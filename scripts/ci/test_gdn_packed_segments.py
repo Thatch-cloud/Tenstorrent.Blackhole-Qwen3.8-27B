@@ -71,7 +71,7 @@ class PackedFixture(unittest.TestCase):
                         norm_batch=False, prefix_zero_reuse=False)
         return run
 
-    def run_packed(self, state, operations, calls, spans, prefixes, slots, checkpoints, **options):
+    def run_packed(self, state, operations, calls, spans, prefixes, slots, checkpoints, rows=32, **options):
         with patch('gdn_device_loop_state.run_batched_projected', side_effect=self.recurrence(calls)), \
                 patch('gdn_device_loop_state.restore_prefix',
                       side_effect=lambda ops, result, entry, destination, accepted:
@@ -79,7 +79,7 @@ class PackedFixture(unittest.TestCase):
                 patch('gdn_device_loop_state.copy_compact'), \
                 patch('gdn_device_loop_state.release_owned'), \
                 patch('gdn_device_loop_state.norm_batch_enabled', return_value=False):
-            return state.decode(SimpleNamespace(shape=(1, 32, 5120)), checkpoints, prefixes,
+            return state.decode(SimpleNamespace(shape=(1, rows, 5120)), checkpoints, prefixes,
                                 segments=spans, slots=slots, **options)
 
 
@@ -198,6 +198,53 @@ class DeferredPackedTests(PackedFixture):
         release.assert_called_once_with(operations, [value for entry in entries for value in entry])
         self.assertEqual([list(entry) for entry in state.segment_entries], [[], []])
         self.assertIsNone(state.segment_results)
+
+
+class FourUserBlockTests(PackedFixture):
+    """M3: four T16 users in one 64-row block - one projection over 64 rows, four 16-row
+    recurrences each from its own carry into its own entry, nothing decided at decode."""
+
+    spans = ((0, 16), (16, 32), (32, 48), (48, 64))
+    slots = [['%s%d' % (name, index) for index in range(5)] for name in 'ABCD']
+    checkpoints = [['ck%s' % name] for name in 'ABCD']
+
+    def test_four_users_share_one_projection_over_sixty_four_rows(self):
+        state, operations, layer, active, calls = self.build(commit_only=True, users=4)
+        result = self.run_packed(state, operations, calls, self.spans, [0] * 4, self.slots, self.checkpoints,
+                                 rows=64, deferred=True)
+        self.assertEqual([entry for entry in calls if entry[0] == 'project'], [('project', 64)],
+                         'the weight pass runs once over the whole 64-row block')
+        self.assertEqual([entry for entry in calls if entry[0] == 'slice'],
+                         [('slice', 0, 16), ('slice', 16, 32), ('slice', 32, 48), ('slice', 48, 64)])
+        entries = state.segment_entries
+        self.assertEqual(len(entries), 4)
+        self.assertEqual(len({entry[0] for entry in entries}), 4, 'one block-start entry per user')
+        expected = []
+        for slot, entry in zip(self.slots, entries):
+            expected += [('restore', slot[0]), ('save', entry[0]), ('recur', 16)]
+        self.assertEqual([entry for entry in calls if entry[0] in ('restore', 'save', 'recur')], expected)
+        self.assertEqual([entry for entry in calls if entry[0] == 'prefix'], [], 'nothing decided at decode')
+        self.assertEqual(result['output'].shape, (1, 64, 5120))
+        self.assertEqual(result['segments'], self.spans)
+        self.assertEqual([piece['states'].shape[0] for piece in state.segment_results], [16] * 4)
+        self.assertEqual((state.calls, state.checkpoint_calls), (1, 4))
+
+    def test_the_sixty_four_row_block_needs_covering_spans_and_one_entry_per_user(self):
+        for users, spans, rows in ((3, self.spans, 64), (4, self.spans[:3], 64), (4, self.spans, 128),
+                                   (4, ((0, 16), (16, 32), (32, 48), (48, 96)), 96), (4, self.spans, 48)):
+            state, operations, layer, active, calls = self.build(commit_only=True, users=users)
+            with self.subTest(users=users, spans=spans, rows=rows), self.assertRaises(ValueError):
+                self.run_packed(state, operations, calls, spans, [0] * len(spans), self.slots[:len(spans)],
+                                self.checkpoints[:len(spans)], rows=rows, deferred=True)
+            layer._project_qkvzab_raw.assert_not_called()
+            active.restore.assert_not_called()
+
+    def test_two_t32_users_also_fill_the_block(self):
+        state, operations, layer, active, calls = self.build(commit_only=True, users=2)
+        self.run_packed(state, operations, calls, ((0, 32), (32, 64)), [0, 0], self.slots[:2],
+                        self.checkpoints[:2], rows=64, deferred=True)
+        self.assertEqual([entry for entry in calls if entry[0] in ('project', 'recur')],
+                         [('project', 64), ('recur', 32), ('recur', 32)])
 
 
 class SegmentValidationTests(unittest.TestCase):

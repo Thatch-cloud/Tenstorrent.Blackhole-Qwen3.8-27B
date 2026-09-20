@@ -80,9 +80,19 @@ class EngineLifecycleTests(unittest.TestCase):
     def test_width_cap_excludes_unused_large_traces(self):
         self.assertEqual(capture_widths(170, 65536, 32, 512, 8), (1, 2, 4, 8))
         self.assertEqual(capture_widths(170, 65536, 32, 3, 8), (1, 2))
-        for cap in (True, 3, 8.0, 0, 64):
+        for cap in (True, 3, 8.0, 0, 128):
             with self.assertRaises(ValueError):
                 capture_widths(170, 65536, 32, 512, cap)
+
+    def test_the_sixty_four_row_block_is_reachable_only_through_an_explicit_cap(self):
+        """M3: 64 is a legal verify width, but the default cap keeps every per-request
+        engine at the widths it captured before."""
+        self.assertEqual(capture_widths(170, 65536, 64, 512, 64), (1, 2, 4, 8, 16, 32, 64))
+        self.assertEqual(capture_widths(170, 65536, 64, 512), (1, 2, 4, 8, 16, 32))
+        self.assertEqual(capture_widths(170, 65536, 32, 512, 64), (1, 2, 4, 8, 16, 32))
+        self.assertEqual(capture_widths(170, 65536, 16, 512, 64), (1, 2, 4, 8, 16))
+        self.assertEqual(capture_widths(65535, 65536, 64, 1, 64), (1,))
+        self.assertEqual(capture_widths(170, 65536, 64, 40, 64), (1, 2, 4, 8, 16, 32))
     def test_replay_options_reach_all_warm_and_retained_buckets(self):
         engine = VerifierEngine.__new__(VerifierEngine)
         engine.model, engine.pages, engine.helpers = object(), object(), []
@@ -149,7 +159,7 @@ class EngineLifecycleTests(unittest.TestCase):
         self.assertEqual(capture_widths(65531, 65536, 32, 5), (1, 2, 4))
         self.assertEqual(capture_widths(4095, 65536, 32, 128), (1, 2, 4, 8, 16, 32))
         for geometry in ((65535, 65536, 32, 2), (-1, 65536, 32, 1),
-                         (0, 65536, 32, 0), (0, 65536, 64, 1), (True, 65536, 32, 1)):
+                         (0, 65536, 32, 0), (0, 65536, 128, 1), (0, 65536, 48, 1), (True, 65536, 32, 1)):
             with self.assertRaises(ValueError):
                 capture_widths(*geometry)
 

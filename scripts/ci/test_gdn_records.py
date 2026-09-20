@@ -43,11 +43,14 @@ def packed_record(mesh, segments=((0, 16), (16, 32))):
 
 
 def packed_block(count=48, segments=((0, 16), (16, 32))):
-    block = RetainedGDNBlock(32, operations())
+    block = RetainedGDNBlock(segments[-1][1], operations())
     mesh = object()
     for index in range(count):
         block.append(*packed_record(mesh, segments))
     return block
+
+
+M3_SEGMENTS = ((0, 16), (16, 32), (32, 48), (48, 64))
 
 
 class RecordTests(unittest.TestCase):
@@ -322,6 +325,69 @@ class PackedRecordTests(unittest.TestCase):
         for segment in (2, -1, None):
             with self.assertRaises(ValueError):
                 block.segment_layers(segment)
+
+    def test_four_t16_users_fill_the_sixty_four_row_block_and_each_commits_its_own_rows(self):
+        """M3: the block is 64 rows, every user's histories and commit stay 16 rows."""
+        block = packed_block(segments=M3_SEGMENTS)
+        self.assertEqual((block.rows, block.segments), (64, M3_SEGMENTS))
+        for segment in range(4):
+            layers = block.segment_layers(segment)
+            self.assertEqual([len(layer) for layer in layers], [20] * 48)
+            self.assertEqual({layer[5].shape[0] for layer in layers}, {16}, 'a 16-row history per user')
+        own = {id(value) for segment in range(4) for layer in block.segment_layers(segment)
+               for value in layer[:10] + layer[15:]}
+        self.assertEqual(len(own), 4 * 48 * 15, 'entry, histories and carry are each user\'s own')
+        publications = [Mock() for segment in range(4)]
+        with patch('gdn_commit_dma.publish') as publish, patch('gdn_records.restore_prefix') as restore:
+            block.commit_user(2, 16, dma=True, publication=publications[2])
+            block.commit_user(0, 0, dma=True, publication=publications[0])
+            block.commit_user(3, 7, dma=True)
+            self.assertFalse(block.replay_ready)
+            block.commit_user(1, 1, dma=True, publication=publications[1], synchronize=True)
+        publications[2].assert_called_once_with(16)
+        publications[0].assert_not_called()
+        publications[1].assert_called_once_with(1)
+        publish.assert_called_once()
+        self.assertEqual(publish.call_args.args[1:], (block.segment_layers(3), 7))
+        restore.assert_not_called()
+        self.assertEqual((block.selected_prefix, block.replay_ready), ((0, 1, 16, 7), True))
+        block.replay(lambda: None)
+        self.assertEqual((block.replay_epoch, block.decisions, block.selected_prefix), (1, {}, None))
+        for segment, prefix in ((4, 0), (0, 17), (3, 65)):
+            with self.assertRaises(ValueError):
+                block.commit_user(segment, prefix)
+
+    def test_a_sixty_four_row_block_takes_only_records_that_cover_it(self):
+        mesh = object()
+        block = packed_block(count=0, segments=M3_SEGMENTS)
+        for segments in (((0, 16), (16, 32), (32, 48)), ((0, 16), (16, 32)), ((0, 32), (32, 64), (64, 96))):
+            with self.subTest(segments=segments), self.assertRaises(ValueError):
+                block.append(*packed_record(mesh, segments))
+        self.assertEqual(block.records, [])
+        block.append(*packed_record(mesh, M3_SEGMENTS))
+        # every layer packs the same four users, and a single-sequence 64-row layer never mixes in
+        with self.assertRaises(ValueError):
+            block.append(*packed_record(mesh, ((0, 32), (32, 64))))
+        with self.assertRaises(ValueError):
+            block.append(*unpacked_record(mesh, 64))
+        self.assertEqual((len(block.records), block.segments), (1, M3_SEGMENTS))
+        two_t32 = packed_block(count=1, segments=((0, 32), (32, 64)))
+        self.assertEqual(two_t32.segments, ((0, 32), (32, 64)))
+        for rows in (48, 128, 1, True, 64.0):
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                RetainedGDNBlock(rows, operations())
+
+    def test_an_unpacked_sixty_four_row_block_is_retained_but_fails_closed_at_commit(self):
+        """Nothing publishes a 64-row single-sequence prefix: restore_prefix and the commit
+        DMA both stop at 32 rows, and the block has no other write path."""
+        block = unpacked_block(rows=64)
+        self.assertEqual(len(block.records), 48)
+        with self.assertRaises(ValueError):
+            block.commit(3)
+        for state, result, checkpoint in block.records:
+            state.active.restore.assert_not_called()
+        with self.assertRaises(ValueError):
+            block.commit(3)
 
     def test_packed_records_carry_each_users_prefixes_entry_and_carry(self):
         mesh = object()

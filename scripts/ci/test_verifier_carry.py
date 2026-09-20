@@ -524,6 +524,10 @@ class PooledStorageTests(unittest.TestCase):
         self.assertEqual(capture_bucket_rows(16, 8, 16), (1, 2, 4, 8))
         self.assertEqual(capture_bucket_rows(16, 24, 16), (1, 2, 4, 8, 8, 16))
         self.assertEqual(capture_bucket_rows(32, 512, 32), (1, 2, 4) + (8,) * 3 + (16,) * 3 + (32,) * 3)
+        # M3: a 64-row block over the output budget touches two families per width, and
+        # the pool's T16 cap leaves today's per-request widths exactly as they were.
+        self.assertEqual(capture_bucket_rows(64, 256, 64), (1, 2, 4, 8, 8, 16, 16, 32, 32, 64, 64))
+        self.assertEqual(capture_bucket_rows(64, 256, 16), (1, 2, 4, 8, 8, 16, 16))
         for remaining in (1, 2, 7, 8, 9, 24, 100, 255, 256, 257, 300):
             bound = Counter(capture_bucket_rows(16, remaining, 16))
             tight = Counter()

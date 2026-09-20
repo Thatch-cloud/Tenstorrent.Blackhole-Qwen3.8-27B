@@ -31,9 +31,16 @@ def gated_decode(gdn, profiler=None):
     return MethodType(namespace["forward_gated"], gdn)
 
 
+# 64 is the M3 packed block: four T16 users, one input projection over all 64 rows and
+# one 16-row recurrence per user (gdn_device_loop_state.DeviceLoopState._decode_packed).
+# Nothing single-sequence runs at 64: the per-segment recurrence, its convolution
+# windows and the commit DMA keep their own 32-row bounds.
+ROW_WIDTHS = (1, 2, 4, 8, 16, 32, 64)
+
+
 def validate_rows(shape):
-    if len(shape) != 3 or shape[0] != 1 or shape[2] != 5120 or shape[1] not in (1, 2, 4, 8, 16, 32):
-        raise ValueError("Expected [1, T, 5120], T=1/2/4/8/16/32")
+    if len(shape) != 3 or shape[0] != 1 or shape[2] != 5120 or shape[1] not in ROW_WIDTHS:
+        raise ValueError("Expected [1, T, 5120], T=1/2/4/8/16/32/64")
     return shape[1]
 
 

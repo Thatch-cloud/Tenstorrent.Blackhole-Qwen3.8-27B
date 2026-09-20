@@ -57,6 +57,49 @@ class PackedProposalTests(unittest.TestCase):
         self.assertEqual(tokens[0][0], 7)
         self.assertEqual(tokens[1][0], 9)
 
+    def test_four_t16_users_lay_out_in_a_sixty_four_row_block(self):
+        """M3's draft layout, ready for a 64-row proposal block: anchors at rows 0, 16,
+        32, 48, and each user's drafts and selector rows at its own offset."""
+        packed = packed_identifiers([1, 2, 3, 4], block_rows=16, block_width=64)
+        self.assertEqual(tuple(packed.shape), (1, 64))
+        self.assertEqual([int(packed[0, row]) for row in (0, 16, 32, 48)], [1, 2, 3, 4])
+        self.assertTrue(all(int(packed[0, row]) == DRAFT_FILLER for row in range(64) if row % 16))
+        parts = user_slices(4, 16, block_width=64)
+        self.assertEqual([(part['drafts'].start, part['drafts'].stop) for part in parts],
+                         [(0, 15), (16, 31), (32, 47), (48, 63)])
+        self.assertEqual([(part['selector'].start, part['selector'].stop) for part in parts],
+                         [(1, 16), (17, 32), (33, 48), (49, 64)])
+        hidden = torch.arange(64, dtype=torch.float32).reshape(1, 64, 1).expand(1, 64, 256)
+        candidates = torch.arange(63, dtype=torch.int64).reshape(1, 63, 1).expand(1, 63, 16)
+        parts = split_selection(hidden, candidates, candidates.clone(), 4, 16, block_width=64)
+        self.assertEqual([int(part['hidden'][0, 0, 0]) for part in parts], [1, 17, 33, 49])
+        self.assertEqual([int(part['candidates'][0, 0, 0]) for part in parts], [0, 16, 32, 48])
+        self.assertEqual([int(part['candidates'][0, -1, 0]) for part in parts], [14, 30, 46, 62])
+        self.assertTrue(all(part['hidden'].shape[1] == 15 and part['candidates'].shape[1] == 15 for part in parts))
+
+    def test_the_thirty_two_row_layout_is_the_default_and_unchanged(self):
+        self.assertTrue(torch.equal(packed_identifiers([5, 6]), packed_identifiers([5, 6], block_width=32)))
+        self.assertEqual(user_slices(2), user_slices(2, 16, block_width=32))
+        hidden, candidates = torch.zeros(1, 32, 256), torch.zeros(1, 31, 16, dtype=torch.int64)
+        self.assertEqual(len(split_selection(hidden, candidates, candidates, 2, 16, block_width=32)), 2)
+        for block_width in (48, 16, 128, '64', True, None):
+            with self.subTest(block_width=block_width):
+                with self.assertRaises(ValueError):
+                    packed_identifiers([1], block_width=block_width)
+                with self.assertRaises(ValueError):
+                    user_slices(1, block_width=block_width)
+                with self.assertRaises(ValueError):
+                    split_selection(hidden, candidates, candidates, 2, 16, block_width=block_width)
+        with self.assertRaises(ValueError):
+            packed_identifiers([1, 2, 3, 4, 5], block_rows=16, block_width=64)
+        with self.assertRaises(ValueError):
+            user_slices(5, 16, block_width=64)
+        with self.assertRaises(ValueError):
+            split_selection(hidden, candidates, candidates, 2, 16, block_width=64)
+        with self.assertRaises(ValueError):
+            split_selection(torch.zeros(1, 64, 256), torch.zeros(1, 63, 16, dtype=torch.int64),
+                            torch.zeros(1, 63, 16, dtype=torch.int64), 2, 16)
+
     def test_bad_counts_and_shapes_are_refused(self):
         hidden, candidates = torch.zeros(1, 32, 256), torch.zeros(1, 31, 16, dtype=torch.int64)
         parts = split_selection(hidden, candidates, candidates.clone(), 2, 16)

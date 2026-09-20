@@ -30,6 +30,23 @@ class TargetPackedPagesTests(unittest.TestCase):
         self.assertTrue(bool((packed['pages'][:16] == 7).all()), 'user 0 reads its own blocks')
         self.assertTrue(bool((packed['pages'][16:] == 11).all()), 'user 1 reads its own blocks')
 
+    def test_four_t16_users_fill_the_sixty_four_row_block(self):
+        """M3: four users' frontiers and page tables in one 64-row block."""
+        users = [dict(start=100 * (index + 1), rows=16, pages=table(40, index + 1)) for index in range(4)]
+        packed = packed_rows(users)
+        self.assertEqual(packed['rows'], 64)
+        self.assertEqual(packed['segments'], ((0, 16), (16, 32), (32, 48), (48, 64)))
+        self.assertEqual(tuple(packed['pages'].shape), (64, 40))
+        for index, user in enumerate(users):
+            rows = slice(16 * index, 16 * (index + 1))
+            self.assertTrue(torch.equal(packed['positions'][rows],
+                                        torch.arange(user['start'], user['start'] + 16, dtype=torch.int32)))
+            self.assertTrue(bool((packed['pages'][rows] == index + 1).all()), 'each user reads its own blocks')
+        with self.assertRaises(ValueError):
+            packed_rows(users[:3])
+        with self.assertRaises(ValueError):
+            packed_rows(users + [dict(start=1, rows=16, pages=table(40, 9))])
+
     def test_uneven_splits_are_allowed_while_the_total_is_a_legal_width(self):
         packed = packed_rows([dict(start=0, rows=8, pages=table(4, 1)),
                               dict(start=64, rows=8, pages=table(4, 2))])

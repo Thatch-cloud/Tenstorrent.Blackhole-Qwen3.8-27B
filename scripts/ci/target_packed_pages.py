@@ -46,7 +46,8 @@ def validate_users(users):
                 or getattr(pages, 'ndim', None) != 2 or pages.shape[0] != 1):
             raise ValueError('Each packed user needs an absolute start, a row count and its own page table')
         total += user['rows']
-    if total not in (1, 2, 4, 8, 16, 32):
+    # 64: the M3 block, four T16 users (docs/packed-device-step-plan-2026-09-20.md section 5).
+    if total not in (1, 2, 4, 8, 16, 32, 64):
         raise ValueError('Packed rows must total a legal verifier block width')
     if len({user['pages'].shape[1] for user in users}) != 1:
         raise ValueError('Every packed page table must cover the same number of blocks')

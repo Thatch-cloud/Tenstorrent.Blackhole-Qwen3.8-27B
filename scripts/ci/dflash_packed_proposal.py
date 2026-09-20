@@ -10,31 +10,54 @@ with a 32-row block the returned index of user u's first draft is u * block_rows
 user 0 holds block rows 1..15 at indices 0..14, and user 1 holds block rows 17..31
 at indices 16..30. Getting that offset wrong silently attributes one user's
 proposals to another, which is why it is pinned by a test rather than a comment.
+
+BLOCK WIDTH. The device's proposal block is 32 rows, and that is intrinsic to it, not
+to the layout arithmetic here: `execute_proposal` embeds and pads 32 rows and builds
+32-row RoPE tables (dflash_device.py), the packed mask is (1, 1, 32, K) (dflash_batched_
+mask.py), the shared head reads (32, 16) candidates back and merges at block_rows=32
+(draft_shared_head.py), the pool's query buffer is (1, 1, 32, 2048) (serving_buffer_pool.
+py) and the T16 native attention admits at most two users, pinned by its source-hashed
+simulator evidence (dflash_t16_native_attention.py, dflash_t16_native_scope.py). So four
+T16 users are proposed in TWO 32-row passes, two users each, while their verify shares
+one 64-row block (M3). The layout helpers below take `block_width` so the 64-row layout
+- four T16 users, anchors at rows 0, 16, 32, 48 - is defined and tested for the day
+the device grows a 64-row proposal block; `propose_packed` and `select_device_outputs`
+stay at the device's 32.
 """
 
 DRAFT_FILLER = 248070
+BLOCK_WIDTH = 32
+BLOCK_WIDTHS = (32, 64)
 
 
-def packed_identifiers(seeds, block_rows=16, *, filler=DRAFT_FILLER):
-    """The (1, 32) anchor/draft token ids the embedding consumes, in block order."""
+def validate_block_width(block_width):
+    if type(block_width) is not int or block_width not in BLOCK_WIDTHS:
+        raise ValueError('A %s-row proposal block width required' % ' or '.join(map(str, BLOCK_WIDTHS)))
+    return block_width
+
+
+def packed_identifiers(seeds, block_rows=16, *, filler=DRAFT_FILLER, block_width=BLOCK_WIDTH):
+    """The (1, block_width) anchor/draft token ids the embedding consumes, in block order."""
     import torch
 
+    validate_block_width(block_width)
     seeds = tuple(seeds)
     if (type(block_rows) is not int or block_rows not in (8, 16, 32)
-            or not seeds or len(seeds) * block_rows > 32
+            or not seeds or len(seeds) * block_rows > block_width
             or any(type(seed) is not int or not 0 <= seed < 248320 for seed in seeds)):
         raise ValueError('One committed anchor per packed user and a fitting block required')
     rows = []
     for seed in seeds:
         rows.extend([seed, *([filler] * (block_rows - 1))])
-    rows.extend([filler] * (32 - len(rows)))
+    rows.extend([filler] * (block_width - len(rows)))
     return torch.tensor([rows], dtype=torch.int64)
 
 
-def user_slices(users, block_rows=16):
+def user_slices(users, block_rows=16, *, block_width=BLOCK_WIDTH):
     """Where each user's drafts sit in the merged candidate and selector tensors."""
+    validate_block_width(block_width)
     if (type(block_rows) is not int or type(users) is not int
-            or not (1 <= users and users * block_rows <= 32)):
+            or not (1 <= users and users * block_rows <= block_width)):
         raise ValueError('A fitting number of packed users required')
     return [dict(user=index, block=slice(index * block_rows, (index + 1) * block_rows),
                  drafts=slice(index * block_rows, index * block_rows + block_rows - 1),
@@ -42,19 +65,20 @@ def user_slices(users, block_rows=16):
             for index in range(users)]
 
 
-def split_selection(projected_hidden, candidates, unary, users, block_rows=16):
+def split_selection(projected_hidden, candidates, unary, users, block_rows=16, *, block_width=BLOCK_WIDTH):
     """Per-user (selector features, candidate ids, candidate scores).
 
     `projected_hidden` is the replicated selector projection over the whole block,
-    shaped (1, 32, 256). `candidates` and `unary` come straight from
-    merge_chunk_candidates(block_rows=32), shaped (1, 31, 16).
+    shaped (1, block_width, 256). `candidates` and `unary` come straight from
+    merge_chunk_candidates(block_rows=block_width), shaped (1, block_width - 1, 16).
     """
-    if (projected_hidden.ndim != 3 or projected_hidden.shape[:2] != (1, 32)
-            or candidates.ndim != 3 or candidates.shape[:2] != (1, 31)
+    validate_block_width(block_width)
+    if (projected_hidden.ndim != 3 or projected_hidden.shape[:2] != (1, block_width)
+            or candidates.ndim != 3 or candidates.shape[:2] != (1, block_width - 1)
             or unary.shape != candidates.shape):
-        raise ValueError('Whole-block selector features and merged 32-row candidates required')
+        raise ValueError('Whole-block selector features and merged %d-row candidates required' % block_width)
     parts = []
-    for part in user_slices(users, block_rows):
+    for part in user_slices(users, block_rows, block_width=block_width):
         parts.append(dict(user=part['user'],
                           hidden=projected_hidden[:, part['selector'], :],
                           candidates=candidates[:, part['drafts']],
@@ -95,6 +119,9 @@ def propose_packed(device, slots, seeds, counts, *, stage=None):
 
     The cached path never reads a history tensor, so none is built: at two 2048-row
     users that would be 42 MB of DRAM nobody touches.
+
+    The pass is the device's 32-row block (module docstring, BLOCK WIDTH): at most two
+    T16 users per call, so M3's four T16 users take two calls.
     """
     import torch
 
@@ -154,7 +181,10 @@ def propose_packed(device, slots, seeds, counts, *, stage=None):
 
 
 def select_device_outputs(device, outputs, seeds, counts, users, block_rows):
-    """Read the shared head back once and split it by user."""
+    """Read the shared head back once and split it by user.
+
+    The readback is the device's 32-row block: (32, 16) candidates per chip and chunk,
+    merged at block_rows=32, a (1, 32, 256) selector projection (BLOCK WIDTH above)."""
     import torch
 
     from draft_shared_head import merge_chunk_candidates

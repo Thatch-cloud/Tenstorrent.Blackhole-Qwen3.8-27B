@@ -24,22 +24,28 @@ output bit-comparable is untouched.
 
 OUTPUT_BUDGET = 256
 NATIVE_GDN_SLOTS = 8
-# The proposal and verify blocks are 32 rows. capture_widths caps a bucket at 32 and
-# dflash_device accepts block_rows in (8, 16, 32), so a packed block divides those 32
-# rows among its users: two T16 users, or four T8 users. FOUR T16 USERS DO NOT FIT -
-# they need 64 rows - and dropping to T8 to fit four cuts each user from 15 proposals
-# to 7, which is a direct cut to committed tokens per cycle.
+# The proposal block is 32 rows and the verify block is 32 or 64. capture_widths caps a
+# per-request bucket at 32 and dflash_device accepts block_rows in (8, 16, 32), so the
+# 32-row packed block divides its rows among its users: two T16 users (M1), or four T8
+# users (M2) - and dropping to T8 to fit four cuts each user from 15 proposals to 7,
+# which is a direct cut to committed tokens per cycle. Four T16 users need the 64-row
+# verify block (M3, docs/packed-device-step-plan-2026-09-20.md section 5); the draft
+# side still proposes in 32-row passes, two T16 users per pass.
 PACKED_BLOCK_ROWS = 32
+PACKED_BLOCK_WIDTHS = (32, 64)
 
 
-def packed_geometry(users):
-    """Rows per user in the shared 32-row block, and the proposals that buys."""
-    if type(users) is not int or users < 1 or PACKED_BLOCK_ROWS % users:
-        raise ValueError('Packed users must divide the %d-row block' % PACKED_BLOCK_ROWS)
-    rows = PACKED_BLOCK_ROWS // users
+def packed_geometry(users, block_rows=PACKED_BLOCK_ROWS):
+    """Rows per user in the shared verify block, and the proposals that buys."""
+    if type(block_rows) is not int or block_rows not in PACKED_BLOCK_WIDTHS:
+        raise ValueError('Packed verify block of %s rows required' % ' or '.join(map(str, PACKED_BLOCK_WIDTHS)))
+    if type(users) is not int or not 1 <= users <= NATIVE_GDN_SLOTS or block_rows % users:
+        raise ValueError('Packed users must divide the %d-row block within the %d native GDN slots'
+                         % (block_rows, NATIVE_GDN_SLOTS))
+    rows = block_rows // users
     if rows not in (8, 16, 32):
         raise ValueError('Each packed user needs a supported T8/T16/T32 share of the block')
-    return dict(users=users, block_rows=rows, verifier_rows=PACKED_BLOCK_ROWS,
+    return dict(users=users, block_rows=rows, verifier_rows=block_rows,
                 proposals_per_user=rows - 1)
 MINIMUM_MODEL_LEN = 4352
 # Prompts are bounded by the served context rather than pinned to 4096; the server

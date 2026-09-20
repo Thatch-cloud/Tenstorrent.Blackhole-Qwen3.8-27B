@@ -35,7 +35,7 @@ def note_packed_step():
 
 class PackedFeatureView:
     """The synthetic bucket's feature capture for an adopted packed segment: the block's
-    32-row taps at this user's row offset (packed_verifier.PackedVerifierEngine.features)."""
+    block-row taps at this user's row offset (packed_verifier.PackedVerifierEngine.features)."""
 
     def __init__(self, block, segment):
         self.block, self.segment = block, segment
@@ -57,14 +57,22 @@ def carry_log(message, **values):
     logger.info(message, **values)
 
 
+# Every width a verify fixture can be captured at. 64 is the M3 block - four T16 users
+# sharing one weight pass (docs/packed-device-step-plan-2026-09-20.md section 5) - and is
+# reachable only through an explicit cap: the default cap stays 32, so every per-request
+# engine captures exactly the widths it did before.
+VERIFY_WIDTHS = (1, 2, 4, 8, 16, 32, 64)
+BLOCK_WIDTHS = (16, 32, 64)
+
+
 def capture_widths(position, capacity, verifier_rows, remaining, max_verify_rows=32):
-    if type(max_verify_rows) is not int or max_verify_rows not in (1, 2, 4, 8, 16, 32):
+    if type(max_verify_rows) is not int or max_verify_rows not in VERIFY_WIDTHS:
         raise ValueError('Explicit supported verification width cap required')
     if any(type(value) is not int for value in (position, capacity, verifier_rows, remaining)):
         raise ValueError('Integer request geometry required')
-    if position < 0 or remaining < 1 or position + remaining > capacity or verifier_rows not in (16, 32):
+    if position < 0 or remaining < 1 or position + remaining > capacity or verifier_rows not in BLOCK_WIDTHS:
         raise ValueError('The complete decode budget must fit the request page capacity')
-    return tuple(rows for rows in (1, 2, 4, 8, 16, 32) if rows <= min(verifier_rows, remaining, max_verify_rows))
+    return tuple(rows for rows in VERIFY_WIDTHS if rows <= min(verifier_rows, remaining, max_verify_rows))
 
 
 def capture_bucket_rows(verifier_rows, remaining, max_verify_rows=32):

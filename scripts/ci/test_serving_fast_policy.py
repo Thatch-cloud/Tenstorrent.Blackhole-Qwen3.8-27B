@@ -36,6 +36,26 @@ class FastPolicyTests(unittest.TestCase):
             self.assertEqual(profile['scheduler_requests'], capacity)
             self.assertEqual(profile['native_gdn_slots'], 8)
 
+    def test_packed_geometry_divides_the_block_and_names_the_m3_shape(self):
+        """M1 and M2 share the 32-row block; M3's four T16 users take the 64-row one."""
+        from serving_fast_policy import PACKED_BLOCK_ROWS, PACKED_BLOCK_WIDTHS, packed_geometry
+
+        self.assertEqual((PACKED_BLOCK_ROWS, PACKED_BLOCK_WIDTHS), (32, (32, 64)))
+        self.assertEqual(packed_geometry(2), dict(users=2, block_rows=16, verifier_rows=32, proposals_per_user=15))
+        self.assertEqual(packed_geometry(4), dict(users=4, block_rows=8, verifier_rows=32, proposals_per_user=7))
+        self.assertEqual(packed_geometry(1), dict(users=1, block_rows=32, verifier_rows=32, proposals_per_user=31))
+        self.assertEqual(packed_geometry(2), packed_geometry(2, 32))
+        self.assertEqual(packed_geometry(4, block_rows=64),
+                         dict(users=4, block_rows=16, verifier_rows=64, proposals_per_user=15))
+        self.assertEqual(packed_geometry(2, block_rows=64),
+                         dict(users=2, block_rows=32, verifier_rows=64, proposals_per_user=31))
+        self.assertEqual(packed_geometry(8, block_rows=64),
+                         dict(users=8, block_rows=8, verifier_rows=64, proposals_per_user=7))
+        for users, block_rows in ((3, 32), (8, 32), (0, 32), (True, 32), (3, 64), (16, 64), (1, 64),
+                                  (4, 48), (4, 16), (4, '64'), (4, 128), (4, True)):
+            with self.subTest(users=users, block_rows=block_rows), self.assertRaises(ValueError):
+                packed_geometry(users, block_rows)
+
     def test_ignore_eos_accepts_either_boolean(self):
         """Relaxed to a type check; it asserted output comparability, not correctness."""
         for value in (True, False):

@@ -57,6 +57,26 @@ class BuildPackTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_pack([])
 
+    def four(self):
+        return [participant(engine(1000 * (index + 1), index + 1), 16, 0, snapshots('ck%d' % index),
+                            snapshots('slot%d' % index)) for index in range(4)]
+
+    def test_four_t16_users_fill_the_sixty_four_row_block(self):
+        """M3: the block is 64 rows and its width must be asked for; the 32-row default
+        still refuses four T16 participants."""
+        pack = build_pack(self.four(), block_rows=64)
+        self.assertEqual([user['rows'] for user in pack], [16] * 4)
+        self.assertEqual([user['start'] for user in pack], [1000, 2000, 3000, 4000])
+        with self.assertRaises(ValueError):
+            build_pack(self.four())
+        with self.assertRaises(ValueError):
+            build_pack(self.four()[:3], block_rows=64)
+        with self.assertRaises(ValueError):
+            build_pack(self.two(), block_rows=64)
+        for block_rows in (48, 128, 96):
+            with self.subTest(block_rows=block_rows), self.assertRaises(ValueError):
+                build_pack(self.four(), block_rows=block_rows)
+
     def test_a_shared_page_table_is_refused(self):
         """Two users reading one table would be two users reading one KV cache."""
         shared = engine(100, 1)

@@ -56,7 +56,8 @@ def build_pack(participants, *, block_rows=32):
     if not users:
         raise ValueError('A packed block needs at least one participant')
     total = sum(user['rows'] for user in users)
-    if total != block_rows or block_rows not in (1, 2, 4, 8, 16, 32):
+    # 64: the M3 block, four T16 participants (docs/packed-device-step-plan-2026-09-20.md section 5).
+    if total != block_rows or block_rows not in (1, 2, 4, 8, 16, 32, 64):
         raise ValueError('Packed participants must fill exactly one legal block width')
     if len({id(user['pages']) for user in users}) != len(users):
         raise ValueError('Each packed user needs its own page table; a shared one means a shared cache')

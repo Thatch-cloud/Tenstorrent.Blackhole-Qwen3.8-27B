@@ -49,9 +49,16 @@ def validate_packed_record(state, result, carries, rows):
     return segments
 
 
+# 64 is the M3 packed block: four 16-row segments, decided one user at a time through
+# commit_user, whose layers are that user's 16-row histories. An UNPACKED 64-row block
+# can be retained but not committed: gdn_commit_dma.validate_shapes and
+# gdn_multitoken_conv.restore_prefix both stop at 32 rows, so commit() fails closed.
+BLOCK_ROWS = (2, 4, 8, 16, 32, 64)
+
+
 class RetainedGDNBlock:
     def __init__(self, rows, operations):
-        if type(rows) is not int or rows not in (2, 4, 8, 16, 32):
+        if type(rows) is not int or rows not in BLOCK_ROWS:
             raise ValueError('Multirow packed-history block required')
         self.rows, self.operations = rows, operations
         self.records = []

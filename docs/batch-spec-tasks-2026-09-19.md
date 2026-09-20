@@ -1981,3 +1981,45 @@ Bases 1000 and 1001 were recorded above; the two new ones:
 
 Kept in runner-evidence.local/packed-gate/; the compare script picks the
 reference by each run's prompt_base and prompt_user_offset.
+
+## M3 memory budget (2026-09-20): four T16 users in one 64-row block, per chip
+
+Per p150a chip (32 GiB = 34.36 GB of GDDR6, memory/tt-rig-hardware-topology.md), page
+width 1024 (65,536-token tables) and 33,024 tokens of context per user (32,768 plus the
+256 budget). Sizes are DEVICE bytes: tiled BF16 pads the (1, 1, 5120) compact
+convolution states and the (1, rows, 5120) windows to 32 rows, which is why one GDN
+snapshot set is 100.7 MB on device against 39.7 MB logical (:1104). Sources are this
+document's lines, `serving_buffer_pool.py` (HISTORY_SHAPE, KV_SHAPE, QUERY_SHAPE at
+:86-88; `describe()` :375-389) and the block's own allocations.
+
+| Item | How it is counted | Per chip |
+| --- | --- | ---: |
+| Sharded target weights | 19.92 GB across TP2 (:348) | 9.96 GB |
+| Pool, four slots | draft 83.9 MB (2 x HISTORY_SHAPE + 4 x 5 x KV_SHAPE) + query 128 KB + nine GDN sets x 100.7 MB = 906 MB (:1104) + taps and inputs ~3 MB; `bytes_per_slot 444,409,204` logical (:1163); x4 | 3.97 GB |
+| Per-request engines, four | retained histories of the multirow buckets (2, 4, 8, 8, 16, 16): 54 rows x 786,432 B x 48 layers = 2.04 GB, plus the windows 6 x 48 x 4 x 327,680 B = 0.38 GB, per request (:1887, "each request's own ~2 GB"); x4 | 9.67 GB |
+| 64-row block: retained histories | 4 segments x 48 layers x (16 x 786,432 + 4 x 327,680) B; :1886 counts the windows unpadded, 1.27 GB per two segments | 2.67 GB |
+| 64-row block: per-user entries | 4 users x 48 x 2,097,152 B (gdn_device_loop_state.py:69; :1886 has 0.2 GB per two) | 0.40 GB |
+| 64-row block: checkpoints | users x 48 sets (packed_verifier.py, CONSTRUCTION ORDER) = 4 x 100.7 MB | 0.40 GB |
+| 64-row block: taps and fixture inputs | 5 x (1, 1, 64, 5120) BF16 sharded on dim 3 = 1.6 MB; tokens, positions, cos/sin, the (64, 1024) pages, 64 row tables and singletons under 1 MB | 0.00 GB |
+| KV, four users at 33,024 | (pages, 2, 64, 256) bfloat8_b per K and V per layer per chip (serving_cache_owner.py:29-31): 34,816 B per page, 516 pages x 32 = 574.9 MB per user | 2.30 GB |
+| Trace region | 1 GiB (serving-harness-history.md:207; :1888): the verify trace, 64 commit traces (packed_shapes.commit_traces) and every per-request trace | 1.07 GB |
+| Total | | 30.44 GB |
+| Headroom | of 34.36 GB | 3.9 GB (11%) |
+
+Not counted: the shared draft weights (PreparedDraftWeights, serving_runtime.py:104-105;
+the attach line prints `draft_weights=weights.describe()`, take the bytes from the next
+attach log), the model's own decode activations and the fused arms' scratch, and the
+fragmentation the trace holes leave (:813). The carries the block restores from are
+the pool slots' own and are counted once, in the pool.
+
+Verdict: it fits, with about 11% headroom, on two conditions. (1) The plugin's KV pool
+is allocated BEFORE the attach (`ServingCacheOwner` inspects `runner.kv_caches`,
+serving_runtime.py:80) out of whatever vLLM's memory fraction leaves after the weights,
+so it must be capped to the four-user working set (2,064 pages, `num_gpu_blocks_override`
+as prefill_profile.py:54-60 does) rather than left to take the free ~24 GB, or the pool,
+the block and the engines find nothing to allocate from. (2) The largest term is not the
+block but the four per-request engines' 8- and 16-row captures (9.67 GB), which the packed
+step uses only as the sequential fallback for narrow tickets and survivors. Keeping the
+per-request captures to the widths that fallback needs takes each engine from 2.42 GB
+towards 0.24 GB (widths 1, 2, 4) and the total to about 21.7 GB, 12.7 GB of headroom;
+that trim is the part-2 lever if 11% proves too tight on the device.
