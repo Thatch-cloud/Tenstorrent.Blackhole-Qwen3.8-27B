@@ -1725,3 +1725,9 @@ constructor makes the initial save and seeds the carry from slot 0), logging
 and test_gdn_snapshot had never been registered in CI and now are; both
 modules join the image lists (drift from the bundle = this change only). A
 follow-up adds the host-readback equality check on each unaligned slice.
+
+Follow-up 18d627d9: `adopt_slot` reads back each device slice and the full
+tensor per chip and requires equality with the full tensor's row k before
+writing row 0; a mismatch raises with the tensor index, chip and max_abs and
+frees the slices. Unconditional, once per admission. The gate run is therefore
+also the device proof of the unaligned conv slice.
