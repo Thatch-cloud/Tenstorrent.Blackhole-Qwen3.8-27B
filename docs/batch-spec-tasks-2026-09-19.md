@@ -1800,3 +1800,19 @@ image, not v42; the pinned SET is what it measured.) So the slot fix and the
 packed step are clear of the recipe; only the pooled replay reader has to live
 in an unpinned module with attention_replay.py restored to its 8c102b20 bytes -
 the relocation in progress. Image v43 follows.
+
+**Relocation (563f633c):** attention_replay.py is byte-identical to 8c102b20 again
+(diff empty) and out of the image lists; `pooled_attention_replay.
+PooledReplayAttentionReader` subclasses the pinned reader and intercepts its
+`upload` callable - the pinned constructor asks for the positions word, then per
+bundle a 2-D int32 page table and a bf16 mask; every 2-D int32 request is
+answered with the next lent table, the rest forwarded - so metadata, positions,
+masks, programs, refresh and the trace capture are the base's verbatim and
+serving_page_binding.py / verifier_engine.py stay untouched. Storage is
+validated before any upload, the tables are staged after construction, lent
+tables move from `owned` to `borrowed`, close() frees only what the base
+uploaded. model_batch chooses the pooled reader when the storage carries the
+family's tables, else the pinned call unchanged. Helpers moved to the new
+module; serving_buffer_pool imports them from there. 218 tests green over the
+twelve modules; test_pooled_attention_replay registered. Image v43 (tag at
+563f633c) is the gate build.
