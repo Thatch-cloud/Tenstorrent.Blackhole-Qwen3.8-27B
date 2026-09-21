@@ -156,3 +156,110 @@ all match `frozen_context_geometry.geometry(65536)` exactly; the Skt=2064
 branch is confirmed compiled and selected (`dspark-fp32-build.json`); the
 golden is built the same way (`reference()`) as the passing 32768 case. No
 evidence of a geometry.patch or golden-construction error.
+
+## 5. Update: the scratch-CB + 1024-key-chunk port, built and run (run
+35593521063, `experiment/frozen-64k-reciprocal-replay-v3`)
+
+Option (a) was implemented as `scripts/ci/frozen_wide_chunk_scratch.py` /
+`scripts/ci/frozen_wide_chunk_normalization.py`, gated on Skt==2080 (the
+frozen recipe's own context+256 capacity basis with 1024-key chunking, not
+the ladder's Skt==2112 - see those files' docstrings for the arithmetic). It
+compiled and ran. Result: **improved but still failing.**
+`dspark-native-8k-attention.json`: `failed_elements` 384 -> **9**, `max_abs`
+0.638 -> **0.455**. Artifact:
+`C:/Users/liamb/.claude/jobs/8376c877/tmp/64k-recip3-art/qwen-frozen-32k-numerical-35593521063-1/`.
+
+**Residual location and pattern.** All 9 failures sit at a single (head=0,
+row=8), across 9 of 128 channels (indices 28,45,50,51,56,65,67,107,126) -
+`numerical_failures[0].failed_by_head_row`. Every one of the 9 `actual`
+values is **bit-identical at -43.5**, while `expected` varies narrowly
+(-43.949 to -43.955). That flatness is the tell: at this magnitude bf16's
+ulp is 0.25, so -43.5 is exactly 2 ulps off the correctly-rounded -44.0 -
+several *different* per-channel numerators are landing on the *same* bf16-
+representable value before the final normalise, so the output loses its
+per-channel variation entirely at this one row. This is a **different**
+(head, row) than any of the three that failed outright in the pre-port run
+(head10/row2, head11/row12, head12/row12) - not the same rows with less
+error, a smaller and relocated residual. The widespread sub-threshold
+pattern is still present and similarly shaped (`max_abs_by_head_row`: 441
+nonzero (head,row) pairs, next-highest 0.435, 0.435, 0.402, 0.394...), just
+uniformly smaller than the pre-port run's - consistent with the scratch-CB
+fix and the ~4x iteration-count drop (258 -> 65) both reducing, not
+eliminating, the same underlying compounding bf16-rounding mechanism.
+
+**Build evidence, confirming the patched branch executed exactly as
+designed** (not just staged): `dspark-native-8k-attention.json` itself
+reports `key_chunk_size: 1024`, `native_padded_keys: 66560`,
+`added_masked_poison_rows: 704` - the literals `_patch_probe` writes, an
+exact match. `geometry.patch` contains the generated text verbatim:
+`KEY_CHUNK = 1024`, `PADDED_KEYS = 66560`,
+`(Skt == 2080 && Sk_chunk_t == 32))`, and both `validate_manifest` imports
+redirected to `frozen_wide_chunk_scratch`. `dspark-fp32-build.json`'s
+`builders.dspark_fp32_intermediates.py` hash
+(`0ee87770add7508f2ef2a35950b447049fcb0627d7dab4da1bc2b90c53dbcaa2`) matches
+the staged file's hash from this port's own dry-run verification exactly;
+`binaries_after` (`274907a9d5a8...`) matches `frozen-build-cache.json`'s
+`binary_sha256` and the binary team lead cited, with `cache_hit: true`
+(reused the pre-warmed context-build-65536-v3 entry) and `import_passed:
+true`. Golden-vs-kernel key range: the golden (`reference()` /
+`dspark_full_attention.geometry`) pads to `storage_keys` (65856), a formula
+untouched by this port and independent of `key_chunk`/`padded_keys`; the
+kernel operates over `padded_keys` (66560), with the extra 704 keys masked
+to `-inf` in both the key/value pad and the mask pad
+(`dspark_attention_chunk_trial.py`, both padding amounts derived from the
+same two overridden literals, so they can't disagree with each other). This
+run fails inside `audit()` before reaching `layout_checks`, so there's no
+direct re-confirmation the mask pad landed correctly on hardware this time,
+but the failure's own shape - a handful of channels quantising to an
+identical bf16 value, not a wrong magnitude, NaN, or a wide swath of
+elements - is the signature of a precision effect, not a range/masking bug.
+
+**Comparison against the ladder's zero-failure pass (run 34797353681) -
+correction to this doc's earlier assumption.** `dspark_ladder_factory.py`
+defines `output_precision()`, which *would* widen `im_df` (the output
+accumulator) to FP32 at Skt==2112 - but grep confirms it is never called:
+`dspark_ladder_build.factory_scope()` only composes `dspark_ladder_factory.
+transform` (the Skt/Sk_chunk_t widening) and `dspark_ladder_normalization.
+factory_transform` (the scratch-CB patch), never `output_precision`. So the
+ladder's own validated, zero-failure configuration *also* runs with `im_df`
+staying bf16 unconditionally - identical to this port on that axis. "Output
+accumulator still bf16" is therefore **not** the differentiator between the
+two runs; both share it. Real differences: (1) capacity basis - the ladder
+reserves `output_tokens=1024` (`dspark_ladder_geometry.py:7,12`), giving
+`storage_keys=66624`, `native_keys=67584`, Skt=2112, 66 iterations; this port
+uses `context+256` (`frozen_context_geometry.py:12`), giving
+`storage_keys=65856`, `padded_keys=66560`, Skt=2080, 65 iterations - a
+768-key/one-iteration gap; (2) a different probe/fixture harness entirely
+(`dspark-ladder-attention-probe.py` vs `dspark-native-8k-attention-probe.py`)
+- a quick grep found no `manual_seed`/`torch.rand` calls directly in the
+ladder probe or `dspark_ladder_fixtures.py`, suggesting it may import the
+same fixture-building code this port's probe uses, but this was not fully
+traced and is left unconfirmed. Scale, exp-approximation and mask
+construction were not directly re-diffed line-by-line against the ladder
+probe in this pass, given the report deadline; flagging as unverified rather
+than asserting they match.
+
+**Recommendation.** Single next change with the best odds: reproduce the
+ladder's exact geometry (Skt=2112, 67584 padded keys, 1024-key chunk, 66
+iterations - i.e. `dspark_ladder_geometry.py`'s own numbers) instead of this
+port's independently-derived 2080/66560/65, since 2112 is the *only*
+combination with an actual zero-failure hardware result behind it. This is
+a pure constant swap in `frozen_wide_chunk_normalization.py` (`SKT`,
+`PADDED_KEYS`, `KEY_CHUNK` stay 1024, `CAPACITY`/`STORAGE_KEYS` change to
+match the ladder's `output_tokens=1024` formula) - cheap, no new kernel
+logic - but confidence is moderate, not high: the fixture harness differs
+too, and the ladder pass has never been shown to hold for *this* probe's
+specific random values. If that still fails, the honest reading is that this
+residual is a genuine, narrow bf16-boundary case - a handful of per-channel
+numerators closer together than one bf16 ulp at this magnitude - that no
+reciprocal-precision or chunk-count lever closes for every possible input,
+only an FP32 output accumulator would. That specific candidate
+(`dspark_ladder_factory.output_precision()`, currently dead code) was tried
+*alone* earlier in this investigation and made things worse (4131 failures,
+`docs/context-ladder-investigation.md`, "FP32 output-intermediate result:
+worse, rejected") - it has never been tried *combined* with the scratch-CB
+reciprocal fix now in place, which changes the starting point enough that
+the old rejection may not transfer. Trying it would cost a fresh
+build+requalification cycle and roughly doubles the stats+output CB
+footprint at this rung, which matters given the tight CB budget already
+flagged separately for target-replay.
