@@ -1,7 +1,7 @@
 name: Qwen frozen recipe 32K numerical check
 on:
   push:
-    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1', 'experiment/frozen-32k-reciprocal-diagnostics-v1', 'experiment/frozen-32k-target-replay-v1', 'experiment/frozen-32k-target-replay-v2', 'experiment/frozen-32k-target-replay-scratch-v1', 'experiment/frozen-32k-target-replay-scratch-v2', 'experiment/frozen-32k-target-replay-scratch-v3', 'experiment/frozen-32k-target-replay-scratch-v4', 'experiment/frozen-64k-numerical-v1', 'experiment/frozen-64k-reciprocal-eager-v1', 'experiment/frozen-64k-reciprocal-replay-v1', 'experiment/frozen-64k-reciprocal-replay-v2', 'experiment/frozen-64k-reciprocal-replay-v3', 'experiment/frozen-64k-reciprocal-replay-v4', 'experiment/frozen-64k-reciprocal-replay-v5', 'experiment/frozen-64k-reciprocal-diagnostics-v1', 'experiment/frozen-64k-target-replay-v1', 'experiment/frozen-64k-target-replay-v2', 'experiment/frozen-64k-target-replay-v3', 'experiment/frozen-64k-target-replay-v4', 'experiment/frozen-64k-target-replay-scratch-v1', 'experiment/frozen-64k-target-replay-scratch-v2', 'experiment/frozen-64k-target-replay-scratch-v3', 'experiment/frozen-64k-target-replay-scratch-v4']
+    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1', 'experiment/frozen-32k-reciprocal-diagnostics-v1', 'experiment/frozen-32k-target-replay-v1', 'experiment/frozen-32k-target-replay-v2', 'experiment/frozen-32k-target-replay-scratch-v1', 'experiment/frozen-32k-target-replay-scratch-v2', 'experiment/frozen-32k-target-replay-scratch-v3', 'experiment/frozen-32k-target-replay-scratch-v4', 'experiment/frozen-64k-numerical-v1', 'experiment/frozen-64k-reciprocal-eager-v1', 'experiment/frozen-64k-reciprocal-replay-v1', 'experiment/frozen-64k-reciprocal-replay-v2', 'experiment/frozen-64k-reciprocal-replay-v3', 'experiment/frozen-64k-reciprocal-replay-v4', 'experiment/frozen-64k-reciprocal-replay-v5', 'experiment/frozen-64k-reciprocal-diagnostics-v1', 'experiment/frozen-64k-target-replay-v1', 'experiment/frozen-64k-target-replay-v2', 'experiment/frozen-64k-target-replay-v3', 'experiment/frozen-64k-target-replay-v4', 'experiment/frozen-64k-target-replay-scratch-v1', 'experiment/frozen-64k-target-replay-scratch-v2', 'experiment/frozen-64k-target-replay-scratch-v3', 'experiment/frozen-64k-target-replay-scratch-v4', 'experiment/frozen-64k-target-replay-scratch-v5', 'experiment/frozen-64k-target-replay-scratch-v6']
 permissions:
   contents: read
 concurrency:
@@ -10,7 +10,7 @@ concurrency:
 jobs:
   numerical:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: ${{ contains(github.ref, 'target-replay-') && !endsWith(github.ref, 'scratch-v4') && 12 || 20 }}
+    timeout-minutes: ${{ contains(github.ref, 'target-replay-') && !contains(github.ref, 'scratch-v4') && !contains(github.ref, 'scratch-v5') && !contains(github.ref, 'scratch-v6') && 12 || 20 }}
     steps:
       - name: Restore ownership of prior simulator artifacts
         run: |
@@ -46,7 +46,7 @@ jobs:
           candidate=()
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-* || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-* ]]; then
             candidate=(--target-replay)
-            if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-scratch-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v4 ]]; then
+            if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-scratch-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v5 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v6 ]]; then
               candidate+=(--probe-seconds 1020)
             fi
           fi
