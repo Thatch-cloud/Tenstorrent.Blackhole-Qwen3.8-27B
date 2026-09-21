@@ -91,8 +91,17 @@ class PreparedDFlashProposal:
             payload = operations.from_torch(value, dtype=destination.dtype, layout=destination.layout,
                 mesh_mapper=operations.ReplicateTensorToMesh(self.mesh))
             operations.copy_host_to_device_tensor(payload, destination)
+        # Pooled, the K/V banks read below are lent (kv_history.borrowed), not owned
+        # (kv_history.owned is empty under the pool): run 35561480877 died on the
+        # FIRST traced proposal with 'input_tensor.is_allocated()' reading active[name]
+        # below, because a context=2048 bucket slices a bank's full row extent - the
+        # same identity the bank already has - and unprotected here, retain() queued
+        # that reslice as a temporary for this call's own release_owned() to free the
+        # live pool bank out from under every later proposal. kv_history.temporaries()
+        # already protects kv_history.borrowed the same way; this call must too.
         owned, retain = device.temporaries([device.history, device.spare_history, *self.owned,
-            *(self.kv_history.owned if self.kv_history is not None else [])])
+            *(self.kv_history.owned if self.kv_history is not None else []),
+            *(self.kv_history.borrowed if self.kv_history is not None else [])])
         try:
             if self.kv_history is None or device.progress is not None:
                 history = retain(operations.slice(device.history, (0, 0, 0, 0), (1, 1, bucket.context, 5120)))

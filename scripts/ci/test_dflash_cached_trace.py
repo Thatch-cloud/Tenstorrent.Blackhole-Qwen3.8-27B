@@ -25,7 +25,7 @@ class CachedProposalTests(unittest.TestCase):
         active = [dict(k=torch.ones((1, 4, 2048, 128), dtype=torch.bfloat16),
             v=torch.full((1, 4, 2048, 128), 3, dtype=torch.bfloat16))]
         cache = SimpleNamespace(position=4093, history_rows=2048, active=active, pending=None,
-            owned=list(active[0].values()))
+            owned=list(active[0].values()), borrowed=[])
         device = SimpleNamespace(operations=operations, mesh=object(), position=4093, history_rows=2048, block_rows=block_rows,
             native_proposal_attention=native, validated_native_proposal_masks=set(),
             history=torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16),
@@ -100,6 +100,109 @@ class CachedProposalTests(unittest.TestCase):
                     self.assertEqual(len(prepared.checks), 1)
             if corruption == 'uncached':
                 operations.execute_trace.assert_not_called()
+
+    def build_pooled_case(self, context, scalar=5, spare_scalar=11):
+        """One request's DraftKVHistory-shaped fixture over a POOLED bank: `active` and
+        `spare` are the lent tensors themselves (draft_kv_history.py, storage=), and
+        `borrowed` lists every one of them regardless of which list currently calls it
+        active - exactly as DraftKVHistory.__init__ builds it, and unlike `owned`,
+        which is empty whenever the pool lends the banks."""
+        operations = SimpleNamespace(ReplicateTensorToMesh=lambda mesh: mesh,
+            from_torch=lambda value, **kwargs: value.clone(),
+            copy_host_to_device_tensor=Mock(side_effect=lambda source, destination: destination.copy_(source)),
+            slice=lambda value, start, end: value[tuple(slice(first, last) for first, last in zip(start, end, strict=True))],
+            copy=Mock(side_effect=lambda source, destination: destination.copy_(source)),
+            synchronize_device=Mock(), deallocate=Mock())
+        active = [dict(k=torch.full((1, 4, 2048, 128), scalar, dtype=torch.bfloat16),
+            v=torch.full((1, 4, 2048, 128), scalar + 1, dtype=torch.bfloat16))]
+        spare = [dict(k=torch.full((1, 4, 2048, 128), spare_scalar, dtype=torch.bfloat16),
+            v=torch.full((1, 4, 2048, 128), spare_scalar + 1, dtype=torch.bfloat16))]
+        cache = SimpleNamespace(position=4093, history_rows=context, active=active, spare=spare, pending=None,
+            owned=[], borrowed=[*active[0].values(), *spare[0].values()])
+        device = SimpleNamespace(operations=operations, mesh=object(), position=4093, history_rows=context, block_rows=8,
+            native_proposal_attention=False, validated_native_proposal_masks=set(),
+            history=torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16),
+            spare_history=torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16), progress=None)
+        device.temporaries = MethodType(DFlashDevice.temporaries, device)
+        host = proposal_inputs(17, 4093, context, 8, context)
+        bucket = SimpleNamespace(context=context, identifiers=host['identifiers'].clone(), mask=host['mask'].clone(),
+            rope={name: tuple(value.clone() for value in host['rope'][name]) for name in ('q', 'k')},
+            history=torch.full((1, 1, context + 32, 5120), 9, dtype=torch.bfloat16),
+            cached_history=[{name: torch.zeros((1, 4, context, 128), dtype=torch.bfloat16) for name in ('k', 'v')}])
+        bucket.inputs = [bucket.identifiers, bucket.history, bucket.mask, *bucket.rope['q'], *bucket.rope['k'],
+            *bucket.cached_history[0].values()]
+        address = lambda operations, value: (value.untyped_storage().data_ptr(), value.untyped_storage().data_ptr() + 1)
+        bucket.addresses = [address(operations, value) for value in bucket.inputs]
+        prepared = PreparedDFlashProposal.__new__(PreparedDFlashProposal)
+        prepared.operations, prepared.device, prepared.mesh = operations, device, device.mesh
+        prepared.kv_history, prepared.owned = cache, bucket.inputs
+        return SimpleNamespace(operations=operations, cache=cache, device=device, bucket=bucket,
+            prepared=prepared, address=address)
+
+    def released_addresses(self, operations, address):
+        """A release_owned exactly as gdn_multitoken_conv.release_owned dedups and frees,
+        but keyed by this test's own address() rather than a real get_device_tensors -
+        the same substitution the neighbouring tests make for `addresses` itself."""
+        def fake_release_owned(ops, tensors):
+            unique = {address(ops, tensor): tensor for tensor in tensors}
+            for tensor in unique.values():
+                ops.deallocate(tensor)
+        return fake_release_owned
+
+    def test_update_does_not_release_the_pooled_kv_banks_it_reads(self):
+        """Run 35561480877: the FIRST traced proposal after four-user pool admission died
+        with TT_FATAL input_tensor.is_allocated() reading kv_history.active - the context
+        2048 bucket (dflash_proposal_inputs.proposal_contexts's top rung, exactly the pool
+        bank's own row extent) slices the bank's full extent, which shares the bank's own
+        storage identity; unprotected in update()'s device.temporaries() (kv_history.owned
+        is empty under the pool - only kv_history.borrowed lists the lent banks), retain()
+        queued that reslice as a temporary and this call's own release_owned() freed the
+        live pool bank. This must never happen, for the top bucket or any other."""
+        for context in (256, 2048):
+            case = self.build_pooled_case(context)
+            release_owned = self.released_addresses(case.operations, case.address)
+            with patch('dflash_proposal_trace.addresses', side_effect=case.address), \
+                    patch('dflash_device.addresses', side_effect=case.address), \
+                    patch('dflash_proposal_trace.release_owned', side_effect=release_owned):
+                case.prepared.update(case.bucket, 5)
+            bank_addresses = {case.address(case.operations, value) for value in case.cache.borrowed}
+            freed_addresses = {case.address(case.operations, call.args[0])
+                for call in case.operations.deallocate.call_args_list}
+            self.assertFalse(bank_addresses & freed_addresses,
+                'context=%d: update() released a pool-lent K/V bank as its own temporary' % context)
+            for name in ('k', 'v'):
+                self.assertTrue(torch.equal(case.bucket.cached_history[0][name],
+                    case.cache.active[0][name][:, :, :context, :]))
+
+    def test_update_protects_both_sides_of_a_committed_bank_swap(self):
+        """The rebinding scenario: DraftKVHistory.commit() (draft_kv_history.py) swaps
+        `self.active` and `self.spare` to the OTHER physical bank without reallocating
+        either one - `borrowed` lists both sides permanently, from construction, so a
+        proposal update() reading whichever bank is active now must never free either
+        side, before or after the swap it did not itself request."""
+        case = self.build_pooled_case(2048)
+        release_owned = self.released_addresses(case.operations, case.address)
+        with patch('dflash_proposal_trace.addresses', side_effect=case.address), \
+                patch('dflash_device.addresses', side_effect=case.address), \
+                patch('dflash_proposal_trace.release_owned', side_effect=release_owned):
+            case.prepared.update(case.bucket, 5)
+            # DraftKVHistory.commit(): self.active, self.spare = self.spare, self.active -
+            # the same two physical banks, roles swapped; borrowed is untouched by design.
+            case.cache.active, case.cache.spare = case.cache.spare, case.cache.active
+            case.bucket.cached_history = [{name: torch.zeros_like(value)
+                for name, value in case.cache.active[0].items()}]
+            case.bucket.inputs = [case.bucket.identifiers, case.bucket.history, case.bucket.mask,
+                *case.bucket.rope['q'], *case.bucket.rope['k'], *case.bucket.cached_history[0].values()]
+            case.bucket.addresses = [case.address(case.operations, value) for value in case.bucket.inputs]
+            case.prepared.owned = case.bucket.inputs
+            case.prepared.update(case.bucket, 11)
+        bank_addresses = {case.address(case.operations, value) for value in case.cache.borrowed}
+        freed_addresses = {case.address(case.operations, call.args[0])
+            for call in case.operations.deallocate.call_args_list}
+        self.assertFalse(bank_addresses & freed_addresses,
+            'a committed bank swap must not expose either physical bank to release')
+        for name in ('k', 'v'):
+            self.assertTrue(torch.equal(case.bucket.cached_history[0][name], case.cache.active[0][name]))
 
 
 if __name__ == '__main__':
