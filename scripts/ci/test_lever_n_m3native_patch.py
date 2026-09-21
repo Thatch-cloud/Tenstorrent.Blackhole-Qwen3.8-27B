@@ -756,5 +756,33 @@ class MlpPatchTests(unittest.TestCase):
             patch_mlp(''.join(lines))
 
 
+class FusedPrefillLayoutGuardTests(unittest.TestCase):
+    """Run 35558196643: at 64 rows every fused all-gather + matmul PREFILL branch was
+    selected on rows alone and refused the replicated decode input (K=10240 vs
+    K_w=5120). Each branch now also requires x narrower than the weight K."""
+
+    def test_attention_qkv_fused_branch_requires_the_k_sharded_input(self):
+        out = patcher.patch_attention_tp(ATTENTION_TP)
+        self.assertIn('if self._fuse_agmm and x.shape[-2] > tpc.TILE_SIZE and x.shape[-1] < tw["wqkv_fused"].shape[-2]:', out)
+        self.assertEqual(out.count('if self._fuse_agmm and x.shape[-2] > tpc.TILE_SIZE'), 1)
+        self.assertEqual(out.count('qkv = tpc.all_gather_matmul_prefill('), 1)
+
+    def test_gdn_project_qkvzab_fused_branch_requires_the_k_sharded_input(self):
+        out = patcher.patch_gdn_tp(GDN_TP)
+        self.assertIn('if self._fuse_agmm and S > tpc.TILE_SIZE and x.shape[-1] < self.tw["qkvz"].shape[-2]:', out)
+        self.assertEqual(out.count('qkvzab = tpc.all_gather_matmul_prefill('), 1)
+
+    def test_mlp_fused_gate_up_requires_the_k_sharded_input(self):
+        out = patcher.patch_mlp(MLP)
+        self.assertIn('_fused_gu = (self._fuse_gateup_agmm and x.shape[-2] > ttnn.TILE_SIZE and w.w_gate_up is not None', out)
+        self.assertIn('and x.shape[-1] < w.w_gate_up.shape[-2])', out)
+        self.assertEqual(out.count('_fused_gu = '), 1)
+        self.assertEqual(out.count('hidden = tpc.all_gather_swiglu_prefill('), 1)
+
+    def test_the_guard_is_absent_before_patching(self):
+        for source in (ATTENTION_TP, GDN_TP, MLP):
+            self.assertNotIn('x.shape[-1] < ', source)
+
+
 if __name__ == '__main__':
     unittest.main()

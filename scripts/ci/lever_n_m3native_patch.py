@@ -243,6 +243,22 @@ def patch_attention_tp(source):
         '        )\n',
         'attention forward_decode prep gate')
 
+    # Lever N M3native (run 35558196643): the fused all-gather + matmul branch is the
+    # K-sharded PREFILL input path (the norm skipped its all-gather), and it was
+    # selected on rows alone. A 64-row decode input is replicated at full K, and
+    # all_gather_minimal_matmul_async gathers it to 2K and refuses (K=10240 vs
+    # K_w=5120), so the fused branch now also requires x narrower than the weight K;
+    # the 64-row decode input falls through to the 1D decode branch below it.
+    span = function_span(''.join(lines), QKV_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '        if self._fuse_agmm and x.shape[-2] > tpc.TILE_SIZE:\n'
+        '            qkv = tpc.all_gather_matmul_prefill(\n',
+        '        # Lever N M3native: the fused all-gather path is for the K-sharded prefill input;\n'
+        '        # a replicated (full-K) 64-row decode input takes the 1D decode branch below.\n'
+        '        if self._fuse_agmm and x.shape[-2] > tpc.TILE_SIZE and x.shape[-1] < tw["wqkv_fused"].shape[-2]:\n'
+        '            qkv = tpc.all_gather_matmul_prefill(\n',
+        'attention _qkv fused-prefill layout guard')
     result = ''.join(lines)
     ast.parse(result)
     return result
@@ -331,6 +347,22 @@ def patch_gdn_tp(source):
         '            )\n',
         'gdn _project_qkvzab_raw 1D decode gate')
 
+    # Lever N M3native (run 35558196643): the fused all-gather + matmul branch is the
+    # K-sharded PREFILL input path (the norm skipped its all-gather), and it was
+    # selected on rows alone. A 64-row decode input is replicated at full K, and
+    # all_gather_minimal_matmul_async gathers it to 2K and refuses (K=10240 vs
+    # K_w=5120), so the fused branch now also requires x narrower than the weight K;
+    # the 64-row decode input falls through to the 1D decode branch below it.
+    span = function_span(''.join(lines), PROJECT_QKVZAB_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '            if self._fuse_agmm and S > tpc.TILE_SIZE:\n'
+        '                qkvzab = tpc.all_gather_matmul_prefill(\n',
+        '            # Lever N M3native: the fused all-gather path is for the K-sharded prefill input;\n'
+        '            # a replicated (full-K) 64-row decode input takes the 1D decode branch below.\n'
+        '            if self._fuse_agmm and S > tpc.TILE_SIZE and x.shape[-1] < self.tw["qkvz"].shape[-2]:\n'
+        '                qkvzab = tpc.all_gather_matmul_prefill(\n',
+        'gdn _project_qkvzab fused-prefill layout guard')
     result = ''.join(lines)
     ast.parse(result)
     return result
@@ -411,6 +443,21 @@ def patch_mlp(source):
         '                     else args.mlp_w2_decode_1d_progcfg)\n',
         'mlp w2 1D decode gate')
 
+    # Lever N M3native (run 35558196643): the fused all-gather + matmul branch is the
+    # K-sharded PREFILL input path (the norm skipped its all-gather), and it was
+    # selected on rows alone. A 64-row decode input is replicated at full K, and
+    # all_gather_minimal_matmul_async gathers it to 2K and refuses (K=10240 vs
+    # K_w=5120), so the fused branch now also requires x narrower than the weight K;
+    # the 64-row decode input falls through to the 1D decode branch below it.
+    span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '        _fused_gu = self._fuse_gateup_agmm and x.shape[-2] > ttnn.TILE_SIZE and w.w_gate_up is not None\n',
+        '        # Lever N M3native: the fused all-gather path is for the K-sharded prefill input;\n'
+        '        # a replicated (full-K) 64-row decode input takes the 1D decode branch below.\n'
+        '        _fused_gu = (self._fuse_gateup_agmm and x.shape[-2] > ttnn.TILE_SIZE and w.w_gate_up is not None\n'
+        '                     and x.shape[-1] < w.w_gate_up.shape[-2])\n',
+        'mlp _forward_tp fused-prefill layout guard')
     result = ''.join(lines)
     ast.parse(result)
     return result
