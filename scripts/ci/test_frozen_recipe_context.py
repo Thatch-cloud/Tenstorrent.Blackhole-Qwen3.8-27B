@@ -66,8 +66,8 @@ timeout() {
 
     def test_deployment_preserves_historical_hardware_runtime(self):
         names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh',
-            'simulator-suite.sh', 'dspark_runtime_cache.py') + FILES
+            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'dspark_fp32_build.py',
+            'run-simulator.sh', 'simulator-suite.sh', 'dspark_runtime_cache.py') + FILES
         originals = {name: subprocess.check_output(
             ['git', 'show', f'{REVISION}:scripts/ci/{name}']) for name in names}
         with tempfile.TemporaryDirectory() as temporary:
@@ -113,8 +113,12 @@ timeout() {
                  # part of `names`, see MINIMAL_ATTENTION_REPLAY above) and
                  # adapt_wide_chunk_normalization's KERNEL_FIX_MODULES loop stages the three
                  # ladder precision fix modules verbatim (SKT-patched) alongside the probe.
+                 # dspark_ladder_backend.py does not exist at REVISION at all; the hardware
+                 # admission graft stages it verbatim from the working tree.
                  'attention_replay.py', 'frozen_wide_chunk_scratch.py',
-                 'frozen_wide_chunk_sum_update.py', 'frozen_wide_chunk_score_center.py'})
+                 'frozen_wide_chunk_sum_update.py', 'frozen_wide_chunk_score_center.py',
+                 'dspark_ladder_backend.py', 'frozen_hardware_build.py',
+                 'frozen-hardware-suite.sh'})
 
     def test_cache_launcher_preserves_bounded_original_probe(self):
         names = ('run-simulator.sh', 'simulator-suite.sh')
@@ -259,8 +263,8 @@ class ProbeSecondsTests(unittest.TestCase):
         against a real historical checkout, not just adapt_cache_launcher()
         called directly."""
         names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh',
-            'simulator-suite.sh') + FILES
+            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'dspark_fp32_build.py',
+            'run-simulator.sh', 'simulator-suite.sh') + FILES
         originals = {name: subprocess.check_output(
             ['git', 'show', f'{REVISION}:scripts/ci/{name}']) for name in names}
         with tempfile.TemporaryDirectory() as temporary:
@@ -309,8 +313,8 @@ class Rung65536CombinedRuntimeStagingTests(unittest.TestCase):
         from frozen_runtime_context import FILES as RUNTIME_FILES
         from frozen_combined_adapters import FILES as COMBINED_FILES
         names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh',
-            'simulator-suite.sh') + RUNTIME_FILES
+            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'dspark_fp32_build.py',
+            'run-simulator.sh', 'simulator-suite.sh') + RUNTIME_FILES
         if combined_runtime:
             names += ('target-t16-attention-8k-probe.py', 'attention_mask_replay.py') + COMBINED_FILES
         originals = {name: subprocess.check_output(

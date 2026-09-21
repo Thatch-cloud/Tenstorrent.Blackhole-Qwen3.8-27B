@@ -43,9 +43,15 @@ def adapted_sources(context, probe_seconds=1020):
     scalar-reciprocal/target-replay/combined-runtime adapters), plus
     frozen_sim_build_cache.py - staged verbatim from the working tree by
     main()'s later unconditional-copy loop, which runs before this module's
-    adapter (frozen_recipe_context.py wires it in right after that loop)."""
+    adapter (frozen_recipe_context.py wires it in right after that loop).
+    dspark_fp32_build.py is fetched from the pin the same way
+    frozen_recipe_context.py's own `names` tuple now does (added for the
+    hardware-lane patch; see frozen_wide_chunk_normalization.py's module
+    docstring) - adapt_probe_sources()/adapt_cache_launcher() do not touch
+    it, so its historical() text passes through unchanged here too."""
     names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-        'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh', 'simulator-suite.sh')
+        'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'dspark_fp32_build.py',
+        'run-simulator.sh', 'simulator-suite.sh')
     sources = {name: historical(name) for name in names}
     result = adapt_cache_launcher(adapt_probe_sources(sources, context), probe_seconds)
     result['frozen_sim_build_cache.py'] = Path(__file__).with_name('frozen_sim_build_cache.py').read_text()
@@ -265,6 +271,124 @@ class WideChunkPatchTests(unittest.TestCase):
                 for name, source in result.items():
                     if name.endswith('.py'):
                         compile(source, name, 'exec')
+
+
+class HardwareAdmissionPatchTests(unittest.TestCase):
+    """The --hardware graft added to _patch_probe/_patch_fp32_build: replaces
+    the old hardcoded ladder-geometry guard (CAPACITY != 66560, POSITIONS !=
+    (65536, 66545) - the working tree's own numbers, from
+    dspark_ladder_geometry.geometry(65536, output_tokens=1024)) with a check
+    against THIS frozen recipe's own geometry (frozen_context_geometry.
+    geometry(65536): capacity=65792, positions=(65536, 65777)), and grafts in
+    the --hardware flag/backend selection/packer validation that the pinned
+    revision (8c102b20) never had at all (added two commits later, d475d08c
+    and 466f6891)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sources = adapted_sources(65536)
+
+    def _geometries(self):
+        return [wide.geometry_for_skt(skt) for skt in wide.ACCEPTED_SKT]
+
+    def test_probe_patch_replaces_ladder_geometry_guard_with_frozen_recipe_geometry(self):
+        for geometry in self._geometries():
+            with self.subTest(skt=geometry['skt']):
+                patched = wide._patch_probe(self.sources['dspark-native-8k-attention-probe.py'], geometry)
+                self.assertIn(
+                    "if options.hardware and (CAPACITY != 65792 or POSITIONS != (65536, 65777) or PROPOSALS != 15):",
+                    patched)
+                # The old ladder-geometry numbers must be gone from the guard line
+                # itself, not just superseded - a residual duplicate guard would be
+                # a silent bug. (66560 legitimately reappears elsewhere in this
+                # file at Skt==2080 - it is geometry['padded_keys'], an unrelated
+                # kernel-padding number - so the check is scoped to the guard line.)
+                self.assertNotIn('CAPACITY != 66560', patched)
+                self.assertNotIn('POSITIONS != (65536, 66545)', patched)
+                compile(patched, 'dspark-native-8k-attention-probe.py', 'exec')
+
+    def test_probe_patch_adds_hardware_flag_and_backend_selection(self):
+        patched = wide._patch_probe(self.sources['dspark-native-8k-attention-probe.py'],
+            wide.geometry_for_skt(2112))
+        self.assertIn("parser.add_argument('--hardware', action='store_true')", patched)
+        self.assertIn('from dspark_ladder_backend import require_backend, require_packer_mode', patched)
+        self.assertIn("backend = require_backend(os.environ, hardware=options.hardware,", patched)
+        self.assertIn('backend=backend, scope=__doc__,', patched)
+        self.assertNotIn("backend='simulator'", patched)
+        self.assertNotIn('from feature_projection import require_projection_environment', patched)
+        self.assertIn('resources_before=snapshot(bounded=not options.hardware),', patched)
+        self.assertIn("report['resources_after'] = snapshot(bounded=not options.hardware)", patched)
+        compile(patched, 'dspark-native-8k-attention-probe.py', 'exec')
+
+    def test_probe_patch_adds_backend_specific_packer_check(self):
+        patched = wide._patch_probe(self.sources['dspark-native-8k-attention-probe.py'],
+            wide.geometry_for_skt(2112))
+        self.assertIn("hardware = os.environ.get('QWEN_LADDER_BACKEND') == 'hardware'", patched)
+        self.assertIn('require_packer_mode(hardware=hardware, packer_compat=packer_compat, '
+            'precise_native=precise_native)', patched)
+        self.assertIn('expected_packer = NATIVE.ORIGINAL_PACKER if hardware else NATIVE.COMPAT_PACKER', patched)
+        self.assertNotIn("if packer_compat is not True or precise_native is not True:", patched)
+        compile(patched, 'dspark-native-8k-attention-probe.py', 'exec')
+
+    def test_probe_patch_tracks_dspark_ladder_backend_source_hash(self):
+        patched = wide._patch_probe(self.sources['dspark-native-8k-attention-probe.py'],
+            wide.geometry_for_skt(2112))
+        self.assertIn("'dspark_attention_8k_gate.py', 'dspark_ladder_backend.py'", patched)
+
+    def test_fp32_build_patch_adds_hardware_branch_without_touching_validate_manifest(self):
+        source = self.sources['dspark_fp32_build.py']
+        # Precondition: fetched fresh from the pin, not the working tree's
+        # diverged copy (which already defines a separate main(*, hardware=...)).
+        # ('hardware' alone is not a safe substring check - dspark_hardware_gate
+        # is a real, unrelated import this file already has.)
+        self.assertIn('def main():\n', source)
+        self.assertNotIn('def main(*, hardware', source)
+        patched = wide._patch_fp32_build(source)
+        self.assertIn('def main(*, hardware=False):', patched)
+        self.assertIn('from dspark_ladder_backend import require_backend', patched)
+        self.assertIn("require_backend(os.environ, hardware=True, device_present=Path('/dev/tenstorrent').exists())",
+            patched)
+        self.assertIn("elif (os.environ.get('QWEN_SIM_ONLY') != '1'", patched)
+        # validate_manifest()'s inlined reversal - the thing factory_scope()'s
+        # docstring says this patch must not disturb - is untouched.
+        self.assertIn("original = source.replace(replacement.encode(), ANCHOR.encode())", patched)
+        self.assertNotIn('restore_factory_source', patched)
+        compile(patched, 'dspark_fp32_build.py', 'exec')
+
+    def test_full_adapter_stages_dspark_ladder_backend_verbatim_and_patches_fp32_build(self):
+        for knob in ('2080', '2112'):
+            with self.subTest(knob=knob), patch.dict(os.environ, {wide.KNOB: knob}):
+                result = wide.adapt_wide_chunk_normalization(dict(self.sources), 65536)
+                self.assertEqual(result['dspark_ladder_backend.py'],
+                    Path(__file__).with_name('dspark_ladder_backend.py').read_text())
+                self.assertIn('def main(*, hardware=False):', result['dspark_fp32_build.py'])
+                compile(result['dspark_ladder_backend.py'], 'dspark_ladder_backend.py', 'exec')
+                compile(result['dspark_fp32_build.py'], 'dspark_fp32_build.py', 'exec')
+
+    def test_hardware_entrypoints_are_staged_into_the_65536_tree(self):
+        """run-frozen-hardware.sh copies the frozen-recipe CHECKOUT's scripts/
+        directory into the container, not the orchestrator's, so the two
+        hardware entrypoints only reach /experiment-scripts/ci if the adapter
+        stages them. Neither exists at the pinned revision."""
+        for knob in ('2080', '2112'):
+            with self.subTest(knob=knob), patch.dict(os.environ, {wide.KNOB: knob}):
+                result = wide.adapt_wide_chunk_normalization(dict(self.sources), 65536)
+                for name in ('frozen_hardware_build.py', 'frozen-hardware-suite.sh'):
+                    self.assertEqual(result[name], Path(__file__).with_name(name).read_text())
+                compile(result['frozen_hardware_build.py'], 'frozen_hardware_build.py', 'exec')
+                # The suite invokes both by their staged container paths.
+                self.assertIn('/experiment-scripts/ci/frozen_hardware_build.py',
+                    result['frozen-hardware-suite.sh'])
+
+    def test_32768_gets_neither_new_file_nor_patch(self):
+        sources_32768 = adapted_sources(32768)
+        result = wide.adapt_wide_chunk_normalization(dict(sources_32768), 32768)
+        self.assertNotIn('dspark_ladder_backend.py', result)
+        self.assertNotIn('frozen_hardware_build.py', result)
+        self.assertNotIn('frozen-hardware-suite.sh', result)
+        self.assertEqual(result['dspark_fp32_build.py'], sources_32768['dspark_fp32_build.py'])
+        self.assertIn('def main():\n', result['dspark_fp32_build.py'])
+        self.assertNotIn('def main(*, hardware', result['dspark_fp32_build.py'])
 
 
 def target_probe_source():

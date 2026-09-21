@@ -76,6 +76,57 @@ experiment/frozen-64k-reciprocal-replay-v3). Skt==2112 alone (this fix, no
 sum-update/score-center) is equally unvalidated - it has not itself been
 built or run; only the *combination* of all three ladder fixes together at
 that Skt has a passing hardware result.
+
+UPDATE: hardware-lane wiring. The simulator (libttsim) cannot finish this
+probe's eager_0 pass within any budget tried (up to 3000s,
+docs/numerics-65536-attention.md); the same complete precision set passed on
+real hardware in ~28s (run 34797353681), just under a different geometry
+basis (the ladder's own, output_tokens=1024) and via a probe invocation this
+frozen-recipe lane never took. `_patch_probe` below now also grafts hardware
+admission into the staged 65536 probe - `--hardware`, `dspark_ladder_backend.
+require_backend()`/`require_packer_mode()`, and a corrected CAPACITY/
+POSITIONS guard - reproducing commits d475d08c ("Separate allocated hardware
+admission from simulator ladder execution") and 466f6891 ("Validate stock
+hardware packer separately from simulator compatibility graft") against the
+PINNED probe text, not the working tree's. Those commits landed on this
+branch two commits after REVISION (8c102b20): the pinned probe has no
+`--hardware` flag, `backend` kwarg, or dspark_ladder_backend import at all,
+and its own hardcoded guard values in the CURRENT working tree
+(CAPACITY != 66560, POSITIONS != (65536, 66545)) are the LADDER's own
+geometry (dspark_ladder_geometry.geometry(65536, output_tokens=1024)), not
+this frozen recipe's (frozen_context_geometry.geometry(65536): capacity =
+context + 256 = 65792, positions = (65536, 65777)) - a different capacity
+basis entirely, not a typo. The staged guard below checks THIS module's own
+CAPACITY/CONTEXT constants, so it stays correct for the frozen recipe's
+geometry regardless of which Skt knob value is resolved (Skt only changes
+kernel-internal padding, never CAPACITY/POSITIONS - see the module docstring
+above). PROPOSALS is included in the guard for documentation symmetry with
+CAPACITY/POSITIONS even though it is invariant (always staged as the literal
+15, never derived from SHAPE) and so can never actually trip it.
+
+dspark_fp32_build.py is grafted the same way, but from a FRESH pinned-revision
+fetch (frozen_recipe_context.py's `names` tuple, not the verbatim-from-working-
+tree copy loop): the working tree's own dspark_fp32_build.py has diverged
+structurally from the pinned one (it now defines a separate
+restore_factory_source function; see frozen_wide_chunk_scratch.py's
+factory_scope() docstring for why that distinction matters), so grafting it
+wholesale would silently break factory_scope()'s self-detecting reversal.
+_patch_fp32_build() below applies only the minimal hardware-branch hunk from
+d475d08c to the pinned text, leaving every other line - including the
+inlined ANCHOR/REPLACEMENT reversal factory_scope() depends on - untouched.
+
+The hardware hunk is invoked in TWO places, deliberately kept off the
+simulator lane's own build path: the probe's own runner_fingerprints() (which
+now branches on QWEN_LADDER_BACKEND=hardware for the packer/build check), and
+a NEW, separate build invocation the hardware workflow arm calls directly
+(`with frozen_wide_chunk_scratch.factory_scope(): dspark_fp32_build.main(
+hardware=True)`) - NOT through frozen_sim_build_cache.py's caching wrapper,
+which this module leaves completely untouched. Two reasons: the cache key
+does not carry the backend, so a simulator-mode cache hit could silently
+short-circuit a hardware build (or vice versa); and the ladder's own hardware
+lane (scripts/ci/ladder-hardware-suite.sh) already establishes the pattern of
+a direct, uncached hardware build via dspark_ladder_build.py, which this
+mirrors for the frozen recipe instead of inventing a new mechanism.
 """
 
 import os
@@ -195,7 +246,93 @@ def _patch_probe(source, geometry):
         '    from frozen_wide_chunk_scratch import kernel_scope\n')
     source = _once(source, 'scoped_stats_pack(),',
         'sum_update_scope(), score_center_scope(), kernel_scope(), scoped_stats_pack(),')
+    # Hardware admission graft (commits d475d08c, 466f6891 - see the module
+    # docstring's UPDATE section). Applied against the pinned-revision text,
+    # which predates both commits and has no --hardware support at all.
+    source = _once(source, 'from feature_projection import require_projection_environment',
+        'from dspark_ladder_backend import require_backend, require_packer_mode')
+    source = _once(source,
+        "def runner_fingerprints(root, *, packer_compat=False, precise_native=False):\n"
+        "    from native_draft_sdpa import audit_active_kernel\n"
+        "    if packer_compat is not True or precise_native is not True:\n"
+        "        raise ValueError('Explicit compatible packer and precise native kernel required')\n"
+        "    audit_active_kernel(root)\n",
+        "def runner_fingerprints(root, *, packer_compat=False, precise_native=False):\n"
+        "    from native_draft_sdpa import audit_active_kernel\n"
+        "    hardware = os.environ.get('QWEN_LADDER_BACKEND') == 'hardware'\n"
+        "    require_packer_mode(hardware=hardware, packer_compat=packer_compat, precise_native=precise_native)\n"
+        "    audit_active_kernel(root)\n")
+    source = _once(source,
+        "    if result[NATIVE.PACKER] != NATIVE.COMPAT_PACKER or any(result[name] != value for name, value in binaries.items()):\n"
+        "        raise ValueError('Pinned CI simulator binaries and compatible packer required')\n",
+        "    expected_packer = NATIVE.ORIGINAL_PACKER if hardware else NATIVE.COMPAT_PACKER\n"
+        "    if result[NATIVE.PACKER] != expected_packer or any(result[name] != value for name, value in binaries.items()):\n"
+        "        raise ValueError('Pinned rebuilt binaries and backend-specific packer required')\n")
+    source = _once(source,
+        "def run():\n"
+        "    parser = argparse.ArgumentParser(description=__doc__)\n"
+        "    parser.add_argument('--output', type=Path, required=True)\n"
+        "    options = parser.parse_args()\n"
+        "    require_projection_environment(os.environ, False)\n"
+        "    kernel_audit = run_precise_probe(__file__)\n"
+        "    if (options.output.exists() or os.environ.get('QWEN_SIM_SHARED_BDF') != '1'\n"
+        "            or os.environ.get('QWEN_SIM_BOUNDED_MEMORY') != '1'\n"
+        "            or os.environ.get('QWEN_PRECISE_DRAFT_ACTIVE') != '1'\n"
+        "            or any(os.environ.get(name) == '1' for name in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'))):\n"
+        "        raise ValueError('Fresh bounded two-chip simulator and owned precise native runtime required')\n",
+        "def run():\n"
+        "    parser = argparse.ArgumentParser(description=__doc__)\n"
+        "    parser.add_argument('--output', type=Path, required=True)\n"
+        "    parser.add_argument('--hardware', action='store_true')\n"
+        "    options = parser.parse_args()\n"
+        "    backend = require_backend(os.environ, hardware=options.hardware,\n"
+        "        device_present=Path('/dev/tenstorrent').exists())\n"
+        f"    if options.hardware and (CAPACITY != {CAPACITY} or POSITIONS != ({CONTEXT}, {CAPACITY - 15}) "
+        "or PROPOSALS != 15):\n"
+        "        raise ValueError('Hardware requires the explicit 65536 frozen-recipe fixture and output headroom')\n"
+        "    kernel_audit = run_precise_probe(__file__)\n"
+        "    if options.output.exists() or os.environ.get('QWEN_PRECISE_DRAFT_ACTIVE') != '1':\n"
+        "        raise ValueError('Fresh output and owned precise native runtime required')\n")
+    source = _once(source, "backend='simulator', scope=__doc__,", "backend=backend, scope=__doc__,")
+    source = _once(source, 'resources_before=snapshot(bounded=True),', 'resources_before=snapshot(bounded=not options.hardware),')
+    source = _once(source, "report['resources_after'] = snapshot(bounded=True)",
+        "report['resources_after'] = snapshot(bounded=not options.hardware)")
+    # Track dspark_ladder_backend.py's own hash the same way the working tree's
+    # SOURCES tuple already does (source_hashes()/source integrity checking).
+    # Anchored on the tail literal, not the whole appended triple, so this
+    # composes cleanly whether or not adapt_scalar_reciprocal() already ran
+    # (same defensive pattern as the `scoped_stats_pack(),` anchor above).
+    source = _once(source, "'dspark_attention_8k_gate.py'", "'dspark_attention_8k_gate.py', 'dspark_ladder_backend.py'")
     return source
+
+
+def _patch_fp32_build(source):
+    """dspark_fp32_build.py, fetched fresh from the pinned revision (see
+    frozen_recipe_context.py's `names` tuple): port commit d475d08c's
+    hardware/simulator main() branch so the build this module's hardware
+    lane calls directly (dspark_fp32_build.main(hardware=True), wrapped in
+    frozen_wide_chunk_scratch.factory_scope() - see the module docstring's
+    UPDATE section) can run against a real device instead of refusing
+    outright (the pinned text's main() only ever accepts QWEN_SIM_ONLY=1 +
+    TT_METAL_SIMULATOR). Deliberately the smallest possible surgical patch:
+    every other line of the pinned dspark_fp32_build.py is untouched,
+    including validate_manifest()'s inlined ANCHOR/REPLACEMENT reversal (no
+    separate restore_factory_source function at this revision), which
+    factory_scope() is written specifically to match."""
+    before = (
+        "def main():\n"
+        "    if (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')\n")
+    after = (
+        "def main(*, hardware=False):\n"
+        "    if type(hardware) is not bool:\n"
+        "        raise ValueError('Explicit build backend required')\n"
+        "    if hardware:\n"
+        "        from dspark_ladder_backend import require_backend\n"
+        "        require_backend(os.environ, hardware=True, device_present=Path('/dev/tenstorrent').exists())\n"
+        "        if os.environ.get('TT_METAL_HOME') != '/opt/tt-metal':\n"
+        "            raise ValueError('Disposable pinned runtime required')\n"
+        "    elif (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')\n")
+    return _once(source, before, after)
 
 
 def _patch_chunk_trial(source, geometry):
@@ -327,6 +464,25 @@ def adapt_wide_chunk_normalization(sources, context):
     result['dspark_fp32_intermediates.py'] = _patch_fp32_intermediates(
         result['dspark_fp32_intermediates.py'], geometry)
     result['frozen_sim_build_cache.py'] = _patch_build_cache(result['frozen_sim_build_cache.py'])
+    # dspark_fp32_build.py was fetched fresh from the pin by frozen_recipe_context.py's
+    # `names` tuple specifically for this patch (see the module docstring's UPDATE
+    # section) - present in every context's `sources`/`result`, but only ever edited
+    # here, at context==65536.
+    result['dspark_fp32_build.py'] = _patch_fp32_build(result['dspark_fp32_build.py'])
+    # dspark_ladder_backend.py does not exist at the pinned revision at all (added by
+    # commit d475d08c, after REVISION); staged verbatim from the working tree, same
+    # pattern as KERNEL_FIX_MODULES below - it is context-agnostic (its own checks key
+    # off QWEN_LADDER_CONTEXT=='65536', QWEN_LADDER_BACKEND, etc., not this module's
+    # Skt knob), so no patching is needed, only staging.
+    result['dspark_ladder_backend.py'] = Path(__file__).with_name('dspark_ladder_backend.py').read_text()
+    # The hardware lane's two entrypoints ride with the orchestrator the same way.
+    # Neither exists at the pinned revision, and neither is meaningful below 65536:
+    # frozen_hardware_build.py imports frozen_wide_chunk_scratch (staged only here),
+    # and frozen-hardware-suite.sh asserts QWEN_LADDER_CONTEXT=65536 on entry. Staging
+    # them here is what puts them inside the container at all - run-frozen-hardware.sh
+    # copies the frozen-recipe CHECKOUT's scripts/ directory, not the orchestrator's.
+    for name in ('frozen_hardware_build.py', 'frozen-hardware-suite.sh'):
+        result[name] = Path(__file__).with_name(name).read_text()
     # Only present when --target-replay was passed (frozen_target_replay.
     # adapt_target_probe(), applied earlier in frozen_recipe_context.main()'s
     # pipeline, is what stages this file at all).

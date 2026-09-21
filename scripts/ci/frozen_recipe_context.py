@@ -229,8 +229,16 @@ def main():
     if git('status', '--porcelain', '--untracked-files=no').strip() or options.manifest.exists():
         raise ValueError('Clean tracked checkout and fresh manifest required')
     from frozen_runtime_context import FILES, adapt_runtime_sources
+    # dspark_fp32_build.py is fetched here (not copied verbatim from the working tree
+    # like frozen_sim_build_cache.py) because frozen_wide_chunk_normalization.py's
+    # hardware patch must apply to the SAME pinned-revision structure that
+    # frozen_wide_chunk_scratch.factory_scope() already assumes (no separate
+    # restore_factory_source function; validate_manifest() inlines that reversal) -
+    # the working tree's own copy of this file has diverged from that structure and
+    # would silently break factory_scope()'s self-detecting reversal if staged as-is.
     names = tuple(dict.fromkeys(('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-        'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh', 'simulator-suite.sh') + FILES))
+        'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'dspark_fp32_build.py',
+        'run-simulator.sh', 'simulator-suite.sh') + FILES))
     if options.target_replay:
         names += ('target-t16-attention-8k-probe.py', 'attention_mask_replay.py')
     if options.combined_runtime:
