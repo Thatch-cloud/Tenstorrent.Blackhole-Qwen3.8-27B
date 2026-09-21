@@ -118,7 +118,7 @@ timeout() {
                  'attention_replay.py', 'frozen_wide_chunk_scratch.py',
                  'frozen_wide_chunk_sum_update.py', 'frozen_wide_chunk_score_center.py',
                  'dspark_ladder_backend.py', 'frozen_hardware_build.py',
-                 'frozen-hardware-suite.sh'})
+                 'frozen-hardware-suite.sh', 'run-frozen-hardware.sh'})
 
     def test_cache_launcher_preserves_bounded_original_probe(self):
         names = ('run-simulator.sh', 'simulator-suite.sh')

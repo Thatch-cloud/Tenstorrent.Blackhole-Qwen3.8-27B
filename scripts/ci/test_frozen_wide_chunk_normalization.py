@@ -373,12 +373,15 @@ class HardwareAdmissionPatchTests(unittest.TestCase):
         for knob in ('2080', '2112'):
             with self.subTest(knob=knob), patch.dict(os.environ, {wide.KNOB: knob}):
                 result = wide.adapt_wide_chunk_normalization(dict(self.sources), 65536)
-                for name in ('frozen_hardware_build.py', 'frozen-hardware-suite.sh'):
+                for name in ('frozen_hardware_build.py', 'frozen-hardware-suite.sh',
+                             'run-frozen-hardware.sh'):
                     self.assertEqual(result[name], Path(__file__).with_name(name).read_text())
                 compile(result['frozen_hardware_build.py'], 'frozen_hardware_build.py', 'exec')
                 # The suite invokes both by their staged container paths.
                 self.assertIn('/experiment-scripts/ci/frozen_hardware_build.py',
                     result['frozen-hardware-suite.sh'])
+                self.assertIn('/experiment-scripts/ci/frozen-hardware-suite.sh',
+                    result['run-frozen-hardware.sh'])
 
     def test_32768_gets_neither_new_file_nor_patch(self):
         sources_32768 = adapted_sources(32768)
@@ -386,6 +389,7 @@ class HardwareAdmissionPatchTests(unittest.TestCase):
         self.assertNotIn('dspark_ladder_backend.py', result)
         self.assertNotIn('frozen_hardware_build.py', result)
         self.assertNotIn('frozen-hardware-suite.sh', result)
+        self.assertNotIn('run-frozen-hardware.sh', result)
         self.assertEqual(result['dspark_fp32_build.py'], sources_32768['dspark_fp32_build.py'])
         self.assertIn('def main():\n', result['dspark_fp32_build.py'])
         self.assertNotIn('def main(*, hardware', result['dspark_fp32_build.py'])

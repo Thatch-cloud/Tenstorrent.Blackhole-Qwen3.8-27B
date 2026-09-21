@@ -475,13 +475,17 @@ def adapt_wide_chunk_normalization(sources, context):
     # off QWEN_LADDER_CONTEXT=='65536', QWEN_LADDER_BACKEND, etc., not this module's
     # Skt knob), so no patching is needed, only staging.
     result['dspark_ladder_backend.py'] = Path(__file__).with_name('dspark_ladder_backend.py').read_text()
-    # The hardware lane's two entrypoints ride with the orchestrator the same way.
-    # Neither exists at the pinned revision, and neither is meaningful below 65536:
+    # The hardware lane's three entrypoints ride with the orchestrator the same way.
+    # None exists at the pinned revision, and none is meaningful below 65536:
     # frozen_hardware_build.py imports frozen_wide_chunk_scratch (staged only here),
     # and frozen-hardware-suite.sh asserts QWEN_LADDER_CONTEXT=65536 on entry. Staging
     # them here is what puts them inside the container at all - run-frozen-hardware.sh
-    # copies the frozen-recipe CHECKOUT's scripts/ directory, not the orchestrator's.
-    for name in ('frozen_hardware_build.py', 'frozen-hardware-suite.sh'):
+    # copies the frozen-recipe CHECKOUT's scripts/ directory, not the orchestrator's,
+    # and the workflow invokes the runner from that same checkout (run 35656351247
+    # exited 127, 'scripts/ci/run-frozen-hardware.sh: No such file or directory',
+    # because only the container-side pair was staged), exactly as the simulator lane
+    # runs the staged run-simulator.sh rather than the orchestrator's.
+    for name in ('frozen_hardware_build.py', 'frozen-hardware-suite.sh', 'run-frozen-hardware.sh'):
         result[name] = Path(__file__).with_name(name).read_text()
     # Only present when --target-replay was passed (frozen_target_replay.
     # adapt_target_probe(), applied earlier in frozen_recipe_context.main()'s
