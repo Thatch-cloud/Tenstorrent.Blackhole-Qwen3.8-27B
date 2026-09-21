@@ -474,6 +474,7 @@ class ModelBatch:
             raise ValueError('Norm batching requires packed checkpoints')
         self.norm_batch = norm_batch_enabled(recurrence_rows(self.rows, self.pack, norm_batch), norm_batch)
         self.norm_batch_calls = 0
+        self.user_batched_calls = 0
         if retain_records and not self.packed_checkpoints:
             raise ValueError('Retained records require active packed checkpoints')
         from gdn_records import RetainedGDNBlock
@@ -676,6 +677,7 @@ class ModelBatch:
                     release_owned(operations, [value for value in result['owned'] if value is not output])
                 self.gdn_calls += 1
                 self.norm_batch_calls += int(result.get('norm_batch', False))
+                self.user_batched_calls += int(result.get('user_batched', False))
                 return output
 
             return device_forward
@@ -732,6 +734,7 @@ class ModelBatch:
             raise ValueError('A retained fixture owns exactly one captured or eager block')
         before_gdn = self.gdn_calls
         before_norm_batch = self.norm_batch_calls
+        before_user_batched = self.user_batched_calls
         before_compact = [(state.calls, state.checkpoint_calls) for state in self.working_states]
         before_clones = [state.skipped_clones for state in self.working_states]
         before_writes = [writer.calls for writer in self.writers]
@@ -766,7 +769,12 @@ class ModelBatch:
             writer.calls - before != 2 for writer, before in zip(self.writers, before_writes, strict=True)
         ):
             raise AssertionError("All 48 GDN and 16 attention adapters must engage")
-        if self.norm_batch_calls - before_norm_batch != (48 if self.norm_batch else 0):
+        # The selected row-parallel norm engages either as the norm-batch recurrence adapter
+        # (norm_batch=True per layer) or, under QWEN_FAST_GDN_USER_BATCH=1, as the one
+        # user-batched launch that fuses every packed user's norm/gate (user_batched=True,
+        # norm_batch=False per layer). Either way every GDN layer must take that form.
+        norm_engaged = (self.norm_batch_calls - before_norm_batch) + (self.user_batched_calls - before_user_batched)
+        if norm_engaged != (48 if self.norm_batch else 0):
             raise AssertionError('Selected row-parallel norm must engage in all48 GDN layers')
         if any(reader.calls - before != (16 if self.attention_replay else 1)
                for reader, before in zip(self.readers, before_reads, strict=True)):

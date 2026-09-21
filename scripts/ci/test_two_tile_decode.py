@@ -1246,7 +1246,7 @@ class ModelBatchWiringTests(unittest.TestCase):
 
         fixture = ModelBatch.__new__(ModelBatch)
         fixture.retained = None
-        fixture.gdn_calls = fixture.norm_batch_calls = 0
+        fixture.gdn_calls = fixture.norm_batch_calls = fixture.user_batched_calls = 0
         fixture.norm_batch = fixture.compact_gdn = fixture.attention_replay = fixture.attention_mask_once = False
         fixture.working_states, fixture.writers, fixture.readers = [], [], []
         fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)

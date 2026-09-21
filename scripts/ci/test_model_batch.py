@@ -18,7 +18,7 @@ class ModelBatchTests(unittest.TestCase):
     def test_shared_replay_reader_must_engage_for_all_sixteen_layers(self):
         fixture = ModelBatch.__new__(ModelBatch)
         fixture.retained = None
-        fixture.gdn_calls = fixture.norm_batch_calls = 0
+        fixture.gdn_calls = fixture.norm_batch_calls = fixture.user_batched_calls = 0
         fixture.norm_batch = fixture.compact_gdn = False
         fixture.attention_replay = True
         fixture.attention_mask_once = False
@@ -56,7 +56,7 @@ class ModelBatchTests(unittest.TestCase):
         fixture = ModelBatch.__new__(ModelBatch)
         fixture.retained = None
         fixture.gdn_calls = 0
-        fixture.norm_batch_calls = 0
+        fixture.norm_batch_calls = fixture.user_batched_calls = 0
         fixture.norm_batch = False
         fixture.attention_mask_once = False
         fixture.working_states, fixture.writers, fixture.readers, fixture.bindings = [], [], [], []
@@ -164,7 +164,7 @@ class ModelBatchTests(unittest.TestCase):
         Lever N M3native retires MLP/GDN-output - and nothing else two_tile touches."""
         fixture = ModelBatch.__new__(ModelBatch)
         fixture.retained = None
-        fixture.gdn_calls = fixture.norm_batch_calls = 0
+        fixture.gdn_calls = fixture.norm_batch_calls = fixture.user_batched_calls = 0
         fixture.norm_batch = fixture.compact_gdn = fixture.attention_replay = fixture.attention_mask_once = False
         fixture.working_states, fixture.writers, fixture.readers, fixture.bindings = [], [], [], []
         fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
@@ -248,7 +248,7 @@ class ModelBatchTests(unittest.TestCase):
         independent switch (a RUNTIME/ENV fact, never a model attribute)."""
         fixture = ModelBatch.__new__(ModelBatch)
         fixture.retained = None
-        fixture.gdn_calls = fixture.norm_batch_calls = 0
+        fixture.gdn_calls = fixture.norm_batch_calls = fixture.user_batched_calls = 0
         fixture.norm_batch = fixture.compact_gdn = fixture.attention_replay = fixture.attention_mask_once = False
         fixture.working_states, fixture.writers, fixture.readers, fixture.bindings = [], [], [], []
         fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
@@ -716,7 +716,7 @@ class PackedFixtureTests(unittest.TestCase):
         fixture.norm_batch = fixture.prefix_zero_reuse = fixture.defer_conv_publication = False
         fixture.operations = SimpleNamespace(reshape=lambda value, shape: SimpleNamespace(shape=shape),
             get_device_tensors=lambda value: [SimpleNamespace(buffer_address=lambda: id(value))] * 2)
-        fixture.working_states, fixture.gdn_calls, fixture.norm_batch_calls = [], 0, 0
+        fixture.working_states, fixture.gdn_calls, fixture.norm_batch_calls, fixture.user_batched_calls = [], 0, 0, 0
         fixture.retained = SimpleNamespace(append=Mock())
         return fixture
 
@@ -751,7 +751,7 @@ class PackedFixtureTests(unittest.TestCase):
         fixture = ModelBatch.__new__(ModelBatch)
         fixture.retained = None
         fixture.rows = 32
-        fixture.gdn_calls = fixture.norm_batch_calls = 0
+        fixture.gdn_calls = fixture.norm_batch_calls = fixture.user_batched_calls = 0
         fixture.norm_batch = fixture.attention_mask_once = fixture.skip_row_clones = False
         fixture.compact_gdn = fixture.device_loop_gdn = True
         fixture.writers, fixture.readers, fixture.bindings = [], [], []
@@ -773,6 +773,41 @@ class PackedFixtureTests(unittest.TestCase):
         for fixture.pack, decisions[0] in ((None, 2), (packed, 1)):
             with self.assertRaisesRegex(AssertionError, 'once per user'):
                 fixture.run()
+
+    def test_the_user_batched_launch_counts_as_the_selected_row_parallel_norm(self):
+        """QWEN_FAST_GDN_USER_BATCH=1 fuses every packed user's norm/gate into one launch per
+        layer, reported as user_batched=True with norm_batch=False; with the row-parallel norm
+        selected that satisfies the all-48-layers check exactly as the norm-batch adapter does,
+        and a layer that reports neither still fails it."""
+        fixture = ModelBatch.__new__(ModelBatch)
+        fixture.retained = fixture.pack = None
+        fixture.rows = 32
+        fixture.gdn_calls = fixture.norm_batch_calls = fixture.user_batched_calls = 0
+        fixture.norm_batch = True
+        fixture.attention_mask_once = fixture.skip_row_clones = False
+        fixture.compact_gdn = fixture.device_loop_gdn = True
+        fixture.writers, fixture.readers, fixture.bindings = [], [], []
+        fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
+        fixture.working_states = [SimpleNamespace(calls=0, checkpoint_calls=0, skipped_clones=0) for layer in range(48)]
+        engaged = ['user_batched']
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            for state in fixture.working_states:
+                state.calls += 1
+                state.checkpoint_calls += 1
+            if engaged[0] == 'user_batched':
+                fixture.user_batched_calls += 48
+            elif engaged[0] == 'norm_batch':
+                fixture.norm_batch_calls += 48
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        for engaged[0] in ('user_batched', 'norm_batch'):
+            self.assertEqual(fixture.run(), 'logits')
+        engaged[0] = 'neither'
+        with self.assertRaisesRegex(AssertionError, 'row-parallel norm must engage in all48'):
+            fixture.run()
 
 
 class WideBlockTests(unittest.TestCase):
