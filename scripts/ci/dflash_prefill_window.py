@@ -1,10 +1,18 @@
 """Bounded owned draft features at an absolute target prefill frontier."""
 
+import os
 from gdn_multitoken_conv import addresses
 from contextlib import contextmanager
 import operator
 from model_batch import instance_overrides
 from target_features import LayerOutputCapture
+
+# The absolute prefill position (prompt frontier) the fast path admits. The
+# serving default stays 65,504 - the target allocation and verification headroom
+# the fleet is qualified for. QWEN_FAST_MAX_POSITION raises it for a measurement
+# only (e.g. a single-user 163,840 acceptance run); it changes nothing unless set,
+# following the QWEN_FAST_* / QWEN_DSPARK_* measurement-gate convention.
+MAX_POSITION = int(os.environ.get('QWEN_FAST_MAX_POSITION', '65504'))
 
 
 def prefill_slot(empty_slots):
@@ -30,7 +38,7 @@ def prefill_slot(empty_slots):
 
 
 def prefill_window(position):
-    if type(position) is not int or not 1 <= position <= 65504:
+    if type(position) is not int or not 1 <= position <= MAX_POSITION:
         raise ValueError('Absolute prefill position within the target allocation and verification headroom required')
     return dict(start=max(0, position - 2048), end=position, rows=min(position, 2048))
 
