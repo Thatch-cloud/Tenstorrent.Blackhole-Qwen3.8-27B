@@ -48,7 +48,7 @@ jobs:
             candidate=(--target-replay)
             if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-scratch-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v5 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v6 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v7 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v8 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v9 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v10 ]]; then
               candidate+=(--probe-seconds 1020)
-              if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v9 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v10 ]]; then candidate=("${candidate[@]/--probe-seconds/}"); candidate=("${candidate[@]/1020/}"); candidate+=(--probe-seconds 3000); fi
+              if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v9 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v10 ]]; then candidate=(--target-replay --probe-seconds 3000); fi
             fi
           fi
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-eager-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-reciprocal-eager-v1 ]]; then
