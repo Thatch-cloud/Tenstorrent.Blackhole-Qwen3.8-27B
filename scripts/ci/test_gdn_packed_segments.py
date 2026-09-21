@@ -105,7 +105,8 @@ class PackedFixture(unittest.TestCase):
                 patch('gdn_device_loop_state.restore_prefix',
                       side_effect=lambda ops, result, entry, destination, accepted:
                           calls.append(('prefix', destination[0] if isinstance(destination, list) else destination, accepted))), \
-                patch('gdn_device_loop_state.copy_compact'), \
+                patch('gdn_device_loop_state.copy_compact',
+                      side_effect=lambda source, destination: calls.append(('copy_compact', source[0], destination[0]))), \
                 patch('gdn_device_loop_state.release_owned'), \
                 patch('gdn_device_loop_state.norm_batch_enabled', return_value=False):
             return state.decode(packed, checkpoints, prefixes, segments=spans, slots=slots, **options)
@@ -136,12 +137,23 @@ class PackedSegmentTests(PackedFixture):
         self.assertEqual(len(state.segment_results), 2)
 
     def test_each_segment_starts_from_its_own_carried_state(self):
+        # Every segment but the last moves its carried state straight into the shared
+        # entry with one copy_compact launch; only the LAST segment's carried state is
+        # actually restored into the native active buffer (see FourUserBlockTests for
+        # why: the native buffer is documented to end a packed round holding the LAST
+        # segment's user). Either way, each recurrence starts from that user's own
+        # carried state, immediately before it runs.
         state, operations, layer, active, calls = self.build()
         slots = [['A%d' % index for index in range(5)], ['B%d' % index for index in range(5)]]
         self.run_packed(state, operations, calls, ((0, 16), (16, 32)), [12, 9], slots, [['ckA'], ['ckB']])
-        order = [entry for entry in calls if entry[0] in ('restore', 'recur')]
-        self.assertEqual(order, [('restore', 'A0'), ('recur', 16), ('restore', 'B0'), ('recur', 16)],
-                         'each user is restored immediately before its own recurrence')
+        order = [entry for entry in calls if entry[0] in ('restore', 'save', 'copy_compact', 'recur')]
+        # This fixture is not deferred, so `_recurrence` also snapshots the shared entry
+        # into `state.state` (its own, unrelated copy_compact call) right after each
+        # entry is populated and before its recurrence runs.
+        self.assertEqual(order, [
+            ('copy_compact', 'A0', state.entry[0]), ('copy_compact', state.entry[0], state.state[0]), ('recur', 16),
+            ('restore', 'B0'), ('save', state.entry[0]), ('copy_compact', state.entry[0], state.state[0]), ('recur', 16),
+        ], 'each user reaches the recurrence from its own carried state, immediately before it runs')
 
     def test_each_user_checkpoints_its_own_prefix_and_advances_only_its_own_rows(self):
         state, operations, layer, active, calls = self.build()
@@ -192,10 +204,11 @@ class DeferredPackedTests(PackedFixture):
         first, second = state.segment_entries
         self.assertEqual((state.entry, state.state), ([], []), 'no shared entry, no speculative state')
         self.assertNotEqual(first, second)
-        self.assertEqual([entry for entry in calls if entry[0] in ('restore', 'save', 'recur')],
-                         [('restore', 'A0'), ('save', first[0]), ('recur', 16),
+        self.assertEqual([entry for entry in calls if entry[0] in ('restore', 'save', 'copy_compact', 'recur')],
+                         [('copy_compact', 'A0', first[0]), ('recur', 16),
                           ('restore', 'B0'), ('save', second[0]), ('recur', 16)],
-                         'each user: restored from its carry, snapshotted into its own entry, run')
+                         'the non-last user is snapshotted straight from its carry into its own entry; '
+                         'the LAST user is additionally restored into the native buffer')
         self.assertEqual([entry for entry in calls if entry[0] == 'history'],
                          [('history', first[0], tuple(first[1:])), ('history', second[0], tuple(second[1:]))],
                          'the recurrence starts from that user\'s own entry, read-only')
@@ -259,10 +272,19 @@ class FourUserBlockTests(PackedFixture):
         entries = state.segment_entries
         self.assertEqual(len(entries), 4)
         self.assertEqual(len({entry[0] for entry in entries}), 4, 'one block-start entry per user')
+        # Every segment but the last (index 3 of 4) moves its carried state straight
+        # into its own entry with one copy_compact launch and never touches the native
+        # active buffer; only the LAST segment is actually restored into it, because
+        # the native buffer is documented below to end the round holding the LAST
+        # segment's user.
         expected = []
-        for slot, entry in zip(self.slots, entries):
-            expected += [('restore', slot[0]), ('save', entry[0]), ('recur', 16)]
-        self.assertEqual([entry for entry in calls if entry[0] in ('restore', 'save', 'recur')], expected)
+        for index, (slot, entry) in enumerate(zip(self.slots, entries)):
+            if index == len(self.slots) - 1:
+                expected += [('restore', slot[0]), ('save', entry[0]), ('recur', 16)]
+            else:
+                expected += [('copy_compact', slot[0], entry[0]), ('recur', 16)]
+        self.assertEqual(
+            [entry for entry in calls if entry[0] in ('restore', 'save', 'copy_compact', 'recur')], expected)
         self.assertEqual([entry for entry in calls if entry[0] == 'prefix'], [], 'nothing decided at decode')
         self.assertEqual(result['output'].shape, (1, 64, 5120))
         self.assertEqual(result['segments'], self.spans)
@@ -305,6 +327,8 @@ class FourUserBlockTests(PackedFixture):
             RuntimeError('no L1 left')])
         packed = SimpleNamespace(shape=(1, 64, 5120), name='packed', memory_config=lambda: 'l1')
         with patch('gdn_device_loop_state.run_batched_projected', side_effect=self.recurrence(calls)), \
+                patch('gdn_device_loop_state.copy_compact',
+                      side_effect=lambda source, destination: calls.append(('copy_compact', source[0], destination[0]))), \
                 patch('gdn_device_loop_state.release_owned') as release, \
                 patch('gdn_device_loop_state.norm_batch_enabled', return_value=False):
             with self.assertRaisesRegex(RuntimeError, 'no L1 left'):

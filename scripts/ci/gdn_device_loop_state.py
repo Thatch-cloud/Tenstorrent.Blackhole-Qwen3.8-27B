@@ -162,12 +162,24 @@ class DeviceLoopState:
         self.calls = self.checkpoint_calls = self.skipped_clones = 0
         self.native_addresses = [addresses(operations, value) for value in active.live]
 
-    def _recurrence(self, projected, rows, prefix, defer_publication, entry=None):
+    def _recurrence(self, projected, rows, prefix, defer_publication, entry=None, slot=None):
         """One recurrence run over `projected`, starting from whatever the layer's
-        active state currently holds. The caller puts the right user there first."""
+        active state currently holds. The caller puts the right user there first.
+
+        `slot` is the packed path's launch reduction: when the caller already holds
+        this segment's compact carried state in hand and has NOT restored it into
+        the native active buffer, passing it here fetches `entry` with one
+        compact-to-compact `copy_compact` launch instead of the two-launch round
+        trip (`active.restore` then `active.save`) through the native buffer.
+        Omitted - the single-user branch and the packed path's last segment both
+        omit it - `entry` is read from the native buffer's current row 0, which is
+        then the only source of truth."""
         operations, layer = self.operations, self.gdn
         entry = self.entry if entry is None else entry
-        self.active.save(entry)
+        if slot is None:
+            self.active.save(entry)
+        else:
+            copy_compact(slot, entry)
         if not defer_publication:
             copy_compact(entry, self.state)
         operation = run_batched_projected if self.batch_conv else run_projected
@@ -249,17 +261,31 @@ class DeviceLoopState:
             raise ValueError('Deferred packed decode needs one entry per packed user, allocated at construction')
         projected = project_qkvzab_by_tile(operations, layer, packed, rows)
         results, owned, outputs = [], [projected], []
+        last = len(spans) - 1
         try:
             for index, ((start, stop), slot, point, accepted) in enumerate(zip(spans, slots, checkpoints, prefixes)):
                 width = stop - start
-                # The layer active state becomes this user before its segment runs, so
-                # the recurrence starts where that user left off rather than where the
-                # user packed above it ended.
-                self.active.restore(slot)
+                entry = None if entries is None else entries[index]
+                if index == last:
+                    # The layer active state becomes this user before its segment runs,
+                    # so the recurrence starts where that user left off rather than
+                    # where the user packed above it ended. A real restore, kept for
+                    # the LAST segment only: the native buffer is documented (below)
+                    # to be left holding the LAST segment's user once the round ends.
+                    self.active.restore(slot)
+                    recurrence_slot = None
+                else:
+                    # Every other segment's carried state moves straight into its own
+                    # entry (one copy_compact launch): the recurrence reads `entry`,
+                    # never the native buffer, and no segment before the last needs
+                    # the native buffer to hold anything in particular, so writing
+                    # `slot` into it first and reading it straight back out again -
+                    # a full round trip through native state for a value already in
+                    # hand - bought nothing.
+                    recurrence_slot = slot
                 piece = resident_piece(operations,
                                        operations.slice(projected, (0, start, 0), (1, stop, projected.shape[-1])), owned)
-                result = self._recurrence(piece, width, accepted, defer_publication,
-                                          None if entries is None else entries[index])
+                result = self._recurrence(piece, width, accepted, defer_publication, entry, slot=recurrence_slot)
                 owned.extend(result['owned'])
                 if not deferred:
                     restore_prefix(operations, result, self.entry, point, accepted)
@@ -272,9 +298,11 @@ class DeviceLoopState:
                 outputs.append(result['output'])
                 results.append(result)
             # The layer's active state is left holding the LAST segment's user. That is
-            # safe only because every packed segment restores its own slot before it
-            # runs; an unpacked decode on the same layer afterwards would inherit that
-            # user, so packed and unpacked blocks must not be mixed within a request.
+            # safe only because the LAST segment always restores its own slot into the
+            # native buffer before it runs (every earlier segment's carried state moves
+            # straight into its entry and never touches the native buffer at all); an
+            # unpacked decode on the same layer afterwards would inherit that user, so
+            # packed and unpacked blocks must not be mixed within a request.
             output = outputs[0] if len(outputs) == 1 else operations.concat(outputs, dim=1)
             if len(outputs) > 1:
                 owned.append(output)
