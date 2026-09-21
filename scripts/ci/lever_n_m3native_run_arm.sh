@@ -56,12 +56,26 @@ for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
 # by env (KOPGRAFT64=<dir>) rather than hasattr-detected; default empty mounts nothing
 # and passes no QWEN_FAST_NATIVE_ATTN, today's exact two-call behaviour
 # (two_tile_decode.native_attn_enabled). Mirrors ~/kwork64/test-k64.sh on the rig.
+#
+# The grafted _ttnncpp.so also replaces the combined-runtime binary that
+# dflash_combined_sim_runtime.BINARY_SHA256 pins, so its hash is passed through as
+# QWEN_FAST_RUNTIME_BINARY_SHA256 for runtime_binary_override to admit at attach.
+# Run 35558196471 mounted an earlier K64 graft binary and was refused at attach by
+# that pin: it had been built over the ORIGINAL SDPA factory, not the COMBINED one
+# the pin requires, so admitting it would have changed the qualified draft fp32 SDPA
+# intermediates unnoticed. ~/opgraft-K64c on the rig is the same kernel graft rebuilt
+# over the combined SDPA factory fd8c0676 on 2026-09-21 03:47 UTC, so it passes both
+# runtime_binary_override checks (every pinned path matches, and the factory hash is
+# the combined one) and is admitted for measurement without touching the pin itself.
 KM=""
+graft_binary_sha=""
 if [ -n "${KOPGRAFT64:-}" ]; then
   KM="$KM -v $KOPGRAFT64/_ttnn.so:/opt/tt-metal/ttnn/ttnn/_ttnn.so:ro"
   KM="$KM -v $KOPGRAFT64/_ttnncpp.so:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so:ro"
+  KM="$KM -v $KOPGRAFT64/_ttnncpp.so:/opt/tt-metal/build_Release/lib/_ttnncpp.so:ro"
   KM="$KM -v $KOPGRAFT64/attn_prep:/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/attn_prep:ro"
   KM="$KM -v $KOPGRAFT64/nlp_concat_heads_decode:/opt/tt-metal/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode:ro"
+  graft_binary_sha=$(sha256sum "$KOPGRAFT64/_ttnncpp.so" | cut -c1-64)
 fi
 
 name="qwen-m3native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -85,6 +99,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   "${mounts[@]}" \
   $KM \
   ${KOPGRAFT64:+-e QWEN_FAST_NATIVE_ATTN=1} \
+  ${KOPGRAFT64:+-e QWEN_FAST_RUNTIME_BINARY_SHA256=$graft_binary_sha} \
   -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
   -e QWEN_FAST_FOUR_AS_TWO=0 \
   -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=32768 \

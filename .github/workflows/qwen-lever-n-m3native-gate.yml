@@ -98,13 +98,17 @@ jobs:
         timeout-minutes: 40
         shell: bash
         run: |
-          # Two arms from one commit, told apart by the tag: -v2 serves the plain native_m3
-          # graft (attn prep and head concat still two-call, K64 not mounted) so the five
-          # per_core_M=2 matmul grids are isolated; -v3 also mounts ~/opgraft-K64 (the
-          # batch-64 attn_decode_prep and nlp_concat_heads_decode kernels) and sets
-          # QWEN_FAST_NATIVE_ATTN=1 through the run-arm: the round with no two-call op.
+          # Two arms from one commit, told apart by the tag: -v2 and -v3 are consumed
+          # (v3 was the plain opgraft-K64 mount refused at attach by the combined-runtime
+          # binary pin, run 35558196471); -v4 is the plain native_m3 graft rerun (attn prep
+          # and head concat still two-call, K64 not mounted) so the five per_core_M=2 matmul
+          # grids are isolated; -v5 mounts ~/opgraft-K64c (the same batch-64 attn_decode_prep
+          # and nlp_concat_heads_decode kernels, rebuilt over the combined SDPA factory) and
+          # sets QWEN_FAST_NATIVE_ATTN=1 and QWEN_FAST_RUNTIME_BINARY_SHA256 through the
+          # run-arm: the round with no two-call op, on the binary runtime_binary_override
+          # now admits.
           case "$GITHUB_REF_NAME" in
-            *-v3) export KOPGRAFT64=/home/thatch/opgraft-K64 ;;
+            *-v5) export KOPGRAFT64=/home/thatch/opgraft-K64c ;;
           esac
           echo "tag=$GITHUB_REF_NAME KOPGRAFT64=${KOPGRAFT64:-}"
           bash scripts/ci/lever_n_m3native_run_arm.sh

@@ -29,6 +29,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     from sampling_link_policy import sampler_links
 
     policy = validate_fast_config(worker.vllm_config)
+    # Measurement-only, env-gated admission of one named grafted binary (K64 kernel
+    # graft): inert unless QWEN_FAST_RUNTIME_BINARY_SHA256 is set, and it neither
+    # touches the hash-pinned sources nor lowers the pin itself. Must run before
+    # combined_runtime() is entered below, since dflash_t16_native_scope.admit runs inside it.
+    from runtime_binary_override import install as override_runtime_binary
+    override_runtime_binary(runtime_root, log=pindiag)
     if (native_attention_evidence is None or kv_publication_evidence is None
             or block_stream is None or 'pipeline_evidence' in block_stream):
         raise ValueError('Native T16, direct KV publication and serial weight-stream recipe required')
