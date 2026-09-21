@@ -27,7 +27,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
                      'scope, the sampler links, the pool) - their exits fence the device, and a hung device blocks '
                      'the first fence')
 
-    def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None, four_as_two=None):
+    def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None, four_as_two=None,
+                 replay_group_rows=None):
         events = []
 
         def diag(template, *values):
@@ -93,6 +94,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
         env = {'QWEN_FAST_PACKED_STEP': '1' if packed else '0'}
         if four_as_two is not None:
             env['QWEN_FAST_FOUR_AS_TWO'] = '1' if four_as_two else '0'
+        if replay_group_rows is not None:
+            env['QWEN_FAST_REPLAY_GROUP_ROWS'] = str(replay_group_rows)
         with patch.dict('os.environ', env), \
                 patch.dict(sys.modules, {
                 'models.common.sampling.generator': SimpleNamespace(SamplingGenerator=generator),
@@ -159,6 +162,12 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         if two_blocks:
                             self.assertEqual(options['packed_replicas'], {(2, 16): 2})
                             expected.add('packed_replicas')
+                        # QWEN_FAST_REPLAY_GROUP_ROWS (packed_verifier.replay_group_rows),
+                        # read only here beside a block that is actually built: 4 unless
+                        # named, matching the flag packed_verifier.py itself now reads.
+                        self.assertEqual(options['packed_replay_group_rows'],
+                                         replay_group_rows if replay_group_rows is not None else 4)
+                        expected.add('packed_replay_group_rows')
                     self.assertEqual(set(options), expected)
                     # The device geometry from_prefill asks for, prepared once inside the
                     # admitted runtime and before any request.
@@ -260,6 +269,20 @@ class RuntimeAttachmentTests(unittest.TestCase):
     def test_a_request_failure_closes_both_packed_blocks_after_the_lifecycle_and_before_the_weights(self):
         with self.assertRaisesRegex(RuntimeError, 'request failed'):
             self.exercise(fail=True, packed=True, users=4)
+
+    def test_the_pool_receives_the_replay_group_rows_flag_when_a_block_is_built(self):
+        self.exercise(packed=True, users=2, replay_group_rows=8)
+
+    def test_the_pool_receives_the_default_replay_group_rows_without_the_flag(self):
+        self.exercise(packed=True, users=4)
+
+    def test_the_flag_is_inert_when_no_block_is_built(self):
+        # users=3 takes neither shape (packed_shapes.serving_shape): no block is built, and
+        # exercise()'s own pool-options check only expects 'packed_replay_group_rows' when
+        # `built` is True, so this proves the runtime's `if packed_shapes:` guard keeps the
+        # kwarg (and the packed_verifier import behind it) out of the pool call here, flag
+        # set or not.
+        self.exercise(packed=True, users=3, replay_group_rows=8)
 
     def test_the_bridge_factory_caps_the_engines_captures_only_beside_the_four_user_block_and_logs_the_allocator(self):
         for users, packed, expected in ((4, True, dict(capture_rows=4)), (2, True, {}), (1, False, {})):

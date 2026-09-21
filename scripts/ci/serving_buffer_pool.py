@@ -360,7 +360,7 @@ class ServingBufferPool:
 
     def __init__(self, operations, mesh, *, users, helpers=None, page_width=None, bucket_rows=(),
                  feature_taps=0, rope=None, mtp_hidden=False, replay_group_rows=4, replay_capacities=None,
-                 packed_shapes=None, packed_replicas=None):
+                 packed_shapes=None, packed_replicas=None, packed_replay_group_rows=None):
         import torch
 
         if type(users) is not int or not 1 <= users <= NATIVE_GDN_SLOTS:
@@ -397,6 +397,16 @@ class ServingBufferPool:
             # page table can hold - each bundle's sized by the reader's own grouping.
             if type(replay_group_rows) is not int or replay_group_rows not in (4, 8):
                 raise ValueError('Replay group width must be integer four or eight')
+            # The packed block's own grouping, independent of the per-request bucket
+            # slots' replay_group_rows above: None (the default) keeps today's behaviour
+            # of bundling the packed tables at the SAME width as the bucket slots; named
+            # explicitly, only PackedReplayTables (below) bundles at it - the per-request
+            # engines (serving_request_factory.py) always capture at replay_group_rows=4
+            # and must never see this value.
+            if packed_replay_group_rows is None:
+                packed_replay_group_rows = replay_group_rows
+            elif type(packed_replay_group_rows) is not int or packed_replay_group_rows not in (4, 8):
+                raise ValueError('Packed replay group width must be integer four or eight')
             admitted = family_capacities(page_width=page_width)
             if replay_capacities is None:
                 replay_capacities = admitted
@@ -406,7 +416,8 @@ class ServingBufferPool:
                 raise ValueError('Replay families must be distinct native chunk capacities the page table holds: %r'
                                  % (admitted,))
         elif (page_width is not None or bucket_rows or feature_taps or rope is not None or mtp_hidden
-                or replay_group_rows != 4 or replay_capacities is not None or packed_shapes or packed_replicas):
+                or replay_group_rows != 4 or replay_capacities is not None or packed_shapes or packed_replicas
+                or packed_replay_group_rows is not None):
             raise ValueError('Verifier storage geometry without the GDN helpers that shape it')
         else:
             packed_shapes, packed_replicas = (), {}
@@ -414,6 +425,7 @@ class ServingBufferPool:
         self.helpers, self.page_width, self.bucket_rows = helpers, page_width, bucket_rows
         self.feature_taps, self.mtp_hidden = feature_taps, mtp_hidden
         self.replay_group_rows, self.replay_capacities = replay_group_rows, replay_capacities
+        self.packed_replay_group_rows = packed_replay_group_rows
         self.packed_shapes, self.packed_replicas = packed_shapes, packed_replicas
         self.owned, self.slots = [], []
         self.packed, self.packed_bytes = {}, 0
@@ -495,7 +507,7 @@ class ServingBufferPool:
                     counted[0] = 0
                     integers = dict(dtype=operations.int32, layout=operations.ROW_MAJOR_LAYOUT, itemsize=4)
                     tables = {capacity: [[allocate((batches, capacity // 64), **integers)
-                                          for batches in bundle_batches(rows, capacity, max_group_rows=replay_group_rows)]
+                                          for batches in bundle_batches(rows, capacity, max_group_rows=packed_replay_group_rows)]
                                          for user in range(count)]
                               for capacity in replay_capacities}
                     self.packed[(count, rows)].append(PackedReplayTables(count, rows, tables))
@@ -570,6 +582,7 @@ class ServingBufferPool:
                 gdn_snapshot_sets=2 + len(self.bucket_rows), feature_taps=self.feature_taps,
                 mtp_hidden=self.mtp_hidden, replay_group_rows=self.replay_group_rows,
                 replay_capacities=list(self.replay_capacities), replay_page_bytes_per_slot=replay_bytes,
+                packed_replay_group_rows=self.packed_replay_group_rows,
                 packed_shapes=[list(shape) for shape in self.packed_shapes], packed_replay_bytes=self.packed_bytes,
                 packed_replay=[tables.describe(self.operations) for group in self.packed.values() for tables in group])
         return report

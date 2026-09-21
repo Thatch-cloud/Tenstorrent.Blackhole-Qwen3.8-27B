@@ -152,10 +152,16 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # so its multiplicity is named separately, and the pool lends each block asking for
         # it its OWN independent replay table set (ServingBufferPool.packed_replay).
         distinct_shapes = tuple(dict.fromkeys((shape.users, shape.rows_per_user) for shape in packed_shapes))
+        if packed_shapes:
+            # The packed block's own replay grouping (QWEN_FAST_REPLAY_GROUP_ROWS), which
+            # may differ from the per-request bucket slots' fixed four-row grouping above -
+            # packed_verifier.py is the only reader of this value.
+            from packed_verifier import replay_group_rows
         pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'],
             helpers=helpers, page_width=page_width, bucket_rows=bucket_rows,
             feature_taps=len(TARGET_TAPS), rope=rope,
             **({} if not packed_shapes else dict(packed_shapes=distinct_shapes,
+                packed_replay_group_rows=replay_group_rows(),
                 **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}))))
         scopes.callback(pool.close)
         owner = ServingCacheOwner(operations, runner, model)

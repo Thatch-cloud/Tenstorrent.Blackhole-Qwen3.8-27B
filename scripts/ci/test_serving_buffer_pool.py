@@ -430,14 +430,17 @@ class VerifierStorageTests(unittest.TestCase):
                    # Replay families: distinct, admitted, and within the page table (4608 needs 72 pages).
                    dict(replay_group_rows=6), dict(replay_group_rows=4.0), dict(replay_capacities=(4096, 4096)),
                    dict(replay_capacities=(4608,)), dict(replay_capacities=(4000,)), dict(replay_capacities=(4096.0,)),
-                   dict(replay_capacities=(256,))]
+                   dict(replay_capacities=(256,)),
+                   # The packed block's own grouping: same domain as replay_group_rows, but
+                   # None (untested here - see PackedReplayGroupRowsTests) is legal.
+                   dict(packed_replay_group_rows=6), dict(packed_replay_group_rows=4.0)]
         for overrides in invalid:
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 verifier_pool(operations, **overrides)
         # Geometry without the helpers that shape it is a mistake, not a plain pool.
         for options in (dict(page_width=68), dict(bucket_rows=(1,)), dict(feature_taps=5),
                         dict(rope=fake_rope(operations)), dict(mtp_hidden=True), dict(replay_group_rows=8),
-                        dict(replay_capacities=(4096,))):
+                        dict(replay_capacities=(4096,)), dict(packed_replay_group_rows=8)):
             with self.subTest(options=options), self.assertRaisesRegex(ValueError, 'without the GDN helpers'):
                 ServingBufferPool(operations, 'mesh', users=1, **options)
         self.assertEqual(operations.live, [])
@@ -711,6 +714,52 @@ class PackedReplayTableTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'without the GDN helpers'):
             ServingBufferPool(operations, 'mesh', users=2, packed_replicas={(2, 16): 2})
         # Every case raised before allocating anything.
+        self.assertEqual(operations.live, [])
+
+    def test_packed_replay_group_rows_none_keeps_the_bucket_slots_grouping(self):
+        """None (the default) is 'same as replay_group_rows' - every packed-shape test
+        above that never names packed_replay_group_rows keeps its exact four-row shapes,
+        and that stays true when replay_group_rows itself is moved off the default too."""
+        operations = FakeOperations()
+        pool = verifier_pool(operations, users=4, bucket_rows=(8,), packed_shapes=((4, 16),))
+        self.assertEqual(pool.packed_replay_group_rows, 4)
+        self.assertEqual(pool.describe()['packed_replay_group_rows'], 4)
+        tables = pool.packed_replay(4, 16)
+        for capacity, per_user in tables.replay_pages.items():
+            for user_tables in per_user:
+                self.assertEqual([value.shape for value in user_tables],
+                                 [(batches, capacity // 64) for batches in bundle_batches(16, capacity, max_group_rows=4)])
+        moved = verifier_pool(FakeOperations(), users=4, bucket_rows=(8,), packed_shapes=((4, 16),), replay_group_rows=8)
+        self.assertEqual((moved.replay_group_rows, moved.packed_replay_group_rows), (8, 8))
+        moved_tables = moved.packed_replay(4, 16)
+        for capacity, per_user in moved_tables.replay_pages.items():
+            for user_tables in per_user:
+                self.assertEqual([value.shape for value in user_tables],
+                                 [(batches, capacity // 64) for batches in bundle_batches(16, capacity, max_group_rows=8)])
+
+    def test_packed_replay_group_rows_named_explicitly_bundles_only_the_packed_tables(self):
+        """packed_replay_group_rows=8 moves the packed block's tables to eight-row bundles
+        while the per-request bucket slots (serving_request_factory.py's engines, which
+        always capture at replay_group_rows=4) keep their four-row shapes untouched."""
+        operations = FakeOperations()
+        pool = verifier_pool(operations, users=4, bucket_rows=(8, 16), packed_shapes=((4, 16),),
+                             packed_replay_group_rows=8)
+        self.assertEqual((pool.replay_group_rows, pool.packed_replay_group_rows), (4, 8))
+        for bucket in pool.slots[0].verifier.buckets:
+            for capacity, values in bucket.batch.replay_pages.items():
+                self.assertEqual([value.shape for value in values],
+                                 [(batches, capacity // 64) for batches in bundle_batches(bucket.rows, capacity, max_group_rows=4)])
+        tables = pool.packed_replay(4, 16)
+        for capacity, per_user in tables.replay_pages.items():
+            for user_tables in per_user:
+                self.assertEqual([value.shape for value in user_tables],
+                                 [(batches, capacity // 64) for batches in bundle_batches(16, capacity, max_group_rows=8)])
+        self.assertEqual(pool.describe()['packed_replay_group_rows'], 8)
+
+    def test_named_without_helpers_is_refused_like_any_other_verifier_geometry(self):
+        operations = FakeOperations()
+        with self.assertRaisesRegex(ValueError, 'without the GDN helpers'):
+            ServingBufferPool(operations, 'mesh', users=2, packed_replay_group_rows=8)
         self.assertEqual(operations.live, [])
 
 
