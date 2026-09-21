@@ -1,7 +1,7 @@
 name: Qwen frozen 32K combined candidate
 on:
   push:
-    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1', 'experiment/frozen-32k-mlp-buffer-v1', 'experiment/frozen-32k-gdn-cache-v1', 'experiment/frozen-32k-incremental-v1', 'experiment/frozen-32k-norm-prefetch-v1', 'experiment/frozen-32k-mlp-input-v1', 'experiment/frozen-32k-wait-profile-v1', 'experiment/frozen-32k-wait-profile-v2', 'experiment/frozen-32k-wait-profile-v3', 'experiment/frozen-32k-wait-profile-v4', 'experiment/frozen-32k-draft-tail-v1', 'experiment/frozen-32k-draft-tail-audit-v1', 'experiment/frozen-32k-draft-tail-audit-v2', 'experiment/frozen-32k-draft-tail-timed-v1']
+    tags: ['experiment/frozen-32k-combined-v1', 'experiment/frozen-32k-combined-v2', 'experiment/frozen-32k-combined-v3', 'experiment/frozen-32k-combined-v4', 'experiment/frozen-32k-verifier-profile-v1', 'experiment/frozen-32k-mlp-buffer-v1', 'experiment/frozen-32k-gdn-cache-v1', 'experiment/frozen-32k-incremental-v1', 'experiment/frozen-32k-norm-prefetch-v1', 'experiment/frozen-32k-mlp-input-v1', 'experiment/frozen-32k-wait-profile-v1', 'experiment/frozen-32k-wait-profile-v2', 'experiment/frozen-32k-wait-profile-v3', 'experiment/frozen-32k-wait-profile-v4', 'experiment/frozen-32k-draft-tail-v1', 'experiment/frozen-32k-draft-tail-audit-v1', 'experiment/frozen-32k-draft-tail-audit-v2', 'experiment/frozen-32k-draft-tail-timed-v1', 'experiment/frozen-64k-combined-v1', 'experiment/frozen-64k-combined-v2', 'experiment/frozen-64k-combined-v3', 'experiment/frozen-64k-combined-v4']
 permissions:
   contents: read
   actions: read
@@ -32,15 +32,113 @@ jobs:
           ref: 8c102b20df22329106955b4006bf4d650bb94e40
           path: frozen-hardware
           persist-credentials: false
+      - name: Confirm no process holds a card
+        if: contains(github.ref, 'refs/tags/experiment/frozen-64k-combined-')
+        working-directory: frozen-hardware
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Reset every board before this job opens the pair
+        if: contains(github.ref, 'refs/tags/experiment/frozen-64k-combined-')
+        working-directory: frozen-hardware
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Copied verbatim from qwen-lever-n-m3native-gate.yml: a long run can leave an
+          # active ethernet core the next open cannot bring back (llrt.cpp:594 "Timed out
+          # while waiting for active ethernet core ... to become active again"), and
+          # resetting one board alone can leave the mesh at 1x1 - both link ends must come
+          # back together. No firmware is written and no host reboot happens. The preceding
+          # step already proved no process holds a card.
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/reset.log 2>&1 || status=$?
+          if [ "$status" != 0 ]; then
+            echo "multi-board reset exited $status; resetting each in turn" >> experiment-results/reset.log
+            status=0
+            for path in "${paths[@]}"; do
+              timeout -k 20 300 "${prefix[@]}" "$smi" -r "$path" >> experiment-results/reset.log 2>&1 || status=$?
+            done
+          fi
+          echo "reset_exit=$status" | tee experiment-results/reset.status
+          tail -20 experiment-results/reset.log || true
+          timeout -k 5 30 "${prefix[@]}" "$smi" -ls 2>&1 | tee experiment-results/boards-after-reset.txt | tail -8
+          test "$status" = 0
       - name: Stage retained qualifications and explicit candidate
         timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Single place the 65536 arm is selected from the tag: everything downstream
+          # (--context, capacity assertions, QWEN_DSPARK_REQUEST_CONTEXT,
+          # QWEN_FROZEN_COMBINED_CONTEXT, the ci-65536 staged-tree overlay) reads this.
+          # frozen_context_geometry.geometry(65536): capacity 65792, target_page_count 1028,
+          # target_cache_blocks 1036, target_sequence_capacity 131072.
+          context=32768
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-64k-combined-* ]]; then
+            context=65536
+          fi
+          echo "context=$context"
           evidence=$(mktemp -d "$RUNNER_TEMP/qwen-combined-evidence.XXXXXX")
-          gh run download 35060395395 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35060395395-1 --dir "$evidence/numerical"
-          gh run download 35062238298 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-recovered-35062238298-1 --dir "$evidence/diagnostics"
-          gh run download 35068517785 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35068517785-1 --dir "$evidence/target"
+          if [ "$context" = 65536 ]; then
+            # No fixed run IDs exist yet for the 64k evidence chain: discover the latest
+            # successful run of each producing lane by its exact tag. Order this lane
+            # depends on: experiment/frozen-64k-reciprocal-replay-v1 (numerical.yml) and
+            # experiment/frozen-64k-target-replay-v1 (numerical.yml) must have completed;
+            # experiment/frozen-64k-reciprocal-diagnostics-v1 (numerical.yml) must have
+            # completed immediately before experiment/frozen-64k-recover-v1 (recover.yml)
+            # on the SAME runner, since recover.yml has no checkout and revalidates that
+            # prior run's leftover workspace in place rather than downloading an artifact -
+            # any other job landing on thatch-build-amd64-02-cp-temp in between invalidates it.
+            resolve_run() {
+              gh run list --repo "$GITHUB_REPOSITORY" --workflow "$1" --branch "$2" \
+                --status success --limit 1 --json databaseId --jq '.[0].databaseId'
+            }
+            resolve_artifact() {
+              gh run view "$1" --repo "$GITHUB_REPOSITORY" --json artifacts --jq '.artifacts[0].name'
+            }
+            numerical_run=$(resolve_run qwen-frozen-32k-numerical.yml experiment/frozen-64k-reciprocal-replay-v1)
+            diagnostics_run=$(resolve_run qwen-frozen-recover.yml experiment/frozen-64k-recover-v1)
+            target_run=$(resolve_run qwen-frozen-32k-numerical.yml experiment/frozen-64k-target-replay-v1)
+            if [ -z "$numerical_run" ] || [ -z "$diagnostics_run" ] || [ -z "$target_run" ]; then
+              echo "::error::Missing 64k evidence run(s): numerical=${numerical_run:-<none>} diagnostics=${diagnostics_run:-<none>} target=${target_run:-<none>}. Run experiment/frozen-64k-reciprocal-replay-v1, experiment/frozen-64k-reciprocal-diagnostics-v1 immediately followed by experiment/frozen-64k-recover-v1, and experiment/frozen-64k-target-replay-v1 first."
+              exit 1
+            fi
+            echo "64k evidence runs: numerical=$numerical_run diagnostics=$diagnostics_run target=$target_run"
+            numerical_name=$(resolve_artifact "$numerical_run")
+            diagnostics_name=$(resolve_artifact "$diagnostics_run")
+            target_name=$(resolve_artifact "$target_run")
+            gh run download "$numerical_run" --repo "$GITHUB_REPOSITORY" --name "$numerical_name" --dir "$evidence/numerical"
+            gh run download "$diagnostics_run" --repo "$GITHUB_REPOSITORY" --name "$diagnostics_name" --dir "$evidence/diagnostics"
+            gh run download "$target_run" --repo "$GITHUB_REPOSITORY" --name "$target_name" --dir "$evidence/target"
+          else
+            gh run download 35060395395 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35060395395-1 --dir "$evidence/numerical"
+            gh run download 35062238298 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-recovered-35062238298-1 --dir "$evidence/diagnostics"
+            gh run download 35068517785 --repo "$GITHUB_REPOSITORY" --name qwen-frozen-32k-numerical-35068517785-1 --dir "$evidence/target"
+          fi
           mkdir -p frozen-hardware/experiment-results
           profile=()
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-incremental-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-norm-prefetch-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-mlp-input-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v2 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v3 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-wait-profile-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-timed-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v2 ]]; then
@@ -74,9 +172,13 @@ jobs:
             cp "$evidence/buffer/fused-batch.json" frozen-hardware/scripts/ci/frozen-mlp-buffer.json
           fi
           python3 -B frozen-orchestrator/scripts/ci/frozen_recipe_context.py \
-            --checkout frozen-hardware --context 32768 --scalar-reciprocal --target-replay --combined-runtime \
+            --checkout frozen-hardware --context "$context" --scalar-reciprocal --target-replay --combined-runtime \
             "${profile[@]}" \
             --manifest frozen-hardware/experiment-results/frozen-geometry.json
+          if [ "$context" = 65536 ]; then
+            test -d frozen-hardware/scripts/ci-65536
+            cp -a frozen-hardware/scripts/ci-65536/. frozen-hardware/scripts/ci/
+          fi
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-timed-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-32k-draft-tail-audit-v2 ]]; then
             gh run download 35158163367 --repo "$GITHUB_REPOSITORY" --name qwen-draft-tail-hardware-35158163367 --dir "$evidence/draft-tail"
             test "$(cat "$evidence/draft-tail/draft-tail-hardware.exit-status")" = 0
@@ -107,7 +209,7 @@ jobs:
           python3 -B frozen-orchestrator/scripts/ci/frozen_stage_evidence.py \
             --repository frozen-orchestrator --numerical "$evidence/numerical" \
             --diagnostics "$evidence/diagnostics" --target "$evidence/target" \
-            --output frozen-hardware/scripts/ci/frozen-evidence \
+            --output frozen-hardware/scripts/ci/frozen-evidence --context "$context" \
             > frozen-hardware/experiment-results/component-qualification.json
           python3 -B frozen-orchestrator/scripts/ci/frozen_benchmark_timeout.py --checkout frozen-hardware \
             > frozen-hardware/experiment-results/benchmark-timeout-policy.json
@@ -131,7 +233,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           QWEN_CARDS_ALLOCATED: '1'
           QWEN_FROZEN_COMBINED_RUNTIME: '1'
-          QWEN_DSPARK_REQUEST_CONTEXT: '32768'
+          QWEN_DSPARK_REQUEST_CONTEXT: ${{ contains(github.ref, 'refs/tags/experiment/frozen-64k-combined-') && '65536' || '32768' }}
+          QWEN_FROZEN_COMBINED_CONTEXT: ${{ contains(github.ref, 'refs/tags/experiment/frozen-64k-combined-') && '65536' || '32768' }}
           QWEN_DSPARK_MODE: request-target-attention
           QWEN_DSPARK_CODING_TASK: merge_intervals
           QWEN_DSPARK_MLP_DOWN: '0'
