@@ -336,6 +336,11 @@ def main():
             'fused_1d_input.cpp', 'fused_t16_admission.py',
             'fused-t16-target-simulator.json', 'fused-t16-target-simulator.exit-status'):
         adapted[name] = Path(__file__).with_name(name).read_text()
+    # Must run after the verbatim-copy loop above (it overwrites
+    # frozen_sim_build_cache.py unconditionally) and is a pure no-op for
+    # every context other than 65536 - see frozen_wide_chunk_normalization.py.
+    from frozen_wide_chunk_normalization import adapt_wide_chunk_normalization
+    adapted = adapt_wide_chunk_normalization(adapted, options.context)
     for name, source in adapted.items():
         if name.endswith('.py'):
             compile(source, name, 'exec')
