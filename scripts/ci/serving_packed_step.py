@@ -65,6 +65,19 @@ AUDIT_LINE = ('[PACKED] request={request} segment={segment} position={position} 
 COMMIT_HOST_LINE = ('[PACKED-COMMIT-HOST] round={round} adopt_ms=[{adopt}] block_ms=[{block}] '
                      'session_ms=[{session}] other_ms=[{other}]')
 
+# Under QWEN_FAST_PACKED_AUDIT=1, one line per ROUND breaking session_ms's own host cost
+# further, into DFlashRequestRuntime.publish's own named stages (dflash_request_runtime.py:
+# publish, its publication_stage(name, prefix) seam - a nullcontext there by default, timed
+# here instead): 'features' (VerifierEngine.verified_features_for_publication), 'prepare_
+# history' (DFlashDevice.prepare_publication - project_features, the history concat/pad/
+# copy, DraftKVHistory.prepare), 'publish_target' (VerifierEngine.publish, which is where
+# block_ms's own packed_verifier.PackedVerifierEngine.commit_user runs), and 'commit_
+# history' (DFlashDevice.commit_publication, a pointer swap). One array entry per entry in
+# the round's scheduler order, 0.0 for an entry whose accepted prefix was 0 (publish()
+# skips 'features'/'prepare_history' entirely then, per dflash_request_runtime.py:78).
+PUBLISH_STAGES = ('features', 'prepare_history', 'publish_target', 'commit_history')
+PUBLISH_LINE = '[PACKED-PUBLISH] round={round} stages={stages}'
+
 
 def audit_enabled():
     return os.environ.get('QWEN_FAST_PACKED_AUDIT') == '1'
@@ -78,6 +91,55 @@ def audit_log(message, **values):
         print(message.format(**values), flush=True)
         return
     logger.info(message, **values)
+
+
+class _StageTimer:
+    """One with-block's wall time, written into `sink[name]` on exit - the
+    publication_stage(name, prefix) seam's real implementation, installed only for the
+    span of one commit_entry() call (install_stage_timer below)."""
+    __slots__ = ('name', 'sink', 'started')
+
+    def __init__(self, name, sink):
+        self.name, self.sink = name, sink
+
+    def __enter__(self):
+        self.started = time.perf_counter()
+        return self
+
+    def __exit__(self, *exc_info):
+        self.sink[self.name] = (time.perf_counter() - self.started) * 1000
+        return False
+
+
+def install_stage_timer(runtime, sink):
+    """Rebind runtime.publication_stage (an instance attribute, shadowing
+    DFlashRequestRuntime's own nullcontext-returning method) so every `with self.
+    publication_stage(name, prefix):` inside publish() times itself into `sink[name]`.
+    Returns a restore callable. Safe on any object - including a fake runtime whose
+    class defines no publication_stage at all - since this only ever sets and later
+    deletes an INSTANCE attribute."""
+    if 'publication_stage' in runtime.__dict__:
+        raise ValueError('runtime.publication_stage is already overridden')
+
+    def stage(name, prefix):
+        return _StageTimer(name, sink)
+
+    runtime.publication_stage = stage
+
+    def restore():
+        del runtime.publication_stage
+
+    return restore
+
+
+def format_publish_stages(publish_stage_timings):
+    parts = []
+    for name in PUBLISH_STAGES:
+        values = publish_stage_timings.get(name)
+        if values is None:
+            continue
+        parts.append('%s: [%s]' % (name, ','.join('%.2f' % value for value in values)))
+    return '{%s}' % ', '.join(parts)
 
 
 def proposal_rows(block, requests):
@@ -242,6 +304,11 @@ def run_verified_block(entries, *, cancelled, block):
         # Only collected under the audit gate: appending a dict per entry is cheap, but
         # there is no reason to pay even that when nobody will read it.
         commit_host_timings = [] if audit_enabled() else None
+        # {stage_name: [ms per entry, in entries order]} - built up one entry at a time
+        # (commit_entry appends its own dict per call) so the round's line stays
+        # positional with commit_host_timings and predictions/segments above; an entry
+        # whose publish() skipped a stage (prefix 0) contributes 0.0 for it, not a gap.
+        publish_stage_timings = {} if audit_enabled() else None
         for entry, segment, rows in zip(entries, segments, predictions):
             # entries[i] is served by metrics['segments'][i] and predictions[i]: the
             # segment its engine's carry is bound to, never its index in the entries
@@ -249,7 +316,7 @@ def run_verified_block(entries, *, cancelled, block):
                            lambda entry=entry, segment=segment, rows=rows: commit_entry(
                                entry, block, segment, rows, cancelled=cancelled, metrics=metrics,
                                verify_started=verify_started, verified=verified,
-                               commit_host_timings=commit_host_timings))
+                               commit_host_timings=commit_host_timings, publish_stage_timings=publish_stage_timings))
             outputs.append(output)
         if commit_host_timings:
             audit_log(COMMIT_HOST_LINE, round=getattr(block, 'rounds', 0),
@@ -257,6 +324,9 @@ def run_verified_block(entries, *, cancelled, block):
                       block=','.join('%.2f' % item['block_ms'] for item in commit_host_timings),
                       session=','.join('%.2f' % item['session_ms'] for item in commit_host_timings),
                       other=','.join('%.2f' % item['other_ms'] for item in commit_host_timings))
+        if publish_stage_timings:
+            audit_log(PUBLISH_LINE, round=getattr(block, 'rounds', 0),
+                      stages=format_publish_stages(publish_stage_timings))
         return outputs
     except BaseException:
         fail_round(entries, block)
@@ -378,7 +448,8 @@ def packed_device_rounds(entries, *, cancelled, blocks):
     return [outputs_by_id[entry['request_id']] for entry in entries]
 
 
-def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_started, verified, commit_host_timings=None):
+def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_started, verified,
+                 commit_host_timings=None, publish_stage_timings=None):
     """FastRequest.step from its verify readback on, for one user of the block."""
     request, ticket, request_id = entry['request'], entry['ticket'], entry['request_id']
     session, engine, runtime = request.session, request.engine, request.runtime
@@ -387,20 +458,45 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
     adopt_started = time.perf_counter()
     engine.adopt_packed(ticket, block, segment)
     adopt_ms = (time.perf_counter() - adopt_started) * 1000
-    # session.commit and session.abort both end in runtime.publish - DFlashRequestRuntime.
-    # publish (dflash_request_runtime.py) - which runs VerifierEngine.publish and, through
-    # it, packed_verifier.PackedVerifierEngine.commit_user: this one interval covers all
-    # of that, for either outcome.
-    session_started = time.perf_counter()
-    if cancelled():
-        session.abort(request_id, ticket, runtime.publish)
-        request.cancelled = True
-        decision = None
-        output = CommittedOutput(request_id, (), session.position, True, True)
-    else:
-        decision = session.commit(request_id, ticket, rows, runtime.publish)
-        output = CommittedOutput(request_id, tuple(decision.emitted), session.position, session.finished)
-    session_ms = (time.perf_counter() - session_started) * 1000
+    # QWEN_FAST_PACKED_AUDIT: times DFlashRequestRuntime.publish's own named stages
+    # (dflash_request_runtime.publication_stage's seam) for this one user's commit only -
+    # installed and restored around session.commit/session.abort below, never left on
+    # runtime past this call. stage_sink stays {} (every PUBLISH_STAGES entry reported as
+    # 0.0) for a runtime whose publish() never calls publication_stage at all (a fake in a
+    # test that does not model it) or an entry whose accepted prefix is 0.
+    stage_sink = {} if publish_stage_timings is not None else None
+    restore_stage_timer = install_stage_timer(runtime, stage_sink) if stage_sink is not None else None
+    # QWEN_FAST_PIPELINED_PUBLISH: merges prepare_publication's own three device fences
+    # into one for this user's commit (dflash_pipelined_publish.install_merge_release) -
+    # installed on the drafter only if this runtime actually exposes one (a dspark
+    # request's runtime, or a test fake that does not model prepare_publication, has none).
+    drafter = getattr(runtime, 'drafter', None)
+    restore_merge_release = None
+    if drafter is not None:
+        from dflash_pipelined_publish import pipelined_publish_enabled, install_merge_release
+
+        if pipelined_publish_enabled():
+            restore_merge_release = install_merge_release(drafter)
+    try:
+        # session.commit and session.abort both end in runtime.publish - DFlashRequestRuntime.
+        # publish (dflash_request_runtime.py) - which runs VerifierEngine.publish and, through
+        # it, packed_verifier.PackedVerifierEngine.commit_user: this one interval covers all
+        # of that, for either outcome.
+        session_started = time.perf_counter()
+        if cancelled():
+            session.abort(request_id, ticket, runtime.publish)
+            request.cancelled = True
+            decision = None
+            output = CommittedOutput(request_id, (), session.position, True, True)
+        else:
+            decision = session.commit(request_id, ticket, rows, runtime.publish)
+            output = CommittedOutput(request_id, tuple(decision.emitted), session.position, session.finished)
+        session_ms = (time.perf_counter() - session_started) * 1000
+    finally:
+        if restore_merge_release is not None:
+            restore_merge_release()
+        if restore_stage_timer is not None:
+            restore_stage_timer()
     finished = time.perf_counter()
     if audit_enabled():
         audit_log(AUDIT_LINE, request=str(request_id)[:48], segment=segment, position=ticket.position,
@@ -419,6 +515,9 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
         block_ms = block_ms[segment] if block_ms is not None else 0.0
         other_ms = max((finished - started) * 1000 - adopt_ms - session_ms, 0.0)
         commit_host_timings.append(dict(adopt_ms=adopt_ms, block_ms=block_ms, session_ms=session_ms, other_ms=other_ms))
+    if publish_stage_timings is not None:
+        for name in PUBLISH_STAGES:
+            publish_stage_timings.setdefault(name, []).append(stage_sink.get(name, 0.0))
     return output
 
 

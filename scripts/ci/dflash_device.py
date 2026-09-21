@@ -529,7 +529,7 @@ class DFlashDevice:
         identity = addresses(self.operations, output) if output is not None else None
         release_owned(self.operations, [value for value in owned if addresses(self.operations, value) != identity])
 
-    def project_features(self, features, count, row_offset=None):
+    def project_features(self, features, count, row_offset=None, *, retain=None):
         # A packed block's taps hold every user's rows (packed_verifier.PackedFeatureTaps
         # names this user's first row); unpacked taps start at row 0.
         offset = getattr(features, 'row_offset', 0) if row_offset is None else row_offset
@@ -540,7 +540,16 @@ class DFlashDevice:
                     or value.shape[2] < offset + count or value.shape[3] != 2560 or value.dtype != operations.bfloat16
                     for value in features)):
             raise ValueError('Five complete ordered BF16 local feature taps required')
-        owned, retain = self.temporaries(features)
+        # QWEN_FAST_PIPELINED_PUBLISH (dflash_pipelined_publish.install_merge_release):
+        # a caller-owned `retain` folds every temporary here into the CALLER's own
+        # release scope instead of a fresh one of this call's own, so the
+        # synchronize_device and release below are skipped entirely - deferred to
+        # whichever synchronize_device the caller eventually performs
+        # (prepare_publication's own, below). Default (`retain=None`) is exactly
+        # today's behaviour: its own scope, its own sync, its own release.
+        owned = None
+        if retain is None:
+            owned, retain = self.temporaries(features)
         output = None
         try:
             chunks = []
@@ -564,22 +573,31 @@ class DFlashDevice:
                     compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
                 chunks.append(retain(operations.slice(normalized, (0, 0, 0, 0), (1, 1, rows, 5120))))
             output = retain(operations.concat(chunks, dim=2)) if len(chunks) > 1 else chunks[0]
-            operations.synchronize_device(self.mesh)
+            if owned is not None:
+                operations.synchronize_device(self.mesh)
         except BaseException:
-            release_owned(operations, owned)
+            if owned is not None:
+                release_owned(operations, owned)
             raise
-        self.release_except(owned, output)
+        if owned is not None:
+            self.release_except(owned, output)
         return output
 
-    def prepare_publication(self, features, prefix, *, position):
+    def prepare_publication(self, features, prefix, *, position, merge_release=False):
         if self.closed or self.pending is not None or position != self.position or type(prefix) is not int or not 1 <= prefix <= 32:
             raise ValueError('One live target-feature publication at the committed frontier required')
+        if type(merge_release) is not bool:
+            raise ValueError('Explicit merge_release selection required')
         operations = self.operations
         owned, retain = self.temporaries([self.history, self.spare_history])
         output = None
         cache_publication = None
         try:
-            projected = retain(self.project_features(features, prefix))
+            # QWEN_FAST_PIPELINED_PUBLISH: with merge_release, project_features folds its
+            # temporaries into THIS call's own owned/retain scope instead of syncing and
+            # releasing on its own - see project_features' own comment for why that is
+            # safe to defer.
+            projected = retain(self.project_features(features, prefix, retain=(retain if merge_release else None)))
             valid_history = retain(operations.slice(self.history, (0, 0, 0, 0), (1, 1, self.history_rows, 5120)))
             combined = retain(operations.concat([valid_history, projected], dim=2))
             rows = min(2048, self.history_rows + prefix)
@@ -588,7 +606,14 @@ class DFlashDevice:
             operations.copy(padded, self.spare_history)
             if self.kv_history is not None:
                 cache_publication = self.kv_history.prepare(projected, prefix, position=position)
-            operations.synchronize_device(self.mesh)
+            # kv_history.prepare() above already ran its own synchronize_device(self.mesh)
+            # over the SAME shared mesh queue, in submission order after everything
+            # enqueued so far in this call (project_features' merged work and the copy
+            # above included) - so with a committed cache AND merge_release, this call's
+            # own fence would be redundant and is skipped; every other combination keeps
+            # today's unconditional fence.
+            if not (merge_release and self.kv_history is not None):
+                operations.synchronize_device(self.mesh)
             self.pending = SimpleNamespace(position=position, prefix=prefix, rows=rows, history=self.spare_history,
                 kv=cache_publication, status='prepared')
         except BaseException:

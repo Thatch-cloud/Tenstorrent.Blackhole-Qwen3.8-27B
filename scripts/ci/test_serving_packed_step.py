@@ -575,17 +575,25 @@ class PackedStepTests(unittest.TestCase):
         self.block = FakeBlock()
         seen = lines(self.two(), True)
         host_lines = [line for line in seen if line.startswith('[PACKED-COMMIT-HOST]')]
+        publish_lines = [line for line in seen if line.startswith('[PACKED-PUBLISH]')]
         packed_lines = [line for line in seen if line.startswith('[PACKED] ')]
         self.assertEqual(len(packed_lines), 2, 'one [PACKED] line per user, as before')
         self.assertEqual(len(host_lines), 1, 'exactly one [PACKED-COMMIT-HOST] line for the whole round')
+        self.assertEqual(len(publish_lines), 1, 'exactly one [PACKED-PUBLISH] line for the whole round')
         # FakeBlock carries no commit_block_ms (the real PackedVerifierEngine does): every
         # entry's block_ms falls back to 0.00, and the round is FakeBlock.rounds (1, after
         # one verify())
         self.assertRegex(host_lines[0],
             r'^\[PACKED-COMMIT-HOST\] round=1 adopt_ms=\[[\d.]+,[\d.]+\] block_ms=\[0\.00,0\.00\] '
             r'session_ms=\[[\d.]+,[\d.]+\] other_ms=\[[\d.]+,[\d.]+\]$')
-        # the host line comes after both users' own [PACKED] lines: the round's last commit
-        self.assertEqual(seen[-1], host_lines[0])
+        # FakeRuntime.publish() (test_serving_packed_step.py's own fake) never calls
+        # publication_stage at all, so every stage falls back to 0.00 for both users -
+        # the line still reports every PUBLISH_STAGES name, unconditionally.
+        self.assertEqual(publish_lines[0], '[PACKED-PUBLISH] round=1 stages={features: [0.00,0.00], '
+            'prepare_history: [0.00,0.00], publish_target: [0.00,0.00], commit_history: [0.00,0.00]}')
+        # both round-level lines come after both users' own [PACKED] lines: the round's
+        # last commit produces [PACKED-COMMIT-HOST] then [PACKED-PUBLISH], in that order.
+        self.assertEqual(seen[-2:], [host_lines[0], publish_lines[0]])
 
     def test_the_commit_host_lines_block_ms_follows_each_entrys_own_segment(self):
         """Predictions, segments and now block_ms are all indexed by SEGMENT, never by an
@@ -625,6 +633,165 @@ class PackedStepTests(unittest.TestCase):
             self.assertIs(serving_packed_step.audit_enabled(), False)
         with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1'}):
             self.assertIs(serving_packed_step.audit_enabled(), True)
+
+
+class InstrumentedFakeRuntime:
+    """Mirrors DFlashRequestRuntime.publish()'s actual stage structure - each of
+    'features', 'prepare_history', 'publish_target', 'commit_history' wrapped in its
+    own self.publication_stage(name, prefix) call, and a real self.drafter - unlike
+    FakeRuntime above, which models neither. Used only by the tests below that check
+    the audit instrumentation and the pipelined-publish shim actually reach something
+    that calls both."""
+
+    def __init__(self, engine, drafter):
+        self.engine, self.drafter = engine, drafter
+        self.published = []
+
+    def publication_stage(self, name, prefix):
+        from contextlib import nullcontext
+        return nullcontext()
+
+    def publish(self, prefix):
+        engine = self.engine
+        ticket = engine.session.pending
+        if engine.phase != 'verified' or engine.pending is not ticket or engine.session.phase != 'committing':
+            raise ValueError('Feature publication requires the current verified target transaction')
+        publication = None
+        try:
+            if prefix:
+                with self.publication_stage('features', prefix):
+                    features = engine.verified_features_for_publication(ticket)
+                with self.publication_stage('prepare_history', prefix):
+                    publication = self.drafter.prepare_publication(features, prefix, position=engine.position)
+            with self.publication_stage('publish_target', prefix):
+                engine.publish(prefix)
+            if publication is not None:
+                with self.publication_stage('commit_history', prefix):
+                    self.drafter.commit_publication(publication)
+            self.published.append(prefix)
+        except BaseException:
+            engine.phase = 'failed'
+            raise
+
+
+class FakeDrafter:
+    """dflash_device.DFlashDevice.prepare_publication/commit_publication as
+    InstrumentedFakeRuntime's publish() calls them - records merge_release so the
+    pipelined-publish wiring can be checked without any device machinery."""
+
+    def __init__(self):
+        self.prepare_calls = []
+        self.commit_calls = []
+
+    def prepare_publication(self, features, prefix, *, position, merge_release=False):
+        self.prepare_calls.append((features, prefix, position, merge_release))
+        return SimpleNamespace(status='prepared')
+
+    def commit_publication(self, publication):
+        self.commit_calls.append(publication)
+        publication.status = 'committed'
+
+
+class PublishInstrumentationTests(unittest.TestCase):
+    """The [PACKED-PUBLISH] stage line (QWEN_FAST_PACKED_AUDIT) and the
+    QWEN_FAST_PIPELINED_PUBLISH merge_release wiring, against InstrumentedFakeRuntime -
+    FakeRuntime above models neither, so PackedStepTests' own tests cannot exercise
+    either path (test_the_commit_host_line_reports_one_line_per_round_not_per_user
+    above already covers the case where the runtime does not model publication_stage
+    at all)."""
+
+    def setUp(self):
+        verifier_engine.note_prefill()
+        self.block = FakeBlock()
+        self.stepped = []
+
+    def request(self, request_id, segment, position, accept, rows=ROWS):
+        request = FakeRequest(request_id, position, self.stepped)
+        drafter = FakeDrafter()
+        request.runtime = InstrumentedFakeRuntime(request.engine, drafter)
+        self.block.bind(request.engine, segment)
+        request.propose(self.block.predictions_for(segment), accept, rows)
+        return request
+
+    def two(self):
+        first = self.request('A', 0, 100, accept=15)
+        second = self.request('B', 1, 3000, accept=9)
+        return [entry(second), entry(first)]
+
+    def step(self, entries, cancelled=None):
+        return packed_device_step(entries, cancelled=cancelled or (lambda: False), block=self.block)
+
+    def test_publish_line_is_silent_without_the_audit_flag(self):
+        entries = self.two()
+        with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '0'}), patch('serving_packed_step.audit_log') as log:
+            self.step(entries)
+        self.assertFalse(any(call.args[0].startswith('[PACKED-PUBLISH]') for call in log.call_args_list))
+
+    def test_publish_line_reports_every_stage_for_every_user_in_entries_order(self):
+        entries = self.two()  # presented [B (segment 1), A (segment 0)]
+        with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1'}), patch('serving_packed_step.audit_log') as log:
+            self.step(entries)
+        (publish_call,) = [item for item in log.call_args_list if item.args[0].startswith('[PACKED-PUBLISH]')]
+        stages = publish_call.kwargs['stages']
+        for name in ('features:', 'prepare_history:', 'publish_target:', 'commit_history:'):
+            self.assertIn(name, stages)
+        # both users accepted a nonzero prefix, so every stage ran for both - two
+        # comma-separated ms values inside each stage's own brackets.
+        import re
+        for match in re.finditer(r': \[([^\]]*)\]', stages):
+            self.assertEqual(len(match.group(1).split(',')), 2)
+
+    def test_a_zero_prefix_entry_reports_zero_for_features_and_prepare_history(self):
+        """publish() skips 'features'/'prepare_history' entirely when prefix is 0
+        (dflash_request_runtime.py:78) - reached on cancellation, session.abort's own
+        restore(0) call. The line still reports a slot for that user, as 0.00, never
+        a gap."""
+        entries = self.two()
+        # False first (passes packed_device_step's own pre-verify check), True after
+        # (both commits cancelled) - answers()'s own established pattern for this,
+        # PackedStepTests.test_a_cancellation_after_the_verify_aborts_every_user_through_the_block.
+        with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1'}), patch('serving_packed_step.audit_log') as log:
+            self.step(entries, cancelled=answers(False, True))
+        (publish_call,) = [item for item in log.call_args_list if item.args[0].startswith('[PACKED-PUBLISH]')]
+        self.assertIn('features: [0.00,0.00]', publish_call.kwargs['stages'])
+        self.assertIn('prepare_history: [0.00,0.00]', publish_call.kwargs['stages'])
+
+    def test_pipelined_publish_off_by_default_leaves_merge_release_false(self):
+        import os
+
+        entries = self.two()
+        self.assertNotIn('QWEN_FAST_PIPELINED_PUBLISH', os.environ)
+        self.step(entries)
+        for e in entries:
+            drafter = e['request'].runtime.drafter
+            self.assertTrue(drafter.prepare_calls)
+            self.assertTrue(all(call[3] is False for call in drafter.prepare_calls))
+
+    def test_pipelined_publish_flag_installs_merge_release_and_restores_after(self):
+        entries = self.two()
+        with patch.dict('os.environ', {'QWEN_FAST_PIPELINED_PUBLISH': '1'}):
+            self.step(entries)
+        for e in entries:
+            drafter = e['request'].runtime.drafter
+            self.assertTrue(drafter.prepare_calls)
+            self.assertTrue(all(call[3] is True for call in drafter.prepare_calls))
+            self.assertNotIn('prepare_publication', drafter.__dict__, 'restored after the commit')
+
+    def test_pipelined_publish_flag_is_inert_for_a_runtime_with_no_drafter(self):
+        """FakeRuntime (PackedStepTests' own fixture) has no .drafter at all - the
+        flag must not try to install anything on it. Two plain FakeRequests (not this
+        class's own InstrumentedFakeRuntime-bearing request()), matching FakeBlock's
+        default two users."""
+        request_a = FakeRequest('A', 100, self.stepped)
+        request_b = FakeRequest('B', 3000, self.stepped)
+        self.block.bind(request_a.engine, 0)
+        self.block.bind(request_b.engine, 1)
+        request_a.propose(self.block.predictions_for(0), 15)
+        request_b.propose(self.block.predictions_for(1), 9)
+        with patch.dict('os.environ', {'QWEN_FAST_PIPELINED_PUBLISH': '1'}):
+            self.step([entry(request_b), entry(request_a)])
+        self.assertEqual(request_a.runtime.published, [16])
+        self.assertEqual(request_b.runtime.published, [10])
 
 
 class FourUserStepTests(unittest.TestCase):
