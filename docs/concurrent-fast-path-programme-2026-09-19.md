@@ -224,3 +224,24 @@ measured obstacles to 131k, and the plan in dependency order:
 Honest expectation: acceptance falls with context (12.1 at 4k, 7.08 at 32k), so per-user rate at
 131k will be well under 200 tok/s; the deliverable is four concurrent speculative users AT 131k and
 the measured per-user and aggregate rates. 161k is superseded (no rung; 4 users do not fit at bf8).
+
+## CORRECTED TARGET 2026-09-21: the single-stream rate PER USER under four-way batching
+
+The user's target is per-user parity: each of four users at the single-stream rate (125.99 tok/s
+measured at 4k), not aggregate throughput. Per-user rate is accepted tokens per round over round
+time, so parity needs the four-user round to cost about the one-user round: ONE forward, ONE weight
+pass for all four. That is a NATIVE 64-row decode round with per_core_M=2 kernels, one op per
+projection - not the two-call-and-concat workarounds (1453 ms), and not two 32-row rounds (two
+weight passes, ~68% per user; landing only as a selectable interim).
+
+Physics of parity: at 4k the KV read is negligible, so four users cost ~one and per-user reaches
+~121, full parity. At 131k the four users' bf8 KV is 8.4 GB/card (~21 ms/round at 405 GB/s) and must
+be read every round, so the four-user round is ~1.5x the one-user round and per-user lands ~65-80%
+of single. Acceptance (12.1 at 4k, 7.08 at 32k) sets the absolute level.
+
+The 64-row decode configs live in the model's builders (tp_common create_matmul_1d_decode_progcfg,
+attention/tp.py, gdn/tp.py, mlp.py, model_config progcfgs at per_core_M 1), so this is a model
+graft via the M1/M2 bind-mount mechanism. Two C++ limits a Python graft cannot lift may bound it:
+attn_decode_prep hangs at batch 64 and nlp_concat_heads_decode refuses input_shape[1] > 32; those
+may stay two-call. This native-64 graft is now the PRIMARY effort (task #39); 131k plan A/B/C apply
+on top of it for the 131k context.
