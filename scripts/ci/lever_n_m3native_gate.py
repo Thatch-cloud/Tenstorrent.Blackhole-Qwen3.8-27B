@@ -87,12 +87,17 @@ REFERENCE_NAME = re.compile(r'^single-user-(?:(\d{4})-)?\d+\.json$')
 # 33-round four-user run (about 50 kept lines per round) instead of cutting rounds 16-21
 # out of the middle at 800.
 DIAGNOSTIC_CAP = 4000
+# A native death leaves no Python traceback: TT_FATAL / TT_THROW text, the C++ runtime's
+# terminate message, the shell's signal report, or vLLM's engine-death notice are the
+# only record (run 35579223088 had none of them in the kept lines).
+CRASH_TEXT = ('FATAL', 'Segmentation', 'Aborted', 'Killed', 'terminate called', 'what():',
+              'core dumped', 'died', 'Bus error', 'Illegal instruction', 'TT_THROW')
 
 
 def select_diagnostic(lines, cap=DIAGNOSTIC_CAP):
     diagnostic = [line[:300] for line in lines
                   if '[PINDIAG]' in line or '[PACKED' in line or '[PHASE]' in line
-                  or 'ERROR' in line or 'Traceback' in line]
+                  or 'ERROR' in line or 'Traceback' in line or any(crash in line for crash in CRASH_TEXT)]
     if len(diagnostic) > cap:
         omitted = len(diagnostic) - cap
         diagnostic = diagnostic[:cap // 2] + ['... %d diagnostic lines omitted' % omitted] + diagnostic[-(cap // 2):]

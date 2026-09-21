@@ -75,6 +75,14 @@ done
 refs="$PWD/scripts/ci/references/packed-gate"
 if [ -d "$PWD/runner-evidence.local/packed-gate" ]; then refs="$PWD/runner-evidence.local/packed-gate"; fi
 mounts+=(--mount "type=bind,src=$refs,dst=/bench/packed-gate-reference,readonly")
+# The gate's own results directory (its raw server.log, every line the stdout filter
+# drops) persists under experiment-results/gate and ships with the artifact. The
+# container runs as root with no CAP_DAC_OVERRIDE, so the directory must be world-writable
+# (run 35579223088: the engine died with no Python traceback and the only copy of the
+# native crash text was /tmp/m3native-gate/server.log inside the container).
+mkdir -p experiment-results/gate
+chmod 0777 experiment-results/gate
+mounts+=(--mount "type=bind,src=$PWD/experiment-results/gate,dst=/experiment-results-gate")
 mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
 devices=()
 for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
@@ -197,6 +205,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PIPELINED_PROPOSALS:+-e QWEN_FAST_PIPELINED_PROPOSALS=1} \
   ${M3NATIVE_FAST_COMMIT:+-e QWEN_FAST_FAST_COMMIT=1} \
   ${M3NATIVE_GDN_USER_BATCH:+-e QWEN_FAST_GDN_USER_BATCH=1} \
+  ${M3NATIVE_REPLAY_GROUP_ROWS:+-e QWEN_FAST_REPLAY_GROUP_ROWS=$M3NATIVE_REPLAY_GROUP_ROWS} \
   ${M3NATIVE_PROFILE:+-e TTNN_OP_PROFILER=1} \
   ${M3NATIVE_PROFILE:+-e TT_METAL_DEVICE_PROFILER=1} \
   ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_TRACE_TRACKING=1} \
@@ -223,7 +232,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --entrypoint python3 "$image" "${entry_args[@]}" \
   --users "$users" --context "$context" --prompt-tokens "$prompt_tokens" --max-tokens "$max_tokens" --stream-timeout 600 --trace-region-bytes "$trace_region_bytes" \
   --prompt-base 1000 --prompt-user-offset 1 --stagger 0 \
-  --references /bench/packed-gate-reference $allow_missing_references \
+  --references /bench/packed-gate-reference $allow_missing_references --results /experiment-results-gate \
   > experiment-results/m3native-gate-stdout.log 2>&1 || true
 
 if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then

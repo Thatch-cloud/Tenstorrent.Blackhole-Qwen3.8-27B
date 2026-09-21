@@ -125,7 +125,9 @@ class DiagnosticFilterTests(unittest.TestCase):
     def test_every_packed_audit_family_and_the_phase_lines_pass_the_filter(self):
         lines = ['x [PACKED] request=a segment=0', 'x [PACKED-PHASE] round=1', 'x [PACKED-COMMIT] round=1',
                  'x [PACKED-COMMIT-HOST] round=1', 'x [PACKED-PROPOSE] round=1', 'x [PHASE] step a begin',
-                 'x [PINDIAG] dram after', 'plain server chatter', 'x ERROR boom', 'Traceback (most recent call last):']
+                 'x [PINDIAG] dram after', 'plain server chatter', 'x ERROR boom', 'Traceback (most recent call last):',
+                 'TT_FATAL @ llrt.cpp:594: Timed out', 'Segmentation fault (core dumped)', 'terminate called after throwing',
+                 'Engine core proc EngineCore_0 died unexpectedly']
         kept = select_diagnostic(lines)
         self.assertEqual(kept, [line for line in lines if line != 'plain server chatter'])
 
