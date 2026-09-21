@@ -22,6 +22,36 @@ def phase(name, request_id, call):
     return result
 
 
+def real_remaining_budget(bridge):
+    """The request's REAL, externally-imposed remaining token budget - the one vLLM's
+    own scheduler enforces - or `None` when it cannot be read.
+
+    `GreedySession.max_new_tokens` is a fixed 256 (the full device capture ceiling),
+    never the request's own `max_tokens`: `serving_request_factory.from_prefill` never
+    threads `sampling_params.max_tokens` into the session, because stopping a request
+    at its OWN shorter budget is left entirely to vLLM's scheduler, external to this
+    engine - `session.finished` only ever goes True from an EOS token or from actually
+    reaching all 256 slots. So a request can be a round away from vLLM excluding it
+    from the NEXT schedule (`len(state.output_token_ids) >= sampling_params.max_tokens`,
+    checked by the scheduler, not by us) while `session.finished` still reads False:
+    run 35567165791 hit exactly this, one round after run 35564623068's fix landed -
+    the finishing request's OWN draft still ran a full ~205 ms proposal in the very
+    tick that turned out to draft its LAST round, because nothing here knew its real
+    budget was already exhausted.
+
+    `bridge.state` is `runner.requests[request_id]` (`FastRunnerBridge.__init__`) -
+    the same object `apply_committed_output` (serving_vllm_state.py) extends every
+    committed round, so its `output_token_ids` is exactly what the scheduler's own
+    stop check reads, kept in sync one round ahead of anything `session` can see.
+    """
+    state = getattr(bridge, 'state', None)
+    max_tokens = getattr(getattr(state, 'sampling_params', None), 'max_tokens', None)
+    output_token_ids = getattr(state, 'output_token_ids', None)
+    if type(max_tokens) is not int or output_token_ids is None:
+        return None
+    return max_tokens - len(output_token_ids)
+
+
 def discard_stale_ticket(request, packed_rows):
     """A pending ticket the coming round's shared width would replace.
 
@@ -181,9 +211,28 @@ class FastWorkerHook:
         # without the policy (the sequential step) leaves every proposal as before.
         policy = getattr(self.packed_step, 'proposal_rows', None)
         have_policy = callable(policy)
-        packed_rows = policy([bridge.request for bridge in self.bridges.values()]) if have_policy else None
+        bridges = list(self.bridges.values())
+        packed_rows = policy([bridge.request for bridge in bridges]) if have_policy else None
+        if packed_rows is not None:
+            # proposal_rows only sees session.finished (EOS or the full 256-slot
+            # ceiling), never a request's own shorter max_tokens - that budget is
+            # vLLM's own, enforced by excluding the request from the NEXT schedule,
+            # not by anything here. A live request already at or past ITS real
+            # budget is about to be one of those exclusions, and drafting the round
+            # at the block's width anyway repeats run 35567165791: the survivors'
+            # fresh block-width tickets ride into a round the scheduler admits one
+            # entry short, with no capture anywhere to serve them standalone
+            # (real_remaining_budget's docstring). Caught here, before drafting,
+            # the round degrades to native widths THIS tick instead of next.
+            for bridge in bridges:
+                if getattr(bridge.request.session, 'finished', False):
+                    continue
+                remaining = real_remaining_budget(bridge)
+                if remaining is not None and remaining < packed_rows:
+                    packed_rows = None
+                    break
         request_ids, tokens = [], []
-        for bridge in self.bridges.values():
+        for bridge in bridges:
             # Before drafting, not after: a bridge whose pending ticket is already
             # this round's width is untouched (the two-user block and the sequential
             # default never trim their engines' captures, so this never fires for

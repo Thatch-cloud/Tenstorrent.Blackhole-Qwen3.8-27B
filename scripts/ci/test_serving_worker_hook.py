@@ -213,6 +213,83 @@ class WorkerHookTests(unittest.TestCase):
             hook.bridges = original
             hook.close()
 
+    def test_a_live_requests_real_max_tokens_budget_narrower_than_the_round_forces_a_native_redraft(self):
+        """proposal_rows only ever sees session.finished - an EOS token or the session's
+        own fixed 256-slot capture ceiling (GreedySession.max_new_tokens) - never a
+        request's own, usually much shorter, max_tokens: that budget is vLLM's, enforced
+        by excluding the request from the NEXT schedule, external to this engine's own
+        bookkeeping. So a live request can be one round away from that exclusion while
+        session.finished still reads False - run 35567165791, the round right after run
+        35564623068's discard fix landed: the finishing request's own draft still ran a
+        full proposal in the very tick that turned out to draft its LAST round, and its
+        partners' fresh block-width tickets rode into a round the scheduler admitted one
+        entry short, exactly like the bug the discard fix closed. Real remaining budget
+        (state.sampling_params.max_tokens - len(state.output_token_ids), the same state
+        apply_committed_output keeps in sync with the scheduler's own count) catches this
+        a round earlier: narrower than the round's own width forces the WHOLE round to
+        redraft at native width, exactly as a policy answering None outright already does."""
+        worker, bridge, events, scheduled = self.fixture()
+        policy = Mock(return_value=16)
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False, packed_step=SimpleNamespace(proposal_rows=policy))
+        original = hook.bridges
+
+        def make_bridge(name, *, max_tokens=None, output_token_ids=None):
+            session = SimpleNamespace(request_id=name, pending=None, phase='idle', finished=False)
+            state = None
+            if max_tokens is not None:
+                state = SimpleNamespace(sampling_params=SimpleNamespace(max_tokens=max_tokens),
+                                        output_token_ids=list(output_token_ids or []))
+            return SimpleNamespace(request=SimpleNamespace(session=session, runtime=SimpleNamespace()), state=state,
+                                   drafts=Mock(return_value=SimpleNamespace(req_ids=[name], draft_token_ids=[[1]])))
+
+        # a: 48-token budget, 47 already emitted - one round short of the block's 16 rows.
+        # b: the same budget, plenty left.
+        bridges = {'a': make_bridge('a', max_tokens=48, output_token_ids=[0] * 47),
+                   'b': make_bridge('b', max_tokens=48, output_token_ids=[0] * 10)}
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        try:
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+            policy.assert_called_once_with([bridges['a'].request, bridges['b'].request])
+            for name in 'ab':
+                bridges[name].drafts.assert_called_once_with()
+            # the same real shortfall, but the session itself already calls it
+            # finished: the real FastRunnerBridge.drafts() short-circuits that one on
+            # its own (this fixture's bare Mock does not), so the veto here skips it -
+            # 'b' is the only one it has to judge, and 'b' has plenty of budget, so
+            # the policy's width stands for both
+            for name in 'ab':
+                bridges[name].drafts.reset_mock()
+            bridges['a'].request.session.finished = True
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+            for name in 'ab':
+                bridges[name].drafts.assert_called_once_with(packed_rows=16)
+            bridges['a'].request.session.finished = False
+            # real budget catches up: plenty of room for both now, so the policy's
+            # width stands, unchanged from today's behaviour
+            for name in 'ab':
+                bridges[name].drafts.reset_mock()
+            bridges['a'].state.output_token_ids = [0] * 10
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+            for name in 'ab':
+                bridges[name].drafts.assert_called_once_with(packed_rows=16)
+            # no state at all (the existing fixtures never model one): nothing here
+            # can second-guess the policy, so its width stands exactly as before
+            for name in 'ab':
+                bridges[name].drafts.reset_mock()
+            bridges['a'].state = None
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+            for name in 'ab':
+                bridges[name].drafts.assert_called_once_with(packed_rows=16)
+        finally:
+            hook.bridges = original
+            hook.close()
+
     def test_queued_sampler_or_second_owner_rejected(self):
         worker, bridge, _, _ = self.fixture()
         bridge.runner._pending_samples.append(object())
