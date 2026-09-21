@@ -2694,3 +2694,16 @@ under TT_METAL_WATCHER=5: B=8, B=32 and B=64 bit-exact against the torch reshape
 native B=64 output equals the two 32-user halves joined. B<=32 is term-for-term the original offset.
 The overlay's TwoTileConcatHeads can be retired once the K64 graft is mounted into the serving
 container. attn_decode_prep at batch 64 remains the last two-call op.
+
+## attn_decode_prep at batch 64: the hang was two producers on one circular buffer (54bad24f)
+
+cb_out had two producers on different RISCs: the reader (NCRISC) pushed the v/gate copy kinds and the
+compute pack thread (TRISC2) pushed q/k; the writer waited on it. A Metal CB producer stores its own
+local page count into the shared word the consumer polls, so a second producer erases the first's
+receipt and the writer's cb_wait_front never satisfies. B<=32 never put both producers on one core
+(per_core 1, or per_core 2 with an even start so kinds pair as {q,k} or {v,gate}); at B=64 per_core
+is 3 with start 3c, so every core c == 1 (mod 4) gets {gate,q,k} - exactly the 21-core checkerboard
+the watcher showed on run 35507675630. Fix (optimisation/ttnn-op/kernels-batch64/attn_prep): a private
+ring c_23 for the reader's copies; the writer reads cb_out for q/k and the new ring for v/gate. One
+producer per ring, deadlock-free for any split; compute kernel and device operation unchanged; B<=32
+is a relabelling of a private ring. Under test on card M.
