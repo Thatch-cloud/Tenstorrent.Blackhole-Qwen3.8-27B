@@ -124,6 +124,14 @@ if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
               --op-support-count 20000 -o /experiment-results-profile
               /bench/lever_n_m3native_gate.py)
 fi
+# Traced proposals cost DRAM: each request uploads its own proposal-trace inputs (the
+# (1,1,context+32,5120) history and per-layer cached K/V), 0.80 GB per engine against
+# 0.58 GB eager, and the fourth user's admission ran out of memory with 716 MB largest
+# free (run 35565478581). The traced arm halves the recipe's 1 GiB trace region for the
+# headroom; decode traces are command streams and this repo's probes run at 256 MiB.
+if [ -n "${M3NATIVE_TRACED_PROPOSAL:-}" ]; then
+  trace_region_bytes=536870912
+fi
 name="qwen-m3native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 timeout -k 30 2200 docker run --rm --name "$name" --network none \
