@@ -10,6 +10,26 @@ from frozen_context_geometry import CONTEXTS, geometry
 
 
 REVISION = '8c102b20df22329106955b4006bf4d650bb94e40'
+# Contexts the offline --combined-runtime candidate may be staged at. 32768 is the
+# retained, evidence-qualified recipe (frozen_combined_gate.REPORTS); 65536 stages the
+# geometry-derived tree but frozen_combined_gate.qualify() refuses it until its own
+# evidence lands (see docs/t16-recipe-rung-65k.md). Adding a rung here only unblocks
+# staging the tree; it never grants qualification.
+COMBINED_RUNTIME_CONTEXTS = (32768, 65536)
+
+
+def combined_runtime_directory(checkout, context):
+    """Where a --combined-runtime staged tree is written for a given context.
+
+    32768 keeps the historical unsuffixed path (checkout/scripts/ci) byte-for-byte,
+    so existing lanes (qwen-frozen-combined.yml, the non-combined-runtime callers of
+    this module) are untouched. Any other staged context gets its own directory so
+    both trees can coexist under one checkout/image without the 32768 default ever
+    changing path or content.
+    """
+    if type(context) is not int or context not in COMBINED_RUNTIME_CONTEXTS:
+        raise ValueError('Explicit staged combined-runtime context required')
+    return checkout / 'scripts/ci' if context == 32768 else checkout / f'scripts/ci-{context}'
 
 
 def replace_once(source, before, after):
@@ -193,9 +213,9 @@ def main():
         parser.error('Buffer comparison requires uninstrumented combined runtime')
     if options.verifier_profile and not options.combined_runtime:
         parser.error('Verifier profiling requires the admitted combined runtime')
-    if options.combined_runtime and (options.context != 32768 or not options.scalar_reciprocal
-            or not options.target_replay or options.eager_only):
-        parser.error('Combined candidate requires 32768, scalar reciprocal and target replay, not eager-only')
+    if options.combined_runtime and (options.context not in COMBINED_RUNTIME_CONTEXTS
+            or not options.scalar_reciprocal or not options.target_replay or options.eager_only):
+        parser.error('Combined candidate requires 32768 or 65536, scalar reciprocal and target replay, not eager-only')
     checkout = options.checkout.resolve(strict=True)
 
     def git(*arguments):
@@ -243,7 +263,7 @@ def main():
         adapted = adapt_eager_only(adapted)
     if options.combined_runtime:
         from frozen_combined_adapters import adapt_combined_sources
-        adapted = adapt_combined_sources(adapted)
+        adapted = adapt_combined_sources(adapted, context=options.context)
         for name in ('frozen_combined_runtime.py', 'frozen_combined_gate.py', 'frozen_target_replay.py',
                 'frozen_combined_history.py', 'frozen_reciprocal_isolation.py'):
             adapted[name] = Path(__file__).with_name(name).read_text()
@@ -319,13 +339,16 @@ def main():
     for name, source in adapted.items():
         if name.endswith('.py'):
             compile(source, name, 'exec')
+    staged_directory = (combined_runtime_directory(checkout, options.context)
+        if options.combined_runtime else checkout / 'scripts/ci')
     for name, source in adapted.items():
-        destination = checkout / 'scripts/ci' / name
+        destination = staged_directory / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(source.encode('utf-8'))
     checksum = lambda source: hashlib.sha256(source.encode()).hexdigest()
     options.manifest.write_text(json.dumps(dict(revision=REVISION,
-        geometry=geometry(options.context), before={name: checksum(source) for name, source in sources.items()},
+        geometry=geometry(options.context), staged_directory=staged_directory.relative_to(checkout).as_posix(),
+        before={name: checksum(source) for name, source in sources.items()},
         after={name: checksum(source) for name, source in adapted.items()},
         scope='Shared probe/runtime geometry adaptation; no numerical or runtime admission',
         reciprocal_variant='scalar-fp32' if options.scalar_reciprocal else 'native',

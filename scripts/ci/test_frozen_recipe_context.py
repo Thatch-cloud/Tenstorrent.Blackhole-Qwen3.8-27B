@@ -9,7 +9,9 @@ import sys
 from unittest.mock import patch
 
 import frozen_recipe_context
-from frozen_recipe_context import REVISION, adapt_probe_sources, adapt_cache_launcher, adapt_scalar_reciprocal, adapt_eager_only, geometry
+from frozen_recipe_context import (REVISION, adapt_probe_sources, adapt_cache_launcher,
+    adapt_scalar_reciprocal, adapt_eager_only, geometry, COMBINED_RUNTIME_CONTEXTS,
+    combined_runtime_directory)
 from frozen_context_geometry import CONTEXTS, selected_geometry, factory_selector
 from frozen_runtime_context import FILES
 
@@ -183,6 +185,101 @@ timeout() {
         broken[names[0]] += '\nPADDED_KEYS = 8704\n'
         with self.assertRaises(ValueError):
             adapt_probe_sources(broken, 32768)
+
+
+class Rung65536CombinedRuntimeStagingTests(unittest.TestCase):
+    """--combined-runtime at context 65536: the argparse guard, and where the staged
+    tree lands on disk. See docs/t16-recipe-rung-65k.md."""
+
+    def test_combined_runtime_contexts_are_32768_and_65536_only(self):
+        self.assertEqual(COMBINED_RUNTIME_CONTEXTS, (32768, 65536))
+
+    def test_staged_directory_is_unsuffixed_only_for_the_32768_default(self):
+        checkout = Path('/checkout')
+        self.assertEqual(combined_runtime_directory(checkout, 32768), checkout / 'scripts/ci')
+        self.assertEqual(combined_runtime_directory(checkout, 65536), checkout / 'scripts/ci-65536')
+        for context in (4096, 8192, 16384, 131072, 262144):
+            with self.subTest(context=context), self.assertRaises(ValueError):
+                combined_runtime_directory(checkout, context)
+
+    def _run_main(self, checkout, manifest, *, context, combined_runtime):
+        from frozen_runtime_context import FILES as RUNTIME_FILES
+        from frozen_combined_adapters import FILES as COMBINED_FILES
+        names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
+            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh',
+            'simulator-suite.sh') + RUNTIME_FILES
+        if combined_runtime:
+            names += ('target-t16-attention-8k-probe.py', 'attention_mask_replay.py') + COMBINED_FILES
+        originals = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}']) for name in names}
+        scripts = checkout / 'scripts/ci'
+        scripts.mkdir(parents=True)
+        for name, source in originals.items():
+            (scripts / name).write_bytes(source)
+
+        def git(command):
+            arguments = command[3:]
+            if arguments == ['rev-parse', 'HEAD']:
+                return REVISION.encode() + b'\n'
+            if arguments == ['status', '--porcelain', '--untracked-files=no']:
+                return b''
+            if arguments[0] == 'show':
+                return originals[arguments[1].rsplit('/', 1)[1]]
+            raise AssertionError(command)
+
+        argv = ['adapter', '--checkout', str(checkout), '--context', str(context), '--manifest', str(manifest)]
+        if combined_runtime:
+            argv += ['--scalar-reciprocal', '--target-replay', '--combined-runtime']
+        with patch('sys.argv', argv), \
+                patch.object(frozen_recipe_context.subprocess, 'check_output', side_effect=git):
+            frozen_recipe_context.main()
+        return json.loads(manifest.read_text())
+
+    def test_combined_runtime_65536_lands_in_its_own_directory_32768_stays_put(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            report = self._run_main(checkout, checkout / 'deployment-65536.json',
+                context=65536, combined_runtime=True)
+            self.assertEqual(report['staged_directory'], 'scripts/ci-65536')
+            self.assertTrue((checkout / 'scripts/ci-65536/dspark_8k_admission.py').exists())
+            # The 32768 path (the historical input checkout itself) must be untouched by a
+            # 65536 combined-runtime run - both trees can coexist under one checkout.
+            self.assertNotIn('enabled=request_context() == 65536',
+                (checkout / 'scripts/ci/dspark_runtime_cache.py').read_text())
+            self.assertIn('enabled=request_context() == 65536',
+                (checkout / 'scripts/ci-65536/dspark_runtime_cache.py').read_text())
+            for name, checksum in report['after'].items():
+                self.assertEqual(hashlib.sha256(
+                    (checkout / 'scripts/ci-65536' / name).read_bytes()).hexdigest(), checksum, name)
+
+    def test_combined_runtime_32768_default_still_lands_at_the_historical_unsuffixed_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            report = self._run_main(checkout, checkout / 'deployment-32768.json',
+                context=32768, combined_runtime=True)
+            self.assertEqual(report['staged_directory'], 'scripts/ci')
+            self.assertFalse((checkout / 'scripts/ci-32768').exists())
+            self.assertIn('enabled=request_context() == 32768',
+                (checkout / 'scripts/ci/dspark_runtime_cache.py').read_text())
+
+    def test_non_combined_runtime_staging_is_unaffected_by_this_change(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            report = self._run_main(checkout, checkout / 'deployment-plain.json',
+                context=65536, combined_runtime=False)
+            self.assertEqual(report['staged_directory'], 'scripts/ci')
+            self.assertFalse((checkout / 'scripts/ci-65536').exists())
+
+    def test_combined_runtime_still_refuses_unsupported_contexts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            (checkout / 'scripts/ci').mkdir(parents=True)
+            manifest = checkout / 'deployment-rejected.json'
+            argv = ['adapter', '--checkout', str(checkout), '--context', '131072',
+                '--manifest', str(manifest), '--scalar-reciprocal', '--target-replay', '--combined-runtime']
+            with patch('sys.argv', argv), self.assertRaises(SystemExit):
+                frozen_recipe_context.main()
+            self.assertFalse(manifest.exists())
 
 
 if __name__ == '__main__':
