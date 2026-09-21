@@ -330,7 +330,7 @@ def main():
         if log_path.is_file():
             lines = log_path.read_text(errors='replace').splitlines()
             diagnostic = [line[:300] for line in lines
-                         if '[PINDIAG]' in line or '[PACKED-PHASE]' in line or '[PHASE]' in line
+                         if '[PINDIAG]' in line or '[PACKED-PHASE]' in line or '[PACKED-COMMIT]' in line or '[PHASE]' in line
                          or 'ERROR' in line or 'Traceback' in line]
             if len(diagnostic) > 800:
                 omitted = len(diagnostic) - 800
