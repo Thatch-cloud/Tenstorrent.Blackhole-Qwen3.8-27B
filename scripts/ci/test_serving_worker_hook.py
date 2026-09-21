@@ -178,10 +178,30 @@ class WorkerHookTests(unittest.TestCase):
             stale_runtime.discard_proposal.assert_not_called()
             self.assertIs(stale_session.pending, matched_ticket)
             bridges['a'].drafts.assert_called_once_with(packed_rows=16)
-            # no policy decision (a sequential round): nothing is ever discarded here,
-            # exactly as before - each engine's own capture stays the deciding word
+            # the policy answers None for THIS round - too few live requests for the
+            # block's own group (a partner just finished, run 35564623068) or a
+            # survivor's remaining budget narrower than a block round both land here -
+            # while still being a configured policy: a ticket pending at some other
+            # width is exactly as stale as a mismatch against a real packed_rows
+            # number, since the round has no shared width to hold it against either
+            # way, and is discarded and redrafted fresh at the engine's own native
+            # width rather than riding into a round with no capture anywhere to fall
+            # back to (packed_device_step's refuse_round).
             policy.return_value = None
             stale_session.pending, stale_session.phase = stale_ticket, 'pending'
+            for name in 'ab':
+                bridges[name].drafts.reset_mock()
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+            stale_runtime.discard_proposal.assert_called_once_with()
+            self.assertEqual((stale_session.pending, stale_session.phase), (None, 'idle'))
+            bridges['a'].drafts.assert_called_once_with()
+            # no policy AT ALL (a packed_step with no proposal_rows - the plain
+            # sequential default): nothing is ever discarded here, exactly as before -
+            # each engine's own capture stays the deciding word
+            hook.packed_step = lambda entries, *, cancelled: []
+            stale_session.pending, stale_session.phase = stale_ticket, 'pending'
+            stale_runtime.discard_proposal.reset_mock()
             for name in 'ab':
                 bridges[name].drafts.reset_mock()
             with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):

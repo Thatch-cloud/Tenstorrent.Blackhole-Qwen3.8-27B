@@ -701,6 +701,81 @@ class FourUserStepTests(unittest.TestCase):
         for owner in owners:
             self.assertEqual(owner.session.phase, 'idle')
 
+    def test_survivors_holding_stale_block_width_tickets_after_a_partner_finishes_are_refused_not_served(self):
+        """The exact shape of run 35564623068, the opposite direction from the previous two
+        tests: entries drop BELOW the block's own user count when one of four finishes, but
+        a survivor's PENDING ticket is still the block's own 16-row width - drafted while
+        all four were live, never discarded because a round the policy answers None for
+        (too few live requests for a full group) was not treated as one that could hold a
+        stale ticket. Beside the real 64-row block every engine is trimmed to its
+        sequential captures (1, 2, 4) (packed_shapes.sequential_capture_rows), so a 16-row
+        ticket has no capture to fall back to: `ineligible` refuses the round on entry count
+        alone and `unservable` finds every ticket unservable, so `packed_device_step` calls
+        `refuse_round` - failing every survivor's session, not just the finished partner's.
+        The next `serving_vllm_contract.prepared_ticket` call for any of them then raises,
+        because their session.phase is 'failed', not 'pending' - the engine crash the bug
+        report traced. This is the state `serving_worker_hook._drafts` must never produce."""
+        owners = [self.request('A', 0, 100, accept=15), self.request('B', 1, 3000, accept=9),
+                  self.request('C', 2, 700, accept=0), self.request('D', 3, 5000, accept=12)]
+        for owner in owners:
+            owner.engine.widths = (1, 2, 4)
+        for live in (owners[:3], owners[:2], owners[:1]):
+            with self.subTest(live=[owner.session.request_id for owner in live]):
+                for owner in live:
+                    # A stale ticket the coming round has no shared width for: minted
+                    # fresh here at the block's width, standing in for one drafted
+                    # before the partner finished and never discarded.
+                    owner.session.pending, owner.session.phase = None, 'idle'
+                    owner.propose(self.block.predictions_for(owners.index(owner)), accept=0, rows=16)
+                entries = [entry(owner) for owner in live]
+                with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as captured:
+                    outputs = self.step(entries)
+                self.assertEqual(outputs, [CommittedOutput(owner.session.request_id, (), owner.session.position,
+                                                            True, True) for owner in live])
+                self.assertIn('block_users=4', captured.getvalue())
+                self.assertEqual(self.block.calls, [], 'the block was never touched')
+                for owner in live:
+                    self.assertEqual(owner.session.phase, 'failed')
+                    self.assertEqual(owner.engine.adopted, [])
+
+    def test_survivors_of_a_trimmed_block_reach_the_sequential_step_once_discard_gives_them_native_tickets(self):
+        """The fix for the previous test: `serving_worker_hook.discard_stale_ticket`, called
+        for every live request whenever a packed policy is configured - even a round it
+        answers None for - drops the survivor's stale block-width ticket, exactly as it
+        drops a mismatched narrower one for the three-to-four transition above. Redrafted at
+        each engine's own trimmed capture, `unservable` finds every ticket servable
+        standalone and `packed_device_step` hands the round to `sequential_packed_step`
+        instead of `refuse_round`: degrade, not crash - all the way down, three of four
+        survivors, then two, then the last."""
+        from serving_worker_hook import discard_stale_ticket
+
+        owners = [self.request('A', 0, 100, accept=15), self.request('B', 1, 3000, accept=9),
+                  self.request('C', 2, 700, accept=0), self.request('D', 3, 5000, accept=12)]
+        for owner in owners:
+            owner.engine.widths = (1, 2, 4)
+        for live in (owners[:3], owners[:2], owners[:1]):
+            with self.subTest(live=[owner.session.request_id for owner in live]):
+                for owner in live:
+                    # discard_stale_ticket(owner, None) is exactly what the widened
+                    # _drafts guard now runs for every live request when proposal_rows
+                    # answers None - regardless of what width was pending before.
+                    discard_stale_ticket(owner, None)
+                    self.assertIsNone(owner.session.pending)
+                    owner.propose(self.block.predictions_for(owners.index(owner)), accept=1, rows=4)
+                self.stepped.clear()
+                entries = [entry(owner) for owner in live]
+                outputs = self.step(entries)
+                self.assertEqual(self.stepped, [(owner.session.request_id, False) for owner in live])
+                self.assertEqual([output.request_id for output in outputs],
+                                 [owner.session.request_id for owner in live])
+                self.assertEqual(self.block.calls, [], 'the four-user block was not touched')
+                for owner in live:
+                    # sequential_packed_step never touches session state itself (that is
+                    # FastRequest.step's own job, covered elsewhere) - what matters here
+                    # is that refuse_round's fail_round never ran, so the session is not
+                    # left 'failed' for the next _drafts call to trip over.
+                    self.assertNotEqual(owner.session.phase, 'failed')
+
     def test_a_cancellation_between_commits_aborts_the_users_still_pending(self):
         entries = self.four()
         outputs = self.step(entries, cancelled=answers(False, False, False, True))

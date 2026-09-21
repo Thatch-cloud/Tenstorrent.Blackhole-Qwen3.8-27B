@@ -38,6 +38,16 @@ def discard_stale_ticket(request, packed_rows):
     35535533720). Discarding the stale ticket here, before drafting, keeps every live
     request's pending ticket at one width per step, so that round is never formed.
 
+    `packed_rows` is `None` exactly when `proposal_rows` decided this round is not the
+    block's - too few live requests for a full group (a partner just finished, run
+    35564623068) or a survivor's remaining budget narrower than a block round - and a
+    ticket already pending at some OTHER width (typically the block's) is exactly as
+    stale here as a width mismatch against a real `packed_rows` number: `len(ticket.
+    tokens) == None` is never true, so a pending ticket is always cleared when the
+    round has no shared width to match it against, and `drafts()` then redrafts fresh
+    at the engine's own native width - the one width `serving_packed_step.unservable`
+    always finds a capture for.
+
     Never verified - drafting only runs the draft device and caches a proposal, never
     the target verifier or the block - so dropping it is a pure host-side reset back to
     `idle`; the request's own `drafts()` then redrafts fresh at `packed_rows`, exactly
@@ -170,7 +180,8 @@ class FastWorkerHook:
         # (survivors, a user with fewer than sixteen tokens left) at the engines'. A step
         # without the policy (the sequential step) leaves every proposal as before.
         policy = getattr(self.packed_step, 'proposal_rows', None)
-        packed_rows = policy([bridge.request for bridge in self.bridges.values()]) if callable(policy) else None
+        have_policy = callable(policy)
+        packed_rows = policy([bridge.request for bridge in self.bridges.values()]) if have_policy else None
         request_ids, tokens = [], []
         for bridge in self.bridges.values():
             # Before drafting, not after: a bridge whose pending ticket is already
@@ -178,7 +189,25 @@ class FastWorkerHook:
             # default never trim their engines' captures, so this never fires for
             # them - packed_shapes.sequential_capture_rows), and one that is not gets
             # a clean redraft at packed_rows instead of riding into a mixed round.
-            if packed_rows is not None:
+            #
+            # This runs whenever a packed policy is CONFIGURED, even when the policy
+            # answers None for this particular round - fewer live requests than the
+            # block's users (a partner just finished) or a survivor's remaining budget
+            # narrower than a block round both answer None here exactly as 'no block
+            # round today' does. A ticket already pending at the block's width does not
+            # stop being stale just because this round has nowhere shared to put it:
+            # left alone, it rides into a round with fewer (or oddly shaped) entries
+            # than the block's users, which `serving_packed_step.ineligible` refuses on
+            # ENTRY COUNT alone, and whose block-width tickets the survivors' own
+            # trimmed engines never captured (`packed_shapes.sequential_capture_rows`) -
+            # so `unservable` finds no fallback and `packed_device_step` calls
+            # `refuse_round`, failing every survivor's session instead of the one
+            # partner who actually finished (run 35564623068). Discarding it here lets
+            # `drafts()` redraft fresh at each engine's own native width instead, which
+            # the sequential step can always fall back to. Only a packed_step with no
+            # `proposal_rows` at all (the plain sequential default) skips this - there
+            # is no shared width concept to go stale against.
+            if have_policy:
                 discard_stale_ticket(bridge.request, packed_rows)
             # Phase lines around each proposal: run 35482551725 stalled with both
             # requests still running and neither device past its FIRST proposal, so
