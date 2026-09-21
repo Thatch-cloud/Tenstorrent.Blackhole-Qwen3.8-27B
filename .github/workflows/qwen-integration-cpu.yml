@@ -82,7 +82,7 @@ jobs:
           python -B -m unittest test_full_dspark_request test_fused_t16_scope test_native_draft_sdpa test_history_publication_profile test_cpu_simulator_ci test_target_t16_context_cli test_winning_verifier_profile test_winning_risc_attribution
           python -B -m unittest test_dspark_confidence_reference test_dspark_confidence_fixture test_dspark_confidence_parity
           python -B -m unittest discover -s scripts/ci -p 'test_frozen_ladder*.py'
-          python -B -m unittest test_full_window_tail test_full_window_geometry_admission test_frozen_runtime_context test_frozen_recipe_context test_frozen_wide_chunk_normalization test_frozen_wide_chunk_scratch
+          python -B -m unittest test_full_window_tail test_full_window_geometry_admission test_frozen_runtime_context test_frozen_recipe_context test_frozen_wide_chunk_normalization test_frozen_wide_chunk_scratch test_frozen_wide_chunk_replay
           python -B -m unittest test_prefill_cache_inventory test_winning_device_attribution
           python -B -m unittest test_mlp_clock_samples test_mlp_clock_projection test_frozen_mlp_wait_zones
           python -B -m unittest test_mlp_clock_capture test_mlp_clock_stage

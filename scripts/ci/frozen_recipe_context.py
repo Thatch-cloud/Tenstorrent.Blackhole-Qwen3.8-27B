@@ -341,6 +341,11 @@ def main():
     # every context other than 65536 - see frozen_wide_chunk_normalization.py.
     from frozen_wide_chunk_normalization import adapt_wide_chunk_normalization
     adapted = adapt_wide_chunk_normalization(adapted, options.context)
+    # attention_replay.py is not otherwise staged at all (see
+    # frozen_wide_chunk_replay.py's module docstring); also a no-op for
+    # every context other than 65536.
+    from frozen_wide_chunk_replay import adapt_replay_k_chunk
+    adapted = adapt_replay_k_chunk(adapted, options.context, checkout)
     for name, source in adapted.items():
         if name.endswith('.py'):
             compile(source, name, 'exec')
