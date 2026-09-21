@@ -2,7 +2,7 @@ name: Qwen frozen recipe 64K numerical hardware check
 
 on:
   push:
-    tags: ['experiment/frozen-64k-numerical-hw-v1', 'experiment/frozen-64k-numerical-hw-v2', 'experiment/frozen-64k-numerical-hw-v3']
+    tags: ['experiment/frozen-64k-numerical-hw-v1', 'experiment/frozen-64k-numerical-hw-v2', 'experiment/frozen-64k-numerical-hw-v3', 'experiment/frozen-64k-numerical-hw-v4', 'experiment/frozen-64k-numerical-hw-v5', 'experiment/frozen-64k-numerical-hw-v6', 'experiment/frozen-64k-numerical-hw-v7', 'experiment/frozen-64k-numerical-hw-v8', 'experiment/frozen-64k-numerical-hw-v9', 'experiment/frozen-64k-numerical-hw-v10']
 
 permissions:
   contents: read
