@@ -14,7 +14,7 @@
 # $1 is the image sha, defaulting to the pinned qwen-fp2u-image.yml fast-serving image so
 # the graft rides the exact image the four-user runs measure against.
 set -euo pipefail
-image="${1:-sha256:8312d86ad35fde425dcea6f8e81e46a188831a2f975c09ffa46e068b0c2c704d}"
+image="${1:-sha256:4d1594dfa8317507f2adbe409a97d04d1ff26e5dcd5a8ae0877f352458944679}"
 target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
