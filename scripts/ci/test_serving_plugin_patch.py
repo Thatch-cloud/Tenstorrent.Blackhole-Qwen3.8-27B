@@ -39,8 +39,26 @@ class PluginPatchTests(unittest.TestCase):
                 namespace['Platform'].configure(config)
             config.speculative_config = None
             self.assertEqual(namespace['Platform'].configure(config), 'configured')
+            # max_num_seqs was pinned to exactly 1 until 2026-09-19 (commit 7faf7bcf),
+            # when it was deliberately lifted to the device's own bound,
+            # serving_fast_policy.NATIVE_GDN_SLOTS - admitting concurrent requests is
+            # the entire point of the four-user work. This test asserted the old pin
+            # and went red for two days because the branch CPU suite did not run in
+            # that window. It now asserts the contract that actually holds: anything
+            # inside 1..NATIVE_GDN_SLOTS is admitted, anything outside still refused.
+            for admitted in (1, 2, serving_fast_policy.NATIVE_GDN_SLOTS):
+                config = FastPolicyTests().fixture()
+                config.scheduler_config.max_num_seqs = admitted
+                self.assertEqual(namespace['Platform'].configure(config), 'configured')
+            for refused in (0, -1, serving_fast_policy.NATIVE_GDN_SLOTS + 1, 1.0, '2', None):
+                config = FastPolicyTests().fixture()
+                config.scheduler_config.max_num_seqs = refused
+                with self.assertRaises(ValueError):
+                    namespace['Platform'].configure(config)
+            # The rest of the profile is still exact: a second HOST-side parallel axis
+            # is a different thing from the mesh's own TP2 and stays refused.
             config = FastPolicyTests().fixture()
-            config.scheduler_config.max_num_seqs = 2
+            config.parallel_config.tensor_parallel_size = 2
             with self.assertRaises(ValueError):
                 namespace['Platform'].configure(config)
         with self.assertRaises(ValueError):
