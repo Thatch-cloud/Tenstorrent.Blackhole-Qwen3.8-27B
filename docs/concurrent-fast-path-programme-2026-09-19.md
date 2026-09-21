@@ -206,3 +206,21 @@ T3 is the only thing that changes that.
 Lever N M2 remains worth finishing for prefill behaviour under concurrency, but it should
 not be described as being on the path to 200 tok/s. It is not.
 
+## RE-SCOPE 2026-09-21: four users at 131,072 context, bf8, on the speculative path
+
+The user re-pointed the target from 161k to 131,072. Why 131k is the right rung: it is an actual
+frozen_context_geometry ladder context (CONTEXTS has 131072; 163840 has no rung), and Checkpoint B
+proved four concurrent speculative users token-exact at 33k (runs 35540885281 / 35544598063). The
+measured obstacles to 131k, and the plan in dependency order:
+
+| Step | Blocker measured | Work | Size |
+| --- | --- | --- | --- |
+| A memory | 4 users bf8 at 131k ~36.8 GB/card at attach vs 33.10 (33k attach measured 29.99 with 2.30 KV; KV scales ~4x) | classify the ~17.7 GB/card non-weight-non-KV overhead as sharded vs replicated; reshard what is replicated (draft weights?) and trim pool / captures / trace to recover ~4-6 GB/card | days |
+| B qualify | validate_request_option admits only {4096, 8192, 32768}; validate_target_option hard-codes 32768 | generate frozen T16 evidence at the 131072 rung (ladder + offline simulator), generalize both gates, re-run frozen qualification | multi-day, long pole |
+| C ramp | 131k prefill ~310 s/user, four serial one-in-flight admissions ~20 min; clients time out, users never overlap | fast-path chunked prefill (M1 into serving_lifecycle) + M2 alternation gate (b5ce9a59); raise bench timeouts | days |
+| D round | packed round 1453 ms at 33k; KV read ~4x at 131k | measure at 131k; device profiler / native 64-row graft if needed | follows |
+| E gate | none | four 131k single-user references, four-user token-exact gate, acceptance and tok/s at 131k | 1 day |
+
+Honest expectation: acceptance falls with context (12.1 at 4k, 7.08 at 32k), so per-user rate at
+131k will be well under 200 tok/s; the deliverable is four concurrent speculative users AT 131k and
+the measured per-user and aggregate rates. 161k is superseded (no rung; 4 users do not fit at bf8).
