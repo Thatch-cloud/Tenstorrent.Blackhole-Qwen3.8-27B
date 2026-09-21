@@ -61,6 +61,59 @@ run cited in the task brief (35583274784): circular buffers grow to 1,829,824 B 
 1,572,864 B L1 budget. Going to 16 rows/group (needed for a 4-slot, 4-user layout) would
 be worse, and going to 64 rows/group (1 slot for all 4 users) worse still.
 
+### CB arithmetic detail (added on request)
+
+**Caveat up front**: `sdpa_program_factory.cpp` is not vendored in this worktree and this
+investigation has no rig/hardware access, so nothing below is a verified line-cited read
+of the live source - it is reconstructed from the pinned patch's own variable names
+(`dflash_combined_sim_runtime.py:17-22`), the reader's fixed call parameters, and the two
+known failures, then bounded against a third point (today's working config) rather than
+asserted as exact.
+
+`Skt` (the factory's own variable name for total K length in tiles) is fully recoverable:
+testing `Skt = capacity//32 + 8` against every value in the pinned `COMBINED_FACTORY`
+patch's Skt list (`dflash_combined_sim_runtime.py:19`, values 144/272/528/1040/2064/4112/8208)
+reproduces all seven exactly for context rungs 4096 through 262144 (`capacity = context +
+256`, verified by running the formula). So the 65536-context failure (`capacity=65792`,
+run 35585801822) sits at **Skt=2064** confirmed, and the 32768-family 8-row failure sits
+at Skt=1040 (context 32768, same family the packed T16 replay uses).
+
+Two failures, one working baseline, three unknowns (a Skt-scaled term, a q-row-scaled
+term, and a fixed floor) - not fully solvable, but boundable:
+- **65536 case**: Skt 1040->2064 (+1024 tiles), q rows unchanged (still the production
+  4-row group), total 1,572,864(fits, today's 32768 config) -> 1,600,448 (fails by 27,584 B).
+  Lower bound: the Skt-scaled term costs >=27,584 B per +1024 tiles, i.e. >=27 B/tile - a
+  lower bound because the 32768 baseline is not known to sit exactly at the 1,572,864
+  ceiling, only under it.
+- **8-row case**: Skt fixed at ~1040 (still 32768), rows 4->8, total 1,572,864(fits) ->
+  1,829,824 (fails by 256,960 B). Lower bound: the q-row-scaled term costs >=256,960 B for
+  +4 rows, i.e. >=64,240 B/row - again a floor, not the exact per-row cost.
+
+Row width is the dominant lever by a wide margin (>=64,240 B/row vs >=27 B/Skt-tile), which
+is consistent with per-row-scaled CBs (QK score tile, output accumulator, softmax stats -
+all sized by `Sq_chunk_t`) being far larger per unit than whatever scales with `Skt`. That
+a **4-row, unwidened** launch still overflows purely from context growth (the 65536 case)
+points at a component that is NOT chunk-bounded by `k_chunk_size` (fixed at 256/8 tiles
+regardless of capacity, `attention_replay.py:53-54`) but scales with the *full* `Skt`
+instead - the likeliest candidate is the attention mask: `attn_mask` is shaped `(batches, 1, rows*12, capacity)`
+(`attention_replay.py:50`) - **full-capacity width, not chunk width** - because
+`is_causal=False` with a dense provided mask is used (`attention_parallel.py:18`) instead
+of the op's chunked-causal path. The pinned patch's own condition list names a
+`!is_chunked` / `compute_use_provided_mask` combination (`dflash_combined_sim_runtime.py:19-20`)
+as a real mode switch in the factory, consistent with a full-width mask-staging buffer for
+this call pattern - inference from indirect evidence, not a confirmed CB name/line.
+
+**Lowest-numerical-impact lever for 65536 specifically** (context growth alone, group
+width already at production minimum): reduce `k_chunk_size` below 256. Chunk size is
+normally a pure re-tiling knob in online-softmax kernels - the running max/sum combine is
+chunk-size-invariant - so this should carry no extra numerical risk. It only helps if a
+chunk-scaled CB is part of the 27,584 B overflow; if the dominant term is the full-`Skt`
+mask buffer above, `QWEN_SDPA_TREE_SCRATCH_ROUNDS` (`attention_replay.py:23`, "process-fixed
+compact native scratch") is the more direct candidate - its name ties it to trading L1
+scratch for more DMA rounds, the same class of fix a full-width buffer needs. Grid size is
+**not** expected to help: static per-core CB size is a function of chunk/row parameters,
+not core count. None of this is verified against the real factory source.
+
 **Verdict: infeasible at the kernel's current core/CB allocation strategy on either axis.**
 This is not a data-plumbing change (stack 4 users' tensors and call once) - it needs a new
 core-to-work mapping in the C++ program factory, i.e. the authorized-kernel-change route
