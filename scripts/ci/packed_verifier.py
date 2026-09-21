@@ -358,6 +358,13 @@ class PackedVerifierEngine:
         self.commits = [{} for user in range(shape.users)]
         self.phase, self.first, self.rounds = 'preparing', True, 0
         self.pending_segments = set()
+        # QWEN_FAST_PIPELINED_COMMITS=1: each user's commit trace is enqueued
+        # (blocking=False) instead of replayed one at a time; read once here rather than
+        # per call, since a round's four commits must agree on one mode (see execute_commit,
+        # commit_user). commit_timings is this round's per-segment device/enqueue time,
+        # indexed by segment, printed as one line under QWEN_FAST_PACKED_AUDIT=1.
+        self.pipelined_commits = os.environ.get('QWEN_FAST_PIPELINED_COMMITS') == '1'
+        self.commit_timings = [0.0] * shape.users
         self.stage = 'allocating'
         started = time.perf_counter()
         try:
@@ -590,6 +597,7 @@ class PackedVerifierEngine:
             finished = time.perf_counter()
             self.first = False
             self.pending_segments = set(segments)
+            self.commit_timings = [0.0] * self.users
             self.rounds += 1
             self.phase = 'verified'
             dump_device_profiler_after_round(self.operations, self.mesh, self.rounds)
@@ -631,24 +639,65 @@ class PackedVerifierEngine:
         return PackedFeatureTaps(self.feature_capture.outputs(), row_offset=start, rows=self.rows_per_user)
 
     def execute_commit(self, segment, prefix):
-        if prefix:
-            self.operations.execute_trace(self.mesh, self.commits[segment][prefix], cq_id=0, blocking=True)
+        """This user's own prefix trace. Blocking (the default), this call IS the device
+        replay and the elapsed time is the trace time (commit_trace_ms). Under
+        QWEN_FAST_PIPELINED_COMMITS=1 (self.pipelined_commits) the trace is enqueued
+        instead (blocking=False) and the elapsed time is only the host-side submission
+        (commit_enqueue_ms) - the real device time for all four users' traces is folded
+        into the one trailing fence commit_user measures as sync_ms. Returns the elapsed
+        ms, or None when prefix 0 ran no trace (the caller's `mode=` audit field, not this
+        return value, says which of the two the number means)."""
+        if not prefix:
+            return None
+        blocking = not self.pipelined_commits
+        started = time.perf_counter()
+        self.operations.execute_trace(self.mesh, self.commits[segment][prefix], cq_id=0, blocking=blocking)
+        return (time.perf_counter() - started) * 1000
 
     def commit_user(self, segment, prefix):
         """Commit one user's decision: its own prefix trace writes the accepted state into
-        native slot 0 and into that user's carry; prefix 0 runs nothing."""
+        native slot 0 and into that user's carry; prefix 0 runs nothing.
+
+        Blocking (the default), each commit trace already fences the host, so the extra
+        `synchronize=last` fence below costs nothing extra. Under
+        QWEN_FAST_PIPELINED_COMMITS=1, execute_commit enqueues this segment's trace without
+        blocking; RetainedGDNBlock.commit_user (gdn_records.py) calls its own
+        `self.operations.synchronize_device(mesh)` right after the publication callback
+        returns, WHEN `synchronize=True` - i.e. on the round's LAST segment here - which
+        fences the whole command queue (cq_id=0) that all four of this round's enqueued
+        commit traces were submitted to, in this same per-segment call order. So by the
+        time `self.fixture.retained.commit_user(...)` returns below, every enqueued commit
+        trace of the round has completed - no separate trailing sync is added here; the
+        existing `synchronize=last` plumbing already provides it."""
         self.check_segment(segment)
         if type(prefix) is not int or not 0 <= prefix <= self.rows_per_user:
             raise ValueError('Selected prefix outside the user segment')
         # Each commit trace already blocks the host; the one fence that matters is the
         # last user's, which arms the retained block's replay for the next round.
         last = self.pending_segments == {segment}
+        commit_ms = 0.0
+
+        def publish(selected):
+            nonlocal commit_ms
+            commit_ms = self.execute_commit(segment, selected) or 0.0
+
         try:
-            self.fixture.retained.commit_user(segment, prefix, dma=True, synchronize=last,
-                publication=lambda selected: self.execute_commit(segment, selected))
+            call_started = time.perf_counter()
+            self.fixture.retained.commit_user(segment, prefix, dma=True, synchronize=last, publication=publish)
+            call_ms = (time.perf_counter() - call_started) * 1000
+            self.commit_timings[segment] = commit_ms
             self.pending_segments.discard(segment)
             if not self.pending_segments:
                 self.phase = 'idle'
+                if os.environ.get('QWEN_FAST_PACKED_AUDIT') == '1':
+                    # sync_ms is what the LAST segment's own call spent beyond its own
+                    # commit_ms: bookkeeping plus (when pipelined) the trailing fence that
+                    # drains the whole round's four enqueued traces; near zero when blocking,
+                    # since the trace replay above already drained the queue.
+                    sync_ms = max(call_ms - commit_ms, 0.0)
+                    diagnostic('[PACKED-COMMIT] round=%d mode=%s commit_ms=[%s] sync_ms=%.2f'
+                               % (self.rounds, 'pipelined' if self.pipelined_commits else 'blocking',
+                                  ','.join('%.2f' % value for value in self.commit_timings), sync_ms))
         except BaseException:
             self.phase = 'failed'
             raise

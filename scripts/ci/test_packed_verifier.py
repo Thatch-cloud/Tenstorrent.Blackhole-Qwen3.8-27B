@@ -56,6 +56,10 @@ class FakeTTNN:
         self.hosts, self.host_copies, self.executed, self.released, self.deallocated = [], [], [], [], []
         self.device_uploads, self.zeroed = [], []
         self.synchronized = 0
+        # Parallel to .executed (unchanged: still one entry per execute_trace call, the
+        # trace itself, so every existing `self.ttnn.executed == [...]` assertion is
+        # untouched) - the blocking flag that call was made with.
+        self.execute_blocking = []
         self.SDPAProgramConfig = Mock(return_value='sdpa-config')
 
     def full_like(self, tensor, fill, optional_tensor=None):
@@ -92,6 +96,7 @@ class FakeTTNN:
 
     def execute_trace(self, mesh, trace, cq_id=0, blocking=True):
         self.executed.append(trace)
+        self.execute_blocking.append(blocking)
 
     def release_trace(self, mesh, trace):
         self.released.append(trace)
@@ -164,10 +169,17 @@ def model():
 
 class FakeRetained:
     """gdn_records.RetainedGDNBlock as the block uses it: records of (state, result, carries),
-    segment_layers built from them, commit_user publishing nothing at prefix 0."""
+    segment_layers built from them, commit_user publishing nothing at prefix 0.
 
-    def __init__(self, rows):
+    `commit`'s own `if synchronize: self.operations.synchronize_device(mesh)`, AFTER
+    `publication(prefix)`, mirrors gdn_records.RetainedGDNBlock.commit_user exactly (its
+    real `if synchronize:` branch runs the same way, in the same order, for the same
+    reason - PackedVerifierEngine.commit_user's pipelined mode relies on this to fence the
+    round's enqueued commit traces without a separate sync call of its own)."""
+
+    def __init__(self, rows, operations=None, mesh=None):
         self.rows, self.records, self.closed = rows, [], False
+        self.operations, self.mesh = operations, mesh
         self.commit_user = Mock(side_effect=self.commit)
         self.replay = Mock(side_effect=lambda operation: operation())
         self.commits = []
@@ -181,6 +193,8 @@ class FakeRetained:
         self.commits.append((segment, prefix))
         if prefix:
             publication(prefix)
+        if synchronize and self.operations is not None:
+            self.operations.synchronize_device(self.mesh)
 
     def close(self):
         self.closed = True
@@ -213,7 +227,7 @@ class FakeModelBatch:
                             for first, last in (tile_rows(rows) if rows > 32 else ())]
         self.cos = ttnn.allocate((1, rows, 1, 64), 'bf16', 'tile', torch.zeros(1, rows, 1, 64))
         self.sin = ttnn.allocate((1, rows, 1, 64), 'bf16', 'tile', torch.zeros(1, rows, 1, 64))
-        self.retained = FakeRetained(rows) if options.get('retain_records') else None
+        self.retained = FakeRetained(rows, ttnn, model.mesh_device) if options.get('retain_records') else None
         # The real per-user replay reader over the block's lent tables, as model_batch
         # builds it packed: one pooled reader per segment in the capture's family.
         self.replay_reader, self.readers, self.grouped_readers = None, [], []
@@ -1020,6 +1034,113 @@ class FourUserRoundTests(FourUserFixture):
         self.assertFalse(any(any(value is entry for entry in freed) for value in tables.tensors))
         pooled = [value for slot in self.pool.slots for snapshot in slot.verifier.carry for value in snapshot]
         self.assertFalse(any(any(value is entry for entry in freed) for value in pooled))
+
+
+class PipelinedCommitTests(FourUserFixture):
+    """QWEN_FAST_PIPELINED_COMMITS=1 (task #45): each user's commit trace is enqueued
+    (blocking=False) instead of replayed one at a time. The round's one trailing fence is
+    NOT a new call here - it is the existing `synchronize=last` plumbing
+    (gdn_records.RetainedGDNBlock.commit_user calls `self.operations.synchronize_device`
+    right after the publication callback returns, on the round's last segment only; mirrored
+    faithfully by FakeRetained.commit above), which already fences the whole command queue
+    every one of the round's four commits was enqueued to, in this same per-segment call
+    order. Read once at construction (self.pipelined_commits), like every other packed
+    engine flag."""
+
+    def pipelined_build(self, **options):
+        with patch.dict('os.environ', {'QWEN_FAST_PIPELINED_COMMITS': '1'}):
+            return self.build(**options)
+
+    def test_default_mode_is_unchanged_four_blocking_replays_one_trailing_sync(self):
+        block = self.build()
+        self.assertFalse(block.pipelined_commits)
+        block.verify(self.four())
+        synchronized = self.ttnn.synchronized
+        for segment, prefix in zip((2, 0, 3, 1), (9, 16, 0, 4)):
+            block.commit_user(segment, prefix)
+        # three traces ran (segment 3's prefix 0 runs none), every one blocking - exactly
+        # as before this change
+        self.assertEqual(self.ttnn.execute_blocking[-3:], [True, True, True])
+        # the pre-existing `synchronize=last` fence still fires exactly once
+        self.assertEqual(self.ttnn.synchronized - synchronized, 1)
+        self.assertEqual(block.phase, 'idle')
+
+    def test_pipelined_mode_enqueues_all_four_and_synchronizes_once_after_the_last(self):
+        block = self.pipelined_build()
+        self.assertTrue(block.pipelined_commits)
+        block.verify(self.four())
+        executed, synchronized = len(self.ttnn.executed), self.ttnn.synchronized
+        decisions = list(zip((2, 0, 3, 1), (9, 16, 3, 4)))  # every prefix here is nonzero
+        for segment, prefix in decisions[:-1]:
+            block.commit_user(segment, prefix)
+            # not yet the last segment: enqueued, not fenced, the round still open
+            self.assertEqual(self.ttnn.synchronized, synchronized, 'no sync before the last segment')
+            self.assertEqual(block.phase, 'verified')
+        last_segment, last_prefix = decisions[-1]
+        block.commit_user(last_segment, last_prefix)
+        # four non-blocking enqueues
+        self.assertEqual(self.ttnn.execute_blocking[executed:], [False, False, False, False])
+        # exactly one synchronize_device call fences all four - and by the time this method's
+        # call into RetainedGDNBlock.commit_user returns, that fence has already happened, so
+        # the block is idle only once every enqueued trace has completed
+        self.assertEqual(self.ttnn.synchronized - synchronized, 1)
+        self.assertEqual(block.phase, 'idle')
+
+    def test_a_pipelined_prefix_zero_commit_enqueues_nothing(self):
+        block = self.pipelined_build()
+        block.verify(self.four())
+        executed = len(self.ttnn.executed)
+        block.commit_user(2, 0)
+        self.assertEqual(len(self.ttnn.executed), executed, 'prefix 0 enqueues no trace')
+        for segment, prefix in ((0, 16), (3, 4), (1, 9)):
+            block.commit_user(segment, prefix)
+        self.assertEqual(self.ttnn.execute_blocking[executed:], [False, False, False])
+        self.assertEqual(block.phase, 'idle')
+
+    def test_verify_is_refused_until_every_segment_of_the_round_is_committed(self):
+        block = self.pipelined_build()
+        block.verify(self.four())
+        for segment, prefix in zip((2, 0, 3), (9, 16, 4)):
+            block.commit_user(segment, prefix)
+        self.assertEqual(block.phase, 'verified')
+        with self.assertRaisesRegex(ValueError, 'idle packed block is required'):
+            block.verify(self.four(order=(0, 1, 2, 3)))
+        block.commit_user(1, 0)
+        self.assertEqual(block.phase, 'idle')
+        # now accepted
+        block.verify(self.four(order=(0, 1, 2, 3)))
+
+    def test_audit_line_reports_pipelined_mode_per_commit_timings_and_the_trailing_sync(self):
+        block = self.pipelined_build()
+        block.verify(self.four())
+        lines = []
+        with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1'}), \
+                patch.object(packed_verifier, 'diagnostic', Mock(side_effect=lines.append)):
+            for segment, prefix in zip((2, 0, 3, 1), (9, 16, 0, 4)):
+                block.commit_user(segment, prefix)
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r'^\[PACKED-COMMIT\] round=1 mode=pipelined '
+                                   r'commit_ms=\[[\d.]+,[\d.]+,[\d.]+,[\d.]+\] sync_ms=[\d.]+$')
+        # commit_timings is segment-indexed; segment 3's prefix-0 commit cost nothing
+        self.assertEqual(block.commit_timings[3], 0.0)
+
+    def test_audit_line_reports_blocking_mode_by_name(self):
+        block = self.build()
+        block.verify(self.four())
+        lines = []
+        with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1'}), \
+                patch.object(packed_verifier, 'diagnostic', Mock(side_effect=lines.append)):
+            for segment, prefix in zip((2, 0, 3, 1), (9, 16, 0, 4)):
+                block.commit_user(segment, prefix)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith('[PACKED-COMMIT] round=1 mode=blocking commit_ms='))
+
+    def test_audit_line_is_silent_without_the_flag(self):
+        block = self.pipelined_build()
+        block.verify(self.four())
+        with patch.object(packed_verifier, 'diagnostic', Mock(side_effect=AssertionError('should not be called'))):
+            for segment, prefix in zip((2, 0, 3, 1), (9, 16, 0, 4)):
+                block.commit_user(segment, prefix)
 
 
 class ProjectionOffsetTests(unittest.TestCase):
