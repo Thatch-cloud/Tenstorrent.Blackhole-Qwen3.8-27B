@@ -341,7 +341,24 @@ class FastWorkerHook:
             # every eligible bridge's prewarm plus the one shared fence - was
             # actually where a chunk of the time went.
             ids = ','.join(str(bridge.request.session.request_id)[:48] for bridge in bridges)
-            phase('prepare_proposals', ids, lambda: prepare_pipelined_drafts(bridges))
+            # QWEN_FAST_PACKED_PROPOSAL (dflash_packed_proposal.packed_proposal_enabled,
+            # dflash_packed_proposal_coordinator.PackedProposalCoordinator): pairs eligible
+            # bridges by fixed pool slot and runs one traced two-user pass per full pair
+            # instead of two single-user passes, then falls back to prepare_pipelined_drafts'
+            # own per-bridge loop for anything left unpaired. Off by default; with it unset
+            # this is exactly the unmodified prepare_pipelined_drafts(bridges) call below, and
+            # self never gains a _packed_coordinator attribute at all.
+            from dflash_packed_proposal import packed_proposal_enabled
+
+            if packed_proposal_enabled():
+                coordinator = getattr(self, '_packed_coordinator', None)
+                if coordinator is None:
+                    from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+                    coordinator = self._packed_coordinator = PackedProposalCoordinator()
+                phase('prepare_proposals', ids, lambda: coordinator.prepare(bridges))
+            else:
+                phase('prepare_proposals', ids, lambda: prepare_pipelined_drafts(bridges))
         request_ids, tokens = [], []
         for bridge in bridges:
             # Phase lines around each proposal: run 35482551725 stalled with both
@@ -361,6 +378,12 @@ class FastWorkerHook:
     def close(self):
         if self.closed:
             return
+        # Only present at all if QWEN_FAST_PACKED_PROPOSAL was ever taken this hook's
+        # life (serving_worker_hook._drafts) - a hook that never did carries no such
+        # attribute, and getattr below is then exactly the no-op it always was.
+        coordinator = getattr(self, '_packed_coordinator', None)
+        if coordinator is not None:
+            coordinator.close()
         for bridge in list(self.bridges.values()):
             bridge.close()
         self.bridges.clear()

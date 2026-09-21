@@ -186,3 +186,84 @@ class ProposePackedTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             propose_packed(device, slots, [1, 2], [15, 15])
         device.execute_proposal.assert_not_called()
+
+
+class PackedProposalFlagTests(unittest.TestCase):
+    def test_default_is_off(self):
+        from dflash_packed_proposal import packed_proposal_enabled
+
+        self.assertFalse(packed_proposal_enabled({}))
+
+    def test_only_0_or_1_accepted(self):
+        from dflash_packed_proposal import packed_proposal_enabled
+
+        self.assertFalse(packed_proposal_enabled({'QWEN_FAST_PACKED_PROPOSAL': '0'}))
+        self.assertTrue(packed_proposal_enabled({'QWEN_FAST_PACKED_PROPOSAL': '1'}))
+        for bad in ('true', 'yes', '2', ' 1', ''):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    packed_proposal_enabled({'QWEN_FAST_PACKED_PROPOSAL': bad})
+
+    def test_reads_the_real_os_environ_by_default(self):
+        import os
+        from dflash_packed_proposal import packed_proposal_enabled
+
+        with unittest.mock.patch.dict(os.environ, {'QWEN_FAST_PACKED_PROPOSAL': '1'}):
+            self.assertTrue(packed_proposal_enabled())
+        self.assertNotIn('QWEN_FAST_PACKED_PROPOSAL', os.environ)
+        self.assertFalse(packed_proposal_enabled())
+
+
+class PairSlotsTests(unittest.TestCase):
+    def test_four_active_pairs_both_fixed_pairs(self):
+        from dflash_packed_proposal import pair_slots
+
+        self.assertEqual(pair_slots({0, 1, 2, 3}), [(0, 1), (2, 3)])
+
+    def test_three_active_degrades_the_broken_pair_to_a_singleton(self):
+        """Slot 2 finished: (0, 1) still packs, (2, 3) degrades to (3,) alone - never
+        paired across the gap with slot 0 or 1."""
+        from dflash_packed_proposal import pair_slots
+
+        self.assertEqual(pair_slots({0, 1, 3}), [(0, 1), (3,)])
+
+    def test_two_active_same_fixed_pair_still_packs(self):
+        from dflash_packed_proposal import pair_slots
+
+        self.assertEqual(pair_slots({0, 1}), [(0, 1)])
+
+    def test_two_active_across_fixed_pairs_never_packs(self):
+        from dflash_packed_proposal import pair_slots
+
+        self.assertEqual(pair_slots({0, 2}), [(0,), (2,)])
+
+    def test_one_active_is_a_singleton(self):
+        from dflash_packed_proposal import pair_slots
+
+        self.assertEqual(pair_slots({3}), [(3,)])
+
+    def test_no_active_is_no_groups(self):
+        from dflash_packed_proposal import pair_slots
+
+        self.assertEqual(pair_slots(set()), [])
+        self.assertEqual(pair_slots({}), [])
+
+    def test_a_slot_outside_the_fixed_pairs_is_refused(self):
+        from dflash_packed_proposal import pair_slots
+
+        for bad in ({4}, {-1}, {0, 1, 4}):
+            with self.subTest(active=bad):
+                with self.assertRaises(ValueError):
+                    pair_slots(bad)
+
+    def test_a_non_int_slot_is_refused(self):
+        from dflash_packed_proposal import pair_slots
+
+        with self.assertRaises(ValueError):
+            pair_slots({0, '1'})
+
+    def test_accepts_any_iterable_of_slots_not_just_a_set(self):
+        from dflash_packed_proposal import pair_slots
+
+        self.assertEqual(pair_slots([1, 0, 3, 2]), [(0, 1), (2, 3)])
+        self.assertEqual(pair_slots({0: 'a', 1: 'b'}), [(0, 1)])

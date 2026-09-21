@@ -170,7 +170,12 @@ fi
 # 0.58 GB eager, and the fourth user's admission ran out of memory with 716 MB largest
 # free (run 35565478581). The traced arm halves the recipe's 1 GiB trace region for the
 # headroom; decode traces are command streams and this repo's probes run at 256 MiB.
-if [ -n "${M3NATIVE_TRACED_PROPOSAL:-}" ]; then
+if [ -n "${M3NATIVE_TRACED_PROPOSAL:-}" ] || [ -n "${M3NATIVE_PACKED_PROPOSAL:-}" ]; then
+  # A packed proposal trace uploads the SAME per-request placeholders as one
+  # traced-proposal request (dflash_proposal_trace.PreparedPackedDFlashProposal
+  # mirrors PreparedDFlashProposal's own placeholder set) but for TWO users at
+  # once per pair, so QWEN_FAST_PACKED_PROPOSAL needs at least the traced arm's
+  # own headroom trim and never less.
   trace_region_bytes=536870912
 fi
 # The tt-metal watcher (TT_METAL_WATCHER=20, inherited from the fp2u lane's hang diagnosis)
@@ -204,6 +209,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PIPELINED_COMMITS:+-e QWEN_FAST_PIPELINED_COMMITS=1} \
   ${M3NATIVE_PIPELINED_PROPOSALS:+-e QWEN_FAST_PIPELINED_PROPOSALS=1} \
   ${M3NATIVE_FAST_COMMIT:+-e QWEN_FAST_FAST_COMMIT=1} \
+  ${M3NATIVE_PACKED_PROPOSAL:+-e QWEN_FAST_PACKED_PROPOSAL=1} \
   ${M3NATIVE_GDN_USER_BATCH:+-e QWEN_FAST_GDN_USER_BATCH=1} \
   ${M3NATIVE_REPLAY_GROUP_ROWS:+-e QWEN_FAST_REPLAY_GROUP_ROWS=$M3NATIVE_REPLAY_GROUP_ROWS} \
   ${M3NATIVE_PROFILE:+-e TTNN_OP_PROFILER=1} \

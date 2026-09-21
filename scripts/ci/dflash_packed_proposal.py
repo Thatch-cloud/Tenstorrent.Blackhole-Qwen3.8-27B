@@ -25,9 +25,55 @@ the device grows a 64-row proposal block; `propose_packed` and `select_device_ou
 stay at the device's 32.
 """
 
+import os
+
 DRAFT_FILLER = 248070
 BLOCK_WIDTH = 32
 BLOCK_WIDTHS = (32, 64)
+
+# QWEN_FAST_PACKED_PROPOSAL: opt-in wiring of propose_packed() into serving as two
+# per-round traced two-user passes (dflash_packed_proposal_trace.PreparedPackedDFlashProposal,
+# serving_worker_hook.prepare_pipelined_drafts), instead of four serial single-user
+# passes. Default OFF; anything but '0'/'1' is a configuration error rather than a
+# silent fallback - the gdn_user_batch.enabled() pattern (scripts/ci/gdn_user_batch.py).
+PACKED_PROPOSAL_FLAG = 'QWEN_FAST_PACKED_PROPOSAL'
+
+# The same fixed slot pairing the packed VERIFY side already uses under
+# QWEN_FAST_FOUR_AS_TWO (serving_runtime.py): 'block A over pool slots (0, 1), block B
+# over (2, 3)'. Reusing it here means a request's pairing never depends on which of the
+# two packed passes - propose or verify - happens to run first.
+FOUR_AS_TWO_PAIRS = ((0, 1), (2, 3))
+
+
+def packed_proposal_enabled(environ=None):
+    """QWEN_FAST_PACKED_PROPOSAL=1. Read at each round rather than at import, so the
+    switch a test flips is the one the round sees."""
+    value = (os.environ if environ is None else environ).get(PACKED_PROPOSAL_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1' % PACKED_PROPOSAL_FLAG)
+    return value == '1'
+
+
+def pair_slots(active):
+    """Group active pool-slot indices into FOUR_AS_TWO_PAIRS packed rounds.
+
+    Each fixed pair with BOTH members in `active` packs into one two-element group; a
+    fixed pair with only ONE active member degrades to a one-element group for that
+    member alone. A slot is never paired across the other fixed pair - so one finished
+    neighbour (slot 1 gone, say) never silently recombines slot 0 with slot 2 or 3 just
+    because both happen to be active. Order follows FOUR_AS_TWO_PAIRS, not `active`'s
+    own order; an empty `active` returns no groups at all.
+    """
+    valid = {slot for pair in FOUR_AS_TWO_PAIRS for slot in pair}
+    active = set(active)
+    if any(type(slot) is not int or slot not in valid for slot in active):
+        raise ValueError('Every active slot must be one of the fixed FOUR_AS_TWO_PAIRS slots %r' % (valid,))
+    groups = []
+    for pair in FOUR_AS_TWO_PAIRS:
+        present = tuple(slot for slot in pair if slot in active)
+        if present:
+            groups.append(present)
+    return groups
 
 
 def validate_block_width(block_width):

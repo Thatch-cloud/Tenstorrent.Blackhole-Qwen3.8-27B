@@ -271,3 +271,281 @@ class PreparedDFlashProposal:
         release_owned(self.operations, self.owned)
         self.owned.clear()
         self.closed = True
+
+
+class PreparedPackedDFlashProposal:
+    """QWEN_FAST_PACKED_PROPOSAL: one traced two-user packed proposal for a single
+    FOUR_AS_TWO_PAIRS slot pair (dflash_packed_proposal.FOUR_AS_TWO_PAIRS), mirroring
+    PreparedDFlashProposal's single-user capture above but built over
+    dflash_packed_proposal.propose_packed's own cached-path geometry
+    (packed_identifiers, dflash_batched_mask.batched_attention_mask/
+    packed_rope_tables/live_key_rope) instead of duplicating it - the CACHED path
+    only, so no history tensor is ever built here (propose_packed's own module
+    docstring: 'that would be 42 MB of DRAM nobody touches').
+
+    Keyed at capture by the pair's OWN geometry: block_rows (both devices' qualified
+    T16 width) and each user's history_rows - dflash_batched_mask packs by KEY
+    SEGMENT, sized from the exact context, so a (1024, 2048) pair needs a different
+    capture from a (2048, 2048) one. Built lazily, one bucket per distinct
+    (history_rows_a, history_rows_b) this SPECIFIC slot pair actually reaches, kept
+    for the life of this object.
+
+    dflash_packed_proposal_coordinator.PackedProposalCoordinator is the only caller,
+    and it gates packing to history_rows == 2048 on BOTH devices before ever calling
+    prepare_device() here - draft_kv_history.DraftKVHistory requires history_rows ==
+    min(position, 2048), so that is a PERMANENT, monotonic state every request
+    eventually reaches and never leaves. Below 2048, history_rows changes almost every
+    round (by however many tokens that round accepted), so an exact-context bucket key
+    would recapture on nearly every round of the ramp - capture is a blocking,
+    expensive device operation, so this class does not by itself avoid that cost; the
+    coordinator's gate is what keeps it out of the ramp entirely. This class stays
+    correct for any (history_rows_a, history_rows_b) pair regardless - the gate is a
+    policy choice above it, not a correctness requirement of the geometry here.
+
+    device_a and device_b must share weights (dflash_device.SharedDraftWeights.lend,
+    the only way four concurrent requests share the five DFlash2 layers today):
+    device_a is used as execute_proposal's weight/layer owner (propose_packed's own
+    `device` argument), device_b contributes only its own K/V cache and position.
+
+    Uncertified: host construction and the mocked device-call sequence only (matching
+    dflash_packed_proposal.ProposePackedTests' own mocked-device pattern). Nothing
+    here has run on a device or against a real ttnn runtime."""
+
+    def __init__(self, device_a, device_b):
+        if device_a.operations is not device_b.operations or device_a.mesh is not device_b.mesh:
+            raise ValueError('Both paired devices must share one mesh and runtime')
+        if (device_a.block_rows != device_b.block_rows
+                or not getattr(device_a, 'native_proposal_attention', False)
+                or not getattr(device_b, 'native_proposal_attention', False)):
+            raise ValueError('Both paired devices must share the qualified native-proposal block width')
+        if device_a.kv_history is None or device_b.kv_history is None:
+            raise ValueError('Both paired devices require a committed K/V cache')
+        self.device_a, self.device_b = device_a, device_b
+        self.operations, self.mesh = device_a.operations, device_a.mesh
+        self.block_rows = device_a.block_rows
+        self.buckets, self.owned = {}, []
+        self.closed = False
+        # (seed_a, seed_b, bucket, owned) once prepare_device() has enqueued this
+        # pair's device work and is waiting on finish() (from EACH side) to read it
+        # back - None the rest of the time. Mirrors PreparedDFlashProposal._pending,
+        # but one shared pending covers both users: the trace replay is one device
+        # call, not two.
+        self._pending = None
+
+    def _upload(self, value, *, identifiers=False):
+        operations = self.operations
+        tensor = operations.from_torch(value, device=self.mesh,
+            dtype=operations.uint32 if identifiers else operations.bfloat16,
+            layout=operations.ROW_MAJOR_LAYOUT if identifiers else operations.TILE_LAYOUT,
+            memory_config=operations.DRAM_MEMORY_CONFIG, mesh_mapper=operations.ReplicateTensorToMesh(self.mesh))
+        self.owned.append(tensor)
+        return tensor
+
+    def _bucket(self, context_a, context_b):
+        key = (context_a, context_b)
+        bucket = self.buckets.get(key)
+        if bucket is not None:
+            return bucket
+        import torch
+        from dflash_batched_mask import batched_attention_mask, packed_rope_tables, live_key_rope
+        from dflash_packed_proposal import packed_identifiers
+        from dflash_t16_native_attention import validate_mask
+
+        operations, device = self.operations, self.device_a
+        # Placeholder users: seed 0, and a position equal to the bucket's own context -
+        # only the SHAPE of the geometry matters at capture time (proposal_inputs'
+        # own convention, PreparedDFlashProposal above); update() re-uploads every
+        # round's real seeds and real positions onto these same fixed tensors before
+        # every replay.
+        placeholder_users = [dict(position=context_a, history_rows=context_a),
+                             dict(position=context_b, history_rows=context_b)]
+        host_mask = batched_attention_mask([context_a, context_b], self.block_rows)
+        validate_mask(host_mask, contexts=[context_a, context_b])
+        tables = packed_rope_tables(placeholder_users, self.block_rows)
+        live = live_key_rope(placeholder_users, self.block_rows)
+        bucket = SimpleNamespace(context=(context_a, context_b),
+            identifiers=self._upload(packed_identifiers([0, 0], self.block_rows), identifiers=True),
+            mask=self._upload(host_mask),
+            rope=dict(q=tuple(self._upload(value) for value in tables['q']),
+                      k=tuple(self._upload(value) for value in tables['k']),
+                      live_k=tuple(self._upload(value) for value in live)),
+            cached_history=[[{name: self._upload(torch.zeros((1, 4, context, 128), dtype=torch.bfloat16))
+                    for name in ('k', 'v')} for _ in self.device_a.kv_history.active]
+                for context in (context_a, context_b)],
+            trace=None, outputs=None, owned=[], tokens=None, consumed=set())
+        bucket.inputs = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k'],
+            *(value for cache in bucket.cached_history for layer in cache for value in layer.values())]
+        bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
+        device.validated_native_proposal_masks.add(addresses(operations, bucket.mask))
+        self.buckets[key] = bucket
+        try:
+            self._update(bucket, 0, 0)
+            transient, retain = device.temporaries([device.history, device.spare_history,
+                self.device_b.history, self.device_b.spare_history, *self.owned])
+            try:
+                self._execute(bucket, transient, retain)
+                operations.synchronize_device(self.mesh)
+            finally:
+                release_owned(operations, transient)
+            bucket.owned, retain = device.temporaries([device.history, device.spare_history,
+                self.device_b.history, self.device_b.spare_history, *self.owned])
+            bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
+                lambda: self._execute(bucket, bucket.owned, retain))
+            operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
+        except BaseException:
+            del self.buckets[key]
+            device.validated_native_proposal_masks.discard(addresses(operations, bucket.mask))
+            release_owned(operations, bucket.owned)
+            raise
+        return bucket
+
+    def _execute(self, bucket, owned, retain):
+        rope = dict(q=bucket.rope['q'], k=bucket.rope['k'], live_k=bucket.rope['live_k'])
+        users = [dict(position=self.device_a.position, history_rows=bucket.context[0]),
+                 dict(position=self.device_b.position, history_rows=bucket.context[1])]
+        return self.device_a.execute_proposal(bucket.identifiers, None, bucket.mask, rope, context=None,
+            pack=users, cached_history=bucket.cached_history, owned=owned, retain=retain,
+            stage=lambda name, **values: None, audit=False)
+
+    def _update(self, bucket, seed_a, seed_b, *, defer_finish=False):
+        from dflash_batched_mask import packed_rope_tables, live_key_rope
+        from dflash_packed_proposal import packed_identifiers
+
+        device_a, device_b, operations = self.device_a, self.device_b, self.operations
+        context_a, context_b = bucket.context
+        if device_a.history_rows != context_a or device_b.history_rows != context_b:
+            raise ValueError("Packed proposal replay requires both users at this bucket's committed context")
+        if (device_a.kv_history.pending is not None or device_b.kv_history.pending is not None
+                or device_a.position - device_a.history_rows < 0 or device_b.position - device_b.history_rows < 0):
+            raise ValueError('Packed proposal replay requires a fully committed matching K/V frontier')
+        users = [dict(position=device_a.position, history_rows=context_a),
+                 dict(position=device_b.position, history_rows=context_b)]
+        identifiers_host = packed_identifiers([seed_a, seed_b], self.block_rows)
+        tables = packed_rope_tables(users, self.block_rows)
+        live = live_key_rope(users, self.block_rows)
+        sources = [identifiers_host, *tables['q'], *tables['k'], *live]
+        destinations = [bucket.identifiers, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k']]
+        for value, destination in zip(sources, destinations, strict=True):
+            payload = operations.from_torch(value, dtype=destination.dtype, layout=destination.layout,
+                mesh_mapper=operations.ReplicateTensorToMesh(self.mesh))
+            operations.copy_host_to_device_tensor(payload, destination)
+        owned, retain = device_a.temporaries([device_a.history, device_a.spare_history,
+            device_b.history, device_b.spare_history, *self.owned,
+            *device_a.kv_history.owned, *device_a.kv_history.borrowed,
+            *device_b.kv_history.owned, *device_b.kv_history.borrowed])
+
+        def copy_cache():
+            for index, device in enumerate((device_a, device_b)):
+                context = bucket.context[index]
+                for active, destination in zip(device.kv_history.active, bucket.cached_history[index], strict=True):
+                    for name in ('k', 'v'):
+                        value = retain(operations.slice(active[name], (0, 0, 0, 0), (1, 4, context, 128)))
+                        operations.copy(value, destination[name])
+        if defer_finish:
+            try:
+                copy_cache()
+            except BaseException:
+                # Nothing will call finish() for this attempt, so this must release
+                # right here or leak them - PreparedDFlashProposal.update()'s own
+                # defer_finish path, above.
+                release_owned(operations, owned)
+                raise
+            return owned
+        try:
+            copy_cache()
+            operations.synchronize_device(self.mesh)
+            if [addresses(operations, value) for value in bucket.inputs] != bucket.addresses:
+                raise AssertionError('Prepared packed proposal input addresses moved')
+        finally:
+            release_owned(operations, owned)
+
+    def prepare_device(self, seed_a, seed_b):
+        """Enqueue this pair's copies and its trace replay without waiting on the
+        device, deferring update()'s synchronize_device and address-identity check to
+        finish() - PreparedDFlashProposal.prepare_device()'s own contract, for both
+        users at once. Returns False when there is nothing to prewarm: closed, either
+        device mid-publication or already closed, or either device under audit
+        (progress is not None, which reads intermediates back inline and cannot
+        defer) - the caller then falls back to each device's own prepare_device()."""
+        if self.closed:
+            return False
+        if self._pending is not None:
+            self.discard_pending()
+        device_a, device_b = self.device_a, self.device_b
+        if (device_a.closed or device_b.closed or device_a.pending is not None or device_b.pending is not None
+                or device_a.progress is not None or device_b.progress is not None):
+            return False
+        bucket = self._bucket(device_a.history_rows, device_b.history_rows)
+        owned = self._update(bucket, seed_a, seed_b, defer_finish=True)
+        self.operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=False)
+        self._pending = (seed_a, seed_b, bucket, owned)
+        return True
+
+    def has_pending(self, which, seed):
+        if self._pending is None:
+            return False
+        seed_a, seed_b, bucket, owned = self._pending
+        if which in bucket.consumed:
+            # This side's own half already came back through finish() this round;
+            # the OTHER side's may still be outstanding, but this one is not pending
+            # again until the coordinator's next prepare_device().
+            return False
+        return seed == (seed_a if which == 'a' else seed_b)
+
+    def finish(self, which, count):
+        """Counterpart to prepare_device(): the deferred address-identity check
+        followed by the trace's host readback and BOTH users' selection, run once
+        (on whichever side's finish() is called first) - the caller's own shared
+        synchronize_device (PackedProposalCoordinator.prepare) has already fenced
+        this pair's device work, so this issues no synchronize_device of its own.
+        The second side's finish() just reads its own half back out."""
+        if self._pending is None:
+            raise ValueError('No prepared packed proposal is pending')
+        seed_a, seed_b, bucket, owned = self._pending
+        if bucket.tokens is None:
+            operations = self.operations
+            if [addresses(operations, value) for value in bucket.inputs] != bucket.addresses:
+                release_owned(operations, owned)
+                raise AssertionError('Prepared packed proposal input addresses moved')
+            release_owned(operations, owned)
+            from dflash_packed_proposal import select_device_outputs
+
+            bucket.tokens = select_device_outputs(self.device_a, bucket.outputs, (seed_a, seed_b),
+                (self.block_rows - 1, self.block_rows - 1), 2, self.block_rows)
+        tokens = bucket.tokens[0 if which == 'a' else 1]
+        bucket.consumed.add(which)
+        if len(bucket.consumed) == 2:
+            self._pending = None
+            bucket.tokens, bucket.consumed = None, set()
+        return tokens[:count]
+
+    def discard_pending(self):
+        """Release a prepare_device() that will never be finish()ed by either side:
+        a phase-A failure (PackedProposalCoordinator.prepare), a stale prewarm this
+        object itself finds still pending, or close(). Callers other than
+        prepare_device() must synchronize_device first, exactly as finish() requires
+        - this only releases host-side bookkeeping and transients, it does not fence
+        the device."""
+        if self._pending is None:
+            return
+        _, _, bucket, owned = self._pending
+        self._pending = None
+        bucket.tokens, bucket.consumed = None, set()
+        release_owned(self.operations, owned)
+
+    def close(self):
+        if self.closed:
+            return
+        self.operations.synchronize_device(self.mesh)
+        self.discard_pending()
+        for bucket in self.buckets.values():
+            if bucket.trace is not None:
+                self.operations.release_trace(self.mesh, bucket.trace)
+                bucket.trace = None
+            self.device_a.validated_native_proposal_masks.discard(addresses(self.operations, bucket.mask))
+            release_owned(self.operations, bucket.owned)
+            bucket.owned.clear()
+        release_owned(self.operations, self.owned)
+        self.owned.clear()
+        self.buckets.clear()
+        self.closed = True

@@ -513,6 +513,87 @@ class WorkerHookTests(unittest.TestCase):
             hook.bridges = original
             hook.close()
 
+    def test_packed_proposal_unset_never_creates_a_coordinator_and_matches_the_pipelined_default(self):
+        """QWEN_FAST_PACKED_PROPOSAL unset (default): behaviour is byte-identical to
+        test_pipelined_proposals_prewarm_every_eligible_bridge_then_fence_once above -
+        same prepare/sync/drafts order, same result - and the hook never gains a
+        _packed_coordinator attribute at all."""
+        worker, bridge, events, scheduled = self.fixture()
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        original = hook.bridges
+        order = []
+        mesh = object()
+        operations = SimpleNamespace(synchronize_device=Mock(side_effect=lambda mesh: order.append(('sync', mesh))))
+        bridges = self.make_pipelined_bridges('abcd', operations=operations, mesh=mesh, order=order)
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        try:
+            self.assertNotIn('QWEN_FAST_PACKED_PROPOSAL', os.environ)
+            with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1'}), \
+                    patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                result = worker.take_draft_token_ids()
+            self.assertEqual((result.req_ids, result.draft_token_ids), (['a', 'b', 'c', 'd'], [[1], [1], [1], [1]]))
+            self.assertEqual(order, [
+                ('prepare', 'a', 100), ('prepare', 'b', 101), ('prepare', 'c', 102), ('prepare', 'd', 103),
+                ('sync', mesh),
+                ('drafts', 'a', {}), ('drafts', 'b', {}), ('drafts', 'c', {}), ('drafts', 'd', {}),
+            ])
+            self.assertFalse(hasattr(hook, '_packed_coordinator'))
+        finally:
+            hook.bridges = original
+            hook.close()
+
+    def test_packed_proposal_enabled_with_no_pooled_slots_falls_back_to_the_same_per_bridge_prepares(self):
+        """QWEN_FAST_PACKED_PROPOSAL=1 but no bridge's drafter exposes a pool_slot
+        (exactly make_pipelined_bridges' own fixture): PackedProposalCoordinator finds
+        no full FOUR_AS_TWO_PAIRS pair to build and every bridge still runs its own
+        single-user prepare_device(), in the same order, with the same one shared
+        fence - the flag changes WHICH function decides that, not the result."""
+        worker, bridge, events, scheduled = self.fixture()
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        original = hook.bridges
+        order = []
+        mesh = object()
+        operations = SimpleNamespace(synchronize_device=Mock(side_effect=lambda mesh: order.append(('sync', mesh))))
+        bridges = self.make_pipelined_bridges('abcd', operations=operations, mesh=mesh, order=order)
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        try:
+            with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1'}), \
+                    patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                result = worker.take_draft_token_ids()
+            self.assertEqual((result.req_ids, result.draft_token_ids), (['a', 'b', 'c', 'd'], [[1], [1], [1], [1]]))
+            self.assertEqual(order, [
+                ('prepare', 'a', 100), ('prepare', 'b', 101), ('prepare', 'c', 102), ('prepare', 'd', 103),
+                ('sync', mesh),
+                ('drafts', 'a', {}), ('drafts', 'b', {}), ('drafts', 'c', {}), ('drafts', 'd', {}),
+            ])
+            self.assertIsNotNone(getattr(hook, '_packed_coordinator', None))
+        finally:
+            hook.bridges = original
+            hook.close()
+
+    def test_packed_coordinator_is_closed_with_the_hook(self):
+        worker, bridge, events, scheduled = self.fixture()
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        original = hook.bridges
+        order = []
+        operations = SimpleNamespace(synchronize_device=Mock(side_effect=lambda mesh: order.append(('sync', mesh))))
+        bridges = self.make_pipelined_bridges('ab', operations=operations, mesh=object(), order=order)
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1'}), \
+                patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+            worker.take_draft_token_ids()
+        hook.bridges = original
+        coordinator = hook._packed_coordinator
+        coordinator.close = Mock(wraps=coordinator.close)
+        hook.close()
+        coordinator.close.assert_called_once()
+
     def test_queued_sampler_or_second_owner_rejected(self):
         worker, bridge, _, _ = self.fixture()
         bridge.runner._pending_samples.append(object())
