@@ -97,9 +97,19 @@ core (`gdn_multitoken.cb_plan(True)`) against the value split's 276 KB, plus 200
 norm stage. Per core that is what the single-user fused path already runs at, so no core is
 asked for anything new - but 96 cores are now asked instead of 24, leaving about 725 KB of
 1.5 MB claimed on 72 cores that held 276 KB, and every L1-resident decode activation is
-spread over the same grid. The device test allocates only its own inputs and will not see
-this; the first full-model run under the flag will, as an L1 allocation failure at program
-build. That is why the flag defaults OFF.
+spread over the same grid. That is why the flag defaults OFF.
+
+`gdn_user_batch_l1_probe.py` measured what that actually costs, on card M, and the answer
+is milder than it looks. Four sequential single-user launches and one batched launch leave
+**exactly the same** L1 free: both captured a trace and then took 128 MiB of interleaved L1
+canaries before the next allocation failed. And the failure is loud. tt-metal rejects the
+overlap when the program is created, with `Statically allocated circular buffers in program
+13 clash with L1 buffers on core range [0-0 - 0-0]`, naming both addresses. Below
+exhaustion, replaying either captured trace eight times changed **not one canary byte**.
+
+So the risk is a clean exception at admission, not silent corruption, and it is not made
+worse by batching. What the probe could not compare is the fused plan against the deployed
+value split, because `gdn_vsplit.execute` requires a 1x2 mesh and card M is one card.
 
 **Concurrency, not just launch count.** The four users' kernels are independent and run on
 disjoint cores, but share DRAM bandwidth and the NOC, and the estimate assumes they overlap

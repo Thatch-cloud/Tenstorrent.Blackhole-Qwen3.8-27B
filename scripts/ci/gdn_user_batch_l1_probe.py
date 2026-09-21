@@ -121,8 +121,19 @@ def main():
         tiles = max(1, int(arguments.canary_mb * 1024 * 1024) // 2048)
         canary_shape = (1, 32, tiles * 32)
 
+        def release(produced):
+            for output, states in produced or ():
+                ttnn.deallocate(output)
+                ttnn.deallocate(states)
+
         def run_arm(name, launch):
             """Capture `launch` into a trace, fill L1 with canaries, replay, then check them."""
+            # Warm first, exactly as packed_verifier.py:422-423 does before its capture:
+            # a kernel compiled for the first time inside a capture is not something the
+            # serving path ever asks for, and it is not what this probe is measuring.
+            stage(name + '-warm')
+            release(launch())
+            ttnn.synchronize_device(mesh)
             stage(name + '-capture')
             trace = ttnn.begin_trace_capture(mesh, cq_id=0)
             produced = None
@@ -142,30 +153,43 @@ def main():
             except BaseException as error:
                 refusal = repr(error)[:400]
 
-            stage(name + '-replay', canaries=len(canaries))
+            def survey():
+                damage = []
+                for index, (value, want) in enumerate(zip(canaries, expected)):
+                    for chip, shard in enumerate(host(value)):
+                        if not same_bits(torch, shard, want):
+                            gap = (shard.float() - want.float()).abs()
+                            damage.append(dict(canary=index, chip=chip, differing=int((gap > 0).sum()),
+                                               of=int(gap.numel())))
+                return damage
+
+            # BEFORE the replay. Without this the probe cannot tell the GDN trace apart
+            # from its own canary uploads: every `from_torch` to L1 runs a program whose
+            # own circular buffers are placed in the same descending region, so filling
+            # L1 to exhaustion damages canaries on its own. Only damage that APPEARS
+            # across the replay is attributable to the launch under test.
+            stage(name + '-check-before-replay')
+            before = survey()
+
+            stage(name + '-replay', canaries=len(canaries), damaged_before=len(before))
             for unused in range(arguments.replays):
                 ttnn.execute_trace(mesh, trace, cq_id=0, blocking=True)
             ttnn.synchronize_device(mesh)
 
             stage(name + '-check')
-            corrupted = []
-            for index, (value, want) in enumerate(zip(canaries, expected)):
-                for chip, shard in enumerate(host(value)):
-                    if not same_bits(torch, shard, want):
-                        gap = (shard.float() - want.float()).abs()
-                        corrupted.append(dict(canary=index, chip=chip, differing=int((gap > 0).sum()),
-                                              of=int(gap.numel()), max_abs=float(gap.max())))
+            after = survey()
+            known = {(entry['canary'], entry['chip']) for entry in before}
+            caused = [entry for entry in after if (entry['canary'], entry['chip']) not in known]
             report['arms'][name] = dict(
                 canaries_allocated=len(canaries),
                 l1_free_bytes_measured=len(canaries) * tiles * 2048,
                 l1_free_mib_measured=len(canaries) * tiles * 2048 / (1024 * 1024),
-                allocator_refusal=refusal, corrupted=corrupted, canaries_intact=not corrupted)
+                allocator_refusal=refusal,
+                damaged_by_the_uploads=before, damaged_after_replay=after,
+                caused_by_the_replay=caused, replay_is_clean=not caused)
             for value in canaries:
                 ttnn.deallocate(value)
-            if produced is not None:
-                for output, states in produced:
-                    ttnn.deallocate(output)
-                    ttnn.deallocate(states)
+            release(produced)
             ttnn.release_trace(mesh, trace)
             ttnn.synchronize_device(mesh)
 
@@ -174,13 +198,15 @@ def main():
 
         per_user, batched = report['arms']['per_user'], report['arms']['batched']
         report['l1_free_delta_mib'] = per_user['l1_free_mib_measured'] - batched['l1_free_mib_measured']
-        report['any_corruption'] = bool(per_user['corrupted'] or batched['corrupted'])
+        report['replay_caused_corruption'] = bool(per_user['caused_by_the_replay'] or batched['caused_by_the_replay'])
+        report['batched_is_worse'] = len(batched['caused_by_the_replay']) > len(per_user['caused_by_the_replay'])
         report['verdict'] = (
-            'corruption reproduced: the reserved circular-buffer region overwrites L1 allocated after capture'
-            if report['any_corruption'] else
-            'no corruption: the allocator refused rather than overlapping, so this is not the segfault mechanism'
-            if (per_user['allocator_refusal'] or batched['allocator_refusal']) else
-            'inconclusive: neither arm exhausted L1, so nothing was pushed into the reserved region')
+            'the batched replay corrupts L1 the per-user replay does not: the reservation is the bug'
+            if report['batched_is_worse'] else
+            'both replays corrupt L1 equally: a property of the fused plan, not of batching'
+            if report['replay_caused_corruption'] else
+            'neither replay changed a single canary byte: the captured launch does not overwrite L1 '
+            'allocated after capture, and this is not the segfault mechanism')
         report['result'] = 'pass'
         stage('done', verdict=report['verdict'], l1_free_delta_mib=report['l1_free_delta_mib'])
         print('VERDICT', report['verdict'], flush=True)

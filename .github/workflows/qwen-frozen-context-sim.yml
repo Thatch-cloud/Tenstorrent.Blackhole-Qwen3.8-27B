@@ -1,7 +1,7 @@
 name: Qwen winning recipe larger-context simulator
 on:
   push:
-    tags: ['experiment/frozen-context-sim-v1', 'experiment/frozen-context-sim-v2', 'experiment/frozen-context-sim-v3', 'experiment/frozen-context-build-v1', 'experiment/frozen-target-scratch-build-v1']
+    tags: ['experiment/frozen-context-sim-v1', 'experiment/frozen-context-sim-v2', 'experiment/frozen-context-sim-v3', 'experiment/frozen-context-build-v1', 'experiment/frozen-target-scratch-build-v1', 'experiment/frozen-context-build-65536-v1']
 permissions:
   contents: read
 concurrency:
@@ -36,14 +36,22 @@ jobs:
           QWEN_SIM_ONLY: '1'
           QWEN_LEARNED_STACK: '1'
           QWEN_SIM_CASE: dspark-native-8k-attention
-          QWEN_DSPARK_REQUEST_CONTEXT: '8192'
+          QWEN_DSPARK_REQUEST_CONTEXT: ${{ endsWith(github.ref, 'frozen-context-build-65536-v1') && '65536' || '8192' }}
           QWEN_FROZEN_BUILD_ONLY: '1'
           QWEN_FROZEN_TARGET_SCRATCH: ${{ endsWith(github.ref, 'target-scratch-build-v1') && '1' || '0' }}
         run: |
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p frozen-build/experiment-results
+          # frozen_sim_build_cache.py's cache_key() never hashes context (see report): this
+          # value only picks which QWEN_SIM_CASE Skt branch gets warmed/compiled against,
+          # not a distinct cache entry. Kept tag-derived for traceability, not correctness.
+          context=8192
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-context-build-65536-v1 ]]; then
+            context=65536
+          fi
+          echo "context=$context"
           python3 -B frozen-orchestrator/scripts/ci/frozen_recipe_context.py \
-            --checkout frozen-build --context 8192 \
+            --checkout frozen-build --context "$context" \
             --manifest frozen-build/experiment-results/frozen-geometry.json
           cd frozen-build
           timeout -k 45 600 bash scripts/ci/run-simulator.sh
