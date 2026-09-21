@@ -136,6 +136,12 @@ fi
 if [ -n "${M3NATIVE_TRACED_PROPOSAL:-}" ]; then
   trace_region_bytes=536870912
 fi
+# The tt-metal watcher (TT_METAL_WATCHER=20, inherited from the fp2u lane's hang diagnosis)
+# compiles NoC sanitisation and waypoints into every kernel. The same folded SDPA decode
+# call costs 0.46 ms on card M without it and 2.05 ms in the gate's device profile with
+# it (run 35567165791 vs sdpa_verify_prefill_style_bench.py), so every packed-round
+# trace_ms measured so far (1453, 1118, 1100 ms) carries watcher overhead the
+# single-stream baselines never had. Off by default; M3NATIVE_WATCHER=1 re-enables it.
 name="qwen-m3native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 timeout -k 30 2200 docker run --rm --name "$name" --network none \
@@ -170,7 +176,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=32768 \
   ${M3NATIVE_TRACED_PROPOSAL:--e QWEN_FAST_EAGER_PROPOSAL=1} -e QWEN_FAST_SHARD_CHECK=0 -e QWEN_FAST_PHASE_LOG=1 -e QWEN_FAST_CARRY_LOG=1 \
   -e QWEN_FAST_SHARED_CCL=1 -e QWEN_FAST_PACKED_STEP=1 -e QWEN_FAST_PACKED_AUDIT=1 -e QWEN_FAST_FAULTHANDLER=1 \
-  -e TT_METAL_WATCHER=20 -e TT_METAL_WATCHER_APPEND=1 -e TT_METAL_WATCHER_DISABLE_ASSERT=1 \
+  ${M3NATIVE_WATCHER:+-e TT_METAL_WATCHER=20} ${M3NATIVE_WATCHER:+-e TT_METAL_WATCHER_APPEND=1} ${M3NATIVE_WATCHER:+-e TT_METAL_WATCHER_DISABLE_ASSERT=1} \
   -e QWEN_GDN_DIRECT_WINDOW=1 -e QWEN_GDN_SHARED_QK_EXPERIMENT=1 \
   -e QWEN_MLP_BLOCK_STREAM_EXPERIMENT=1 -e QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 \
   -e QWEN_SDPA_BF8=1 -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 \
