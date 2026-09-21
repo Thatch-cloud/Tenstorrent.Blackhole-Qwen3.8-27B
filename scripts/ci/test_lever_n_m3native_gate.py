@@ -10,6 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from lever_n_m3native_gate import select_diagnostic  # noqa: E402
 from lever_n_m3native_gate import (  # noqa: E402
     RETIRED_LABELS, compare_prefix, evaluate_gate, retired_binder_leaks)
 
@@ -118,6 +119,21 @@ class EvaluateGateTests(unittest.TestCase):
         kwargs = dict(COMPLETE_KWARGS, checked=[], allow_missing_references=True,
                       retired_binder_calls_nonzero=[{'MLP forward': 1}])
         self.assertFalse(evaluate_gate(**kwargs))
+
+
+class DiagnosticFilterTests(unittest.TestCase):
+    def test_every_packed_audit_family_and_the_phase_lines_pass_the_filter(self):
+        lines = ['x [PACKED] request=a segment=0', 'x [PACKED-PHASE] round=1', 'x [PACKED-COMMIT] round=1',
+                 'x [PACKED-COMMIT-HOST] round=1', 'x [PACKED-PROPOSE] round=1', 'x [PHASE] step a begin',
+                 'x [PINDIAG] dram after', 'plain server chatter', 'x ERROR boom', 'Traceback (most recent call last):']
+        kept = select_diagnostic(lines)
+        self.assertEqual(kept, [line for line in lines if line != 'plain server chatter'])
+
+    def test_the_cap_keeps_both_ends_and_says_how_much_it_dropped(self):
+        lines = ['[PHASE] %d' % index for index in range(10)]
+        self.assertEqual(select_diagnostic(lines, cap=4),
+                         ['[PHASE] 0', '[PHASE] 1', '... 6 diagnostic lines omitted', '[PHASE] 8', '[PHASE] 9'])
+        self.assertEqual(select_diagnostic(lines, cap=10), lines)
 
 
 if __name__ == '__main__':

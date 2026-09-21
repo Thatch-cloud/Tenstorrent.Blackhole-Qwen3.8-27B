@@ -80,6 +80,25 @@ RETIRED_LABELS = ('MLP forward', 'GDN output projection', 'sliced attn_decode_pr
 REFERENCE_NAME = re.compile(r'^single-user-(?:(\d{4})-)?\d+\.json$')
 
 
+# The server log lines the gate's stdout keeps. Every '[PACKED' family passes (the per-user
+# '[PACKED] request=' audit, '[PACKED-PHASE]', '[PACKED-COMMIT]', '[PACKED-COMMIT-HOST]' and
+# any later '[PACKED-...]' line): run 35578180747 lost the commit-host attribution and the
+# per-user audit because the old filter named four exact prefixes. The cap keeps a whole
+# 33-round four-user run (about 50 kept lines per round) instead of cutting rounds 16-21
+# out of the middle at 800.
+DIAGNOSTIC_CAP = 4000
+
+
+def select_diagnostic(lines, cap=DIAGNOSTIC_CAP):
+    diagnostic = [line[:300] for line in lines
+                  if '[PINDIAG]' in line or '[PACKED' in line or '[PHASE]' in line
+                  or 'ERROR' in line or 'Traceback' in line]
+    if len(diagnostic) > cap:
+        omitted = len(diagnostic) - cap
+        diagnostic = diagnostic[:cap // 2] + ['... %d diagnostic lines omitted' % omitted] + diagnostic[-(cap // 2):]
+    return diagnostic
+
+
 def load_references(directory):
     """Each user's single-stream reference text, keyed by its prompt base.
 
@@ -353,13 +372,7 @@ def main():
         log_path = options.results / 'server.log'
         if log_path.is_file():
             lines = log_path.read_text(errors='replace').splitlines()
-            diagnostic = [line[:300] for line in lines
-                         if '[PINDIAG]' in line or '[PACKED-PHASE]' in line or '[PACKED-COMMIT]' in line or '[PHASE]' in line
-                         or 'ERROR' in line or 'Traceback' in line]
-            if len(diagnostic) > 800:
-                omitted = len(diagnostic) - 800
-                diagnostic = diagnostic[:400] + ['... %d diagnostic lines omitted' % omitted] + diagnostic[-400:]
-            for line in diagnostic:
+            for line in select_diagnostic(lines):
                 print(line)
             for line in lines[-200:]:
                 print(line[:300])
