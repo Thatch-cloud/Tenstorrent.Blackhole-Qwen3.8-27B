@@ -2,7 +2,7 @@
 
 from gdn_multitoken_conv import addresses, release_owned, restore_prefix, run_projected
 from gdn_prefix import validate_rows
-from gdn_state_copy import copy_compact
+from gdn_state_copy import batch_enabled, copy_compact, copy_compact_batch
 from gdn_batched_conv import norm_batch_enabled, run_batched_projected
 from gdn_user_batch import enabled as user_batch_enabled, min_users as user_batch_min_users
 from gdn_user_batch_conv import run_user_batched_projected
@@ -357,20 +357,36 @@ class DeviceLoopState:
         one shared write (`copy_compact(entry, self.state)`) does not happen at all when
         publication is deferred, and a hoisted version of it would hand every user the
         last user's convolution state.
+
+        Under `gdn_state_copy.batch_enabled()` the earlier segments' compact moves also
+        become one launch instead of one each (three of them at four packed users, on
+        every one of the 48 GDN layers). They are already independent - each reads one
+        user's own slot and writes that user's own entry, none of them touches the
+        native buffer, and no two share a source or a destination - so collapsing them
+        moves the same bytes to the same places. The LAST segment stays separate: it
+        goes through the native buffer, whose full-slot geometry cannot share a page
+        layout with a compact-to-compact transfer. Ordering against it does not matter
+        for the same reason the segments do not order against each other.
         """
         operations, layer = self.operations, self.gdn
         last = len(spans) - 1
-        pending = []
+        pending, batched = [], [] if batch_enabled() else None
         for index, ((start, stop), slot) in enumerate(zip(spans, slots)):
             entry = entries[index]
             if index == last:
                 self.active.restore(slot)
                 self.active.save(entry)
+            elif batched is not None:
+                batched.append((slot, entry))
             else:
                 copy_compact(slot, entry)
             piece = resident_piece(operations,
                                    operations.slice(projected, (0, start, 0), (1, stop, projected.shape[-1])), owned)
             pending.append((piece, entry[0], entry[1:]))
+        # Every batched entry is read by the launch below, never before it, so deferring
+        # the moves to here is exactly as early as they need to be.
+        if batched:
+            copy_compact_batch(batched)
         results = run_user_batched_projected(layer.mesh, pending, list(layer.tw['conv_taps']),
             layer.tw['dt_bias'], layer.tw['neg_exp_A'], layer.tw['norm_w'], self.kernels, operations,
             prefix_zero_reuse=self.prefix_zero_reuse)

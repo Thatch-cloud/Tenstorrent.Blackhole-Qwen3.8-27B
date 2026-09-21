@@ -32,6 +32,7 @@ container=$(docker create --network none --hostname qwen-experiment --add-host q
     --label "thatch.qwen.source-revision=${GITHUB_SHA:-untracked}" \
     -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
     -e QWEN_LADDER_BACKEND=hardware -e QWEN_LADDER_CONTEXT=65536 \
+    -e QWEN_DSPARK_REQUEST_CONTEXT=65536 \
     -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/tmp/frozen-hardware-kernels -e MESH_DEVICE=P300 \
     -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=1 \

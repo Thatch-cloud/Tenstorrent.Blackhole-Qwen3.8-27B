@@ -33,11 +33,20 @@ void kernel_main() {
     constexpr auto seventh = TensorAccessorArgs<sixth.next_compile_time_args_offset()>();
     constexpr auto eighth = TensorAccessorArgs<seventh.next_compile_time_args_offset()>();
     constexpr auto ninth = TensorAccessorArgs<eighth.next_compile_time_args_offset()>();
-    const uint32_t worker = get_arg_val<uint32_t>(15);
+    // One launch may now carry several whole transfers back to back. Every group
+    // uses the SAME nine accessor specs above - the offsets are compile-time, so a
+    // group can only ride along if its tensors are laid out identically, which the
+    // Python side checks rather than assumes. Only the fifteen addresses/counts per
+    // group are runtime, so groups cost one extra arg block each and no extra code.
+    const uint32_t groups = get_arg_val<uint32_t>(0);
+    const uint32_t worker = get_arg_val<uint32_t>(1);
     const uint32_t scratch = get_write_ptr(0);
-    transfer<0, first.next_compile_time_args_offset(), false>(0, worker, scratch);
-    transfer<second.next_compile_time_args_offset(), third.next_compile_time_args_offset(), true>(3, worker, scratch);
-    transfer<fourth.next_compile_time_args_offset(), fifth.next_compile_time_args_offset(), true>(6, worker, scratch);
-    transfer<sixth.next_compile_time_args_offset(), seventh.next_compile_time_args_offset(), true>(9, worker, scratch);
-    transfer<eighth.next_compile_time_args_offset(), ninth.next_compile_time_args_offset(), true>(12, worker, scratch);
+    for (uint32_t group = 0; group < groups; ++group) {
+        const uint32_t base = 2 + group * 15;
+        transfer<0, first.next_compile_time_args_offset(), false>(base, worker, scratch);
+        transfer<second.next_compile_time_args_offset(), third.next_compile_time_args_offset(), true>(base + 3, worker, scratch);
+        transfer<fourth.next_compile_time_args_offset(), fifth.next_compile_time_args_offset(), true>(base + 6, worker, scratch);
+        transfer<sixth.next_compile_time_args_offset(), seventh.next_compile_time_args_offset(), true>(base + 9, worker, scratch);
+        transfer<eighth.next_compile_time_args_offset(), ninth.next_compile_time_args_offset(), true>(base + 12, worker, scratch);
+    }
 }

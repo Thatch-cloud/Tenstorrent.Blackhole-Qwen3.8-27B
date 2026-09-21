@@ -4,6 +4,7 @@ test "${QWEN_CARDS_ALLOCATED:-0}" = 1
 test "${QWEN_HARDWARE_TESTS:-0}" = 1
 test "${QWEN_LADDER_BACKEND:-}" = hardware
 test "${QWEN_LADDER_CONTEXT:-}" = 65536
+test "${QWEN_DSPARK_REQUEST_CONTEXT:-}" = 65536
 test -z "${TT_METAL_SIMULATOR:-}"
 test -z "${TT_METAL_MOCK_CLUSTER_DESC_PATH:-}"
 test -z "${TT_METAL_SLOW_DISPATCH_MODE:-}"
