@@ -89,7 +89,11 @@ def adapt_replay_k_chunk(sources, context, checkout):
     if 'attention_replay.py' in sources:
         raise ValueError('attention_replay.py unexpectedly already staged before this adapter runs')
     result = dict(sources)
-    original = (Path(checkout) / 'scripts/ci' / 'attention_replay.py').read_text()
+    path = Path(checkout) / 'scripts/ci' / 'attention_replay.py'
+    if not path.is_file():
+        raise ValueError('attention_replay.py missing from checkout (a real checkout at REVISION always '
+            'has it): ' + str(path))
+    original = path.read_text()
     result['attention_replay.py'] = _patch_attention_replay(original)
     compile(result['attention_replay.py'], 'attention_replay.py', 'exec')
     return result

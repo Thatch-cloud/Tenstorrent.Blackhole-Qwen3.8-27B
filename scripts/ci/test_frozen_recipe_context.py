@@ -16,6 +16,23 @@ from frozen_context_geometry import CONTEXTS, selected_geometry, factory_selecto
 from frozen_runtime_context import FILES
 
 
+# frozen_wide_chunk_replay.py reads attention_replay.py straight off the
+# --checkout directory (it is not otherwise staged by frozen_recipe_context.py
+# at all) and only for context 65536; a real checkout always has the file,
+# these synthetic ones below do not unless this is written in. Minimal, not
+# the real file, but carries both anchors _patch_attention_replay needs.
+MINIMAL_ATTENTION_REPLAY = '''"""Minimal fixture carrying the two frozen_wide_chunk_replay.py anchors."""
+
+
+class ReplayAttentionReader:
+    def __init__(self, operations, mesh, rows, capacity, pages_host, upload, *, max_group_rows=4,
+                 short_context=False):
+        grid = mesh.compute_with_storage_grid_size()
+        config = operations.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
+            exp_approx_mode=False, q_chunk_size=0, k_chunk_size=256)
+'''
+
+
 class FrozenRecipeContextTests(unittest.TestCase):
     def test_cleanup_is_bounded_and_preserves_failure(self):
         sources = {name: subprocess.check_output(
@@ -59,6 +76,7 @@ timeout() {
             scripts.mkdir(parents=True)
             for name, source in originals.items():
                 (scripts / name).write_bytes(source)
+            (scripts / 'attention_replay.py').write_text(MINIMAL_ATTENTION_REPLAY)
             manifest = checkout / 'deployment.json'
 
             def git(command):
@@ -216,6 +234,8 @@ class Rung65536CombinedRuntimeStagingTests(unittest.TestCase):
         scripts.mkdir(parents=True)
         for name, source in originals.items():
             (scripts / name).write_bytes(source)
+        if context == 65536:
+            (scripts / 'attention_replay.py').write_text(MINIMAL_ATTENTION_REPLAY)
 
         def git(command):
             arguments = command[3:]

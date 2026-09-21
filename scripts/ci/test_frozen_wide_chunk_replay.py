@@ -47,6 +47,22 @@ class NoOpForOtherContextsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replay.adapt_replay_k_chunk(sources, 65536, checkout='/does/not/matter')
 
+    def test_missing_attention_replay_raises_clear_value_error_naming_the_file(self):
+        """The bug this guards: a synthetic/partial checkout (e.g. a test
+        fixture that doesn't happen to include attention_replay.py) must not
+        surface as a raw FileNotFoundError traceback from deep inside this
+        module - it must be an explicit, named ValueError, since a REAL
+        checkout at REVISION always has the file and a missing one signals a
+        genuinely wrong --checkout argument, not something to swallow."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp)
+            (checkout / 'scripts/ci').mkdir(parents=True)  # directory exists, file does not
+            with self.assertRaises(ValueError) as caught:
+                replay.adapt_replay_k_chunk({}, 65536, checkout)
+            self.assertIn('attention_replay.py', str(caught.exception))
+            self.assertNotIsInstance(caught.exception, FileNotFoundError)
+
 
 class PatchAgainstRealHistoricalSourceTests(unittest.TestCase):
 
