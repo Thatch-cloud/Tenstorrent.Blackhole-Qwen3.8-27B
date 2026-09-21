@@ -13,6 +13,13 @@
 #
 # $1 is the image sha, defaulting to the pinned qwen-fp2u-image.yml fast-serving image so
 # the graft rides the exact image the four-user runs measure against.
+#
+# QWEN_FAST_FOUR_AS_TWO=0 is required: serving_runtime.py defaults four scheduler
+# requests to TWO 32-row M1 blocks (QWEN_FAST_FOUR_AS_TWO, default ON at count 4), and
+# under that default the single 64-row M3 block this gate exists to exercise is never
+# built - two_tile_bindings(32) returns () and the [PINDIAG] native_m3 marker can never
+# fire (gate 1, run 35556533480: a false negative - no decode round ever ran, even
+# though the graft was mounted correctly). Setting it to 0 keeps the single M3 block.
 set -euo pipefail
 image="${1:-sha256:4d1594dfa8317507f2adbe409a97d04d1ff26e5dcd5a8ae0877f352458944679}"
 target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
@@ -34,12 +41,28 @@ done
 for layer in 1 2 3 4; do
   mounts+=(--mount "type=bind,src=$cache/dflash2-stack-$revision/layer-$layer,dst=/experiment-dflash-fixture/layer-$layer,readonly")
 done
-if [ -d "$PWD/runner-evidence.local/packed-gate" ]; then
-  mounts+=(--mount "type=bind,src=$PWD/runner-evidence.local/packed-gate,dst=/bench/packed-gate-reference,readonly")
-fi
+# The tracked references (scripts/ci/references/packed-gate) are what the runner has;
+# a local runner-evidence.local copy, when present, is preferred (freshest local run).
+refs="$PWD/scripts/ci/references/packed-gate"
+if [ -d "$PWD/runner-evidence.local/packed-gate" ]; then refs="$PWD/runner-evidence.local/packed-gate"; fi
+mounts+=(--mount "type=bind,src=$refs,dst=/bench/packed-gate-reference,readonly")
 mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
 devices=()
 for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+
+# Optional K64 kernel graft (~/opgraft-K64: the batch-64 attn_decode_prep and
+# nlp_concat_heads_decode C++ ops, both proved bit-exact on device). Unlike native_m3
+# this patches no Python source, only the two ops and their bindings, so it is opt-in
+# by env (KOPGRAFT64=<dir>) rather than hasattr-detected; default empty mounts nothing
+# and passes no QWEN_FAST_NATIVE_ATTN, today's exact two-call behaviour
+# (two_tile_decode.native_attn_enabled). Mirrors ~/kwork64/test-k64.sh on the rig.
+KM=""
+if [ -n "${KOPGRAFT64:-}" ]; then
+  KM="$KM -v $KOPGRAFT64/_ttnn.so:/opt/tt-metal/ttnn/ttnn/_ttnn.so:ro"
+  KM="$KM -v $KOPGRAFT64/_ttnncpp.so:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so:ro"
+  KM="$KM -v $KOPGRAFT64/attn_prep:/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/attn_prep:ro"
+  KM="$KM -v $KOPGRAFT64/nlp_concat_heads_decode:/opt/tt-metal/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode:ro"
+fi
 
 name="qwen-m3native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
@@ -60,7 +83,10 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$PWD/scripts/ci/longctx_cycle_bench.py,dst=/bench/longctx_cycle_bench.py,readonly" \
   --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
   "${mounts[@]}" \
+  $KM \
+  ${KOPGRAFT64:+-e QWEN_FAST_NATIVE_ATTN=1} \
   -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
+  -e QWEN_FAST_FOUR_AS_TWO=0 \
   -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=32768 \
   -e QWEN_FAST_EAGER_PROPOSAL=1 -e QWEN_FAST_SHARD_CHECK=0 -e QWEN_FAST_PHASE_LOG=1 -e QWEN_FAST_CARRY_LOG=1 \
   -e QWEN_FAST_SHARED_CCL=1 -e QWEN_FAST_PACKED_STEP=1 -e QWEN_FAST_PACKED_AUDIT=1 -e QWEN_FAST_FAULTHANDLER=1 \

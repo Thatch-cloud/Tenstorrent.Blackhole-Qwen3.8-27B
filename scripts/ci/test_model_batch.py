@@ -240,6 +240,115 @@ class ModelBatchTests(unittest.TestCase):
             self.assertEqual(fixture.run(), 'logits')
         marker.assert_not_called()
 
+    def native_attn_fixture(self, prep_expected=0, concat_expected=0, active_expected=1):
+        """A ModelBatch with three fake two_tile binders - the full-attention forward
+        (always required) and QWEN_FAST_NATIVE_ATTN's two retired-wrapper guards
+        (TwoTileNativeAttnGuard: sliced attn_decode_prep, two-tile head concat) - and
+        nothing else two_tile touches. Mirrors native_m3_fixture; native_attn is its own
+        independent switch (a RUNTIME/ENV fact, never a model attribute)."""
+        fixture = ModelBatch.__new__(ModelBatch)
+        fixture.retained = None
+        fixture.gdn_calls = fixture.norm_batch_calls = 0
+        fixture.norm_batch = fixture.compact_gdn = fixture.attention_replay = fixture.attention_mask_once = False
+        fixture.working_states, fixture.writers, fixture.readers, fixture.bindings = [], [], [], []
+        fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
+        fixture.native_m3 = False
+        fixture.native_attn = True
+
+        class FakeBinder:
+            def __init__(self, label, expected_calls):
+                self.label, self.expected_calls, self.calls = label, expected_calls, 0
+
+        active = FakeBinder('full-attention forward', active_expected)
+        prep_guard = FakeBinder('sliced attn_decode_prep', prep_expected)
+        concat_guard = FakeBinder('two-tile head concat', concat_expected)
+        fixture.two_tile = [active, prep_guard, concat_guard]
+        return fixture, active, prep_guard, concat_guard
+
+    def test_native_attn_binder_calls_are_reported_every_round(self):
+        fixture, active, prep_guard, concat_guard = self.native_attn_fixture()
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            active.calls += 1
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        with patch('dflash_device.pindiag') as marker:
+            self.assertEqual(fixture.run(), 'logits')
+        marker.assert_called_once()
+        template, payload = marker.call_args.args
+        self.assertIn('native_m3 binder calls this round', template)
+        self.assertEqual(payload, {'full-attention forward': 1, 'sliced attn_decode_prep': 0,
+                                   'two-tile head concat': 0})
+
+    def test_a_call_leaking_through_the_prep_guard_fails_loudly(self):
+        """The exact silent-fallback-to-the-sliced-prep failure mode QWEN_FAST_NATIVE_ATTN
+        exists to catch: something still runs the legacy per-tile attn_decode_prep path."""
+        fixture, active, prep_guard, concat_guard = self.native_attn_fixture()
+
+        def leaking_forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            active.calls += 1
+            prep_guard.calls += 1
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=leaking_forward))
+        with self.assertRaisesRegex(AssertionError,
+                                    'retired the sliced attn_decode_prep two-tile wrapper.*1 unexpected call'):
+            fixture.run()
+
+    def test_a_call_leaking_through_the_concat_guard_fails_loudly(self):
+        """Same failure mode, for the retired two-tile head concat wrapper."""
+        fixture, active, prep_guard, concat_guard = self.native_attn_fixture()
+
+        def leaking_forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            active.calls += 1
+            concat_guard.calls += 1
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=leaking_forward))
+        with self.assertRaisesRegex(AssertionError,
+                                    'retired the two-tile head concat two-tile wrapper.*1 unexpected call'):
+            fixture.run()
+
+    def test_native_attn_alone_without_native_m3_also_prints_the_diagnostic(self):
+        """native_attn is independent of native_m3: either one engaged is enough for
+        run()'s per-round [PINDIAG] binder-calls line to fire."""
+        fixture, active, prep_guard, concat_guard = self.native_attn_fixture()
+        self.assertFalse(fixture.native_m3)
+        self.assertTrue(fixture.native_attn)
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            active.calls += 1
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        with patch('dflash_device.pindiag') as marker:
+            self.assertEqual(fixture.run(), 'logits')
+        marker.assert_called_once()
+
+    def test_without_native_attn_a_genuine_binder_message_is_unchanged(self):
+        """With native_attn off, a guard configured with a nonzero expectation (the
+        shape a genuine, non-retired two-tile binder takes) reports the ordinary
+        engaged/expected message, not the retired-wrapper leak message."""
+        fixture, active, prep_guard, concat_guard = self.native_attn_fixture(active_expected=1)
+        fixture.native_attn = False
+        prep_guard.expected_calls = 1  # a genuine (non-retired) binder that must engage
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            active.calls += 1
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        with self.assertRaisesRegex(
+                AssertionError,
+                'Every sliced attn_decode_prep of the wide block must take its two-tile form: 0 engaged, 1 expected'):
+            fixture.run()
+
 
 if __name__ == "__main__":
     unittest.main()

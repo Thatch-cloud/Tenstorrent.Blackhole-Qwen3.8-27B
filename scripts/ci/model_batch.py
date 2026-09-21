@@ -297,30 +297,56 @@ def two_tile_bindings(rows, model, operations):
     So MLP and GDN-output retire their two-tile wrapping entirely (bind_two_tile_mlp,
     bind_two_tile_gdn_output: `bindings=()`, `expected_calls=0` - nothing overrides the
     now-native `feed_forward.forward` / `_row_proj`), and the attention binder keeps
-    only what still has to be two-call: `prep_by_tile` and TwoTileConcatHeads wrap
-    ttnn.transformer.attn_decode_prep (hangs at batch 64, C++) and
-    nlp_concat_heads_decode (TT_FATAL beyond 32, C++) regardless of the graft, so
-    forward_decode is still bound, but its own `_wo_proj` wrapping and its runtime QKV
-    progcfg rebuild are dropped (two_tile_decode.TwoTileAttentionBinding/
-    TwoTileAttentionDecode, native_m3=True): `_wo_proj` is native too, and the graft's
-    own attn_qkv_decode_1d_progcfg_64 already IS the per_core_M 2 config the runtime
-    rebuild would otherwise compute. Without the graft (no _64 attrs) every binder
-    behaves exactly as before - native_m3 is False and this is dead code."""
+    only what still has to be two-call absent the K64 graft below: `prep_by_tile` and
+    TwoTileConcatHeads wrap ttnn.transformer.attn_decode_prep (hangs at batch 64, C++)
+    and nlp_concat_heads_decode (TT_FATAL beyond 32, C++), so forward_decode is still
+    bound, but its own `_wo_proj` wrapping and its runtime QKV progcfg rebuild are
+    dropped (two_tile_decode.TwoTileAttentionBinding/TwoTileAttentionDecode,
+    native_m3=True): `_wo_proj` is native too, and the graft's own
+    attn_qkv_decode_1d_progcfg_64 already IS the per_core_M 2 config the runtime rebuild
+    would otherwise compute. Without the graft (no _64 attrs) every binder behaves
+    exactly as before - native_m3 is False and this is dead code.
+
+    NATIVE ATTN (~/opgraft-K64, two_tile_decode.native_attn_enabled). A second, C++-only
+    graft component - the batch-64 attn_decode_prep and nlp_concat_heads_decode kernels
+    themselves, not a Python source patch - so its presence is a RUNTIME/ENV fact
+    (QWEN_FAST_NATIVE_ATTN=1, set only when lever_n_m3native_run_arm.sh's KOPGRAFT64
+    block mounted it), never a model attribute, unlike native_m3's hasattr check.
+    Independent of native_m3: once engaged, the attention binder's forward runs the prep
+    op once at the block's full row count instead of once per tile, and leaves
+    `_concat_heads_decode` unbound so the model's own method (now native at the block's
+    rows) runs directly - the same "leave it native" shape native_m3 uses for `_wo_proj`.
+    `attention_binding.prep_guard` and `.concat_guard` (TwoTileNativeAttnGuard) are
+    appended as two extra two_tile entries ONLY when native_attn is engaged, so run()'s
+    generic per-binder loop guards both retired legacy forms (`expected_calls=0`, loud
+    on a leak) without changing the tuple's shape - and so nothing that unpacks this
+    function's return by position - as (norm, attention, mlp, gdn_output) - needs to
+    change when native_attn stays off, which is every four-user round today."""
     validate_checkpoint(rows, rows)
     if rows <= TILE_ROWS:
         return ()
     from two_tile_norm import bind_two_tile_norms
-    from two_tile_decode import bind_two_tile_attention, bind_two_tile_gdn_output, bind_two_tile_mlp
+    from two_tile_decode import bind_two_tile_attention, bind_two_tile_gdn_output, bind_two_tile_mlp, native_attn_enabled
 
     native_m3 = hasattr(getattr(model, 'args', None), 'attn_wo_decode_1d_progcfg_64')
-    if native_m3:
+    native_attn = native_attn_enabled()
+    if native_m3 or native_attn:
         from dflash_device import pindiag
-        pindiag('[PINDIAG] native_m3 engaged: rows={} (wo/gdn-out/mlp native at per_core_M=2; '
-               'attn_decode_prep and nlp_concat_heads_decode stay two-call)', rows)
+        if native_m3:
+            pindiag('[PINDIAG] native_m3 engaged: rows={} (wo/gdn-out/mlp native at per_core_M=2)', rows)
+        if native_attn:
+            pindiag('[PINDIAG] native_attn engaged: one attn_decode_prep at batch 64 and one '
+                   'nlp_concat_heads_decode at 64 users')
+    attention_binding = bind_two_tile_attention(model, rows, operations, native_m3=native_m3, native_attn=native_attn)
+    # native_attn's leak guards are appended, never inserted, and only when engaged: the
+    # tuple's first four entries stay (norm, attention, mlp, gdn_output) in that order
+    # either way, so every existing positional unpack of this function's return keeps
+    # working unchanged with native_attn off.
+    guards = (attention_binding.prep_guard, attention_binding.concat_guard) if native_attn else ()
     return (bind_two_tile_norms(model, rows, operations),
-            bind_two_tile_attention(model, rows, operations, native_m3=native_m3),
+            attention_binding,
             bind_two_tile_mlp(model, rows, operations, native_m3=native_m3),
-            bind_two_tile_gdn_output(model, rows, operations, native_m3=native_m3))
+            bind_two_tile_gdn_output(model, rows, operations, native_m3=native_m3)) + guards
 
 
 def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):
@@ -589,6 +615,8 @@ class ModelBatch:
         # forward finds the block's writer and readers already bound. Nothing within one tile.
         self.two_tile = two_tile_bindings(self.rows, model, ttnn)
         self.native_m3 = hasattr(getattr(model, 'args', None), 'attn_wo_decode_1d_progcfg_64')
+        from two_tile_decode import native_attn_enabled
+        self.native_attn = native_attn_enabled()
         for binder in self.two_tile:
             self.bindings.extend(binder.bindings)
         if profiler:
@@ -730,7 +758,7 @@ class ModelBatch:
                                          '%d unexpected call(s) leaked through' % (binder.label, engaged))
                 raise AssertionError('Every %s of the wide block must take its two-tile form: %d engaged, %d expected'
                                      % (binder.label, engaged, binder.expected_calls))
-        if getattr(self, 'native_m3', False) and two_tile:
+        if (getattr(self, 'native_m3', False) or getattr(self, 'native_attn', False)) and two_tile:
             from dflash_device import pindiag
             pindiag('[PINDIAG] native_m3 binder calls this round: {}',
                    {binder.label: binder.calls - before for binder, before in zip(two_tile, before_two_tile)})

@@ -30,6 +30,14 @@ what the target 200 tok/s/user work measures, and the packed-step/audit env vars
 that produce [PACKED-PHASE] lines are set by lever_n_m3native_run_arm.sh at
 `docker run`, not here - they are inherited by this process and by the vLLM server
 subprocess it starts.
+
+K64 KERNEL GRAFT (KOPGRAFT64, run_arm's optional mount block). A second, independent
+graft: the batch-64 attn_decode_prep and nlp_concat_heads_decode C++ kernels
+themselves, mounted only when KOPGRAFT64 is set (QWEN_FAST_NATIVE_ATTN=1 then reaches
+the container). Not part of the pass/fail criteria above - this gate is run once
+without it (the plain graft) and once with it, so `native_attn_engaged`
+(NATIVE_ATTN_MARKER, the "[PINDIAG] native_attn engaged" line two_tile_bindings logs
+once) is recorded in the JSON for the run to be read against, not asserted here.
 """
 
 import argparse
@@ -59,6 +67,7 @@ BLOCK_SIZE = 64
 MODEL = ('/models/hub/models--Qwen--Qwen3.8-27B/snapshots/'
          '1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0')
 NATIVE_M3_MARKER = '[PINDIAG] native_m3'
+NATIVE_ATTN_MARKER = '[PINDIAG] native_attn engaged'
 PACKED_PHASE_TRACE_MS = re.compile(r'\[PACKED-PHASE\][^\n]*\btrace_ms=([0-9.]+)')
 BINDER_CALLS_LINE = re.compile(r'\[PINDIAG\] native_m3 binder calls this round: (\{.*\})')
 REFERENCE_NAME = re.compile(r'^single-user-(?:(\d{4})-)?\d+\.json$')
@@ -94,7 +103,13 @@ def load_references(directory):
 def start_server(port, users, context, results, log_name, readiness_seconds=900):
     """The fast T16 + speculation recipe the four-user cycle bench serves
     (qwen-fp2u-image.yml), so the packed round under test is the one the 200
-    tok/s/user work actually measures."""
+    tok/s/user work actually measures.
+
+    --served-model-name is 'qwen-longctx', not this gate's own name: stream_once
+    (longctx_cycle_bench.py, reused here exactly) hard-codes model='qwen-longctx' in
+    its request payload, so any other served name 404s every stream in milliseconds
+    (gate 1, run 35556533480 - a false negative that looked like readiness with zero
+    decode rounds actually run)."""
     recipe = dict(tt=dict(trace_mode='decode_only', trace_region_size=1073741824,
                           l1_small_size=24576),
                  qwen_fast_t16=True,
@@ -102,7 +117,7 @@ def start_server(port, users, context, results, log_name, readiness_seconds=900)
                                         fixtures='/experiment-dflash-fixture', target_snapshot=MODEL))
     blocks = -(-(users * context) // BLOCK_SIZE)
     command = [sys.executable, '-m', 'vllm.entrypoints.openai.api_server',
-               '--model', MODEL, '--served-model-name', 'qwen-m3native',
+               '--model', MODEL, '--served-model-name', 'qwen-longctx',
                '--host', '127.0.0.1', '--port', str(port), '--dtype', 'bfloat16',
                '--max-model-len', str(context), '--max-num-seqs', str(users),
                '--max-num-batched-tokens', str(context),
@@ -245,6 +260,7 @@ def main():
 
         log_text = log_path.read_text(errors='replace') if log_path.is_file() else ''
         report['native_m3_marker_present'] = NATIVE_M3_MARKER in log_text
+        report['native_attn_engaged'] = NATIVE_ATTN_MARKER in log_text
         report['packed_phase'] = packed_phase_stats(log_text)
         binder_rounds = retired_binder_rounds(log_text)
         report['retired_binder_rounds_observed'] = len(binder_rounds)

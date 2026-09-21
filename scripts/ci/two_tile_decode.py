@@ -96,8 +96,28 @@ device by v51 before layer 3's prep: the fused QKV matmul at per_core_M 2, and t
 2D program configs at M = 64 for the GDN in and out projections and w1, w3, w2.
 """
 
+import os
+
 TILE = 32
 SUBBLOCK_CAP = 4  # fp32 dest accumulation: the builder's cap on out_subblock_h * out_subblock_w
+
+NATIVE_ATTN_ENV = 'QWEN_FAST_NATIVE_ATTN'
+
+
+def native_attn_enabled(environ=None):
+    """Whether the K64 kernel graft (~/opgraft-K64: the batch-64
+    ttnn.transformer.attn_decode_prep and nlp_concat_heads_decode kernels, both proved
+    bit-exact on device) is mounted into the serving container this process runs in - a
+    RUNTIME/ENV fact, never a model attribute the way native_m3 is. native_m3 patches
+    Python source (model_config.py, attention/tp.py, gdn/tp.py, mlp.py), so its own
+    presence is detectable by hasattr on the model args; this graft replaces only the
+    two C++ ops and their bindings (_ttnn.so, _ttnncpp.so, the op directories) - nothing
+    lands on the model args to detect. Set QWEN_FAST_NATIVE_ATTN=1 only when the graft
+    is mounted (lever_n_m3native_run_arm.sh's KOPGRAFT64 block); leave it unset and the
+    two-call path - prep_by_tile's two 32-batch attn_decode_prep calls joined, then
+    TwoTileConcatHeads' two 32-user _concat_heads_decode halves joined - is exactly
+    today's."""
+    return (os.environ if environ is None else environ).get(NATIVE_ATTN_ENV) == '1'
 
 
 def validate_two_tile_rows(rows):
@@ -191,6 +211,28 @@ def prep_by_tile(operations, attention, qkv_raw, cos, sin, rows):
     finally:
         for value in owned:
             operations.deallocate(value)
+
+
+def prep_native(operations, attention, qkv_raw, cos, sin, rows):
+    """ttnn.transformer.attn_decode_prep over the block as ONE call at its full row count,
+    once the K64 graft's kernel accepts batch > 32 (QWEN_FAST_NATIVE_ATTN):
+    `attention._kv_shard_cfg(rows)` - the 8x8 grid attention/tp.py already builds for
+    B != self.B - at batch=rows, over the fused projection and rotary tables whole (no
+    per-tile slice, no per-tile join). The op's four outputs are handed back untouched,
+    exactly as they are at one tile; nothing is owned or freed here - prep_by_tile's own
+    per-tile pieces simply do not exist on this path."""
+    validate_two_tile_rows(rows)
+    shape, rope = tuple(qkv_raw.shape), tuple(cos.shape)
+    if len(shape) != 4 or shape[:3] != (1, 1, rows):
+        raise ValueError('The fused QKV projection of a %d-row block must be (1, 1, %d, width); %r given' % (rows, rows, shape))
+    if len(rope) != 4 or rope[:2] != (1, rows) or tuple(sin.shape) != rope:
+        raise ValueError('The rotary tables of a %d-row block must be a (1, %d, 1, rope_dim) pair; %r and %r given'
+                         % (rows, rows, rope, tuple(sin.shape)))
+    config = attention._kv_shard_cfg(rows)
+    return operations.transformer.attn_decode_prep(
+        qkv_raw, cos, sin, attention.tw['q_norm'], attention.tw['k_norm'],
+        attention.NH, attention.NKV, attention.HD, attention.rope_dim, config,
+        batch=rows, memory_config=operations.DRAM_MEMORY_CONFIG)
 
 
 class TwoTileConcatHeads:
@@ -307,11 +349,24 @@ class TwoTileAttentionDecode:
     patched attention/tp.py widens its own gate and selects `attn_wo_decode_1d_progcfg_64`
     (lever_n_m3native_patch.patch_attention_tp), so no wrapping is needed: `self.wo` is
     None and `_decode_from_prep` finds `_wo_proj` unbound - the class's own, now-native,
-    method - the same way it always looked it up (attention/tp.py:749)."""
+    method - the same way it always looked it up (attention/tp.py:749).
 
-    def __init__(self, attention, rows, operations, progcfg, native_m3=False):
+    NATIVE ATTN (native_attn=True). Independent of native_m3 (a separate graft component,
+    gated on QWEN_FAST_NATIVE_ATTN rather than a model attribute): the prep op runs once
+    at the block's full row count (`prep_native`) instead of once per 32-row tile, and
+    `_concat_heads_decode` is left unbound so `_decode_from_prep` finds the model's own
+    method - the K64 graft's kernel now serves it at the block's full row count in one
+    call, the same "leave it native" shape native_m3 uses for `_wo_proj`. `self.concat`
+    is still built (an inert call counter for model_batch.run()'s zero-call leak guard,
+    the discipline TwoTileMLPBinding/TwoTileGDNOutputBinding use under native_m3) but is
+    never bound and never expected to be called; `self.prep_calls` counts how many times
+    the legacy sliced `prep_by_tile` path ran (must stay 0 under native_attn)."""
+
+    def __init__(self, attention, rows, operations, progcfg, native_m3=False, native_attn=False):
         validate_two_tile_rows(rows)
-        self.rows, self.operations, self.progcfg, self.native_m3 = rows, operations, progcfg, native_m3
+        self.rows, self.operations, self.progcfg = rows, operations, progcfg
+        self.native_m3, self.native_attn = native_m3, native_attn
+        self.prep_calls = 0
         args = getattr(attention, 'args', None)
         if args is None or not getattr(args, 'proj_1d_decode', False):
             raise ValueError('The two-tile attention forward serves the 1D decode projection the model config selects')
@@ -346,13 +401,17 @@ class TwoTileAttentionDecode:
         rows = self.rows
         qkv_raw = attention._qkv_raw_decode(x)
         try:
-            q, gate, k_sh, v_sh = prep_by_tile(operations, attention, qkv_raw, cos_tt, sin_tt, rows)
+            if self.native_attn:
+                q, gate, k_sh, v_sh = prep_native(operations, attention, qkv_raw, cos_tt, sin_tt, rows)
+            else:
+                q, gate, k_sh, v_sh = prep_by_tile(operations, attention, qkv_raw, cos_tt, sin_tt, rows)
+                self.prep_calls += 1
         finally:
             operations.deallocate(qkv_raw)
         concats = self.concat.calls
         wo_calls = self.wo.calls if self.wo is not None else 0
         result = attention._decode_from_prep(q, gate, k_sh, v_sh, cur_pos_tt, page_table, rows)
-        if self.concat.calls - concats != 1:
+        if not self.native_attn and self.concat.calls - concats != 1:
             raise AssertionError("The wide block's attention tail must take its two-tile head concat exactly once; "
                                  "%d taken" % (self.concat.calls - concats))
         if self.wo is not None and self.wo.calls - wo_calls != 1:
@@ -379,11 +438,21 @@ class TwoTileAttentionBinding:
     is used directly. `_wo_proj` is native at the block's rows too
     (lever_n_m3native_patch.patch_attention_tp), so it needs no two-tile wrapping or
     binding here - TwoTileAttentionDecode's own `wo` is None and `_decode_from_prep`
-    finds the class's native `_wo_proj` unbound."""
+    finds the class's native `_wo_proj` unbound.
+
+    NATIVE ATTN (native_attn=True). Independent of native_m3: `_concat_heads_decode` is
+    not bound (`bindings` carries only `forward_decode` per layer, plus `_wo_proj` when
+    native_m3 also leaves it unbound), so `_decode_from_prep` finds the model's own
+    method - the K64 graft's kernel now serves it at the block's rows in one call. Each
+    forward's own prep op call also runs once at the block's full rows instead of once
+    per tile (TwoTileAttentionDecode.native_attn). `prep_guard` and `concat_guard`
+    expose the per-layer legacy-path counters (TwoTileNativeAttnGuard) so
+    model_batch.run()'s generic per-binder loop can guard both retired forms the same
+    way it guards MLP/GDN-output under native_m3: `expected_calls` 0, loud on a leak."""
 
     label = 'full-attention forward'
 
-    def __init__(self, model, rows, operations, native_m3=False):
+    def __init__(self, model, rows, operations, native_m3=False, native_attn=False):
         validate_two_tile_rows(rows)
         layers = [layer for layer in getattr(model, 'layers', ()) if getattr(layer, 'is_full_attention', False)]
         args = getattr(model, 'args', None)
@@ -392,7 +461,7 @@ class TwoTileAttentionBinding:
         attentions = [layer.attention for layer in layers]
         if any(getattr(attention, 'args', None) is not args for attention in attentions):
             raise ValueError('Every full-attention layer must share the model args the config is bound on')
-        self.rows, self.native_m3 = rows, native_m3
+        self.rows, self.native_m3, self.native_attn = rows, native_m3, native_attn
         if native_m3:
             native_64 = getattr(args, 'attn_qkv_decode_1d_progcfg_64', None)
             if native_64 is None:
@@ -403,19 +472,56 @@ class TwoTileAttentionBinding:
             if native is None:
                 raise ValueError('The model args carry no attn_qkv_decode_1d_progcfg to rebuild; the model changed')
             self.progcfg = two_tile_matmul_1d_progcfg(native, rows, operations)
-        self.forwards = [TwoTileAttentionDecode(attention, rows, operations, self.progcfg, native_m3=native_m3)
+        self.forwards = [TwoTileAttentionDecode(attention, rows, operations, self.progcfg,
+                                                native_m3=native_m3, native_attn=native_attn)
                          for attention in attentions]
         self.bindings = [(args, 'attn_qkv_decode_1d_progcfg', self.progcfg)]
         for attention, forward in zip(attentions, self.forwards):
             self.bindings.append((attention, 'forward_decode', forward))
-            self.bindings.append((attention, '_concat_heads_decode', forward.concat))
+            if not native_attn:
+                self.bindings.append((attention, '_concat_heads_decode', forward.concat))
             if forward.wo is not None:
                 self.bindings.append((attention, '_wo_proj', forward.wo))
         self.expected_calls = len(self.forwards)
+        self.prep_guard = TwoTileNativeAttnGuard(self, 'sliced attn_decode_prep', lambda forward: forward.prep_calls)
+        self.concat_guard = TwoTileNativeAttnGuard(self, 'two-tile head concat', lambda forward: forward.concat.calls)
 
     @property
     def calls(self):
         return sum(forward.calls for forward in self.forwards)
+
+
+class TwoTileNativeAttnGuard:
+    """A read-only view over one attention binding's per-layer legacy-path call counts,
+    shaped for model_batch.run()'s generic per-binder loop (label/calls/expected_calls/
+    bindings, the same surface every other two_tile binder exposes). QWEN_FAST_NATIVE_ATTN
+    retires two things once the K64 graft is mounted: the sliced two-call
+    ttnn.transformer.attn_decode_prep (prep_by_tile) in favour of one call at the block's
+    full row count (prep_native), and the two-tile head concat (TwoTileConcatHeads) in
+    favour of the model's own _concat_heads_decode, which the graft's kernel now serves at
+    the block's full row count too. Both retirements make `expected_calls` 0 here - the
+    per-layer TwoTileConcatHeads instances stay built, unbound, as inert counters, the
+    same discipline TwoTileMLPBinding and TwoTileGDNOutputBinding use under native_m3, and
+    prep_by_tile's own use is a plain counter kept on the forward itself - so any call
+    that still lands on either path is a leak that must fail loudly rather than just cost
+    a slower round. Without native_attn this is unchanged: TwoTileAttentionDecode's own
+    per-forward assertions already enforce exactly one call to each, every round, so here
+    `expected_calls` is simply one per full-attention forward. `bindings` is always empty:
+    the real bindings (when present) already live on the attention binding itself; this
+    guard only counts."""
+
+    bindings = ()
+
+    def __init__(self, attention_binding, label, calls_of):
+        self.attention_binding, self.label, self._calls_of = attention_binding, label, calls_of
+
+    @property
+    def expected_calls(self):
+        return 0 if self.attention_binding.native_attn else len(self.attention_binding.forwards)
+
+    @property
+    def calls(self):
+        return sum(self._calls_of(forward) for forward in self.attention_binding.forwards)
 
 
 class TwoTileMLPForward:
@@ -549,8 +655,8 @@ class TwoTileGDNOutputBinding:
         return sum(projection.calls for projection in self.projections)
 
 
-def bind_two_tile_attention(model, rows, operations, native_m3=False):
-    return TwoTileAttentionBinding(model, rows, operations, native_m3=native_m3)
+def bind_two_tile_attention(model, rows, operations, native_m3=False, native_attn=False):
+    return TwoTileAttentionBinding(model, rows, operations, native_m3=native_m3, native_attn=native_attn)
 
 
 def bind_two_tile_mlp(model, rows, operations, native_m3=False):

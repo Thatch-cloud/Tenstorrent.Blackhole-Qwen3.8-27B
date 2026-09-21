@@ -1,12 +1,14 @@
+import os
 import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from model_batch import instance_overrides
-from two_tile_decode import (TwoTileAttentionBinding, TwoTileAttentionDecode, TwoTileConcatHeads,
-                             TwoTileGDNOutputBinding, TwoTileMLPBinding, TwoTileMLPForward, TwoTileProjectionSplit,
-                             bind_two_tile_attention, bind_two_tile_gdn_output, bind_two_tile_mlp, prep_by_tile,
+from two_tile_decode import (NATIVE_ATTN_ENV, TwoTileAttentionBinding, TwoTileAttentionDecode, TwoTileConcatHeads,
+                             TwoTileGDNOutputBinding, TwoTileMLPBinding, TwoTileMLPForward, TwoTileNativeAttnGuard,
+                             TwoTileProjectionSplit, bind_two_tile_attention, bind_two_tile_gdn_output,
+                             bind_two_tile_mlp, native_attn_enabled, prep_by_tile, prep_native,
                              two_tile_matmul_1d_progcfg, validate_two_tile_rows)
 
 
@@ -22,8 +24,9 @@ class FakeTTNN:
     class BufferType:
         L1, DRAM = 'l1', 'dram'
 
-    def __init__(self):
+    def __init__(self, prep_limit=32):
         self.deallocated, self.calls = [], []
+        self.prep_limit = prep_limit
         self.transformer = SimpleNamespace(attn_decode_prep=Mock(side_effect=self.prep))
 
     def tensor(self, shape, name, memory='dram'):
@@ -31,8 +34,10 @@ class FakeTTNN:
 
     def prep(self, qkv, cos, sin, q_norm, k_norm, NH, NKV, HD, rope_dim, config, *, batch, memory_config):
         """The model's op at one tile: q and the gate (1, B, NH, HD) interleaved, K and V
-        (1, B, 32, HD) height-sharded per `config`. At batch 64 the device hung (v51)."""
-        if batch > 32:
+        (1, B, 32, HD) height-sharded per `config`. At batch 64 the stock kernel hung
+        (v51); `prep_limit=None` stands in for the K64 graft's fixed kernel (proved
+        bit-exact at B=64), which raises nothing here regardless of batch."""
+        if self.prep_limit is not None and batch > self.prep_limit:
             raise RuntimeError('attn_decode_prep hangs at batch %d' % batch)
         tag = qkv.name
         return (self.tensor((1, batch, NH, HD), 'q(%s)' % tag, memory_config),
@@ -104,11 +109,12 @@ class FakeAttention:
     block-bound tail: it calls the head concat and the output projection on `self`, as the
     model's does (attention/tp.py:749, :7xx)."""
 
-    def __init__(self, args, ttnn, *, nlp_heads=True):
+    def __init__(self, args, ttnn, *, nlp_heads=True, concat_limit=32):
         self.args, self.ttnn = args, ttnn
         self.use_paged, self._fused_qkv, self._use_nlp_decode_heads = True, True, nlp_heads
         self.tw = {'q_norm': 'qn', 'k_norm': 'kn'}
         self.NH, self.NKV, self.HD, self.rope_dim = 12, 2, 256, 64
+        self.concat_limit = concat_limit
         self._qkv_raw_decode = Mock(side_effect=lambda x: ttnn.tensor((1, 1, x.shape[-2], 7168), 'qkv_raw'))
         self._kv_shard_cfg = Mock(side_effect=lambda batch: 'kv-shard-%d' % batch)
         self._decode_from_prep = Mock(side_effect=self.tail)
@@ -125,8 +131,10 @@ class FakeAttention:
 
     def _concat_heads_decode(self, gated, B):
         """The model's method: consumes and frees its input, emits (1, B, NH * HD) in L1; its
-        op refuses more than one tile of users (v51's host raise)."""
-        if B > 32:
+        op refuses more than one tile of users (v51's host raise) unless `concat_limit` is
+        raised past it (None stands in for the K64 graft's fixed kernel, proved bit-exact
+        at B=64, which accepts any batch here)."""
+        if self.concat_limit is not None and B > self.concat_limit:
             raise RuntimeError('TT_FATAL nlp_concat_heads_decode_device_operation.cpp:39: input_shape[1] <= 32')
         self.native_concats.append((gated.name, B))
         self.ttnn.deallocate(gated)
@@ -189,7 +197,7 @@ def fake_gdn(args, ttnn):
 
 
 def fake_model(ttnn, layers=64, full=(3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63), progcfg=None,
-              native_m3=False):
+              native_m3=False, concat_limit=32):
     args = SimpleNamespace(proj_1d_decode=True, attn_qkv_decode_1d_progcfg=progcfg or one_tile_progcfg(ttnn))
     args.get_norm_config = Mock(side_effect=lambda name, mode: dict(
         sharded_output_config=ttnn.MemoryConfig('width', 'l1', ttnn.ShardSpec('g', [32, 160], 'rm')),
@@ -211,7 +219,8 @@ def fake_model(ttnn, layers=64, full=(3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 
     for index in range(layers):
         is_full = index in full
         model.layers.append(SimpleNamespace(is_full_attention=is_full,
-                                            attention=fake_attention(args, ttnn) if is_full else fake_gdn(args, ttnn),
+                                            attention=fake_attention(args, ttnn, concat_limit=concat_limit) if is_full
+                                            else fake_gdn(args, ttnn),
                                             feed_forward=fake_mlp(ttnn)))
     return model
 
@@ -259,6 +268,63 @@ class ProgramConfigTests(unittest.TestCase):
             with self.subTest(rows=rows), self.assertRaisesRegex(ValueError, 'beyond one tile'):
                 two_tile_matmul_1d_progcfg(one_tile_progcfg(ttnn), rows, ttnn)
         self.assertEqual(validate_two_tile_rows(64), 2)
+
+
+class NativeAttnDetectionTests(unittest.TestCase):
+    """QWEN_FAST_NATIVE_ATTN gates native_attn_enabled - a RUNTIME/ENV fact (the K64
+    kernel graft patches no Python source), never inferred from the model the way
+    native_m3's hasattr check is."""
+
+    def test_only_the_exact_value_one_engages_it(self):
+        self.assertEqual(NATIVE_ATTN_ENV, 'QWEN_FAST_NATIVE_ATTN')
+        self.assertFalse(native_attn_enabled({}))
+        for off in ('0', 'true', 'True', 'yes', ' 1', '1 '):
+            with self.subTest(value=off):
+                self.assertFalse(native_attn_enabled({NATIVE_ATTN_ENV: off}))
+        self.assertTrue(native_attn_enabled({NATIVE_ATTN_ENV: '1'}))
+
+    def test_defaults_to_reading_the_real_process_environment(self):
+        with patch.dict(os.environ, {NATIVE_ATTN_ENV: '1'}):
+            self.assertTrue(native_attn_enabled())
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(native_attn_enabled())
+
+
+class PrepNativeTests(unittest.TestCase):
+    """ttnn.transformer.attn_decode_prep as ONE call at the block's full row count
+    (QWEN_FAST_NATIVE_ATTN), once the K64 graft's kernel accepts batch > 32: no slicing,
+    no per-tile join, `_kv_shard_cfg(rows)` rather than `_kv_shard_cfg(TILE)`."""
+
+    def test_one_call_over_the_whole_projection_and_tables_no_slice_or_join(self):
+        ttnn = FakeTTNN(prep_limit=None)
+        attention = fake_attention(SimpleNamespace(proj_1d_decode=True), ttnn, concat_limit=None)
+        qkv_raw = ttnn.tensor((1, 1, 64, 7168), 'qkv_raw')
+        cos, sin = ttnn.tensor((1, 64, 1, 64), 'cos'), ttnn.tensor((1, 64, 1, 64), 'sin')
+        q, gate, k_sh, v_sh = prep_native(ttnn, attention, qkv_raw, cos, sin, 64)
+        attention._kv_shard_cfg.assert_called_once_with(64)
+        prep = ttnn.transformer.attn_decode_prep
+        prep.assert_called_once_with(qkv_raw, cos, sin, 'qn', 'kn', 12, 2, 256, 64, 'kv-shard-64',
+                                     batch=64, memory_config='dram')
+        self.assertEqual([(value.shape, value.name) for value in (q, gate, k_sh, v_sh)],
+                         [((1, 64, 12, 256), 'q(qkv_raw)'), ((1, 64, 12, 256), 'gate(qkv_raw)'),
+                          ((1, 64, 32, 256), 'k_sh(qkv_raw)'), ((1, 64, 32, 256), 'v_sh(qkv_raw)')])
+        # unlike prep_by_tile, nothing is sliced, joined, owned or freed here
+        self.assertEqual(ttnn.calls, [])
+        self.assertEqual(ttnn.deallocated, [])
+
+    def test_refuses_the_wrong_projection_or_table_geometry(self):
+        ttnn = FakeTTNN(prep_limit=None)
+        attention = fake_attention(SimpleNamespace(proj_1d_decode=True), ttnn)
+        cos, sin = ttnn.tensor((1, 64, 1, 64), 'cos'), ttnn.tensor((1, 64, 1, 64), 'sin')
+        with self.assertRaisesRegex(ValueError, 'fused QKV projection of a 64-row block'):
+            prep_native(ttnn, attention, ttnn.tensor((1, 1, 32, 7168), 'qkv_raw'), cos, sin, 64)
+        with self.assertRaisesRegex(ValueError, 'rotary tables of a 64-row block'):
+            prep_native(ttnn, attention, ttnn.tensor((1, 1, 64, 7168), 'qkv_raw'), ttnn.tensor((1, 32, 1, 64), 'cos'), sin, 64)
+        with self.assertRaisesRegex(ValueError, 'rotary tables of a 64-row block'):
+            prep_native(ttnn, attention, ttnn.tensor((1, 1, 64, 7168), 'qkv_raw'), cos, ttnn.tensor((1, 64, 1, 32), 'sin'), 64)
+        with self.assertRaisesRegex(ValueError, 'beyond one tile'):
+            prep_native(ttnn, attention, ttnn.tensor((1, 1, 32, 7168), 'qkv_raw'), cos, sin, 32)
+        ttnn.transformer.attn_decode_prep.assert_not_called()
 
 
 class AttentionForwardTests(unittest.TestCase):
@@ -453,6 +519,83 @@ class AttentionForwardTests(unittest.TestCase):
             TwoTileAttentionDecode(NoWo(SimpleNamespace(proj_1d_decode=True), ttnn), 64, ttnn, progcfg)
         with self.assertRaisesRegex(ValueError, 'beyond one tile'):
             TwoTileAttentionDecode(fake_attention(SimpleNamespace(proj_1d_decode=True), ttnn), 32, ttnn, progcfg)
+
+
+class NativeAttnAttentionForwardTests(unittest.TestCase):
+    """QWEN_FAST_NATIVE_ATTN: the forward at 64 rows runs the K64 graft's kernels once
+    each - one attn_decode_prep at batch 64, one model-native _concat_heads_decode at 64
+    users - instead of the sliced two-call forms; `_wo_proj` two-tile splitting (native_m3
+    territory) is unaffected either way."""
+
+    def forward(self, ttnn=None, rows=64, native_m3=False, **options):
+        ttnn = ttnn or FakeTTNN(prep_limit=None)
+        args = SimpleNamespace(proj_1d_decode=True)
+        attention = fake_attention(args, ttnn, concat_limit=None, **options)
+        progcfg = two_tile_matmul_1d_progcfg(one_tile_progcfg(ttnn), 64, ttnn)
+        args.attn_qkv_decode_1d_progcfg = progcfg
+        return ttnn, attention, TwoTileAttentionDecode(attention, rows, ttnn, progcfg,
+                                                       native_m3=native_m3, native_attn=True)
+
+    def test_one_native_prep_call_and_the_models_own_concat_at_the_full_batch(self):
+        ttnn, attention, forward = self.forward()
+        self.assertTrue(forward.native_attn)
+        x, positions, cos, sin = block_inputs(ttnn)
+        with instance_overrides([(attention, '_wo_proj', forward.wo)]):
+            self.assertEqual(forward(x, positions, cos, sin, page_table='pages'), 'attention-output')
+        attention._qkv_raw_decode.assert_called_once_with(x)
+        # the 8x8 (64-user) shard config, never the 32-user one prep_by_tile takes
+        attention._kv_shard_cfg.assert_called_once_with(64)
+        prep = ttnn.transformer.attn_decode_prep
+        prep.assert_called_once()
+        qkv_arg, cos_arg, sin_arg = prep.call_args.args[:3]
+        # the whole projection and tables, unsliced - qkv_raw's own name/shape, not a
+        # 32-row piece of it
+        self.assertEqual((qkv_arg.name, qkv_arg.shape), ('qkv_raw', (1, 1, 64, 7168)))
+        self.assertIs(cos_arg, cos)
+        self.assertIs(sin_arg, sin)
+        self.assertEqual(prep.call_args.kwargs, dict(batch=64, memory_config='dram'))
+        # no per-tile slicing or joining of the projection, tables or gated SDPA output -
+        # exact-name match, so wo's own two-tile split (native_m3 territory, unaffected
+        # by native_attn) over its DIFFERENTLY-named 'heads(gated)' activation is not
+        # mistaken for a leak here
+        disallowed = {'qkv_raw', 'cos', 'sin', 'gated'}
+        for entry in ttnn.calls:
+            if entry[0] == 'slice':
+                self.assertNotIn(entry[1], disallowed)
+            elif entry[0] == 'concat':
+                self.assertFalse(disallowed.intersection(entry[1]))
+        tail = attention._decode_from_prep
+        tail.assert_called_once()
+        # the model's own concat ran once, at the full 64-user batch, never through the
+        # retired TwoTileConcatHeads wrapper
+        self.assertEqual(attention.native_concats, [('gated', 64)])
+        self.assertEqual(attention.wo_calls[0][1], (1, 32, 3072))  # wo stays two-tile, unaffected
+        self.assertEqual(len(attention.wo_calls), 2)
+        self.assertEqual((forward.calls, forward.prep_calls, forward.concat.calls, forward.wo.calls), (1, 0, 0, 1))
+
+    def test_legacy_slicing_never_engages_even_though_the_wrapper_objects_still_exist(self):
+        ttnn, attention, forward = self.forward()
+        self.assertIsInstance(forward.concat, TwoTileConcatHeads, 'kept as an inert leak counter')
+        x, positions, cos, sin = block_inputs(ttnn)
+        with instance_overrides([(attention, '_wo_proj', forward.wo)]):
+            forward(x, positions, cos, sin, page_table='pages')
+        # the retired wrapper was never bound, so it was never called either
+        self.assertFalse('_concat_heads_decode' in attention.__dict__)
+        self.assertEqual(forward.concat.calls, 0)
+        self.assertEqual(forward.prep_calls, 0)
+
+    def test_a_tail_that_skips_the_concat_is_not_flagged_here_under_native_attn(self):
+        """Without native_attn a skipped concat fails loudly inside the forward itself
+        (test_a_tail_that_skips_the_head_concat_is_refused); under native_attn the
+        concat is the model's own unbound method, so this forward has nothing local left
+        to check - model_batch.run()'s prep/concat guards catch a leak instead, at the
+        binder level. native_m3=True here too, so there is no wo check left to confound
+        this: native_attn's own concat check is what is under test."""
+        ttnn, attention, forward = self.forward(native_m3=True)
+        attention._decode_from_prep = Mock(return_value='no-concat')
+        x, positions, cos, sin = block_inputs(ttnn)
+        self.assertEqual(forward(x, positions, cos, sin, page_table='pages'), 'no-concat')
+        self.assertEqual(forward.calls, 1)
 
 
 class ConcatHeadsTests(unittest.TestCase):
@@ -731,6 +874,86 @@ class NativeM3AttentionBindingTests(unittest.TestCase):
         self.assertEqual([(instance, name) for instance, name, value in binding.bindings[1:]], expected)
 
 
+class NativeAttnAttentionBindingTests(unittest.TestCase):
+    """QWEN_FAST_NATIVE_ATTN: the attention binder drops its `_concat_heads_decode`
+    binding (the model's own method, native at the block's rows once the K64 graft's
+    kernel is mounted, runs unbound), independent of native_m3's `_wo_proj` retirement.
+    `prep_guard`/`concat_guard` (TwoTileNativeAttnGuard) expose the per-layer legacy-path
+    counters for model_batch.run()'s generic per-binder loop: expected_calls 0 under
+    native_attn, loud on a leak; unchanged (one per forward) otherwise."""
+
+    def test_concat_binding_drops_wo_binding_stays_prep_and_concat_guards_expect_zero(self):
+        ttnn = FakeTTNN(prep_limit=None)
+        model = fake_model(ttnn, layers=6, full=(3,), concat_limit=None)
+        binding = bind_two_tile_attention(model, 64, ttnn, native_attn=True)
+        self.assertTrue(binding.native_attn)
+        full = [layer.attention for layer in model.layers if layer.is_full_attention]
+        expected = []
+        for attention in full:
+            expected += [(attention, 'forward_decode'), (attention, '_wo_proj')]
+        self.assertEqual([(instance, name) for instance, name, value in binding.bindings[1:]], expected,
+                         'no _concat_heads_decode binding under native_attn: the model source runs it natively')
+        self.assertEqual((binding.prep_guard.expected_calls, binding.concat_guard.expected_calls), (0, 0))
+        self.assertEqual((binding.prep_guard.calls, binding.concat_guard.calls), (0, 0))
+        self.assertEqual((binding.prep_guard.label, binding.concat_guard.label),
+                         ('sliced attn_decode_prep', 'two-tile head concat'))
+        self.assertEqual(binding.prep_guard.bindings, ())
+        self.assertEqual(binding.concat_guard.bindings, ())
+
+        # driven for real: one native prep call and one native concat call per layer,
+        # never through the retired wrappers
+        with instance_overrides(binding.bindings):
+            for attention in full:
+                x, positions, cos, sin = block_inputs(ttnn)
+                attention.forward_decode(x, positions, cos, sin, page_table='pages')
+        self.assertEqual(binding.calls, 1)
+        self.assertEqual((binding.prep_guard.calls, binding.concat_guard.calls), (0, 0),
+                         'no leak: the legacy paths never ran')
+        self.assertTrue(all(attention.native_concats == [('gated', 64)] for attention in full))
+
+    def test_a_leaked_call_through_either_retired_wrapper_shows_up_on_its_guard(self):
+        ttnn = FakeTTNN(prep_limit=None)
+        model = fake_model(ttnn, layers=4, full=(1, 3), concat_limit=None)
+        binding = bind_two_tile_attention(model, 64, ttnn, native_attn=True)
+        # simulate a future bug that still reaches the retired per-layer wrapper objects
+        # (they are built as inert counters purely so a leak like this is visible)
+        binding.forwards[0].prep_calls += 1
+        self.assertEqual(binding.prep_guard.calls, 1)
+        self.assertEqual(binding.concat_guard.calls, 0)
+        gated = ttnn.tensor((1, 64, 12, 256), 'gated', 'l1')
+        binding.forwards[1].concat(gated, 64)
+        self.assertEqual(binding.concat_guard.calls, 1)
+
+    def test_native_attn_false_is_unchanged(self):
+        ttnn = FakeTTNN()
+        model = fake_model(ttnn, layers=6, full=(3,))
+        binding = bind_two_tile_attention(model, 64, ttnn)
+        self.assertFalse(binding.native_attn)
+        full = [layer.attention for layer in model.layers if layer.is_full_attention]
+        expected = []
+        for attention in full:
+            expected += [(attention, 'forward_decode'), (attention, '_concat_heads_decode'), (attention, '_wo_proj')]
+        self.assertEqual([(instance, name) for instance, name, value in binding.bindings[1:]], expected)
+        self.assertEqual((binding.prep_guard.expected_calls, binding.concat_guard.expected_calls), (1, 1))
+        with instance_overrides(binding.bindings):
+            for attention in full:
+                x, positions, cos, sin = block_inputs(ttnn)
+                attention.forward_decode(x, positions, cos, sin, page_table='pages')
+        self.assertEqual((binding.prep_guard.calls, binding.concat_guard.calls), (1, 1))
+
+    def test_native_m3_and_native_attn_together_leave_only_forward_decode_bound(self):
+        """Both grafts at once: `_wo_proj` is native (native_m3) and `_concat_heads_decode`
+        is native (native_attn), so the attention binder's only per-layer binding left is
+        `forward_decode` itself - it still has to run the prep op and pick the right
+        progcfg, so it cannot retire the way MLP/GDN-output's bindings do."""
+        ttnn = FakeTTNN(prep_limit=None)
+        model = fake_model(ttnn, layers=4, full=(1, 3), native_m3=True, concat_limit=None)
+        binding = bind_two_tile_attention(model, 64, ttnn, native_m3=True, native_attn=True)
+        full = [layer.attention for layer in model.layers if layer.is_full_attention]
+        self.assertEqual([(instance, name) for instance, name, value in binding.bindings[1:]],
+                         [(attention, 'forward_decode') for attention in full])
+
+
 class NativeM3MLPAndGDNOutputBindingTests(unittest.TestCase):
     """Lever N M3native retires the MLP and GDN-output two-tile wrappers entirely: their
     bindings are empty (nothing overrides the now-native feed_forward.forward / _row_proj)
@@ -986,6 +1209,37 @@ class ModelBatchWiringTests(unittest.TestCase):
             norm, attention, mlp, gdn_output = two_tile_bindings(64, model, ttnn)
         marker.assert_not_called()
         self.assertEqual([binder.expected_calls for binder in (norm, attention, mlp, gdn_output)], [129, 16, 64, 48])
+
+    def test_native_attn_appends_its_two_guards_and_fires_its_own_marker(self):
+        """QWEN_FAST_NATIVE_ATTN (a RUNTIME/ENV fact, unlike native_m3's hasattr check):
+        the tuple grows from four to six, the two extras being the attention binding's
+        own prep_guard/concat_guard, appended (never inserted) so every existing
+        positional unpack of the first four stays valid."""
+        from model_batch import two_tile_bindings
+
+        ttnn = FakeTTNN(prep_limit=None)
+        model = fake_model(ttnn, concat_limit=None)
+        with decode_mode_module(), patch.dict(os.environ, {NATIVE_ATTN_ENV: '1'}), \
+             patch('dflash_device.pindiag') as marker:
+            two_tile = two_tile_bindings(64, model, ttnn)
+        self.assertEqual(len(two_tile), 6)
+        norm, attention, mlp, gdn_output, prep_guard, concat_guard = two_tile
+        self.assertIsInstance(attention, TwoTileAttentionBinding)
+        self.assertIs(prep_guard, attention.prep_guard)
+        self.assertIs(concat_guard, attention.concat_guard)
+        self.assertEqual([binder.expected_calls for binder in two_tile], [129, 16, 64, 48, 0, 0])
+        self.assertEqual(marker.call_count, 1, 'one native_attn marker line, no native_m3 line (not engaged)')
+        self.assertIn('native_attn engaged', marker.call_args.args[0])
+
+    def test_native_attn_off_keeps_the_four_tuple_shape(self):
+        from model_batch import two_tile_bindings
+
+        ttnn = FakeTTNN()
+        model = fake_model(ttnn)
+        with decode_mode_module(), patch.dict(os.environ):
+            os.environ.pop(NATIVE_ATTN_ENV, None)
+            two_tile = two_tile_bindings(64, model, ttnn)
+        self.assertEqual(len(two_tile), 4)
 
     def fixture(self, two_tile):
         from model_batch import ModelBatch
