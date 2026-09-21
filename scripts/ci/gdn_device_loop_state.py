@@ -4,6 +4,8 @@ from gdn_multitoken_conv import addresses, release_owned, restore_prefix, run_pr
 from gdn_prefix import validate_rows
 from gdn_state_copy import copy_compact
 from gdn_batched_conv import norm_batch_enabled, run_batched_projected
+from gdn_user_batch import enabled as user_batch_enabled
+from gdn_user_batch_conv import run_user_batched_projected
 
 TILE = 32
 
@@ -123,7 +125,7 @@ def resident_piece(operations, piece, owned):
 class DeviceLoopState:
     def __init__(self, active, operations, kernels, compact_prologue=False, batch_conv=False, dma_windows=False,
                  packed_checkpoints=False, norm_batch=False, prefix_zero_reuse=False, defer_conv_publication=False,
-                 norm_source_root=None, commit_only=False, users=None):
+                 norm_source_root=None, commit_only=False, users=None, user_batch=None):
         if type(commit_only) is not bool or (commit_only and not (batch_conv and dma_windows and packed_checkpoints)):
             raise ValueError('Commit-only GDN requires packed batched DMA histories and an explicit decision owner')
         self.commit_only = commit_only
@@ -144,6 +146,18 @@ class DeviceLoopState:
             raise ValueError('DMA windows require batched convolution')
         if packed_checkpoints and not dma_windows:
             raise ValueError('Packed checkpoints require DMA-built convolution windows')
+        # QWEN_FAST_GDN_USER_BATCH: one recurrence/norm launch for every packed user
+        # instead of one pair per user (docs/gdn-user-batch-launches.md). Default OFF,
+        # and only ever consulted by the deferred packed path - an explicit bool here
+        # is the test seam, so a CPU fixture never reads the process environment.
+        if user_batch is None:
+            user_batch = user_batch_enabled()
+        if type(user_batch) is not bool:
+            raise ValueError('Explicit bool user-batched GDN option required')
+        if user_batch and not (batch_conv and dma_windows and packed_checkpoints
+                               and (defer_conv_publication or commit_only)):
+            raise ValueError('User-batched GDN requires packed batched DMA histories and deferred publication')
+        self.user_batch = user_batch
         if not active.direct or active.gdn.B != 8 or not active.gdn._stable_state:
             raise ValueError('Audited stable B8 active snapshots required')
         self.active, self.gdn, self.operations, self.kernels = active, active.gdn, operations, kernels
@@ -259,10 +273,18 @@ class DeviceLoopState:
         entries = self.segment_entries
         if deferred and (entries is None or len(entries) != len(spans)):
             raise ValueError('Deferred packed decode needs one entry per packed user, allocated at construction')
+        if self.user_batch and not (deferred and defer_publication):
+            raise ValueError('User-batched GDN serves the deferred packed decode, which publishes nothing here')
         projected = project_qkvzab_by_tile(operations, layer, packed, rows)
         results, owned, outputs = [], [projected], []
         last = len(spans) - 1
         try:
+            if self.user_batch:
+                results = self._recurrence_user_batched(projected, spans, slots, entries, owned)
+                for result in results:
+                    owned.extend(result['owned'])
+                    outputs.append(result['output'])
+                return self._finish_packed(spans, results, outputs, owned)
             for index, ((start, stop), slot, point, accepted) in enumerate(zip(spans, slots, checkpoints, prefixes)):
                 width = stop - start
                 entry = None if entries is None else entries[index]
@@ -303,20 +325,67 @@ class DeviceLoopState:
             # straight into its entry and never touches the native buffer at all); an
             # unpacked decode on the same layer afterwards would inherit that user, so
             # packed and unpacked blocks must not be mixed within a request.
-            output = outputs[0] if len(outputs) == 1 else operations.concat(outputs, dim=1)
-            if len(outputs) > 1:
-                owned.append(output)
-            pieces = tuple(results)
-            combined = dict(results[0])
-            combined.update(output=output, owned=owned, segments=tuple(spans),
-                            segment_results=pieces, commit_only_gdn=self.commit_only)
-            self.segment_results = pieces
-            self.calls += 1
-            self.checkpoint_calls += len(spans)
-            return combined
+            return self._finish_packed(spans, results, outputs, owned)
         except BaseException:
             release_owned(operations, owned)
             raise
+
+    def _recurrence_user_batched(self, projected, spans, slots, entries, owned):
+        """Every packed user's recurrence and fused norm/gate in ONE launch.
+
+        The per-segment state moves are exactly the ones the per-user path makes, in the
+        same order: each earlier segment's carried state goes straight into its own entry
+        with one `copy_compact`, and the LAST segment restores its slot into the native
+        buffer and saves it back out, which is what leaves the native buffer holding the
+        last user - the documented invariant the unpacked path and `commit_user` rely on.
+        Only the four launches that followed them become one.
+
+        Nothing is published here: this path is the deferred packed decode, so no entry
+        is written into the shared working state and no carry is advanced. That is also
+        why hoisting the state moves ahead of the launch is sound - the per-user path's
+        one shared write (`copy_compact(entry, self.state)`) does not happen at all when
+        publication is deferred, and a hoisted version of it would hand every user the
+        last user's convolution state.
+        """
+        operations, layer = self.operations, self.gdn
+        last = len(spans) - 1
+        pending = []
+        for index, ((start, stop), slot) in enumerate(zip(spans, slots)):
+            entry = entries[index]
+            if index == last:
+                self.active.restore(slot)
+                self.active.save(entry)
+            else:
+                copy_compact(slot, entry)
+            piece = resident_piece(operations,
+                                   operations.slice(projected, (0, start, 0), (1, stop, projected.shape[-1])), owned)
+            pending.append((piece, entry[0], entry[1:]))
+        results = run_user_batched_projected(layer.mesh, pending, list(layer.tw['conv_taps']),
+            layer.tw['dt_bias'], layer.tw['neg_exp_A'], layer.tw['norm_w'], self.kernels, operations,
+            prefix_zero_reuse=self.prefix_zero_reuse)
+        if len(results) != len(spans):
+            raise AssertionError('Batched GDN returned a result per packed user')
+        for result, (start, stop) in zip(results, spans):
+            if not result.get('user_batched', False) or not result.get('deferred_conv_publication', False):
+                raise AssertionError('User-batched GDN did not engage as selected')
+            if result.get('norm_batch', True) or result['states'].shape[0] != stop - start:
+                raise AssertionError('User-batched GDN did not return this user own prefix geometry')
+        return results
+
+    def _finish_packed(self, spans, results, outputs, owned):
+        """Join the segments' outputs and publish one block result, whichever path ran."""
+        operations = self.operations
+        output = outputs[0] if len(outputs) == 1 else operations.concat(outputs, dim=1)
+        if len(outputs) > 1:
+            owned.append(output)
+        pieces = tuple(results)
+        combined = dict(results[0])
+        combined.update(output=output, owned=owned, segments=tuple(spans),
+                        segment_results=pieces, commit_only_gdn=self.commit_only)
+        self.segment_results = pieces
+        self.calls += 1
+        self.checkpoint_calls += len(spans)
+        return combined
 
     def close(self):
         entries = list(self.segment_entries or ())
