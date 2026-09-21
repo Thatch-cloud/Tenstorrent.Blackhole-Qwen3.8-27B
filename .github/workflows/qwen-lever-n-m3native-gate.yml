@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p experiment-results graft/attention graft/gdn
-          image=sha256:11ef6dd3a6dac3ae01ec6a01b64425a2150716b7e114f0bf023b0d28b1abae34
+          image=sha256:a0dfff395249d8ec6a7d684adc6769781401d7ca86a0fb193c800f2ff28f794e
           root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
           name="qwen-m3native-extract-$GITHUB_RUN_ID"
           docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
@@ -109,6 +109,7 @@ jobs:
           # now admits.
           case "$GITHUB_REF_NAME" in
             *-v5) export KOPGRAFT64=/home/thatch/opgraft-K64c ;;
+            *-v7) export M3NATIVE_TRACED_PROPOSAL=1 ;;
           esac
           echo "tag=$GITHUB_REF_NAME KOPGRAFT64=${KOPGRAFT64:-}"
           bash scripts/ci/lever_n_m3native_run_arm.sh

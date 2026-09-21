@@ -21,7 +21,7 @@
 # fire (gate 1, run 35556533480: a false negative - no decode round ever ran, even
 # though the graft was mounted correctly). Setting it to 0 keeps the single M3 block.
 set -euo pipefail
-image="${1:-sha256:11ef6dd3a6dac3ae01ec6a01b64425a2150716b7e114f0bf023b0d28b1abae34}"
+image="${1:-sha256:a0dfff395249d8ec6a7d684adc6769781401d7ca86a0fb193c800f2ff28f794e}"
 target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
@@ -78,6 +78,18 @@ if [ -n "${KOPGRAFT64:-}" ]; then
   graft_binary_sha=$(sha256sum "$KOPGRAFT64/_ttnncpp.so" | cut -c1-64)
 fi
 
+# Proposals: the fp2u lane runs each request's draft proposal EAGERLY
+# (QWEN_FAST_EAGER_PROPOSAL=1) because per-request proposal traces clobbered each
+# other on one mesh (run 35477522469, serving_request_factory.prepare_proposal). At
+# four users that is four sequential ~213 ms eager proposals per round (run
+# 35559199392), more than half the round. M3NATIVE_TRACED_PROPOSAL=1 replaces that env
+# with an inert marker so each request captures its own proposal trace again; the
+# gate's byte-exact check against the single-stream references catches a clobbered trace.
+if [ "${M3NATIVE_TRACED_PROPOSAL:-}" = "1" ]; then
+  M3NATIVE_TRACED_PROPOSAL="-e M3NATIVE_TRACED_PROPOSAL=1"
+else
+  M3NATIVE_TRACED_PROPOSAL=""
+fi
 name="qwen-m3native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 timeout -k 30 2200 docker run --rm --name "$name" --network none \
@@ -103,7 +115,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
   -e QWEN_FAST_FOUR_AS_TWO=0 \
   -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=32768 \
-  -e QWEN_FAST_EAGER_PROPOSAL=1 -e QWEN_FAST_SHARD_CHECK=0 -e QWEN_FAST_PHASE_LOG=1 -e QWEN_FAST_CARRY_LOG=1 \
+  ${M3NATIVE_TRACED_PROPOSAL:--e QWEN_FAST_EAGER_PROPOSAL=1} -e QWEN_FAST_SHARD_CHECK=0 -e QWEN_FAST_PHASE_LOG=1 -e QWEN_FAST_CARRY_LOG=1 \
   -e QWEN_FAST_SHARED_CCL=1 -e QWEN_FAST_PACKED_STEP=1 -e QWEN_FAST_PACKED_AUDIT=1 -e QWEN_FAST_FAULTHANDLER=1 \
   -e TT_METAL_WATCHER=20 -e TT_METAL_WATCHER_APPEND=1 -e TT_METAL_WATCHER_DISABLE_ASSERT=1 \
   -e QWEN_GDN_DIRECT_WINDOW=1 -e QWEN_GDN_SHARED_QK_EXPERIMENT=1 \
