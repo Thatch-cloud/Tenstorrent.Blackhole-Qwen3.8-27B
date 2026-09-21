@@ -676,15 +676,16 @@ class InstrumentedFakeRuntime:
 
 class FakeDrafter:
     """dflash_device.DFlashDevice.prepare_publication/commit_publication as
-    InstrumentedFakeRuntime's publish() calls them - records merge_release so the
-    pipelined-publish wiring can be checked without any device machinery."""
+    InstrumentedFakeRuntime's publish() calls them - records merge_release and
+    fused_steady_state so the pipelined-publish/traced-publish wiring can be checked
+    without any device machinery."""
 
     def __init__(self):
         self.prepare_calls = []
         self.commit_calls = []
 
-    def prepare_publication(self, features, prefix, *, position, merge_release=False):
-        self.prepare_calls.append((features, prefix, position, merge_release))
+    def prepare_publication(self, features, prefix, *, position, merge_release=False, fused_steady_state=False):
+        self.prepare_calls.append((features, prefix, position, merge_release, fused_steady_state))
         return SimpleNamespace(status='prepared')
 
     def commit_publication(self, publication):
@@ -756,26 +757,51 @@ class PublishInstrumentationTests(unittest.TestCase):
         self.assertIn('features: [0.00,0.00]', publish_call.kwargs['stages'])
         self.assertIn('prepare_history: [0.00,0.00]', publish_call.kwargs['stages'])
 
-    def test_pipelined_publish_off_by_default_leaves_merge_release_false(self):
+    def test_pipelined_and_traced_publish_off_by_default_leaves_both_options_false(self):
         import os
 
         entries = self.two()
         self.assertNotIn('QWEN_FAST_PIPELINED_PUBLISH', os.environ)
+        self.assertNotIn('QWEN_FAST_TRACED_PUBLISH', os.environ)
         self.step(entries)
         for e in entries:
             drafter = e['request'].runtime.drafter
             self.assertTrue(drafter.prepare_calls)
-            self.assertTrue(all(call[3] is False for call in drafter.prepare_calls))
+            self.assertTrue(all(call[3] is False and call[4] is False for call in drafter.prepare_calls))
+            self.assertNotIn('prepare_publication', drafter.__dict__, 'no installer ever ran')
 
-    def test_pipelined_publish_flag_installs_merge_release_and_restores_after(self):
+    def test_pipelined_publish_flag_alone_installs_merge_release_only(self):
         entries = self.two()
         with patch.dict('os.environ', {'QWEN_FAST_PIPELINED_PUBLISH': '1'}):
             self.step(entries)
         for e in entries:
             drafter = e['request'].runtime.drafter
             self.assertTrue(drafter.prepare_calls)
-            self.assertTrue(all(call[3] is True for call in drafter.prepare_calls))
+            self.assertTrue(all(call[3] is True and call[4] is False for call in drafter.prepare_calls))
             self.assertNotIn('prepare_publication', drafter.__dict__, 'restored after the commit')
+
+    def test_traced_publish_flag_alone_installs_fused_steady_state_only(self):
+        entries = self.two()
+        with patch.dict('os.environ', {'QWEN_FAST_TRACED_PUBLISH': '1'}):
+            self.step(entries)
+        for e in entries:
+            drafter = e['request'].runtime.drafter
+            self.assertTrue(drafter.prepare_calls)
+            self.assertTrue(all(call[3] is False and call[4] is True for call in drafter.prepare_calls))
+            self.assertNotIn('prepare_publication', drafter.__dict__, 'restored after the commit')
+
+    def test_both_publish_flags_together_install_both_options_on_one_shim(self):
+        """Neither flag's effect is silently dropped by the other overwriting
+        drafter.prepare_publication after it - dflash_traced_publish.
+        install_publish_options composes both into ONE installer, never two stacked
+        ones."""
+        entries = self.two()
+        with patch.dict('os.environ', {'QWEN_FAST_PIPELINED_PUBLISH': '1', 'QWEN_FAST_TRACED_PUBLISH': '1'}):
+            self.step(entries)
+        for e in entries:
+            drafter = e['request'].runtime.drafter
+            self.assertTrue(drafter.prepare_calls)
+            self.assertTrue(all(call[3] is True and call[4] is True for call in drafter.prepare_calls))
 
     def test_pipelined_publish_flag_is_inert_for_a_runtime_with_no_drafter(self):
         """FakeRuntime (PackedStepTests' own fixture) has no .drafter at all - the

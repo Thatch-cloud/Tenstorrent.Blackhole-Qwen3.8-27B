@@ -99,6 +99,49 @@ class DraftKVHistoryTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         cache.commit(publication)
 
+    def test_fused_steady_state_matches_the_general_path_bit_for_bit(self):
+        """QWEN_FAST_TRACED_PUBLISH's fused_steady_state=True: two independent caches
+        started from the SAME steady-state position (4093, history_rows already 2048),
+        stepped through the SAME sequence of accepted prefixes and candidate features -
+        one committing with the general path, the other with fused_steady_state=True -
+        must reach bit-identical committed history after every single step. This is
+        the direct, real-tensor check for the algebraic identity prepare()'s own
+        fused-branch comment proves: dropping active[history_rows+prefix-rows :
+        history_rows] and appending result[0:prefix] computes exactly what the
+        combined-then-tail-then-pad general path does whenever rows == 2048."""
+        position = 4093
+        features = self.features(2048, position)
+        with self.fixture(features, position) as (general, general_ops), \
+                self.fixture(features, position) as (fused, fused_ops):
+            self.assert_history(general, features)
+            self.assert_history(fused, features)
+            for prefix in range(1, 33):
+                self.assertEqual(general.history_rows, 2048, 'steady state throughout')
+                self.assertEqual(fused.history_rows, 2048, 'steady state throughout')
+                candidate = self.features(32, general.position)
+                self.assertEqual(general.position, fused.position)
+                general.commit(general.prepare(candidate, prefix, position=general.position))
+                fused.commit(fused.prepare(candidate, prefix, position=fused.position, fused_steady_state=True))
+                for layer, (general_pair, fused_pair) in enumerate(zip(general.active, fused.active, strict=True)):
+                    for name in ('k', 'v'):
+                        self.assertTrue(torch.equal(general_pair[name].view(torch.int16), fused_pair[name].view(torch.int16)),
+                            'layer %d %s diverged at prefix=%d' % (layer, name, prefix))
+
+    def test_fused_steady_state_is_inert_before_the_ramp_completes(self):
+        """The flag alone does not force the fused path - rows must also already be
+        2048 (draft_kv_history.DraftKVHistory.prepare's own `fused` gate). Passing
+        fused_steady_state=True at position 170 (history_rows well under 2048) must
+        commit identically to the general path - no divergence, no crash."""
+        position = 170
+        features = self.features(position, position)
+        with self.fixture(features, position) as (cache, operations):
+            self.assert_history(cache, features)
+            candidate = self.features(32, cache.position)
+            cache.commit(cache.prepare(candidate, 7, position=cache.position, fused_steady_state=True))
+            self.assertEqual(cache.history_rows, 177)
+            features = torch.cat((features, candidate[..., :7, :]), dim=2)
+            self.assert_history(cache, features)
+
     def test_failed_preparation_cannot_publish_part_of_a_layer_or_prefix(self):
         features = self.features(2048, 41)
         with self.fixture(features, 4093) as (cache, operations):

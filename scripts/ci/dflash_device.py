@@ -583,11 +583,11 @@ class DFlashDevice:
             self.release_except(owned, output)
         return output
 
-    def prepare_publication(self, features, prefix, *, position, merge_release=False):
+    def prepare_publication(self, features, prefix, *, position, merge_release=False, fused_steady_state=False):
         if self.closed or self.pending is not None or position != self.position or type(prefix) is not int or not 1 <= prefix <= 32:
             raise ValueError('One live target-feature publication at the committed frontier required')
-        if type(merge_release) is not bool:
-            raise ValueError('Explicit merge_release selection required')
+        if type(merge_release) is not bool or type(fused_steady_state) is not bool:
+            raise ValueError('Explicit merge_release and fused_steady_state selection required')
         operations = self.operations
         owned, retain = self.temporaries([self.history, self.spare_history])
         output = None
@@ -598,14 +598,30 @@ class DFlashDevice:
             # releasing on its own - see project_features' own comment for why that is
             # safe to defer.
             projected = retain(self.project_features(features, prefix, retain=(retain if merge_release else None)))
-            valid_history = retain(operations.slice(self.history, (0, 0, 0, 0), (1, 1, self.history_rows, 5120)))
-            combined = retain(operations.concat([valid_history, projected], dim=2))
             rows = min(2048, self.history_rows + prefix)
-            output = retain(operations.slice(combined, (0, 0, combined.shape[2] - rows, 0), (1, 1, combined.shape[2], 5120)))
-            padded = retain(operations.pad(output, [(0, 0), (0, 0), (0, 2048 - rows), (0, 0)], 0.0))
-            operations.copy(padded, self.spare_history)
+            if fused_steady_state and rows == 2048:
+                # QWEN_FAST_TRACED_PUBLISH: draft_kv_history.DraftKVHistory.prepare's own
+                # comment proves the identical identity this mirrors. Whenever rows == 2048
+                # (permanently true once this device is past the prefill ramp -
+                # DraftKVHistory requires history_rows == min(position, 2048)), the general
+                # concat-then-slice-then-pad below always resolves to dropping exactly the
+                # first (history_rows + prefix - rows) rows of self.history and appending
+                # every row of projected, with no padding at all (rows == 2048 already) -
+                # so one slice + one concat (2 ops) replace slice + concat + slice + pad
+                # (4 ops), computing the SAME rows.
+                dropped = retain(operations.slice(self.history, (0, 0, self.history_rows + prefix - rows, 0),
+                    (1, 1, self.history_rows, 5120)))
+                combined = retain(operations.concat([dropped, projected], dim=2))
+                operations.copy(combined, self.spare_history)
+            else:
+                valid_history = retain(operations.slice(self.history, (0, 0, 0, 0), (1, 1, self.history_rows, 5120)))
+                combined = retain(operations.concat([valid_history, projected], dim=2))
+                output = retain(operations.slice(combined, (0, 0, combined.shape[2] - rows, 0), (1, 1, combined.shape[2], 5120)))
+                padded = retain(operations.pad(output, [(0, 0), (0, 0), (0, 2048 - rows), (0, 0)], 0.0))
+                operations.copy(padded, self.spare_history)
             if self.kv_history is not None:
-                cache_publication = self.kv_history.prepare(projected, prefix, position=position)
+                cache_publication = self.kv_history.prepare(projected, prefix, position=position,
+                    fused_steady_state=fused_steady_state)
             # kv_history.prepare() above already ran its own synchronize_device(self.mesh)
             # over the SAME shared mesh queue, in submission order after everything
             # enqueued so far in this call (project_features' merged work and the copy

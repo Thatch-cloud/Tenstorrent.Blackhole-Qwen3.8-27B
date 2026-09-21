@@ -466,17 +466,24 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
     # test that does not model it) or an entry whose accepted prefix is 0.
     stage_sink = {} if publish_stage_timings is not None else None
     restore_stage_timer = install_stage_timer(runtime, stage_sink) if stage_sink is not None else None
-    # QWEN_FAST_PIPELINED_PUBLISH: merges prepare_publication's own three device fences
-    # into one for this user's commit (dflash_pipelined_publish.install_merge_release) -
-    # installed on the drafter only if this runtime actually exposes one (a dspark
-    # request's runtime, or a test fake that does not model prepare_publication, has none).
+    # QWEN_FAST_PIPELINED_PUBLISH merges prepare_publication's own three device fences
+    # into one, and QWEN_FAST_TRACED_PUBLISH cuts its op count in the steady state
+    # (dflash_traced_publish.install_publish_options composes both into ONE installer,
+    # so neither flag's effect is silently dropped by the other overwriting drafter.
+    # prepare_publication after it - see that module for why) - installed on the
+    # drafter only if this runtime actually exposes one (a dspark request's runtime,
+    # or a test fake that does not model prepare_publication, has none), and only if
+    # at least one of the two flags is actually on.
     drafter = getattr(runtime, 'drafter', None)
     restore_merge_release = None
     if drafter is not None:
-        from dflash_pipelined_publish import pipelined_publish_enabled, install_merge_release
+        from dflash_pipelined_publish import pipelined_publish_enabled
+        from dflash_traced_publish import traced_publish_enabled, install_publish_options
 
-        if pipelined_publish_enabled():
-            restore_merge_release = install_merge_release(drafter)
+        merge_release, fused_steady_state = pipelined_publish_enabled(), traced_publish_enabled()
+        if merge_release or fused_steady_state:
+            restore_merge_release = install_publish_options(drafter,
+                merge_release=merge_release, fused_steady_state=fused_steady_state)
     try:
         # session.commit and session.abort both end in runtime.publish - DFlashRequestRuntime.
         # publish (dflash_request_runtime.py) - which runs VerifierEngine.publish and, through

@@ -157,12 +157,15 @@ class DraftKVHistory:
         tables = tuple(retain(self.upload(table)) for table in host)
         return inputs, tables
 
-    def prepare(self, features, prefix, *, position):
+    def prepare(self, features, prefix, *, position, fused_steady_state=False):
         if (self.closed or self.pending is not None or type(position) is not int or position != self.position
                 or type(prefix) is not int or not 1 <= prefix <= 32 or position + prefix > 262144):
             raise ValueError('One accepted-prefix cache update at the current committed frontier required')
+        if type(fused_steady_state) is not bool:
+            raise ValueError('Explicit fused_steady_state selection required')
         operations = self.operations
         rows = min(2048, self.history_rows + prefix)
+        fused = fused_steady_state and rows == 2048
         with self.temporaries([features]) as retain:
             inputs, tables = self.project_inputs(features, prefix, position, retain)
             projected = self.projection.project(inputs, tables) if self.projection is not None else None
@@ -170,13 +173,36 @@ class DraftKVHistory:
                 result = projected[layer] if projected is not None else project_key_value(
                     operations, inputs, self.query, tables, retain, parameters=parameter)
                 for name in ('k', 'v'):
-                    historical = retain(operations.slice(active[name], (0, 0, 0, 0), (1, 4, self.history_rows, 128)))
-                    accepted = retain(operations.slice(result[name], (0, 0, 0, 0), (1, 4, prefix, 128)))
-                    combined = retain(operations.concat([historical, accepted], dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
-                    tail = retain(operations.slice(combined, (0, 0, self.history_rows + prefix - rows, 0),
-                        (1, 4, self.history_rows + prefix, 128)))
-                    padded = retain(operations.pad(tail, [(0, 0), (0, 0), (0, 2048 - rows), (0, 0)], 0.0))
-                    operations.copy(padded, spare[name])
+                    if fused:
+                        # QWEN_FAST_TRACED_PUBLISH: whenever rows == 2048 (permanently true
+                        # once this device is past the prefill ramp - history_rows ==
+                        # min(position, 2048)), the general tail-of-combined slice below
+                        # always resolves to dropping exactly the first (history_rows +
+                        # prefix - rows) rows of active[name] and keeping every row of
+                        # result[name] - proof: combined = concat([active[0:history_rows],
+                        # result[0:prefix]]), length history_rows + prefix; tail =
+                        # combined[history_rows+prefix-rows : history_rows+prefix]; since
+                        # rows == 2048 <= history_rows + prefix, the start index k =
+                        # history_rows+prefix-rows satisfies 0 <= k <= history_rows, so
+                        # tail's first part is active[k:history_rows] (still inside the
+                        # historical segment) and its second part is ALL of result[0:prefix]
+                        # (tail's own end coincides with combined's end). No padding is
+                        # needed either (rows == 2048 already). So slice + slice + concat +
+                        # copy (4 ops) replace slice + slice + concat + slice + pad + copy
+                        # (6 ops), computing the exact same spare[name].
+                        dropped = retain(operations.slice(active[name], (0, 0, self.history_rows + prefix - rows, 0),
+                            (1, 4, self.history_rows, 128)))
+                        accepted = retain(operations.slice(result[name], (0, 0, 0, 0), (1, 4, prefix, 128)))
+                        combined = retain(operations.concat([dropped, accepted], dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
+                        operations.copy(combined, spare[name])
+                    else:
+                        historical = retain(operations.slice(active[name], (0, 0, 0, 0), (1, 4, self.history_rows, 128)))
+                        accepted = retain(operations.slice(result[name], (0, 0, 0, 0), (1, 4, prefix, 128)))
+                        combined = retain(operations.concat([historical, accepted], dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
+                        tail = retain(operations.slice(combined, (0, 0, self.history_rows + prefix - rows, 0),
+                            (1, 4, self.history_rows + prefix, 128)))
+                        padded = retain(operations.pad(tail, [(0, 0), (0, 0), (0, 2048 - rows), (0, 0)], 0.0))
+                        operations.copy(padded, spare[name])
             operations.synchronize_device(self.mesh)
         self.pending = SimpleNamespace(position=position, prefix=prefix, rows=rows, status='prepared')
         return self.pending

@@ -126,7 +126,7 @@ class PreparePublicationTests(unittest.TestCase):
 
     def test_merge_release_with_a_committed_cache_skips_the_trailing_fence(self):
         kv_history = SimpleNamespace(
-            prepare=unittest.mock.Mock(side_effect=lambda projected, prefix, position: (
+            prepare=unittest.mock.Mock(side_effect=lambda projected, prefix, position, fused_steady_state=False: (
                 operations.synchronize_device('mesh'), SimpleNamespace(status='prepared'))[1]))
         operations = fake_operations()
         device = build_device(operations, kv_history=kv_history)
@@ -144,7 +144,7 @@ class PreparePublicationTests(unittest.TestCase):
         """Byte-identical default: merge_release's whole optimisation is inert unless
         explicitly requested, regardless of whether a cache is present."""
         kv_history = SimpleNamespace(
-            prepare=unittest.mock.Mock(side_effect=lambda projected, prefix, position: (
+            prepare=unittest.mock.Mock(side_effect=lambda projected, prefix, position, fused_steady_state=False: (
                 operations.synchronize_device('mesh'), SimpleNamespace(status='prepared'))[1]))
         operations = fake_operations()
         device = build_device(operations, kv_history=kv_history)
@@ -154,6 +154,110 @@ class PreparePublicationTests(unittest.TestCase):
         # project_features' own sync + kv_history.prepare()'s own sync + prepare_
         # publication's own trailing sync - three, exactly as today.
         self.assertEqual(operations.synchronize_device.call_count, 3)
+
+    def test_fused_steady_state_type_is_checked(self):
+        operations = fake_operations()
+        device = build_device(operations)
+        with self.assertRaises(ValueError):
+            device.prepare_publication([make_feature_tap() for _ in range(5)], 1, position=100, fused_steady_state='yes')
+
+    def test_fused_steady_state_threads_through_to_kv_history_prepare(self):
+        kv_history = SimpleNamespace(prepare=unittest.mock.Mock(return_value=SimpleNamespace(status='prepared')))
+        operations = fake_operations()
+        device = build_device(operations, kv_history=kv_history)
+        device.history_rows = 2048
+        p = patched(operations)
+        with p[0], p[1], p[2], p[3]:
+            device.prepare_publication([make_feature_tap() for _ in range(5)], 1, position=100, fused_steady_state=True)
+        kv_history.prepare.assert_called_once()
+        self.assertTrue(kv_history.prepare.call_args.kwargs['fused_steady_state'])
+
+    def test_fused_steady_state_issues_fewer_ops_when_rows_is_2048(self):
+        """slice+concat+copy replaces slice+concat+slice+pad+copy for prepare_
+        publication's own direct sequence (project_features and kv_history.prepare
+        are separately gated and separately tested)."""
+        operations = fake_operations()
+        device = build_device(operations, kv_history=None)
+        device.history_rows = 2048
+        p = patched(operations)
+        with p[0], p[1], p[2], p[3]:
+            device.prepare_publication([make_feature_tap() for _ in range(5)], 1, position=100, fused_steady_state=True)
+        general_ops = fake_operations()
+        general_device = build_device(general_ops, kv_history=None)
+        general_device.history_rows = 2048
+        p2 = patched(general_ops)
+        with p2[0], p2[1], p2[2], p2[3]:
+            general_device.prepare_publication([make_feature_tap() for _ in range(5)], 1, position=100)
+        self.assertLess(operations.slice.call_count + operations.pad.call_count,
+            general_ops.slice.call_count + general_ops.pad.call_count)
+        # project_features pads its own narrow feature taps regardless of
+        # fused_steady_state (unrelated to this branch) - the difference is
+        # prepare_publication's OWN direct pad call, which the fused path skips
+        # entirely (rows == 2048 already, nothing left to pad).
+        self.assertEqual(operations.pad.call_count, general_ops.pad.call_count - 1,
+            "fused skips prepare_publication's own pad call, and only that one")
+
+    def test_fused_steady_state_falls_back_to_the_general_path_before_rows_is_2048(self):
+        """The flag alone does not force the fused branch - rows must also already
+        be 2048 (history_rows == 2048 permanently, once reached). Below that,
+        fused_steady_state=True runs the SAME op sequence as the default."""
+        operations = fake_operations()
+        device = build_device(operations, kv_history=None)
+        device.history_rows = 50  # rows = min(2048, 50+1) = 51, not 2048
+        p = patched(operations)
+        with p[0], p[1], p[2], p[3]:
+            device.prepare_publication([make_feature_tap() for _ in range(5)], 1, position=100, fused_steady_state=True)
+        self.assertGreater(operations.pad.call_count, 0, 'the general path still pads')
+
+
+class PreparePublicationFusedCorrectnessTests(unittest.TestCase):
+    """Real-tensor check for the algebraic identity prepare_publication's own
+    fused-branch comment proves: with a committed cache (kv_history not exercised
+    here - draft_kv_history's own identity is checked separately, in
+    test_draft_kv_history.py, against the real DraftKVHistory), fused_steady_state
+    must write the SAME self.spare_history content as the general path, at every
+    prefix, once history_rows == 2048."""
+
+    def functional_operations(self):
+        import torch
+
+        return SimpleNamespace(bfloat16=torch.bfloat16,
+            slice=lambda value, start, end: value[tuple(slice(a, b) for a, b in zip(start, end, strict=True))],
+            pad=lambda value, padding, fill: torch.nn.functional.pad(
+                value, tuple(item for pair in reversed(padding) for item in pair), value=fill),
+            concat=lambda values, dim, **kwargs: torch.cat(values, dim=dim),
+            copy=lambda source, destination: destination.copy_(source),
+            synchronize_device=lambda mesh: None)
+
+    def run_prepare(self, *, fused_steady_state, prefix, history_rows=2048):
+        import torch
+        import types as _types
+        from dflash_device import DFlashDevice
+
+        operations = self.functional_operations()
+        generator = torch.Generator().manual_seed(7)
+        history = torch.randn((1, 1, 2048, 5120), generator=generator).bfloat16()
+        projected = torch.randn((1, 1, prefix, 5120), generator=generator).bfloat16()
+        spare_history = torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16)
+        device = SimpleNamespace(operations=operations, mesh='mesh', closed=False, pending=None,
+            position=100, history_rows=history_rows, history=history, spare_history=spare_history,
+            kv_history=None, owned=[], borrowed=[],
+            project_features=lambda features, prefix, retain=None: projected)
+        device.temporaries = _types.MethodType(DFlashDevice.temporaries, device)
+        with unittest.mock.patch('dflash_device.addresses', side_effect=lambda operations, value: (id(value),)), \
+                unittest.mock.patch('dflash_device.release_owned'):
+            DFlashDevice.prepare_publication(device, [make_feature_tap()] * 5, prefix, position=100,
+                fused_steady_state=fused_steady_state)
+        return spare_history
+
+    def test_fused_matches_general_at_every_prefix_in_steady_state(self):
+        for prefix in range(1, 33):
+            with self.subTest(prefix=prefix):
+                general = self.run_prepare(fused_steady_state=False, prefix=prefix)
+                fused = self.run_prepare(fused_steady_state=True, prefix=prefix)
+                import torch
+
+                self.assertTrue(torch.equal(general.view(torch.int16), fused.view(torch.int16)))
 
 
 if __name__ == '__main__':

@@ -22,6 +22,7 @@ COPY scripts/ci/dflash_proposal_trace.py /experiment-scripts/ci/
 COPY scripts/ci/gdn_user_batch.py scripts/ci/gdn_user_batch_conv.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_packed_proposal.py scripts/ci/dflash_packed_proposal_coordinator.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_pipelined_publish.py /experiment-scripts/ci/
+COPY scripts/ci/dflash_traced_publish.py /experiment-scripts/ci/
 COPY scripts/ci/profiled_block_stream_override.py /experiment-scripts/ci/
 COPY scripts/ci/serving_vllm_packed.py /experiment-scripts/ci/
 COPY scripts/ci/serving_vllm_contract.py /experiment-scripts/ci/
