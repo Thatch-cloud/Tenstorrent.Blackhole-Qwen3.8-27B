@@ -263,3 +263,83 @@ the old rejection may not transfer. Trying it would cost a fresh
 build+requalification cycle and roughly doubles the stats+output CB
 footprint at this rung, which matters given the tight CB budget already
 flagged separately for target-replay.
+
+## 6. Update: the Skt selectable knob (v4) - and why the swap alone probably
+isn't sufficient
+
+Implemented as requested: `frozen_wide_chunk_normalization.py` now resolves
+Skt from `QWEN_FROZEN_65536_SKT` (accepted `'2080'`/`'2112'`, default
+`'2112'` as of this lane) at staging time, and generates exactly one Skt
+branch for 65536 accordingly - `padded_keys`/`iterations`/masked-poison-row
+count all derive from the resolved Skt (`geometry_for_skt()`), and
+`frozen_wide_chunk_scratch.py`'s own `SKT` constant is patched to match
+before staging, so the scratch-CB substitutions gate on the same value. The
+`frozen-geometry.json` manifest's `padded_keys`/`key_chunk` fields are now
+also overridden per the resolved Skt (`manifest_geometry_override()`,
+wired into `frozen_recipe_context.main()`'s manifest write) - the cosmetic
+gap from section 1 is fixed for this field; `storage_keys`/`positions`/
+`capacity` are untouched, which is correct (they don't change under either
+Skt choice - this stays a kernel-internal padding change).
+
+**Why Skt==2112 alone is unlikely to close the residual.** Read
+`dspark-ladder-attention-probe.py:77-85` (the probe behind run 34797353681)
+in full this round. Its passing configuration applies FOUR separate
+precision fixes simultaneously, not one:
+
+1. `scalar_reciprocal()` (`dspark_ladder_scalar_reciprocal.py`) - already
+   present in this port's lane via the existing `--scalar-reciprocal` flag,
+   unrelated to this port specifically.
+2. `scalar_sum_update()` (`dspark_ladder_sum_update.py`) - a TR0 scalar-FP32
+   correction to the running-sum update (`current[offset] = current[offset]
+   + previous[offset] * correction`, replacing a bf16 `add_block_inplace`),
+   gated on `get_compile_time_arg_val(3) == 2112`. **Not staged or applied by
+   this port at all.**
+3. `scalar_score_center(key_tiles=2112)` (`dspark_ladder_score_center.py`) -
+   a TR0 scalar-FP32 mask-add and max-centering pass on the raw QK scores
+   before the exponential, replacing `sub_bcast_cols_init`/
+   `sub_tiles_bcast_cols`, also gated on `get_compile_time_arg_val(3) ==
+   2112`. **Not staged or applied by this port at all.**
+4. `scratch_normalization()` (`dspark_ladder_normalization.py`) - the
+   dedicated-scratch-CB reciprocal fix this port already carries (as
+   `frozen_wide_chunk_scratch.py`), also gated on Skt==2112 in the original.
+
+Both (2) and (3) are themselves hardcoded to `Skt == 2112` in their own C++
+text, exactly like (4) - but they live in modules this port has never
+staged, imported, or applied. Selecting `QWEN_FROZEN_65536_SKT=2112` makes
+*this port's* scratch-CB condition match the validated value; it changes
+nothing about (2) or (3), which simply don't run. Given
+`docs/context-ladder-investigation.md`'s own history shows the sum-update
+fix alone got the failure count from 129 down to "one, still unqualified"
+and the score-centering work continued from there before scratch-CB
+normalization was even introduced, these look like fixes for a *different*
+stage of the computation (denominator/running-sum accumulation, and
+raw-score masking/centering) than the final normalization reciprocal
+scratch-CB addresses - not redundant with it. This is the most likely
+explanation for why 9 elements remain at Skt==2080: not exclusively a
+generic "which Skt" question, but three additive, independently-gated fixes
+of which this port carries only the last.
+
+**Fixture trace (best-effort, CPU-only).** `dspark-ladder-attention-probe.py`
+does not build its own fixture directly - it calls `fixture_probe(context)`
+(`dspark_ladder_fixtures.py`) and `adapter(context)`
+(`dspark_ladder_attention.py`), neither of which was read in this pass (time
+did not allow it); a grep for `manual_seed`/`torch.rand`/`torch.randn` found
+no direct hits in either file or in the ladder probe itself, suggesting they
+likely wrap/reuse `dspark-native-8k-attention-probe.py`'s own `fixtures()`
+(same seed 383928, same query/key/value construction) rather than
+generating independent random data, but this was not traced through
+`fixture_probe`'s and `adapter`'s actual bodies to confirm, and scale/mask
+construction were not diffed line-by-line either. Left as an open item
+rather than asserted either way - if it turns out the fixtures differ, that
+would be an *additional*, independent reason Skt==2112 alone might not
+transfer, on top of the missing sum-update/score-center fixes above.
+
+**Revised recommendation:** the geometry swap was worth doing as the
+requested cheap experiment and is in place, defaulted to 2112. But given the
+above, the single next change with the best odds is no longer "just try
+2112" - it's porting `scalar_sum_update()` and `scalar_score_center()`
+alongside the existing scratch-CB fix, the same way this port already
+ported `scratch_normalization()` (own module, gated on the frozen recipe's
+resolved Skt, staged only for 65536). That is real, unstarted work - two
+more C++ text substitutions to port and parameterize away from the ladder's
+hardcoded 2112, plus their own build/requalify cycle - not a knob flip.

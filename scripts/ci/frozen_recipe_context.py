@@ -356,8 +356,17 @@ def main():
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(source.encode('utf-8'))
     checksum = lambda source: hashlib.sha256(source.encode()).hexdigest()
+    # None for every context other than 65536 (adapt_wide_chunk_normalization's
+    # own no-op guard); keeps the manifest's reported padded_keys/key_chunk
+    # honest for 65536, where the staged files no longer use the standard
+    # 256-key formula geometry(options.context) alone would report.
+    from frozen_wide_chunk_normalization import manifest_geometry_override
+    reported_geometry = dict(geometry(options.context))
+    override = manifest_geometry_override(options.context)
+    if override is not None:
+        reported_geometry.update(override)
     options.manifest.write_text(json.dumps(dict(revision=REVISION,
-        geometry=geometry(options.context), staged_directory=staged_directory.relative_to(checkout).as_posix(),
+        geometry=reported_geometry, staged_directory=staged_directory.relative_to(checkout).as_posix(),
         before={name: checksum(source) for name, source in sources.items()},
         after={name: checksum(source) for name, source in adapted.items()},
         scope='Shared probe/runtime geometry adaptation; no numerical or runtime admission',

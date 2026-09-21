@@ -18,6 +18,7 @@ actually exports fails here instead of in a build lane.
 """
 
 import hashlib
+import os
 import subprocess
 import sys
 import types
@@ -176,15 +177,18 @@ REVISION = '8c102b20df22329106955b4006bf4d650bb94e40'
 ROOT = Path(__file__).resolve().parents[2]
 
 
-class RealStagedModuleTests(unittest.TestCase):
+class RealStagedModuleTestsBase(unittest.TestCase):
     """Imports the ACTUAL dspark_fp32_build module from a real dry-run
-    checkout staged for context 65536 (frozen_recipe_context.main(), the
-    same technique used elsewhere in this port) - not a hand-built fake - and
-    exercises frozen_wide_chunk_scratch.factory_scope() against it directly.
-    This is what would have caught run 35591662531's AttributeError: that
-    bug was invisible to FactoryScopeRoundTripTests above only because its
-    OLD fakes (before this file's fix) had a restore_factory_source function
-    the real, pinned module does not.
+    checkout staged for context 65536 under this class's KNOB value
+    (frozen_recipe_context.main(), the same technique used elsewhere in this
+    port) - not a hand-built fake - and exercises
+    frozen_wide_chunk_scratch.factory_scope() against it directly. This is
+    what would have caught run 35591662531's AttributeError: that bug was
+    invisible to FactoryScopeRoundTripTests above only because its OLD fakes
+    (before this file's fix) had a restore_factory_source function the real,
+    pinned module does not. Concrete subclasses below set KNOB to each
+    accepted QWEN_FROZEN_65536_SKT value, so both staged-module round trips
+    run for real, not just one.
 
     Does not attempt to run dspark_fp32_build.main() or
     frozen_sim_build_cache.main() themselves: both hardcode absolute paths
@@ -199,8 +203,12 @@ class RealStagedModuleTests(unittest.TestCase):
     dspark_fp32_build.transform and .validate_manifest, the two functions
     factory_scope() wraps."""
 
+    KNOB = None  # set by concrete subclasses
+
     @classmethod
     def setUpClass(cls):
+        if cls is RealStagedModuleTestsBase:
+            raise unittest.SkipTest('base class; see the per-knob subclasses below')
         import tempfile
         cls._tmp = tempfile.TemporaryDirectory()
         checkout = Path(cls._tmp.name) / 'checkout'
@@ -209,7 +217,8 @@ class RealStagedModuleTests(unittest.TestCase):
         manifest = Path(cls._tmp.name) / 'manifest.json'
         subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('frozen_recipe_context.py')),
             '--checkout', str(checkout), '--context', '65536', '--target-replay', '--scalar-reciprocal',
-            '--probe-seconds', '1020', '--manifest', str(manifest)], check=True)
+            '--probe-seconds', '1020', '--manifest', str(manifest)],
+            env=dict(os.environ, QWEN_FROZEN_65536_SKT=cls.KNOB), check=True)
         cls.staged = checkout / 'scripts/ci'
 
     @classmethod
@@ -242,6 +251,12 @@ class RealStagedModuleTests(unittest.TestCase):
         self.assertFalse(hasattr(self.build, 'restore_factory_source'))
         self.assertTrue(hasattr(self.build, 'transform'))
         self.assertTrue(hasattr(self.build, 'validate_manifest'))
+
+    def test_staged_scratch_module_skt_matches_this_class_knob(self):
+        """Proves the QWEN_FROZEN_65536_SKT env var set for this class's
+        staging run actually landed in the staged frozen_wide_chunk_scratch.py
+        - not just that staging succeeded with some value."""
+        self.assertEqual(self.scratch.SKT, int(self.KNOB))
 
     def test_entering_factory_scope_against_the_real_staged_module_does_not_raise(self):
         """The exact call frozen_sim_build_cache.py makes
@@ -295,6 +310,17 @@ class RealStagedModuleTests(unittest.TestCase):
                 # check this test targets) rather than failing reconstruction
                 # itself - proving the scratch-CB layer round-tripped.
                 self.assertIn('binar', str(caught.exception).lower())
+
+
+class RealStagedModuleTestsSkt2080(RealStagedModuleTestsBase):
+    """This port's own first derivation (frozen recipe's context+256 basis)."""
+    KNOB = '2080'
+
+
+class RealStagedModuleTestsSkt2112(RealStagedModuleTestsBase):
+    """The ladder's own Skt - the value with an actual zero-failure hardware
+    result behind it (run 34797353681), and the v4 lane's default."""
+    KNOB = '2112'
 
 
 if __name__ == '__main__':
