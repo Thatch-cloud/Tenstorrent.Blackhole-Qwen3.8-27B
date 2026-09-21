@@ -32,20 +32,22 @@ class TargetReplayTests(unittest.TestCase):
         self.assertIn('zip(allocation_host, gold[0], strict=True)', changed)
         self.assertNotIn('warm = reader(', changed)
 
-    def test_comparison_is_an_ulp_budget_not_a_bit_exact_equality(self):
-        """T16 folds <=4-row groups at k_chunk_size 128; native B1 runs 16 sequential
-        single-row decodes at k_chunk_size 0. Same mathematics, different online-softmax
-        merge order, so bf16 results differ in the last bit - torch.equal between them
-        was never a numerical statement. Run 35662960713 measured the disagreement at
-        exactly one ulp with no non-finites and all rows affected uniformly."""
+    def test_bar_is_bit_exact_and_ulp_stats_are_the_diagnosis(self):
+        """Run 35663000515 showed T16 and B1 agree EXACTLY at k_chunk_size 256, the
+        value B1 itself picks, at all four start positions. The one-ulp disagreement run
+        35662960713 measured came entirely from the 65536-only override to 128. Exactness
+        is free, so the bar stays bit-exact; MAX_ULP only classifies a failure when one
+        happens, and the stats print on every comparison so an exact run says max_ulp 0.0."""
         changed = adapt_target_probe(self.original)
         self.assertIn('MAX_ULP = 4.0', changed)
         self.assertIn("stage='t16-b1-ulp'", changed)
         for field in ('max_ulp=worst', 'mean_ulp=float(error.mean())', 'budget_ulp=MAX_ULP',
                       'nonfinite=nonfinite', 'rows_over_budget=int(rows.numel())'):
             self.assertIn(field, changed)
-        # The failure condition is the budget and non-finites, not inequality.
-        self.assertIn('if nonfinite or worst > MAX_ULP:', changed)
+        # The failure condition is inequality and non-finites - not the budget.
+        self.assertIn('if nonfinite or differing:', changed)
+        self.assertNotIn('worst > MAX_ULP', changed)
+        self.assertIn('MAX_ULP is NOT the pass condition', changed)
         self.assertNotIn('if not torch.equal(actual, expected)]', changed)
         # Shape and dtype stay exact - the budget is for values only.
         self.assertIn('if actual.shape != expected.shape or actual.dtype != expected.dtype:', changed)
@@ -80,8 +82,11 @@ class TargetReplayTests(unittest.TestCase):
         self.assertEqual(reports[0]['max_ulp'], 0.0)
         self.assertEqual(reports[0]['differing'], 0)
 
-    def test_one_ulp_of_rounding_passes_and_is_reported(self):
-        """The measured case: max_abs exactly 2**-15 on values near 2**-8."""
+    def test_one_ulp_of_rounding_now_fails_but_is_diagnosed(self):
+        """The k_chunk=128 case. It FAILS, because exactness is achievable at 256 and a
+        tolerance would accept a regression for nothing - but the report still says it was
+        one ulp with no rows over the structural threshold, which is what tells you at a
+        glance that it is merge order and not a wrong row."""
         try:
             import torch
         except ImportError:
@@ -90,14 +95,15 @@ class TargetReplayTests(unittest.TestCase):
         actual = expected[0].to(torch.float32)
         actual += 2.0 ** -15                      # exactly one ulp at this magnitude
         failures, reports = self._run_comparison([actual.to(torch.bfloat16)], expected)
-        self.assertEqual(failures, [])
-        self.assertLessEqual(reports[0]['max_ulp'], 4.0)
+        self.assertEqual(failures, [0])
         self.assertGreater(reports[0]['max_ulp'], 0.0)
+        self.assertLessEqual(reports[0]['max_ulp'], 4.0)
+        self.assertEqual(reports[0]['rows_over_budget'], 0)
         self.assertEqual(reports[0]['nonfinite'], 0)
 
     def test_a_structurally_wrong_row_still_fails(self):
-        """The whole point of a budget rather than a blanket allclose: a real defect
-        perturbs a SUBSET of rows by order the value itself, which is hundreds of ulp."""
+        """Both kinds of failure are caught, and the report tells them apart: a wrong row
+        puts rows_over_budget above zero, where merge-order rounding leaves it at zero."""
         try:
             import torch
         except ImportError:

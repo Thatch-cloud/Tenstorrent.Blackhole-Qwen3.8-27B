@@ -79,7 +79,8 @@ class PatchAgainstRealHistoricalSourceTests(unittest.TestCase):
 
     def test_patch_targets_the_real_anchor_and_only_that_literal(self):
         patched = replay._patch_attention_replay(self.historical)
-        self.assertIn("os.environ.get('QWEN_FROZEN_65536_REPLAY_K_CHUNK', '128')", patched)
+        self.assertIn("os.environ.get('QWEN_FROZEN_65536_REPLAY_K_CHUNK', '%s')" % replay.DEFAULT, patched)
+        self.assertEqual(replay.DEFAULT, '256')
         self.assertIn('k_chunk_size=_qwen_replay_k_chunk)', patched)
         self.assertNotIn('k_chunk_size=256)', patched)
         # q_chunk_size=0 is a separate, untouched parameter.
@@ -152,7 +153,7 @@ class RuntimeValidationTests(unittest.TestCase):
     def _run_validation(self, env_value):
         namespace = {'os': types.SimpleNamespace(environ=({} if env_value is None else {replay.KNOB: env_value}))}
         source = (
-            "_qwen_replay_k_chunk = os.environ.get('QWEN_FROZEN_65536_REPLAY_K_CHUNK', '128')\n"
+            "_qwen_replay_k_chunk = os.environ.get('QWEN_FROZEN_65536_REPLAY_K_CHUNK', '256')\n"
             "if _qwen_replay_k_chunk not in ('64', '128', '256'):\n"
             "    raise ValueError('Explicit 64/128/256 replay K-chunk width required')\n"
             "_qwen_replay_k_chunk = int(_qwen_replay_k_chunk)\n"
@@ -160,8 +161,11 @@ class RuntimeValidationTests(unittest.TestCase):
         exec(source, namespace)
         return namespace['_qwen_replay_k_chunk']
 
-    def test_unset_defaults_to_128(self):
-        self.assertEqual(self._run_validation(None), 128)
+    def test_unset_defaults_to_256(self):
+        """256 is the original hardcoded value and the one B1 picks, so it is the only
+        default that keeps T16 bit-exact against B1 (run 35663000515)."""
+        self.assertEqual(self._run_validation(None), 256)
+        self.assertEqual(replay.DEFAULT, '256')
 
     def test_accepted_values(self):
         for value, expected in (('64', 64), ('128', 128), ('256', 256)):

@@ -42,6 +42,24 @@ admission pooled_attention_replay.py's docstring describes) would need the
 same wrap-don't-modify treatment that module already establishes as the
 house pattern for this exact problem, not a direct edit.
 
+RESOLVED 2026-09-22 - the default is back to 256, the original value.
+
+Run 35663000515 ran the 256 arm through the unchanged bit-exact gate and every
+replay came back exact: true at all four start positions (65536, 65553, 65776,
+65536). Run 35662960713 at 128 disagreed with native B1 on 88 percent of
+elements, each by at most one ulp, uniformly across all 192 rows - the
+signature of a different online-softmax merge order, not of a defect. B1 runs
+k_chunk_size=0 and picks 256; T16 at 128 therefore folded differently, and the
+disagreement was entirely an artefact of this override.
+
+The CB overflow this lever was built for (27,584 B over budget) does not occur
+at 256 today: that run allocated, built and replayed clean. The docstring's own
+CAVEAT predicted this - the dominant Skt-scaled term is the dense attn_mask
+buffer, not anything k_chunk-scoped - and the scratch work that landed since is
+the likelier reason the gap closed. 128 is retained as an accepted value and as
+the documented control arm, but it is no longer the default, because choosing
+it costs bit-exactness against B1 for no measured benefit.
+
 adapt_replay_k_chunk(sources, context, checkout) is a pure no-op for every
 context other than 65536, and touches no file this module doesn't explicitly
 list - attention_replay.py is not otherwise staged by frozen_recipe_context.py
@@ -55,7 +73,7 @@ from pathlib import Path
 
 CONTEXT = 65536
 KNOB = 'QWEN_FROZEN_65536_REPLAY_K_CHUNK'
-DEFAULT = '128'
+DEFAULT = '256'
 ACCEPTED = ('64', '128', '256')
 
 
