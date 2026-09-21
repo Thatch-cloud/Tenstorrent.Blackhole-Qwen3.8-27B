@@ -213,6 +213,27 @@ def retired_binder_leaks(rounds):
             if any(payload.get(label) for label in RETIRED_LABELS)]
 
 
+def evaluate_gate(*, ready, users, checked, allow_missing_references, native_m3_marker_present,
+                  packed_phase, binder_rounds, retired_binder_calls_nonzero):
+    """Whether the run passes, given the pieces `main` already computed.
+
+    Full reference coverage (`len(checked) == users`) is required unless
+    `allow_missing_references` - for an arm with no single-stream reference yet (e.g. 131k),
+    where `checked` may be empty or short by design. Any reference that IS present must
+    still match exactly (the `all(...)` term below is never relaxed): this only widens what
+    counts as complete coverage, not what counts as a match."""
+    coverage_ok = True if allow_missing_references else len(checked) == users
+    return bool(
+        ready
+        and coverage_ok
+        and all(c.get('identical_prefix') for c in checked)
+        and native_m3_marker_present
+        and packed_phase is not None
+        and bool(binder_rounds)
+        and not retired_binder_calls_nonzero
+    )
+
+
 def retired_binder_rounds(text):
     """Every per-round '[PINDIAG] native_m3 binder calls this round: {...}' payload
     (model_batch.ModelBatch.run), each mapping a retired binder's label to how many
@@ -245,6 +266,11 @@ def main():
     parser.add_argument('--references', type=Path,
                         default=Path('runner-evidence.local/packed-gate'),
                         help='directory holding single-user-*.json single-stream references')
+    parser.add_argument('--allow-missing-references', action='store_true',
+                        help='for arms with no single-stream reference yet (e.g. 131k): do not '
+                             'require every user to have a reference for gate_passed. Comparisons '
+                             'still record reference_present, and any reference that IS present '
+                             'must still match exactly; the dram/packed_phase reporting is unchanged.')
     options = parser.parse_args()
     try:
         options.results.mkdir(parents=True, exist_ok=True)
@@ -309,15 +335,13 @@ def main():
 
         checked = [c for c in comparisons if c.get('reference_present')]
         report['users_checked'] = len(checked)
-        report['gate_passed'] = bool(
-            report['ready']
-            and len(checked) == options.users
-            and all(c.get('identical_prefix') for c in checked)
-            and report['native_m3_marker_present']
-            and report['packed_phase'] is not None
-            and bool(binder_rounds)
-            and not report['retired_binder_calls_nonzero']
-        )
+        report['allow_missing_references'] = options.allow_missing_references
+        report['gate_passed'] = evaluate_gate(
+            ready=report['ready'], users=options.users, checked=checked,
+            allow_missing_references=options.allow_missing_references,
+            native_m3_marker_present=report['native_m3_marker_present'],
+            packed_phase=report['packed_phase'], binder_rounds=binder_rounds,
+            retired_binder_calls_nonzero=report['retired_binder_calls_nonzero'])
     except BaseException as error:
         report['fatal'] = '%s: %s' % (type(error).__name__, str(error)[:600])
     finally:

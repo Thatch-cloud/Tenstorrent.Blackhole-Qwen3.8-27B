@@ -21,11 +21,40 @@
 # fire (gate 1, run 35556533480: a false negative - no decode round ever ran, even
 # though the graft was mounted correctly). Setting it to 0 keeps the single M3 block.
 set -euo pipefail
-image="${1:-sha256:71e7fac137f8da2f9f46f81b848cd6f5e48148b6e94601ee470b87319c2f84a4}"
+image="${1:-sha256:8310fdfe6257a546a47822372deb7646c4380874815141f2f2f6c76f5e21fe80}"
 target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
+
+# Arm geometry: M3NATIVE_USERS/CONTEXT/PROMPT_TOKENS default to today's four-user 32768
+# recipe, so an unset environment reproduces the exact prior invocation. A wider arm (e.g.
+# the 131k one-user attach probe) overrides these three; QWEN_DSPARK_REQUEST_CONTEXT tracks
+# prompt_tokens below because that is what the frozen recipe's request-context selector
+# reads. Setting it past 32768 does NOT admit a wider T16 fast path today - the staged
+# combined-runtime recipe is CLI-locked to context 32768 (frozen_recipe_context.py:196-198)
+# and every downstream literal it emits is a hard 32768, not derived from this value; see
+# docs/lever-n-131k-attach-arm.md for the exact refusal chain. This arm exists to measure
+# attach and report, not to reach a decode round.
+users="${M3NATIVE_USERS:-4}"
+context="${M3NATIVE_CONTEXT:-33024}"
+prompt_tokens="${M3NATIVE_PROMPT_TOKENS:-32768}"
+dspark_context="$prompt_tokens"
+# QWEN_FAST_MAX_POSITION raises dflash_prefill_window's absolute prefill-position ceiling
+# (default 65504) so a wider-than-default context can reach prefill at all; only set when
+# non-default, so the default arm's docker invocation stays byte-identical to before.
+max_position=""
+if [ "$context" != "33024" ]; then
+  max_position="$context"
+fi
+# M3NATIVE_ALLOW_MISSING_REFERENCES=1 threads --allow-missing-references to the gate for
+# arms with no single-stream reference yet (e.g. 131k): comparisons still record
+# reference_present=false and the dram/packed_phase lines still print, but gate_passed no
+# longer requires every user to have a reference. Unset by default (empty, no flag added).
+allow_missing_references=""
+if [ "${M3NATIVE_ALLOW_MISSING_REFERENCES:-}" = "1" ]; then
+  allow_missing_references="--allow-missing-references"
+fi
 
 mkdir -p experiment-results draft-config
 if [ ! -s draft-config/config.json ]; then
@@ -166,6 +195,8 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${KOPGRAFT64:+-e QWEN_FAST_RUNTIME_BINARY_SHA256=$graft_binary_sha} \
   ${M3NATIVE_PIPELINED_COMMITS:+-e QWEN_FAST_PIPELINED_COMMITS=1} \
   ${M3NATIVE_PIPELINED_PROPOSALS:+-e QWEN_FAST_PIPELINED_PROPOSALS=1} \
+  ${M3NATIVE_FAST_COMMIT:+-e QWEN_FAST_FAST_COMMIT=1} \
+  ${M3NATIVE_GDN_USER_BATCH:+-e QWEN_FAST_GDN_USER_BATCH=1} \
   ${M3NATIVE_PROFILE:+-e TTNN_OP_PROFILER=1} \
   ${M3NATIVE_PROFILE:+-e TT_METAL_DEVICE_PROFILER=1} \
   ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_TRACE_TRACKING=1} \
@@ -175,7 +206,8 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PROFILE:+-e QWEN_FAST_PROFILED_BLOCK_STREAM=1} \
   -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
   -e QWEN_FAST_FOUR_AS_TWO=0 \
-  -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=32768 \
+  -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=$dspark_context \
+  ${max_position:+-e QWEN_FAST_MAX_POSITION=$max_position} \
   ${M3NATIVE_TRACED_PROPOSAL:--e QWEN_FAST_EAGER_PROPOSAL=1} -e QWEN_FAST_SHARD_CHECK=0 -e QWEN_FAST_PHASE_LOG=1 -e QWEN_FAST_CARRY_LOG=1 \
   -e QWEN_FAST_SHARED_CCL=1 -e QWEN_FAST_PACKED_STEP=1 -e QWEN_FAST_PACKED_AUDIT=1 -e QWEN_FAST_FAULTHANDLER=1 \
   ${M3NATIVE_WATCHER:+-e TT_METAL_WATCHER=20} ${M3NATIVE_WATCHER:+-e TT_METAL_WATCHER_APPEND=1} ${M3NATIVE_WATCHER:+-e TT_METAL_WATCHER_DISABLE_ASSERT=1} \
@@ -189,9 +221,9 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
   -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
   --entrypoint python3 "$image" "${entry_args[@]}" \
-  --users 4 --context 33024 --prompt-tokens 32768 --max-tokens "$max_tokens" --stream-timeout 600 --trace-region-bytes "$trace_region_bytes" \
+  --users "$users" --context "$context" --prompt-tokens "$prompt_tokens" --max-tokens "$max_tokens" --stream-timeout 600 --trace-region-bytes "$trace_region_bytes" \
   --prompt-base 1000 --prompt-user-offset 1 --stagger 0 \
-  --references /bench/packed-gate-reference \
+  --references /bench/packed-gate-reference $allow_missing_references \
   > experiment-results/m3native-gate-stdout.log 2>&1 || true
 
 if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
@@ -204,4 +236,8 @@ sed -n '/M3NATIVE_GATE_JSON_BEGIN/,/M3NATIVE_GATE_JSON_END/p' experiment-results
   | sed '1d;$d' > experiment-results/m3native-gate.json || true
 sed -n '/M3NATIVE_GATE_LOG_BEGIN/,/M3NATIVE_GATE_LOG_END/p' experiment-results/m3native-gate-stdout.log \
   | sed '1d;$d' > experiment-results/m3native-server-tail.log || true
+# Every '[PINDIAG] dram after' line, straight to the workflow log: an arm that never
+# reaches a packed round (e.g. the 131k attach probe) still has this to read without
+# downloading the artifact.
+grep -F '[PINDIAG] dram after' experiment-results/m3native-server-tail.log || true
 test -s experiment-results/m3native-gate.json

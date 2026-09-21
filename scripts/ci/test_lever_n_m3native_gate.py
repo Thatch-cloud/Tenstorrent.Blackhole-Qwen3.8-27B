@@ -10,9 +10,18 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from lever_n_m3native_gate import RETIRED_LABELS, compare_prefix, retired_binder_leaks  # noqa: E402
+from lever_n_m3native_gate import (  # noqa: E402
+    RETIRED_LABELS, compare_prefix, evaluate_gate, retired_binder_leaks)
 
 V4_ROUND = {'decode norm': 129, 'full-attention forward': 16, 'MLP forward': 0, 'GDN output projection': 0}
+
+# A complete, passing four-user round: every ingredient evaluate_gate checks for.
+COMPLETE_KWARGS = dict(
+    ready=True, users=4,
+    checked=[{'user': index, 'identical_prefix': True} for index in range(4)],
+    allow_missing_references=False, native_m3_marker_present=True,
+    packed_phase={'rounds': 3, 'trace_ms_min': 1.0, 'trace_ms_mean': 1.0, 'trace_ms_max': 1.0},
+    binder_rounds=[V4_ROUND], retired_binder_calls_nonzero=[])
 
 
 class RetiredBinderLeakTests(unittest.TestCase):
@@ -54,6 +63,61 @@ class ComparePrefixTests(unittest.TestCase):
 
     def test_empty_actual_is_a_partial_prefix_of_any_reference(self):
         self.assertEqual(compare_prefix('', 'hello world'), (True, True))
+
+
+class EvaluateGateTests(unittest.TestCase):
+    """evaluate_gate: the --allow-missing-references flag only widens what counts as
+    complete reference coverage; it never relaxes a mismatch, readiness, the native_m3
+    marker, packed_phase, or the retired-binder checks."""
+
+    def test_a_complete_passing_round_passes_by_default(self):
+        self.assertTrue(evaluate_gate(**COMPLETE_KWARGS))
+
+    def test_a_missing_reference_fails_by_default_unchanged_behaviour(self):
+        # Exactly today's pre-flag behaviour: fewer checked users than the run served.
+        kwargs = dict(COMPLETE_KWARGS, checked=COMPLETE_KWARGS['checked'][:3])
+        self.assertFalse(evaluate_gate(**kwargs))
+
+    def test_no_references_at_all_fails_by_default(self):
+        # The 131k arm with no reference file yet: checked is empty.
+        kwargs = dict(COMPLETE_KWARGS, checked=[])
+        self.assertFalse(evaluate_gate(**kwargs))
+
+    def test_no_references_at_all_passes_with_the_flag_when_everything_else_holds(self):
+        kwargs = dict(COMPLETE_KWARGS, checked=[], allow_missing_references=True)
+        self.assertTrue(evaluate_gate(**kwargs))
+
+    def test_partial_references_pass_with_the_flag_if_all_present_ones_match(self):
+        kwargs = dict(COMPLETE_KWARGS, checked=COMPLETE_KWARGS['checked'][:2],
+                      allow_missing_references=True)
+        self.assertTrue(evaluate_gate(**kwargs))
+
+    def test_partial_references_still_fail_without_the_flag(self):
+        kwargs = dict(COMPLETE_KWARGS, checked=COMPLETE_KWARGS['checked'][:2],
+                      allow_missing_references=False)
+        self.assertFalse(evaluate_gate(**kwargs))
+
+    def test_the_flag_never_forgives_an_actual_mismatch(self):
+        checked = [dict(COMPLETE_KWARGS['checked'][0], identical_prefix=False)]
+        kwargs = dict(COMPLETE_KWARGS, checked=checked, allow_missing_references=True)
+        self.assertFalse(evaluate_gate(**kwargs))
+
+    def test_the_flag_never_forgives_an_unready_server(self):
+        kwargs = dict(COMPLETE_KWARGS, checked=[], allow_missing_references=True, ready=False)
+        self.assertFalse(evaluate_gate(**kwargs))
+
+    def test_the_flag_never_forgives_a_missing_native_m3_marker(self):
+        # This is the actual 131k-attach-arm outcome today: the T16 gate refuses the
+        # request inside engine construction before any packed round runs (see
+        # docs/lever-n-131k-attach-arm.md), so no decode round ever prints the marker.
+        kwargs = dict(COMPLETE_KWARGS, checked=[], allow_missing_references=True,
+                      native_m3_marker_present=False, packed_phase=None, binder_rounds=[])
+        self.assertFalse(evaluate_gate(**kwargs))
+
+    def test_the_flag_never_forgives_a_retired_binder_leak(self):
+        kwargs = dict(COMPLETE_KWARGS, checked=[], allow_missing_references=True,
+                      retired_binder_calls_nonzero=[{'MLP forward': 1}])
+        self.assertFalse(evaluate_gate(**kwargs))
 
 
 if __name__ == '__main__':

@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p experiment-results graft/attention graft/gdn
-          image=sha256:71e7fac137f8da2f9f46f81b848cd6f5e48148b6e94601ee470b87319c2f84a4
+          image=sha256:8310fdfe6257a546a47822372deb7646c4380874815141f2f2f6c76f5e21fe80
           root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
           name="qwen-m3native-extract-$GITHUB_RUN_ID"
           docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
@@ -151,6 +151,20 @@ jobs:
             *-v12) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_PROFILE=1 ;;
             *-v13) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 ;;
             *-v14) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 ;;
+            *-v17) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 ;;
+            # -v15/-v16: the 131k one-user/two-user attach arm. No reference exists at 131k
+            # yet, so M3NATIVE_ALLOW_MISSING_REFERENCES=1 keeps the gate reporting instead of
+            # requiring gate_passed. QWEN_DSPARK_REQUEST_CONTEXT and QWEN_FAST_MAX_POSITION are
+            # derived from these inside the run-arm - there is no separate "ladder" env to set
+            # here: the earlier 131k single-stream qualification used a disjoint offline
+            # harness (dspark_request_experiment.py via qwen-combined-ladder.yml against the
+            # historical 8c102b20 checkout), not this vLLM+packed-decode stack, and the staged
+            # T16 combined-runtime recipe this gate serves is CLI-locked to context 32768
+            # (frozen_recipe_context.py:196-198). See docs/lever-n-131k-attach-arm.md for the
+            # exact refusal expected: attach succeeds and prints dram headroom, but the T16
+            # gate refuses the first request's engine construction before any packed round.
+            *-v15) export M3NATIVE_USERS=1 M3NATIVE_CONTEXT=131328 M3NATIVE_PROMPT_TOKENS=131072 M3NATIVE_ALLOW_MISSING_REFERENCES=1 ;;
+            *-v16) export M3NATIVE_USERS=2 M3NATIVE_CONTEXT=131328 M3NATIVE_PROMPT_TOKENS=131072 M3NATIVE_ALLOW_MISSING_REFERENCES=1 ;;
           esac
           echo "tag=$GITHUB_REF_NAME KOPGRAFT64=${KOPGRAFT64:-}"
           bash scripts/ci/lever_n_m3native_run_arm.sh
