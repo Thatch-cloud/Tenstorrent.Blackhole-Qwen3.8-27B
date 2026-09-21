@@ -11,7 +11,7 @@ from unittest.mock import patch
 import frozen_recipe_context
 from frozen_recipe_context import (REVISION, adapt_probe_sources, adapt_cache_launcher,
     adapt_scalar_reciprocal, adapt_eager_only, geometry, COMBINED_RUNTIME_CONTEXTS,
-    combined_runtime_directory)
+    combined_runtime_directory, PROBE_SECONDS_CHOICES)
 from frozen_context_geometry import CONTEXTS, selected_geometry, factory_selector
 from frozen_runtime_context import FILES
 
@@ -107,7 +107,14 @@ timeout() {
             self.assertEqual(set(report['after']), set(names) - {'dspark_runtime_cache.py'} |
                 {'frozen_binary_cache.py', 'frozen_context_geometry.py',
                  'frozen_sim_build_cache.py', 'frozen_sim_phase.py', 'frozen_sim_assets.py',
-                 'frozen_probe_evidence.py'})
+                 'frozen_probe_evidence.py', 'fused_1d_input.cpp', 'fused_t16_admission.py',
+                 'fused-t16-target-simulator.json', 'fused-t16-target-simulator.exit-status',
+                 # 65536-only: adapt_replay_k_chunk stages attention_replay.py (not otherwise
+                 # part of `names`, see MINIMAL_ATTENTION_REPLAY above) and
+                 # adapt_wide_chunk_normalization's KERNEL_FIX_MODULES loop stages the three
+                 # ladder precision fix modules verbatim (SKT-patched) alongside the probe.
+                 'attention_replay.py', 'frozen_wide_chunk_scratch.py',
+                 'frozen_wide_chunk_sum_update.py', 'frozen_wide_chunk_score_center.py'})
 
     def test_cache_launcher_preserves_bounded_original_probe(self):
         names = ('run-simulator.sh', 'simulator-suite.sh')
@@ -203,6 +210,84 @@ timeout() {
         broken[names[0]] += '\nPADDED_KEYS = 8704\n'
         with self.assertRaises(ValueError):
             adapt_probe_sources(broken, 32768)
+
+
+class ProbeSecondsTests(unittest.TestCase):
+    """QWEN_FROZEN_65536_SKT's full precision set (TR0 scalar sum-update +
+    score-centering, ported alongside the scratch-CB fix) is much slower in
+    the simulator than the plain scratch-CB-only v2/v3 runs - run 35598117412
+    timed out at the 1020s budget inside eager_0. 3000 is the new, third
+    accepted --probe-seconds value; 510 and 1020 must stay byte-identical."""
+
+    def test_probe_seconds_choices_includes_3000_without_removing_existing_values(self):
+        self.assertEqual(set(PROBE_SECONDS_CHOICES), {510, 1020, 3000})
+
+    def test_adapt_cache_launcher_default_output_unchanged(self):
+        names = ('run-simulator.sh', 'simulator-suite.sh')
+        sources = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
+        default_call = adapt_cache_launcher(sources)
+        explicit_510 = adapt_cache_launcher(sources, probe_seconds=510)
+        self.assertEqual(default_call, explicit_510)
+
+    def test_adapt_cache_launcher_threads_3000_into_the_probe_phase_only(self):
+        names = ('run-simulator.sh', 'simulator-suite.sh')
+        sources = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
+        for probe_seconds in PROBE_SECONDS_CHOICES:
+            with self.subTest(probe_seconds=probe_seconds):
+                result = adapt_cache_launcher(sources, probe_seconds=probe_seconds)
+                self.assertIn(f'--phase probe --seconds {probe_seconds} ', result['simulator-suite.sh'])
+                # prepare_seconds (the ninja-build-cache phase, unrelated to
+                # the probe's own timeout - see the port report) is untouched
+                # by probe_seconds at every accepted value, including 3000.
+                self.assertIn('prepare_seconds=120\n', result['simulator-suite.sh'])
+                self.assertIn('prepare_seconds=510', result['simulator-suite.sh'])
+                self.assertNotIn('prepare_seconds=3000', result['simulator-suite.sh'])
+
+    def test_adapt_cache_launcher_rejects_unsupported_values(self):
+        names = ('run-simulator.sh', 'simulator-suite.sh')
+        sources = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
+        for bad in (0, 511, 1021, 2999, 3001, -3000):
+            with self.subTest(probe_seconds=bad):
+                with self.assertRaises(ValueError):
+                    adapt_cache_launcher(sources, probe_seconds=bad)
+
+    def test_real_pipeline_run_with_probe_seconds_3000(self):
+        """End-to-end: frozen_recipe_context.main() with --probe-seconds 3000
+        against a real historical checkout, not just adapt_cache_launcher()
+        called directly."""
+        names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
+            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh',
+            'simulator-suite.sh') + FILES
+        originals = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}']) for name in names}
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            scripts = checkout / 'scripts/ci'
+            scripts.mkdir(parents=True)
+            for name, source in originals.items():
+                (scripts / name).write_bytes(source)
+            manifest = checkout / 'deployment-3000.json'
+
+            def git(command):
+                arguments = command[3:]
+                if arguments == ['rev-parse', 'HEAD']:
+                    return REVISION.encode() + b'\n'
+                if arguments == ['status', '--porcelain', '--untracked-files=no']:
+                    return b''
+                if arguments[0] == 'show':
+                    return originals[arguments[1].rsplit('/', 1)[1]]
+                raise AssertionError(command)
+
+            with patch('sys.argv', ['adapter', '--checkout', str(checkout), '--context', '32768',
+                    '--probe-seconds', '3000', '--manifest', str(manifest)]), \
+                    patch.object(frozen_recipe_context.subprocess, 'check_output', side_effect=git):
+                frozen_recipe_context.main()
+            self.assertIn('--phase probe --seconds 3000 ', (scripts / 'simulator-suite.sh').read_text())
+            report = json.loads(manifest.read_text())
+            self.assertEqual(report['probe_seconds'], 3000)
 
 
 class Rung65536CombinedRuntimeStagingTests(unittest.TestCase):

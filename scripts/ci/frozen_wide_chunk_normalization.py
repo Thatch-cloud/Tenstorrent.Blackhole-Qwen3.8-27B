@@ -272,6 +272,41 @@ def _patch_build_cache(source):
     return source
 
 
+def _patch_target_probe(source):
+    """target-t16-attention-8k-probe.py, post frozen_target_replay.
+    adapt_target_probe() (only present in `sources` when --target-replay was
+    passed): redirect its compact-scratch branch's validate_manifest import
+    the same way _patch_probe does for dspark-native-8k-attention-probe.py.
+
+    Without this, QWEN_FROZEN_TARGET_SCRATCH=1 (the frozen-64k-target-replay-
+    scratch-* lanes) calls the plain, unwrapped dspark_fp32_build.
+    validate_manifest (frozen_target_replay.py:77,81 - injected by
+    adapt_target_probe(), not by this module), which cannot reconstruct a
+    scratch-CB-patched sdpa_program_factory.cpp: its reconstruction check
+    (restore the condition-text swap, then re-transform and compare) leaves
+    the scratch-CB layer in place, so the intermediate "original" never
+    matches SOURCE_SHA256, and dspark_fp32_intermediates.transform()'s own
+    guard raises 'Exact pinned SDPA factory required' (run 35598585759) -
+    exactly the class of bug frozen_wide_chunk_scratch.factory_scope() was
+    built to fix for the numerical probe; this port simply never redirected
+    the target probe's own, separate import of the same function.
+
+    Confirmed safe to fix this way rather than needing a per-context
+    expected-factory-hash mechanism: sdpa_tree_scratch.py's own pins
+    (HASHES / PATCHED_FACTORY_SHA256, sdpa_tree_scratch.py:9-13,20) are
+    entirely about ttnn/.../sdpa_decode/device/sdpa_decode_program_factory.cpp
+    - the DECODE kernel family attention_replay.py's ReplayAttentionReader
+    actually computes through (paged_scaled_dot_product_attention_decode) -
+    a completely different file from sdpa_program_factory.cpp, which this
+    port's wide-chunk patch touches. The compact-scratch target probe's own
+    numerics and scratch CB layout (chunk sizes, CB ids) are therefore not
+    coupled to sdpa_program_factory.cpp at all; its validate_manifest call
+    here is a build-provenance audit of a binary the target probe doesn't
+    otherwise depend on, not a source of correctness assumptions about it."""
+    return _once(source, "        from dspark_fp32_build import validate_manifest\n",
+        "        from frozen_wide_chunk_scratch import validate_manifest\n")
+
+
 def adapt_wide_chunk_normalization(sources, context):
     """Entry point called from frozen_recipe_context.main(). No-op unless
     context == 65536: every other context's sources dict is returned
@@ -292,6 +327,12 @@ def adapt_wide_chunk_normalization(sources, context):
     result['dspark_fp32_intermediates.py'] = _patch_fp32_intermediates(
         result['dspark_fp32_intermediates.py'], geometry)
     result['frozen_sim_build_cache.py'] = _patch_build_cache(result['frozen_sim_build_cache.py'])
+    # Only present when --target-replay was passed (frozen_target_replay.
+    # adapt_target_probe(), applied earlier in frozen_recipe_context.main()'s
+    # pipeline, is what stages this file at all).
+    if 'target-t16-attention-8k-probe.py' in result:
+        result['target-t16-attention-8k-probe.py'] = _patch_target_probe(
+            result['target-t16-attention-8k-probe.py'])
     for name in KERNEL_FIX_MODULES:
         module_source = Path(__file__).with_name(name).read_text()
         result[name] = _patch_skt_constant(module_source, geometry)

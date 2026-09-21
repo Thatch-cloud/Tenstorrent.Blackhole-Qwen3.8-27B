@@ -267,6 +267,70 @@ class WideChunkPatchTests(unittest.TestCase):
                         compile(source, name, 'exec')
 
 
+def target_probe_source():
+    """Real historical target-t16-attention-8k-probe.py after
+    frozen_target_replay.adapt_target_probe() - the exact text
+    adapt_wide_chunk_normalization() receives whenever --target-replay was
+    passed (frozen_recipe_context.py applies adapt_target_probe() at
+    line 259, before this module's adapter runs at line 346; the
+    verbatim-copy loop in between does not touch this filename)."""
+    from frozen_target_replay import adapt_target_probe
+    return adapt_target_probe(historical('target-t16-attention-8k-probe.py'))
+
+
+class TargetProbePatchTests(unittest.TestCase):
+    """_patch_target_probe: the target-replay-scratch factory-pin fix for
+    run 35598585759 ('Exact pinned SDPA factory required', QWEN_FROZEN_
+    TARGET_SCRATCH=1 lanes). Only staged when --target-replay was passed
+    (target-t16-attention-8k-probe.py present in `sources`); a pure no-op
+    omission otherwise, and for every context other than 65536 regardless
+    of --target-replay."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = target_probe_source()
+
+    def test_anchor_appears_exactly_once_in_the_real_adapted_text(self):
+        # Precondition for _once() inside _patch_target_probe: if this ever
+        # drifts to 0 or >1, _patch_target_probe raises ValueError instead
+        # of silently mismatching - this just documents why that's expected.
+        self.assertEqual(self.source.count('        from dspark_fp32_build import validate_manifest\n'), 1)
+
+    def test_redirects_the_compact_scratch_validate_manifest_import(self):
+        patched = wide._patch_target_probe(self.source)
+        self.assertEqual(patched.count('from frozen_wide_chunk_scratch import validate_manifest'), 1)
+        self.assertNotIn('from dspark_fp32_build import validate_manifest', patched)
+        # The unrelated report['factory_build'] call site itself is untouched -
+        # only the import line changes.
+        self.assertIn("report['factory_build'] = validate_manifest("
+            "'/opt/tt-metal', '/experiment/results/dspark-fp32-build.json')", patched)
+        compile(patched, 'target-t16-attention-8k-probe.py', 'exec')
+
+    def test_full_adapter_applies_the_redirect_when_target_replay_key_present(self):
+        sources = adapted_sources(65536)
+        sources['target-t16-attention-8k-probe.py'] = self.source
+        result = wide.adapt_wide_chunk_normalization(sources, 65536)
+        patched = result['target-t16-attention-8k-probe.py']
+        self.assertEqual(patched.count('from frozen_wide_chunk_scratch import validate_manifest'), 1)
+        self.assertNotIn('from dspark_fp32_build import validate_manifest', patched)
+        compile(patched, 'target-t16-attention-8k-probe.py', 'exec')
+
+    def test_full_adapter_is_a_no_op_when_target_replay_key_absent(self):
+        # Real eager-only / reciprocal-only lanes never pass --target-replay,
+        # so target-t16-attention-8k-probe.py is never staged at all - the
+        # conditional wiring in adapt_wide_chunk_normalization must not add it.
+        sources = adapted_sources(65536)
+        self.assertNotIn('target-t16-attention-8k-probe.py', sources)
+        result = wide.adapt_wide_chunk_normalization(sources, 65536)
+        self.assertNotIn('target-t16-attention-8k-probe.py', result)
+
+    def test_32768_leaves_target_probe_source_untouched_even_when_present(self):
+        sources = adapted_sources(32768)
+        sources['target-t16-attention-8k-probe.py'] = self.source
+        result = wide.adapt_wide_chunk_normalization(sources, 32768)
+        self.assertEqual(result['target-t16-attention-8k-probe.py'], self.source)
+
+
 class ContentAddressedCacheDifferentiationTests(unittest.TestCase):
     """No manual per-context binary pin is added (see the port report): the
     existing content-addressed build cache (frozen_binary_cache.cache_key,

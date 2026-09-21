@@ -88,8 +88,11 @@ def adapt_probe_sources(sources, context):
     return result
 
 
+PROBE_SECONDS_CHOICES = (510, 1020, 3000)
+
+
 def adapt_cache_launcher(sources, probe_seconds=510):
-    if type(probe_seconds) is not int or probe_seconds not in (510, 1020):
+    if type(probe_seconds) is not int or probe_seconds not in PROBE_SECONDS_CHOICES:
         raise ValueError('Explicit supported probe budget required')
     result = dict(sources)
     result['run-simulator.sh'] = replace_once(result['run-simulator.sh'],
@@ -176,7 +179,7 @@ def main():
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--context', type=int, choices=CONTEXTS, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
-    parser.add_argument('--probe-seconds', type=int, choices=(510, 1020), default=510)
+    parser.add_argument('--probe-seconds', type=int, choices=PROBE_SECONDS_CHOICES, default=510)
     parser.add_argument('--scalar-reciprocal', action='store_true',
         help='Explicit changed-math diagnostic candidate, not the unchanged winning recipe')
     parser.add_argument('--eager-only', action='store_true',
