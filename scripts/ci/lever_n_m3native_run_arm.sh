@@ -21,7 +21,7 @@
 # fire (gate 1, run 35556533480: a false negative - no decode round ever ran, even
 # though the graft was mounted correctly). Setting it to 0 keeps the single M3 block.
 set -euo pipefail
-image="${1:-sha256:8d3f6a280df8e3bec376076dfbf7026725419dc73950b92578ec5845e1c7c900}"
+image="${1:-sha256:70aab32606c8b285436b6e2f12ca91ca3b5729c0c770ae77eff43b8339602320}"
 target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
@@ -210,6 +210,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PIPELINED_PROPOSALS:+-e QWEN_FAST_PIPELINED_PROPOSALS=1} \
   ${M3NATIVE_FAST_COMMIT:+-e QWEN_FAST_FAST_COMMIT=1} \
   ${M3NATIVE_PACKED_PROPOSAL:+-e QWEN_FAST_PACKED_PROPOSAL=1} \
+  ${M3NATIVE_PIPELINED_PUBLISH:+-e QWEN_FAST_PIPELINED_PUBLISH=1} \
   ${M3NATIVE_GDN_USER_BATCH:+-e QWEN_FAST_GDN_USER_BATCH=1} \
   ${M3NATIVE_REPLAY_GROUP_ROWS:+-e QWEN_FAST_REPLAY_GROUP_ROWS=$M3NATIVE_REPLAY_GROUP_ROWS} \
   ${M3NATIVE_GDN_USER_BATCH_MIN_USERS:+-e QWEN_FAST_GDN_USER_BATCH_MIN_USERS=$M3NATIVE_GDN_USER_BATCH_MIN_USERS} \
