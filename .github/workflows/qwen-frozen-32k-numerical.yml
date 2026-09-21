@@ -78,6 +78,7 @@ jobs:
           QWEN_FROZEN_PROBE_PART: ${{ endsWith(github.ref, 'reciprocal-diagnostics-v1') && 'diagnostics' || 'numerical' }}
           QWEN_FROZEN_BUILD_ONLY: '0'
           QWEN_FROZEN_TARGET_SCRATCH: ${{ contains(github.ref, 'target-replay-scratch-') && '1' || '0' }}
+          QWEN_FROZEN_65536_REPLAY_K_CHUNK: ${{ endsWith(github.ref, 'target-replay-scratch-v9') && '256' || '128' }}
         run: |
           limit=1090
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-64k-* ]]; then limit=3400; fi

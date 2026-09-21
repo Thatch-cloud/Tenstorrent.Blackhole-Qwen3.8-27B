@@ -38,5 +38,6 @@ container=$(docker create --network none --hostname qwen-experiment --add-host q
     -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=1 \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/frozen-hardware-suite.sh)
 docker cp scripts "$container:/experiment-scripts"
+docker cp optimisation/sim "$container:/simulator-support"
 docker start -a "$container" 2>&1 | tee "$results/frozen-hardware-console.log"
 test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0

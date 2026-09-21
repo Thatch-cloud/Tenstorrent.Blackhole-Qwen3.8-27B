@@ -9,6 +9,14 @@ test -z "${TT_METAL_SIMULATOR:-}"
 test -z "${TT_METAL_MOCK_CLUSTER_DESC_PATH:-}"
 test -z "${TT_METAL_SLOW_DISPATCH_MODE:-}"
 export PYTHONPATH=/experiment-scripts/ci:/opt/tt-metal/ttnn:/opt/tt-metal
+# The probe hashes its own SOURCES, one of which is written relative to scripts/ci
+# as ../../optimisation/sim/run-dispatch-probe.sh (dspark-attention-captured-probe.py
+# at the pinned revision), so it resolves to /optimisation/sim inside the container.
+# The simulator lane mounts exactly this and symlinks it the same way; run
+# 35657803627 failed here with FileNotFoundError on that path.
+mkdir -p /optimisation
+ln -sfn /simulator-support /optimisation/sim
+test -f /optimisation/sim/run-dispatch-probe.sh
 printf 'frozen hardware result write preflight\n' > /experiment/results/frozen-hardware-write-preflight.txt
 python3 /experiment-scripts/ci/device-owners.py > /experiment/results/allocation.json
 python3 /experiment-scripts/ci/hardware-correctness.py --suite audit --output /experiment/results/runtime-audit.json

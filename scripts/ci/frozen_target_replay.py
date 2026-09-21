@@ -106,7 +106,22 @@ def adapt_target_probe(source):
         "                        raise AssertionError('T16 long-context warm output differs from native B1')\n"
         '                finally:\n'
         '                    ttnn.deallocate(warm)\n',
-        '                if any(not torch.equal(actual, expected) for actual, expected in zip(allocation_host, gold[0], strict=True)):\n'
+        '                mismatched = [index for index, (actual, expected)\n'
+        '                    in enumerate(zip(allocation_host, gold[0], strict=True))\n'
+        '                    if not torch.equal(actual, expected)]\n'
+        '                for index in mismatched:\n'
+        '                    actual, expected = allocation_host[index], gold[0][index]\n'
+        '                    difference = (actual.to(torch.float32) - expected.to(torch.float32)).abs()\n'
+        '                    rows = torch.nonzero(difference.reshape(-1, difference.shape[-1]).amax(dim=-1),\n'
+        '                        as_tuple=False).flatten()\n'
+        "                    print(json.dumps(dict(stage='t16-b1-mismatch', tensor=index, start=start,\n"
+        '                        shape=list(actual.shape), elements=int(actual.numel()),\n'
+        '                        mismatching=int((actual != expected).sum()),\n'
+        '                        max_abs=float(difference.max()), mean_abs=float(difference.mean()),\n'
+        '                        nonfinite=int((~torch.isfinite(actual.to(torch.float32))).sum()),\n'
+        '                        rows_affected=int(rows.numel()),\n'
+        '                        first_rows=[int(value) for value in rows[:8]])), flush=True)\n'
+        '                if mismatched:\n'
         "                    raise AssertionError('T16 long-context warm output differs from native B1')\n")
     source = replace_once(source, '    import torch\n',
         '    from attention_mask_replay import validate_ticket\n'

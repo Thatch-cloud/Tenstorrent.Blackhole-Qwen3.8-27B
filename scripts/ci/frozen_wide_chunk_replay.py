@@ -95,5 +95,17 @@ def adapt_replay_k_chunk(sources, context, checkout):
             'has it): ' + str(path))
     original = path.read_text()
     result['attention_replay.py'] = _patch_attention_replay(original)
+    if 'run-simulator.sh' not in result:
+        raise ValueError('run-simulator.sh must be staged before the replay k-chunk knob '
+            'can be forwarded into the container')
+    # The knob is read inside the container at runtime, so it has to be forwarded
+    # there: without this line every 65536 replay silently ran at DEFAULT no matter
+    # what the workflow set. Same default on both sides, so an unset knob behaves
+    # exactly as before. adapt_cache_launcher() has already rewritten this env block
+    # by the time this adapter runs (frozen_recipe_context.main() orders it last).
+    result['run-simulator.sh'] = _once(result['run-simulator.sh'],
+        '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"',
+        f'    -e "{KNOB}=${{{KNOB}:-{DEFAULT}}}" \\\n'
+        '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}"')
     compile(result['attention_replay.py'], 'attention_replay.py', 'exec')
     return result

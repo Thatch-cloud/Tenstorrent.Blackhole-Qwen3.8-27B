@@ -29,6 +29,13 @@ def historical_attention_replay():
         check=True, capture_output=True, text=True).stdout
 
 
+BACKSLASH = chr(92)
+
+LAUNCHER = ('docker create \\\n'
+    '    -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \\\n'
+    '    --entrypoint /bin/bash image suite.sh\n')
+
+
 class NoOpForOtherContextsTests(unittest.TestCase):
 
     def test_returns_equal_dict_without_attention_replay_for_every_other_context(self):
@@ -91,9 +98,49 @@ class PatchAgainstRealHistoricalSourceTests(unittest.TestCase):
             checkout = Path(tmp)
             (checkout / 'scripts/ci').mkdir(parents=True)
             (checkout / 'scripts/ci/attention_replay.py').write_text(self.historical)
-            result = replay.adapt_replay_k_chunk({}, 65536, checkout)
+            result = replay.adapt_replay_k_chunk({'run-simulator.sh': LAUNCHER}, 65536, checkout)
             self.assertIn('attention_replay.py', result)
             self.assertIn('_qwen_replay_k_chunk', result['attention_replay.py'])
+            # The launcher is a required input at 65536 now: the knob is useless unless
+            # it reaches the container, so a missing runner is an error, not a skip.
+            with self.assertRaisesRegex(ValueError, 'run-simulator.sh must be staged'):
+                replay.adapt_replay_k_chunk({}, 65536, checkout)
+
+
+class KnobForwardingTests(unittest.TestCase):
+    """The knob is read at runtime INSIDE the container, so run-simulator.sh has to
+    pass it through. Nothing did before, which is why scratch-v1..v8 are all
+    k_chunk=128 results whatever the workflow set."""
+
+    def setUp(self):
+        self.historical = historical_attention_replay()
+
+    def _adapt(self, context, sources):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp)
+            (checkout / 'scripts/ci').mkdir(parents=True)
+            (checkout / 'scripts/ci/attention_replay.py').write_text(self.historical)
+            return replay.adapt_replay_k_chunk(sources, context, checkout)
+
+    def test_knob_is_forwarded_just_before_the_case_anchor(self):
+        result = self._adapt(65536, {'run-simulator.sh': LAUNCHER})
+        runner = result['run-simulator.sh']
+        expected = '    -e "%s=${%s:-%s}" %s\n' % (replay.KNOB, replay.KNOB, replay.DEFAULT, BACKSLASH)
+        self.assertIn(expected, runner)
+        self.assertEqual(runner.count('-e "QWEN_SIM_CASE='), 1)
+        self.assertLess(runner.index(replay.KNOB + '='), runner.index('-e "QWEN_SIM_CASE='))
+        # Same default on both sides, so an unset knob is exactly the shipped behaviour.
+        self.assertIn(':-' + replay.DEFAULT + '}', runner)
+
+    def test_every_forwarded_line_still_continues(self):
+        runner = self._adapt(65536, {'run-simulator.sh': LAUNCHER})['run-simulator.sh']
+        block = runner.split('docker create', 1)[1].split('--entrypoint', 1)[0]
+        self.assertEqual([line for line in block.split('\n')[:-1] if not line.endswith(BACKSLASH)], [])
+
+    def test_forwarding_is_65536_only(self):
+        self.assertEqual(replay.adapt_replay_k_chunk({'run-simulator.sh': LAUNCHER}, 32768,
+            Path('.'))['run-simulator.sh'], LAUNCHER)
 
 
 class RuntimeValidationTests(unittest.TestCase):

@@ -32,6 +32,60 @@ class TargetReplayTests(unittest.TestCase):
         self.assertIn('zip(allocation_host, gold[0], strict=True)', changed)
         self.assertNotIn('warm = reader(', changed)
 
+    def test_failing_comparison_reports_magnitude_and_shape_before_raising(self):
+        """The bare torch.equal told us only that T16 and B1 disagree, never by how
+        much or on which rows, so a 2-ulp bf16 rounding difference and a wrong-rows
+        structural bug looked identical in the artifact (docs/t16-vs-b1-65536.md).
+        Every mismatching tensor now prints one JSON line first; the assertion that
+        fails the probe is unchanged and still fires."""
+        changed = adapt_target_probe(self.original)
+        self.assertIn("stage='t16-b1-mismatch'", changed)
+        for field in ('tensor=index', 'start=start', 'shape=list(actual.shape)',
+                      'mismatching=int((actual != expected).sum())', 'max_abs=float(difference.max())',
+                      'mean_abs=float(difference.mean())', 'rows_affected=int(rows.numel())',
+                      'first_rows=[int(value) for value in rows[:8]]'):
+            self.assertIn(field, changed)
+        self.assertIn('nonfinite=int((~torch.isfinite(actual.to(torch.float32))).sum())', changed)
+        # Diagnostics run first, then the same failure.
+        self.assertLess(changed.index("stage='t16-b1-mismatch'"),
+            changed.index("raise AssertionError('T16 long-context warm output differs from native B1')"))
+        self.assertIn('if mismatched:', changed)
+        compile(changed, 'target-probe', 'exec')
+
+    def test_mismatch_report_runs_against_real_tensors(self):
+        """Execute the emitted block itself, not just its text: a shape or dtype slip
+        in the generated source would otherwise only surface on the rig."""
+        import json
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        opening = '                mismatched = [index for index, (actual, expected)'
+        changed = adapt_target_probe(self.original)
+        body = opening + changed.split(opening, 1)[1].split('                if mismatched:', 1)[0]
+        # zip(strict=) is 3.10, which the container has and this host does not; the
+        # lengths are equal by construction here, so dropping it changes nothing the
+        # block does. Exactly one occurrence, or the extraction moved.
+        self.assertEqual(body.count(', strict=True'), 1)
+        body = body.replace(', strict=True', '')
+        block = '\n'.join(line[16:] if line.startswith(' ' * 16) else line for line in body.split('\n'))
+        expected = [torch.zeros(4, 8, dtype=torch.bfloat16), torch.ones(2, 3, dtype=torch.bfloat16)]
+        actual = [value.clone() for value in expected]
+        actual[0][1][2] = 0.5
+        printed = []
+        namespace = dict(allocation_host=actual, gold=[expected], torch=torch, start=65536,
+            json=json, print=lambda value, flush=False: printed.append(value))
+        exec(compile(block, 'mismatch-block', 'exec'), namespace)
+        self.assertEqual(namespace['mismatched'], [0])
+        self.assertEqual(len(printed), 1)
+        report = json.loads(printed[0])
+        self.assertEqual(report['stage'], 't16-b1-mismatch')
+        self.assertEqual((report['tensor'], report['start']), (0, 65536))
+        self.assertEqual(report['shape'], [4, 8])
+        self.assertEqual((report['mismatching'], report['elements']), (1, 32))
+        self.assertEqual((report['max_abs'], report['nonfinite']), (0.5, 0))
+        self.assertEqual((report['rows_affected'], report['first_rows']), (1, [1]))
+
     def test_source_drift_and_reapplication_rejected(self):
         with self.assertRaises(ValueError):
             adapt_target_probe(self.original.replace('for capacity in (8448,):', 'for capacity in (4352,):'))
