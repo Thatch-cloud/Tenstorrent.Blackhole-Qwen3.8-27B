@@ -16,6 +16,11 @@ class PreparedDFlashProposal:
         self.cache_checks = []
         self.kv_history = getattr(device, 'kv_history', None)
         self.closed = False
+        # QWEN_FAST_PIPELINED_PROPOSALS (serving_worker_hook.prepare_pipelined_drafts):
+        # (seed, bucket, owned) once prepare_device() has enqueued this proposal's
+        # device work and is waiting on finish() to read it back - None the rest of
+        # the time, including on the unmodified single-phase propose() path below.
+        self._pending = None
         operations = self.operations
         def upload(value, *, identifiers=False):
             tensor = operations.from_torch(value, device=self.mesh,
@@ -61,7 +66,16 @@ class PreparedDFlashProposal:
             **(dict(audit_convolution=True) if audit_convolution else {}),
             **(dict(cached_history=bucket.cached_history) if use_cache and bucket.cached_history is not None else {}))
 
-    def update(self, bucket, seed):
+    def update(self, bucket, seed, *, defer_finish=False):
+        """Copy this proposal's inputs onto `bucket` for `seed`. By default (`defer_finish`
+        False, every existing caller) this synchronizes the device, checks the prepared
+        addresses did not move and releases its own transients before returning - exactly
+        as before. `defer_finish=True` (QWEN_FAST_PIPELINED_PROPOSALS, prepare_device()
+        below) enqueues the same copies without waiting on any of that, and hands the
+        transients back instead of releasing them, so several requests' updates can share
+        one synchronize_device (serving_worker_hook.prepare_pipelined_drafts) instead of
+        paying one each; the caller must finish() (or discard_pending()) what this
+        returns before the device can safely reuse the storage it protects."""
         operations, device = self.operations, self.device
         if getattr(device, 'live_query_qk', False):
             device.validated_live_masks.discard(addresses(operations, bucket.mask))
@@ -102,7 +116,7 @@ class PreparedDFlashProposal:
         owned, retain = device.temporaries([device.history, device.spare_history, *self.owned,
             *(self.kv_history.owned if self.kv_history is not None else []),
             *(self.kv_history.borrowed if self.kv_history is not None else [])])
-        try:
+        def copy_history_and_cache():
             if self.kv_history is None or device.progress is not None:
                 history = retain(operations.slice(device.history, (0, 0, 0, 0), (1, 1, bucket.context, 5120)))
                 padded = retain(operations.pad(history, [(0, 0), (0, 0), (0, 32), (0, 0)], 0.0))
@@ -112,6 +126,18 @@ class PreparedDFlashProposal:
                     for name in ('k', 'v'):
                         value = retain(operations.slice(active[name], (0, 0, 0, 0), (1, 4, bucket.context, 128)))
                         operations.copy(value, destination[name])
+        if defer_finish:
+            try:
+                copy_history_and_cache()
+            except BaseException:
+                # Nothing will call finish() for this attempt, so there is no later
+                # point that releases these - unlike the non-deferred path's finally
+                # below, this must release right here or leak them.
+                release_owned(operations, owned)
+                raise
+            return owned
+        try:
+            copy_history_and_cache()
             operations.synchronize_device(self.mesh)
             if [addresses(operations, value) for value in bucket.inputs] != bucket.addresses:
                 raise AssertionError('Prepared proposal input addresses moved')
@@ -121,6 +147,73 @@ class PreparedDFlashProposal:
                 device.validated_native_proposal_masks.add(addresses(operations, bucket.mask))
         finally:
             release_owned(operations, owned)
+
+    def prepare_device(self, seed):
+        """Phase A of QWEN_FAST_PIPELINED_PROPOSALS (serving_worker_hook.
+        prepare_pipelined_drafts): enqueue this proposal's copies and its trace
+        replay without waiting on the device, deferring update()'s
+        synchronize_device, its address-identity assertion and its transient
+        release to finish(). Returns False - the caller falls back to this
+        bridge's normal blocking drafts() - when there is nothing to prewarm:
+        this capture is closed, or its device audits its proposal (progress is
+        not None; the audit path reads back inline and cannot defer). A prepare
+        left over from a round the harness chose not to consume (GreedySession.
+        propose's `limit > 1` gate, a request within one token of the session's
+        256-slot ceiling - real_remaining_budget's docstring) is discarded here
+        rather than left to raise, so one skipped round does not refuse every
+        later prewarm for that request."""
+        if self.closed or self.device.progress is not None:
+            return False
+        if self._pending is not None:
+            self.discard_pending()
+        device, operations = self.device, self.operations
+        bucket = next((value for context, value in self.buckets.items() if context >= device.history_rows), None)
+        if bucket is None:
+            raise ValueError('Committed history exceeds prepared request contexts')
+        owned = self.update(bucket, seed, defer_finish=True)
+        operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=False)
+        self._pending = (seed, bucket, owned)
+        return True
+
+    def has_pending(self, seed):
+        return self._pending is not None and self._pending[0] == seed
+
+    def finish(self, count):
+        """Phase B counterpart to prepare_device(): update()'s deferred tail (the
+        address-identity assertion, validated-mask bookkeeping and transient
+        release) followed by propose()'s own tail (the trace's host readback and
+        selection) - run once the caller's single shared synchronize_device has
+        already fenced every prepared request's device work, not just this one's,
+        so this issues no synchronize_device of its own."""
+        if self._pending is None:
+            raise ValueError('No prepared proposal is pending')
+        seed, bucket, owned = self._pending
+        self._pending = None
+        operations, device = self.operations, self.device
+        try:
+            if [addresses(operations, value) for value in bucket.inputs] != bucket.addresses:
+                raise AssertionError('Prepared proposal input addresses moved')
+            if getattr(device, 'live_query_qk', False):
+                device.validated_live_masks.add(addresses(operations, bucket.mask))
+            if getattr(device, 'native_proposal_attention', False):
+                device.validated_native_proposal_masks.add(addresses(operations, bucket.mask))
+        finally:
+            release_owned(operations, owned)
+        return device.select_proposal(bucket.outputs, seed, count)
+
+    def discard_pending(self):
+        """Release a prepare_device() that will never be finish()ed: a phase-A
+        failure fencing every OTHER bridge's already-enqueued work before it
+        re-raises (serving_worker_hook.prepare_pipelined_drafts), a stale prewarm
+        prepare_device() itself finds still pending, or close(). Callers other
+        than prepare_device() must synchronize_device first, exactly as finish()
+        requires - this only releases host-side bookkeeping and transients, it
+        does not fence the device."""
+        if self._pending is None:
+            return
+        _, _, owned = self._pending
+        self._pending = None
+        release_owned(self.operations, owned)
 
     def propose(self, seed, count):
         import torch
@@ -162,6 +255,8 @@ class PreparedDFlashProposal:
         if self.closed:
             return
         self.operations.synchronize_device(self.mesh)
+        # After the sync above, exactly as finish()/discard_pending() require.
+        self.discard_pending()
         for bucket in self.buckets.values():
             if bucket.trace is not None:
                 self.operations.release_trace(self.mesh, bucket.trace)

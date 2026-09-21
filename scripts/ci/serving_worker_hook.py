@@ -93,6 +93,72 @@ def discard_stale_ticket(request, packed_rows):
     session.pending, session.phase = None, 'idle'
 
 
+def pipelined_device(bridge):
+    """The DFlashDevice a bridge's proposal would run on this round, when its
+    runtime exposes one (dflash2's DFlashRequestRuntime.drafter) and the bridge
+    is actually eligible to draft - the same eligibility FastRunnerBridge.drafts()
+    itself checks (bridge.failed, request.closed/cancelled, session.finished,
+    session.pending) - so prepare_pipelined_drafts() never prewarms a bridge whose
+    drafts() call would skip or refuse drafting anyway. None for anything else:
+    a bridge with no draft need this round, a dspark request (DSparkRequestRuntime
+    subclasses DFlashRequestRuntime and has a `.drafter`, but every DSparkDevice
+    class - dspark_device.py, dspark_prepared_proposal.py, dspark_t32_device.py -
+    has no `prepare_device` method, unlike this file only adds to DFlashDevice),
+    or one with no captured trace at all (DFlashDevice.prepare_device's own
+    `proposal_capture is None` no-op, QWEN_FAST_EAGER_PROPOSAL) - the caller just
+    leaves it to run its normal blocking drafts() in phase B."""
+    request = bridge.request
+    if getattr(bridge, 'failed', False) or getattr(request, 'closed', False) or getattr(request, 'cancelled', False):
+        return None
+    session = request.session
+    if getattr(session, 'finished', False) or session.pending is not None:
+        return None
+    device = getattr(getattr(request, 'runtime', None), 'drafter', None)
+    return device if device is not None and callable(getattr(device, 'prepare_device', None)) else None
+
+
+def prepare_pipelined_drafts(bridges):
+    """QWEN_FAST_PIPELINED_PROPOSALS phase A: enqueue every eligible bridge's
+    proposal device work (DFlashDevice.prepare_device -> dflash_proposal_trace.
+    PreparedDFlashProposal.prepare_device) without waiting on any of it, then
+    fence the shared mesh ONCE instead of once per bridge, before phase B (the
+    unmodified per-bridge drafts() loop in _drafts, below) reads any of it back -
+    the execute_trace(blocking=False) x N + one synchronize_device pattern
+    mlp-sweep.py already uses for N independent replays on one mesh. Every
+    device's own .mesh is the SAME physical mesh (DFlashDevice.mesh is model.
+    mesh_device, shared by every concurrent request), so ANY one prepared
+    device's .operations/.mesh fences all of them; phase B needs no width or
+    count from here; DFlashDevice.propose() finds each prepared bridge's matching
+    seed by itself when the harness eventually calls it and finishes the prewarm
+    in place of redoing the work, in the SAME original bridge order phase B
+    already iterates in.
+
+    A device that raises while being prepared fails the round exactly as its own
+    drafts() call would have (the exception is never swallowed) - but only after
+    every OTHER already-prepared device's enqueued work is fenced and released,
+    so a mid-loop failure never leaves the shared mesh with in-flight work whose
+    transients this function is about to free out from under it."""
+    prepared, fence = [], None
+    try:
+        for bridge in bridges:
+            device = pipelined_device(bridge)
+            if device is None:
+                continue
+            if device.prepare_device(bridge.request.session.seed):
+                prepared.append(device)
+                if fence is None:
+                    fence = (device.operations, device.mesh)
+    except BaseException:
+        if fence is not None:
+            fence[0].synchronize_device(fence[1])
+        for device in prepared:
+            device.proposal_capture.discard_pending()
+        raise
+    if fence is not None:
+        fence[0].synchronize_device(fence[1])
+    return prepared
+
+
 class FastWorkerHook:
     def __init__(self, worker, bridge, *, cancelled, packed_step=None):
         runner = worker.model_runner
@@ -231,33 +297,45 @@ class FastWorkerHook:
                 if remaining is not None and remaining < packed_rows:
                     packed_rows = None
                     break
+        # Before drafting, not after: a bridge whose pending ticket is already
+        # this round's width is untouched (the two-user block and the sequential
+        # default never trim their engines' captures, so this never fires for
+        # them - packed_shapes.sequential_capture_rows), and one that is not gets
+        # a clean redraft at packed_rows instead of riding into a mixed round.
+        #
+        # This runs whenever a packed policy is CONFIGURED, even when the policy
+        # answers None for this particular round - fewer live requests than the
+        # block's users (a partner just finished) or a survivor's remaining budget
+        # narrower than a block round both answer None here exactly as 'no block
+        # round today' does. A ticket already pending at the block's width does not
+        # stop being stale just because this round has nowhere shared to put it:
+        # left alone, it rides into a round with fewer (or oddly shaped) entries
+        # than the block's users, which `serving_packed_step.ineligible` refuses on
+        # ENTRY COUNT alone, and whose block-width tickets the survivors' own
+        # trimmed engines never captured (`packed_shapes.sequential_capture_rows`) -
+        # so `unservable` finds no fallback and `packed_device_step` calls
+        # `refuse_round`, failing every survivor's session instead of the one
+        # partner who actually finished (run 35564623068). Discarding it here lets
+        # `drafts()` redraft fresh at each engine's own native width instead, which
+        # the sequential step can always fall back to. Only a packed_step with no
+        # `proposal_rows` at all (the plain sequential default) skips this - there
+        # is no shared width concept to go stale against.
+        if have_policy:
+            for bridge in bridges:
+                discard_stale_ticket(bridge.request, packed_rows)
+        if os.environ.get('QWEN_FAST_PIPELINED_PROPOSALS') == '1':
+            # Phase A only - prewarms whichever bridges are eligible and fences
+            # them once. Phase B is the loop below, completely unchanged: every
+            # bridge still calls its own drafts() in this same original order,
+            # and a bridge this left unprepared just runs it exactly as today.
+            # Must run after discard_stale_ticket above: a bridge a stale ticket
+            # left with session.pending set would otherwise look ineligible here
+            # (pipelined_device's own session.pending check) a moment before that
+            # same pending gets cleared for phase B, losing the prewarm for exactly
+            # the case the discard exists to redraft.
+            prepare_pipelined_drafts(bridges)
         request_ids, tokens = [], []
         for bridge in bridges:
-            # Before drafting, not after: a bridge whose pending ticket is already
-            # this round's width is untouched (the two-user block and the sequential
-            # default never trim their engines' captures, so this never fires for
-            # them - packed_shapes.sequential_capture_rows), and one that is not gets
-            # a clean redraft at packed_rows instead of riding into a mixed round.
-            #
-            # This runs whenever a packed policy is CONFIGURED, even when the policy
-            # answers None for this particular round - fewer live requests than the
-            # block's users (a partner just finished) or a survivor's remaining budget
-            # narrower than a block round both answer None here exactly as 'no block
-            # round today' does. A ticket already pending at the block's width does not
-            # stop being stale just because this round has nowhere shared to put it:
-            # left alone, it rides into a round with fewer (or oddly shaped) entries
-            # than the block's users, which `serving_packed_step.ineligible` refuses on
-            # ENTRY COUNT alone, and whose block-width tickets the survivors' own
-            # trimmed engines never captured (`packed_shapes.sequential_capture_rows`) -
-            # so `unservable` finds no fallback and `packed_device_step` calls
-            # `refuse_round`, failing every survivor's session instead of the one
-            # partner who actually finished (run 35564623068). Discarding it here lets
-            # `drafts()` redraft fresh at each engine's own native width instead, which
-            # the sequential step can always fall back to. Only a packed_step with no
-            # `proposal_rows` at all (the plain sequential default) skips this - there
-            # is no shared width concept to go stale against.
-            if have_policy:
-                discard_stale_ticket(bridge.request, packed_rows)
             # Phase lines around each proposal: run 35482551725 stalled with both
             # requests still running and neither device past its FIRST proposal, so
             # the next run has to say whether it is a proposal or a step that never

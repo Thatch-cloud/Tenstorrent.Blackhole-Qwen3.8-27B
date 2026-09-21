@@ -359,6 +359,58 @@ class ProposeTests(unittest.TestCase):
         self.assertIn('QWEN_FAST_EAGER_PROPOSAL=1', log.lines[0])
         device.execute_proposal.assert_not_called()
 
+    def test_a_prepared_pending_proposal_is_finished_instead_of_redone(self):
+        """QWEN_FAST_PIPELINED_PROPOSALS: prepare_device(seed) already ran this
+        proposal's device work and left it pending - propose() must finish it
+        (the deferred assertion/bookkeeping/release and the readback) rather than
+        replay the trace and redo the copies a second time."""
+        device, operations = self.device(tensors=False)
+        device.proposal_capture = SimpleNamespace(has_pending=Mock(return_value=True),
+            finish=Mock(return_value=(7, 8)), propose=Mock())
+        log = Lines()
+        with patch('dflash_device.pindiag', log):
+            self.assertEqual(DFlashDevice.propose(device, 17, 15), (7, 8))
+        device.proposal_capture.has_pending.assert_called_once_with(17)
+        device.proposal_capture.finish.assert_called_once_with(15)
+        device.proposal_capture.propose.assert_not_called()
+        self.assertEqual(device.proposal_calls, 3)
+        self.assertEqual(log.lines, [], 'a finished prewarm is expected, not a surprise the audit line reports')
+
+    def test_no_pending_proposal_falls_back_to_the_normal_trace_replay(self):
+        device, operations = self.device(tensors=False)
+        device.proposal_capture = SimpleNamespace(has_pending=Mock(return_value=False),
+            finish=Mock(), propose=Mock(return_value=(4, 5)))
+        self.assertEqual(DFlashDevice.propose(device, 17, 15), (4, 5))
+        device.proposal_capture.has_pending.assert_called_once_with(17)
+        device.proposal_capture.propose.assert_called_once_with(17, 15)
+        device.proposal_capture.finish.assert_not_called()
+
+    def test_prepare_device_delegates_to_the_captured_trace(self):
+        device, operations = self.device(tensors=False)
+        device.proposal_capture = SimpleNamespace(prepare_device=Mock(return_value=True))
+        self.assertTrue(DFlashDevice.prepare_device(device, 17))
+        device.proposal_capture.prepare_device.assert_called_once_with(17)
+
+    def test_prepare_device_is_a_no_op_without_a_captured_trace_mid_publication_or_closed(self):
+        device, operations = self.device(tensors=False)
+        # No captured trace at all - the eager QWEN_FAST_EAGER_PROPOSAL path.
+        self.assertFalse(DFlashDevice.prepare_device(device, 17))
+        device.proposal_capture = SimpleNamespace(prepare_device=Mock(return_value=True))
+        device.pending = object()
+        self.assertFalse(DFlashDevice.prepare_device(device, 17))
+        device.proposal_capture.prepare_device.assert_not_called()
+        device.pending = None
+        device.closed = True
+        self.assertFalse(DFlashDevice.prepare_device(device, 17))
+        device.proposal_capture.prepare_device.assert_not_called()
+
+    def test_prepare_device_rejects_an_unbounded_seed(self):
+        device, operations = self.device(tensors=False)
+        device.proposal_capture = SimpleNamespace(prepare_device=Mock(return_value=True))
+        with self.assertRaises(ValueError):
+            DFlashDevice.prepare_device(device, -1)
+        device.proposal_capture.prepare_device.assert_not_called()
+
 
 class ExecuteProposalTests(unittest.TestCase):
     """execute_proposal over a stand-in `self`: the observer is scoped per layer and

@@ -290,6 +290,157 @@ class WorkerHookTests(unittest.TestCase):
             hook.bridges = original
             hook.close()
 
+    def make_pipelined_bridges(self, names, *, operations, mesh, order):
+        """Four bridges over a shared fake mesh, each with a fake dflash2
+        DFlashDevice reachable at request.runtime.drafter - prepare_device()
+        records ('prepare', name, seed) into the shared `order` list and returns
+        True (successfully prewarmed); operations.synchronize_device records
+        ('sync', mesh); each bridge's drafts() records ('drafts', name, kwargs)."""
+        bridges = {}
+        for index, name in enumerate(names):
+            session = SimpleNamespace(request_id=name, seed=100 + index, pending=None, finished=False)
+            device = SimpleNamespace(operations=operations, mesh=mesh,
+                proposal_capture=SimpleNamespace(discard_pending=Mock(side_effect=lambda name=name: order.append(('discard', name)))),
+                prepare_device=Mock(side_effect=lambda seed, name=name: order.append(('prepare', name, seed)) or True))
+            request = SimpleNamespace(session=session, runtime=SimpleNamespace(drafter=device), closed=False, cancelled=False)
+            bridges[name] = SimpleNamespace(request=request, failed=False,
+                drafts=Mock(side_effect=lambda name=name, **kwargs: order.append(('drafts', name, kwargs)) or
+                            SimpleNamespace(req_ids=[name], draft_token_ids=[[1]])))
+        return bridges
+
+    def test_pipelined_proposals_are_off_by_default(self):
+        """QWEN_FAST_PIPELINED_PROPOSALS unset: no bridge is prewarmed, no shared
+        fence happens, and every bridge's own drafts() runs exactly as it always
+        has - the existing single-phase loop, untouched."""
+        worker, bridge, events, scheduled = self.fixture()
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        original = hook.bridges
+        order = []
+        operations = SimpleNamespace(synchronize_device=Mock(side_effect=lambda mesh: order.append(('sync', mesh))))
+        bridges = self.make_pipelined_bridges('abcd', operations=operations, mesh=object(), order=order)
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        try:
+            self.assertNotIn('QWEN_FAST_PIPELINED_PROPOSALS', os.environ)
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                result = worker.take_draft_token_ids()
+            self.assertEqual((result.req_ids, result.draft_token_ids), (['a', 'b', 'c', 'd'], [[1], [1], [1], [1]]))
+            for name in 'abcd':
+                bridges[name].request.runtime.drafter.prepare_device.assert_not_called()
+                bridges[name].drafts.assert_called_once_with()
+            operations.synchronize_device.assert_not_called()
+            self.assertEqual(order, [('drafts', name, {}) for name in 'abcd'])
+        finally:
+            hook.bridges = original
+            hook.close()
+
+    def test_pipelined_proposals_prewarm_every_eligible_bridge_then_fence_once(self):
+        """QWEN_FAST_PIPELINED_PROPOSALS=1: every bridge's device work is enqueued
+        (prepare_device) before any of them is read back, ONE synchronize_device
+        fences the shared mesh, and only then does phase B - drafts() for every
+        bridge, in the same original order, completely unchanged - run."""
+        worker, bridge, events, scheduled = self.fixture()
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        original = hook.bridges
+        order = []
+        mesh = object()
+        operations = SimpleNamespace(synchronize_device=Mock(side_effect=lambda mesh: order.append(('sync', mesh))))
+        bridges = self.make_pipelined_bridges('abcd', operations=operations, mesh=mesh, order=order)
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        try:
+            with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1'}), \
+                    patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                result = worker.take_draft_token_ids()
+            self.assertEqual((result.req_ids, result.draft_token_ids), (['a', 'b', 'c', 'd'], [[1], [1], [1], [1]]))
+            self.assertEqual(order, [
+                ('prepare', 'a', 100), ('prepare', 'b', 101), ('prepare', 'c', 102), ('prepare', 'd', 103),
+                ('sync', mesh),
+                ('drafts', 'a', {}), ('drafts', 'b', {}), ('drafts', 'c', {}), ('drafts', 'd', {}),
+            ])
+            operations.synchronize_device.assert_called_once_with(mesh)
+            for name in 'abcd':
+                bridges[name].request.runtime.drafter.proposal_capture.discard_pending.assert_not_called()
+        finally:
+            hook.bridges = original
+            hook.close()
+
+    def test_a_bridge_with_no_pipeline_eligible_drafter_falls_back_to_its_own_blocking_drafts(self):
+        """A dspark bridge (no `.drafter`), one with no captured trace at all
+        (`.drafter` present but no `prepare_device`), and one that already has a
+        pending ticket are all left for phase B exactly as they run today; only
+        the genuinely eligible bridges are prepared and fenced."""
+        worker, bridge, events, scheduled = self.fixture()
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        original = hook.bridges
+        order = []
+        mesh = object()
+        operations = SimpleNamespace(synchronize_device=Mock(side_effect=lambda mesh: order.append(('sync', mesh))))
+        bridges = self.make_pipelined_bridges('ad', operations=operations, mesh=mesh, order=order)
+        # b: dspark - no drafter attribute on its runtime at all.
+        session_b = SimpleNamespace(request_id='b', seed=200, pending=None, finished=False)
+        bridges['b'] = SimpleNamespace(request=SimpleNamespace(session=session_b, runtime=SimpleNamespace(),
+            closed=False, cancelled=False), failed=False,
+            drafts=Mock(side_effect=lambda **kwargs: order.append(('drafts', 'b', kwargs)) or
+                        SimpleNamespace(req_ids=['b'], draft_token_ids=[[1]])))
+        # c: a pending ticket already - drafts() will not even call prepare() for it.
+        session_c = SimpleNamespace(request_id='c', seed=201, pending='ticket', finished=False)
+        bridges['c'] = SimpleNamespace(request=SimpleNamespace(session=session_c, runtime=SimpleNamespace(),
+            closed=False, cancelled=False), failed=False,
+            drafts=Mock(side_effect=lambda **kwargs: order.append(('drafts', 'c', kwargs)) or
+                        SimpleNamespace(req_ids=['c'], draft_token_ids=[[1]])))
+        hook.bridges = {name: bridges[name] for name in 'abcd'}
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        try:
+            with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1'}), \
+                    patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+            prepares = [entry for entry in order if entry[0] == 'prepare']
+            self.assertEqual([name for _, name, _ in prepares], ['a', 'd'])
+            operations.synchronize_device.assert_called_once_with(mesh)
+            drafts = [entry for entry in order if entry[0] == 'drafts']
+            self.assertEqual([name for _, name, _ in drafts], ['a', 'b', 'c', 'd'], 'every bridge still drafts, in order')
+        finally:
+            hook.bridges = original
+            hook.close()
+
+    def test_a_phase_a_failure_fences_and_releases_every_already_prepared_bridge_before_reraising(self):
+        """A device raising while being prepared must fail the round loudly, exactly
+        as that bridge's own drafts() raising would - but only after every OTHER
+        already-prepared bridge's enqueued work is fenced (one synchronize_device)
+        and released (discard_pending), and before ANY bridge's readback (phase B
+        - drafts() - must never run once phase A itself has failed)."""
+        worker, bridge, events, scheduled = self.fixture()
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        original = hook.bridges
+        order = []
+        mesh = object()
+        operations = SimpleNamespace(synchronize_device=Mock(side_effect=lambda mesh: order.append(('sync', mesh))))
+        bridges = self.make_pipelined_bridges('abcd', operations=operations, mesh=mesh, order=order)
+        failure = RuntimeError('device fault preparing c')
+        bridges['c'].request.runtime.drafter.prepare_device = Mock(side_effect=failure)
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        try:
+            with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1'}), \
+                    patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                with self.assertRaises(RuntimeError) as failed:
+                    worker.take_draft_token_ids()
+            self.assertIs(failed.exception, failure)
+            self.assertEqual([entry[:2] for entry in order],
+                [('prepare', 'a'), ('prepare', 'b'), ('sync', mesh), ('discard', 'a'), ('discard', 'b')])
+            operations.synchronize_device.assert_called_once_with(mesh)
+            for name in 'abcd':
+                bridges[name].drafts.assert_not_called()
+            bridges['d'].request.runtime.drafter.prepare_device.assert_not_called()
+        finally:
+            hook.bridges = original
+            hook.close()
+
     def test_queued_sampler_or_second_owner_rejected(self):
         worker, bridge, _, _ = self.fixture()
         bridge.runner._pending_samples.append(object())

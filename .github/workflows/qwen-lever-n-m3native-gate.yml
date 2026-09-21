@@ -150,6 +150,7 @@ jobs:
             *-v10|*-v11) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 ;;
             *-v12) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_PROFILE=1 ;;
             *-v13) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 ;;
+            *-v14) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 ;;
           esac
           echo "tag=$GITHUB_REF_NAME KOPGRAFT64=${KOPGRAFT64:-}"
           bash scripts/ci/lever_n_m3native_run_arm.sh

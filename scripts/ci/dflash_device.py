@@ -751,12 +751,36 @@ class DFlashDevice:
             torch.tensor([seed], dtype=torch.int64))
         return tuple(int(token) for token in tokens[0, :count])
 
+    def prepare_device(self, seed):
+        """Phase A of QWEN_FAST_PIPELINED_PROPOSALS (serving_worker_hook.
+        prepare_pipelined_drafts): delegate to the captured trace's own
+        prepare_device() so this request's proposal copies and trace replay are
+        enqueued without a blocking synchronize_device. Returns False - callers
+        fall back to this device's normal blocking propose() - when there is
+        nothing to prewarm: closed, mid-publication (self.pending), or no
+        captured trace at all (QWEN_FAST_EAGER_PROPOSAL's eager path, which this
+        never touches)."""
+        if self.closed or self.pending is not None or self.proposal_capture is None:
+            return False
+        if type(seed) is not int or not 0 <= seed < 248320:
+            raise ValueError('Bounded anchor id required')
+        return self.proposal_capture.prepare_device(seed)
+
     def propose(self, seed, count):
         import torch
 
         if self.closed or self.pending is not None or type(seed) is not int or not 0 <= seed < 248320 or type(count) is not int or not 1 <= count <= self.max_drafts:
             raise ValueError('Committed DFlash2 history and bounded anchor/proposal IDs required')
         if self.proposal_capture is not None:
+            has_pending = getattr(self.proposal_capture, 'has_pending', None)
+            if callable(has_pending) and has_pending(seed):
+                # prepare_device(seed) already ran this proposal's device work and
+                # deferred its finish - the caller's shared synchronize_device has
+                # since fenced it (prepare_pipelined_drafts), so finish() only does
+                # host-side bookkeeping and the readback, no device wait of its own.
+                tokens = self.proposal_capture.finish(count)
+                self.proposal_calls += 1
+                return tokens
             if proposal_audit_enabled():
                 pindiag('[AUDIT] dev={:x} call={} proposal is a trace replay: the stage audit reads intermediates '
                         'only from the eager proposal (QWEN_FAST_EAGER_PROPOSAL=1)', id(self), self.proposal_calls)

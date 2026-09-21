@@ -174,6 +174,116 @@ class CachedProposalTests(unittest.TestCase):
                 self.assertTrue(torch.equal(case.bucket.cached_history[0][name],
                     case.cache.active[0][name][:, :, :context, :]))
 
+    def build_pipelined_case(self):
+        """A real update() over fake tensors and a real PreparedDFlashProposal
+        instance, extended with a bucket.trace/outputs and device.select_proposal
+        so prepare_device()/finish()/discard_pending() can be exercised end to
+        end - the same fixture shape as exercise_update, with the trace-replay
+        and readback pieces propose() itself needs added."""
+        operations = SimpleNamespace(ReplicateTensorToMesh=lambda mesh: mesh,
+            from_torch=lambda value, **kwargs: value.clone(),
+            copy_host_to_device_tensor=Mock(side_effect=lambda source, destination: destination.copy_(source)),
+            slice=lambda value, start, end: value[tuple(slice(first, last) for first, last in zip(start, end, strict=True))],
+            copy=Mock(side_effect=lambda source, destination: destination.copy_(source)),
+            synchronize_device=Mock(), execute_trace=Mock(), deallocate=Mock())
+        active = [dict(k=torch.ones((1, 4, 2048, 128), dtype=torch.bfloat16),
+            v=torch.full((1, 4, 2048, 128), 3, dtype=torch.bfloat16))]
+        cache = SimpleNamespace(position=4093, history_rows=2048, active=active, pending=None,
+            owned=list(active[0].values()), borrowed=[])
+        device = SimpleNamespace(operations=operations, mesh=object(), position=4093, history_rows=2048, block_rows=8,
+            native_proposal_attention=False, validated_native_proposal_masks=set(),
+            history=torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16),
+            spare_history=torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16), progress=None,
+            select_proposal=Mock(return_value=(9, 9, 9)))
+        device.temporaries = MethodType(DFlashDevice.temporaries, device)
+        host = proposal_inputs(17, 4093, 2048, 8, 2048)
+        bucket = SimpleNamespace(context=2048, identifiers=host['identifiers'].clone(), mask=host['mask'].clone(),
+            rope={name: tuple(value.clone() for value in host['rope'][name]) for name in ('q', 'k')},
+            history=torch.full((1, 1, 2080, 5120), 9, dtype=torch.bfloat16),
+            cached_history=[{name: torch.zeros_like(value) for name, value in active[0].items()}],
+            trace='trace-object', outputs='captured-outputs')
+        bucket.inputs = [bucket.identifiers, bucket.history, bucket.mask, *bucket.rope['q'], *bucket.rope['k'],
+            *bucket.cached_history[0].values()]
+        address = lambda operations, value: (value.untyped_storage().data_ptr(), value.untyped_storage().data_ptr() + 1)
+        bucket.addresses = [address(operations, value) for value in bucket.inputs]
+        prepared = PreparedDFlashProposal.__new__(PreparedDFlashProposal)
+        prepared.operations, prepared.device, prepared.mesh = operations, device, device.mesh
+        prepared.kv_history, prepared.owned = cache, bucket.inputs
+        prepared.closed, prepared._pending, prepared.buckets = False, None, {2048: bucket}
+        return SimpleNamespace(operations=operations, cache=cache, device=device, bucket=bucket,
+            prepared=prepared, address=address)
+
+    def test_prepare_device_defers_the_sync_and_replays_non_blocking_then_finish_reads_back(self):
+        case = self.build_pipelined_case()
+        release_owned = self.released_addresses(case.operations, case.address)
+        with patch('dflash_proposal_trace.addresses', side_effect=case.address), \
+                patch('dflash_device.addresses', side_effect=case.address), \
+                patch('dflash_proposal_trace.release_owned', side_effect=release_owned):
+            self.assertTrue(case.prepared.prepare_device(5))
+            # The copies ran (host->device and the history/cache slices into the
+            # bucket), but neither the address-identity assertion's synchronize
+            # nor the mask bookkeeping nor the trace replay's own wait happened yet.
+            case.operations.synchronize_device.assert_not_called()
+            case.operations.execute_trace.assert_called_once_with(
+                case.prepared.mesh, case.bucket.trace, cq_id=0, blocking=False)
+            self.assertTrue(case.prepared.has_pending(5))
+            self.assertFalse(case.prepared.has_pending(6))
+            case.operations.deallocate.assert_not_called()
+            for name in ('k', 'v'):
+                self.assertTrue(torch.equal(case.bucket.cached_history[0][name], case.cache.active[0][name]))
+            # finish() does the deferred assertion/bookkeeping/release and the
+            # readback - no synchronize_device of its own, the caller's shared one
+            # is assumed to have already fenced this device.
+            tokens = case.prepared.finish(7)
+        case.operations.synchronize_device.assert_not_called()
+        self.assertEqual(tokens, (9, 9, 9))
+        case.device.select_proposal.assert_called_once_with(case.bucket.outputs, 5, 7)
+        self.assertFalse(case.prepared.has_pending(5))
+        with self.assertRaises(ValueError):
+            case.prepared.finish(7)
+
+    def test_a_prepared_proposal_whose_addresses_moved_still_raises_from_finish(self):
+        case = self.build_pipelined_case()
+        release_owned = self.released_addresses(case.operations, case.address)
+        with patch('dflash_proposal_trace.addresses', side_effect=case.address), \
+                patch('dflash_device.addresses', side_effect=case.address), \
+                patch('dflash_proposal_trace.release_owned', side_effect=release_owned):
+            case.prepared.prepare_device(5)
+            case.bucket.addresses = [(0, 0)] * len(case.bucket.addresses)
+            with self.assertRaisesRegex(AssertionError, 'moved'):
+                case.prepared.finish(7)
+        case.device.select_proposal.assert_not_called()
+        self.assertFalse(case.prepared.has_pending(5), 'a failed finish must not leave the prepare pending forever')
+
+    def test_a_second_prepare_device_discards_the_first_still_pending_one(self):
+        case = self.build_pipelined_case()
+        release_owned = self.released_addresses(case.operations, case.address)
+        with patch('dflash_proposal_trace.addresses', side_effect=case.address), \
+                patch('dflash_device.addresses', side_effect=case.address), \
+                patch('dflash_proposal_trace.release_owned', side_effect=release_owned):
+            case.prepared.prepare_device(5)
+            first_owned = case.prepared._pending[2]
+            case.prepared.prepare_device(11)
+        self.assertTrue(case.prepared.has_pending(11))
+        freed = {case.address(case.operations, call.args[0]) for call in case.operations.deallocate.call_args_list}
+        self.assertTrue({case.address(case.operations, value) for value in first_owned} <= freed,
+            'a stale prepare_device() left pending by an earlier round must be released, not leaked')
+
+    def test_discard_pending_is_a_no_op_with_nothing_pending(self):
+        case = self.build_pipelined_case()
+        case.prepared.discard_pending()
+        case.operations.deallocate.assert_not_called()
+
+    def test_prepare_device_is_a_no_op_when_closed_or_the_device_audits_its_proposal(self):
+        case = self.build_pipelined_case()
+        case.prepared.closed = True
+        self.assertFalse(case.prepared.prepare_device(5))
+        case.operations.execute_trace.assert_not_called()
+        case.prepared.closed = False
+        case.device.progress = lambda **kwargs: None
+        self.assertFalse(case.prepared.prepare_device(5))
+        case.operations.execute_trace.assert_not_called()
+
     def test_update_protects_both_sides_of_a_committed_bank_swap(self):
         """The rebinding scenario: DraftKVHistory.commit() (draft_kv_history.py) swaps
         `self.active` and `self.spare` to the OTHER physical bank without reallocating
