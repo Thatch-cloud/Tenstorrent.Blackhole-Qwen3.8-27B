@@ -108,7 +108,10 @@ fi
 # Profile mode also sets QWEN_FAST_PROFILED_BLOCK_STREAM=1 so serving_runtime's
 # profiled_block_stream_override admits TT_METAL_DEVICE_PROFILER into the mandatory
 # block-stream recipe for this attribution measurement only (run 35561945903 refused it).
-max_tokens=256
+# M3NATIVE_MAX_TOKENS overrides the 256-token run so users finish at DIFFERENT rounds (the
+# early-finish transition, runs 35564623068 / 35567165791); the gate compares a shorter
+# stream as a prefix of its reference.
+max_tokens="${M3NATIVE_MAX_TOKENS:-256}"
 trace_region_bytes=1073741824
 entry_args=(-B /bench/lever_n_m3native_gate.py)
 if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
