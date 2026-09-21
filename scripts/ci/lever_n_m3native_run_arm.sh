@@ -27,7 +27,7 @@ cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
 
-mkdir -p experiment-results draft-config experiment-results/profile
+mkdir -p experiment-results draft-config
 if [ ! -s draft-config/config.json ]; then
   curl -fsSL --max-time 30 \
     "https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/resolve/$revision/config.json" \
@@ -115,6 +115,7 @@ if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
   # The container runs as root with every capability dropped (no CAP_DAC_OVERRIDE), so
   # it cannot create tracy's .logs inside a host directory owned by the runner user
   # (run 35561589158: 'rm -rf /experiment-results-profile/.logs; mkdir -p ...' exit 1).
+  mkdir -p experiment-results/profile
   chmod 0777 experiment-results/profile
   mounts+=(--mount "type=bind,src=$PWD/experiment-results/profile,dst=/experiment-results-profile")
   max_tokens=48

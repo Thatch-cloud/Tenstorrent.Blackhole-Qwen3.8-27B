@@ -164,13 +164,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -d experiment-results/profile ]; then
+          if [ -s experiment-results/profile/.logs/cpp_device_perf_report.csv ]; then
             python3 -B scripts/ci/lever_n_m3native_profile_report.py \
               --profile-dir experiment-results/profile \
               --log experiment-results/m3native-gate-stdout.log \
               --out experiment-results/m3native-profile.json
           else
-            echo 'No experiment-results/profile directory (M3NATIVE_PROFILE was not set for this tag); skipping attribution.'
+            echo 'No device profiler CSV (not a profile tag, or the profiler wrote nothing); skipping attribution.'
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
