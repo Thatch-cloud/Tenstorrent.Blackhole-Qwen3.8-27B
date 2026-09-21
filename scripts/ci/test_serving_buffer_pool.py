@@ -575,7 +575,7 @@ class PackedReplayTableTests(unittest.TestCase):
                     # In the pool's own record, on independent chip storage, and no two sets share a table.
                     self.assertTrue(all(any(value is owned for owned in pool.owned) for value in tables.tensors))
                     self.assertEqual(len(tables.tensors), count * sum(len(bundle_batches(rows, capacity)) for capacity in REPLAY_CAPACITIES))
-                every = [value for tables in pool.packed.values() for value in tables.tensors]
+                every = [value for group in pool.packed.values() for tables in group for value in tables.tensors]
                 self.assertEqual(len({id(value) for value in every}), len(every))
                 self.assertEqual(pool.packed_bytes, sum(4 * value.shape[0] * value.shape[1] for value in every))
                 # Not in any slot: one block serves every slot, and the slot loan zeroes nothing of it.
@@ -667,6 +667,51 @@ class PackedReplayTableTests(unittest.TestCase):
             self.assertEqual(verifier_pool(FakeOperations(), users=2, bucket_rows=(8,)).packed_shapes, ((2, 16),))
             self.assertEqual(verifier_pool(FakeOperations(), users=2, bucket_rows=(8,), packed_shapes=((4, 16),)).packed_shapes,
                              ((4, 16),))
+
+    def test_packed_replicas_lend_independent_sets_of_the_same_shape(self):
+        """QWEN_FAST_FOUR_AS_TWO's pair of 32-row blocks: `packed_shapes` still names the
+        (2, 16) shape once (a shape repeated there is still refused - see
+        test_shapes_are_checked_before_anything_is_allocated), and the two independent
+        sets come from `packed_replicas` instead. `packed_replay(2, 16)` lends the first
+        untaken one each call, so each block's own PackedVerifierEngine.__init__ (which
+        immediately `take()`s what it is given) ends up with its OWN set without either
+        naming which."""
+        operations = FakeOperations()
+        pool = verifier_pool(operations, users=4, bucket_rows=(8,), packed_shapes=((2, 16),),
+                             packed_replicas={(2, 16): 2})
+        self.assertEqual((pool.packed_shapes, pool.packed_replicas), (((2, 16),), {(2, 16): 2}))
+        self.assertEqual(len(pool.packed[(2, 16)]), 2)
+        first = pool.packed_replay(2, 16)
+        self.assertIs(first.take(), first)
+        second = pool.packed_replay(2, 16)
+        self.assertIsNot(second, first)
+        self.assertIs(second.take(), second)
+        # Independent chip storage: no table is shared between the two lent sets.
+        every = [value for tables in (first, second) for value in tables.tensors]
+        self.assertEqual(len({id(value) for value in every}), len(every))
+        # Both taken: packed_replay still returns one of them (the single-replica case
+        # always returned its one set regardless of taken state), and its own take() raises.
+        third = pool.packed_replay(2, 16)
+        self.assertIn(third, (first, second))
+        with self.assertRaisesRegex(ValueError, 'already lent'):
+            third.take()
+        second.release()
+        self.assertIs(pool.packed_replay(2, 16), second, 'the freed set comes back once released')
+        report = pool.describe()
+        self.assertEqual(len(report['packed_replay']), 2)
+        pool.close()
+        self.assertEqual(len(operations.deallocated), len(operations.live))
+
+    def test_packed_replicas_default_to_one_and_reject_unknown_shapes_or_bad_counts(self):
+        self.assertEqual(verifier_pool(FakeOperations(), users=2).packed_replicas, {})
+        operations = FakeOperations()
+        for replicas in ({(4, 16): 2}, {(2, 16): 0}, {(2, 16): 1.0}):
+            with self.subTest(replicas=replicas), self.assertRaisesRegex(ValueError, 'Packed replay replica counts'):
+                verifier_pool(operations, users=4, packed_shapes=((2, 16),), packed_replicas=replicas)
+        with self.assertRaisesRegex(ValueError, 'without the GDN helpers'):
+            ServingBufferPool(operations, 'mesh', users=2, packed_replicas={(2, 16): 2})
+        # Every case raised before allocating anything.
+        self.assertEqual(operations.live, [])
 
 
 class DramStatisticsTests(unittest.TestCase):

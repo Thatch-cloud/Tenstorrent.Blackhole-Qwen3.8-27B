@@ -1089,5 +1089,54 @@ class ProjectionOffsetTests(unittest.TestCase):
                 self.project(features, count, **options)
 
 
+class PoolSlotBindingTests(BlockFixture):
+    """QWEN_FAST_FOUR_AS_TWO's pair of 32-row blocks: each bound to its OWN disjoint pool
+    slots (block A over 0, 1; block B over 2, 3) instead of the pool's first `shape.users`
+    slots. `pool_slots=` names them explicitly; left unnamed, a block still takes slots
+    0..users-1 in order, exactly as it always has."""
+
+    USERS = 4
+
+    def setUp(self):
+        super().setUp()
+        # A second (2, 16) table set alongside the one an M1 block over this pool would
+        # already find - one per block, as the pool built for QWEN_FAST_FOUR_AS_TWO would
+        # hold (serving_buffer_pool.py, packed_replicas).
+        self.pool.packed[(2, 16)] = packed_tables(self.ttnn, users=2)
+
+    def shape(self):
+        # The four-slot pool is FourUserFixture's; the block built over it here is M1's.
+        return m1_shape(PAGE_WIDTH)
+
+    def test_a_block_bound_to_the_upper_two_slots_restores_and_commits_through_them(self):
+        block = self.build(pool_slots=(2, 3))
+        self.assertEqual(block.pool_slots, (2, 3))
+        self.assertEqual(block.describe()['pool_slots'], [2, 3])
+        # segment u carries pool slot (2 + u)'s carry, never slot u's
+        for segment in range(2):
+            lent = self.pool.slots[2 + segment].verifier.carry
+            self.assertTrue(all(a is b for mine, theirs in zip(block.carries[segment], lent, strict=True)
+                                for a, b in zip(mine, theirs, strict=True)))
+        first = request('A', self.pool.slots[2], 4100, 7)
+        second = request('B', self.pool.slots[3], 4200, 11)
+        self.assertEqual(block.segment_of(first.engine), 0)
+        self.assertEqual(block.segment_of(second.engine), 1)
+        # an engine borrowed from slot 0 or 1 - this block's segments are 2 and 3 - matches nothing
+        foreign = request('X', self.pool.slots[0], 4100, 7)
+        with self.assertRaises(ValueError):
+            block.segment_of(foreign.engine)
+
+    def test_left_unnamed_a_block_still_takes_slots_zero_and_one_in_order(self):
+        block = self.build()
+        self.assertEqual(block.pool_slots, (0, 1))
+        first = request('A', self.pool.slots[0], 4100, 7)
+        self.assertEqual(block.segment_of(first.engine), 0)
+
+    def test_pool_slots_must_be_distinct_and_within_the_pool(self):
+        for pool_slots in ((0,), (0, 0), (0, 4), (0, 'x'), (0, 1, 2)):
+            with self.subTest(pool_slots=pool_slots), self.assertRaisesRegex(ValueError, 'One distinct pool slot'):
+                self.build(pool_slots=pool_slots)
+
+
 if __name__ == '__main__':
     unittest.main()

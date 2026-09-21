@@ -79,18 +79,32 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # scheduler's request count (packed_shapes.serving_shape): two requests take the
         # 32-row M1 block, four the 64-row M3 block, and any other count builds no block,
         # so the sequential step serves the rounds and the stage line says so. Chosen
-        # before the pool, which lends the block its per-user replay page tables for
+        # before the pool, which lends the block(s) their per-user replay page tables for
         # exactly that shape; with the switch unset the pool is built as it always was.
+        #
+        # Four requests are the one count with a choice: QWEN_FAST_FOUR_AS_TWO (default ON
+        # at four requests) builds TWO 32-row M1 blocks instead of the single 64-row M3
+        # block - block A over pool slots (0, 1), block B over (2, 3) - because two proven,
+        # workaround-free 32-row rounds (M1b, 109 ms measured, run 35500352729) cost far
+        # less than the 64-row round's two-tile workarounds (1453 ms, run 35544598063) for
+        # the same four users. QWEN_FAST_FOUR_AS_TWO=0 keeps the single M3 block.
         packed_requested = os.environ.get('QWEN_FAST_PACKED_STEP') == '1'
-        packed_shape = None
+        four_as_two = False
+        packed_shapes = ()
         if packed_requested:
-            from packed_shapes import serving_shape
+            from packed_shapes import m1_shape, serving_shape
 
-            packed_shape = serving_shape(policy['scheduler_requests'], page_width)
-            if packed_shape is None:
-                pindiag('[PINDIAG] QWEN_FAST_PACKED_STEP=1 builds no packed block for {} scheduler requests '
-                        '(two take the 32-row M1 block, four the 64-row M3 block); the sequential step '
-                        'serves the rounds', policy['scheduler_requests'])
+            if policy['scheduler_requests'] == 4 and os.environ.get('QWEN_FAST_FOUR_AS_TWO', '1') != '0':
+                four_as_two = True
+                packed_shapes = (m1_shape(page_width), m1_shape(page_width))
+            else:
+                shape = serving_shape(policy['scheduler_requests'], page_width)
+                if shape is None:
+                    pindiag('[PINDIAG] QWEN_FAST_PACKED_STEP=1 builds no packed block for {} scheduler requests '
+                            '(two take the 32-row M1 block, four the 64-row M3 block); the sequential step '
+                            'serves the rounds', policy['scheduler_requests'])
+                else:
+                    packed_shapes = (shape,)
         # The per-request engines' capture widths, and the pool's buckets that hold them:
         # the full T16 set by default and beside the 32-row block, the sequential widths
         # (1, 2, 4) beside the 64-row block, whose four engines' 8- and 16-row captures do
@@ -98,18 +112,38 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # in the first engine with 32.9 of 33.1 GB per chip allocated). The rounds the
         # block serves are drafted at its width (serving_packed_step.proposal_rows); the
         # survivors decode sequentially at four rows per round.
-        from packed_shapes import sequential_capture_rows
+        #
+        # Two 32-row blocks retain the SAME total state as the one 64-row block - every
+        # per-segment term in packed_verifier.py scales from users x rows_per_user, 4 x 16
+        # either way, not from one block's own width - so nothing here has re-measured a
+        # device with two 32-row blocks built beside four untrimmed engines and found the
+        # headroom the single 64-row measurement did not have (run 35509307389: 32.9 of
+        # 33.1 GB allocated with ONE untrimmed engine's captures still pending). Trimming
+        # is the safe assumption for four_as_two too: `sequential_capture_rows(m1_shape)`
+        # would answer 16 (correctly - a LONE 32-row block never needed the trim), so the
+        # four-user, two-block case is decided explicitly here instead, by total rows
+        # rather than by either shape alone.
+        from packed_shapes import M3_SEQUENTIAL_CAPTURE_ROWS, sequential_capture_rows
 
-        capture_rows = sequential_capture_rows(packed_shape)
+        if four_as_two:
+            capture_rows = M3_SEQUENTIAL_CAPTURE_ROWS
+        else:
+            capture_rows = sequential_capture_rows(packed_shapes[0] if packed_shapes else None)
         bucket_rows = capture_bucket_rows(policy['verifier_rows'], policy['output_budget'], capture_rows)
         trimmed = capture_rows != policy['verifier_rows']
         if trimmed:
             pindiag('[PINDIAG] per-request captures trimmed to widths {} for the four-user block',
                     tuple(sorted(set(bucket_rows))))
+        # packed_shapes covers each distinct shape once (validate_packed_shapes still
+        # refuses a shape repeated there); four_as_two's two blocks share one (2, 16) shape,
+        # so its multiplicity is named separately, and the pool lends each block asking for
+        # it its OWN independent replay table set (ServingBufferPool.packed_replay).
+        distinct_shapes = tuple(dict.fromkeys((shape.users, shape.rows_per_user) for shape in packed_shapes))
         pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'],
             helpers=helpers, page_width=page_width, bucket_rows=bucket_rows,
             feature_taps=len(TARGET_TAPS), rope=rope,
-            **({} if packed_shape is None else dict(packed_shapes=((packed_shape.users, packed_shape.rows_per_user),))))
+            **({} if not packed_shapes else dict(packed_shapes=distinct_shapes,
+                **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}))))
         scopes.callback(pool.close)
         owner = ServingCacheOwner(operations, runner, model)
         # Built once and shared by every request: two TT_CCL objects cycling semaphore
@@ -150,17 +184,30 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         from serving_sequential_step import describe as describe_sequential_step, sequential_packed_step
 
         packed_step, step_description = sequential_packed_step, describe_sequential_step()
-        if packed_shape is not None:
+        if packed_shapes:
             from packed_verifier import PackedVerifierEngine
             from serving_packed_step import PackedStep, describe as describe_packed_step
 
-            block = PackedVerifierEngine(operations, model, helpers, sampler, pool=pool, shared_weights=weights,
-                                         shape=packed_shape, feature_taps=TARGET_TAPS)
-            scopes.callback(block.close)
-            # The step bound to its block, carrying the per-round ticket-width policy the
-            # worker hook asks before drafting.
-            packed_step = PackedStep(block)
-            step_description = dict(describe_packed_step(), block=block.describe())
+            # One block per configured shape, each bound to its own disjoint pool slots in
+            # scheduler order - four_as_two's block A over (0, 1), block B over (2, 3) - so
+            # every block keeps its fixed carry-identity binding for the pool's whole life
+            # and no round ever rebinds a segment. A single configured shape (the m1
+            # two-user or m3 four-user default) gets no `pool_slots=` at all, so its block
+            # is built exactly as it always was: slots 0..users-1, in order.
+            packed_blocks, slot = [], 0
+            for shape in packed_shapes:
+                packed_block = PackedVerifierEngine(operations, model, helpers, sampler, pool=pool, shared_weights=weights,
+                                                    shape=shape, feature_taps=TARGET_TAPS,
+                                                    **({'pool_slots': tuple(range(slot, slot + shape.users))} if four_as_two else {}))
+                scopes.callback(packed_block.close)
+                packed_blocks.append(packed_block)
+                slot += shape.users
+            # The step bound to its block (or blocks), carrying the per-round ticket-width
+            # policy the worker hook asks before drafting.
+            packed_step = PackedStep(packed_blocks if four_as_two else packed_blocks[0])
+            step_description = dict(describe_packed_step(),
+                **(dict(blocks=[packed_block.describe() for packed_block in packed_blocks]) if four_as_two
+                   else dict(block=packed_blocks[0].describe())))
         elif packed_requested:
             step_description = dict(step_description,
                 packed_block_skipped='no packed block shape for %d scheduler requests' % policy['scheduler_requests'])

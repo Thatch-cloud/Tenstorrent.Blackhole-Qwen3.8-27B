@@ -251,7 +251,7 @@ class PackedVerifierEngine:
     publication, `commit_user(segment, prefix)` for each user's decision."""
 
     def __init__(self, operations, model, helpers, sampler, *, pool, shared_weights, shape, feature_taps,
-                 capture_position=None):
+                 capture_position=None, pool_slots=None):
         import torch
 
         self.shape = validate_shape(shape)
@@ -276,6 +276,21 @@ class PackedVerifierEngine:
                              'at this page-table width, is required')
         if any(slot.lent for slot in pool.slots):
             raise ValueError('The packed block must be built before any request exists: a pool slot is lent')
+        # Which pool slots this block's segments carry: slots 0..users-1 in segment order by
+        # default - the only binding a single serving block ever needed. Given explicitly
+        # when several blocks share one pool (serving_runtime's QWEN_FAST_FOUR_AS_TWO, two
+        # 32-row M1 blocks over a four-slot pool): each block claims its own disjoint slots
+        # - (0, 1) and (2, 3) - so its carries restore from and commit to the users admitted
+        # through THOSE slots, and `segment_of` never matches a request bound to the other
+        # block's slots.
+        if pool_slots is None:
+            pool_slots = tuple(range(shape.users))
+        else:
+            pool_slots = tuple(pool_slots)
+        if (len(pool_slots) != shape.users or len(set(pool_slots)) != shape.users
+                or any(type(index) is not int or not 0 <= index < len(pool.slots) for index in pool_slots)):
+            raise ValueError('One distinct pool slot per packed user, within the pool, is required')
+        self.pool_slots = pool_slots
         if (getattr(shared_weights, 'closed', True) or not callable(getattr(shared_weights, 'lend', None))
                 or not getattr(shared_weights, 'tensors', None)):
             raise ValueError('The packed block must be built after the shared draft weights are uploaded')
@@ -299,11 +314,11 @@ class PackedVerifierEngine:
         self.helpers = helpers
         self.name = 'PackedVerifierEngine@%x users=%d rows=%d' % (id(self), shape.users, shape.rows_per_user)
         self.carries = []
-        for index in range(shape.users):
+        for segment, index in enumerate(pool_slots):
             carry = pool.slots[index].verifier.carry
             if len(carry) != GDN_LAYERS or any(len(snapshot) != len(helper.live)
                                                 for snapshot, helper in zip(carry, helpers, strict=True)):
-                raise ValueError('Pooled carry %d must hold one slot-zero snapshot per GDN helper' % index)
+                raise ValueError('Pooled carry %d must hold one slot-zero snapshot per GDN helper' % segment)
             self.carries.append([list(snapshot) for snapshot in carry])
         self.native_addresses = [[addresses(operations, value) for value in helper.live] for helper in helpers]
         self.carry_addresses = self.slot_addresses()
@@ -613,6 +628,7 @@ class PackedVerifierEngine:
     def describe(self):
         operations = self.operations
         return dict(name='packed', shape=self.shape._asdict(), capture_position=self.capture_position,
+            pool_slots=list(self.pool_slots),
             weight_passes_per_round='one for every user', batched=True,
             verify_traces=1 if self.trace is not None else 0,
             commit_traces=sum(len(commits) for commits in self.commits),

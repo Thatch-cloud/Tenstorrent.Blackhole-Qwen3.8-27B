@@ -86,6 +86,16 @@ one table set per user per family, each shaped as a rows_per_user-row reader bun
 restages every user's table into them before each verify, so they are not zeroed. The
 serving runtime names the one shape its block takes (`packed_shapes=`); by default the
 pool holds every default shape its slot count can fill.
+
+AND TWO BLOCKS OF THE SAME SHAPE. QWEN_FAST_FOUR_AS_TWO builds two 32-row M1 blocks over
+one four-slot pool instead of the single 64-row M3 block - block A over slots (0, 1),
+block B over (2, 3) - and each needs its OWN lent (2, 16) table set: one set is sized for
+one block's two users, not both blocks' four. `packed_shapes=` still names the shape once
+(a shape repeated there is refused, same as ever); the multiplicity is a separate
+`packed_replicas={(2, 16): 2}`, which builds that many independent sets under the one key.
+`packed_replay(2, 16)` then lends the first untaken one each time it is asked, so the two
+blocks' own `PackedVerifierEngine.__init__` calls - made in turn, each immediately
+`take()`-ing what it got back - end up with two different sets without either naming which.
 """
 
 from types import SimpleNamespace
@@ -350,7 +360,7 @@ class ServingBufferPool:
 
     def __init__(self, operations, mesh, *, users, helpers=None, page_width=None, bucket_rows=(),
                  feature_taps=0, rope=None, mtp_hidden=False, replay_group_rows=4, replay_capacities=None,
-                 packed_shapes=None):
+                 packed_shapes=None, packed_replicas=None):
         import torch
 
         if type(users) is not int or not 1 <= users <= NATIVE_GDN_SLOTS:
@@ -362,6 +372,18 @@ class ServingBufferPool:
             # many scheduler slots can fill, or an explicit tuple of (users, rows_per_user)
             # (serving_runtime names the one shape of the block it builds over this pool).
             packed_shapes = validate_packed_shapes(default_packed_shapes(users) if packed_shapes is None else packed_shapes)
+            # How many INDEPENDENT table sets to lend for each shape, keyed the same way -
+            # 1 unless named. Two blocks of the same shape (QWEN_FAST_FOUR_AS_TWO's pair of
+            # 32-row M1 blocks) each need their own lent set, but `packed_shapes` itself
+            # still names each distinct shape once (validate_packed_shapes keeps refusing a
+            # shape repeated there): the multiplicity is this separate mapping instead.
+            if packed_replicas is None:
+                packed_replicas = {}
+            else:
+                packed_replicas = dict(packed_replicas)
+                if (any(shape not in packed_shapes for shape in packed_replicas)
+                        or any(type(count) is not int or count < 1 for count in packed_replicas.values())):
+                    raise ValueError('Packed replay replica counts must be positive integers naming shapes the pool holds')
             helpers = tuple(helpers)
             if (len(helpers) != GDN_LAYERS or any(not callable(getattr(helper, 'allocate', None)) for helper in helpers)
                     or type(page_width) is not int or page_width < 1
@@ -384,15 +406,15 @@ class ServingBufferPool:
                 raise ValueError('Replay families must be distinct native chunk capacities the page table holds: %r'
                                  % (admitted,))
         elif (page_width is not None or bucket_rows or feature_taps or rope is not None or mtp_hidden
-                or replay_group_rows != 4 or replay_capacities is not None or packed_shapes):
+                or replay_group_rows != 4 or replay_capacities is not None or packed_shapes or packed_replicas):
             raise ValueError('Verifier storage geometry without the GDN helpers that shape it')
         else:
-            packed_shapes = ()
+            packed_shapes, packed_replicas = (), {}
         self.operations, self.mesh, self.users = operations, mesh, users
         self.helpers, self.page_width, self.bucket_rows = helpers, page_width, bucket_rows
         self.feature_taps, self.mtp_hidden = feature_taps, mtp_hidden
         self.replay_group_rows, self.replay_capacities = replay_group_rows, replay_capacities
-        self.packed_shapes = packed_shapes
+        self.packed_shapes, self.packed_replicas = packed_shapes, packed_replicas
         self.owned, self.slots = [], []
         self.packed, self.packed_bytes = {}, 0
         self.closed = False
@@ -464,30 +486,40 @@ class ServingBufferPool:
                 self.slots.append(HistorySlot(self, index, *pair, kv, query, verifier, counted[0]))
             # The packed block's per-user replay page tables (PackedReplayTables): per shape,
             # per family, one (batches, capacity // 64) table per bundle of a rows_per_user-row
-            # reader, for every user of the shape. Not per slot: one block serves them all.
+            # reader, for every user of the shape. Not per slot: one block serves them all -
+            # or, with `packed_replicas` naming more than one, one independent set per block
+            # of that shape (QWEN_FAST_FOUR_AS_TWO's two 32-row blocks each lend their own).
             for count, rows in packed_shapes:
-                counted[0] = 0
-                integers = dict(dtype=operations.int32, layout=operations.ROW_MAJOR_LAYOUT, itemsize=4)
-                tables = {capacity: [[allocate((batches, capacity // 64), **integers)
-                                      for batches in bundle_batches(rows, capacity, max_group_rows=replay_group_rows)]
-                                     for user in range(count)]
-                          for capacity in replay_capacities}
-                self.packed[(count, rows)] = PackedReplayTables(count, rows, tables)
-                self.packed_bytes += counted[0]
+                self.packed[(count, rows)] = []
+                for replica in range(packed_replicas.get((count, rows), 1)):
+                    counted[0] = 0
+                    integers = dict(dtype=operations.int32, layout=operations.ROW_MAJOR_LAYOUT, itemsize=4)
+                    tables = {capacity: [[allocate((batches, capacity // 64), **integers)
+                                          for batches in bundle_batches(rows, capacity, max_group_rows=replay_group_rows)]
+                                         for user in range(count)]
+                              for capacity in replay_capacities}
+                    self.packed[(count, rows)].append(PackedReplayTables(count, rows, tables))
+                    self.packed_bytes += counted[0]
             operations.synchronize_device(mesh)
         except BaseException:
             self.close()
             raise
 
     def packed_replay(self, users, rows):
-        """The packed block's replay page tables for (users, rows_per_user), to be taken once."""
+        """The packed block's replay page tables for (users, rows_per_user), to be taken once.
+
+        With one set for the shape (every shape but a named replica count) this is exactly
+        as before, taken or not. With several - QWEN_FAST_FOUR_AS_TWO's pair of 32-row
+        blocks - the first untaken set is handed out, so each block calling this in turn
+        gets its OWN set; once every set is taken, the last one is returned again and its
+        own `take()` raises 'already lent', exactly as the single-set case always did."""
         if self.closed:
             raise ValueError('Closed serving buffer pool cannot lend packed replay page tables')
-        tables = self.packed.get((users, rows))
-        if tables is None:
+        candidates = self.packed.get((users, rows))
+        if not candidates:
             raise ValueError('The pool holds packed replay page tables for shapes %r; %r was asked for'
                              % (sorted(self.packed), (users, rows)))
-        return tables
+        return next((tables for tables in candidates if not tables.taken), candidates[-1])
 
     def acquire(self, *, owner='unnamed'):
         if self.closed:
@@ -539,7 +571,7 @@ class ServingBufferPool:
                 mtp_hidden=self.mtp_hidden, replay_group_rows=self.replay_group_rows,
                 replay_capacities=list(self.replay_capacities), replay_page_bytes_per_slot=replay_bytes,
                 packed_shapes=[list(shape) for shape in self.packed_shapes], packed_replay_bytes=self.packed_bytes,
-                packed_replay=[tables.describe(self.operations) for tables in self.packed.values()])
+                packed_replay=[tables.describe(self.operations) for group in self.packed.values() for tables in group])
         return report
 
     def close(self):

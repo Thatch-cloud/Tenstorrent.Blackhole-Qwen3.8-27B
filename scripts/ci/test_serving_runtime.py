@@ -15,7 +15,9 @@ import serving_sequential_step
 from test_serving_fast_policy import FastPolicyTests
 
 # The block the runtime builds per scheduler request count under QWEN_FAST_PACKED_STEP=1
-# (packed_shapes.serving_shape): two take M1, four take M3, any other count none.
+# (packed_shapes.serving_shape): two take M1, four take M3 - UNLESS four scheduler
+# requests take QWEN_FAST_FOUR_AS_TWO's pair of 32-row M1 blocks instead, which is the
+# default at four requests (serving_runtime.py).
 SHAPES = {2: m1_shape(68), 4: m3_shape(68)}
 
 
@@ -25,7 +27,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                      'scope, the sampler links, the pool) - their exits fence the device, and a hung device blocks '
                      'the first fence')
 
-    def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None):
+    def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None, four_as_two=None):
         events = []
 
         def diag(template, *values):
@@ -33,10 +35,20 @@ class RuntimeAttachmentTests(unittest.TestCase):
             # closes is checked; every other line is inspected through the mock
             if template.startswith('[PINDIAG] attach failed'):
                 events.append(('diag', template.format(*values)))
-        shape = SHAPES.get(users) if packed else None
-        built = shape is not None
-        # beside the four-user block the per-request captures are trimmed to (1, 2, 4)
-        trimmed = built and shape.users == 4
+        # QWEN_FAST_FOUR_AS_TWO defaults ON at four scheduler requests (serving_runtime.py):
+        # `four_as_two=None` leaves that default in force (two 32-row M1 blocks), True sets
+        # it explicitly, False keeps the single 64-row M3 block. At any other request count
+        # the switch does nothing.
+        two_blocks = packed and users == 4 and four_as_two is not False
+        if two_blocks:
+            shapes = (m1_shape(68), m1_shape(68))
+        else:
+            shape = SHAPES.get(users) if packed else None
+            shapes = (shape,) if shape is not None else ()
+        built = bool(shapes)
+        # Beside the four-user block - one 64-row block or two 32-row ones, the same total
+        # rows either way - the per-request captures are trimmed to (1, 2, 4).
+        trimmed = packed and users == 4
         model = SimpleNamespace(args=object(), mesh_device=object(),
             layers=[SimpleNamespace(is_full_attention=False, attention=object()) for _ in range(48)])
         config = FastPolicyTests().fixture()
@@ -78,7 +90,10 @@ class RuntimeAttachmentTests(unittest.TestCase):
             events.append('block_build')
             return block
 
-        with patch.dict('os.environ', {'QWEN_FAST_PACKED_STEP': '1' if packed else '0'}), \
+        env = {'QWEN_FAST_PACKED_STEP': '1' if packed else '0'}
+        if four_as_two is not None:
+            env['QWEN_FAST_FOUR_AS_TWO'] = '1' if four_as_two else '0'
+        with patch.dict('os.environ', env), \
                 patch.dict(sys.modules, {
                 'models.common.sampling.generator': SimpleNamespace(SamplingGenerator=generator),
                 'models.tt_transformers.tt.ccl': SimpleNamespace(TT_CCL=Mock()),
@@ -99,10 +114,12 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         block_stream={'streams': 'serial', 'evidence': 'stream'},
                         kv_publication_evidence='dma', eos_ids=(99,), cancelled=lambda: False) as attached:
                     # One stage line carrying the pool, the named shared weights and the
-                    # device step that serves the rounds - with the block when it was built,
+                    # device step that serves the rounds - with the block(s) when built,
                     # and why none was when the switch asked for one.
                     lines = [json.loads(line) for line in out.getvalue().splitlines() if line.startswith('{')]
-                    if built:
+                    if built and two_blocks:
+                        step = dict(serving_packed_step.describe(), blocks=[dict(name='packed-block')] * len(shapes))
+                    elif built:
                         step = dict(serving_packed_step.describe(), block=dict(name='packed-block'))
                     elif packed:
                         step = dict(serving_sequential_step.describe(),
@@ -121,7 +138,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                     # the one page-table width, the capture widths with multiplicity for a
                     # 256-token budget under a T16 cap, the five feature taps and the rotary
                     # builder (which imports the native construction only when called) - and,
-                    # only when a block is built over it, the one packed shape that block takes.
+                    # only when a block is built over it, the packed shape(s) that block takes.
                     pooled.assert_called_once()
                     self.assertEqual(pooled.call_args.args, (operations, model.mesh_device))
                     options = pooled.call_args.kwargs
@@ -133,8 +150,15 @@ class RuntimeAttachmentTests(unittest.TestCase):
                     self.assertTrue(callable(options['rope']))
                     expected = {'users', 'helpers', 'page_width', 'bucket_rows', 'feature_taps', 'rope'}
                     if built:
-                        self.assertEqual(options['packed_shapes'], ((shape.users, shape.rows_per_user),))
+                        # `packed_shapes` names each distinct shape ONCE (four_as_two's pair of
+                        # 32-row blocks share one (2, 16) shape); the pool lends each block its
+                        # own set through the separate `packed_replicas` count.
+                        self.assertEqual(options['packed_shapes'],
+                                         ((2, 16),) if two_blocks else ((shapes[0].users, shapes[0].rows_per_user),))
                         expected.add('packed_shapes')
+                        if two_blocks:
+                            self.assertEqual(options['packed_replicas'], {(2, 16): 2})
+                            expected.add('packed_replicas')
                     self.assertEqual(set(options), expected)
                     # The device geometry from_prefill asks for, prepared once inside the
                     # admitted runtime and before any request.
@@ -142,18 +166,27 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         block_rows=16, live_query_qk=False, native_proposal_attention=True)
                     packed_step = install.call_args.kwargs['packed_step']
                     if built:
-                        # The packed block: over the same 48 helpers and the pinned sampler, the
-                        # pool it restores from, the uploaded draft weights, the shape the request
-                        # count picks at the pool's page width and the five feature taps; the
-                        # step is bound to it.
-                        packed_engine.assert_called_once()
-                        args, options = packed_engine.call_args.args, packed_engine.call_args.kwargs
-                        self.assertEqual((args[0], args[1], len(args[2])), (operations, model, 48))
-                        self.assertIs(args[3], generator.return_value)
-                        self.assertEqual(options, dict(pool=pool, shared_weights=weights, shape=shape,
-                                                       feature_taps=(5, 19, 33, 47, 61)))
+                        # The packed block(s): over the same 48 helpers and the pinned sampler,
+                        # the pool it restores from, the uploaded draft weights, the shape the
+                        # request count picks at the pool's page width and the five feature
+                        # taps; the step is bound to it (or, under the switch, to both, each
+                        # claiming its own disjoint pool slots in scheduler order).
+                        self.assertEqual(packed_engine.call_count, len(shapes))
+                        for index, shape in enumerate(shapes):
+                            call = packed_engine.call_args_list[index]
+                            self.assertEqual((call.args[0], call.args[1], len(call.args[2])), (operations, model, 48))
+                            self.assertIs(call.args[3], generator.return_value)
+                            expected_options = dict(pool=pool, shared_weights=weights, shape=shape,
+                                                    feature_taps=(5, 19, 33, 47, 61))
+                            if two_blocks:
+                                expected_options['pool_slots'] = tuple(range(2 * index, 2 * index + 2))
+                            self.assertEqual(call.kwargs, expected_options)
                         self.assertIsInstance(packed_step, serving_packed_step.PackedStep)
-                        self.assertIs(packed_step.block, block)
+                        if two_blocks:
+                            self.assertEqual(packed_step.blocks, (block, block))
+                            self.assertIsNone(packed_step.block, 'no single block owns a two-block round')
+                        else:
+                            self.assertIs(packed_step.block, block)
                     else:
                         # No block: the sequential step is wired.
                         packed_engine.assert_not_called()
@@ -178,19 +211,22 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         raise RuntimeError('request failed')
             finally:
                 # Pool first and closed last; weights inside the admitted runtime; both
-                # outlive the lifecycle that lends them to devices. The block, when built,
-                # comes after the weights and before the lifecycle, and closes between them.
-                # An attach that fails logs the failure BEFORE any scope closes (their exits
-                # fence the device, which a failed attach may have left hung: run 35507675630).
+                # outlive the lifecycle that lends them to devices. Each block, when built,
+                # comes after the weights and before the lifecycle, and closes between them,
+                # one entry per configured shape. An attach that fails logs the failure
+                # BEFORE any scope closes (their exits fence the device, which a failed
+                # attach may have left hung: run 35507675630).
+                block_built = ['block_build'] * len(shapes)
+                block_closed = ['block_close'] * len(shapes)
                 if attach_fail:
                     self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
-                                              *(['block_build'] if built else []), ('diag', self.ATTACH_FAILED),
-                                              *(['block_close'] if built else []), 'weights_close', 'runtime_exit',
+                                              *block_built, ('diag', self.ATTACH_FAILED),
+                                              *block_closed, 'weights_close', 'runtime_exit',
                                               'pool_close'])
                 else:
                     self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
-                                              *(['block_build'] if built else []), 'request', 'lifecycle_close',
-                                              *(['block_close'] if built else []), 'weights_close', 'runtime_exit',
+                                              *block_built, 'request', 'lifecycle_close',
+                                              *block_closed, 'weights_close', 'runtime_exit',
                                               'pool_close'])
 
     def test_combined_recipe_lives_until_request_traces_are_closed(self):
@@ -207,8 +243,23 @@ class RuntimeAttachmentTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'request failed'):
             self.exercise(fail=True, packed=True, users=2)
 
-    def test_four_scheduler_requests_take_the_sixty_four_row_block(self):
+    def test_four_scheduler_requests_take_two_thirty_two_row_blocks_by_default(self):
         self.exercise(packed=True, users=4)
+
+    def test_four_scheduler_requests_take_two_thirty_two_row_blocks_with_the_switch_explicitly_on(self):
+        self.exercise(packed=True, users=4, four_as_two=True)
+
+    def test_four_scheduler_requests_take_the_sixty_four_row_block_with_the_switch_off(self):
+        self.exercise(packed=True, users=4, four_as_two=False)
+
+    def test_two_scheduler_requests_take_one_thirty_two_row_block_regardless_of_the_switch(self):
+        for four_as_two in (None, True, False):
+            with self.subTest(four_as_two=four_as_two):
+                self.exercise(packed=True, users=2, four_as_two=four_as_two)
+
+    def test_a_request_failure_closes_both_packed_blocks_after_the_lifecycle_and_before_the_weights(self):
+        with self.assertRaisesRegex(RuntimeError, 'request failed'):
+            self.exercise(fail=True, packed=True, users=4)
 
     def test_the_bridge_factory_caps_the_engines_captures_only_beside_the_four_user_block_and_logs_the_allocator(self):
         for users, packed, expected in ((4, True, dict(capture_rows=4)), (2, True, {}), (1, False, {})):

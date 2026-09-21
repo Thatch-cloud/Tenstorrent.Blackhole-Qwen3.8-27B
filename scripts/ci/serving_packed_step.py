@@ -74,29 +74,69 @@ def proposal_rows(block, requests):
     frontier inside the block's native chunk family - else None, and each engine proposes
     at its own captured width.
 
-    Beside the 64-row block the per-request engines capture only the sequential widths
+    `block` is either one packed verify block or a sequence of them
+    (QWEN_FAST_FOUR_AS_TWO's pair of 32-row blocks for four users, instead of the single
+    64-row block). Eligibility is checked PER BLOCK: every live request must be bound to
+    SOME configured block, and THAT block's own full user set must be live, each with a
+    block's worth of tokens left and inside its family - so a round where one block's pair
+    is intact and another's partner has already finished still answers the shared width
+    here (the finished partner is not live, so its block is never even asked to be full),
+    but a request bound to no configured block, or whose own block is missing one of its
+    users, makes the WHOLE round None, exactly as a lone block always required all its own
+    users present. Every configured block shares one rows-per-user in practice; if they
+    ever did not, the mismatch answers None rather than picking one width over another.
+
+    Beside the 64-row block (or the two 32-row blocks together, the same total rows) the
+    per-request engines may capture only the sequential widths
     (packed_shapes.sequential_capture_rows), so a block-served round MUST be drafted at the
     block's width and a sequential round (survivors, a last narrow block) at the engines';
-    a ticket drafted for the block that the block then does not serve has no capture
-    anywhere (`unservable`). The draft returns exactly the rows asked of it
+    a ticket drafted for a block that then does not serve it has no capture anywhere
+    (`unservable`). The draft returns exactly the rows asked of it
     (dflash_request_runtime.propose), so the decision here is the ticket width.
     """
-    shape = block.shape
+    blocks = tuple(block) if isinstance(block, (list, tuple)) else (block,)
     live = [request for request in requests if not request.session.finished]
-    if len(live) != shape.users:
+    if not live:
         return None
-    capacity = getattr(block, 'replay_capacity', None)
+    members = {}
+    order = []
     for request in live:
-        session = request.session
-        if session.max_new_tokens - len(session.emitted) < shape.rows_per_user:
+        matched = None
+        for candidate in blocks:
+            try:
+                candidate.segment_of(request.engine)
+            except ValueError:
+                continue
+            matched = candidate
+            break
+        if matched is None:
             return None
-        try:
-            block.segment_of(request.engine)
+        key = id(matched)
+        if key not in members:
+            members[key] = (matched, [])
+            order.append(key)
+        members[key][1].append(request)
+    width = None
+    for key in order:
+        matched, group = members[key]
+        shape = matched.shape
+        if len(group) != shape.users:
+            return None
+        if width is None:
+            width = shape.rows_per_user
+        elif width != shape.rows_per_user:
+            return None
+        capacity = getattr(matched, 'replay_capacity', None)
+        for request in group:
+            session = request.session
+            if session.max_new_tokens - len(session.emitted) < shape.rows_per_user:
+                return None
             if capacity is not None:
-                validate_ticket(session.position, shape.rows_per_user, capacity, short_context=False)
-        except ValueError:
-            return None
-    return shape.rows_per_user
+                try:
+                    validate_ticket(session.position, shape.rows_per_user, capacity, short_context=False)
+                except ValueError:
+                    return None
+    return width
 
 
 def unservable(entries):
@@ -111,19 +151,31 @@ def unservable(entries):
 
 
 class PackedStep:
-    """The packed device step bound to its block: the step itself, and the per-round
-    ticket-width policy the worker hook asks before drafting (`proposal_rows`)."""
+    """The packed device step bound to its block (or blocks - QWEN_FAST_FOUR_AS_TWO's pair
+    of 32-row blocks for four users): the step itself, and the per-round ticket-width policy
+    the worker hook asks before drafting (`proposal_rows`).
 
-    def __init__(self, block):
-        if block is None:
+    With exactly one block this runs the SAME `packed_device_step` a lone block always
+    did - `self.block` still names it, as callers that built a `PackedStep` over one block
+    have always relied on. With several, each round is partitioned by block and run through
+    `packed_device_rounds` instead; `self.block` is then None, since no one block owns the
+    round."""
+
+    def __init__(self, blocks):
+        if blocks is None:
             raise ValueError('A packed verify block is required')
-        self.block = block
+        self.blocks = tuple(blocks) if isinstance(blocks, (list, tuple)) else (blocks,)
+        if not self.blocks:
+            raise ValueError('At least one packed verify block is required')
+        self.block = self.blocks[0] if len(self.blocks) == 1 else None
 
     def __call__(self, entries, *, cancelled):
-        return packed_device_step(entries, cancelled=cancelled, block=self.block)
+        if len(self.blocks) == 1:
+            return packed_device_step(entries, cancelled=cancelled, block=self.blocks[0])
+        return packed_device_rounds(entries, cancelled=cancelled, blocks=self.blocks)
 
     def proposal_rows(self, requests):
-        return proposal_rows(self.block, requests)
+        return proposal_rows(self.blocks, requests)
 
 
 def ineligible(entries, block):
@@ -142,39 +194,22 @@ def ineligible(entries, block):
     return None
 
 
-def packed_device_step(entries, *, cancelled, block):
-    """Step every packed request through one verify pass, committing in the scheduler's order."""
-    entries = list(entries)
-    if not entries:
-        raise ValueError('A packed step needs at least one admitted request')
-    if not callable(cancelled) or block is None:
-        raise ValueError('A cancellation callback and the packed verify block are required')
+def validate_packed_entries(entries):
+    """FastRequest.step's own refusal, before any device work: one live owner with its own
+    prepared ticket, for every entry of the round - regardless of which block, if any, will
+    serve it, so this runs once over the whole round rather than once per block group."""
     for entry in entries:
         request, ticket = entry['request'], entry['ticket']
         if ticket.request_id != entry['request_id']:
             raise ValueError('Each packed entry must carry its own prepared ticket')
-        # FastRequest.step's own refusal, before any device work
         if request.closed or request.busy or request.cancelled or request.session.pending is not ticket:
             raise ValueError('One live owner with its prepared ticket required for every packed entry')
-    reason = ineligible(entries, block)
-    if reason is not None:
-        # A round drafted for the block (proposal_rows) whose entries changed before the
-        # step: its tickets have no capture anywhere, and the session cannot re-propose
-        # (fail_verification is final), so the round is failed here, before any device
-        # work, with the reason - rather than by the engine's own refusal one step later.
-        # serving_worker_hook.discard_stale_ticket keeps every live request's pending
-        # ticket at one width per step, so this is unreachable in normal steady-state
-        # and transition operation; kept only as a last-resort guard, it degrades this
-        # round (refuse_round) instead of raising past the step - a scheduler race must
-        # never crash the engine for every OTHER live user (run 35535533720).
-        refused = unservable(entries)
-        if refused:
-            return refuse_round(entries, block, reason, refused)
-    elif cancelled():
-        # Each request's own step answers a cancellation without touching the device.
-        reason = 'cancelled before the verify'
-    if reason is not None:
-        return sequential_packed_step(entries, cancelled=cancelled)
+
+
+def run_verified_block(entries, *, cancelled, block):
+    """The block's own round once `packed_device_step` (or `packed_device_rounds`, per block
+    group) has decided it will serve these entries as one pass: the verify, then each
+    entry's own commit, in entries order."""
     requests = [entry['request'] for entry in entries]
     for request in requests:
         request.busy = True
@@ -207,6 +242,116 @@ def packed_device_step(entries, *, cancelled, block):
         verifier_engine.note_packed_step()
         for request in requests:
             request.busy = False
+
+
+def packed_device_step(entries, *, cancelled, block):
+    """Step every packed request through one verify pass, committing in the scheduler's order."""
+    entries = list(entries)
+    if not entries:
+        raise ValueError('A packed step needs at least one admitted request')
+    if not callable(cancelled) or block is None:
+        raise ValueError('A cancellation callback and the packed verify block are required')
+    validate_packed_entries(entries)
+    reason = ineligible(entries, block)
+    if reason is not None:
+        # A round drafted for the block (proposal_rows) whose entries changed before the
+        # step: its tickets have no capture anywhere, and the session cannot re-propose
+        # (fail_verification is final), so the round is failed here, before any device
+        # work, with the reason - rather than by the engine's own refusal one step later.
+        # serving_worker_hook.discard_stale_ticket keeps every live request's pending
+        # ticket at one width per step, so this is unreachable in normal steady-state
+        # and transition operation; kept only as a last-resort guard, it degrades this
+        # round (refuse_round) instead of raising past the step - a scheduler race must
+        # never crash the engine for every OTHER live user (run 35535533720).
+        refused = unservable(entries)
+        if refused:
+            return refuse_round(entries, block, reason, refused)
+    elif cancelled():
+        # Each request's own step answers a cancellation without touching the device.
+        reason = 'cancelled before the verify'
+    if reason is not None:
+        return sequential_packed_step(entries, cancelled=cancelled)
+    return run_verified_block(entries, cancelled=cancelled, block=block)
+
+
+def group_by_block(entries, blocks):
+    """Partition entries by the block their engine is bound to (segment_of), preserving each
+    group's relative entries-order and the order blocks are first seen in; entries bound to
+    none of `blocks` come back separately, in their own relative order."""
+    groups, order, unbound = {}, [], []
+    for entry in entries:
+        matched = None
+        for block in blocks:
+            try:
+                block.segment_of(entry['request'].engine)
+            except ValueError:
+                continue
+            matched = block
+            break
+        if matched is None:
+            unbound.append(entry)
+            continue
+        key = id(matched)
+        if key not in groups:
+            groups[key] = (matched, [])
+            order.append(key)
+        groups[key][1].append(entry)
+    return [groups[key] for key in order], unbound
+
+
+def packed_device_rounds(entries, *, cancelled, blocks):
+    """One round over SEVERAL packed blocks (QWEN_FAST_FOUR_AS_TWO's pair of 32-row blocks
+    for four users, instead of one 64-row block): partition the entries by the block their
+    engine is bound to, then run each block's own round - exactly as `packed_device_step`
+    runs a lone block's round, `ineligible`/`unservable`/`refuse_round`/cancellation and all
+    - in the blocks' configured order (block A's verify and commits, then block B's).
+
+    Eligibility is PER BLOCK, not whole-round: a block whose group is not its own full user
+    set (one partner already finished, or missing entirely) falls to the sequential step for
+    just its own live member(s), while another block whose group IS complete still runs
+    packed in the same round. Entries bound to no configured block go to that same sequential
+    batch. Every request is served exactly once; the returned outputs always follow
+    `entries`' own order, whichever block (or the sequential step) actually produced them."""
+    entries = list(entries)
+    if not entries:
+        raise ValueError('A packed step needs at least one admitted request')
+    blocks = tuple(blocks)
+    if not callable(cancelled) or not blocks:
+        raise ValueError('A cancellation callback and at least one packed verify block are required')
+    validate_packed_entries(entries)
+    order = {entry['request_id']: index for index, entry in enumerate(entries)}
+    groups, sequential_entries = group_by_block(entries, blocks)
+    by_block = {id(matched): (matched, group_entries) for matched, group_entries in groups}
+    outputs_by_id = {}
+    for block in blocks:
+        group = by_block.get(id(block))
+        if group is None:
+            continue
+        matched, group_entries = group
+        reason = ineligible(group_entries, block)
+        if reason is not None:
+            # Same degrade-not-crash rule as the single-block step, applied to this block's
+            # own group: a mixed group with no fallback capture anywhere is refused (failed)
+            # here rather than raised past the step for every OTHER live user or block.
+            refused = unservable(group_entries)
+            if refused:
+                for output in refuse_round(group_entries, block, reason, refused):
+                    outputs_by_id[output.request_id] = output
+                continue
+        elif cancelled():
+            reason = 'cancelled before the verify'
+        if reason is not None:
+            sequential_entries.extend(group_entries)
+            continue
+        for output in run_verified_block(group_entries, cancelled=cancelled, block=block):
+            outputs_by_id[output.request_id] = output
+    if sequential_entries:
+        # Back into the round's own entries order: a block's fallback group is appended
+        # after entries no block claimed at all, which need not be their relative order.
+        sequential_entries.sort(key=lambda entry: order[entry['request_id']])
+        for output in sequential_packed_step(sequential_entries, cancelled=cancelled):
+            outputs_by_id[output.request_id] = output
+    return [outputs_by_id[entry['request_id']] for entry in entries]
 
 
 def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_started, verified):

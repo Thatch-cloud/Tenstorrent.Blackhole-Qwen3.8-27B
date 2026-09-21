@@ -711,6 +711,219 @@ class FourUserStepTests(unittest.TestCase):
         self.assertEqual((self.block.phase, self.block.pending_segments), ('idle', set()))
 
 
+class TwoBlockProposalRowsTests(unittest.TestCase):
+    """proposal_rows over SEVERAL blocks (QWEN_FAST_FOUR_AS_TWO's pair of 32-row blocks for
+    four users): the shared width when every live entry's OWN matched block is itself fully
+    live (with budget and family beside) - exactly as the single m3 block required all
+    four, since two disjoint two-user blocks covering the same four users make "every
+    entry's own block is complete" and "all four are live" the same condition. Else None:
+    a live survivor of an incomplete block (its partner already finished) takes every live
+    request back to drafting at its own captured width - including another block's still-
+    intact pair - rather than a forced 16 the trimmed survivor's engine could never capture
+    (packed_shapes.M3_SEQUENTIAL_CAPTURE_ROWS beside two 32-row blocks, serving_runtime.py).
+    `packed_device_step`'s own per-block partition still degrades a MIXED round gracefully
+    when one reaches it anyway (a stale-ticket race, TwoBlockStepTests below) - this is the
+    policy that keeps such a round from forming in normal steady-state operation."""
+
+    def setUp(self):
+        verifier_engine.note_prefill()
+        self.block_a = FakeBlock(users=2)
+        self.block_b = FakeBlock(users=2)
+        self.stepped = []
+
+    def requests(self, block, names, position=4100):
+        made = []
+        for segment, name in enumerate(names):
+            request = FakeRequest(name, position + segment * 50, self.stepped)
+            block.bind(request.engine, segment)
+            made.append(request)
+        return made
+
+    def test_the_shared_width_when_both_blocks_full_pairs_are_live(self):
+        a, b = self.requests(self.block_a, 'AB')
+        c, d = self.requests(self.block_b, 'CD')
+        self.assertEqual(proposal_rows([self.block_a, self.block_b], [a, b, c, d]), 16)
+        self.assertEqual(proposal_rows([self.block_a, self.block_b], [c, d, a, b]), 16, 'in any order')
+
+    def test_a_finished_partner_leaves_its_block_incomplete_and_answers_none_for_the_whole_round(self):
+        a, b = self.requests(self.block_a, 'AB')
+        c, d = self.requests(self.block_b, 'CD')
+        d.session.finished = True
+        self.assertIsNone(proposal_rows([self.block_a, self.block_b], [a, b, c, d]),
+                          "block A's own pair is intact, but block B is not, and two blocks over four users "
+                          "means that is the same as not all four being live")
+        # d simply absent from the round is the same answer
+        self.assertIsNone(proposal_rows([self.block_a, self.block_b], [a, b, c]))
+
+    def test_a_request_bound_to_no_configured_block_makes_the_whole_round_none(self):
+        a, b = self.requests(self.block_a, 'AB')
+        foreign = FakeRequest('X', 9000, self.stepped)
+        self.assertIsNone(proposal_rows([self.block_a, self.block_b], [a, b, foreign]))
+
+    def test_budget_and_family_are_checked_per_request_against_its_own_matched_block(self):
+        a, b = self.requests(self.block_a, 'AB')
+        c, d = self.requests(self.block_b, 'CD')
+        c.session.emitted = [1] * 241
+        self.assertIsNone(proposal_rows([self.block_a, self.block_b], [a, b, c, d]),
+                          'fewer than sixteen tokens left for C')
+        c.session.emitted = []
+        self.block_b.replay_capacity = 4352
+        d.session.position = 4340
+        self.assertIsNone(proposal_rows([self.block_a, self.block_b], [a, b, c, d]),
+                          "D's frontier leaves block B's native chunk family")
+        d.session.position = 4336
+        self.assertEqual(proposal_rows([self.block_a, self.block_b], [a, b, c, d]), 16)
+
+    def test_the_bare_single_block_form_is_unaffected(self):
+        a, b = self.requests(self.block_a, 'AB')
+        self.assertEqual(proposal_rows(self.block_a, [a, b]), 16, 'a lone block still takes the bare, non-list form')
+        self.assertIsNone(proposal_rows(self.block_a, [a]))
+
+
+class TwoBlockStepTests(unittest.TestCase):
+    """QWEN_FAST_FOUR_AS_TWO: two independent 32-row blocks instead of one 64-row block.
+    Entries are partitioned by the block their engine is bound to; each block runs its own
+    verify+commit round - exactly as a lone block's round always has - in the blocks'
+    CONFIGURED order (block A's whole round, then block B's); a block whose pair is not
+    fully live falls to the sequential step for its own live member(s) while another
+    block, still complete, runs packed in the same round."""
+
+    def setUp(self):
+        verifier_engine.note_prefill()
+        self.block_a = FakeBlock(users=2, rows=ROWS)
+        self.block_b = FakeBlock(users=2, rows=ROWS)
+        self.stepped = []
+
+    def request(self, block, request_id, segment, position, accept, rows=ROWS, bind=True):
+        request = FakeRequest(request_id, position, self.stepped)
+        if bind:
+            block.bind(request.engine, segment)
+        request.propose(block.predictions_for(segment), accept, rows)
+        return request
+
+    def four(self):
+        """A, B bound to block A (segments 0, 1); C, D to block B (segments 0, 1);
+        presented interleaved - a scheduler need not group entries by block."""
+        a = self.request(self.block_a, 'A', 0, 100, accept=15)
+        b = self.request(self.block_a, 'B', 1, 3000, accept=9)
+        c = self.request(self.block_b, 'C', 0, 700, accept=0)
+        d = self.request(self.block_b, 'D', 1, 5000, accept=12)
+        return [entry(c), entry(a), entry(d), entry(b)]
+
+    def step(self, entries, cancelled=None):
+        return PackedStep([self.block_a, self.block_b])(entries, cancelled=cancelled or (lambda: False))
+
+    def test_partitions_entries_by_block_and_runs_each_blocks_round_in_configured_order(self):
+        entries = self.four()
+        outputs = self.step(entries)
+        # block A's whole round (its own entries' relative order: A then B) before block B's
+        self.assertEqual(self.block_a.calls, [('verify', ['A', 'B']), ('commit', 0, 16), ('commit', 1, 10)])
+        self.assertEqual(self.block_b.calls, [('verify', ['C', 'D']), ('commit', 0, 1), ('commit', 1, 13)])
+        self.assertEqual(self.stepped, [], 'no request went through the sequential step')
+        # the scheduler's own order, not the blocks' processing order
+        self.assertEqual([output.request_id for output in outputs], ['C', 'A', 'D', 'B'])
+        self.assertEqual(outputs, [
+            CommittedOutput('C', tuple(self.block_b.predictions_for(0)[:1]), 701, False),
+            CommittedOutput('A', tuple(self.block_a.predictions_for(0)[:16]), 116, False),
+            CommittedOutput('D', tuple(self.block_b.predictions_for(1)[:13]), 5013, False),
+            CommittedOutput('B', tuple(self.block_a.predictions_for(1)[:10]), 3010, False)])
+        for block in (self.block_a, self.block_b):
+            self.assertEqual((block.phase, block.pending_segments, block.rounds), ('idle', set(), 1))
+        self.assertIsNone(verifier_engine._resident)
+
+    def test_a_block_whose_pair_is_not_fully_live_falls_to_sequential_while_the_other_stays_packed(self):
+        a = self.request(self.block_a, 'A', 0, 100, accept=15)
+        b = self.request(self.block_a, 'B', 1, 3000, accept=9)
+        # D already finished and is not part of this round: block B's group is only C
+        c = self.request(self.block_b, 'C', 0, 700, accept=3)
+        outputs = self.step([entry(c), entry(a), entry(b)])
+        self.assertEqual(self.block_a.calls, [('verify', ['A', 'B']), ('commit', 0, 16), ('commit', 1, 10)])
+        self.assertEqual(self.block_b.calls, [], 'block B was never touched: only one of its two users is present')
+        self.assertEqual(self.stepped, [('C', False)], "C's own step, since block B cannot serve it alone")
+        self.assertEqual([output.request_id for output in outputs], ['C', 'A', 'B'])
+        self.assertEqual(outputs[0], CommittedOutput('C', (7,), 700, False))
+        self.assertEqual(outputs[1], CommittedOutput('A', tuple(self.block_a.predictions_for(0)[:16]), 116, False))
+        self.assertEqual(outputs[2], CommittedOutput('B', tuple(self.block_a.predictions_for(1)[:10]), 3010, False))
+
+    def test_both_blocks_incomplete_pairs_go_entirely_to_the_sequential_step(self):
+        a = self.request(self.block_a, 'A', 0, 100, accept=15)
+        c = self.request(self.block_b, 'C', 0, 700, accept=3)
+        outputs = self.step([entry(c), entry(a)])
+        self.assertEqual((self.block_a.calls, self.block_b.calls), ([], []))
+        self.assertEqual(self.stepped, [('C', False), ('A', False)])
+        self.assertEqual([output.request_id for output in outputs], ['C', 'A'])
+
+    def test_an_entry_bound_to_neither_configured_block_joins_the_sequential_batch(self):
+        a = self.request(self.block_a, 'A', 0, 100, accept=15)
+        b = self.request(self.block_a, 'B', 1, 3000, accept=9)
+        foreign = self.request(self.block_b, 'X', 0, 100, accept=3, bind=False)
+        outputs = self.step([entry(foreign), entry(a), entry(b)])
+        self.assertEqual(self.block_a.calls, [('verify', ['A', 'B']), ('commit', 0, 16), ('commit', 1, 10)])
+        self.assertEqual(self.block_b.calls, [])
+        self.assertEqual(self.stepped, [('X', False)])
+        self.assertEqual([output.request_id for output in outputs], ['X', 'A', 'B'])
+
+    def test_a_cancellation_before_the_verify_is_answered_by_each_requests_own_step(self):
+        entries = self.four()
+        outputs = self.step(entries, cancelled=lambda: True)
+        self.assertEqual(self.stepped, [('C', True), ('A', True), ('D', True), ('B', True)])
+        self.assertTrue(all(output.cancelled for output in outputs))
+        self.assertEqual((self.block_a.calls, self.block_b.calls), ([], []))
+
+    def test_a_round_a_blocks_own_group_cannot_serve_degrades_without_raising_past_the_step(self):
+        """A stale 16-row ticket for block A, whose partner is missing from this round, has
+        no capture anywhere once its engine is trimmed to (1, 2, 4): the degrade-not-crash
+        refusal (serving_packed_step.refuse_round) applies to block A's own group, while
+        block B's intact pair still runs packed in the same round."""
+        a = self.request(self.block_a, 'A', 0, 100, accept=15)
+        a.engine.widths = (1, 2, 4)
+        c = self.request(self.block_b, 'C', 0, 700, accept=0)
+        d = self.request(self.block_b, 'D', 1, 5000, accept=12)
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
+            outputs = self.step([entry(c), entry(a), entry(d)])
+        self.assertEqual(self.block_a.calls, [], 'block A never ran: its own group could not serve the ticket')
+        self.assertEqual(self.block_b.calls, [('verify', ['C', 'D']), ('commit', 0, 1), ('commit', 1, 13)])
+        self.assertIn('cannot serve (entries=1 block_users=2) holds tickets no request '
+                      'engine captured (request=A rows=16)', output.getvalue())
+        self.assertEqual([output.request_id for output in outputs], ['C', 'A', 'D'])
+        self.assertEqual(outputs[1], CommittedOutput('A', (), 100, True, True))
+        self.assertEqual(a.session.phase, 'failed')
+        self.assertEqual(a.engine.adopted, [])
+        self.assertEqual(self.stepped, [], 'the degraded group is refused, not sent to the sequential step')
+
+    def test_single_block_packed_step_still_runs_the_unchanged_packed_device_step(self):
+        """A PackedStep built over ONE block runs `packed_device_step` directly, never the
+        multi-block partition path - the single-block behavior stays exactly what it was."""
+        block = FakeBlock(users=2)
+        step = PackedStep(block)
+        self.assertIs(step.block, block)
+        a, b = FakeRequest('A', 100, self.stepped), FakeRequest('B', 3000, self.stepped)
+        block.bind(a.engine, 0)
+        block.bind(b.engine, 1)
+        a.propose(block.predictions_for(0), accept=15)
+        b.propose(block.predictions_for(1), accept=9)
+        with patch('serving_packed_step.packed_device_rounds') as rounds:
+            outputs = step([entry(a), entry(b)], cancelled=lambda: False)
+        rounds.assert_not_called()
+        self.assertEqual([output.request_id for output in outputs], ['A', 'B'])
+        self.assertEqual(block.calls, [('verify', ['A', 'B']), ('commit', 0, 16), ('commit', 1, 10)])
+
+    def test_the_packed_step_object_carries_several_blocks_and_their_shared_proposal_policy(self):
+        step = PackedStep([self.block_a, self.block_b])
+        self.assertEqual(step.blocks, (self.block_a, self.block_b))
+        self.assertIsNone(step.block, 'no single block owns a multi-block round')
+        requests = [FakeRequest(name, 100 + index * 50, self.stepped) for index, name in enumerate('ABCD')]
+        for block, pair in ((self.block_a, requests[:2]), (self.block_b, requests[2:])):
+            for segment, request in enumerate(pair):
+                block.bind(request.engine, segment)
+        self.assertEqual(step.proposal_rows(requests), 16)
+        self.assertIsNone(step.proposal_rows(requests[:3]))
+        with self.assertRaises(ValueError):
+            PackedStep([])
+        with self.assertRaises(ValueError):
+            PackedStep(None)
+
+
 class RealBlockTests(BlockFixture):
     """The step over the real PackedVerifierEngine (test_packed_verifier's fakes underneath:
     a fake ttnn, a fake ModelBatch retaining one record per layer, the commit DMA recorded).
