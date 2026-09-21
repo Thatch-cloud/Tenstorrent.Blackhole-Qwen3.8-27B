@@ -177,3 +177,4 @@ jobs:
         with:
           name: m3native-gate-${{ github.run_id }}
           path: m3native/experiment-results/
+          include-hidden-files: true
