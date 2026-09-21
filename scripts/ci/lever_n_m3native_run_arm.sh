@@ -107,6 +107,10 @@ fi
 max_tokens=256
 entry_args=(-B /bench/lever_n_m3native_gate.py)
 if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
+  # The container runs as root with every capability dropped (no CAP_DAC_OVERRIDE), so
+  # it cannot create tracy's .logs inside a host directory owned by the runner user
+  # (run 35561589158: 'rm -rf /experiment-results-profile/.logs; mkdir -p ...' exit 1).
+  chmod 1777 experiment-results/profile
   mounts+=(--mount "type=bind,src=$PWD/experiment-results/profile,dst=/experiment-results-profile")
   max_tokens=48
   entry_args=(-m tracy -p --check-exit-code --disable-device-data-dump-to-files
