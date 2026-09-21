@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p experiment-results graft/attention graft/gdn
-          image=sha256:3d338c65f4c17761648b26e6233c9ab2a71e30d60f1c850ab2e045549881c15a
+          image=sha256:c596d5d46a02ab95242faef06463a7ea1a19b1757789d2707bdacd77e30e44e9
           root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
           name="qwen-m3native-extract-$GITHUB_RUN_ID"
           docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
