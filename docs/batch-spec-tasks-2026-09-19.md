@@ -2683,3 +2683,14 @@ attention wo). Token-exact (same output shas as v54), no crash, 34 packed rounds
 MLP all-reduces/round; a native 64-row decode kernel would avoid both but is a model graft. No host
 decomposition possible (single captured trace); needs the device profiler. Per-user rate 0.8-2.8
 tok/s, still dominated by the serial prefill ramp.
+
+## Batch-64 head concat proven on device (2026-09-21, card M, opgraft-K64)
+
+nlp_concat_heads_decode's `input_shape[1] <= 32` fatal protected only the reader's output row offset,
+written for one 32-row tile; with wptr_offset = batch_tile x head_size + face_offset(row_in_tile) in
+both readers (commit ee2db2ff, optimisation/ttnn-op/kernels-batch64/nlp_concat_heads_decode), the op
+takes 64 users in one call. Built in 19 s (ninja, unity_1/unity_2 of experimental/transformer), tested
+under TT_METAL_WATCHER=5: B=8, B=32 and B=64 bit-exact against the torch reshape reference, and the
+native B=64 output equals the two 32-user halves joined. B<=32 is term-for-term the original offset.
+The overlay's TwoTileConcatHeads can be retired once the K64 graft is mounted into the serving
+container. attn_decode_prep at batch 64 remains the last two-call op.
