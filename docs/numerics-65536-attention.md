@@ -427,3 +427,106 @@ Re-verified end to end: 32768 byte-identical (plain and `--target-replay`),
 `--scalar-reciprocal`, `git diff --check` passing throughout. Still
 UNVALIDATED beyond that: none of this has been built or run on hardware or
 in the simulator yet.
+
+## 8. Update: 3000 s probe budget, and the target-replay-scratch factory pin
+fix (commit `93069ed2`)
+
+Two real failures came back from the full four-fix precision set (section 7)
+running in the simulator. `reciprocal-replay-v4` (run 35598117412) timed out
+at its 1020 s budget inside `eager_0` - the full composed set is
+substantially slower to simulate than the earlier two-fix set the 1020 s
+figure was sized for. `target-replay-scratch-v6` (run 35598585759) died at
+probe start with `ValueError: Exact pinned SDPA factory required`, unrelated
+to timing.
+
+**Probe budget.** `PROBE_SECONDS_CHOICES` (`frozen_recipe_context.py`) gained
+`3000` alongside the existing `510`/`1020`, threaded through the same
+`--probe-seconds` argparse choice and `adapt_cache_launcher()` path that
+already handled the other two values - no new plumbing needed, since that
+path already parameterized the `frozen_sim_phase.py --phase probe --seconds
+N` literal in `simulator-suite.sh` on this same value. `prepare_seconds`
+(the `--phase prepare` step's own budget, fixed at 510) is a separate,
+independent phase and does not need to scale with the probe budget - real
+dry run confirms it stays `prepare_seconds=510` regardless of the chosen
+`--probe-seconds`. Existing values (510, 1020, and the default) produce
+byte-identical output to before.
+
+**Target-replay-scratch factory pin.** `frozen_target_replay.py`'s
+`adapt_target_probe()` (lines 68-87 at the pinned revision) injects, into
+`target-t16-attention-8k-probe.py`'s compact-scratch branch
+(`QWEN_FROZEN_TARGET_SCRATCH=1`), a plain `from dspark_fp32_build import
+validate_manifest` call used to audit the build that produced the binary
+under test. That plain, unwrapped `validate_manifest` cannot reconstruct a
+scratch-CB-patched `sdpa_program_factory.cpp`: its own reconstruction check
+(undo the condition-text swap, re-transform, compare against
+`SOURCE_SHA256`) leaves the scratch-CB layer in place, so the intermediate
+"original" never matches, and `dspark_fp32_intermediates.transform()`'s
+guard raises exactly the observed error - the same class of bug
+`frozen_wide_chunk_scratch.factory_scope()` was built to fix for the
+numerical probe (section 3/7), just never applied to the target probe's own,
+separate import of the same function.
+
+Confirmed safe to fix with the same redirect rather than a per-context
+factory-hash pin: `sdpa_tree_scratch.py`'s own pins (`HASHES`,
+`PATCHED_FACTORY_SHA256`) are entirely about
+`sdpa_decode_program_factory.cpp` - the DECODE kernel family
+`attention_replay.py`'s `ReplayAttentionReader` actually computes through
+(`paged_scaled_dot_product_attention_decode`), a completely different file
+from `sdpa_program_factory.cpp`, which this port's wide-chunk patch touches.
+The compact-scratch target probe's own numerics and scratch layout (chunk
+sizes, CB ids) are not coupled to `sdpa_program_factory.cpp` at all; its
+`validate_manifest` call is a build-provenance audit of a binary the target
+probe doesn't otherwise depend on, not a source of correctness assumptions.
+`_patch_target_probe()` (`frozen_wide_chunk_normalization.py`) redirects the
+import through `frozen_wide_chunk_scratch.validate_manifest` - the same
+already-tested redirect used for `dspark-native-8k-attention-probe.py` -
+applied only when `target-t16-attention-8k-probe.py` is present in `sources`
+(i.e. only when `--target-replay` was passed; a no-op omission otherwise,
+and a no-op for every context other than 65536 regardless).
+
+**A pre-existing test gap found and fixed while re-running the full suite:**
+`test_frozen_recipe_context.py`'s `test_deployment_preserves_historical_
+hardware_runtime` asserted an incomplete expected file set for 65536 -
+missing `attention_replay.py` (staged by `adapt_replay_k_chunk`), the four
+files the unconditional verbatim-copy loop added for the fused MLP input
+reader (`fused_1d_input.cpp`, `fused_t16_admission.py`,
+`fused-t16-target-simulator.json`, `fused-t16-target-simulator.exit-status`),
+and the three `frozen_wide_chunk_*` fix modules the `KERNEL_FIX_MODULES`
+loop stages. A latent gap from the section-7 round, never caught because
+that round's own new tests didn't touch this older assertion. Fixed by
+adding the missing names; re-verified.
+
+**Re-verified via real dry run** against the pinned checkout (fresh clone,
+`git checkout 8c102b20...`, comparing the last-committed adapter code
+against the code with this round's changes): 65536 + `--target-replay`
+staging produces exactly one changed file
+(`target-t16-attention-8k-probe.py`, the single import-line redirect shown
+above) versus before; 32768 stays byte-identical, both plain and under
+`--target-replay` (`diff -rq` empty, manifest `before`/`after`/`geometry`
+hashes equal); `git diff --check` clean throughout; 65536 +
+`--scalar-reciprocal --probe-seconds 3000` (the `reciprocal-replay-v6`
+lane's flags) stages cleanly with `--seconds 3000` correctly threaded into
+`simulator-suite.sh` and `prepare_seconds` unchanged at 510. 95 tests pass
+locally across `test_frozen_wide_chunk_normalization.py`,
+`test_frozen_wide_chunk_scratch.py`, `test_frozen_wide_chunk_sum_update.py`,
+`test_frozen_wide_chunk_score_center.py`,
+`test_frozen_wide_chunk_kernel_composition.py`,
+`test_frozen_wide_chunk_replay.py`, `test_frozen_recipe_context.py`,
+`test_frozen_combined_adapters.py` and `test_frozen_target_replay.py`.
+
+**Since committed and iterated on the workflow side (no further adapter
+changes needed):** `reciprocal-replay-v6`/`v7` and
+`target-replay-scratch-v7`/`v8` retry tags were added
+(`qwen-frozen-32k-numerical.yml`), the job timeout raised to 65 minutes and
+the run-simulator wrapper's `limit` raised to 3400 s for 64k tags
+(`ea7d2d63`, `3222bcfd`, `fb6ceb60`). `target-replay-scratch-v9`/`v10` tags
+followed with a further retry at `--probe-seconds 3000` after `v7`
+progressed past two native references before hitting the then-620 s
+target-probe wrapper limit (`710148c7`); a bash array-editing bug in the
+`v9`/`v10` candidate construction (`"${candidate[@]/--probe-seconds/}"`
+against an array that no longer contained that literal) was found and fixed
+by building the `--target-replay --probe-seconds 3000` array directly,
+`bash -n` checked (`c43ca1cb`). All of this is workflow-YAML-only; none of
+it implicates `frozen_wide_chunk_normalization.py` or the fixes above. Lane
+outcomes for `v9`/`v10` and `reciprocal-replay-v6`/`v7` are not yet known
+from this side - pending CI results.
