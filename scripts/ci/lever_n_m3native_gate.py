@@ -70,6 +70,13 @@ NATIVE_M3_MARKER = '[PINDIAG] native_m3'
 NATIVE_ATTN_MARKER = '[PINDIAG] native_attn engaged'
 PACKED_PHASE_TRACE_MS = re.compile(r'\[PACKED-PHASE\][^\n]*\btrace_ms=([0-9.]+)')
 BINDER_CALLS_LINE = re.compile(r'\[PINDIAG\] native_m3 binder calls this round: (\{.*\})')
+# The binder-calls diagnostic (model_batch.ModelBatch.run) lists EVERY two-tile binder,
+# retired or not: 'decode norm' (129 = two per layer plus the final norm) and
+# 'full-attention forward' (16) are expected to be non-zero in every arm, and run
+# 35559199392 was reported NOT PASSED on exactly those two. Only the binders the
+# native path retires must be zero: the MLP and GDN-output wrappers under native_m3,
+# and the sliced prep / two-tile concat guards once QWEN_FAST_NATIVE_ATTN retires them.
+RETIRED_LABELS = ('MLP forward', 'GDN output projection', 'sliced attn_decode_prep', 'two-tile head concat')
 REFERENCE_NAME = re.compile(r'^single-user-(?:(\d{4})-)?\d+\.json$')
 
 
@@ -178,6 +185,14 @@ def packed_phase_stats(text):
                trace_ms_mean=round(statistics.fmean(values), 3), trace_ms_max=round(max(values), 3))
 
 
+def retired_binder_leaks(rounds):
+    """The rounds in which a RETIRED binder (RETIRED_LABELS) saw a call; every other
+    label in the payload is a binder that is meant to run and is ignored here."""
+    return [{label: calls for label, calls in payload.items() if label in RETIRED_LABELS and calls}
+            for payload in rounds
+            if any(payload.get(label) for label in RETIRED_LABELS)]
+
+
 def retired_binder_rounds(text):
     """Every per-round '[PINDIAG] native_m3 binder calls this round: {...}' payload
     (model_batch.ModelBatch.run), each mapping a retired binder's label to how many
@@ -264,8 +279,7 @@ def main():
         report['packed_phase'] = packed_phase_stats(log_text)
         binder_rounds = retired_binder_rounds(log_text)
         report['retired_binder_rounds_observed'] = len(binder_rounds)
-        report['retired_binder_calls_nonzero'] = [
-            payload for payload in binder_rounds if any(payload.values())]
+        report['retired_binder_calls_nonzero'] = retired_binder_leaks(binder_rounds)
 
         checked = [c for c in comparisons if c.get('reference_present')]
         report['users_checked'] = len(checked)
