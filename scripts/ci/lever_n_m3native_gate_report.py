@@ -34,6 +34,10 @@ def main():
         print('  user %-2s prompt_base=%-6s %-17s reference_len=%-6s actual_len=%-6s %s'
               % (entry.get('user'), entry.get('prompt_base'), mark, entry.get('reference_len'),
                  entry.get('actual_len'), ('ERROR ' + entry['error'][:120]) if entry.get('error') else ''))
+    admission = report.get('ttft_profile')
+    if admission and not admission.get('error'):
+        from m3native_ttft_profile import render as ttft_render
+        print(ttft_render(admission))
     phase = report.get('packed_phase')
     if phase:
         print('[PACKED-PHASE] trace_ms rounds=%s min=%s mean=%s max=%s'

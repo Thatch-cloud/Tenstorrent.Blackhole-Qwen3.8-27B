@@ -338,6 +338,16 @@ def main():
         for thread in threads:
             thread.join()
         report['streams'] = results
+        # Derived, not measured: the gate already records ttft_s and gaps_ms per
+        # stream, and run 35658854824 showed those carry a precise serial-prefill
+        # story no gate asserted. Reporting is unconditional; the thresholds are
+        # opt-in, so this cannot fail a run until someone sets a ceiling.
+        from m3native_ttft_profile import profile as ttft_profile, render as ttft_render
+        try:
+            report['ttft_profile'] = ttft_profile(results)
+            print(ttft_render(report['ttft_profile']), flush=True)
+        except ValueError as error:
+            report['ttft_profile'] = dict(error=str(error))
 
         comparisons = []
         for index, entry in enumerate(results):
