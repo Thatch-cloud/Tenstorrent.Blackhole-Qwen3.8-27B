@@ -10,7 +10,7 @@ concurrency:
 jobs:
   numerical:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: ${{ contains(github.ref, 'target-replay-') && !contains(github.ref, 'scratch-v4') && !contains(github.ref, 'scratch-v5') && !contains(github.ref, 'scratch-v6') && 12 || 20 }}
+    timeout-minutes: ${{ contains(github.ref, 'frozen-64k-') && 65 || (contains(github.ref, 'target-replay-') && !contains(github.ref, 'scratch-v4') && !contains(github.ref, 'scratch-v5') && !contains(github.ref, 'scratch-v6') && 12 || 20) }}
     steps:
       - name: Restore ownership of prior simulator artifacts
         run: |
@@ -55,6 +55,7 @@ jobs:
           fi
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-replay-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-reciprocal-replay-v* ]]; then
             candidate=(--scalar-reciprocal --probe-seconds 1020)
+            if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-64k-* ]]; then candidate=(--scalar-reciprocal --probe-seconds 3000); fi
           fi
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-diagnostics-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-reciprocal-diagnostics-v1 ]]; then
             candidate=(--scalar-reciprocal)
