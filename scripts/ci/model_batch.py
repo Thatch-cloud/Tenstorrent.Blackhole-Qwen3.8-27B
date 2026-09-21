@@ -284,17 +284,43 @@ def two_tile_bindings(rows, model, operations):
     Two more of the model's own decode-mode linear projections take a slow prefill arm
     above one tile: the attention output projection (`_wo_proj`, looked up by
     `_decode_from_prep`) and the GDN output projection (`_row_proj`, looked up by
-    gdn_multitoken_conv.finish_output, FROZEN). Both are bound two-tile the same way as
-    the head concat and the MLP forward - `_wo_proj` alongside the attention binder,
-    `_row_proj` as its own GDN output binder."""
+    gdn_multitoken_conv.finish_output, FROZEN). Without the Lever N M3native graft both
+    are bound two-tile the same way as the head concat and the MLP forward - `_wo_proj`
+    alongside the attention binder, `_row_proj` as its own GDN output binder.
+
+    NATIVE M3 (lever_n_m3native_patch.py). Once the graft's model_config.py adds
+    attn_wo_decode_1d_progcfg_64 (detected here by hasattr, never by an env var: the
+    attribute IS the graft, mounted read-only alongside the model sources it patches -
+    lever_n_m3native_run_arm.sh), the model's own wo, GDN in/out and MLP w1/w3/w2 decode
+    matmuls run natively at the block's rows (per_core_M 2): patch_attention_tp,
+    patch_gdn_tp and patch_mlp each widen a gate and select that config above one tile.
+    So MLP and GDN-output retire their two-tile wrapping entirely (bind_two_tile_mlp,
+    bind_two_tile_gdn_output: `bindings=()`, `expected_calls=0` - nothing overrides the
+    now-native `feed_forward.forward` / `_row_proj`), and the attention binder keeps
+    only what still has to be two-call: `prep_by_tile` and TwoTileConcatHeads wrap
+    ttnn.transformer.attn_decode_prep (hangs at batch 64, C++) and
+    nlp_concat_heads_decode (TT_FATAL beyond 32, C++) regardless of the graft, so
+    forward_decode is still bound, but its own `_wo_proj` wrapping and its runtime QKV
+    progcfg rebuild are dropped (two_tile_decode.TwoTileAttentionBinding/
+    TwoTileAttentionDecode, native_m3=True): `_wo_proj` is native too, and the graft's
+    own attn_qkv_decode_1d_progcfg_64 already IS the per_core_M 2 config the runtime
+    rebuild would otherwise compute. Without the graft (no _64 attrs) every binder
+    behaves exactly as before - native_m3 is False and this is dead code."""
     validate_checkpoint(rows, rows)
     if rows <= TILE_ROWS:
         return ()
     from two_tile_norm import bind_two_tile_norms
     from two_tile_decode import bind_two_tile_attention, bind_two_tile_gdn_output, bind_two_tile_mlp
 
-    return (bind_two_tile_norms(model, rows, operations), bind_two_tile_attention(model, rows, operations),
-            bind_two_tile_mlp(model, rows, operations), bind_two_tile_gdn_output(model, rows, operations))
+    native_m3 = hasattr(getattr(model, 'args', None), 'attn_wo_decode_1d_progcfg_64')
+    if native_m3:
+        from dflash_device import pindiag
+        pindiag('[PINDIAG] native_m3 engaged: rows={} (wo/gdn-out/mlp native at per_core_M=2; '
+               'attn_decode_prep and nlp_concat_heads_decode stay two-call)', rows)
+    return (bind_two_tile_norms(model, rows, operations),
+            bind_two_tile_attention(model, rows, operations, native_m3=native_m3),
+            bind_two_tile_mlp(model, rows, operations, native_m3=native_m3),
+            bind_two_tile_gdn_output(model, rows, operations, native_m3=native_m3))
 
 
 def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):
@@ -562,6 +588,7 @@ class ModelBatch:
         # each (two_tile_bindings), after the per-layer adapters so a full-attention
         # forward finds the block's writer and readers already bound. Nothing within one tile.
         self.two_tile = two_tile_bindings(self.rows, model, ttnn)
+        self.native_m3 = hasattr(getattr(model, 'args', None), 'attn_wo_decode_1d_progcfg_64')
         for binder in self.two_tile:
             self.bindings.extend(binder.bindings)
         if profiler:
@@ -691,9 +718,22 @@ class ModelBatch:
         if self.attention_mask_once and self.replay_reader.refresh_calls - before_mask_refresh != len(self.replay_reader.metadata):
             raise AssertionError('Shared masks must refresh exactly once per model forward')
         for binder, before in zip(two_tile, before_two_tile, strict=True):
-            if binder.calls - before != binder.expected_calls:
+            engaged = binder.calls - before
+            if engaged != binder.expected_calls:
+                if binder.expected_calls == 0:
+                    # Lever N M3native retired this binder's two-tile wrapping (its
+                    # bindings are empty, so nothing should ever call through it): any
+                    # nonzero count here means something re-bound it despite native_m3,
+                    # a silent fallback to the two-call path that must fail loudly
+                    # rather than just cost a slower round.
+                    raise AssertionError('native_m3 retired the %s two-tile wrapper (it must stay native): '
+                                         '%d unexpected call(s) leaked through' % (binder.label, engaged))
                 raise AssertionError('Every %s of the wide block must take its two-tile form: %d engaged, %d expected'
-                                     % (binder.label, binder.calls - before, binder.expected_calls))
+                                     % (binder.label, engaged, binder.expected_calls))
+        if getattr(self, 'native_m3', False) and two_tile:
+            from dflash_device import pindiag
+            pindiag('[PINDIAG] native_m3 binder calls this round: {}',
+                   {binder.label: binder.calls - before for binder, before in zip(two_tile, before_two_tile)})
         if self.gdn_calls - before_gdn != 48 or any(
             writer.calls - before != 2 for writer, before in zip(self.writers, before_writes, strict=True)
         ):

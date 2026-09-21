@@ -1,0 +1,459 @@
+"""Lever N M3native: graft the native 64-row (four-user) decode path onto the pinned
+model sources.
+
+Read from the image's own dump (probe run 35503727180: model_config.py, tp_common.py,
+attention/tp.py, gdn/tp.py, mlp.py), the model's decode-time 1D matmul configs
+(tp_common.create_matmul_1d_decode_progcfg) are all built at M = 1 (model_config.py
+_init_tp_config), and the seven gates that select them (attention/tp.py's _qkv,
+_wo_proj and forward_decode's prep gate; gdn/tp.py's _row_proj, _project_qkvzab and
+_project_qkvzab_raw; mlp.py's w1/w3 and w2 sites) all cap at one 32-row tile
+(`x.shape[-2] <= tpc.TILE_SIZE` or the ttnn spelling of the same constant). Beyond
+that they fall through to a slow PREFILL 2D program config - the two-call wrapper in
+two_tile_decode.py exists to avoid that fall-through by calling the fast one-tile arm
+twice and joining the halves.
+
+create_matmul_1d_decode_progcfg's per_core_M is ceil(m / TILE_SIZE) (tp_common.py:161)
+with no other shape-dependent branch, so the SAME builder call at M = 64 produces the
+per_core_M = 2 config the two-tile wrapper's own runtime rebuild
+(two_tile_decode.two_tile_matmul_1d_progcfg) already proved on the device for the
+fused QKV projection (run 35507675630, image v51). This module adds that M = 64
+sibling for every one of the seven configs, alongside - never replacing - the
+existing M = 1 ones, then widens each of the seven gates to also select it for rows
+33..64, so the model's own decode path is what runs a 64-row block natively once the
+graft is mounted (lever_n_m3native_run_arm.sh), while a stock image (no _64 attrs)
+takes the exact byte-identical path it does today.
+
+NOT touched here (both C++-bounded, not a program-config question): attn_decode_prep
+(hangs at batch 64 on the device, run 35502452429) and nlp_concat_heads_decode
+(TT_FATAL input_shape[1] <= 32 on the host). Those stay two-call regardless of the
+graft - two_tile_decode.py's own overlay switch (model_batch.py's native_m3
+detection) keeps exactly those two wrapped and drops everything else.
+
+Every edit here is scoped to a named function's AST line range and asserts its
+literal anchor text matched exactly once within that scope, mirroring
+lever_n_model_patch.py: a source change fails the patch loudly instead of silently
+touching the wrong lookalike line (attention/tp.py's `_project_qkvzab`-shaped gate at
+gdn/tp.py:431 and the `_project_qkvzab_raw`-shaped one at :1035 read alike outside
+their own functions).
+
+Applying nothing on import: stage() is explicit, mirroring lever_n_model_patch.
+"""
+
+import argparse
+import ast
+from pathlib import Path
+
+
+def function_span(source, name):
+    """Line span [start, end) of a method, by AST sibling order (see lever_n_model_patch).
+
+    end_lineno needs Python 3.8; this has to run under 3.7 locally as well as 3.10 in
+    the image, so the end is taken as the next sibling definition's start (or the end
+    of the class body) rather than from the node.
+    """
+    tree = ast.parse(source)
+    total = len(source.splitlines())
+    for body in tree.body:
+        if not isinstance(body, ast.ClassDef):
+            continue
+        members = [node for node in body.body
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for index, node in enumerate(members):
+            if node.name != name:
+                continue
+            if node.decorator_list:
+                start = min(d.lineno for d in node.decorator_list) - 1
+            else:
+                start = node.lineno - 1
+            if index + 1 < len(members):
+                following = members[index + 1]
+                end = (min(d.lineno for d in following.decorator_list)
+                       if following.decorator_list else following.lineno) - 1
+            else:
+                end = total
+            return start, end
+    raise ValueError('no method named %s' % name)
+
+
+def replace_once(lines, span, old, new, what):
+    """Replace old with new inside a line span, requiring exactly one occurrence."""
+    start, end = span
+    region = ''.join(lines[start:end])
+    if region.count(old) != 1:
+        raise ValueError('%s: expected one occurrence of %r in %s, found %d'
+                         % (what, old[:60], span, region.count(old)))
+    lines[start:end] = (region.replace(old, new, 1)).splitlines(keepends=True)
+    return lines
+
+
+# ---------------------------------------------------------------------------------
+# A. model_config.py: seven M = 64 siblings, alongside the M = 1 originals.
+# ---------------------------------------------------------------------------------
+
+TP_CONFIG_FUNCTION = '_init_tp_config'
+
+KV_SHARD_ANCHOR = (
+    '        self.kv_update_shard_cfg = ttnn.create_sharded_memory_config(\n'
+    '            shape=(tpc.TILE_SIZE, self.head_dim),\n'
+    '            core_grid=ttnn.CoreGrid(x=_cols, y=_rows),\n'
+    '            strategy=ttnn.ShardStrategy.HEIGHT,\n'
+    '            orientation=ttnn.ShardOrientation.ROW_MAJOR,\n'
+    '            use_height_and_width_as_shard_shape=True,\n'
+    '        )\n'
+)
+
+# Every argument here matches its M = 1 original above byte for byte; only the M
+# changes (a new M64 local, never touching the M = 1 the DRAM-sharded configs above
+# still read). Order mirrors the originals: mlp w1/w3/w2, attn_qkv (for symmetry -
+# already proven on the device by the two-tile wrapper's own runtime rebuild),
+# gdn_qkvz, attn_wo, gdn_out.
+NATIVE_64_BLOCK = (
+    '\n'
+    '        # Lever N M3native: the same seven 1D decode matmul configs above, rebuilt at\n'
+    '        # M = 64 (per_core_M = 2) for the native 64-row (four T16 user) decode graft.\n'
+    '        # create_matmul_1d_decode_progcfg\'s per_core_M is ceil(m / TILE_SIZE)\n'
+    '        # (tp_common.py:161), so this needs no builder change - only a second M. Every\n'
+    '        # M = 1 config above is left byte-identical.\n'
+    '        M64 = 64\n'
+    '        self.mlp_w1_decode_1d_progcfg_64 = tpc.create_matmul_1d_decode_progcfg(\n'
+    '            M64,\n'
+    '            self.dim,\n'
+    '            self.hidden_dim // tp,\n'
+    '            num_cores=44,\n'
+    '            fused_activation=ttnn.UnaryOpType.SILU,\n'
+    '            grid_w=self.decode_grid_w,\n'
+    '        )\n'
+    '        self.mlp_w3_decode_1d_progcfg_64 = tpc.create_matmul_1d_decode_progcfg(\n'
+    '            M64, self.dim, self.hidden_dim // tp, num_cores=44, grid_w=self.decode_grid_w\n'
+    '        )\n'
+    '        self.mlp_w2_decode_1d_progcfg_64 = tpc.create_matmul_1d_decode_progcfg(\n'
+    '            M64, self.hidden_dim // tp, self.dim, num_cores=33, grid_w=self.decode_grid_w\n'
+    '        )\n'
+    '        self.attn_qkv_decode_1d_progcfg_64 = tpc.create_matmul_1d_decode_progcfg(\n'
+    '            M64, self.dim, self.attn_qkv_fused_dim_tp, num_cores=64\n'
+    '        )\n'
+    '        self.gdn_qkvz_decode_1d_progcfg_64 = tpc.create_matmul_1d_decode_progcfg(\n'
+    '            M64, self.dim, self.gdn_qkvzab_dim_tp, num_cores=44, grid_w=self.decode_grid_w\n'
+    '        )\n'
+    '        self.attn_wo_decode_1d_progcfg_64 = tpc.create_matmul_1d_decode_progcfg(\n'
+    '            M64, self.attn_out_dim_tp, self.dim, num_cores=33, grid_w=self.decode_grid_w\n'
+    '        )\n'
+    '        self.gdn_out_decode_1d_progcfg_64 = tpc.create_matmul_1d_decode_progcfg(\n'
+    '            M64, self.gdn_value_dim_tp, self.dim, num_cores=33, grid_w=self.decode_grid_w\n'
+    '        )\n'
+)
+
+
+def patch_model_config(source):
+    """Append the seven M = 64 progcfgs right after kv_update_shard_cfg, inside
+    _init_tp_config. Every M = 1 assignment above stays untouched."""
+    if 'mlp_w1_decode_1d_progcfg_64' in source:
+        raise ValueError('model_config.py already carries the M3native _64 progcfgs')
+    lines = source.splitlines(keepends=True)
+    span = function_span(source, TP_CONFIG_FUNCTION)
+    lines = replace_once(lines, span, KV_SHARD_ANCHOR, KV_SHARD_ANCHOR + NATIVE_64_BLOCK,
+                         'model_config kv_update_shard_cfg anchor')
+    result = ''.join(lines)
+    ast.parse(result)
+    return result
+
+
+# ---------------------------------------------------------------------------------
+# B. attention/tp.py: _qkv, _wo_proj, forward_decode's prep gate.
+# ---------------------------------------------------------------------------------
+
+QKV_FUNCTION = '_qkv'
+WO_PROJ_FUNCTION = '_wo_proj'
+FORWARD_DECODE_FUNCTION = 'forward_decode'
+
+
+def patch_attention_tp(source):
+    lines = source.splitlines(keepends=True)
+
+    span = function_span(source, QKV_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '        elif getattr(self.args, "proj_1d_decode", False) and x.shape[-2] <= tpc.TILE_SIZE:\n'
+        '            # Decode: small-grid 1D matmul (interleaved weight). Output DRAM so _make_heads_decode\'s\n'
+        '            # to_memory_config(.,L1) stays a real copy before it deallocates the source.\n'
+        '            qkv = tpc.matmul_1d_decode(\n'
+        '                x,\n'
+        '                tw["wqkv_fused"],\n'
+        '                self.args.attn_qkv_decode_1d_progcfg,\n'
+        '                self.compute_cfg,\n'
+        '                out_memory_config=ttnn.DRAM_MEMORY_CONFIG,\n'
+        '            )\n',
+        '        elif getattr(self.args, "proj_1d_decode", False) and x.shape[-2] <= 2 * tpc.TILE_SIZE:\n'
+        '            # Decode: small-grid 1D matmul (interleaved weight). Output DRAM so _make_heads_decode\'s\n'
+        '            # to_memory_config(.,L1) stays a real copy before it deallocates the source.\n'
+        '            # Lever N M3native: rows 1-32 keep the M = 1 config; rows 33-64 select the\n'
+        '            # native 64-row (per_core_M 2) config the model_config graft adds alongside it.\n'
+        '            qkv = tpc.matmul_1d_decode(\n'
+        '                x,\n'
+        '                tw["wqkv_fused"],\n'
+        '                self.args.attn_qkv_decode_1d_progcfg_64 if x.shape[-2] > tpc.TILE_SIZE\n'
+        '                else self.args.attn_qkv_decode_1d_progcfg,\n'
+        '                self.compute_cfg,\n'
+        '                out_memory_config=ttnn.DRAM_MEMORY_CONFIG,\n'
+        '            )\n',
+        'attention _qkv 1D decode gate')
+
+    span = function_span(''.join(lines), WO_PROJ_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '        if getattr(self.args, "proj_1d_decode", False) and x.shape[-2] <= tpc.TILE_SIZE:\n'
+        '            # Decode: tuned ~32-core 1D matmul (interleaved weight) -> DRAM for the reduce-scatter.\n'
+        '            return tpc.matmul_1d_decode(\n'
+        '                x,\n'
+        '                weight,\n'
+        '                self.args.attn_wo_decode_1d_progcfg,\n'
+        '                self.compute_cfg,\n'
+        '                out_memory_config=ttnn.DRAM_MEMORY_CONFIG,\n'
+        '            )\n',
+        '        if getattr(self.args, "proj_1d_decode", False) and x.shape[-2] <= 2 * tpc.TILE_SIZE:\n'
+        '            # Decode: tuned ~32-core 1D matmul (interleaved weight) -> DRAM for the reduce-scatter.\n'
+        '            # Lever N M3native: rows 1-32 keep the M = 1 config; rows 33-64 select the\n'
+        '            # native 64-row (per_core_M 2) config.\n'
+        '            return tpc.matmul_1d_decode(\n'
+        '                x,\n'
+        '                weight,\n'
+        '                self.args.attn_wo_decode_1d_progcfg_64 if x.shape[-2] > tpc.TILE_SIZE\n'
+        '                else self.args.attn_wo_decode_1d_progcfg,\n'
+        '                self.compute_cfg,\n'
+        '                out_memory_config=ttnn.DRAM_MEMORY_CONFIG,\n'
+        '            )\n',
+        'attention _wo_proj 1D decode gate')
+
+    span = function_span(''.join(lines), FORWARD_DECODE_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '        _prep = (\n'
+        '            os.environ.get("QWEN_ATTN_PREP", "0") == "1"\n'
+        '            and use_paged\n'
+        '            and self._fused_qkv\n'
+        '            and x.shape[-2] <= ttnn.TILE_SIZE\n'
+        '        )\n',
+        '        _prep = (\n'
+        '            os.environ.get("QWEN_ATTN_PREP", "0") == "1"\n'
+        '            and use_paged\n'
+        '            and self._fused_qkv\n'
+        '            # Lever N M3native: widened alongside _qkv/_wo_proj so a 64-row prep-path\n'
+        '            # forward stays gated the same way its own projections are.\n'
+        '            and x.shape[-2] <= 2 * ttnn.TILE_SIZE\n'
+        '        )\n',
+        'attention forward_decode prep gate')
+
+    result = ''.join(lines)
+    ast.parse(result)
+    return result
+
+
+# ---------------------------------------------------------------------------------
+# C. gdn/tp.py: _row_proj, _project_qkvzab, _project_qkvzab_raw.
+# ---------------------------------------------------------------------------------
+
+ROW_PROJ_FUNCTION = '_row_proj'
+PROJECT_QKVZAB_FUNCTION = '_project_qkvzab'
+PROJECT_QKVZAB_RAW_FUNCTION = '_project_qkvzab_raw'
+
+
+def patch_gdn_tp(source):
+    lines = source.splitlines(keepends=True)
+
+    span = function_span(source, ROW_PROJ_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '        if getattr(self.args, "proj_1d_decode", False) and x.shape[-2] <= tpc.TILE_SIZE:\n'
+        '            # Decode: tuned ~32-core 1D matmul (interleaved weight) -> DRAM for the reduce-scatter.\n'
+        '            return tpc.matmul_1d_decode(\n'
+        '                x, weight, self.args.gdn_out_decode_1d_progcfg, self.cfg, out_memory_config=ttnn.DRAM_MEMORY_CONFIG\n'
+        '            )\n',
+        '        if getattr(self.args, "proj_1d_decode", False) and x.shape[-2] <= 2 * tpc.TILE_SIZE:\n'
+        '            # Decode: tuned ~32-core 1D matmul (interleaved weight) -> DRAM for the reduce-scatter.\n'
+        '            # Lever N M3native: rows 1-32 keep the M = 1 config; rows 33-64 select the\n'
+        '            # native 64-row (per_core_M 2) config.\n'
+        '            _row_proj_cfg = (self.args.gdn_out_decode_1d_progcfg_64 if x.shape[-2] > tpc.TILE_SIZE\n'
+        '                             else self.args.gdn_out_decode_1d_progcfg)\n'
+        '            return tpc.matmul_1d_decode(\n'
+        '                x, weight, _row_proj_cfg, self.cfg, out_memory_config=ttnn.DRAM_MEMORY_CONFIG\n'
+        '            )\n',
+        'gdn _row_proj 1D decode gate')
+
+    span = function_span(''.join(lines), PROJECT_QKVZAB_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '            elif getattr(self.args, "proj_1d_decode", False) and S <= tpc.TILE_SIZE:\n'
+        '                # Decode: small-grid 1D matmul on the interleaved fused weight (beats the DRAM-sharded grid).\n'
+        '                qkvzab = tpc.matmul_1d_decode(\n'
+        '                    x,\n'
+        '                    self.tw["qkvz"],\n'
+        '                    self.args.gdn_qkvz_decode_1d_progcfg,\n'
+        '                    self.cfg,\n'
+        '                    out_memory_config=ttnn.L1_MEMORY_CONFIG if out_mc is not None else ttnn.DRAM_MEMORY_CONFIG,\n'
+        '                )\n',
+        '            elif getattr(self.args, "proj_1d_decode", False) and S <= 2 * tpc.TILE_SIZE:\n'
+        '                # Decode: small-grid 1D matmul on the interleaved fused weight (beats the DRAM-sharded grid).\n'
+        '                # Lever N M3native: rows 1-32 keep the M = 1 config; rows 33-64 select the\n'
+        '                # native 64-row (per_core_M 2) config.\n'
+        '                qkvzab = tpc.matmul_1d_decode(\n'
+        '                    x,\n'
+        '                    self.tw["qkvz"],\n'
+        '                    self.args.gdn_qkvz_decode_1d_progcfg_64 if S > tpc.TILE_SIZE\n'
+        '                    else self.args.gdn_qkvz_decode_1d_progcfg,\n'
+        '                    self.cfg,\n'
+        '                    out_memory_config=ttnn.L1_MEMORY_CONFIG if out_mc is not None else ttnn.DRAM_MEMORY_CONFIG,\n'
+        '                )\n',
+        'gdn _project_qkvzab 1D decode gate')
+
+    span = function_span(''.join(lines), PROJECT_QKVZAB_RAW_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '        if getattr(self.args, "proj_1d_decode", False) and S <= tpc.TILE_SIZE:\n'
+        '            return tpc.matmul_1d_decode(\n'
+        '                x,\n'
+        '                self.tw["qkvz"],\n'
+        '                self.args.gdn_qkvz_decode_1d_progcfg,\n'
+        '                self.cfg,\n'
+        '                out_memory_config=ttnn.L1_MEMORY_CONFIG if out_mc is not None else ttnn.DRAM_MEMORY_CONFIG,\n'
+        '            )\n',
+        '        if getattr(self.args, "proj_1d_decode", False) and S <= 2 * tpc.TILE_SIZE:\n'
+        '            # Lever N M3native: rows 1-32 keep the M = 1 config; rows 33-64 select the\n'
+        '            # native 64-row (per_core_M 2) config - the single call\n'
+        '            # gdn_device_loop_state.project_qkvzab_by_tile makes over a whole packed\n'
+        '            # 64-row block once native_m3 raises its tile cap.\n'
+        '            return tpc.matmul_1d_decode(\n'
+        '                x,\n'
+        '                self.tw["qkvz"],\n'
+        '                self.args.gdn_qkvz_decode_1d_progcfg_64 if S > tpc.TILE_SIZE\n'
+        '                else self.args.gdn_qkvz_decode_1d_progcfg,\n'
+        '                self.cfg,\n'
+        '                out_memory_config=ttnn.L1_MEMORY_CONFIG if out_mc is not None else ttnn.DRAM_MEMORY_CONFIG,\n'
+        '            )\n',
+        'gdn _project_qkvzab_raw 1D decode gate')
+
+    result = ''.join(lines)
+    ast.parse(result)
+    return result
+
+
+# ---------------------------------------------------------------------------------
+# D. mlp.py: the w1/w3 site and the w2 site inside _forward_tp.
+# ---------------------------------------------------------------------------------
+
+FORWARD_TP_FUNCTION = '_forward_tp'
+
+
+def patch_mlp(source):
+    lines = source.splitlines(keepends=True)
+    span = function_span(source, FORWARD_TP_FUNCTION)
+
+    lines = replace_once(
+        lines, span,
+        '        elif self._mlp_1d_decode and x.shape[-2] <= ttnn.TILE_SIZE:\n'
+        '            # 1D mcast decode matmuls on a small explicit grid, silu fused in the w1 progcfg.\n'
+        '            # mcast_in0 needs interleaved in0, but ff-norm hands us a width-shard -> interleave first.\n'
+        '            x_il = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)\n'
+        '            w1_out = ttnn.linear(\n'
+        '                x_il,\n'
+        '                w.w1,\n'
+        '                compute_kernel_config=ckc,\n'
+        '                program_config=args.mlp_w1_decode_1d_progcfg,\n'
+        '                memory_config=ttnn.L1_MEMORY_CONFIG,\n'
+        '            )\n'
+        '            w3_out = ttnn.linear(\n'
+        '                x_il,\n'
+        '                w.w3,\n'
+        '                compute_kernel_config=ckc,\n'
+        '                program_config=args.mlp_w3_decode_1d_progcfg,\n'
+        '                memory_config=ttnn.L1_MEMORY_CONFIG,\n'
+        '            )\n'
+        '            ttnn.deallocate(x_il)\n'
+        '            _silu_fused = True\n',
+        '        elif self._mlp_1d_decode and x.shape[-2] <= 2 * ttnn.TILE_SIZE:\n'
+        '            # 1D mcast decode matmuls on a small explicit grid, silu fused in the w1 progcfg.\n'
+        '            # mcast_in0 needs interleaved in0, but ff-norm hands us a width-shard -> interleave first.\n'
+        '            # Lever N M3native: rows 1-32 keep the M = 1 configs; rows 33-64 select the\n'
+        '            # native 64-row (per_core_M 2) configs.\n'
+        '            x_il = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)\n'
+        '            _w1_1d_cfg = (args.mlp_w1_decode_1d_progcfg_64 if x.shape[-2] > ttnn.TILE_SIZE\n'
+        '                         else args.mlp_w1_decode_1d_progcfg)\n'
+        '            _w3_1d_cfg = (args.mlp_w3_decode_1d_progcfg_64 if x.shape[-2] > ttnn.TILE_SIZE\n'
+        '                         else args.mlp_w3_decode_1d_progcfg)\n'
+        '            w1_out = ttnn.linear(\n'
+        '                x_il,\n'
+        '                w.w1,\n'
+        '                compute_kernel_config=ckc,\n'
+        '                program_config=_w1_1d_cfg,\n'
+        '                memory_config=ttnn.L1_MEMORY_CONFIG,\n'
+        '            )\n'
+        '            w3_out = ttnn.linear(\n'
+        '                x_il,\n'
+        '                w.w3,\n'
+        '                compute_kernel_config=ckc,\n'
+        '                program_config=_w3_1d_cfg,\n'
+        '                memory_config=ttnn.L1_MEMORY_CONFIG,\n'
+        '            )\n'
+        '            ttnn.deallocate(x_il)\n'
+        '            _silu_fused = True\n',
+        'mlp w1/w3 1D decode gate')
+
+    span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '        if self._mlp_1d_decode and hidden.shape[-2] <= ttnn.TILE_SIZE:\n'
+        '            # 1D mcast decode down-proj on a small explicit grid (~16 cores).\n'
+        '            w2_pc = args.mlp_w2_decode_1d_progcfg\n',
+        '        if self._mlp_1d_decode and hidden.shape[-2] <= 2 * ttnn.TILE_SIZE:\n'
+        '            # 1D mcast decode down-proj on a small explicit grid (~16 cores).\n'
+        '            # Lever N M3native: rows 1-32 keep the M = 1 config; rows 33-64 select the\n'
+        '            # native 64-row (per_core_M 2) config.\n'
+        '            w2_pc = (args.mlp_w2_decode_1d_progcfg_64 if hidden.shape[-2] > ttnn.TILE_SIZE\n'
+        '                     else args.mlp_w2_decode_1d_progcfg)\n',
+        'mlp w2 1D decode gate')
+
+    result = ''.join(lines)
+    ast.parse(result)
+    return result
+
+
+PATCHES = {
+    'model_config.py': patch_model_config,
+    'attention/tp.py': patch_attention_tp,
+    'gdn/tp.py': patch_gdn_tp,
+    'mlp.py': patch_mlp,
+}
+
+
+def stage(root, output=None):
+    """Read the four originals from `root`, apply the four patches, write the four
+    patched files under `output` (default: in place, same as `root`).
+
+    Returns {relative path: written Path}. Every output is ast.parse'd (both inside
+    each patch_* function and again here) and every replace_once inside the patches
+    already asserts its own one-occurrence match, so a mismatch anywhere - a moved
+    anchor, a source that no longer matches the probe dump - fails loudly here rather
+    than producing a graft that silently does nothing.
+    """
+    root = Path(root)
+    output = Path(output) if output else root
+    written = {}
+    for relative, patch in PATCHES.items():
+        source = (root / relative).read_text(encoding='utf-8')
+        patched = patch(source)
+        ast.parse(patched)
+        target = output / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(patched, encoding='utf-8', newline='\n')
+        written[relative] = target
+    return written
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('root', help='directory holding model_config.py, attention/tp.py, '
+                                     'gdn/tp.py and mlp.py (the qwen36/tt originals)')
+    parser.add_argument('--output', help='directory to write the patched files into '
+                                         '(default: alongside the originals)')
+    options = parser.parse_args()
+    for relative, target in stage(options.root, options.output).items():
+        print('wrote %s -> %s' % (relative, target))

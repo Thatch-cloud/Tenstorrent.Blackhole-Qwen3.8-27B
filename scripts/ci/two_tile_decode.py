@@ -299,12 +299,19 @@ class TwoTileAttentionDecode:
     """One full-attention layer's forward_decode at the block's rows: the model's fused prep
     path (attention/tp.py:533-557) - its projection under the rebuilt config, its prep op
     once per 32-row tile (prep_by_tile), then its own `_decode_from_prep`, which the block
-    has bound to its K/V writer, readers, two-tile head concat (`concat`) and two-tile
-    output projection (`wo`), each of which must run exactly once."""
+    has bound to its K/V writer, readers, two-tile head concat (`concat`) and - without the
+    Lever N M3native graft - a two-tile output projection (`wo`), each of which must run
+    exactly once.
 
-    def __init__(self, attention, rows, operations, progcfg):
+    NATIVE M3 (native_m3=True). `_wo_proj` is native at the block's rows once the graft's
+    patched attention/tp.py widens its own gate and selects `attn_wo_decode_1d_progcfg_64`
+    (lever_n_m3native_patch.patch_attention_tp), so no wrapping is needed: `self.wo` is
+    None and `_decode_from_prep` finds `_wo_proj` unbound - the class's own, now-native,
+    method - the same way it always looked it up (attention/tp.py:749)."""
+
+    def __init__(self, attention, rows, operations, progcfg, native_m3=False):
         validate_two_tile_rows(rows)
-        self.rows, self.operations, self.progcfg = rows, operations, progcfg
+        self.rows, self.operations, self.progcfg, self.native_m3 = rows, operations, progcfg, native_m3
         args = getattr(attention, 'args', None)
         if args is None or not getattr(args, 'proj_1d_decode', False):
             raise ValueError('The two-tile attention forward serves the 1D decode projection the model config selects')
@@ -324,7 +331,7 @@ class TwoTileAttentionDecode:
         if any(not callable(getattr(operations, name, None)) for name in ('slice', 'concat', 'sharded_to_interleaved')):
             raise ValueError('ttnn slice, concat and sharded_to_interleaved are required to join the per-tile prep outputs')
         self.concat = TwoTileConcatHeads(attention, rows, operations)
-        self.wo = TwoTileProjectionSplit(attention, '_wo_proj', rows, operations)
+        self.wo = None if native_m3 else TwoTileProjectionSplit(attention, '_wo_proj', rows, operations)
         self.attention = attention
         self.calls = 0
 
@@ -342,12 +349,13 @@ class TwoTileAttentionDecode:
             q, gate, k_sh, v_sh = prep_by_tile(operations, attention, qkv_raw, cos_tt, sin_tt, rows)
         finally:
             operations.deallocate(qkv_raw)
-        concats, wo_calls = self.concat.calls, self.wo.calls
+        concats = self.concat.calls
+        wo_calls = self.wo.calls if self.wo is not None else 0
         result = attention._decode_from_prep(q, gate, k_sh, v_sh, cur_pos_tt, page_table, rows)
         if self.concat.calls - concats != 1:
             raise AssertionError("The wide block's attention tail must take its two-tile head concat exactly once; "
                                  "%d taken" % (self.concat.calls - concats))
-        if self.wo.calls - wo_calls != 1:
+        if self.wo is not None and self.wo.calls - wo_calls != 1:
             raise AssertionError("The wide block's attention tail must take its two-tile output projection exactly "
                                  "once; %d taken" % (self.wo.calls - wo_calls))
         self.calls += 1
@@ -355,14 +363,27 @@ class TwoTileAttentionDecode:
 
 
 class TwoTileAttentionBinding:
-    """The wide block's attention bindings: the rebuilt fused-QKV config on the model args
-    and, per full-attention layer, the two-tile forward, its head concat and its output
-    projection on the attention instance; `calls` counts the forwards (each of which
-    counted its concat and its output projection)."""
+    """The wide block's attention bindings: the fused-QKV config on the model args and,
+    per full-attention layer, the two-tile forward, its head concat and - without the
+    Lever N M3native graft - its output projection on the attention instance; `calls`
+    counts the forwards (each of which counted its concat and, unwrapped, its output
+    projection).
+
+    NATIVE M3 (native_m3=True). `_qkv_raw_decode` still reads
+    `args.attn_qkv_decode_1d_progcfg` unconditionally at every row count (attention/tp.py
+    is not patched there), so the block still needs the config on the model args bound to
+    something shaped for its own rows for the call this forward makes - but the graft's
+    model_config.py already built that exact M = 64 config
+    (attn_qkv_decode_1d_progcfg_64, the same per_core_M 2 shape
+    two_tile_matmul_1d_progcfg computes at runtime), so no runtime rebuild is needed: it
+    is used directly. `_wo_proj` is native at the block's rows too
+    (lever_n_m3native_patch.patch_attention_tp), so it needs no two-tile wrapping or
+    binding here - TwoTileAttentionDecode's own `wo` is None and `_decode_from_prep`
+    finds the class's native `_wo_proj` unbound."""
 
     label = 'full-attention forward'
 
-    def __init__(self, model, rows, operations):
+    def __init__(self, model, rows, operations, native_m3=False):
         validate_two_tile_rows(rows)
         layers = [layer for layer in getattr(model, 'layers', ()) if getattr(layer, 'is_full_attention', False)]
         args = getattr(model, 'args', None)
@@ -371,17 +392,25 @@ class TwoTileAttentionBinding:
         attentions = [layer.attention for layer in layers]
         if any(getattr(attention, 'args', None) is not args for attention in attentions):
             raise ValueError('Every full-attention layer must share the model args the config is bound on')
-        native = getattr(args, 'attn_qkv_decode_1d_progcfg', None)
-        if native is None:
-            raise ValueError('The model args carry no attn_qkv_decode_1d_progcfg to rebuild; the model changed')
-        self.rows = rows
-        self.progcfg = two_tile_matmul_1d_progcfg(native, rows, operations)
-        self.forwards = [TwoTileAttentionDecode(attention, rows, operations, self.progcfg) for attention in attentions]
+        self.rows, self.native_m3 = rows, native_m3
+        if native_m3:
+            native_64 = getattr(args, 'attn_qkv_decode_1d_progcfg_64', None)
+            if native_64 is None:
+                raise ValueError('native_m3 requires attn_qkv_decode_1d_progcfg_64 on the model args')
+            self.progcfg = native_64
+        else:
+            native = getattr(args, 'attn_qkv_decode_1d_progcfg', None)
+            if native is None:
+                raise ValueError('The model args carry no attn_qkv_decode_1d_progcfg to rebuild; the model changed')
+            self.progcfg = two_tile_matmul_1d_progcfg(native, rows, operations)
+        self.forwards = [TwoTileAttentionDecode(attention, rows, operations, self.progcfg, native_m3=native_m3)
+                         for attention in attentions]
         self.bindings = [(args, 'attn_qkv_decode_1d_progcfg', self.progcfg)]
         for attention, forward in zip(attentions, self.forwards):
             self.bindings.append((attention, 'forward_decode', forward))
             self.bindings.append((attention, '_concat_heads_decode', forward.concat))
-            self.bindings.append((attention, '_wo_proj', forward.wo))
+            if forward.wo is not None:
+                self.bindings.append((attention, '_wo_proj', forward.wo))
         self.expected_calls = len(self.forwards)
 
     @property
@@ -458,19 +487,30 @@ class TwoTileMLPForward:
 
 
 class TwoTileMLPBinding:
-    """The wide block's MLP bindings: one two-tile forward per layer; `calls` counts them."""
+    """The wide block's MLP bindings: one two-tile forward per layer; `calls` counts them.
+
+    NATIVE M3 (native_m3=True). mlp.py's own `_forward_tp` is native at the block's rows
+    once the graft widens its w1/w3 and w2 gates (lever_n_m3native_patch.patch_mlp), so
+    this binder's two-tile wrapping is retired entirely: `bindings` is empty (nothing
+    overrides `feed_forward.forward`, so the native, now one-pass, method runs) and
+    `expected_calls` is 0. The per-layer TwoTileMLPForward instances are still built -
+    cheap, and the same construction-time validation this binder always did - purely so
+    `calls` stays a real counter: a future change that mistakenly rebinds them would show
+    up as calls > 0 against an expectation of 0, model_batch.run()'s per-binder loop
+    failing loudly instead of silently doubling the weight pass."""
 
     label = 'MLP forward'
 
-    def __init__(self, model, rows, operations):
+    def __init__(self, model, rows, operations, native_m3=False):
         validate_two_tile_rows(rows)
         layers = list(getattr(model, 'layers', ()))
         if not layers or any(getattr(layer, 'feed_forward', None) is None for layer in layers):
             raise ValueError('A model whose every layer carries a feed_forward MLP is required')
-        self.rows = rows
+        self.rows, self.native_m3 = rows, native_m3
         self.forwards = [TwoTileMLPForward(layer.feed_forward, rows, operations) for layer in layers]
-        self.bindings = [(layer.feed_forward, 'forward', forward) for layer, forward in zip(layers, self.forwards)]
-        self.expected_calls = len(self.forwards)
+        self.bindings = () if native_m3 else [
+            (layer.feed_forward, 'forward', forward) for layer, forward in zip(layers, self.forwards)]
+        self.expected_calls = 0 if native_m3 else len(self.forwards)
 
     @property
     def calls(self):
@@ -483,32 +523,39 @@ class TwoTileGDNOutputBinding:
     the attention instance - `gdn_multitoken_conv.finish_output` (FROZEN) looks
     `_row_proj` up on the gdn instance by attribute at call time and cannot be edited.
     The single all-reduce after it, in that frozen file, still runs once over the full
-    concatenated block; `calls` counts the two-tile projections."""
+    concatenated block; `calls` counts the two-tile projections.
+
+    NATIVE M3 (native_m3=True). gdn/tp.py's own `_row_proj` is native at the block's rows
+    once the graft widens its gate (lever_n_m3native_patch.patch_gdn_tp), so this
+    binder's wrapping is retired entirely the same way TwoTileMLPBinding's is: `bindings`
+    is empty and `expected_calls` is 0, while `projections` are still built as inert
+    counters for that same regression guard."""
 
     label = 'GDN output projection'
 
-    def __init__(self, model, rows, operations):
+    def __init__(self, model, rows, operations, native_m3=False):
         validate_two_tile_rows(rows)
         layers = [layer.attention for layer in getattr(model, 'layers', ()) if not getattr(layer, 'is_full_attention', True)]
         if not layers:
             raise ValueError('A model with at least one GDN layer is required')
-        self.rows = rows
+        self.rows, self.native_m3 = rows, native_m3
         self.projections = [TwoTileProjectionSplit(gdn, '_row_proj', rows, operations) for gdn in layers]
-        self.bindings = [(gdn, '_row_proj', projection) for gdn, projection in zip(layers, self.projections)]
-        self.expected_calls = len(self.projections)
+        self.bindings = () if native_m3 else [
+            (gdn, '_row_proj', projection) for gdn, projection in zip(layers, self.projections)]
+        self.expected_calls = 0 if native_m3 else len(self.projections)
 
     @property
     def calls(self):
         return sum(projection.calls for projection in self.projections)
 
 
-def bind_two_tile_attention(model, rows, operations):
-    return TwoTileAttentionBinding(model, rows, operations)
+def bind_two_tile_attention(model, rows, operations, native_m3=False):
+    return TwoTileAttentionBinding(model, rows, operations, native_m3=native_m3)
 
 
-def bind_two_tile_mlp(model, rows, operations):
-    return TwoTileMLPBinding(model, rows, operations)
+def bind_two_tile_mlp(model, rows, operations, native_m3=False):
+    return TwoTileMLPBinding(model, rows, operations, native_m3=native_m3)
 
 
-def bind_two_tile_gdn_output(model, rows, operations):
-    return TwoTileGDNOutputBinding(model, rows, operations)
+def bind_two_tile_gdn_output(model, rows, operations, native_m3=False):
+    return TwoTileGDNOutputBinding(model, rows, operations, native_m3=native_m3)

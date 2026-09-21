@@ -159,6 +159,87 @@ class ModelBatchTests(unittest.TestCase):
         self.assertNotIn("forward", first.__dict__)
         self.assertEqual(first.forward, "native")
 
+    def native_m3_fixture(self, retired_expected=0, active_expected=1):
+        """A ModelBatch with two fake two_tile binders - one active, one retired the way
+        Lever N M3native retires MLP/GDN-output - and nothing else two_tile touches."""
+        fixture = ModelBatch.__new__(ModelBatch)
+        fixture.retained = None
+        fixture.gdn_calls = fixture.norm_batch_calls = 0
+        fixture.norm_batch = fixture.compact_gdn = fixture.attention_replay = fixture.attention_mask_once = False
+        fixture.working_states, fixture.writers, fixture.readers, fixture.bindings = [], [], [], []
+        fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
+        fixture.native_m3 = True
+
+        class FakeBinder:
+            def __init__(self, label, expected_calls):
+                self.label, self.expected_calls, self.calls = label, expected_calls, 0
+
+        active = FakeBinder('full-attention forward', active_expected)
+        retired = FakeBinder('MLP forward', retired_expected)
+        fixture.two_tile = [active, retired]
+        return fixture, active, retired
+
+    def test_native_m3_binder_calls_are_reported_every_round(self):
+        fixture, active, retired = self.native_m3_fixture()
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            active.calls += 1
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        with patch('dflash_device.pindiag') as marker:
+            self.assertEqual(fixture.run(), 'logits')
+        marker.assert_called_once()
+        template, payload = marker.call_args.args
+        self.assertIn('native_m3 binder calls this round', template)
+        self.assertEqual(payload, {'full-attention forward': 1, 'MLP forward': 0})
+
+    def test_a_call_leaking_through_a_retired_binder_fails_loudly(self):
+        """The exact silent-fallback-to-two-call failure mode native_m3's overlay switch
+        exists to catch: something re-binds the retired MLP wrapper and it engages."""
+        fixture, active, retired = self.native_m3_fixture()
+
+        def leaking_forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            active.calls += 1
+            retired.calls += 1
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=leaking_forward))
+        with self.assertRaisesRegex(AssertionError,
+                                    'native_m3 retired the MLP forward two-tile wrapper.*1 unexpected call'):
+            fixture.run()
+
+    def test_without_native_m3_the_original_two_tile_message_is_unchanged(self):
+        fixture, active, retired = self.native_m3_fixture(active_expected=1)
+        fixture.native_m3 = False
+        retired.expected_calls = 1  # a genuine (non-retired) binder that must engage
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            active.calls += 1
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        with self.assertRaisesRegex(AssertionError,
+                                    'Every MLP forward of the wide block must take its two-tile form: 0 engaged, 1 expected'):
+            fixture.run()
+
+    def test_without_native_m3_no_diagnostic_is_printed(self):
+        fixture, active, retired = self.native_m3_fixture(retired_expected=0)
+        fixture.native_m3 = False
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            active.calls += 1
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        with patch('dflash_device.pindiag') as marker:
+            self.assertEqual(fixture.run(), 'logits')
+        marker.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

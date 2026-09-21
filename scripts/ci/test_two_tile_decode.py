@@ -188,13 +188,25 @@ def fake_gdn(args, ttnn):
     return FakeGDN(args, ttnn)
 
 
-def fake_model(ttnn, layers=64, full=(3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63), progcfg=None):
+def fake_model(ttnn, layers=64, full=(3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63), progcfg=None,
+              native_m3=False):
     args = SimpleNamespace(proj_1d_decode=True, attn_qkv_decode_1d_progcfg=progcfg or one_tile_progcfg(ttnn))
     args.get_norm_config = Mock(side_effect=lambda name, mode: dict(
         sharded_output_config=ttnn.MemoryConfig('width', 'l1', ttnn.ShardSpec('g', [32, 160], 'rm')),
         sharded_program_config=ttnn.LayerNormShardedMultiCoreProgramConfig(
             compute_with_storage_grid_size=(8, 4), subblock_w=1, block_h=1, block_w=5, inplace=False),
         output_mem_config=None))
+    if native_m3:
+        # The Lever N M3native graft's model_config.py attributes: a distinct M=64
+        # config object per projection, so tests can assert identity (the runtime
+        # rebuild is skipped in favour of these) rather than shape alone.
+        args.attn_qkv_decode_1d_progcfg_64 = one_tile_progcfg(ttnn, per_core_M=2, out_subblock_h=2)
+        args.attn_wo_decode_1d_progcfg_64 = one_tile_progcfg(ttnn, per_core_M=2, out_subblock_h=2)
+        args.gdn_qkvz_decode_1d_progcfg_64 = one_tile_progcfg(ttnn, per_core_M=2, out_subblock_h=2)
+        args.gdn_out_decode_1d_progcfg_64 = one_tile_progcfg(ttnn, per_core_M=2, out_subblock_h=2)
+        args.mlp_w1_decode_1d_progcfg_64 = one_tile_progcfg(ttnn, per_core_M=2, out_subblock_h=2)
+        args.mlp_w3_decode_1d_progcfg_64 = one_tile_progcfg(ttnn, per_core_M=2, out_subblock_h=2)
+        args.mlp_w2_decode_1d_progcfg_64 = one_tile_progcfg(ttnn, per_core_M=2, out_subblock_h=2)
     model = SimpleNamespace(args=args, layers=[])
     for index in range(layers):
         is_full = index in full
@@ -665,6 +677,99 @@ class AttentionBindingTests(unittest.TestCase):
             bind_two_tile_attention(fake_model(ttnn, layers=8, full=(3, 7)), 32, ttnn)
 
 
+class NativeM3AttentionBindingTests(unittest.TestCase):
+    """Lever N M3native: once model_batch.two_tile_bindings passes native_m3=True (a
+    model whose args carry attn_wo_decode_1d_progcfg_64), the attention binder uses the
+    graft's own M=64 config directly - no runtime rebuild - and drops its _wo_proj
+    wrapping; _wo_proj is native at the block's rows once the graft's patched
+    attention/tp.py widens its own gate."""
+
+    def test_the_binding_uses_the_grafts_own_64_config_without_a_runtime_rebuild_and_drops_wo(self):
+        ttnn = FakeTTNN()
+        model = fake_model(ttnn, native_m3=True)
+        native_64 = model.args.attn_qkv_decode_1d_progcfg_64
+        original_progcfg = model.args.attn_qkv_decode_1d_progcfg
+        binding = bind_two_tile_attention(model, 64, ttnn, native_m3=True)
+        self.assertIsInstance(binding, TwoTileAttentionBinding)
+        self.assertIs(binding.progcfg, native_64, "native_m3 uses the graft's own M=64 config directly, no rebuild")
+        self.assertEqual((binding.rows, binding.expected_calls, binding.calls), (64, 16, 0))
+        full = [layer.attention for layer in model.layers if layer.is_full_attention]
+        expected = []
+        for attention in full:
+            expected += [(attention, 'forward_decode'), (attention, '_concat_heads_decode')]
+        self.assertEqual([(instance, name) for instance, name, value in binding.bindings[1:]], expected,
+                         'no _wo_proj binding under native_m3: the model source is native there')
+        forwards = [value for instance, name, value in binding.bindings[1:] if name == 'forward_decode']
+        self.assertTrue(forwards and all(forward.wo is None for forward in forwards))
+        # bound and unbound cleanly, even with no _wo_proj entry to restore
+        with instance_overrides(binding.bindings):
+            self.assertIs(model.args.attn_qkv_decode_1d_progcfg, native_64)
+            self.assertTrue(all(attention.forward_decode is forward
+                                for attention, forward in zip(full, forwards)))
+        self.assertIs(model.args.attn_qkv_decode_1d_progcfg, original_progcfg)
+        self.assertFalse(any(name in attention.__dict__ for attention in full
+                             for name in ('forward_decode', '_concat_heads_decode', '_wo_proj')))
+
+    def test_native_m3_requires_the_grafts_64_config_on_the_model_args(self):
+        ttnn = FakeTTNN()
+        model = fake_model(ttnn)  # no _64 attrs at all
+        with self.assertRaisesRegex(ValueError, 'attn_qkv_decode_1d_progcfg_64'):
+            bind_two_tile_attention(model, 64, ttnn, native_m3=True)
+
+    def test_native_m3_false_is_unaffected_even_when_the_64_attrs_happen_to_be_present(self):
+        """The switch is explicit (model_batch's hasattr detection passes it down), not
+        inferred by the binder itself from the attrs' mere presence."""
+        ttnn = FakeTTNN()
+        model = fake_model(ttnn, native_m3=True)
+        binding = bind_two_tile_attention(model, 64, ttnn)
+        self.assertIsNot(binding.progcfg, model.args.attn_qkv_decode_1d_progcfg_64)
+        self.assertEqual(binding.progcfg.per_core_M, 2)
+        full = [layer.attention for layer in model.layers if layer.is_full_attention]
+        expected = []
+        for attention in full:
+            expected += [(attention, 'forward_decode'), (attention, '_concat_heads_decode'), (attention, '_wo_proj')]
+        self.assertEqual([(instance, name) for instance, name, value in binding.bindings[1:]], expected)
+
+
+class NativeM3MLPAndGDNOutputBindingTests(unittest.TestCase):
+    """Lever N M3native retires the MLP and GDN-output two-tile wrappers entirely: their
+    bindings are empty (nothing overrides the now-native feed_forward.forward / _row_proj)
+    and expected_calls is 0, while the per-layer wrapper objects are still built as inert
+    call counters for model_batch.run()'s tightened zero-call assertion."""
+
+    def test_mlp_binding_drops_its_bindings_and_expects_zero_calls(self):
+        ttnn = FakeTTNN()
+        model = fake_model(ttnn, layers=6, full=(3,), native_m3=True)
+        binding = bind_two_tile_mlp(model, 64, ttnn, native_m3=True)
+        self.assertEqual(binding.bindings, ())
+        self.assertEqual(binding.expected_calls, 0)
+        self.assertEqual(len(binding.forwards), 6, 'still built, as an inert call counter')
+        self.assertEqual(binding.calls, 0)
+        natives = [layer.feed_forward.forward for layer in model.layers]
+        with instance_overrides(binding.bindings):
+            pass
+        self.assertEqual([layer.feed_forward.forward for layer in model.layers], natives,
+                         'nothing was ever overridden - there was nothing to restore either')
+
+    def test_gdn_output_binding_drops_its_bindings_and_expects_zero_calls(self):
+        ttnn = FakeTTNN()
+        model = fake_model(ttnn, layers=6, full=(3,), native_m3=True)
+        binding = bind_two_tile_gdn_output(model, 64, ttnn, native_m3=True)
+        self.assertEqual(binding.bindings, ())
+        self.assertEqual(binding.expected_calls, 0)
+        self.assertEqual(len(binding.projections), 5)
+        self.assertEqual(binding.calls, 0)
+
+    def test_without_native_m3_both_bindings_are_unchanged(self):
+        ttnn = FakeTTNN()
+        model = fake_model(ttnn, layers=6, full=(3,), native_m3=True)
+        mlp = bind_two_tile_mlp(model, 64, ttnn)
+        gdn_output = bind_two_tile_gdn_output(model, 64, ttnn)
+        self.assertEqual(mlp.expected_calls, 6)
+        self.assertEqual(gdn_output.expected_calls, 5)
+        self.assertTrue(mlp.bindings and gdn_output.bindings)
+
+
 class MLPForwardTests(unittest.TestCase):
     """The forward at 64 rows: two 32-row calls to `_forward_tp`, concatenated on the row
     axis, instead of one 64-row call with the fusion switch off."""
@@ -852,6 +957,35 @@ class ModelBatchWiringTests(unittest.TestCase):
         self.assertEqual([binder.expected_calls for binder in (norm, attention, mlp, gdn_output)], [129, 16, 64, 48])
         self.assertEqual([binder.label for binder in (norm, attention, mlp, gdn_output)],
                          ['decode norm', 'full-attention forward', 'MLP forward', 'GDN output projection'])
+
+    def test_native_m3_still_builds_all_four_binders_but_retires_mlp_and_gdn_output(self):
+        """Lever N M3native: detected by hasattr on the model args (the graft's own
+        attn_wo_decode_1d_progcfg_64 attribute, mounted alongside the patched sources -
+        never an env var). All four binders are still built (norm and attention are
+        needed regardless), but MLP and GDN-output retire their wrapping entirely and
+        the [PINDIAG] native_m3 marker fires once."""
+        from model_batch import two_tile_bindings
+
+        ttnn = FakeTTNN()
+        model = fake_model(ttnn, native_m3=True)
+        with decode_mode_module(), patch('dflash_device.pindiag') as marker:
+            norm, attention, mlp, gdn_output = two_tile_bindings(64, model, ttnn)
+        marker.assert_called_once()
+        self.assertIn('native_m3 engaged', marker.call_args.args[0])
+        self.assertEqual([binder.expected_calls for binder in (norm, attention, mlp, gdn_output)], [129, 16, 0, 0])
+        self.assertEqual((mlp.bindings, gdn_output.bindings), ((), ()))
+        self.assertTrue(norm.bindings and attention.bindings)
+        self.assertIs(attention.progcfg, model.args.attn_qkv_decode_1d_progcfg_64)
+
+    def test_without_the_64_attrs_native_m3_is_not_inferred(self):
+        from model_batch import two_tile_bindings
+
+        ttnn = FakeTTNN()
+        model = fake_model(ttnn)
+        with decode_mode_module(), patch('dflash_device.pindiag') as marker:
+            norm, attention, mlp, gdn_output = two_tile_bindings(64, model, ttnn)
+        marker.assert_not_called()
+        self.assertEqual([binder.expected_calls for binder in (norm, attention, mlp, gdn_output)], [129, 16, 64, 48])
 
     def fixture(self, two_tile):
         from model_batch import ModelBatch

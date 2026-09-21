@@ -1,0 +1,114 @@
+name: Qwen Lever N M3native gate
+on:
+  push:
+    tags: ['experiment/lever-n-m3native-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  graft:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: m3native
+          persist-credentials: false
+      - name: Graft the native 64-row decode patch onto the pinned sources
+        working-directory: m3native
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results graft/attention graft/gdn
+          image=sha256:8312d86ad35fde425dcea6f8e81e46a188831a2f975c09ffa46e068b0c2c704d
+          root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
+          name="qwen-m3native-extract-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          docker cp "$name:$root/model_config.py" graft/model_config.py.orig
+          docker cp "$name:$root/attention/tp.py" graft/attention/tp.py.orig
+          docker cp "$name:$root/gdn/tp.py" graft/gdn/tp.py.orig
+          docker cp "$name:$root/mlp.py" graft/mlp.py.orig
+          sha256sum graft/model_config.py.orig graft/attention/tp.py.orig graft/gdn/tp.py.orig graft/mlp.py.orig \
+            >> experiment-results/source.sha256
+          python3 -B - <<'PY'
+          import ast, io, sys
+          sys.path.insert(0, 'scripts/ci')
+          import lever_n_m3native_patch as patcher
+          for name, apply in patcher.PATCHES.items():
+              source = io.open('graft/%s.orig' % name, encoding='utf-8').read()
+              patched = apply(source)
+              ast.parse(patched)
+              io.open('graft/%s' % name, 'w', encoding='utf-8', newline='\n').write(patched)
+              print('%s: %d -> %d bytes' % (name, len(source), len(patched)))
+          PY
+          sha256sum graft/model_config.py graft/attention/tp.py graft/gdn/tp.py graft/mlp.py \
+            >> experiment-results/graft.sha256
+          cat experiment-results/graft.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m3native-graft-${{ github.run_id }}
+          path: m3native/graft/
+          retention-days: 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: m3native-graft-sha-${{ github.run_id }}
+          path: m3native/experiment-results/
+
+  arm:
+    needs: graft
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: m3native
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m3native-graft-${{ github.run_id }}
+          path: m3native/graft/
+      - name: Confirm no process holds a card
+        working-directory: m3native
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Run the native M3 gate
+        working-directory: m3native
+        timeout-minutes: 40
+        shell: bash
+        run: bash scripts/ci/lever_n_m3native_run_arm.sh
+      - name: Report the gate
+        working-directory: m3native
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/ci/lever_n_m3native_gate_report.py \
+            --report experiment-results/m3native-gate.json \
+            --log experiment-results/m3native-gate-stdout.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: m3native-gate-${{ github.run_id }}
+          path: m3native/experiment-results/

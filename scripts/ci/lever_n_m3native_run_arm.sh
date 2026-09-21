@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Serve the Lever N M3native gate: mount the native 64-row decode graft (model_config.py,
+# attention/tp.py, gdn/tp.py, mlp.py) read-only over the pinned qwen36/tt sources and run
+# the four-user packed gate against it.
+#
+# One arm only, unlike M1/M2's baseline/resumable split: native_m3 is a hasattr-gated
+# overlay switch (model_batch.two_tile_bindings), not a scheduler edit with a stock
+# counterpart worth serving separately. The same image with the graft mounted IS the
+# thing under test; its own [PINDIAG] native_m3 marker and the retired binders' zero
+# call counts (lever_n_m3native_gate.py) are the positive controls that the overlay
+# actually engaged rather than silently falling back to the two-call path a stock
+# image (no _64 attrs) would take unnoticed.
+#
+# $1 is the image sha, defaulting to the pinned qwen-fp2u-image.yml fast-serving image so
+# the graft rides the exact image the four-user runs measure against.
+set -euo pipefail
+image="${1:-sha256:8312d86ad35fde425dcea6f8e81e46a188831a2f975c09ffa46e068b0c2c704d}"
+target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
+cache=/home/thatch/.cache/qwen-experiments
+revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
+root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
+
+mkdir -p experiment-results draft-config
+if [ ! -s draft-config/config.json ]; then
+  curl -fsSL --max-time 30 \
+    "https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/resolve/$revision/config.json" \
+    > draft-config/config.json
+fi
+
+mounts=()
+for component in attention convolution mlp projection selector; do
+  mounts+=(--mount "type=bind,src=$cache/dflash2-$component-$revision,dst=/experiment-dflash-fixture/$component,readonly")
+done
+for layer in 1 2 3 4; do
+  mounts+=(--mount "type=bind,src=$cache/dflash2-stack-$revision/layer-$layer,dst=/experiment-dflash-fixture/layer-$layer,readonly")
+done
+if [ -d "$PWD/runner-evidence.local/packed-gate" ]; then
+  mounts+=(--mount "type=bind,src=$PWD/runner-evidence.local/packed-gate,dst=/bench/packed-gate-reference,readonly")
+fi
+mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+devices=()
+for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+
+name="qwen-m3native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+timeout -k 30 2200 docker run --rm --name "$name" --network none \
+  --hostname qwen-m3native --add-host qwen-m3native:127.0.0.1 \
+  --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+  --pids-limit 4096 --memory 96g --cpus 16 --shm-size 8g \
+  "${devices[@]}" \
+  --mount type=bind,src=/dev/tenstorrent,dst=/host-dev/tenstorrent,readonly \
+  --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+  --mount "type=bind,src=$target,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly" \
+  --mount "type=bind,src=$PWD/draft-config,dst=/draft-config,readonly" \
+  --mount "type=bind,src=$PWD/graft/model_config.py,dst=$root/model_config.py,readonly" \
+  --mount "type=bind,src=$PWD/graft/attention/tp.py,dst=$root/attention/tp.py,readonly" \
+  --mount "type=bind,src=$PWD/graft/gdn/tp.py,dst=$root/gdn/tp.py,readonly" \
+  --mount "type=bind,src=$PWD/graft/mlp.py,dst=$root/mlp.py,readonly" \
+  --mount "type=bind,src=$PWD/scripts/ci/lever_n_m3native_gate.py,dst=/bench/lever_n_m3native_gate.py,readonly" \
+  --mount "type=bind,src=$PWD/scripts/ci/longctx_cycle_bench.py,dst=/bench/longctx_cycle_bench.py,readonly" \
+  --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
+  "${mounts[@]}" \
+  -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
+  -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=32768 \
+  -e QWEN_FAST_EAGER_PROPOSAL=1 -e QWEN_FAST_SHARD_CHECK=0 -e QWEN_FAST_PHASE_LOG=1 -e QWEN_FAST_CARRY_LOG=1 \
+  -e QWEN_FAST_SHARED_CCL=1 -e QWEN_FAST_PACKED_STEP=1 -e QWEN_FAST_PACKED_AUDIT=1 -e QWEN_FAST_FAULTHANDLER=1 \
+  -e TT_METAL_WATCHER=20 -e TT_METAL_WATCHER_APPEND=1 -e TT_METAL_WATCHER_DISABLE_ASSERT=1 \
+  -e QWEN_GDN_DIRECT_WINDOW=1 -e QWEN_GDN_SHARED_QK_EXPERIMENT=1 \
+  -e QWEN_MLP_BLOCK_STREAM_EXPERIMENT=1 -e QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 \
+  -e QWEN_SDPA_BF8=1 -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 \
+  -e QWEN_SKIP_UNUSED_SINGLETON_POSITIONS=1 -e QWEN_FAST_PHASE_TIMING=1 \
+  -e QWEN_GDN_GROUPED_GATHER_ABBA=0 -e QWEN_GDN_GATE_EXP_ABBA=0 \
+  -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e VLLM_USE_V2_MODEL_RUNNER=0 \
+  -e TT_METAL_HOME=/opt/tt-metal -e MESH_DEVICE=P300 -e OMP_NUM_THREADS=8 \
+  -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
+  -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
+  --entrypoint python3 "$image" -B /bench/lever_n_m3native_gate.py \
+  --users 4 --context 33024 --prompt-tokens 32768 --max-tokens 256 --stream-timeout 600 \
+  --prompt-base 1000 --prompt-user-offset 1 --stagger 0 \
+  --references /bench/packed-gate-reference \
+  > experiment-results/m3native-gate-stdout.log 2>&1 || true
+
+sed -n '/M3NATIVE_GATE_JSON_BEGIN/,/M3NATIVE_GATE_JSON_END/p' experiment-results/m3native-gate-stdout.log \
+  | sed '1d;$d' > experiment-results/m3native-gate.json || true
+sed -n '/M3NATIVE_GATE_LOG_BEGIN/,/M3NATIVE_GATE_LOG_END/p' experiment-results/m3native-gate-stdout.log \
+  | sed '1d;$d' > experiment-results/m3native-server-tail.log || true
+test -s experiment-results/m3native-gate.json

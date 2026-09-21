@@ -27,9 +27,20 @@ def project_qkvzab_by_tile(operations, layer, packed, rows):
     only ever handed over as tile slices, nothing else frees the whole tensor, so it is
     freed here right after the slices are cut - the same discipline
     two_tile_decode.TwoTileConcatHeads and TwoTileMLPForward use for their own inputs.
+
+    NATIVE M3 (Lever N M3native graft, lever_n_m3native_patch.patch_gdn_tp). Once the
+    graft is mounted, `layer.args` carries `attn_wo_decode_1d_progcfg_64` and
+    `_project_qkvzab_raw`'s own gate (gdn/tp.py) widens to `S <= 2 * TILE_SIZE` and
+    selects `gdn_qkvz_decode_1d_progcfg_64` (per_core_M 2) above one tile - so the cap
+    here raises to 64 and the whole packed block goes through in ONE native call
+    instead of two tiled ones. `layer` here has no `.args` in every CPU fixture that
+    predates this graft, so the check goes through `getattr` and defaults to the
+    original one-tile cap without it.
     """
     l1 = operations.L1_MEMORY_CONFIG
-    if rows <= TILE:
+    native_m3 = hasattr(getattr(layer, 'args', None), 'attn_wo_decode_1d_progcfg_64')
+    cap = 64 if native_m3 else TILE
+    if rows <= cap:
         return layer._project_qkvzab_raw(packed, rows, l1)
     width = packed.shape[-1]
     slices = []

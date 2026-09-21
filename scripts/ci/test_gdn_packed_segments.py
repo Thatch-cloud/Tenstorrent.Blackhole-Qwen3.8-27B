@@ -359,6 +359,48 @@ class FourUserBlockTests(PackedFixture):
                          [('project', 32), ('project', 32), ('recur', 32), ('recur', 32)])
 
 
+class NativeM3Tests(PackedFixture):
+    """Lever N M3native: once the graft's model_config.py adds
+    attn_wo_decode_1d_progcfg_64 onto the GDN layer's own args (patched gdn/tp.py
+    widens _project_qkvzab_raw's own gate the same way), project_qkvzab_by_tile's
+    tile cap raises from 32 to 64 so the packed four-user block's input projection
+    is ONE native call, not one per 32-row tile."""
+
+    spans = ((0, 16), (16, 32), (32, 48), (48, 64))
+    slots = [['%s%d' % (name, index) for index in range(5)] for name in 'ABCD']
+    checkpoints = [['ck%s' % name] for name in 'ABCD']
+
+    def test_four_users_share_one_native_call_over_sixty_four_rows_under_the_graft(self):
+        state, operations, layer, active, calls = self.build(commit_only=True, users=4)
+        layer.args = SimpleNamespace(attn_wo_decode_1d_progcfg_64=object())
+        result = self.run_packed(state, operations, calls, self.spans, [0] * 4, self.slots, self.checkpoints,
+                                 rows=64, deferred=True)
+        self.assertEqual(layer._project_qkvzab_raw.call_count, 1,
+                         'native_m3 must land on ONE call, not one per 32-row tile')
+        self.assertEqual([entry for entry in calls if entry[0] == 'project'], [('project', 64)])
+        # no tiling slice of the packed block itself; only the four per-user segment slices
+        self.assertEqual([entry for entry in calls if entry[0] == 'slice'],
+                         [('slice', 0, 16), ('slice', 16, 32), ('slice', 32, 48), ('slice', 48, 64)])
+        self.assertEqual(result['output'].shape, (1, 64, 5120))
+        self.assertEqual((state.calls, state.checkpoint_calls), (1, 4))
+
+    def test_without_the_64_attribute_the_tile_cap_is_unchanged(self):
+        state, operations, layer, active, calls = self.build(commit_only=True, users=4)
+        layer.args = SimpleNamespace()  # an args object, but without the graft's marker
+        self.run_packed(state, operations, calls, self.spans, [0] * 4, self.slots, self.checkpoints,
+                        rows=64, deferred=True)
+        self.assertEqual([entry for entry in calls if entry[0] == 'project'], [('project', 32), ('project', 32)])
+
+    def test_a_layer_with_no_args_at_all_is_unaffected(self):
+        """Every CPU fixture that predates this graft (PackedFixture.build's own layer)
+        has no .args at all; the hasattr(getattr(...)) check must not raise on it."""
+        state, operations, layer, active, calls = self.build(commit_only=True, users=4)
+        self.assertFalse(hasattr(layer, 'args'))
+        self.run_packed(state, operations, calls, self.spans, [0] * 4, self.slots, self.checkpoints,
+                        rows=64, deferred=True)
+        self.assertEqual([entry for entry in calls if entry[0] == 'project'], [('project', 32), ('project', 32)])
+
+
 class SegmentValidationTests(unittest.TestCase):
     def test_spans_must_cover_the_block_in_order(self):
         for spans in (((0, 16),), ((0, 16), (17, 32)), ((16, 32), (0, 16)), ((0, 32), (32, 32))):
