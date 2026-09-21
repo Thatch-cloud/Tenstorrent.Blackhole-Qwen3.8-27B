@@ -86,9 +86,19 @@ jobs:
           mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
           paths=()
           for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
-          status=0
-          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
-          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+          # The rig's telemetry exporter opens every card for a tt-smi snapshot every 30 s
+          # (run 35582967265 failed here on exactly that: 'tt-smi' as the only holder). A
+          # tt-smi holder is read-only and gone within seconds, so it is ignored and the
+          # check retries; any other holder still fails the job.
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s experiment-results/holders.txt ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' experiment-results/holders.txt | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then
             echo 'Device ownership not clear'
             cat experiment-results/holders.txt || true
             exit 1
@@ -153,7 +163,7 @@ jobs:
             *-v14) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 ;;
             *-v17) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 ;;
             *-v18|*-v19|*-v21) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 ;;
-            *-v20) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_REPLAY_GROUP_ROWS=8 ;;
+            *-v20|*-v26) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_REPLAY_GROUP_ROWS=8 ;;
             *-v22|*-v23) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PACKED_PROPOSAL=1 ;;
             *-v24|*-v25) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_FAST_COMMIT=1 ;;
             # -v15/-v16: the 131k one-user/two-user attach arm. No reference exists at 131k

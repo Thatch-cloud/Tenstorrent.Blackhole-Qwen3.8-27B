@@ -46,9 +46,19 @@ jobs:
           mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
           paths=()
           for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
-          status=0
-          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
-          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+          # The rig's telemetry exporter opens every card for a tt-smi snapshot every 30 s
+          # (run 35582967265 failed here on exactly that: 'tt-smi' as the only holder). A
+          # tt-smi holder is read-only and gone within seconds, so it is ignored and the
+          # check retries; any other holder still fails the job.
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s experiment-results/holders.txt ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' experiment-results/holders.txt | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then
             echo 'Device ownership not clear'
             cat experiment-results/holders.txt || true
             exit 1
