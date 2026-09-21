@@ -56,6 +56,7 @@ timeout -k 30 900 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$hf_target,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly" \
   --mount "type=bind,src=$script_src,dst=/bench/matmul64_sweep.py,readonly" \
   --mount "type=bind,src=$outdir,dst=/results" \
+  -e HF_MODEL=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
   -e TT_METAL_HOME=/opt/tt-metal -e OMP_NUM_THREADS=8 \
   -e TT_METAL_CACHE=/tmp/matmul64-kernel-cache \
