@@ -67,7 +67,7 @@ jobs:
           git -C frozen-recipe diff --check
           git -C frozen-recipe diff > frozen-recipe/experiment-results/geometry.patch
       - name: Cache-required 32K numerical probe without model weights
-        timeout-minutes: 19
+        timeout-minutes: ${{ contains(github.ref, 'frozen-64k-') && 60 || 19 }}
         working-directory: frozen-recipe
         env:
           QWEN_SIM_ONLY: '1'
