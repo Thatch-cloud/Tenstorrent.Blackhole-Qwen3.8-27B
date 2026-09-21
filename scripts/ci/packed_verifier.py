@@ -245,6 +245,36 @@ def stage_packed(operations, model, fixture, shape, users):
     return len(destinations)
 
 
+PROFILE_DUMP_ROUND = 'QWEN_FAST_PROFILE_DUMP_ROUND'
+
+
+def dump_device_profiler_after_round(operations, mesh, rounds, environ=None):
+    """Under the m3native profile arm only (QWEN_FAST_PROFILE_DUMP_ROUND=N): read the device
+    profiler buffers back once, right after packed round N, so cpp_device_perf_report.csv
+    exists before anything later in the run can end the process uncleanly. The pinned
+    profiler writes that CSV only on a clean device close or on ttnn.ReadDeviceProfiler,
+    and run 35564623068 profiled seven packed rounds then died (a user finishing first)
+    with nothing written. Returns True when the dump was issued; inert when unset."""
+    import os
+
+    value = (os.environ if environ is None else environ).get(PROFILE_DUMP_ROUND, '')
+    if not value:
+        return False
+    try:
+        target = int(value)
+    except ValueError:
+        raise ValueError('%s must be a round number; got %r' % (PROFILE_DUMP_ROUND, value))
+    if rounds != target:
+        return False
+    reader = getattr(operations, 'ReadDeviceProfiler', None)
+    if reader is None:
+        diagnostic('[PINDIAG] %s=%d but the runtime has no ReadDeviceProfiler; no device dump' % (PROFILE_DUMP_ROUND, target))
+        return False
+    reader(mesh)
+    diagnostic('[PINDIAG] device profiler read back after packed round %d (%s)' % (rounds, PROFILE_DUMP_ROUND))
+    return True
+
+
 class PackedVerifierEngine:
     """Owner of one packed verify block: build at attach, then per round
     `verify(entries)` -> per-entry predictions, `features(segment)` for each user's
@@ -562,6 +592,7 @@ class PackedVerifierEngine:
             self.pending_segments = set(segments)
             self.rounds += 1
             self.phase = 'verified'
+            dump_device_profiler_after_round(self.operations, self.mesh, self.rounds)
             metrics = dict(segments=segments, staged_buffers=staged,
                 binding_validation_ms=(started - binding_started) * 1000,
                 input_ms=(staged_at - started) * 1000, verify_readback_ms=(finished - staged_at) * 1000,

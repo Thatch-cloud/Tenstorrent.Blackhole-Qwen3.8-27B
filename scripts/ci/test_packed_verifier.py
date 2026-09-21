@@ -1138,5 +1138,35 @@ class PoolSlotBindingTests(BlockFixture):
                 self.build(pool_slots=pool_slots)
 
 
+class ProfileDumpRoundTests(unittest.TestCase):
+    """QWEN_FAST_PROFILE_DUMP_ROUND=N reads the device profiler back exactly once, after round N."""
+
+    def setUp(self):
+        from packed_verifier import dump_device_profiler_after_round
+        self.dump = dump_device_profiler_after_round
+        self.reads = []
+        self.operations = SimpleNamespace(ReadDeviceProfiler=lambda mesh: self.reads.append(mesh))
+        self.mesh = object()
+
+    def test_inert_when_unset(self):
+        self.assertFalse(self.dump(self.operations, self.mesh, 5, environ={}))
+        self.assertEqual(self.reads, [])
+
+    def test_reads_back_only_on_the_named_round(self):
+        env = {'QWEN_FAST_PROFILE_DUMP_ROUND': '5'}
+        self.assertFalse(self.dump(self.operations, self.mesh, 4, environ=env))
+        self.assertTrue(self.dump(self.operations, self.mesh, 5, environ=env))
+        self.assertFalse(self.dump(self.operations, self.mesh, 6, environ=env))
+        self.assertEqual(self.reads, [self.mesh])
+
+    def test_a_runtime_without_the_reader_is_reported_not_crashed(self):
+        env = {'QWEN_FAST_PROFILE_DUMP_ROUND': '2'}
+        self.assertFalse(self.dump(SimpleNamespace(), self.mesh, 2, environ=env))
+
+    def test_a_non_integer_round_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.dump(self.operations, self.mesh, 1, environ={'QWEN_FAST_PROFILE_DUMP_ROUND': 'five'})
+
+
 if __name__ == '__main__':
     unittest.main()
