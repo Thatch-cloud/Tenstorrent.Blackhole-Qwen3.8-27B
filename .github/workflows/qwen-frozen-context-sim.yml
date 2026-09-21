@@ -1,7 +1,7 @@
 name: Qwen winning recipe larger-context simulator
 on:
   push:
-    tags: ['experiment/frozen-context-sim-v1', 'experiment/frozen-context-sim-v2', 'experiment/frozen-context-sim-v3', 'experiment/frozen-context-build-v1', 'experiment/frozen-target-scratch-build-v1', 'experiment/frozen-context-build-65536-v1', 'experiment/frozen-context-build-65536-v2', 'experiment/frozen-context-build-65536-v3']
+    tags: ['experiment/frozen-context-sim-v1', 'experiment/frozen-context-sim-v2', 'experiment/frozen-context-sim-v3', 'experiment/frozen-context-build-v1', 'experiment/frozen-target-scratch-build-v1', 'experiment/frozen-context-build-65536-v1', 'experiment/frozen-context-build-65536-v2', 'experiment/frozen-context-build-65536-v3', 'experiment/frozen-context-build-65536-v4', 'experiment/frozen-context-build-65536-v5']
 permissions:
   contents: read
 concurrency:
