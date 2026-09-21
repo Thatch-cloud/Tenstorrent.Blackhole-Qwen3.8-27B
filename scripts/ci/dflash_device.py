@@ -620,8 +620,21 @@ class DFlashDevice:
                 padded = retain(operations.pad(output, [(0, 0), (0, 0), (0, 2048 - rows), (0, 0)], 0.0))
                 operations.copy(padded, self.spare_history)
             if self.kv_history is not None:
-                cache_publication = self.kv_history.prepare(projected, prefix, position=position,
-                    fused_steady_state=fused_steady_state)
+                # kv_history.prepare's OWN steady-state fusion is no longer selected by an
+                # argument here: draft_kv_slide_adapter.build_prepare source-text-patches
+                # DraftKVHistory.prepare's exact body at combined-runtime attach time, so
+                # restructuring that method's own source (as this branch's sibling above
+                # does for self.history) broke the attach for every arm, flag or not (v29,
+                # commit b05c8af8). The fusion is re-homed as a transient override installed
+                # on THIS instance's kv_history.prepare by dflash_traced_publish.
+                # install_fused_kv_history, for the scope of one publish call - see that
+                # function's own docstring for how it detects and defers to whatever
+                # draft_kv_slide_scope may already have installed at the class level instead.
+                # A caller that wants the fusion must route through dflash_traced_publish.
+                # install_publish_options; called directly (as here, or in a test), this
+                # always runs whatever is currently live on kv_history.prepare - the original
+                # method by default.
+                cache_publication = self.kv_history.prepare(projected, prefix, position=position)
             # kv_history.prepare() above already ran its own synchronize_device(self.mesh)
             # over the SAME shared mesh queue, in submission order after everything
             # enqueued so far in this call (project_features' merged work and the copy

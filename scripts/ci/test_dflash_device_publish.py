@@ -126,7 +126,7 @@ class PreparePublicationTests(unittest.TestCase):
 
     def test_merge_release_with_a_committed_cache_skips_the_trailing_fence(self):
         kv_history = SimpleNamespace(
-            prepare=unittest.mock.Mock(side_effect=lambda projected, prefix, position, fused_steady_state=False: (
+            prepare=unittest.mock.Mock(side_effect=lambda projected, prefix, position: (
                 operations.synchronize_device('mesh'), SimpleNamespace(status='prepared'))[1]))
         operations = fake_operations()
         device = build_device(operations, kv_history=kv_history)
@@ -144,7 +144,7 @@ class PreparePublicationTests(unittest.TestCase):
         """Byte-identical default: merge_release's whole optimisation is inert unless
         explicitly requested, regardless of whether a cache is present."""
         kv_history = SimpleNamespace(
-            prepare=unittest.mock.Mock(side_effect=lambda projected, prefix, position, fused_steady_state=False: (
+            prepare=unittest.mock.Mock(side_effect=lambda projected, prefix, position: (
                 operations.synchronize_device('mesh'), SimpleNamespace(status='prepared'))[1]))
         operations = fake_operations()
         device = build_device(operations, kv_history=kv_history)
@@ -161,7 +161,18 @@ class PreparePublicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             device.prepare_publication([make_feature_tap() for _ in range(5)], 1, position=100, fused_steady_state='yes')
 
-    def test_fused_steady_state_threads_through_to_kv_history_prepare(self):
+    def test_fused_steady_state_never_threads_a_kwarg_into_kv_history_prepare(self):
+        """kv_history.prepare's OWN steady-state fusion is no longer selected by an
+        argument prepare_publication passes through: draft_kv_slide_adapter.
+        build_prepare source-text-patches DraftKVHistory.prepare's exact body at
+        combined-runtime attach time, so prepare()'s own source (and therefore its
+        signature) must stay untouched (see dflash_device.py's own comment at this
+        call site, and dflash_traced_publish's module docstring, for why - v29,
+        commit b05c8af8). kv_history.prepare is always called with exactly
+        (projected, prefix, position=position); whether it fuses is decided by
+        whatever dflash_traced_publish.install_fused_kv_history has - or has not -
+        installed on THIS kv_history instance before this call, tested separately in
+        test_dflash_traced_publish.py."""
         kv_history = SimpleNamespace(prepare=unittest.mock.Mock(return_value=SimpleNamespace(status='prepared')))
         operations = fake_operations()
         device = build_device(operations, kv_history=kv_history)
@@ -169,8 +180,16 @@ class PreparePublicationTests(unittest.TestCase):
         p = patched(operations)
         with p[0], p[1], p[2], p[3]:
             device.prepare_publication([make_feature_tap() for _ in range(5)], 1, position=100, fused_steady_state=True)
-        kv_history.prepare.assert_called_once()
-        self.assertTrue(kv_history.prepare.call_args.kwargs['fused_steady_state'])
+        kv_history.prepare.assert_called_once_with(unittest.mock.ANY, 1, position=100)
+
+    def test_fused_steady_state_off_also_never_passes_the_kwarg(self):
+        kv_history = SimpleNamespace(prepare=unittest.mock.Mock(return_value=SimpleNamespace(status='prepared')))
+        operations = fake_operations()
+        device = build_device(operations, kv_history=kv_history)
+        p = patched(operations)
+        with p[0], p[1], p[2], p[3]:
+            device.prepare_publication([make_feature_tap() for _ in range(5)], 1, position=100, fused_steady_state=False)
+        kv_history.prepare.assert_called_once_with(unittest.mock.ANY, 1, position=100)
 
     def test_fused_steady_state_issues_fewer_ops_when_rows_is_2048(self):
         """slice+concat+copy replaces slice+concat+slice+pad+copy for prepare_
