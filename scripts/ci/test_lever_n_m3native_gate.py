@@ -121,6 +121,21 @@ class EvaluateGateTests(unittest.TestCase):
         self.assertFalse(evaluate_gate(**kwargs))
 
 
+class StreamCompletionTests(unittest.TestCase):
+    def test_an_errored_stream_fails_the_gate_even_with_a_matching_prefix(self):
+        kwargs = dict(COMPLETE_KWARGS)
+        kwargs['checked'] = [dict(c, error='EngineCore encountered an issue') for c in COMPLETE_KWARGS['checked']]
+        self.assertFalse(evaluate_gate(**kwargs))
+
+    def test_a_stream_cut_short_of_its_reference_fails_unless_short_output_was_requested(self):
+        kwargs = dict(COMPLETE_KWARGS)
+        kwargs['checked'] = [dict(c, actual_len=12, reference_len=240) for c in COMPLETE_KWARGS['checked']]
+        self.assertFalse(evaluate_gate(**kwargs))
+        self.assertTrue(evaluate_gate(**dict(kwargs, full_output_required=False)))
+        kwargs['checked'] = [dict(c, actual_len=960, reference_len=240) for c in COMPLETE_KWARGS['checked']]
+        self.assertTrue(evaluate_gate(**kwargs))
+
+
 class DiagnosticFilterTests(unittest.TestCase):
     def test_every_packed_audit_family_and_the_phase_lines_pass_the_filter(self):
         lines = ['x [PACKED] request=a segment=0', 'x [PACKED-PHASE] round=1', 'x [PACKED-COMMIT] round=1',
