@@ -107,7 +107,8 @@ def load_references(directory):
     return references
 
 
-def start_server(port, users, context, results, log_name, readiness_seconds=900):
+def start_server(port, users, context, results, log_name, readiness_seconds=900,
+                 trace_region_bytes=1073741824):
     """The fast T16 + speculation recipe the four-user cycle bench serves
     (qwen-fp2u-image.yml), so the packed round under test is the one the 200
     tok/s/user work actually measures.
@@ -117,7 +118,11 @@ def start_server(port, users, context, results, log_name, readiness_seconds=900)
     its request payload, so any other served name 404s every stream in milliseconds
     (gate 1, run 35556533480 - a false negative that looked like readiness with zero
     decode rounds actually run)."""
-    recipe = dict(tt=dict(trace_mode='decode_only', trace_region_size=1073741824,
+    # trace_region_bytes: the recipe's 1 GiB unless the profile arm shrinks it - the device
+    # profiler reserves ~0.72 GB of DRAM per chip (run 35563019626: 32.38 GB allocatable
+    # instead of 33.10, and the fourth user's first proposal hit Out of Memory), while
+    # decode traces are command streams that this repo's own probes run at 256 MiB.
+    recipe = dict(tt=dict(trace_mode='decode_only', trace_region_size=int(trace_region_bytes),
                           l1_small_size=24576),
                  qwen_fast_t16=True,
                  qwen_fast_runtime=dict(directory='/experiment-scripts/ci', runtime_root='/opt/tt-metal',
@@ -235,6 +240,8 @@ def main():
     parser.add_argument('--stagger', type=float, default=0.0)
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--results', type=Path, default=Path('/tmp/m3native-gate'))
+    parser.add_argument('--trace-region-bytes', type=int, default=1073741824,
+                        help='device trace region per chip (the recipe uses 1 GiB; the profile arm passes less)')
     parser.add_argument('--references', type=Path,
                         default=Path('runner-evidence.local/packed-gate'),
                         help='directory holding single-user-*.json single-stream references')
@@ -253,7 +260,8 @@ def main():
         report['references_loaded'] = sorted(references)
 
         process, handle, log_path, command = start_server(
-            options.port, options.users, options.context, options.results, 'server.log')
+            options.port, options.users, options.context, options.results, 'server.log',
+            trace_region_bytes=options.trace_region_bytes)
         report['command'] = command
         report['ready'] = True
 
