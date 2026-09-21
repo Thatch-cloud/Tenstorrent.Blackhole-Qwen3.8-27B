@@ -342,12 +342,18 @@ def main():
         # stream, and run 35658854824 showed those carry a precise serial-prefill
         # story no gate asserted. Reporting is unconditional; the thresholds are
         # opt-in, so this cannot fail a run until someone sets a ceiling.
-        from m3native_ttft_profile import profile as ttft_profile, render as ttft_render
+        # Never let a diagnostic fail a run that would otherwise pass. Run
+        # 35668593700 lost a whole rig run because this import raised
+        # ModuleNotFoundError inside the container - the module is mounted at
+        # /bench now, but the guard stays, because the profile is reporting and
+        # the gate's verdict does not depend on it.
         try:
+            from m3native_ttft_profile import profile as ttft_profile, render as ttft_render
             report['ttft_profile'] = ttft_profile(results)
             print(ttft_render(report['ttft_profile']), flush=True)
-        except ValueError as error:
-            report['ttft_profile'] = dict(error=str(error))
+        except Exception as error:
+            report['ttft_profile'] = dict(error='%s: %s' % (type(error).__name__, error))
+            print('[TTFT] profile unavailable: %s' % report['ttft_profile']['error'], flush=True)
 
         comparisons = []
         for index, entry in enumerate(results):

@@ -201,6 +201,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$PWD/graft/mlp.py,dst=$root/mlp.py,readonly" \
   --mount "type=bind,src=$PWD/scripts/ci/lever_n_m3native_gate.py,dst=/bench/lever_n_m3native_gate.py,readonly" \
   --mount "type=bind,src=$PWD/scripts/ci/longctx_cycle_bench.py,dst=/bench/longctx_cycle_bench.py,readonly" \
+  --mount "type=bind,src=$PWD/scripts/ci/m3native_ttft_profile.py,dst=/bench/m3native_ttft_profile.py,readonly" \
   --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
   "${mounts[@]}" \
   $KM \

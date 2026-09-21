@@ -36,8 +36,13 @@ def main():
                  entry.get('actual_len'), ('ERROR ' + entry['error'][:120]) if entry.get('error') else ''))
     admission = report.get('ttft_profile')
     if admission and not admission.get('error'):
-        from m3native_ttft_profile import render as ttft_render
-        print(ttft_render(admission))
+        try:
+            from m3native_ttft_profile import render as ttft_render
+            print(ttft_render(admission))
+        except Exception as error:
+            print('TTFT profile render unavailable: %s' % error)
+    elif admission:
+        print('TTFT profile unavailable: %s' % admission.get('error'))
     phase = report.get('packed_phase')
     if phase:
         print('[PACKED-PHASE] trace_ms rounds=%s min=%s mean=%s max=%s'
