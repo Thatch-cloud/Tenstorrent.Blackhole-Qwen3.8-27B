@@ -122,14 +122,23 @@ call needs a native batch-64 paged-SDPA-decode kernel (C++, authorised)."*
 
 ## 3. Where the 2.05 ms/launch goes
 
-KV cache dtype at this frozen recipe's capacity family is `ttnn.bfloat16`, not bf8
-(`scripts/ci/frozen_runtime_context.py:45-46`, `full_mtp_request.py:164`,
-`full-prefix.py:552`, all `ttnn.bfloat16`; `frozen_target_replay.py:34,63` requires
-`kv_dtype == 'bfloat16'`). Full-capacity K+V read for one launch: 32768 keys x 256
-head_dim x 2 (K,V) x 2 local KV heads x 2 bytes = 67,108,864 B (64 MiB). At 2.05 ms
-that is ~32 GB/s - plausible for one op's DMA, i.e. consistent with **K/V streaming**,
-not fixed launch overhead, dominating the measured kernel duration (this column is
-on-device time only, already excluding host dispatch).
+**Corrected 2026-09-22** (`docs/sdpa-kv-bf8-plan.md`). This section originally read
+the KV dtype as `ttnn.bfloat16` from `frozen_runtime_context.py:45-46` and friends.
+That citation belongs to a simulator-gated harness, not to the serving decode launch:
+the launch this section is about reads **bfloat8_b** K/V zero-copy from the vLLM
+serving cache (`attention_replay.py:118/129`, `attention_parallel.py:17-19`,
+`serving_cache_owner.py:26-31`, `packed_cache_writer.py:3`). So there is no bf16
+KV copy on this path and no bf16-to-bf8 saving left to claim.
+
+Full-capacity K+V read for one launch is therefore 32768 keys x 256 head_dim x
+2 (K,V) x 2 local KV heads x 1 byte = 33,554,432 B (32 MiB), half the figure this
+section first gave. At 2.05 ms that is ~16-20 GB/s once the dense bf16 mask
+(3-9 MiB, still bf16 and still the one remaining bytes lever here) is counted with
+it - lower than the ~32 GB/s originally inferred, and low enough that K/V streaming
+alone no longer obviously accounts for the launch duration. The qualitative
+conclusion below still holds (per-user K/V is distinct DRAM content, so batching
+users does not amortise the read), but the bandwidth headroom argument should be
+re-derived before anything is built on it.
 
 But the team's own attribution puts SDPA at only ~40 ms of the 157.8 ms round
 (`docs/trace-datamov-plan.md:47-58`), while the raw serial sum of the 128 dev-0 launches'
