@@ -177,6 +177,53 @@ class PreparedPackedDFlashProposalTests(unittest.TestCase):
         self.assertFalse(trace.prepare_device(1, 2))
         device_a.execute_proposal.assert_not_called()
 
+    def test_a_failed_build_releases_every_placeholder_it_uploaded_not_just_the_capture_scope(self):
+        """Run 35585107688: a failed bucket build used to leave its identifiers/mask/
+        rope/cached_history placeholders allocated forever (only the capture-scoped
+        transients were released) - self.owned must be back to its pre-attempt length
+        after a failure, and everything uploaded during the attempt must have gone
+        through release_owned."""
+        operations, device_a, device_b = self.paired(context_a=300, context_b=300)
+        device_a.execute_proposal = unittest.mock.Mock(side_effect=RuntimeError('warm-up OOM'))
+        released = []
+        with unittest.mock.patch('dflash_proposal_trace.addresses', side_effect=lambda operations, value: (id(value),)), \
+                unittest.mock.patch('dflash_proposal_trace.release_owned',
+                                    side_effect=lambda operations, values: released.extend(values)):
+            trace = self.build(device_a, device_b)
+            before = len(trace.owned)
+            with self.assertRaisesRegex(RuntimeError, 'warm-up OOM'):
+                trace.prepare_device(11, 22)
+        self.assertEqual(len(trace.owned), before, 'no placeholder from the failed attempt stays tracked')
+        # identifiers + mask + 2 rope.q + 2 rope.k + 2 rope.live_k + (2 users x 5
+        # layers x 2 k/v) cached_history = 1+1+2+2+2+20 = 28 placeholders uploaded
+        # for this one failed attempt, every one of them released.
+        self.assertEqual(len(released), 28)
+        self.assertEqual(trace.buckets, {}, 'the failed bucket never stays cached')
+
+    def test_a_retry_after_a_failed_build_does_not_accumulate_leaked_placeholders(self):
+        """Three consecutive failed attempts (run 35585107688's own shape) must leave
+        the SAME owned length as one failed attempt - never growing - and, once the
+        underlying condition clears, a successful build still only holds ONE
+        attempt's worth of placeholders."""
+        operations, device_a, device_b = self.paired(context_a=300, context_b=300)
+        real_execute = device_a.execute_proposal
+        device_a.execute_proposal = unittest.mock.Mock(side_effect=RuntimeError('warm-up OOM'))
+        with unittest.mock.patch('dflash_proposal_trace.addresses', side_effect=lambda operations, value: (id(value),)), \
+                unittest.mock.patch('dflash_proposal_trace.release_owned'):
+            trace = self.build(device_a, device_b)
+            before = len(trace.owned)
+            for _ in range(3):
+                with self.assertRaises(RuntimeError):
+                    trace.prepare_device(11, 22)
+                self.assertEqual(len(trace.owned), before, 'never grows across repeated failed attempts')
+            device_a.execute_proposal = real_execute
+            with unittest.mock.patch('dflash_packed_proposal.select_device_outputs', return_value=((1,), (2,))):
+                self.assertTrue(trace.prepare_device(33, 44))
+                trace.finish('a', 1)
+                trace.finish('b', 1)
+        self.assertGreater(len(trace.owned), before, 'the successful attempt uploaded its own placeholders')
+        self.assertEqual(len(trace.buckets), 1)
+
     def test_close_releases_the_trace_and_validated_masks(self):
         operations, device_a, device_b = self.paired(context_a=300, context_b=300)
         with unittest.mock.patch('dflash_proposal_trace.addresses', side_effect=lambda operations, value: (id(value),)), \

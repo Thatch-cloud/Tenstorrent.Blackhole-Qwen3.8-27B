@@ -352,33 +352,44 @@ class PreparedPackedDFlashProposal:
         from dflash_t16_native_attention import validate_mask
 
         operations, device = self.operations, self.device_a
-        # Placeholder users: seed 0, and a position equal to the bucket's own context -
-        # only the SHAPE of the geometry matters at capture time (proposal_inputs'
-        # own convention, PreparedDFlashProposal above); update() re-uploads every
-        # round's real seeds and real positions onto these same fixed tensors before
-        # every replay.
-        placeholder_users = [dict(position=context_a, history_rows=context_a),
-                             dict(position=context_b, history_rows=context_b)]
-        host_mask = batched_attention_mask([context_a, context_b], self.block_rows)
-        validate_mask(host_mask, contexts=[context_a, context_b])
-        tables = packed_rope_tables(placeholder_users, self.block_rows)
-        live = live_key_rope(placeholder_users, self.block_rows)
-        bucket = SimpleNamespace(context=(context_a, context_b),
-            identifiers=self._upload(packed_identifiers([0, 0], self.block_rows), identifiers=True),
-            mask=self._upload(host_mask),
-            rope=dict(q=tuple(self._upload(value) for value in tables['q']),
-                      k=tuple(self._upload(value) for value in tables['k']),
-                      live_k=tuple(self._upload(value) for value in live)),
-            cached_history=[[{name: self._upload(torch.zeros((1, 4, context, 128), dtype=torch.bfloat16))
-                    for name in ('k', 'v')} for _ in self.device_a.kv_history.active]
-                for context in (context_a, context_b)],
-            trace=None, outputs=None, owned=[], tokens=None, consumed=set())
-        bucket.inputs = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k'],
-            *(value for cache in bucket.cached_history for layer in cache for value in layer.values())]
-        bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
-        device.validated_native_proposal_masks.add(addresses(operations, bucket.mask))
-        self.buckets[key] = bucket
+        # Every self._upload() below appends into self.owned (the trace's own
+        # persistent placeholder list, not the transient/capture-scoped owned lists
+        # further down) - snapshotted here so a failure anywhere in this build can
+        # release exactly what THIS attempt added and nothing from any other bucket
+        # already built on this trace. Run 35585107688: without this, a failed
+        # build left its identifiers/mask/rope/cached_history placeholders (the
+        # ~42 MB per attempt the report accounts for) allocated forever - three
+        # consecutive failed attempts for one pair leaked three full sets on top of
+        # the DRAM an already-96%-full device had none of left, which is what
+        # starved the 20 MB prepare_publication transient that actually killed it.
+        placeholder_mark = len(self.owned)
         try:
+            # Placeholder users: seed 0, and a position equal to the bucket's own
+            # context - only the SHAPE of the geometry matters at capture time
+            # (proposal_inputs' own convention, PreparedDFlashProposal above);
+            # update() re-uploads every round's real seeds and real positions onto
+            # these same fixed tensors before every replay.
+            placeholder_users = [dict(position=context_a, history_rows=context_a),
+                                 dict(position=context_b, history_rows=context_b)]
+            host_mask = batched_attention_mask([context_a, context_b], self.block_rows)
+            validate_mask(host_mask, contexts=[context_a, context_b])
+            tables = packed_rope_tables(placeholder_users, self.block_rows)
+            live = live_key_rope(placeholder_users, self.block_rows)
+            bucket = SimpleNamespace(context=(context_a, context_b),
+                identifiers=self._upload(packed_identifiers([0, 0], self.block_rows), identifiers=True),
+                mask=self._upload(host_mask),
+                rope=dict(q=tuple(self._upload(value) for value in tables['q']),
+                          k=tuple(self._upload(value) for value in tables['k']),
+                          live_k=tuple(self._upload(value) for value in live)),
+                cached_history=[[{name: self._upload(torch.zeros((1, 4, context, 128), dtype=torch.bfloat16))
+                        for name in ('k', 'v')} for _ in self.device_a.kv_history.active]
+                    for context in (context_a, context_b)],
+                trace=None, outputs=None, owned=[], tokens=None, consumed=set())
+            bucket.inputs = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k'],
+                *(value for cache in bucket.cached_history for layer in cache for value in layer.values())]
+            bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
+            device.validated_native_proposal_masks.add(addresses(operations, bucket.mask))
+            self.buckets[key] = bucket
             self._update(bucket, 0, 0)
             transient, retain = device.temporaries([device.history, device.spare_history,
                 self.device_b.history, self.device_b.spare_history, *self.owned])
@@ -393,9 +404,18 @@ class PreparedPackedDFlashProposal:
                 lambda: self._execute(bucket, bucket.owned, retain))
             operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
         except BaseException:
-            del self.buckets[key]
-            device.validated_native_proposal_masks.discard(addresses(operations, bucket.mask))
-            release_owned(operations, bucket.owned)
+            self.buckets.pop(key, None)
+            built = locals().get('bucket')
+            if built is not None:
+                # Reads built.mask's address (validated_native_proposal_masks.discard)
+                # and releases built.owned (the capture-scoped intermediates, disjoint
+                # from the placeholders below) BEFORE any placeholder is deallocated -
+                # built.mask is itself one of the placeholders released next.
+                device.validated_native_proposal_masks.discard(addresses(operations, built.mask))
+                release_owned(operations, built.owned)
+            leaked = self.owned[placeholder_mark:]
+            del self.owned[placeholder_mark:]
+            release_owned(operations, leaked)
             raise
         return bucket
 

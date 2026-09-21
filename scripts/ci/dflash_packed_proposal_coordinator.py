@@ -32,7 +32,72 @@ AUDIT_LINE = '[PACKED-PROPOSE] round={round} pairs={pairs} propose_ms={propose_m
 # the precondition this line's fallback pair failed anyway, on hardware, despite
 # passing every host-side check this module can perform.
 PAIR_FALLBACK_LINE = '[PACKED-PROPOSE] pair={pair} fallback={fallback}'
+# One line whenever _ensure_single_user rebuilds a device's own single-user
+# PreparedDFlashProposal after _release_single_user freed it - a fallback after
+# release is exactly the case run 35585107688 needs visible.
+RECAPTURE_LINE = '[PACKED-PROPOSE] recapture slot={slot}'
 PACKED_CONTEXT = 2048
+
+DRAM_RESERVE_FLAG = 'QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB'
+DRAM_RESERVE_DEFAULT_MB = 256
+
+# One packed pair's own placeholder buffers at the only packable geometry (steady
+# state, 2048-row context, T16 block_rows=16): identifiers (1,32) uint32 (~128 B,
+# negligible), mask (1,1,32,4160) bf16 (~266 KB), rope.q (2x(1,1,32,128) bf16,
+# ~16 KB), rope.k (2x(1,1,4160,128) bf16, ~2.03 MB), rope.live_k (2x(1,1,32,128)
+# bf16, ~16 KB), cached_history (2 users x 5 layers x 2 k/v x (1,4,2048,128) bf16,
+# ~40 MB - the dominant term). Precisely computed from dflash_proposal_trace.
+# PreparedPackedDFlashProposal._bucket's own upload calls and dflash_batched_mask.
+# segments' span formula (see the report for the full derivation) - a LOWER BOUND:
+# it does not include the trace's own internal compute/intermediate buffers
+# (embeddings, 5 layers of attention and MLP intermediates) that capture_operation
+# retains for replay, which are not sized from source here.
+PAIR_CAPTURE_PLACEHOLDER_BYTES = 128 + 266_240 + 16_384 + 2_129_920 + 16_384 + 41_943_040
+
+# The (1,1,2048,5120) bf16 transient every prepare_publication call allocates and
+# releases (the 'padded'/'combined' tensor, general or fused_steady_state path
+# alike, dflash_device.py) - exactly the shape and size of the allocation that
+# killed run 35585107688's engine (20,971,520 B). A fallback's own single-user
+# commit needs this same allocation regardless of packing, so the reserve below
+# accounts for BOTH paired users needing it in the worst case (the pair capture
+# fails and both fall back to their own commit in the same round).
+PREPARE_PUBLICATION_TRANSIENT_BYTES = 2048 * 5120 * 2
+
+
+def estimated_pair_capture_bytes():
+    return PAIR_CAPTURE_PLACEHOLDER_BYTES + 2 * PREPARE_PUBLICATION_TRANSIENT_BYTES
+
+
+def dram_reserve_bytes(environ=None):
+    """QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB: an integer number of megabytes,
+    default 256. Read at each round rather than at import, so the value a test
+    sets is the one the round sees."""
+    value = (os.environ if environ is None else environ).get(DRAM_RESERVE_FLAG, str(DRAM_RESERVE_DEFAULT_MB))
+    try:
+        megabytes = int(value)
+    except (TypeError, ValueError):
+        raise ValueError('%s must be an integer number of megabytes' % DRAM_RESERVE_FLAG)
+    if megabytes < 0:
+        raise ValueError('%s must not be negative' % DRAM_RESERVE_FLAG)
+    return megabytes * 1024 * 1024
+
+
+def dram_headroom(device):
+    """The smallest largest-contiguous-free-DRAM-block across this device's chips,
+    or None if the allocator statistics are unavailable. serving_buffer_pool.
+    dram_statistics's own contract is 'a diagnostic, never a gate': unavailable
+    statistics here fall through to packing exactly as the reserve check being off
+    would, rather than refusing to ever pack in an environment (or a host test)
+    that cannot read the allocator at all."""
+    from serving_buffer_pool import dram_statistics
+
+    tensor = getattr(device, 'history', None)
+    if tensor is None:
+        return None
+    statistics = dram_statistics(device.operations, tensor)
+    if isinstance(statistics, dict):
+        return None
+    return min(chip['largest_free'] for chip in statistics)
 
 
 def audit_enabled(environ=None):
@@ -146,7 +211,11 @@ class _PackedCaptureView:
         # The shared trace outlives any one device - PackedProposalCoordinator owns
         # closing it (at hook teardown, or when a pair is retired) - so a per-device
         # close() must only close this device's OWN single-user capture underneath.
-        return self._original.close()
+        # _original is None whenever PackedProposalCoordinator._release_single_user
+        # has freed it and no fallback has needed it back since (this pair packed
+        # every round from then until the request itself ended) - nothing to close.
+        if self._original is not None:
+            return self._original.close()
 
 
 def _install(device, trace, which):
@@ -166,30 +235,106 @@ class PackedProposalCoordinator:
     never once per round. A slot pair with only one member active this round, or not
     yet at the packable steady-state context, runs each member's OWN
     device.prepare_device() unchanged, exactly as prepare_pipelined_drafts always
-    has; this coordinator never touches a bridge outside a full, packable pair."""
+    has; this coordinator never touches a bridge outside a full, packable pair.
+
+    self.pairs[pair] holds (device_a, device_b, trace, released): `released` is True
+    once the pair's first successful capture has freed both devices' own single-user
+    PreparedDFlashProposal (_release_single_user) - run 35585107688: a packed pair's
+    placeholder set duplicates the two single-user traced-proposal placeholder sets,
+    so keeping all three allocated at once is pure DRAM duplication once the pair is
+    doing the same job. _ensure_single_user rebuilds a released capture, once, the
+    first time ANY later round needs the single-user fallback again (the pair's own
+    capture failing, or the pair breaking up when a partner finishes)."""
 
     def __init__(self):
         self.pairs = {}
         self.rounds = 0
 
     def close(self):
-        for _, _, trace in self.pairs.values():
+        for _, _, trace, _ in self.pairs.values():
             trace.close()
         self.pairs.clear()
 
-    def _trace_for(self, pair, device_a, device_b):
+    def _cached_trace(self, pair, device_a, device_b):
+        """The pair's already-captured trace if the SAME two devices still occupy
+        it and neither has closed, else None - a fresh capture (and the DRAM
+        reserve check that must gate one) is needed either way."""
         cached = self.pairs.get(pair)
-        if cached is not None:
-            old_a, old_b, trace = cached
-            if old_a is device_a and old_b is device_b and not device_a.closed and not device_b.closed:
-                return trace
-            trace.close()
+        if cached is None:
+            return None
+        old_a, old_b, trace, released = cached
+        if old_a is device_a and old_b is device_b and not device_a.closed and not device_b.closed:
+            return trace
+        return None
+
+    def _trace_for(self, pair, device_a, device_b):
+        trace = self._cached_trace(pair, device_a, device_b)
+        if trace is not None:
+            return trace
+        if pair in self.pairs:
+            self.pairs[pair][2].close()
             del self.pairs[pair]
         from dflash_proposal_trace import PreparedPackedDFlashProposal
 
         trace = PreparedPackedDFlashProposal(device_a, device_b)
-        self.pairs[pair] = (device_a, device_b, trace)
+        self.pairs[pair] = (device_a, device_b, trace, False)
         return trace
+
+    def _release_single_user(self, device):
+        """Free device's own single-user PreparedDFlashProposal (reached either
+        directly, if no pair has ever formed for it, or through the _PackedCaptureView
+        _install put in its place) once its pair has captured successfully - see the
+        class docstring for why keeping both is pure duplication. Marks the device so
+        _ensure_single_user knows this - and ONLY this - is why its capture (or its
+        view's _original) reads None afterwards; a device whose capture is None for
+        any OTHER reason (QWEN_FAST_EAGER_PROPOSAL, or one this coordinator never
+        touched at all) must never be treated as needing a rebuild. Idempotent: a
+        device whose capture is already released is left alone."""
+        capture = device.proposal_capture
+        if isinstance(capture, _PackedCaptureView):
+            if capture._original is not None:
+                capture._original.close()
+                capture._original = None
+                device._packed_capture_released = True
+        elif capture is not None:
+            capture.close()
+            device.proposal_capture = None
+            device._packed_capture_released = True
+
+    def _ensure_single_user(self, device):
+        """Rebuild device's own single-user PreparedDFlashProposal if
+        _release_single_user freed it (device._packed_capture_released, set ONLY by
+        that method - never inferred from proposal_capture being None alone, which
+        is also the ordinary QWEN_FAST_EAGER_PROPOSAL state this coordinator must
+        leave untouched) - reached either as device.proposal_capture directly (no
+        pair ever formed for this device) or as the _original a _PackedCaptureView
+        falls through to (a pair released it, then broke up or its capture failed
+        this round) - device.prepare_device() delegates to whichever of the two it
+        finds, and DFlashDevice.propose()'s own fallback (self.proposal_capture.
+        propose(...), reached through the SAME view when has_pending() answers
+        False) would otherwise run onto None. max_new_tokens=1 reproduces the SAME
+        single 2048-row bucket the original ladder would have narrowed to by now
+        regardless of its real value - dflash_proposal_inputs.proposal_contexts(
+        position, max_new_tokens) returns exactly (2048,) whenever position >= 2048
+        (steady state, the only state packable() ever admits a device in) for ANY
+        max_new_tokens satisfying its own bound (1 <= max_new_tokens <= 262144 -
+        position - 32) - the real original value is not stored anywhere on
+        DFlashDevice and is not needed to reproduce its ladder."""
+        if not getattr(device, '_packed_capture_released', False):
+            return False
+        capture = device.proposal_capture
+        view = capture if isinstance(capture, _PackedCaptureView) else None
+        from dflash_proposal_trace import PreparedDFlashProposal
+
+        rebuilt = PreparedDFlashProposal(device, max_new_tokens=1)
+        if view is not None:
+            view._original = rebuilt
+        else:
+            device.proposal_capture = rebuilt
+        device._packed_capture_released = False
+        if audit_enabled():
+            audit_log(RECAPTURE_LINE, slot=getattr(getattr(device, 'pool_slot', None), 'index', None))
+        return True
 
     def prepare(self, bridges):
         """Phase A, packed variant: pair eligible bridges by fixed pool slot, run one
@@ -223,8 +368,14 @@ class PackedProposalCoordinator:
         pair_labels, pair_ms = [], []
 
         def prepare_single(entry):
-            if entry['device'].prepare_device(entry['seed']):
-                prepared.append(entry['device'])
+            device = entry['device']
+            # A no-op unless a pair had already released this device's own single-
+            # user capture (PackedProposalCoordinator._release_single_user) and this
+            # is the first round since that needs it back - see _ensure_single_user's
+            # own docstring for why this must run before prepare_device() below.
+            self._ensure_single_user(device)
+            if device.prepare_device(entry['seed']):
+                prepared.append(device)
                 return True
             return False
 
@@ -235,33 +386,49 @@ class PackedProposalCoordinator:
                     entry_a, entry_b = by_slot[slot_a], by_slot[slot_b]
                     device_a, device_b = entry_a['device'], entry_b['device']
                     if packable(device_a, device_b):
-                        started = time.perf_counter() if audit_enabled() else None
-                        trace = self._trace_for(group, device_a, device_b)
-                        ids = '%s,%s' % (entry_a['bridge'].request.session.request_id,
-                                         entry_b['bridge'].request.session.request_id)
-                        try:
-                            ready = phase('propose_pair', ids,
-                                          lambda: trace.prepare_device(entry_a['seed'], entry_b['seed']))
-                        except Exception as failure:
-                            # The four-user gate must never lose the engine to a
-                            # proposal-path refusal (run 35581352016: packable() passed
-                            # every host-side check yet execute_proposal still raised on
-                            # the pair's first traced execution) - this pair falls back
-                            # to single-user for THIS round only. _bucket()'s own
-                            # exception handling already removed any partially-built
-                            # bucket before re-raising, so the trace object itself stays
-                            # valid; discard_pending() is a safe no-op here (prepare_
-                            # device() never reached setting self._pending before its
-                            # own _bucket() call raised) but is called anyway, matching
-                            # every other failure path in this module. packable() is
-                            # re-evaluated fresh next round - a permanent-shaped failure
-                            # (see packable()'s own docstring) then just falls back
-                            # every round, harmlessly, rather than being retried once
-                            # and blacklisted.
-                            trace.discard_pending()
-                            if audit_enabled():
-                                audit_log(PAIR_FALLBACK_LINE, pair=[slot_a, slot_b],
-                                          fallback='%s: %s' % (type(failure).__name__, str(failure)[:160]))
+                        fresh_build = self._cached_trace(group, device_a, device_b) is None
+                        headroom_ok = True
+                        if fresh_build:
+                            # Only a FRESH capture allocates new placeholder buffers -
+                            # replaying an already-built trace does not - so the
+                            # reserve check only ever gates the first round a pair
+                            # forms, never every round after (run 35585107688).
+                            headroom = dram_headroom(device_a)
+                            if headroom is not None and headroom < estimated_pair_capture_bytes() + dram_reserve_bytes():
+                                headroom_ok = False
+                                if audit_enabled():
+                                    audit_log(PAIR_FALLBACK_LINE, pair=[slot_a, slot_b], fallback='dram_reserve')
+                        if headroom_ok:
+                            started = time.perf_counter() if audit_enabled() else None
+                            trace = self._trace_for(group, device_a, device_b)
+                            ids = '%s,%s' % (entry_a['bridge'].request.session.request_id,
+                                             entry_b['bridge'].request.session.request_id)
+                            try:
+                                ready = phase('propose_pair', ids,
+                                              lambda: trace.prepare_device(entry_a['seed'], entry_b['seed']))
+                            except Exception as failure:
+                                # The four-user gate must never lose the engine to a
+                                # proposal-path refusal (run 35581352016: packable() passed
+                                # every host-side check yet execute_proposal still raised on
+                                # the pair's first traced execution) - this pair falls back
+                                # to single-user for THIS round only. _bucket()'s own
+                                # exception handling already removed any partially-built
+                                # bucket (and every placeholder it uploaded, run
+                                # 35585107688) before re-raising, so the trace object itself
+                                # stays valid; discard_pending() is a safe no-op here
+                                # (prepare_device() never reached setting self._pending
+                                # before its own _bucket() call raised) but is called
+                                # anyway, matching every other failure path in this module.
+                                # packable() is re-evaluated fresh next round - a permanent-
+                                # shaped failure (see packable()'s own docstring) then just
+                                # falls back every round, harmlessly, rather than being
+                                # retried once and blacklisted.
+                                trace.discard_pending()
+                                if audit_enabled():
+                                    audit_log(PAIR_FALLBACK_LINE, pair=[slot_a, slot_b],
+                                              fallback='%s: %s' % (type(failure).__name__, str(failure)[:160]))
+                                ready = False
+                        else:
                             ready = False
                         if ready:
                             _install(device_a, trace, 'a')
@@ -272,6 +439,11 @@ class PackedProposalCoordinator:
                             if started is not None:
                                 pair_labels.append([slot_a, slot_b])
                                 pair_ms.append((time.perf_counter() - started) * 1000)
+                            cached = self.pairs.get(group)
+                            if cached is not None and not cached[3]:
+                                self._release_single_user(device_a)
+                                self._release_single_user(device_b)
+                                self.pairs[group] = (cached[0], cached[1], cached[2], True)
                             continue
                     for entry in (entry_a, entry_b):
                         if prepare_single(entry) and fence is None:
