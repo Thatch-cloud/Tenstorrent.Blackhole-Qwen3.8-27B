@@ -27,11 +27,24 @@ class TilesAndDivisorsTests(unittest.TestCase):
         self.assertEqual(sweep.tiles(5120), 160)
         self.assertEqual(sweep.tiles(32), 1)
 
-    def test_tiles_rejects_non_multiple(self):
-        with self.assertRaises(ValueError):
-            sweep.tiles(33)
+    def test_tiles_ceils_non_aligned_dims_instead_of_raising(self):
+        # gdn_qkvz's REAL per-chip N on the rig was 8240 - not a multiple of 32 (head-
+        # count arithmetic, not tile alignment, drives GDN widths). tiles() must ceil,
+        # never raise, or the sweep dies on exactly this shape (as it did in practice).
+        self.assertEqual(sweep.tiles(8240), 258)
+        self.assertEqual(sweep.tiles(33), 2)
+        self.assertEqual(sweep.tiles(1), 1)
+
+    def test_tiles_rejects_non_positive(self):
         with self.assertRaises(ValueError):
             sweep.tiles(0)
+        with self.assertRaises(ValueError):
+            sweep.tiles(-32)
+
+    def test_pad_to_tile(self):
+        self.assertEqual(sweep.pad_to_tile(8240), 8256)
+        self.assertEqual(sweep.pad_to_tile(5120), 5120)  # already aligned -> unchanged
+        self.assertEqual(sweep.pad_to_tile(1), 32)
 
     def test_divisors(self):
         self.assertEqual(sweep.divisors(12), [1, 2, 3, 4, 6, 12])
@@ -109,11 +122,38 @@ class ShapeTableTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sweep.shape_table(incomplete)
 
+    def test_every_shape_carries_padded_dims(self):
+        # Real per-chip GDN/attn widths are not guaranteed tile-aligned (gdn_qkvz's
+        # real N was 8240 on the rig); every shape row must carry the padded width
+        # alongside the logical one so callers never have to re-derive it.
+        for shape in sweep.shape_table(FAKE_DIMS, tp=2):
+            self.assertEqual(shape["K_padded"], sweep.pad_to_tile(shape["K"]))
+            self.assertEqual(shape["N_padded"], sweep.pad_to_tile(shape["N"]))
+
+    def test_non_aligned_dims_reported_padded_not_raised(self):
+        # gdn_nv=34 (still even, so it clears the TP=2 divisibility check) produces a
+        # non-tile-aligned gdn_qkvz N of 6434 - mirrors the real gdn_qkvz=8240 case
+        # that crashed the sweep - and shape_table must not raise for it.
+        dims = dict(FAKE_DIMS, gdn_nv=34)
+        table = {shape["name"]: shape for shape in sweep.shape_table(dims, tp=2)}
+        self.assertEqual(table["gdn_qkvz"]["N"], 6434)
+        self.assertFalse(table["gdn_qkvz"]["N"] % sweep.TILE == 0)
+        self.assertEqual(table["gdn_qkvz"]["N_padded"], 6464)
+
 
 class DramFloorTests(unittest.TestCase):
     def test_weight_bytes_includes_bfp8_overhead(self):
         # one exact 32x32 tile: 1024 elements * 1.0625 bytes/element = 1088 bytes
         self.assertAlmostEqual(sweep.weight_bytes(32, 32), 1088.0)
+
+    def test_weight_bytes_pads_non_aligned_dims(self):
+        # K=32 (aligned) x N=8240 (gdn_qkvz's real, non-aligned N) -> N pads to 8256;
+        # DRAM traffic reads whole tiles, so the floor must reflect the padded size.
+        self.assertAlmostEqual(sweep.weight_bytes(32, 8240), 32 * 8256 * sweep.BFP8_BYTES_PER_ELEMENT)
+        # Every N in (8225..8256] shares the same padded tile, so their weight_bytes
+        # are identical - but crossing into the NEXT tile (8257) must cost more.
+        self.assertAlmostEqual(sweep.weight_bytes(32, 8240), sweep.weight_bytes(32, 8256))
+        self.assertGreater(sweep.weight_bytes(32, 8257), sweep.weight_bytes(32, 8240))
 
     def test_dram_floor_scales_with_bytes_and_bandwidth(self):
         floor_400 = sweep.dram_floor_us(5120, 8704, bandwidth_gbps=400.0)
@@ -149,21 +189,31 @@ class GridEnumerationTests(unittest.TestCase):
             self.assertLessEqual(x * y, n_tiles)
 
     def test_legal_grids_excludes_grids_wider_than_n_tiles(self):
-        n_tiles = 100  # the full 13x10=130-core worker grid exceeds this
+        n_tiles = 100  # the full 11x10=110-core worker grid exceeds this
         grids = sweep.legal_grids(n_tiles)
-        self.assertNotIn((13, 10), grids)
+        self.assertNotIn((11, 10), grids)
         self.assertIn((10, 10), grids)  # 100 cores == n_tiles is still legal
 
+    def test_legal_grids_never_exceeds_measured_worker_grid(self):
+        # The rig measured device.compute_with_storage_grid_size() == (11, 10); 12x/13x
+        # candidates produced TT_FATAL there, so legal_grids must never offer them.
+        for x, y in sweep.legal_grids(10_000):
+            self.assertLessEqual(x, 11)
+            self.assertLessEqual(y, 10)
+
     def test_legal_grids_includes_prime_tile_count(self):
-        # gdn_qkvz's real N (6176) is 193 tiles, and 193 is prime - under the old
-        # exact-division rule only the trivial 1x1 grid was legal for a shape like
-        # this. Every grid up to the worker bound should now be legal (193 > 130).
+        # gdn_qkvz's real N on the rig (8240) is 258 tiles; a smaller illustrative
+        # prime tile count (193) is used here instead - under the old exact-division
+        # rule only the trivial 1x1 grid was legal for a shape whose tile count is
+        # prime. Every grid up to the worker bound should now be legal (193 exceeds
+        # even the full 11x10=110-core grid).
         n_tiles = 193
         self.assertEqual(len(sweep.legal_grids(n_tiles)),
-                         sum(1 for x in range(1, 14) for y in range(1, 11)))
+                         sum(1 for x in range(1, sweep.WORKER_GRID_X + 1)
+                             for y in range(1, sweep.WORKER_GRID_Y + 1)))
 
     def test_select_grids_quick_includes_legal_named_grids(self):
-        n_tiles = 193  # prime; every named grid (max 130 cores) is now legal
+        n_tiles = 193  # prime; every named grid (max 110 cores) is now legal
         grids = sweep.select_grids(n_tiles, quick=True)
         for named in sweep.NAMED_GRIDS:
             self.assertIn(named, grids)
@@ -187,7 +237,14 @@ class GridEnumerationTests(unittest.TestCase):
 
     def test_select_grids_ignores_illegal_extra(self):
         n_tiles = 100
-        illegal = (13, 10)  # 130 cores > 100 tiles
+        illegal = (13, 10)  # x=13 exceeds the measured 11-wide worker grid
+        grids = sweep.select_grids(n_tiles, quick=True, extra=(illegal,))
+        self.assertNotIn(illegal, grids)
+
+    def test_select_grids_ignores_extra_wider_than_worker_grid_but_not_n_tiles(self):
+        # (11, 10) is within the worker grid but its 110 cores exceed n_tiles=100.
+        n_tiles = 100
+        illegal = (11, 10)
         grids = sweep.select_grids(n_tiles, quick=True, extra=(illegal,))
         self.assertNotIn(illegal, grids)
 

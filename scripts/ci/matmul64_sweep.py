@@ -22,7 +22,7 @@ Four measurement arms per shape, per M, per activation placement:
                          config (the exact call model_config.py makes), rebuilt here by
                          calling that same builder - not reimplemented.
   (b) grid_bxh_blkw    - a swept ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig over
-                         core grids (up to the Blackhole p150a 13x10 worker grid) and
+                         core grids (up to the Blackhole p150a 11x10 worker grid) and
                          in0_block_w choices that divide K in tiles.
   (c) auto             - ttnn.linear with program_config=None (ttnn's own auto config),
                          as a no-tuning reference point.
@@ -51,10 +51,13 @@ from pathlib import Path
 
 TILE = 32
 
-# Blackhole p150a physical worker grid (task brief); the model's own decode_grid_w
-# (mesh_device.compute_with_storage_grid_size().x, 11 on BH per model_config.py's
-# comments) is narrower - the whole point of this sweep is to look past that default.
-WORKER_GRID_X = 13
+# Blackhole p150a physical worker grid, as MEASURED on the rig card this sweep ran on
+# (device.compute_with_storage_grid_size() == (11, 10) - run against image v65, card
+# M; 12x/13x candidates only produced TT_FATAL rows there). The model's own
+# decode_grid_w (mesh_device.compute_with_storage_grid_size().x, 11 on BH per
+# model_config.py's comments) already matches this width - the whole point of this
+# sweep is to look past its narrow HEIGHT (grid_w=11 but only ~4 rows used).
+WORKER_GRID_X = 11
 WORKER_GRID_Y = 10
 
 DRAM_BANDWIDTH_GBPS = 400.0
@@ -71,7 +74,10 @@ BFP8_BYTES_PER_ELEMENT = BFP8_BYTES_PER_TILE / (TILE * TILE)
 # goal-200tps-concurrent): TP2 on two Blackhole p150a.
 MODEL_TP = 2
 
-NAMED_GRIDS = ((8, 8), (10, 8), (13, 8), (13, 10))
+# Six corners/edges of the real 11x10 worker grid this sweep measured against
+# (12x/13x candidates were dropped after they produced TT_FATAL on the rig - the
+# device's actual compute_with_storage_grid_size() tops out at (11, 10)).
+NAMED_GRIDS = ((8, 8), (10, 8), (11, 8), (8, 10), (10, 10), (11, 10))
 
 # The seven decode matmuls, in model_config.py's own NATIVE_64_BLOCK order. Each entry
 # is (name, K-from, N-from, num_cores, grid_w_pinned, silu) where K/N-from select which
@@ -90,10 +96,20 @@ _SHAPE_SPECS = (
 
 
 def tiles(n):
-    """n in 32-row/col tiles; every shape in this model is tile-aligned."""
-    if n <= 0 or n % TILE:
-        raise ValueError("%d is not a positive multiple of the %d-element tile" % (n, TILE))
-    return n // TILE
+    """n in 32-row/col tiles, rounding UP (ceiling) for a non-tile-aligned dim. Never
+    raises: real per-chip GDN widths are NOT always tile-aligned (gdn_qkvz's real N was
+    8240 on the rig, not a multiple of 32 - head-count arithmetic, not tile alignment,
+    drives that width), and ttnn pads a non-aligned tensor to the next full tile
+    itself, so this mirrors that rather than rejecting the shape outright."""
+    if n <= 0:
+        raise ValueError("tiles() needs a positive size, got %d" % n)
+    return math.ceil(n / TILE)
+
+
+def pad_to_tile(n):
+    """n rounded UP to the next multiple of TILE (32) - the padded width ttnn actually
+    allocates on device for a non-tile-aligned dim (pad_to_tile(8240) == 8256)."""
+    return tiles(n) * TILE
 
 
 def divisors(n):
@@ -154,15 +170,19 @@ def shape_table(dims, tp=MODEL_TP):
     derived.update(gdn_tp_dims(dims["gdn_nk"], dims["gdn_nv"], dims["gdn_dk"], dims["gdn_dv"], tp))
     table = []
     for name, k_key, n_key, num_cores, grid_w_pinned, silu in _SHAPE_SPECS:
+        K, N = derived[k_key], derived[n_key]
         table.append(dict(
-            name=name, K=derived[k_key], N=derived[n_key],
+            name=name, K=K, N=N, K_padded=pad_to_tile(K), N_padded=pad_to_tile(N),
             num_cores=num_cores, grid_w_pinned=grid_w_pinned, silu=silu,
         ))
     return table
 
 
 def weight_bytes(K, N):
-    return K * N * BFP8_BYTES_PER_ELEMENT
+    """Bytes for the weight ttnn actually allocates: K and N are padded up to the next
+    full tile first (real DRAM traffic reads whole tiles, never a partial one - e.g.
+    gdn_qkvz's real N of 8240 is read as its 8256-wide padded tile allocation)."""
+    return pad_to_tile(K) * pad_to_tile(N) * BFP8_BYTES_PER_ELEMENT
 
 
 def dram_floor_us(K, N, bandwidth_gbps=None):
@@ -189,7 +209,7 @@ def legal_grids(n_tiles, max_x=WORKER_GRID_X, max_y=WORKER_GRID_Y):
     gdn_qkvz's N (6176, 193 tiles - 193 is prime) has NO divisor between 1 and
     itself, which made the exact-division sweep degenerate to a single 1x1 grid for
     that shape alone. Ceiling-based per_core_N matches what tp_common already does and
-    keeps the full 13x10 worker grid in play for every shape."""
+    keeps the full 11x10 worker grid in play for every shape."""
     out = set()
     for x in range(1, max_x + 1):
         for y in range(1, max_y + 1):
@@ -200,7 +220,7 @@ def legal_grids(n_tiles, max_x=WORKER_GRID_X, max_y=WORKER_GRID_Y):
 
 
 def select_grids(n_tiles, quick=True, extra=(), budget=20):
-    """quick keeps the four named grids (8x8, 10x8, 13x8, 13x10) that are legal for
+    """quick keeps the six named grids (8x8, 10x8, 11x8, 8x10, 10x10, 11x10) that are legal for
     this N (cores <= n_tiles - see legal_grids), any `extra` grids (e.g. the model's
     own), and a core-count-spread sample of the rest up to `budget` grids total (the
     named/extra grids count against the same budget). build_configs sizes `budget`
@@ -208,7 +228,7 @@ def select_grids(n_tiles, quick=True, extra=(), budget=20):
     configs without either axis silently truncating the other's candidates (a fixed
     20-grid budget plus up to 6 block probes could overflow a flat 24-config cap and
     lose whichever block width iterated last - see build_configs). full returns every
-    legal grid up to the 13x10 worker grid, uncapped."""
+    legal grid up to the 11x10 worker grid, uncapped."""
     legal = legal_grids(n_tiles)
     legal_set = set(legal)
     keep = [grid for grid in NAMED_GRIDS if grid in legal_set]
@@ -440,15 +460,21 @@ def dram_sharded_progcfg(K, N, M):
 
 
 def make_weight(ttnn, torch, device, K, N, memory_config, seed=0):
+    """Allocates at the PADDED (K, N) - the program configs this sweep builds size
+    per_core_M/N off ceil(dim / TILE) tile counts, so the tensor handed to ttnn.linear
+    must already be the tile-rounded width (gdn_qkvz's real N=8240 pads to 8256) rather
+    than relying on from_torch's own padding to agree with a progcfg built separately."""
     torch.manual_seed(seed)
-    weight = torch.randn(K, N, dtype=torch.bfloat16) * 0.02
+    weight = torch.randn(pad_to_tile(K), pad_to_tile(N), dtype=torch.bfloat16) * 0.02
     return ttnn.from_torch(weight, device=device, dtype=ttnn.bfloat8_b, layout=ttnn.TILE_LAYOUT,
                            memory_config=memory_config)
 
 
 def make_activation(ttnn, torch, device, M, K, memory_config, seed=0):
+    """M is always 32 or 64 (already tile-aligned by construction); K is padded for
+    the same reason make_weight pads - it must match the progcfg's tile-rounded K."""
     torch.manual_seed(seed + 1000)
-    value = torch.randn(1, 1, M, K, dtype=torch.bfloat16) * 0.02
+    value = torch.randn(1, 1, M, pad_to_tile(K), dtype=torch.bfloat16) * 0.02
     return ttnn.from_torch(value, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
                            memory_config=memory_config)
 
@@ -472,11 +498,15 @@ def time_matmul(ttnn, device, run_once, warmup=3, iters=20):
     return dict(mean_us=statistics.mean(samples), min_us=min(samples), samples_us=samples)
 
 
-def run_shape(ttnn, torch, device, shape, quick, iters, warmup, activations):
+def run_shape(ttnn, torch, device, shape, quick, iters, warmup, activations, runs):
     """Run every arm ((a) model_current, (b) grid sweep, (c) auto, (d) dram_sharded)
-    for one shape at M in (32, 64) x the requested activation placements. Returns a
-    flat list of run records; a failing config is caught and recorded as an error
-    row rather than aborting the sweep."""
+    for one shape at M in (32, 64) x the requested activation placements. A failing
+    CONFIG is caught and recorded as an error row rather than aborting the sweep (see
+    safe_time below). Appends into the caller-owned `runs` list IN PLACE, rather than
+    building and returning its own list, so a failure that escapes this function
+    entirely (e.g. build_configs raising before any config for a shape has even been
+    tried) still leaves every row measured so far in `runs` for main() to save -
+    main() wraps the call in its own try/except per shape and saves after every one."""
     K, N, name = shape["K"], shape["N"], shape["name"]
     ckc = compute_kernel_config(ttnn)
     act_memcfgs = []
@@ -489,8 +519,6 @@ def run_shape(ttnn, torch, device, shape, quick, iters, warmup, activations):
     model_grid_w = None
     if shape["grid_w_pinned"]:
         model_grid_w = device.compute_with_storage_grid_size().x
-
-    runs = []
 
     def record(M, act_name, arm, is_model_current, config, timing_or_error):
         row = dict(shape=name, M=M, activation=act_name, arm=arm,
@@ -563,7 +591,6 @@ def run_shape(ttnn, torch, device, shape, quick, iters, warmup, activations):
 
             ttnn.deallocate(x)
     ttnn.deallocate(weight)
-    return runs
 
 
 def main():
@@ -582,7 +609,7 @@ def main():
     group.add_argument("--quick", action="store_true", default=True,
                       help="cap grids to ~24 configs per shape (default)")
     group.add_argument("--full", dest="quick", action="store_false",
-                      help="every legal grid up to the 13x10 worker grid")
+                      help="every legal grid up to the 11x10 worker grid")
     args = parser.parse_args()
     DRAM_BANDWIDTH_GBPS = args.bandwidth_gbps
 
@@ -599,24 +626,42 @@ def main():
     shapes_by_name = {shape["name"]: shape for shape in shapes}
     activations = set(args.activations.split(","))
 
-    device = ttnn.open_device(device_id=args.device_id, l1_small_size=24576)
-    report = dict(passed=False, dims=dims, shapes=shapes, quick=args.quick,
-                 bandwidth_gbps=DRAM_BANDWIDTH_GBPS,
+    report = dict(passed=False, complete=False, dims=dims, shapes=shapes, quick=args.quick,
+                 bandwidth_gbps=DRAM_BANDWIDTH_GBPS, runs=[], summary={}, shape_errors={},
                  scope="Single-device, single-layer decode matmul timing; not a full-model or "
                        "TP2-collective measurement")
-    all_runs = []
-    try:
-        for shape in shapes:
-            print("== sweeping %s (K=%d, N=%d) ==" % (shape["name"], shape["K"], shape["N"]), flush=True)
-            runs = run_shape(ttnn, torch, device, shape, args.quick, args.iters, args.warmup, activations)
-            all_runs.extend(runs)
-        report["runs"] = all_runs
-        report["summary"] = summarize(all_runs, shapes_by_name)
-        report["passed"] = True
-    finally:
+
+    def save():
+        # Called after EVERY shape (success or failure) so a later crash - device-level,
+        # or a bug in a shape this sweep has not hit yet - never loses shapes already
+        # measured (run 35... on the rig lost four completed shapes this way: gdn_qkvz's
+        # N=8240 crashed build_configs, and the only write_text call was in a single
+        # top-level `finally`, which then itself failed with an unwritable /results).
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=2, default=str))
-        ttnn.close_device(device)
+
+    device = None
+    try:
+        device = ttnn.open_device(device_id=args.device_id, l1_small_size=24576)
+        for shape in shapes:
+            print("== sweeping %s (K=%d, N=%d) ==" % (shape["name"], shape["K"], shape["N"]), flush=True)
+            try:
+                run_shape(ttnn, torch, device, shape, args.quick, args.iters, args.warmup,
+                         activations, report["runs"])
+            except Exception as error:  # noqa: BLE001 - one shape's bug must not lose the rest
+                message = "%s: %s" % (type(error).__name__, error)
+                report["shape_errors"][shape["name"]] = message
+                print("!! %s failed: %s" % (shape["name"], message), flush=True)
+            report["summary"] = summarize(report["runs"], shapes_by_name)
+            save()
+        report["complete"] = True
+        report["passed"] = not report["shape_errors"]
+    except Exception as error:  # noqa: BLE001 - e.g. device open itself failing
+        report["fatal_error"] = "%s: %s" % (type(error).__name__, error)
+    finally:
+        save()
+        if device is not None:
+            ttnn.close_device(device)
 
     print(format_table(report["summary"], shapes_by_name))
     if not report["passed"]:

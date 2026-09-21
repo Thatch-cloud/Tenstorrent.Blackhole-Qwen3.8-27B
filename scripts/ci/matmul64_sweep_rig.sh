@@ -36,6 +36,13 @@ extra_args=("$@")
 
 mkdir -p "$outdir"
 outdir=$(cd "$outdir" && pwd)
+# The main container below runs as root with --cap-drop ALL. Writing into a host
+# directory it does not own fails EACCES unless the directory is already
+# world-writable (run against image v65 hit exactly this: matmul64-sweep.json never
+# got written, and the four already-completed shapes' results were lost with it -
+# see the post-run fixup below and matmul64_sweep.py's own per-shape partial saves,
+# which now save after every shape rather than only in one final `finally`).
+chmod 0777 "$outdir"
 
 device=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
 test -e "$device"
@@ -64,6 +71,17 @@ timeout -k 30 900 docker run --rm --name "$name" --network none \
   --entrypoint python3 "$image" -B /bench/matmul64_sweep.py \
   --out /results/matmul64-sweep.json --device-id 0 "${extra_args[@]}" \
   > "$outdir/matmul64-sweep-console.log" 2>&1 || true
+
+# The main container's own writes into /results come out root-owned even with the
+# chmod 0777 above (that widened the DIRECTORY, not files root subsequently creates in
+# it), so the runner user could not read or delete them afterwards. A SEPARATE
+# default-capability container (no --cap-drop) hands the tree back, mirroring
+# lever_n_m3native_run_arm.sh's own tracy .logs fixup. Best-effort: a failure here must
+# not hide the sweep's own exit state, which the `test -s` below still checks.
+timeout -k 10 60 docker run --rm --network none \
+  --mount "type=bind,src=$outdir,dst=/results" \
+  --entrypoint sh "$image" -c 'chmod -R a+rwX /results' \
+  > /dev/null 2>&1 || true
 
 test -s "$outdir/matmul64-sweep.json"
 echo "results: $outdir/matmul64-sweep.json"
