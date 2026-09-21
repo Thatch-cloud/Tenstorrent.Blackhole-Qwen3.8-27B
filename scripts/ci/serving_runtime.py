@@ -35,6 +35,13 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # combined_runtime() is entered below, since dflash_t16_native_scope.admit runs inside it.
     from runtime_binary_override import install as override_runtime_binary
     override_runtime_binary(runtime_root, log=pindiag)
+    # Measurement-only, env-gated admission of the device profiler into the mandatory
+    # block-stream recipe (attribution only, never a throughput claim): inert unless
+    # QWEN_FAST_PROFILED_BLOCK_STREAM=1, and edits no recipe file. Must run before
+    # combined_runtime() is entered below, since scoped_block_stream's require_hardware
+    # check runs inside it.
+    from profiled_block_stream_override import install as admit_profiled_block_stream
+    admit_profiled_block_stream(log=pindiag)
     if (native_attention_evidence is None or kv_publication_evidence is None
             or block_stream is None or 'pipeline_evidence' in block_stream):
         raise ValueError('Native T16, direct KV publication and serial weight-stream recipe required')

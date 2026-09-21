@@ -18,6 +18,7 @@ COPY scripts/ci/serving_fast_request.py /experiment-scripts/ci/
 COPY scripts/ci/serving_worker_hook.py /experiment-scripts/ci/
 COPY scripts/ci/serving_one_in_flight.py /experiment-scripts/ci/
 COPY scripts/ci/runtime_binary_override.py /experiment-scripts/ci/
+COPY scripts/ci/profiled_block_stream_override.py /experiment-scripts/ci/
 COPY scripts/ci/serving_vllm_packed.py /experiment-scripts/ci/
 COPY scripts/ci/serving_vllm_contract.py /experiment-scripts/ci/
 COPY scripts/ci/model_batch.py /experiment-scripts/ci/
@@ -52,7 +53,7 @@ RUN OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 VLLM_PLUGINS='' python3 -B -m unittest \
     test_serving_fast_request test_serving_vllm_contract test_serving_vllm_state \
     test_serving_page_binding test_serving_runner_bridge test_serving_request_factory \
     test_serving_worker_hook test_serving_lifecycle test_serving_cache_owner test_serving_runtime test_serving_gather_experiment \
-    test_serving_runtime_binary_override
+    test_serving_runtime_binary_override test_serving_profiled_block_stream_override
 RUN VLLM_PLUGINS='' python3 -c 'import ttnn; from importlib.metadata import version; assert version("vllm").split("+")[0] == "0.25.1"; assert all(callable(getattr(ttnn.transformer, name)) for name in ("attn_decode_prep", "gdn_decode_norm_gate", "gdn_decode_conv_gates", "decode_gated_delta_rule_packed"))'
 WORKDIR /opt/tt-metal
 RUN VLLM_PLUGINS='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python3 -B /experiment-scripts/ci/serving_image_preflight.py --root /opt/tt-metal --output /opt/qwen-serving/startup-preflight.json

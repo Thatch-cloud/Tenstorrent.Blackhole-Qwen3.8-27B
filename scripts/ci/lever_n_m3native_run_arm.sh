@@ -104,6 +104,10 @@ fi
 # fewer rounds is less work than the unprofiled 256-token run it replaces, and the
 # workflow's own 40-minute step / 45-minute job ceilings leave no room to grow it to
 # dflash-request-profile.sh's 4200 s (that budget covers a much larger, unrelated run).
+#
+# Profile mode also sets QWEN_FAST_PROFILED_BLOCK_STREAM=1 so serving_runtime's
+# profiled_block_stream_override admits TT_METAL_DEVICE_PROFILER into the mandatory
+# block-stream recipe for this attribution measurement only (run 35561945903 refused it).
 max_tokens=256
 entry_args=(-B /bench/lever_n_m3native_gate.py)
 if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
@@ -145,6 +149,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_TRACE_TRACKING=1} \
   ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_CPP_POST_PROCESS=1} \
   ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_MID_RUN_DUMP=1} \
+  ${M3NATIVE_PROFILE:+-e QWEN_FAST_PROFILED_BLOCK_STREAM=1} \
   -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
   -e QWEN_FAST_FOUR_AS_TWO=0 \
   -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=32768 \
