@@ -105,6 +105,41 @@ jobs:
           for metric in cpu memory io; do cat "/proc/pressure/$metric"; done \
             > experiment-results/host-pressure-before.txt
           cat experiment-results/host-pressure-before.txt
+      - name: Reset every board before this job opens the pair
+        working-directory: cycle
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # A long four-user run leaves an active ethernet core on device 0 that the next
+          # open cannot bring back: llrt.cpp:594 "Timed out while waiting for active
+          # ethernet core 31-25 to become active again" (runs 35560086522 and 35560086573,
+          # the latter twice - once right after the former had passed). Reset EVERY board
+          # before the job opens the pair, exactly as qwen-card-reset.yml does: both link
+          # ends must come back together (resetting one board alone left the mesh at 1x1,
+          # run 35414390308). No firmware is written and no host reboot happens. The
+          # preceding step already proved no process holds a card.
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/reset.log 2>&1 || status=$?
+          if [ "$status" != 0 ]; then
+            echo "multi-board reset exited $status; resetting each in turn" >> experiment-results/reset.log
+            status=0
+            for path in "${paths[@]}"; do
+              timeout -k 20 300 "${prefix[@]}" "$smi" -r "$path" >> experiment-results/reset.log 2>&1 || status=$?
+            done
+          fi
+          echo "reset_exit=$status" | tee experiment-results/reset.status
+          tail -20 experiment-results/reset.log || true
+          timeout -k 5 30 "${prefix[@]}" "$smi" -ls 2>&1 | tee experiment-results/boards-after-reset.txt | tail -8
+          test "$status" = 0
       - name: Decode at ${{ matrix.users }} users x ${{ matrix.context }} ctx, plain path
         working-directory: cycle
         timeout-minutes: 34
