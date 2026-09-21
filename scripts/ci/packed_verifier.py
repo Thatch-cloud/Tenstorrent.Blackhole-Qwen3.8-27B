@@ -275,6 +275,21 @@ def dump_device_profiler_after_round(operations, mesh, rounds, environ=None):
     return True
 
 
+REPLAY_GROUP_ROWS_FLAG = 'QWEN_FAST_REPLAY_GROUP_ROWS'
+
+
+def replay_group_rows(environ=None):
+    """The opt-in flag for the packed block's per-user replay reader group-row width
+    (model_batch.ModelBatch's replay_group_rows, which accepts only 4 or 8; 8 requires
+    attention_replay, already True for this fixture). Default '4' is today's grouping,
+    byte-identical; anything but '4' or '8' is a configuration error rather than a silent
+    fallback, the same pattern as gdn_user_batch.enabled."""
+    value = (os.environ if environ is None else environ).get(REPLAY_GROUP_ROWS_FLAG, '4')
+    if value not in ('4', '8'):
+        raise ValueError('%s must be 4 or 8' % REPLAY_GROUP_ROWS_FLAG)
+    return int(value)
+
+
 class PackedVerifierEngine:
     """Owner of one packed verify block: build at attach, then per round
     `verify(entries)` -> per-entry predictions, `features(segment)` for each user's
@@ -364,6 +379,10 @@ class PackedVerifierEngine:
         # commit_user). commit_timings is this round's per-segment device/enqueue time,
         # indexed by segment, printed as one line under QWEN_FAST_PACKED_AUDIT=1.
         self.pipelined_commits = os.environ.get('QWEN_FAST_PIPELINED_COMMITS') == '1'
+        # QWEN_FAST_REPLAY_GROUP_ROWS: read once here, like pipelined_commits above, and
+        # stored for the block's whole life so build_fixture (the trace capture) and
+        # describe() (the diagnostic dict) always agree on the value actually in use.
+        self.replay_group_rows = replay_group_rows()
         self.commit_timings = [0.0] * shape.users
         # This round's per-segment HOST cost of the RetainedGDNBlock.commit_user call
         # itself (gdn_records.py), beyond its device commit trace: call_ms - commit_ms,
@@ -477,7 +496,7 @@ class PackedVerifierEngine:
             serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True,
             skip_row_clones=True, hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
             batch_conv=True, packed_checkpoints=True, retain_records=True, ordered_cache=True,
-            norm_batch=True, attention_replay=True, attention_mask_once=False, replay_group_rows=4,
+            norm_batch=True, attention_replay=True, attention_mask_once=False, replay_group_rows=self.replay_group_rows,
             short_context=False, attention_audit=False, commit_only_gdn=True)
 
     def operation(self, fixture):
@@ -732,7 +751,7 @@ class PackedVerifierEngine:
             taps=[list(addresses(operations, tap)) for tap in self.taps],
             checkpoints=[list(addresses(operations, checkpoints[0][0])) for checkpoints in self.checkpoints],
             carries=[list(carry[0][0]) for carry in self.carry_addresses],
-            attention=dict(reader='per-user bundled replay', family=self.replay_capacity, replay_group_rows=4,
+            attention=dict(reader='per-user bundled replay', family=self.replay_capacity, replay_group_rows=self.replay_group_rows,
                            bundles_per_user=[len(tables) for tables in self.replay_tables],
                            tables=[[list(address) for address in tables] for tables in self.replay_addresses]),
             setup_ms=getattr(self, 'setup_ms', None), rounds=self.rounds)

@@ -134,12 +134,15 @@ def snapshot_set(ttnn):
     return [[tensor(ttnn) for part in range(5)] for layer in range(GDN_LAYERS)]
 
 
-def packed_tables(ttnn, users=2, rows=16, families=FAMILIES):
+def packed_tables(ttnn, users=2, rows=16, families=FAMILIES, max_group_rows=4):
     """The pool's packed replay page tables for one shape (serving_buffer_pool.PackedReplayTables):
-    per family, per user, one (batches, capacity // 64) table per bundle of a rows-row reader."""
+    per family, per user, one (batches, capacity // 64) table per bundle of a rows-row reader.
+    `max_group_rows` must match what the reader that will use these tables was built with
+    (packed_verifier.replay_group_rows()); a pool provisioned for one grouping does not fit
+    a reader built for the other (pooled_attention_replay.validate_storage checks this for real)."""
     return PackedReplayTables(users, rows, {
         capacity: [[ttnn.allocate((batches, capacity // 64), 'int32', 'row_major', torch.zeros(batches, capacity // 64, dtype=torch.int32))
-                    for batches in bundle_batches(rows, capacity)] for user in range(users)]
+                    for batches in bundle_batches(rows, capacity, max_group_rows=max_group_rows)] for user in range(users)]
         for capacity in families})
 
 
@@ -1298,6 +1301,70 @@ class PoolSlotBindingTests(BlockFixture):
         for pool_slots in ((0,), (0, 0), (0, 4), (0, 'x'), (0, 1, 2)):
             with self.subTest(pool_slots=pool_slots), self.assertRaisesRegex(ValueError, 'One distinct pool slot'):
                 self.build(pool_slots=pool_slots)
+
+
+class ReplayGroupRowsFlagTests(unittest.TestCase):
+    """QWEN_FAST_REPLAY_GROUP_ROWS selects packed_verifier.replay_group_rows()'s return
+    value; unset (or any value but '4'/'8') stays exactly today's four-row grouping."""
+
+    def test_unset_defaults_to_four(self):
+        self.assertEqual(packed_verifier.replay_group_rows(environ={}), 4)
+
+    def test_eight_is_accepted(self):
+        self.assertEqual(packed_verifier.replay_group_rows(environ={'QWEN_FAST_REPLAY_GROUP_ROWS': '8'}), 8)
+
+    def test_four_is_accepted_explicitly(self):
+        self.assertEqual(packed_verifier.replay_group_rows(environ={'QWEN_FAST_REPLAY_GROUP_ROWS': '4'}), 4)
+
+    def test_any_other_value_is_refused(self):
+        for value in ('6', '0', '04', ' 8', '8.0', ''):
+            with self.subTest(value=value), \
+                    self.assertRaisesRegex(ValueError, 'QWEN_FAST_REPLAY_GROUP_ROWS must be 4 or 8'):
+                packed_verifier.replay_group_rows(environ={'QWEN_FAST_REPLAY_GROUP_ROWS': value})
+
+    def test_defaults_from_the_real_environment_when_no_mapping_is_given(self):
+        import os
+
+        with patch.dict('os.environ', {}, clear=False):
+            os.environ.pop('QWEN_FAST_REPLAY_GROUP_ROWS', None)
+            self.assertEqual(packed_verifier.replay_group_rows(), 4)
+        with patch.dict('os.environ', {'QWEN_FAST_REPLAY_GROUP_ROWS': '8'}):
+            self.assertEqual(packed_verifier.replay_group_rows(), 8)
+
+
+class ReplayGroupRowsConstructionTests(BlockFixture):
+    """The flag is read once at block construction and stored on the engine, so a fixture
+    built under it and the block's own describe() dict agree on the value in use."""
+
+    def test_default_construction_stays_four_row_groups_everywhere(self):
+        block = self.build()
+        self.assertEqual(block.replay_group_rows, 4)
+        for fixture in FakeModelBatch.instances:
+            self.assertEqual(fixture.options['replay_group_rows'], 4)
+        self.assertEqual(block.describe()['attention']['replay_group_rows'], 4)
+
+    def test_the_flag_selects_eight_row_replay_groups_in_the_fixture_and_the_describe_dict(self):
+        # The pool's lent tables must be provisioned for the grouping the reader is built
+        # with (pooled_attention_replay.validate_storage), so this one test's pool is built
+        # with max_group_rows=8 rather than the fixture's default four-row tables.
+        eight_row_pool = pool(self.ttnn, self.helpers, users=self.USERS,
+                              packed={(self.USERS, 16): packed_tables(self.ttnn, users=self.USERS, max_group_rows=8)})
+        # attention_replay.ReplayAttentionReader gates eight-row grouping on its own
+        # scratch-readiness flag (QWEN_SDPA_TREE_SCRATCH_ROUNDS), independent of this
+        # flag; set both so the underlying reader actually builds at width 8.
+        with patch.dict('os.environ', {'QWEN_FAST_REPLAY_GROUP_ROWS': '8', 'QWEN_SDPA_TREE_SCRATCH_ROUNDS': '1'}):
+            block = PackedVerifierEngine(self.ttnn, self.model, self.helpers, 'sampler', pool=eight_row_pool,
+                shared_weights=self.weights, shape=self.shape(), feature_taps=TAPS)
+        self.assertEqual(block.replay_group_rows, 8)
+        for fixture in FakeModelBatch.instances:
+            self.assertEqual(fixture.options['replay_group_rows'], 8)
+        self.assertEqual(block.describe()['attention']['replay_group_rows'], 8)
+
+    def test_an_invalid_flag_value_is_refused_before_any_allocation(self):
+        with patch.dict('os.environ', {'QWEN_FAST_REPLAY_GROUP_ROWS': '6'}), \
+                self.assertRaisesRegex(ValueError, 'QWEN_FAST_REPLAY_GROUP_ROWS must be 4 or 8'):
+            self.build()
+        self.assertEqual(FakeModelBatch.instances, [])
 
 
 class ProfileDumpRoundTests(unittest.TestCase):
