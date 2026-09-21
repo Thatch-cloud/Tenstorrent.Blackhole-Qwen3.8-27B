@@ -101,6 +101,29 @@ class TargetReplayTests(unittest.TestCase):
         self.assertEqual(reports[0]['rows_over_budget'], 0)
         self.assertEqual(reports[0]['nonfinite'], 0)
 
+    def test_near_zero_references_do_not_inflate_the_ulp_report(self):
+        """Run 35665484092 reported max_ulp 91393 for a worst difference of 3.05e-05,
+        because the per-element denominator collapsed on near-zero entries. The ulp is
+        now taken at the reference TENSOR scale, so the number stays interpretable when
+        most of the tensor is zero - which is the normal shape of attention output."""
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.zeros(4, 8, dtype=torch.bfloat16)]
+        expected[0][0][0] = 0.0028                  # one large entry, the rest zero
+        actual = expected[0].to(torch.float32)
+        actual[1][1] = 3.0517578125e-05             # a one-ulp-of-scale difference on a zero
+        failures, reports = self._run_comparison([actual.to(torch.bfloat16)], expected)
+        self.assertEqual(failures, [0])             # still fails: the bar is exactness
+        report = reports[0]
+        # 0.0028 rounds to this exactly in bfloat16; ulp at that scale is scale * 2**-7,
+        # so the 3.05e-05 difference is about 1.4 ulp - the interpretable number.
+        self.assertAlmostEqual(report['scale'], 0.0028076171875, places=9)
+        self.assertAlmostEqual(report['max_ulp'], 1.39, places=1)
+        self.assertLess(report['max_ulp'], 10.0)    # ~1.4, not 91393
+        self.assertEqual(report['rows_over_budget'], 0)
+
     def test_a_structurally_wrong_row_still_fails(self):
         """Both kinds of failure are caught, and the report tells them apart: a wrong row
         puts rows_over_budget above zero, where merge-order rounding leaves it at zero."""
