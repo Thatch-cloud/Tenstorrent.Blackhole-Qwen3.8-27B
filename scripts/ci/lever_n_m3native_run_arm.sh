@@ -21,7 +21,7 @@
 # fire (gate 1, run 35556533480: a false negative - no decode round ever ran, even
 # though the graft was mounted correctly). Setting it to 0 keeps the single M3 block.
 set -euo pipefail
-image="${1:-sha256:01ccd6f8586d365d7116983d49c25cc8188008f388adbe00146a4035549ec785}"
+image="${1:-sha256:f31de99a8d64f98f39baf251d8b0aade386870b9f8cd61c3145abf385b62dd80}"
 target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
