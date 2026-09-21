@@ -57,8 +57,8 @@ timeout -k 30 900 docker run --rm --name "$name" --network none \
   --workdir /opt/tt-metal \
   --entrypoint python3 "$image" -B /bench/sdpa_verify_prefill_style_bench.py \
   --out /results/sdpa-verify-prefill-style-bench.json --device-id 0 "${extra_args[@]}" \
-docker run --rm --network none --mount "type=bind,src=$outdir,dst=/p" --entrypoint sh "$image" -c "chmod -R a+rwX /p" > /dev/null 2>&1 || true
   > "$outdir/sdpa-bench-console.log" 2>&1 || true
+docker run --rm --network none --mount "type=bind,src=$outdir,dst=/p" --entrypoint sh "$image" -c "chmod -R a+rwX /p" > /dev/null 2>&1 || true
 
 test -s "$outdir/sdpa-verify-prefill-style-bench.json"
 echo "results: $outdir/sdpa-verify-prefill-style-bench.json"
