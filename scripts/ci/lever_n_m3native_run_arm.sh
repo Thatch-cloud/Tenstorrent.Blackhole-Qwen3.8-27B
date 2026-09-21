@@ -109,6 +109,7 @@ fi
 # profiled_block_stream_override admits TT_METAL_DEVICE_PROFILER into the mandatory
 # block-stream recipe for this attribution measurement only (run 35561945903 refused it).
 max_tokens=256
+trace_region_bytes=1073741824
 entry_args=(-B /bench/lever_n_m3native_gate.py)
 if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
   # The container runs as root with every capability dropped (no CAP_DAC_OVERRIDE), so
@@ -117,6 +118,7 @@ if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
   chmod 0777 experiment-results/profile
   mounts+=(--mount "type=bind,src=$PWD/experiment-results/profile,dst=/experiment-results-profile")
   max_tokens=48
+  trace_region_bytes=402653184
   entry_args=(-m tracy -p --check-exit-code --disable-device-data-dump-to-files
               --disable-device-data-push-to-tracy --dump-device-data-mid-run
               --op-support-count 20000 -o /experiment-results-profile
@@ -166,7 +168,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
   -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
   --entrypoint python3 "$image" "${entry_args[@]}" \
-  --users 4 --context 33024 --prompt-tokens 32768 --max-tokens "$max_tokens" --stream-timeout 600 \
+  --users 4 --context 33024 --prompt-tokens 32768 --max-tokens "$max_tokens" --stream-timeout 600 --trace-region-bytes "$trace_region_bytes" \
   --prompt-base 1000 --prompt-user-offset 1 --stagger 0 \
   --references /bench/packed-gate-reference \
   > experiment-results/m3native-gate-stdout.log 2>&1 || true
