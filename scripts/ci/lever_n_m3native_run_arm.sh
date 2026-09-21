@@ -114,7 +114,7 @@ if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
   # The container runs as root with every capability dropped (no CAP_DAC_OVERRIDE), so
   # it cannot create tracy's .logs inside a host directory owned by the runner user
   # (run 35561589158: 'rm -rf /experiment-results-profile/.logs; mkdir -p ...' exit 1).
-  chmod 1777 experiment-results/profile
+  chmod 0777 experiment-results/profile
   mounts+=(--mount "type=bind,src=$PWD/experiment-results/profile,dst=/experiment-results-profile")
   max_tokens=48
   entry_args=(-m tracy -p --check-exit-code --disable-device-data-dump-to-files
@@ -171,6 +171,12 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --references /bench/packed-gate-reference \
   > experiment-results/m3native-gate-stdout.log 2>&1 || true
 
+if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
+  # tracy wrote its .logs as root inside the bind mount; the runner user could not
+  # delete them and the next checkout died (run 35562881085, EACCES unlink). A container
+  # with its default capabilities hands the tree back before anything else runs.
+  timeout -k 10 120 docker run --rm --network none     --mount "type=bind,src=$PWD/experiment-results/profile,dst=/p"     --entrypoint sh "$image" -c 'chmod -R a+rwX /p' > /dev/null 2>&1 || true
+fi
 sed -n '/M3NATIVE_GATE_JSON_BEGIN/,/M3NATIVE_GATE_JSON_END/p' experiment-results/m3native-gate-stdout.log \
   | sed '1d;$d' > experiment-results/m3native-gate.json || true
 sed -n '/M3NATIVE_GATE_LOG_BEGIN/,/M3NATIVE_GATE_LOG_END/p' experiment-results/m3native-gate-stdout.log \
