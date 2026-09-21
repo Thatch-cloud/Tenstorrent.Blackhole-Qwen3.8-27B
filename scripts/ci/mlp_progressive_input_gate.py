@@ -13,7 +13,10 @@ from mlp_register_epilogue_gate import SIM_PACKER
 
 REPORT_SHA256 = '8b843215d54c68ee2f7272db1a4c2ec0d4bdab1524cb062bb02239bf9422c72a'
 STAGING_SHA256 = '618ede1c41773d6c9a7f4a2412b21efdf2fd787cce4d90308d753d4dc0581fb4'
-READER_SHA256 = '5d433b22eeab77f80dee3d3ef2a0cf9b34ae21743897b312d23032904684b4a5'
+# The transformed progressive reader now carries the exit drain commit 4d890d6a
+# added to fused_1d_input.cpp; this transform rebuilds the tail, so the drain has
+# to be repeated in it (see mlp_progressive_input.reader) and the hash moves with it.
+READER_SHA256 = '5dbe53d386ad4074c1493fc65ec5845671490adfa1f1db0c86a034b8f1947f1f'
 CANDIDATE_SHA256 = 'f8e227fd3e95977b52b18c4fdb3855d78040cdad4250197935a3f89d7f33be01'
 
 

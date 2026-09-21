@@ -65,14 +65,41 @@ def additions(role):
     return setup, finish
 
 
+def _before_exit_drain(source):
+    """Split off the exit drain commit 4d890d6a added after the block loop.
+
+    Every zone predicate here is written in terms of `block`, which only exists
+    inside that loop, so the drain can never be a valid instrumentation target -
+    wrapping its barrier would not even compile. Its own
+    noc_async_write_barrier() nonetheless made the bare statement anchor match
+    twice, which is what replace_once refused. Splitting first keeps every zone
+    anchor and every emitted string byte-identical to what was reviewed.
+
+    The tail is not a blind spot: it must be exactly that drain and the closing
+    brace, comments aside. Anything else after the loop - including source drift
+    appended to the end - is refused here rather than quietly skipped.
+    """
+    marker = source.find('    // Drain before exit:')
+    if marker < 0:
+        return source, ''
+    body, drain = source[:marker], source[marker:]
+    code = [line.strip() for line in drain.split('\n')
+            if line.strip() and not line.strip().startswith('//')]
+    if code != ['noc_async_write_barrier();', 'noc_async_atomic_barrier();', '}']:
+        raise ValueError('Unexpected source after the exit drain: %r' % (code,))
+    return body, drain
+
+
 def instrument(source, role):
     setup, finish = additions(role)
     if 'qwen_sample_clock' in source or 'DeviceZoneScopedN' in source:
         raise ValueError('Only uninstrumented native reader operations admitted')
     result = replace_once(source, '#include "api/dataflow/dataflow_api.h"\n',
         '#include "api/dataflow/dataflow_api.h"\n' + HELPER)
+    result, drain = _before_exit_drain(result)
     for index, (statement, name, predicate) in enumerate(ZONES[role]):
         result = replace_once(result, statement, wrapper(statement, predicate, index))
+    result += drain
     anchor = '    for (uint32_t block = 0; block < 20; ++block) {\n'
     result = replace_once(result, anchor, setup + anchor)
     end = result.rfind('}')

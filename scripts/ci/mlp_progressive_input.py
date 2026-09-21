@@ -7,7 +7,7 @@ from pathlib import Path
 from frozen_recipe_context import replace_once
 
 
-CONTROL_SHA256 = '381739e8070b910c61395e5e82970200d96f1de8bff0de25f74d483a1d3258b9'
+CONTROL_SHA256 = '3e907b91884d5b07c915a91c677da8cf299fab2a4832247fe69bcc1a593112bf'
 
 
 def require_simulator():
@@ -52,6 +52,13 @@ def reader(original):
             cb_pop_front(0, 8);
         }
     }
+    // The same exit drain the original carries (commit 4d890d6a). This transform
+    // replaces everything from the block loop onwards with its own body, so
+    // without repeating the drain here the progressive variant would exit with a
+    // multicast or a semaphore increment still in flight - exactly the fault that
+    // commit fixed, silently reintroduced in this arm only.
+    noc_async_write_barrier();
+    noc_async_atomic_barrier();
 }
 '''
 

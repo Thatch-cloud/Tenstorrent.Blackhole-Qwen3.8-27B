@@ -5,7 +5,8 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from mlp_register_epilogue_gate import COMPUTE, HARDWARE_PACKER, HELPERS, SIM_PACKER, expected_kernel, qualify, stage_candidate
+from mlp_register_epilogue_gate import (COMPUTE, HARDWARE_PACKER, HELPERS, REPORT_SHA256, SIM_PACKER,
+    digest, expected_kernel, qualify, stage_candidate)
 
 
 class RegisterGateTests(unittest.TestCase):
@@ -37,9 +38,17 @@ class RegisterGateTests(unittest.TestCase):
 
     def test_retained_artifact_and_source_changes(self):
         from frozen_recipe_context import REVISION
-        evidence = Path('D:/qwen-evidence/35238822290')
-        if not evidence.exists():
-            self.skipTest('Retained simulator artifact unavailable')
+        # Pick the retained artifact whose report IS the reviewed one, rather than
+        # naming a run id. Commit 5819047a regenerated this evidence for the drained
+        # reader (4d890d6a) and moved REPORT_SHA256 with it; run 35238822290 predates
+        # that and still carries the old report, so a hardcoded id turned a stale
+        # local copy into a failure that looked like a regression. CI has no retained
+        # artifacts at all and has always skipped here.
+        evidence = next((path.parent for path in
+            sorted(Path('D:/qwen-evidence').glob('*/fused-batch.json'))
+            if digest(path) == REPORT_SHA256), None)
+        if evidence is None:
+            self.skipTest('No retained simulator artifact carries the reviewed report')
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             for name in ('fused_1d.py', 'fused_1d_input.cpp', 'fused_1d_weights.cpp', 'fusion_trace.py',
