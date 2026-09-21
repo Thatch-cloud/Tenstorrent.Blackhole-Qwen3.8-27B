@@ -4,7 +4,7 @@ from gdn_multitoken_conv import addresses, release_owned, restore_prefix, run_pr
 from gdn_prefix import validate_rows
 from gdn_state_copy import copy_compact
 from gdn_batched_conv import norm_batch_enabled, run_batched_projected
-from gdn_user_batch import enabled as user_batch_enabled
+from gdn_user_batch import enabled as user_batch_enabled, min_users as user_batch_min_users
 from gdn_user_batch_conv import run_user_batched_projected
 
 TILE = 32
@@ -125,7 +125,7 @@ def resident_piece(operations, piece, owned):
 class DeviceLoopState:
     def __init__(self, active, operations, kernels, compact_prologue=False, batch_conv=False, dma_windows=False,
                  packed_checkpoints=False, norm_batch=False, prefix_zero_reuse=False, defer_conv_publication=False,
-                 norm_source_root=None, commit_only=False, users=None, user_batch=None):
+                 norm_source_root=None, commit_only=False, users=None, user_batch=None, user_batch_min=None):
         if type(commit_only) is not bool or (commit_only and not (batch_conv and dma_windows and packed_checkpoints)):
             raise ValueError('Commit-only GDN requires packed batched DMA histories and an explicit decision owner')
         self.commit_only = commit_only
@@ -158,6 +158,14 @@ class DeviceLoopState:
                                and (defer_conv_publication or commit_only)):
             raise ValueError('User-batched GDN requires packed batched DMA histories and deferred publication')
         self.user_batch = user_batch
+        # QWEN_FAST_GDN_USER_BATCH_MIN_USERS: how many packed users a block must carry
+        # before the batched launch engages. Above the batched path's own cap it never
+        # engages, which is the off switch that keeps the rest of an arm identical.
+        if user_batch_min is None:
+            user_batch_min = user_batch_min_users()
+        if type(user_batch_min) is not int or type(user_batch_min) is bool or user_batch_min < 0:
+            raise ValueError('User-batched GDN threshold must be a non-negative int')
+        self.user_batch_min = user_batch_min
         if not active.direct or active.gdn.B != 8 or not active.gdn._stable_state:
             raise ValueError('Audited stable B8 active snapshots required')
         self.active, self.gdn, self.operations, self.kernels = active, active.gdn, operations, kernels
@@ -273,13 +281,16 @@ class DeviceLoopState:
         entries = self.segment_entries
         if deferred and (entries is None or len(entries) != len(spans)):
             raise ValueError('Deferred packed decode needs one entry per packed user, allocated at construction')
-        if self.user_batch and not (deferred and defer_publication):
+        # Below the threshold the flag is a no-op and the per-user path runs untouched,
+        # so the configuration checks below must not fire on a block that never batches.
+        batched = self.user_batch and len(spans) >= self.user_batch_min
+        if batched and not (deferred and defer_publication):
             raise ValueError('User-batched GDN serves the deferred packed decode, which publishes nothing here')
         projected = project_qkvzab_by_tile(operations, layer, packed, rows)
         results, owned, outputs = [], [projected], []
         last = len(spans) - 1
         try:
-            if self.user_batch:
+            if batched:
                 results = self._recurrence_user_batched(projected, spans, slots, entries, owned)
                 for result in results:
                     owned.extend(result['owned'])

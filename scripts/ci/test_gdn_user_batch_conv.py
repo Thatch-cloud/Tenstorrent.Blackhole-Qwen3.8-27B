@@ -174,6 +174,52 @@ class BatchedConvTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.launch(execute=explode)
 
+    def test_a_raise_after_the_launch_still_releases_every_users_output(self):
+        # The per-user loop asserts on convolution state addresses. A raise part way
+        # through it must not strand the outputs of the users it never reached: the
+        # batched launch has already handed ownership of all of them over.
+        calls, operations, groups, taps, extras = self.build(users=4)
+        moved = [False]
+
+        def batched(mesh, inputs, kernels, ops, output_memory=None):
+            return [(operations.make('out%d' % index, (1, ROWS, 3072)),
+                     operations.make('prefix%d' % index, (ROWS, 24, 128, 128)))
+                    for index in range(len(inputs))]
+
+        original = operations.get_device_tensors
+
+        def shifting(value):
+            # Flip one convolution state's address once the second user is checked.
+            if value.name == 'conv2.0' and not moved[0]:
+                moved[0] = True
+                return original(value)
+            if value.name == 'conv2.0':
+                return [SimpleNamespace(buffer_address=lambda: 999), SimpleNamespace(buffer_address=lambda: 998)]
+            return original(value)
+
+        operations.get_device_tensors = Mock(side_effect=shifting)
+        with patch('gdn_conv_windows.build_windows', side_effect=self.windows(calls, operations)),                 patch('gdn_user_batch.execute', side_effect=batched):
+            with self.assertRaisesRegex(AssertionError, 'changed stable state addresses'):
+                run_user_batched_projected('mesh', groups, taps, extras['dt_bias'], extras['neg_exp_A'],
+                                           extras['norm_w'], 'kernels', operations)
+        freed = {entry[1] for entry in calls if entry[0] == 'free'}
+        for index in range(4):
+            self.assertIn('out%d' % index, freed, 'user %d output leaked' % index)
+            self.assertIn('prefix%d' % index, freed, 'user %d prefix states leaked' % index)
+
+    def test_a_launch_returning_the_wrong_number_of_users_raises_rather_than_truncating(self):
+        calls, operations, groups, taps, extras = self.build(users=4)
+
+        def short(mesh, inputs, kernels, ops, output_memory=None):
+            return [(operations.make('out%d' % index, (1, ROWS, 3072)),
+                     operations.make('prefix%d' % index, (ROWS, 24, 128, 128)))
+                    for index in range(len(inputs) - 1)]
+
+        with patch('gdn_conv_windows.build_windows', side_effect=self.windows(calls, operations)),                 patch('gdn_user_batch.execute', side_effect=short):
+            with self.assertRaises(ValueError):
+                run_user_batched_projected('mesh', groups, taps, extras['dt_bias'], extras['neg_exp_A'],
+                                           extras['norm_w'], 'kernels', operations)
+
     def test_the_options_this_path_does_not_serve_are_rejected(self):
         validate_options(True, True, True, False)
         for options in ((False, True, True, False), (True, False, True, False), (True, True, False, False)):
@@ -309,6 +355,46 @@ class WiringTests(PackedFixture):
         for value in (1, 'yes', 0):
             with self.assertRaisesRegex(ValueError, 'Explicit bool user-batched'):
                 DeviceLoopState(active, operations, 'kernels', user_batch=value)
+
+    def test_the_threshold_routes_a_block_with_too_few_users_to_the_per_user_path(self):
+        for threshold, expect_batched in ((1, True), (4, True), (5, False), (0, True)):
+            state, operations, layer, active, calls = self.build(commit_only=True, users=4,
+                                                                 user_batch=True, user_batch_min=threshold)
+            self.assertEqual(state.user_batch_min, threshold)
+            packed = SimpleNamespace(shape=(1, 64, 5120), name='packed', memory_config=lambda: 'l1')
+            with patch('gdn_device_loop_state.run_user_batched_projected',
+                       side_effect=self.segment_result(calls)) as batched,                     patch('gdn_device_loop_state.run_batched_projected', side_effect=self.recurrence(calls)),                     patch('gdn_device_loop_state.restore_prefix'),                     patch('gdn_device_loop_state.copy_compact'), patch('gdn_device_loop_state.release_owned'):
+                state.decode(packed, self.checkpoints, [0] * 4, segments=self.spans,
+                             slots=self.slots, deferred=True)
+            self.assertEqual(batched.call_count, int(expect_batched), 'threshold %d' % threshold)
+            self.assertEqual([entry for entry in calls if entry[0] == 'recur'],
+                             [] if expect_batched else [('recur', 16)] * 4)
+
+    def test_a_threshold_above_the_block_makes_the_flag_a_complete_no_op(self):
+        # Retained (not deferred) packed block: with the flag on this raises, because the
+        # batched path publishes nothing. Above the threshold it must not even be consulted.
+        state, operations, layer, active, calls = self.build(user_batch=True, defer_conv_publication=True,
+                                                             user_batch_min=5)
+        packed = SimpleNamespace(shape=(1, 64, 5120), name='packed', memory_config=lambda: 'l1')
+        with patch('gdn_device_loop_state.run_user_batched_projected') as batched,                 patch('gdn_device_loop_state.run_batched_projected', side_effect=self.recurrence(calls)),                 patch('gdn_device_loop_state.restore_prefix'),                 patch('gdn_device_loop_state.copy_compact'), patch('gdn_device_loop_state.release_owned'):
+            state.decode(packed, self.checkpoints, [0] * 4, segments=self.spans, slots=self.slots)
+        batched.assert_not_called()
+        self.assertEqual([entry for entry in calls if entry[0] == 'recur'], [('recur', 16)] * 4)
+
+    def test_the_threshold_comes_from_the_environment_when_not_given(self):
+        for value, expected in (({}, 1), ({'QWEN_FAST_GDN_USER_BATCH_MIN_USERS': '4'}, 4),
+                                ({'QWEN_FAST_GDN_USER_BATCH_MIN_USERS': '5'}, 5)):
+            with patch.dict('os.environ', value, clear=True):
+                state, operations, layer, active, calls = self.build(commit_only=True, users=4)
+            self.assertEqual(state.user_batch_min, expected)
+        with patch.dict('os.environ', {'QWEN_FAST_GDN_USER_BATCH_MIN_USERS': 'four'}, clear=True):
+            with self.assertRaisesRegex(ValueError, 'non-negative decimal integer'):
+                self.build(commit_only=True, users=4)
+
+    def test_the_threshold_must_be_a_non_negative_int(self):
+        for value in (-1, '4', 4.0, True):
+            with self.assertRaisesRegex(ValueError, 'threshold must be a non-negative int'):
+                self.build(commit_only=True, users=4, user_batch=True, user_batch_min=value)
 
     def test_a_launch_that_loses_a_user_or_a_users_width_is_caught(self):
         for broken in ('short', 'wide', 'norm', 'flag'):

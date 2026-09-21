@@ -234,6 +234,17 @@ class FlagTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 batch.enabled({batch.FLAG: value})
 
+    def test_the_threshold_defaults_to_one_and_only_takes_a_decimal_integer(self):
+        self.assertEqual(batch.min_users({}), 1)
+        self.assertEqual(batch.min_users({batch.MIN_USERS_FLAG: '0'}), 0)
+        self.assertEqual(batch.min_users({batch.MIN_USERS_FLAG: '4'}), 4)
+        # Above the batched path's own cap the flag can never engage: the bisect off switch.
+        self.assertEqual(batch.min_users({batch.MIN_USERS_FLAG: '5'}), 5)
+        self.assertGreater(batch.min_users({batch.MIN_USERS_FLAG: '5'}), batch.MAX_USERS)
+        for value in ('', '-1', '2.0', 'four', ' 2', '02', '+2', 'true'):
+            with self.assertRaisesRegex(ValueError, 'non-negative decimal integer'):
+                batch.min_users({batch.MIN_USERS_FLAG: value})
+
     def test_load_kernels_asks_for_the_fused_sources_and_nothing_else(self):
         with patch('gdn_multitoken.load_kernels', return_value=KERNELS) as load:
             self.assertIs(batch.load_kernels('/audited'), KERNELS)

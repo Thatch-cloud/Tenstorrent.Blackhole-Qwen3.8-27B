@@ -35,6 +35,7 @@ DEFAULT_ROOT = Path('/opt/tt-metal')
 HEADS = 24
 MAX_USERS = 4
 FLAG = 'QWEN_FAST_GDN_USER_BATCH'
+MIN_USERS_FLAG = 'QWEN_FAST_GDN_USER_BATCH_MIN_USERS'
 
 
 def enabled(environ=None):
@@ -44,6 +45,26 @@ def enabled(environ=None):
     if value not in ('0', '1'):
         raise ValueError('%s must be 0 or 1' % FLAG)
     return value == '1'
+
+
+def min_users(environ=None):
+    """How many packed users a block must carry before the batched launch engages.
+
+    Default 1: the flag alone decides, which is the behaviour the flag shipped with.
+    Above `MAX_USERS` the batched path can never engage, which is the clean off switch
+    for a bisect that keeps every other part of the arm identical.
+
+    Two notes for whoever sets this. The packed serving block always carries
+    `shape.users` segments - placeholder users fill the slots no live request holds
+    (packed_verifier.py:415-421) - so in serving the threshold is a straight on/off at 5,
+    not a live-user count. And on the measured single-user numbers the fused 24-core
+    launch is SLOWER than the per-user value split it replaces, so 2 is the throughput
+    optimum even though 1 is the compatible default.
+    """
+    value = (os.environ if environ is None else environ).get(MIN_USERS_FLAG, '1')
+    if type(value) is not str or not value.isdigit() or value != str(int(value)):
+        raise ValueError('%s must be a non-negative decimal integer' % MIN_USERS_FLAG)
+    return int(value)
 
 
 def load_kernels(root=DEFAULT_ROOT):
@@ -180,7 +201,7 @@ def build_program(operations, mesh, user_shards, kernels, widths):
     for chip in range(chips):
         descriptors = []
         private, weights = [], []
-        for shards, rows, share, cores in zip(user_shards, widths, shares, ranges):
+        for shards, rows, share, cores in zip(user_shards, widths, shares, ranges, strict=True):
             local = [value[chip] for value in shards]
             addresses = [value.buffer_address() for value in local]
             if len(set(addresses)) != len(addresses):
@@ -240,7 +261,7 @@ def execute(mesh, users, kernels, operations=None, *, output_memory=None):
 
     produced = []
     try:
-        for user, rows in zip(groups, widths):
+        for user, rows in zip(groups, widths, strict=True):
             output = operations.empty((1, rows, 3072), device=mesh, dtype=operations.bfloat16,
                                       layout=operations.TILE_LAYOUT, memory_config=output_memory)
             produced.append(output)

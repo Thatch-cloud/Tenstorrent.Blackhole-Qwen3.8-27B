@@ -37,7 +37,13 @@ extra_args=("$@")
 mkdir -p "$outdir"
 outdir=$(cd "$outdir" && pwd)
 
-device=/dev/tenstorrent/2
+# Device nodes RENUMBER across a board reset, and tt-smi indices do not track them: on
+# 2026-09-21 after a reset, tt-smi index 1 (PCI 0000:f3:00) was /dev/tenstorrent/0 while
+# tt-smi index 0 (PCI 0000:d1:00) was /dev/tenstorrent/2. Always map before trusting a
+# number: `ls -la /dev/tenstorrent/by-id/` and
+# `cat /sys/class/tenstorrent/tenstorrent!<n>/device/uevent | grep PCI_SLOT_NAME`
+# against `tt-smi -ls`. Override with GDN_USER_BATCH_DEVICE when the mapping has moved.
+device=${GDN_USER_BATCH_DEVICE:-/dev/tenstorrent/2}
 test -e "$device"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

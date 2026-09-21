@@ -83,10 +83,14 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
                                  inputs=(packed[0], packed[1], packed[2], initial, z, weights)))
         produced = gdn_user_batch.execute(mesh, [user['inputs'] for user in per_user], kernels, operations,
                                           output_memory=output_memory)
+        # Owned BEFORE anything below can raise. The per-user loop asserts on state
+        # addresses, and a raise part way through it would otherwise strand the outputs
+        # of every user it had not reached yet: `execute` has already handed ownership
+        # over, so nothing else would ever free them.
+        owned.extend(value for pair in produced for value in pair)
         results = []
         for index, ((projected, initial, conv_states), user, rows, (output, states)) in enumerate(
-                zip(groups, per_user, widths, produced)):
-            owned.extend((output, states))
+                zip(groups, per_user, widths, produced, strict=True)):
             user['owned'].extend((output, states))
             if [addresses(operations, state) for state in conv_states] != bindings[index]:
                 raise AssertionError('Batched convolution changed stable state addresses')
