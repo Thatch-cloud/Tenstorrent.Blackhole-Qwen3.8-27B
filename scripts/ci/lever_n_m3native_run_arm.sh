@@ -27,7 +27,7 @@ cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
 
-mkdir -p experiment-results draft-config
+mkdir -p experiment-results draft-config experiment-results/profile
 if [ ! -s draft-config/config.json ]; then
   curl -fsSL --max-time 30 \
     "https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/resolve/$revision/config.json" \
@@ -90,6 +90,30 @@ if [ "${M3NATIVE_TRACED_PROPOSAL:-}" = "1" ]; then
 else
   M3NATIVE_TRACED_PROPOSAL=""
 fi
+
+# Optional device-op profiling (M3NATIVE_PROFILE=1), off by default and byte-identical to
+# today's invocation when unset. Mirrors dflash-request-profile.sh's own tracy wrapper
+# exactly (the same five profiler env vars, the same `python3 -m tracy -p
+# --check-exit-code --disable-device-data-dump-to-files --disable-device-data-push-to-tracy
+# --dump-device-data-mid-run --op-support-count 20000 -o <dir>` invocation), so the packed
+# round this gate serves is attributed with the same method already qualified for the T8
+# verifier profile (docs/current-verifier-profile-2026-09-09.md), not a new one. The
+# mid-run dumps are large, so profiling caps the run at --max-tokens 48 (three or four
+# packed rounds after the four prefills) instead of the usual 256; every other arg, mount
+# and env var stays the same. The existing 2200 s outer timeout is kept as-is: profiling
+# fewer rounds is less work than the unprofiled 256-token run it replaces, and the
+# workflow's own 40-minute step / 45-minute job ceilings leave no room to grow it to
+# dflash-request-profile.sh's 4200 s (that budget covers a much larger, unrelated run).
+max_tokens=256
+entry_args=(-B /bench/lever_n_m3native_gate.py)
+if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
+  mounts+=(--mount "type=bind,src=$PWD/experiment-results/profile,dst=/experiment-results-profile")
+  max_tokens=48
+  entry_args=(-m tracy -p --check-exit-code --disable-device-data-dump-to-files
+              --disable-device-data-push-to-tracy --dump-device-data-mid-run
+              --op-support-count 20000 -o /experiment-results-profile
+              /bench/lever_n_m3native_gate.py)
+fi
 name="qwen-m3native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 timeout -k 30 2200 docker run --rm --name "$name" --network none \
@@ -112,6 +136,11 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   $KM \
   ${KOPGRAFT64:+-e QWEN_FAST_NATIVE_ATTN=1} \
   ${KOPGRAFT64:+-e QWEN_FAST_RUNTIME_BINARY_SHA256=$graft_binary_sha} \
+  ${M3NATIVE_PROFILE:+-e TTNN_OP_PROFILER=1} \
+  ${M3NATIVE_PROFILE:+-e TT_METAL_DEVICE_PROFILER=1} \
+  ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_TRACE_TRACKING=1} \
+  ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_CPP_POST_PROCESS=1} \
+  ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_MID_RUN_DUMP=1} \
   -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
   -e QWEN_FAST_FOUR_AS_TWO=0 \
   -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=32768 \
@@ -127,8 +156,8 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   -e TT_METAL_HOME=/opt/tt-metal -e MESH_DEVICE=P300 -e OMP_NUM_THREADS=8 \
   -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
   -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
-  --entrypoint python3 "$image" -B /bench/lever_n_m3native_gate.py \
-  --users 4 --context 33024 --prompt-tokens 32768 --max-tokens 256 --stream-timeout 600 \
+  --entrypoint python3 "$image" "${entry_args[@]}" \
+  --users 4 --context 33024 --prompt-tokens 32768 --max-tokens "$max_tokens" --stream-timeout 600 \
   --prompt-base 1000 --prompt-user-offset 1 --stagger 0 \
   --references /bench/packed-gate-reference \
   > experiment-results/m3native-gate-stdout.log 2>&1 || true

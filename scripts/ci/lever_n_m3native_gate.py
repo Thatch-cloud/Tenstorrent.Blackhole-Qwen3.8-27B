@@ -185,6 +185,21 @@ def packed_phase_stats(text):
                trace_ms_mean=round(statistics.fmean(values), 3), trace_ms_max=round(max(values), 3))
 
 
+def compare_prefix(actual, reference_text):
+    """Whether `actual` (this run's stream) is consistent with `reference_text` (the
+    single-user reference).
+
+    A full-length or longer stream must match the reference exactly over the
+    reference's own length - unchanged from the original all-length semantics. A
+    stream shorter than the reference (as a profiling run capped at a small
+    --max-tokens produces) cannot be checked that way, since `actual` never reaches
+    the reference's length; instead it must itself be an exact prefix of the
+    reference. Returns (identical_prefix, partial)."""
+    if len(actual) < len(reference_text):
+        return reference_text.startswith(actual), True
+    return actual[:len(reference_text)] == reference_text, False
+
+
 def retired_binder_leaks(rounds):
     """The rounds in which a RETIRED binder (RETIRED_LABELS) saw a call; every other
     label in the payload is a binder that is meant to run and is ignored here."""
@@ -267,7 +282,10 @@ def main():
                 comparison['reference_len'] = len(reference['text'])
                 actual = (entry or {}).get('text') or ''
                 comparison['actual_len'] = len(actual)
-                comparison['identical_prefix'] = actual[:len(reference['text'])] == reference['text']
+                identical_prefix, partial = compare_prefix(actual, reference['text'])
+                comparison['identical_prefix'] = identical_prefix
+                if partial:
+                    comparison['partial'] = True
                 if entry and entry.get('error'):
                     comparison['error'] = entry['error']
             comparisons.append(comparison)
