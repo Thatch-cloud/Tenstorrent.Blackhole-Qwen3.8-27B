@@ -1,3 +1,4 @@
+import os
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -419,3 +420,87 @@ class PackedRecordTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             single.append(*packed_record(mesh))
         self.assertEqual((len(block.records), len(single.records)), (1, 1))
+
+
+def counting_operations():
+    """operations(), plus a running tally of get_device_tensors calls - the host round
+    trip validate_bindings makes once per native buffer it checks (gdn_multitoken_conv.
+    addresses)."""
+    ops = operations()
+    calls = []
+    original = ops.get_device_tensors
+    ops.get_device_tensors = lambda value, calls=calls, original=original: (calls.append(value), original(value))[1]
+    return ops, calls
+
+
+class FastCommitTests(unittest.TestCase):
+    """QWEN_FAST_FAST_COMMIT=1 (task: attribute and cut the packed_commit phase's host
+    cost): RetainedGDNBlock.commit_user's own validate_bindings call re-checks, on EVERY
+    one of a round's per-user commits, the same 48 x 5 native buffer addresses
+    packed_verifier.PackedVerifierEngine.validate_bindings already checked once at the
+    top of that round's verify() - four redundant passes of 240 get_device_tensors calls
+    each, for a four-user M3 block. Skipping the redundant three keeps the check on the
+    round's first commit (still catching a binding actually broken before any commit)
+    and removes the other three."""
+
+    def block(self):
+        ops, calls = counting_operations()
+        block = RetainedGDNBlock(M3_SEGMENTS[-1][1], ops)
+        mesh = object()
+        for index in range(48):
+            block.append(*packed_record(mesh, M3_SEGMENTS))
+        return block, calls
+
+    def commit_all_four(self, block):
+        """Every user's commit, in order, the last one fenced - exactly the shape
+        packed_verifier.PackedVerifierEngine.commit_user drives a round in."""
+        publications = [Mock() for segment in range(4)]
+        with patch('gdn_commit_dma.publish'), patch('gdn_records.restore_prefix'):
+            for segment in range(4):
+                block.commit_user(segment, 1, dma=True, publication=publications[segment], synchronize=segment == 3)
+
+    def test_default_mode_validates_every_one_of_the_rounds_four_commits(self):
+        block, calls = self.block()
+        self.assertFalse(block.fast_commit)
+        self.commit_all_four(block)
+        self.assertEqual(len(calls), 4 * 48 * 5)
+
+    def test_fast_commit_validates_only_the_rounds_first_commit(self):
+        with patch.dict('os.environ', {'QWEN_FAST_FAST_COMMIT': '1'}):
+            block, calls = self.block()
+        self.assertTrue(block.fast_commit)
+        self.commit_all_four(block)
+        self.assertEqual(len(calls), 1 * 48 * 5)
+
+    def test_fast_commit_is_off_unless_the_flag_is_exactly_one(self):
+        for value in ('0', 'true', '', 'yes'):
+            with patch.dict('os.environ', {'QWEN_FAST_FAST_COMMIT': value}):
+                block, calls = self.block()
+            self.assertFalse(block.fast_commit, value)
+
+    def test_fast_commit_still_catches_a_binding_broken_before_the_rounds_first_commit(self):
+        with patch.dict('os.environ', {'QWEN_FAST_FAST_COMMIT': '1'}):
+            block, calls = self.block()
+        block.records[-1][0].gdn.B = 1
+        with self.assertRaisesRegex(ValueError, 'Native layer binding changed'):
+            block.commit_user(0, 1, dma=True, publication=Mock())
+        self.assertEqual(block.decisions, {}, 'a validation failure decides nothing')
+
+    def test_fast_commit_revalidates_the_first_commit_of_every_new_round(self):
+        """The skip is per ROUND (self.decisions, reset by replay()), not per block
+        lifetime: the next round's first commit validates again even though this block
+        already ran a full round under the flag. replay() makes its own two
+        validate_bindings calls regardless of fast_commit - untouched by this change -
+        so the round's own contribution is measured as a DELTA around it, not an
+        absolute total."""
+        with patch.dict('os.environ', {'QWEN_FAST_FAST_COMMIT': '1'}):
+            block, calls = self.block()
+        self.commit_all_four(block)
+        self.assertEqual(len(calls), 1 * 48 * 5, 'only the rounds first commit validated')
+        after_first_round = len(calls)
+        block.replay(lambda: None)
+        after_replay = len(calls)
+        self.commit_all_four(block)
+        self.assertEqual(len(calls) - after_replay, 1 * 48 * 5,
+                         'the new rounds first commit validated again, not the whole round')
+        self.assertGreater(after_replay, after_first_round, 'replay makes its own validate_bindings calls')

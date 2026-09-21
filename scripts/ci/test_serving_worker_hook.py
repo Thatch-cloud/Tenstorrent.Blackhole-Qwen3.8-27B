@@ -441,6 +441,78 @@ class WorkerHookTests(unittest.TestCase):
             hook.bridges = original
             hook.close()
 
+    def test_pipelined_proposals_wrap_phase_a_in_phase_begin_and_end_lines(self):
+        """QWEN_FAST_PIPELINED_PROPOSALS=1 with QWEN_FAST_PHASE_LOG=1: phase A (every
+        eligible bridge's prewarm plus the one shared fence) gets its own
+        '[PHASE] prepare_proposals <ids> begin/end' lines, the same shape phase B's own
+        'propose' lines already have - so a slow round's phase-B total no longer looks
+        like the whole round when phase A was where a chunk of the time actually went."""
+        import serving_worker_hook
+
+        worker, bridge, events, scheduled = self.fixture()
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        original = hook.bridges
+        order = []
+        mesh = object()
+        operations = SimpleNamespace(synchronize_device=Mock(side_effect=lambda mesh: order.append(('sync', mesh))))
+        bridges = self.make_pipelined_bridges('ab', operations=operations, mesh=mesh, order=order)
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        lines = []
+        stub = ModuleType('loguru')
+        stub.logger = SimpleNamespace(info=lambda template, *values: lines.append(template.format(*values)))
+        try:
+            with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1'}), \
+                    patch.dict('sys.modules', {'vllm.v1.outputs': outputs, 'loguru': stub}), \
+                    patch.object(serving_worker_hook, 'PHASE_LOG', True):
+                worker.take_draft_token_ids()
+            # phase B's own 'propose' begin/end lines (one pair per bridge) are unchanged
+            # and still fire; isolate phase A's new pair among them.
+            phase_a = [line for line in lines if 'prepare_proposals' in line]
+            self.assertEqual(len(phase_a), 2)
+            self.assertEqual(phase_a[0], '[PHASE] prepare_proposals a,b begin')
+            self.assertTrue(phase_a[1].startswith('[PHASE] prepare_proposals a,b end '))
+            self.assertEqual(len(lines), 6, 'phase As pair plus two propose pairs, one per bridge')
+            # phase A (both prepares, then the one fence) still runs entirely before
+            # phase B (both drafts() calls) - the wrap changes nothing about that order
+            self.assertEqual([entry[0] for entry in order], ['prepare', 'prepare', 'sync', 'drafts', 'drafts'])
+        finally:
+            hook.bridges = original
+            hook.close()
+
+    def test_the_default_non_pipelined_path_is_unaffected_by_phase_logging(self):
+        """QWEN_FAST_PIPELINED_PROPOSALS unset: prepare_pipelined_drafts is never called at
+        all (the existing off-by-default behaviour), so there is no phase A to wrap and
+        QWEN_FAST_PHASE_LOG logs nothing for it - only phase B's own 'propose' lines, as
+        before this change."""
+        import serving_worker_hook
+
+        worker, bridge, events, scheduled = self.fixture()
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        original = hook.bridges
+        order = []
+        operations = SimpleNamespace(synchronize_device=Mock(side_effect=lambda mesh: order.append(('sync', mesh))))
+        bridges = self.make_pipelined_bridges('ab', operations=operations, mesh=object(), order=order)
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        lines = []
+        stub = ModuleType('loguru')
+        stub.logger = SimpleNamespace(info=lambda template, *values: lines.append(template.format(*values)))
+        try:
+            self.assertNotIn('QWEN_FAST_PIPELINED_PROPOSALS', os.environ)
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs, 'loguru': stub}), \
+                    patch.object(serving_worker_hook, 'PHASE_LOG', True):
+                worker.take_draft_token_ids()
+            self.assertFalse(any(line.startswith('[PHASE] prepare_proposals') for line in lines))
+            for name in 'ab':
+                bridges[name].request.runtime.drafter.prepare_device.assert_not_called()
+            operations.synchronize_device.assert_not_called()
+        finally:
+            hook.bridges = original
+            hook.close()
+
     def test_queued_sampler_or_second_owner_rejected(self):
         worker, bridge, _, _ = self.fixture()
         bridge.runner._pending_samples.append(object())

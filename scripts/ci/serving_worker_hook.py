@@ -333,7 +333,15 @@ class FastWorkerHook:
             # (pipelined_device's own session.pending check) a moment before that
             # same pending gets cleared for phase B, losing the prewarm for exactly
             # the case the discard exists to redraft.
-            prepare_pipelined_drafts(bridges)
+            #
+            # Wrapped in the same [PHASE] begin/end lines phase B's own drafts()
+            # calls already get (QWEN_FAST_PHASE_LOG=1): phase A was previously
+            # invisible to that log, so a slow round's phase-B total (the sum of
+            # its 'propose' lines) could look like the whole round when phase A -
+            # every eligible bridge's prewarm plus the one shared fence - was
+            # actually where a chunk of the time went.
+            ids = ','.join(str(bridge.request.session.request_id)[:48] for bridge in bridges)
+            phase('prepare_proposals', ids, lambda: prepare_pipelined_drafts(bridges))
         request_ids, tokens = [], []
         for bridge in bridges:
             # Phase lines around each proposal: run 35482551725 stalled with both

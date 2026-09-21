@@ -365,6 +365,15 @@ class PackedVerifierEngine:
         # indexed by segment, printed as one line under QWEN_FAST_PACKED_AUDIT=1.
         self.pipelined_commits = os.environ.get('QWEN_FAST_PIPELINED_COMMITS') == '1'
         self.commit_timings = [0.0] * shape.users
+        # This round's per-segment HOST cost of the RetainedGDNBlock.commit_user call
+        # itself (gdn_records.py), beyond its device commit trace: call_ms - commit_ms,
+        # dominated by validate_bindings' native-buffer address re-checks. Always
+        # collected (a handful of perf_counter calls and float subtractions - the same
+        # cost class as commit_timings above, already collected unconditionally),
+        # printed only under QWEN_FAST_PACKED_AUDIT=1 by serving_packed_step.py's
+        # run_verified_block, alongside commit_entry's own adopt/session/other split, as
+        # '[PACKED-COMMIT-HOST]'.
+        self.commit_block_ms = [0.0] * shape.users
         self.stage = 'allocating'
         started = time.perf_counter()
         try:
@@ -598,6 +607,7 @@ class PackedVerifierEngine:
             self.first = False
             self.pending_segments = set(segments)
             self.commit_timings = [0.0] * self.users
+            self.commit_block_ms = [0.0] * self.users
             self.rounds += 1
             self.phase = 'verified'
             dump_device_profiler_after_round(self.operations, self.mesh, self.rounds)
@@ -686,6 +696,13 @@ class PackedVerifierEngine:
             self.fixture.retained.commit_user(segment, prefix, dma=True, synchronize=last, publication=publish)
             call_ms = (time.perf_counter() - call_started) * 1000
             self.commit_timings[segment] = commit_ms
+            # This segment's own call cost beyond its device commit trace: bookkeeping
+            # plus RetainedGDNBlock.commit_user's validate_bindings (gdn_records.py) and,
+            # on the round's last segment, the trailing fence (see sync_ms below, the
+            # same quantity for that one segment). Collected for every segment, not just
+            # the last, so serving_packed_step.py's per-user [PACKED-COMMIT-HOST] line
+            # can attribute this round's host time to validate_bindings specifically.
+            self.commit_block_ms[segment] = max(call_ms - commit_ms, 0.0)
             self.pending_segments.discard(segment)
             if not self.pending_segments:
                 self.phase = 'idle'
@@ -694,7 +711,7 @@ class PackedVerifierEngine:
                     # commit_ms: bookkeeping plus (when pipelined) the trailing fence that
                     # drains the whole round's four enqueued traces; near zero when blocking,
                     # since the trace replay above already drained the queue.
-                    sync_ms = max(call_ms - commit_ms, 0.0)
+                    sync_ms = self.commit_block_ms[segment]
                     diagnostic('[PACKED-COMMIT] round=%d mode=%s commit_ms=[%s] sync_ms=%.2f'
                                % (self.rounds, 'pipelined' if self.pipelined_commits else 'blocking',
                                   ','.join('%.2f' % value for value in self.commit_timings), sync_ms))

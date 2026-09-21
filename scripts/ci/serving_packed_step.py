@@ -51,6 +51,20 @@ import verifier_engine
 AUDIT_LINE = ('[PACKED] request={request} segment={segment} position={position} '
               'prefix={prefix} emitted={emitted} predictions={predictions}')
 
+# Under QWEN_FAST_PACKED_AUDIT=1, one line per ROUND (not per user, unlike AUDIT_LINE
+# above): the packed_commit phase's host wall time split into commit_entry's own
+# sub-phases, one array entry per entry in the round's scheduler order - adopt_ms
+# (engine.adopt_packed), session_ms (session.commit or session.abort, which is where
+# DFlashRequestRuntime.publish, VerifierEngine.publish and
+# packed_verifier.PackedVerifierEngine.commit_user all run), block_ms (the portion of
+# session_ms that was packed_verifier.PackedVerifierEngine.commit_block_ms for that
+# entry's segment - RetainedGDNBlock.commit_user's own host cost, gdn_records.py,
+# dominated by validate_bindings' native-buffer address re-checks) and other_ms
+# (whatever of commit_entry's own wall time neither adopt_ms nor session_ms accounts
+# for: CommittedOutput construction, the [PACKED] audit line above, record_timing).
+COMMIT_HOST_LINE = ('[PACKED-COMMIT-HOST] round={round} adopt_ms=[{adopt}] block_ms=[{block}] '
+                     'session_ms=[{session}] other_ms=[{other}]')
+
 
 def audit_enabled():
     return os.environ.get('QWEN_FAST_PACKED_AUDIT') == '1'
@@ -225,14 +239,24 @@ def run_verified_block(entries, *, cancelled, block):
         if len(predictions) != len(entries) or len(segments) != len(entries):
             raise ValueError('The packed block must return one prediction list and one segment per entry')
         outputs = []
+        # Only collected under the audit gate: appending a dict per entry is cheap, but
+        # there is no reason to pay even that when nobody will read it.
+        commit_host_timings = [] if audit_enabled() else None
         for entry, segment, rows in zip(entries, segments, predictions):
             # entries[i] is served by metrics['segments'][i] and predictions[i]: the
             # segment its engine's carry is bound to, never its index in the entries
             output = phase('packed_commit', entry['request_id'],
                            lambda entry=entry, segment=segment, rows=rows: commit_entry(
                                entry, block, segment, rows, cancelled=cancelled, metrics=metrics,
-                               verify_started=verify_started, verified=verified))
+                               verify_started=verify_started, verified=verified,
+                               commit_host_timings=commit_host_timings))
             outputs.append(output)
+        if commit_host_timings:
+            audit_log(COMMIT_HOST_LINE, round=getattr(block, 'rounds', 0),
+                      adopt=','.join('%.2f' % item['adopt_ms'] for item in commit_host_timings),
+                      block=','.join('%.2f' % item['block_ms'] for item in commit_host_timings),
+                      session=','.join('%.2f' % item['session_ms'] for item in commit_host_timings),
+                      other=','.join('%.2f' % item['other_ms'] for item in commit_host_timings))
         return outputs
     except BaseException:
         fail_round(entries, block)
@@ -354,13 +378,20 @@ def packed_device_rounds(entries, *, cancelled, blocks):
     return [outputs_by_id[entry['request_id']] for entry in entries]
 
 
-def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_started, verified):
+def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_started, verified, commit_host_timings=None):
     """FastRequest.step from its verify readback on, for one user of the block."""
     request, ticket, request_id = entry['request'], entry['ticket'], entry['request_id']
     session, engine, runtime = request.session, request.engine, request.runtime
     started = time.perf_counter()
     # Verified on the block, in this segment: the publication is the block's per-user commit.
+    adopt_started = time.perf_counter()
     engine.adopt_packed(ticket, block, segment)
+    adopt_ms = (time.perf_counter() - adopt_started) * 1000
+    # session.commit and session.abort both end in runtime.publish - DFlashRequestRuntime.
+    # publish (dflash_request_runtime.py) - which runs VerifierEngine.publish and, through
+    # it, packed_verifier.PackedVerifierEngine.commit_user: this one interval covers all
+    # of that, for either outcome.
+    session_started = time.perf_counter()
     if cancelled():
         session.abort(request_id, ticket, runtime.publish)
         request.cancelled = True
@@ -369,6 +400,7 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
     else:
         decision = session.commit(request_id, ticket, rows, runtime.publish)
         output = CommittedOutput(request_id, tuple(decision.emitted), session.position, session.finished)
+    session_ms = (time.perf_counter() - session_started) * 1000
     finished = time.perf_counter()
     if audit_enabled():
         audit_log(AUDIT_LINE, request=str(request_id)[:48], segment=segment, position=ticket.position,
@@ -377,6 +409,16 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
     if decision is not None and getattr(request, 'collect_timings', False):
         record_timing(request, ticket, decision, metrics, segment,
                       verify_started=verify_started, verified=verified, started=started, finished=finished)
+    if commit_host_timings is not None:
+        # block_ms is the portion of session_ms already attributed to
+        # RetainedGDNBlock.commit_user's own host cost (packed_verifier.py's
+        # commit_block_ms, indexed the same way predictions/segments are - by THIS
+        # entry's segment, never its index in the round); other_ms is whatever of this
+        # call's own wall time neither adopt_ms nor session_ms accounts for.
+        block_ms = getattr(block, 'commit_block_ms', None)
+        block_ms = block_ms[segment] if block_ms is not None else 0.0
+        other_ms = max((finished - started) * 1000 - adopt_ms - session_ms, 0.0)
+        commit_host_timings.append(dict(adopt_ms=adopt_ms, block_ms=block_ms, session_ms=session_ms, other_ms=other_ms))
     return output
 
 

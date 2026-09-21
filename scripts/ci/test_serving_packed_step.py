@@ -534,7 +534,10 @@ class PackedStepTests(unittest.TestCase):
             with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1' if enabled else '0'}), \
                     patch('serving_packed_step.audit_log') as log:
                 self.step(entries, cancelled=cancelled)
-            return [item.args[0].format(**item.kwargs) for item in log.call_args_list]
+            # This test is about AUDIT_LINE (one '[PACKED] ' line per user) specifically;
+            # the round's own '[PACKED-COMMIT-HOST]' line is covered separately, below.
+            return [item.args[0].format(**item.kwargs) for item in log.call_args_list
+                    if item.args[0].startswith('[PACKED] ')]
 
         self.assertEqual(lines(self.two(), False), [])
         self.block = FakeBlock()
@@ -556,6 +559,45 @@ class PackedStepTests(unittest.TestCase):
         with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
             audit_log('[PACKED] request={request} segment={segment}', request='A', segment=0)
         self.assertEqual(output.getvalue().strip(), '[PACKED] request=A segment=0')
+
+    def test_the_commit_host_line_reports_one_line_per_round_not_per_user(self):
+        """commit_entry's own adopt/session/other split, plus the block's per-segment
+        commit_block_ms (packed_verifier.PackedVerifierEngine), as one
+        '[PACKED-COMMIT-HOST]' line covering the whole round - unlike AUDIT_LINE's
+        '[PACKED]', which is one line per user."""
+        def lines(entries, enabled):
+            with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1' if enabled else '0'}), \
+                    patch('serving_packed_step.audit_log') as log:
+                self.step(entries)
+            return [item.args[0].format(**item.kwargs) for item in log.call_args_list]
+
+        self.assertEqual(lines(self.two(), False), [], 'silent without the flag, like every other audit line')
+        self.block = FakeBlock()
+        seen = lines(self.two(), True)
+        host_lines = [line for line in seen if line.startswith('[PACKED-COMMIT-HOST]')]
+        packed_lines = [line for line in seen if line.startswith('[PACKED] ')]
+        self.assertEqual(len(packed_lines), 2, 'one [PACKED] line per user, as before')
+        self.assertEqual(len(host_lines), 1, 'exactly one [PACKED-COMMIT-HOST] line for the whole round')
+        # FakeBlock carries no commit_block_ms (the real PackedVerifierEngine does): every
+        # entry's block_ms falls back to 0.00, and the round is FakeBlock.rounds (1, after
+        # one verify())
+        self.assertRegex(host_lines[0],
+            r'^\[PACKED-COMMIT-HOST\] round=1 adopt_ms=\[[\d.]+,[\d.]+\] block_ms=\[0\.00,0\.00\] '
+            r'session_ms=\[[\d.]+,[\d.]+\] other_ms=\[[\d.]+,[\d.]+\]$')
+        # the host line comes after both users' own [PACKED] lines: the round's last commit
+        self.assertEqual(seen[-1], host_lines[0])
+
+    def test_the_commit_host_lines_block_ms_follows_each_entrys_own_segment(self):
+        """Predictions, segments and now block_ms are all indexed by SEGMENT, never by an
+        entry's position in the round (serving_packed_step's own long-standing rule,
+        docs/packed-device-step-plan-2026-09-20.md; probe 35436807668)."""
+        self.block = FakeBlock()
+        self.block.commit_block_ms = [1.5, 2.5]  # segment 0 (A): 1.50 ms, segment 1 (B): 2.50 ms
+        entries = self.two()  # presented as [B (segment 1), A (segment 0)]
+        with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1'}), patch('serving_packed_step.audit_log') as log:
+            self.step(entries)
+        (host_call,) = [item for item in log.call_args_list if item.args[0].startswith('[PACKED-COMMIT-HOST]')]
+        self.assertEqual(host_call.kwargs['block'], '2.50,1.50', 'B (segment 1) first, then A (segment 0)')
 
     def test_timings_are_recorded_for_a_request_that_collects_them(self):
         entries = self.two()

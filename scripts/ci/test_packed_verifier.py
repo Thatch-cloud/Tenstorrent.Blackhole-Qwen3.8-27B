@@ -1143,6 +1143,47 @@ class PipelinedCommitTests(FourUserFixture):
                 block.commit_user(segment, prefix)
 
 
+class CommitBlockHostTimingTests(FourUserFixture):
+    """commit_block_ms (task: attribute and instrument the packed_commit phase's host
+    cost): the per-segment host cost of RetainedGDNBlock.commit_user's own call
+    (gdn_records.py, dominated by validate_bindings), beyond its device commit trace -
+    call_ms - commit_ms - collected for EVERY segment of the round, not just the last
+    one PACKED-COMMIT's own sync_ms already names. serving_packed_step.py reads this
+    per segment to build its own '[PACKED-COMMIT-HOST]' line."""
+
+    def test_populated_for_every_segment_not_only_the_last(self):
+        block = self.build()
+        block.verify(self.four())
+        self.assertEqual(block.commit_block_ms, [0.0, 0.0, 0.0, 0.0], 'nothing committed yet this round')
+        for segment, prefix in zip((2, 0, 3, 1), (1, 16, 0, 4)):
+            block.commit_user(segment, prefix)
+            self.assertGreaterEqual(block.commit_block_ms[segment], 0.0)
+        self.assertTrue(all(isinstance(value, float) for value in block.commit_block_ms))
+
+    def test_matches_the_last_segments_sync_ms_in_the_existing_audit_line(self):
+        block = self.build()
+        block.verify(self.four())
+        lines = []
+        with patch.dict('os.environ', {'QWEN_FAST_PACKED_AUDIT': '1'}), \
+                patch.object(packed_verifier, 'diagnostic', Mock(side_effect=lines.append)):
+            for segment, prefix in zip((2, 0, 3, 1), (1, 16, 0, 4)):
+                block.commit_user(segment, prefix)
+        sync_ms = float(lines[0].rsplit('sync_ms=', 1)[1])
+        # segment 1 committed last (the order above): commit_block_ms[1] is exactly what
+        # the existing PACKED-COMMIT line already calls this round's sync_ms (that line
+        # prints it rounded to two decimal places; compare at that precision)
+        self.assertAlmostEqual(block.commit_block_ms[1], sync_ms, places=2)
+
+    def test_resets_to_zero_at_the_top_of_every_round(self):
+        block = self.build()
+        block.verify(self.four())
+        for segment, prefix in zip((2, 0, 3, 1), (1, 16, 0, 4)):
+            block.commit_user(segment, prefix)
+        self.assertEqual(len(block.commit_block_ms), 4)
+        block.verify(self.four(order=(0, 1, 2, 3)))
+        self.assertEqual(block.commit_block_ms, [0.0, 0.0, 0.0, 0.0])
+
+
 class ProjectionOffsetTests(unittest.TestCase):
     """DFlashDevice.project_features slices a packed block's taps at the user's row offset."""
 

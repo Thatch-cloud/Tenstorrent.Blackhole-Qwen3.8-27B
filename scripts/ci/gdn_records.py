@@ -1,5 +1,7 @@
 """Retain GDN histories for one decision per explicitly synchronized trace epoch."""
 
+import os
+
 from gdn_multitoken_conv import addresses, release_owned, restore_prefix
 
 
@@ -65,6 +67,10 @@ class RetainedGDNBlock:
         # Packed: the users' spans, and this epoch's per-user decisions as they arrive.
         self.segments = None
         self.decisions = {}
+        # QWEN_FAST_FAST_COMMIT=1: read once at construction, like every other packed
+        # engine flag (packed_verifier.PackedVerifierEngine.pipelined_commits). See
+        # commit_user for what it skips.
+        self.fast_commit = os.environ.get('QWEN_FAST_FAST_COMMIT') == '1'
         self.poisoned = False
         self.selected_prefix = None
         self.replay_ready = False
@@ -166,7 +172,22 @@ class RetainedGDNBlock:
             raise ValueError('Each packed user decides once per block')
         if publication is not None and (not dma or not callable(publication)):
             raise ValueError('A bound publication callback requires the DMA path')
-        self.validate_bindings()
+        # validate_bindings checks the SAME 48 x 5 native buffer addresses (state.gdn.
+        # rec_state and conv_states) that packed_verifier.PackedVerifierEngine.
+        # validate_bindings already checked once, this round, at the top of verify() -
+        # nothing between verify() and any of this round's commit_user calls (each one
+        # DMAs into a distinct user's CARRY, never a native buffer's identity) can move
+        # them. Called on every one of a round's commit_user calls (once per packed
+        # user) it is a genuine but redundant re-check: measured at ~8 ms per user (four
+        # users x 48 layers x 5 get_device_tensors host round trips each), it dominates
+        # the packed_commit phase's host wall time. Under QWEN_FAST_FAST_COMMIT=1, keep
+        # the check on this round's FIRST commit_user call only (`self.decisions` is
+        # still empty there) - still catches a binding actually broken before any commit
+        # of the round - and skip the three repeats that only re-confirm what verify()
+        # already established. Default (fast_commit False) behaviour is unchanged: every
+        # commit_user call validates, exactly as before.
+        if not self.fast_commit or not self.decisions:
+            self.validate_bindings()
         mesh = self.bound_mesh() if dma or synchronize else None
         self.decisions[segment] = prefix
         if len(self.decisions) == len(self.segments):
