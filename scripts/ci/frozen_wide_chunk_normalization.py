@@ -164,6 +164,37 @@ def _patch_probe(source, geometry):
     source = _once(source,
         "from dspark_fp32_build import validate_manifest\n        report['factory_build'] = validate_manifest(",
         "from frozen_wide_chunk_scratch import validate_manifest\n        report['factory_build'] = validate_manifest(")
+    # Wire the three kernel-level fixes into main()'s context-manager chain,
+    # in the ladder's own order (dspark-ladder-attention-probe.py:77-85:
+    # scalar_reciprocal, scalar_sum_update, scalar_score_center,
+    # scratch_normalization), inserted immediately before the untouched,
+    # pre-existing scoped_stats_pack(). Deliberately targets the bare
+    # `scoped_stats_pack(),` call site, not `with scalar_reciprocal(),
+    # scoped_stats_pack(),` - context==65536 staging runs unconditionally,
+    # for every flag combination frozen_recipe_context.py accepts, and not
+    # every 65536 lane passes --scalar-reciprocal (the real
+    # experiment/frozen-64k-target-replay-* lanes do not - only the
+    # reciprocal-eager/replay/diagnostics ones do,
+    # .github/workflows/qwen-frozen-32k-numerical.yml's sequential, non-elif
+    # if-blocks). Targeting the wider anchor would raise "anchor missing" for
+    # every target-replay-only staging, breaking lanes this port does not
+    # even need to touch dspark-native-8k-attention-probe.py's main() for
+    # (target-replay runs target-t16-attention-8k-probe.py instead; this
+    # file just needs to stage without crashing). The bare anchor works
+    # identically either way: when scalar_reciprocal() precedes it (the
+    # common case for lanes that exercise this port's fixes at all), the
+    # three new ones land between it and scoped_stats_pack(), matching the
+    # ladder's order exactly; when it does not, they still compose cleanly,
+    # just without scalar_reciprocal() preceding them (a combination that
+    # never actually executes this probe as the container's main entry
+    # point, since QWEN_SIM_CASE routes elsewhere for those lanes).
+    source = _once(source, '    from dspark_stats_pack import scoped_stats_pack\n',
+        '    from dspark_stats_pack import scoped_stats_pack\n'
+        '    from frozen_wide_chunk_sum_update import sum_update_scope\n'
+        '    from frozen_wide_chunk_score_center import score_center_scope\n'
+        '    from frozen_wide_chunk_scratch import kernel_scope\n')
+    source = _once(source, 'scoped_stats_pack(),',
+        'sum_update_scope(), score_center_scope(), kernel_scope(), scoped_stats_pack(),')
     return source
 
 
@@ -204,8 +235,12 @@ def _patch_fp32_intermediates(source, geometry):
     return _once(source, before, after)
 
 
-def _patch_scratch_module(source, geometry):
-    """frozen_wide_chunk_scratch.py's own SKT constant, so the scratch-CB
+KERNEL_FIX_MODULES = ('frozen_wide_chunk_scratch.py', 'frozen_wide_chunk_sum_update.py',
+    'frozen_wide_chunk_score_center.py')
+
+
+def _patch_skt_constant(source, geometry):
+    """Each of KERNEL_FIX_MODULES' own SKT constant, so the kernel-level
     substitutions it applies are gated on the SAME Skt value this staging
     resolved to, not a stale default."""
     return _once(source, 'SKT = 2080', f"SKT = {geometry['skt']}")
@@ -257,8 +292,9 @@ def adapt_wide_chunk_normalization(sources, context):
     result['dspark_fp32_intermediates.py'] = _patch_fp32_intermediates(
         result['dspark_fp32_intermediates.py'], geometry)
     result['frozen_sim_build_cache.py'] = _patch_build_cache(result['frozen_sim_build_cache.py'])
-    scratch_source = Path(__file__).with_name('frozen_wide_chunk_scratch.py').read_text()
-    result['frozen_wide_chunk_scratch.py'] = _patch_scratch_module(scratch_source, geometry)
+    for name in KERNEL_FIX_MODULES:
+        module_source = Path(__file__).with_name(name).read_text()
+        result[name] = _patch_skt_constant(module_source, geometry)
     for name, source in result.items():
         if name.endswith('.py'):
             compile(source, name, 'exec')

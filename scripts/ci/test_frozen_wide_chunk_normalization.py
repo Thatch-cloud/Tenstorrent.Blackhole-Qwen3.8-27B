@@ -180,7 +180,27 @@ class WideChunkPatchTests(unittest.TestCase):
                 self.assertNotIn("native_padded_keys=SHAPE['padded_keys']", patched)
                 self.assertEqual(patched.count('from frozen_wide_chunk_scratch import validate_manifest'), 2)
                 self.assertNotIn('from dspark_fp32_build import validate_manifest', patched)
+                self.assertIn('from frozen_wide_chunk_sum_update import sum_update_scope', patched)
+                self.assertIn('from frozen_wide_chunk_score_center import score_center_scope', patched)
+                self.assertIn('from frozen_wide_chunk_scratch import kernel_scope', patched)
+                self.assertIn('sum_update_scope(), score_center_scope(), kernel_scope(), scoped_stats_pack(),',
+                    patched)
                 compile(patched, 'dspark-native-8k-attention-probe.py', 'exec')
+
+    def test_probe_patch_works_without_scalar_reciprocal_too(self):
+        """context==65536 staging runs unconditionally for any flag
+        combination frozen_recipe_context.py accepts - including the real
+        experiment/frozen-64k-target-replay-* lanes, which do not pass
+        --scalar-reciprocal (qwen-frozen-32k-numerical.yml's sequential,
+        non-elif if-blocks: only the reciprocal-eager/replay/diagnostics
+        patterns add that flag). _patch_probe must not assume
+        adapt_scalar_reciprocal() already ran."""
+        source = self.sources['dspark-native-8k-attention-probe.py']
+        self.assertNotIn('scalar_reciprocal()', source)  # precondition: --scalar-reciprocal was not applied here
+        geometry = wide.geometry_for_skt(2112)
+        patched = wide._patch_probe(source, geometry)
+        self.assertIn('with sum_update_scope(), score_center_scope(), kernel_scope(), scoped_stats_pack(),', patched)
+        compile(patched, 'dspark-native-8k-attention-probe.py', 'exec')
 
     def test_chunk_trial_patch(self):
         for geometry in self._geometries():
@@ -216,15 +236,16 @@ class WideChunkPatchTests(unittest.TestCase):
                         self.assertNotIn(f'Skt == {other} &&', patched)
                 compile(patched, 'dspark_fp32_intermediates.py', 'exec')
 
-    def test_scratch_module_skt_patched_to_match(self):
-        real_scratch = Path(__file__).with_name('frozen_wide_chunk_scratch.py').read_text()
-        for geometry in self._geometries():
-            with self.subTest(skt=geometry['skt']):
-                patched = wide._patch_scratch_module(real_scratch, geometry)
-                self.assertIn(f"SKT = {geometry['skt']}", patched)
-                if geometry['skt'] != 2080:
-                    self.assertNotIn('SKT = 2080', patched)
-                compile(patched, 'frozen_wide_chunk_scratch.py', 'exec')
+    def test_kernel_fix_modules_skt_patched_to_match(self):
+        for module_name in wide.KERNEL_FIX_MODULES:
+            real_source = Path(__file__).with_name(module_name).read_text()
+            for geometry in self._geometries():
+                with self.subTest(module=module_name, skt=geometry['skt']):
+                    patched = wide._patch_skt_constant(real_source, geometry)
+                    self.assertIn(f"SKT = {geometry['skt']}", patched)
+                    if geometry['skt'] != 2080:
+                        self.assertNotIn('SKT = 2080', patched)
+                    compile(patched, module_name, 'exec')
 
     def test_build_cache_patch(self):
         real_build_cache = Path(__file__).with_name('frozen_sim_build_cache.py').read_text()

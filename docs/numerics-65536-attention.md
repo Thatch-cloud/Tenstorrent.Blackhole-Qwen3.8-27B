@@ -343,3 +343,87 @@ ported `scratch_normalization()` (own module, gated on the frozen recipe's
 resolved Skt, staged only for 65536). That is real, unstarted work - two
 more C++ text substitutions to port and parameterize away from the ladder's
 hardcoded 2112, plus their own build/requalify cycle - not a knob flip.
+
+## 7. Critical correction: the scratch-CB port was never actually active, and
+the two missing ladder fixes are now ported too
+
+**The scratch-CB fix has never actually run, in any prior evidence run of
+this port (v2, v3).** `dspark_ladder_normalization.py` has two independent
+halves. `factory_transform()` patches `sdpa_program_factory.cpp` (the
+FACTORY) to allocate the dedicated `recip_scratch` CB and set its unpack
+mode - this port carried that from the start. `scratch_normalization()`
+patches `compute_common.hpp` (the KERNEL) via `native_draft_sdpa.replacements`,
+inserting the `qwen_normalize_scratch` helper AND - the part this port was
+missing entirely - replacing the actual call site
+(`mul_block_bcast_cols<Sq_chunk_t, vDHt, false, false>(...)`) that performs
+the final normalization multiply, so it routes through the dedicated CB
+instead of the original shared one. Without that second half, the factory
+allocates `recip_scratch` but nothing in the kernel ever reads or writes it:
+the original, shared, TF32-truncating reciprocal path stayed in use the
+entire time, unconditionally, regardless of Skt or the factory-level patch.
+Found this while tracing dspark-ladder-attention-probe.py:77-85 for the
+sum-update/score-center port below - `frozen_wide_chunk_scratch.py` only
+ever exported `factory_transform`/`factory_scope`/`validate_manifest`,
+nothing touching `native_draft_sdpa.replacements` at all.
+
+**Consequence:** every improvement this port showed before now (384 -> 9
+failed elements, run 35593521063) is attributable entirely to the widened
+fp32-stats condition (`stats_df` now `Float32` at `Sk_chunk_t==32`, which
+never matched anything before this port existed - the base
+`factory_selector()`-driven clause only ever paired with `Sk_chunk_t==8`)
+and the reduced online-softmax iteration count (258 -> 65/66), not to the
+scratch-CB reciprocal fix this port is named for. That fix has now actually
+been ported, for the first time, in this round.
+
+**Fixed, and the two remaining ladder fixes ported alongside it.**
+`frozen_wide_chunk_scratch.py` gained `kernel_scope()` - the missing
+kernel-level half, parameterized on the module's own `SKT` constant (patched
+at staging time, same mechanism as before). Two new modules,
+`frozen_wide_chunk_sum_update.py` (`sum_update_scope()`, a parallel,
+independent port of `dspark_ladder_sum_update.scalar_sum_update()` - that
+function takes no parameter at all, so this is a from-scratch parameterized
+copy, not a call-through) and `frozen_wide_chunk_score_center.py`
+(`score_center_scope()`, ported from `dspark_ladder_score_center.
+scalar_score_center()`, which IS parameterized by `key_tiles` but refuses
+anything outside `(40, 2112)` via its own validation guard - reproduced
+without that restriction rather than modifying the ladder's own module),
+generated for both accepted Skt values in every case (2080 and 2112 - their
+underlying substitution text is a clean literal parameter in both, so
+neither needed to refuse 2080).
+
+All four fixes (`scalar_reciprocal()`, already active via
+`--scalar-reciprocal`; the two new ones; `kernel_scope()`) are now composed
+into `dspark-native-8k-attention-probe.py`'s `main()`, in the ladder's own
+order (`dspark-ladder-attention-probe.py:77-85`). A synthetic-fixture test
+(`test_frozen_wide_chunk_kernel_composition.py`) confirms every anchor is
+found exactly once at the point its own patch runs - no collision with an
+earlier patch's output - built from each module's own anchor constants, not
+hand-retyped text.
+
+**A real bug this surfaced and fixed:** the first attempt at the
+composition substitution targeted `with scalar_reciprocal(),
+scoped_stats_pack(),` (the post-`--scalar-reciprocal` text) directly. That
+anchor does not exist when `--scalar-reciprocal` is not passed - and the
+real `experiment/frozen-64k-target-replay-*` lanes do not pass it
+(`qwen-frozen-32k-numerical.yml`'s candidate-array logic is a sequence of
+independent, non-`elif` `if`-blocks; only the `reciprocal-eager`/
+`reciprocal-replay`/`reciprocal-diagnostics` tag patterns add
+`--scalar-reciprocal` - the `target-replay`/`target-replay-scratch`
+patterns do not). Since context==65536 staging runs unconditionally for any
+flag combination, this would have made every `target-replay`-only staging
+fail outright with "anchor missing", even though
+`dspark-native-8k-attention-probe.py` is not even the probe those lanes
+execute (`target-t16-attention-8k-probe.py` is, per `QWEN_SIM_CASE`) - the
+staging-time substitution still has to succeed regardless. Fixed by
+targeting the bare `scoped_stats_pack(),` call site instead, which survives
+`adapt_scalar_reciprocal()`'s edit unchanged either way. Re-verified with a
+real dry run of `--context 65536 --target-replay --probe-seconds 1020`
+(no `--scalar-reciprocal`) against the pinned checkout: generates cleanly,
+`git diff --check` passes, and the `with` line correctly omits
+`scalar_reciprocal()` when it was never requested.
+
+Re-verified end to end: 32768 byte-identical (plain and `--target-replay`),
+65536 clean under both Skt knob values and both with/without
+`--scalar-reciprocal`, `git diff --check` passing throughout. Still
+UNVALIDATED beyond that: none of this has been built or run on hardware or
+in the simulator yet.

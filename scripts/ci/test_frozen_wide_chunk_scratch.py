@@ -132,6 +132,42 @@ class FactoryScopeRoundTripTests(unittest.TestCase):
         with self.scratch.factory_scope():
             pass
 
+    def test_kernel_scope_adds_exactly_three_substitutions_gated_on_module_skt(self):
+        """The kernel-level half factory_transform() alone cannot provide -
+        see the module docstring's CORRECTION. Without this, the factory
+        allocates recip_scratch but nothing in the kernel ever uses it."""
+        fake_native = types.ModuleType('native_draft_sdpa')
+        fake_native.replacements = lambda: {'compute_common.hpp': ()}
+        sys.modules['native_draft_sdpa'] = fake_native
+        try:
+            with self.scratch.kernel_scope():
+                result = fake_native.replacements()
+            substitutions = result['compute_common.hpp']
+            self.assertEqual(len(substitutions), 3)
+            befores = [before for before, _ in substitutions]
+            self.assertEqual(befores, ['#include "api/compute/bcast.h"', 'enum SDPAType {',
+                self.scratch.KERNEL_FINAL_CALL])
+            final_after = substitutions[2][1]
+            self.assertIn(f'get_compile_time_arg_val(3) == {self.scratch.SKT}', final_after)
+            self.assertIn('qwen_normalize_scratch<vDHt>(alias_mm2_prev_out, alias_prev_sum, '
+                'get_compile_time_arg_val(42), cb_out)', final_after)
+            # Original call preserved as the else-branch fallback.
+            self.assertIn(self.scratch.KERNEL_FINAL_CALL, final_after)
+        finally:
+            sys.modules.pop('native_draft_sdpa', None)
+
+    def test_kernel_scope_does_not_leak_after_exit(self):
+        fake_native = types.ModuleType('native_draft_sdpa')
+        original = lambda: {'compute_common.hpp': ()}
+        fake_native.replacements = original
+        sys.modules['native_draft_sdpa'] = fake_native
+        try:
+            with self.scratch.kernel_scope():
+                pass
+            self.assertIs(fake_native.replacements, original)
+        finally:
+            sys.modules.pop('native_draft_sdpa', None)
+
     def test_build_time_transform_applies_both_layers_in_order(self):
         with self.scratch.factory_scope():
             built = self.build.transform(PRISTINE, enabled=True)
@@ -231,17 +267,22 @@ class RealStagedModuleTestsBase(unittest.TestCase):
         # imported by other test modules in the same run) can substitute for
         # the actual staged/pinned module under test.
         for name in ('dspark_fp32_build', 'dspark_fp32_intermediates', 'frozen_wide_chunk_scratch',
+                'frozen_wide_chunk_sum_update', 'frozen_wide_chunk_score_center',
                 'dspark_hardware_gate', 'sdpa_graft_build'):
             sys.modules.pop(name, None)
         self._old_path = list(sys.path)
         sys.path.insert(0, str(self.staged))
         import dspark_fp32_build as staged_build
         import frozen_wide_chunk_scratch as staged_scratch
+        import frozen_wide_chunk_sum_update as staged_sum_update
+        import frozen_wide_chunk_score_center as staged_score_center
         self.build, self.scratch = staged_build, staged_scratch
+        self.sum_update, self.score_center = staged_sum_update, staged_score_center
 
     def tearDown(self):
         sys.path[:] = self._old_path
         for name in ('dspark_fp32_build', 'dspark_fp32_intermediates', 'frozen_wide_chunk_scratch',
+                'frozen_wide_chunk_sum_update', 'frozen_wide_chunk_score_center',
                 'dspark_hardware_gate', 'sdpa_graft_build'):
             sys.modules.pop(name, None)
 
@@ -251,6 +292,34 @@ class RealStagedModuleTestsBase(unittest.TestCase):
         self.assertFalse(hasattr(self.build, 'restore_factory_source'))
         self.assertTrue(hasattr(self.build, 'transform'))
         self.assertTrue(hasattr(self.build, 'validate_manifest'))
+
+    def test_all_four_staged_fix_modules_share_the_same_resolved_skt(self):
+        """The scratch-CB, sum-update and score-center fixes must all gate
+        on the identical Skt value this staging run resolved to - a mismatch
+        between any of them would mean some fixes fire for a different
+        geometry than others, or not at all."""
+        self.assertTrue(hasattr(self.scratch, 'kernel_scope'))
+        self.assertEqual(self.scratch.SKT, int(self.KNOB))
+        self.assertEqual(self.sum_update.SKT, int(self.KNOB))
+        self.assertEqual(self.score_center.SKT, int(self.KNOB))
+
+    def test_staged_probe_composes_all_four_fixes_in_ladder_order(self):
+        """dspark-native-8k-attention-probe.py's main() must import and
+        compose sum_update_scope(), score_center_scope() and kernel_scope()
+        - alongside the pre-existing scalar_reciprocal() - in that order, or
+        the fixes this port ported never actually run against the probe."""
+        probe_source = (self.staged / 'dspark-native-8k-attention-probe.py').read_text()
+        self.assertIn('from frozen_wide_chunk_sum_update import sum_update_scope', probe_source)
+        self.assertIn('from frozen_wide_chunk_score_center import score_center_scope', probe_source)
+        self.assertIn('from frozen_wide_chunk_scratch import kernel_scope', probe_source)
+        with_line = next(line for line in probe_source.splitlines() if 'with scalar_reciprocal()' in line)
+        for name in ('scalar_reciprocal()', 'sum_update_scope()', 'score_center_scope()', 'kernel_scope()',
+                'scoped_stats_pack()'):
+            self.assertIn(name, with_line)
+        self.assertLess(with_line.index('scalar_reciprocal()'), with_line.index('sum_update_scope()'))
+        self.assertLess(with_line.index('sum_update_scope()'), with_line.index('score_center_scope()'))
+        self.assertLess(with_line.index('score_center_scope()'), with_line.index('kernel_scope()'))
+        self.assertLess(with_line.index('kernel_scope()'), with_line.index('scoped_stats_pack()'))
 
     def test_staged_scratch_module_skt_matches_this_class_knob(self):
         """Proves the QWEN_FROZEN_65536_SKT env var set for this class's
