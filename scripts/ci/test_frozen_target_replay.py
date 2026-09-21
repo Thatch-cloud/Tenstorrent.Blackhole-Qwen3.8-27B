@@ -32,59 +32,105 @@ class TargetReplayTests(unittest.TestCase):
         self.assertIn('zip(allocation_host, gold[0], strict=True)', changed)
         self.assertNotIn('warm = reader(', changed)
 
-    def test_failing_comparison_reports_magnitude_and_shape_before_raising(self):
-        """The bare torch.equal told us only that T16 and B1 disagree, never by how
-        much or on which rows, so a 2-ulp bf16 rounding difference and a wrong-rows
-        structural bug looked identical in the artifact (docs/t16-vs-b1-65536.md).
-        Every mismatching tensor now prints one JSON line first; the assertion that
-        fails the probe is unchanged and still fires."""
+    def test_comparison_is_an_ulp_budget_not_a_bit_exact_equality(self):
+        """T16 folds <=4-row groups at k_chunk_size 128; native B1 runs 16 sequential
+        single-row decodes at k_chunk_size 0. Same mathematics, different online-softmax
+        merge order, so bf16 results differ in the last bit - torch.equal between them
+        was never a numerical statement. Run 35662960713 measured the disagreement at
+        exactly one ulp with no non-finites and all rows affected uniformly."""
         changed = adapt_target_probe(self.original)
-        self.assertIn("stage='t16-b1-mismatch'", changed)
-        for field in ('tensor=index', 'start=start', 'shape=list(actual.shape)',
-                      'mismatching=int((actual != expected).sum())', 'max_abs=float(difference.max())',
-                      'mean_abs=float(difference.mean())', 'rows_affected=int(rows.numel())',
-                      'first_rows=[int(value) for value in rows[:8]]'):
+        self.assertIn('MAX_ULP = 4.0', changed)
+        self.assertIn("stage='t16-b1-ulp'", changed)
+        for field in ('max_ulp=worst', 'mean_ulp=float(error.mean())', 'budget_ulp=MAX_ULP',
+                      'nonfinite=nonfinite', 'rows_over_budget=int(rows.numel())'):
             self.assertIn(field, changed)
-        self.assertIn('nonfinite=int((~torch.isfinite(actual.to(torch.float32))).sum())', changed)
-        # Diagnostics run first, then the same failure.
-        self.assertLess(changed.index("stage='t16-b1-mismatch'"),
-            changed.index("raise AssertionError('T16 long-context warm output differs from native B1')"))
-        self.assertIn('if mismatched:', changed)
+        # The failure condition is the budget and non-finites, not inequality.
+        self.assertIn('if nonfinite or worst > MAX_ULP:', changed)
+        self.assertNotIn('if not torch.equal(actual, expected)]', changed)
+        # Shape and dtype stay exact - the budget is for values only.
+        self.assertIn('if actual.shape != expected.shape or actual.dtype != expected.dtype:', changed)
+        # The reference-reuse check compares INPUTS and must stay bit-exact.
+        self.assertIn('torch.equal(ticket_query, queries[0])', changed)
         compile(changed, 'target-probe', 'exec')
 
-    def test_mismatch_report_runs_against_real_tensors(self):
-        """Execute the emitted block itself, not just its text: a shape or dtype slip
-        in the generated source would otherwise only surface on the rig."""
+    def _run_comparison(self, actual, expected, start=65536):
+        """Execute the emitted comparison block itself against real tensors."""
         import json
+        import torch
+        opening = '                failures = []'
+        changed = adapt_target_probe(self.original)
+        body = opening + changed.split(opening, 1)[1].split('                if failures:', 1)[0]
+        self.assertEqual(body.count(', strict=True'), 1)
+        body = body.replace(', strict=True', '')   # 3.10 only; lengths equal by construction
+        block = '\n'.join(line[16:] if line.startswith(' ' * 16) else line for line in body.split('\n'))
+        printed = []
+        namespace = dict(allocation_host=actual, gold=[expected], torch=torch, start=start,
+            MAX_ULP=4.0, json=json, print=lambda value, flush=False: printed.append(value))
+        exec(compile(block, 'comparison-block', 'exec'), namespace)
+        return namespace['failures'], [json.loads(line) for line in printed]
+
+    def test_bit_identical_tensors_pass_with_zero_ulp(self):
         try:
             import torch
         except ImportError:
             self.skipTest('torch not installed on this host')
-        opening = '                mismatched = [index for index, (actual, expected)'
-        changed = adapt_target_probe(self.original)
-        body = opening + changed.split(opening, 1)[1].split('                if mismatched:', 1)[0]
-        # zip(strict=) is 3.10, which the container has and this host does not; the
-        # lengths are equal by construction here, so dropping it changes nothing the
-        # block does. Exactly one occurrence, or the extraction moved.
-        self.assertEqual(body.count(', strict=True'), 1)
-        body = body.replace(', strict=True', '')
-        block = '\n'.join(line[16:] if line.startswith(' ' * 16) else line for line in body.split('\n'))
-        expected = [torch.zeros(4, 8, dtype=torch.bfloat16), torch.ones(2, 3, dtype=torch.bfloat16)]
-        actual = [value.clone() for value in expected]
-        actual[0][1][2] = 0.5
-        printed = []
-        namespace = dict(allocation_host=actual, gold=[expected], torch=torch, start=65536,
-            json=json, print=lambda value, flush=False: printed.append(value))
-        exec(compile(block, 'mismatch-block', 'exec'), namespace)
-        self.assertEqual(namespace['mismatched'], [0])
-        self.assertEqual(len(printed), 1)
-        report = json.loads(printed[0])
-        self.assertEqual(report['stage'], 't16-b1-mismatch')
-        self.assertEqual((report['tensor'], report['start']), (0, 65536))
-        self.assertEqual(report['shape'], [4, 8])
-        self.assertEqual((report['mismatching'], report['elements']), (1, 32))
-        self.assertEqual((report['max_abs'], report['nonfinite']), (0.5, 0))
-        self.assertEqual((report['rows_affected'], report['first_rows']), (1, [1]))
+        expected = [torch.full((4, 8), 0.005, dtype=torch.bfloat16)]
+        failures, reports = self._run_comparison([expected[0].clone()], expected)
+        self.assertEqual(failures, [])
+        self.assertEqual(reports[0]['max_ulp'], 0.0)
+        self.assertEqual(reports[0]['differing'], 0)
+
+    def test_one_ulp_of_rounding_passes_and_is_reported(self):
+        """The measured case: max_abs exactly 2**-15 on values near 2**-8."""
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.full((4, 8), 0.005, dtype=torch.bfloat16)]
+        actual = expected[0].to(torch.float32)
+        actual += 2.0 ** -15                      # exactly one ulp at this magnitude
+        failures, reports = self._run_comparison([actual.to(torch.bfloat16)], expected)
+        self.assertEqual(failures, [])
+        self.assertLessEqual(reports[0]['max_ulp'], 4.0)
+        self.assertGreater(reports[0]['max_ulp'], 0.0)
+        self.assertEqual(reports[0]['nonfinite'], 0)
+
+    def test_a_structurally_wrong_row_still_fails(self):
+        """The whole point of a budget rather than a blanket allclose: a real defect
+        perturbs a SUBSET of rows by order the value itself, which is hundreds of ulp."""
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.full((4, 8), 0.005, dtype=torch.bfloat16)]
+        actual = expected[0].clone()
+        actual[2] = 0.05                          # one row an order of magnitude out
+        failures, reports = self._run_comparison([actual], expected)
+        self.assertEqual(failures, [0])
+        self.assertGreater(reports[0]['max_ulp'], 4.0)
+        self.assertEqual(reports[0]['rows_over_budget'], 1)
+        self.assertEqual(reports[0]['first_rows'], [2])
+
+    def test_non_finite_output_fails_even_within_budget(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.full((4, 8), 0.005, dtype=torch.bfloat16)]
+        actual = expected[0].clone()
+        actual[1][3] = float('nan')
+        failures, reports = self._run_comparison([actual], expected)
+        self.assertEqual(failures, [0])
+        self.assertEqual(reports[0]['nonfinite'], 1)
+
+    def test_shape_mismatch_is_refused_outright(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.full((4, 8), 0.005, dtype=torch.bfloat16)]
+        with self.assertRaises(AssertionError):
+            self._run_comparison([torch.full((4, 9), 0.005, dtype=torch.bfloat16)], expected)
 
     def test_source_drift_and_reapplication_rejected(self):
         with self.assertRaises(ValueError):
