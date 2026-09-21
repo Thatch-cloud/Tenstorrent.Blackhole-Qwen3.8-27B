@@ -79,6 +79,7 @@ jobs:
           QWEN_FROZEN_TARGET_SCRATCH: ${{ contains(github.ref, 'target-replay-scratch-') && '1' || '0' }}
         run: |
           limit=1090
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-64k-* ]]; then limit=3400; fi
           if [[ "$QWEN_SIM_CASE" = target-t16-attention-8k && "$GITHUB_REF" != refs/tags/experiment/frozen-32k-target-replay-scratch-v4 && "$GITHUB_REF" != refs/tags/experiment/frozen-64k-target-replay-scratch-v4 ]]; then limit=620; fi
           timeout -k 45 "$limit" bash scripts/ci/run-simulator.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
