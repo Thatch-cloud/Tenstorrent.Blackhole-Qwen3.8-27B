@@ -118,7 +118,7 @@ if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
   chmod 0777 experiment-results/profile
   mounts+=(--mount "type=bind,src=$PWD/experiment-results/profile,dst=/experiment-results-profile")
   max_tokens=48
-  trace_region_bytes=402653184
+  trace_region_bytes=268435456
   entry_args=(-m tracy -p --check-exit-code --disable-device-data-dump-to-files
               --disable-device-data-push-to-tracy --dump-device-data-mid-run
               --op-support-count 20000 -o /experiment-results-profile
