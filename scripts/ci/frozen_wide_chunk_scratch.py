@@ -51,6 +51,9 @@ SUBSTITUTIONS = (
 )
 
 
+MARKER = b'qwen_normalization_modes'  # present iff the scratch-CB layer below is applied
+
+
 def factory_transform(source, *, reverse=False):
     if not isinstance(source, bytes):
         raise ValueError('Explicit factory source bytes required')
@@ -64,35 +67,44 @@ def factory_transform(source, *, reverse=False):
 
 
 def factory_scope():
-    """Context manager wrapping dspark_fp32_build.transform /
-    restore_factory_source so the scratch-CB substitutions above apply on
-    top of the base ANCHOR/REPLACEMENT swap during a build, and reverse
-    cleanly during validate_manifest()'s self-consistency check. Mirrors
-    dspark_ladder_build.factory_scope()'s structure; only usable once this
-    module's factory_transform has been staged alongside dspark_fp32_build.py
-    (i.e. only for the 65536-context tree)."""
+    """Context manager wrapping dspark_fp32_build.transform so the scratch-CB
+    substitutions above apply on top of the base ANCHOR/REPLACEMENT swap
+    during a build, and reverse cleanly during validate_manifest()'s
+    reconstruction check.
+
+    Only patches `transform` - not a `restore_factory_source` function, which
+    does not exist at the pinned revision (8c102b20): dspark_fp32_build.py
+    there inlines that reversal directly inside validate_manifest() as
+    `original = source.replace(replacement.encode(), ANCHOR.encode())`, with
+    no separate, patchable name for it. (The current working tree's own copy
+    of dspark_fp32_build.py does define restore_factory_source, but this
+    module is staged into, and must work against, the tree the pinned lane
+    actually executes - the historical one.) Instead, the patched `transform`
+    is made self-detecting: called with input that already carries the
+    scratch-CB marker (validate_manifest's inlined reversal only ever strips
+    the condition-text swap, never the scratch-CB layer, since it has no
+    knowledge of it), it reverses that layer itself before doing anything
+    else. This works identically whether the caller's own reversal step is a
+    separate function, inlined, or absent, and requires no assumption about
+    which shape of dspark_fp32_build.py is staged. Mirrors
+    dspark_ladder_build.factory_scope()'s structure otherwise."""
     from contextlib import contextmanager
     from unittest.mock import patch
     import dspark_fp32_build as baseline
 
     original_transform = baseline.transform
-    original_restore = baseline.restore_factory_source
 
     def selected(source, *, enabled=True):
+        if enabled and MARKER in source:
+            source = factory_transform(source, reverse=True)
         result = original_transform(source, enabled=enabled)
         if enabled:
             result = factory_transform(result)
         return result
 
-    def restore(source, replacement):
-        if replacement == baseline.REPLACEMENT:
-            source = factory_transform(source, reverse=True)
-        return original_restore(source, replacement)
-
     @contextmanager
     def scope():
-        with patch.object(baseline, 'transform', selected), \
-                patch.object(baseline, 'restore_factory_source', restore):
+        with patch.object(baseline, 'transform', selected):
             yield
 
     return scope()
@@ -101,7 +113,8 @@ def factory_scope():
 def validate_manifest(root, output):
     """Drop-in replacement for dspark_fp32_build.validate_manifest, re-entering
     factory_scope() for the duration of the call so the reconstruction check
-    inside it (restore_factory_source then transform) sees and correctly
+    inside it (source.replace(...) then transform(), inlined at the pinned
+    revision - see factory_scope()'s docstring) sees and correctly
     reverses/reapplies the scratch-CB substitutions, whichever process or
     call site invokes it (the build-time call in frozen_sim_build_cache.py
     and the probe's own runtime calls are separate Python processes; each
