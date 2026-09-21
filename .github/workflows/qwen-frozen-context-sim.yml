@@ -1,7 +1,7 @@
 name: Qwen winning recipe larger-context simulator
 on:
   push:
-    tags: ['experiment/frozen-context-sim-v1', 'experiment/frozen-context-sim-v2', 'experiment/frozen-context-sim-v3', 'experiment/frozen-context-build-v1', 'experiment/frozen-target-scratch-build-v1', 'experiment/frozen-context-build-65536-v1', 'experiment/frozen-context-build-65536-v2', 'experiment/frozen-context-build-65536-v3', 'experiment/frozen-context-build-65536-v4', 'experiment/frozen-context-build-65536-v5']
+    tags: ['experiment/frozen-context-sim-v1', 'experiment/frozen-context-sim-v2', 'experiment/frozen-context-sim-v3', 'experiment/frozen-context-build-v1', 'experiment/frozen-target-scratch-build-v1', 'experiment/frozen-target-scratch-build-65536-v1', 'experiment/frozen-target-scratch-build-65536-v2', 'experiment/frozen-context-build-65536-v1', 'experiment/frozen-context-build-65536-v2', 'experiment/frozen-context-build-65536-v3', 'experiment/frozen-context-build-65536-v4', 'experiment/frozen-context-build-65536-v5']
 permissions:
   contents: read
 concurrency:
@@ -36,9 +36,9 @@ jobs:
           QWEN_SIM_ONLY: '1'
           QWEN_LEARNED_STACK: '1'
           QWEN_SIM_CASE: dspark-native-8k-attention
-          QWEN_DSPARK_REQUEST_CONTEXT: ${{ contains(github.ref, 'frozen-context-build-65536-v') && '65536' || '8192' }}
+          QWEN_DSPARK_REQUEST_CONTEXT: ${{ (contains(github.ref, 'frozen-context-build-65536-v') || contains(github.ref, 'frozen-target-scratch-build-65536-v')) && '65536' || '8192' }}
           QWEN_FROZEN_BUILD_ONLY: '1'
-          QWEN_FROZEN_TARGET_SCRATCH: ${{ endsWith(github.ref, 'target-scratch-build-v1') && '1' || '0' }}
+          QWEN_FROZEN_TARGET_SCRATCH: ${{ contains(github.ref, 'target-scratch-build-') && '1' || '0' }}
         run: |
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p frozen-build/experiment-results
@@ -46,7 +46,7 @@ jobs:
           # value only picks which QWEN_SIM_CASE Skt branch gets warmed/compiled against,
           # not a distinct cache entry. Kept tag-derived for traceability, not correctness.
           context=8192
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-context-build-65536-v* ]]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-context-build-65536-v* || "$GITHUB_REF" = refs/tags/experiment/frozen-target-scratch-build-65536-v* ]]; then
             context=65536
           fi
           echo "context=$context"
