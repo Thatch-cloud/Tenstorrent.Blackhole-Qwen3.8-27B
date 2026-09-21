@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p experiment-results graft/attention graft/gdn
-          image=sha256:4d1594dfa8317507f2adbe409a97d04d1ff26e5dcd5a8ae0877f352458944679
+          image=sha256:11ef6dd3a6dac3ae01ec6a01b64425a2150716b7e114f0bf023b0d28b1abae34
           root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
           name="qwen-m3native-extract-$GITHUB_RUN_ID"
           docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
@@ -97,7 +97,17 @@ jobs:
         working-directory: m3native
         timeout-minutes: 40
         shell: bash
-        run: bash scripts/ci/lever_n_m3native_run_arm.sh
+        run: |
+          # Two arms from one commit, told apart by the tag: -v2 serves the plain native_m3
+          # graft (attn prep and head concat still two-call, K64 not mounted) so the five
+          # per_core_M=2 matmul grids are isolated; -v3 also mounts ~/opgraft-K64 (the
+          # batch-64 attn_decode_prep and nlp_concat_heads_decode kernels) and sets
+          # QWEN_FAST_NATIVE_ATTN=1 through the run-arm: the round with no two-call op.
+          case "$GITHUB_REF_NAME" in
+            *-v3) export KOPGRAFT64=/home/thatch/opgraft-K64 ;;
+          esac
+          echo "tag=$GITHUB_REF_NAME KOPGRAFT64=${KOPGRAFT64:-}"
+          bash scripts/ci/lever_n_m3native_run_arm.sh
       - name: Report the gate
         working-directory: m3native
         if: always()
