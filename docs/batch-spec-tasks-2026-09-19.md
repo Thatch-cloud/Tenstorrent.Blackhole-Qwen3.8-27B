@@ -2707,3 +2707,11 @@ the watcher showed on run 35507675630. Fix (optimisation/ttnn-op/kernels-batch64
 ring c_23 for the reader's copies; the writer reads cb_out for q/k and the new ring for v/gate. One
 producer per ring, deadlock-free for any split; compute kernel and device operation unchanged; B<=32
 is a relabelling of a private ring. Under test on card M.
+
+## Batch-64 attention prep proven on device (2026-09-21 03:07 UTC, card M, opgraft-K64)
+
+With the private reader ring (54bad24f), attn_decode_prep at batch 64 passes on the 8x8 K/V grid with
+two batch tiles under the watcher: q and k PCC 0.99999, v and gate exact, pads zero, and every B<=32
+case unchanged. Traced device time 225.3 us at B=32 and 352.9 us at B=64 (1.57x), so one 64-batch
+call is cheaper than the two 32-batch calls the overlay makes today. Both C++-bounded ops are now
+lifted; the 64-row round can run every op once.
