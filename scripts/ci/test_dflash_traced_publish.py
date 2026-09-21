@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import os
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 import unittest.mock
@@ -10,6 +11,8 @@ import torch
 from draft_head_preparation import rope_reference, rope_tables
 import draft_kv_history
 from draft_kv_history import KV_SHAPE, QUERY_SHAPE, DraftKVHistory
+import draft_kv_slide
+from draft_kv_slide_adapter import build_prepare
 
 
 class FlagTests(unittest.TestCase):
@@ -295,18 +298,21 @@ class FusedOverrideBehaviorTests(FusedKVHistoryFixture, unittest.TestCase):
 
 class FusedOverrideDeclinesForTheSlideCandidateTests(FusedKVHistoryFixture, unittest.TestCase):
     """(d): install_fused_kv_history must not install - and must not guess at
-    reproducing - whenever draft_kv_slide_scope.scoped_publication's own candidate is
-    CURRENTLY the live class-level DraftKVHistory.prepare (its _draft_kv_slide
-    marker, set by draft_kv_slide_scope.py itself). This module does not attempt the
-    "reproduce it" half of the instruction - it cannot verify prepare_slide's own
-    transport matches without hardware - so it always takes the "decline" half,
-    logging why under QWEN_FAST_PACKED_AUDIT=1."""
+    reproducing - whenever the live class-level DraftKVHistory.prepare carries the
+    `_draft_kv_slide` marker but is NOT recognizably draft_kv_slide_scope.
+    scoped_publication's own wrapper (_slide_transport_is_recognizable: __module__/
+    __qualname__ must match too, not just the marker). A plain function defined
+    right here in this test module, marker set by hand, is exactly that case - its
+    __module__ is this test file's, never 'draft_kv_slide_scope' - so it always
+    declines, logging why under QWEN_FAST_PACKED_AUDIT=1. The companion case - the
+    marker AND the matching identity, which must instead ENGAGE - is
+    FusedOverrideEngagesTheRecognizedSlideCandidateTests below."""
 
     @staticmethod
     def marked_slide_candidate():
         def candidate(self, features, prefix, *, position):
             raise AssertionError('the slide candidate must never actually run here - '
-                                  'only its liveness (the _draft_kv_slide marker) is checked')
+                                  'only its liveness and identity are checked')
         candidate._draft_kv_slide = True
         return candidate
 
@@ -320,7 +326,7 @@ class FusedOverrideDeclinesForTheSlideCandidateTests(FusedKVHistoryFixture, unit
                 restore = install_fused_kv_history(cache)
             self.assertIsNone(restore)
             self.assertNotIn('prepare', vars(cache))
-            audit_log.assert_called_once_with(FUSION_DECLINED_LINE, reason='slide_candidate_live')
+            audit_log.assert_called_once_with(FUSION_DECLINED_LINE, reason='unrecognized_slide_candidate')
 
     def test_decline_is_silent_without_the_audit_flag(self):
         from dflash_traced_publish import install_fused_kv_history
@@ -347,6 +353,156 @@ class FusedOverrideDeclinesForTheSlideCandidateTests(FusedKVHistoryFixture, unit
             self.assertIsNotNone(restore)
             self.assertIn('prepare', vars(cache))
             restore()
+
+
+def slide_style_transport(mesh, active, delta, spare, *, history_rows, prefix):
+    """A CPU-safe stand-in for draft_kv_slide.prepare's own contract - (mesh, active,
+    delta, spare, *, history_rows, prefix) -> zero-arg callable that writes into
+    `spare` in place - using the REAL, hardware-independent draft_kv_slide.geometry()
+    to derive drop/rows, so this stays faithful to that module's own documented
+    per-row mapping (row_source) without needing ttnn or hardware. Never touches
+    draft_kv_slide.py/.cpp; only calls the pure-Python helper it already exposes."""
+    shape = draft_kv_slide.geometry(history_rows, prefix)
+    drop, rows = shape['drop'], shape['rows']
+    def execute():
+        combined = torch.cat([active[..., drop:history_rows, :], delta[..., :prefix, :]], dim=2)
+        spare[..., :rows, :] = combined[..., :rows, :]
+        if rows < 2048:
+            spare[..., rows:, :] = 0.0
+        return None
+    return execute
+
+
+def build_recognizable_slide_candidate(transport):
+    """Mimics exactly what draft_kv_slide_scope.scoped_publication installs at the
+    class level: the REAL exec'd candidate from draft_kv_slide_adapter.build_prepare
+    against the ACTUAL draft_kv_history.py source (not a re-implementation), wrapped
+    the same way scoped_publication's own local `prepare` wraps it (the five-layer
+    check; tensor-copy counting is left out here since nothing in this test suite
+    reads it), with __module__/__qualname__ set to what a genuine scoped_publication
+    installs - the identity _slide_transport_is_recognizable checks for. Imports
+    only draft_kv_history/draft_kv_slide_adapter; never draft_kv_slide_scope.py
+    itself (that file needs QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1, hardware, and a
+    qualified evidence directory none of this suite has)."""
+    source = Path(draft_kv_history.__file__).read_text()
+    candidate, metadata = build_prepare(source, vars(draft_kv_history), transport)
+
+    def prepare(cache, *args, **kwargs):
+        if len(cache.parameters) != 5:
+            raise ValueError('All five learned draft layers required')
+        return candidate(cache, *args, **kwargs)
+
+    prepare._draft_kv_slide = True
+    prepare.__module__ = 'draft_kv_slide_scope'
+    prepare.__qualname__ = 'scoped_publication.<locals>.prepare'
+    return prepare, candidate
+
+
+class FusedOverrideEngagesTheRecognizedSlideCandidateTests(FusedKVHistoryFixture, unittest.TestCase):
+    """v32 follow-up: when draft_kv_slide_scope.scoped_publication's own candidate IS
+    recognizably live, install_fused_kv_history must ENGAGE (not decline) and
+    reproduce that candidate's own prepare_slide transport calls bit-for-bit, using
+    the REAL exec'd candidate (build_recognizable_slide_candidate, not a
+    re-implementation) as the oracle - this is the companion case to
+    FusedOverrideDeclinesForTheSlideCandidateTests above."""
+
+    def test_engages_and_matches_the_real_candidate_bit_for_bit_across_every_prefix(self):
+        from dflash_traced_publish import install_fused_kv_history
+
+        position = 4093
+        features = self.features(2048, position)
+        with self.fixture(features, position, layers=5) as (oracle, unused_oracle_ops), \
+                self.fixture(features, position, layers=5) as (overridden, unused_over_ops), \
+                patch.object(draft_kv_slide, 'prepare', slide_style_transport):
+            marker, candidate = build_recognizable_slide_candidate(slide_style_transport)
+            with patch.object(draft_kv_history.DraftKVHistory, 'prepare', marker):
+                restore = install_fused_kv_history(overridden)
+            self.assertIsNotNone(restore, 'a recognizable slide candidate must be engaged, not declined')
+            self.assertIn('prepare', vars(overridden))
+            try:
+                for prefix in range(1, 33):
+                    self.assertEqual(oracle.history_rows, 2048, 'steady state throughout')
+                    self.assertEqual(overridden.history_rows, 2048, 'steady state throughout')
+                    self.assertEqual(oracle.position, overridden.position)
+                    candidate_features = self.features(32, oracle.position)
+                    oracle.commit(candidate(oracle, candidate_features, prefix, position=oracle.position))
+                    overridden.commit(overridden.prepare(candidate_features, prefix, position=overridden.position))
+                    for layer, (oracle_pair, over_pair) in enumerate(zip(oracle.active, overridden.active, strict=True)):
+                        for name in ('k', 'v'):
+                            self.assertTrue(torch.equal(oracle_pair[name].view(torch.int16), over_pair[name].view(torch.int16)),
+                                'layer %d %s diverged at prefix=%d' % (layer, name, prefix))
+            finally:
+                restore()
+            self.assertNotIn('prepare', vars(overridden))
+
+    def test_the_transitional_round_that_first_reaches_2048_also_matches(self):
+        from dflash_traced_publish import install_fused_kv_history
+
+        position = 2030
+        features = self.features(position, position)
+        with self.fixture(features, position, layers=5) as (oracle, unused_oracle_ops), \
+                self.fixture(features, position, layers=5) as (overridden, unused_over_ops), \
+                patch.object(draft_kv_slide, 'prepare', slide_style_transport):
+            marker, candidate = build_recognizable_slide_candidate(slide_style_transport)
+            with patch.object(draft_kv_history.DraftKVHistory, 'prepare', marker):
+                restore = install_fused_kv_history(overridden)
+            try:
+                self.assertEqual(oracle.history_rows + 32, 2062, 'crosses 2048 mid-prefix')
+                candidate_features = self.features(32, oracle.position)
+                oracle.commit(candidate(oracle, candidate_features, 32, position=oracle.position))
+                overridden.commit(overridden.prepare(candidate_features, 32, position=overridden.position))
+            finally:
+                restore()
+            self.assertEqual(oracle.history_rows, 2048)
+            self.assertEqual(overridden.history_rows, 2048)
+            for layer, (oracle_pair, over_pair) in enumerate(zip(oracle.active, overridden.active, strict=True)):
+                for name in ('k', 'v'):
+                    self.assertTrue(torch.equal(oracle_pair[name].view(torch.int16), over_pair[name].view(torch.int16)),
+                        'layer %d %s diverged on the transitional round' % (layer, name))
+
+    def test_falls_through_to_the_recognized_candidate_before_the_ramp_completes(self):
+        """rows != 2048: the override must not attempt its own fused transport call at
+        all - it must fall straight through to `original` (the bound recognized
+        candidate captured at install time), so the ramping regime is still served by
+        the SAME qualified transport scoped_publication would have used, unmodified."""
+        from dflash_traced_publish import install_fused_kv_history
+
+        position = 170
+        features = self.features(position, position)
+        with self.fixture(features, position, layers=5) as (oracle, unused_oracle_ops), \
+                self.fixture(features, position, layers=5) as (overridden, unused_over_ops), \
+                patch.object(draft_kv_slide, 'prepare', slide_style_transport):
+            marker, candidate = build_recognizable_slide_candidate(slide_style_transport)
+            with patch.object(draft_kv_history.DraftKVHistory, 'prepare', marker):
+                restore = install_fused_kv_history(overridden)
+            try:
+                candidate_features = self.features(32, oracle.position)
+                oracle.commit(candidate(oracle, candidate_features, 7, position=oracle.position))
+                overridden.commit(overridden.prepare(candidate_features, 7, position=overridden.position))
+            finally:
+                restore()
+            self.assertEqual(overridden.history_rows, 177)
+            self.assertEqual(oracle.history_rows, overridden.history_rows)
+            for layer, (oracle_pair, over_pair) in enumerate(zip(oracle.active, overridden.active, strict=True)):
+                for name in ('k', 'v'):
+                    self.assertTrue(torch.equal(oracle_pair[name].view(torch.int16), over_pair[name].view(torch.int16)),
+                        'layer %d %s diverged during the ramp' % (layer, name))
+
+    def test_still_declines_for_an_unrecognized_marker_even_with_a_real_transport_available(self):
+        """Sanity cross-check: build_recognizable_slide_candidate's OWN candidate,
+        installed WITHOUT the __module__/__qualname__ correction, must still be
+        declined - proving engagement depends on the identity check, not merely on
+        whether a working candidate happens to be present."""
+        from dflash_traced_publish import install_fused_kv_history
+
+        with self.fixture(self.features(2048, 4093), 4093, layers=5) as (cache, unused_ops), \
+                patch.object(draft_kv_slide, 'prepare', slide_style_transport):
+            marker, candidate = build_recognizable_slide_candidate(slide_style_transport)
+            marker.__module__ = __name__  # this test file's own module, not 'draft_kv_slide_scope'
+            with patch.object(draft_kv_history.DraftKVHistory, 'prepare', marker):
+                restore = install_fused_kv_history(cache)
+            self.assertIsNone(restore)
+            self.assertNotIn('prepare', vars(cache))
 
 
 if __name__ == '__main__':

@@ -72,7 +72,8 @@ FLAG = 'QWEN_FAST_TRACED_PUBLISH'
 
 # Logged under QWEN_FAST_PACKED_AUDIT=1 (dflash_packed_proposal_coordinator.audit_log)
 # whenever install_fused_kv_history declines to install rather than guess at
-# reproducing another live override's own behavior - see that function's docstring.
+# reproducing an unrecognized live override's own behavior - see that function's
+# own docstring and _slide_transport_is_recognizable for what "unrecognized" means.
 FUSION_DECLINED_LINE = '[PACKED-PUBLISH] fusion=declined reason={reason}'
 
 
@@ -153,26 +154,117 @@ def _fused_kv_history_prepare(cache, original, features, prefix, *, position):
     return cache.pending
 
 
+def _slide_transport_is_recognizable(candidate):
+    """True only for draft_kv_slide_scope.scoped_publication's own outer wrapper -
+    the `_draft_kv_slide` marker alone is not a safe identity check (it is a plain
+    bool anyone could set on any function); __module__/__qualname__ pin it to that
+    function's ACTUAL origin, the local `prepare` closure scoped_publication itself
+    defines and installs via unittest.mock.patch.object. A marker present on
+    anything else (a test double, a future different experiment reusing the same
+    marker convention) fails this and is declined, never guessed at."""
+    return (getattr(candidate, '_draft_kv_slide', False)
+            and getattr(candidate, '__module__', None) == 'draft_kv_slide_scope'
+            and getattr(candidate, '__qualname__', '') == 'scoped_publication.<locals>.prepare')
+
+
+def _fused_kv_history_prepare_via_slide(cache, original, transport, features, prefix, *, position):
+    """The steady-state fusion for one DraftKVHistory instance's own .prepare, when
+    draft_kv_slide_scope.scoped_publication's own candidate is the live class method
+    (see install_fused_kv_history) - reproduces what THAT candidate does, calling the
+    SAME transport (draft_kv_slide.prepare, imported directly - draft_kv_slide_scope.
+    py's own import is a hardcoded `from draft_kv_slide import prepare as transport`,
+    never swapped at runtime) with the SAME arguments, in the SAME order, the SAME
+    number of times (10: 5 layers x k/v) that draft_kv_slide_adapter.build_prepare's
+    exec'd candidate would - see draft_kv_slide_adapter.REPLACEMENT for the exact
+    call shape this mirrors: prepare_slide(mesh, active[name], result[name],
+    spare[name], history_rows=self.history_rows, prefix=prefix)().
+
+    This is safe to call ONLY because install_fused_kv_history only ever reaches
+    here after confirming (_slide_transport_is_recognizable) that draft_kv_slide_
+    scope.scoped_publication's own scope is ALREADY open - meaning its own
+    admission/qualification check (draft_kv_slide_gate.qualify) has ALREADY passed
+    for this session. This function never calls draft_kv_slide.prepare on its own
+    initiative outside that scope - doing so would use an admission-gated,
+    unqualified-by-default transport (draft_kv_slide.py's own docstring: "no serving
+    integration") without the check that gates it.
+
+    KNOWN LIMITATION, understood and accepted rather than worked around: this
+    bypasses scoped_publication's own audit counting (audit['prepare_calls'] /
+    audit['tensor_copies'], incremented only inside its class-level `prepare`
+    wrapper and `counted_transport` closure - both skipped here, since this runs as
+    an INSTANCE-level override and Python attribute lookup never reaches the class
+    method at all). The only consumer of those counts is dflash_native_comparison_
+    report.py's K/V-publication ABBA check (`audit['prepare_calls'] != len(entry
+    ['blocks'])`), fed exclusively by dflash_native_comparison_experiment.py /
+    drafter_comparison_experiment.py - neither of which references serving_packed_
+    step, install_publish_options or QWEN_FAST_TRACED_PUBLISH at all (grepped, scripts
+    /ci/*.py), so today this override is never installed during a run that check
+    would see. If that ever changes, the mismatch fails LOUD (a ValueError from that
+    check), not silent - it is a canary, not a silent corruption - but it would still
+    need the audit dict threaded down to here to pass. Flagged to the team lead
+    rather than solved: doing so needs a reachable path from install_fused_kv_history
+    to draft_kv_slide_scope's own audit dict, and today there is none (it is a
+    closure-local variable, reachable in the live runtime only via worker.
+    _qwen_fast_attachment['runtime']['publication'] - serving_startup.py - many
+    layers above where install_fused_kv_history is called from).
+
+    Falls straight through to `original` (the bound class method captured before
+    this override existed - itself scoped_publication's own wrapper, so the ramping
+    case still goes through the qualified candidate, not this module's ttnn-op
+    fusion) whenever rows != 2048."""
+    rows = min(2048, cache.history_rows + prefix)
+    if rows != 2048:
+        return original(features, prefix, position=position)
+    if (cache.closed or cache.pending is not None or type(position) is not int or position != cache.position
+            or type(prefix) is not int or not 1 <= prefix <= 32 or position + prefix > 262144):
+        raise ValueError('One accepted-prefix cache update at the current committed frontier required')
+    from types import SimpleNamespace
+
+    from draft_kv_projection import project_key_value
+
+    operations = cache.operations
+    with cache.temporaries([features]) as retain:
+        inputs, tables = cache.project_inputs(features, prefix, position, retain)
+        projected = cache.projection.project(inputs, tables) if cache.projection is not None else None
+        for layer, (parameter, active, spare) in enumerate(zip(cache.parameters, cache.active, cache.spare, strict=True)):
+            result = projected[layer] if projected is not None else project_key_value(
+                operations, inputs, cache.query, tables, retain, parameters=parameter)
+            for name in ('k', 'v'):
+                transport(cache.mesh, active[name], result[name], spare[name],
+                    history_rows=cache.history_rows, prefix=prefix)()
+        operations.synchronize_device(cache.mesh)
+    cache.pending = SimpleNamespace(position=position, prefix=prefix, rows=rows, status='prepared')
+    return cache.pending
+
+
 def install_fused_kv_history(kv_history):
     """Install a transient, INSTANCE-level override on kv_history.prepare (shadowing
     draft_kv_history.DraftKVHistory.prepare the same way install_publish_options
     shadows drafter.prepare_publication - an attribute on this one object, never the
-    class) that runs _fused_kv_history_prepare above in place of the class method,
-    for the life of one publish call. Returns a restore callable, or None if nothing
-    was installed (kv_history is None, or this declined - see below); restore()
-    always removes exactly what THIS call installed, never more.
+    class) for the life of one publish call. Returns a restore callable, or None if
+    nothing was installed (kv_history is None, not a real DraftKVHistory, or this
+    declined - see below); restore() always removes exactly what THIS call
+    installed, never more.
 
-    Declines outright (returns None, logging FUSION_DECLINED_LINE under
-    QWEN_FAST_PACKED_AUDIT=1) rather than installing, whenever draft_kv_slide_scope.
-    scoped_publication's own candidate is CURRENTLY the live class-level
-    DraftKVHistory.prepare - detected via that candidate's own `_draft_kv_slide`
-    marker (draft_kv_slide_scope.py sets it on the function it installs, and checks
-    the same marker itself to forbid nested overrides). That candidate already
-    replaces prepare()'s entire per-(layer, head) sequence with its own prepare_slide
-    transport (draft_kv_slide_adapter.py); this module has no way to confirm without
-    hardware that _fused_kv_history_prepare's own slice+concat reproduces
-    prepare_slide's transport bit-for-bit, so - per instruction - it leaves that
-    candidate's behavior alone rather than guess at matching it.
+    Three cases, decided once at install time by reading draft_kv_history.
+    DraftKVHistory.prepare (the current CLASS method):
+
+      - Nothing live (the true original method): installs _fused_kv_history_prepare
+        (this module's own ttnn slice+concat fusion).
+      - draft_kv_slide_scope.scoped_publication's own candidate is recognizably live
+        (_slide_transport_is_recognizable): installs _fused_kv_history_prepare_via_
+        slide, reproducing that candidate's own prepare_slide transport calls
+        bit-for-bit (same args, same order, same count) - see that function's own
+        docstring for what "reproducing" does and does not cover here.
+      - Something else entirely has the `_draft_kv_slide` marker set but is not
+        recognizably scoped_publication's own wrapper (module/qualname mismatch):
+        declines outright (returns None, logging FUSION_DECLINED_LINE under
+        QWEN_FAST_PACKED_AUDIT=1 with reason='unrecognized_slide_candidate') rather
+        than guess at reproducing an unknown candidate's behavior.
+
+    Both installed variants fall through to the true original class method whenever
+    rows != 2048 (still ramping) - correctness there is never this module's to prove,
+    only steady state's algebraic identity is.
 
     Raises ValueError if kv_history.prepare is already instance-overridden by
     something else (the same contract install_publish_options enforces on
@@ -186,16 +278,23 @@ def install_fused_kv_history(kv_history):
         return None
     if 'prepare' in vars(kv_history):
         raise ValueError('kv_history.prepare is already overridden')
-    if getattr(draft_kv_history.DraftKVHistory.prepare, '_draft_kv_slide', False):
-        from dflash_packed_proposal_coordinator import audit_enabled, audit_log
-
-        if audit_enabled():
-            audit_log(FUSION_DECLINED_LINE, reason='slide_candidate_live')
-        return None
+    live = draft_kv_history.DraftKVHistory.prepare
     original = kv_history.prepare
+    if getattr(live, '_draft_kv_slide', False):
+        if not _slide_transport_is_recognizable(live):
+            from dflash_packed_proposal_coordinator import audit_enabled, audit_log
 
-    def fused(features, prefix, *, position):
-        return _fused_kv_history_prepare(kv_history, original, features, prefix, position=position)
+            if audit_enabled():
+                audit_log(FUSION_DECLINED_LINE, reason='unrecognized_slide_candidate')
+            return None
+        import draft_kv_slide
+
+        def fused(features, prefix, *, position):
+            return _fused_kv_history_prepare_via_slide(kv_history, original, draft_kv_slide.prepare,
+                features, prefix, position=position)
+    else:
+        def fused(features, prefix, *, position):
+            return _fused_kv_history_prepare(kv_history, original, features, prefix, position=position)
 
     kv_history.prepare = fused
 
