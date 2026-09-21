@@ -658,8 +658,21 @@ class DFlashDevice:
             raise ValueError('Live-query proposal mask was not validated before upload/capture')
         if native_proposal_attention and addresses(operations, mask) not in self.validated_native_proposal_masks:
             raise ValueError('Native proposal mask was not validated before upload/capture')
-        if cached_history is not None and (self.kv_history is None or len(cached_history) != len(self.layers)):
-            raise ValueError('Every prepared learned layer requires a committed K/V cache')
+        if cached_history is not None:
+            if self.kv_history is None:
+                raise ValueError('Every prepared learned layer requires a committed K/V cache')
+            # Packed, cached_history is user-major (dflash_packed_proposal.propose_packed's
+            # own tested convention, and the per-layer indexing at
+            # `[cache[layer] for cache in cached_history]` a few lines down): one entry per
+            # packed user, each itself the per-layer caches that ONE user's execute_proposal
+            # call would have passed unpacked. len(cached_history) is the pack size here, not
+            # len(self.layers) - checking it against len(self.layers) refused every real pack
+            # unconditionally, regardless of any device's state (run 35581352016).
+            if pack is None:
+                if len(cached_history) != len(self.layers):
+                    raise ValueError('Every prepared learned layer requires a committed K/V cache')
+            elif len(cached_history) != len(pack) or any(len(cache) != len(self.layers) for cache in cached_history):
+                raise ValueError('Every prepared learned layer requires a committed K/V cache')
         if type(audit_convolution) is not bool or (audit_convolution and not self.fused_convolution):
             raise ValueError('Convolution audit requires the explicit fused candidate')
         # After the guards, so an unregistered mask or a bad audit request still fails

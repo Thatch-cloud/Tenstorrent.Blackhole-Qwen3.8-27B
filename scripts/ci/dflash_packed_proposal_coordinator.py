@@ -24,6 +24,14 @@ import time
 
 AUDIT_FLAG = 'QWEN_FAST_PACKED_AUDIT'
 AUDIT_LINE = '[PACKED-PROPOSE] round={round} pairs={pairs} propose_ms={propose_ms}'
+# One line per pair whose first (or any) traced execution raised - run 35581352016
+# (image v73): a pair formed the moment packable() first saw both devices at
+# history_rows == 2048, and dflash_device.DFlashDevice.execute_proposal refused the
+# packed cached_history it was handed ('Every prepared learned layer requires a
+# committed K/V cache', dflash_device.py:661-662). See packable()'s own docstring for
+# the precondition this line's fallback pair failed anyway, on hardware, despite
+# passing every host-side check this module can perform.
+PAIR_FALLBACK_LINE = '[PACKED-PROPOSE] pair={pair} fallback={fallback}'
 PACKED_CONTEXT = 2048
 
 
@@ -42,21 +50,51 @@ def audit_log(message, **values):
     logger.info(message, **values)
 
 
+def _committed_kv_history(device):
+    """The exact precondition dflash_device.DFlashDevice.execute_proposal itself
+    checks before accepting ANY packed cached_history for this device
+    (dflash_device.py:661-662): `self.kv_history is None or len(cached_history) !=
+    len(self.layers)` raises 'Every prepared learned layer requires a committed K/V
+    cache'. There is no separate kv_history.committed flag anywhere in draft_kv_history.
+    py or dflash_device.py - DraftKVHistory.active is populated once, at construction,
+    from the prefill features, not by any later commit, so this is a structural check
+    (kv_history exists and holds one active bank per prepared draft layer), not a
+    timing one. Checked here so a device this admits is a device execute_proposal's
+    OWN guard would structurally accept too - though see PAIR_FALLBACK_LINE and
+    PackedProposalCoordinator.prepare(): run 35581352016 hit that same guard anyway,
+    on hardware, for a pair both members of which pass every check in this function."""
+    kv_history = getattr(device, 'kv_history', None)
+    if kv_history is None:
+        return False
+    active = getattr(kv_history, 'active', None)
+    layers = getattr(device, 'layers', None)
+    return active is not None and layers is not None and len(active) == len(layers)
+
+
 def packable(device_a, device_b):
     """Both paired devices at the permanent steady-state context, both running the
-    qualified native-proposal path, and both carrying a real single-user
-    proposal_capture (QWEN_FAST_EAGER_PROPOSAL off) for _PackedCaptureView to fall
-    through to - a device with none (proposal_capture is None: DFlashDevice.
-    prepare_device already declines it unconditionally) must never be wrapped, or a
-    later round that falls back to its single-user path (its partner finished,
-    breaking the pair) would delegate has_pending()/finish()/propose() onto None
-    and crash. draft_kv_history.DraftKVHistory requires history_rows ==
-    min(position, 2048), so history_rows == 2048 is monotonic and permanent once
-    reached - this never flips back to False for a pair that has started packing."""
+    qualified native-proposal path, both carrying a committed K/V history
+    (_committed_kv_history, the same precondition execute_proposal itself checks),
+    and both carrying a real single-user proposal_capture (QWEN_FAST_EAGER_PROPOSAL
+    off) for _PackedCaptureView to fall through to - a device with none
+    (proposal_capture is None: DFlashDevice.prepare_device already declines it
+    unconditionally) must never be wrapped, or a later round that falls back to its
+    single-user path (its partner finished, breaking the pair) would delegate
+    has_pending()/finish()/propose() onto None and crash. draft_kv_history.
+    DraftKVHistory requires history_rows == min(position, 2048), so history_rows ==
+    2048 is monotonic and permanent once reached - this never flips back to False for
+    a pair that has started packing.
+
+    Passing every check here is NOT a guarantee execute_proposal will accept the
+    pack - PackedProposalCoordinator.prepare() treats a pair's first traced execution
+    as fallible regardless, and falls the pair back to single-user for that one round
+    on any exception (PAIR_FALLBACK_LINE)."""
     return (getattr(device_a, 'history_rows', None) == PACKED_CONTEXT
             and getattr(device_b, 'history_rows', None) == PACKED_CONTEXT
             and getattr(device_a, 'native_proposal_attention', False)
             and getattr(device_b, 'native_proposal_attention', False)
+            and _committed_kv_history(device_a)
+            and _committed_kv_history(device_b)
             and getattr(device_a, 'proposal_capture', None) is not None
             and getattr(device_b, 'proposal_capture', None) is not None)
 
@@ -201,8 +239,30 @@ class PackedProposalCoordinator:
                         trace = self._trace_for(group, device_a, device_b)
                         ids = '%s,%s' % (entry_a['bridge'].request.session.request_id,
                                          entry_b['bridge'].request.session.request_id)
-                        ready = phase('propose_pair', ids,
-                                      lambda: trace.prepare_device(entry_a['seed'], entry_b['seed']))
+                        try:
+                            ready = phase('propose_pair', ids,
+                                          lambda: trace.prepare_device(entry_a['seed'], entry_b['seed']))
+                        except Exception as failure:
+                            # The four-user gate must never lose the engine to a
+                            # proposal-path refusal (run 35581352016: packable() passed
+                            # every host-side check yet execute_proposal still raised on
+                            # the pair's first traced execution) - this pair falls back
+                            # to single-user for THIS round only. _bucket()'s own
+                            # exception handling already removed any partially-built
+                            # bucket before re-raising, so the trace object itself stays
+                            # valid; discard_pending() is a safe no-op here (prepare_
+                            # device() never reached setting self._pending before its
+                            # own _bucket() call raised) but is called anyway, matching
+                            # every other failure path in this module. packable() is
+                            # re-evaluated fresh next round - a permanent-shaped failure
+                            # (see packable()'s own docstring) then just falls back
+                            # every round, harmlessly, rather than being retried once
+                            # and blacklisted.
+                            trace.discard_pending()
+                            if audit_enabled():
+                                audit_log(PAIR_FALLBACK_LINE, pair=[slot_a, slot_b],
+                                          fallback='%s: %s' % (type(failure).__name__, str(failure)[:160]))
+                            ready = False
                         if ready:
                             _install(device_a, trace, 'a')
                             _install(device_b, trace, 'b')

@@ -432,7 +432,7 @@ class ExecuteProposalTests(unittest.TestCase):
             selector_projection='selector', validated_live_masks=set(), validated_native_proposal_masks=set(),
             convolution_checks=[], position=4096)
 
-    def run_proposal(self, device, **extra):
+    def run_proposal(self, device, *, context=2048, **extra):
         rope = {name: (object(), object()) for name in ('q', 'k')}
         with patch('dflash_device.projection_links', return_value=1), \
                 patch('dflash_device.shared_head_candidates', return_value=['chunks']), \
@@ -449,7 +449,7 @@ class ExecuteProposalTests(unittest.TestCase):
                 return dict(output=object())
 
             attention.side_effect, mlp.side_effect = attend, feed
-            outputs = DFlashDevice.execute_proposal(device, object(), object(), object(), rope, context=2048,
+            outputs = DFlashDevice.execute_proposal(device, object(), object(), object(), rope, context=context,
                 owned=[], retain=lambda value: value, stage=lambda name, **values: None, **extra)
         return outputs, attention, mlp
 
@@ -472,6 +472,68 @@ class ExecuteProposalTests(unittest.TestCase):
         for call in [*attention.call_args_list, *mlp.call_args_list]:
             self.assertNotIn('observe', call.kwargs)
         self.assertEqual(outputs.chunks, ['chunks'])
+
+    def test_unpacked_cached_history_with_no_kv_history_is_refused(self):
+        device = self.device()
+        self.assertIsNone(device.kv_history)
+        with self.assertRaises(ValueError):
+            self.run_proposal(device, cached_history=[object()] * 5)
+
+    def test_unpacked_cached_history_matching_the_five_layers_is_accepted(self):
+        """Byte-identical to before the guard was split for pack mode: unpacked,
+        len(cached_history) must equal len(self.layers) (5), exactly as it always
+        has - a plain per-layer list, not one list per packed user."""
+        device = self.device()
+        device.kv_history = object()
+        outputs, attention, mlp = self.run_proposal(device, cached_history=[object()] * 5)
+        self.assertEqual(outputs.chunks, ['chunks'])
+
+    def test_unpacked_cached_history_with_the_wrong_layer_count_is_refused(self):
+        device = self.device()
+        device.kv_history = object()
+        for count in (4, 6):
+            with self.subTest(count=count):
+                with self.assertRaises(ValueError):
+                    self.run_proposal(device, cached_history=[object()] * count)
+
+    def test_packed_cached_history_one_entry_per_user_each_five_layers_is_accepted(self):
+        """Run 35581352016: a packed cached_history is USER-major - one entry per
+        packed user, each itself a complete five-layer cache - and must be checked
+        against the pack size, not len(self.layers). Two users, five layers each."""
+        device = self.device()
+        device.kv_history = object()
+        pack = [dict(position=4096, history_rows=2048), dict(position=8192, history_rows=2048)]
+        outputs, attention, mlp = self.run_proposal(device, context=None, pack=pack,
+            cached_history=[[object()] * 5, [object()] * 5])
+        self.assertEqual(outputs.chunks, ['chunks'])
+
+    def test_packed_cached_history_with_a_four_layer_users_cache_is_refused(self):
+        """The exact shape of a device without a full committed K/V cache: one of the
+        pack's two users contributes only four per-layer caches instead of five."""
+        device = self.device()
+        device.kv_history = object()
+        pack = [dict(position=4096, history_rows=2048), dict(position=8192, history_rows=2048)]
+        with self.assertRaises(ValueError):
+            self.run_proposal(device, context=None, pack=pack,
+                cached_history=[[object()] * 5, [object()] * 4])
+
+    def test_packed_cached_history_length_not_matching_the_pack_size_is_refused(self):
+        """The bug run 35581352016 actually hit: two packed users but a cached_history
+        checked against len(self.layers) (5) instead of len(pack) (2) - refused every
+        real pack unconditionally. Confirms the fixed guard checks the pack axis."""
+        device = self.device()
+        device.kv_history = object()
+        pack = [dict(position=4096, history_rows=2048), dict(position=8192, history_rows=2048)]
+        with self.assertRaises(ValueError):
+            self.run_proposal(device, context=None, pack=pack, cached_history=[[object()] * 5])
+
+    def test_packed_cached_history_with_no_kv_history_is_refused(self):
+        device = self.device()
+        self.assertIsNone(device.kv_history)
+        pack = [dict(position=4096, history_rows=2048), dict(position=8192, history_rows=2048)]
+        with self.assertRaises(ValueError):
+            self.run_proposal(device, context=None, pack=pack,
+                cached_history=[[object()] * 5, [object()] * 5])
 
 
 class BranchStageTests(unittest.TestCase):
