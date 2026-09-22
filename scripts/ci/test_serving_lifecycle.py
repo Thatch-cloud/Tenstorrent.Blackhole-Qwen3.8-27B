@@ -110,6 +110,70 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'changed sampler behaviour mid-prompt'):
             worker.execute_model(self.continuation(scheduled, 2048, 2048))
 
+    def test_a_mid_prompt_chunk_sampling_step_delegates_instead_of_refusing(self):
+        """Run 35687608717, the first arm to reach the sampler with chunking really on.
+
+        vLLM calls model_executor.sample_tokens on EVERY step (v1/engine/core.py:499),
+        not only when a token is due, so _sample is entered after a mid-prompt chunk.
+        prefill_pending is correctly still clear there, and the native-sampling guard
+        took the engine down with 'Only an unstructured pending prefill may use native
+        sampling'. The step has to delegate to the plugin's own sampler instead.
+        """
+        lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+        worker.execute_model(scheduled)
+        self.assertTrue(lifecycle.chunk_in_flight)
+        self.assertFalse(lifecycle.prefill_pending)
+
+        sentinel = SimpleNamespace(req_ids=[], sampled_token_ids=[])
+        worker.model_runner.sample_tokens.return_value = sentinel
+        self.assertIs(worker.sample_tokens(None), sentinel,
+                      'the mid-prompt step must return the original sampler result')
+        self.assertFalse(lifecycle.failed, 'delegating must not fail the lifecycle')
+
+    def test_the_mid_prompt_sampling_step_delegates_even_with_grammar_output(self):
+        """The guard refuses structured output because native sampling cannot honour
+        it. A mid-prompt chunk is not native sampling at all, so it delegates rather
+        than refusing - the original sampler is the one that decides."""
+        lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+        worker.execute_model(scheduled)
+        sentinel = SimpleNamespace(req_ids=[], sampled_token_ids=[])
+        worker.model_runner.sample_tokens.return_value = sentinel
+        self.assertIs(worker.sample_tokens(object()), sentinel)
+
+    def test_the_final_chunk_clears_the_in_flight_flag_and_arms_native_sampling(self):
+        lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+        capture.finish_at = 2
+        worker.execute_model(scheduled)
+        self.assertTrue(lifecycle.chunk_in_flight)
+        worker.execute_model(self.continuation(scheduled, 2048, 2048))
+        self.assertFalse(lifecycle.chunk_in_flight, 'the seed is due, not deferred')
+        self.assertTrue(lifecycle.prefill_pending)
+
+    def test_the_unchunked_path_never_sets_the_in_flight_flag(self):
+        """A whole-prompt step arms native sampling directly; nothing about the
+        unchunked path may start depending on the chunk flag."""
+        lifecycle, worker, _, capture, _, scheduled, _ = self.fixture()
+        worker.execute_model(scheduled)
+        self.assertFalse(lifecycle.chunk_in_flight)
+        self.assertTrue(lifecycle.prefill_pending)
+
+    def test_chunk_state_is_per_request_not_per_process(self):
+        """chunk_deferred was initialised once and never cleared, so a new prompt's
+        first chunk was compared against the PREVIOUS request's last one. Harmless at
+        one request in flight and wrong the moment there are two, which is the point
+        of the whole programme.
+
+        Driven by poisoning the residue rather than running two full requests: without
+        the reset on admission, the mid-prompt check sees deferred=True against a
+        stale False and raises 'changed sampler behaviour mid-prompt'.
+        """
+        lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+        lifecycle.chunk_deferred = [False]
+        lifecycle.chunk_in_flight = True
+        worker.execute_model(scheduled)
+        self.assertEqual(lifecycle.chunk_deferred, [True],
+                         'admission must start this prompt its own chunk history')
+
     def test_a_continuation_for_another_request_is_not_routed_to_this_capture(self):
         lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
         worker.execute_model(scheduled)

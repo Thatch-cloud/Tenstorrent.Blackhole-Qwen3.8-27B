@@ -37,6 +37,9 @@ class FastServingLifecycle:
         # the most recent, so existing single-user behaviour reads the same.
         self.decoding_ids = []
         self.prefill_pending = self.failed = self.closed = self.ignore_eos = False
+        # A mid-prompt prefill chunk has run and produced no token. Distinct from
+        # prefill_pending, which means the native seed IS due.
+        self.chunk_in_flight = False
         # One entry per prefill chunk: True when the plugin's execute deferred its
         # sampler (returned None). docs/lever-n-plugin-contract-2026-09-19.md:55-72
         # establishes that the RUNNER zeroes next_token_ids for mid-prompt rows and
@@ -147,6 +150,11 @@ class FastServingLifecycle:
             self.ignore_eos = bool(getattr(new.sampling_params, 'ignore_eos', False))
             self.request_id = new.req_id
             self.capture = self.capture_factory(len(new.prompt_token_ids))
+            # Per-request, not per-process: without this the mid-prompt sampler
+            # check below compares this prompt's first chunk against the PREVIOUS
+            # request's last one.
+            self.chunk_deferred = []
+            self.chunk_in_flight = False
             # A native prefill rewrites GDN slot 0, so whichever engine's state it
             # held is gone; the next verify must restore its own carry.
             note_prefill()
@@ -190,18 +198,33 @@ class FastServingLifecycle:
         self.chunk_deferred.append(deferred)
         if not whole and not self.capture.complete:
             # Mid-prompt. The runner has already zeroed next_token_ids for these rows
-            # and drops the placeholders when it builds the output, so there is nothing
-            # to sample and prefill_pending stays clear - the deferred sampler belongs
-            # to the token the FINAL chunk produces.
+            # and drops the placeholders when it builds the output, so there is no
+            # token here - the deferred sampler belongs to the one the FINAL chunk
+            # produces, and prefill_pending stays clear until then.
+            #
+            # That does NOT mean _sample is skipped. vLLM calls sample_tokens on
+            # every step (v1/engine/core.py:499), so it is entered here too, and run
+            # 35687608717 died because the guard there saw prefill_pending clear and
+            # refused. This flag is the third state the guard was missing.
+            self.chunk_in_flight = True
             return result
         if not deferred:
             raise ValueError('Expected native prefill deferred sampler on the final chunk')
+        self.chunk_in_flight = False
         self.prefill_pending = True
         return None
 
     def _sample(self, worker, grammar_output):
         self._check()
         try:
+            if self.chunk_in_flight:
+                # A mid-prompt chunk produced no token, so there is no native seed to
+                # commit. The plugin's own sampler drops the zeroed placeholders the
+                # runner wrote. Checked BEFORE the guard below, because that guard is
+                # about misuse of native sampling and this is not native sampling at
+                # all - including when grammar_output is set, which this path leaves
+                # to the original sampler rather than refusing.
+                return self.original_sample(grammar_output)
             if not self.prefill_pending or grammar_output is not None:
                 raise ValueError('Only an unstructured pending prefill may use native sampling')
             result = self.original_sample(grammar_output)
