@@ -175,3 +175,57 @@ The vLLM invocation was verified: `--max-model-len 131328`, `--num-gpu-blocks-ov
 2052`, `--max-num-seqs 1`. The docker `-e` flags are not echoed in the job log, but the
 prefill of 131,072 positions is itself proof `QWEN_FAST_MAX_POSITION` reached the
 container: without it `dflash_prefill_window` refuses positions above 65,504.
+
+## v88: 131k decode works, and context length is not the wall
+
+v87 (run 35790454545) still refused - its traceback raised from `ordered_cache.py` line
+54, the OLD file's raise, because the file was in neither image copy list and image v93
+shipped the frozen bundle's version. Image v94 overlays it (build log: `COPY
+scripts/ci/ordered_cache.py` at step 41/51), and `test_serving_image_copy_closure` now
+fails on any module changed since the bundle but overlaid by neither list.
+
+Run **35791589709 (v88)**: one user at 131,072, the v84 configuration, image v94. It
+**decoded** - the first m3native decode at 131k - with only the harmless shutdown
+`empty_cache` error.
+
+| | 32k (v84, 35783241354) | 131k (v88, 35791589709) |
+|---|---|---|
+| per-user rate | 48.0 tok/s | **47.5 tok/s** |
+| median round | 125.0 ms | 128.5 ms |
+| decode step | 98.3 ms | 106.7 ms |
+| tokens per round (completion / chunks) | 6.74 | 6.10 |
+| mean acceptance (vLLM metric) | 6.47 | 6.50 |
+| TTFT | 17.2 s | 68.4 s |
+| DRAM after engine, chip 0 | - | 26.93 GB, 6.71 GB free (predicted 26.98) |
+
+**The m3native attention slope is ~0.085 ms per 1k tokens per user**: +8.4 ms of step over
+98,304 extra tokens. That is **2.6x smaller** than the 0.2225 every earlier 131k
+prediction borrowed from the frozen lineage, and **below the ~0.15 threshold** at which
+four-user parity at 131k would be structurally excluded. Acceptance does not fall.
+
+**Output at 131k is byte-identical to the 32k run over all 960 characters (256 tokens).**
+Those decode positions, 131,072-131,327, are exactly page-table entries 2,048-2,051 - the
+entries the new width admits. A misread there would corrupt the most recent K/V and
+almost certainly change the continuation. This is strong evidence the writer is correct
+at width 2,052. It is **not** the independent qualification the review required: the
+prompt is synthetic and periodic, and the check is not independent of the kernel. The
+host-predicted hardware probe is still owed.
+
+### What this changes
+
+The previous section predicted ~355 ms for four users at 131k against ~147 ms for one,
+using the borrowed slope. With the measured slope:
+
+- single-stream at 131k is **~47.5 tok/s** - the bar is the same as at 32k;
+- attention adds only ~8.4 ms per user from 32k to 131k, so a four-user 131k round is
+  projected at roughly 267.5 + 4 x 8.4 = **~301 ms**, about **20 tok/s per user, ~0.42
+  of single-stream**. (Projection: the packed four-user path uses the native batch-64
+  attention, whose context scaling is not yet measured separately.)
+
+**So the 131k target reduces to the 32k problem plus capacity.** The wall is the ~40-52 ms
+per added user of context-independent work - GDN recurrence and launches, in-trace data
+movement, draft passes, draft publication - plus the ~6.1 GB per chip DRAM shortfall for
+4 x 131k, which is fast-path overhead rather than KV. The DRAM-bandwidth floor (75.8 ms
+for four users at 131k) says the hardware has the headroom; the per-user work is
+overhead-bound, not bandwidth-bound, so the path to parity is making it overlap rather
+than add.
