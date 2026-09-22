@@ -634,3 +634,83 @@ class PhaseLogTests(unittest.TestCase):
             self.assertEqual(serving_worker_hook.phase('propose', 'r', lambda: 'drafts'), 'drafts')
         self.assertEqual(lines[0], '[PHASE] propose r begin')
         self.assertTrue(lines[1].startswith('[PHASE] propose r end '))
+
+
+class ChunkedPrefillRoutingTests(unittest.TestCase):
+    """A second user's prefill CHUNK must reach the runner, not the decode contract.
+
+    Run 35711818636 (v67) died here. With the M2 alternation live, a decoding user and
+    a chunk-prefilling user coexisted for the first time and the step that returned to
+    prefill was refused:
+
+        [PHASE] execute total=2048 new=0 cached=1 spec=0
+        ValueError: scheduled_only=['cmpl-a007c5bc...']  <- user 2, prefilling
+                    prepared_only=['cmpl-95f0b271...']   <- user 1, the live decoder
+
+    _execute already routed someone else's prefill away, but only when it arrived as a
+    NEW request. Under M1 resumable chunked prefill only the FIRST chunk is new; later
+    chunks are CACHED, so that guard never fires. Bridge ownership is the condition that
+    actually separates the cases.
+    """
+
+    def fixture(self):
+        return WorkerHookTests().fixture()
+
+    def hook(self, worker, bridge):
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        self.addCleanup(hook.close)
+        return hook
+
+    def test_a_second_users_prefill_chunk_reaches_the_runner(self):
+        """The v67 failure, as a unit test."""
+        worker, bridge, _, scheduled = self.fixture()
+        original = bridge.runner.execute_model
+        self.hook(worker, bridge)
+        scheduled.scheduled_cached_reqs.req_ids = ['someone-else']
+        scheduled.total_num_scheduled_tokens = 2048
+        worker.execute_model(scheduled)
+        original.assert_called_once_with(scheduled)
+
+    def test_the_new_request_guard_could_not_have_caught_it(self):
+        """The negative control. If scheduled_new_reqs were non-empty here the old
+        guard would already have handled it and this fix would be redundant."""
+        _, _, _, scheduled = self.fixture()
+        scheduled.scheduled_cached_reqs.req_ids = ['someone-else']
+        self.assertFalse(getattr(scheduled, 'scheduled_new_reqs', None),
+                         'a continuation chunk is cached, not new - that is the whole bug')
+
+    def test_a_held_requests_step_still_takes_the_decode_path(self):
+        """The regression guard: this must not divert this hook's own decode."""
+        worker, bridge, _, scheduled = self.fixture()
+        original = bridge.runner.execute_model
+        self.hook(worker, bridge)
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.ModelRunnerOutput = SimpleNamespace
+        with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+            result = worker.execute_model(scheduled)
+        original.assert_not_called()
+        self.assertEqual(result.sampled_token_ids, [list(range(11, 27))])
+
+    def test_a_step_mixing_a_held_and_an_unheld_id_also_passes_through(self):
+        """Defensive: TTScheduler does not mix prefill and decode, but if a step ever
+        names an id this hook cannot serve, refusing it is worse than delegating."""
+        worker, bridge, _, scheduled = self.fixture()
+        original = bridge.runner.execute_model
+        self.hook(worker, bridge)
+        scheduled.scheduled_cached_reqs.req_ids = ['request', 'someone-else']
+        worker.execute_model(scheduled)
+        original.assert_called_once_with(scheduled)
+
+    def test_once_the_second_user_is_held_the_step_is_no_longer_diverted(self):
+        """The guard is about OWNERSHIP, not about how many requests exist. Once the
+        second user has a bridge on this hook, its step is this hook's work again."""
+        worker, bridge, _, scheduled = self.fixture()
+        original = bridge.runner.execute_model
+        hook = self.hook(worker, bridge)
+        scheduled.scheduled_cached_reqs.req_ids = ['someone-else']
+        hook.bridges['someone-else'] = bridge
+        try:
+            worker.execute_model(scheduled)
+        except Exception:
+            pass
+        original.assert_not_called()

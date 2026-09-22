@@ -234,6 +234,21 @@ class FastWorkerHook:
                         sorted(getattr(scheduled, 'preempted_req_ids', None) or (), key=str))
         if getattr(scheduled, 'scheduled_new_reqs', None):
             return self.original_execute(scheduled)
+        # ... and under CHUNKED prefill only the first chunk is new. Every later
+        # chunk of someone else's prompt is a CACHED request, so the guard above
+        # does not fire and the step reaches the decode contract naming a request
+        # this hook holds no bridge for. Run 35711818636 died exactly there, on
+        # execute total=2048 new=0 cached=1, the first time a decoding user and a
+        # chunk-prefilling user coexisted.
+        #
+        # Bridge ownership is the condition that actually separates the cases.
+        # TTScheduler never mixes prefill and decode in one batch (probe
+        # 35435453374) and the M2 alternation preserves that, so a step carrying a
+        # cached id this hook does not hold carries none of its decode work.
+        cached_ids = getattr(getattr(scheduled, 'scheduled_cached_reqs', None),
+                             'req_ids', None) or ()
+        if set(cached_ids) - set(self.bridges):
+            return self.original_execute(scheduled)
         # A step that schedules no tokens is a bookkeeping step - a request
         # finishing, for instance - not this hook's decode. With one bridge the
         # lifecycle released the hook before such a step could arrive; holding
