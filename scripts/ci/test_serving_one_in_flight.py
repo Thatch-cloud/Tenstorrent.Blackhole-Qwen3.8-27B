@@ -10,7 +10,8 @@ starve prefill entirely whenever any request was decoding.
 from types import SimpleNamespace
 import unittest
 
-from serving_one_in_flight import effective_capacity, install, one_in_flight_scheduler
+from serving_one_in_flight import (allowed_prefills, effective_capacity, install,
+                                   one_in_flight_scheduler, waiting_headroom)
 
 
 class CapacityArithmeticTests(unittest.TestCase):
@@ -24,14 +25,16 @@ class CapacityArithmeticTests(unittest.TestCase):
                 for partials in range(0, 4):
                     capacity = effective_capacity(configured, decodes, partials)
                     where = 'configured=%d decodes=%d partials=%d' % (configured, decodes, partials)
-                    self.assertLessEqual(capacity, partials + 1, where)
-                    self.assertEqual(capacity, min(partials + 1, max(0, configured - decodes)), where)
+                    self.assertLessEqual(capacity, allowed_prefills(partials), where)
+                    self.assertEqual(capacity,
+                                     min(allowed_prefills(partials), max(0, configured - decodes)), where)
 
     def test_one_slot_survives_whenever_the_configuration_can_afford_it(self):
         for decodes in range(0, 6):
             for partials in range(0, 4):
-                self.assertEqual(effective_capacity(decodes + partials + 1, decodes, partials),
-                                 partials + 1, 'decodes=%d partials=%d' % (decodes, partials))
+                self.assertEqual(effective_capacity(decodes + allowed_prefills(partials), decodes, partials),
+                                 allowed_prefills(partials),
+                                 'decodes=%d partials=%d' % (decodes, partials))
 
     def test_a_naive_cap_would_starve_prefill_and_this_one_does_not(self):
         """Capping at partials + 1 WITHOUT adding the decodes back gives
@@ -86,7 +89,17 @@ class SubclassTests(unittest.TestCase):
         scheduler = one_in_flight_scheduler(FakeScheduler)()
         scheduler.running = [self.request(True), self.request(False)]
         scheduler._schedule_prefill_only()
-        self.assertEqual(calls, [2], 'the partial continues and one fresh prompt may join')
+        # CHANGED 2026-09-22, build plan step 8. This used to be [2]: the partial
+        # continued and one fresh prompt could join it. It may not any more. The pinned
+        # plugin replaces self.running with the partials and then admits from waiting up
+        # to max_num_running_reqs - len(self.running), so a cap of `partials` leaves
+        # zero headroom while a partial is in flight - which is the only place that
+        # interleaving can be stopped, the GDN prefill scratch being single-occupancy
+        # and the model-side cursor being legitimately reset by a fresh start == 0.
+        # Inert on every arm today: is_prefill_chunk requires chunked prefill, which is
+        # off unless M3NATIVE_PREFILL_CHUNK_TOKENS is set, so partials is always 0 and
+        # allowed_prefills(0) is 1 exactly as before.
+        self.assertEqual(calls, [1], 'the partial continues alone; no fresh prompt joins')
 
     def test_the_configured_capacity_is_restored_even_on_failure(self):
         FakeScheduler, calls = self.base()
@@ -123,6 +136,40 @@ class InstallTests(unittest.TestCase):
         config = SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls='someone_elses'))
         with self.assertRaises(ValueError):
             install(config, scheduler='marker')
+
+
+class WaitingHeadroomTests(unittest.TestCase):
+    """The property the cap exists for, stated in the units that matter: how many FRESH
+    prompts the base scheduler's waiting loop can admit.
+
+    Derived from the pinned plugin source captured by probe_plugin_scheduler_sources
+    (cpu-probe 35665853903, scheduler.py sha256 a1bd6257d3a14c90:154-173), which
+    replaces self.running with the partials before calling super().schedule(), so the
+    waiting loop's budget is max_num_running_reqs - partials.
+    """
+
+    def test_one_fresh_prompt_with_nothing_in_flight(self):
+        for decodes in range(0, 4):
+            with self.subTest(decodes=decodes):
+                self.assertEqual(waiting_headroom(8, decodes, 0), 1)
+
+    def test_no_fresh_prompt_while_a_partial_prefill_is_in_flight(self):
+        """The corruption this prevents: a fresh prompt between two continuations either
+        re-zeroes the single-occupancy GDN scratch on its own start == 0 or advances it
+        with foreign tokens, and the suspended prompt resumes on another's recurrence."""
+        for decodes in range(0, 4):
+            for partials in range(1, 4):
+                with self.subTest(decodes=decodes, partials=partials):
+                    self.assertEqual(waiting_headroom(8, decodes, partials), 0)
+
+    def test_headroom_never_goes_negative_when_capacity_is_exhausted(self):
+        self.assertEqual(waiting_headroom(1, 4, 2), 0)
+        self.assertEqual(waiting_headroom(0, 0, 0), 0)
+
+    def test_allowed_prefills_rejects_nonsense(self):
+        for bad in (-1, 1.0, None, True):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                allowed_prefills(bad)
 
 
 if __name__ == '__main__':

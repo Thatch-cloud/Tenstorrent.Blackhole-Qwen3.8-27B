@@ -57,32 +57,46 @@ def one_in_flight_scheduler(base=None):
 def allowed_prefills(partials):
     """How many requests a prefill step may carry, given the partials already running.
 
-    UNCHANGED BEHAVIOUR, named so the open question has somewhere to live. Today this
-    returns partials + 1, exactly what the inline expression it replaced computed.
+    RESOLVED from the pinned plugin source, captured by probe_plugin_scheduler_sources
+    (cpu-probe run 35665853903, scheduler.py sha256 a1bd6257d3a14c90, lines 154-173):
 
-    Build plan step 8 wants ZERO fresh prompts admitted while a partial prefill is in
-    flight: the GDN prefill scratch and host RoPE table are single-occupancy, so a
-    fresh prompt slotted between two continuations either re-zeroes the scratch on its
-    own start == 0 or advances it with foreign tokens, and the suspended prompt then
-    resumes on somebody else's recurrence. The model-side guard cannot catch that - a
-    start == 0 legitimately resets its cursor (see the test that pins that limit in
-    test_lever_n_model_patch) - so the scheduler is the only place it can be stopped.
+        pure_decodes    = [r for r in self.running if not r.is_prefill_chunk]
+        partial_prefills = [r for r in self.running if r.is_prefill_chunk]
+        saved_max = self.max_num_running_reqs
+        self.running = cast(list[Request], partial_prefills)
+        self.max_num_running_reqs = max(0, saved_max - len(pure_decodes))
+        result = super().schedule()
 
-    WHY IT IS NOT CHANGED YET. The plugin computes max(0, max_num_running_reqs -
-    decodes) for its waiting loop, subtracting only `decodes`, so partials consume
-    waiting capacity in ITS arithmetic. Whether a continuation is then scheduled out of
-    `running` or out of `waiting` decides which value gives zero fresh admissions, and
-    that is not answerable from this repo - the pinned plugin's _schedule_prefill_only
-    is not here. Guessing would put a wrong cap on the one seam that exists to prevent
-    silent state corruption, which is worse than leaving it visible and unchanged.
+    `self.running` is REPLACED by just the partials, so the base scheduler's running
+    loop advances those and its waiting loop admits new prompts up to
+    max_num_running_reqs - len(self.running). This class writes saved_max, so the
+    plugin's value becomes `allowed` and the waiting headroom is:
 
-    Resolve with probe_plugin_scheduler_sources.py against the m3native image, then
-    change the return and the test together. Until then this is a rename, not a fix,
-    and step 8 is NOT done.
+        allowed - partials
+
+    Hence: no partial in flight, allowed 1, headroom 1 - the one fresh prompt the fast
+    path can serve. A partial in flight, allowed == partials, headroom ZERO - the
+    continuations advance and nothing new joins them.
+
+    That last case is the point. The GDN prefill scratch and host RoPE table are
+    single-occupancy, so a fresh prompt admitted between two continuations either
+    re-zeroes the scratch on its own start == 0 or advances it with foreign tokens, and
+    the suspended prompt resumes on somebody else's recurrence. The model-side guard
+    cannot catch it - a start == 0 legitimately resets its cursor, which
+    test_lever_n_model_patch pins - so this is the only place it can be stopped.
     """
     if type(partials) is not int or partials < 0:
         raise ValueError('Non-negative integer partial count required')
-    return partials + 1
+    return partials if partials else 1
+
+
+def waiting_headroom(max_num_running_reqs, decodes, partials):
+    """Fresh prompts the base scheduler's waiting loop may admit, after both caps.
+
+    The whole point of the change, expressed so it can be checked without a scheduler:
+    this must be 1 with no partial in flight and 0 with one.
+    """
+    return max(0, effective_capacity(max_num_running_reqs, decodes, partials) - partials)
 
 
 def effective_capacity(max_num_running_reqs, decodes, partials):
