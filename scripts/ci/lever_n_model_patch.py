@@ -334,6 +334,8 @@ def patch_platform(source):
     35415811328 never chunked a 5,918-token prompt despite being asked to: the flag was
     overridden at config time and max_num_batched_tokens was bumped back to max_model_len.
     """
+    if '_m1_chunked_prefill_opt_in' in source:
+        raise ValueError('platform already carries the M1 chunked-prefill opt-in')
     lines = source.splitlines(keepends=True)
     anchor = 'def _apply_chunked_prefill_policy(vllm_config: "VllmConfig") -> None:'
     hits = [i for i, line in enumerate(lines) if line.startswith(anchor)]
@@ -345,11 +347,32 @@ def patch_platform(source):
     block = PLATFORM_OPT_IN.lstrip(chr(10)).splitlines(keepends=True)
     lines[hits[0]:hits[0]] = block
     span = function_span_module(''.join(lines), '_apply_chunked_prefill_policy')
+    # A SEPARATE early return, placed after the allowlist branch rather than inside
+    # its condition. Opening that condition ('... or _m1_chunked_prefill_opt_in()')
+    # sent qwen3_5 into the branch written for gemma4, and that branch sets
+    # disable_chunked_mm_input - the exact flag vLLM refuses to honour when a declared
+    # multimodal item is larger than the batched-token budget. Run 35681324335 died
+    # before readiness: 'max_tokens_per_mm_item (16384) is larger than
+    # max_num_batched_tokens (2048)'.
+    #
+    # Qwen3_5ForConditionalGeneration resolves to Qwen36ForCausalLM, which is text-only
+    # and cannot consume an image, so that 16384-token item is a phantom of the HF
+    # config's nested vision config. gemma4's reason for the flag - a chunk boundary
+    # would split a real multimodal item's embeddings from their positions - cannot
+    # apply to a class that has no such items, so this path must not inherit it.
+    # vLLM 0.25.1 defaults disable_chunked_mm_input to False and the raise is guarded
+    # by it (probe_mm_budget_chunked_prefill, run 35681729538), so leaving the field
+    # alone is both closer to this model's shipped behaviour and enough to start.
+    #
+    # Placed AFTER the allowlist branch so gemma4 stays byte-identical, and BEFORE the
+    # block that turns enable_chunked_prefill off, which is what it has to pre-empt.
     lines = replace_once(
         lines, span,
-        '    if model_type in _CHUNKED_PREFILL_MODEL_TYPES:',
-        '    if model_type in _CHUNKED_PREFILL_MODEL_TYPES or _m1_chunked_prefill_opt_in():',
-        'platform allowlist')
+        '    if scheduler_config.enable_chunked_prefill:',
+        '    if _m1_chunked_prefill_opt_in():' + chr(10) +
+        '        return' + chr(10) + chr(10) +
+        '    if scheduler_config.enable_chunked_prefill:',
+        'platform opt-in')
     return ''.join(lines)
 
 

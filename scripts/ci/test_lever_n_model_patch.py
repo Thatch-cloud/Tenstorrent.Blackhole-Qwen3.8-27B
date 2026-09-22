@@ -6,7 +6,11 @@ wrong one. These tests hold the scoping honest without needing the real 174 KB f
 """
 
 import ast
+import os
 import unittest
+from unittest.mock import patch
+from pathlib import Path
+import types
 
 import lever_n_model_patch
 
@@ -152,6 +156,51 @@ class OutputTests(unittest.TestCase):
 
 
 
+# scripts/ci/fixtures/platform_chunked_prefill_policy.py is the REAL function, copied
+# verbatim out of run 35681324335's graft artifact (_CHUNKED_PREFILL_MODEL_TYPES plus
+# _apply_chunked_prefill_policy, nothing else). The reduction below stays because it is
+# a readable statement of the shape the patch depends on, but it is no longer the only
+# thing under test: the reduction had silently dropped the max_num_batched_tokens bump,
+# and a reduction can never tell me what the real branch also does. Run 35681324335
+# died because the real gemma4 branch sets disable_chunked_mm_input and this file had
+# that line in front of it without a single test asking what the opt-in path does with
+# it.
+REAL_POLICY = Path(__file__).parent / 'fixtures' / 'platform_chunked_prefill_policy.py'
+
+
+class Box(object):
+    """A stand-in for the vllm config objects, which cannot be imported here."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+UNSET = 'UNSET'
+
+
+def apply_policy(source, model_type, env):
+    """Execute the patched policy and hand back the scheduler config it produced.
+
+    Executing it is the point. Every assertion that v37 passed was about the TEXT of
+    the patched source - that the condition had gained an `or`. None of them ran it, so
+    none could see that the branch it now entered sets disable_chunked_mm_input.
+    """
+    module = types.ModuleType('patched_platform')
+    module.__dict__['logger'] = Box(info=lambda *a, **k: None,
+                                    warning=lambda *a, **k: None)
+    exec(compile(source, 'patched_platform', 'exec'), module.__dict__)
+
+    scheduler = Box(enable_chunked_prefill=True, max_num_batched_tokens=2048,
+                    long_prefill_token_threshold=2048, disable_chunked_mm_input=UNSET)
+    config = Box(scheduler_config=scheduler,
+                 model_config=Box(hf_config=Box(model_type=model_type),
+                                  max_model_len=33024))
+    environ = {} if env is None else {'TT_M1_FORCE_CHUNKED_PREFILL': env}
+    with patch.dict(os.environ, environ, clear=True):
+        module._apply_chunked_prefill_policy(config)
+    return scheduler
+
+
 # The real policy, reduced to the shape patch_platform depends on.
 PLATFORM = """import os
 
@@ -180,27 +229,107 @@ def _unrelated(vllm_config):
 
 
 class PlatformTests(unittest.TestCase):
-    def test_the_allowlist_gains_an_explicit_opt_in(self):
+    def test_the_opt_in_is_a_separate_return_not_a_widened_allowlist(self):
+        """Widening the allowlist condition is what broke run 35681324335: qwen3_5 then
+        entered the branch written for gemma4, which sets disable_chunked_mm_input."""
         out = patch_platform(PLATFORM)
         ast.parse(out)
         self.assertIn('def _m1_chunked_prefill_opt_in():', out)
-        self.assertIn('if model_type in _CHUNKED_PREFILL_MODEL_TYPES or '
-                      '_m1_chunked_prefill_opt_in():', out)
+        self.assertIn('    if _m1_chunked_prefill_opt_in():', out)
+        self.assertNotIn('_CHUNKED_PREFILL_MODEL_TYPES or _m1_chunked_prefill_opt_in()',
+                         out)
 
-    def test_a_lookalike_condition_elsewhere_is_untouched(self):
-        """_unrelated carries the same line; only the policy function may change."""
+    def test_the_opt_in_path_leaves_disable_chunked_mm_input_alone(self):
+        """THE test v37 needed and did not have.
+
+        vLLM 0.25.1 raises 'Chunked MM input disabled but max_tokens_per_mm_item
+        (16384) is larger than max_num_batched_tokens (2048)' when that flag is set,
+        and probe run 35681729538 confirmed the raise is guarded by it and that its
+        default is False. Qwen36ForCausalLM is text-only, so the 16384-token item can
+        never exist and gemma4's reason for the flag cannot apply here.
+        """
+        for source in (PLATFORM, REAL_POLICY.read_text(encoding='utf-8')):
+            with self.subTest(source='reduced' if source is PLATFORM else 'real'):
+                scheduler = apply_policy(patch_platform(source), 'qwen3_5', '1')
+                self.assertEqual(scheduler.disable_chunked_mm_input, UNSET)
+                self.assertTrue(scheduler.enable_chunked_prefill)
+                self.assertEqual(scheduler.max_num_batched_tokens, 2048)
+                self.assertEqual(scheduler.long_prefill_token_threshold, 2048)
+
+    def test_without_the_env_the_policy_is_todays_behaviour(self):
+        """Every arm that does not opt in must be unchanged: chunked prefill off, the
+        batched budget bumped back to max_model_len, the threshold zeroed."""
+        real = REAL_POLICY.read_text(encoding='utf-8')
+        for env in (None, '0'):
+            with self.subTest(env=env):
+                scheduler = apply_policy(patch_platform(real), 'qwen3_5', env)
+                self.assertFalse(scheduler.enable_chunked_prefill)
+                self.assertEqual(scheduler.max_num_batched_tokens, 33024)
+                self.assertEqual(scheduler.long_prefill_token_threshold, 0)
+                self.assertEqual(scheduler.disable_chunked_mm_input, UNSET)
+
+    def test_gemma4_is_untouched_in_both_env_states(self):
+        """The allowlisted model types keep the branch and the flag they shipped with,
+        whether or not the Qwen graft's variable happens to be set."""
+        real = REAL_POLICY.read_text(encoding='utf-8')
+        for model_type in ('gemma4', 'gemma4_unified'):
+            for env in ('1', None):
+                with self.subTest(model_type=model_type, env=env):
+                    scheduler = apply_policy(patch_platform(real), model_type, env)
+                    self.assertTrue(scheduler.disable_chunked_mm_input)
+                    self.assertTrue(scheduler.enable_chunked_prefill)
+                    self.assertEqual(scheduler.long_prefill_token_threshold, 2048)
+
+    def test_the_real_captured_policy_is_the_one_the_graft_will_see(self):
+        """A drift guard on the fixture itself: if the shipped function stops matching
+        the shape the patch anchors to, this fails here rather than on the rig."""
+        real = REAL_POLICY.read_text(encoding='utf-8')
+        self.assertIn('def _apply_chunked_prefill_policy(', real)
+        self.assertIn('_CHUNKED_PREFILL_MODEL_TYPES = {"gemma4", "gemma4_unified"}', real)
+        self.assertIn('        scheduler_config.disable_chunked_mm_input = True', real)
+        self.assertIn('    if scheduler_config.enable_chunked_prefill:', real)
+        ast.parse(patch_platform(real))
+
+    def test_a_lookalike_function_elsewhere_is_byte_identical(self):
+        """_unrelated carries the same condition line; only the policy may change.
+
+        This used to assert that the policy's condition had been rewritten and so
+        appeared once instead of twice. The patch no longer rewrites that condition -
+        it inserts a separate return - so counting the line says nothing about
+        scoping. Comparing _unrelated's own source before and after does.
+        """
         out = patch_platform(PLATFORM)
-        self.assertEqual(out.count('if model_type in _CHUNKED_PREFILL_MODEL_TYPES:'), 1)
-        self.assertIn('def _unrelated(vllm_config):', out)
+
+        def body_of(source, name):
+            tree = ast.parse(source)
+            lines = source.splitlines(keepends=True)
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef) and node.name == name:
+                    return ''.join(lines[node.lineno - 1:node.end_lineno])
+            raise AssertionError('no function named %s' % name)
+
+        self.assertEqual(body_of(out, '_unrelated'), body_of(PLATFORM, '_unrelated'))
+        self.assertEqual(out.count('    if _m1_chunked_prefill_opt_in():'), 1)
+        self.assertIn('if _m1_chunked_prefill_opt_in():',
+                      body_of(out, '_apply_chunked_prefill_policy'))
 
     def test_the_opt_in_reads_the_documented_variable(self):
         out = patch_platform(PLATFORM)
         self.assertIn('os.environ.get("TT_M1_FORCE_CHUNKED_PREFILL") == "1"', out)
 
     def test_patching_twice_raises(self):
-        out = patch_platform(PLATFORM)
-        with self.assertRaises(ValueError):
-            patch_platform(out)
+        """Idempotence has to be checked, not inherited from anchor uniqueness.
+
+        The old patch rewrote the allowlist condition, so a second pass could not find
+        the original text and failed by accident. A plain insertion leaves the anchor
+        intact, so without an explicit guard a double patch would quietly stack two
+        opt-in blocks and two helper definitions.
+        """
+        for source in (PLATFORM, REAL_POLICY.read_text(encoding='utf-8')):
+            with self.subTest(source='reduced' if source is PLATFORM else 'real'):
+                out = patch_platform(source)
+                with self.assertRaises(ValueError):
+                    patch_platform(out)
 
     def test_a_source_without_the_policy_raises(self):
         with self.assertRaises(ValueError):

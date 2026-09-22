@@ -75,8 +75,15 @@ def main():
     guarded_by_flag = 'disable_chunked_mm_input' in budget_src
     note('Q3 raise is guarded by disable_chunked_mm_input: %s' % guarded_by_flag)
 
-    nonzero_gated = 'nonzero_modality' in budget_src or 'nonzero' in budget_src
-    note('Q4 budget consults a nonzero-modality map: %s' % nonzero_gated)
+    # My first version matched 'nonzero' and reported 'fix B NOT established' on run
+    # 35681729538, which was wrong: the parameter is mm_max_toks_per_item and the early
+    # return is 'if not mm_max_toks_per_item'. The verbatim source printed above is
+    # what caught my own bad heuristic, which is the reason it is printed at all.
+    empty_gated = 'if not mm_max_toks_per_item' in budget_src
+    names_the_flag = 'limit_mm_per_prompt' in budget_src
+    note('Q4 budget returns early on an empty item map: %s' % empty_gated)
+    note('Q4 that early return names limit_mm_per_prompt: %s' % names_the_flag)
+    nonzero_gated = empty_gated
 
     # Q2: the default, from the dataclass field rather than from a docstring.
     from vllm.config import SchedulerConfig
