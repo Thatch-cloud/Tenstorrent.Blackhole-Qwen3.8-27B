@@ -81,3 +81,70 @@ Nothing measured here changes the reachability assessment recorded in
 `memory/goal-200tps-concurrent.md`. What it removes is one of the two unknowns: the
 scheduler-side stall is now a solved problem, and the device-side single-occupancy of
 the bridge is the whole of what is left.
+
+---
+
+# v69: the routing fix lands, and the next pin is the lifecycle's prefill slot
+
+Run **35714211185 (v69)**, image v88 (`sha256:a3432592f5`, built from 8629382f, whose
+build ran `test_serving_worker_hook` inside the image).
+
+## What moved
+
+| | v67 | v69 |
+|---|---|---|
+| `scheduled`/`prepared` set mismatch | fatal | **0 occurrences** |
+| alternation events | 2 | **30** (15 yield, 15 no-yield, exactly r=1) |
+| resumable prefill calls | 15 (one user) | **30** (two users x 15 chunks) |
+| users reaching a first token | 1 | **2** (`ttft=[14.91, 30.11]`) |
+| steps with a decoder live beside a partial prefill | 1 | **15** (`partials=1 decodes=1`) |
+| max simultaneous decoders | 1 | **2** (`partials=0 decodes=2`) |
+
+The chunked-prefill routing fix did what it was meant to: a second user prefilled
+through fifteen chunks while the first decoded, and the alternation held 1:1 across the
+whole of it.
+
+## The caveat, stated plainly
+
+**The fast path served only user 1.** All 94 `[PHASE] propose` / `[PHASE] step` records
+name `cmpl-91e3c647...`, and only one `pool slot 0 acquired` appears. User 2 prefilled
+and produced its first token on the PLAIN path - which is where the routing fix sends a
+step the hook does not own. So this is not two fast-path streams; it is one fast-path
+stream that no longer freezes while a second user prefills beside it.
+
+The second TTFT is 30.11 s against the first's 14.91 s, i.e. still ~2x. That is the
+expected result and not a disappointment: the alternation yields decode steps to the
+DECODER, protecting its throughput. It does nothing for the prefilling user's TTFT, and
+the staircase is a separate problem (#37 says so explicitly).
+
+## The next pin
+
+```
+serving_lifecycle.py:122
+ValueError: Fast serving requires one complete fresh prefill:
+  prefill_slot='cmpl-a5975da9...'  new=['cmpl-be4fd8c8...']  cached=[]
+```
+
+A third request arrived while the lifecycle's singular prefill slot was still held by
+the second. The step immediately before it is
+`m2 one-in-flight: partials=0 decodes=2 allowed=1 hidden=False`.
+
+That line is the whole diagnosis. The **scheduler** had stopped counting user 2 as a
+partial prefill - its chunks were done, so it is no longer `is_prefill_chunk` - and
+therefore un-hid the waiting queue and admitted user 3. The **lifecycle** had not yet
+run user 2's prefill-to-decode handoff, which is what clears `self.request_id`
+(serving_lifecycle.py:268). The two disagree for a window of one step, and a new arrival
+inside that window is fatal.
+
+This is the "singular session state in `serving_lifecycle`" item of the standing pin
+list, now located precisely: not a missing capability - `decoding_ids` is already a list
+and `FastWorkerHook.attach()` already admits further bridges - but a race between two
+views of "is anyone still prefilling".
+
+## Honest position
+
+Two things are now true that were not before: the scheduler-side stall is solved and
+proven, and a second user can prefill to completion beside a decoding one. Two things
+remain: the second user is never adopted onto the fast path, and the lifecycle's
+prefill-slot handoff races the scheduler's queue-hiding. Neither is a throughput
+question yet, so no tok/s claim can be made from this run.
