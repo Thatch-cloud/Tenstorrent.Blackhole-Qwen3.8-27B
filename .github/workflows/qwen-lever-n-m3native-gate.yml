@@ -40,6 +40,7 @@ jobs:
             *-v63|*-v64) image=sha256:06fd3a7f9f476adea65921c113b3e6349f02740b1ee23ba7fb14fb87c750214c ;;
             *-v65|*-v66) image=sha256:06fd3a7f9f476adea65921c113b3e6349f02740b1ee23ba7fb14fb87c750214c ;;
             *-v67|*-v68) image=sha256:06fd3a7f9f476adea65921c113b3e6349f02740b1ee23ba7fb14fb87c750214c ;;
+            *-v69|*-v70) image=sha256:a3432592f52c38867cf475ccf0b46afec4cb839dc156cd602ed0254a3f42f675 ;;
           esac
           echo "graft image: $image"
           root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
@@ -47,7 +48,7 @@ jobs:
           docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
           trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
           case "$GITHUB_REF_NAME" in
-            *-v36|*-v37|*-v38|*-v40|*-v42|*-v44|*-v45|*-v46|*-v47|*-v48|*-v49|*-v50|*-v51|*-v52|*-v53|*-v54|*-v55|*-v56|*-v57|*-v58|*-v59|*-v60|*-v61|*-v62|*-v63|*-v64|*-v65|*-v66|*-v67|*-v68) export M3NATIVE_LEVER_N=1 ;;
+            *-v36|*-v37|*-v38|*-v40|*-v42|*-v44|*-v45|*-v46|*-v47|*-v48|*-v49|*-v50|*-v51|*-v52|*-v53|*-v54|*-v55|*-v56|*-v57|*-v58|*-v59|*-v60|*-v61|*-v62|*-v63|*-v64|*-v65|*-v66|*-v67|*-v68|*-v69|*-v70) export M3NATIVE_LEVER_N=1 ;;
           esac
           python3 -B - <<'PY' > graft/manifest.txt
           import os
@@ -233,6 +234,8 @@ jobs:
             *-v66) export M3NATIVE_IMAGE=sha256:06fd3a7f9f476adea65921c113b3e6349f02740b1ee23ba7fb14fb87c750214c ;;
             *-v67) export M3NATIVE_PREFILL_CHUNK_TOKENS=2048 M3NATIVE_IMAGE=sha256:06fd3a7f9f476adea65921c113b3e6349f02740b1ee23ba7fb14fb87c750214c ;;
             *-v68) export M3NATIVE_PREFILL_CHUNK_TOKENS=2048 M3NATIVE_INTERLEAVE=0 M3NATIVE_IMAGE=sha256:06fd3a7f9f476adea65921c113b3e6349f02740b1ee23ba7fb14fb87c750214c ;;
+            *-v69) export M3NATIVE_PREFILL_CHUNK_TOKENS=2048 M3NATIVE_IMAGE=sha256:a3432592f52c38867cf475ccf0b46afec4cb839dc156cd602ed0254a3f42f675 ;;
+            *-v70) export M3NATIVE_PREFILL_CHUNK_TOKENS=2048 M3NATIVE_INTERLEAVE=0 M3NATIVE_IMAGE=sha256:a3432592f52c38867cf475ccf0b46afec4cb839dc156cd602ed0254a3f42f675 ;;
             *-v24|*-v25) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_FAST_COMMIT=1 ;;
             *-v27) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PIPELINED_PUBLISH=1 ;;
             *-v29|*-v32) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_TRACED_PUBLISH=1 ;;
