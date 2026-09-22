@@ -340,3 +340,52 @@ exists to require equality and it is correctly refusing.
 
 This outranks the throughput work. A 10 tok/s four-user configuration that produces
 wrong tokens is not a slower correct system; it is an incorrect one.
+
+---
+
+## RETRACTION: v75 is not "the first four-user number", and 10 tok/s is not a baseline
+
+Two claims in the v75 section above are withdrawn.
+
+**1. "The first four-user throughput measurement in this programme" is false.**
+`docs/200tps-verdict-2026-09-22.md` records run **35658854824 (m3native v34)**: four
+concurrent users at 32768 context, `gate_passed: true`, **token-exact against each
+user's own single-user reference**, mean **23.0 tok/s per user**
+(20.2 / 26.2 / 21.5 / 24.2). That is better than v75 on both axes and predates all of
+this work. I wrote the claim without reading a doc that was already in the repository -
+the second time in this session that skipping that check produced a wrong statement.
+
+**2. The 10 tok/s figure is not comparable to 23 tok/s, so it is not a regression.**
+The two arms are not the same configuration:
+
+| | v34 | v75 |
+|---|---|---|
+| K64 kernel graft (`KOPGRAFT64`) | yes | no |
+| `M3NATIVE_TRACED_PROPOSAL` | yes | **no - so the arm passes `QWEN_FAST_EAGER_PROPOSAL=1`** |
+| `M3NATIVE_PIPELINED_COMMITS` / `_PROPOSALS` | yes | no |
+| `M3NATIVE_PACKED_PROPOSAL` | yes | no |
+| `M3NATIVE_GDN_USER_BATCH` | yes | no |
+| `M3NATIVE_FAST_COMMIT` | yes | no |
+| `M3NATIVE_TRACED_PUBLISH` | yes | no |
+| `M3NATIVE_GDN_STATE_COPY_BATCH` | yes | no |
+| chunked prefill + alternation | no | yes |
+
+v75 ran with **none** of the eight optimisation flags and with eager proposals, which
+task #43 exists to retire. The ~10 tok/s says what an unoptimised arm does; it does not
+measure the cost of Lever N.
+
+**The token-exactness comparison is confounded for the same reason.** v34 was 4/4;
+v73 and v75 are 3/4. Several of the missing flags touch per-user state directly
+(packed proposal, GDN state-copy batch, traced publish), so the divergence cannot be
+attributed to the M1/M2 work on this evidence either. It remains real and unexplained -
+see task #62 - but "Lever N broke token-exactness" is **not** supported.
+
+**What this does not change.** The 200 tok/s verdict stands on its own measurements and
+is untouched by any of this: at 23.0 tok/s the stack is 8.7x short; the round budget for
+200 tok/s is 29.4 ms against a measured 253-258 ms; the packed verify trace alone is
+157.7 ms, 5.4x the whole budget; and deleting 100% of SDPA, its companion and every
+matmul still leaves 66.0 ms, 2.2x over - at 32768 context, a fifth of the 163,840 the
+target names.
+
+**The comparable experiment has not been run.** v77 should carry v34's full flag set
+PLUS chunked prefill and the alternation. Only that isolates what Lever N costs or buys.
