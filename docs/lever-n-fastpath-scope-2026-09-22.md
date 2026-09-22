@@ -422,3 +422,91 @@ Not measured, and still the whole point:
 So the remaining work is two independent pieces, neither of which is Lever N M1: the
 concurrency pin (T3's build) and M2 item 1. Neither changes the 200 tok/s verdict, which
 stays closed as measured-unreachable.
+
+
+---
+
+## Addendum: section 3.3 named a class this deployment never constructs
+
+`docs/lever-N-prefill-decode-interleave.md` section 3.3 places the alternation in
+`TTLaneCoordinator._negotiate_forced_mode` (the doc calls it `LaneScheduler`).
+Run **35707860782 (v65)** mounted the graft there and it did nothing. Delivery was
+not the problem; three independent facts rule it out.
+
+- **The graft applied.** `lane_scheduler.py` in the graft artifact differs from its
+  `.orig` by exactly the 35 policy lines, and the manifest mounts it at
+  `/opt/qwen-fast-plugin/src/vllm_tt_plugin`.
+- **The mount worked.** The sibling graft in the same mounted file set -
+  `patch_scheduler`'s one-in-flight edit - printed `[PINDIAG] m2 one-in-flight:`
+  **54 times** in that same run, while `[PINDIAG] m2 alternation:` appears **0**
+  times across every `.log`/`.txt` in the artifact. Counted with
+  `read_gate_markers.py`, which walks the whole tree, so the zero is a real zero.
+- **The class was never built.** `platform.check_and_update_config` sets
+  `scheduler_cls = TT_LANE_SCHEDULER_CLS`
+  (`vllm_tt_plugin.lane_scheduler.TTLaneCoordinator`) only when
+  `uses_tt_lane_coordinator(vllm_config)` is true, else `TT_SCHEDULER_CLS`
+  (`vllm_tt_plugin.scheduler.TTScheduler`). The run logged `data_parallel_size=1`
+  and loaded `vllm_tt_plugin.scheduler.TTScheduler` - one occurrence, no
+  `TTLaneCoordinator` anywhere.
+
+### Where the stall actually is
+
+With no coordinator nothing ever calls `set_forced_mode`, so `_forced_mode` stays
+`DEFAULT` for the life of the engine and the *default branch* of
+`TTScheduler.schedule` is the live policy:
+
+```python
+# Default mode:
+# Prefer prefill whenever prefill work is pending, so new requests are
+# admitted and partial prefills advance.
+if has_pending_prefill:
+    prefill_result = self._schedule_prefill_only()
+    if prefill_result.total_num_scheduled_tokens == 0 and has_running_decode:
+        ...decode
+```
+
+Decode gets a step **only when prefill schedules zero tokens** - only when prefill
+cannot move at all. A decoding user freezes for the whole of another user's
+prefill. That is the 79.4 s stall, 31% of user-facing wall. Section 3.3's
+mechanism is right; its seat is not.
+
+### The correction
+
+`patch_scheduler_alternation` applies the **same** policy in that default branch -
+same condition, same `R`, same `TT_PREFILL_DECODE_INTERLEAVE` /
+`TT_DECODE_STEPS_PER_PREFILL_CHUNK`, same marker - yielding through the existing
+`_schedule_decode_only()`. Not a second policy.
+
+One deliberate refinement: the trigger is a **partial prefill in flight**, not
+`has_pending_prefill`. The latter is also true of a fresh waiting prompt, and
+yielding there would delay admission and worsen the TTFT staircase. Only an
+in-flight chunked prefill freezes a decoding user - which is exactly section 3.3's
+`any_partial_prefill()`.
+
+`patch_lane_scheduler` stays, correct for a lane-mode deployment. The two seats are
+mutually exclusive by construction: in lane mode `_forced_mode` is set every step,
+so the default branch is unreachable. Whichever class the platform picks, exactly
+one alternation policy is live.
+
+The graft table maps one function per file, so `scheduler.py` now maps to
+`patch_scheduler_full`, composing both edits. Mapping only `patch_scheduler` is
+precisely how the alternation would go missing a second time, and
+`test_the_graft_table_applies_BOTH_scheduler_patches` fails if it does.
+
+### Tests
+
+`scripts/ci/test_lever_n_scheduler_alternation.py` (13 tests) **drives**
+`schedule()` and records which sub-scheduler each step called, rather than matching
+strings - the failure mode of run 35690327326. It carries a negative control
+(`test_the_shipped_policy_really_does_starve_decode`: unpatched, the same inputs
+give `PREFILL` six times out of six), so the alternation assertion means something,
+plus a regression guard that the shipped zero-token fallback still works.
+
+### Generalisable lesson
+
+A graft can be delivered, applied and syntactically correct and still be dead
+because its class is never instantiated. The marker **inside the method** is what
+separates those cases; an install-time marker would have reported success. This is
+the third run in this programme where a policy was delivered but never executed
+(35690327326, 35692388798, 35707860782), and the second where a sibling marker in
+the same file set supplied the positive control that localised it.

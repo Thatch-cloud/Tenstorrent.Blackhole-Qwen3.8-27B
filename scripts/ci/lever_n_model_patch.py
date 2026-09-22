@@ -381,6 +381,11 @@ def patch_vllm_entry(source):
 # never run. This one cannot be emitted unless the edited code executed.
 MARKER_SCHEDULER = '[PINDIAG] m2 one-in-flight:'
 MARKER_ALTERNATE = '[PINDIAG] m2 alternation:'
+# The shipped prefer-prefill branch of TTScheduler.schedule, and its replacement.
+# Verified unique and byte-identical in fixtures/plugin_scheduler.py and in the real
+# plugin file dumped by graft run 35707860782.
+_ALTERNATION_ANCHOR = '        # Default mode:\n        # Prefer prefill whenever prefill work is pending, so new requests are\n        # admitted and partial prefills advance.\n        if has_pending_prefill:\n            prefill_result = self._schedule_prefill_only()\n'
+_ALTERNATION_REPLACEMENT = '        # Default mode:\n        # Prefer prefill whenever prefill work is pending, so new requests are\n        # admitted and partial prefills advance.\n        if has_pending_prefill:\n            # Lever N M2 item 1, design section 3.3, in the class that actually\n            # runs. The design named TTLaneCoordinator._negotiate_forced_mode; run\n            # 35707860782 mounted that graft and it never fired, because\n            # check_and_update_config only selects TTLaneCoordinator when\n            # uses_tt_lane_coordinator() is true and this deployment logs\n            # data_parallel_size=1 and loads vllm_tt_plugin.scheduler.TTScheduler.\n            # With no coordinator, set_forced_mode is never called, _forced_mode\n            # stays DEFAULT, and THIS branch is the prefer-prefill rule that gives\n            # decode a step only when prefill schedules zero tokens.\n            #\n            # The trigger is a partial prefill in flight, NOT has_pending_prefill:\n            # that is also true of a fresh waiting prompt, and yielding there would\n            # delay admission and worsen the TTFT staircase. Only an in-flight\n            # chunked prefill freezes a decoding user, so only that alternates.\n            import os as _qwen_os\n            _qwen_on = _qwen_os.environ.get(\n                "TT_PREFILL_DECODE_INTERLEAVE", "1") == "1"\n            _qwen_partial = any(r.is_prefill_chunk for r in self.running)\n            _qwen_streak = getattr(self, "_qwen_prefill_streak", 0)\n            _qwen_credit = getattr(self, "_qwen_decode_credit", 0)\n            if _qwen_on and _qwen_partial and has_running_decode:\n                try:\n                    _qwen_r = int(_qwen_os.environ.get(\n                        "TT_DECODE_STEPS_PER_PREFILL_CHUNK", "1"))\n                except ValueError:\n                    _qwen_r = 1\n                _qwen_yield = _qwen_streak >= 1 and _qwen_credit < _qwen_r\n                if _qwen_yield:\n                    self._qwen_decode_credit = _qwen_credit + 1\n                else:\n                    self._qwen_decode_credit = 0\n                    self._qwen_prefill_streak = _qwen_streak + 1\n                logger.info(\n                    f"[PINDIAG] m2 alternation: yield_decode={_qwen_yield} "\n                    f"streak={_qwen_streak} credit={_qwen_credit} r={_qwen_r}")\n                if _qwen_yield:\n                    result = self._schedule_decode_only()\n                    return self._finalize_scheduler_output(result)\n            else:\n                self._qwen_prefill_streak = 1\n                self._qwen_decode_credit = 0\n            prefill_result = self._schedule_prefill_only()\n'
 
 
 PLATFORM_OPT_IN = """def _m1_chunked_prefill_opt_in():
@@ -532,6 +537,31 @@ def patch_scheduler(source):
         'scheduler one-in-flight')
     return ''.join(lines)
 
+
+def patch_scheduler_alternation(source):
+    """Alternate prefill chunks with decode steps inside TTScheduler.schedule.
+
+    Section 3.3's policy in the DEFAULT-mode branch. See
+    move_alternation_to_ttscheduler.py for why this seat and not the coordinator:
+    run 35707860782 proved TTLaneCoordinator is never constructed here.
+    """
+    if MARKER_ALTERNATE in source:
+        raise ValueError('scheduler already carries the alternation graft')
+    if source.count(_ALTERNATION_ANCHOR) != 1:
+        raise ValueError('default-mode prefer-prefill anchor matched %d times'
+                         % source.count(_ALTERNATION_ANCHOR))
+    return source.replace(_ALTERNATION_ANCHOR, _ALTERNATION_REPLACEMENT)
+
+
+def patch_scheduler_full(source):
+    """Both M2 edits to scheduler.py: one prefill in flight, then alternation.
+
+    They touch different methods - _schedule_prefill_only and schedule - so the
+    order does not matter, but they must both be applied: the graft table maps one
+    function per file, and mapping only patch_scheduler is how the alternation
+    would silently go missing again.
+    """
+    return patch_scheduler_alternation(patch_scheduler(source))
 
 def patch_lane_scheduler(source):
     """Alternate prefill chunks with decode steps, per design section 3.3.

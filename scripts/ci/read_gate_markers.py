@@ -34,6 +34,11 @@ MARKERS = (
     ('native_m3 engaged', r'native_m3 engaged'),
     ('native_attn engaged', r'native_attn engaged: one attn_decode_prep'),
     ('one-in-flight scheduler', r'one-in-flight scheduler installed'),
+    # M2 one-in-flight fires per prefill step; m2 alternation fires only when a
+    # partial prefill and a running decode coexist. Absent means the policy did
+    # not run - v65 mounted it on a class the platform never constructed.
+    ('m2 one-in-flight', r'm2 one-in-flight: \S'),
+    ('m2 alternation', r'm2 alternation: \S'),
     ('runtime binary override', r'runtime binary pin overridden'),
     ('CCL links', r'\[CCLLINKS\]'),
     ('readiness timeout', r'readiness exceeded'),

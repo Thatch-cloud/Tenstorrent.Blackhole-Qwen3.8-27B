@@ -495,11 +495,19 @@ def with_lever_n():
         # (serving_one_in_flight.install setting scheduler_cls) cannot work:
         # platform.check_and_update_config overwrites that attribute afterwards, which
         # run 35690327326 proved with a marker that never fired.
-        'scheduler.py': (PLUGIN_ROOT, m1.patch_scheduler),
-        # M2 item 1, the alternation of design section 3.3. Also a plugin file,
-        # so it grafts with no image rebuild. Without it a partial prefill votes
-        # prefill on every step and a decoding user freezes for the whole of
-        # someone else's prompt - which IS the 79.4 s stall.
+        # BOTH M2 edits: one-in-flight in _schedule_prefill_only, and the
+        # alternation of section 3.3 in schedule()'s default branch. The table
+        # maps ONE function per file, so patch_scheduler_full composes them -
+        # mapping only patch_scheduler is how the alternation goes missing.
+        'scheduler.py': (PLUGIN_ROOT, m1.patch_scheduler_full),
+        # The same alternation for a LANE-MODE deployment. Run 35707860782 proved
+        # this class is inert here: check_and_update_config builds TTLaneCoordinator
+        # only when uses_tt_lane_coordinator() is true, and that run logged
+        # data_parallel_size=1 and loaded vllm_tt_plugin.scheduler.TTScheduler, so
+        # the graft was mounted, correct, and never executed. It stays because the
+        # two seats are mutually exclusive - in lane mode _forced_mode is set every
+        # step, so TTScheduler's default branch is unreachable - and whichever class
+        # the platform picks, exactly one alternation policy is live.
         'lane_scheduler.py': (PLUGIN_ROOT, m1.patch_lane_scheduler),
     }
     overlap = set(extra) & set(SOURCES)

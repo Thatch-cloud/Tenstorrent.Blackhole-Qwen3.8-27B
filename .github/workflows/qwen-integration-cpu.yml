@@ -55,6 +55,7 @@ jobs:
           python -B -m unittest test_lever_n_m3native_patch
           python -B -m unittest test_lever_n_scheduler_graft
           python -B -m unittest test_lever_n_alternation
+          python -B -m unittest test_lever_n_scheduler_alternation
           python -B -m unittest test_lever_n_m3native_gate_report
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
