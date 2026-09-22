@@ -1,0 +1,163 @@
+name: Qwen ordered cache wide page-table hardware probe
+# Weight-free: ordered BF8 cache writes at page-table width 2,052 (and a 1,024 control),
+# eager and trace replay, compared on both chips against a host-predicted full cache
+# (scripts/ci/ordered_cache_hw_plan.py). One device-opening step. The tag pattern must be
+# allowlisted in the org runner group before a tag will be picked up.
+on:
+  push:
+    tags: ['experiment/ordered-cache-hw-probe-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: probe
+          persist-credentials: false
+      - name: Select the serving image and confirm its baked writer is this checkout's
+        working-directory: probe
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          image=unset
+          case "$GITHUB_REF_NAME" in
+            *-v1|*-v2) image=sha256:f369d08cb505dce89e8db616fcf993061aa399dbb9610eb6c43230b2f5637d1a ;;
+          esac
+          if ! printf '%s' "$image" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "No serving image digest pinned for $GITHUB_REF_NAME (got '$image'); add it to the case statement."
+            exit 1
+          fi
+          test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image"
+          echo "PROBE_IMAGE=$image" >> "$GITHUB_ENV"
+          expected=$(sha256sum scripts/ci/ordered_cache.py | cut -c1-64)
+          baked=$(timeout -k 5 60 docker run --rm --network none --entrypoint sha256sum "$image" /experiment-scripts/ci/ordered_cache.py | cut -c1-64)
+          printf 'image=%s\ncheckout_ordered_cache=%s\nbaked_ordered_cache=%s\ncommit=%s\n' "$image" "$expected" "$baked" "$GITHUB_SHA" | tee experiment-results/provenance.txt
+          if [ "$expected" != "$baked" ]; then
+            echo 'The image bakes a different ordered_cache.py than this checkout; rebuild the image or retag.'
+            exit 1
+          fi
+      - name: Confirm no process holds a card
+        working-directory: probe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          # The telemetry exporter's tt-smi snapshot is a read-only holder that leaves within
+          # seconds, so it is ignored and the check retries; any other holder fails the job.
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s experiment-results/holders.txt ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' experiment-results/holders.txt | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Reset every board before this job opens the pair
+        working-directory: probe
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # Both link ends must come back together, so every board is reset, as
+          # qwen-card-reset.yml does. No firmware is written (it stays 19.12.0).
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/reset.log 2>&1 || status=$?
+          if [ "$status" != 0 ]; then
+            echo "multi-board reset exited $status; resetting each in turn" >> experiment-results/reset.log
+            status=0
+            for path in "${paths[@]}"; do
+              timeout -k 20 300 "${prefix[@]}" "$smi" -r "$path" >> experiment-results/reset.log 2>&1 || status=$?
+            done
+          fi
+          echo "reset_exit=$status" | tee experiment-results/reset.status
+          tail -20 experiment-results/reset.log || true
+          timeout -k 5 30 "${prefix[@]}" "$smi" -ls 2>&1 | tee experiment-results/boards-after-reset.txt | tail -8
+          test "$status" = 0
+      - name: Run the probe (the only step that opens the devices)
+        working-directory: probe
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # The container runs as root with every capability dropped, so the directory it
+          # writes the report into must be world-writable. Only the two new files are
+          # mounted at /bench; /experiment-scripts/ci stays the image's baked tree.
+          mkdir -p experiment-results/probe
+          chmod 0777 experiment-results/probe
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          expected=$(sha256sum scripts/ci/ordered_cache.py | cut -c1-64)
+          name="qwen-ordered-cache-probe-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          status=0
+          timeout -k 30 1080 docker run --rm --name "$name" --network none \
+            --hostname qwen-ordered-cache --add-host qwen-ordered-cache:127.0.0.1 \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --memory 96g --cpus 16 --shm-size 8g \
+            "${devices[@]}" \
+            --mount type=bind,src=/dev/tenstorrent,dst=/host-dev/tenstorrent,readonly \
+            --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$PWD/scripts/ci/ordered-cache-hw-probe.py,dst=/bench/ordered-cache-hw-probe.py,readonly" \
+            --mount "type=bind,src=$PWD/scripts/ci/ordered_cache_hw_plan.py,dst=/bench/ordered_cache_hw_plan.py,readonly" \
+            --mount "type=bind,src=$PWD/experiment-results/probe,dst=/experiment-results-probe" \
+            -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 \
+            -e ORDERED_CACHE_SHA256="$expected" \
+            -e TT_METAL_HOME=/opt/tt-metal -e MESH_DEVICE=P300 -e OMP_NUM_THREADS=8 \
+            -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
+            -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONUNBUFFERED=1 \
+            --entrypoint python3 "$PROBE_IMAGE" -B /bench/ordered-cache-hw-probe.py --output /experiment-results-probe/ordered-cache-hw-probe.json \
+            > experiment-results/probe-stdout.log 2>&1 || status=$?
+          echo "probe_exit=$status" | tee experiment-results/probe.status
+          tail -80 experiment-results/probe-stdout.log || true
+          test "$status" = 0
+      - name: Re-check the report against the reviewed plan (no device)
+        working-directory: probe
+        if: always()
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PROBE_IMAGE:-}" ]; then echo 'No image selected; nothing to check.'; exit 1; fi
+          test -s experiment-results/probe/ordered-cache-hw-probe.json
+          timeout -k 5 120 docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+            --mount "type=bind,src=$PWD/scripts/ci/ordered_cache_hw_plan.py,dst=/bench/ordered_cache_hw_plan.py,readonly" \
+            --mount "type=bind,src=$PWD/experiment-results/probe,dst=/report,readonly" \
+            --entrypoint python3 "$PROBE_IMAGE" -B /bench/ordered_cache_hw_plan.py --check /report/ordered-cache-hw-probe.json \
+            | tee experiment-results/probe-verdict.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ordered-cache-hw-probe-${{ github.run_id }}
+          path: probe/experiment-results/
+          include-hidden-files: true
