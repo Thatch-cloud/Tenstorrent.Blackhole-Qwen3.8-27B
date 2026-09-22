@@ -131,3 +131,47 @@ produces the single-stream 131k bar the target has to meet. If the step implied 
 at or above ~0.15 ms per 1k tokens per user, four-user parity at 131k is structurally
 excluded on this kernel family; below it, parity becomes a question of per-user overhead
 and capacity rather than of attention.
+
+## v86 result: the real 131k pin, and three unknowns answered
+
+Run **35787268942 (v86)**: one user at 131,072 on the exact v84 configuration.
+
+It **attached and served** (`ready: true`), **prefilled all 131,072 tokens**, and died on
+the first decode KV write:
+
+```
+ordered_cache.py:53 validate_shapes
+ValueError: Paired position vector and page-table rows required
+  <- attention_batch.OrderedCacheWriter <- attention/tp.py _decode_from_prep
+  <- layer.forward <- model._forward_decode
+```
+
+The clause is `not 1 <= pages[1] <= min(1024, cache[0])`: the native ordered-cache writer
+refuses a page table wider than **1,024 entries**. At 64-token pages that is exactly
+**65,536 tokens**. 131,328 needs 2,052. The same cap refuses 65,792 (1,028 pages), so
+**the m3native path has never been able to decode above ~65k**, whatever the 65k
+numerics qualification says. `test_ordered_cache.py` asserts 1,025 is rejected on
+purpose, so the cap was deliberate; whether it reflects a kernel limit or only audit
+coverage is under investigation (workflow `wf_8cc3f3d3-0a4`) before anything is changed,
+because a wrong KV write corrupts output silently rather than failing.
+
+**This pin was missed by the static reading** ("no Python validator in the request path
+refuses 4 x 131072"). A sweep afterwards of scripts/ci, the grafted model files and the
+image's own model.py / qwen36_vllm.py found it to be the **only** target-side context cap.
+The DSpark 8192 caps belong to a drafter m3native does not use; the 2048 caps are
+DFlash2's draft window by design; `frozen_context_geometry.py:13` already grows past
+1024 pages.
+
+Answered by v86 even though decode failed:
+
+| unknown | result |
+|---|---|
+| does m3native attach and prefill at 131k? | **yes** - ready, and prefill completed |
+| prefill time at 131k on m3native | **64.4 s** (21:36:03.6 -> 21:37:08.1), close to the combined path's 61.7 s; the unsourced ~310 s is wrong |
+| does non-KV DRAM grow with context? | **no** - 24.87 GB allocated after attach against a predicted 23.13 + 1.71 = 24.84 GB; 8.77 GB free at one user |
+| attention slope, acceptance, single-stream 131k bar | **still unmeasured** - they need a decode step |
+
+The vLLM invocation was verified: `--max-model-len 131328`, `--num-gpu-blocks-override
+2052`, `--max-num-seqs 1`. The docker `-e` flags are not echoed in the job log, but the
+prefill of 131,072 positions is itself proof `QWEN_FAST_MAX_POSITION` reached the
+container: without it `dflash_prefill_window` refuses positions above 65,504.
