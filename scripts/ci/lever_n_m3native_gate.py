@@ -131,8 +131,15 @@ def load_references(directory):
     return references
 
 
-def start_server(port, users, context, results, log_name, readiness_seconds=900,
-                 trace_region_bytes=1073741824):
+def engine_argv(port, users, context, trace_region_bytes=1073741824):
+    """The vLLM argv this gate serves, as a list, with nothing launched.
+
+    Split out of start_server so test_m3native_engine_argv can assert it. Two rig
+    slots were spent on argv mistakes that a CPU test would have caught in
+    milliseconds: run 35679222511 served --no-enable-chunked-prefill on the
+    chunked arm, and run 35681324335 was refused at startup because nothing
+    zeroed the phantom multimodal item.
+    """
     """The fast T16 + speculation recipe the four-user cycle bench serves
     (qwen-fp2u-image.yml), so the packed round under test is the one the 200
     tok/s/user work actually measures.
@@ -190,6 +197,21 @@ def start_server(port, users, context, results, log_name, readiness_seconds=900,
                '--speculative-config', json.dumps(
                    dict(model='/draft-config', method='dflash', num_speculative_tokens=15,
                         draft_sample_method='greedy', rejection_sample_method='standard'))]
+    return command
+
+
+def start_server(port, users, context, results, log_name, readiness_seconds=900,
+                 trace_region_bytes=1073741824):
+    """The fast T16 + speculation recipe the four-user cycle bench serves
+    (qwen-fp2u-image.yml), so the packed round under test is the one the 200
+    tok/s/user work actually measures.
+
+    --served-model-name is 'qwen-longctx', not this gate's own name: stream_once
+    (longctx_cycle_bench.py, reused here exactly) hard-codes model='qwen-longctx' in
+    its request payload, so any other served name 404s every stream in milliseconds
+    (gate 1, run 35556533480 - a false negative that looked like readiness with zero
+    decode rounds actually run)."""
+    command = engine_argv(port, users, context, trace_region_bytes)
     log_path = results / log_name
     handle = log_path.open('w')
     process = subprocess.Popen(command, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
