@@ -75,3 +75,56 @@ Two caveats this document cannot settle, which belong to the scoping work that f
 - Lever N v1 keeps the **one-in-flight prefill** rule, which fixes the stall but not the serial
   ramp of section 2. The last user still waits behind three prefills; only v2 scratch parking, or
   batching prefill across users, addresses that.
+
+---
+
+## CAVEAT ONE, ANSWERED 2026-09-22: the graft does reach this prefill path
+
+The first caveat above - "Lever N was designed against the managed endpoint, where
+speculative decoding is off ... Whether the graft reaches this prefill path at all is an
+open question" - is now settled, on hardware, on the fast path with dflash T16 drafts and
+four packed users.
+
+Run **35688313093** (lever-n-m3native-v47), from `gate/server.log`:
+
+```
+[M1] prefill path: resumable prefill_paged_slots_range starts=[1992] ends=[3984]
+```
+
+That is `prefill_paged_slots_range` executing with a nonzero start, reached through
+`qwen36_vllm.py:309 _prefill_forward_tp_batched`, on the speculative fast path. The
+contract of section 3.1 is live where the doc could not assume it would be.
+
+It took nine arms to establish, and eight of them died before the model:
+
+| arm | died on |
+| --- | --- |
+| v36 | the chunk flag never crossed into the container |
+| v37 | engine refused at config: gemma4's `disable_chunked_mm_input` |
+| v38 | the image's pre-step-5 `serving_lifecycle` |
+| v39 | `ImportError: batch_enabled` - the bundle predates the symbol |
+| v41, v43 | warmup hang - a grafted `.py` without its sibling `.cpp` |
+| v45 | the native sampler refused a mid-prompt chunk |
+| v47 | **the range path ran**, then the capture's one-call guard refused the continuation |
+| v49 | a second prompt joined the partial - the one-in-flight policy used the wrong mechanism |
+
+Each is now guarded by a CPU test, and `scripts/ci/read_gate_markers.py` reads a run's
+markers across every log rather than whichever file happens to hold them.
+
+## CAVEAT TWO STANDS, and it bounds what these runs can deliver
+
+Lever N v1 keeps one-in-flight prefill, so what it recovers is the **decode stall**, not
+the ramp:
+
+- **Recovered:** the 79.4 s of decode stall, 31% of user-facing wall. Section 4 predicts
+  each freeze drops from a full prefill to ~0.5 s per chunk, so the 39.5 s a decoding
+  user spends frozen while a newcomer prefills becomes something near the round time.
+- **NOT recovered:** the TTFT staircase itself - 13.5 / 26.5 / 39.6 / 52.5 s. The fourth
+  user still waits behind three prefills, because the GDN prefill scratch is
+  single-occupancy and one-in-flight is what keeps it safe. Only v2 scratch parking, or
+  batching prefill across users, touches that.
+
+So for the four-concurrent-single-streams target this is worth being exact about: Lever N
+v1 makes a user who is ALREADY decoding stop freezing when somebody else arrives. It does
+not make the fourth user's first token arrive sooner. Both matter and they are different
+problems; only the first is in flight.
