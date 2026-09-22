@@ -213,3 +213,65 @@ v38's failure the first genuinely informative one: it proved vLLM chunks the pro
   copied verbatim from v37's graft artifact. Catches v38's class of fault: the previous
   tests all asked whether the patched source had gained an `or`, so none could see which
   branch it then entered.
+
+---
+
+## ADDENDUM 2, 2026-09-22 late: step 8's delivery mechanism was never viable
+
+Run **35690327326** (v51) carried a marker that fires from *inside*
+`_schedule_prefill_only`, added precisely because `install()`'s marker had proved
+nothing. It did not fire:
+
+```
+one-in-flight policy      0   -
+one-in-flight scheduler   3   (the install marker, in all three logs)
+```
+
+The policy never ran. And the failure changed shape to two FRESH prompts in one step,
+`prefill_slot=None new=['A','B'] cached=[]`, so neither the queue hiding nor the
+capacity cap was in the loop.
+
+**Why.** `serving_one_in_flight.install()` sets
+`vllm_config.scheduler_config.scheduler_cls` to our subclass. The plugin's own
+`platform.check_and_update_config` then writes it again:
+
+```python
+vllm_config.scheduler_config.scheduler_cls = TT_LANE_SCHEDULER_CLS   # line 1079
+vllm_config.scheduler_config.scheduler_cls = TT_SCHEDULER_CLS        # line 1085
+```
+
+Last writer wins, and the plugin writes later. `install()` guards against a scheduler
+class *already* being selected, which is true at our call site and irrelevant by the
+time the config is resolved.
+
+**This document's own contract said where M2 belongs**, before step 8 was built
+(`docs/lever-n-plugin-contract-2026-09-19.md`): "two small, precisely located changes",
+**both in the vLLM TT plugin, not our overlay code** -
+`LaneScheduler._negotiate_forced_mode` for alternation and
+`TTScheduler._schedule_prefill_only` for one-in-flight. Step 8 implemented the second as
+an overlay via `scheduler_cls` instead of as a graft, and the overlay cannot survive the
+plugin's own config pass.
+
+### What the correct delivery looks like, and it is the pattern already in use
+
+The arm already bind-mounts a patched `platform.py` into
+`/opt/qwen-fast-plugin/src/vllm_tt_plugin/`, produced by
+`lever_n_model_patch.patch_platform` with anchor-checked `replace_once` edits. The
+scheduler needs exactly the same treatment, and both sources are already captured
+verbatim by `probe_plugin_scheduler_sources` (cpu-probe run **35665853903**):
+
+| file | sha256 | lines | what M2 edits |
+| --- | --- | --- | --- |
+| `scheduler.py` | `a1bd6257d3a14c90` | 207 | `TTScheduler._schedule_prefill_only`, line 154 |
+| `lane_scheduler.py` | `f8e19e1907c05b24` | 758 | `LaneScheduler._negotiate_forced_mode` |
+
+So M2 is tractable and its inputs are in hand. It is a graft of one or two plugin files,
+not an overlay, and `serving_one_in_flight`'s arithmetic (`allowed_prefills`,
+`effective_capacity`) is still the right policy - only its delivery was wrong.
+
+### The lesson, which is the session's recurring one
+
+`install()` logged `[PINDIAG] one-in-flight scheduler installed` on every run from v38
+onward, and it meant only that a string had been assigned. A positive control has to
+observe the behaviour, not the intention. The marker that settled this took ten minutes
+to add and should have existed in step 8.
