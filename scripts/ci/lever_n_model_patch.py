@@ -159,13 +159,43 @@ SLOTS_RANGE = '''
 
         One in-flight prefill per lane in v1: the GDN scratch and the host RoPE table are
         single-occupancy, so a second request's prefill between two chunk steps of the
-        first would corrupt it. The scheduler enforces that; this method assumes it.
+        first would corrupt it. The scheduler is meant to enforce that. This method no
+        longer merely assumes it - see the two checks below and what they do NOT cover.
         """
         assert self.num_devices > 1, "prefill_paged_slots_range is the TP (num_devices>1) path"
         N = len(token_ids_list)
         assert len(empty_slots) == N and len(starts) == N and len(ends) == N, (
             "one slot, start and end per request"
         )
+        # The scratch is single-occupancy and nothing downstream notices a violation.
+        # docs/lever-n-build-plan-2026-09-22.md section 3: two of the three guards the
+        # design cited are not guards (one is a constructor check that reads no address),
+        # and the corruption mode this method introduces is structurally invisible to all
+        # of them. A wrong resumption therefore produces wrong tokens, not an error. So
+        # the invariant is asserted here, at the point of use.
+        resumed = [u for u in range(N) if int(starts[u]) > 0]
+        if resumed and N > 1:
+            # Fatal within one call: every request runs through the same scratch in the
+            # loop below, and a sibling either re-zeroes it (do_reset on its start == 0)
+            # or advances it with its own tokens. The resumed request would then continue
+            # from another prompt's recurrence.
+            raise ValueError(
+                'Lever N: a resumed prefill cannot share a call with another request; '
+                'starts=%r with N=%d' % ([int(s) for s in starts], N))
+        # Chunk sequencing for the in-flight prompt. A continuation must arrive at exactly
+        # the offset the previous step left off; a fresh prompt (start == 0) restarts it.
+        # This catches a wrong-offset resume and an out-of-order chunk. It does NOT catch
+        # a fresh prompt admitted BETWEEN two continuations of another - that resets the
+        # cursor legitimately, and only the scheduler can prevent it (build plan step 8,
+        # capping prefill capacity at partials rather than partials + 1).
+        expected = getattr(self, '_qwen_lever_n_next_start', None)
+        if resumed:
+            start_u = int(starts[0])
+            if expected is None or start_u != expected:
+                raise ValueError(
+                    'Lever N: prefill resumed at %d but the scratch was left at %r; '
+                    'a chunk was skipped, replayed, or belongs to another prompt'
+                    % (start_u, expected))
         pt = page_table if isinstance(page_table, torch.Tensor) else ttnn.to_torch(page_table)
         assert pt.shape[0] == N, "page_table must have one row per request"
         comp = ttnn.ConcatMeshToTensor(self.mesh_device, dim=0)
@@ -191,6 +221,7 @@ SLOTS_RANGE = '''
                     .view(1, 1, -1)
                 )
                 ttnn.deallocate(lg)
+                self._qwen_lever_n_next_start = start + actual
                 finished.append(
                     (
                         u,

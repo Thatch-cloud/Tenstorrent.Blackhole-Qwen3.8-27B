@@ -8,6 +8,8 @@ wrong one. These tests hold the scoping honest without needing the real 174 KB f
 import ast
 import unittest
 
+import lever_n_model_patch
+
 from lever_n_model_patch import (function_span, patch_chunked_entry, patch_model,
                                  patch_platform, patch_prefill_chunk, patch_tp_replay,
                                  patch_vllm_entry, replace_once)
@@ -228,6 +230,141 @@ class PrefillChunkTests(unittest.TestCase):
     def test_refuses_an_ambiguous_source(self):
         with self.assertRaises(ValueError):
             patch_prefill_chunk(self.SOURCE + self.SOURCE, 4096)
+
+
+class ScratchOccupancyGuardTests(unittest.TestCase):
+    """The GDN prefill scratch is single-occupancy and the emitted method used to say so
+    in prose - "The scheduler enforces that; this method assumes it." Nothing downstream
+    checks it: docs/lever-n-build-plan-2026-09-22.md section 3 found two of the three
+    guards the design cited are not guards, and the corruption this method introduces is
+    invisible to all of them, so a wrong resumption yields wrong tokens rather than an
+    error. These tests execute the guards that replaced the prose.
+
+    The method body is extracted and run against stubs; the device work (mesh, ttnn,
+    traced replay) is stubbed out, because what is under test is the sequencing
+    arithmetic, not the prefill.
+    """
+
+    def method(self):
+        """The emitted prefill_paged_slots_range, bound into a throwaway class."""
+        import ast
+        import textwrap
+        source = 'class Host:\n' + lever_n_model_patch.SLOTS_RANGE
+        ast.parse(source)          # the graft must be valid where it lands
+        namespace = {'torch': _StubTorch(), 'ttnn': _StubTtnn()}
+        exec(compile(textwrap.dedent(source), '<slots-range>', 'exec'), namespace)
+        return namespace['Host']
+
+    def host(self, **overrides):
+        Host = self.method()
+        host = Host()
+        host.num_devices = 2
+        host.mesh_device = object()
+        host.layers = []
+        host.args = type('A', (), {'vocab_size': 8})()
+        host._bind_gdn_prefill_scratch = lambda: 'prev'
+        host._unbind_gdn_prefill_scratch = lambda prev: None
+        host._write_gdn_slot = lambda slot, rec, conv: None
+        host.prefill_traced_chunked = lambda toks, pt, actual_len, start: 'logits'
+        for name, value in overrides.items():
+            setattr(host, name, value)
+        return host
+
+    def call(self, host, starts, lengths=None, slots=None):
+        n = len(starts)
+        lengths = lengths or [2048] * n
+        toks = [_StubTensor((1, length)) for length in lengths]
+        return host.prefill_paged_slots_range(
+            toks, _StubTensor((n, 4)), slots or list(range(n)), starts,
+            [s + l for s, l in zip(starts, lengths)], valid_lens=lengths)
+
+    def test_a_resumed_prefill_cannot_share_a_call_with_another_request(self):
+        """Fatal within one call: every request runs through the same scratch, so a
+        sibling either re-zeroes it or advances it with its own tokens."""
+        host = self.host(_qwen_lever_n_next_start=2048)
+        with self.assertRaisesRegex(ValueError, 'cannot share a call with another request'):
+            self.call(host, [2048, 0])
+        with self.assertRaisesRegex(ValueError, 'cannot share a call with another request'):
+            self.call(host, [0, 2048])
+
+    def test_several_fresh_prompts_in_one_call_are_still_allowed(self):
+        """Unchanged behaviour: N fresh prompts each reset and complete within the call,
+        which is what prefill_paged_slots always did. Only RESUMPTION is exclusive."""
+        host = self.host()
+        self.assertEqual(len(self.call(host, [0, 0, 0])), 3)
+
+    def test_a_continuation_must_arrive_at_the_offset_the_last_step_left(self):
+        host = self.host()
+        self.call(host, [0], lengths=[2048])              # fresh chunk, cursor -> 2048
+        self.assertEqual(host._qwen_lever_n_next_start, 2048)
+        self.call(host, [2048], lengths=[2048])           # in sequence
+        self.assertEqual(host._qwen_lever_n_next_start, 4096)
+        with self.assertRaisesRegex(ValueError, 'the scratch was left at'):
+            self.call(host, [2048], lengths=[2048])       # replayed chunk
+        with self.assertRaisesRegex(ValueError, 'the scratch was left at'):
+            self.call(host, [8192], lengths=[2048])       # skipped chunk
+
+    def test_resuming_with_no_prefill_in_flight_is_refused(self):
+        """start > 0 with an empty cursor means the scratch holds nothing, or holds
+        another prompt whose steps this process never saw."""
+        host = self.host()
+        with self.assertRaisesRegex(ValueError, 'the scratch was left at None'):
+            self.call(host, [2048])
+
+    def test_a_fresh_prompt_resets_the_cursor_which_this_guard_does_NOT_police(self):
+        """Stated so the limit is on the record rather than assumed away: a fresh prompt
+        admitted between two continuations of another legitimately resets the cursor, so
+        this guard cannot see that interleaving. Only the scheduler can prevent it -
+        build plan step 8, capping prefill capacity at partials rather than partials + 1."""
+        host = self.host()
+        self.call(host, [0], lengths=[2048])
+        self.call(host, [2048], lengths=[2048])
+        self.call(host, [0], lengths=[512])               # another prompt barges in
+        self.assertEqual(host._qwen_lever_n_next_start, 512)
+        # The first prompt's next continuation is now refused, but only because the
+        # offsets disagree - not because the guard understood what happened.
+        with self.assertRaisesRegex(ValueError, 'the scratch was left at 512'):
+            self.call(host, [4096], lengths=[2048])
+
+
+class _StubTensor:
+    def __init__(self, shape):
+        self.shape = shape
+
+    def __getitem__(self, item):
+        return self
+
+
+class _StubTorch:
+    Tensor = _StubTensor
+
+
+class _StubTtnn:
+    @staticmethod
+    def to_torch(value, mesh_composer=None):
+        return _StubHostLogits()
+
+    @staticmethod
+    def deallocate(value):
+        return None
+
+    @staticmethod
+    def ConcatMeshToTensor(mesh, dim=0):
+        return object()
+
+
+class _StubHostLogits:
+    def reshape(self, *shape):
+        return self
+
+    def __getitem__(self, item):
+        return self
+
+    def float(self):
+        return self
+
+    def view(self, *shape):
+        return self
 
 
 if __name__ == '__main__':
