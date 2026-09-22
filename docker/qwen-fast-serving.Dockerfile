@@ -34,6 +34,14 @@ COPY scripts/ci/serving_buffer_pool.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_device.py scripts/ci/draft_attention_branch.py scripts/ci/draft_mlp_branch.py scripts/ci/draft_convolution.py scripts/ci/draft_convolution_fused.py scripts/ci/draft_convolution_fused_io.cpp scripts/ci/verifier_engine.py scripts/ci/verifier_pack.py scripts/ci/draft_kv_history.py /experiment-scripts/ci/
 COPY scripts/ci/serving_runtime.py scripts/ci/serving_gather_experiment.py scripts/ci/gdn_grouped_gather.py scripts/ci/gdn_grouped_gather_gate.py scripts/ci/gdn_grouped_gather_scope.py /experiment-scripts/ci/
 COPY scripts/ci/packed_verifier.py scripts/ci/serving_packed_step.py scripts/ci/gdn_device_loop_state.py scripts/ci/gdn_records.py scripts/ci/dflash_request_runtime.py /experiment-scripts/ci/
+# gdn_state_copy travels with gdn_device_loop_state, which imports batch_enabled
+# and copy_compact_batch from it. Both were added by commit 7ecf980a (K1: one
+# launch for the packed decode state moves) and neither exists in the bundle,
+# whose tree is commit 77d6995a. Run 35683127469 died at engine init with
+# "cannot import name batch_enabled from gdn_state_copy"; it went unnoticed
+# because the m3native lane serves a different image. test_serving_image_copy_closure
+# now fails on CPU for any COPYed file needing a symbol the bundle cannot supply.
+COPY scripts/ci/gdn_state_copy.py /experiment-scripts/ci/
 COPY scripts/ci/gdn_snapshot.py scripts/ci/dflash_prefill_window.py /experiment-scripts/ci/
 COPY scripts/ci/pooled_attention_replay.py /experiment-scripts/ci/
 COPY scripts/ci/target_packed_pages.py /experiment-scripts/ci/
@@ -54,6 +62,7 @@ RUN git clone --filter=blob:none https://github.com/tenstorrent/vllm-tt-plugin.g
     && python3 -B /experiment-scripts/ci/serving_plugin_patch.py /opt/qwen-fast-plugin \
     && python3 -m pip install --no-deps -e /opt/qwen-fast-plugin
 COPY scripts/ci/test_serving_*.py /experiment-scripts/ci/
+COPY scripts/ci/test_packed_verifier.py /experiment-scripts/ci/
 RUN OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 VLLM_PLUGINS='' python3 -B -m unittest \
     test_serving_fast_request test_serving_vllm_contract test_serving_vllm_state \
     test_serving_page_binding test_serving_runner_bridge test_serving_request_factory \

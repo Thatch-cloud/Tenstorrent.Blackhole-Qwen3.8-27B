@@ -57,6 +57,7 @@ jobs:
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
           python -B -m unittest test_m3native_engine_argv
+          python -B -m unittest test_serving_image_copy_closure
           python -B -m unittest test_serving_plugin_patch
           python -B -m unittest test_serving_worker_hook
           python -B -m unittest test_serving_request_factory
