@@ -30,6 +30,7 @@ jobs:
             *-v41|*-v42|*-v43|*-v44) image=sha256:836e7abb249b04018ce59848d290738142a7b9e6589e6770944f98d4b7630793 ;;
             *-v45|*-v46) image=sha256:8ce279e6ad9a55304f85a49a3626c3635fb2203c23fcc42a06e826019778c11a ;;
             *-v47|*-v48) image=sha256:330b1593c4fe0dc1b02b3abaa0922552eb978721bfc16f276b1a4831f806505b ;;
+            *-v49|*-v50) image=sha256:ebb0d2976cb7e376a8f8792aebf90f4dfcfb49a617607f32b9f08b35ee3858f0 ;;
           esac
           echo "graft image: $image"
           root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
@@ -37,7 +38,7 @@ jobs:
           docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
           trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
           case "$GITHUB_REF_NAME" in
-            *-v36|*-v37|*-v38|*-v40|*-v42|*-v44|*-v45|*-v46|*-v47|*-v48) export M3NATIVE_LEVER_N=1 ;;
+            *-v36|*-v37|*-v38|*-v40|*-v42|*-v44|*-v45|*-v46|*-v47|*-v48|*-v49|*-v50) export M3NATIVE_LEVER_N=1 ;;
           esac
           python3 -B - <<'PY' > graft/manifest.txt
           import os
@@ -203,6 +204,8 @@ jobs:
             *-v46) export M3NATIVE_IMAGE=sha256:8ce279e6ad9a55304f85a49a3626c3635fb2203c23fcc42a06e826019778c11a ;;
             *-v47) export M3NATIVE_PREFILL_CHUNK_TOKENS=2048 M3NATIVE_IMAGE=sha256:330b1593c4fe0dc1b02b3abaa0922552eb978721bfc16f276b1a4831f806505b ;;
             *-v48) export M3NATIVE_IMAGE=sha256:330b1593c4fe0dc1b02b3abaa0922552eb978721bfc16f276b1a4831f806505b ;;
+            *-v49) export M3NATIVE_PREFILL_CHUNK_TOKENS=2048 M3NATIVE_IMAGE=sha256:ebb0d2976cb7e376a8f8792aebf90f4dfcfb49a617607f32b9f08b35ee3858f0 ;;
+            *-v50) export M3NATIVE_IMAGE=sha256:ebb0d2976cb7e376a8f8792aebf90f4dfcfb49a617607f32b9f08b35ee3858f0 ;;
             *-v24|*-v25) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_FAST_COMMIT=1 ;;
             *-v27) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PIPELINED_PUBLISH=1 ;;
             *-v29|*-v32) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_TRACED_PUBLISH=1 ;;
