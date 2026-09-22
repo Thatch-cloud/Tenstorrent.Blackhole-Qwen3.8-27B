@@ -417,6 +417,16 @@ class TPGatedDeltaNet:
 
     def _conv_gates_enabled(self):
         return os.environ.get("QWEN_GDN_CONV_GATES", "0") == "1"
+
+    def remap_slots(self, remap):
+        """Reindex the batched decode state after a vLLM batch condense: slot i takes the state
+        previously at slot remap[i] (identity entries are no-ops)."""
+        idx = [int(remap[i]) for i in range(self.B)]
+        if all(idx[i] == i for i in range(self.B)):
+            return
+        self._gather_indices(self.rec_state, idx, dim=0)
+        for m in range(self.K):
+            self._gather_indices(self.conv_states[m], idx, dim=1)
 '''
 
 # mlp.py, class Qwen36MLP: _forward_tp verbatim (both the w1/w3 site and the w2 site).

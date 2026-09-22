@@ -114,5 +114,27 @@ class ShortSlotRemapTests(unittest.TestCase):
             patch_gdn_slot_remap('class GDN:' + chr(10) + '    pass' + chr(10))
 
 
+class TheGraftTableAppliesItTests(unittest.TestCase):
+    """patch_gdn_tp must carry this, or the fix never reaches the rig.
+
+    The graft table maps one function per file, so a fix chained into the wrong one is
+    silently absent - which is how the M2 alternation was mounted onto a class the
+    platform never constructs (run 35707860782) and cost a rig cycle.
+    """
+
+    def test_patch_gdn_tp_output_carries_the_padded_index(self):
+        import test_lever_n_m3native_patch as m3
+        from lever_n_m3native_patch import patch_gdn_tp
+        out = patch_gdn_tp(m3.GDN_TP)
+        self.assertIn('if i < _qwen_n else i', out)
+
+    def test_the_gdn_fixture_still_contains_the_anchor(self):
+        """If the fixture loses remap_slots the graft raises rather than passing, but
+        this says so directly instead of as a confusing failure elsewhere."""
+        import test_lever_n_m3native_patch as m3
+        self.assertIn('def remap_slots', m3.GDN_TP)
+        self.assertIn('idx = [int(remap[i]) for i in range(self.B)]', m3.GDN_TP)
+
+
 if __name__ == '__main__':
     unittest.main()
