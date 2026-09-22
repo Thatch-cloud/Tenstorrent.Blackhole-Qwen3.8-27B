@@ -554,6 +554,25 @@ def patch_scheduler(source):
     return ''.join(lines)
 
 
+# remap_slots reads self.B entries from a remap vLLM sizes to the live batch.
+_GDN_REMAP_OLD = '        idx = [int(remap[i]) for i in range(self.B)]\n'
+_GDN_REMAP_NEW = '        # vLLM sizes slot_remap to the LIVE batch, while self.B is the full slot\n        # space (args.max_batch_size), so a remap shorter than B indexed out of\n        # bounds on the first slot past its end - run 35717866188 died on\n        # "index 4 is out of bounds for dimension 0 with size 4". Slots the remap\n        # does not mention are not live after a condense, so identity is right:\n        # their state is left alone and re-initialised when a request takes them.\n        #\n        # Padded, never truncated. _gather_indices concats one row per entry and\n        # copies in place, so a short idx would build a tensor narrower than the\n        # buffer and the copy would mismatch.\n        _qwen_n = len(remap)\n        idx = [int(remap[i]) if i < _qwen_n else i for i in range(self.B)]\n'
+
+
+def patch_gdn_slot_remap(source):
+    """Tolerate a slot_remap shorter than the GDN slot space.
+
+    See fix_short_slot_remap.py: the caller sizes the remap to the live batch and
+    remap_slots reads self.B = args.max_batch_size entries from it.
+    """
+    if _GDN_REMAP_NEW in source:
+        raise ValueError('gdn tp already carries the slot-remap graft')
+    if source.count(_GDN_REMAP_OLD) != 1:
+        raise ValueError('remap_slots index line matched %d times'
+                         % source.count(_GDN_REMAP_OLD))
+    return source.replace(_GDN_REMAP_OLD, _GDN_REMAP_NEW)
+
+
 def patch_scheduler_alternation(source):
     """Alternate prefill chunks with decode steps inside TTScheduler.schedule.
 

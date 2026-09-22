@@ -364,6 +364,12 @@ def patch_gdn_tp(source):
         '                qkvzab = tpc.all_gather_matmul_prefill(\n',
         'gdn _project_qkvzab fused-prefill layout guard')
     result = ''.join(lines)
+    # remap_slots reads self.B entries from a remap vLLM sizes to the LIVE batch, so a
+    # short remap indexed out of bounds the moment a batch condense happened with two
+    # users decoding - run 35717866188. Latent until then: nothing had got two users
+    # decoding together before, so no condense had ever run.
+    import lever_n_model_patch as _m1
+    result = _m1.patch_gdn_slot_remap(result)
     ast.parse(result)
     return result
 
