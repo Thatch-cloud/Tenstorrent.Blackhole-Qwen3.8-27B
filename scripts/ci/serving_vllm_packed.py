@@ -40,7 +40,14 @@ def ordered_tickets(requests, scheduled):
         raise ValueError('Resident decode requests at the exact scheduled frontier required: '
                          + '; '.join(found))
     if set(by_id) != set(order):
-        raise ValueError('The scheduled requests and the prepared requests must be the same set')
+        # Which side has the extra id decides what went wrong, and a bare refusal says
+        # neither. Run 35699498963 hit this immediately after the first interleaving
+        # state on hardware - a user decoding while another prefilled in chunks - and
+        # the message left the cause unknowable from the artifact.
+        raise ValueError('The scheduled requests and the prepared requests must be the same set: '
+                         'scheduled_only=%r prepared_only=%r scheduled=%r prepared=%r'
+                         % (sorted(set(order) - set(by_id)), sorted(set(by_id) - set(order)),
+                            list(order), sorted(by_id)))
     resumed = set(getattr(cached, 'resumed_req_ids', ()) or ())
     positions = list(cached.num_computed_tokens)
     if len(positions) != len(order):
