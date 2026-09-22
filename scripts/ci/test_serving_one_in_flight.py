@@ -8,9 +8,10 @@ starve prefill entirely whenever any request was decoding.
 """
 
 from types import SimpleNamespace
+import collections
 import unittest
 
-from serving_one_in_flight import (allowed_prefills, effective_capacity, install,
+from serving_one_in_flight import (one_in_flight_scheduler, allowed_prefills, effective_capacity, install,
                                    one_in_flight_scheduler, waiting_headroom)
 
 
@@ -174,3 +175,100 @@ class WaitingHeadroomTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SchedulerClassTests(unittest.TestCase):
+    """What the class DOES, which no test checked until run 35689293766."""
+
+    def build(self, running, waiting=('w1', 'w2'), skipped=('s1',), max_running=4):
+        seen = {}
+
+        class Base(object):
+            def __init__(self):
+                self.running = list(running)
+                self.waiting = collections.deque(waiting)
+                self.skipped_waiting = collections.deque(skipped)
+                self.max_num_running_reqs = max_running
+
+            def _schedule_prefill_only(self):
+                # What the base scheduler would see, captured mid-call.
+                seen['waiting'] = list(self.waiting)
+                seen['skipped_waiting'] = list(self.skipped_waiting)
+                seen['max_num_running_reqs'] = self.max_num_running_reqs
+                seen['waiting_type'] = type(self.waiting)
+                return 'scheduled'
+
+        return one_in_flight_scheduler(Base)(), seen
+
+    @staticmethod
+    def request(is_chunk):
+        return type('R', (), {'is_prefill_chunk': is_chunk})()
+
+    def test_a_partial_in_flight_hides_both_queues_from_the_base_scheduler(self):
+        """The contract's mechanism, docs/lever-n-plugin-contract-2026-09-19.md:123.
+        Capping capacity was not enough - v49 computed headroom zero and the waiting
+        loop admitted a second prompt anyway."""
+        scheduler, seen = self.build([self.request(True)])
+        self.assertEqual(scheduler._schedule_prefill_only(), 'scheduled')
+        self.assertEqual(seen['waiting'], [], 'nothing new may join a partial')
+        self.assertEqual(seen['skipped_waiting'], [])
+
+    def test_the_queues_are_restored_afterwards(self):
+        scheduler, _ = self.build([self.request(True)])
+        scheduler._schedule_prefill_only()
+        self.assertEqual(list(scheduler.waiting), ['w1', 'w2'])
+        self.assertEqual(list(scheduler.skipped_waiting), ['s1'])
+        self.assertEqual(scheduler.max_num_running_reqs, 4)
+
+    def test_the_queues_are_restored_even_when_scheduling_raises(self):
+        scheduler, _ = self.build([self.request(True)])
+        def boom():
+            raise RuntimeError('scheduling failed')
+        type(scheduler).__mro__[1]._schedule_prefill_only = lambda self: boom()
+        with self.assertRaises(RuntimeError):
+            scheduler._schedule_prefill_only()
+        self.assertEqual(list(scheduler.waiting), ['w1', 'w2'])
+        self.assertEqual(scheduler.max_num_running_reqs, 4)
+
+    def test_the_queue_type_is_preserved(self):
+        """The base scheduler popleft()s its waiting queue, so a list would break it."""
+        scheduler, seen = self.build([self.request(True)])
+        scheduler._schedule_prefill_only()
+        self.assertIs(seen['waiting_type'], collections.deque)
+
+    def test_with_no_partial_the_queues_stay_visible_and_capacity_caps_to_one(self):
+        """Hiding alone would admit nothing ever. With no partial in flight the fast
+        path serves exactly one fresh prompt, which is the cap's job."""
+        scheduler, seen = self.build([])
+        scheduler._schedule_prefill_only()
+        self.assertEqual(seen['waiting'], ['w1', 'w2'], 'a fresh prompt must be visible')
+        self.assertEqual(seen['max_num_running_reqs'], 1, 'exactly one, not four')
+
+    def test_decodes_are_added_back_so_the_plugin_subtraction_nets_out(self):
+        """The plugin computes max(0, max_num_running_reqs - decodes), so the value
+        written here has to carry the decodes it will remove."""
+        scheduler, seen = self.build([self.request(False), self.request(False)])
+        scheduler._schedule_prefill_only()
+        self.assertEqual(seen['max_num_running_reqs'], 3, 'allowed 1 plus 2 decodes')
+        self.assertEqual(seen['waiting'], ['w1', 'w2'], 'decodes are not partials')
+
+    def test_a_partial_alongside_decodes_still_hides_the_queues(self):
+        scheduler, seen = self.build([self.request(True), self.request(False)])
+        scheduler._schedule_prefill_only()
+        self.assertEqual(seen['waiting'], [])
+        self.assertEqual(seen['max_num_running_reqs'], 2, 'allowed 1 plus 1 decode')
+
+    def test_a_base_without_skipped_waiting_is_tolerated(self):
+        """skipped_waiting is not guaranteed on every plugin version; a missing
+        attribute must not turn a policy into an AttributeError."""
+        class Base(object):
+            def __init__(self):
+                self.running = [SchedulerClassTests.request(True)]
+                self.waiting = collections.deque(['w1'])
+                self.max_num_running_reqs = 4
+            def _schedule_prefill_only(self):
+                return 'scheduled'
+        scheduler = one_in_flight_scheduler(Base)()
+        self.assertEqual(scheduler._schedule_prefill_only(), 'scheduled')
+        self.assertEqual(list(scheduler.waiting), ['w1'])
+

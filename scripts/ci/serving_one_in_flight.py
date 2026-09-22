@@ -43,15 +43,59 @@ def one_in_flight_scheduler(base=None):
             saved = self.max_num_running_reqs
             decodes = sum(1 for request in self.running if not request.is_prefill_chunk)
             partials = len(self.running) - decodes
+            hidden = {}
             try:
-                # The plugin will subtract `decodes` from whatever it reads here, so
-                # add it back: the value it computes becomes `allowed`.
+                # Clause one: nothing new joins a partial. The contract
+                # (docs/lever-n-plugin-contract-2026-09-19.md line 123) puts this here
+                # and says to hide the queues rather than cap capacity. Run
+                # 35689293766 is why it says that - the cap below computes headroom
+                # zero and the waiting loop admitted a second prompt regardless.
+                if partials:
+                    for name in ('waiting', 'skipped_waiting'):
+                        queue = getattr(self, name, None)
+                        if queue is None:
+                            continue
+                        hidden[name] = queue
+                        # Same type, so a deque stays a deque and a list a list; the
+                        # base scheduler's popleft/append must keep working.
+                        setattr(self, name, type(queue)())
+                # Clause two: with no partial, waiting is visible and the base
+                # scheduler would admit up to max_num_running_reqs fresh prompts. The
+                # fast path serves exactly one. The plugin subtracts `decodes` from
+                # whatever it reads here, so add it back.
                 self.max_num_running_reqs = min(saved, allowed_prefills(partials) + decodes)
+                _log_policy(partials, decodes, bool(hidden))
                 return super()._schedule_prefill_only()
             finally:
+                for name, queue in hidden.items():
+                    setattr(self, name, queue)
                 self.max_num_running_reqs = saved
 
     return OneInFlightScheduler
+
+
+_LOGGED = set()
+
+
+def _log_policy(partials, decodes, hid):
+    """Say what the policy DID, once per distinct state.
+
+    install() logs that scheduler_cls was set, which proves a string was written and
+    nothing else: run 35689293766 printed that marker and still admitted a second
+    prompt. This fires from inside the scheduling call, so its absence means the class
+    never ran and its presence carries the numbers it decided on.
+    """
+    state = (partials, decodes, hid)
+    if state in _LOGGED:
+        return
+    _LOGGED.add(state)
+    try:
+        from loguru import logger
+        logger.info('[PINDIAG] one-in-flight policy: partials={} decodes={} '
+                    'waiting_hidden={} allowed={}',
+                    partials, decodes, hid, allowed_prefills(partials))
+    except BaseException:
+        pass
 
 
 def allowed_prefills(partials):
