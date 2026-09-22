@@ -389,3 +389,58 @@ target names.
 
 **The comparable experiment has not been run.** v77 should carry v34's full flag set
 PLUS chunked prefill and the alternation. Only that isolates what Lever N costs or buys.
+
+---
+
+# THE CONTROLLED RESULT: Lever N makes this configuration slower and incorrect
+
+Three runs, everything held constant except the named variable - same image
+(`sha256:67a28229`), same seven optimisation flags, same K64 kernel graft, same four
+users at 32,768-token prompts, same 256 completion tokens each.
+
+| | v83 control | v80 Lever N | v34 reference |
+|---|---|---|---|
+| Lever N model graft, chunked prefill, alternation | **no** | **yes** | no |
+| `M3NATIVE_GDN_USER_BATCH` | no | no | yes |
+| `gate_passed` | **true** | false | true |
+| token-exact streams | **4 / 4** | 3 / 4 | 4 / 4 |
+| mean acceptance length | **7.17** | 1.00-4.00 | 5.89 |
+| TTFT (s) | 13.6 / 26.5 / 39.6 / 52.5 | 15.5 / 30.0 / **65.4 / 79.5** | 13.5 / 26.5 / 39.6 / 52.5 |
+| wall for all four users | **65.1 s** | 98.1 s | - |
+
+**Lever N is 51% slower end to end** (98.1 s against 65.1 s) and fails the equality gate
+the control passes.
+
+## Reading the rate correctly
+
+The gate's `tokens` field counts streamed CHUNKS, not tokens, and `gaps_ms` is the gap
+between chunks. v83 shows 43 chunks and 256 completion tokens because its acceptance is
+7.17; v80 shows 256 chunks for 256 tokens because its acceptance collapses toward 1. An
+earlier reading of these gaps as per-token times made the control look four times slower
+than the treatment, which is the exact opposite of the truth.
+
+## What the evidence supports
+
+Acceptance falls from **7.17 to between 1.00 and 4.00**, and exactly one stream loses
+token-equality - in v75 and v80 that stream is user 1, in v73 it was user 0. Both
+symptoms point the same way: the M1 chunked prefill and the M2 alternation disturb
+per-user speculative and recurrent state. A draft that is rejected is a round spent for
+one token, which is sufficient to explain the wall-clock loss without any other cause.
+
+The alternation does exactly what it was designed to do - it yields real decode steps
+mid-prefill, proven in v67 against the v65 control - but the design assumed the decode
+steps it wins are worth more than the prefill progress it defers. **At four users this
+measurement says they are not.** TTFT for users three and four goes from 39.6/52.5 s to
+65.4/79.5 s, and nothing in the decode column pays that back.
+
+## Honest conclusion about this line of work
+
+`docs/200tps-verdict-2026-09-22.md` already established that 200 tok/s per user is
+unreachable, on v34's own measurements, by arguments this work does not touch. What
+these three runs add is that **Lever N as built does not improve the four-user
+configuration - it degrades it on every axis measured**: gate, correctness, acceptance,
+TTFT and total wall.
+
+That is a negative result about my own work, and the right response is to say so rather
+than to keep tuning `r`. The stall M2 targets is real, but the cure costs more than the
+disease at four users, and the correctness regression is disqualifying on its own.
