@@ -1,5 +1,7 @@
 import unittest
 
+from lever_n_model_patch import SLOTS_RANGE
+
 from lever_n_prefill_range import (DEFAULT_CHUNK_SIZE, plan_batch, plan_step,
                                    steps_for_prompt, validate_chunking)
 
@@ -97,3 +99,42 @@ class InvariantTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CursorSemanticsTests(unittest.TestCase):
+    """valid_lens is the ABSOLUTE end, and both cursor writes must agree on that.
+
+    Run 35694645353 got two resumable calls - starts=[2048] ends=[4096], then
+    starts=[4096] ends=[6144] - and refused the third with "resumed at 4096 but the
+    scratch was left at 6144". The range path wrote start + actual where actual is
+    already the absolute end, so it double-counted; the one-shot branch wrote plens[0],
+    which is right. A whole prompt has to walk cleanly through both.
+    """
+
+    def test_the_range_cursor_is_the_absolute_end_not_start_plus_length(self):
+        source = SLOTS_RANGE if isinstance(SLOTS_RANGE, str) else ''
+        self.assertIn('self._qwen_lever_n_next_start = actual', source)
+        self.assertNotIn('self._qwen_lever_n_next_start = start + actual', source)
+
+    def test_a_whole_prompt_walks_chunk_by_chunk(self):
+        """The arithmetic both writes imply, simulated over 32768 tokens at 2048.
+
+        Chunk one is the one-shot branch writing plens[0]; the rest are range calls
+        writing valid_lens. Every continuation must arrive exactly at the cursor the
+        previous chunk left.
+        """
+        chunk, prompt = 2048, 32768
+        cursor = chunk                      # one-shot chunk one wrote plens[0]
+        starts = []
+        while cursor < prompt:
+            start = cursor
+            end = min(cursor + chunk, prompt)
+            self.assertEqual(start, cursor, 'continuation must match the cursor')
+            starts.append(start)
+            cursor = end                    # the range path writes the absolute end
+        self.assertEqual(cursor, prompt, 'the prompt is fully covered')
+        self.assertEqual(len(starts), 15, 'fifteen continuations after the one-shot chunk')
+        self.assertEqual(starts[0], 2048)
+        self.assertEqual(starts[-1], 30720)
+        self.assertTrue(all(s % 128 == 0 for s in starts), 'every start stays aligned')
+

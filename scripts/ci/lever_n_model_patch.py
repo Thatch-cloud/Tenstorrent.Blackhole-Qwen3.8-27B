@@ -276,7 +276,13 @@ SLOTS_RANGE = '''
                     .view(1, 1, -1)
                 )
                 ttnn.deallocate(lg)
-                self._qwen_lever_n_next_start = start + actual
+                # actual is valid_lens[u], which is the ABSOLUTE end of the range
+                # just covered - not the chunk length. Adding start double-counts:
+                # run 35694645353 covered [2048, 4096) and left the cursor at
+                # 2048 + 4096 = 6144, so the next chunk at 4096 was refused. The
+                # one-shot branch already writes plens[0], the same absolute end,
+                # and these two have to agree.
+                self._qwen_lever_n_next_start = actual
                 finished.append(
                     (
                         u,

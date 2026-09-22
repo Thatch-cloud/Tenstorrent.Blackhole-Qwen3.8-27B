@@ -515,15 +515,28 @@ class ScratchOccupancyGuardTests(unittest.TestCase):
         self.assertEqual(len(self.call(host, [0, 0, 0])), 3)
 
     def test_a_continuation_must_arrive_at_the_offset_the_last_step_left(self):
+        """valid_lens is the ABSOLUTE END of the covered range, not the chunk length.
+
+        This test used to drive lengths=[2048] for every chunk and expect the cursor to
+        accumulate, which encoded the cursor as start + length. Run 35694645353
+        contradicted that on hardware: the entry passes valid_lens=plens and the runner's
+        plens are absolute ends - its own marker reads
+        'starts=[2048] ends=[4096]' - so a chunk covering [2048, 4096) left the cursor at
+        2048 + 4096 = 6144 and the next chunk at 4096 was refused.
+
+        Driven the way the runner actually drives it: lengths ARE the ends.
+        """
         host = self.host()
-        self.call(host, [0], lengths=[2048])              # fresh chunk, cursor -> 2048
+        self.call(host, [0], lengths=[2048])              # covers [0, 2048)
         self.assertEqual(host._qwen_lever_n_next_start, 2048)
-        self.call(host, [2048], lengths=[2048])           # in sequence
+        self.call(host, [2048], lengths=[4096])           # covers [2048, 4096)
         self.assertEqual(host._qwen_lever_n_next_start, 4096)
+        self.call(host, [4096], lengths=[6144])           # covers [4096, 6144)
+        self.assertEqual(host._qwen_lever_n_next_start, 6144)
         with self.assertRaisesRegex(ValueError, 'the scratch was left at'):
-            self.call(host, [2048], lengths=[2048])       # replayed chunk
+            self.call(host, [4096], lengths=[6144])       # replayed chunk
         with self.assertRaisesRegex(ValueError, 'the scratch was left at'):
-            self.call(host, [8192], lengths=[2048])       # skipped chunk
+            self.call(host, [8192], lengths=[10240])      # skipped chunk
 
     def test_resuming_with_no_prefill_in_flight_is_refused(self):
         """start > 0 with an empty cursor means the scratch holds nothing, or holds
