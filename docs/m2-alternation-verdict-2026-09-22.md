@@ -313,3 +313,30 @@ that it is unproven either way until the per-token cost at four users is attribu
 **No claim is made here that the reframed target is reachable.** What is now established
 is the starting number: four concurrent users, 32k prompts, ~10 tok/s each, three of
 four token-exact.
+
+## Four-user output is not token-exact, and the victim moves
+
+Both four-user runs fail equality on exactly one stream, but not the same one:
+
+| run | diverging user | that stream's text |
+|---|---|---|
+| v73 (35718626867) | user 0 | coherent (`" would ...veniss ourclassraw ..."`) |
+| v75 (35720619574) | user 1 | **degenerate** (`" ...venvenvenven..."`, one token repeated 256 times) |
+
+In v75 stream 1 emits its first token and then repeats it for all 256 - the signature of
+decode state that never advances. In v73 the same stream was fine and a different user
+diverged with a merely different continuation.
+
+**The victim moving between runs is the diagnostic.** A deterministic fault in the GDN
+slot-remap padding added for v73 would be expected to hit the same slot each time. It
+does not. That weakens, but does not clear, that change as a suspect: the padding only
+acts when a condense occurs, and when a condense occurs is itself timing-dependent, so a
+varying victim is not inconsistent with it either. Both runs carried the graft, so there
+is no four-user control without it - v71 crashed before two users decoded.
+
+What can be said without guessing: **the four-user configuration is not token-exact**,
+in two runs out of two, and that blocks qualification regardless of throughput. The gate
+exists to require equality and it is correctly refusing.
+
+This outranks the throughput work. A 10 tok/s four-user configuration that produces
+wrong tokens is not a slower correct system; it is an incorrect one.
