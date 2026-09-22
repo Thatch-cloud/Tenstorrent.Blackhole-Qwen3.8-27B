@@ -148,3 +148,51 @@ proven, and a second user can prefill to completion beside a decoding one. Two t
 remain: the second user is never adopted onto the fast path, and the lifecycle's
 prefill-slot handoff races the scheduler's queue-hiding. Neither is a throughput
 question yet, so no tok/s claim can be made from this run.
+
+---
+
+## Correction to the v69 section above (same day)
+
+Two claims in the v69 write-up do not survive a closer read of the artifact. Both are
+corrected here rather than edited away, because the reasoning that produced them is the
+thing to avoid repeating.
+
+**1. "User 2 prefilled and decoded on the PLAIN path" is withdrawn.**
+
+The log shows `Prefilling 1 user(s) into slots [0]` **16 times** and
+`into slots [1]` **16 times** - one one-shot plus fifteen resumable each. Both users
+prefilled in the model, through the lifecycle's own continuation path. User 2 was not
+on some separate plain path; it simply never reached
+`serving_request_factory` (one `nothing to adopt` line, for user 1 only), so it was
+never adopted onto the fast path for DECODE.
+
+The inference was drawn from the absence of `[PHASE] propose`/`step` records for user 2.
+That absence is real and still means the fast path decoded only user 1 - but it does not
+locate where user 2's prefill ran, and I stated that it did.
+
+**2. The "handoff race" mechanism is downgraded to one of two candidates.**
+
+I wrote that the scheduler un-hid the queue after user 2's chunks finished while the
+lifecycle had not yet cleared `request_id`. That fits. So does a second reading:
+
+- user 2's seed committed and the handoff ran (consistent with
+  `partials=0 decodes=2` and `recorded=2` TTFTs),
+- user 3 (`a5975da9`) was then admitted into the lifecycle's prefill slot,
+- user 4 (`be4fd8c8`) arrived before user 3's first chunk existed, so
+  `partial_prefills` was still empty, the queue stayed un-hidden, and the refusal fired.
+
+The artifact cannot separate them: a step the lifecycle handles alone never reaches the
+hook, so it prints no `[PHASE] execute` line, and an admitted-but-not-yet-prefilling
+request is invisible in the log. `a5975da9` appears **only** in the error text, which is
+equally consistent with "user 2, slot not yet cleared" and "user 3, just admitted".
+
+**What is common to both, and therefore safe to act on.** In each reading the lifecycle
+holds `request_id` while the scheduler admits another fresh request, because the
+scheduler's test for "a prefill is in flight" is `is_prefill_chunk` in `running` - which
+is false both before a prefill's first chunk and after its last. The lifecycle's slot and
+the scheduler's partial-set disagree at both ends.
+
+So the fix that is correct under either reading is the one that gives the scheduler the
+lifecycle's own answer instead of inferring it. The next run should also carry a marker
+naming the request id at admission and at handoff, which settles which reading was true
+rather than leaving it to inference a second time.
