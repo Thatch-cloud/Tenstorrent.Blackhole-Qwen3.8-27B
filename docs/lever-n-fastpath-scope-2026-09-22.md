@@ -275,3 +275,85 @@ not an overlay, and `serving_one_in_flight`'s arithmetic (`allowed_prefills`,
 onward, and it meant only that a string had been assigned. A positive control has to
 observe the behaviour, not the intention. The marker that settled this took ten minutes
 to add and should have existed in step 8.
+
+---
+
+## M1 PROVEN END TO END, 2026-09-22: run 35696842354
+
+The whole 32,768-token prompt was prefilled through the resumable path on the
+speculative fast path, in sixteen chunks, every continuation landing on a 128-aligned
+boundary at exactly the offset the previous chunk left:
+
+```
+[M1] prefill path: one-shot prefill_paged_slots                     covers [0, 2048)
+[M1] prefill path: resumable prefill_paged_slots_range starts=[2048]  ends=[4096]
+                                                       starts=[4096]  ends=[6144]
+                                                       starts=[6144]  ends=[8192]
+      ... twelve more, every start a multiple of 2048 ...
+                                                       starts=[30720] ends=[32768]
+```
+
+Fifteen resumable calls, one one-shot first chunk by design, no gaps and no replays.
+`prefill_paged_slots_range` - the contract of design section 3.1 - is live on hardware
+with dflash T16 drafts and four packed users, which the TTFT document had listed as an
+open question because Lever N was designed against an endpoint with speculation off.
+
+M2's one-in-flight rule is live with it, confirmed by a marker emitted from inside the
+grafted method rather than from an installer:
+
+```
+[PINDIAG] m2 one-in-flight: partials=0 decodes=0 allowed=1 hidden=False
+[PINDIAG] m2 one-in-flight: partials=1 decodes=0 allowed=1 hidden=True
+```
+
+Both clauses: exactly one fresh prompt when nothing is in flight, and nothing admitted
+alongside a partial.
+
+### What it took, and what each arm cost
+
+Twelve arms. Seven were delivery faults that a CPU test now catches; five were real
+integration bugs that only hardware could surface.
+
+| arm | died on | class |
+| --- | --- | --- |
+| v36 | the chunk flag never crossed into the container | delivery |
+| v37 | gemma4's `disable_chunked_mm_input` inherited by qwen3_5 | delivery |
+| v38 | the image's pre-step-5 `serving_lifecycle` | delivery |
+| v39 | `ImportError: batch_enabled` - the bundle predates the symbol | delivery |
+| v41, v43 | warmup hang - a grafted `.py` without its sibling `.cpp` | delivery |
+| v45 | the native sampler refused a mid-prompt chunk | integration |
+| v47 | the capture's one-call guard refused the continuation | integration |
+| v49 | two requests in one step - M2 used the wrong mechanism | integration |
+| v51 | M2's policy never ran - `scheduler_cls` is overwritten by the plugin | delivery |
+| v53 | chunk one never recorded the cursor the range path resumes from | integration |
+| v55 | the eager chunk loop, which serving runs, was never patched | integration |
+| v57 | `valid_lens` is an absolute end; the cursor double-counted it | integration |
+| v59 | **all sixteen chunks landed** | - |
+
+Three of those repeated a mistake this repo had already written down: the
+traced-versus-eager fork (recorded in `patch_prefill_chunk_fallback`), the `{}`-versus-%
+logger format (recorded in `serving_one_in_flight.install`), and the two copy lists
+(recorded in memory `serving-image-bundle-provenance`).
+
+### The next blocker, and it is one layer further out
+
+```
+ValueError: Fresh native prefill with pre-step frontier zero, one emitted seed
+            and all GDN helpers required        serving_request_factory.py:72
+```
+
+The clause is `state.num_computed_tokens != 0`. It is correct for a whole-prompt
+prefill, where the request arrives fresh and is prefilled in that step. After a chunked
+prefill the seed is emitted on the FINAL chunk, by which point 30,720 tokens are already
+computed. The same shape as step 5's lifecycle relaxation, one layer out: a contract
+written for whole-prompt prefill meeting chunked prefill.
+
+`serving_request_factory.py` is baked into the image rather than grafted, so that fix
+carries an image build with it.
+
+### Still true, and worth restating against the headline
+
+None of this moves the 200 tok/s target, which is closed as measured-unreachable. Lever
+N v1 recovers the 79.4 s decode stall, 31% of user-facing wall; it does not move the
+13.5 / 26.5 / 39.6 / 52.5 s TTFT staircase, which needs v2 scratch parking or cross-user
+prefill batching.
