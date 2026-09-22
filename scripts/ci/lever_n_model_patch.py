@@ -307,6 +307,12 @@ def patch_vllm_entry(source):
     return ''.join(lines)
 
 
+# Logged from INSIDE the grafted method. install()'s marker only ever proved a
+# config string had been written - run 35690327326 printed it and the policy had
+# never run. This one cannot be emitted unless the edited code executed.
+MARKER_SCHEDULER = '[PINDIAG] m2 one-in-flight:'
+
+
 PLATFORM_OPT_IN = """def _m1_chunked_prefill_opt_in():
     \"\"\"Lever N M1: allow chunked prefill for a generator the graft made resumable.
 
@@ -376,11 +382,101 @@ def patch_platform(source):
     return ''.join(lines)
 
 
-def function_span_module(source, name):
-    """Span of a module-level function, by the same next-sibling rule as function_span."""
+def patch_scheduler(source):
+    """One prefill in flight, inside TTScheduler._schedule_prefill_only.
+
+    The shipped body is:
+
+        saved_max = self.max_num_running_reqs
+        self.running = cast(list[Request], partial_prefills)
+        self.max_num_running_reqs = max(0, saved_max - len(pure_decodes))
+        try:
+            result = super().schedule()
+        finally:
+            self.running.extend(pure_decodes)
+            self.max_num_running_reqs = saved_max
+        return result
+
+    Two things are wrong with it for the fast path. With a partial in flight the
+    waiting loop still admits a fresh prompt, which run 35689293766 hit
+    (new=[B] cached=[A]). With nothing in flight the cap is saved_max, so it admits
+    up to four, which run 35690327326 hit (new=[A, B] cached=[]). The fast path
+    serves exactly one prompt per prefill: the GDN prefill scratch and the host RoPE
+    table are single-occupancy.
+
+    The hide/restore is lifted from the plugin's own _schedule_decode_only, which
+    already blanks both queues with create_request_queue(self.policy) and merges
+    anything the base scheduler added back with prepend_requests. Using the file's
+    own idiom is the point - this is the contract's policy, not a second one.
+    """
+    if MARKER_SCHEDULER in source:
+        raise ValueError('scheduler already carries the one-in-flight graft')
+    lines = source.splitlines(keepends=True)
+    span = function_span_module(source, '_schedule_prefill_only', method=True)
+    lines = replace_once(
+        lines, span,
+        '        saved_max = self.max_num_running_reqs\n'
+        '        self.running = cast(list[Request], partial_prefills)\n'
+        '        self.max_num_running_reqs = max(0, saved_max - len(pure_decodes))\n'
+        '        try:\n'
+        '            result = super().schedule()\n'
+        '        finally:\n'
+        '            self.running.extend(pure_decodes)\n'
+        '            self.max_num_running_reqs = saved_max\n'
+        '        return result\n',
+        '        saved_max = self.max_num_running_reqs\n'
+        '        self.running = cast(list[Request], partial_prefills)\n'
+        '        # Lever N M2: one prefill in flight. Allowed is the partials already\n'
+        '        # running, or exactly one fresh prompt when there are none - the fast\n'
+        '        # path cannot serve two, its GDN prefill scratch is single-occupancy.\n'
+        '        _qwen_allowed = len(partial_prefills) if partial_prefills else 1\n'
+        '        self.max_num_running_reqs = max(\n'
+        '            0, min(saved_max - len(pure_decodes), _qwen_allowed))\n'
+        '        # Hiding the queues is what actually stops a newcomer joining a partial;\n'
+        '        # the cap alone does not, which run 35689293766 demonstrated. Same idiom\n'
+        '        # as _schedule_decode_only below.\n'
+        '        _qwen_saved_waiting = self.waiting\n'
+        '        _qwen_saved_skipped = getattr(self, "skipped_waiting", None)\n'
+        '        if partial_prefills:\n'
+        '            self.waiting = create_request_queue(self.policy)\n'
+        '            if _qwen_saved_skipped is not None:\n'
+        '                self.skipped_waiting = create_request_queue(self.policy)\n'
+        '        logger.info(\n'
+        '            "' + MARKER_SCHEDULER + ' partials={} decodes={} allowed={} hidden={}",\n'
+        '            len(partial_prefills), len(pure_decodes), _qwen_allowed,\n'
+        '            bool(partial_prefills))\n'
+        '        try:\n'
+        '            result = super().schedule()\n'
+        '        finally:\n'
+        '            if partial_prefills:\n'
+        '                if self.waiting:\n'
+        '                    _qwen_saved_waiting.prepend_requests(self.waiting)\n'
+        '                if _qwen_saved_skipped is not None:\n'
+        '                    if self.skipped_waiting:\n'
+        '                        _qwen_saved_skipped.prepend_requests(self.skipped_waiting)\n'
+        '                    self.skipped_waiting = _qwen_saved_skipped\n'
+        '                self.waiting = _qwen_saved_waiting\n'
+        '            self.running.extend(pure_decodes)\n'
+        '            self.max_num_running_reqs = saved_max\n'
+        '        return result\n',
+        'scheduler one-in-flight')
+    return ''.join(lines)
+
+
+def function_span_module(source, name, method=False):
+    """Span of a module-level function, by the same next-sibling rule as function_span.
+
+    With method=True, search every class body instead: the scheduler edit targets
+    TTScheduler._schedule_prefill_only, and scoping to that method's own line range is
+    what keeps the edit off the identically-shaped _schedule_decode_only below it.
+    """
     tree = ast.parse(source)
     total = len(source.splitlines())
-    members = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if method:
+        members = [n for cls in tree.body if isinstance(cls, ast.ClassDef)
+                   for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    else:
+        members = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
     for index, node in enumerate(members):
         if node.name != name:
             continue

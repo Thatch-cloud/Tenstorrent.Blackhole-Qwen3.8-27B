@@ -9,6 +9,7 @@ lever_n_model_patch.py's own tests hold scoping honest against.
 """
 
 import ast
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -806,14 +807,27 @@ class GraftFileSetTests(unittest.TestCase):
         for relative, patch in patcher.PATCHES.items():
             self.assertIs(patcher.SOURCES[relative][1], patch)
 
-    def test_with_lever_n_adds_the_three_m1_files_from_their_real_trees(self):
+    def test_with_lever_n_adds_the_lever_n_files_from_their_real_trees(self):
+        """Four now, not three. scheduler.py joined for M2 item 2 - one prefill in
+        flight - after run 35690327326 proved the overlay route cannot deliver it:
+        serving_one_in_flight.install sets scheduler_config.scheduler_cls and the
+        plugin's platform.check_and_update_config overwrites it afterwards."""
         full = patcher.with_lever_n()
         self.assertEqual(sorted(set(full) - set(patcher.SOURCES)),
-                         ['model.py', 'platform.py', 'qwen36_vllm.py'])
-        # platform.py is the one that does NOT live under the model root.
+                         ['model.py', 'platform.py', 'qwen36_vllm.py', 'scheduler.py'])
+        # The two that do NOT live under the model root are the plugin's own.
         self.assertEqual(full['platform.py'][0], patcher.PLUGIN_ROOT)
+        self.assertEqual(full['scheduler.py'][0], patcher.PLUGIN_ROOT)
         self.assertEqual(full['model.py'][0], patcher.MODEL_ROOT)
         self.assertEqual(full['qwen36_vllm.py'][0], patcher.MODEL_ROOT)
+
+    def test_every_lever_n_file_is_mounted_by_the_arm(self):
+        """A graft the arm does not mount is a file patched into an artifact and never
+        served - which is exactly how steps 1/2/4, 5 and 8 sat unused for five runs."""
+        arm = (Path(__file__).parent / 'lever_n_m3native_run_arm.sh').read_text(encoding='utf-8')
+        for relative in sorted(set(patcher.with_lever_n()) - set(patcher.SOURCES)):
+            with self.subTest(graft=relative):
+                self.assertIn('graft/%s,dst=' % relative, arm)
 
     def test_with_lever_n_leaves_the_decode_side_four_untouched(self):
         full = patcher.with_lever_n()

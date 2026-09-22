@@ -490,6 +490,12 @@ def with_lever_n():
         'model.py': (MODEL_ROOT, m1.patch_model),
         'qwen36_vllm.py': (MODEL_ROOT, m1.patch_vllm_entry),
         'platform.py': (PLUGIN_ROOT, m1.patch_platform),
+        # M2 item 2, one prefill in flight. A PLUGIN file, so it is delivered by
+        # bind-mount like platform.py and needs no image rebuild. The overlay route
+        # (serving_one_in_flight.install setting scheduler_cls) cannot work:
+        # platform.check_and_update_config overwrites that attribute afterwards, which
+        # run 35690327326 proved with a marker that never fired.
+        'scheduler.py': (PLUGIN_ROOT, m1.patch_scheduler),
     }
     overlap = set(extra) & set(SOURCES)
     if overlap:
