@@ -496,6 +496,11 @@ def with_lever_n():
         # platform.check_and_update_config overwrites that attribute afterwards, which
         # run 35690327326 proved with a marker that never fired.
         'scheduler.py': (PLUGIN_ROOT, m1.patch_scheduler),
+        # M2 item 1, the alternation of design section 3.3. Also a plugin file,
+        # so it grafts with no image rebuild. Without it a partial prefill votes
+        # prefill on every step and a decoding user freezes for the whole of
+        # someone else's prompt - which IS the 79.4 s stall.
+        'lane_scheduler.py': (PLUGIN_ROOT, m1.patch_lane_scheduler),
     }
     overlap = set(extra) & set(SOURCES)
     if overlap:

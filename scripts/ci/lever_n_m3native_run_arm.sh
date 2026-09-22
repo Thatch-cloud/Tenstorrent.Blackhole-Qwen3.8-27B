@@ -83,6 +83,7 @@ if [ -n "${M3NATIVE_PREFILL_CHUNK_TOKENS:-}" ]; then
   lever_n_mounts+=(--mount "type=bind,src=$PWD/graft/qwen36_vllm.py,dst=$root/qwen36_vllm.py,readonly")
   lever_n_mounts+=(--mount "type=bind,src=$PWD/graft/platform.py,dst=$plugin/platform.py,readonly")
   lever_n_mounts+=(--mount "type=bind,src=$PWD/graft/scheduler.py,dst=$plugin/scheduler.py,readonly")
+  lever_n_mounts+=(--mount "type=bind,src=$PWD/graft/lane_scheduler.py,dst=$plugin/lane_scheduler.py,readonly")
   lever_n_mounts+=(-e TT_M1_FORCE_CHUNKED_PREFILL=1)
 fi
 # The gate's own results directory (its raw server.log, every line the stdout filter

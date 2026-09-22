@@ -808,16 +808,18 @@ class GraftFileSetTests(unittest.TestCase):
             self.assertIs(patcher.SOURCES[relative][1], patch)
 
     def test_with_lever_n_adds_the_lever_n_files_from_their_real_trees(self):
-        """Four now, not three. scheduler.py joined for M2 item 2 - one prefill in
+        """Five now. scheduler.py is M2 item 2, one prefill in
         flight - after run 35690327326 proved the overlay route cannot deliver it:
         serving_one_in_flight.install sets scheduler_config.scheduler_cls and the
         plugin's platform.check_and_update_config overwrites it afterwards."""
         full = patcher.with_lever_n()
         self.assertEqual(sorted(set(full) - set(patcher.SOURCES)),
-                         ['model.py', 'platform.py', 'qwen36_vllm.py', 'scheduler.py'])
-        # The two that do NOT live under the model root are the plugin's own.
+                         ['lane_scheduler.py', 'model.py', 'platform.py',
+                          'qwen36_vllm.py', 'scheduler.py'])
+        # The three that do NOT live under the model root are the plugin's own.
         self.assertEqual(full['platform.py'][0], patcher.PLUGIN_ROOT)
         self.assertEqual(full['scheduler.py'][0], patcher.PLUGIN_ROOT)
+        self.assertEqual(full['lane_scheduler.py'][0], patcher.PLUGIN_ROOT)
         self.assertEqual(full['model.py'][0], patcher.MODEL_ROOT)
         self.assertEqual(full['qwen36_vllm.py'][0], patcher.MODEL_ROOT)
 

@@ -380,6 +380,7 @@ def patch_vllm_entry(source):
 # config string had been written - run 35690327326 printed it and the policy had
 # never run. This one cannot be emitted unless the edited code executed.
 MARKER_SCHEDULER = '[PINDIAG] m2 one-in-flight:'
+MARKER_ALTERNATE = '[PINDIAG] m2 alternation:'
 
 
 PLATFORM_OPT_IN = """def _m1_chunked_prefill_opt_in():
@@ -529,6 +530,72 @@ def patch_scheduler(source):
         '            self.max_num_running_reqs = saved_max\n'
         '        return result\n',
         'scheduler one-in-flight')
+    return ''.join(lines)
+
+
+def patch_lane_scheduler(source):
+    """Alternate prefill chunks with decode steps, per design section 3.3.
+
+    The shipped body is two lines:
+
+        intent = max(self._local_prefill_intent(sched) for sched in self.lanes)
+        return TTSchedulingMode.from_prefill_intent(intent)
+
+    and _local_prefill_intent votes prefill unconditionally while a partial is in
+    flight, so one chunked prompt owns every step until it finishes. The replacement is
+    section 3.3's pseudo-code: when a partial prefill AND a running decode both exist,
+    spend R decode steps after each prefill chunk instead of voting prefill every time.
+
+    Everything else is unchanged by construction - no running decodes still means
+    prefill, no prefill work still means decode, and the zero-token fallback is
+    untouched because this only chooses the forced mode.
+    """
+    if MARKER_ALTERNATE in source:
+        raise ValueError('lane scheduler already carries the alternation graft')
+    lines = source.splitlines(keepends=True)
+    span = function_span_module(source, '_negotiate_forced_mode', method=True)
+    lines = replace_once(
+        lines, span,
+        '        intent = max(self._local_prefill_intent(sched) for sched in self.lanes)\n'
+        '        return TTSchedulingMode.from_prefill_intent(intent)\n',
+        '        intent = max(self._local_prefill_intent(sched) for sched in self.lanes)\n'
+        '        # Lever N M2 item 1, design section 3.3. os and a logger are local: this\n'
+        '        # module imports neither, and the marker is an f-string because the\n'
+        '        # plugin logger is not loguru - run 35692388798 printed a brace-format\n'
+        '        # marker literally and carried no numbers.\n'
+        '        import os as _qwen_os\n'
+        '        _qwen_on = _qwen_os.environ.get("TT_PREFILL_DECODE_INTERLEAVE", "1") == "1"\n'
+        '        _qwen_streak = getattr(self, "_qwen_prefill_streak", 0)\n'
+        '        _qwen_credit = getattr(self, "_qwen_decode_credit", 0)\n'
+        '        if intent and _qwen_on:\n'
+        '            _qwen_partial = any(any(r.is_prefill_chunk for r in s.running)\n'
+        '                                for s in self.lanes)\n'
+        '            _qwen_decoding = any(any(not r.is_prefill_chunk for r in s.running)\n'
+        '                                 for s in self.lanes)\n'
+        '            if _qwen_partial and _qwen_decoding:\n'
+        '                try:\n'
+        '                    _qwen_r = int(_qwen_os.environ.get(\n'
+        '                        "TT_DECODE_STEPS_PER_PREFILL_CHUNK", "1"))\n'
+        '                except ValueError:\n'
+        '                    _qwen_r = 1\n'
+        '                _qwen_yield = _qwen_streak >= 1 and _qwen_credit < _qwen_r\n'
+        '                if _qwen_yield:\n'
+        '                    self._qwen_decode_credit = _qwen_credit + 1\n'
+        '                else:\n'
+        '                    self._qwen_decode_credit = 0\n'
+        '                    self._qwen_prefill_streak = _qwen_streak + 1\n'
+        '                try:\n'
+        '                    from loguru import logger as _qwen_logger\n'
+        '                    _qwen_logger.info(\n'
+        '                        f"' + MARKER_ALTERNATE + ' yield_decode={_qwen_yield} "\n'
+        '                        f"streak={_qwen_streak} credit={_qwen_credit} r={_qwen_r}")\n'
+        '                except BaseException:\n'
+        '                    pass\n'
+        '                return TTSchedulingMode.from_prefill_intent(0 if _qwen_yield else 1)\n'
+        '        self._qwen_prefill_streak = 1 if intent else 0\n'
+        '        self._qwen_decode_credit = 0\n'
+        '        return TTSchedulingMode.from_prefill_intent(intent)\n',
+        'lane scheduler alternation')
     return ''.join(lines)
 
 
