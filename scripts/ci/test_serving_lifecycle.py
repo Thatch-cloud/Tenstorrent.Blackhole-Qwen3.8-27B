@@ -221,6 +221,11 @@ class LifecycleTests(unittest.TestCase):
         held_before = lifecycle.request_id
         other = self.continuation(scheduled, 2048, 2048)
         other.scheduled_cached_reqs = SimpleNamespace(req_ids=['someone-else'])
+        # original_execute is the worker's bound execute_model, a plain function and
+        # not a Mock, so the delegation is observed by substituting a recorder rather
+        # than by asserting on a mock that does not exist.
+        delegated = []
+        lifecycle.original_execute = delegated.append
 
         worker.execute_model(other)
 
@@ -228,7 +233,7 @@ class LifecycleTests(unittest.TestCase):
                          'another request must never be fed into this capture')
         self.assertEqual(lifecycle.request_id, held_before,
                          'the in-flight prefill must be undisturbed')
-        lifecycle.original_execute.assert_called_with(other)
+        self.assertEqual(delegated, [other], 'it belongs on the stock path')
 
     def test_a_chunk_larger_than_the_prompt_is_refused(self):
         lifecycle, worker, _, _, _, scheduled, _ = self.chunked_fixture(chunk=8192, prompt=4096)
