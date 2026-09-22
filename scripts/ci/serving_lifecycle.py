@@ -5,6 +5,25 @@ from types import MethodType
 from serving_fast_policy import validate_fast_config, validate_request_sampling
 from serving_worker_hook import FastWorkerHook
 
+# The scheduler cannot see the lifecycle: one is the mounted plugin, the other the
+# baked evidence tree. They do share the EngineCore process, so a module parked
+# under a fixed sys.modules key reaches both without either importing the other by
+# path. Readers treat absent-or-unset as "no prefill held", which is the behaviour
+# before this existed.
+PREFILL_GATE_KEY = '_qwen_prefill_gate'
+
+
+def prefill_gate():
+    """The shared holder, created on first use by whichever side runs first."""
+    import sys
+    import types
+    gate = sys.modules.get(PREFILL_GATE_KEY)
+    if gate is None:
+        gate = types.ModuleType(PREFILL_GATE_KEY)
+        gate.held = None
+        sys.modules[PREFILL_GATE_KEY] = gate
+    return gate
+
 
 def note_prefill():
     # verifier_engine is only importable where the target model is; elsewhere a
@@ -17,6 +36,29 @@ def note_prefill():
 
 
 class FastServingLifecycle:
+    # request_id is assigned at five sites - construction, reset, the
+    # EOS-at-first-token release, the prefill-to-decode handoff, and admission.
+    # A property catches all of them and any added later. Patching the sites
+    # individually is how one gets missed, which the EOS release already records:
+    # run 35441524535 refused a second request with prefill_slot still naming the
+    # first, because that site did not clear it.
+    @property
+    def request_id(self):
+        return self._request_id
+
+    @request_id.setter
+    def request_id(self, value):
+        previous = getattr(self, "_request_id", None)
+        self._request_id = value
+        prefill_gate().held = value
+        if previous != value:
+            try:
+                from loguru import logger
+                logger.info(
+                    f"[PINDIAG] prefill gate: held={value!r} was={previous!r}")
+            except BaseException:
+                pass
+
     def __init__(self, worker, *, config, capture_factory, bridge_factory, eos_ids, cancelled,
                  packed_step=None):
         validate_fast_config(config)

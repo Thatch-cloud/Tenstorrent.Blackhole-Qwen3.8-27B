@@ -39,6 +39,10 @@ MARKERS = (
     # not run - v65 mounted it on a class the platform never constructed.
     ('m2 one-in-flight', r'm2 one-in-flight: \S'),
     ('m2 alternation', r'm2 alternation: \S'),
+    # Names the request id at every prefill-slot transition. v69's mechanism was
+    # ambiguous between a race at the START of a prefill and one at its END, and
+    # the artifact could not separate them; this settles it by evidence.
+    ('prefill gate', r'prefill gate: held=\S'),
     ('runtime binary override', r'runtime binary pin overridden'),
     ('CCL links', r'\[CCLLINKS\]'),
     ('readiness timeout', r'readiness exceeded'),

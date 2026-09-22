@@ -80,10 +80,14 @@ class SchedulerGraftTests(unittest.TestCase):
 
     def test_no_partial_caps_capacity_to_one(self):
         """Run 35690327326 died on two FRESH prompts in one step. The shipped cap is
-        saved_max minus the decodes, which is four when nothing is running."""
-        body = method(patch_scheduler(source()), '_schedule_prefill_only')
-        self.assertIn('_qwen_allowed = len(partial_prefills) if partial_prefills else 1', body)
-        self.assertIn('min(saved_max - len(pure_decodes), _qwen_allowed)', body)
+        saved_max minus the decodes, which is four when nothing is running.
+
+        Driven rather than string-matched. This used to name the generated line
+        verbatim and broke when the cap grew a third branch for the prefill gate,
+        with nothing wrong - what matters is the cap it produces.
+        """
+        self.assertEqual(run_prefill_only(partials=0, decodes=0)['max_running'], 1)
+        self.assertEqual(run_prefill_only(partials=0, decodes=2)['max_running'], 1)
 
     def test_the_marker_is_emitted_from_inside_the_method(self):
         """install()'s marker proved only that a config string had been assigned. This
@@ -116,3 +120,155 @@ class SchedulerGraftTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def run_prefill_only(partials=0, decodes=0, gate=None, saved_max=4):
+    """Build the patched TTScheduler and actually run _schedule_prefill_only.
+
+    Returns what the base scheduler saw when it was called - the capacity cap and
+    whether the waiting queue had been blanked - plus whether it was restored after.
+    String-matching the generated source cannot tell any of that apart.
+    """
+    import sys as _sys
+    import types as _types
+
+    module = _types.ModuleType('patched_scheduler_graft')
+    seen = {}
+    state = {}
+
+    class Queue(list):
+        def prepend_requests(self, other):
+            self[:0] = list(other)
+
+    class Base(object):
+        def schedule(self):
+            seen['max_running'] = self.max_num_running_reqs
+            seen['waiting_is_blank'] = self.waiting is not state['waiting']
+            return _types.SimpleNamespace(total_num_scheduled_tokens=1)
+
+    class Mode(object):
+        DEFAULT = 'DEFAULT'
+        PREFILL_ONLY = 'PREFILL_ONLY'
+        DECODE_ONLY = 'DECODE_ONLY'
+
+    module.__dict__.update(
+        AsyncScheduler=Base, SchedulerOutput=object, Request=object,
+        TTSchedulingMode=Mode, RequestQueue=Queue,
+        create_request_queue=lambda policy: Queue(),
+        cast=lambda kind, value: value,
+        logger=_types.SimpleNamespace(info=lambda *a, **k: None))
+    exec(compile(patch_scheduler(source()), 'patched_scheduler_graft', 'exec'),
+         module.__dict__)
+
+    def request(is_chunk):
+        return _types.SimpleNamespace(is_prefill_chunk=is_chunk)
+
+    built = module.TTScheduler.__new__(module.TTScheduler)
+    built.running = ([request(True)] * partials) + ([request(False)] * decodes)
+    state['waiting'] = Queue([request(False)])
+    built.waiting = state['waiting']
+    built.skipped_waiting = Queue()
+    built.policy = None
+    built.max_num_running_reqs = saved_max
+
+    saved_gate = _sys.modules.get('_qwen_prefill_gate')
+    _sys.modules.pop('_qwen_prefill_gate', None)
+    if gate is not None:
+        holder = _types.ModuleType('_qwen_prefill_gate')
+        holder.held = gate
+        _sys.modules['_qwen_prefill_gate'] = holder
+    try:
+        built._schedule_prefill_only()
+    finally:
+        _sys.modules.pop('_qwen_prefill_gate', None)
+        if saved_gate is not None:
+            _sys.modules['_qwen_prefill_gate'] = saved_gate
+    seen['restored'] = built.waiting is state['waiting']
+    seen['max_restored'] = built.max_num_running_reqs == saved_max
+    return seen
+
+
+class PrefillGateTests(unittest.TestCase):
+    """The scheduler must ask the lifecycle, not infer from is_prefill_chunk.
+
+    Run 35714211185 (v69) died with a fresh request admitted while the lifecycle held
+    its prefill slot. partial_prefills is false at BOTH ends of a prefill - before the
+    first chunk exists and after the last is consumed - so it cannot answer "is a
+    prefill in flight". The lifecycle publishes request_id under a fixed sys.modules
+    key; this reads it.
+    """
+
+    def test_a_held_gate_admits_nobody_and_hides_the_queue(self):
+        seen = run_prefill_only(partials=0, decodes=1, gate='cmpl-someone')
+        self.assertEqual(seen['max_running'], 0)
+        self.assertTrue(seen['waiting_is_blank'])
+
+    def test_without_the_gate_a_fresh_prompt_is_still_admitted(self):
+        """The negative control. If this also capped at zero, the gate would be doing
+        nothing visible and the engine would simply never admit anyone."""
+        seen = run_prefill_only(partials=0, decodes=1, gate=None)
+        self.assertEqual(seen['max_running'], 1)
+        self.assertFalse(seen['waiting_is_blank'])
+
+    def test_a_partial_still_hides_regardless_of_the_gate(self):
+        for gate in (None, 'cmpl-someone'):
+            seen = run_prefill_only(partials=1, decodes=1, gate=gate)
+            self.assertEqual(seen['max_running'], 1, gate)
+            self.assertTrue(seen['waiting_is_blank'], gate)
+
+    def test_the_queue_is_restored_when_the_gate_hid_it(self):
+        """Hiding without restoring loses the queue, so the hide site and the finally
+        block must share one condition - which is why both use _qwen_hide."""
+        seen = run_prefill_only(partials=0, decodes=1, gate='cmpl-someone')
+        # Assert it was hidden FIRST. Without this the test passes unpatched, where
+        # nothing hides and so 'restored' is trivially true - a green light for the
+        # wrong reason.
+        self.assertTrue(seen['waiting_is_blank'])
+        self.assertTrue(seen['restored'])
+        self.assertTrue(seen['max_restored'])
+
+    def test_an_unreadable_gate_reads_as_not_held(self):
+        """The plugin must never hard-depend on the baked tree being importable: a run
+        where the lifecycle never loaded has to schedule exactly as it did before."""
+        import sys as _sys
+        import types as _types
+
+        class Broken(object):
+            # sys.modules accepts any object, and a module type is immutable, so the
+            # raising attribute lives on an ordinary class. getattr with a default
+            # swallows only AttributeError - a RuntimeError propagates, which is
+            # exactly why the graft wraps the read in try/except BaseException.
+            @property
+            def held(self):
+                raise RuntimeError('gate unreadable')
+
+        broken = Broken()
+        saved = _sys.modules.get('_qwen_prefill_gate')
+        _sys.modules['_qwen_prefill_gate'] = broken
+        try:
+            seen = run_prefill_only(partials=0, decodes=1, gate=None)
+        finally:
+            _sys.modules.pop('_qwen_prefill_gate', None)
+            if saved is not None:
+                _sys.modules['_qwen_prefill_gate'] = saved
+        self.assertEqual(seen['max_running'], 1)
+
+
+class LifecyclePublishesTheGateTests(unittest.TestCase):
+    """The other half: the lifecycle actually sets what the scheduler reads."""
+
+    def test_setting_request_id_publishes_it_and_clearing_it_clears(self):
+        import serving_lifecycle
+        holder = serving_lifecycle.FastServingLifecycle.__new__(
+            serving_lifecycle.FastServingLifecycle)
+        holder.request_id = 'cmpl-abc'
+        self.assertEqual(serving_lifecycle.prefill_gate().held, 'cmpl-abc')
+        holder.request_id = None
+        self.assertIsNone(serving_lifecycle.prefill_gate().held)
+
+    def test_the_property_reads_back_what_was_set(self):
+        import serving_lifecycle
+        holder = serving_lifecycle.FastServingLifecycle.__new__(
+            serving_lifecycle.FastServingLifecycle)
+        holder.request_id = 'cmpl-xyz'
+        self.assertEqual(holder.request_id, 'cmpl-xyz')
