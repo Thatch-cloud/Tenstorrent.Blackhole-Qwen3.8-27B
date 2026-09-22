@@ -61,3 +61,76 @@ Both remaining levers are the same change, and it is already the primary task. T
 is the honest read: **there is no cheap dispatch win left in the traced round**, and
 the 200 tok/s target rests on the native batch-4 decode kernel, not on launch
 hygiene.
+
+---
+
+## RETRACTION 2026-09-22: the "on" arm was not on
+
+**This verdict's measurement is a null comparison and its conclusion is unsupported.**
+
+v33 and v34 differ by exactly one flag, `M3NATIVE_GDN_STATE_COPY_BATCH=1`, which the
+arm passes through as `QWEN_FAST_GDN_STATE_COPY_BATCH=1`. Both ran on image
+`sha256:e41ef884f4c8`. A CPU tree diff of that image against a fresh build
+(run 35685598363) established what its `/experiment-scripts/ci` actually holds:
+
+    gdn_state_copy.py         4cc8f6529b94f789   built from commit 12d62af5af07
+    gdn_device_loop_state.py  2c27c93ee34964cb   built from commit 4b144ce2a766
+
+At that vintage:
+
+- `gdn_state_copy.py` defines `page_counts`, `transfer_counts`, `copy_active`,
+  `copy_compact` and `_copy_state`. There is **no `FLAG`, no `batch_enabled`, no
+  `copy_compact_batch`**, and zero occurrences of the string
+  `QWEN_FAST_GDN_STATE_COPY_BATCH`.
+- `gdn_device_loop_state.py` line 5 is `from gdn_state_copy import copy_compact` -
+  `copy_compact` alone.
+- Nothing else at that vintage references the flag either. (`model_batch.py` and
+  `gdn_device_loop_state.py` do contain `batch_enabled` substrings, but every one is
+  `norm_batch_enabled` or `user_batch_enabled`, which are
+  `gdn_batched_conv.norm_batch_enabled` and `gdn_user_batch.enabled` - unrelated.)
+
+The batching landed in commit **7ecf980a**, which added `batch_enabled`,
+`copy_compact_batch` and the import together, and added the module to neither of the
+two copy lists the image build needs. So the code was never in any image, and
+`e41ef884f4c8` predates it regardless.
+
+**v34's arm therefore ran the same configuration as v33.** The table's
+-0.035 ms trace and -1.6 ms round are run-to-run noise between identical arms, which
+is what the original text was describing when it noted "a run-to-run spread that is
+wider than that in both arms" - correctly, and for the wrong reason.
+
+### What this does and does not invalidate
+
+- The claim **"the batching bought nothing measurable"** is vacuously true: nothing
+  was applied. It is not evidence about batching.
+- The claim **"launch count is not what the traced round is paying for"** has **no
+  supporting measurement**. It is not disproven; it is unsupported. The 96-fewer-
+  launches figure was derived by reading the code, not observed in either run.
+- The retirement of **the whole collapse-the-launches family**, including the
+  14,754-launch GDN slice+clone, is withdrawn. That family is untested, not retired.
+- The trace attribution in `docs/trace-op-attribution.md` and its point about
+  eager-mode host dispatch (94.6 us per launch being dispatch, not device time) stand
+  on their own; they did not depend on this run.
+
+### The sting in the tail
+
+When `7ecf980a`'s code finally does reach hardware - image v81
+(`sha256:836e7abb`), which carries today's repo versions of both files - the engine
+**hangs during warmup and never reaches readiness**. Two runs, two different frames,
+both a ttnn op launched and never returned inside `attach_combined_runtime`:
+
+    v41 35684239068  gdn_user_batch_conv.py:72   ttnn.transformer.gdn_decode_conv_gates
+    v43 35685401900  ordered_cache.py:127        ttnn.generic_op (SOURCE_CODE kernels)
+
+v43 had the K64 kernel graft excluded (`native_attn engaged` 0 occurrences, `runtime
+binary pin overridden` 0), so the graft is not the cause - and the graft binary hash
+was identical on working and hanging runs anyway (`3e40b501` over `4b7299c1`,
+factory `fd8c0676`, on both `e41ef884f4c8` and v81).
+
+So the state-copy batching is not merely unmeasured. On the evidence available it is
+**broken on device**, and the only reason that has been invisible is that every
+m3native run served an image built before it.
+
+### Task status
+
+Task #51 is reopened. The measurement it recorded did not take place.
