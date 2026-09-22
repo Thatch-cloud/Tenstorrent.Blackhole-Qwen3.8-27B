@@ -157,6 +157,37 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(lifecycle.chunk_in_flight)
         self.assertTrue(lifecycle.prefill_pending)
 
+    def test_a_four_chunk_prompt_interleaves_execute_and_sample_like_the_engine(self):
+        """The shape the rig actually runs, which no test drove before v45.
+
+        vLLM alternates execute_model and sample_tokens every step. The suite tested
+        those calls separately and never in sequence, so the mid-prompt sampling step
+        - the one that killed run 35687608717 - had no coverage at all. This drives
+        four chunks with a sampling step after each, and asserts the flags move the
+        way the engine needs them to.
+        """
+        lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+        capture.finish_at = 4
+        deferred = SimpleNamespace(req_ids=[], sampled_token_ids=[])
+        worker.model_runner.sample_tokens.return_value = deferred
+
+        worker.execute_model(scheduled)
+        for index in range(2, 4):
+            self.assertTrue(lifecycle.chunk_in_flight, 'chunk %d is mid-prompt' % (index - 1))
+            self.assertFalse(lifecycle.prefill_pending)
+            self.assertIs(worker.sample_tokens(None), deferred)
+            worker.execute_model(self.continuation(scheduled, 2048 * (index - 1), 2048))
+
+        self.assertTrue(lifecycle.chunk_in_flight, 'chunk 3 is still mid-prompt')
+        self.assertIs(worker.sample_tokens(None), deferred)
+        worker.execute_model(self.continuation(scheduled, 2048 * 3, 2048))
+
+        self.assertTrue(capture.complete, 'the fourth chunk finishes the prompt')
+        self.assertFalse(lifecycle.chunk_in_flight)
+        self.assertTrue(lifecycle.prefill_pending, 'the seed is due on the final chunk')
+        self.assertEqual(lifecycle.chunk_deferred, [True, True, True, True])
+        self.assertFalse(lifecycle.failed)
+
     def test_chunk_state_is_per_request_not_per_process(self):
         """chunk_deferred was initialised once and never cleared, so a new prompt's
         first chunk was compared against the PREVIOUS request's last one. Harmless at
