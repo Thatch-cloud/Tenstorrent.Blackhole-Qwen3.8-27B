@@ -193,6 +193,15 @@ fi
 # it (run 35567165791 vs sdpa_verify_prefill_style_bench.py), so every packed-round
 # trace_ms measured so far (1453, 1118, 1100 ms) carries watcher overhead the
 # single-stream baselines never had. Off by default; M3NATIVE_WATCHER=1 re-enables it.
+# Three env vars are read by the scripts mounted at /bench, not by this script, so
+# they have to cross into the container or they are dead: M3NATIVE_PREFILL_CHUNK_TOKENS
+# (lever_n_m3native_gate builds --enable-chunked-prefill from it) and the two TTFT
+# ceilings m3native_ttft_profile asserts. Run 35679222511 set CHUNK_TOKENS=2048 on the
+# HOST, mounted the three M1 files, passed TT_M1_FORCE_CHUNKED_PREFILL=1 - and the
+# gate inside still saw it unset, launched the server with --no-enable-chunked-prefill
+# --max-num-batched-tokens 33024, and prefilled each prompt whole. The resumable path
+# never ran. test_m3native_arm_env.py now derives this list from the /bench mounts and
+# fails if a read is not passed through.
 name="qwen-m3native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 timeout -k 30 2200 docker run --rm --name "$name" --network none \
@@ -228,6 +237,9 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_GDN_USER_BATCH_MIN_USERS:+-e QWEN_FAST_GDN_USER_BATCH_MIN_USERS=$M3NATIVE_GDN_USER_BATCH_MIN_USERS} \
   ${M3NATIVE_GDN_STATE_COPY_BATCH:+-e QWEN_FAST_GDN_STATE_COPY_BATCH=1} \
   ${M3NATIVE_PREFILL_CHUNK:+-e MAX_PREFILL_CHUNK_SIZE=$M3NATIVE_PREFILL_CHUNK} \
+  ${M3NATIVE_PREFILL_CHUNK_TOKENS:+-e M3NATIVE_PREFILL_CHUNK_TOKENS=$M3NATIVE_PREFILL_CHUNK_TOKENS} \
+  ${M3NATIVE_TTFT_MAX_S:+-e M3NATIVE_TTFT_MAX_S=$M3NATIVE_TTFT_MAX_S} \
+  ${M3NATIVE_TTFT_MAX_STALL_S:+-e M3NATIVE_TTFT_MAX_STALL_S=$M3NATIVE_TTFT_MAX_STALL_S} \
   ${M3NATIVE_PROFILE:+-e TTNN_OP_PROFILER=1} \
   ${M3NATIVE_PROFILE:+-e TT_METAL_DEVICE_PROFILER=1} \
   ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_TRACE_TRACKING=1} \
