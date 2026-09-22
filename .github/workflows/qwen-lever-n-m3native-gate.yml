@@ -29,25 +29,42 @@ jobs:
           name="qwen-m3native-extract-$GITHUB_RUN_ID"
           docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
           trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
-          docker cp "$name:$root/model_config.py" graft/model_config.py.orig
-          docker cp "$name:$root/attention/tp.py" graft/attention/tp.py.orig
-          docker cp "$name:$root/gdn/tp.py" graft/gdn/tp.py.orig
-          docker cp "$name:$root/mlp.py" graft/mlp.py.orig
-          sha256sum graft/model_config.py.orig graft/attention/tp.py.orig graft/gdn/tp.py.orig graft/mlp.py.orig \
-            >> experiment-results/source.sha256
-          python3 -B - <<'PY'
-          import ast, io, sys
+          case "$GITHUB_REF_NAME" in
+            *-v36) export M3NATIVE_LEVER_N=1 ;;
+          esac
+          python3 -B - <<'PY' > graft/manifest.txt
+          import os
+          import sys
           sys.path.insert(0, 'scripts/ci')
           import lever_n_m3native_patch as patcher
-          for name, apply in patcher.PATCHES.items():
-              source = io.open('graft/%s.orig' % name, encoding='utf-8').read()
+          selected = patcher.with_lever_n() if os.environ.get('M3NATIVE_LEVER_N') else patcher.SOURCES
+          for relative, (directory, _) in sorted(selected.items()):
+              print('%s %s' % (directory, relative))
+          PY
+          cat graft/manifest.txt
+          while read -r directory relative; do
+            mkdir -p "graft/$(dirname "$relative")"
+            docker cp "$name:$directory/$relative" "graft/$relative.orig"
+          done < graft/manifest.txt
+          python3 -B - <<'PY'
+          import ast
+          import io
+          import os
+          import sys
+          sys.path.insert(0, 'scripts/ci')
+          import lever_n_m3native_patch as patcher
+          selected = patcher.with_lever_n() if os.environ.get('M3NATIVE_LEVER_N') else patcher.SOURCES
+          for relative, (directory, apply) in sorted(selected.items()):
+              source = io.open('graft/%s.orig' % relative, encoding='utf-8').read()
               patched = apply(source)
               ast.parse(patched)
-              io.open('graft/%s' % name, 'w', encoding='utf-8', newline='\n').write(patched)
-              print('%s: %d -> %d bytes' % (name, len(source), len(patched)))
+              io.open('graft/%s' % relative, 'w', encoding='utf-8', newline='\n').write(patched)
+              print('%s from %s: %d -> %d bytes' % (relative, directory, len(source), len(patched)))
           PY
-          sha256sum graft/model_config.py graft/attention/tp.py graft/gdn/tp.py graft/mlp.py \
-            >> experiment-results/graft.sha256
+          while read -r directory relative; do
+            sha256sum "graft/$relative.orig" >> experiment-results/source.sha256
+            sha256sum "graft/$relative" >> experiment-results/graft.sha256
+          done < graft/manifest.txt
           cat experiment-results/graft.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -168,6 +185,7 @@ jobs:
             *-v33) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PACKED_PROPOSAL=1 M3NATIVE_TRACED_PUBLISH=1 ;;
             *-v34) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PACKED_PROPOSAL=1 M3NATIVE_TRACED_PUBLISH=1 M3NATIVE_GDN_STATE_COPY_BATCH=1 ;;
             *-v35) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PACKED_PROPOSAL=1 M3NATIVE_TRACED_PUBLISH=1 M3NATIVE_GDN_STATE_COPY_BATCH=1 M3NATIVE_PREFILL_CHUNK=32 ;;
+            *-v36) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PACKED_PROPOSAL=1 M3NATIVE_TRACED_PUBLISH=1 M3NATIVE_GDN_STATE_COPY_BATCH=1 M3NATIVE_PREFILL_CHUNK_TOKENS=2048 ;;
             *-v24|*-v25) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_FAST_COMMIT=1 ;;
             *-v27) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PIPELINED_PUBLISH=1 ;;
             *-v29|*-v32) export KOPGRAFT64=/home/thatch/opgraft-K64c M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_TRACED_PUBLISH=1 ;;

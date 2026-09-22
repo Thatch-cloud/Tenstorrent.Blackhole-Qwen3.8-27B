@@ -75,6 +75,15 @@ done
 refs="$PWD/scripts/ci/references/packed-gate"
 if [ -d "$PWD/runner-evidence.local/packed-gate" ]; then refs="$PWD/runner-evidence.local/packed-gate"; fi
 mounts+=(--mount "type=bind,src=$refs,dst=/bench/packed-gate-reference,readonly")
+
+lever_n_mounts=()
+if [ -n "${M3NATIVE_PREFILL_CHUNK_TOKENS:-}" ]; then
+  plugin=/opt/qwen-fast-plugin/src/vllm_tt_plugin
+  lever_n_mounts+=(--mount "type=bind,src=$PWD/graft/model.py,dst=$root/model.py,readonly")
+  lever_n_mounts+=(--mount "type=bind,src=$PWD/graft/qwen36_vllm.py,dst=$root/qwen36_vllm.py,readonly")
+  lever_n_mounts+=(--mount "type=bind,src=$PWD/graft/platform.py,dst=$plugin/platform.py,readonly")
+  lever_n_mounts+=(-e TT_M1_FORCE_CHUNKED_PREFILL=1)
+fi
 # The gate's own results directory (its raw server.log, every line the stdout filter
 # drops) persists under experiment-results/gate and ships with the artifact. The
 # container runs as root with no CAP_DAC_OVERRIDE, so the directory must be world-writable
@@ -199,6 +208,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$PWD/graft/attention/tp.py,dst=$root/attention/tp.py,readonly" \
   --mount "type=bind,src=$PWD/graft/gdn/tp.py,dst=$root/gdn/tp.py,readonly" \
   --mount "type=bind,src=$PWD/graft/mlp.py,dst=$root/mlp.py,readonly" \
+  "${lever_n_mounts[@]}" \
   --mount "type=bind,src=$PWD/scripts/ci/lever_n_m3native_gate.py,dst=/bench/lever_n_m3native_gate.py,readonly" \
   --mount "type=bind,src=$PWD/scripts/ci/longctx_cycle_bench.py,dst=/bench/longctx_cycle_bench.py,readonly" \
   --mount "type=bind,src=$PWD/scripts/ci/m3native_ttft_profile.py,dst=/bench/m3native_ttft_profile.py,readonly" \

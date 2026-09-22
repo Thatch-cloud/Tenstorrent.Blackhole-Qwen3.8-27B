@@ -10,6 +10,9 @@ lever_n_model_patch.py's own tests hold scoping honest against.
 
 import ast
 import unittest
+from unittest.mock import patch
+
+import lever_n_m3native_patch as patcher
 
 from lever_n_m3native_patch import (function_span, patch_attention_tp, patch_gdn_tp,
                                     patch_mlp, patch_model_config, replace_once)
@@ -782,6 +785,46 @@ class FusedPrefillLayoutGuardTests(unittest.TestCase):
     def test_the_guard_is_absent_before_patching(self):
         for source in (ATTENTION_TP, GDN_TP, MLP):
             self.assertNotIn('x.shape[-1] < ', source)
+
+
+class GraftFileSetTests(unittest.TestCase):
+    """The graft's file list used to live in four places - the docker cp lines, two
+    sha256sum lines and PATCHES - and the 65536 hardware lane shipped a runner nothing
+    staged because of exactly that duplication. SOURCES is now the single table the
+    workflow derives all of them from, so these tests pin its shape.
+    """
+
+    def test_sources_is_the_decode_side_four_under_the_model_root(self):
+        self.assertEqual(sorted(patcher.SOURCES),
+                         ['attention/tp.py', 'gdn/tp.py', 'mlp.py', 'model_config.py'])
+        for relative, (directory, apply) in patcher.SOURCES.items():
+            self.assertEqual(directory, patcher.MODEL_ROOT, relative)
+            self.assertTrue(callable(apply), relative)
+
+    def test_sources_and_patches_cannot_drift_apart(self):
+        self.assertEqual(sorted(patcher.SOURCES), sorted(patcher.PATCHES))
+        for relative, patch in patcher.PATCHES.items():
+            self.assertIs(patcher.SOURCES[relative][1], patch)
+
+    def test_with_lever_n_adds_the_three_m1_files_from_their_real_trees(self):
+        full = patcher.with_lever_n()
+        self.assertEqual(sorted(set(full) - set(patcher.SOURCES)),
+                         ['model.py', 'platform.py', 'qwen36_vllm.py'])
+        # platform.py is the one that does NOT live under the model root.
+        self.assertEqual(full['platform.py'][0], patcher.PLUGIN_ROOT)
+        self.assertEqual(full['model.py'][0], patcher.MODEL_ROOT)
+        self.assertEqual(full['qwen36_vllm.py'][0], patcher.MODEL_ROOT)
+
+    def test_with_lever_n_leaves_the_decode_side_four_untouched(self):
+        full = patcher.with_lever_n()
+        for relative, entry in patcher.SOURCES.items():
+            self.assertEqual(full[relative], entry, relative)
+
+    def test_an_overlap_between_the_two_grafts_is_refused(self):
+        """Two patchers rewriting one file would silently drop one of them."""
+        with patch.dict(patcher.SOURCES, {'model.py': (patcher.MODEL_ROOT, lambda s: s)}):
+            with self.assertRaisesRegex(ValueError, 'graft the same file'):
+                patcher.with_lever_n()
 
 
 if __name__ == '__main__':

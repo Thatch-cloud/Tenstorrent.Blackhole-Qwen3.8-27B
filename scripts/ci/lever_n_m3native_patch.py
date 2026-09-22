@@ -470,6 +470,32 @@ PATCHES = {
     'mlp.py': patch_mlp,
 }
 
+# The M1 files, added for Lever N. They live in TWO image trees, and their patches
+# belong to lever_n_model_patch rather than this module - this table only says which
+# file comes from where, so the workflow can derive its docker cp and sha256sum lists
+# instead of carrying four hardcoded copies of the same knowledge. That duplication is
+# exactly what let the 65536 hardware lane ship a runner nothing staged.
+MODEL_ROOT = '/opt/tt-metal/models/demos/blackhole/qwen36/tt'
+PLUGIN_ROOT = '/opt/qwen-fast-plugin/src/vllm_tt_plugin'
+
+# relative path -> (image directory, patch callable)
+SOURCES = {name: (MODEL_ROOT, patch) for name, patch in PATCHES.items()}
+
+
+def with_lever_n():
+    """SOURCES plus the three M1 files. Separate so an arm can graft the decode-side
+    four alone, which is every arm that does not set M3NATIVE_PREFILL_CHUNK_TOKENS."""
+    import lever_n_model_patch as m1
+    extra = {
+        'model.py': (MODEL_ROOT, m1.patch_model),
+        'qwen36_vllm.py': (MODEL_ROOT, m1.patch_vllm_entry),
+        'platform.py': (PLUGIN_ROOT, m1.patch_platform),
+    }
+    overlap = set(extra) & set(SOURCES)
+    if overlap:
+        raise ValueError('M1 and m3native graft the same file: %r' % sorted(overlap))
+    return dict(SOURCES, **extra)
+
 
 def stage(root, output=None):
     """Read the four originals from `root`, apply the four patches, write the four
