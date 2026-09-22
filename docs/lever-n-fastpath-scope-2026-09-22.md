@@ -357,3 +357,68 @@ None of this moves the 200 tok/s target, which is closed as measured-unreachable
 N v1 recovers the 79.4 s decode stall, 31% of user-facing wall; it does not move the
 13.5 / 26.5 / 39.6 / 52.5 s TTFT staircase, which needs v2 scratch parking or cross-user
 prefill batching.
+
+---
+
+## WHERE LEVER N STOPS: the load-bearing concurrency pin, run 35702186384
+
+The packed step's refusal, with both sides named:
+
+```
+scheduled_only=['cmpl-a67d7b61...']  prepared_only=['cmpl-b495584c...']
+scheduled=['cmpl-a67d7b61...']       prepared=['cmpl-b495584c...']
+```
+
+One scheduled, one prepared, and they are DIFFERENT requests. With
+`one-shot: 2, resumable: 15`: user one completed all sixteen chunks and is the prepared
+one, decoding, with a first token at 14.54 s. User two has started its own prefill and
+is scheduled - and the fast path holds exactly one prepared request, so user two has
+nowhere to be.
+
+This is not a new discovery. It is the pin T1 classified as **load-bearing** on
+2026-09-19 and T3 re-scoped around: "Session state is singular from serving_lifecycle
+down, so it means per-session capture and bridge state, a trace bucket sized for N, and
+a verify-row budget above 32 with capture buckets prepared for the wider rows." What is
+new is that Lever N now runs right up to it: M1 and M2 are no longer the blocker, and
+this is.
+
+### A correction to what one sample suggested
+
+After run 35699498963 I reported that chunking costs the first user 0.8 to 1.3 seconds,
+6 to 9 percent. That was one sample against a baseline, and it does not survive the
+second:
+
+| | TTFT |
+| --- | --- |
+| chunked, run 35699498963 | 15.49 s |
+| chunked, run 35702186384 | 14.54 s |
+| unchunked references | 14.17 / 14.52 / 14.56 / 14.68 s |
+
+The two chunked samples span 0.95 s between them and straddle the unchunked range. With
+n=2 and that spread, **the TTFT cost of chunking is below what this data can resolve**.
+It may be small, it may be zero, and claiming 6 to 9 percent from one sample was
+over-reading it. The right statement is that chunking has not been shown to cost the
+first user anything measurable.
+
+### What is proven, and what is not
+
+Proven on hardware:
+
+- M1 resumable prefill, sixteen chunks, the whole 32,768-token prompt, aligned starts,
+  on the speculative fast path with four packed users.
+- M2 one-in-flight, all four policy states including `partials=1 decodes=1`.
+- A user reaching a first token through the chunked path, twice.
+
+Not measured, and still the whole point:
+
+- The **79.4 s decode stall**, 31% of user-facing wall. No run has had two users decoding
+  concurrently, so the stall has never been re-measured. `ttft_profile` still reports
+  `recorded=1 of 4`.
+- M2 item 1, the `_negotiate_forced_mode` alternation, is unbuilt. The captured source
+  shows `has_partial_prefill` forces EVERY step prefill-only while a chunk is in flight,
+  which is the stall itself. Item 2 stops a newcomer joining a partial; item 1 is what
+  lets a decode run between chunks.
+
+So the remaining work is two independent pieces, neither of which is Lever N M1: the
+concurrency pin (T3's build) and M2 item 1. Neither changes the 200 tok/s verdict, which
+stays closed as measured-unreachable.
