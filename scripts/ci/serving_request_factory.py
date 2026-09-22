@@ -66,10 +66,25 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
 
     prompt = tuple(state.prompt_token_ids)
     validate_request_sampling(state.sampling_params, prompt_tokens=len(prompt), eos_ids=eos_ids)
-    if (len(state.output_token_ids) != 1 or state.num_computed_tokens != 0
+    # The frontier. Under whole-prompt prefill this is zero: the request arrives fresh
+    # and is prefilled inside the step, so anything else means it had been advanced
+    # already. Under CHUNKED prefill the seed is emitted on the final chunk, by which
+    # point the earlier chunks are counted - run 35696842354 reached here with 30720 of
+    # 32768 after sixteen chunks, and was refused for it.
+    #
+    # What the clause protects is that the request has not DECODED: the seed being
+    # adopted must be this prefill's own first token, not a continuation of a stream
+    # already in flight. That is frontier < len(prompt), true of both shapes, and still
+    # false for an advanced request. On the unchunked path nothing has run, so zero
+    # stays the only value it can take there.
+    frontier = state.num_computed_tokens
+    if (len(state.output_token_ids) != 1
+            or type(frontier) is not int or not 0 <= frontier < len(prompt)
             or not isinstance(state.req_id, str) or not state.req_id
             or len(helpers) != 48):
-        raise ValueError('Fresh native prefill with pre-step frontier zero, one emitted seed and all GDN helpers required')
+        raise ValueError('Fresh native prefill with the frontier inside the prompt, one emitted seed '
+                         'and all GDN helpers required; frontier=%r prompt=%d emitted=%d helpers=%d'
+                         % (frontier, len(prompt), len(state.output_token_ids), len(helpers)))
     seed = state.output_token_ids[0]
     if type(seed) is not int or not 0 <= seed < model.args.vocab_size:
         raise ValueError('Valid target-selected prefill seed required')

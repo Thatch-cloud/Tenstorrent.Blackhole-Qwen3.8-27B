@@ -205,10 +205,33 @@ class RequestFactoryTests(unittest.TestCase):
             self.build(components, arguments)
         components.device.assert_not_called()
 
-    def test_cached_or_advanced_scheduler_snapshot_is_not_a_fresh_prefill(self):
-        for frontier in (1, 2048, 4096):
+    def test_a_frontier_at_or_past_the_prompt_is_not_a_fresh_prefill(self):
+        """The boundary moved, and hardware is why.
+
+        This asserted that ANY nonzero frontier is an advanced snapshot, which held
+        while prefill happened in one step. Under chunked prefill the seed is emitted on
+        the final chunk, so the frontier is legitimately the tokens the earlier chunks
+        covered: run 35696842354 prefilled 32768 tokens in sixteen chunks and arrived
+        here with 30720, and was refused for it.
+
+        What the clause protects is that the request has not DECODED - the seed adopted
+        must be this prefill's own first token. That boundary is the prompt length.
+        """
+        for frontier in (4096, 4097, 99999, -1, 'x'):
             components, _, _, arguments = self.fixture()
             arguments['state'].num_computed_tokens = frontier
-            with self.subTest(frontier=frontier), self.assertRaisesRegex(ValueError, 'pre-step frontier zero'):
+            with self.subTest(frontier=frontier), self.assertRaisesRegex(
+                    ValueError, 'frontier inside the prompt'):
                 self.build(components, arguments)
             components.device.assert_not_called()
+
+    def test_a_frontier_inside_the_prompt_is_a_chunked_prefill_and_is_allowed(self):
+        """The shape run 35696842354 actually produced: fifteen chunks behind it and
+        the sixteenth emitting the seed. Zero stays legal - that is the unchunked path,
+        where nothing has run yet."""
+        for frontier in (0, 1, 2048, 4095):
+            components, _, _, arguments = self.fixture()
+            arguments['state'].num_computed_tokens = frontier
+            with self.subTest(frontier=frontier):
+                self.build(components, arguments)
+            components.device.assert_called_once()
