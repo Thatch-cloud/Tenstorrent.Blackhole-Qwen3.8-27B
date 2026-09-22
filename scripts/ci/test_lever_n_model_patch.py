@@ -138,6 +138,65 @@ class OutputTests(unittest.TestCase):
         self.assertIn('if not any(s > 0 for s in starts):', out)
         self.assertNotIn('if start_pos is None:', out)
 
+    def test_the_one_shot_chunk_records_where_the_range_path_resumes(self):
+        """Run 35692388798 died at the seam between two correct decisions.
+
+        The dispatch routes chunk ONE through prefill_paged_slots on purpose - its end
+        is chunk-aligned, so tail_real is 0 and the one-shot call is equivalent. But
+        that entry never touches _qwen_lever_n_next_start, and the range path demands
+        the cursor equal the previous end. Chunk two then arrived at starts=[2048] and
+        found the scratch at None:
+
+          Lever N: prefill resumed at 2048 but the scratch was left at None;
+          a chunk was skipped, replayed, or belongs to another prompt
+
+        plens[0] is the end of the range the one-shot call just covered, which is
+        exactly where the continuation begins.
+        """
+        out = patch_vllm_entry(VLLM)
+        ast.parse(out)
+        self.assertIn('model._qwen_lever_n_next_start = int(plens[0])', out)
+        one_shot = out[out.index('if not any(s > 0 for s in starts):'):out.index('else:')]
+        self.assertIn('_qwen_lever_n_next_start', one_shot,
+                      'the cursor must be set on the ONE-SHOT branch, not the range one')
+
+    def test_the_cursor_is_only_recorded_when_chunking_is_on(self):
+        """start_pos is always supplied, so the guard is on `starts` being non-empty.
+        An unchunked prompt never has a continuation to read the cursor, but writing it
+        unconditionally would claim something the call did not establish.
+
+        Checked by nesting rather than by proximity: the assignment must sit inside an
+        `if starts:` block, which a character-window search got wrong.
+        """
+        out = patch_vllm_entry(VLLM)
+        tree = ast.parse(out)
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            if not (isinstance(node.test, ast.Name) and node.test.id == 'starts'):
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Assign)
+                        and any(isinstance(target, ast.Attribute)
+                                and target.attr == '_qwen_lever_n_next_start'
+                                for target in inner.targets)):
+                    found.append(inner)
+        self.assertEqual(len(found), 1,
+                         'exactly one cursor write, nested under "if starts:"')
+
+    def test_the_scheduler_marker_formats_itself(self):
+        """The mirror of a mistake this repo already documented. install() warns that
+        loguru formats with {} and a % marker prints the literal; the scheduler graft
+        used {} against a logger that is not loguru, and run 35692388798 printed
+        'partials={} decodes={} allowed={} hidden={}'. An f-string is formatted before
+        the call and is correct either way."""
+        from lever_n_model_patch import patch_scheduler
+        fixture = (Path(__file__).parent / 'fixtures' / 'plugin_scheduler.py').read_text(encoding='utf-8')
+        body = patch_scheduler(fixture)
+        self.assertIn('f"[PINDIAG] m2 one-in-flight: partials={len(partial_prefills)} "', body)
+        self.assertNotIn('partials={} decodes={}', body)
+
     def test_is_last_is_not_threaded_because_the_runner_does_not_send_it(self):
         out = patch_vllm_entry(VLLM)
         self.assertNotIn('is_last', out)
