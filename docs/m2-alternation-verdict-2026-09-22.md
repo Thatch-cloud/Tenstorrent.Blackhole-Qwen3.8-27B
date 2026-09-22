@@ -196,3 +196,61 @@ So the fix that is correct under either reading is the one that gives the schedu
 lifecycle's own answer instead of inferring it. The next run should also carry a marker
 naming the request id at admission and at handoff, which settles which reading was true
 rather than leaving it to inference a second time.
+
+---
+
+# v73: all four users reach a first token, and the alternation's cost is visible
+
+Run **35718626867 (v73)**, image v89 plus the GDN slot-remap graft (mounted, no rebuild).
+
+| | v71 | v73 |
+|---|---|---|
+| users reaching a first token | 2 (`incomplete=True`) | **4** (`incomplete=False`) |
+| ids the FAST path served | 1 | **2** (486 and 604 propose/step records) |
+| resumable prefill calls | 30 (two users) | **60** (four users x 15) |
+| alternation events | 30 | **60** |
+| `gdn/tp.py` IndexError | fatal | gone |
+
+This is the first run in the programme where every one of the four users produced a
+token. It is also the first where the fast path decoded more than one.
+
+## The cost, which must not be buried
+
+```
+v73 TTFT:              14.61   29.66   71.61   86.24
+known staircase:       13.5    26.5    39.6    52.5
+```
+
+Users 3 and 4 are **substantially worse** - 71.6 s against 39.6 s, 86.2 s against
+52.5 s. That is the alternation doing exactly what it was designed to do, seen from the
+other side: every decode step yielded to a running user is a step not spent on the
+queued user's prefill. The policy protects the DECODER's throughput and charges the
+later arrivals' TTFT for it.
+
+Two things follow. First, `r=1` (one decode step per prefill chunk) is not obviously the
+right operating point at four users, and `TT_DECODE_STEPS_PER_PREFILL_CHUNK` exists
+precisely to move it - but that is a tuning question to settle with measurements, not by
+argument, and it needs a run that survives to steady state first. Second, no tok/s claim
+can be made from v73 either: the run still dies, so there is no sustained decode window
+to measure.
+
+## The next failure
+
+```
+ValueError: Fast serving requires one complete fresh prefill:
+  prefill_slot=None new=[] cached=['cmpl-9629ed6b...'] spec={'cmpl-9629ed6b...': [...]}
+```
+
+No new request, one cached request carrying speculative tokens: a decode step, judged by
+a clause that exists to vet an admission. It reached that clause because `self.hook` was
+None - `_release_request` tore the hook down once every request the lifecycle TRACKS had
+finished, while an untracked one was still decoding.
+
+The narrow fix is to delegate a step with no new request to the stock path, as the two
+branches above already do for every other shape the fast path does not own, and to log
+it so the delegation is visible rather than silent.
+
+**That is not the root cause.** The root cause is that v73 adopted only two of the four
+users onto the fast path; the other two decoded untracked, which is why releasing on the
+tracked set was premature. Adopting every user is its own task, and until it is done the
+fast path is serving two streams, not four.

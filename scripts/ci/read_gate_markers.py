@@ -43,6 +43,7 @@ MARKERS = (
     # ambiguous between a race at the START of a prefill and one at its END, and
     # the artifact could not separate them; this settles it by evidence.
     ('prefill gate', r'prefill gate: held=\S'),
+    ('lifecycle delegate', r'lifecycle delegate: cached=\S'),
     ('runtime binary override', r'runtime binary pin overridden'),
     ('CCL links', r'\[CCLLINKS\]'),
     ('readiness timeout', r'readiness exceeded'),

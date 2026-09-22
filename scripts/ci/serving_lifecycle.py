@@ -154,6 +154,33 @@ class FastServingLifecycle:
                     and not scheduled.scheduled_new_reqs
                     and list(scheduled.scheduled_cached_reqs.req_ids) == [self.request_id]):
                 return self._continue_prefill(scheduled)
+            # Nothing to admit. The clause below vets a request JOINING the fast
+            # path, so a step carrying no new request was never an admission and
+            # must not be judged as one. Run 35718626867 raised here on
+            # prefill_slot=None new=[] cached=[one id] spec={...} - a plain decode,
+            # arriving after _release_request tore down the hook because every
+            # request the lifecycle TRACKS had finished while an untracked one was
+            # still decoding.
+            #
+            # Delegating is what the two branches above already do for every other
+            # shape the fast path does not own. Logged per request id rather than
+            # silent: if this fires once every user is adopted, something else is
+            # wrong and the marker is how that becomes visible.
+            if not scheduled.scheduled_new_reqs:
+                _qwen_seen = getattr(self, "_qwen_delegated_ids", None)
+                if _qwen_seen is None:
+                    _qwen_seen = self._qwen_delegated_ids = set()
+                _qwen_ids = tuple(scheduled.scheduled_cached_reqs.req_ids)
+                if _qwen_ids not in _qwen_seen:
+                    _qwen_seen.add(_qwen_ids)
+                    try:
+                        from loguru import logger
+                        logger.info(
+                            f"[PINDIAG] lifecycle delegate: cached={list(_qwen_ids)} "
+                            f"tracked={list(self.decoding_ids)} hook={self.hook is not None}")
+                    except BaseException:
+                        pass
+                return self.original_execute(scheduled)
             if (self.request_id is not None or len(scheduled.scheduled_new_reqs) != 1
                     or scheduled.scheduled_cached_reqs.req_ids
                     or scheduled.scheduled_spec_decode_tokens
