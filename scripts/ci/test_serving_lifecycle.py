@@ -206,12 +206,29 @@ class LifecycleTests(unittest.TestCase):
                          'admission must start this prompt its own chunk history')
 
     def test_a_continuation_for_another_request_is_not_routed_to_this_capture(self):
+        """It used to RAISE. Under concurrency a cached step naming another request is
+        that request's own decode, not an error, so it now reaches the stock path -
+        run 35718626867 died exactly there, on a decode step judged by the admission
+        contract while a prefill was in flight.
+
+        The guarantee this test exists for is unchanged and is now asserted directly
+        rather than inferred from an exception: the capture must not see it, and the
+        in-flight prefill must be left alone.
+        """
         lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
         worker.execute_model(scheduled)
+        segments_before = capture.segment.call_count
+        held_before = lifecycle.request_id
         other = self.continuation(scheduled, 2048, 2048)
         other.scheduled_cached_reqs = SimpleNamespace(req_ids=['someone-else'])
-        with self.assertRaises(ValueError):
-            worker.execute_model(other)
+
+        worker.execute_model(other)
+
+        self.assertEqual(capture.segment.call_count, segments_before,
+                         'another request must never be fed into this capture')
+        self.assertEqual(lifecycle.request_id, held_before,
+                         'the in-flight prefill must be undisturbed')
+        lifecycle.original_execute.assert_called_with(other)
 
     def test_a_chunk_larger_than_the_prompt_is_refused(self):
         lifecycle, worker, _, _, _, scheduled, _ = self.chunked_fixture(chunk=8192, prompt=4096)
