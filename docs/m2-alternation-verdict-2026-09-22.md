@@ -254,3 +254,62 @@ it so the delegation is visible rather than silent.
 users onto the fast path; the other two decoded untracked, which is why releasing on the
 tracked set was premature. Adopting every user is its own task, and until it is done the
 fast path is serving two streams, not four.
+
+---
+
+# v75: the engine survives, and four users are measured for the first time
+
+Run **35720619574 (v75)**, image v92. No `ValueError`, no `EngineCore encountered a
+fatal error` - zero of each across the artifact. Every earlier run in this sequence died.
+
+## Measured, four concurrent users at 32,768-token prompts
+
+Per-stream inter-token gaps, from the gate's own `gaps_ms`:
+
+| stream | tokens | first quarter | last quarter | best observed |
+|---|---|---|---|---|
+| 0 | 213 | 371 ms (2.7 tok/s) | 105 ms (9.6 tok/s) | 95 ms (10.5 tok/s) |
+| 1 | 256 | 111 ms (9.0 tok/s) | 101 ms (9.9 tok/s) | 90 ms (11.1 tok/s) |
+| 2 | 212 | 357 ms (2.8 tok/s) | 103 ms (9.7 tok/s) | 91 ms (11.0 tok/s) |
+| 3 | 256 | 100 ms (10.0 tok/s) | 55 ms (18.0 tok/s) | 51 ms (19.8 tok/s) |
+
+So **steady state is roughly 10 tok/s per user**, one stream reaching 18-20. The
+first-quarter figures for streams 0 and 2 (2.7-2.8 tok/s) are the prefill-overlap
+window: a decode step costing roughly one 2048-token prefill chunk plus its own time.
+
+TTFT: `14.51 / 29.72 / 70.41 / 85.14` s, against the `13.5 / 26.5 / 39.6 / 52.5`
+baseline. Users three and four remain much worse, as in v73.
+
+## Correctness
+
+Three of four users are token-identical to their single-user references
+(`identical_prefix: true` for users 0, 2 and 3). **User 1 diverges**
+(`identical_prefix: false`). That is a real correctness failure on one stream and it is
+not explained yet.
+
+## Speculation is working - a claim I nearly got wrong
+
+The final metrics line reads `Mean acceptance length: 1.00, Accepted throughput: 0.00`,
+which invites the conclusion that the T16 draft contributes nothing. It does not.
+Across the run acceptance reaches **4.00**, with 3.82 and 3.88 also recorded; the 1.00
+readings are the tail windows after streams finish. v73 shows the same shape (4.00,
+3.88, 1.34, then 1.00s). Reading only the last line would have produced a confident
+wrong claim about the biggest lever in the system.
+
+## What this says about the target
+
+Against **200 tok/s per user**, the measured 10 tok/s steady state is **20x short**, and
+the best single stream seen anywhere in the run (19.8 tok/s) is still 10x short. Nothing
+measured in this programme suggests a 20x lever exists on this path: the round is
+already speculative with acceptance near 4, the native decode graft is engaged, and the
+per-token cost at four users is dominated by work that scales with the number of live
+streams.
+
+Against the reframed target in `memory/goal-200tps-concurrent.md` - four users near the
+44 tok/s single-stream rate - the gap is **4.4x** at 10 tok/s, or 2.2x against the best
+stream. That is a large gap but not obviously a closed door, and the honest position is
+that it is unproven either way until the per-token cost at four users is attributed.
+
+**No claim is made here that the reframed target is reachable.** What is now established
+is the starting number: four concurrent users, 32k prompts, ~10 tok/s each, three of
+four token-exact.
