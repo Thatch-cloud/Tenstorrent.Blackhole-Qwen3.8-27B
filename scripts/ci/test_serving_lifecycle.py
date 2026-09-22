@@ -1,4 +1,4 @@
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -34,6 +34,100 @@ class LifecycleTests(unittest.TestCase):
             capture_factory=Mock(return_value=capture), bridge_factory=build,
             eos_ids=(99,), cancelled=lambda: False)
         return lifecycle, worker, bridge, capture, build, scheduled, decode
+
+    def chunked_fixture(self, chunk=2048, prompt=4096):
+        """The same fixture, but the step carries only the first chunk and the capture
+        knows about suspension - a `segment` context and a `complete` flag."""
+        lifecycle, worker, bridge, capture, build, scheduled, decode = self.fixture()
+        capture.complete = False
+        capture.segments = 0
+        # complete is set at a segment's EXIT, when the cursor has reached position -
+        # never before it. finish_at says which segment gets there.
+        capture.finish_at = 10 ** 9
+
+        @contextmanager
+        def segment():
+            capture.segments += 1
+            yield capture
+            if capture.segments >= capture.finish_at:
+                capture.complete = True
+
+        capture.segment = Mock(side_effect=segment)
+        scheduled.num_scheduled_tokens = {'request': chunk}
+        scheduled.total_num_scheduled_tokens = chunk
+        scheduled.scheduled_new_reqs[0].prompt_token_ids = [1] * prompt
+        return lifecycle, worker, bridge, capture, build, scheduled, decode
+
+    def continuation(self, scheduled, chunk, computed):
+        """How a continuation actually arrives: a CACHED request, no new ones."""
+        return SimpleNamespace(finished_req_ids=set(), scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=['request']),
+            scheduled_spec_decode_tokens={}, num_scheduled_tokens={'request': chunk},
+            total_num_scheduled_tokens=chunk)
+
+    def test_a_first_chunk_short_of_the_prompt_is_admitted(self):
+        """The admission contract used to demand the whole prompt in one step. That was
+        the only clause relaxed; text-only, uncached and single-request all still hold."""
+        lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+        self.assertIsNone(worker.execute_model(scheduled))
+        capture.segment.assert_called_once()
+        capture.capture.assert_not_called()
+        self.assertEqual(lifecycle.request_id, 'request')
+        self.assertFalse(lifecycle.prefill_pending, 'mid-prompt has no token to sample')
+
+    def test_a_whole_prompt_step_still_uses_the_stricter_capture_api(self):
+        """The unchunked path must not acquire a dependency on suspension support."""
+        lifecycle, worker, _, capture, _, scheduled, _ = self.fixture()
+        self.assertIsNone(worker.execute_model(scheduled))
+        capture.capture.assert_called_once()
+        self.assertTrue(lifecycle.prefill_pending)
+
+    def test_a_continuation_is_routed_to_the_open_capture(self):
+        lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+        worker.execute_model(scheduled)
+        self.assertIsNone(worker.execute_model(self.continuation(scheduled, 2048, 2048)))
+        self.assertEqual(capture.segments, 2)
+        self.assertFalse(lifecycle.prefill_pending)
+
+    def test_the_final_chunk_completes_the_prefill_and_arms_the_sampler(self):
+        lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+        capture.finish_at = 2                        # the second segment reaches position
+        worker.execute_model(scheduled)
+        self.assertFalse(capture.complete)
+        self.assertIsNone(worker.execute_model(self.continuation(scheduled, 2048, 2048)))
+        self.assertTrue(capture.complete)
+        self.assertTrue(lifecycle.prefill_pending, 'the final chunk produces the token')
+        self.assertEqual(lifecycle.chunk_deferred, [True, True])
+
+    def test_a_sampler_behaviour_change_mid_prompt_is_refused(self):
+        """Whether the plugin defers on an intermediate chunk is not determinable from
+        this repo, so both are accepted - but not a change of mind mid-prompt, which
+        would mean one of the chunks was not the shape it appeared to be."""
+        lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+        worker.execute_model(scheduled)
+        self.assertEqual(lifecycle.chunk_deferred, [True])
+        worker.model_runner.execute_model.return_value = SimpleNamespace(req_ids=['request'])
+        with self.assertRaisesRegex(ValueError, 'changed sampler behaviour mid-prompt'):
+            worker.execute_model(self.continuation(scheduled, 2048, 2048))
+
+    def test_a_continuation_for_another_request_is_not_routed_to_this_capture(self):
+        lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+        worker.execute_model(scheduled)
+        other = self.continuation(scheduled, 2048, 2048)
+        other.scheduled_cached_reqs = SimpleNamespace(req_ids=['someone-else'])
+        with self.assertRaises(ValueError):
+            worker.execute_model(other)
+
+    def test_a_chunk_larger_than_the_prompt_is_refused(self):
+        lifecycle, worker, _, _, _, scheduled, _ = self.chunked_fixture(chunk=8192, prompt=4096)
+        with self.assertRaisesRegex(ValueError, 'whole or first chunk, required'):
+            worker.execute_model(scheduled)
+
+    def test_a_step_scheduling_a_second_request_is_still_refused(self):
+        lifecycle, worker, _, _, _, scheduled, _ = self.chunked_fixture()
+        scheduled.num_scheduled_tokens = {'request': 2048, 'other': 2048}
+        with self.assertRaisesRegex(ValueError, 'whole or first chunk, required'):
+            worker.execute_model(scheduled)
 
     def test_second_prefill_during_decode_reaches_the_prefill_path(self):
         """A new request arriving while another decodes is a PREFILL-only step.

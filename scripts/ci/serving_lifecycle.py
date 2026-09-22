@@ -37,6 +37,15 @@ class FastServingLifecycle:
         # the most recent, so existing single-user behaviour reads the same.
         self.decoding_ids = []
         self.prefill_pending = self.failed = self.closed = self.ignore_eos = False
+        # One entry per prefill chunk: True when the plugin's execute deferred its
+        # sampler (returned None). docs/lever-n-plugin-contract-2026-09-19.md:55-72
+        # establishes that the RUNNER zeroes next_token_ids for mid-prompt rows and
+        # drops the placeholders when it builds the output, so an intermediate chunk
+        # has nothing to sample - but whether the plugin then defers or returns that
+        # output is not determinable from this repo. Both are accepted and recorded,
+        # and a change of behaviour mid-prompt is refused, so the first rig run says
+        # which it is instead of a guess deciding it here.
+        self.chunk_deferred = []
         self.original_execute, self.original_sample = worker.execute_model, worker.sample_tokens
         self.saved = []
         for name, value in (('_qwen_fast_lifecycle', self),
@@ -91,6 +100,15 @@ class FastServingLifecycle:
                     return self.original_execute(scheduled)
             elif scheduled.total_num_scheduled_tokens == 0:
                 return self.original_execute(scheduled)
+            # A continuation of the prefill already in flight. It arrives as a CACHED
+            # request, so without this it would either be handed to the hook (which
+            # refuses a request it is not decoding) or fall into the fresh-prefill
+            # contract below and be refused as 'one complete fresh prefill'.
+            if (self.capture is not None and self.request_id is not None
+                    and not self.capture.complete
+                    and not scheduled.scheduled_new_reqs
+                    and list(scheduled.scheduled_cached_reqs.req_ids) == [self.request_id]):
+                return self._continue_prefill(scheduled)
             if (self.request_id is not None or len(scheduled.scheduled_new_reqs) != 1
                     or scheduled.scheduled_cached_reqs.req_ids
                     or scheduled.scheduled_spec_decode_tokens
@@ -107,11 +125,23 @@ class FastServingLifecycle:
                                     getattr(scheduled, 'has_structured_output_requests', False),
                                     getattr(scheduled, 'scheduled_encoder_inputs', {})))
             new = scheduled.scheduled_new_reqs[0]
+            # Split into a STEP shape and a REQUEST shape. Everything that protected the
+            # request is unchanged - text only, uncached, one request in the step, and the
+            # per-request and total token counts agreeing. The single clause relaxed is
+            # that this step must carry the WHOLE prompt: with chunked prefill the first
+            # step carries the first chunk, and the capture is still built for the full
+            # prompt below, so the draft window stays anchored at the true position.
+            chunk = scheduled.num_scheduled_tokens.get(new.req_id)
             if (new.prompt_token_ids is None or new.num_computed_tokens != 0
                     or new.mm_features or new.prompt_embeds is not None or new.lora_request is not None
-                    or scheduled.num_scheduled_tokens != {new.req_id: len(new.prompt_token_ids)}
-                    or scheduled.total_num_scheduled_tokens != len(new.prompt_token_ids)):
-                raise ValueError('Text-only uncached complete prompt required')
+                    or set(scheduled.num_scheduled_tokens) != {new.req_id}
+                    or not isinstance(chunk, int) or not 1 <= chunk <= len(new.prompt_token_ids)
+                    or scheduled.total_num_scheduled_tokens != chunk):
+                raise ValueError('Text-only uncached prompt, whole or first chunk, required: '
+                                 'computed=%r chunk=%r prompt=%r total=%r'
+                                 % (getattr(new, 'num_computed_tokens', None), chunk,
+                                    None if new.prompt_token_ids is None else len(new.prompt_token_ids),
+                                    scheduled.total_num_scheduled_tokens))
             validate_request_sampling(new.sampling_params, prompt_tokens=len(new.prompt_token_ids), eos_ids=self.eos_ids)
             # A terminal first token only ends the request when EOS is honoured.
             self.ignore_eos = bool(getattr(new.sampling_params, 'ignore_eos', False))
@@ -120,15 +150,54 @@ class FastServingLifecycle:
             # A native prefill rewrites GDN slot 0, so whichever engine's state it
             # held is gone; the next verify must restore its own carry.
             note_prefill()
-            with self.capture.capture():
+            # A step that carries the whole prompt keeps using capture(), whose contract
+            # is the stricter one - a single segment must cover the prompt - so the
+            # unchunked path behaves exactly as it did and needs no capture that knows
+            # about suspension. segment() is only for a step that does NOT finish the
+            # prompt, which cannot happen until chunked prefill is enabled.
+            whole = chunk == len(new.prompt_token_ids)
+            with (self.capture.capture() if whole else self.capture.segment()):
                 result = self.original_execute(scheduled)
-            if result is not None:
-                raise ValueError('Expected native prefill deferred sampler')
-            self.prefill_pending = True
-            return None
+            return self._after_prefill_chunk(result, whole)
         except BaseException:
             self.failed = True
             raise
+
+    def _continue_prefill(self, scheduled):
+        """One more chunk of the prefill already in flight.
+
+        The capture stays open across the suspension (dflash_prefill_window.segment),
+        so its cursor, chunks and children carry the no-gap ledger from the previous
+        step. Nothing else about the request changes: request_id, ignore_eos and the
+        sampling validation were all settled when the first chunk was admitted.
+        """
+        with self.capture.segment():
+            result = self.original_execute(scheduled)
+        return self._after_prefill_chunk(result, False)
+
+    def _after_prefill_chunk(self, result, whole):
+        """What follows a prefill chunk, whether it finished the prompt or not.
+
+        `whole` says the step carried the entire prompt, which is the only shape that
+        exists before chunked prefill is enabled. It is passed rather than derived so
+        this never consults capture.complete on the unchunked path - keeping that path
+        independent of whether the capture knows about suspension at all.
+        """
+        deferred = result is None
+        if self.chunk_deferred and deferred != self.chunk_deferred[-1]:
+            raise ValueError('Prefill chunk changed sampler behaviour mid-prompt: '
+                             'deferred=%r after %r' % (deferred, self.chunk_deferred))
+        self.chunk_deferred.append(deferred)
+        if not whole and not self.capture.complete:
+            # Mid-prompt. The runner has already zeroed next_token_ids for these rows
+            # and drops the placeholders when it builds the output, so there is nothing
+            # to sample and prefill_pending stays clear - the deferred sampler belongs
+            # to the token the FINAL chunk produces.
+            return result
+        if not deferred:
+            raise ValueError('Expected native prefill deferred sampler on the final chunk')
+        self.prefill_pending = True
+        return None
 
     def _sample(self, worker, grammar_output):
         self._check()

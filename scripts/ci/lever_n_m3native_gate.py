@@ -152,14 +152,30 @@ def start_server(port, users, context, results, log_name, readiness_seconds=900,
                  qwen_fast_runtime=dict(directory='/experiment-scripts/ci', runtime_root='/opt/tt-metal',
                                         fixtures='/experiment-dflash-fixture', target_snapshot=MODEL))
     blocks = -(-(users * context) // BLOCK_SIZE)
+    # Chunked prefill is what gives a prefill somewhere to yield, and it is opt-in so
+    # every existing arm is byte-identical without it. Two invariants come with it and
+    # both are load-bearing: max_num_batched_tokens must EQUAL the model chunk size,
+    # because a larger budget hands the model a window it cannot replay as whole traced
+    # chunks and a smaller one starts a continuation mid-chunk, breaking
+    # start % chunk_size == 0; and long_prefill_token_threshold must not sub-chunk
+    # inside vLLM, which would produce the same unaligned starts.
+    chunk = os.environ.get('M3NATIVE_PREFILL_CHUNK_TOKENS')
+    if chunk is None:
+        batched_tokens, chunked_flags = context, ['--no-enable-chunked-prefill']
+    else:
+        batched_tokens = int(chunk)
+        if batched_tokens not in (1024, 2048, 4096):
+            raise ValueError('M3NATIVE_PREFILL_CHUNK_TOKENS must be 1024, 2048 or 4096')
+        chunked_flags = ['--enable-chunked-prefill',
+                         '--long-prefill-token-threshold', str(batched_tokens)]
     command = [sys.executable, '-m', 'vllm.entrypoints.openai.api_server',
                '--model', MODEL, '--served-model-name', 'qwen-longctx',
                '--host', '127.0.0.1', '--port', str(port), '--dtype', 'bfloat16',
                '--max-model-len', str(context), '--max-num-seqs', str(users),
-               '--max-num-batched-tokens', str(context),
+               '--max-num-batched-tokens', str(batched_tokens),
                '--block-size', str(BLOCK_SIZE), '--num-gpu-blocks-override', str(blocks),
                '--no-enable-prefix-caching', '--no-async-scheduling',
-               '--no-enable-chunked-prefill', '--shutdown-timeout', '30',
+               *chunked_flags, '--shutdown-timeout', '30',
                '--additional-config', json.dumps(recipe),
                '--speculative-config', json.dumps(
                    dict(model='/draft-config', method='dflash', num_speculative_tokens=15,

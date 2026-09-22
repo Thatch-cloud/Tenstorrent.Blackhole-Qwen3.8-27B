@@ -45,13 +45,44 @@ def one_in_flight_scheduler(base=None):
             partials = len(self.running) - decodes
             try:
                 # The plugin will subtract `decodes` from whatever it reads here, so
-                # add it back: the value it computes becomes partials + 1.
-                self.max_num_running_reqs = min(saved, partials + 1 + decodes)
+                # add it back: the value it computes becomes `allowed`.
+                self.max_num_running_reqs = min(saved, allowed_prefills(partials) + decodes)
                 return super()._schedule_prefill_only()
             finally:
                 self.max_num_running_reqs = saved
 
     return OneInFlightScheduler
+
+
+def allowed_prefills(partials):
+    """How many requests a prefill step may carry, given the partials already running.
+
+    UNCHANGED BEHAVIOUR, named so the open question has somewhere to live. Today this
+    returns partials + 1, exactly what the inline expression it replaced computed.
+
+    Build plan step 8 wants ZERO fresh prompts admitted while a partial prefill is in
+    flight: the GDN prefill scratch and host RoPE table are single-occupancy, so a
+    fresh prompt slotted between two continuations either re-zeroes the scratch on its
+    own start == 0 or advances it with foreign tokens, and the suspended prompt then
+    resumes on somebody else's recurrence. The model-side guard cannot catch that - a
+    start == 0 legitimately resets its cursor (see the test that pins that limit in
+    test_lever_n_model_patch) - so the scheduler is the only place it can be stopped.
+
+    WHY IT IS NOT CHANGED YET. The plugin computes max(0, max_num_running_reqs -
+    decodes) for its waiting loop, subtracting only `decodes`, so partials consume
+    waiting capacity in ITS arithmetic. Whether a continuation is then scheduled out of
+    `running` or out of `waiting` decides which value gives zero fresh admissions, and
+    that is not answerable from this repo - the pinned plugin's _schedule_prefill_only
+    is not here. Guessing would put a wrong cap on the one seam that exists to prevent
+    silent state corruption, which is worse than leaving it visible and unchanged.
+
+    Resolve with probe_plugin_scheduler_sources.py against the m3native image, then
+    change the return and the test together. Until then this is a rename, not a fix,
+    and step 8 is NOT done.
+    """
+    if type(partials) is not int or partials < 0:
+        raise ValueError('Non-negative integer partial count required')
+    return partials + 1
 
 
 def effective_capacity(max_num_running_reqs, decodes, partials):
@@ -64,7 +95,7 @@ def effective_capacity(max_num_running_reqs, decodes, partials):
     if any(type(value) is not int or value < 0
            for value in (max_num_running_reqs, decodes, partials)):
         raise ValueError('Non-negative integer scheduler capacities required')
-    capped = min(max_num_running_reqs, partials + 1 + decodes)
+    capped = min(max_num_running_reqs, allowed_prefills(partials) + decodes)
     return max(0, capped - decodes)
 
 
