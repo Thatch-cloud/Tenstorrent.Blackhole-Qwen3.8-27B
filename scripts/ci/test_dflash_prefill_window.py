@@ -248,6 +248,67 @@ class PrefillWindowTests(unittest.TestCase):
         model.prefill_paged_slots = prefill_paged_slots
         return model, calls
 
+    def resumable_batched_model(self):
+        """batched_model, but each call prefills the NEXT chunk rather than replaying
+        chunk zero. That is what prefill_paged_slots_range does on a resumed prompt,
+        and the one-shot stub cannot stand in for it: the second call would replay an
+        absolute position the capture has already seen."""
+        model, calls = self.model(), []
+
+        def prefill_paged_slots(token_ids_list, page_table, empty_slots, valid_lens=None):
+            start = 2048 * len(calls)
+            calls.append((token_ids_list, page_table, empty_slots, valid_lens))
+            value = torch.ones((1, 1, 2048, 2560), dtype=torch.bfloat16)
+            model._forward_prefill_chunk_masked_tp(value, 2048, start, page_table, 2048)
+            return 'logits'
+
+        model.prefill_paged_slots = prefill_paged_slots
+        return model, calls
+
+    def test_a_continuation_may_re_enter_the_batched_entry_with_the_same_slot(self):
+        """The relaxation step 4 promised in a comment and did not make.
+
+        A resumed prompt re-enters prefill_paged_slots_range on every chunk. The guard
+        said one CALL per capture, so run 35688313093 - the first run ever to reach
+        prefill_paged_slots_range, with starts=[1992] - was refused on its continuation
+        with 'One batched prefill per capture required'. Three 2048-token chunks of a
+        6144-token prompt, so the capture is still open for the second and third.
+        """
+        operations, (model, calls) = self.operations(), self.resumable_batched_model()
+        capture = PrefillWindowCapture(operations, model, 6144, (1, 3))
+        with self.storage_addresses():
+            for _ in range(3):
+                with capture.segment():
+                    model.prefill_paged_slots('tokens', 'pages', [1], valid_lens=[2048])
+        self.assertEqual(capture.prefill_slot, 1)
+        self.assertEqual(len(calls), 3, 'every chunk reaches the native entry')
+        self.assertEqual(capture.segments, 3)
+        capture.close()
+
+    def test_a_second_prompt_adopting_the_capture_is_still_refused(self):
+        """What the old guard was really protecting, kept: a DIFFERENT slot mid-capture
+        means another prompt took this capture over."""
+        operations, (model, _) = self.operations(), self.resumable_batched_model()
+        capture = PrefillWindowCapture(operations, model, 6144, (1, 3))
+        with self.storage_addresses():
+            with capture.segment():
+                model.prefill_paged_slots('tokens', 'pages', [0], valid_lens=[2048])
+            with self.assertRaisesRegex(ValueError, 'One prefill slot per capture'):
+                with capture.segment():
+                    model.prefill_paged_slots('tokens', 'pages', [1], valid_lens=[2048])
+        capture.close()
+
+    def test_more_than_one_slot_in_a_call_is_still_refused(self):
+        """prefill_slot, not the call counter, is what catches two prompts batched into
+        one step - which is why relaxing the counter costs nothing real."""
+        operations, (model, _) = self.operations(), self.batched_model()
+        capture = PrefillWindowCapture(operations, model, 6144, (1, 3))
+        with self.storage_addresses():
+            with self.assertRaisesRegex(ValueError, 'exactly one user per call'):
+                with capture.segment():
+                    model.prefill_paged_slots('tokens', 'pages', [0, 1], valid_lens=[2048])
+        capture.close()
+
     def test_batched_prefill_records_its_one_slot_and_restores_the_hook(self):
         # vLLM hands the request's decode slot as a one-element list - [0] for the first
         # user, [1] for the second - and a tensor or tuple element records as a plain int.

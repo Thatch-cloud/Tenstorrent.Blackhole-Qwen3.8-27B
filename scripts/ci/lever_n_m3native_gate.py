@@ -170,11 +170,27 @@ def engine_argv(port, users, context, trace_region_bytes=1073741824):
     if chunk is None:
         batched_tokens, chunked_flags = context, ['--no-enable-chunked-prefill']
     else:
-        batched_tokens = int(chunk)
-        if batched_tokens not in (1024, 2048, 4096):
+        size = int(chunk)
+        if size not in (1024, 2048, 4096):
             raise ValueError('M3NATIVE_PREFILL_CHUNK_TOKENS must be 1024, 2048 or 4096')
+        # CORRECTED by run 35688313093. The rule above USED to be that
+        # max_num_batched_tokens equals the model chunk size, on the reasoning that a
+        # larger budget hands the model a window it cannot replay as whole traced
+        # chunks. What matters is the WINDOW, and long_prefill_token_threshold is what
+        # sets it; the equality was a sufficient way to get there that speculative
+        # decoding breaks. vLLM reserves draft-token slots out of the batched budget and
+        # says so itself:
+        #
+        #   num_scheduled_tokens is set to 1992 based on the speculative decoding
+        #   settings ... Consider increasing max_num_batched_tokens to accommodate
+        #   the additional draft token slots
+        #
+        # 1992 is not a multiple of 128, so the graft's own
+        # 'assert start % chunk_size == 0' would have fired on the next chunk. Giving
+        # the budget headroom lets the threshold bind at exactly the chunk size.
+        batched_tokens = 2 * size
         chunked_flags = ['--enable-chunked-prefill',
-                         '--long-prefill-token-threshold', str(batched_tokens)]
+                         '--long-prefill-token-threshold', str(size)]
     command = [sys.executable, '-m', 'vllm.entrypoints.openai.api_server',
                '--model', MODEL, '--served-model-name', 'qwen-longctx',
                '--host', '127.0.0.1', '--port', str(port), '--dtype', 'bfloat16',

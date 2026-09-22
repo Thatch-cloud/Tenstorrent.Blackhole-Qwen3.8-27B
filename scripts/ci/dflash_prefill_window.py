@@ -129,6 +129,10 @@ class PrefillWindowCapture:
         # The native GDN slot the batched prefill wrote this user's state into, or
         # None when the single-sequence prefill_traced_chunked path ran instead.
         self.prefill_slot = None
+        # Batched prefill calls in the CURRENT activation. Reset by capture()
+        # and segment(), so "one call per step" survives the relaxation that
+        # lets a resumed prompt re-enter across steps.
+        self.segment_calls = 0
 
     def wrap(self, original):
         def chunk(token_buf, valid_len, chunk_start, page_table, bucket, *args, **kwargs):
@@ -163,15 +167,25 @@ class PrefillWindowCapture:
         # its own sat unread in slot 1 (runs 35492676194, 35493208438). Record the
         # slot so admission can adopt it into slot 0 before anything reads it.
         def slots(token_ids_list, page_table, empty_slots, *args, **kwargs):
-            # One CALL per capture, still. A resumed prompt re-enters this on every
-            # continuation chunk and will need 'one SLOT per capture' instead - but
-            # that relaxation belongs with the change that makes a capture span steps
-            # (build plan step 4). Until then this guard is what catches two prompts
-            # batched into one step, which the fast path cannot serve, so relaxing it
-            # early would remove a live check for a capability that does not exist.
-            if not self.active or self.prefill_slot is not None:
+            # One SLOT per capture. This used to be one CALL, with a note that a
+            # resumed prompt would need the slot form once a capture could span steps.
+            # Step 4 made captures span steps and left this behind, so run 35688313093
+            # got prefill_paged_slots_range running for the first time - starts=[1992] -
+            # and was refused here on the continuation.
+            #
+            # Nothing real is lost. The 'two prompts batched into one step' case the
+            # old comment defended is caught by prefill_slot itself, which refuses any
+            # empty_slots that is not exactly one integer slot. A continuation must be
+            # allowed to re-enter with THE SAME slot; a DIFFERENT slot mid-capture would
+            # mean a second prompt adopting this capture, and that is still refused.
+            if not self.active or self.segment_calls:
                 raise ValueError('One batched prefill per capture required')
-            self.prefill_slot = prefill_slot(empty_slots)
+            slot = prefill_slot(empty_slots)
+            if self.prefill_slot is not None and self.prefill_slot != slot:
+                raise ValueError('One prefill slot per capture required; %r then %r'
+                                 % (self.prefill_slot, slot))
+            self.segment_calls += 1
+            self.prefill_slot = slot
             return original(token_ids_list, page_table, empty_slots, *args, **kwargs)
         return slots
 
@@ -235,6 +249,7 @@ class PrefillWindowCapture:
         if hasattr(self.model, '_qwen_dflash_prefill_capture') or hasattr(self.model, '_qwen_target_feature_capture'):
             raise ValueError('One non-nested native prefill capture required')
         self.started = self.active = True
+        self.segment_calls = 0
         self.segments += 1
         try:
             with instance_overrides(self.bindings()):

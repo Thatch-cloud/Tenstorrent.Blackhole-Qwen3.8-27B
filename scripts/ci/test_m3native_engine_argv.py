@@ -86,12 +86,29 @@ class ChunkedArmTests(unittest.TestCase):
                 self.assertIn('--enable-chunked-prefill', args)
                 self.assertNotIn('--no-enable-chunked-prefill', args)
 
-    def test_batched_budget_and_threshold_both_equal_the_chunk(self):
+    def test_the_threshold_is_the_chunk_and_the_budget_has_headroom(self):
+        """CORRECTED by run 35688313093, which is why the name changed.
+
+        This used to assert max_num_batched_tokens == the chunk size, matching the
+        gate's stated invariant. Speculative decoding breaks that: vLLM reserves
+        draft-token slots out of the batched budget and warns about it in as many
+        words - 'num_scheduled_tokens is set to 1992 based on the speculative decoding
+        settings ... Consider increasing max_num_batched_tokens'. 1992 is not a
+        multiple of 128, so the graft's own 'assert start % chunk_size == 0' would
+        have fired on the following chunk.
+
+        What has to equal the model chunk size is the WINDOW the model is handed, and
+        long_prefill_token_threshold is what sets that. The budget needs room above it
+        for the reservation.
+        """
         for chunk in ('1024', '2048', '4096'):
             with self.subTest(chunk=chunk):
                 args = argv(chunk)
-                self.assertEqual(value_of(args, '--max-num-batched-tokens'), chunk)
-                self.assertEqual(value_of(args, '--long-prefill-token-threshold'), chunk)
+                self.assertEqual(value_of(args, '--long-prefill-token-threshold'), chunk,
+                                 'the threshold IS the model chunk size')
+                budget = int(value_of(args, '--max-num-batched-tokens'))
+                self.assertGreater(budget, int(chunk),
+                                   'the budget must leave room for the draft slots')
 
     def test_an_unqualified_chunk_is_refused(self):
         for bad in ('0', '512', '3000', '8192', 'yes', ''):
