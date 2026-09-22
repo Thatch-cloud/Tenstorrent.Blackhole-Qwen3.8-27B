@@ -23,6 +23,9 @@ import ast
 from pathlib import Path
 
 TP_FUNCTION = '_prefill_traced_chunked_tp'
+# The one serving actually runs. prefill_traced_chunked falls back to it whenever no
+# chunk trace is captured, which is every serving run (trace_mode='decode_only').
+EAGER_FUNCTION = '_prefill_chunked_eager_tp'
 CHUNKED_FUNCTION = 'prefill_traced_chunked'
 SLOTS_FUNCTION = 'prefill_paged_slots'
 
@@ -69,37 +72,53 @@ def replace_once(lines, span, old, new, what):
     return lines
 
 
-def patch_tp_replay(source):
-    """Make the TP chunk replay resumable: a chunk range, a conditional reset and tail."""
+def _patch_replay_loop(source, function, signature, reset_comment, label):
+    """Make one chunk loop resumable: a chunk range, a conditional reset and tail.
+
+    Shared by both members of the family. _prefill_traced_chunked_tp replays a captured
+    trace; _prefill_chunked_eager_tp is the fallback the entry takes when there is none,
+    which is every serving run. Patching one and not the other is how run 35693338281
+    replayed chunk zero on a continuation.
+    """
     lines = source.splitlines(keepends=True)
-    span = function_span(source, TP_FUNCTION)
+    span = function_span(source, function)
+    lines = replace_once(
+        lines, span, signature,
+        signature + ',\n        chunk_from=0, chunk_to=None, do_reset=True, do_tail=True',
+        '%s signature' % label)
 
+    span = function_span(''.join(lines), function)
     lines = replace_once(
         lines, span,
-        'self, token_ids, page_table, actual_len, num_full, chunk_size, tail_real, vision_tokens=None',
-        'self, token_ids, page_table, actual_len, num_full, chunk_size, tail_real, vision_tokens=None,\n'
-        '        chunk_from=0, chunk_to=None, do_reset=True, do_tail=True',
-        'tp signature')
-
-    span = function_span(''.join(lines), TP_FUNCTION)
-    lines = replace_once(
-        lines, span,
-        '        # Re-zero GDN once; carries across replays + tail (chunk_start>0 skips reset).\n'
-        '        self._reset_gdn_state_for_new_sequence()',
+        reset_comment + '\n        self._reset_gdn_state_for_new_sequence()',
         '        # Re-zero GDN on the first step only; state carries across steps, replays and tail.\n'
         '        chunk_to = num_full if chunk_to is None else int(chunk_to)\n'
         '        if do_reset:\n'
         '            self._reset_gdn_state_for_new_sequence()',
-        'tp reset')
+        '%s reset' % label)
 
-    span = function_span(''.join(lines), TP_FUNCTION)
+    span = function_span(''.join(lines), function)
     lines = replace_once(lines, span, '        for c in range(num_full):',
-                         '        for c in range(chunk_from, chunk_to):', 'tp chunk loop')
+                         '        for c in range(chunk_from, chunk_to):', '%s chunk loop' % label)
 
-    span = function_span(''.join(lines), TP_FUNCTION)
+    span = function_span(''.join(lines), function)
     lines = replace_once(lines, span, '        if tail_real > 0:',
-                         '        if do_tail and tail_real > 0:', 'tp tail')
+                         '        if do_tail and tail_real > 0:', '%s tail' % label)
     return ''.join(lines)
+
+
+def patch_tp_replay(source):
+    """Both chunk loops, the traced one and the eager fallback serving runs."""
+    source = _patch_replay_loop(
+        source, TP_FUNCTION,
+        'self, token_ids, page_table, actual_len, num_full, chunk_size, tail_real, vision_tokens=None',
+        '        # Re-zero GDN once; carries across replays + tail (chunk_start>0 skips reset).',
+        'tp')
+    return _patch_replay_loop(
+        source, EAGER_FUNCTION,
+        'self, token_ids, page_table, actual_len, num_full, chunk_size, tail_real, flex_sdpa=True, vision_tokens=None',
+        '        # Re-zero GDN at sequence start; tail (chunk_start>0) keeps carried state.',
+        'eager')
 
 
 def patch_chunked_entry(source):
@@ -139,6 +158,42 @@ def patch_chunked_entry(source):
         '                    chunk_to=num_full, do_reset=(start == 0),\n'
         '                )',
         'chunked tp call')
+
+    # The eager fallback, which is the branch every serving run takes: the traced call
+    # above needs a captured chunk trace and trace_mode is 'decode_only'. Run
+    # 35693338281 threaded the range into the traced call only, so the continuation
+    # reached this one and replayed chunk zero.
+    span = function_span(''.join(lines), CHUNKED_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '            return self._prefill_chunked_eager_tp(\n'
+        '                token_ids,\n'
+        '                page_table,\n'
+        '                actual_len,\n'
+        '                num_full,\n'
+        '                chunk_size,\n'
+        '                tail_real,\n'
+        '                flex_sdpa=True,\n'
+        '                vision_tokens=vision_tokens,\n'
+        '            )',
+        '            assert start % chunk_size == 0, (\n'
+        '                "resumable prefill must continue on a chunk boundary: "\n'
+        '                f"start={start} chunk_size={chunk_size}"\n'
+        '            )\n'
+        '            return self._prefill_chunked_eager_tp(\n'
+        '                token_ids,\n'
+        '                page_table,\n'
+        '                actual_len,\n'
+        '                num_full,\n'
+        '                chunk_size,\n'
+        '                tail_real,\n'
+        '                flex_sdpa=True,\n'
+        '                vision_tokens=vision_tokens,\n'
+        '                chunk_from=start // chunk_size,\n'
+        '                chunk_to=num_full,\n'
+        '                do_reset=(start == 0),\n'
+        '            )',
+        'chunked eager call')
     return ''.join(lines)
 
 

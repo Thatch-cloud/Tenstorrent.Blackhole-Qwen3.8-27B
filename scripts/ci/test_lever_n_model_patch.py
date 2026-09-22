@@ -43,6 +43,29 @@ class Model:
                 return self._prefill_traced_chunked_tp(
                     token_ids, page_table, actual_len, num_full, chunk_size, tail_real, vision_tokens=vision_tokens
                 )
+            # Eager fallback: flexible qk=64 SDPA matches traced path.
+            return self._prefill_chunked_eager_tp(
+                token_ids,
+                page_table,
+                actual_len,
+                num_full,
+                chunk_size,
+                tail_real,
+                flex_sdpa=True,
+                vision_tokens=vision_tokens,
+            )
+        return None
+
+    def _prefill_chunked_eager_tp(
+        self, token_ids, page_table, actual_len, num_full, chunk_size, tail_real, flex_sdpa=True, vision_tokens=None
+    ):
+        """Docstring."""
+        # Re-zero GDN at sequence start; tail (chunk_start>0) keeps carried state.
+        self._reset_gdn_state_for_new_sequence()
+        for c in range(num_full):
+            pass
+        if tail_real > 0:
+            return self.prefill_masked_bucket()
         return None
 
     def _prefill_traced_chunked_tp(
@@ -84,11 +107,21 @@ class ScopingTests(unittest.TestCase):
         self.assertNotIn('def decoy_two', region)
         self.assertEqual(region.count('for c in range(num_full):'), 1)
 
-    def test_decoys_are_untouched(self):
+    def test_both_real_loops_are_rewritten_and_the_decoys_are_not(self):
+        """TWO now, not one. _prefill_chunked_eager_tp is the branch serving actually
+        takes - prefill_traced_chunked falls back to it whenever no chunk trace is
+        captured, and trace_mode is 'decode_only' in serving. Patching only the traced
+        twin is how run 35693338281 replayed chunk zero on a continuation.
+
+        The decoys still carry the unrewritten loop, which is what proves the edit is
+        scoped to the two real methods rather than applied by text across the file.
+        """
         out = patch_tp_replay(MODEL)
-        self.assertEqual(out.count('for c in range(chunk_from, chunk_to):'), 1)
-        self.assertEqual(out.count('for c in range(num_full):'), 2)  # both decoys intact
-        self.assertEqual(out.count('if do_tail and tail_real > 0:'), 1)
+        self.assertEqual(out.count('for c in range(chunk_from, chunk_to):'), 2,
+                         'the traced loop and the eager one')
+        self.assertEqual(out.count('for c in range(num_full):'), 2, 'both decoys intact')
+        self.assertEqual(out.count('if do_tail and tail_real > 0:'), 2)
+        self.assertEqual(out.count('if do_reset:'), 2)
 
     def test_replace_once_refuses_an_ambiguous_region(self):
         lines = MODEL.splitlines(keepends=True)
