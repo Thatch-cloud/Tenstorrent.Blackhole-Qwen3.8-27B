@@ -122,6 +122,9 @@ class PrefillWindowCapture:
         self.checks, self.chunks, self.children, self.merged = checks, [], [], []
         self.cursor = 0
         self.started = self.active = self.complete = self.closed = False
+        # How many engine steps this prompt's chunks arrived across. One for an
+        # unsuspended prefill; more once Lever N interleaves decode between chunks.
+        self.segments = 0
         self.result = None
         # The native GDN slot the batched prefill wrote this user's state into, or
         # None when the single-sequence prefill_traced_chunked path ran instead.
@@ -172,37 +175,73 @@ class PrefillWindowCapture:
             return original(token_ids_list, page_table, empty_slots, *args, **kwargs)
         return slots
 
+    def bindings(self):
+        """The model attributes this capture owns while a segment is open.
+
+        Reinstalled at the start of every segment and removed at its end, so between
+        engine steps the model carries no capture attributes at all - which is what
+        keeps the one-non-nested-capture guard meaningful across a suspended prefill.
+        """
+        found = [(self.model, '_qwen_dflash_prefill_capture', self),
+                 (self.model, '_forward_prefill_chunk_masked_tp', self.wrap(self.model._forward_prefill_chunk_masked_tp))]
+        # A model without a batched entry point prefills one sequence through
+        # prefill_traced_chunked, whose state lands where the fast path reads it.
+        # Every batched entry point the model DOES expose must be wrapped, or its
+        # slot goes unrecorded and adopt_prefill_slot reads 'nothing to adopt' -
+        # which is a legitimate value for the single-sequence path, so the failure
+        # is silent and the next user decodes from this one's recurrent state.
+        # That is exactly what M1's prefill_paged_slots_range did: added in
+        # lever_n_model_patch, absent from this list, invisible at runtime.
+        # Enumerate rather than list, so a method added later fails loudly here
+        # instead of silently there.
+        for name in sorted(n for n in dir(self.model) if n.startswith('prefill_paged_slots')):
+            if not callable(getattr(self.model, name, None)):
+                continue
+            if name not in BATCHED_PREFILL_ENTRIES:
+                raise ValueError('Unrecognised batched prefill entry point %r: the capture would '
+                                 'not record its GDN slot. Add it to BATCHED_PREFILL_ENTRIES '
+                                 'once its empty_slots argument is confirmed third-positional.'
+                                 % (name,))
+            found.append((self.model, name, self.wrap_slots(getattr(self.model, name))))
+        return found
+
     @contextmanager
-    def capture(self):
-        if self.started or self.closed or hasattr(self.model, '_qwen_dflash_prefill_capture') or hasattr(self.model, '_qwen_target_feature_capture'):
+    def segment(self):
+        """One engine step's worth of this prefill; several make one prompt.
+
+        Lever N suspends a prefill between chunks so a decode round can run, which
+        means the chunks of one prompt arrive across several execute_model calls. Four
+        things made that impossible while capture() was the only lifetime, all of them
+        consequences of tying the capture to one call rather than to the prompt:
+        instance_overrides removed the wrappers at the first step's exit,
+        validate_prefill_chunks fired there while cursor was still short of position,
+        `started` refused re-entry, and a fresh capture per step restarted cursor at 0
+        so the next chunk_start mismatched.
+
+        So the two things that end a capture are separated from the thing that ends a
+        step. A segment installs the bindings, runs, and removes them. Validation and
+        `complete` happen only when the cursor has actually reached position - which is
+        also why 'the last chunk' is the wrong unit to key anything on: at position
+        65504 with 2048-token chunks the draft tail straddles two calls, 32 rows then
+        2016 (docs/lever-n-build-plan-2026-09-22.md section 1).
+
+        The cursor, chunks and children all live on the object and are untouched
+        between segments, so the no-gap/no-replay ledger spans the suspension.
+        """
+        if self.closed:
+            raise ValueError('Chunked prefill capture is closed')
+        if self.complete:
+            raise ValueError('Chunked prefill capture already covered its prompt')
+        if hasattr(self.model, '_qwen_dflash_prefill_capture') or hasattr(self.model, '_qwen_target_feature_capture'):
             raise ValueError('One non-nested native prefill capture required')
         self.started = self.active = True
+        self.segments += 1
         try:
-            bindings = [(self.model, '_qwen_dflash_prefill_capture', self),
-                        (self.model, '_forward_prefill_chunk_masked_tp', self.wrap(self.model._forward_prefill_chunk_masked_tp))]
-            # A model without a batched entry point prefills one sequence through
-            # prefill_traced_chunked, whose state lands where the fast path reads it.
-            # Every batched entry point the model DOES expose must be wrapped, or its
-            # slot goes unrecorded and adopt_prefill_slot reads 'nothing to adopt' -
-            # which is a legitimate value for the single-sequence path, so the failure
-            # is silent and the next user decodes from this one's recurrent state.
-            # That is exactly what M1's prefill_paged_slots_range did: added in
-            # lever_n_model_patch, absent from this list, invisible at runtime.
-            # Enumerate rather than list, so a method added later fails loudly here
-            # instead of silently there.
-            for name in sorted(n for n in dir(self.model) if n.startswith('prefill_paged_slots')):
-                if not callable(getattr(self.model, name, None)):
-                    continue
-                if name not in BATCHED_PREFILL_ENTRIES:
-                    raise ValueError('Unrecognised batched prefill entry point %r: the capture would '
-                                     'not record its GDN slot. Add it to BATCHED_PREFILL_ENTRIES '
-                                     'once its empty_slots argument is confirmed third-positional.'
-                                     % (name,))
-                bindings.append((self.model, name, self.wrap_slots(getattr(self.model, name))))
-            with instance_overrides(bindings):
+            with instance_overrides(self.bindings()):
                 yield self
-            validate_prefill_chunks(self.position, self.chunks)
-            self.complete = True
+            if self.cursor >= self.position:
+                validate_prefill_chunks(self.position, self.chunks)
+                self.complete = True
         except BaseException:
             self.active = False
             self.close()
@@ -210,6 +249,30 @@ class PrefillWindowCapture:
         finally:
             self.active = False
 
+    @contextmanager
+    def capture(self):
+        """The whole prompt in one engine step - the unsuspended path, unchanged.
+
+        Kept as its own entry point because it is what every existing caller uses and
+        because its contract is stricter: one segment must cover the prompt. A caller
+        that means to suspend uses segment() and is then responsible for reaching
+        position; this refuses to leave a half-captured prompt looking finished.
+        """
+        if self.started:
+            raise ValueError('One non-nested native prefill capture required')
+        with self.segment():
+            yield self
+        if not self.complete:
+            # Raises with validate_prefill_chunks' own message, which is the one that
+            # names what is actually wrong with the chunk set. Closed on the way out:
+            # the segment's own handler cannot do it, because a short-but-well-formed
+            # chunk set raises HERE rather than inside the segment, and an abandoned
+            # capture must still release its snapshots and un-install its hooks.
+            try:
+                validate_prefill_chunks(self.position, self.chunks)
+            except BaseException:
+                self.close()
+                raise
     def outputs(self):
         if not self.complete or self.active or self.closed:
             raise ValueError('Complete open chunked prefill capture required')

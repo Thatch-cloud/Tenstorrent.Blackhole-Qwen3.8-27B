@@ -72,6 +72,13 @@ class PrefillWindowTests(unittest.TestCase):
         model._forward_prefill_chunk_masked_tp = chunk
         return model
 
+    def host_rows(self, position):
+        return (torch.arange(position).reshape(1, 1, -1, 1) % 97).expand(1, 1, -1, 2560).bfloat16()
+
+    def storage_addresses(self):
+        return patch('dflash_prefill_window.addresses',
+                     side_effect=lambda operations, tensor: (tensor.untyped_storage().data_ptr(),) * 2)
+
     def test_native_chunks_stitch_only_the_valid_tail_after_sources_are_reused(self):
         for position in (170, 2048, 2049, 4093, 4096, 6144):
             operations, model, checks = self.operations(), self.model(), []
@@ -114,6 +121,105 @@ class PrefillWindowTests(unittest.TestCase):
             self.assertTrue(capture.closed)
             self.assertIs(model._forward_prefill_chunk_masked_tp, original)
             self.assertFalse(hasattr(model, '_qwen_dflash_prefill_capture'))
+
+    def drive(self, capture, model, host, start, valid):
+        """One chunk, the way the plugin delivers it: bucket-padded, then reused."""
+        bucket = ((valid + 31) // 32) * 32
+        value = torch.full((1, 1, bucket, 2560), -500, dtype=torch.bfloat16)
+        value[..., :valid, :] = host[..., start:start + valid, :]
+        model._forward_prefill_chunk_masked_tp(value, valid, start, None, bucket)
+        value.zero_()
+
+    def test_a_prompt_captured_across_segments_matches_the_one_shot_result(self):
+        """Lever N suspends a prefill between chunks so a decode round can run, so one
+        prompt's chunks arrive across several execute_model calls. The stitched draft
+        tail must be identical to the unsuspended capture's."""
+        for position in (4096, 4093, 6144, 65504 % 8192 + 4096):
+            with self.subTest(position=position):
+                model, host = self.model(), self.host_rows(position)
+                one_shot = PrefillWindowCapture(self.operations(), self.model(), position, (1, 3))
+                spanning = PrefillWindowCapture(self.operations(), model, position, (1, 3))
+                with self.storage_addresses():
+                    reference_model = one_shot.model
+                    with one_shot.capture():
+                        for start in range(0, position, 2048):
+                            self.drive(one_shot, reference_model, host, start, min(2048, position - start))
+                    # The same chunks, one segment each.
+                    for start in range(0, position, 2048):
+                        with spanning.segment():
+                            self.drive(spanning, model, host, start, min(2048, position - start))
+                self.assertTrue(spanning.complete)
+                self.assertEqual(spanning.segments, len(range(0, position, 2048)))
+                for left, right in zip(spanning.outputs(), one_shot.outputs()):
+                    self.assertTrue(torch.equal(left, right))
+
+    def test_the_draft_tail_may_straddle_two_segments(self):
+        """The case that makes 'do it on the last chunk' wrong: at a position just past a
+        chunk boundary the 2048-row window is split across two calls, so both must
+        contribute or the stitched tail is short."""
+        position = 4096 + 32
+        model, host = self.model(), self.host_rows(position)
+        capture = PrefillWindowCapture(self.operations(), model, position, (1, 3))
+        with self.storage_addresses():
+            for start in range(0, position, 2048):
+                with capture.segment():
+                    self.drive(capture, model, host, start, min(2048, position - start))
+        retained = [chunk['retained_rows'] for chunk in capture.chunks]
+        self.assertEqual(sum(retained), 2048)
+        self.assertEqual(retained, [0, 2016, 32])          # both of the last two contribute
+        for output in capture.outputs():
+            self.assertTrue(torch.equal(output, host[..., -2048:, :]))
+
+    def test_the_cursor_and_its_refusals_span_the_suspension(self):
+        model, host = self.model(), self.host_rows(4096)
+        capture = PrefillWindowCapture(self.operations(), model, 4096, (1, 3))
+        with self.storage_addresses():
+            with capture.segment():
+                self.drive(capture, model, host, 0, 2048)
+            self.assertEqual(capture.cursor, 2048)
+            self.assertFalse(capture.complete)             # NOT complete at the first exit
+            with self.assertRaises(ValueError):            # replayed chunk, across the gap
+                with capture.segment():
+                    self.drive(capture, model, host, 0, 2048)
+        self.assertTrue(capture.closed)
+
+    def test_the_model_carries_no_capture_attributes_while_suspended(self):
+        """What keeps the one-non-nested-capture guard meaningful mid-prefill: between
+        segments the model is clean, so a second capture would be refused on entry but
+        nothing is left installed to confuse an unrelated decode step."""
+        model, host = self.model(), self.host_rows(4096)
+        original = model._forward_prefill_chunk_masked_tp
+        capture = PrefillWindowCapture(self.operations(), model, 4096, (1, 3))
+        with self.storage_addresses():
+            with capture.segment():
+                self.drive(capture, model, host, 0, 2048)
+                self.assertTrue(hasattr(model, '_qwen_dflash_prefill_capture'))
+            self.assertFalse(hasattr(model, '_qwen_dflash_prefill_capture'))
+            self.assertIs(model._forward_prefill_chunk_masked_tp, original)
+            with capture.segment():
+                self.drive(capture, model, host, 2048, 2048)
+        self.assertTrue(capture.complete)
+
+    def test_a_finished_capture_refuses_another_segment(self):
+        model, host = self.model(), self.host_rows(2048)
+        capture = PrefillWindowCapture(self.operations(), model, 2048, (1, 3))
+        with self.storage_addresses():
+            with capture.segment():
+                self.drive(capture, model, host, 0, 2048)
+            self.assertTrue(capture.complete)
+            with self.assertRaisesRegex(ValueError, 'already covered its prompt'):
+                with capture.segment():
+                    pass
+
+    def test_one_shot_capture_still_refuses_a_second_entry(self):
+        model, host = self.model(), self.host_rows(2048)
+        capture = PrefillWindowCapture(self.operations(), model, 2048, (1, 3))
+        with self.storage_addresses():
+            with capture.capture():
+                self.drive(capture, model, host, 0, 2048)
+            with self.assertRaisesRegex(ValueError, 'One non-nested native prefill capture required'):
+                with capture.capture():
+                    pass
 
     def test_straddling_window_coordinates_are_absolute_not_chunk_local(self):
         self.assertEqual(chunk_window(4093, 0, 2048), dict(start=2045, end=2048, rows=3))
