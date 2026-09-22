@@ -129,3 +129,87 @@ dependency order it needs: the fast-path overlay changed (image build) so the li
 admits partial prefills; `PrefillWindowCapture` taught to span suspended chunks across
 engine steps *and* to wrap the range method; M2 re-aimed at `OneInFlightScheduler`; the
 three images reconciled; and a four-user TTFT gate built to prove any of it worked.
+
+---
+
+## ADDENDUM 2026-09-22 late: what four hardware attempts established
+
+Four arms (v36 35679222511, v37 35681324335, v38 35682236496, v39 35683127469) plus
+one CPU probe (35681729538) and one image build (35682784112). None has yet produced a
+Lever N measurement. Each failed for a different, now-closed reason, and the sequence
+is worth recording because three of the four were avoidable from what this document
+already said.
+
+| Run | Reached | Died on | Avoidable? |
+| --- | --- | --- | --- |
+| v36 | server start | `--no-enable-chunked-prefill`: the host env var never crossed into the container | yes - argv fact |
+| v37 | config validation | `disable_chunked_mm_input` inherited from gemma4's branch | yes - argv fact |
+| v38 | the fast-path lifecycle | the image's **pre-step-5** `serving_lifecycle.py` | yes - **this document said so** |
+| v39 | in flight | control for the image swap | n/a |
+
+### The delivery split, which is the real finding
+
+Lever N's eight build steps do not share a delivery route:
+
+- **Graft (bind-mount) reaches:** step 3 and step 7's model-tree edits - `model.py`,
+  `qwen36_vllm.py`, `platform.py`, and the four m3native files.
+- **Only an image build reaches:** steps 1, 2 and 4 (`dflash_prefill_window.py`),
+  step 5 (`serving_lifecycle.py`), step 8 (`serving_one_in_flight.py`). All three live
+  in `/experiment-scripts/ci`, baked by the Dockerfile, and mounting over that tree is
+  forbidden.
+
+The overstatement this document corrected - "graft, not image build" - was corrected in
+words and then not acted on. Half the build was structurally unable to reach the rig
+through the route being used, and three arms ran anyway. `fast-serving-image-v79`
+(`sha256:e215968de712`, from commit 85f3fc50) is the build that carries them, with
+`test_serving_lifecycle` passing at bake time.
+
+### M1's equality gate was already passed, before any of this
+
+Run **35416319586** (`lever-n-m1-v8`, 2026-09-19) passed it on the plain path:
+
+    baseline_took_one_shot : true
+    baseline_avoided_range : true
+    resumable_took_range   : true
+    chunked: true   chunk_size: 2048   lengths_checked: 3/3   gate_passed: true
+
+Three prompt shapes - 460, 3524 and 5918 tokens, i.e. no full chunk, one chunk plus a
+tail, several chunks plus a tail - all `identical: true`. The `fatal: KeyError:
+'baseline'` on the resumable report is a reporting artefact of the arm that ran first
+with no peer yet; the baseline arm ran second with `--peer` and produced the comparisons.
+
+The fourth gate case, the mid-prefill short prompt, is **deliberately** not covered
+there: the gate's own docstring says v1 allows one in-flight prefill per lane, so it
+needs the M2 scheduler and is gated with M2.
+
+So the open question for M1 was never "does resumable prefill produce identical
+output". It was, and remains, **fast-path delivery**. Two observations sharpen that:
+
+1. The M1 lane is plain-path **by design**. `--fast-path` exists as a flag and is passed
+   by no workflow. Run 35413668471 tried it and every request died in
+   `dflash_device.__init__` with `bounded prefill required`.
+2. That refusal is narrower than "the 4096 pin blocks the fast path". The m3native lane
+   serves 32,768-token prompts on the fast path routinely. The fast path accepts
+   **qualified rungs**; the M1 gate's arbitrary 460/3524/5918-token prompts are not
+   rungs, and the staged recipe is CLI-locked to 32768
+   (`frozen_recipe_context.py:196-198`).
+
+Which makes the m3native lane the correct vehicle for the fast-path question - it is the
+only lane that reaches the fast path at a qualified rung with four users - and makes
+v38's failure the first genuinely informative one: it proved vLLM chunks the prompt
+(2048 of 32,768 scheduled) and that the fast-path lifecycle is the next wall.
+
+### Guards added so none of these three recur
+
+- `test_m3native_arm_env` - derives the `/bench` script list from the arm's own mount
+  flags, walks each script's AST for `M3NATIVE_*` environment reads (resolving through
+  helpers), and fails if one is not passed through with `-e`. Catches v36.
+- `test_m3native_engine_argv` - `engine_argv` split out of `start_server` so the argv is
+  assertable without launching a server. Pins both arms, the batched-budget-equals-chunk
+  invariant, the multimodal zeros, and that chunking moves the prefill budget and
+  nothing else. Catches v36 (12 failures) and v37 (2 failures) when either is reverted.
+- `test_lever_n_model_patch` platform tests now **execute** the patched policy against
+  stub configs instead of asserting on its text. The fixture is the real function,
+  copied verbatim from v37's graft artifact. Catches v38's class of fault: the previous
+  tests all asked whether the patched source had gained an `or`, so none could see which
+  branch it then entered.
