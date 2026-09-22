@@ -175,6 +175,47 @@ def sibling_kernel_modules():
     return found
 
 
+
+# Modules the image deliberately ships at their BUNDLE version although HEAD has moved on.
+# A module in the bundle tree, changed since BUNDLE_COMMIT and overlaid by neither copy list
+# is invisible to every other check in this file - both lists 'agree' about a file neither
+# names. That is how run 35790454545 (v87) ran the old ordered_cache.py on an image built
+# from the commit that changed it. Every such module must be listed here with a reason.
+UNREVIEWED = 'UNREVIEWED: changed at HEAD since bundle 77d6995a and overlaid by neither list, so the image ships the bundle version. Confirm whether serving imports it before relying on the HEAD behaviour.'
+
+KNOWN_STALE = {
+    'lever_n_model_patch.py': 'host-side only: imported by lever_n_m3native_patch in the graft '
+                              'job on the runner, never inside the container',
+    'longctx_cycle_bench.py': 'mounted per arm at /bench/longctx_cycle_bench.py '
+                              '(lever_n_m3native_run_arm.sh), not imported from the baked tree',
+    'feature_collective.py': UNREVIEWED,
+    'frozen_combined_adapters.py': UNREVIEWED,
+    'frozen_combined_gate.py': UNREVIEWED,
+    'frozen_combined_runtime.py': UNREVIEWED,
+    'frozen_mlp_wait_zones.py': UNREVIEWED,
+    'frozen_recipe_context.py': UNREVIEWED,
+    'frozen_stage_evidence.py': UNREVIEWED,
+    'frozen_target_replay.py': UNREVIEWED,
+    'mlp_clock_samples.py': UNREVIEWED,
+    'mlp_progressive_input.py': UNREVIEWED,
+    'mlp_progressive_input_gate.py': UNREVIEWED,
+}
+
+
+def stale_in_image():
+    """Bundle modules changed since BUNDLE_COMMIT that neither copy list overlays."""
+    def names(*command):
+        out = subprocess.run(command, capture_output=True, text=True, encoding='utf-8',
+                             cwd=str(ROOT)).stdout
+        return {line.rsplit('/', 1)[-1] for line in out.split(chr(10)) if line.strip()}
+
+    bundle = names('git', 'ls-tree', '-r', '--name-only', BUNDLE_COMMIT, '--', 'scripts/ci')
+    changed = names('git', 'diff', '--name-only', BUNDLE_COMMIT, 'HEAD', '--', 'scripts/ci')
+    overlaid = set(dockerfile_modules(dockerfile_text())) | set(context_modules())
+    return {name for name in bundle & changed
+            if name.endswith(('.py', '.cpp')) and not name.startswith('test_')
+            and name not in overlaid}
+
 class CopyClosureTests(unittest.TestCase):
     def test_a_copied_module_brings_its_sibling_kernel(self):
         """The blind spot that cost runs 35684239068 and 35685401900.
@@ -274,6 +315,27 @@ class CopyClosureTests(unittest.TestCase):
                              'cannot read scripts/ci at %s - is the clone shallow?'
                              % BUNDLE_COMMIT)
 
+
+    def test_no_changed_module_is_silently_stale_in_the_image(self):
+        """Run 35790454545 ran ordered_cache.py's OLD line 54 on an image built from the
+        commit that changed it: the file was in neither list, and every other test here
+        passed. A module changed since the bundle and overlaid by neither list must be named
+        in KNOWN_STALE with a reason - or added to BOTH lists."""
+        unlisted = sorted(stale_in_image() - set(KNOWN_STALE))
+        self.assertEqual(unlisted, [],
+                         'changed since the bundle but overlaid by neither copy list, so the image '
+                         'ships the OLD version: add each to BOTH the Dockerfile COPY list and the '
+                         'workflow context loop, or to KNOWN_STALE with a reason')
+
+    def test_known_stale_entries_are_still_stale(self):
+        """An entry that has since been overlaid, or reverted to the bundle version, must be
+        removed - otherwise KNOWN_STALE rots into a blanket exemption."""
+        self.assertEqual(sorted(set(KNOWN_STALE) - stale_in_image()), [])
+
+    def test_ordered_cache_is_overlaid(self):
+        """The file whose absence cost run 35790454545."""
+        self.assertIn('ordered_cache.py', dockerfile_modules(dockerfile_text()))
+        self.assertIn('ordered_cache.py', context_modules())
 
 if __name__ == '__main__':
     unittest.main()
