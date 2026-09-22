@@ -175,6 +175,16 @@ def start_server(port, users, context, results, log_name, readiness_seconds=900,
                '--max-num-batched-tokens', str(batched_tokens),
                '--block-size', str(BLOCK_SIZE), '--num-gpu-blocks-override', str(blocks),
                '--no-enable-prefix-caching', '--no-async-scheduling',
+               # Qwen3_5ForConditionalGeneration declares a 16384-token image item that
+               # Qwen36ForCausalLM, the text-only TT class it resolves to, can never
+               # consume. Left declared, vLLM sizes an encoder cache for it and, with
+               # disable_chunked_mm_input set, refuses to start at all when the batched
+               # budget is smaller (run 35681324335). lever_n_m1_gate has passed these
+               # exact zeros since its v8 run, so the keys are established rather than
+               # guessed; this is parity with a lane that works, and it makes
+               # compute_mm_encoder_budget return (0, 0) instead of sizing a cache for
+               # a modality this model has no weights for.
+               '--limit-mm-per-prompt', json.dumps(dict(image=0, video=0)),
                *chunked_flags, '--shutdown-timeout', '30',
                '--additional-config', json.dumps(recipe),
                '--speculative-config', json.dumps(
