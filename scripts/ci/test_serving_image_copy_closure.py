@@ -1,10 +1,15 @@
 """A file COPYed into the image must not need a symbol the bundle cannot supply.
 
 The image's /experiment-scripts/ci is two layers. The bundle archive is the base and is
-frozen at commit 77d6995a; the Dockerfile then COPYs about 89 modules from the repo over
-the top. probe_image_drift calls that the "thin adapter layer" and warns that overriding
-one of the core modules is only safe when the repo copy is byte-identical or a
-deliberate change. What neither it nor anything else checked is the seam BETWEEN the
+frozen at commit 77d6995a; repo modules are then layered over the top - but that takes
+TWO lists agreeing. qwen-fast-serving-image.yml assembles a build context by copying
+named files into it, and the Dockerfile COPYs from that context, so a module is in the
+image only when both name it. A module in the context loop alone never arrives and
+nothing says so; a module in the Dockerfile alone fails the build.
+
+probe_image_drift calls the repo layer the "thin adapter layer" and warns that
+overriding one of the core modules is only safe when the repo copy is byte-identical or
+a deliberate change. What neither it nor anything else checked is the seam BETWEEN the
 layers: a repo module copied over the bundle may import a symbol that only exists in the
 repo, from a module that was NOT copied and therefore arrives as the bundle's older copy.
 
@@ -30,7 +35,9 @@ import subprocess
 import unittest
 
 HERE = Path(__file__).parent
-DOCKERFILE = HERE.parent.parent / 'docker' / 'qwen-fast-serving.Dockerfile'
+ROOT = HERE.parent.parent
+DOCKERFILE = ROOT / 'docker' / 'qwen-fast-serving.Dockerfile'
+WORKFLOW = ROOT / '.github' / 'workflows' / 'qwen-fast-serving-image.yml'
 
 # The tree the bundle archive was built from. docs/batch-spec-tasks-2026-09-19.md
 # records it as inventory sha 826ea8f0 at commit 77d6995a, and memory
@@ -44,8 +51,8 @@ def dockerfile_text():
     return DOCKERFILE.read_text(encoding='utf-8').replace(chr(13) + chr(10), chr(10))
 
 
-def copied_modules(text):
-    """Every scripts/ci module the Dockerfile copies over the bundle."""
+def dockerfile_modules(text):
+    """Every scripts/ci module a Dockerfile COPY line names."""
     names = set()
     for line in text.splitlines():
         if not line.startswith('COPY '):
@@ -59,6 +66,30 @@ def copied_modules(text):
     if not names:
         raise AssertionError('no scripts/ci COPY lines parsed - the regex has drifted')
     return names
+
+
+def context_modules():
+    """Every scripts/ci module the image workflow copies into the build context."""
+    text = WORKFLOW.read_text(encoding='utf-8').replace(chr(13) + chr(10), chr(10))
+    names = set()
+    for match in re.finditer(r'for name in ([^;]+); do', text):
+        for token in match.group(1).split():
+            if re.match(r'^[A-Za-z0-9_]+[.]py$', token):
+                names.add(token)
+    for match in re.finditer(r'cp serving-build-orchestrator/scripts/ci/(\S+)', text):
+        token = match.group(1)
+        if token == 'test_serving_*.py':
+            names.update(p.name for p in HERE.glob('test_serving_*.py'))
+        elif re.match(r'^[A-Za-z0-9_]+[.]py$', token):
+            names.add(token)
+    if not names:
+        raise AssertionError('no context copies parsed - the workflow shape has drifted')
+    return names
+
+
+def copied_modules(text):
+    """Modules that actually reach the image: named in BOTH lists."""
+    return dockerfile_modules(text) & context_modules()
 
 
 def source_at_bundle(name):
@@ -151,12 +182,33 @@ class CopyClosureTests(unittest.TestCase):
         source = (HERE / 'gdn_device_loop_state.py').read_text(encoding='utf-8')
         self.assertIn('from gdn_state_copy import', source)
 
+    def test_the_two_lists_agree(self):
+        """A module in one list only. Context-only never reaches the image and nothing
+        reports it; Dockerfile-only fails the build on a missing context file - which is
+        how image v80 (run 35683705303) was going to fail, because I added
+        gdn_state_copy.py to the Dockerfile and not to the context loop."""
+        docker = dockerfile_modules(dockerfile_text())
+        context = context_modules()
+        self.assertEqual(
+            sorted(docker - context), [],
+            'in the Dockerfile but not copied into the build context, so docker build '
+            'cannot find them')
+        self.assertEqual(
+            sorted(context - docker), [],
+            'copied into the build context but never COPYed into the image, so they are '
+            'silently absent at runtime')
+
+    def test_both_new_modules_are_in_both_lists(self):
+        for name in ('gdn_state_copy.py', 'test_packed_verifier.py'):
+            with self.subTest(module=name):
+                self.assertIn(name, dockerfile_modules(dockerfile_text()))
+                self.assertIn(name, context_modules())
+
     def test_the_bundle_commit_is_still_the_pinned_one(self):
         """The check is only sound while BUNDLE_COMMIT is the tree the bundle was built
         from. The image workflow asserts the inventory sha, so comparing against it
         catches a re-pin that left this constant behind."""
-        workflow = (DOCKERFILE.parent.parent / '.github' / 'workflows'
-                    / 'qwen-fast-serving-image.yml').read_text(encoding='utf-8')
+        workflow = WORKFLOW.read_text(encoding='utf-8')
         self.assertIn(BUNDLE_INVENTORY_SHA, workflow,
                       'the image workflow no longer pins the inventory this commit '
                       'belongs to; re-check BUNDLE_COMMIT against the new bundle')
