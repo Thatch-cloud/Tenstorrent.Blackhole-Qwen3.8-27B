@@ -58,7 +58,7 @@ def dockerfile_modules(text):
         if not line.startswith('COPY '):
             continue
         for token in line.split():
-            match = re.match(r'^scripts/ci/([A-Za-z0-9_]+[.]py)$', token)
+            match = re.match(r'^scripts/ci/([A-Za-z0-9_]+[.](?:py|cpp))$', token)
             if match:
                 names.add(match.group(1))
             elif token == 'scripts/ci/test_serving_*.py':
@@ -74,13 +74,13 @@ def context_modules():
     names = set()
     for match in re.finditer(r'for name in ([^;]+); do', text):
         for token in match.group(1).split():
-            if re.match(r'^[A-Za-z0-9_]+[.]py$', token):
+            if re.match(r'^[A-Za-z0-9_]+[.](?:py|cpp)$', token):
                 names.add(token)
     for match in re.finditer(r'cp serving-build-orchestrator/scripts/ci/(\S+)', text):
         token = match.group(1)
         if token == 'test_serving_*.py':
             names.update(p.name for p in HERE.glob('test_serving_*.py'))
-        elif re.match(r'^[A-Za-z0-9_]+[.]py$', token):
+        elif re.match(r'^[A-Za-z0-9_]+[.](?:py|cpp)$', token):
             names.add(token)
     if not names:
         raise AssertionError('no context copies parsed - the workflow shape has drifted')
@@ -151,7 +151,61 @@ def unsatisfiable_imports():
     return missing
 
 
+SIBLING_KERNEL = ('with_suffix(' + chr(34) + '.cpp' + chr(34) + ')',
+                  'with_suffix(' + chr(39) + '.cpp' + chr(39) + ')')
+
+
+def sibling_kernel_modules():
+    """Modules that build a kernel from the .cpp sitting next to them.
+
+    ttnn.KernelDescriptor(kernel_source=Path(__file__).with_suffix('.cpp')) means the
+    sibling file IS the kernel, so the pair is atomic: copy one without the other and
+    the python drives a kernel expecting different arguments.
+    """
+    found = []
+    for path in sorted(HERE.glob('*.py')):
+        try:
+            source = path.read_text(encoding='utf-8')
+        except UnicodeDecodeError:
+            continue
+        if any(marker in source for marker in SIBLING_KERNEL):
+            found.append(path.name)
+    if not found:
+        raise AssertionError('no sibling-kernel modules found - the marker has drifted')
+    return found
+
+
 class CopyClosureTests(unittest.TestCase):
+    def test_a_copied_module_brings_its_sibling_kernel(self):
+        """The blind spot that cost runs 35684239068 and 35685401900.
+
+        Import closure cannot see a .cpp loaded by path, so a python module copied over
+        the bundle can end up driving the bundle's older kernel with a newer argument
+        layout. That does not raise - it wedges a core and the next generic_op hangs.
+        """
+        docker = dockerfile_modules(dockerfile_text())
+        context = context_modules()
+        broken = []
+        for name in sibling_kernel_modules():
+            kernel = name[:-3] + '.cpp'
+            if not (HERE / kernel).is_file():
+                continue
+            py_copied = name in docker or name in context
+            kernel_copied = kernel in docker and kernel in context
+            if py_copied and not kernel_copied:
+                broken.append('%s is copied but %s is not' % (name, kernel))
+        self.assertEqual(broken, [], '; '.join(broken))
+
+    def test_gdn_state_copy_travels_as_a_pair(self):
+        """Named explicitly because it is the one that broke, and because 7ecf980a
+        changed both halves in the same commit - 84 lines of python, 21 of kernel."""
+        docker = dockerfile_modules(dockerfile_text())
+        context = context_modules()
+        for name in ('gdn_state_copy.py', 'gdn_state_copy.cpp'):
+            with self.subTest(file=name):
+                self.assertIn(name, docker)
+                self.assertIn(name, context)
+
     def test_no_copied_module_needs_a_symbol_the_bundle_lacks(self):
         missing = unsatisfiable_imports()
         report = []

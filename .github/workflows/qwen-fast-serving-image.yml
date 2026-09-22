@@ -58,7 +58,7 @@ jobs:
           for name in serving_runtime.py serving_gather_experiment.py gdn_grouped_gather.py gdn_grouped_gather_gate.py gdn_grouped_gather_scope.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
-          for name in packed_verifier.py serving_packed_step.py gdn_device_loop_state.py gdn_records.py gdn_state_copy.py test_packed_verifier.py; do
+          for name in packed_verifier.py serving_packed_step.py gdn_device_loop_state.py gdn_records.py gdn_state_copy.py gdn_state_copy.cpp test_packed_verifier.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
           for name in gdn_snapshot.py dflash_prefill_window.py; do

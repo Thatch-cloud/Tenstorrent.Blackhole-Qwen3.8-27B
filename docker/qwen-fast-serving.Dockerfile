@@ -41,7 +41,15 @@ COPY scripts/ci/packed_verifier.py scripts/ci/serving_packed_step.py scripts/ci/
 # "cannot import name batch_enabled from gdn_state_copy"; it went unnoticed
 # because the m3native lane serves a different image. test_serving_image_copy_closure
 # now fails on CPU for any COPYed file needing a symbol the bundle cannot supply.
-COPY scripts/ci/gdn_state_copy.py /experiment-scripts/ci/
+# The .cpp travels with it: gdn_state_copy builds its KernelDescriptor with
+# kernel_source=Path(__file__).with_suffix(".cpp"), so the SIBLING file is the
+# kernel. Commit 7ecf980a changed both together - the new python emits runtime
+# args as group-count + worker-index + 15-value blocks and the new kernel reads
+# that layout. Copying only the .py left the new python driving the bundle's OLD
+# kernel, which read a count where an address belongs, issued a DMA that never
+# completed, and wedged the core - so the NEXT generic_op hung, which is why runs
+# 35684239068 and 35685401900 hung at two different ops in the same warmup pass.
+COPY scripts/ci/gdn_state_copy.py scripts/ci/gdn_state_copy.cpp /experiment-scripts/ci/
 COPY scripts/ci/gdn_snapshot.py scripts/ci/dflash_prefill_window.py /experiment-scripts/ci/
 COPY scripts/ci/pooled_attention_replay.py /experiment-scripts/ci/
 COPY scripts/ci/target_packed_pages.py /experiment-scripts/ci/
