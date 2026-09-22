@@ -79,7 +79,14 @@ def profile(streams, environ=None):
         raise ValueError('At least one completed stream required for a TTFT profile')
 
     ttfts = sorted(s['ttft_s'] for s in streams if s.get('ttft_s') is not None)
-    deltas = [b - a for a, b in zip(ttfts, ttfts[1:])]
+    # Do NOT characterise from fewer TTFTs than there are users. Run 35679222511 had
+    # one user reach a first token and three error out, and this reported
+    # ttft_spread_s 0.0 with prefill_serial false - which reads as "the staircase is
+    # gone" when it means "three users never started". A spread over one sample is not
+    # a measurement, and a profile that looks like a result when it is not is worse
+    # than one that refuses.
+    incomplete = len(ttfts) < len(streams)
+    deltas = [] if incomplete else [b - a for a, b in zip(ttfts, ttfts[1:])]
     interval = statistics.median(deltas) if deltas else None
 
     # Steady-state round time, from every gap that is not a stall.
@@ -109,9 +116,11 @@ def profile(streams, environ=None):
 
     result = dict(
         users=len(streams),
+        ttfts_recorded=len(ttfts),
+        incomplete=incomplete,
         ttft_s=[round(v, 2) for v in ttfts],
         ttft_deltas_s=[round(v, 2) for v in deltas],
-        ttft_spread_s=round(ttfts[-1] - ttfts[0], 2) if ttfts else None,
+        ttft_spread_s=None if incomplete else round(ttfts[-1] - ttfts[0], 2),
         prefill_interval_s=round(interval, 2) if interval else None,
         prefill_serial=serial,
         round_s=round(round_s, 3) if round_s else None,
@@ -131,12 +140,23 @@ def profile(streams, environ=None):
     worst = _threshold(environ, FLAG_MAX_TTFT)
     if worst is not None and ttfts and ttfts[-1] > worst:
         failures.append('worst TTFT %.1f s exceeds %s=%.1f' % (ttfts[-1], FLAG_MAX_TTFT, worst))
+    # An incomplete run must not clear a gate. The worst-TTFT check above reads
+    # ttfts[-1], which on run 35679222511 was the ONE surviving user - three users
+    # dying made that ceiling easier to pass, not harder. Incompleteness is itself
+    # the failure whenever a threshold is being asserted.
+    if incomplete and (ceiling is not None or worst is not None):
+        failures.append('only %d of %d users reached a first token, so nothing here'
+                        ' characterises admission' % (len(ttfts), len(streams)))
     result['thresholds_checked'] = ceiling is not None or worst is not None
     result['failures'] = failures
     return result
 
 
 def render(result):
+    if result.get('incomplete'):
+        return ('TTFT profile: INCOMPLETE - %d of %d users reached a first token.\n'
+                '  Nothing here characterises admission; fix the run before reading it.'
+                % (result['ttfts_recorded'], result['users']))
     lines = ['TTFT profile: %d users' % result['users'],
              '  TTFT            %s  (spread %.1f s)' % (
                  ' '.join('%.1f' % v for v in result['ttft_s']), result['ttft_spread_s'] or 0.0)]

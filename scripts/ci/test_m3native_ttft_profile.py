@@ -106,6 +106,38 @@ class ThresholdTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     profile(V34)
 
+    def test_an_incomplete_run_characterises_nothing(self):
+        """Run 35679222511: one user reached a first token, three errored out. The
+        profile reported ttft_spread_s 0.0 and prefill_serial false, which I read as
+        the staircase being gone. It meant three users never started."""
+        v36 = [stream(13.68, 39.5)] + [dict(ttft_s=None, gaps_ms=[], wall_s=60.0, tokens=0)] * 3
+        with patch.dict(os.environ, {}, clear=True):
+            result = profile(v36)
+        self.assertTrue(result['incomplete'])
+        self.assertEqual(result['ttfts_recorded'], 1)
+        self.assertEqual(result['users'], 4)
+        self.assertIsNone(result['ttft_spread_s'])
+        self.assertIsNone(result['prefill_interval_s'])
+        self.assertFalse(result['prefill_serial'])
+        self.assertFalse(result['stall_explained_by_admission'])
+        self.assertIn('INCOMPLETE', render(result))
+        self.assertNotIn('SERIAL', render(result))
+
+    def test_an_incomplete_run_cannot_pass_a_threshold(self):
+        """The surviving user's 13.7 s TTFT clears a 30 s ceiling that the full four
+        (52.5 s worst) would have blown, so incompleteness has to fail the gate."""
+        v36 = [stream(13.68, 39.5)] + [dict(ttft_s=None, gaps_ms=[], wall_s=60.0, tokens=0)] * 3
+        with patch.dict(os.environ, {FLAG_MAX_TTFT: '30'}, clear=True):
+            result = profile(v36)
+        self.assertTrue(result['thresholds_checked'])
+        self.assertEqual(len(result['failures']), 1)
+        self.assertIn('1 of 4 users', result['failures'][0])
+
+    def test_a_complete_run_is_not_flagged_incomplete(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(profile(V34)['incomplete'])
+            self.assertEqual(profile(V34)['ttfts_recorded'], 4)
+
     def test_empty_streams_refused(self):
         with self.assertRaises(ValueError):
             profile([])
