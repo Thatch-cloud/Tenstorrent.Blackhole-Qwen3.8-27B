@@ -229,3 +229,32 @@ movement, draft passes, draft publication - plus the ~6.1 GB per chip DRAM short
 for four users at 131k) says the hardware has the headroom; the per-user work is
 overhead-bound, not bandwidth-bound, so the path to parity is making it overlap rather
 than add.
+
+## The KV writer is independently verified at width 2,052
+
+Run **35793799919** (`experiment/ordered-cache-hw-probe-v1`, image v94) - the weight-free
+hardware probe the review required. The expected cache is predicted on the HOST from the
+page table alone, never read back from a native writer, so a misread shared by the
+ordered and native writers can no longer pass.
+
+- provenance: the image's baked `ordered_cache.py` and the checkout's are the same file
+  (sha256 `c74799af`), tt-metal `9f9cd4fd`, kernel hashes equal to `HASHES`;
+- geometry: 2,064 zeroed BF8 blocks, 16 rows each with its own permutation of block ids,
+  every row hitting page entries 0, 1, 1023, 1024, 1025 and 2047-2051;
+- **82 checks on hardware, all exact**: 58 full-cache comparisons plus zero-baseline,
+  page-upload, pages-unchanged and input-unchanged checks, on both chips;
+- the predicted set grows step by step - 16 blocks up to 95 (1,024 control), 157 (2,052
+  eager) and 166 (2,052 traced, page table rewritten in place between replays) - with
+  **0 predicted-block mismatches and 0 stray non-zero blocks** anywhere in the cache.
+
+So the writer is correct at width 2,052, eager and traced, both chips, including the four
+tail entries - independently of the native page-table read. Together with v88's
+byte-identical 131k decode, the 131k single-stream measurement stands on a verified
+writer.
+
+Still owed from the review, and lower risk now: an in-model permutation-invariance check -
+the same 131,072-token prompt under two physical block maps must give bit-identical tokens.
+
+Housekeeping: `ordered_cache.py`'s comment still says 2,052 is not yet qualified on
+hardware. Updating it changes the file's sha256 and so forces an image rebuild for the
+baked-copy check; it will be corrected with the next functional change to that file.
