@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import torch
 
 from dflash_device import DFlashDevice
-from dflash_prefill_window import PrefillWindowCapture, chunk_window, prefill_window, snapshot_prefill_tail, validate_prefill_chunks
+from dflash_prefill_window import BATCHED_PREFILL_ENTRIES, PrefillWindowCapture, chunk_window, prefill_window, snapshot_prefill_tail, validate_prefill_chunks
 
 
 class PrefillWindowTests(unittest.TestCase):
@@ -195,6 +195,61 @@ class PrefillWindowTests(unittest.TestCase):
             self.assertTrue(capture.closed)
             self.assertIs(model.prefill_paged_slots, original)
             self.assertFalse(hasattr(model, '_qwen_dflash_prefill_capture'))
+
+    def test_every_batched_prefill_entry_point_is_wrapped_not_just_the_known_one(self):
+        """The hazard this closes: M1 adds prefill_paged_slots_range, the capture bound
+        only prefill_paged_slots, so a resumed prompt left prefill_slot None - and None
+        is a LEGITIMATE value meaning 'single-sequence path, nothing to adopt', so
+        adopt_prefill_slot logged and returned and the next user decoded from this
+        one's recurrent state. Wrong output, no error. The capture now wraps every
+        entry point the model exposes."""
+        model = self.model()
+        calls = []
+
+        def paged_slots_range(token_ids_list, page_table, empty_slots, starts, ends, valid_lens=None):
+            calls.append(('range', list(empty_slots)))
+            return None
+
+        model.prefill_paged_slots_range = paged_slots_range
+        capture = PrefillWindowCapture(self.operations(), model, 64, (1, 3))
+        with patch('dflash_prefill_window.addresses',
+                   side_effect=lambda operations, tensor: (tensor.untyped_storage().data_ptr(),) * 2):
+            with capture.capture():
+                model.prefill_paged_slots_range(['t'], 'pt', [3], [0], [64])
+                value = torch.full((1, 1, 64, 2560), 0, dtype=torch.bfloat16)
+                model._forward_prefill_chunk_masked_tp(value, 64, 0, None, 64)
+        self.assertEqual(capture.prefill_slot, 3)
+        self.assertEqual(calls, [('range', [3])])
+
+    def test_an_unknown_batched_entry_point_is_refused_loudly_at_capture_time(self):
+        """A method added later must fail here, where it is obvious, rather than there,
+        where it is silent. The refusal is at capture entry, before any device work."""
+        model = self.model()
+        model.prefill_paged_slots_elsewhere = lambda *a, **k: None
+        capture = PrefillWindowCapture(self.operations(), model, 64, (1, 3))
+        with self.assertRaisesRegex(ValueError, 'Unrecognised batched prefill entry point'):
+            with capture.capture():
+                pass
+
+    def test_the_allowlist_names_exactly_the_two_known_entry_points(self):
+        self.assertEqual(set(BATCHED_PREFILL_ENTRIES),
+                         {'prefill_paged_slots', 'prefill_paged_slots_range'})
+
+    def test_a_model_with_no_batched_entry_point_still_captures(self):
+        """The single-sequence path through prefill_traced_chunked, whose state already
+        lands where the fast path reads it. prefill_slot stays None and that is correct."""
+        model = self.model()
+        # The fixture model has no batched entry point to begin with, which IS the
+        # single-sequence shape; drop one only if a future fixture adds it.
+        if hasattr(model, 'prefill_paged_slots'):
+            del model.prefill_paged_slots
+        capture = PrefillWindowCapture(self.operations(), model, 64, (1, 3))
+        with patch('dflash_prefill_window.addresses',
+                   side_effect=lambda operations, tensor: (tensor.untyped_storage().data_ptr(),) * 2):
+            with capture.capture():
+                value = torch.full((1, 1, 64, 2560), 0, dtype=torch.bfloat16)
+                model._forward_prefill_chunk_masked_tp(value, 64, 0, None, 64)
+        self.assertIsNone(capture.prefill_slot)
 
     def test_a_second_batched_prefill_in_one_capture_is_refused(self):
         operations, (model, calls) = self.operations(), self.batched_model()

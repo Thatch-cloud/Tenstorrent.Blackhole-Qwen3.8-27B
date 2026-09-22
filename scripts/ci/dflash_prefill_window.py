@@ -15,6 +15,15 @@ from target_features import LayerOutputCapture
 MAX_POSITION = int(os.environ.get('QWEN_FAST_MAX_POSITION', '65504'))
 
 
+# Every batched prefill entry point whose third positional argument is empty_slots.
+# prefill_paged_slots is the plugin's own; prefill_paged_slots_range is the resumable
+# form M1 adds (lever_n_model_patch.py), whose signature is
+# (token_ids_list, page_table, empty_slots, starts, ends, valid_lens=None) - the same
+# first three, so one wrapper serves both. A name outside this set is refused at
+# capture time rather than silently unwrapped.
+BATCHED_PREFILL_ENTRIES = frozenset({'prefill_paged_slots', 'prefill_paged_slots_range'})
+
+
 def prefill_slot(empty_slots):
     """The one native GDN slot a batched prefill writes.
 
@@ -151,6 +160,12 @@ class PrefillWindowCapture:
         # its own sat unread in slot 1 (runs 35492676194, 35493208438). Record the
         # slot so admission can adopt it into slot 0 before anything reads it.
         def slots(token_ids_list, page_table, empty_slots, *args, **kwargs):
+            # One CALL per capture, still. A resumed prompt re-enters this on every
+            # continuation chunk and will need 'one SLOT per capture' instead - but
+            # that relaxation belongs with the change that makes a capture span steps
+            # (build plan step 4). Until then this guard is what catches two prompts
+            # batched into one step, which the fast path cannot serve, so relaxing it
+            # early would remove a live check for a capability that does not exist.
             if not self.active or self.prefill_slot is not None:
                 raise ValueError('One batched prefill per capture required')
             self.prefill_slot = prefill_slot(empty_slots)
@@ -165,10 +180,25 @@ class PrefillWindowCapture:
         try:
             bindings = [(self.model, '_qwen_dflash_prefill_capture', self),
                         (self.model, '_forward_prefill_chunk_masked_tp', self.wrap(self.model._forward_prefill_chunk_masked_tp))]
-            # A model without the batched entry point prefills one sequence through
+            # A model without a batched entry point prefills one sequence through
             # prefill_traced_chunked, whose state lands where the fast path reads it.
-            if callable(getattr(self.model, 'prefill_paged_slots', None)):
-                bindings.append((self.model, 'prefill_paged_slots', self.wrap_slots(self.model.prefill_paged_slots)))
+            # Every batched entry point the model DOES expose must be wrapped, or its
+            # slot goes unrecorded and adopt_prefill_slot reads 'nothing to adopt' -
+            # which is a legitimate value for the single-sequence path, so the failure
+            # is silent and the next user decodes from this one's recurrent state.
+            # That is exactly what M1's prefill_paged_slots_range did: added in
+            # lever_n_model_patch, absent from this list, invisible at runtime.
+            # Enumerate rather than list, so a method added later fails loudly here
+            # instead of silently there.
+            for name in sorted(n for n in dir(self.model) if n.startswith('prefill_paged_slots')):
+                if not callable(getattr(self.model, name, None)):
+                    continue
+                if name not in BATCHED_PREFILL_ENTRIES:
+                    raise ValueError('Unrecognised batched prefill entry point %r: the capture would '
+                                     'not record its GDN slot. Add it to BATCHED_PREFILL_ENTRIES '
+                                     'once its empty_slots argument is confirmed third-positional.'
+                                     % (name,))
+                bindings.append((self.model, name, self.wrap_slots(getattr(self.model, name))))
             with instance_overrides(bindings):
                 yield self
             validate_prefill_chunks(self.position, self.chunks)
