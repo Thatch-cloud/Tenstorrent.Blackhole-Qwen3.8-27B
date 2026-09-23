@@ -66,6 +66,29 @@ bench as it was):
                   'M1 KERNEL_ELF K <hex|none> files=N'. K0c's output equals stock by design, so its
                   proof that the mounted reader was compiled is its reader ELF differing from stock's
                   (with stock's reproducible run to run: the session's closing stock2).
+
+Prefill-chain additions (sdpa-prefill-share-spec.md 3.7 / 6.2-6.3; optimisation/ttnn-op/sdpa_prefill_chain;
+all off by default, and the chain arms need the K64g graft: run_m1.sh KOPGRAFT_PF=~/opgraft-K64g):
+  arms chain / chain_b / chain_o / chain_bo
+                  the baseline call with SDPAProgramConfig.max_cores_per_head_batch = 0x5EFA0001 /
+                  0x5EFA0003 / 0x5EFA0005 / 0x5EFA0007 (the G6 K/V chain; 0x2 injector read cadence,
+                  0x4 NoC-cost chain order). Never in the default --arms.
+  --program-word HEX[,HEX]
+                  one extra arm per word, named word_0x<hex>: the baseline call with that word (test
+                  flags 0x100 / 0x200 need QWEN_SDPA_PF_TEST=1 in the container; refusal checks).
+  --q-memory {dram,l1}
+                  where Q lives (the model's Q is L1-interleaved: the Q2 acceptance placement).
+  --page-blocks N the page-table width in blocks (the model's 2080 at 131k), >= what the starts need,
+                  a multiple of 32; the K/V pool has the same number of blocks.
+  --verify-log    fds 1/2 go to <out>.native.log for the run; the factory's
+                  '[QWEN-SDPA-PF] flags=' lines are parsed (report 'pf_log') and printed as
+                  'M1 PF_LOG ...': exactly one per chain arm's flags (one program per shape, page
+                  width and flags), chains=16 members=96 at 2048 rows, none for a flags word no arm used.
+  --k0b32-slope S the K0b32 slope (ms per 1k keys) Q2's rule (a) compares against (default: the K0
+                  session's 0.2116). With the baseline and a chain arm timed, 'M1 Q2: ...' reports the
+                  best chain arm, per-step times (slope x 64 us) and rules (a) best <= 1.10 x K0b32,
+                  (b) best <= 0.85 x baseline, (c) intercept <= baseline + 0.2 ms, (d) every chain arm's
+                  output equals the baseline's at every start (needs --sha; without it Q2 FAILs).
 """
 
 import argparse
@@ -75,6 +98,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import statistics
 import struct
 import sys
@@ -119,12 +143,38 @@ ARMS = (
 )
 ARM_NAMES = tuple(arm['name'] for arm in ARMS)
 
+# Prefill lever #1: the baseline call plus the G6 K/V chain word (sdpa_prefill_chain/apply_factory_pf.py).
+PF_TAG = 0x5EFA0000
+PF_TEST_FLAGS = 0x300
+CHAIN_ARMS = (
+    dict(ARMS[0], name='chain', program_word=PF_TAG | 0x1),
+    dict(ARMS[0], name='chain_b', program_word=PF_TAG | 0x3),
+    dict(ARMS[0], name='chain_o', program_word=PF_TAG | 0x5),
+    dict(ARMS[0], name='chain_bo', program_word=PF_TAG | 0x7),
+)
+CHAIN_ARM_NAMES = tuple(arm['name'] for arm in CHAIN_ARMS)
+K0B32_SLOPE = 0.2116          # ms per 1k keys: K0b32, card M, image A' 1b9b6445 (Q2 rule (a))
+STEP_US_PER_SLOPE = 64.0      # per-step time (us) = slope (ms / 1k keys) x 0.128 k / 2 steps x 1000
+Q2_FORWARD_MAX = 1.10
+Q2_BASELINE_MAX = 0.85
+Q2_INTERCEPT_MAX_MS = 0.2
+Q2_PREFER_MARGIN = 0.02       # a flag set beyond 0x1 wins only with a >= 2% lower slope
+
+
+def word_arm(word):
+    """The baseline call with max_cores_per_head_batch = word (--program-word)."""
+    if not 0 <= word < (1 << 32):
+        raise ValueError('program word %r is not a 32-bit value' % (word,))
+    return dict(ARMS[0], name='word_%#x' % word, program_word=word)
+
 
 def arm_by_name(name):
-    for arm in ARMS:
+    for arm in ARMS + CHAIN_ARMS:
         if arm['name'] == name:
             return dict(arm)
-    raise ValueError('unknown arm %r (known: %s)' % (name, ', '.join(ARM_NAMES)))
+    if name.startswith('word_0x'):
+        return word_arm(int(name[len('word_'):], 16))
+    raise ValueError('unknown arm %r (known: %s)' % (name, ', '.join(ARM_NAMES + CHAIN_ARM_NAMES)))
 
 
 def validate(arm, starts, block=BLOCK):
@@ -449,12 +499,146 @@ def kernel_elf_line(report):
     return 'M1 KERNEL_ELF %s %s files=%d' % (report['name'], report.get('digest') or 'none', len(report.get('files') or ()))
 
 
+def q2_exact(chains, sha256, sha_stable=None):
+    """Rule (d): every production chain arm's output equals the baseline's, bit for bit, at every
+    timed start (--sha digests, report 'sha256' keyed 'arm@start'), and every digest was stable over
+    its two calls. None without digests (a run without --sha cannot pass Q2)."""
+    if not sha256:
+        return None, ['no --sha digests: exactness unchecked']
+    problems = []
+    starts = sorted({int(key.rsplit('@', 1)[1]) for key in sha256 if key.startswith('baseline@')})
+    if not starts:
+        return False, ['no baseline digest']
+    for name in sorted(chains):
+        for start in starts:
+            key, base = '%s@%d' % (name, start), 'baseline@%d' % start
+            if sha256.get(key) is None:
+                problems.append('%s: no digest' % key)
+            elif sha256[key] != sha256[base]:
+                problems.append('%s differs from the baseline output' % key)
+    for key, stable in sorted((sha_stable or {}).items()):
+        if not stable and (key.startswith('baseline@') or key.split('@', 1)[0] in chains):
+            problems.append('%s: the two calls gave different outputs' % key)
+    return not problems, problems
+
+
+def q2_verdict(table, k0b32_slope=K0B32_SLOPE, sha256=None, sha_stable=None):
+    """Spec 6.3's pass rules on one run's fitted slopes (None without the baseline and a chain arm):
+    the best production chain arm (no test flags) against K0b32 (a), the baseline (b) and the
+    baseline intercept (c); (d) every production chain arm's output equals the baseline's at every
+    start (--sha; without digests d is unchecked and Q2 does not pass); per-step times; and which
+    chain arms beat 'chain' (0x1) by >= 2%."""
+    base = table.get('baseline')
+    chains = {}
+    for name, line in table.items():
+        word = arm_by_name(name).get('program_word')
+        if line and word is not None and (word & 0xFFFF0000) == PF_TAG and not word & PF_TEST_FLAGS:
+            chains[name] = line
+    if not base or not chains:
+        return None
+    best = min(chains, key=lambda name: chains[name]['slope_ms_per_1k_keys'])
+    slope = chains[best]['slope_ms_per_1k_keys']
+    exact, exact_problems = q2_exact(chains, sha256, sha_stable)
+    rules = dict(a=slope <= Q2_FORWARD_MAX * k0b32_slope, b=slope <= Q2_BASELINE_MAX * base['slope_ms_per_1k_keys'],
+                 c=chains[best]['intercept_ms'] <= base['intercept_ms'] + Q2_INTERCEPT_MAX_MS, d=exact)
+    step_us = {name: line['slope_ms_per_1k_keys'] * STEP_US_PER_SLOPE for name, line in chains.items()}
+    step_us['baseline'] = base['slope_ms_per_1k_keys'] * STEP_US_PER_SLOPE
+    reference = chains.get('chain')
+    better = sorted(name for name, line in chains.items() if name != 'chain' and reference is not None
+                    and line['slope_ms_per_1k_keys'] <= (1 - Q2_PREFER_MARGIN) * reference['slope_ms_per_1k_keys'])
+    return dict(best=best, best_slope=slope, baseline_slope=base['slope_ms_per_1k_keys'], k0b32_slope=k0b32_slope,
+                best_over_k0b32=slope / k0b32_slope, best_over_baseline=slope / base['slope_ms_per_1k_keys'],
+                intercept_delta_ms=chains[best]['intercept_ms'] - base['intercept_ms'], rules=rules,
+                passed=all(value is True for value in rules.values()), step_us=step_us, beat_chain_by_2pct=better,
+                exact_problems=exact_problems)
+
+
+def q2_line(q2):
+    exact = q2['rules'].get('d')
+    return ('M1 Q2: %s | best=%s slope=%.4f (x%.3f K0b32, x%.3f baseline) intercept%+.3f ms step=%.2f us '
+            '(baseline %.2f us) a=%d b=%d c=%d d(exact)=%s beat_0x1_by_2pct=%s%s' % (
+                'PASS' if q2['passed'] else 'FAIL', q2['best'], q2['best_slope'], q2['best_over_k0b32'],
+                q2['best_over_baseline'], q2['intercept_delta_ms'], q2['step_us'][q2['best']], q2['step_us']['baseline'],
+                q2['rules']['a'], q2['rules']['b'], q2['rules']['c'], '-' if exact is None else int(exact),
+                ','.join(q2['beat_chain_by_2pct']) or '-',
+                '' if not q2.get('exact_problems') else ' | ' + '; '.join(q2['exact_problems'][:4])))
+
+
+PF_LOG = '[QWEN-SDPA-PF] flags='
+PF_LOG_LINE = re.compile(r'\[QWEN-SDPA-PF\] flags=(0x[0-9a-f]+) kv_chain=1 chains=([0-9]+) members=([0-9]+) '
+                         r'order=([a-z]+)')
+
+
+def pf_log_lines(text):
+    """The factory F4 lines: [dict(flags, chains, members, order)]."""
+    return [dict(flags=int(m.group(1), 16), chains=int(m.group(2)), members=int(m.group(3)), order=m.group(4))
+            for m in PF_LOG_LINE.finditer(text)]
+
+
+def check_pf_log(lines, arms, rows=ROWS):
+    """[problems]: exactly one line per chain arm's flags (one program each: one shape, one page
+    width per run), none for flags no arm used, chains=16 members=96 at 2048 rows, the order the
+    0x4 bit asks for."""
+    problems = []
+    wanted = sorted({arm['program_word'] & 0xFFFF for arm in arms
+                     if arm.get('program_word') is not None and (arm['program_word'] & 0xFFFF0000) == PF_TAG})
+    counts = {}
+    for line in lines:
+        counts[line['flags']] = counts.get(line['flags'], 0) + 1
+        if rows == 2048 and (line['chains'], line['members']) != (16, 96):
+            problems.append('flags %#x: chains=%d members=%d, expected 16 / 96' % (line['flags'], line['chains'],
+                                                                                line['members']))
+        if line['order'] != ('noc' if line['flags'] & 0x4 else 'raster'):
+            problems.append('flags %#x: order=%s' % (line['flags'], line['order']))
+    for flags in wanted:
+        if counts.get(flags, 0) != 1:
+            problems.append('flags %#x: %d factory lines, expected exactly 1' % (flags, counts.get(flags, 0)))
+    for flags in sorted(set(counts) - set(wanted)):
+        problems.append('flags %#x: %d factory lines nobody asked for' % (flags, counts[flags]))
+    return problems
+
+
+class NativeLog:
+    """fds 1 and 2 (tt-logger's sinks) to a file for the run; Python's own prints keep going to the
+    original stdout/stderr (as test_sdpa_decode_qwen_card_m.NativeLog)."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def __enter__(self):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self.saved = [os.dup(1), os.dup(2)]
+        self.handle = open(self.path, 'wb')
+        os.dup2(self.handle.fileno(), 1)
+        os.dup2(self.handle.fileno(), 2)
+        self.stdout, self.stderr = sys.stdout, sys.stderr
+        sys.stdout = os.fdopen(os.dup(self.saved[0]), 'w', buffering=1)
+        sys.stderr = os.fdopen(os.dup(self.saved[1]), 'w', buffering=1)
+        return self
+
+    def __exit__(self, *exc):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.stdout.close()
+        sys.stderr.close()
+        sys.stdout, sys.stderr = self.stdout, self.stderr
+        os.dup2(self.saved[0], 1)
+        os.dup2(self.saved[1], 2)
+        for fd in self.saved:
+            os.close(fd)
+        self.handle.close()
+        return False
+
+    def text(self):
+        return self.path.read_bytes().decode('utf-8', 'replace') if self.path.is_file() else ''
+
+
 def format_table(results, table, starts):
     lines = ['%-11s %6s %5s' % ('arm', 'rows', 'cores') + ''.join(' %10s' % ('@%dk' % (s // 1024)) for s in starts)
              + ' %12s %14s' % ('ms/1k keys', 'per 2048 rows')]
-    for arm in ARMS:
-        if arm['name'] not in results:
-            continue
+    names = [arm['name'] for arm in ARMS if arm['name'] in results] + [name for name in results if name not in ARM_NAMES]
+    for arm in (arm_by_name(name) for name in names):
         cells = ''.join(' %10s' % ('ERR' if results[arm['name']].get(str(s)) is None
                                    else '%.3f' % results[arm['name']][str(s)]) for s in starts)
         line = table.get(arm['name'])
@@ -472,9 +656,21 @@ def _dtype(ttnn, name):
     return ttnn.bfloat8_b if name == 'bf8' else ttnn.bfloat16
 
 
-def build_inputs(ttnn, torch, device, arms, starts, seed=0):
+def page_table_blocks(arms, starts, page_blocks=None, block=BLOCK):
+    """The pool / page-table width: what the starts need, or --page-blocks (>= that, a multiple of 32)."""
+    needed = pool_blocks(arms, starts, block)
+    if page_blocks is None:
+        return needed
+    if page_blocks < needed or page_blocks % 32:
+        raise ValueError('--page-blocks %d must be >= %d (the largest start + rows) and a multiple of 32'
+                         % (page_blocks, needed))
+    return page_blocks
+
+
+def build_inputs(ttnn, torch, device, arms, starts, seed=0, q_memory='dram', page_blocks=None):
     """One K/V pool per KV dtype, one scattered page table, one Q per (rows, dtype)."""
-    blocks = pool_blocks(arms, starts)
+    blocks = page_table_blocks(arms, starts, page_blocks)
+    q_config = ttnn.L1_MEMORY_CONFIG if q_memory == 'l1' else ttnn.DRAM_MEMORY_CONFIG
     generator = torch.Generator().manual_seed(seed)
     inputs = dict(blocks=blocks, pools={}, queries={}, starts={})
     for kv_dtype in sorted({arm['kv_dtype'] for arm in arms}):
@@ -492,7 +688,7 @@ def build_inputs(ttnn, torch, device, arms, starts, seed=0):
         if key not in inputs['queries']:
             host = torch.randn(q_shape(arm), generator=generator, dtype=torch.float32).to(torch.bfloat16)
             inputs['queries'][key] = ttnn.from_torch(host, dtype=_dtype(ttnn, arm['q_dtype']), layout=ttnn.TILE_LAYOUT,
-                                                     device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                                                     device=device, memory_config=q_config)
     for start in starts:
         inputs['starts'][start] = ttnn.from_torch(torch.tensor([start], dtype=torch.int32), dtype=ttnn.int32,
                                                   layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
@@ -505,8 +701,11 @@ def make_call(ttnn, device, inputs, arm, start, grid, start_mode):
     query = inputs['queries'][(arm['rows'], arm['q_dtype'])]
     compute = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi2, math_approx_mode=True,
                                                fp32_dest_acc_en=arm['fp32_dest'], packer_l1_acc=True)
-    program = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=grid, exp_approx_mode=arm['exp_approx'],
-                                     q_chunk_size=arm['q_chunk'], k_chunk_size=arm['k_chunk'])
+    config = dict(compute_with_storage_grid_size=grid, exp_approx_mode=arm['exp_approx'],
+                  q_chunk_size=arm['q_chunk'], k_chunk_size=arm['k_chunk'])
+    if arm.get('program_word') is not None:
+        config['max_cores_per_head_batch'] = arm['program_word']   # the G6 chain word (K64g factory F1)
+    program = ttnn.SDPAProgramConfig(**config)
     common = dict(input_tensor_q=query, input_tensor_k=k_pool, input_tensor_v=v_pool,
                   page_table_tensor=inputs['page_table'], compute_kernel_config=compute, program_config=program)
     if start_mode == 'tensor':
@@ -544,7 +743,8 @@ def run(options, watchdog=None):
     with guard('open_device', extra=COMPILE_GRACE_S):      # a fresh TT_METAL_CACHE: the firmware builds here
         device = ttnn.open_device(device_id=options.device_id, l1_small_size=24576)
     report = dict(passed=False, arms=arms, starts=list(options.starts), start_mode=options.start_mode,
-                  warmup=options.warmup, rounds=options.rounds)
+                  warmup=options.warmup, rounds=options.rounds, q_memory=getattr(options, 'q_memory', 'dram'),
+                  page_blocks=getattr(options, 'page_blocks', None))
     try:
         grid_size = device.compute_with_storage_grid_size()
         grid = (grid_size.x, grid_size.y)
@@ -562,7 +762,9 @@ def run(options, watchdog=None):
             except Exception as error:  # noqa: BLE001 - the fixture must never cost the timing run
                 report['coords_error'] = '%s: %s' % (type(error).__name__, error)
         with guard('build_inputs', extra=COMPILE_GRACE_S):     # host bf8 tilize of two K/V pools, 8 CPUs, CI load
-            inputs = build_inputs(ttnn, torch, device, arms, options.starts, seed=options.seed)
+            inputs = build_inputs(ttnn, torch, device, arms, options.starts, seed=options.seed,
+                                  q_memory=getattr(options, 'q_memory', 'dram'),
+                                  page_blocks=getattr(options, 'page_blocks', None))
         report['pool_blocks'] = inputs['blocks']
         calls, errors, paths = {}, {}, {}
         for arm in arms:
@@ -621,6 +823,8 @@ def run(options, watchdog=None):
                                  for start in options.starts} for arm in arms}
         table = slopes(results)
         outcome = verdict(table)
+        q2 = q2_verdict(table, getattr(options, 'k0b32_slope', K0B32_SLOPE), digests.get('sha256'),
+                        digests.get('sha_stable'))
         report.update(
             passed=bool(calls) and all(value is not None for value in results.get('baseline', {}).values()),
             median_ms=results, slopes=table, verdict=outcome, verdict_line=verdict_line(outcome),
@@ -630,6 +834,8 @@ def run(options, watchdog=None):
             busy_cores={arm['name']: busy_cores(arm) for arm in arms},
             kv_gbytes_per_call={arm['name']: {str(s): kv_bytes(arm, s) / 1e9 for s in options.starts} for arm in arms},
             table=format_table(results, table, list(options.starts)), **digests)
+        if q2 is not None:
+            report.update(q2=q2, q2_line=q2_line(q2))
     finally:
         with guard('close_device'):
             ttnn.close_device(device)
@@ -661,8 +867,19 @@ def main(argv=None):
                         help='also write worker_core_from_logical_core for every grid core (JSON) here')
     parser.add_argument('--kernel-elf', default=None, metavar='KERNEL',
                         help="after the run, digest this kernel's compiled ELFs in $TT_METAL_CACHE (PT_LOAD bytes)")
+    parser.add_argument('--program-word', default='',
+                        help='extra arms: the baseline call with max_cores_per_head_batch = each HEX word (comma list)')
+    parser.add_argument('--q-memory', choices=('dram', 'l1'), default='dram', help='Q placement (the model: l1)')
+    parser.add_argument('--page-blocks', type=int, default=None, help='page-table width in blocks (the model: 2080)')
+    parser.add_argument('--verify-log', action='store_true',
+                        help="capture fds 1/2 to <out>.native.log and check the factory's [QWEN-SDPA-PF] lines")
+    parser.add_argument('--k0b32-slope', type=float, default=K0B32_SLOPE, help='Q2 rule (a) reference slope')
     options = parser.parse_args(argv)
     options.arms = parse_list(options.arms)
+    for word in parse_list(options.program_word, lambda text: int(text, 0)):
+        name = word_arm(word)['name']
+        if name not in options.arms:
+            options.arms.append(name)
     options.starts = parse_list(options.starts, int)
     for name in options.arms:
         arm_by_name(name)
@@ -679,11 +896,23 @@ def main(argv=None):
         dict(passed=False, error='WATCHDOG: %s did not return within %.0f s' % (what, options.watchdog_s),
              watchdog=what)))
     report = dict(passed=False)
+    native = NativeLog(options.out.with_name(options.out.name + '.native.log')) if options.verify_log else None
     try:
-        report = run(options, watchdog)
+        if native is not None:
+            options.out.parent.mkdir(parents=True, exist_ok=True)
+            with native:
+                report = run(options, watchdog)
+        else:
+            report = run(options, watchdog)
     except Exception as error:  # noqa: BLE001
         report['error'] = '%s: %s' % (type(error).__name__, error)
     finally:
+        if native is not None:
+            lines = pf_log_lines(native.text())
+            problems = check_pf_log(lines, [arm_by_name(name) for name in options.arms])
+            report['pf_log'] = dict(path=str(native.path), lines=lines, problems=problems)
+            if problems:
+                report['passed'] = False
         if options.kernel_elf:
             report['kernel_elf'] = kernel_elf_report(os.environ.get('TT_METAL_CACHE'), options.kernel_elf)
         write_report(report)
@@ -697,6 +926,14 @@ def main(argv=None):
         print(kernel_elf_line(report['kernel_elf']))
     if report.get('coords_error'):
         print('COORDS ERROR: %s' % report['coords_error'])
+    if report.get('pf_log') is not None:
+        for line in report['pf_log']['lines']:
+            print('M1 PF_LOG flags=%#x chains=%d members=%d order=%s' % (line['flags'], line['chains'], line['members'],
+                                                                        line['order']))
+        print('M1 PF_LOG %s' % ('ok' if not report['pf_log']['problems']
+                                else 'FAIL: ' + '; '.join(report['pf_log']['problems'])))
+    if report.get('q2_line'):
+        print(report['q2_line'])
     print(report.get('verdict_line') or 'M1 VERDICT: incomplete | %s' % report.get('error', 'no result'))
     return 0 if report.get('passed') else 1
 

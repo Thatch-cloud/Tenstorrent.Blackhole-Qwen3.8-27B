@@ -480,7 +480,8 @@ class RunnerTests(unittest.TestCase):
         refusal = text.index('docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "refusing: image')
         self.assertLess(text.index('holds a Tenstorrent device'), refusal)
         self.assertLess(refusal, text.index('echo "### M1 $stamp node='))
-        self.assertLess(text.index('echo "### M1 $stamp node='), text.index('timeout -k 30 1800 "${argv[@]}"'))
+        self.assertLess(text.index('echo "### M1 $stamp node='), text.index('timeout -k 30 "$timeout_s" "${argv[@]}"'))
+        self.assertIn('timeout_s=1800', text)             # 900 only under WATCHER=1 (the prefill-chain pass)
 
     def test_a_directory_or_a_missing_file_is_refused(self):
         for reader in (posix(K0_DIR), posix(K0_DIR / 'no_such_reader.cpp')):

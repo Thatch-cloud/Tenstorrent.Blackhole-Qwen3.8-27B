@@ -66,6 +66,7 @@ jobs:
           python -B -m unittest test_m3native_arm_env
           python -B -m unittest test_lever_n_prefill_profile_report
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_bench -p 'test_*.py'
+          python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_chain -p 'test_*.py'
           python -B -m unittest test_m3native_engine_argv
           python -B -m unittest test_serving_image_copy_closure
           python -B -m unittest test_serving_plugin_patch
