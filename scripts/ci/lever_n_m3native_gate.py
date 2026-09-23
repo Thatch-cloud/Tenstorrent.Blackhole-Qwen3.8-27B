@@ -343,14 +343,19 @@ def retired_binder_leaks(rounds):
 
 
 def evaluate_gate(*, ready, users, checked, allow_missing_references, native_m3_marker_present,
-                  packed_phase, binder_rounds, retired_binder_calls_nonzero, full_output_required=True):
+                  packed_phase, binder_rounds, retired_binder_calls_nonzero, full_output_required=True,
+                  reference_run=False):
     """Whether the run passes, given the pieces `main` already computed.
 
     Full reference coverage (`len(checked) == users`) is required unless
     `allow_missing_references` - for an arm with no single-stream reference yet (e.g. 131k),
     where `checked` may be empty or short by design. Any reference that IS present must
     still match exactly (the `all(...)` term below is never relaxed): this only widens what
-    counts as complete coverage, not what counts as a match."""
+    counts as complete coverage, not what counts as a match.
+
+    `reference_run` (--sequential-users): lone streams never form a packed round, so the
+    native_m3 marker, [PACKED-PHASE] and binder terms cannot apply; every reference term
+    still does."""
     coverage_ok = True if allow_missing_references else len(checked) == users
     # A stream that errored, or one cut short of its reference when the arm asked for the
     # full 256 tokens, is not a pass: run 35585107688 died of DRAM after three rounds with
@@ -360,13 +365,18 @@ def evaluate_gate(*, ready, users, checked, allow_missing_references, native_m3_
         and (not full_output_required or 'actual_len' not in c or 'reference_len' not in c
              or c['actual_len'] >= c['reference_len'])
         for c in checked)
-    return bool(
+    references_ok = bool(
         ready
         and coverage_ok
         and streams_ok
         and all(c.get('identical_prefix') for c in checked)
         # Two references for one base that disagree leave nothing to be exact against.
         and not any(c.get('reference_conflicts') for c in checked)
+    )
+    if reference_run:
+        return references_ok
+    return bool(
+        references_ok
         and native_m3_marker_present
         and packed_phase is not None
         and bool(binder_rounds)
@@ -518,7 +528,8 @@ def main():
             native_m3_marker_present=report['native_m3_marker_present'],
             packed_phase=report['packed_phase'], binder_rounds=binder_rounds,
             retired_binder_calls_nonzero=report['retired_binder_calls_nonzero'],
-            full_output_required=options.max_tokens >= 256)
+            full_output_required=options.max_tokens >= 256,
+            reference_run=bool(options.sequential_users))
     except BaseException as error:
         report['fatal'] = '%s: %s' % (type(error).__name__, str(error)[:600])
     finally:

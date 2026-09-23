@@ -271,5 +271,28 @@ class SequentialReferenceRunTests(unittest.TestCase):
             self._main(['--users', '4', '--sequential-users', '4'])
 
 
+
+class ReferenceRunVerdictTests(unittest.TestCase):
+    """v97: four clean lone streams went red on packed-round terms they can never meet."""
+
+    LONE = dict(COMPLETE_KWARGS, native_m3_marker_present=False, packed_phase=None, binder_rounds=[])
+
+    def test_a_clean_reference_run_passes_without_packed_round_evidence(self):
+        self.assertTrue(evaluate_gate(**dict(self.LONE, reference_run=True)))
+
+    def test_the_same_evidence_still_fails_a_packed_run(self):
+        self.assertFalse(evaluate_gate(**self.LONE))
+
+    def test_a_reference_run_still_needs_every_reference_term(self):
+        mismatch = [dict(c, identical_prefix=c['user'] != 2) for c in COMPLETE_KWARGS['checked']]
+        short = [dict(c, actual_len=10, reference_len=20) for c in COMPLETE_KWARGS['checked']]
+        conflict = [dict(c, reference_conflicts=['x']) for c in COMPLETE_KWARGS['checked']]
+        for label, changes in (('mismatch', dict(checked=mismatch)), ('short', dict(checked=short)),
+                               ('conflict', dict(checked=conflict)), ('uncovered', dict(checked=[])),
+                               ('unready', dict(ready=False))):
+            with self.subTest(case=label):
+                self.assertFalse(evaluate_gate(**dict(self.LONE, reference_run=True, **changes)))
+
+
 if __name__ == '__main__':
     unittest.main()
