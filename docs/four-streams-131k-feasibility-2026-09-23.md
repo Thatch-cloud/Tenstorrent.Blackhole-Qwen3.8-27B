@@ -202,6 +202,10 @@ Run **35791589709 (v88)**: one user at 131,072, the v84 configuration, image v94
 | TTFT | 17.2 s | 68.4 s |
 | DRAM after engine, chip 0 | - | 26.93 GB, 6.71 GB free (predicted 26.98) |
 
+> **Corrected below ("Where the 4 x 131k verify goes"):** the 0.085 slope compares decode steps across two
+> images (v84 67a28229, v88 f369d08c) whose commit and draft phases also moved. The verify trace itself grows
+> 0.2245 ms per 1k tokens per user - the frozen lineage's 0.2225 was right.
+
 **The m3native attention slope is ~0.085 ms per 1k tokens per user**: +8.4 ms of step over
 98,304 extra tokens. That is **2.6x smaller** than the 0.2225 every earlier 131k
 prediction borrowed from the frozen lineage, and **below the ~0.15 threshold** at which
@@ -224,7 +228,9 @@ using the borrowed slope. With the measured slope:
 - attention adds only ~8.4 ms per user from 32k to 131k, so a four-user 131k round is
   projected at roughly 267.5 + 4 x 8.4 = **~301 ms**, about **20 tok/s per user, ~0.42
   of single-stream**. (Projection: the packed four-user path uses the native batch-64
-  attention, whose context scaling is not yet measured separately.)
+  attention, whose context scaling is not yet measured separately.) **Wrong twice, see below:**
+  the K64 graft covers attn_decode_prep and nlp_concat_heads_decode only - SDPA is still the
+  per-user replay reader - and v101 measured 340 ms, not ~301.
 
 **So the 131k target reduces to the 32k problem plus capacity.** The wall is the ~40-52 ms
 per added user of context-independent work - GDN recurrence and launches, in-trace data
@@ -362,3 +368,48 @@ levers that would move it are the ones the planner listed as beyond the evidence
 plan: a second command queue / sub-device overlap of the per-user phases, a cross-user
 SDPA kernel, and prefill-decode interleave (Lever N) for TTFT. WY-form GDN is faster but
 not token-exact, which is a user decision.
+
+## Where the 4 x 131k verify goes: each user's KV is read four times per layer
+
+A 9-agent diagnosis with adversarial verification (workflow wf_a79442c7-ffb) settled why the
+verify trace grows 88.5 ms from 4 x 32k to 4 x 131k (157.8 -> 246.3 ms; matched pairs v103 ->
+v101 +88.47 and v104 -> v105 +88.53; the trace does not depend on the capacity flags).
+
+**Mechanism, from the code.** `packed_verifier.py:494-500` builds the block with
+`replay_group_rows=4`, so `attention_head_fold.parallel_groups` splits each user's 16 query rows
+into a batch-3 and a batch-1 bundle of 4-row groups. `attention_replay.py:49` gives every batch
+entry the same user's page table, and `attention_parallel.py:17-19` calls
+`paged_scaled_dot_product_attention_decode` with `is_causal=False`, a dense full-capacity mask and
+no `cur_pos`, so every entry walks the whole capture family (context + 256 keys). The sdpa_decode
+factory assigns cores per batch entry with no KV sharing - K multicast exists only on the MLA path.
+**Each user's KV is streamed four times per layer.** The device-profiled bench shows it at 32k:
+batch-3 428 us against batch-1 191 us for the same work per core.
+
+**The packed path does not scale worse than single-user.** The single-user verifier uses the same
+reader: its trace grows +22.06 ms per user (65.61 -> 87.67 ms, v97 -> v98, one image), and
+4 x 22.06 = 88.2. The single-user ROUND grew only 3.5 ms (v84 -> v88) because commit and draft
+phases shrank at the same time on a different image. An earlier reading of mine - that the packed
+path scaled ~25x worse than one user - compared a whole round across images with a trace on one,
+and is withdrawn.
+
+| part of the +88.5 ms (bytes-proportional; not yet profiled at 131k) | ms |
+|---|---|
+| first read of the added KV (unavoidable) | ~18-20 |
+| reads 2-4 of the same KV (redundant) | ~54-59 |
+| dense bf16 mask, read by every batch entry, non-zero only in the last 256 keys | ~9-17 |
+
+SDPA is ~39.6 ms of the round at 4 x 32k (619 us per user-layer) and ~128 ms at 4 x 131k. One read
+per user would cost ~23-26 ms at 4 x 131k.
+
+**Two cheaper routes are closed.** v107 (run 35812188001) tried 8-row groups
+(`QWEN_FAST_REPLAY_GROUP_ROWS=8`: one batch-2 bundle, two reads): the SDPA program's static
+circular buffers grow to 1,835,968 B against 1,572,864 B of L1 and the engine dies at warmup, even
+with the tree-scratch patch. And dropping the bf8 draft at 4 x 131k (v105, run 35809967020) fits
+with 0.49 GB free, but its largest free block (285 MB) falls below the ~342 MB proposal reserve, so
+the second proposal pair falls back every round (37 `fallback=dram_reserve` lines, ~+21 ms):
+capacity margin shows up as speed. v101's configuration stays.
+
+**Next: the kernel.** Read each k-chunk once for all of a user's row groups, and read the mask
+only in the last chunk, in sdpa_decode itself (kernel work authorised). The served sources are
+dumped by `scripts/ci/probe_sdpa_decode_sources.py` (cpu-probe-v24, run 35812394787; factory
+tree-scratch patched 3e0a69af). Expected: up to ~70-100 ms off the 340 ms round at 4 x 131k.
