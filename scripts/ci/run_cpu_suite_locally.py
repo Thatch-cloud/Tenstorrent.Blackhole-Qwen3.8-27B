@@ -35,13 +35,33 @@ SCRIPTS = Path(__file__).resolve().parent
 MISSING = re.compile(r"No module named '([A-Za-z0-9_.]+)'")
 
 
+DISCOVER = re.compile(r"\s*python -B -m unittest discover -s scripts/ci -p '([A-Za-z0-9_*.?\[\]-]+)'$")
+
+
 def groups():
+    """Every unittest group the workflow runs, in order. A `discover -s scripts/ci -p PATTERN`
+    line becomes the modules its pattern matches here. Any other unittest line this cannot
+    read is an error, never a silent skip: the discover lines were skipped for weeks, and a
+    regression they cover stayed red in CI while this runner reported green."""
     text = io.open(WORKFLOW, encoding='utf-8').read().replace('\r\n', '\n')
-    found = []
+    found, unread = [], []
     for line in text.split('\n'):
         match = re.match(r'\s*python -B -m unittest ([A-Za-z0-9_. -]+)$', line)
-        if match:
+        if match and not match.group(1).startswith('discover'):
             found.append(match.group(1).split())
+            continue
+        discover = DISCOVER.match(line)
+        if discover:
+            modules = sorted(path.stem for path in SCRIPTS.glob(discover.group(1)))
+            if not modules:
+                unread.append(line.strip() + '  (pattern matches no module)')
+            else:
+                found.append(modules)
+            continue
+        if re.match(r'\s*python -B -m unittest', line):
+            unread.append(line.strip())
+    if unread:
+        raise SystemExit('Unittest lines this runner cannot reproduce:\n  ' + '\n  '.join(unread))
     if not found:
         raise SystemExit('No unittest invocations found in %s' % WORKFLOW)
     return found
