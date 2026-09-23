@@ -545,6 +545,50 @@ class ScratchOccupancyGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'the scratch was left at None'):
             self.call(host, [2048])
 
+    def test_a_moved_slot_is_write_only_and_the_cursor_still_guards_the_resume(self):
+        """A pin, not a regression test: lever_n_model_patch is unchanged by the v121
+        fix, so this passes before and after it. It holds the model-side property the
+        capture's relaxed slot guard (dflash_prefill_window.check_resumed_call) relies
+        on, so a later change to SLOTS_RANGE that breaks it fails here.
+
+        Run v121: the plugin handed user 3's third chunk slot 0 after two chunks in
+        slot 2. At the model the slot is only where this step's snapshot is WRITTEN;
+        the recurrence continues in the prefill scratch, which prefill_traced_chunked
+        resets only when start == 0 - and a resumed range call never carries start 0.
+        So the moved chunk resumes the same scratch, writes the new slot, and every
+        later write follows it. A call that does not resume at the cursor is refused
+        whatever slot it names, and writes nothing.
+
+        Driven the way qwen36_vllm._prefill_forward_tp_batched drives it: chunk one
+        goes to the one-shot prefill_paged_slots (not in SLOTS_RANGE), whose branch
+        leaves the cursor at plens[0]; each continuation then passes starts=[start],
+        ends=plens and valid_lens=plens, plens being the ABSOLUTE end."""
+        written, runs = [], []
+        host = self.host(
+            _write_gdn_slot=lambda slot, rec, conv: written.append(slot),
+            prefill_traced_chunked=lambda toks, pt, actual_len, start: runs.append(
+                (start, actual_len)) or 'logits')
+
+        def continuation(start, slot):
+            end = start + 2048
+            return host.prefill_paged_slots_range(
+                [_StubTensor((1, end))], _StubTensor((1, 4)), [slot], [start], [end],
+                valid_lens=[end])
+
+        host._qwen_lever_n_next_start = 2048   # the one-shot branch, chunk [0, 2048) in slot 2
+        continuation(2048, 2)
+        continuation(4096, 0)
+        continuation(6144, 0)
+        self.assertEqual(written, [2, 0, 0], 'each step writes the slot the runner chose')
+        self.assertEqual(runs, [(2048, 4096), (4096, 6144), (6144, 8192)],
+                         'no resumed step carries start 0, so none resets the scratch')
+        self.assertEqual(host._qwen_lever_n_next_start, 8192)
+        for start in (2048, 4096, 10240):                 # replayed, older, skipped
+            with self.assertRaisesRegex(ValueError, 'the scratch was left at 8192'):
+                continuation(start, 1)
+        self.assertEqual(written, [2, 0, 0], 'a refused resume writes no slot')
+        self.assertEqual(len(runs), 3, 'and runs nothing')
+
     def test_a_fresh_prompt_resets_the_cursor_which_this_guard_does_NOT_police(self):
         """Stated so the limit is on the record rather than assumed away: a fresh prompt
         admitted between two continuations of another legitimately resets the cursor, so

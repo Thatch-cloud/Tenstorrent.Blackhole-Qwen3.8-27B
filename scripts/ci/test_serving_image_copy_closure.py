@@ -151,6 +151,38 @@ def unsatisfiable_imports():
     return missing
 
 
+def uncopied_test_imports():
+    """{importer: {test module}} for copied modules importing a test module neither list copies.
+
+    The build runs unittest over the test_serving_* modules INSIDE the image, so every test
+    module they import must be in the image at HEAD. One that is not arrives as the bundle's
+    copy, and unsatisfiable_imports cannot see the damage: the imported name (a TestCase
+    class) exists at the bundle, while the helper methods later called on it may not.
+    """
+    copied = copied_modules(dockerfile_text())
+    local_tests = {p.name for p in HERE.glob('test_*.py')}
+    found = {}
+    for name in sorted(copied):
+        if not name.endswith('.py'):
+            continue
+        try:
+            tree = ast.parse((HERE / name).read_text(encoding='utf-8'))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                modules = [node.module]
+            elif isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            else:
+                continue
+            for module in modules:
+                dep = module.split('.')[0] + '.py'
+                if dep in local_tests and dep not in copied:
+                    found.setdefault(name, set()).add(dep)
+    return found
+
+
 SIBLING_KERNEL = ('with_suffix(' + chr(34) + '.cpp' + chr(34) + ')',
                   'with_suffix(' + chr(39) + '.cpp' + chr(39) + ')')
 
@@ -257,6 +289,24 @@ class CopyClosureTests(unittest.TestCase):
             report, [],
             'these arrive from the frozen bundle, which cannot supply the symbol - add '
             'the module to the Dockerfile COPY list: ' + '; '.join(report))
+
+    def test_a_copied_test_module_imports_only_copied_test_modules(self):
+        """The in-image unittest step imports every test_serving_* module, so a test
+        module one of them imports must be overlaid too. The first draft of the v121 fix
+        (moved GDN prefill slot) had test_serving_request_factory import
+        PrefillWindowTests from test_dflash_prefill_window and call plugin_sequence on it.
+        test_dflash_prefill_window is in neither list, so the image got the bundle's
+        copy, which has the class but not the method: AttributeError in docker build,
+        twice (test_serving_lifecycle imports RequestFactoryTests). The symbol check
+        above passed, because the class name exists at the bundle."""
+        report = ['%s imports %s' % (importer, dep)
+                  for importer, deps in sorted(uncopied_test_imports().items())
+                  for dep in sorted(deps)]
+        self.assertEqual(
+            report, [],
+            'a copied test module imports a test module the image ships at its bundle '
+            'version: move the shared fixture into a copied module, or add the imported '
+            'module to BOTH copy lists: ' + '; '.join(report))
 
     def test_the_two_modules_run_35683127469_needed_are_copied(self):
         """gdn_state_copy is the one that killed the run. test_packed_verifier was

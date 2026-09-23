@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import torch
 
@@ -248,23 +248,6 @@ class PrefillWindowTests(unittest.TestCase):
         model.prefill_paged_slots = prefill_paged_slots
         return model, calls
 
-    def resumable_batched_model(self):
-        """batched_model, but each call prefills the NEXT chunk rather than replaying
-        chunk zero. That is what prefill_paged_slots_range does on a resumed prompt,
-        and the one-shot stub cannot stand in for it: the second call would replay an
-        absolute position the capture has already seen."""
-        model, calls = self.model(), []
-
-        def prefill_paged_slots(token_ids_list, page_table, empty_slots, valid_lens=None):
-            start = 2048 * len(calls)
-            calls.append((token_ids_list, page_table, empty_slots, valid_lens))
-            value = torch.ones((1, 1, 2048, 2560), dtype=torch.bfloat16)
-            model._forward_prefill_chunk_masked_tp(value, 2048, start, page_table, 2048)
-            return 'logits'
-
-        model.prefill_paged_slots = prefill_paged_slots
-        return model, calls
-
     def test_a_continuation_may_re_enter_the_batched_entry_with_the_same_slot(self):
         """The relaxation step 4 promised in a comment and did not make.
 
@@ -273,29 +256,341 @@ class PrefillWindowTests(unittest.TestCase):
         prefill_paged_slots_range, with starts=[1992] - was refused on its continuation
         with 'One batched prefill per capture required'. Three 2048-token chunks of a
         6144-token prompt, so the capture is still open for the second and third.
+
+        Driven through the entries the plugin really calls (plugin_model): the first
+        chunk through prefill_paged_slots, each resumed one through
+        prefill_paged_slots_range at the capture's cursor. This used to re-enter the
+        one-shot entry with a stub that advanced by itself, which the capture now
+        refuses before the native call (check_resumed_call) - the plugin never sends a
+        nonzero start there.
         """
-        operations, (model, calls) = self.operations(), self.resumable_batched_model()
+        operations, (model, calls) = self.operations(), self.plugin_model()
         capture = PrefillWindowCapture(operations, model, 6144, (1, 3))
         with self.storage_addresses():
-            for _ in range(3):
+            for index in range(3):
                 with capture.segment():
-                    model.prefill_paged_slots('tokens', 'pages', [1], valid_lens=[2048])
+                    self.plugin_chunk(model, index, 1)
         self.assertEqual(capture.prefill_slot, 1)
         self.assertEqual(len(calls), 3, 'every chunk reaches the native entry')
+        self.assertEqual([entry for entry, *_ in calls], ['one-shot', 'range', 'range'])
         self.assertEqual(capture.segments, 3)
+        self.assertTrue(capture.complete)
         capture.close()
 
-    def test_a_second_prompt_adopting_the_capture_is_still_refused(self):
-        """What the old guard was really protecting, kept: a DIFFERENT slot mid-capture
-        means another prompt took this capture over."""
-        operations, (model, _) = self.operations(), self.resumable_batched_model()
-        capture = PrefillWindowCapture(operations, model, 6144, (1, 3))
+    def plugin_model(self):
+        """The two entries the plugin's _prefill_forward_tp_batched really calls
+        (qwen36_vllm.py:303-319): prefill_paged_slots for a prompt's first chunk, and
+        prefill_paged_slots_range(token_ids_list, pt, empty_slots, starts, plens,
+        valid_lens=plens) for every chunk with a nonzero start, where starts is the
+        absolute offset and plens the absolute end."""
+        model, calls = self.model(), []
+
+        def run(start, end):
+            value = torch.ones((1, 1, 2048, 2560), dtype=torch.bfloat16)
+            model._forward_prefill_chunk_masked_tp(value, end - start, start, None, 2048)
+
+        def prefill_paged_slots(token_ids_list, page_table, empty_slots, valid_lens=None):
+            calls.append(('one-shot', list(empty_slots), 0, valid_lens[0]))
+            run(0, valid_lens[0])
+            return 'logits'
+
+        def prefill_paged_slots_range(token_ids_list, page_table, empty_slots, starts, ends,
+                                      valid_lens=None):
+            calls.append(('range', list(empty_slots), starts[0], ends[0]))
+            run(starts[0], ends[0])
+            return 'logits'
+
+        model.prefill_paged_slots = prefill_paged_slots
+        model.prefill_paged_slots_range = prefill_paged_slots_range
+        return model, calls
+
+    def plugin_chunk(self, model, index, slot, start=None):
+        """Chunk `index` the way the plugin sends it, into plugin slot `slot`."""
+        start = 2048 * index if start is None else start
+        if start == 0:
+            return model.prefill_paged_slots('tokens', 'pages', [slot], valid_lens=[2048])
+        return model.prefill_paged_slots_range('tokens', 'pages', [slot], [start], [start + 2048],
+                                               valid_lens=[start + 2048])
+
+    def plugin_sequence(self, slots):
+        """A prompt of len(slots) 2048-token chunks, one segment (engine step) each, the
+        plugin choosing slots[i] for chunk i. Returns the capture, the native calls, each
+        segment's recorded slot, and the moved-slot markers logged."""
+        operations, (model, calls) = self.operations(), self.plugin_model()
+        capture = PrefillWindowCapture(operations, model, 2048 * len(slots), (1, 3))
+        segment_slots = []
+        with self.storage_addresses(), patch('dflash_prefill_window._log') as log:
+            for index, slot in enumerate(slots):
+                with capture.segment():
+                    self.plugin_chunk(model, index, slot)
+                segment_slots.append(getattr(capture, 'segment_slot', None))
+        moved = [entry.args for entry in log.call_args_list if 'prefill slot moved' in entry.args[0]]
+        return capture, calls, segment_slots, moved
+
+    def test_a_resumed_prompt_follows_its_slot_when_the_plugin_moves_it(self):
+        """Run v121, user 3 at 4 x 131k: chunks 1-2 into plugin slot 2 while users 1 and
+        2 held 0 and 1; user 1 finished; chunk 3 was handed [0], because the plugin
+        re-allocates a prefill's slot on every prompt step and a lone prefill is row 0.
+        The capture refused it ('One prefill slot per capture required; 2 then 0') and
+        the engine died with three users on it.
+
+        That refusal encoded a wrong assumption - a different slot meant another prompt
+        had taken the capture over. It did not: it is the same prompt at the next
+        cursor. The prompt completes, and the capture records the LAST slot written,
+        which is the one holding the finished state and the one admission adopts."""
+        capture, calls, segment_slots, moved = self.plugin_sequence([2, 2, 0, 0])
+        self.assertTrue(capture.complete)
+        self.assertFalse(capture.closed)
+        self.assertEqual(capture.prefill_slot, 0, 'the final chunk landed in slot 0')
+        self.assertEqual(segment_slots, [2, 2, 0, 0])
+        self.assertEqual(calls, [('one-shot', [2], 0, 2048), ('range', [2], 2048, 4096),
+                                 ('range', [0], 4096, 6144), ('range', [0], 6144, 8192)],
+                         'every chunk reaches the native entry with the slot the plugin chose')
+        self.assertEqual(len(moved), 1, 'one marker, at the move and not after it')
+        message, old, new, cursor, position, segment = moved[0]
+        self.assertTrue(message.startswith('[PINDIAG] prefill slot moved: {} -> {}'))
+        self.assertEqual((old, new, cursor, position, segment), (2, 0, 4096, 8192, 3))
+        self.assertEqual(validate_prefill_chunks(8192, capture.chunks)[0]['start'], 6144)
+        capture.close()
+
+    def test_the_last_slot_wins_whichever_way_the_slot_moves(self):
+        """Admission adopts capture.prefill_slot, so it must be the final chunk's slot:
+        keeping the first would copy a stale snapshot over the finished state."""
+        for slots, last in (([1, 3, 3], 3), ([0, 2], 2), ([2, 0, 1], 1)):
+            with self.subTest(slots=slots):
+                capture, _, segment_slots, moved = self.plugin_sequence(slots)
+                self.assertTrue(capture.complete)
+                self.assertEqual(capture.prefill_slot, last)
+                self.assertEqual(segment_slots, slots)
+                self.assertEqual(len(moved), sum(a != b for a, b in zip(slots, slots[1:])))
+                capture.close()
+
+    def test_a_slot_that_never_moves_behaves_exactly_as_before(self):
+        """No move, no marker, and the recorded slot is the one slot used throughout -
+        the shape v118 (4 x 32k, slots 0..3 stable) ran token-exact."""
+        for slot in (0, 1, 3):
+            with self.subTest(slot=slot):
+                capture, calls, segment_slots, moved = self.plugin_sequence([slot] * 4)
+                self.assertTrue(capture.complete)
+                self.assertEqual(capture.prefill_slot, slot)
+                self.assertEqual(segment_slots, [slot] * 4)
+                self.assertEqual([call[1] for call in calls], [[slot]] * 4)
+                self.assertEqual(moved, [])
+                capture.close()
+
+    def test_a_moved_slot_is_refused_unless_it_resumes_this_prompt_at_its_cursor(self):
+        """What the relaxed guard still refuses, before any device work: a moved slot on
+        a call that does not continue this prompt from exactly where it stopped. A fresh
+        prompt (start 0, or the one-shot entry), a replayed chunk and a skipped chunk
+        are all foreign to the capture's cursor."""
+        cases = (
+            ('fresh prompt through the range entry', dict(start=0)),
+            ('fresh prompt through the one-shot entry', dict(start=0, one_shot=True)),
+            # The entry check alone: the one-shot entry's first positional argument
+            # (valid_lens) happens to equal the cursor, which a start-only check would
+            # take for a resumed start.
+            ('one-shot entry naming the cursor positionally', dict(start=4096, one_shot=True)),
+            ('replayed chunk', dict(start=2048)),
+            ('skipped chunk', dict(start=6144)),
+        )
+        for label, case in cases:
+            with self.subTest(label):
+                operations, (model, calls) = self.operations(), self.plugin_model()
+                original = model.prefill_paged_slots_range
+                capture = PrefillWindowCapture(operations, model, 8192, (1, 3))
+                with self.storage_addresses(), patch('dflash_prefill_window._log') as log:
+                    for index in range(2):
+                        with capture.segment():
+                            self.plugin_chunk(model, index, 2)
+                    self.assertEqual(capture.cursor, 4096)
+                    with self.assertRaisesRegex(ValueError, 'may move only on a resumed chunk'):
+                        with capture.segment():
+                            if case.get('one_shot') and case['start']:
+                                model.prefill_paged_slots('tokens', 'pages', [0], [case['start']])
+                            elif case.get('one_shot'):
+                                model.prefill_paged_slots('tokens', 'pages', [0], valid_lens=[2048])
+                            else:
+                                start = case['start']
+                                model.prefill_paged_slots_range('tokens', 'pages', [0], [start],
+                                    [start + 2048], valid_lens=[start + 2048])
+                self.assertEqual(len(calls), 2, 'refused before the native prefill ran')
+                self.assertEqual(capture.prefill_slot, 2, 'the refused slot is not recorded')
+                self.assertTrue(capture.closed)
+                self.assertIs(model.prefill_paged_slots_range, original)
+                log.assert_not_called()
+
+    def test_a_foreign_call_keeping_the_slot_is_refused_before_the_native_prefill(self):
+        """With the slot unchanged, a call that does not resume this prompt used to be
+        refused only by the chunk ledger in wrap(), INSIDE the native call - after
+        prefill_paged_slots had bound and, at start 0, reset the persistent GDN scratch.
+        Loud either way, but asymmetric with the moved-slot path. Once the cursor has
+        moved, every call must be the resumable entry at the cursor whatever slot it
+        names, so each of these is now refused before any device work."""
+        cases = (
+            ('fresh prompt through the one-shot entry', dict(start=0, one_shot=True)),
+            ('one-shot entry naming the cursor positionally', dict(start=4096, one_shot=True)),
+            ('fresh prompt through the range entry', dict(start=0)),
+            ('replayed chunk', dict(start=2048)),
+            ('skipped chunk', dict(start=6144)),
+        )
+        for label, case in cases:
+            with self.subTest(label):
+                operations, (model, calls) = self.operations(), self.plugin_model()
+                capture = PrefillWindowCapture(operations, model, 8192, (1, 3))
+                with self.storage_addresses():
+                    for index in range(2):
+                        with capture.segment():
+                            self.plugin_chunk(model, index, 2)
+                    with self.assertRaisesRegex(ValueError, 'must resume this capture at its cursor'):
+                        with capture.segment():
+                            if case.get('one_shot') and case['start']:
+                                model.prefill_paged_slots('tokens', 'pages', [2], [case['start']])
+                            elif case.get('one_shot'):
+                                model.prefill_paged_slots('tokens', 'pages', [2], valid_lens=[2048])
+                            else:
+                                start = case['start']
+                                model.prefill_paged_slots_range('tokens', 'pages', [2], [start],
+                                    [start + 2048], valid_lens=[start + 2048])
+                self.assertEqual(len(calls), 2, 'refused before the native prefill ran')
+                self.assertEqual((capture.cursor, capture.prefill_slot), (4096, 2))
+                self.assertTrue(capture.closed)
+
+    def test_a_moved_slot_before_any_chunk_ran_is_refused(self):
+        """The cursor clause on its own. A batched call that advanced no chunk leaves the
+        cursor at 0 with a slot recorded; a later call in another slot naming start 0
+        matches that cursor, but it resumes nothing, so it is refused."""
+        operations, model, calls = self.operations(), self.model(), []
+
+        def prefill_paged_slots(token_ids_list, page_table, empty_slots, valid_lens=None):
+            calls.append(list(empty_slots))
+            return 'logits'
+
+        def prefill_paged_slots_range(token_ids_list, page_table, empty_slots, starts, ends,
+                                      valid_lens=None):
+            calls.append(list(empty_slots))
+            return 'logits'
+
+        model.prefill_paged_slots = prefill_paged_slots
+        model.prefill_paged_slots_range = prefill_paged_slots_range
+        capture = PrefillWindowCapture(operations, model, 4096, (1, 3))
         with self.storage_addresses():
             with capture.segment():
-                model.prefill_paged_slots('tokens', 'pages', [0], valid_lens=[2048])
-            with self.assertRaisesRegex(ValueError, 'One prefill slot per capture'):
+                model.prefill_paged_slots('tokens', 'pages', [2], valid_lens=[2048])
+            self.assertEqual((capture.cursor, capture.prefill_slot), (0, 2))
+            with self.assertRaisesRegex(ValueError, 'may move only on a resumed chunk'):
                 with capture.segment():
-                    model.prefill_paged_slots('tokens', 'pages', [1], valid_lens=[2048])
+                    model.prefill_paged_slots_range('tokens', 'pages', [0], [0], [2048],
+                                                    valid_lens=[2048])
+        self.assertEqual(calls, [[2]])
+        self.assertTrue(capture.closed)
+
+    def test_a_move_inside_one_segment_is_still_one_call_too_many(self):
+        """Relaxing the slot did not relax one batched call per segment."""
+        operations, (model, calls) = self.operations(), self.plugin_model()
+        capture = PrefillWindowCapture(operations, model, 8192, (1, 3))
+        with self.storage_addresses(), patch('dflash_prefill_window._log'):
+            with self.assertRaisesRegex(ValueError, 'One batched prefill per capture required'):
+                with capture.segment():
+                    self.plugin_chunk(model, 0, 2)
+                    self.plugin_chunk(model, 1, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(capture.closed)
+
+    def test_each_segment_reports_only_its_own_slot(self):
+        """segment_slot is what the lifecycle reads after a continuation to decide
+        whether the chunk wrote slot 0; a segment with no batched call reports None,
+        never the previous segment's slot."""
+        operations, (model, _) = self.operations(), self.plugin_model()
+        capture = PrefillWindowCapture(operations, model, 6144, (1, 3))
+        self.assertIsNone(capture.segment_slot)
+        with self.storage_addresses():
+            with capture.segment():
+                self.plugin_chunk(model, 0, 2)
+            self.assertEqual(capture.segment_slot, 2)
+            with capture.segment():
+                self.assertIsNone(capture.segment_slot, 'reset on entry')
+                value = torch.ones((1, 1, 2048, 2560), dtype=torch.bfloat16)
+                model._forward_prefill_chunk_masked_tp(value, 2048, 2048, None, 2048)
+            self.assertIsNone(capture.segment_slot)
+            self.assertEqual(capture.prefill_slot, 2)
+            with capture.segment():
+                self.plugin_chunk(model, 2, 2)
+            self.assertEqual(capture.segment_slot, 2)
+        self.assertTrue(capture.complete)
+        capture.close()
+
+    def test_a_prompt_finished_without_a_batched_call_is_not_left_adoptable(self):
+        """prefill_slot carries over between segments while segment_slot does not, and
+        admission adopts prefill_slot as the FINAL chunk's slot. A final segment that
+        reached position without a batched call would hand admission an earlier chunk's
+        partial snapshot, silently - so completion refuses it. (The plugin always
+        prefills through a batched entry on TP; this is the broken-contract case.)"""
+        operations, (model, calls) = self.operations(), self.plugin_model()
+        capture = PrefillWindowCapture(operations, model, 4096, (1, 3))
+        with self.storage_addresses():
+            with capture.segment():
+                self.plugin_chunk(model, 0, 2)
+            with self.assertRaisesRegex(ValueError, 'final prefill segment made no batched call'):
+                with capture.segment():
+                    value = torch.ones((1, 1, 2048, 2560), dtype=torch.bfloat16)
+                    model._forward_prefill_chunk_masked_tp(value, 2048, 2048, None, 2048)
+        self.assertFalse(capture.complete)
+        self.assertTrue(capture.closed)
+        self.assertEqual(len(calls), 1)
+
+    def test_admission_adopts_the_slot_the_final_chunk_wrote(self):
+        """Run v121's user 3: the plugin wrote chunks 1-2 into slot 2 and, after user 1
+        finished, the rest into slot 0. Every chunk writes a complete snapshot of the
+        prefill scratch, so only the final chunk's slot holds the finished state. A real
+        capture driven through that sequence must hand admission the final slot: 0 is
+        'nothing to adopt' (the finished state already sits in the working row), and a
+        final nonzero slot is copied from there, never from the stale earlier one.
+
+        Kept HERE rather than in test_serving_request_factory: that suite also runs
+        inside the serving image build (qwen-fast-serving.Dockerfile), where this module
+        is not overlaid and arrives as the frozen bundle's copy, which has no
+        plugin_sequence - importing it from there broke the build."""
+        from serving_request_factory import adopt_prefill_slot
+
+        for slots, adopted in (([2, 2, 0, 0], None), ([2, 0, 1], 1), ([1, 3, 3], 3)):
+            with self.subTest(slots=slots):
+                capture = self.plugin_sequence(slots)[0]
+                self.assertTrue(capture.complete)
+                helpers = [Mock(spec=['adopt_slot'], **{'adopt_slot.return_value': 2})
+                           for _ in range(48)]
+                with patch('serving_request_factory._log') as log:
+                    adopt_prefill_slot(helpers, capture, 'cmpl-ae24a631')
+                if adopted is None:
+                    self.assertEqual([helper.adopt_slot.call_count for helper in helpers], [0] * 48)
+                    log.assert_called_once_with('[PINDIAG] prefill slot {}, nothing to adopt for request {}',
+                                                0, 'cmpl-ae24a631')
+                else:
+                    self.assertEqual([helper.adopt_slot.call_args_list for helper in helpers],
+                                     [[call(adopted, layer=layer)] for layer in range(48)])
+                capture.close()
+
+    def test_the_lifecycle_displaces_on_the_slot_a_real_capture_reports(self):
+        """The seam between the two halves of the v121 fix, which the lifecycle suite
+        covers only with a stand-in capture: _displace_after_continuation reads
+        segment_slot off the real PrefillWindowCapture after each continuation. Through
+        v121's sequence it displaces the resident engine after the chunks that wrote
+        slot 0, and after no other."""
+        from serving_lifecycle import FastServingLifecycle
+
+        operations, (model, _) = self.operations(), self.plugin_model()
+        capture = PrefillWindowCapture(operations, model, 8192, (1, 3))
+        lifecycle = SimpleNamespace(capture=capture, request_id='cmpl-ae24a631')
+        displaced = []
+        with self.storage_addresses(), patch('dflash_prefill_window._log'), \
+                patch('serving_lifecycle.note_prefill',
+                      side_effect=lambda: displaced.append(capture.segments)):
+            for index, slot in enumerate([2, 2, 0, 0]):
+                with capture.segment():
+                    self.plugin_chunk(model, index, slot)
+                if index:              # continuations only; admission displaces itself
+                    FastServingLifecycle._displace_after_continuation(lifecycle)
+        self.assertEqual(displaced, [3, 4])
+        self.assertTrue(capture.complete)
         capture.close()
 
     def test_more_than_one_slot_in_a_call_is_still_refused(self):

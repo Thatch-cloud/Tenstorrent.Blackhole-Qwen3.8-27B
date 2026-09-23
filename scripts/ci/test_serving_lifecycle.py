@@ -445,6 +445,92 @@ class LifecycleTests(unittest.TestCase):
             worker.execute_model(prefill)
         displace.assert_called_once_with()
 
+    def slotted_chunks(self, slots):
+        """A chunked prompt whose chunk i the plugin writes into GDN slot slots[i]:
+        the capture reports each segment's slot the way PrefillWindowCapture does."""
+        lifecycle, worker, bridge, capture, build, scheduled, decode = self.chunked_fixture(
+            prompt=2048 * len(slots))
+        capture.finish_at = len(slots)
+        capture.segment_slot = None
+        segment = capture.segment.side_effect
+
+        @contextmanager
+        def slotted():
+            capture.segment_slot = None
+            with segment() as value:
+                capture.segment_slot = slots[capture.segments - 1]
+                yield value
+
+        capture.segment = Mock(side_effect=slotted)
+        return lifecycle, worker, capture, scheduled
+
+    def test_a_continuation_into_slot_zero_displaces_the_resident_gdn_engine(self):
+        """Run v121's user 3: chunks into slot 2, then - user 1 having finished - into
+        slot 0, the fast path's working row. Admission displaced the resident engine
+        before chunk 1; continuations did not, so a lone decoder resident at row 0
+        would skip its carry restore and decode from user 3's partial recurrence.
+        Every continuation that wrote slot 0 must displace; the ones that wrote
+        another row must leave residency exactly as before."""
+        lifecycle, worker, capture, scheduled = self.slotted_chunks([2, 2, 0, 0])
+        displaced = []
+        with patch('serving_lifecycle.note_prefill', side_effect=lambda: displaced.append(
+                capture.segments)) as displace:
+            worker.execute_model(scheduled)
+            self.assertEqual(displaced, [0], 'admission displaces before the first chunk')
+            for index in range(1, 4):
+                worker.execute_model(self.continuation(scheduled, 2048, 2048 * index))
+        self.assertEqual(displaced, [0, 3, 4],
+                         'displaced after the slot-0 chunks (segments 3 and 4) only')
+        self.assertEqual(displace.call_count, 3)
+        self.assertTrue(capture.complete)
+        self.assertTrue(lifecycle.prefill_pending)
+        self.assertFalse(lifecycle.failed)
+
+    def test_continuations_into_other_rows_leave_residency_alone(self):
+        """v118's shape - slots stable and never 0 after admission: behaviour identical
+        to before the fix, the only displacement is admission's own."""
+        lifecycle, worker, capture, scheduled = self.slotted_chunks([1, 1, 1])
+        with patch('serving_lifecycle.note_prefill') as displace:
+            worker.execute_model(scheduled)
+            for index in range(1, 3):
+                worker.execute_model(self.continuation(scheduled, 2048, 2048 * index))
+        displace.assert_called_once_with()
+        self.assertTrue(lifecycle.prefill_pending)
+
+    def test_a_continuation_with_no_reported_slot_displaces(self):
+        """No batched call in the segment means the single-sequence path, which writes
+        the live state; a capture that reports nothing is treated the same way."""
+        for reported in (None, 'missing'):
+            with self.subTest(reported=reported):
+                lifecycle, worker, _, capture, _, scheduled, _ = self.chunked_fixture()
+                if reported is None:
+                    capture.segment_slot = None
+                with patch('serving_lifecycle.note_prefill') as displace:
+                    worker.execute_model(scheduled)
+                    worker.execute_model(self.continuation(scheduled, 2048, 2048))
+                self.assertEqual(displace.call_count, 2)
+
+    def test_the_resident_decoder_restores_its_carry_after_a_slot_zero_chunk(self):
+        """The hazard itself, against the real residency flag: the decoder that was the
+        last to use row 0 must restore its carry on its next verify after a chunk wrote
+        row 0, and must still skip it after a chunk that wrote another row."""
+        import verifier_engine
+        self.addCleanup(setattr, verifier_engine, '_resident', verifier_engine._resident)
+        decoder = SimpleNamespace(carry=[['state']], copy_carry=Mock(),
+                                  session=SimpleNamespace(request_id='cmpl-a661863f'))
+        lifecycle, worker, capture, scheduled = self.slotted_chunks([2, 2, 0])
+        worker.execute_model(scheduled)
+        verifier_engine._resident = decoder                   # decoded after admission
+        worker.execute_model(self.continuation(scheduled, 2048, 2048))
+        self.assertIs(verifier_engine._resident, decoder, 'slot 2 chunk: row 0 untouched')
+        self.assertFalse(verifier_engine.VerifierEngine.restore_carry(decoder))
+        decoder.copy_carry.assert_not_called()
+        worker.execute_model(self.continuation(scheduled, 2048, 4096))
+        self.assertIsNone(verifier_engine._resident, 'slot 0 chunk: nobody is resident')
+        self.assertTrue(verifier_engine.VerifierEngine.restore_carry(decoder))
+        decoder.copy_carry.assert_called_once_with('restore', 'none')
+        self.assertIs(verifier_engine._resident, decoder)
+
     def test_partial_prefill_rejected_without_device_execution(self):
         lifecycle, worker, _, capture, build, prefill, _ = self.fixture()
         prefill.total_num_scheduled_tokens = 2048

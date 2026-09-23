@@ -298,7 +298,14 @@ class FastServingLifecycle:
         the continuation test sat below the hook branch. A negative control only: it
         must reproduce v80's signature (chunks outside the capture, gate held through
         decode). Read per call so a test can set it; it reaches a served container
-        only if the launcher forwards it with -e."""
+        only if the launcher forwards it with -e.
+
+        Not token-exact with more than one user. Under this flag a continuation that
+        arrives while a hook is live bypasses _continue_prefill, and with it
+        _displace_after_continuation: the plugin hands a lone resumed prefill GDN slot
+        0 whenever slot 0 is free (run v121), so a decoder still marked resident at row
+        0 would skip its carry restore and decode from the other prompt's partial
+        state, with no error. Use it as a single-user or signature-only control."""
         import os
         return os.environ.get('QWEN_FAST_LEGACY_CONTINUATION_ORDER') == '1'
 
@@ -336,7 +343,39 @@ class FastServingLifecycle:
             pass
         with self.capture.segment():
             result = self.original_execute(scheduled)
+        self._displace_after_continuation()
         return self._after_prefill_chunk(result, False)
+
+    def _displace_after_continuation(self):
+        """A continuation chunk that wrote GDN slot 0 overwrote the resident decoder.
+
+        Admission calls note_prefill before every first chunk; continuations did not,
+        which was safe only while a resumed prompt never wrote slot 0. It can: the
+        plugin re-allocates a prefill's slot on every prompt step and hands a lone
+        prefill slot 0 whenever slot 0 is free (run v121: user 3's chunks went to [2],
+        then [0] after user 1 finished). Every chunk writes a snapshot of the in-flight
+        prompt into its slot, and slot 0 is the fast path's working row, so a decoder
+        still marked resident would skip its carry restore (verifier_engine
+        restore_carry) and decode from the other prompt's partial recurrence - wrong
+        tokens, no error.
+
+        Keyed on the slot this chunk actually wrote, so a chunk written anywhere else
+        leaves residency exactly as before. Anything short of a positive nonzero slot
+        (the single-sequence path, which writes the live state, or a capture that does
+        not report one) displaces: a spurious restore costs one carry copy, a missed
+        one costs the stream.
+        """
+        slot = getattr(self.capture, 'segment_slot', None)
+        if type(slot) is int and slot > 0:
+            return
+        note_prefill()
+        try:
+            from loguru import logger
+            logger.info(
+                f"[PINDIAG] prefill chunk wrote working GDN slot {slot!r}: resident "
+                f"engine displaced (req={self.request_id!r})")
+        except BaseException:
+            pass
 
     def _after_prefill_chunk(self, result, whole):
         """What follows a prefill chunk, whether it finished the prompt or not.

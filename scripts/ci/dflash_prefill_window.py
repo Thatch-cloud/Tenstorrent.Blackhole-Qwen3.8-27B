@@ -22,6 +22,32 @@ MAX_POSITION = int(os.environ.get('QWEN_FAST_MAX_POSITION', '65504'))
 # first three, so one wrapper serves both. A name outside this set is refused at
 # capture time rather than silently unwrapped.
 BATCHED_PREFILL_ENTRIES = frozenset({'prefill_paged_slots', 'prefill_paged_slots_range'})
+# The one entry a resumed chunk arrives through. The plugin sends a prompt's first
+# chunk (start 0) to prefill_paged_slots and every chunk with a nonzero start here.
+RESUMABLE_PREFILL_ENTRY = 'prefill_paged_slots_range'
+
+
+def _log(message, *values):
+    try:
+        from loguru import logger
+    except ImportError:
+        print(message.format(*values), flush=True)
+        return
+    logger.info(message, *values)
+
+
+def resumed_start(starts):
+    """The one absolute start a resumed range call names, or None if it names anything else."""
+    try:
+        values = list(starts)
+    except TypeError:
+        return None
+    if len(values) != 1 or isinstance(values[0], bool):
+        return None
+    try:
+        return operator.index(values[0])
+    except TypeError:
+        return None
 
 
 def prefill_slot(empty_slots):
@@ -126,9 +152,17 @@ class PrefillWindowCapture:
         # unsuspended prefill; more once Lever N interleaves decode between chunks.
         self.segments = 0
         self.result = None
-        # The native GDN slot the batched prefill wrote this user's state into, or
-        # None when the single-sequence prefill_traced_chunked path ran instead.
+        # The native GDN slot the LAST batched prefill call wrote this user's state
+        # into, or None when the single-sequence prefill_traced_chunked path ran
+        # instead. Every chunk writes a complete snapshot, so the last slot holds the
+        # finished state and is the one admission adopts, even when the plugin moved
+        # the slot mid-prompt (wrap_slots).
         self.prefill_slot = None
+        # The slot the CURRENT (or most recent) segment's batched call wrote, None if
+        # no batched call ran in it. Reset by segment(). The lifecycle reads it after
+        # a continuation: a chunk written into slot 0, the fast path's working row,
+        # has overwritten whichever decoder was resident there.
+        self.segment_slot = None
         # Batched prefill calls in the CURRENT activation. Reset by capture()
         # and segment(), so "one call per step" survives the relaxation that
         # lets a resumed prompt re-enter across steps.
@@ -158,7 +192,7 @@ class PrefillWindowCapture:
             return output
         return chunk
 
-    def wrap_slots(self, original):
+    def wrap_slots(self, original, entry=None):
         # The plugin's _prefill_forward_tp_batched calls prefill_paged_slots, which
         # runs the prompt on a B=1 scratch and writes the result into row
         # empty_slots[0] of the live GDN buffers, leaving the other rows alone. The
@@ -167,27 +201,73 @@ class PrefillWindowCapture:
         # its own sat unread in slot 1 (runs 35492676194, 35493208438). Record the
         # slot so admission can adopt it into slot 0 before anything reads it.
         def slots(token_ids_list, page_table, empty_slots, *args, **kwargs):
-            # One SLOT per capture. This used to be one CALL, with a note that a
-            # resumed prompt would need the slot form once a capture could span steps.
-            # Step 4 made captures span steps and left this behind, so run 35688313093
-            # got prefill_paged_slots_range running for the first time - starts=[1992] -
-            # and was refused here on the continuation.
+            # One call per SEGMENT, one integer slot per call. This used to be one
+            # call per capture; run 35688313093 was refused on its first continuation.
+            # The 'two prompts batched into one step' case is caught by prefill_slot
+            # itself, which refuses any empty_slots that is not exactly one slot.
             #
-            # Nothing real is lost. The 'two prompts batched into one step' case the
-            # old comment defended is caught by prefill_slot itself, which refuses any
-            # empty_slots that is not exactly one integer slot. A continuation must be
-            # allowed to re-enter with THE SAME slot; a DIFFERENT slot mid-capture would
-            # mean a second prompt adopting this capture, and that is still refused.
+            # The slot may MOVE between segments. This used to refuse a different slot
+            # mid-capture as 'a second prompt adopting this capture', and run v121 (4 x
+            # 131k) died on it: the plugin re-allocates a prefill's GDN slot on every
+            # prompt step (model_runner._alloc_prefill_state_slots: slot = row if that
+            # slot is not held, and a lone prefill is row 0), so when user 1 finished
+            # mid-way through user 3's prompt its slot 0 came free and user 3's next
+            # chunk was handed [0] after [2]. Nothing about request identity was ever
+            # in that check: the lifecycle routes a continuation to this capture only
+            # for the gate holder (serving_lifecycle._is_continuation), and the chunk
+            # cursor below and the model's _qwen_lever_n_next_start refuse any chunk
+            # that does not resume this prompt exactly. Every call after the prompt's
+            # first chunk - moved slot or not - must be a resumed range call starting at
+            # this capture's cursor (check_resumed_call), which a foreign prompt cannot
+            # satisfy, and anything else is refused before any device work.
             if not self.active or self.segment_calls:
                 raise ValueError('One batched prefill per capture required')
             slot = prefill_slot(empty_slots)
-            if self.prefill_slot is not None and self.prefill_slot != slot:
-                raise ValueError('One prefill slot per capture required; %r then %r'
-                                 % (self.prefill_slot, slot))
+            self.check_resumed_call(slot, entry, args[0] if args else kwargs.get('starts'))
             self.segment_calls += 1
-            self.prefill_slot = slot
+            # The LAST slot is the one admission adopts: every chunk writes a complete
+            # snapshot of the prefill scratch, so only the final chunk's write holds
+            # the finished state; an earlier slot is left stale and unowned.
+            self.prefill_slot = self.segment_slot = slot
             return original(token_ids_list, page_table, empty_slots, *args, **kwargs)
         return slots
+
+    def check_resumed_call(self, slot, entry, starts):
+        """Accept a batched call after the prompt's first chunk only if it resumes it.
+
+        The GDN recurrence of the prompt lives in the prefill scratch, which carries
+        across steps and is written to empty_slots on every chunk, so the slot a chunk
+        lands in is write-only and a move does not disturb the prompt. What a later call
+        must not become is a way in for another prompt: that needs the resumable entry
+        (the plugin sends only a prompt's first chunk, start 0, to the one-shot entry)
+        and a start equal to this capture's cursor.
+
+        Checked on EVERY call once the cursor has moved, not only when the slot moves.
+        Same-slot calls used to be policed only by the chunk ledger in wrap(), which
+        runs inside the native call - after prefill_paged_slots(_range) has bound and,
+        at start 0, reset the persistent scratch. The acceptance set is unchanged: the
+        model's first inner chunk of a resumed call starts at starts[0]
+        (prefill_traced_chunked, chunk_from=start // chunk_size), so the ledger already
+        refused any call this refuses; it now happens before any device work. A
+        prompt's first call (cursor 0, slot unmoved) is the whole-prompt shape, and is
+        never checked here.
+        """
+        moved = self.prefill_slot is not None and self.prefill_slot != slot
+        if self.cursor <= 0 and not moved:
+            return
+        start = resumed_start(starts) if entry == RESUMABLE_PREFILL_ENTRY else None
+        if start is None or self.cursor <= 0 or start != self.cursor:
+            if moved:
+                raise ValueError('A prefill slot may move only on a resumed chunk at this capture\'s '
+                                 'cursor: slot %r then %r, entry=%r starts=%r cursor=%r'
+                                 % (self.prefill_slot, slot, entry, starts, self.cursor))
+            raise ValueError('A batched prefill after the first chunk must resume this capture '
+                             'at its cursor through %s: slot %r, entry=%r starts=%r cursor=%r'
+                             % (RESUMABLE_PREFILL_ENTRY, slot, entry, starts, self.cursor))
+        if moved:
+            _log('[PINDIAG] prefill slot moved: {} -> {} at cursor={} of {} (segment {}); the plugin '
+                 're-allocated the resumed prompt\'s GDN slot, the last slot written is adopted',
+                 self.prefill_slot, slot, self.cursor, self.position, self.segments)
 
     def bindings(self):
         """The model attributes this capture owns while a segment is open.
@@ -216,7 +296,7 @@ class PrefillWindowCapture:
                                  'not record its GDN slot. Add it to BATCHED_PREFILL_ENTRIES '
                                  'once its empty_slots argument is confirmed third-positional.'
                                  % (name,))
-            found.append((self.model, name, self.wrap_slots(getattr(self.model, name))))
+            found.append((self.model, name, self.wrap_slots(getattr(self.model, name), name)))
         return found
 
     @contextmanager
@@ -250,12 +330,22 @@ class PrefillWindowCapture:
             raise ValueError('One non-nested native prefill capture required')
         self.started = self.active = True
         self.segment_calls = 0
+        self.segment_slot = None
         self.segments += 1
         try:
             with instance_overrides(self.bindings()):
                 yield self
             if self.cursor >= self.position:
                 validate_prefill_chunks(self.position, self.chunks)
+                if self.prefill_slot is not None and self.segment_slot is None:
+                    # Admission adopts prefill_slot as the FINAL chunk's slot. It carries
+                    # over between segments, so a final segment that finished the prompt
+                    # without a batched call would hand admission an earlier chunk's
+                    # partial snapshot - silently. The plugin always prefills through a
+                    # batched entry on TP, so this only fires on a broken contract.
+                    raise ValueError('The final prefill segment made no batched call, so slot %r '
+                                     'holds an earlier chunk\'s partial state, not the finished '
+                                     'prompt' % (self.prefill_slot,))
                 self.complete = True
         except BaseException:
             self.active = False
