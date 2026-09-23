@@ -538,8 +538,62 @@ def refuse_if_grafted(source, what):
         raise ValueError('%s: already grafted (%s present)' % (what, SINGLE_GATEUP_FLAG))
 
 
+C1_SLICE_ROWS = 1024
+
+# Module-level helper added to mlp.py under C1. At TP2 the unfused 2D prefill program for
+# gate/up (N=8704 per device) does not fit L1 at 2048 rows: v100 (run 35807762937) found its
+# L1 outputs in the way, and with DRAM outputs v102 (run 35808212287) still found the
+# program's own circular buffers reaching 1,559,424 bytes against persistent L1 buffers from
+# 1,539,072. Row slices of 1024 halve per_core_M and the buffers with it. Each slice is the
+# model's own matmul (the same builder, the same activation) on fewer rows, output in DRAM,
+# and the slices are joined on the row axis. Up to 1024 rows the builder is called with the
+# very arguments the branch uses, so only the output placement differs.
+C1_LINEAR_HELPER = (
+    '\n'
+    '\n'
+    '_QWEN_C1_SLICE_ROWS = ' + str(C1_SLICE_ROWS) + '\n'
+    '\n'
+    '\n'
+    'def _qwen_c1_linear(args, tpc, w, max_cols, tuning):\n'
+    '    """Lever N M3native C1 (QWEN_FAST_SINGLE_GATEUP=1): the unfused prefill gate/up matmul\n'
+    '    at TP2, on row slices of _QWEN_C1_SLICE_ROWS with DRAM outputs, joined on rows. Same\n'
+    '    call shape as ttnn.linear; the passed program and memory configs are rebuilt per slice."""\n'
+    '\n'
+    '    def linear(x, weight, compute_kernel_config=None, program_config=None, memory_config=None):\n'
+    '        seq = x.shape[-2]\n'
+    '        rank = len(x.shape)\n'
+    '        options = dict(max_cols=max_cols, tuning=tuning)\n'
+    '        if weight is w.w1:\n'
+    '            options["fused_activation"] = ttnn.UnaryOpType.SILU\n'
+    '        parts = []\n'
+    '        for start in range(0, seq, _QWEN_C1_SLICE_ROWS):\n'
+    '            rows = min(_QWEN_C1_SLICE_ROWS, seq - start)\n'
+    '            if rows == seq:\n'
+    '                part = x\n'
+    '            else:\n'
+    '                begins = [0] * rank\n'
+    '                ends = [x.shape[i] for i in range(rank)]\n'
+    '                begins[rank - 2], ends[rank - 2] = start, start + rows\n'
+    '                part = ttnn.slice(x, begins, ends)\n'
+    '            config = tpc.create_prefill_mlp_matmul_program_config(rows, args.dim, weight.shape[-1], **options)\n'
+    '            parts.append(ttnn.linear(part, weight, compute_kernel_config=compute_kernel_config,\n'
+    '                                     program_config=config, memory_config=ttnn.DRAM_MEMORY_CONFIG))\n'
+    '            if part is not x:\n'
+    '                ttnn.deallocate(part)\n'
+    '        if len(parts) == 1:\n'
+    '            return parts[0]\n'
+    '        joined = ttnn.concat(parts, dim=rank - 2, memory_config=ttnn.DRAM_MEMORY_CONFIG)\n'
+    '        for part in parts:\n'
+    '            ttnn.deallocate(part)\n'
+    '        return joined\n'
+    '\n'
+    '    return linear\n'
+)
+
+
 def patch_mlp_single_gateup(source):
-    """C1 in mlp.py: both switch call sites, plus two markers. Inert unless the flag is 1."""
+    """C1 in mlp.py: both switch call sites, the sliced prefill gate/up, and two markers.
+    Inert unless the flag is 1."""
     refuse_if_grafted(source, 'mlp single gate/up')
     lines = source.splitlines(keepends=True)
     span = module_function_span(source, LOAD_WEIGHTS_FUNCTION)
@@ -582,24 +636,30 @@ def patch_mlp_single_gateup(source):
         '                type(self)._qwen_2d_logged = True\n'
         '                from loguru import logger as _qwen_logger\n'
         '\n'
-        '                _qwen_logger.info("' + MARKER_PREFILL_2D + ': rows={} fused={} x={} outputs=DRAM", seq,\n'
-        '                                  self._fuse_gateup_agmm, getattr(x, "memory_config", lambda: None)())\n'
-        '            # Lever N M3native C1: at TP2 the gate/up outputs (N=8704 per device) do not fit L1 (v100).\n'
-        '            _qwen_c1_out = ttnn.L1_MEMORY_CONFIG if ' + FLAG_OFF + ' else ttnn.DRAM_MEMORY_CONFIG\n',
+        '                _qwen_logger.info("' + MARKER_PREFILL_2D + ': rows={} fused={} x={} slices of {} rows, DRAM outputs",\n'
+        '                                  seq, self._fuse_gateup_agmm, getattr(x, "memory_config", lambda: None)(),\n'
+        '                                  _QWEN_C1_SLICE_ROWS)\n',
         'mlp prefill 2D branch marker')
-    span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
-    lines = replace_once(
-        lines, span,
-        '                x, w.w1, compute_kernel_config=ckc, program_config=pc_gate, memory_config=ttnn.L1_MEMORY_CONFIG\n',
-        '                x, w.w1, compute_kernel_config=ckc, program_config=pc_gate, memory_config=_qwen_c1_out\n',
-        'mlp prefill 2D w1 output placement')
-    span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
-    lines = replace_once(
-        lines, span,
-        '                x, w.w3, compute_kernel_config=ckc, program_config=pc_up, memory_config=ttnn.L1_MEMORY_CONFIG\n',
-        '                x, w.w3, compute_kernel_config=ckc, program_config=pc_up, memory_config=_qwen_c1_out\n',
-        'mlp prefill 2D w3 output placement')
+    selection = (
+        '            # Lever N M3native C1: row-sliced, DRAM-output gate/up at TP2 under the flag (v100, v102).\n'
+        '            _qwen_linear = ttnn.linear if ' + FLAG_OFF + ' else _qwen_c1_linear(args, tpc, w, _gw, _pt)\n')
+    for weight, config in (('w1', 'pc_gate'), ('w3', 'pc_up')):
+        span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
+        lines = replace_once(
+            lines, span,
+            '            %s_out = ttnn.linear(\n'
+            '                x, w.%s, compute_kernel_config=ckc, program_config=%s, memory_config=ttnn.L1_MEMORY_CONFIG\n'
+            % (weight, weight, config),
+            (selection if weight == 'w1' else '') +
+            '            %s_out = _qwen_linear(\n'
+            '                x, w.%s, compute_kernel_config=ckc, program_config=%s, memory_config=ttnn.L1_MEMORY_CONFIG\n'
+            % (weight, weight, config),
+            'mlp prefill 2D %s call' % weight)
     result = ''.join(lines)
+    anchor = '\n\nclass Qwen36MLP:\n'
+    if result.count(anchor) != 1:
+        raise ValueError('mlp C1 helper: expected one Qwen36MLP class anchor, found %d' % result.count(anchor))
+    result = result.replace(anchor, C1_LINEAR_HELPER + anchor)
     ast.parse(result)
     return result
 

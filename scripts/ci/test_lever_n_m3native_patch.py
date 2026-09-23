@@ -1009,6 +1009,7 @@ def _strip_c1(text):
     """Remove every C1 insertion: flag-gated if-blocks, the local import and the flag term."""
     kept = []
     skipping = None
+    dropping_helper = False
     lines = text.splitlines(keepends=True)
     for index, line in enumerate(lines):
         if skipping is not None:
@@ -1022,8 +1023,15 @@ def _strip_c1(text):
             continue
         if stripped.startswith('# Lever N M3native C1'):
             continue
-        if stripped.startswith('_qwen_c1_out = '):
+        if stripped.startswith('_qwen_linear = '):
             continue
+        if line.startswith('_QWEN_C1_SLICE_ROWS = '):
+            dropping_helper = True
+        if dropping_helper:
+            if line.startswith('class '):
+                dropping_helper = False
+            else:
+                continue
         if stripped.startswith('# gate/up copy and never fuses the gather'):
             continue
         if stripped == 'import os\n' and len(line) - len(stripped) > 0:
@@ -1033,7 +1041,7 @@ def _strip_c1(text):
         if line == '\0':
             continue
         kept.append(line.replace(' and os.environ.get("QWEN_FAST_SINGLE_GATEUP") != "1"', '')
-                    .replace('memory_config=_qwen_c1_out', 'memory_config=ttnn.L1_MEMORY_CONFIG'))
+                    .replace('= _qwen_linear(', '= ttnn.linear('))
     return ''.join(kept)
 
 
@@ -1140,36 +1148,88 @@ class SingleGateUpGraftTests(unittest.TestCase):
 
 
 
-class SingleGateUpPlacementTests(unittest.TestCase):
-    """v100 (run 35807762937): at TP2 the unfused branch's L1 gate/up outputs collided with
-    the w1 program's circular buffers on the first 2048-row prefill chunk."""
 
-    def test_both_2d_outputs_follow_the_flag_and_nothing_else_moves(self):
+class SingleGateUpSlicingTests(unittest.TestCase):
+    """At TP2 the unfused 2D gate/up program does not fit L1 at 2048 rows: v100 (run
+    35807762937) hit its L1 outputs, v102 (run 35808212287) its own circular buffers. Under
+    the flag the branch runs 1024-row slices with DRAM outputs, joined on rows."""
+
+    def _helper(self, rank=4):
+        """Execute the grafted module's helper against a fake ttnn and tp_common."""
+        import types
+        calls = []
+
+        class Tensor:
+            def __init__(self, shape, name):
+                self.shape, self.name = tuple(shape), name
+
+        ttnn = types.SimpleNamespace(
+            UnaryOpType=types.SimpleNamespace(SILU='SILU'), DRAM_MEMORY_CONFIG='DRAM',
+            slice=lambda x, b, e: calls.append(('slice', b[rank - 2], e[rank - 2])) or Tensor(
+                x.shape[:rank - 2] + (e[rank - 2] - b[rank - 2], x.shape[-1]), 'slice'),
+            linear=lambda x, weight, **k: calls.append(('linear', x.shape[-2], weight.name, k['program_config'],
+                                                        k['memory_config'])) or Tensor(x.shape[:-1] + (8704,), 'out'),
+            concat=lambda parts, dim, memory_config: calls.append(('concat', len(parts), dim, memory_config)) or Tensor(
+                parts[0].shape[:rank - 2] + (sum(p.shape[-2] for p in parts), 8704), 'joined'),
+            deallocate=lambda t: calls.append(('free', t.name)))
+        tpc = types.SimpleNamespace(create_prefill_mlp_matmul_program_config=lambda rows, k, n, **o: (rows, k, n, o.get(
+            'fused_activation'), o.get('max_cols'), o.get('tuning')))
+        source = patch_mlp_full(MLP_MODULE)
+        start = source.index('_QWEN_C1_SLICE_ROWS = ')
+        end = source.index('class Qwen36MLP:')
+        namespace = {'ttnn': ttnn}
+        exec(source[start:end], namespace)
+        w = types.SimpleNamespace(w1=Tensor((5120, 8704), 'w1'), w3=Tensor((5120, 8704), 'w3'))
+        args = types.SimpleNamespace(dim=5120)
+        return namespace['_qwen_c1_linear'](args, tpc, w, 11, 'tune'), w, Tensor, calls
+
+    def test_2048_rows_run_as_two_1024_row_slices_joined_in_dram(self):
+        linear, w, Tensor, calls = self._helper()
+        x = Tensor((1, 1, 2048, 5120), 'x')
+        out = linear(x, w.w1, compute_kernel_config='ckc', program_config='ignored', memory_config='L1')
+        self.assertEqual(out.shape, (1, 1, 2048, 8704))
+        self.assertEqual(calls, [
+            ('slice', 0, 1024), ('linear', 1024, 'w1', (1024, 5120, 8704, 'SILU', 11, 'tune'), 'DRAM'), ('free', 'slice'),
+            ('slice', 1024, 2048), ('linear', 1024, 'w1', (1024, 5120, 8704, 'SILU', 11, 'tune'), 'DRAM'), ('free', 'slice'),
+            ('concat', 2, 2, 'DRAM'), ('free', 'out'), ('free', 'out')])
+
+    def test_up_carries_no_activation(self):
+        linear, w, Tensor, calls = self._helper()
+        linear(Tensor((1, 1, 2048, 5120), 'x'), w.w3, compute_kernel_config='ckc')
+        self.assertEqual({c[3][3] for c in calls if c[0] == 'linear'}, {None})
+
+    def test_up_to_1024_rows_is_one_unsliced_call_with_the_branchs_own_builder_arguments(self):
+        linear, w, Tensor, calls = self._helper()
+        x = Tensor((1, 1, 512, 5120), 'x')
+        out = linear(x, w.w1, compute_kernel_config='ckc')
+        self.assertEqual(calls, [('linear', 512, 'w1', (512, 5120, 8704, 'SILU', 11, 'tune'), 'DRAM')])
+        self.assertEqual(out.name, 'out')
+
+    def test_a_ragged_tail_gets_its_own_short_slice(self):
+        linear, w, Tensor, calls = self._helper()
+        linear(Tensor((1, 1, 1536, 5120), 'x'), w.w3, compute_kernel_config='ckc')
+        self.assertEqual([c[1:] for c in calls if c[0] == 'slice'], [(0, 1024), (1024, 1536)])
+
+    def test_the_branch_selects_plain_ttnn_linear_unless_the_flag_is_one(self):
+        import os
+        import types
+        line = [l.strip() for l in patch_mlp_full(MLP_MODULE).splitlines() if l.strip().startswith('_qwen_linear = ')][0]
+        ttnn = types.SimpleNamespace(linear='ttnn.linear')
+        for environ, expected in (({}, 'ttnn.linear'), ({'QWEN_FAST_SINGLE_GATEUP': '0'}, 'ttnn.linear'),
+                                  ({'QWEN_FAST_SINGLE_GATEUP': '1'}, 'sliced')):
+            with self.subTest(environ=environ), patch.dict('os.environ', environ, clear=True):
+                namespace = dict(ttnn=ttnn, os=os, args=None, tpc=None, w=None, _gw=None, _pt=None,
+                                 _qwen_c1_linear=lambda *a: 'sliced')
+                exec(line, namespace)
+                self.assertEqual(namespace['_qwen_linear'], expected)
+
+    def test_both_2d_calls_go_through_the_selection(self):
         patched = patch_mlp_full(MLP_MODULE)
         span = function_span(patched, '_forward_tp')
         region = ''.join(patched.splitlines(keepends=True)[span[0]:span[1]])
-        self.assertIn('_qwen_c1_out = ttnn.L1_MEMORY_CONFIG if os.environ.get("QWEN_FAST_SINGLE_GATEUP") != "1" '
-                      'else ttnn.DRAM_MEMORY_CONFIG', region)
-        self.assertEqual(region.count('memory_config=_qwen_c1_out'), 2)
-        self.assertIn('program_config=pc_gate, memory_config=_qwen_c1_out', region)
-        self.assertIn('program_config=pc_up, memory_config=_qwen_c1_out', region)
-        # Defined before either use, inside the 2D branch.
-        branch = region.index('        elif x.shape[-2] > ttnn.TILE_SIZE:\n')
-        self.assertLess(branch, region.index('_qwen_c1_out = '))
-        self.assertLess(region.index('_qwen_c1_out = '), region.index('memory_config=_qwen_c1_out'))
-
-    def test_the_placement_evaluates_to_l1_unless_the_flag_is_one(self):
-        import types
-        ttnn = types.SimpleNamespace(L1_MEMORY_CONFIG='L1', DRAM_MEMORY_CONFIG='DRAM')
-        line = [l.strip() for l in patch_mlp_full(MLP_MODULE).splitlines() if l.strip().startswith('_qwen_c1_out = ')][0]
-        for environ, expected in (({}, 'L1'), ({'QWEN_FAST_SINGLE_GATEUP': '0'}, 'L1'),
-                                  ({'QWEN_FAST_SINGLE_GATEUP': '1'}, 'DRAM')):
-            with self.subTest(environ=environ), patch.dict('os.environ', environ, clear=True):
-                import os
-                namespace = {'ttnn': ttnn, 'os': os}
-                exec(line, namespace)
-                self.assertEqual(namespace['_qwen_c1_out'], expected)
-
+        self.assertEqual(region.count('_out = _qwen_linear('), 2)
+        self.assertLess(region.index('_qwen_linear = '), region.index('w1_out = _qwen_linear('))
+        self.assertLess(region.index('        elif x.shape[-2] > ttnn.TILE_SIZE:\n'), region.index('_qwen_linear = '))
 
 if __name__ == '__main__':
     unittest.main()
