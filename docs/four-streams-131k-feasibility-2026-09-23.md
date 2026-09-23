@@ -576,3 +576,25 @@ reader in the M1 bench, image A', `optimisation/ttnn-op/sdpa_prefill_bench/k0_se
   while the controlled stock step here is 18.2 us. Sharing removes about 25.6% of the attention prefill term:
   about 4.9 s per 131k prompt on the bench's slope, about 5.8 s on the 22.7 s term fitted from model prefills.
   It remains the largest prefill lever left (C1d 2-3 s, GDN scan 1.2-1.8 s); the K64g graft build is in progress.
+
+## Round host phases, Build 1: -8 ms per round, exact
+
+The ~82 ms of each 4 x 131k round spent outside the verify trace (v120 round 31: commits 34 ms, proposals ~46 ms) was
+diagnosed and ranked by a workflow with two adversarial verifications (`round-host-phases-spec.md`); the savings
+verifier cut the spec's own estimates (Build 1 -15..-20 to about -8 ms central) and the exactness verifier ruled the
+pair-pipelining build (C3) unsafe as specified. Build 1 takes only the cuts that are exact by construction, behind
+`QWEN_FAST_ROUND_B1=1` (commit 8c86e98c, image A''' 02f758e1): one batched FP64 token selection for all users, O(1)
+`retain()` with cached borrowed-weight addresses, dropping a feature-history write no served path reads, and dropping
+two dead 4160-row key-RoPE uploads per pair.
+
+- **Correct on hardware** (v143, 4 x 32k, `QWEN_FAST_ROUND_B1_AUDIT=1`): 4/4 exact; 48 audited rounds re-derived
+  174 batched selections, 89 RoPE tables, 28,500 retain decisions, 639 cached-address checks and 178 release lists
+  by the old path with 0 mismatches.
+- **ABAB at 4 x 131k on the best config** (K64f tail+share, C1c, GDN prefill conv): v139 off 262 ms, v140 on 254 ms,
+  v141 off 259 ms, v142 on 251 ms (round medians) - **-8 ms per round in both pairs**, about +3% per-user rate
+  (26.3 -> 27.1 tok/s at ~6.85 tokens per round). All four exact; trace and TTFT unchanged. The commit phase drops
+  from 8.95 to 7.6 ms per user; the per-user propose from 2.3 to 0.1 ms, with the batched selection (+3.8 ms) now
+  inside prepare_proposals.
+- Still open from the spec: Build 2 (pair-pipelined commit/propose, pre-staging the next verify; about -12 to -17 ms
+  more by the verifier's figures) needs a redesign so no deferred commit outlives the step, and a per-round tensor
+  never straddles a trace replay.
