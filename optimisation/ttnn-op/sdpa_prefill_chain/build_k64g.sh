@@ -39,6 +39,9 @@
 # touch and a rebuild ninja would call the unity TUs up to date. On a failure the EXIT trap restores
 # and touches the sources but does not rebuild; it says so.
 set -euo pipefail
+# Byte-order collation for every sort/comm: the rig run died at step 7 with "comm: file 1 is not in
+# sorted order" (qwen_strings sorted under one locale, comm checking under another) and set -e.
+export LC_ALL=C
 
 S=${K64G_SRC:-$HOME/kwork64/k64g}
 DS=${K64G_DECODE_SRC:-$HOME/kwork64/k64f}
