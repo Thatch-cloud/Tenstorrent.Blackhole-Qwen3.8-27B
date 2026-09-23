@@ -327,6 +327,16 @@ model's own builder per slice, DRAM outputs, joined on rows). v103 (run 35808667
 32k, every flag) and v101 are both **4/4 exact over 256 tokens**: the unfused prefill
 produces the same tokens as the fused one on these prompts.
 
+**From the C1c graft on, a rerun of a `QWEN_FAST_SINGLE_GATEUP` tag is not the historical
+MLP.** C1c (`lever_n_m3native_patch` section F: one slice of x per 1024 rows feeding both w1
+and w3, product-only concat) is the default whenever the flag is set, and the graft job applies
+it to every 0648ca9a tag. So reruns of v104, v108, v115, v116 (and any other SINGLE_GATEUP tag)
+measure C1c: the same values as C1 by construction, but a different op count, DRAM peak and
+prefill time. Set `M3NATIVE_C1_LEGACY=1` (`QWEN_FAST_C1_LEGACY=1`) to rerun the C1 that was
+measured. The gate now proves which one ran: it requires the C1c branch marker by default and
+C1's `prefill MLP via w1/w3 2D branch` marker under LEGACY (C1d's two markers under
+`QWEN_FAST_C1_AGMM=1`).
+
 ### References are now full-length and context-exact
 
 Every tracked reference used to be 64 tokens, so "token-exact" had covered a quarter of
@@ -440,3 +450,52 @@ first run of a new graft also paid JIT compiles: up to 1.5 s per first commit sh
 **Next cuts, in flight:** a tail-only mask in sdpa_decode (stage 1: K64e, card M 180/180 byte-exact, SDPA
 2058 -> 1768 us per user-layer at 131k; A/B/A v111-v114 running), then leader/twin K/V multicast so each user's KV
 is read once (stage 3).
+
+## Stage 1 (tail-only mask) on hardware, the 4 x 32k best config, and the v116 warm-up bug
+
+**Stage 1 is exact and takes 15 ms off the 131k verify trace.** v113 (K64e, `QWEN_FAST_SDPA_MODES=tail`, 8-row
+groups, warm kernel cache) is 4/4 exact over 256 tokens against the 131k references. The verify trace goes from
+184.8 to 169.5 ms, the median four-user round from 280 to 264 ms, and the steady per-user rate from 24.8 to
+**26.0 tok/s** (55% of the 47.5 tok/s single-stream bar). v112, the same setting on a cold per-graft kernel cache,
+is exact but its first rounds pay JIT compiles; judge rate on the warm repeat.
+
+**The best config at 4 x 32k** (v115: v113's flags at a 32,768 window) is exact, runs a 230 ms round and 30.1 tok/s
+per user against the 48.0 bar, with 8.40 GB per chip free.
+
+**v116, the single-stream bar on the same kernels, found a real integration bug on the one-user path only.** It
+aborted at the first bucket capture with `TT_FATAL: Cannot load new binaries during trace capture`. Cause, from the
+log and the source: `verifier_engine` warms each bucket on a fresh fixture and then captures on the pooled one. The
+pooled and packed replay readers apply the sdpa modes at construction (the log shows exactly two
+`[PINDIAG] sdpa qwen-modes` lines, both for the pooled capture readers), but the warm-up fixture has no storage, so
+`model_batch` builds it the pinned, unpooled `ReplayAttentionReader`, which never took the modes. The warm-up
+compiled the legacy SDPA program and the capture met the moded one uncompiled. The four-user runs never hit it
+because the packed reader applies the modes to every per-user reader, pooled or not. Fixed in `model_batch.py`
+(the unpooled branch now calls `apply_sdpa_modes` before any forward); it ships in image A'.
+
+## Stage 3 (K/V share) and the GDN prefill conv op on card M
+
+**Stage 3** (K64f, `_ttnncpp.so` d59b3c99: leader/twin K/V multicast inside a batch-2 bundle, flag 0x2 of the
+`0x51DEC000` sentinel) is byte-exact on card M with no hang and a clean soak, and takes the 131k call from 876 to
+816 us - about 4 ms per four-user round. Small; it runs at 4 x 131k as the next A/B.
+
+**Prefill lever #2, the GDN prefill conv op** (`scripts/ci/gdn_prefill_conv_exact*`: one generic_op launch in place of
+the FIR's 22 ops per layer-chunk), passed card M in full: every case of the matrix byte-exact on q, k, v and
+new_state, all four chains exact, all four negative controls differ, and a cache hit adds no program. At T=2048 it
+takes **0.228 ms against 2.287 ms** for the served FIR plus its three slices - 10x, about 2.06 ms per layer-chunk,
+which is up to about 6.3 s of a 131k prompt's 66.5 s if every chunk takes it (48 GDN layers x 64 chunks). Host time
+is 102 us per call, twice the 50 us design target (about 0.3 s per prompt, overlapped with dispatch).
+
+Two findings on the way:
+
+- **Both FIR state paths canonicalise new_state.** The first card-M pass (pcx-20260923T063828) showed the one-hot
+  path flushes denormals as well as -0, and the static slice path (valid_len None) turns -0 into +0 and flushes
+  denormals too - its untilize / concat / tilize round trip does what the one-hot matmul does. The op now defaults
+  to `CANON_DENORM` and `STATIC_CANON` (a runtime arg), the harness searches both paths including -0 data, and the
+  second pass (pcx-20260923T070701, then the full run pcx-20260923T070812) is exact with the defaults.
+- **The image's FIR is fac29122, not the TT-Sim copy's e2fe112e.** The only difference is the tap slices' DRAM
+  memory config inside `_causal_conv1d_fir` - placement, not arithmetic - and the comparison always runs against the
+  image's own FIR; the harness now pins fac29122.
+
+The model-side gate requires one engaged-chunk marker per chunk per user and 48 calls (one per GDN layer) per chunk,
+so a run where full chunks bypass the op (`valid_len=None` takes `ttnn.conv1d` in the served tp.py) fails rather
+than passing on the tail chunks alone. The first model run is v125 (4 x 32k, 64 calls audited against the FIR).

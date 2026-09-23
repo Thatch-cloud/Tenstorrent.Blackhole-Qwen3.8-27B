@@ -542,6 +542,14 @@ class ModelBatch:
             elif tables is None:
                 self.replay_reader = ReplayAttentionReader(ttnn, model.mesh_device, self.rows, self.replay_capacity, pages,
                     upload_replay, max_group_rows=self.replay_group_rows, short_context=self.short_context)
+                # QWEN_FAST_SDPA_MODES on the pinned reader too, before any forward: verifier_engine
+                # warms each bucket on an unpooled fixture and then captures on the pooled one, so
+                # a warm-up without the modes compiles the legacy SDPA program and the capture
+                # meets the moded one uncompiled (v116, TT_FATAL !is_capturing_trace). A no-op
+                # when the variable is unset.
+                from pooled_attention_replay import apply_sdpa_modes, sdpa_modes
+
+                apply_sdpa_modes(self.replay_reader, sdpa_modes())
             else:
                 from pooled_attention_replay import PooledReplayAttentionReader
 

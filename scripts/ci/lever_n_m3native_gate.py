@@ -119,18 +119,135 @@ SINGLE_GATEUP_MARKERS = (
     '[PINDIAG] single gate/up copy: w_gate_up not built',
     '[PINDIAG] single gate/up copy: ff_norm gathers its own input',
 )
+# C1d (QWEN_FAST_C1_AGMM=1 with QWEN_FAST_SINGLE_GATEUP=1, lever_n_m3native_patch section F): the
+# ff_norm skips its gather again, so its gathers-for-itself marker cannot fire; the layer's C1d
+# marker and the MLP's C1d branch marker (logged inside the executed branch) take its place.
+C1D_MARKERS = ('[PINDIAG] C1d: ff_norm skips its all-gather for the MLP AGMM',
+               '[PINDIAG] prefill MLP C1d: two all_gather_matmul_prefill')
+
+
+# Which prefill MLP branch ran is proved by the marker logged inside it (once per process):
+# C1c is the default under QWEN_FAST_SINGLE_GATEUP=1 (lever_n_m3native_patch section F), so
+# a rerun of a SINGLE_GATEUP tag (v104, v108, v115, v116) measures C1c, and a graft that fell
+# through to C1 must not pass. QWEN_FAST_C1_LEGACY=1 keeps C1, whose 2D-branch marker is then
+# required instead. C1d's branch precedes both, so under QWEN_FAST_C1_AGMM=1 only its markers.
+C1C_MARKER = '[PINDIAG] prefill MLP C1c: one slice of x per 1024 rows'
+C1_LEGACY_MARKER = '[PINDIAG] prefill MLP via w1/w3 2D branch'
+
+
+def single_gateup_markers(environ):
+    """SINGLE_GATEUP_MARKERS plus the executed prefill MLP branch's marker: C1c by default, C1's
+    2D branch under QWEN_FAST_C1_LEGACY=1, or (QWEN_FAST_C1_AGMM=1) C1d's two in place of the
+    ff_norm's gathers-for-itself marker."""
+    markers = list(SINGLE_GATEUP_MARKERS)
+    if environ.get('QWEN_FAST_C1_AGMM') == '1':
+        markers.remove('[PINDIAG] single gate/up copy: ff_norm gathers its own input')
+        markers.extend(C1D_MARKERS)
+    elif environ.get('QWEN_FAST_C1_LEGACY') == '1':
+        markers.append(C1_LEGACY_MARKER)
+    else:
+        markers.append(C1C_MARKER)
+    return markers
+
+
+# QWEN_PREFILL_PROFILE_FLUSH=1 (M3NATIVE_PROFILE, lever_n_m3native_patch section G): the layer.py
+# hook logs this once per process at its first ReadDeviceProfiler drain, inside the drain.
+PREFILL_FLUSH_MARKER = '[PINDIAG] prefill profile flush: first flush'
+
+
 SKIP_BLOCK_STREAM_MARKER = '[PINDIAG] block stream skipped for the 64-row block'
 DRAFT_BF8_MARKER = 'projections dtype=bf8 x36'
 LEDGER_MARKERS = ('[MEMLEDGER] phase=P7 ', ' check=residual status=')
-# QWEN_FAST_SDPA_MODES=tail (optimisation/ttnn-op/sdpa_decode_qwen, stage 1). The two [PINDIAG]
-# lines are emitted inside pooled_attention_replay.apply_sdpa_modes (the loaded _ttnncpp.so was
-# checked for the factory branch; a replay reader's configs were rewritten), never at install or
-# mount time. The [QWEN-SDPA] line is the grafted factory's own log_info (F4), printed when it
-# builds a tail-mode program: the C++ branch itself ran, not just the Python that selects it.
+# QWEN_FAST_SDPA_MODES (optimisation/ttnn-op/sdpa_decode_qwen: 'tail' stage 1, 'share' stage 3).
+# The two [PINDIAG] lines are emitted inside pooled_attention_replay.apply_sdpa_modes (the
+# loaded _ttnncpp.so was checked for the factory branch; a replay reader's configs were
+# rewritten), never at install or mount time. The [QWEN-SDPA] line is the grafted factory's own
+# log_info (F4), printed when it builds a program in that mode: the C++ branch itself ran, not
+# just the Python that selects it. With share the line must carry flag 0x2 (0x3 with tail),
+# which the reader sets only on bundles of more than one entry, so kv_share=true was built.
 SDPA_MODES_MARKERS = ('[PINDIAG] sdpa qwen-modes binary ', '[PINDIAG] sdpa qwen-modes modes=tail ',
                       '[QWEN-SDPA] flags=0x1 ')
+SDPA_MODE_FLAGS = {'tail': 0x1, 'share': 0x2}
 GDN_ALL_BATCHED = re.compile(r'gdn user_batched calls this captured forward: ([1-9][0-9]*) of ([0-9]+) GDN layers')
 LEDGER_RESIDUAL = re.compile(r'\[MEMLEDGER\] phase=P7 [^\n]*check=residual status=([a-zA-Z]+)')
+
+
+# Lever #2 (QWEN_FAST_GDN_PREFILL_CONV=1, lever_n_m3native_patch section H): the graft logs the
+# engaged marker inside the op's own branch, once per prefill chunk, with the calls the previous
+# chunk made, and (from chunk 2 on) a completion line when a chunk reaches chunk 1's count. Under
+# QWEN_FAST_GDN_PREFILL_CONV_AUDIT=<n> the first audit line must say exact=True (a mismatch
+# raises in the engine). The flag fails on: any FIR-fallback line; a completed chunk that did not
+# engage every GDN layer (GDN_LAYERS); a last chunk with no completion line; and fewer engaged
+# chunks than users x ceil(prompt_tokens / PREFILL_CONV_CHUNK_TOKENS) - a prefill that engaged
+# only its tail or masked chunks while the full chunks kept the FIR would otherwise pass with
+# every count equal. A partly-replaced prefill is not the thing under test.
+PREFILL_CONV_FLAG = 'QWEN_FAST_GDN_PREFILL_CONV'
+PREFILL_CONV_AUDIT_FLAG = 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT'
+PREFILL_CONV_MARKER = '[PINDIAG] GDN prefill conv engaged'
+PREFILL_CONV_FALLBACK = '[PINDIAG] GDN prefill conv fell back to the FIR'
+PREFILL_CONV_AUDIT_MARKER = '[PINDIAG] GDN prefill conv audit'
+PREFILL_CONV_COMPLETE_MARKER = '[PINDIAG] GDN prefill conv chunk complete'
+PREFILL_CONV_CHUNK = re.compile(r'\[PINDIAG\] GDN prefill conv engaged: chunk ([0-9]+) previous_chunk_calls=([0-9]+)')
+PREFILL_CONV_COMPLETE = re.compile(r'\[PINDIAG\] GDN prefill conv chunk complete: chunk ([0-9]+) calls=([0-9]+)')
+GDN_LAYERS = 48                   # GDN layers per forward: the spec gate steps the call counter by 48
+PREFILL_CONV_CHUNK_TOKENS = 2048  # the model's prefill chunk (forward_prefill T)
+
+
+def prefill_conv_markers(environ):
+    markers = [PREFILL_CONV_MARKER]
+    try:
+        audited = int(environ.get(PREFILL_CONV_AUDIT_FLAG) or 0)
+    except ValueError:
+        audited = 0
+    if audited > 0:
+        markers.append(PREFILL_CONV_AUDIT_MARKER + ' 1 exact=True')
+    return markers
+
+
+def prefill_conv_chunk_calls(log_text):
+    """Each completed chunk's call count, from the NEXT chunk's marker (the first marker has none)."""
+    return [int(match.group(2)) for match in PREFILL_CONV_CHUNK.finditer(log_text) if match.group(1) != '1']
+
+
+def prefill_conv_required_chunks(users, prompt_tokens, chunk_tokens=PREFILL_CONV_CHUNK_TOKENS):
+    """The engaged-chunk markers a run of `users` prompts of `prompt_tokens` must at least log."""
+    if not prompt_tokens:
+        return 0
+    return users * -(-int(prompt_tokens) // chunk_tokens)
+
+
+def prefill_conv_summary(log_text, gdn_layers=GDN_LAYERS, required_chunks=0):
+    """What the markers say: each completed chunk's calls, the engaged chunks, and the last chunk."""
+    chunks = [int(match.group(1)) for match in PREFILL_CONV_CHUNK.finditer(log_text)]
+    complete = {int(match.group(1)): int(match.group(2)) for match in PREFILL_CONV_COMPLETE.finditer(log_text)}
+    last = max(chunks) if chunks else None
+    return dict(chunk_calls=prefill_conv_chunk_calls(log_text), engaged_chunks=len(chunks),
+                required_chunks=required_chunks, gdn_layers=gdn_layers, last_chunk=last,
+                last_chunk_calls=complete.get(last) if last is not None and last > 1 else None,
+                complete_calls=sorted(set(complete.values())))
+
+
+def prefill_conv_problems(log_text, gdn_layers=GDN_LAYERS, required_chunks=0):
+    problems = []
+    if PREFILL_CONV_FALLBACK in log_text:
+        problems.append('%s: no FIR fallback (%s)' % (PREFILL_CONV_FLAG, PREFILL_CONV_FALLBACK))
+    summary = prefill_conv_summary(log_text, gdn_layers, required_chunks)
+    counts = summary['chunk_calls']
+    if any(count != gdn_layers for count in counts):
+        problems.append('%s: every completed prefill chunk engages all %d GDN layers (previous_chunk_calls %s)'
+                        % (PREFILL_CONV_FLAG, gdn_layers, sorted(set(counts))))
+    if any(calls != gdn_layers for calls in summary['complete_calls']):
+        problems.append('%s: completion lines report %s calls, not %d' % (PREFILL_CONV_FLAG, summary['complete_calls'],
+                                                                         gdn_layers))
+    last = summary['last_chunk']
+    if last is not None and last > 1 and summary['last_chunk_calls'] != gdn_layers:
+        problems.append('%s: the last chunk (%d) never completed %d GDN layer calls (%s)'
+                        % (PREFILL_CONV_FLAG, last, gdn_layers, PREFILL_CONV_COMPLETE_MARKER))
+    if summary['engaged_chunks'] < required_chunks:
+        problems.append('%s: %d engaged prefill chunks, at least %d expected (users x ceil(prompt / %d)): the '
+                        'other chunks kept the FIR' % (PREFILL_CONV_FLAG, summary['engaged_chunks'], required_chunks,
+                                                       PREFILL_CONV_CHUNK_TOKENS))
+    return problems
 
 
 def required_flag_markers(environ, users):
@@ -138,16 +255,35 @@ def required_flag_markers(environ, users):
     on = lambda name: environ.get(name) == '1'
     required = {}
     if on('QWEN_FAST_SINGLE_GATEUP'):
-        required['QWEN_FAST_SINGLE_GATEUP'] = list(SINGLE_GATEUP_MARKERS)
+        required['QWEN_FAST_SINGLE_GATEUP'] = single_gateup_markers(environ)
     elif on('QWEN_FAST_SKIP_BLOCK_STREAM'):
         required['QWEN_FAST_SKIP_BLOCK_STREAM'] = [SKIP_BLOCK_STREAM_MARKER]
     if on('QWEN_FAST_DRAFT_BF8'):
         required['QWEN_FAST_DRAFT_BF8'] = [DRAFT_BF8_MARKER]
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
-    if 'tail' in sdpa_mode_names(environ):
-        required['QWEN_FAST_SDPA_MODES'] = list(SDPA_MODES_MARKERS)
+    if on('QWEN_PREFILL_PROFILE_FLUSH'):
+        required['QWEN_PREFILL_PROFILE_FLUSH'] = [PREFILL_FLUSH_MARKER]
+    if on(PREFILL_CONV_FLAG):
+        required[PREFILL_CONV_FLAG] = prefill_conv_markers(environ)
+    markers = sdpa_mode_markers(sdpa_mode_names(environ))
+    if markers:
+        required['QWEN_FAST_SDPA_MODES'] = markers
     return required
+
+
+def sdpa_mode_markers(names):
+    """The three markers a QWEN_FAST_SDPA_MODES value promises, or [] when it names no served
+    mode. The modes line is apply_sdpa_modes' sorted join; the factory line carries every
+    requested flag (tail alone: 0x1, the stage-1 markers exactly; tail,share: 0x3)."""
+    served = sorted(names.intersection(SDPA_MODE_FLAGS))
+    if not served:
+        return []
+    flags = 0
+    for name in served:
+        flags |= SDPA_MODE_FLAGS[name]
+    return [SDPA_MODES_MARKERS[0], '[PINDIAG] sdpa qwen-modes modes=%s ' % ','.join(sorted(names)),
+            '[QWEN-SDPA] flags=0x%x ' % flags]
 
 
 def sdpa_mode_names(environ):
@@ -156,8 +292,9 @@ def sdpa_mode_names(environ):
     return {name.strip() for name in (environ.get('QWEN_FAST_SDPA_MODES') or '').split(',') if name.strip()}
 
 
-def flag_marker_report(environ, users, log_text):
-    """Which promised markers the server log carries, and which flags left theirs out."""
+def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=GDN_LAYERS):
+    """Which promised markers the server log carries, and which flags left theirs out.
+    prompt_tokens (each user's prompt) sets the engaged-chunk floor of QWEN_FAST_GDN_PREFILL_CONV."""
     required = required_flag_markers(environ, users)
     found = {flag: {marker: marker in log_text for marker in markers} for flag, markers in required.items()}
     missing = sorted('%s: %s' % (flag, marker) for flag, markers in found.items()
@@ -168,8 +305,15 @@ def flag_marker_report(environ, users, log_text):
         found['QWEN_FAST_GDN_USER_BATCH'] = {'n of n GDN layers batched': bool(complete)}
         if not complete:
             missing.append('QWEN_FAST_GDN_USER_BATCH: a captured forward batching every GDN layer')
+    prefill_conv = summary = None
+    if environ.get(PREFILL_CONV_FLAG) == '1':
+        required_chunks = prefill_conv_required_chunks(users, prompt_tokens)
+        missing.extend(prefill_conv_problems(log_text, gdn_layers, required_chunks))
+        summary = prefill_conv_summary(log_text, gdn_layers, required_chunks)
+        prefill_conv = summary['chunk_calls']
     residual = LEDGER_RESIDUAL.search(log_text)
-    return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None)
+    return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
+                prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary)
 
 
 def load_references(directory, prompt_tokens=GENERIC_REFERENCE_TOKENS):
@@ -584,7 +728,8 @@ def main():
         report['retired_binder_rounds_observed'] = len(binder_rounds)
         report['retired_binder_calls_nonzero'] = retired_binder_leaks(binder_rounds)
 
-        report['flag_markers'] = flag_marker_report(os.environ, streams, log_text)
+        report['flag_markers'] = flag_marker_report(os.environ, streams, log_text,
+                                                    prompt_tokens=options.prompt_tokens)
         checked = [c for c in comparisons if c.get('reference_present')]
         report['users_checked'] = len(checked)
         report['allow_missing_references'] = options.allow_missing_references

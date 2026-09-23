@@ -92,6 +92,21 @@ jobs:
             sha256sum "graft/$relative.orig" >> experiment-results/source.sha256
             sha256sum "graft/$relative" >> experiment-results/graft.sha256
           done < graft/manifest.txt
+          # Lever #2: the unpatched op files the arm mounts beside gdn/tp.py under
+          # M3NATIVE_GDN_PREFILL_CONV=1, staged from lever_n_m3native_patch.PREFILL_CONV_FILES (the
+          # same table the arm derives its mounts from). Staged on every tag; mounted only on the flag.
+          python3 -B - <<'PY' > graft/prefill-conv-manifest.txt
+          import sys
+          sys.path.insert(0, 'scripts/ci')
+          import lever_n_m3native_patch as patcher
+          for relative, source in sorted(patcher.PREFILL_CONV_FILES.items()):
+              print('%s %s' % (source, relative))
+          PY
+          while read -r source relative; do
+            mkdir -p "graft/$(dirname "$relative")"
+            cp "scripts/ci/$source" "graft/$relative"
+            sha256sum "graft/$relative" >> experiment-results/graft.sha256
+          done < graft/prefill-conv-manifest.txt
           cat experiment-results/graft.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -293,6 +308,22 @@ jobs:
             # 131k on the same kernels (sequential single users, bases 1000..1003, image A, K64e, tail mask).
             *-v115) export KOPGRAFT64=/home/thatch/opgraft-K64e M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PACKED_PROPOSAL=1 M3NATIVE_TRACED_PUBLISH=1 M3NATIVE_TRACE_REGION_BYTES=268435456 M3NATIVE_MEMORY_LEDGER=1 M3NATIVE_SKIP_BLOCK_STREAM=1 M3NATIVE_SINGLE_GATEUP=1 M3NATIVE_DRAFT_BF8=1 M3NATIVE_REPLAY_GROUP_ROWS=8 M3NATIVE_SDPA_MODES=tail M3NATIVE_IMAGE=sha256:0648ca9ad663acc72e7d8ea59d9cde0f9218b583ad74a60d58ff2f31bddd6fae ;;
             *-v116) export KOPGRAFT64=/home/thatch/opgraft-K64e M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PACKED_PROPOSAL=1 M3NATIVE_TRACED_PUBLISH=1 M3NATIVE_GDN_STATE_COPY_BATCH=1 M3NATIVE_USERS=1 M3NATIVE_SEQUENTIAL_USERS=4 M3NATIVE_CONTEXT=131328 M3NATIVE_PROMPT_TOKENS=131072 M3NATIVE_SDPA_MODES=tail M3NATIVE_IMAGE=sha256:0648ca9ad663acc72e7d8ea59d9cde0f9218b583ad74a60d58ff2f31bddd6fae ;;
+            # TEMPLATE (not wired; pick a free tag, add it to the graft job's 0648ca9a image case
+            # above and to runner group 3's workflow@tag allowlist): prefill ranking M2, the
+            # single-user 131k prefill device profile on the v108 argv. M3NATIVE_PROFILE=1 also
+            # passes QWEN_PREFILL_PROFILE_FLUSH=1 (layer.py drains the profiler every 16 layers and
+            # signposts chunks 0/1/31/32/62/63); M3NATIVE_MAX_TOKENS=1 is honoured in profile mode;
+            # the op-support count is raised to 200000. M3NATIVE_C1_LEGACY=1 keeps the served C1
+            # MLP (C1c is now the default under SINGLE_GATEUP); drop it to profile C1c. The timing
+            # pair is the same line without M3NATIVE_PROFILE / M3NATIVE_PROFILE_OP_SUPPORT.
+            # *-vNNN) export KOPGRAFT64=/home/thatch/opgraft-K64d M3NATIVE_TRACED_PROPOSAL=1 M3NATIVE_PIPELINED_COMMITS=1 M3NATIVE_PIPELINED_PROPOSALS=1 M3NATIVE_GDN_USER_BATCH=1 M3NATIVE_FAST_COMMIT=1 M3NATIVE_PACKED_PROPOSAL=1 M3NATIVE_TRACED_PUBLISH=1 M3NATIVE_TRACE_REGION_BYTES=268435456 M3NATIVE_MEMORY_LEDGER=1 M3NATIVE_SKIP_BLOCK_STREAM=1 M3NATIVE_SINGLE_GATEUP=1 M3NATIVE_C1_LEGACY=1 M3NATIVE_DRAFT_BF8=1 M3NATIVE_USERS=1 M3NATIVE_CONTEXT=131328 M3NATIVE_PROMPT_TOKENS=131072 M3NATIVE_MAX_TOKENS=1 M3NATIVE_PROFILE=1 M3NATIVE_PROFILE_OP_SUPPORT=200000 M3NATIVE_IMAGE=sha256:0648ca9ad663acc72e7d8ea59d9cde0f9218b583ad74a60d58ff2f31bddd6fae ;;
+            # TEMPLATE (not wired; only after the card-M gate in optimisation/ttnn-op/gdn_prefill_conv
+            # passes): lever #2, the GDN prefill conv op. Step 2 of its gate plan is the v95 32k
+            # single-stream argv plus M3NATIVE_GDN_PREFILL_CONV=1 M3NATIVE_GDN_PREFILL_CONV_AUDIT=64 (the op
+            # replaces only the valid_len FIR - the one gate12b profiled); step 3 is the v116 131k argv
+            # with and without M3NATIVE_GDN_PREFILL_CONV=1, ABBA. The graft job already
+            # stages graft/gdn/gdn_prefill_conv_exact*.{py,cpp} on every tag; the arm mounts them on the flag.
+            # *-vNNN) export <the v95 or v116 argv> M3NATIVE_GDN_PREFILL_CONV=1 M3NATIVE_GDN_PREFILL_CONV_AUDIT=64 ;;
             # -v95/-v96: I0 single-stream REFERENCE runs. One server, bases 1000..1003 one at a
             # time (M3NATIVE_SEQUENTIAL_USERS=4), each alone, full 256 tokens, on the v84/v88
             # one-user flag set; each stream is written as a reference candidate. v95 at 32k
@@ -340,6 +371,20 @@ jobs:
               --out experiment-results/m3native-profile.json
           else
             echo 'No device profiler CSV (not a profile tag, or the profiler wrote nothing); skipping attribution.'
+          fi
+          # Prefill ranking M2: only when the layer.py flush hook actually ran. Its markers are in
+          # the raw server log (experiment-results/gate) or the stdout copy, whichever has them.
+          flush_log=$(grep -rlF '[PINDIAG] prefill profile flush' experiment-results/gate \
+                      experiment-results/m3native-gate-stdout.log 2>/dev/null | head -1 || true)
+          if [ -s experiment-results/profile/.logs/cpp_device_perf_report.csv ] && [ -n "$flush_log" ]; then
+            python3 -B scripts/ci/lever_n_prefill_profile_report.py \
+              --profile-dir experiment-results/profile \
+              --log "$flush_log" \
+              --out experiment-results/m3native-prefill-profile.json || true
+          elif [ -s experiment-results/profile/.logs/cpp_device_perf_report.csv ]; then
+            echo '::warning::PREFILL PROFILE FLUSH HOOK DID NOT RUN: a device profile CSV exists but no' \
+                 "'[PINDIAG] prefill profile flush' marker is in the server log; per-core buffers may" \
+                 'have overflowed mid-chunk (the ~40% capture), so no prefill report was produced.'
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

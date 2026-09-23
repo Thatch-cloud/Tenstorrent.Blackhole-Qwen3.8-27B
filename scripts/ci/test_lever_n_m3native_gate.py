@@ -311,11 +311,36 @@ class FlagMarkerTests(unittest.TestCase):
         self.assertFalse(evaluate_gate(**dict(COMPLETE_KWARGS, missing_markers=report['missing'])))
 
     def test_single_gateup_needs_all_four_markers_and_supersedes_the_skip_marker(self):
-        from lever_n_m3native_gate import SINGLE_GATEUP_MARKERS
+        from lever_n_m3native_gate import C1C_MARKER, SINGLE_GATEUP_MARKERS
         environ = {'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_SKIP_BLOCK_STREAM': '1'}
-        log = chr(10).join(m + ' 64 layers' for m in SINGLE_GATEUP_MARKERS)
+        log = chr(10).join([m + ' 64 layers' for m in SINGLE_GATEUP_MARKERS] + [C1C_MARKER + ', product-only concat'])
         self.assertEqual(self._report(environ, log)['missing'], [])
-        self.assertEqual(len(self._report(environ, chr(10).join(log.split(chr(10))[:3]))['missing']), 1)
+        self.assertEqual(len(self._report(environ, chr(10).join(log.split(chr(10))[:3] + [C1C_MARKER]))['missing']), 1)
+
+    def test_single_gateup_needs_the_marker_of_the_prefill_mlp_branch_that_ran(self):
+        """C1c is the default: a rerun of a SINGLE_GATEUP tag that fell through to C1 does not
+        pass; under QWEN_FAST_C1_LEGACY=1 C1's own 2D-branch marker is the proof instead."""
+        from lever_n_m3native_gate import C1C_MARKER, C1_LEGACY_MARKER, SINGLE_GATEUP_MARKERS
+        base = [m + ' 64 layers' for m in SINGLE_GATEUP_MARKERS]
+        c1c_log = chr(10).join(base + [C1C_MARKER + ', product-only concat: rows=2048 slices of 1024 rows'])
+        c1_log = chr(10).join(base + [C1_LEGACY_MARKER + ': rows=2048 fused=False x=None slices of 1024 rows'])
+        single = {'QWEN_FAST_SINGLE_GATEUP': '1'}
+        legacy = {'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_C1_LEGACY': '1'}
+        self.assertEqual(self._report(single, c1c_log)['missing'], [])
+        self.assertEqual(self._report(single, c1_log)['missing'], ['QWEN_FAST_SINGLE_GATEUP: ' + C1C_MARKER])
+        self.assertEqual(self._report(legacy, c1_log)['missing'], [])
+        self.assertEqual(self._report(legacy, c1c_log)['missing'], ['QWEN_FAST_SINGLE_GATEUP: ' + C1_LEGACY_MARKER])
+        self.assertFalse(evaluate_gate(**dict(COMPLETE_KWARGS, missing_markers=self._report(single, c1_log)['missing'])))
+        # Neither flag alone (without SINGLE_GATEUP) promises anything.
+        for environ in ({'QWEN_FAST_C1_LEGACY': '1'}, {'QWEN_FAST_C1_AGMM': '1'}):
+            self.assertEqual(self._report(environ, '')['missing'], [])
+
+    def test_the_prefill_profile_flush_flag_needs_its_first_flush_marker(self):
+        from lever_n_m3native_gate import PREFILL_FLUSH_MARKER
+        environ = {'QWEN_PREFILL_PROFILE_FLUSH': '1'}
+        self.assertEqual(self._report(environ, '')['missing'], ['QWEN_PREFILL_PROFILE_FLUSH: ' + PREFILL_FLUSH_MARKER])
+        log = PREFILL_FLUSH_MARKER + ' at prompt 1 chunk 0 layer 15 (every 16 layers)'
+        self.assertEqual(self._report(environ, log, users=1)['missing'], [])
 
     def test_a_model_that_still_holds_the_copy_does_not_count(self):
         environ = {'QWEN_FAST_SINGLE_GATEUP': '1'}
@@ -346,7 +371,7 @@ class FlagMarkerTests(unittest.TestCase):
             '2026-09-23 | INFO | [PINDIAG] sdpa qwen-modes binary /opt/tt-metal/build_Release/lib/_ttnncpp.so carries the [QWEN-SDPA] branch',
             "2026-09-23 | INFO | [PINDIAG] sdpa qwen-modes modes=tail rows=16 capacity=33024 bundles=[3, 1] flags=['0x1', '0x1'] mask=wide",
             '                 Op | INFO     | [QWEN-SDPA] flags=0x1 B=3 PNHt=2 St=1032 mask_width_t=1032 kv_share=false scratch_slots=4 cb_bytes=790592'))
-        for value in ('tail', ' tail ', 'tail,share', 'narrow,tail'):
+        for value in ('tail', ' tail ', 'tail,tail'):
             with self.subTest(value=value):
                 environ = {'QWEN_FAST_SDPA_MODES': value}
                 self.assertEqual(required_flag_markers(environ, 4), {'QWEN_FAST_SDPA_MODES': list(SDPA_MODES_MARKERS)})
@@ -361,10 +386,46 @@ class FlagMarkerTests(unittest.TestCase):
         # A legacy-only program (flags=0x0 never happens; a legacy call logs nothing) is not the tail branch.
         self.assertIn('QWEN_FAST_SDPA_MODES: [QWEN-SDPA] flags=0x1 ',
                       self._report(environ, log.replace('flags=0x1 B=3', 'flags=0x3 B=3'))['missing'])
-        for environ in ({}, {'QWEN_FAST_SDPA_MODES': ''}, {'QWEN_FAST_SDPA_MODES': 'share'}):
+        for environ in ({}, {'QWEN_FAST_SDPA_MODES': ''}, {'QWEN_FAST_SDPA_MODES': 'narrow'}):
             with self.subTest(environ=environ):
                 self.assertEqual(required_flag_markers(environ, 4), {})
                 self.assertEqual(self._report(environ, '')['missing'], [])
+
+    def test_the_share_sdpa_mode_needs_the_factory_line_with_the_share_flag(self):
+        """tail,share (stage 3): the modes line names both, and the factory must have built a program
+        with flag 0x3 - a bundle of twins, kv_share=true - not merely a tail program (0x1)."""
+        from lever_n_m3native_gate import SDPA_MODES_MARKERS, required_flag_markers
+        log = chr(10).join((
+            '2026-09-24 | INFO | [PINDIAG] sdpa qwen-modes binary /opt/tt-metal/build_Release/lib/_ttnncpp.so '
+            'carries the [QWEN-SDPA] branch with KV share',
+            "2026-09-24 | INFO | [PINDIAG] sdpa qwen-modes modes=share,tail rows=16 capacity=33024 bundles=[2] "
+            "flags=['0x3'] mask=wide",
+            '                 Op | INFO     | [QWEN-SDPA] flags=0x3 B=2 PNHt=3 St=1032 mask_width_t=1032 kv_share=true '
+            'scratch_slots=4 cb_bytes=1042496'))
+        expected = [SDPA_MODES_MARKERS[0], '[PINDIAG] sdpa qwen-modes modes=share,tail ', '[QWEN-SDPA] flags=0x3 ']
+        for value in ('tail,share', 'share,tail', ' share , tail '):
+            with self.subTest(value=value):
+                environ = {'QWEN_FAST_SDPA_MODES': value}
+                self.assertEqual(required_flag_markers(environ, 4), {'QWEN_FAST_SDPA_MODES': expected})
+                self.assertEqual(self._report(environ, log)['missing'], [])
+        environ = {'QWEN_FAST_SDPA_MODES': 'tail,share'}
+        for index, marker in enumerate(expected):
+            with self.subTest(dropped=marker):
+                partial = chr(10).join(line for number, line in enumerate(log.split(chr(10))) if number != index)
+                report = self._report(environ, partial)
+                self.assertEqual(report['missing'], ['QWEN_FAST_SDPA_MODES: ' + marker])
+                self.assertFalse(evaluate_gate(**dict(COMPLETE_KWARGS, missing_markers=report['missing'])))
+        # Only tail programs were built (a stage-1 .so, or every bundle single-entry): not share.
+        tail_only = log.replace('flags=0x3 B=2', 'flags=0x1 B=2').replace('kv_share=true', 'kv_share=false')
+        self.assertEqual(self._report(environ, tail_only)['missing'], ['QWEN_FAST_SDPA_MODES: [QWEN-SDPA] flags=0x3 '])
+        # The stage-1 modes line (tail only) does not satisfy a share run either.
+        self.assertIn('QWEN_FAST_SDPA_MODES: [PINDIAG] sdpa qwen-modes modes=share,tail ',
+                      self._report(environ, log.replace('modes=share,tail', 'modes=tail'))['missing'])
+        # share alone: flag 0x2; narrow is refused by the reader, so its modes line never appears.
+        self.assertEqual(required_flag_markers({'QWEN_FAST_SDPA_MODES': 'share'}, 4)['QWEN_FAST_SDPA_MODES'][1:],
+                         ['[PINDIAG] sdpa qwen-modes modes=share ', '[QWEN-SDPA] flags=0x2 '])
+        self.assertEqual(required_flag_markers({'QWEN_FAST_SDPA_MODES': 'narrow,tail'}, 4)['QWEN_FAST_SDPA_MODES'][1:],
+                         ['[PINDIAG] sdpa qwen-modes modes=narrow,tail ', '[QWEN-SDPA] flags=0x1 '])
 
 
 if __name__ == '__main__':

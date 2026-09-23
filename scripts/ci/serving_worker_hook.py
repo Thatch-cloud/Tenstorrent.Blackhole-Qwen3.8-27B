@@ -247,7 +247,11 @@ class FastWorkerHook:
         # cached id this hook does not hold carries none of its decode work.
         cached_ids = getattr(getattr(scheduled, 'scheduled_cached_reqs', None),
                              'req_ids', None) or ()
-        if set(cached_ids) - set(self.bridges):
+        unbridged = set(cached_ids) - set(self.bridges)
+        if unbridged:
+            bridged = set(cached_ids) & set(self.bridges)
+            if bridged and self._carries_tokens(scheduled, unbridged):
+                self._refuse_mixed_step(scheduled, bridged, unbridged)
             return self.original_execute(scheduled)
         # A step that schedules no tokens is a bookkeeping step - a request
         # finishing, for instance - not this hook's decode. With one bridge the
@@ -261,6 +265,72 @@ class FastWorkerHook:
 
         return execute_packed_decode(self.bridges, scheduled, cancelled=self.cancelled,
                                      packed_step=self.packed_step)
+
+    @staticmethod
+    def _carries_tokens(scheduled, request_ids):
+        counts = getattr(scheduled, 'num_scheduled_tokens', None)
+        if isinstance(counts, dict):
+            return any(counts.get(request_id) for request_id in request_ids)
+        # No per-request counts to read: the step's total stands in for them.
+        return bool(getattr(scheduled, 'total_num_scheduled_tokens', 1))
+
+    def _refuse_mixed_step(self, scheduled, bridged, unbridged):
+        """A step decoding a request this hook serves together with one it does not.
+
+        This used to pass the whole step to the stock runner, silently, and that is
+        how the v80 fault stayed hidden: the lifecycle's continuation branch was
+        unreachable while a hook was live, so user 2 finished its prefill without a
+        bridge and every later decode step named both users. The stock path decoded
+        both, the bridged user's session never advanced (it only moves in
+        request.step), the hook kept offering that session's stale ticket as drafts
+        (acceptance ~1.0 in all three Lever N runs), and the runner's frontier ran
+        ahead of the ticket - so the bridged user could never return to this hook
+        anyway: admit_scheduler_output / admit_packed_scheduler_output refuse a
+        frontier that disagrees with the ticket position. Delegating did not keep
+        the fast path alive, it deferred the failure and decoded wrongly meanwhile.
+
+        Every request that decodes here is either bridged at its first token or the
+        lifecycle failed. Two lifecycle faults have produced an unbridged decoder,
+        and both are fixed: a continuation chunk that never reached the lifecycle
+        (serving_lifecycle._is_continuation, tested below the hook branch), and a
+        release that dropped an in-flight prefill's capture and gate because a
+        DIFFERENT request finished (serving_lifecycle._release_decoders /
+        _release_prefill, once a single _release_request). Refused rather than
+        served, with a marker logged first so a count of 0 in a served log proves
+        the fixes ran and a non-zero count names the ids even if the exception text
+        is lost.
+
+        QWEN_FAST_LEGACY_CONTINUATION_ORDER=1 is the exception: that negative
+        control exists to reproduce v80, and v80 IS this shape served on the stock
+        path, so under it the step passes through as it did then - marker still
+        logged, marked as passed.
+        """
+        bridged = sorted(bridged, key=str)
+        unbridged = sorted(unbridged, key=str)
+        legacy = os.environ.get('QWEN_FAST_LEGACY_CONTINUATION_ORDER') == '1'
+        key = (tuple(bridged), tuple(unbridged))
+        seen = getattr(self, '_mixed_steps_seen', None)
+        if seen is None:
+            seen = self._mixed_steps_seen = set()
+        if key not in seen:
+            seen.add(key)
+            try:
+                from loguru import logger
+                logger.warning(
+                    f"[PINDIAG] hook mixed step {'PASSED (legacy order)' if legacy else 'REFUSED'}: "
+                    f"bridged={bridged} unbridged={unbridged} "
+                    f"total={getattr(scheduled, 'total_num_scheduled_tokens', None)!r}")
+            except BaseException:
+                pass
+        if legacy:
+            return
+        raise ValueError('Step mixes requests this hook decodes with requests it holds no '
+                         'bridge for: bridged=%r unbridged=%r - an unbridged request is '
+                         'decoding. Either its prefill chunks never reached the lifecycle '
+                         '(serving_lifecycle._is_continuation) or its prefill was released '
+                         'before handoff because another request finished '
+                         '(serving_lifecycle._release_decoders/_release_prefill)'
+                         % (bridged, unbridged))
 
     def _sample(self, runner, grammar_output):
         # The hook's own decode returns committed output directly and never defers,

@@ -214,6 +214,98 @@ class ArmEnvPassthroughTests(unittest.TestCase):
                 self.assertIn("'QWEN_FAST_%s'" % name, baked)
 
 
+class PrefillProfileArmTests(unittest.TestCase):
+    """Prefill ranking M2: the profile block honours M3NATIVE_MAX_TOKENS (the single-user 131k
+    prefill profile runs --max-tokens 1), takes its op-support count from
+    M3NATIVE_PROFILE_OP_SUPPORT (default 20000), and passes QWEN_PREFILL_PROFILE_FLUSH=1 so the
+    grafted layer.py drains the profiler every 16 layers. The C1c/C1d switches cross as
+    QWEN_FAST_C1_AGMM / QWEN_FAST_C1_LEGACY."""
+
+    START = 'max_tokens="${M3NATIVE_MAX_TOKENS:-256}"'
+    IF = 'if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then'
+
+    def _profile_block(self, environ):
+        import shutil
+        import subprocess
+        import tempfile
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        text = arm_text()
+        start = text.index(self.START)
+        end = text.index(chr(10) + 'fi' + chr(10), text.index(self.IF, start)) + 4
+        script = ('set -euo pipefail' + chr(10) + text[start:end]
+                  + 'printf "RESULT|%s|%s" "$max_tokens" "${entry_args[*]}"' + chr(10))
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(PATH=os.environ.get('PATH', ''), **environ)
+            try:
+                result = subprocess.run([bash, '-c', script], env=env, cwd=directory,
+                                        capture_output=True, text=True, timeout=60)
+            except OSError as error:
+                self.skipTest('bash unusable: %s' % error)
+        return result
+
+    def _run(self, **environ):
+        result = self._profile_block(environ)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        tokens, argv = result.stdout.split('RESULT|')[-1].split('|')
+        return int(tokens), argv
+
+    def test_max_tokens_is_honoured_in_profile_mode_and_defaults_are_kept(self):
+        self.assertEqual(self._run()[0], 256)
+        self.assertEqual(self._run(M3NATIVE_MAX_TOKENS='96')[0], 96)
+        self.assertEqual(self._run(M3NATIVE_PROFILE='1')[0], 48)
+        self.assertEqual(self._run(M3NATIVE_PROFILE='1', M3NATIVE_MAX_TOKENS='1')[0], 1)
+
+    def test_op_support_count_defaults_to_20000_and_is_overridable(self):
+        self.assertIn('--op-support-count 20000 ', self._run(M3NATIVE_PROFILE='1')[1])
+        self.assertIn('--op-support-count 200000 ',
+                      self._run(M3NATIVE_PROFILE='1', M3NATIVE_PROFILE_OP_SUPPORT='200000')[1])
+        self.assertNotIn('tracy', self._run(M3NATIVE_PROFILE_OP_SUPPORT='200000')[1])
+        code = [line for line in arm_text().splitlines() if not line.lstrip().startswith('#')]
+        self.assertEqual([line for line in code if '--op-support-count' in line],
+                         ['              --op-support-count "$op_support" -o /experiment-results-profile'])
+
+    def test_a_bad_op_support_count_is_refused(self):
+        for value in ('abc', '0', '-5', '2e5'):
+            with self.subTest(value=value):
+                result = self._profile_block(dict(M3NATIVE_PROFILE='1', M3NATIVE_PROFILE_OP_SUPPORT=value))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('M3NATIVE_PROFILE_OP_SUPPORT must be a positive integer', result.stderr)
+
+    def test_the_flush_flag_and_the_c1_switches_cross_into_the_container(self):
+        text = arm_text()
+        for line in ('${M3NATIVE_PROFILE:+-e QWEN_PREFILL_PROFILE_FLUSH=1}',
+                     '${M3NATIVE_C1_AGMM:+-e QWEN_FAST_C1_AGMM=1}',
+                     '${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1}'):
+            with self.subTest(line=line):
+                self.assertEqual(text.count(line), 1)
+                self.assertLess(text.index(line), text.index('--entrypoint python3'))
+        graft = (HERE / 'lever_n_m3native_patch.py').read_text(encoding='utf-8')
+        for name in ('QWEN_PREFILL_PROFILE_FLUSH', 'QWEN_FAST_C1_AGMM', 'QWEN_FAST_C1_LEGACY'):
+            with self.subTest(read=name):
+                self.assertIn("'%s'" % name, graft)
+
+
+class LegacyContinuationArmTests(unittest.TestCase):
+    """Lever N's negative control: M3NATIVE_LEGACY_CONTINUATION_ORDER=1 crosses as
+    QWEN_FAST_LEGACY_CONTINUATION_ORDER=1, which serving_lifecycle (the pre-fix routing order)
+    and serving_worker_hook (the mixed-step pass-through) read. Unset, nothing crosses."""
+
+    LINE = '${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1}'
+
+    def test_the_switch_crosses_before_the_entrypoint(self):
+        text = arm_text()
+        self.assertEqual(text.count(self.LINE), 1)
+        self.assertLess(text.index(self.LINE), text.index('--entrypoint python3'))
+
+    def test_both_image_modules_read_it(self):
+        for module in ('serving_lifecycle.py', 'serving_worker_hook.py'):
+            with self.subTest(module=module):
+                source = (HERE / module).read_text(encoding='utf-8')
+                self.assertIn("os.environ.get('QWEN_FAST_LEGACY_CONTINUATION_ORDER') == '1'", source)
+
+
 class SdpaModesArmTests(unittest.TestCase):
     """M3NATIVE_SDPA_MODES and the sdpa_decode op-directory graft (optimisation/ttnn-op/
     sdpa_decode_qwen). The flag is translated, not passed by name, so the /bench scan above

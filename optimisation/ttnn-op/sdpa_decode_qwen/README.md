@@ -1,77 +1,112 @@
-# sdpa_decode_qwen: stage 1 of the one-pass decode SDPA (tail-only mask)
+# sdpa_decode_qwen: the one-pass decode SDPA, stages 1 and 3
 
-This directory holds the first stage of `sdpa-onepass-spec.md` (Angle C, staged, with
-Angle B's per-call opt-in). It is a graft of tt-metal's
-`paged_scaled_dot_product_attention_decode` that the replay attention reader can opt into
-one call at a time. Legacy calls are unchanged.
+This directory holds stages 1 and 3 of `sdpa-onepass-spec.md` (Angle C, staged, with Angle B's
+per-call opt-in). It is a graft of tt-metal's `paged_scaled_dot_product_attention_decode` that
+the replay attention reader can opt into one call at a time. Legacy calls are unchanged.
+
+- **Stage 1 (tail-only mask)** is `~/opgraft-K64e`, served now. Its kernels are the two `.cpp`
+  files in this directory, and `build_k64e.sh` still reproduces it byte for byte.
+- **Stage 3 (K/V leader multicast, "share")** is `~/opgraft-K64f`. It is stage 1 plus F9-F12
+  in the factory and R4-R5 in the reader. Its kernels are in `stage3/` and it is built by
+  `build_k64f.sh`. It is **built and proven on the TT-Sim simulator only, not yet on hardware**
+  (see "Evidence" below).
 
 ## What it changes and why
 
-Each packed verify at 4 × 131k spends about 128 ms per round in decode SDPA. Of the 706 MB
-each chip reads per user-layer, 134 MB is the provided mask: every core reads two mask tile
-rows for every key chunk. The replay mask is `+0.0` everywhere except the last 256 columns,
-because the pinned refresh kernel (`attention_mask_replay.cpp`) writes only the last eight
-column tiles of a zero-initialised mask. Stage 1 stops reading and adding the mask on every
-chunk except each head's final one.
+Each packed verify at 4 × 131k spends about 128 ms per round in decode SDPA.
+
+- **Stage 1.** Of the 706 MB each chip reads per user-layer, 134 MB is the provided mask: every
+  core reads two mask tile rows for every key chunk. The replay mask is `+0.0` everywhere except
+  the last 256 columns, because the pinned refresh kernel (`attention_mask_replay.cpp`) writes
+  only the last eight column tiles of a zero-initialised mask. Stage 1 stops reading and adding
+  the mask on every chunk except each head's final one.
+- **Stage 3.** Every entry of a bundle reads the same page-table row, because the replay reader
+  repeats one user's row per bundle. So every entry reads the same K and V bytes. With the share
+  flag, entry 0 (the leader) reads each K/V chunk from DRAM, then multicasts both CB slots to
+  the other entries (its twins). The twins sit directly below the leader in the same grid
+  column and never read K or V themselves. At 8-row groups each T16 user is one batch-2 bundle,
+  so this halves the K/V bytes again (spec section 2: 286 MB → 143 MB per chip per user-layer
+  at 131k).
 
 | Edit | File | What |
 |---|---|---|
 | F1 | factory | `qwen_mode` / `qwen_flags` from `SDPAProgramConfig.q_chunk_size` (`0x51DEC000 \| flags`). The decode path never reads this field, and the default program hash covers it. |
-| F2 | factory | Preconditions (TT_FATAL). Flag `0x2` (KV share, stage 3) is refused in this build. |
+| F2 | factory | Preconditions (TT_FATAL). Stage 1 refuses flag `0x2` here. |
 | F3 | factory | Forces compact tree scratch in qwen mode. This removes only slots that are never used. |
-| F4 | factory | One `log_info` line per program: `[QWEN-SDPA] flags=… cb_bytes=…`. |
-| F5, F6 | factory | Four suffix reader compile-time args (`mask_tail`, `mask_width_t`, `kv_share`, `kv_ready` semaphore id). They go after every accessor block, so the legacy offsets do not move. |
+| F4 | factory | One `log_info` line per program: `[QWEN-SDPA] flags=… kv_share=… cb_bytes=…`. |
+| F5, F6 | factory | Four suffix reader compile-time args: `mask_tail`, `mask_width_t`, `kv_share` and the `kv_ready` semaphore id (3). They go after every accessor block, so the legacy offsets do not move. |
 | F7 | factory | Compute compile-time arg 32 (`mask_tail`). |
 | F8 | factory | Selects `reader_decode_qwen.cpp` / `sdpa_flash_decode_qwen.cpp` in qwen mode. |
-| R1–R3 | `reader_decode_qwen.cpp` | Reads the suffix args. The mask stride becomes the mask's own width. In tail mode it reads one mask chunk (the last), on `k_chunk == k_num_chunks - 1` only. |
-| C1–C2 | `sdpa_flash_decode_qwen.cpp` | Applies the mask under the same predicate. |
+| **F9** | factory (stage 3) | Replaces stage 1's `KV share is not in this build` refusal with the twin-band fit check. B bands of `ceil(cores_per_batch / grid.x)` rows are needed: B=2 needs 6 of 10 rows, B=3 needs 9, and B=4 (12) is refused. |
+| **F10** | factory (stage 3) | Twin placement. Linear index `i = b * cores_per_batch + p` keeps every role (batch, head, reduce index, tree parameters). Only the coordinate moves, to column `p % grid.x`, row `(p / grid.x) * B + b`. The reducer, output and tree tables follow automatically. |
+| **F11** | factory (stage 3) | Creates the READY semaphore (id 3). VALID is the existing `k_mcast` semaphore (id 2), which is unused because qwen mode refuses `q_heads_parallel_factor > 1`. |
+| **F12** | factory (stage 3) | Fills the existing K-multicast runtime slots 15-19 (no new slots; the idle vector stays at 20). A leader gets `do_k_mcast` and its twins' NoC column span, and TT_FATALs unless that span is vertically contiguous. A twin gets its leader's NoC coordinate. |
+| R1–R3 | reader | Read the suffix args. The mask stride becomes the mask's own width. In tail mode the reader reads one mask chunk (the last), on `k_chunk == k_num_chunks - 1` only. |
+| **R4** | reader (stage 3) | Under `if constexpr (kv_share)`, one READY/VALID round per chunk.<br>**Leader:** `read_k`/`read_v` (the legacy DRAM reads), wait for READY == B-1, reset it, multicast the K slot and the V slot, `async_write_barrier`, then set VALID and multicast it.<br>**Twin:** reserve both slots, reset VALID, raise READY on the leader, wait for VALID, then push both slots.<br>Every entry then reads its own mask. The `else` branch is the stage-1 code, re-indented. |
+| **R5** | reader (stage 3) | At the end of `kernel_main`, the leader does `async_write_barrier` and a twin does `async_atomic_barrier`, then VALID is reset to 0. Nothing is left in flight on exit (the fused_1d_input lesson). |
+| C1–C2 | compute | Apply the mask under the same predicate. Unchanged in stage 3. |
 
-- **Legacy calls.** Every factory branch is gated on `qwen_mode`. The original kernels are untouched.
-- **Exactness.** This holds by argument (section 4.8), not by construction. The skipped work was `qk + (+0.0)`. The card-M byte comparison is what proves it.
-- **Refused for now.** `narrow` (stage 1b) and `share` (stage 3). The Python refuses both names, and the factory refuses flag `0x2`.
+- **Legacy calls.** Every factory branch is gated on `qwen_mode`, and every stage-3 branch on `qwen_kv_share`. That flag is `0x2` inside qwen mode with B > 1. The original kernels are untouched.
+- **Exactness.**
+  - Stage 1 holds by argument (spec section 4.8): the skipped work was `qk + (+0.0)`.
+  - Stage 3 holds by construction relative to the same call without `0x2`. The roles are unchanged, the compute and writer binaries are identical, and each twin's K/V bytes are a copy of the leader's `read_k`/`read_v` on the same page-table row.
+  - The byte comparisons are what prove both.
+- **Precondition of share.** All rows of the page table must be equal, and every replay writer guarantees this. If it is broken the result is wrong attention, not a hang. Card-M check N1 plants exactly that case.
+- **Refused.** `narrow` (stage 1b) is refused by name in the Python.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `make_qwen_kernels.py` | Builds the two kernels from the served originals. The input is either the probe dump or the files themselves. The base shas (49a05926, d24769bd) are enforced, every anchor must occur exactly once, and the output shas are recorded. `--check DIR` verifies a directory. |
-| `reader_decode_qwen.cpp`, `sdpa_flash_decode_qwen.cpp` | The generated kernels: the originals byte for byte plus the edits. They hash to 55d8fe5e… and 8776fcc7…. |
-| `apply_factory_qwen.py` | Applies F1–F8 to the 3e0a69af factory and refuses any other input. The output is 1b54abd3fe466a05…. It inverts back to the input, keeps `.orig-3e0a69af` when patching in place, and exits 0 if the file is already patched. |
-| `build_k64e.sh` | The rig build that produces `~/opgraft-K64e`. Details below. |
-| `run_card_m.sh` | Runs the card-M test in the serving image, in `reference` or `candidate` mode. |
-| `test_sdpa_decode_qwen_card_m.py` | The card-M unit test. Details below. |
-| `test_sdpa_decode_qwen_sources.py` | CPU checks: the edits invert to the bases, the factory patch reproduces its recorded sha, every constant that crosses a file boundary agrees, and the card-M host helpers work. |
+| `make_qwen_kernels.py` | Builds the kernels from the served originals (the probe dump or the files themselves). `--stage 1` (the default) gives R1–R3/C1–C2; `--stage 3` adds R4–R5. The base shas (49a05926, d24769bd) are enforced, every anchor must occur exactly once, and each stage's output shas are recorded. `--check DIR` verifies a directory. Stage 3 also checks that reverting R5 and R4 gives the stage-1 reader. |
+| `reader_decode_qwen.cpp`, `sdpa_flash_decode_qwen.cpp` | Stage 1 (K64e): 55d8fe5e…, 8776fcc7…. |
+| `stage3/reader_decode_qwen.cpp`, `stage3/sdpa_flash_decode_qwen.cpp` | Stage 3 (K64f): **280a847f…**, and 8776fcc7… (the compute kernel is the same file). |
+| `apply_factory_qwen.py` | Applies F1–F8 (`--stage 1`, the default, output 1b54abd3…) or F1–F12 (`--stage 3`, output **06167779a979ba1f…**) to the 3e0a69af factory and refuses any other input. Both stages invert to the base, and stage 3 also inverts to stage 1. It keeps `.orig-3e0a69af` when patching in place. |
+| `build_k64e.sh` | The rig build of `~/opgraft-K64e` (stage 1). Unchanged. |
+| `build_k64f.sh` | The rig build of `~/opgraft-K64f` (stage 3). Details below. |
+| `run_card_m.sh` | Runs the card-M test in the serving image, in `reference` or `candidate` mode, with an optional `WATCHER=1` first pass. |
+| `test_sdpa_decode_qwen_card_m.py` | The card-M unit test for both stages. The stage is read off the loaded binary. |
+| `test_sdpa_decode_qwen_sources.py` | CPU checks: the edits invert to the bases for both stages, the factory patches reproduce their recorded shas, every constant that crosses a file boundary agrees, the card-M host helpers work, and a full dry run of the card-M flow runs against a fake ttnn with the graft's share semantics. That dry run includes a broken fake whose twins read their own rows, which N1, N4 and N5 must catch. |
 
 Python-side wiring lives outside this directory:
 
 - **`scripts/ci/pooled_attention_replay.py`**
-  - Adds `sdpa_modes`, `mode_flags`, `loaded_binary_has_modes` and `apply_sdpa_modes`.
-  - The pooled reader applies the modes at construction, after staging its pages. The packed reader applies them to every user's reader. Both happen before any trace capture.
-  - Unset, nothing runs.
-  - Markers: `[PINDIAG] sdpa qwen-modes binary …` (once per process) and `[PINDIAG] sdpa qwen-modes modes=tail …` (once per reader).
-- **`scripts/ci/lever_n_m3native_run_arm.sh`**
-  - Mounts `$KOPGRAFT64/sdpa_decode` over the container's op directory, but only if the graft has one. K64c and K64d do not, so their runs are unchanged.
-  - That graft gets its own kernel cache: `/experiment-cache/kernels-qwen-<sha12 of the two kernels>`.
-  - `M3NATIVE_SDPA_MODES=tail` becomes `-e QWEN_FAST_SDPA_MODES=tail`, plus a mount of this checkout's `pooled_attention_replay.py` over the baked copy.
+  - `QWEN_FAST_SDPA_MODES` accepts `tail` and `share`. `narrow` is still refused by name.
+  - `mode_flags` sets `0x2` only on bundles with more than one entry. At 8-row groups each T16 user is one batch-2 bundle (`0x3` with tail). At 4-row groups the bundles (3, 1) get `0x3, 0x1`, and with `share` alone a single-entry bundle keeps its pinned config.
+  - `share` also requires the stage-3 factory in the loaded `_ttnncpp.so`: F9's `[QWEN-SDPA] KV-share twin bands` literal must be present. Against K64e the run is refused before any config changes, instead of hitting a TT_FATAL at the first capture.
+  - Markers: `[PINDIAG] sdpa qwen-modes binary … carries the [QWEN-SDPA] branch with KV share` (once per process) and `[PINDIAG] sdpa qwen-modes modes=share,tail … flags=['0x3']` (once per reader).
 - **`scripts/ci/lever_n_m3native_gate.py`**
-  - With `tail` in `QWEN_FAST_SDPA_MODES`, the run fails unless `server.log` has both `[PINDIAG] sdpa qwen-modes` lines and the factory's own `[QWEN-SDPA] flags=0x1 ` line.
+  - The required markers follow the modes.
+  - `tail` alone keeps the stage-1 markers exactly.
+  - `tail,share` requires the `modes=share,tail ` line and the factory's `[QWEN-SDPA] flags=0x3 ` line: a bundle of twins was built with `kv_share=true`. A run that only ever built tail programs (`flags=0x1`) fails the gate.
+  - `share` alone requires `flags=0x2 `.
+- **`scripts/ci/lever_n_m3native_run_arm.sh`** needs nothing new. `M3NATIVE_SDPA_MODES=tail,share` becomes `-e QWEN_FAST_SDPA_MODES=tail,share` plus the `pooled_attention_replay.py` mount. With `KOPGRAFT64=~/opgraft-K64f` the graft's `sdpa_decode` directory is mounted, and the kernel cache is keyed by the two kernels' bytes, so it never reuses K64e's reader. For stage 3 proper, also set `M3NATIVE_REPLAY_GROUP_ROWS=8`.
 
 ## Build (rig)
 
-1. Ship this directory to `~/kwork64/k64e/`, with LF line endings. For anything over about 30 KB, use the base64 tar over stdin pattern.
-2. Run `bash ~/kwork64/k64e/build_k64e.sh`. It:
-   - checks the shipped kernels' shas, and that K64d is `06865d8e…` and carries the tree-scratch factory;
-   - checks that ttbuild's prefill factory is the combined `fd8c0676`, that its decode kernels are the served originals, and that its attn_prep and nlp_concat_heads_decode equal K64d's;
-   - regenerates the qwen kernels from ttbuild's own originals (`make_qwen_kernels.py --check`);
-   - backs up and patches ttbuild's decode factory, stages the two kernels, and runs `ninja -C build_Release ttnn/_ttnncpp.so ttnn/_ttnn.so`;
-   - assembles `~/opgraft-K64e.partial`: the contents of K64d, the new `.so` files, and a copy of ttbuild's whole `sdpa_decode` directory. It drops backup files from that copy and puts its factory `.cpp` back to the audited 3e0a69af, because the compiled factory lives in the `.so` and `sdpa_tree_scratch.audit(patched=True)` hashes the file on disk;
-   - verifies the result:
-     - `strings` shows `[QWEN-SDPA] flags=`, `QWEN_SDPA_TREE_SCRATCH_ROUNDS`, `reader_decode_qwen.cpp` and `qwen_draft_fp32_intermediates`;
-     - the op dirs are identical to K64d's;
-     - every audited kernel sha matches;
-     - `diff -rq` against the serving image's own `sdpa_decode` directory shows **only** the two new kernels;
-   - moves the result to `~/opgraft-K64e`, writes a `MANIFEST.sha256`, and prints `K64E_TTNNCPP_SHA256=…`;
-   - restores ttbuild: factory 3e0a69af (touched, because `docker cp` keeps the saved copy's old mtime and ninja would otherwise call the unity TU up to date), qwen kernel files removed, then reruns ninja so `build_Release` is rebuilt from the restored factory and checks its `_ttnncpp.so` has no `[QWEN-SDPA] flags=` and still has the tree scratch. On failure the EXIT trap restores and touches the sources but does not rebuild; it warns that `build_Release` still holds the qwen objects until the next ninja run. `K64E_KEEP_STAGED=1` keeps them.
+### K64e (stage 1): unchanged
+
+1. Ship this directory to `~/kwork64/k64e/`.
+2. Run `bash ~/kwork64/k64e/build_k64e.sh`.
+
+### K64f (stage 3)
+
+1. Ship this directory, **including `stage3/`**, to `~/kwork64/k64f/` with LF line endings. For anything over about 30 KB, use the base64 tar over stdin pattern.
+2. Run `bash ~/kwork64/k64f/build_k64f.sh`. It follows build_k64e.sh step for step:
+   - It checks the shipped `stage3/` kernels' shas, that K64d is `06865d8e…` with the tree-scratch factory, and ttbuild's prefill factory (`fd8c0676`), decode kernels, attn_prep and nlp_concat_heads_decode.
+   - It regenerates the stage-3 kernels from ttbuild's own originals (`make_qwen_kernels.py --stage 3 --check stage3`).
+   - It backs up ttbuild's decode factory and patches the saved 3e0a69af copy with `apply_factory_qwen.py --stage 3` (06167779…). A ttbuild left on the stage-1 factory by a `K64E_KEEP_STAGED` run is recognised and patched from the saved base, not refused.
+   - It stages the stage-3 kernels and runs `ninja -C build_Release ttnn/_ttnncpp.so ttnn/_ttnn.so`.
+   - It assembles `~/opgraft-K64f.partial` from K64d's contents, the new `.so` files, and ttbuild's `sdpa_decode` directory with its factory `.cpp` put back to the audited 3e0a69af.
+   - It verifies the result:
+     - `strings` shows `[QWEN-SDPA] flags=`, `[QWEN-SDPA] KV-share twin bands`, `QWEN_SDPA_TREE_SCRATCH_ROUNDS` and `reader_decode_qwen.cpp`;
+     - `strings` shows **no** `KV share is not in this build`;
+     - the `qwen_draft_fp32_intermediates` count equals K64d's;
+     - the op dirs equal K64d's;
+     - every audited kernel sha matches, including the stage-3 reader;
+     - `diff -rq` against the serving image's `sdpa_decode` directory shows only the two qwen kernels.
+   - It moves the result to `~/opgraft-K64f`, writes `MANIFEST.sha256`, and prints `K64F_TTNNCPP_SHA256=…`.
+   - It restores ttbuild: factory 3e0a69af (touched), qwen kernel files removed or put back, then `build_Release` rebuilt and checked for no `[QWEN-SDPA] flags=` and the tree scratch still present. The EXIT trap restores on failure. `K64F_KEEP_STAGED=1` keeps the staged state.
 
 ## Test
 
@@ -90,39 +125,68 @@ py -3.11 -B -m unittest test_pooled_attention_replay test_lever_n_m3native_gate 
 On card M:
 
 ```
-bash run_card_m.sh reference    # stock image: legacy calls only, records every output's sha256
-bash run_card_m.sh candidate    # K64e mounted as the arm mounts it
+bash run_card_m.sh reference                      # stock image: legacy calls only, records every output's sha256
+WATCHER=1 bash run_card_m.sh candidate            # FIRST pass of K64f: NoC sanitiser, watchdog, 900 s cap
+bash run_card_m.sh candidate                      # the full sweep, with timing
 ```
 
-`test_sdpa_decode_qwen_card_m.py` runs on one p150a:
+- **Environment.** Both roles set `QWEN_SDPA_TREE_SCRATCH_ROUNDS=1`, as the arm does. The legacy G8 (PNHt=3) call does not fit L1 with the full tree scratch: 1,827,904 B at 2,304 keys, found on the simulator. The test refuses to run the share section without that variable.
+- **`WATCHER=1`.** `TT_METAL_WATCHER=5`, capacities 2,304 and 33,024, seed 0, variants `normal` and `zeroq`, starts +0 and +240, no timing. Each device call gets a 120 s watchdog (`WATCHDOG_S`) that prints `WATCHDOG` and `os._exit(3)`s. The container timeout is 900 s, and the watcher log goes to `$RESULTS/watcher-<stamp>/`.
+- **On exit 3, 124 or 137.** The container is removed. Reset **card M only** with `~/.local/bin/tt-smi -r`; the script never resets anything itself.
 
-- **Inputs.** Folded Q `(1, B, 48, 256)` with 2 KV heads per chip. A batch-3 bundle (groups 0, 4, 8) and a batch-1 bundle (group 12) share one random page table. The bf8 pool is `capacity // 64 + 64` blocks. The mask is full width and zero, except for the refresh formula in its last 256 columns.
-- **Sweep.** Capacities 33,024 and 131,328, seeds 0–4, query variants `normal`, `peaky` and `zeroq`, and block starts +0, +7 and +240.
-- **Byte comparisons.**
-  - Tail against legacy, for every case.
-  - A planted `-inf` in mask chunk 0 must change the legacy output and must not change the tail output (liveness).
-  - The narrow tail against the wide tail.
-  - Legacy outputs against the reference run's shas.
-- **Refusals.** Five TT_FATALs.
-- **Program cache.** 50 alternating legacy/tail pairs.
-- **Log check.** The factory lines must show `scratch_slots=4` and the spec's `cb_bytes` (790,592 at 33k, 796,736 at 131k).
-- **Timing.** Median synchronised host timing, legacy against tail, per bundle and per user-layer.
+`test_sdpa_decode_qwen_card_m.py`, on one p150a:
+
+- **Inputs.**
+  - Q is folded `(1, B, rows*12, 256)` with 2 KV heads per chip.
+  - **G4** is a batch-3 bundle (groups 0, 4, 8) and a batch-1 bundle (group 12), PNHt=2.
+  - **G8** is the same 16 tokens as one batch-2 bundle (offsets 0, 8), PNHt=3. The G4 queries are folded from the G8 query's tokens.
+  - One random page table is repeated to every bundle row. The bf8 pool is `capacity // 64 + 64` blocks. The mask is full width and zero except for the refresh formula in its last 256 columns.
+- **Sweep.** Capacities 2,304 (9 chunks: the early-return path), 33,024 and 131,328; seeds 0–4; variants `normal`, `peaky` and `zeroq`; starts +0, +7 and +240.
+- **Stage 1 (G4).**
+  - Tail equals legacy.
+  - The planted chunk-0 `-inf` moves legacy but not tail.
+  - Narrow equals wide.
+  - Legacy outputs match the reference shas.
+  - 50 legacy/tail alternations.
+- **Stage 3 (spec section 8).**
+  - **E5:** for G8 B=2, G4 B=3 and G4 B=1 (where `0x2` must be a no-op), each of `0x0`, `0x2` share, `0x1` tail, `0x3` tail+share, narrow tail and narrow tail+share equals legacy.
+  - **E4** (stage 2's question, recorded, not failed on): G8 unfolded equals G4 unfolded, per token, for legacy and tail.
+  - **N1:** page-table rows 1.. are other permutations. Share must equal legacy on the leader's row, and each twin must differ from legacy on its own row.
+  - **N2:** a planted `-inf` does not move tail+share.
+  - **N3:** the stage's refusals: B=4 twin bands, unknown flag, 512-wide mask under tail, narrow without tail, the sentinel on a causal call. A stage-1 binary refuses `0x2` instead.
+  - **N4:** 1,000 calls alternating legacy and tail+share on the distinct page table, where the two modes differ.
+  - **N5:** one trace (legacy and tail+share G8, legacy and tail+share G4 B3, legacy and tail G4 B1) replayed 200 times, each replay bit-equal to eager.
+  - **Log:** exactly the requested qwen programs have factory lines, with `kv_share` true only for `0x2` with B>1, `scratch_slots=4`, and the spec's `cb_bytes`.
+  - **Timing:** the spec's acceptance ratios are recorded. G8+tail B2 must be ≤ 0.6 × legacy (B3+B1) at 131k, and share+tail B3 ≤ 1.6 × tail B1.
 - **Output.** `<out>.json` and `<out>.json.native.log`, which holds all C++ output.
 
-The spec expects tail to cut B1 by at least 8% at 33,024 and at least 15% at 131,328. The model predicts −11% and −19%.
+## Evidence (stage 3, before hardware)
+
+The **TT-Sim Blackhole simulator** (local WSL `TT-Sim`, tt-metal 9f9cd4fd with the same factory 3e0a69af and the same kernel shas as served) was used as follows:
+
+- A **private** `_ttnncpp.so` was compiled from the stage-3 factory (06167779…) with clang-20: the transformer unity TU was recompiled and relinked in a private copy of `build_Release`. The shared tree and its build were not touched.
+- The stage-3 kernels were JIT-compiled through a private `TT_METAL_RUNTIME_ROOT` symlink farm.
+
+| Run | Result |
+|---|---|
+| reference (stock `.so`), 2,304 keys, legacy only | passed; E4 legacy exact |
+| candidate K64f-equivalent, 2,304 keys, seed 0, `normal`, start +0 | **passed**: stage-1 checks; E5 for every mode on G8 B2, G4 B3 and G4 B1; E4 legacy and tail exact; N1 (share on the leader's row, twins differ); N2; all five stage-3 refusals; legacy/tail+share alternation; legacy equal to the stock `.so`; the factory lines exactly the 18 requested programs (`kv_share=true` only for `0x2`/`0x3` with B>1) |
+| candidate, 8,448 keys (33 chunks: 2-3 chunks per core, so the handshake repeats and the two-slot CB ring wraps), seed 0, `normal`, start +7, share section only | **passed**: E5 for every mode on G8 B2, G4 B3 and G4 B1; E4 exact; N1 (both G8 and G4 B3, share and tail+share); N2; all five refusals; alternation distinguishable, no drift; 18 factory lines, one per requested program |
+
+No run hung. The simulator runs with slow dispatch, so N5 (trace) and the watcher were not exercised there. They are covered on CPU by the dry run only.
 
 ## Stage plan
 
 | Stage | Change | Status |
 |---|---|---|
 | 0 | Checks before the build: the ttbuild factory sha and the K64c `.so` strings | K64d (tree-scratch factory restored) is built |
-| **1** | Tail-only mask, full-width mask, forced compact scratch, per-call sentinel | **This directory**: K64e, `M3NATIVE_SDPA_MODES=tail` |
-| 1b | Narrow `(b,1,48,256)` mask. Python only; frees about 269 MB per chip at 4 users | Refused by name for now. The factory already admits it, and card M checks narrow = wide. |
-| 2 | 8-row groups (`M3NATIVE_REPLAY_GROUP_ROWS=8`) plus tail | No new code. Needs the card-M 8-row byte compare (E4). |
-| 3 | K/V leader multicast to twin entries (F9–F12, R4–R5), flag `0x2` | Refused by name and by TT_FATAL. Needs a second `.so` build. |
+| **1** | Tail-only mask, full-width mask, forced compact scratch, per-call sentinel | K64e, served; `M3NATIVE_SDPA_MODES=tail`; card M 180/180 |
+| 1b | Narrow `(b,1,48,256)` mask. Python only; frees about 269 MB per chip at 4 users | Refused by name. The factory admits it, and card M checks narrow = wide. |
+| 2 | 8-row groups (`M3NATIVE_REPLAY_GROUP_ROWS=8`) plus tail | No new code. E4 is recorded by the card-M run; exact on the simulator at 2,304 keys. |
+| **3** | K/V leader multicast to twin entries (F9–F12, R4–R5), flag `0x2` | **K64f**: `build_k64f.sh`; `M3NATIVE_SDPA_MODES=tail,share` + `M3NATIVE_REPLAY_GROUP_ROWS=8`. Simulator-proven; hardware next (WATCHER=1 card M first). |
 
-**Hardware gate (spec section 9).** Use `KOPGRAFT64=~/opgraft-K64e` for every arm.
+**Hardware gate (spec section 9).** Use `KOPGRAFT64=~/opgraft-K64f` for every arm. The control and `tail` arms run unchanged on it: the legacy and tail branches are the same code as K64e's.
 
-- Run the control arm with no modes first, then `M3NATIVE_SDPA_MODES=tail`.
-- Read `trace_ms` against the control. The expected value at 4×131k is about 224 ms, with acceptance at ≤ 236 ms.
+- Run the control first, then S2 (`tail` + 8-row), then S3 (`tail,share` + 8-row).
+- S3 is expected at about 150–162 ms at 4×131k, and is accepted at ≤ S2 − 8 ms.
 - The pass criterion is unchanged: all four streams byte-identical to the single-stream references.

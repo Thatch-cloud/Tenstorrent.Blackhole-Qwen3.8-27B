@@ -30,33 +30,37 @@ import re
 import subprocess
 import sys
 
-WORKFLOW = Path(__file__).resolve().parents[2] / '.github/workflows/qwen-integration-cpu.yml'
+ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW = ROOT / '.github/workflows/qwen-integration-cpu.yml'
 SCRIPTS = Path(__file__).resolve().parent
 MISSING = re.compile(r"No module named '([A-Za-z0-9_.]+)'")
 
 
-DISCOVER = re.compile(r"\s*python -B -m unittest discover -s scripts/ci -p '([A-Za-z0-9_*.?\[\]-]+)'$")
+DISCOVER = re.compile(r"\s*python -B -m unittest discover -s ([A-Za-z0-9_./-]+) -p '([A-Za-z0-9_*.?\[\]-]+)'$")
 
 
 def groups():
-    """Every unittest group the workflow runs, in order. A `discover -s scripts/ci -p PATTERN`
-    line becomes the modules its pattern matches here. Any other unittest line this cannot
-    read is an error, never a silent skip: the discover lines were skipped for weeks, and a
-    regression they cover stayed red in CI while this runner reported green."""
+    """Every unittest group the workflow runs, in order, as (start directory, modules). A
+    `discover -s DIR -p PATTERN` line becomes the modules its pattern matches in DIR, run from
+    DIR as discover does (the op test directories under optimisation/ as well as scripts/ci).
+    Any other unittest line this cannot read is an error, never a silent skip: the discover
+    lines were skipped for weeks, and a regression they cover stayed red in CI while this
+    runner reported green."""
     text = io.open(WORKFLOW, encoding='utf-8').read().replace('\r\n', '\n')
     found, unread = [], []
     for line in text.split('\n'):
         match = re.match(r'\s*python -B -m unittest ([A-Za-z0-9_. -]+)$', line)
         if match and not match.group(1).startswith('discover'):
-            found.append(match.group(1).split())
+            found.append((SCRIPTS, match.group(1).split()))
             continue
         discover = DISCOVER.match(line)
         if discover:
-            modules = sorted(path.stem for path in SCRIPTS.glob(discover.group(1)))
+            start = ROOT / discover.group(1)
+            modules = sorted(path.stem for path in start.glob(discover.group(2))) if start.is_dir() else []
             if not modules:
                 unread.append(line.strip() + '  (pattern matches no module)')
             else:
-                found.append(modules)
+                found.append((start, modules))
             continue
         if re.match(r'\s*python -B -m unittest', line):
             unread.append(line.strip())
@@ -70,12 +74,12 @@ def groups():
 def main():
     only = set(sys.argv[1:])
     real, absent, modules = [], {}, 0
-    for group in groups():
+    for start, group in groups():
         if only and not only.intersection(group):
             continue
         modules += len(group)
         result = subprocess.run([sys.executable, '-B', '-m', 'unittest'] + group,
-            cwd=str(SCRIPTS), capture_output=True, text=True,
+            cwd=str(start), capture_output=True, text=True,
             env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
         if result.returncode == 0:
             print('ok    ' + ' '.join(group[:4]) + (' ...' if len(group) > 4 else ''))

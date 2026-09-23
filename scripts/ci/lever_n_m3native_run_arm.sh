@@ -161,6 +161,28 @@ sdpa_mode_mounts=()
 if [ -n "${M3NATIVE_SDPA_MODES:-}" ]; then
   sdpa_mode_mounts+=(--mount "type=bind,src=$PWD/scripts/ci/pooled_attention_replay.py,dst=/experiment-scripts/ci/pooled_attention_replay.py,readonly")
 fi
+# M3NATIVE_GDN_PREFILL_CONV=1 (lever #2) becomes QWEN_FAST_GDN_PREFILL_CONV=1, read by the grafted
+# gdn/tp.py (lever_n_m3native_patch section H), and mounts the op beside it: the module and its
+# three kernels, ONE FILE EACH (never a directory over the image's gdn/), from the graft job's
+# staging. The list is lever_n_m3native_patch.PREFILL_CONV_FILES itself, so the mounts cannot
+# drift from what the graft stages. M3NATIVE_GDN_PREFILL_CONV_AUDIT=<n> runs the FIR beside the
+# first n calls (QWEN_FAST_GDN_PREFILL_CONV_AUDIT). Unset, nothing is mounted or passed.
+prefill_conv_mounts=()
+if [ -n "${M3NATIVE_GDN_PREFILL_CONV:-}" ]; then
+  mapfile -t prefill_conv_files < <(python3 -B -c 'import sys; sys.path.insert(0, "scripts/ci"); import lever_n_m3native_patch as p; print(chr(10).join(sorted(p.PREFILL_CONV_FILES)))' | tr -d '\r')
+  if [ "${#prefill_conv_files[@]}" -eq 0 ]; then
+    echo "M3NATIVE_GDN_PREFILL_CONV: lever_n_m3native_patch.PREFILL_CONV_FILES is empty or unreadable" >&2
+    exit 1
+  fi
+  for relative in "${prefill_conv_files[@]}"; do
+    if [ ! -s "$PWD/graft/$relative" ]; then
+      echo "M3NATIVE_GDN_PREFILL_CONV: graft/$relative was not staged" >&2
+      exit 1
+    fi
+    prefill_conv_mounts+=(--mount "type=bind,src=$PWD/graft/$relative,dst=$root/$relative,readonly")
+  done
+  echo "GDN prefill conv (lever #2): mounting ${prefill_conv_files[*]}"
+fi
 
 # Proposals: the fp2u lane runs each request's draft proposal EAGERLY
 # (QWEN_FAST_EAGER_PROPOSAL=1) because per-request proposal traces clobbered each
@@ -179,7 +201,8 @@ fi
 # today's invocation when unset. Mirrors dflash-request-profile.sh's own tracy wrapper
 # exactly (the same five profiler env vars, the same `python3 -m tracy -p
 # --check-exit-code --disable-device-data-dump-to-files --disable-device-data-push-to-tracy
-# --dump-device-data-mid-run --op-support-count 20000 -o <dir>` invocation), so the packed
+# --dump-device-data-mid-run --op-support-count 20000 -o <dir>` invocation; the count is
+# now M3NATIVE_PROFILE_OP_SUPPORT, default 20000), so the packed
 # round this gate serves is attributed with the same method already qualified for the T8
 # verifier profile (docs/current-verifier-profile-2026-09-09.md), not a new one. The
 # mid-run dumps are large, so profiling caps the run at --max-tokens 48 (three or four
@@ -205,12 +228,25 @@ if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
   mkdir -p experiment-results/profile
   chmod 0777 experiment-results/profile
   mounts+=(--mount "type=bind,src=$PWD/experiment-results/profile,dst=/experiment-results-profile")
-  max_tokens=48
+  # Profile mode still defaults to 48 tokens, but an explicit M3NATIVE_MAX_TOKENS now wins:
+  # the single-user 131k prefill profile (prefill ranking M2) runs --max-tokens 1.
+  max_tokens="${M3NATIVE_MAX_TOKENS:-48}"
   trace_region_bytes=268435456
+  # M3NATIVE_PROFILE_OP_SUPPORT replaces the fixed --op-support-count 20000 (still the
+  # default): one 131k prefill is ~64 chunks x several hundred ops per chunk per chip.
+  op_support="${M3NATIVE_PROFILE_OP_SUPPORT:-20000}"
+  case "$op_support" in
+    ''|*[!0-9]*) echo "M3NATIVE_PROFILE_OP_SUPPORT must be a positive integer, got '$op_support'" >&2; exit 1 ;;
+  esac
+  if [ "$op_support" -le 0 ]; then
+    echo "M3NATIVE_PROFILE_OP_SUPPORT must be a positive integer, got '$op_support'" >&2
+    exit 1
+  fi
   entry_args=(-m tracy -p --check-exit-code --disable-device-data-dump-to-files
               --disable-device-data-push-to-tracy --dump-device-data-mid-run
-              --op-support-count 20000 -o /experiment-results-profile
+              --op-support-count "$op_support" -o /experiment-results-profile
               /bench/lever_n_m3native_gate.py)
+  echo "profile mode: max_tokens=$max_tokens op_support_count=$op_support QWEN_PREFILL_PROFILE_FLUSH=1"
 fi
 # Traced proposals cost DRAM: each request uploads its own proposal-trace inputs (the
 # (1,1,context+32,5120) history and per-layer cached K/V), 0.80 GB per engine against
@@ -270,6 +306,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$PWD/graft/model_config.py,dst=$root/model_config.py,readonly" \
   --mount "type=bind,src=$PWD/graft/attention/tp.py,dst=$root/attention/tp.py,readonly" \
   --mount "type=bind,src=$PWD/graft/gdn/tp.py,dst=$root/gdn/tp.py,readonly" \
+  "${prefill_conv_mounts[@]}" \
   --mount "type=bind,src=$PWD/graft/mlp.py,dst=$root/mlp.py,readonly" \
   --mount "type=bind,src=$PWD/graft/layer.py,dst=$root/layer.py,readonly" \
   "${lever_n_mounts[@]}" \
@@ -296,6 +333,11 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_MEMORY_LEDGER:+-e QWEN_FAST_MEMORY_LEDGER=1} \
   ${M3NATIVE_SKIP_BLOCK_STREAM:+-e QWEN_FAST_SKIP_BLOCK_STREAM=1} \
   ${M3NATIVE_SINGLE_GATEUP:+-e QWEN_FAST_SINGLE_GATEUP=1} \
+  ${M3NATIVE_C1_AGMM:+-e QWEN_FAST_C1_AGMM=1} \
+  ${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1} \
+  ${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1} \
+  ${M3NATIVE_GDN_PREFILL_CONV:+-e QWEN_FAST_GDN_PREFILL_CONV=1} \
+  ${M3NATIVE_GDN_PREFILL_CONV_AUDIT:+-e QWEN_FAST_GDN_PREFILL_CONV_AUDIT=$M3NATIVE_GDN_PREFILL_CONV_AUDIT} \
   ${M3NATIVE_DRAFT_BF8:+-e QWEN_FAST_DRAFT_BF8=1} \
   ${M3NATIVE_PREFILL_CHUNK:+-e MAX_PREFILL_CHUNK_SIZE=$M3NATIVE_PREFILL_CHUNK} \
   ${M3NATIVE_INTERLEAVE:+-e TT_PREFILL_DECODE_INTERLEAVE=$M3NATIVE_INTERLEAVE} \
@@ -310,6 +352,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_MID_RUN_DUMP=1} \
   ${M3NATIVE_PROFILE:+-e QWEN_FAST_PROFILE_DUMP_ROUND=4} \
   ${M3NATIVE_PROFILE:+-e QWEN_FAST_PROFILED_BLOCK_STREAM=1} \
+  ${M3NATIVE_PROFILE:+-e QWEN_PREFILL_PROFILE_FLUSH=1} \
   -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
   -e QWEN_FAST_FOUR_AS_TWO=0 \
   -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=$dspark_context \

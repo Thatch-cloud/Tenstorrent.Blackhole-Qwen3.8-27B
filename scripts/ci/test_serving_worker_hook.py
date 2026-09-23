@@ -692,8 +692,9 @@ class ChunkedPrefillRoutingTests(unittest.TestCase):
         self.assertEqual(result.sampled_token_ids, [list(range(11, 27))])
 
     def test_a_step_mixing_a_held_and_an_unheld_id_also_passes_through(self):
-        """Defensive: TTScheduler does not mix prefill and decode, but if a step ever
-        names an id this hook cannot serve, refusing it is worse than delegating."""
+        """An unheld id that is scheduled NO tokens is not being decoded, so the step
+        still passes through. Only a mixed step whose unheld id carries tokens is
+        refused (MixedStepRefusalTests) - that is the v80 shape."""
         worker, bridge, _, scheduled = self.fixture()
         original = bridge.runner.execute_model
         self.hook(worker, bridge)
@@ -714,3 +715,95 @@ class ChunkedPrefillRoutingTests(unittest.TestCase):
         except Exception:
             pass
         original.assert_not_called()
+
+
+class MixedStepRefusalTests(unittest.TestCase):
+    """A step decoding a bridged request together with an unbridged one is refused.
+
+    v80's signature: user 2 finished its chunked prefill without a bridge (the
+    lifecycle's continuation branch was unreachable while a hook was live), so every
+    later decode step named both users - `total=20 cached=2 spec=2`, 194 of them.
+    The hook handed each whole step to the stock runner in silence: the bridged
+    user's session froze, its stale ticket was offered as drafts every round
+    (acceptance ~1.0), and nothing in the log said why.
+    """
+
+    def fixture(self):
+        worker, bridge, _, scheduled = WorkerHookTests().fixture()
+        # Taken before the hook replaces runner.execute_model with its own router.
+        self.original = bridge.runner.execute_model
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
+        self.addCleanup(hook.close)
+        scheduled.scheduled_cached_reqs.req_ids = ['request', 'someone-else']
+        scheduled.num_scheduled_tokens = dict(scheduled.num_scheduled_tokens, **{'someone-else': 4})
+        return worker, bridge, hook, scheduled
+
+    def logger(self, logged):
+        loguru = ModuleType('loguru')
+        loguru.logger = SimpleNamespace(warning=logged.append, info=logged.append)
+        return patch.dict('sys.modules', {'loguru': loguru})
+
+    def test_the_v80_mixed_decode_step_is_refused_not_sent_to_the_stock_runner(self):
+        worker, bridge, _, scheduled = self.fixture()
+        logged = []
+        with self.logger(logged), self.assertRaisesRegex(
+                ValueError, r"bridged=\['request'\] unbridged=\['someone-else'\]"):
+            worker.execute_model(scheduled)
+        self.original.assert_not_called()
+        self.assertEqual(len(logged), 1, logged)
+        self.assertIn('[PINDIAG] hook mixed step REFUSED', logged[0])
+        self.assertIn('someone-else', logged[0])
+
+    def test_the_marker_fires_once_per_id_set(self):
+        worker, _, _, scheduled = self.fixture()
+        logged = []
+        with self.logger(logged):
+            for _ in range(3):
+                with self.assertRaises(ValueError):
+                    worker.execute_model(scheduled)
+        self.assertEqual(len(logged), 1, logged)
+
+    def test_without_per_request_counts_the_step_total_decides(self):
+        worker, bridge, _, scheduled = self.fixture()
+        del scheduled.num_scheduled_tokens
+        with self.assertRaises(ValueError):
+            worker.execute_model(scheduled)
+        scheduled.total_num_scheduled_tokens = 0
+        worker.execute_model(scheduled)
+        self.original.assert_called_once_with(scheduled)
+
+    def test_an_unbridged_chunk_alone_still_reaches_the_runner(self):
+        """The regression guard: the continuation chunk that the lifecycle now routes
+        through its capture still reaches the stock runner via this hook - it names
+        only the unbridged id, so it is not a mixed step."""
+        worker, bridge, _, scheduled = self.fixture()
+        scheduled.scheduled_cached_reqs.req_ids = ['someone-else']
+        scheduled.num_scheduled_tokens = {'someone-else': 2048}
+        scheduled.total_num_scheduled_tokens = 2048
+        worker.execute_model(scheduled)
+        self.original.assert_called_once_with(scheduled)
+
+    def test_the_error_names_both_lifecycle_causes(self):
+        """Two lifecycle faults have produced this shape - an unrouted continuation
+        and a premature release - so the message must not blame only one."""
+        worker, _, _, scheduled = self.fixture()
+        with self.assertRaises(ValueError) as caught:
+            worker.execute_model(scheduled)
+        self.assertIn('_is_continuation', str(caught.exception))
+        self.assertIn('_release_decoders/_release_prefill', str(caught.exception))
+
+    def test_the_legacy_order_negative_control_passes_the_mixed_step_through(self):
+        """QWEN_FAST_LEGACY_CONTINUATION_ORDER=1 exists to reproduce v80, and v80 is
+        this very step served on the stock path. Refusing it there would kill the
+        negative control at its first mixed step instead of reproducing the fault.
+        The marker still fires, once, and says the step was passed."""
+        worker, _, _, scheduled = self.fixture()
+        logged = []
+        with self.logger(logged), \
+                patch.dict('os.environ', {'QWEN_FAST_LEGACY_CONTINUATION_ORDER': '1'}):
+            worker.execute_model(scheduled)
+            worker.execute_model(scheduled)
+        self.assertEqual(self.original.call_count, 2)
+        self.assertEqual(len(logged), 1, logged)
+        self.assertIn('[PINDIAG] hook mixed step PASSED (legacy order)', logged[0])
+        self.assertIn('someone-else', logged[0])

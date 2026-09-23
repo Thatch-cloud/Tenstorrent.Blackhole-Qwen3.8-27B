@@ -105,16 +105,44 @@ class FastServingLifecycle:
             raise ValueError('Serving lifecycle is failed or closed')
 
     def _release_request(self):
+        """Everything: the decode side and the prefill side. Only close() wants both
+        at once - a finishing request releases the side it belongs to."""
         if self.prefill_pending:
             raise ValueError('Cannot release a pending native sampler')
+        self._release_decoders()
+        self._release_prefill()
+
+    def _release_decoders(self):
+        """The hook and the decoding set, once no request is left decoding on it.
+
+        Leaves a prefill in flight alone. With Lever N the last decoder can finish
+        between two chunks of the next user's prompt - at 131k and r=1 user 1 is
+        expected to finish inside user 2's prefill - and tearing down that capture
+        and gate with the hook sent user 2's remaining chunks to the stock runner
+        untracked, freed the gate so user 3 was admitted, and the first step
+        decoding user 2 beside the bridged user 3 was a mixed step. The prefill's
+        final chunk now builds a fresh hook through _sample's `self.hook is None`
+        branch, the same adoption every first user takes."""
         if self.hook is not None:
             self.hook.close()
             self.hook = None
+        self.decoding_id = None
+        self.decoding_ids = []
+
+    def _release_prefill(self):
+        """The capture and the prefill gate of the request in the prefill phase.
+
+        Leaves the hook alone: a prompt aborted mid-prefill must not close the hook
+        other users are still decoding on. chunk_in_flight is deliberately left as
+        it was, which is what the combined release always did - the next admission
+        resets it, and until then it only makes _sample defer to the plugin's own
+        sampler rather than refuse."""
+        if self.prefill_pending:
+            raise ValueError('Cannot release a pending native sampler')
         if self.capture is not None:
             self.capture.close()
             self.capture = None
-        self.request_id = self.decoding_id = None
-        self.decoding_ids = []
+        self.request_id = None
 
     def _execute(self, worker, scheduled):
         self._check()
@@ -130,9 +158,38 @@ class FastServingLifecycle:
                     self.hook.detach(request_id)
                     if self.decoding_id == request_id:
                         self.decoding_id = self.decoding_ids[-1]
-            if (self.request_id in finished
-                    or (self.decoding_id in finished and not self.decoding_ids)):
-                self._release_request()
+            # Two independent releases, not one. They were a single _release_request
+            # under an `or`, so either side finishing tore down the other: the last
+            # decoder finishing mid-way through someone else's chunked prefill
+            # dropped that prefill's capture and gate, and a prompt aborted
+            # mid-prefill closed the hook a live user was decoding on. Either left
+            # a request decoding with no bridge beside one that has a bridge, which
+            # the hook refuses.
+            if self.decoding_id in finished and not self.decoding_ids:
+                self._release_decoders()
+            if self.request_id is not None and self.request_id in finished:
+                self._release_prefill()
+            # A continuation of the prefill already in flight. It arrives as a CACHED
+            # request, so without this it would either be handed to the hook (which
+            # refuses a request it is not decoding) or fall into the fresh-prefill
+            # contract below and be refused as 'one complete fresh prefill'.
+            #
+            # Tested BEFORE the hook branch, not after it. With a hook live (someone
+            # else decoding) that branch delegates every step that is not new-only,
+            # so a continuation placed below it was unreachable exactly when Lever N
+            # needs it: v80 ran user 2's chunks 2..16 on the stock runner outside the
+            # capture, the final chunk never set prefill_pending, user 2 was never
+            # bridged, the gate stayed held through its whole decode, and every mixed
+            # step decoded both users on the stock path. The device work of a chunk
+            # is unchanged by this - it still reaches the stock runner, through the
+            # hook's unknown-id pass-through - only the bookkeeping around it is.
+            #
+            # Zero-token steps are excluded so every shape other than a real chunk is
+            # routed exactly as before (both branches below send those to the stock
+            # path whether or not a hook is live).
+            if (not self._legacy_continuation_order()
+                    and self._is_continuation(scheduled)):
+                return self._continue_prefill(scheduled)
             if self.hook is not None:
                 # A prefill-only step for a NEW request, while another request
                 # decodes. TTScheduler never mixes prefill and decode in one batch
@@ -145,14 +202,9 @@ class FastServingLifecycle:
                     return self.original_execute(scheduled)
             elif scheduled.total_num_scheduled_tokens == 0:
                 return self.original_execute(scheduled)
-            # A continuation of the prefill already in flight. It arrives as a CACHED
-            # request, so without this it would either be handed to the hook (which
-            # refuses a request it is not decoding) or fall into the fresh-prefill
-            # contract below and be refused as 'one complete fresh prefill'.
-            if (self.capture is not None and self.request_id is not None
-                    and not self.capture.complete
-                    and not scheduled.scheduled_new_reqs
-                    and list(scheduled.scheduled_cached_reqs.req_ids) == [self.request_id]):
+            # The pre-fix position, reachable only under the negative-control flag:
+            # with no hook it behaves exactly as the test above, with one it is dead.
+            if self._legacy_continuation_order() and self._is_continuation(scheduled):
                 return self._continue_prefill(scheduled)
             # Nothing to admit. The clause below vets a request JOINING the fast
             # path, so a step carrying no new request was never an admission and
@@ -240,6 +292,27 @@ class FastServingLifecycle:
             self.failed = True
             raise
 
+    @staticmethod
+    def _legacy_continuation_order():
+        """QWEN_FAST_LEGACY_CONTINUATION_ORDER=1 restores the pre-fix routing, where
+        the continuation test sat below the hook branch. A negative control only: it
+        must reproduce v80's signature (chunks outside the capture, gate held through
+        decode). Read per call so a test can set it; it reaches a served container
+        only if the launcher forwards it with -e."""
+        import os
+        return os.environ.get('QWEN_FAST_LEGACY_CONTINUATION_ORDER') == '1'
+
+    def _is_continuation(self, scheduled):
+        """The step is the next chunk of the prefill this lifecycle holds: a capture
+        open and incomplete, no new request, exactly the gate holder cached, and
+        tokens actually scheduled. Needs chunked prefill to be true at all - without
+        it no capture is ever left incomplete - so it is inert on unchunked arms."""
+        return (self.capture is not None and self.request_id is not None
+                and not self.capture.complete
+                and not scheduled.scheduled_new_reqs
+                and list(scheduled.scheduled_cached_reqs.req_ids) == [self.request_id]
+                and bool(getattr(scheduled, 'total_num_scheduled_tokens', 1)))
+
     def _continue_prefill(self, scheduled):
         """One more chunk of the prefill already in flight.
 
@@ -248,6 +321,19 @@ class FastServingLifecycle:
         step. Nothing else about the request changes: request_id, ignore_eos and the
         sampling validation were all settled when the first chunk was admitted.
         """
+        # One line per chunk, naming where it starts: the count of these per request
+        # is the proof the lifecycle saw every chunk, which v80 could not show.
+        try:
+            from loguru import logger
+            computed = list(getattr(scheduled.scheduled_cached_reqs, 'num_computed_tokens', None) or ())
+            start = computed[0] if computed else None
+            logger.info(
+                f"[PINDIAG] lifecycle continuation: req={self.request_id!r} "
+                f"start={start!r} "
+                f"tokens={getattr(scheduled, 'total_num_scheduled_tokens', None)!r} "
+                f"hook={self.hook is not None}")
+        except BaseException:
+            pass
         with self.capture.segment():
             result = self.original_execute(scheduled)
         return self._after_prefill_chunk(result, False)

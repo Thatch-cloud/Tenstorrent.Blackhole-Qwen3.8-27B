@@ -56,22 +56,27 @@ from gdn_multitoken_conv import addresses
 
 
 # QWEN-SDPA DECODE MODES (optimisation/ttnn-op/sdpa_decode_qwen, docs: the one-pass spec,
-# stage 1). The grafted sdpa_decode factory reads a per-call sentinel from
-# SDPAProgramConfig.q_chunk_size - a field the decode path otherwise never reads - and, in
-# 'tail' mode, reads and adds the provided mask on each head's FINAL k-chunk only. The
-# replay mask is +0.0 everywhere else by construction (the pinned refresh kernel writes only
-# the last eight column tiles of a zero-initialised mask), so the skipped adds were adds of
-# +0.0; card-M byte comparison is what proves it (test_sdpa_decode_qwen_card_m.py). The
-# pinned reader's bytes are untouched: only its per-bundle config entries are replaced,
+# stages 1 and 3). The grafted sdpa_decode factory reads a per-call sentinel from
+# SDPAProgramConfig.q_chunk_size - a field the decode path otherwise never reads.
+#   'tail' (flag 0x1, stage 1, K64e onward): the provided mask is read and added on each
+#     head's FINAL k-chunk only. The replay mask is +0.0 everywhere else by construction
+#     (the pinned refresh kernel writes only the last eight column tiles of a zero-initialised
+#     mask), so the skipped adds were adds of +0.0; card-M byte comparison is what proves it.
+#   'share' (flag 0x2, stage 3, K64f onward): in a bundle of more than one entry every entry
+#     reads the SAME page-table row (the reader repeats one user's row per bundle), so entry 0
+#     reads each K/V chunk from DRAM and multicasts it to the others. Exact by construction;
+#     a bundle of one entry gets no 0x2. At eight-row groups each T16 user is one batch-2
+#     bundle, so share halves the K/V bytes again on top of the eight-row fold.
+# The pinned reader's bytes are untouched: only its per-bundle config entries are replaced,
 # before any trace is captured. Unset, nothing here runs and every config is the pinned one.
 SDPA_MODES_ENV = 'QWEN_FAST_SDPA_MODES'
 QWEN_DECODE_MAGIC = 0x51DEC000                    # factory F1; the low byte holds the flags
 QWEN_MASK_TAIL, QWEN_KV_SHARE = 0x1, 0x2
-SDPA_MODE_NAMES = ('tail',)                       # what this build serves
+SDPA_MODE_NAMES = ('tail', 'share')               # what this build serves
 # Named by the spec, not in this build: refused by name rather than as unknown.
-SDPA_MODES_LATER = {'narrow': 'stage 1b (the narrow (b,1,48,256) tail mask)',
-                    'share': 'stage 3 (K/V leader multicast across twin entries)'}
-QWEN_SDPA_BINARY_MARKER = b'[QWEN-SDPA] flags='   # factory F4's format literal, only in the graft .so
+SDPA_MODES_LATER = {'narrow': 'stage 1b (the narrow (b,1,48,256) tail mask)'}
+QWEN_SDPA_BINARY_MARKER = b'[QWEN-SDPA] flags='   # factory F4's format literal, only in a graft .so
+QWEN_SDPA_SHARE_MARKER = b'[QWEN-SDPA] KV-share twin bands'   # factory F9's, only in the stage-3 .so
 SDPA_MODES_MARKER = '[PINDIAG] sdpa qwen-modes'
 _binary_checked = []
 
@@ -92,7 +97,7 @@ def sdpa_modes(environ=None):
     modes = frozenset(name.strip() for name in value.split(',') if name.strip())
     later = sorted(modes.intersection(SDPA_MODES_LATER))
     if later:
-        raise ValueError('%s=%s: %s not in this build (stage 1 serves tail only): %s'
+        raise ValueError('%s=%s: %s not in this build (it serves tail and share): %s'
                          % (SDPA_MODES_ENV, value, ','.join(later), '; '.join(SDPA_MODES_LATER[name] for name in later)))
     unknown = modes.difference(SDPA_MODE_NAMES)
     if unknown:
@@ -104,9 +109,16 @@ def mode_flags(modes, batches):
     return (QWEN_MASK_TAIL if 'tail' in modes else 0) | (QWEN_KV_SHARE if 'share' in modes and batches > 1 else 0)
 
 
-def loaded_binary_has_modes(maps='/proc/self/maps'):
+def required_binary_markers(modes):
+    """The factory format literals the loaded binary must carry for these modes: the
+    [QWEN-SDPA] branch always, and the stage-3 KV-share branch for 'share' (a stage-1 .so
+    such as K64e would refuse flag 0x2 by TT_FATAL at the first capture)."""
+    return (QWEN_SDPA_BINARY_MARKER,) + ((QWEN_SDPA_SHARE_MARKER,) if 'share' in modes else ())
+
+
+def loaded_binary_has_modes(markers=(QWEN_SDPA_BINARY_MARKER,), maps='/proc/self/maps'):
     """An old binary ignores q_chunk_size and silently runs the legacy op, so check the
-    _ttnncpp.so this process actually mapped for the [QWEN-SDPA] factory branch."""
+    _ttnncpp.so this process actually mapped for every marker the modes need."""
     import mmap
 
     paths = sorted({line.split()[-1] for line in Path(maps).read_text().splitlines()
@@ -114,7 +126,7 @@ def loaded_binary_has_modes(maps='/proc/self/maps'):
     if len(paths) != 1:
         raise RuntimeError('Expected exactly one mapped _ttnncpp.so, found %r' % (paths,))
     with open(paths[0], 'rb') as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as view:
-        return paths[0], view.find(QWEN_SDPA_BINARY_MARKER) >= 0
+        return paths[0], all(view.find(marker) >= 0 for marker in markers)
 
 
 def apply_sdpa_modes(reader, modes, *, log=None, binary_check=None):
@@ -133,12 +145,17 @@ def apply_sdpa_modes(reader, modes, *, log=None, binary_check=None):
         raise ValueError('Qwen sdpa modes %s are not in this build' % ','.join(sorted(modes.difference(SDPA_MODE_NAMES))))
     if reader.short_context:
         raise ValueError('Qwen sdpa modes are long-context only')
-    if not _binary_checked:
-        path, present = binary_check()
+    markers = required_binary_markers(modes)
+    if not any(checked == markers for _path, checked in _binary_checked):
+        path, present = binary_check(markers)
         if not present:
+            if 'share' in modes:
+                raise RuntimeError('%s=%s needs the stage-3 [QWEN-SDPA] KV-share factory branch (K64f onward); '
+                                   '%s lacks it' % (SDPA_MODES_ENV, ','.join(sorted(modes)), path))
             raise RuntimeError('%s is set but %s lacks the [QWEN-SDPA] factory branch' % (SDPA_MODES_ENV, path))
-        _binary_checked.append(path)
-        log('%s binary %s carries the [QWEN-SDPA] branch' % (SDPA_MODES_MARKER, path))
+        _binary_checked.append((path, markers))
+        log('%s binary %s carries the [QWEN-SDPA] branch%s'
+            % (SDPA_MODES_MARKER, path, ' with KV share' if 'share' in modes else ''))
     operations = reader.operations
     grid = reader.mesh.compute_with_storage_grid_size()
     replaced, applied = [], []

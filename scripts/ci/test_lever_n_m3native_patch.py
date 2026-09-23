@@ -1018,7 +1018,9 @@ def _strip_c1(text):
             else:
                 continue
         stripped = line.lstrip()
-        if 'QWEN_FAST_SINGLE_GATEUP' in line and stripped.startswith('if ') and line.rstrip().endswith(':'):
+        # C1d's branch is an elif keyed on the attribute its own flag-gated block sets.
+        gated = 'QWEN_FAST_SINGLE_GATEUP' in line or (stripped.startswith('elif ') and '_qwen_c1_agmm' in line)
+        if gated and stripped.startswith(('if ', 'elif ')) and line.rstrip().endswith(':'):
             skipping = len(line) - len(stripped)
             continue
         if stripped.startswith('# Lever N M3native C1'):
@@ -1119,7 +1121,8 @@ class SingleGateUpGraftTests(unittest.TestCase):
 
     def test_the_table_grafts_mlp_and_layer_but_never_tp_common(self):
         self.assertIs(patcher.PATCHES['mlp.py'], patch_mlp_full)
-        self.assertIs(patcher.PATCHES['layer.py'], patch_layer)
+        # patch_layer_full = patch_layer (C1, C1d) then the M2 prefill profile flush hook.
+        self.assertIs(patcher.PATCHES['layer.py'], patcher.patch_layer_full)
         self.assertNotIn('tp_common.py', patcher.PATCHES)
 
     def test_no_graft_touches_a_source_the_serving_path_qualification_pins(self):
@@ -1230,6 +1233,632 @@ class SingleGateUpSlicingTests(unittest.TestCase):
         self.assertEqual(region.count('_out = _qwen_linear('), 2)
         self.assertLess(region.index('_qwen_linear = '), region.index('w1_out = _qwen_linear('))
         self.assertLess(region.index('        elif x.shape[-2] > ttnn.TILE_SIZE:\n'), region.index('_qwen_linear = '))
+
+
+# ---------------------------------------------------------------------------------
+# C1c / C1d (prefill ranking levers 3a and 3) and the M2 prefill profile flush hook.
+# ---------------------------------------------------------------------------------
+
+def _mlp_env(environ, *, numeric=True):
+    """A fake ttnn / tp_common / ccl for executing a grafted mlp.py's _forward_tp.
+
+    Tensors are numpy float32 arrays, so the fakes also compute: linear is x @ w with the
+    program config's fused SiLU, mul is elementwise, slice and concat are numpy's. Every
+    call is recorded (with names, not ids) so a test can compare the op sequence of two
+    sources, or the values two branches produce."""
+    import sys
+    import types
+    import numpy as np
+
+    calls = []
+    names = {}
+
+    def name(t):
+        return names.get(id(t), 'act')
+
+    def silu(a):
+        return a / (1.0 + np.exp(-a))
+
+    def linear(x, weight, compute_kernel_config=None, program_config=None, memory_config=None, activation=None):
+        calls.append(('linear', x.shape[-2], name(weight), program_config, memory_config, compute_kernel_config))
+        out = np.matmul(x, weight)
+        act = program_config[3] if isinstance(program_config, tuple) else activation
+        return silu(out) if act in ('SILU', 'silu') else out
+
+    def slice_(x, begins, ends, memory_config=None):
+        calls.append(('slice', begins[-2], ends[-2]))
+        return x[tuple(slice(b, e) for b, e in zip(begins, ends))].copy()
+
+    def concat(parts, dim, memory_config=None):
+        calls.append(('concat', len(parts), dim, memory_config))
+        return np.concatenate(parts, axis=dim)
+
+    def mul(a, b, memory_config=None):
+        calls.append(('mul', a.shape[-2], memory_config))
+        return a * b
+
+    ttnn = types.SimpleNamespace(
+        TILE_SIZE=32, DRAM_MEMORY_CONFIG='DRAM', L1_MEMORY_CONFIG='L1', L1_WIDTH_SHARDED_MEMORY_CONFIG='L1WS',
+        UnaryOpType=types.SimpleNamespace(SILU='SILU'),
+        linear=linear, slice=slice_, concat=concat, mul=mul,
+        silu=lambda a, memory_config=None: calls.append(('silu',)) or silu(a),
+        to_memory_config=lambda x, mc: calls.append(('to_memory_config', mc)) or x,
+        deallocate=lambda t: None)
+
+    def agmm(x, weight, tt_ccl, compute_cfg, topology, grid=(7, 9), cluster_axis=1, fused_activation=None,
+             out_memory_config='DRAM'):
+        calls.append(('agmm', x.shape[-2], x.shape[-1], name(weight), compute_cfg, topology, fused_activation,
+                      out_memory_config))
+        return np.zeros(x.shape[:-1] + (weight.shape[-1],), dtype=np.float32)
+
+    def swiglu_agmm(x, weight, tt_ccl, compute_cfg, topology, **_):
+        calls.append(('agmm_swiglu', x.shape[-2], name(weight), compute_cfg))
+        return np.zeros(x.shape[:-1] + (weight.shape[-1] // 2,), dtype=np.float32)
+
+    tpc = types.SimpleNamespace(
+        TILE_SIZE=32,
+        create_prefill_mlp_matmul_program_config=lambda m, k, n, fused_activation=None, max_cols=None, tuning=None: (
+            m, k, n, fused_activation, max_cols, tuning),
+        all_gather_matmul_prefill=agmm, all_gather_swiglu_prefill=swiglu_agmm,
+        mlp_gateup_agmm_enabled=lambda n: n > 1)
+    ccl = types.ModuleType('models.tt_transformers.tt.ccl')
+    ccl.tt_all_reduce = lambda partial, *a, **k: calls.append(('all_reduce',)) or partial
+    logged = []
+    loguru = types.ModuleType('loguru')
+    loguru.logger = types.SimpleNamespace(info=lambda *a: logged.append(a))
+    modules = {'ttnn': ttnn, 'loguru': loguru, 'models.tt_transformers.tt.ccl': ccl}
+    for module in ('models', 'models.demos', 'models.demos.blackhole', 'models.demos.blackhole.qwen36',
+                   'models.demos.blackhole.qwen36.tt', 'models.tt_transformers', 'models.tt_transformers.tt'):
+        modules[module] = types.ModuleType(module)
+    modules['models.demos.blackhole.qwen36.tt'].tp_common = tpc
+    return calls, names, logged, patch.dict(sys.modules, modules), patch.dict('os.environ', environ, clear=True)
+
+
+def _run_mlp(source, environ, x, *, fuse_agmm=False, packed=False, c1_agmm=None, seed=0):
+    """Execute `source`'s Qwen36MLP._forward_tp on x; return (output, calls, logged)."""
+    import types
+    import numpy as np
+
+    calls, names, logged, modules, env = _mlp_env(environ)
+    rng = np.random.default_rng(seed)
+    dim, hidden = 64, 48
+    w1 = rng.standard_normal((dim, hidden)).astype(np.float32)
+    w3 = rng.standard_normal((dim, hidden)).astype(np.float32)
+    w2 = rng.standard_normal((hidden, dim)).astype(np.float32)
+    wgu = rng.standard_normal((dim, 2 * hidden)).astype(np.float32) if packed else None
+    for tensor, label in ((w1, 'w1'), (w2, 'w2'), (w3, 'w3'), (wgu, 'w_gate_up')):
+        if tensor is not None:
+            names[id(tensor)] = label
+    with modules, env:
+        namespace = {'MLPWeights': object, '_build_gate_up': lambda *a: None}
+        exec(compile(source, 'mlp.py', 'exec'), namespace)
+        cls = namespace['Qwen36MLP']
+        mlp = cls.__new__(cls)
+        mlp.weights = types.SimpleNamespace(w1=w1, w2=w2, w3=w3, w_gate_up=wgu)
+        mlp.args = types.SimpleNamespace(
+            dim=dim, decode_grid_w=11, prefill_tuning='tune', ccl_topology=lambda: 'ring',
+            mlp_w1_decode_1d_progcfg='w1_1d', mlp_w3_decode_1d_progcfg='w3_1d', mlp_w2_decode_1d_progcfg='w2_1d',
+            mlp_w1_decode_1d_progcfg_64='w1_1d_64', mlp_w3_decode_1d_progcfg_64='w3_1d_64',
+            mlp_w2_decode_1d_progcfg_64='w2_1d_64')
+        mlp.tt_ccl, mlp.device = 'ccl', 'mesh'
+        mlp.compute_kernel_config, mlp.compute_kernel_config_decode = 'ckc', 'ckc_decode'
+        mlp.compute_kernel_config_agmm = 'ckc_agmm'
+        mlp._mlp_1d_decode, mlp._dram_sharded, mlp._fuse_gateup_agmm = True, False, fuse_agmm
+        if c1_agmm is not None:
+            mlp._qwen_c1_agmm = c1_agmm
+        out = mlp._forward_tp(x)
+    return out, calls, logged
+
+
+def _x(rows, width=64, seed=1):
+    import numpy as np
+    return np.random.default_rng(seed).standard_normal((1, 1, rows, width)).astype(np.float32)
+
+
+SINGLE = {'QWEN_FAST_SINGLE_GATEUP': '1'}
+LEGACY = {'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_C1_LEGACY': '1'}
+C1D = {'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_C1_AGMM': '1'}
+
+
+class C1cGraftTests(unittest.TestCase):
+    """C1c: slice x once per 1024 rows for both w1 and w3, multiply per slice, join only the
+    product. Default whenever QWEN_FAST_SINGLE_GATEUP=1; must be bit-identical to C1."""
+
+    def setUp(self):
+        self.full = patch_mlp_full(MLP_MODULE)
+
+    def test_c1c_is_bit_identical_to_c1_on_the_values_the_ops_produce(self):
+        import numpy as np
+        for rows in (2048, 1536, 1024, 512):
+            with self.subTest(rows=rows):
+                x = _x(rows)
+                c1c = _run_mlp(self.full, SINGLE, x)[0]
+                c1 = _run_mlp(self.full, LEGACY, x)[0]
+                self.assertTrue(np.array_equal(c1c, c1), 'C1c changed a value against C1')
+
+    def test_c1c_runs_exactly_c1s_matmuls_one_slice_per_1024_rows_and_one_concat(self):
+        x = _x(2048)
+        c1c = _run_mlp(self.full, SINGLE, x)[1]
+        c1 = _run_mlp(self.full, LEGACY, x)[1]
+        matmuls = lambda calls: sorted(c for c in calls if c[0] == 'linear' and c[2] in ('w1', 'w3'))
+        # Same programs (builder arguments), same rows, same compute config, same DRAM output.
+        self.assertEqual(matmuls(c1c), matmuls(c1))
+        self.assertEqual(matmuls(c1c), sorted([
+            ('linear', 1024, 'w1', (1024, 64, 48, 'SILU', 11, 'tune'), 'DRAM', 'ckc_decode'),
+            ('linear', 1024, 'w1', (1024, 64, 48, 'SILU', 11, 'tune'), 'DRAM', 'ckc_decode'),
+            ('linear', 1024, 'w3', (1024, 64, 48, None, 11, 'tune'), 'DRAM', 'ckc_decode'),
+            ('linear', 1024, 'w3', (1024, 64, 48, None, 11, 'tune'), 'DRAM', 'ckc_decode')]))
+        count = lambda calls, op: sum(1 for c in calls if c[0] == op)
+        self.assertEqual((count(c1, 'slice'), count(c1, 'concat'), count(c1, 'mul')), (4, 2, 1))
+        self.assertEqual((count(c1c, 'slice'), count(c1c, 'concat'), count(c1c, 'mul')), (2, 1, 2))
+        self.assertEqual([c for c in c1c if c[0] == 'mul'], [('mul', 1024, 'DRAM'), ('mul', 1024, 'DRAM')])
+        self.assertEqual([c for c in c1c if c[0] == 'concat'], [('concat', 2, 2, 'DRAM')])
+        # Order: each slice feeds w1 then w3, then their product, before the next slice.
+        head = [c[0] if c[0] != 'linear' else c[2] for c in c1c][:5]
+        self.assertEqual(head, ['slice', 'w1', 'w3', 'mul', 'slice'])
+
+    def test_the_down_projection_after_c1c_is_the_one_after_c1(self):
+        """_silu_fused stays True in C1c, so the w2 output keeps C1's L1 placement."""
+        x = _x(2048)
+        tail = lambda calls: [c for c in calls if c[0] in ('linear', 'all_reduce') and c[2:3] != ('w1',)
+                              and c[2:3] != ('w3',)]
+        self.assertEqual(tail(_run_mlp(self.full, SINGLE, x)[1]), tail(_run_mlp(self.full, LEGACY, x)[1]))
+        self.assertIn(('linear', 2048, 'w2', (2048, 48, 64, None, 11, 'tune'), 'L1', 'ckc_decode'),
+                      _run_mlp(self.full, SINGLE, x)[1])
+
+    def test_the_c1c_marker_fires_once_inside_the_branch_and_legacy_keeps_c1s_marker(self):
+        logged = _run_mlp(self.full, SINGLE, _x(2048))[2]
+        self.assertEqual([entry[0].split(':')[0] for entry in logged], ['[PINDIAG] prefill MLP C1c'])
+        logged = _run_mlp(self.full, LEGACY, _x(2048))[2]
+        self.assertEqual([entry[0].split(':')[0] for entry in logged], ['[PINDIAG] prefill MLP via w1/w3 2D branch'])
+
+    def test_decode_rows_never_reach_c1c(self):
+        """Rows 1-64 keep the 1D decode branch under the flag, exactly as under C1."""
+        for rows in (32, 64):
+            with self.subTest(rows=rows):
+                self.assertEqual(_run_mlp(self.full, SINGLE, _x(rows))[1], _run_mlp(self.full, LEGACY, _x(rows))[1])
+                self.assertFalse(any(c[0] in ('slice', 'concat') for c in _run_mlp(self.full, SINGLE, _x(rows))[1]))
+
+
+class FlagOffEquivalenceTests(unittest.TestCase):
+    """With no flag set the fully grafted mlp.py runs the op sequence patch_mlp alone runs."""
+
+    def test_every_branch_runs_the_same_ops_as_before_c1(self):
+        full, base = patch_mlp_full(MLP_MODULE), patch_mlp(MLP_MODULE)
+        cases = (
+            dict(x=_x(2048, width=32), fuse_agmm=True, packed=True),    # v98 fused prefill (K-sharded)
+            dict(x=_x(2048), fuse_agmm=False),                          # unfused 2D prefill
+            dict(x=_x(64), fuse_agmm=True, packed=True),                # 64-row native decode
+            dict(x=_x(32), fuse_agmm=True, packed=True),                # one-tile decode
+        )
+        for case in cases:
+            for environ in ({}, {'QWEN_FAST_C1_AGMM': '1'}, {'QWEN_FAST_C1_LEGACY': '1'}):
+                with self.subTest(rows=case['x'].shape[-2], environ=environ):
+                    kwargs = dict(case)
+                    x = kwargs.pop('x')
+                    self.assertEqual(_run_mlp(full, environ, x, **kwargs)[1], _run_mlp(base, environ, x, **kwargs)[1])
+
+
+class C1dGraftTests(unittest.TestCase):
+    """C1d (QWEN_FAST_C1_AGMM=1 with QWEN_FAST_SINGLE_GATEUP=1): two all_gather_matmul_prefill
+    calls (w1 with SiLU fused, then w3) and one mul, with the ff_norm skipping its gather."""
+
+    def setUp(self):
+        self.full = patch_mlp_full(MLP_MODULE)
+
+    def test_k_sharded_prefill_runs_two_agmms_and_a_mul(self):
+        out, calls, logged = _run_mlp(self.full, C1D, _x(2048, width=32), c1_agmm=True)
+        self.assertEqual(calls[:3], [
+            ('agmm', 2048, 32, 'w1', 'ckc_agmm', 'ring', 'SILU', 'DRAM'),
+            ('agmm', 2048, 32, 'w3', 'ckc_agmm', 'ring', None, 'DRAM'),
+            ('mul', 2048, 'DRAM')])
+        self.assertFalse(any(c[0] in ('slice', 'concat', 'agmm_swiglu') for c in calls))
+        # The down projection keeps the fused path's L1 output (_silu_fused), then the reduce.
+        self.assertEqual(calls[3][:3], ('linear', 2048, 'w2'))
+        self.assertEqual(calls[3][4], 'L1')
+        self.assertEqual(calls[4], ('all_reduce',))
+        self.assertEqual(out.shape, (1, 1, 2048, 64))
+        self.assertEqual([entry[0].split(':')[0] for entry in logged], ['[PINDIAG] prefill MLP C1d'])
+
+    def test_a_full_k_input_never_takes_the_agmm_branch(self):
+        """The 64-row native decode input is replicated at full K (run 35558196643)."""
+        for rows in (32, 64):
+            with self.subTest(rows=rows):
+                calls = _run_mlp(self.full, C1D, _x(rows), c1_agmm=True)[1]
+                self.assertFalse(any(c[0] == 'agmm' for c in calls))
+                self.assertEqual(calls[0], ('to_memory_config', 'L1'))
+
+    def test_c1d_is_inert_without_single_gateup(self):
+        """Alone, QWEN_FAST_C1_AGMM sets nothing: the __init__ block needs both flags."""
+        source = patch_mlp_full(MLP_MODULE)
+        for environ, expected in (({'QWEN_FAST_C1_AGMM': '1'}, False), (C1D, True), (SINGLE, False), ({}, False)):
+            with self.subTest(environ=environ):
+                loaded = _run_load(source, True, environ)
+                import types
+                logged, modules, env = _stubbed(True, environ)
+                namespace = {'MLPWeights': object, '_build_gate_up': lambda *a: 'wgu'}
+                with modules, env:
+                    exec(compile(source, 'mlp.py', 'exec'), namespace)
+                    mlp = namespace['Qwen36MLP'](None, {}, None, types.SimpleNamespace(num_devices=2))
+                self.assertEqual(getattr(mlp, '_qwen_c1_agmm', False), expected)
+                # The packed copy is still never built under SINGLE_GATEUP (C1d uses w1/w3).
+                self.assertEqual(loaded[1] == [], 'QWEN_FAST_SINGLE_GATEUP' in environ)
+
+    def test_the_ff_norm_skips_its_gather_exactly_when_the_mlp_fuses_one(self):
+        """Either the packed SwiGLU AGMM (v98) or C1d's two AGMMs; never neither with a skip."""
+        import types
+        for environ in ({}, SINGLE, C1D, {'QWEN_FAST_C1_AGMM': '1'}, LEGACY):
+            with self.subTest(environ=environ):
+                layer_fused, gathers, logged = _run_layer(patch_layer(LAYER), True, environ)
+                result, built, _, mlp_fused = _run_load(patch_mlp_full(MLP_MODULE), True, environ)
+                logged2, modules, env = _stubbed(True, environ)
+                namespace = {'MLPWeights': object, '_build_gate_up': lambda *a: 'wgu'}
+                with modules, env:
+                    exec(compile(patch_mlp_full(MLP_MODULE), 'mlp.py', 'exec'), namespace)
+                    mlp = namespace['Qwen36MLP'](None, {}, None, types.SimpleNamespace(num_devices=2))
+                mlp_gathers = mlp_fused or getattr(mlp, '_qwen_c1_agmm', False)
+                self.assertEqual(layer_fused, mlp_gathers)
+                self.assertEqual(gathers, not layer_fused)
+
+    def test_the_layer_markers_name_what_the_ff_norm_does(self):
+        fused, gathers, logged = _run_layer(patch_layer(LAYER), True, C1D)
+        self.assertEqual((fused, gathers), (True, False))
+        self.assertEqual([entry[0] for entry in logged],
+                         ['[PINDIAG] C1d: ff_norm skips its all-gather for the MLP AGMM (layer {})'])
+        # One device: nothing is fused and nothing is logged, as under C1.
+        self.assertEqual(_run_layer(patch_layer(LAYER), True, C1D, devices=1), (False, True, []))
+
+    def test_c1c_c1d_patch_applies_once_and_needs_c1_first(self):
+        with_c1 = patch_mlp_single_gateup(patch_mlp(MLP_MODULE))
+        with self.assertRaisesRegex(ValueError, 'already grafted'):
+            patcher.patch_mlp_c1_fused(patcher.patch_mlp_c1_fused(with_c1))
+        with self.assertRaisesRegex(ValueError, 'needs the C1 graft first'):
+            patcher.patch_mlp_c1_fused(patch_mlp(MLP_MODULE))
+
+    def test_the_gate_requires_under_c1d_exactly_the_markers_the_graft_emits(self):
+        """Under C1d the ff_norm no longer gathers, so the gate must not demand C1's
+        gathers-for-itself marker, and must demand the two C1d markers instead."""
+        from lever_n_m3native_gate import SINGLE_GATEUP_MARKERS, flag_marker_report, required_flag_markers
+        c1d = required_flag_markers(C1D, 4)['QWEN_FAST_SINGLE_GATEUP']
+        self.assertNotIn(patcher.MARKER_FF_NORM_GATHER, c1d)
+        for marker in c1d[len(SINGLE_GATEUP_MARKERS) - 1:]:
+            self.assertTrue(patcher.MARKER_C1D.startswith(marker) or patcher.MARKER_C1D_FF_NORM.startswith(marker),
+                            marker)
+        # Default SINGLE_GATEUP proves C1c ran; LEGACY proves C1's 2D branch ran (never the other).
+        self.assertEqual(required_flag_markers(SINGLE, 4)['QWEN_FAST_SINGLE_GATEUP'],
+                         list(SINGLE_GATEUP_MARKERS) + ['[PINDIAG] prefill MLP C1c: one slice of x per 1024 rows'])
+        self.assertEqual(required_flag_markers(LEGACY, 4)['QWEN_FAST_SINGLE_GATEUP'],
+                         list(SINGLE_GATEUP_MARKERS) + ['[PINDIAG] prefill MLP via w1/w3 2D branch'])
+        # A C1d run's log: the three C1 markers that still fire plus what the graft logs for C1d.
+        log = chr(10).join([m + ' 64 layers' for m in SINGLE_GATEUP_MARKERS[:3]]
+                           + [patcher.MARKER_C1D_FF_NORM + ' (layer 0)', patcher.MARKER_C1D + ': rows=2048 k_local=2560'])
+        self.assertEqual(flag_marker_report(C1D, 4, log)['missing'], [])
+        # Read as a default SINGLE_GATEUP run, the same log lacks the ff_norm marker and C1c's.
+        self.assertEqual(flag_marker_report(SINGLE, 4, log)['missing'], sorted(
+            'QWEN_FAST_SINGLE_GATEUP: ' + m for m in (patcher.MARKER_FF_NORM_GATHER,
+                                                       '[PINDIAG] prefill MLP C1c: one slice of x per 1024 rows')))
+
+    def test_the_gate_requires_the_marker_of_the_mlp_branch_that_ran(self):
+        """C1c is the default under SINGLE_GATEUP: a graft that silently fell through to C1 (or
+        a LEGACY run that took C1c) must fail the gate. The required text is a prefix of what the
+        executed branch logs, checked against the logger calls the fakes record."""
+        from lever_n_m3native_gate import SINGLE_GATEUP_MARKERS, flag_marker_report, required_flag_markers
+        base = [m + ' 64 layers' for m in SINGLE_GATEUP_MARKERS]
+        for environ, other in ((SINGLE, LEGACY), (LEGACY, SINGLE)):
+            with self.subTest(environ=environ):
+                logged = _run_mlp(self.full, environ, _x(2048))[2]
+                emitted = [entry[0] for entry in logged]
+                wrong = [entry[0] for entry in _run_mlp(self.full, other, _x(2048))[2]]
+                required = required_flag_markers(environ, 4)['QWEN_FAST_SINGLE_GATEUP'][-1]
+                self.assertTrue(any(line.startswith(required) for line in emitted), (required, emitted))
+                self.assertFalse(any(line.startswith(required) for line in wrong))
+                self.assertEqual(flag_marker_report(environ, 4, chr(10).join(base + emitted))['missing'], [])
+                missing = flag_marker_report(environ, 4, chr(10).join(base + wrong))['missing']
+                self.assertEqual(missing, ['QWEN_FAST_SINGLE_GATEUP: ' + required])
+
+    def test_the_gate_requires_the_flush_hooks_first_flush_marker(self):
+        from lever_n_m3native_gate import PREFILL_FLUSH_MARKER, flag_marker_report, required_flag_markers
+        flag = {'QWEN_PREFILL_PROFILE_FLUSH': '1'}
+        self.assertEqual(required_flag_markers(flag, 1), {'QWEN_PREFILL_PROFILE_FLUSH': [PREFILL_FLUSH_MARKER]})
+        self.assertEqual(required_flag_markers({}, 1), {})
+        events = _run_layer_forward(patcher.patch_layer_full(LAYER_MODULE), flag, _chunks(1))
+        logs = [e[1] for e in events if e[0] == 'log']
+        self.assertTrue(any(line.startswith(PREFILL_FLUSH_MARKER) for line in logs), logs)
+        self.assertEqual(flag_marker_report(flag, 1, chr(10).join(logs))['missing'], [])
+        self.assertEqual(flag_marker_report(flag, 1, '')['missing'],
+                         ['QWEN_PREFILL_PROFILE_FLUSH: ' + PREFILL_FLUSH_MARKER])
+
+    def test_tp_common_is_still_never_grafted(self):
+        self.assertNotIn('tp_common.py', patcher.PATCHES)
+        self.assertIn('tpc.all_gather_matmul_prefill(', patch_mlp_full(MLP_MODULE))
+
+
+# layer.py (image dump; graft artifact of run 35816715775, layer.py.orig sha256 586429a11078f91d),
+# Qwen36DecoderLayer.forward lines 153-259 verbatim, appended to the fixture class above.
+LAYER_FORWARD = '''    def forward(
+        self,
+        x,
+        cos=None,
+        sin=None,
+        mode="decode",
+        chunk_size=128,  # = GDN long_prefill_chunk_size; the only size the chunk-seq prefill kernel supports
+        position_tensor=None,
+        page_table=None,
+        chunk_page_table=None,
+        chunk_start_idx=None,
+        chunk_start_idx_tensor=None,
+        valid_len=None,
+        gdn_collect=False,
+    ):
+        _norm_mode = Mode.PREFILL if mode == "prefill" else Mode.DECODE
+        if self.num_devices > 1:
+            # TP: DistributedNorm uses the framework's per-norm memory configs.
+            _attn_norm_config = self.args.get_norm_config("attn", _norm_mode)
+            # PREFILL: distributed rmsnorm outputs in L1 so the fused in-proj AGMM gathers from L1, not DRAM.
+            if _norm_mode == Mode.PREFILL:
+                _attn_norm_config = {**_attn_norm_config, "distributed_output_mem_config": ttnn.L1_MEMORY_CONFIG}
+            # DECODE ff_norm uses the attn_norm layout (act_shard_hidden, 32-core) so Qwen36MLP's input reshard is a no-op and the norm runs on 32 cores not 8; PREFILL keeps the framework ff config.
+            if _norm_mode == Mode.DECODE:
+                _ff_norm_config = self.args.get_norm_config("attn", _norm_mode)
+            else:
+                # ff_norm output stays DRAM: L1 keeps the full-width norm resident across the whole MLP,
+                # clashing with each matmul's CBs (w1/w3/w2) for no gain. Verified dead end; keep DRAM.
+                _ff_norm_config = self.args.get_norm_config("ff", _norm_mode)
+        else:
+            # In decode the norm output stays in L1 (as the old rms_norm_ttnn(memory_config=L1) did);
+            # in prefill the framework RMSNorm returns interleaved DRAM (matches the old None default).
+            _attn_norm_config = _ff_norm_config = (
+                {"output_mem_config": ttnn.L1_MEMORY_CONFIG} if mode == "decode" else None
+            )
+        attn_input = self.attention_norm(x, mode=_norm_mode, norm_config=_attn_norm_config)
+
+        if self.num_devices > 1:
+            # TP modules: input is the gathered (full-dim) norm output [1,1,B/S,dim];
+            # output is fractured along dim=3. cos/sin are in rope_tp format.
+            if self.is_full_attention:
+                if mode == "prefill":
+                    # Contract/vLLM path supplies a page_table → paged KV prefill; the
+                    # demo path (no page_table) uses the internal concat caches.
+                    if page_table is not None:
+                        attn_output = self.attention.forward_prefill_paged(
+                            attn_input,
+                            cos,
+                            sin,
+                            page_table,
+                            chunk_page_table=chunk_page_table,
+                            chunk_start_idx=chunk_start_idx if chunk_start_idx is not None else 0,
+                            chunk_start_idx_tensor=chunk_start_idx_tensor,
+                        )
+                    else:
+                        attn_output = self.attention.forward_prefill(attn_input, cos, sin)
+                else:
+                    attn_output = self.attention.forward_decode(
+                        attn_input, position_tensor, cos, sin, page_table=page_table
+                    )
+            else:
+                # GDN carries its recurrent/conv state internally (capture_state on
+                # prefill, read on decode); it has no paged KV, so page_table is N/A.
+                if mode == "prefill":
+                    if gdn_collect:
+                        # Batched per-user prefill: stash this user's from-scratch state for
+                        # assembly into row u of the batched buffers (finalize_pending later).
+                        attn_output = self.attention.forward_prefill_collect(
+                            attn_input, chunk_size=chunk_size, valid_len=valid_len
+                        )
+                    else:
+                        attn_output = self.attention.forward_prefill(
+                            attn_input, chunk_size=chunk_size, valid_len=valid_len, capture_state=True
+                        )
+                else:
+                    attn_output = self.attention.forward_decode(attn_input)
+        elif self.is_full_attention:
+            attn_output = self.attention.forward(
+                attn_input,
+                cos,
+                sin,
+                position_tensor=position_tensor,
+                page_table=page_table,
+                chunk_page_table=chunk_page_table,
+                chunk_start_idx=chunk_start_idx,
+                chunk_start_idx_tensor=chunk_start_idx_tensor,
+            )
+        else:
+            deltanet_mode = "chunk" if mode == "prefill" else "recurrent"
+            attn_output = self.attention.forward(
+                attn_input, mode=deltanet_mode, chunk_size=chunk_size, valid_len=valid_len
+            )
+        ttnn.deallocate(attn_input)
+
+        h = ttnn.add(x, attn_output)
+        ttnn.deallocate(attn_output)
+
+        ff_input = self.ffn_norm(h, mode=_norm_mode, norm_config=_ff_norm_config)
+
+        ff_output = self.feed_forward.forward(ff_input)
+        ttnn.deallocate(ff_input)
+
+        output = ttnn.add(h, ff_output)
+        ttnn.deallocate(h)
+        ttnn.deallocate(ff_output)
+
+        return output
+'''
+
+LAYER_MODULE = 'import ttnn\n\n\n' + LAYER + '\n' + LAYER_FORWARD
+
+
+def _run_layer_forward(source, environ, schedule, *, n_layers=64, tracy=True):
+    """Drive the (patched) forward through `schedule`: a list of (mode, layer_num) or
+    (mode, layer_num, chunk_start_idx) calls (chunk_start_idx None when omitted).
+
+    Returns the recorded events: ('add'), ('sync', layer), ('read', layer), ('signpost', label),
+    plus every logged line."""
+    import sys
+    import types
+
+    events = []
+    fake = types.SimpleNamespace(
+        L1_MEMORY_CONFIG='L1',
+        add=lambda a, b: events.append(('add',)) or 'sum',
+        deallocate=lambda t: None,
+        synchronize_device=lambda device: events.append(('sync', current[0])),
+        ReadDeviceProfiler=lambda device: events.append(('read', current[0])))
+    current = [None]
+    loguru = types.ModuleType('loguru')
+    loguru.logger = types.SimpleNamespace(info=lambda *a: events.append(('log',) + a))
+    modules = {'ttnn': fake, 'loguru': loguru}
+    if tracy:
+        module = types.ModuleType('tracy')
+        module.signpost = lambda label: events.append(('signpost', label))
+        modules['tracy'] = module
+    else:
+        modules['tracy'] = None  # import tracy raises ImportError
+    mode_type = types.SimpleNamespace(PREFILL='prefill', DECODE='decode')
+    args = types.SimpleNamespace(n_layers=n_layers, get_norm_config=lambda kind, mode: {})
+    attention = types.SimpleNamespace(
+        forward_prefill=lambda a, chunk_size=None, valid_len=None, capture_state=None: 'attn',
+        forward_decode=lambda a: 'attn')
+    x = types.SimpleNamespace(shape=(1, 1, 2048, 2560))
+    with patch.dict(sys.modules, modules), patch.dict('os.environ', environ, clear=True):
+        namespace = {}
+        exec(compile(source, 'layer.py', 'exec'), namespace)
+        namespace['Mode'] = mode_type
+        cls = namespace['Qwen36DecoderLayer']
+        layers = {}
+        for entry in schedule:
+            mode, number = entry[:2]
+            start = entry[2] if len(entry) > 2 else None
+            layer = layers.get(number)
+            if layer is None:
+                layer = layers[number] = cls.__new__(cls)
+                layer.layer_num, layer.device, layer.args, layer.num_devices = number, 'mesh', args, 2
+                layer.is_full_attention = False
+                layer.attention_norm = layer.ffn_norm = lambda t, mode=None, norm_config=None: 'normed'
+                layer.attention = attention
+                layer.feed_forward = types.SimpleNamespace(forward=lambda t: 'ff')
+            current[0] = number
+            layer.forward(x, mode=mode, chunk_start_idx=start)
+    return events
+
+
+def _chunks(count, n_layers=64, rows=2048):
+    """One prompt of `count` chunks, as the served paged path calls it (chunk_start_idx per chunk)."""
+    return [('prefill', number, chunk * rows) for chunk in range(count) for number in range(n_layers)]
+
+
+def _strip_profile(text):
+    """Remove the M2 edits: the helper block and the two gated forward blocks."""
+    kept, skipping, helper = [], None, False
+    for line in text.splitlines(keepends=True):
+        if skipping is not None:
+            if line.strip() and len(line) - len(line.lstrip()) <= skipping:
+                skipping = None
+            else:
+                continue
+        if line.lstrip().startswith('if mode == "prefill" and _qwen_prefill_profile_on():'):
+            skipping = len(line) - len(line.lstrip())
+            continue
+        if line.startswith('# Lever N M2 prefill profile hook'):
+            helper = True
+        if helper:
+            if line.startswith('class '):
+                helper = False
+            else:
+                continue
+        kept.append(line)
+    return ''.join(kept)
+
+
+class PrefillProfileFlushTests(unittest.TestCase):
+    """M2: under QWEN_PREFILL_PROFILE_FLUSH=1 every 16th prefill layer synchronises and reads the
+    device profiler; layer 0 counts chunks; chunks 0, 1, 31, 32, 62, 63 are signposted."""
+
+    def setUp(self):
+        self.full = patcher.patch_layer_full(LAYER_MODULE)
+
+    def test_flag_off_the_forward_does_exactly_what_it_did(self):
+        schedule = _chunks(2) + [('decode', n) for n in range(64)]
+        for environ in ({}, {'QWEN_PREFILL_PROFILE_FLUSH': '0'}):
+            with self.subTest(environ=environ):
+                events = _run_layer_forward(self.full, environ, schedule)
+                self.assertEqual(events, _run_layer_forward(patch_layer(LAYER_MODULE), environ, schedule))
+                self.assertEqual(events, _run_layer_forward(LAYER_MODULE, environ, schedule))
+                self.assertEqual({e[0] for e in events}, {'add'})
+
+    def test_removing_the_m2_edits_gives_back_the_c1_graft(self):
+        self.assertEqual(_strip_profile(self.full), patch_layer(LAYER_MODULE))
+
+    def test_every_16th_prefill_layer_syncs_then_reads(self):
+        events = _run_layer_forward(self.full, {'QWEN_PREFILL_PROFILE_FLUSH': '1'},
+                                    _chunks(2) + [('decode', n) for n in range(64)])
+        device = [e for e in events if e[0] in ('sync', 'read')]
+        expected = [(kind, layer) for _ in range(2) for layer in (15, 31, 47, 63) for kind in ('sync', 'read')]
+        self.assertEqual(device, expected, 'decode calls must never flush')
+
+    def test_the_last_layer_flushes_even_off_the_16_grid(self):
+        events = _run_layer_forward(self.full, {'QWEN_PREFILL_PROFILE_FLUSH': '1'}, _chunks(1, n_layers=40),
+                                    n_layers=40)
+        self.assertEqual([e[1] for e in events if e[0] == 'read'], [15, 31, 39])
+
+    def test_chunks_0_1_31_32_62_63_are_signposted_and_nothing_else(self):
+        events = _run_layer_forward(self.full, {'QWEN_PREFILL_PROFILE_FLUSH': '1'}, _chunks(66))
+        labels = [e[1] for e in events if e[0] == 'signpost']
+        expected = []
+        for chunk in (0, 1, 31, 32, 62, 63):
+            expected += ['qwen_prefill_p1_chunk_%d_begin' % chunk, 'qwen_prefill_p1_chunk_%d_end' % chunk]
+        self.assertEqual(labels, expected)
+        # The end signpost sits after the last layer's sync and before its read.
+        index = events.index(('signpost', 'qwen_prefill_p1_chunk_0_end'))
+        self.assertEqual(events[index - 1], ('sync', 63))
+        self.assertEqual(events[index + 1], ('read', 63))
+
+    def test_the_chunk_counter_counts_layer_0_prefill_calls_only(self):
+        schedule = ([('decode', 0)] * 3 + [('prefill', n) for n in range(1, 64)] + _chunks(2))
+        events = _run_layer_forward(self.full, {'QWEN_PREFILL_PROFILE_FLUSH': '1'}, schedule)
+        begins = [e for e in events if e[0] == 'log' and 'begin rows' in e[1]]
+        # (prompt, chunk, rows, chunk_start_idx, absolute layer-0 prefill call)
+        self.assertEqual([e[2:] for e in begins], [(1, 0, 2048, 0, 1), (1, 1, 2048, 2048, 2)])
+
+    def test_warm_up_prefills_do_not_shift_the_prompt_chunk_index(self):
+        """Warm-up / probe prefills earlier in the process (an unchunked forward, then a short
+        chunked prompt) must not move the real prompt's signposts off chunks 0, 1, 62, 63."""
+        warm = [('prefill', n) for n in range(64)] + _chunks(3)
+        events = _run_layer_forward(self.full, {'QWEN_PREFILL_PROFILE_FLUSH': '1'}, warm + _chunks(64))
+        labels = [e[1] for e in events if e[0] == 'signpost' and e[1].startswith('qwen_prefill_p3_')]
+        expected = []
+        for chunk in (0, 1, 31, 32, 62, 63):
+            expected += ['qwen_prefill_p3_chunk_%d_begin' % chunk, 'qwen_prefill_p3_chunk_%d_end' % chunk]
+        self.assertEqual(labels, expected)
+        begins = [e for e in events if e[0] == 'log' and 'begin rows' in e[1]]
+        # The last prompt's chunk 63 is the process's 68th layer-0 prefill call (1 + 3 + 64).
+        self.assertEqual(begins[-1][2:], (3, 63, 2048, 63 * 2048, 68))
+
+    def test_markers_prove_the_hook_executed(self):
+        events = _run_layer_forward(self.full, {'QWEN_PREFILL_PROFILE_FLUSH': '1'}, _chunks(3))
+        logs = [e[1] for e in events if e[0] == 'log']
+        self.assertEqual(sum('first flush' in line for line in logs), 1)
+        self.assertEqual(sum('begin rows' in line for line in logs), 2)
+        self.assertTrue(all(line.startswith('[PINDIAG] prefill profile flush') for line in logs))
+
+    def test_a_missing_tracy_still_flushes_and_says_so_once(self):
+        events = _run_layer_forward(self.full, {'QWEN_PREFILL_PROFILE_FLUSH': '1'}, _chunks(2), tracy=False)
+        self.assertEqual(sum(1 for e in events if e[0] == 'read'), 8)
+        self.assertFalse(any(e[0] == 'signpost' for e in events))
+        self.assertEqual(sum(1 for e in events if e[0] == 'log' and 'signpost unavailable' in e[1]), 1)
+
+    def test_the_profile_patch_applies_once_and_fails_loudly_on_drift(self):
+        with self.assertRaisesRegex(ValueError, 'already grafted'):
+            patcher.patch_layer_profile_flush(self.full)
+        with self.assertRaises(ValueError):
+            patcher.patch_layer_profile_flush(LAYER_MODULE.replace('        return output\n', '        return h\n'))
+        with self.assertRaises(ValueError):
+            patcher.patch_layer_profile_flush(LAYER_MODULE.replace('import ttnn\n\n\n', ''))
+
+    def test_the_flag_name_the_arm_passes_is_the_one_the_graft_reads(self):
+        arm = (Path(__file__).parent / 'lever_n_m3native_run_arm.sh').read_text(encoding='utf-8')
+        self.assertIn('${M3NATIVE_PROFILE:+-e QWEN_PREFILL_PROFILE_FLUSH=1}', arm)
+        self.assertIn('_QWEN_PREFILL_PROFILE_FLAG = "QWEN_PREFILL_PROFILE_FLUSH"', self.full)
+
 
 if __name__ == '__main__':
     unittest.main()

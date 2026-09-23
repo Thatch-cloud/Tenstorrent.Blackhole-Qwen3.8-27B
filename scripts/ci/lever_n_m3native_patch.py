@@ -43,6 +43,8 @@ import argparse
 import ast
 from pathlib import Path
 
+import gdn_prefill_conv_exact as _pcx
+
 
 def function_span(source, name):
     """Line span [start, end) of a method, by AST sibling order (see lever_n_model_patch).
@@ -664,13 +666,186 @@ def patch_mlp_single_gateup(source):
     return result
 
 
+# ---------------------------------------------------------------------------------
+# F. C1c and C1d: getting back the C1 prefill penalty (prefill ranking, levers 3 and 3a).
+# ---------------------------------------------------------------------------------
+#
+# C1 costs +71-76 ms per 2048-row chunk against the fused v98 path (v99 vs v104 at 32k):
+# the unfused w1/w3 run as two row-sliced matmuls, each joined by its own concat, and a
+# separate mul follows. Two recoveries, both inside mlp.py:
+#
+# C1c (EXACT; the default whenever QWEN_FAST_SINGLE_GATEUP=1). Per 1024-row slice of x,
+# slice ONCE, run the w1 matmul and the w3 matmul on that one slice, multiply the two, and
+# join only the products. It is bit-identical to C1 by construction, op for op:
+#   - every matmul is the same program: the same builder
+#     (create_prefill_mlp_matmul_program_config) with the same (rows, dim, N) and the same
+#     max_cols / tuning / fused_activation (SiLU on w1 only), the same compute kernel config
+#     and the same DRAM output, on the same rows of x (ttnn.slice is a copy, and C1 made the
+#     same slice twice where C1c makes it once);
+#   - the mul is elementwise with no broadcast (both operands [.., rows, N], bf16, TILE,
+#     DRAM interleaved in both cases), so each output element is the product of the same
+#     two input elements under the same compute config. Multiplying per slice and joining
+#     is the same values as joining and multiplying; only the tile count per call changes;
+#   - ttnn.concat moves the same rows into the same order.
+# What changes is only the number of ops (per chunk: two concats of [2048, 8704] become one)
+# and the peak DRAM held between them. QWEN_FAST_C1_LEGACY=1 keeps today's C1 path for a
+# byte comparison of the two on hardware.
+#
+# C1d (QWEN_FAST_C1_AGMM=1, only together with QWEN_FAST_SINGLE_GATEUP=1). The ff_norm skips
+# its all-gather again (layer.py's _fuse_ff_agmm stays True), and the MLP fuses that gather
+# into two tpc.all_gather_matmul_prefill calls on the separate w1 (SiLU fused) and w3, then
+# one mul. tp_common is untouched: all_gather_matmul_prefill is already its public helper.
+# NOT bitwise vs C1 (a different matmul program and accumulation order); the gate decides.
+# The branch sits where v98's fused branch sits (first, K-sharded input only), so the same
+# rows reach it that reached v98's fused path.
+#
+# Markers sit inside each executed branch, once per process.
+
+C1_AGMM_FLAG = 'QWEN_FAST_C1_AGMM'
+C1_LEGACY_FLAG = 'QWEN_FAST_C1_LEGACY'
+C1D_ON = ('os.environ.get("' + SINGLE_GATEUP_FLAG + '") == "1" and os.environ.get("'
+          + C1_AGMM_FLAG + '") == "1"')
+MARKER_C1C = '[PINDIAG] prefill MLP C1c: one slice of x per 1024 rows, product-only concat'
+MARKER_C1D = '[PINDIAG] prefill MLP C1d: two all_gather_matmul_prefill (w1+SiLU, w3) and a mul'
+MARKER_C1D_FF_NORM = '[PINDIAG] C1d: ff_norm skips its all-gather for the MLP AGMM'
+
+# Module-level helper, placed after _qwen_c1_linear (inside the same helper region).
+C1C_SWIGLU_HELPER = (
+    '\n'
+    '\n'
+    'def _qwen_c1_swiglu(args, tpc, w, max_cols, tuning):\n'
+    '    """Lever N M3native C1c (QWEN_FAST_SINGLE_GATEUP=1): silu(x @ w1) * (x @ w3) on row slices\n'
+    '    of _QWEN_C1_SLICE_ROWS. Each slice of x is made once and feeds both matmuls, and only the\n'
+    '    products are joined. Per slice the matmuls and the mul are exactly _qwen_c1_linear\'s and\n'
+    '    the branch\'s own, so the result is bit-identical to C1 (see the patch module, section F)."""\n'
+    '\n'
+    '    def swiglu(x, compute_kernel_config=None):\n'
+    '        seq = x.shape[-2]\n'
+    '        rank = len(x.shape)\n'
+    '        parts = []\n'
+    '        for start in range(0, seq, _QWEN_C1_SLICE_ROWS):\n'
+    '            rows = min(_QWEN_C1_SLICE_ROWS, seq - start)\n'
+    '            if rows == seq:\n'
+    '                part = x\n'
+    '            else:\n'
+    '                begins = [0] * rank\n'
+    '                ends = [x.shape[i] for i in range(rank)]\n'
+    '                begins[rank - 2], ends[rank - 2] = start, start + rows\n'
+    '                part = ttnn.slice(x, begins, ends)\n'
+    '            gate_config = tpc.create_prefill_mlp_matmul_program_config(\n'
+    '                rows, args.dim, w.w1.shape[-1], max_cols=max_cols, tuning=tuning,\n'
+    '                fused_activation=ttnn.UnaryOpType.SILU)\n'
+    '            up_config = tpc.create_prefill_mlp_matmul_program_config(\n'
+    '                rows, args.dim, w.w3.shape[-1], max_cols=max_cols, tuning=tuning)\n'
+    '            gate = ttnn.linear(part, w.w1, compute_kernel_config=compute_kernel_config,\n'
+    '                               program_config=gate_config, memory_config=ttnn.DRAM_MEMORY_CONFIG)\n'
+    '            up = ttnn.linear(part, w.w3, compute_kernel_config=compute_kernel_config,\n'
+    '                             program_config=up_config, memory_config=ttnn.DRAM_MEMORY_CONFIG)\n'
+    '            if part is not x:\n'
+    '                ttnn.deallocate(part)\n'
+    '            parts.append(ttnn.mul(gate, up, memory_config=ttnn.DRAM_MEMORY_CONFIG))\n'
+    '            ttnn.deallocate(gate)\n'
+    '            ttnn.deallocate(up)\n'
+    '        if len(parts) == 1:\n'
+    '            return parts[0]\n'
+    '        joined = ttnn.concat(parts, dim=rank - 2, memory_config=ttnn.DRAM_MEMORY_CONFIG)\n'
+    '        for part in parts:\n'
+    '            ttnn.deallocate(part)\n'
+    '        return joined\n'
+    '\n'
+    '    return swiglu\n'
+)
+
+C1D_INIT_BLOCK = (
+    '        if ' + C1D_ON + ':\n'
+    '            # Lever N M3native C1d: two all_gather_matmul_prefill calls on w1/w3 take the ff_norm\'s\n'
+    '            # gather back (layer.py keeps _fuse_ff_agmm True under the same two flags).\n'
+    '            self._qwen_c1_agmm = tpc.mlp_gateup_agmm_enabled(self.num_devices)\n'
+)
+
+C1D_BRANCH = (
+    '        elif getattr(self, "_qwen_c1_agmm", False) and x.shape[-2] > ttnn.TILE_SIZE and x.shape[-1] < w.w1.shape[-2]:\n'
+    '            # Lever N M3native C1d (QWEN_FAST_C1_AGMM=1): x is K-sharded (the ff_norm skipped its\n'
+    '            # gather). Two fused all-gather + matmul calls on the separate w1 (SiLU fused) and w3,\n'
+    '            # then one mul; hidden is produced here, so the gate*up below is skipped.\n'
+    '            if not getattr(type(self), "_qwen_c1d_logged", False):\n'
+    '                type(self)._qwen_c1d_logged = True\n'
+    '                from loguru import logger as _qwen_logger\n'
+    '\n'
+    '                _qwen_logger.info("' + MARKER_C1D + ': rows={} k_local={}", x.shape[-2], x.shape[-1])\n'
+    '            _qwen_gate = tpc.all_gather_matmul_prefill(\n'
+    '                x, w.w1, self.tt_ccl, self.compute_kernel_config_agmm, args.ccl_topology(),\n'
+    '                fused_activation=ttnn.UnaryOpType.SILU,\n'
+    '            )\n'
+    '            _qwen_up = tpc.all_gather_matmul_prefill(\n'
+    '                x, w.w3, self.tt_ccl, self.compute_kernel_config_agmm, args.ccl_topology()\n'
+    '            )\n'
+    '            hidden = ttnn.mul(_qwen_gate, _qwen_up, memory_config=mc)\n'
+    '            ttnn.deallocate(_qwen_gate)\n'
+    '            ttnn.deallocate(_qwen_up)\n'
+    '            _silu_fused = True\n'
+    '            _fused_gu = True\n'
+)
+
+C1C_BRANCH = (
+    '        elif x.shape[-2] > ttnn.TILE_SIZE and os.environ.get("' + SINGLE_GATEUP_FLAG + '") == "1" and os.environ.get("'
+    + C1_LEGACY_FLAG + '") != "1":\n'
+    '            # Lever N M3native C1c: the C1 prefill gate/up with one slice of x per 1024 rows feeding\n'
+    '            # both matmuls and only the product joined - bit-identical to C1 (patch module, F).\n'
+    '            # hidden is produced here, so the gate*up below is skipped.\n'
+    '            if not getattr(type(self), "_qwen_c1c_logged", False):\n'
+    '                type(self)._qwen_c1c_logged = True\n'
+    '                from loguru import logger as _qwen_logger\n'
+    '\n'
+    '                _qwen_logger.info("' + MARKER_C1C + ': rows={} slices of {} rows", x.shape[-2], _QWEN_C1_SLICE_ROWS)\n'
+    '            hidden = _qwen_c1_swiglu(\n'
+    '                args, tpc, w, getattr(args, "decode_grid_w", 8), getattr(args, "prefill_tuning", None)\n'
+    '            )(x, compute_kernel_config=ckc)\n'
+    '            _silu_fused = True\n'
+    '            _fused_gu = True\n'
+)
+
+
+def patch_mlp_c1_fused(source):
+    """C1c and C1d in mlp.py, on top of C1 (patch_mlp_single_gateup must already be applied)."""
+    if C1_AGMM_FLAG in source:
+        raise ValueError('mlp C1c/C1d: already grafted (%s present)' % C1_AGMM_FLAG)
+    if SINGLE_GATEUP_FLAG not in source:
+        raise ValueError('mlp C1c/C1d: needs the C1 graft first (%s absent)' % SINGLE_GATEUP_FLAG)
+    lines = source.splitlines(keepends=True)
+    # Ahead of C1's own switch (not after it), so the block is followed by code, not a blank line.
+    init_lines = ('        # Lever N M3native C1: the fused branch goes with the packed copy.\n'
+                  '        self._fuse_gateup_agmm = tpc.mlp_gateup_agmm_enabled(self.num_devices) and '
+                  + FLAG_OFF + '\n')
+    span = function_span(source, INIT_FUNCTION)
+    lines = replace_once(lines, span, init_lines, C1D_INIT_BLOCK + init_lines, 'mlp __init__ C1d switch')
+    dram_sharded_branch = '        elif getattr(self, "_dram_sharded", False) and x.shape[-2] <= ttnn.TILE_SIZE:\n'
+    span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
+    lines = replace_once(lines, span, dram_sharded_branch, C1D_BRANCH + dram_sharded_branch,
+                         'mlp C1d branch (after the fused gate/up branch)')
+    prefill_2d_branch = '        elif x.shape[-2] > ttnn.TILE_SIZE:\n'
+    span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
+    lines = replace_once(lines, span, prefill_2d_branch, C1C_BRANCH + prefill_2d_branch,
+                         'mlp C1c branch (before the prefill 2D branch)')
+    result = ''.join(lines)
+    anchor = '\n\nclass Qwen36MLP:\n'
+    if result.count(anchor) != 1 or result.count('\ndef _qwen_c1_linear(') != 1:
+        raise ValueError('mlp C1c helper: expected one Qwen36MLP class anchor after _qwen_c1_linear')
+    if result.index('\ndef _qwen_c1_linear(') > result.index(anchor):
+        raise ValueError('mlp C1c helper: _qwen_c1_linear must precede Qwen36MLP')
+    result = result.replace(anchor, C1C_SWIGLU_HELPER + anchor)
+    ast.parse(result)
+    return result
+
+
 def patch_mlp_full(source):
-    """The table maps ONE function per file: the 64-row decode gates, then C1."""
-    return patch_mlp_single_gateup(patch_mlp(source))
+    """The table maps ONE function per file: the 64-row decode gates, then C1, then C1c/C1d."""
+    return patch_mlp_c1_fused(patch_mlp_single_gateup(patch_mlp(source)))
 
 
 def patch_layer(source):
-    """C1 in layer.py: the ff_norm keeps its own all-gather when the MLP no longer fuses it."""
+    """C1 in layer.py: the ff_norm keeps its own all-gather when the MLP no longer fuses it,
+    and skips it again under C1d (QWEN_FAST_C1_AGMM=1), where the MLP fuses it once more."""
     refuse_if_grafted(source, 'layer ff_norm gather')
     lines = source.splitlines(keepends=True)
     span = function_span(source, INIT_FUNCTION)
@@ -682,7 +857,15 @@ def patch_layer(source):
         '        import os\n'
         '\n'
         '        self._fuse_ff_agmm = tpc.mlp_gateup_agmm_enabled(self.num_devices) and ' + FLAG_OFF + '\n'
-        '        if self.num_devices > 1 and not ' + FLAG_OFF + ':\n'
+        '        if ' + C1D_ON + ':\n'
+        '            # Lever N M3native C1d: the MLP fuses the gather back (two all_gather_matmul_prefill\n'
+        '            # calls on w1/w3, mlp.py\'s _qwen_c1_agmm), so the ff_norm skips it as before C1.\n'
+        '            self._fuse_ff_agmm = tpc.mlp_gateup_agmm_enabled(self.num_devices)\n'
+        '            if self._fuse_ff_agmm:\n'
+        '                from loguru import logger as _qwen_logger\n'
+        '\n'
+        '                _qwen_logger.info("' + MARKER_C1D_FF_NORM + ' (layer {})", layer_num)\n'
+        '        if self.num_devices > 1 and not self._fuse_ff_agmm and not ' + FLAG_OFF + ':\n'
         '            from loguru import logger as _qwen_logger\n'
         '\n'
         '            _qwen_logger.info("' + MARKER_FF_NORM_GATHER + ' (layer {})", layer_num)\n',
@@ -692,12 +875,322 @@ def patch_layer(source):
     return result
 
 
+# ---------------------------------------------------------------------------------
+# G. M2 of the prefill ranking: the prefill device-profile flush hook in layer.py.
+# ---------------------------------------------------------------------------------
+#
+# The device profiler's per-core buffers overflow inside ONE 2048-row prefill chunk (gate12b
+# lost rows after about scan 22 of a forward; run 35422536834 caught only 37-45% of its
+# forwards), because prefill reads the profiler only at the end or on the packed-verify dump
+# round. Under QWEN_PREFILL_PROFILE_FLUSH=1 every 16th decoder layer of a prefill forward
+# synchronises the mesh and calls ttnn.ReadDeviceProfiler, so no more than 16 layers of ops
+# are ever buffered. A module counter, bumped on each layer-0 prefill call and reset to 0 when
+# that call's chunk_start_idx is 0 (or None), is the PROMPT-RELATIVE chunk index, so warm-up
+# or probe prefills earlier in the process cannot shift it (the absolute call count is only
+# logged). Chunks 0, 1, 31, 32, 62 and 63 of every prompt are bracketed by tracy signposts
+# qwen_prefill_p<prompt>_chunk_<n>_begin / _end. The counter assumes one prompt's chunks run
+# back to back (users=1, the M2 arm). Unset, the only difference is one env lookup per layer
+# call on the prefill path: no device op, no synchronisation, no state change.
+#
+# The arm's tracy flags (--disable-device-data-dump-to-files, no ops report) produce no
+# tracy_ops_data.csv, so the signposts reach only the host .tracy capture; the report's
+# primary per-chunk split is device-only (lever_n_prefill_profile_report.split_by_sdpa).
+
+PREFILL_PROFILE_FLAG = 'QWEN_PREFILL_PROFILE_FLUSH'
+PREFILL_PROFILE_EVERY = 16
+PREFILL_PROFILE_SIGNPOST_CHUNKS = (0, 1, 31, 32, 62, 63)
+MARKER_PREFILL_FLUSH = '[PINDIAG] prefill profile flush'
+FORWARD_FUNCTION = 'forward'
+
+PREFILL_PROFILE_HELPERS = (
+    '\n'
+    '\n'
+    '# Lever N M2 prefill profile hook (QWEN_PREFILL_PROFILE_FLUSH=1); inert when unset.\n'
+    '_QWEN_PREFILL_PROFILE_FLAG = "' + PREFILL_PROFILE_FLAG + '"\n'
+    '_QWEN_PREFILL_PROFILE_EVERY = ' + str(PREFILL_PROFILE_EVERY) + '\n'
+    '_QWEN_PREFILL_PROFILE_SIGNPOST_CHUNKS = ' + repr(PREFILL_PROFILE_SIGNPOST_CHUNKS) + '\n'
+    '_QWEN_PREFILL_PROFILE = {"chunk": -1, "prompt": 0, "calls": 0, "label": None, "flushes": 0, "signpost": None}\n'
+    '\n'
+    '\n'
+    'def _qwen_prefill_profile_on():\n'
+    '    import os\n'
+    '\n'
+    '    return os.environ.get(_QWEN_PREFILL_PROFILE_FLAG) == "1"\n'
+    '\n'
+    '\n'
+    'def _qwen_prefill_signpost(label):\n'
+    '    state = _QWEN_PREFILL_PROFILE\n'
+    '    if state["signpost"] is None:\n'
+    '        try:\n'
+    '            from tracy import signpost\n'
+    '        except Exception as error:  # noqa: BLE001 - a missing tracy must not kill prefill\n'
+    '            from loguru import logger as _qwen_logger\n'
+    '\n'
+    '            _qwen_logger.info("' + MARKER_PREFILL_FLUSH + ': tracy signpost unavailable ({})", error)\n'
+    '            signpost = False\n'
+    '        state["signpost"] = signpost\n'
+    '    if state["signpost"]:\n'
+    '        state["signpost"](label)\n'
+    '\n'
+    '\n'
+    'def _qwen_prefill_profile_begin(layer, x, chunk_start_idx):\n'
+    '    """Layer 0 of a prefill forward starts a new chunk; the chosen chunks get a begin signpost.\n'
+    '\n'
+    '    The chunk index is prompt-relative: a forward at chunk_start_idx 0 (or None, an unchunked\n'
+    '    prompt) opens a new prompt at chunk 0, so warm-up or probe prefills earlier in the process\n'
+    '    cannot shift it. The absolute count of layer-0 prefill calls is only logged."""\n'
+    '    if layer.layer_num != 0:\n'
+    '        return\n'
+    '    state = _QWEN_PREFILL_PROFILE\n'
+    '    state["calls"] += 1\n'
+    '    if chunk_start_idx is None or (isinstance(chunk_start_idx, int) and chunk_start_idx == 0):\n'
+    '        state["prompt"] += 1\n'
+    '        state["chunk"] = 0\n'
+    '    else:\n'
+    '        state["chunk"] += 1\n'
+    '    chunk = state["chunk"]\n'
+    '    state["label"] = None\n'
+    '    if chunk in _QWEN_PREFILL_PROFILE_SIGNPOST_CHUNKS:\n'
+    '        from loguru import logger as _qwen_logger\n'
+    '\n'
+    '        state["label"] = "qwen_prefill_p%d_chunk_%d" % (state["prompt"], chunk)\n'
+    '        _qwen_prefill_signpost(state["label"] + "_begin")\n'
+    '        _qwen_logger.info("' + MARKER_PREFILL_FLUSH + ': prompt {} chunk {} begin rows={} chunk_start_idx={} "\n'
+    '                          "(layer-0 prefill call {})",\n'
+    '                          state["prompt"], chunk, x.shape[-2], chunk_start_idx, state["calls"])\n'
+    '\n'
+    '\n'
+    'def _qwen_prefill_profile_end(layer):\n'
+    '    """Every 16th layer (and the last): drain the device profiler so a chunk cannot overflow it."""\n'
+    '    state = _QWEN_PREFILL_PROFILE\n'
+    '    n_layers = getattr(layer.args, "n_layers", None)\n'
+    '    last = n_layers is not None and layer.layer_num == n_layers - 1\n'
+    '    if not last and layer.layer_num % _QWEN_PREFILL_PROFILE_EVERY != _QWEN_PREFILL_PROFILE_EVERY - 1:\n'
+    '        return\n'
+    '    ttnn.synchronize_device(layer.device)\n'
+    '    if last and state["label"] is not None:\n'
+    '        _qwen_prefill_signpost(state["label"] + "_end")\n'
+    '        state["label"] = None\n'
+    '    ttnn.ReadDeviceProfiler(layer.device)\n'
+    '    state["flushes"] += 1\n'
+    '    if state["flushes"] == 1:\n'
+    '        from loguru import logger as _qwen_logger\n'
+    '\n'
+    '        _qwen_logger.info("' + MARKER_PREFILL_FLUSH + ': first flush at prompt {} chunk {} layer {} (every {} layers)",\n'
+    '                          state["prompt"], state["chunk"], layer.layer_num, _QWEN_PREFILL_PROFILE_EVERY)\n'
+)
+
+PREFILL_PROFILE_BEGIN = (
+    '        if mode == "prefill" and _qwen_prefill_profile_on():\n'
+    '            # Lever N M2 prefill profile (QWEN_PREFILL_PROFILE_FLUSH=1): layer 0 counts the chunk.\n'
+    '            _qwen_prefill_profile_begin(self, x, chunk_start_idx)\n'
+)
+
+PREFILL_PROFILE_END = (
+    '        if mode == "prefill" and _qwen_prefill_profile_on():\n'
+    '            # Lever N M2 prefill profile: drain the device profiler every 16th layer.\n'
+    '            _qwen_prefill_profile_end(self)\n'
+)
+
+
+def patch_layer_profile_flush(source):
+    """M2 in layer.py: the prefill profile flush hook, inert unless QWEN_PREFILL_PROFILE_FLUSH=1."""
+    if PREFILL_PROFILE_FLAG in source:
+        raise ValueError('layer prefill profile flush: already grafted (%s present)' % PREFILL_PROFILE_FLAG)
+    lines = source.splitlines(keepends=True)
+    norm_mode = '        _norm_mode = Mode.PREFILL if mode == "prefill" else Mode.DECODE\n'
+    span = function_span(source, FORWARD_FUNCTION)
+    lines = replace_once(lines, span, norm_mode, norm_mode + PREFILL_PROFILE_BEGIN,
+                         'layer forward prefill profile begin')
+    span = function_span(''.join(lines), FORWARD_FUNCTION)
+    lines = replace_once(lines, span, '        return output\n', PREFILL_PROFILE_END + '        return output\n',
+                         'layer forward prefill profile flush')
+    result = ''.join(lines)
+    anchor = '\n\nclass Qwen36DecoderLayer:\n'
+    if result.count(anchor) != 1:
+        raise ValueError('layer profile helpers: expected one Qwen36DecoderLayer class anchor, found %d'
+                         % result.count(anchor))
+    result = result.replace(anchor, PREFILL_PROFILE_HELPERS + anchor)
+    ast.parse(result)
+    return result
+
+
+def patch_layer_full(source):
+    """The table maps ONE function per file: C1 (and C1d) in __init__, then the M2 flush hook."""
+    return patch_layer_profile_flush(patch_layer(source))
+
+
+# ---------------------------------------------------------------------------------
+# H. Lever #2: the GDN prefill conv as one generic_op (gdn_prefill_conv_exact).
+# ---------------------------------------------------------------------------------
+#
+# forward_prefill's valid_len FIR (_causal_conv1d_fir: concat, a host one-hot + matmul for the
+# carry, three untilize/slice/tilize windows, multiply, three addcmul, SiLU) and the three q/k/v
+# slices after it are 22 device ops, 2.28 ms per layer-chunk at T=2048 (gate12b). Under
+# QWEN_FAST_GDN_PREFILL_CONV=1 one launch of gdn_prefill_conv_exact (mounted beside gdn/tp.py,
+# PREFILL_CONV_FILES) replaces them with the same LLK calls on the same bytes.
+#
+# Only the valid_len FIR is replaced. It writes a host one-hot (ttnn.from_torch), which TT_FATALs
+# under a trace capture, so the call site this branch takes over can never be inside one; the
+# valid_len-None conv1d branch ahead of it (the trace-safe one) is untouched and keeps priority.
+#
+# Flag unset: _qwen_prefill_conv_on returns False on its first line - no import, no device op -
+# and forward_prefill runs the FIR, the three slices and the conv deallocate exactly as before.
+# The marker sits inside the executed branch, once per prefill chunk (the first GDN layer of
+# each forward), carrying the previous chunk's call count. From chunk 2 on, a completion line is
+# logged when a chunk's calls reach chunk 1's count, so the gate can count the LAST chunk too
+# (no later marker reports it). QWEN_FAST_GDN_PREFILL_CONV_AUDIT=<n> additionally runs the FIR
+# beside the first n calls and raises on any byte difference.
+
+PREFILL_CONV_FLAG = 'QWEN_FAST_GDN_PREFILL_CONV'
+PREFILL_CONV_AUDIT_FLAG = 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT'
+MARKER_PREFILL_CONV = '[PINDIAG] GDN prefill conv engaged'
+MARKER_PREFILL_CONV_FALLBACK = '[PINDIAG] GDN prefill conv fell back to the FIR'
+MARKER_PREFILL_CONV_AUDIT = '[PINDIAG] GDN prefill conv audit'
+MARKER_PREFILL_CONV_COMPLETE = '[PINDIAG] GDN prefill conv chunk complete'
+FORWARD_PREFILL_FUNCTION = 'forward_prefill'
+PREFILL_CONV_MODULE = 'models.demos.blackhole.qwen36.tt.gdn.gdn_prefill_conv_exact'
+
+# The unpatched files the graft mounts next to the patched gdn/tp.py: {graft-relative path:
+# scripts/ci source}. The ONE table: the workflow stages graft/<path> from it and the arm
+# (lever_n_m3native_run_arm.sh) derives its single-file mounts from it, so neither list can drift.
+PREFILL_CONV_FILES = {'gdn/' + name: name for name in _pcx.RUNTIME_FILES}
+
+PREFILL_CONV_HELPERS = (
+    '\n'
+    '\n'
+    '# Lever #2 (' + PREFILL_CONV_FLAG + '=1): gdn_prefill_conv_exact replaces the valid_len FIR + q/k/v slices.\n'
+    '_QWEN_PREFILL_CONV = {"calls": 0, "first": None, "chunk": 0, "chunk_calls": 0, "expected": None, "audited": 0}\n'
+    '\n'
+    '\n'
+    'def _qwen_prefill_conv_on(layer, qkv, cstate, T, valid_len):\n'
+    '    if os.environ.get("' + PREFILL_CONV_FLAG + '") != "1":\n'
+    '        return False  # flag off: no import, no device op, the FIR path unchanged\n'
+    '    if valid_len is None:\n'
+    '        return False  # only the valid_len FIR (a host one-hot write: never under trace capture)\n'
+    '    from ' + PREFILL_CONV_MODULE.rsplit('.', 1)[0] + ' import ' + PREFILL_CONV_MODULE.rsplit('.', 1)[1] + ' as _pcx\n'
+    '\n'
+    '    reason = _pcx.unsupported(ttnn, layer.mesh, qkv, cstate, layer.tw["conv_taps"], valid_len, layer.key_dim_tp,\n'
+    '                              flat=layer._gdn_flat_qkv, kernel_size=layer.K)\n'
+    '    if reason is not None:\n'
+    '        from loguru import logger as _qwen_logger\n'
+    '\n'
+    '        _qwen_logger.warning("' + MARKER_PREFILL_CONV_FALLBACK + ': {} (T={} valid_len={})", reason, T, valid_len)\n'
+    '    return reason is None\n'
+    '\n'
+    '\n'
+    'def _qwen_prefill_conv(layer, qkv, cstate, valid_len, T):\n'
+    '    """(q, k, v, new_state) from one gdn_prefill_conv_exact launch, byte-identical to the FIR + slices."""\n'
+    '    from ' + PREFILL_CONV_MODULE.rsplit('.', 1)[0] + ' import ' + PREFILL_CONV_MODULE.rsplit('.', 1)[1] + ' as _pcx\n'
+    '\n'
+    '    out = _pcx.gdn_prefill_conv_exact(layer.mesh, qkv, cstate, layer.tw["conv_taps"], valid_len=valid_len,\n'
+    '                                      key_dim_tp=layer.key_dim_tp)\n'
+    '    state = _QWEN_PREFILL_CONV\n'
+    '    state["calls"] += 1\n'
+    '    if state["first"] is None:\n'
+    '        state["first"] = id(layer)\n'
+    '    if id(layer) == state["first"]:\n'
+    '        # The first GDN layer of a forward starts a chunk: one marker per prefill chunk, inside the\n'
+    '        # branch it names, with the calls the previous chunk made (every GDN layer, if it engaged).\n'
+    '        from loguru import logger as _qwen_logger\n'
+    '\n'
+    '        state["chunk"] += 1\n'
+    '        _qwen_logger.info("' + MARKER_PREFILL_CONV + ': chunk {} previous_chunk_calls={} calls={} T={} valid_len={} carry={}",\n'
+    '                          state["chunk"], state["chunk_calls"], state["calls"], T, valid_len, cstate is not None)\n'
+    '        if state["chunk"] == 2:\n'
+    '            state["expected"] = state["chunk_calls"]  # chunk 1\'s count: what a complete chunk makes\n'
+    '        state["chunk_calls"] = 0\n'
+    '    state["chunk_calls"] += 1\n'
+    '    if state["expected"] is not None and state["chunk_calls"] == state["expected"]:\n'
+    '        # The last chunk has no later marker to report it: say when a chunk completes.\n'
+    '        from loguru import logger as _qwen_logger\n'
+    '\n'
+    '        _qwen_logger.info("' + MARKER_PREFILL_CONV_COMPLETE + ': chunk {} calls={}", state["chunk"], state["chunk_calls"])\n'
+    '    if state["audited"] < int(os.environ.get("' + PREFILL_CONV_AUDIT_FLAG + '", "0") or 0):\n'
+    '        # qkv and the carry still hold this chunk\'s inputs: the FIR runs beside the op, bytes compared.\n'
+    '        state["audited"] += 1\n'
+    '        report = _pcx.audit_against_fir(ttnn, _causal_conv1d_fir, layer.mesh, qkv, cstate, layer.tw["conv_taps"],\n'
+    '                                        valid_len, layer.key_dim_tp, out, kernel_size=layer.K)\n'
+    '        from loguru import logger as _qwen_logger\n'
+    '\n'
+    '        _qwen_logger.info("' + MARKER_PREFILL_CONV_AUDIT + ' {} exact={} T={} valid_len={} carry={} mismatches={}",\n'
+    '                          state["audited"], report["exact"], T, valid_len, cstate is not None, report["mismatches"])\n'
+    '        if not report["exact"]:\n'
+    '            raise AssertionError("GDN prefill conv differs from the FIR: %r" % (report,))\n'
+    '    return out\n'
+)
+
+PREFILL_CONV_A_OLD = (
+    '        if self._gdn_conv1d and valid_len is None:\n'
+    '            # Native depthwise ttnn.conv1d (masked buckets keep the MAC FIR: valid_len new_state differs)\n'
+    '            conv, conv_new_state = self._conv1d_prefill(qkv, T, _cstate)\n'
+    '        else:\n'
+)
+PREFILL_CONV_A_NEW = (
+    '        _qwen_pc = None\n'
+    '        if self._gdn_conv1d and valid_len is None:\n'
+    '            # Native depthwise ttnn.conv1d (masked buckets keep the MAC FIR: valid_len new_state differs)\n'
+    '            conv, conv_new_state = self._conv1d_prefill(qkv, T, _cstate)\n'
+    '        elif _qwen_prefill_conv_on(self, qkv, _cstate, T, valid_len):\n'
+    '            # Lever #2 (' + PREFILL_CONV_FLAG + '=1): one tiled launch replaces the FIR + q/k/v slices.\n'
+    '            _qwen_pc = _qwen_prefill_conv(self, qkv, _cstate, valid_len, T)\n'
+    '            conv, conv_new_state = None, _qwen_pc[3]\n'
+    '        else:\n'
+)
+PREFILL_CONV_B_OLD = (
+    '        kd = self.key_dim_tp\n'
+    '        if self._gdn_flat_qkv:\n'
+)
+PREFILL_CONV_B_NEW = (
+    '        kd = self.key_dim_tp\n'
+    '        if _qwen_pc is not None:\n'
+    '            # Lever #2: q/k/v come straight from the op (the flat layout; no conv tensor to slice).\n'
+    '            q, k, v = _qwen_pc[0], _qwen_pc[1], _qwen_pc[2]\n'
+    '            _qkv_head_dims = (Nk, Dk, Nv, Dv)\n'
+    '        elif self._gdn_flat_qkv:\n'
+)
+PREFILL_CONV_C_OLD = (
+    '            _qkv_head_dims = None\n'
+    '        ttnn.deallocate(conv)\n'
+)
+PREFILL_CONV_C_NEW = (
+    '            _qkv_head_dims = None\n'
+    '        if _qwen_pc is None:\n'
+    '            ttnn.deallocate(conv)\n'
+)
+
+
+def patch_gdn_tp_prefill_conv(source):
+    """Lever #2 in gdn/tp.py forward_prefill: three anchored edits and the module helpers."""
+    if PREFILL_CONV_FLAG in source:
+        raise ValueError('gdn prefill conv: already grafted (%s present)' % PREFILL_CONV_FLAG)
+    lines = source.splitlines(keepends=True)
+    for old, new, what in ((PREFILL_CONV_A_OLD, PREFILL_CONV_A_NEW, 'gdn forward_prefill conv branch'),
+                           (PREFILL_CONV_B_OLD, PREFILL_CONV_B_NEW, 'gdn forward_prefill q/k/v split'),
+                           (PREFILL_CONV_C_OLD, PREFILL_CONV_C_NEW, 'gdn forward_prefill conv deallocate')):
+        span = function_span(''.join(lines), FORWARD_PREFILL_FUNCTION)
+        lines = replace_once(lines, span, old, new, what)
+    result = ''.join(lines)
+    anchor = '\n\nclass TPGatedDeltaNet:\n'
+    if result.count(anchor) != 1:
+        raise ValueError('gdn prefill conv helpers: expected one TPGatedDeltaNet class anchor, found %d'
+                         % result.count(anchor))
+    result = result.replace(anchor, PREFILL_CONV_HELPERS + anchor)
+    ast.parse(result)
+    return result
+
+
+def patch_gdn_tp_full(source):
+    """The table maps ONE function per file: the 64-row decode gates (and the slot remap), then lever #2."""
+    return patch_gdn_tp_prefill_conv(patch_gdn_tp(source))
+
+
 PATCHES = {
     'model_config.py': patch_model_config,
     'attention/tp.py': patch_attention_tp,
-    'gdn/tp.py': patch_gdn_tp,
+    'gdn/tp.py': patch_gdn_tp_full,
     'mlp.py': patch_mlp_full,
-    'layer.py': patch_layer,
+    'layer.py': patch_layer_full,
 }
 
 # The M1 files, added for Lever N. They live in TWO image trees, and their patches

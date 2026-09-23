@@ -118,5 +118,55 @@ class DelegateNonAdmissionStepsTests(unittest.TestCase):
         self.assertIsNone(serving_lifecycle.prefill_gate().held)
 
 
+class SplitReleaseTests(unittest.TestCase):
+    """A finishing request releases only its own side: the decode side (hook,
+    decoding set) or the prefill side (capture, gate). They were one release under
+    an `or`, so either finishing tore down the other - see
+    test_serving_lifecycle.ContinuationWithLiveHookTests for the served sequences."""
+
+    def built(self):
+        hook = types.SimpleNamespace(bridges={'one': object()},
+                                     close=unittest.mock.Mock(), detach=unittest.mock.Mock())
+        delegated = []
+        built = lifecycle(delegated, hook=hook, request_id='two', decoding_ids=['one'])
+        built.capture = types.SimpleNamespace(complete=False, close=unittest.mock.Mock())
+        self.addCleanup(setattr, serving_lifecycle.prefill_gate(), 'held', None)
+        return built, hook, built.capture, delegated
+
+    def test_the_last_decoder_finishing_keeps_an_in_flight_prefill(self):
+        built, hook, capture, delegated = self.built()
+        built._execute(None, scheduled(tokens=0, finished=['one']))
+        hook.close.assert_called_once()
+        self.assertIsNone(built.hook)
+        self.assertEqual((built.decoding_id, built.decoding_ids), (None, []))
+        self.assertEqual(built.request_id, 'two')
+        self.assertIs(built.capture, capture)
+        capture.close.assert_not_called()
+        self.assertEqual(serving_lifecycle.prefill_gate().held, 'two')
+
+    def test_the_prefill_request_finishing_keeps_the_live_hook(self):
+        built, hook, capture, delegated = self.built()
+        step = scheduled(cached=['one'], finished=['two'])
+        self.assertEqual(built._execute(None, step), 'stock')
+        self.assertEqual(delegated, [step], 'the decode reaches the hook, which is live')
+        hook.close.assert_not_called()
+        self.assertIs(built.hook, hook)
+        self.assertEqual(built.decoding_ids, ['one'])
+        capture.close.assert_called_once()
+        self.assertIsNone(built.capture)
+        self.assertIsNone(built.request_id)
+        self.assertIsNone(serving_lifecycle.prefill_gate().held)
+
+    def test_both_finishing_in_one_step_releases_both(self):
+        built, hook, capture, _ = self.built()
+        built._execute(None, scheduled(tokens=0, finished=['one', 'two']))
+        hook.close.assert_called_once()
+        capture.close.assert_called_once()
+        self.assertIsNone(built.hook)
+        self.assertIsNone(built.capture)
+        self.assertIsNone(built.request_id)
+        self.assertEqual(built.decoding_ids, [])
+
+
 if __name__ == '__main__':
     unittest.main()

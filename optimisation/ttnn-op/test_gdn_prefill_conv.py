@@ -27,24 +27,25 @@ instead of from a shift register:
     beta     = sigmoid(b)                       [1, T, Nv]
     g        = neg_exp_A * softplus(a + dt_bias)
 
-THE ONE HARD PART, and why it is tractable. Output row t reads input rows t..t+K-1, so
-with 32-row tiles a shift of 1..3 straddles two tiles. A row shift is a matmul by a
-fixed banded 32x32 matrix that is identical for every channel, so
-
-    shifted_j = S_j_self @ x_cur + S_j_prev @ x_prev
-
-and the conv becomes sum_j taps[j] * shifted_j with taps broadcast over rows, exactly
-the decode kernel's inner loop. chunk_gdn_prep already loads constant eye/tril/ones
-matrices this way, so the pattern is established in this codebase.
-
-This file generates those shift matrices and checks them against the naive definition,
-because a wrong constant would otherwise look like a kernel bug.
+THE ONE HARD PART. Output row t reads input rows t..t+K-1, so with 32-row tiles a shift
+of 1..3 straddles two tiles. The shift-matrix premise this file used to carry (a banded
+32x32 matmul per tap) was measured 4.5x slower (docs/gdn-conv-path-2026-09-19.md, 200-252)
+and is gone. The op that was built instead, scripts/ci/gdn_prefill_conv_exact.py (lever #2,
+a generic_op), shifts rows with eight 32-byte face-row copies per tile in its reader
+(shift_copies), keeps TILE layout throughout, and replays the served FIR's four LLK calls
+so it is byte-exact rather than close. check_planner below pins those copy tables against a
+plain row shift; the op's own CPU tests are scripts/ci/test_gdn_prefill_conv_exact.py and its
+device test optimisation/ttnn-op/gdn_prefill_conv/gdn_prefill_conv_card_m.py.
 """
 
 import argparse
+from pathlib import Path
 import sys
 
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts' / 'ci'))
+import gdn_prefill_conv_exact as pcx  # noqa: E402
 
 C, NV, K = 5120, 24, 4
 TILE = 32
@@ -74,41 +75,30 @@ def reference(x, conv_state, taps, a, b, dt_bias, neg_exp_A):
     return conv_out, new_state, beta, g
 
 
-def shift_matrices(k, tile=TILE):
-    """S_self[j], S_prev[j] with (S_prev[j] @ prev + S_self[j] @ cur)[r] == xin[r + j].
-
-    xin is the concatenation, so for an output row r inside tile `cur`, tap j reads
-    xin row r + j, which is cur row r + j - (K-1) once the K-1 carry rows are folded in.
-    A negative index reaches back into the previous tile.
-    """
-    self_m, prev_m = [], []
-    for j in range(k):
-        s = torch.zeros(tile, tile)
-        p = torch.zeros(tile, tile)
-        for r in range(tile):
-            src = r + j - (k - 1)
-            if src >= 0:
-                s[r, src] = 1.0
-            else:
-                p[r, tile + src] = 1.0
-        self_m.append(s)
-        prev_m.append(p)
-    return self_m, prev_m
+def lane(row, column):
+    return (row // 16) * 512 + (column // 16) * 256 + (row % 16) * 16 + column % 16
 
 
-def check_shift_matrices():
-    """The matrices must reproduce a plain shift, or a kernel bug gets blamed instead."""
-    self_m, prev_m = shift_matrices(K)
+def check_planner():
+    """The op's face-row copy tables must reproduce a plain row shift of concat(prev, cur)."""
     torch.manual_seed(0)
-    prev = torch.randn(TILE, 8)
-    cur = torch.randn(TILE, 8)
-    # xin as the kernel sees it: previous tile then current tile, carry already folded in
+    prev = torch.randint(-30000, 30000, (TILE, TILE), dtype=torch.int16)
+    cur = torch.randint(-30000, 30000, (TILE, TILE), dtype=torch.int16)
+    lanes = torch.tensor([[lane(r, c) for c in range(TILE)] for r in range(TILE)]).reshape(-1)
+
+    def faces(block):
+        flat = torch.zeros(TILE * TILE, dtype=torch.int16)
+        flat[lanes] = block.reshape(-1)
+        return flat
+
+    sources = dict(cur=faces(cur), prev=faces(prev))
     xin = torch.cat([prev, cur], dim=0)
-    for j in range(K):
-        got = prev_m[j] @ prev + self_m[j] @ cur
-        want = xin[TILE + j - (K - 1): 2 * TILE + j - (K - 1)]
-        assert torch.allclose(got, want, atol=0), 'shift matrix j=%d is wrong' % j
-    print('shift matrices reproduce the row shift exactly, for all %d taps' % K)
+    for s in (1, 2, 3):
+        out = torch.zeros(TILE * TILE, dtype=torch.int16)
+        for source, offset, length, target in pcx.shift_copies(s, True):
+            out[target // 2:(target + length) // 2] = sources[source][offset // 2:(offset + length) // 2]
+        assert torch.equal(out[lanes].reshape(TILE, TILE), xin[TILE - s:2 * TILE - s]), 'shift %d is wrong' % s
+    print('gdn_prefill_conv_exact.shift_copies reproduces the row shift exactly, for shifts 1..3')
 
 
 def check_reference():
@@ -159,21 +149,14 @@ def main():
                         help='skip the device half; runs anywhere')
     options = parser.parse_args()
 
-    check_shift_matrices()
+    check_planner()
     check_reference()
     check_matches_fir_semantics()
 
     if options.reference_only:
-        print('\nreference pinned. The kernel is not built yet; rerun on the rig without')
-        print('--reference-only once ttnn.transformer.gdn_prefill_conv_gates exists.')
+        print('\nreference pinned.')
         return 0
-
-    import ttnn
-    if not hasattr(getattr(ttnn, 'transformer', None), 'gdn_prefill_conv_gates'):
-        print('ttnn.transformer.gdn_prefill_conv_gates is ABSENT: the op is not built into '
-              'this image yet. Reference checks above still passed.')
-        return 2
-    print('device half not written yet')
+    print('the device half is optimisation/ttnn-op/gdn_prefill_conv/run_card_m.sh (card M only)')
     return 2
 
 

@@ -590,6 +590,11 @@ class ReplayStorageTests(unittest.TestCase):
         self.assertNotIn('storage', source[source.index('= ReplayAttentionReader('):source.index('else:', source.index('= ReplayAttentionReader('))],
                          'the pinned reader takes no storage keyword')
         packed = source[source.index('if self.pack is not None:', source.index('def upload_replay')):source.index('elif tables is None:')]
+        # v116: the pinned (unpooled) reader - the warm-up fixture's - takes QWEN_FAST_SDPA_MODES
+        # before any forward, as the pooled and packed readers do at construction.
+        pinned = source[source.index('elif tables is None:'):source.index('else:', source.index('elif tables is None:'))]
+        self.assertIn('apply_sdpa_modes(self.replay_reader, sdpa_modes())', pinned)
+        self.assertLess(pinned.index('= ReplayAttentionReader('), pinned.index('apply_sdpa_modes('))
         self.assertIn("PackedReplayAttentionReader(ttnn, model.mesh_device, self.pack['segments']", packed)
         self.assertIn("self.pack['tables']", packed)
         self.assertIn('self.borrowed.extend(self.replay_reader.borrowed)', packed)
