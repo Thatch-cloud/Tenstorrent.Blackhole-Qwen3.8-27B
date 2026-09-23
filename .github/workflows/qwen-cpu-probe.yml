@@ -26,7 +26,8 @@ jobs:
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p experiment-results
-          image=sha256:c33a006f3b4bd88ae4c89bae71a79cfaa40f7949960ab6110f0c2cad1074222c
+          # Image A (the served image since v99): the sdpa_decode dump must be of the kernels that run.
+          image=sha256:0648ca9ad663acc72e7d8ea59d9cde0f9218b583ad74a60d58ff2f31bddd6fae
           m3native=sha256:e41ef884f4c8e07ce6632511fac19364af35dc73d601f05f5191784a64a3a768
           fastserv=sha256:836e7abb249b04018ce59848d290738142a7b9e6589e6770944f98d4b7630793
           for pair in "m3native:$m3native" "fastserv:$fastserv"; do
