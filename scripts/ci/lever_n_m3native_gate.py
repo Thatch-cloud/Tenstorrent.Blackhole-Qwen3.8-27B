@@ -77,7 +77,10 @@ BINDER_CALLS_LINE = re.compile(r'\[PINDIAG\] native_m3 binder calls this round: 
 # native path retires must be zero: the MLP and GDN-output wrappers under native_m3,
 # and the sliced prep / two-tile concat guards once QWEN_FAST_NATIVE_ATTN retires them.
 RETIRED_LABELS = ('MLP forward', 'GDN output projection', 'sliced attn_decode_prep', 'two-tile head concat')
-REFERENCE_NAME = re.compile(r'^single-user-(?:(\d{4})-)?\d+\.json$')
+# single-user-<run>.json (base 1000), single-user-<base>-<run>.json, or with a prompt-length
+# segment single-user-<base>-p<tokens>-<run>.json. Unsegmented references are 32,768-token
+# prompts; a segmented one is only used for a run of exactly that prompt length.
+REFERENCE_NAME = re.compile(r'^single-user-(?:(\d{4})-)?(?:p(\d+)-)?\d+\.json$')
 
 
 # The server log lines the gate's stdout keeps. Every '[PACKED' family passes (the per-user
@@ -104,21 +107,33 @@ def select_diagnostic(lines, cap=DIAGNOSTIC_CAP):
     return diagnostic
 
 
-def load_references(directory):
+GENERIC_REFERENCE_TOKENS = 32768
+
+
+def load_references(directory, prompt_tokens=GENERIC_REFERENCE_TOKENS):
     """Each user's single-stream reference text, keyed by its prompt base.
 
     single-user-35492921706.json (base 1000, no offset) carries no digit group; the
-    others are named single-user-<base>-<run>.json.
+    others are named single-user-<base>-<run>.json, or single-user-<base>-p<tokens>-<run>.json
+    for a reference recorded at one prompt length.
+
+    A reference recorded at exactly `prompt_tokens` wins; otherwise the generic
+    (unsegmented, 32,768-token) one is used and `context` says so, because a mismatch
+    against a reference of another length is not conclusive. Among several references of
+    the chosen kind the longest text wins, and any shorter one that is not its prefix is
+    listed under `conflicts` - two references disagreeing is itself a finding.
     """
     references = {}
     directory = Path(directory)
     if not directory.is_dir():
         return references
+    candidates = {}
     for path in sorted(directory.glob('single-user*.json')):
         match = REFERENCE_NAME.match(path.name)
         if not match:
             continue
         base = int(match.group(1)) if match.group(1) else 1000
+        tokens = int(match.group(2)) if match.group(2) else GENERIC_REFERENCE_TOKENS
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
         except ValueError:
@@ -126,9 +141,35 @@ def load_references(directory):
         streams = data.get('streams') or []
         if not streams:
             continue
-        references[base] = dict(path=str(path), text=streams[0].get('text', ''),
-                                text_sha256=streams[0].get('text_sha256'))
+        candidates.setdefault(base, []).append(dict(
+            path=str(path), text=streams[0].get('text', '') or '',
+            text_sha256=streams[0].get('text_sha256'), tokens=tokens, segmented=bool(match.group(2))))
+    for base, found in candidates.items():
+        exact = [c for c in found if c['tokens'] == prompt_tokens]
+        generic = [c for c in found if not c['segmented']]
+        chosen = exact or generic
+        if not chosen:
+            continue
+        best = max(chosen, key=lambda c: (len(c['text']), c['path']))
+        conflicts = sorted(c['path'] for c in chosen if not best['text'].startswith(c['text']))
+        references[base] = dict(path=best['path'], text=best['text'], text_sha256=best['text_sha256'],
+                                context='exact' if exact else 'generic-%d' % GENERIC_REFERENCE_TOKENS,
+                                conflicts=conflicts)
     return references
+
+
+def write_candidate(directory, base, prompt_tokens, entry):
+    """This run's stream for `base`, in the tracked reference format, for promotion to
+    scripts/ci/references/packed-gate after review. Never read back by the gate."""
+    if not entry or entry.get('error') or not entry.get('text'):
+        return None
+    path = Path(directory) / ('reference-candidate-%d-p%d.json' % (base, prompt_tokens))
+    try:
+        path.write_text(json.dumps(dict(label='candidate', prompt_base=base, prompt_tokens=prompt_tokens,
+                                        streams=[entry]), indent=2), encoding='utf-8')
+    except OSError:
+        return None
+    return path
 
 
 def engine_argv(port, users, context, trace_region_bytes=1073741824):
@@ -324,6 +365,8 @@ def evaluate_gate(*, ready, users, checked, allow_missing_references, native_m3_
         and coverage_ok
         and streams_ok
         and all(c.get('identical_prefix') for c in checked)
+        # Two references for one base that disagree leave nothing to be exact against.
+        and not any(c.get('reference_conflicts') for c in checked)
         and native_m3_marker_present
         and packed_phase is not None
         and bool(binder_rounds)
@@ -363,12 +406,17 @@ def main():
     parser.add_argument('--references', type=Path,
                         default=Path('runner-evidence.local/packed-gate'),
                         help='directory holding single-user-*.json single-stream references')
+    parser.add_argument('--sequential-users', type=int, default=0,
+                        help='with --users 1: this many single-stream requests one after another'
+                             ' on one server (bases base + i * offset), each alone - a reference run')
     parser.add_argument('--allow-missing-references', action='store_true',
                         help='for arms with no single-stream reference yet (e.g. 131k): do not '
                              'require every user to have a reference for gate_passed. Comparisons '
                              'still record reference_present, and any reference that IS present '
                              'must still match exactly; the dram/packed_phase reporting is unchanged.')
     options = parser.parse_args()
+    if options.sequential_users and options.users != 1:
+        parser.error('--sequential-users needs --users 1: each request must run alone')
     try:
         options.results.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -379,7 +427,8 @@ def main():
                  prompt_user_offset=options.prompt_user_offset, ready=False)
     process = handle = None
     try:
-        references = load_references(options.references)
+        references = load_references(options.references, options.prompt_tokens)
+        report['sequential_users'] = options.sequential_users
         report['references_loaded'] = sorted(references)
 
         process, handle, log_path, command = start_server(
@@ -388,8 +437,16 @@ def main():
         report['command'] = command
         report['ready'] = True
 
-        results = [None] * options.users
-        threads = [threading.Thread(
+        streams = options.sequential_users or options.users
+        results = [None] * streams
+        if options.sequential_users:
+            # One request at a time: each is the only stream on the server, which is
+            # what a single-stream reference means.
+            for index in range(streams):
+                stream_once(options.port, prompt_for(options.prompt_base, options.prompt_user_offset,
+                                                     index, options.prompt_tokens),
+                            options.max_tokens, results, index, options.stream_timeout)
+        threads = [] if options.sequential_users else [threading.Thread(
             target=stream_once,
             args=(options.port, prompt_for(options.prompt_base, options.prompt_user_offset, index,
                                            options.prompt_tokens),
@@ -424,8 +481,14 @@ def main():
             base = options.prompt_base + index * options.prompt_user_offset
             reference = references.get(base)
             comparison = dict(user=index, prompt_base=base, reference_present=bool(reference))
+            if options.users == 1:
+                # Only a stream that ran alone is a single-stream reference candidate.
+                write_candidate(options.results, base, options.prompt_tokens, entry)
             if reference:
                 comparison['reference_path'] = reference['path']
+                comparison['reference_context'] = reference['context']
+                if reference.get('conflicts'):
+                    comparison['reference_conflicts'] = reference['conflicts']
                 comparison['reference_len'] = len(reference['text'])
                 actual = (entry or {}).get('text') or ''
                 comparison['actual_len'] = len(actual)
@@ -450,7 +513,7 @@ def main():
         report['users_checked'] = len(checked)
         report['allow_missing_references'] = options.allow_missing_references
         report['gate_passed'] = evaluate_gate(
-            ready=report['ready'], users=options.users, checked=checked,
+            ready=report['ready'], users=streams, checked=checked,
             allow_missing_references=options.allow_missing_references,
             native_m3_marker_present=report['native_m3_marker_present'],
             packed_phase=report['packed_phase'], binder_rounds=binder_rounds,

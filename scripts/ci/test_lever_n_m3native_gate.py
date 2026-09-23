@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lever_n_m3native_gate import select_diagnostic  # noqa: E402
 from lever_n_m3native_gate import (  # noqa: E402
-    RETIRED_LABELS, compare_prefix, evaluate_gate, retired_binder_leaks)
+    RETIRED_LABELS, compare_prefix, evaluate_gate, load_references, retired_binder_leaks,
+    write_candidate)
 
 V4_ROUND = {'decode norm': 129, 'full-attention forward': 16, 'MLP forward': 0, 'GDN output projection': 0}
 
@@ -151,6 +152,123 @@ class DiagnosticFilterTests(unittest.TestCase):
         self.assertEqual(select_diagnostic(lines, cap=4),
                          ['[PHASE] 0', '[PHASE] 1', '... 6 diagnostic lines omitted', '[PHASE] 8', '[PHASE] 9'])
         self.assertEqual(select_diagnostic(lines, cap=10), lines)
+
+
+
+class ReferenceSelectionTests(unittest.TestCase):
+    """I0 of the 4 x 131k plan: references become full-length and prompt-length keyed."""
+
+    def _write(self, directory, name, text):
+        import json
+        from pathlib import Path
+        Path(directory, name).write_text(json.dumps({'streams': [{'text': text, 'text_sha256': None}]}),
+                                         encoding='utf-8')
+
+    def test_a_longer_generic_reference_that_extends_the_old_one_wins_without_conflict(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            self._write(directory, 'single-user-1001-35493236124.json', 'abc')
+            self._write(directory, 'single-user-1001-35900000000.json', 'abcdef')
+            reference = load_references(directory, 32768)[1001]
+        self.assertEqual(reference['text'], 'abcdef')
+        # Unsegmented references ARE 32,768-token ones, so at 32k they are an exact match.
+        self.assertEqual(reference['context'], 'exact')
+        self.assertEqual(reference['conflicts'], [])
+
+    def test_two_disagreeing_references_are_a_conflict_and_fail_the_gate(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            self._write(directory, 'single-user-1001-35493236124.json', 'abX')
+            self._write(directory, 'single-user-1001-35900000000.json', 'abcdef')
+            reference = load_references(directory, 32768)[1001]
+        self.assertEqual(len(reference['conflicts']), 1)
+        checked = [dict(c, reference_conflicts=reference['conflicts']) if c['user'] == 1 else c
+                   for c in COMPLETE_KWARGS['checked']]
+        self.assertFalse(evaluate_gate(**dict(COMPLETE_KWARGS, checked=checked)))
+
+    def test_a_prompt_length_reference_is_used_only_at_its_own_length(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            self._write(directory, 'single-user-35492921706.json', 'thirty-two')
+            self._write(directory, 'single-user-1000-p131072-35900000001.json', 'one-three-one')
+            at_131k = load_references(directory, 131072)[1000]
+            at_32k = load_references(directory, 32768)[1000]
+        self.assertEqual((at_131k['text'], at_131k['context']), ('one-three-one', 'exact'))
+        self.assertEqual((at_32k['text'], at_32k['context']), ('thirty-two', 'exact'))
+
+    def test_a_131k_run_without_its_own_reference_falls_back_and_says_so(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            self._write(directory, 'single-user-1002-35498370154.json', 'generic')
+            reference = load_references(directory, 131072)[1002]
+        self.assertEqual(reference['context'], 'generic-32768')
+
+    def test_a_segmented_reference_never_stands_in_for_another_length(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            self._write(directory, 'single-user-1003-p131072-35900000002.json', 'long only')
+            self.assertEqual(load_references(directory, 32768), {})
+
+    def test_the_tracked_references_still_load_by_base(self):
+        from pathlib import Path
+        tracked = Path(__file__).parent / 'references' / 'packed-gate'
+        loaded = load_references(tracked, 32768)
+        self.assertEqual(sorted(loaded), [1000, 1001, 1002, 1003])
+        for base, reference in loaded.items():
+            with self.subTest(base=base):
+                self.assertEqual(reference['conflicts'], [])
+
+    def test_a_candidate_is_written_in_the_tracked_format_and_loads_back(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_candidate(directory, 1001, 131072, {'text': 'hello', 'text_sha256': 'x'})
+            self.assertEqual(path.name, 'reference-candidate-1001-p131072.json')
+            promoted = Path(directory, 'single-user-1001-p131072-35900000003.json')
+            path.rename(promoted)
+            self.assertEqual(load_references(directory, 131072)[1001]['text'], 'hello')
+            self.assertIsNone(write_candidate(directory, 1002, 131072, {'text': 'x', 'error': 'boom'}))
+            self.assertIsNone(write_candidate(directory, 1002, 131072, None))
+
+
+class SequentialReferenceRunTests(unittest.TestCase):
+    """--sequential-users N: N single-stream requests, one at a time, on one server."""
+
+    def _main(self, argv):
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        from unittest import mock
+        import lever_n_m3native_gate as gate
+
+        calls = []
+
+        def stream(port, prompt, max_tokens, results, index, timeout):
+            calls.append((index, prompt[0], len(prompt)))
+            results[index] = {'text': 'stream-%d' % index, 'error': None}
+
+        with tempfile.TemporaryDirectory() as directory:
+            results = str(directory)
+            with mock.patch.object(gate, 'start_server', return_value=(None, None, gate.Path(results, 'server.log'), ['x'])), \
+                    mock.patch.object(gate, 'stop_server'), \
+                    mock.patch.object(gate, 'stream_once', side_effect=stream), \
+                    mock.patch.object(gate.threading, 'Thread', side_effect=AssertionError('no threads')), \
+                    mock.patch.object(sys, 'argv', ['gate'] + argv + ['--results', results,
+                                                                     '--references', results]), \
+                    redirect_stdout(io.StringIO()) as out:
+                code = gate.main()
+            written = sorted(p.name for p in gate.Path(results).glob('reference-candidate-*.json'))
+        return code, calls, written, out.getvalue()
+
+    def test_each_base_runs_alone_in_order_and_becomes_a_candidate(self):
+        code, calls, written, _ = self._main(['--users', '1', '--sequential-users', '4',
+                                              '--prompt-tokens', '128'])
+        self.assertEqual(calls, [(0, 1000, 128), (1, 1001, 128), (2, 1002, 128), (3, 1003, 128)])
+        self.assertEqual(written, ['reference-candidate-%d-p128.json' % b for b in (1000, 1001, 1002, 1003)])
+
+    def test_sequential_mode_refuses_more_than_one_concurrent_user(self):
+        with self.assertRaises(SystemExit):
+            self._main(['--users', '4', '--sequential-users', '4'])
 
 
 if __name__ == '__main__':

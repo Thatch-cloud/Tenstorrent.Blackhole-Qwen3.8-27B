@@ -28,6 +28,9 @@ ARM = HERE / 'lever_n_m3native_run_arm.sh'
 # mounts and other env vars rather than being consumed inside the container.
 HOST_ONLY = frozenset()
 
+# Image A capacity flags: host M3NATIVE_<X> becomes container QWEN_FAST_<X>=1.
+CAPACITY_FLAGS = ('MEMORY_LEDGER', 'SKIP_BLOCK_STREAM', 'SINGLE_GATEUP', 'DRAFT_BF8')
+
 
 def arm_text():
     return ARM.read_text(encoding='utf-8').replace(chr(13) + chr(10), chr(10))
@@ -195,6 +198,18 @@ class ArmEnvPassthroughTests(unittest.TestCase):
             with self.subTest(script=name):
                 self.assertTrue((HERE / name).is_file(), '%s is mounted but absent' % name)
 
+
+    def test_image_a_capacity_flags_reach_the_container_and_are_read_there(self):
+        """The four 4 x 131k capacity flags (docs/four-streams-131k-feasibility-2026-09-23.md).
+        Each host name must become its QWEN_FAST_* name at the docker run, and that name must
+        be read by a module the image bakes - so a rename on either side fails here."""
+        text = arm_text()
+        baked = ''.join(path.read_text(encoding='utf-8') for path in sorted(HERE.glob('*.py'))
+                        if not path.name.startswith('test_'))
+        for name in CAPACITY_FLAGS:
+            with self.subTest(flag=name):
+                self.assertIn('${M3NATIVE_%s:+-e QWEN_FAST_%s=1}' % (name, name), text)
+                self.assertIn("'QWEN_FAST_%s'" % name, baked)
 
 if __name__ == '__main__':
     unittest.main()

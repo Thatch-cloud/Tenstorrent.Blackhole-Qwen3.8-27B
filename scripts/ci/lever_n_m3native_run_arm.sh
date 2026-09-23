@@ -235,6 +235,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$PWD/graft/attention/tp.py,dst=$root/attention/tp.py,readonly" \
   --mount "type=bind,src=$PWD/graft/gdn/tp.py,dst=$root/gdn/tp.py,readonly" \
   --mount "type=bind,src=$PWD/graft/mlp.py,dst=$root/mlp.py,readonly" \
+  --mount "type=bind,src=$PWD/graft/tp_common.py,dst=$root/tp_common.py,readonly" \
   "${lever_n_mounts[@]}" \
   --mount "type=bind,src=$PWD/scripts/ci/lever_n_m3native_gate.py,dst=/bench/lever_n_m3native_gate.py,readonly" \
   --mount "type=bind,src=$PWD/scripts/ci/longctx_cycle_bench.py,dst=/bench/longctx_cycle_bench.py,readonly" \
@@ -254,6 +255,10 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_REPLAY_GROUP_ROWS:+-e QWEN_FAST_REPLAY_GROUP_ROWS=$M3NATIVE_REPLAY_GROUP_ROWS} \
   ${M3NATIVE_GDN_USER_BATCH_MIN_USERS:+-e QWEN_FAST_GDN_USER_BATCH_MIN_USERS=$M3NATIVE_GDN_USER_BATCH_MIN_USERS} \
   ${M3NATIVE_GDN_STATE_COPY_BATCH:+-e QWEN_FAST_GDN_STATE_COPY_BATCH=1} \
+  ${M3NATIVE_MEMORY_LEDGER:+-e QWEN_FAST_MEMORY_LEDGER=1} \
+  ${M3NATIVE_SKIP_BLOCK_STREAM:+-e QWEN_FAST_SKIP_BLOCK_STREAM=1} \
+  ${M3NATIVE_SINGLE_GATEUP:+-e QWEN_FAST_SINGLE_GATEUP=1} \
+  ${M3NATIVE_DRAFT_BF8:+-e QWEN_FAST_DRAFT_BF8=1} \
   ${M3NATIVE_PREFILL_CHUNK:+-e MAX_PREFILL_CHUNK_SIZE=$M3NATIVE_PREFILL_CHUNK} \
   ${M3NATIVE_INTERLEAVE:+-e TT_PREFILL_DECODE_INTERLEAVE=$M3NATIVE_INTERLEAVE} \
   ${M3NATIVE_DECODE_STEPS_PER_CHUNK:+-e TT_DECODE_STEPS_PER_PREFILL_CHUNK=$M3NATIVE_DECODE_STEPS_PER_CHUNK} \
@@ -285,7 +290,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
   --entrypoint python3 "$image" "${entry_args[@]}" \
   --users "$users" --context "$context" --prompt-tokens "$prompt_tokens" --max-tokens "$max_tokens" --stream-timeout 600 --trace-region-bytes "$trace_region_bytes" \
-  --prompt-base 1000 --prompt-user-offset 1 --stagger 0 \
+  --prompt-base 1000 --prompt-user-offset 1 --stagger 0 ${M3NATIVE_SEQUENTIAL_USERS:+--sequential-users $M3NATIVE_SEQUENTIAL_USERS} \
   --references /bench/packed-gate-reference $allow_missing_references --results /experiment-results-gate \
   > experiment-results/m3native-gate-stdout.log 2>&1 || true
 

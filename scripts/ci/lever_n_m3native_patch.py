@@ -469,11 +469,141 @@ def patch_mlp(source):
     return result
 
 
+# ---------------------------------------------------------------------------------
+# E. C1 of the 4 x 131k DRAM plan: one gate/up copy under QWEN_FAST_SINGLE_GATEUP=1.
+# ---------------------------------------------------------------------------------
+#
+# The model builds a SECOND, packed copy of every layer's gate/up weight (w_gate_up,
+# bfloat4_b, ~w1 + w3 per layer) only for the fused all-gather + SwiGLU PREFILL matmul.
+# Decode never reads it on the four-user path (it takes the 1D w1/w3 arm), so dropping it
+# is worth ~3.21 GB per chip. tp_common.mlp_gateup_agmm_enabled decides it, and its three
+# readers - layer.py:66 (the ff_norm skips its all-gather), mlp.py:76 (w_gate_up is built)
+# and mlp.py:178 (the fused branch is selected) - all read it at construction, so gating
+# the one function flips all three together and layer.py needs no graft.
+#
+# With the flag unset the function returns exactly what it did. With it set, prefill runs
+# the unfused w1/w3 2D branch on a gathered input: DIFFERENT ARITHMETIC (separate SiLU and
+# multiply instead of the in-kernel SwiGLU), so it ships only if the byte-exact gates pass.
+# Image A's QWEN_FAST_SINGLE_GATEUP support skips the two scripts/ci consumers of
+# w_gate_up (the block stream and FusedT16Arm); this graft is the model-tree half.
+#
+# Markers sit inside the executed paths (memory: graft mounted is not graft executed):
+# one line per layer whose w_gate_up was not built, and one line the first time any MLP
+# runs its prefill through the 2D branch.
+
+SINGLE_GATEUP_FLAG = 'QWEN_FAST_SINGLE_GATEUP'
+MARKER_SINGLE_GATEUP = '[PINDIAG] single gate/up copy: w_gate_up not built'
+MARKER_PREFILL_2D = '[PINDIAG] prefill MLP via w1/w3 2D branch'
+AGMM_FUNCTION = 'mlp_gateup_agmm_enabled'
+LOAD_WEIGHTS_FUNCTION = 'load_mlp_weights'
+
+
+def module_function_span(source, name):
+    """Line span [start, end) of a MODULE-level function, by AST sibling order.
+
+    function_span only walks class bodies; tp_common's switch and mlp.py's
+    load_mlp_weights are module functions. The end is the next top-level statement's
+    first line (its decorators included), or the end of the file - the same 3.7-safe
+    rule function_span uses.
+    """
+    tree = ast.parse(source)
+    total = len(source.splitlines())
+    for index, node in enumerate(tree.body):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != name:
+            continue
+        start = (min(d.lineno for d in node.decorator_list) if node.decorator_list else node.lineno) - 1
+        if index + 1 < len(tree.body):
+            following = tree.body[index + 1]
+            decorators = getattr(following, 'decorator_list', None) or []
+            end = (min(d.lineno for d in decorators) if decorators else following.lineno) - 1
+        else:
+            end = total
+        return start, end
+    raise ValueError('no module function named %s' % name)
+
+
+def refuse_if_grafted(source, what):
+    """Both C1 edits keep their anchor inside the replacement, so a second pass would
+    match again and silently double up. The flag name is absent from both originals."""
+    if SINGLE_GATEUP_FLAG in source:
+        raise ValueError('%s: already grafted (%s present)' % (what, SINGLE_GATEUP_FLAG))
+
+
+def patch_tp_common(source):
+    refuse_if_grafted(source, 'tp_common single gate/up switch')
+    lines = source.splitlines(keepends=True)
+    span = module_function_span(source, AGMM_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '    return num_devices > 1\n',
+        '    # Lever N M3native, 4 x 131k DRAM plan C1: QWEN_FAST_SINGLE_GATEUP=1 keeps one\n'
+        '    # gate/up copy. No packed w_gate_up is built (mlp.py), prefill takes the unfused\n'
+        '    # w1/w3 2D branch, and the ff_norm gathers its own input (layer.py). All three read\n'
+        '    # this at construction, so they flip together. Unset, the answer is unchanged.\n'
+        '    import os as _qwen_os\n'
+        '\n'
+        '    if _qwen_os.environ.get("' + SINGLE_GATEUP_FLAG + '") == "1":\n'
+        '        return False\n'
+        '    return num_devices > 1\n',
+        'tp_common single gate/up switch')
+    result = ''.join(lines)
+    ast.parse(result)
+    return result
+
+
+def patch_mlp_single_gateup(source):
+    """The two C1 markers, both inert unless QWEN_FAST_SINGLE_GATEUP=1."""
+    refuse_if_grafted(source, 'mlp single gate/up markers')
+    lines = source.splitlines(keepends=True)
+    span = module_function_span(source, LOAD_WEIGHTS_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '            if tpc.mlp_gateup_agmm_enabled(tp)\n'
+        '            else None\n'
+        '        )\n',
+        '            if tpc.mlp_gateup_agmm_enabled(tp)\n'
+        '            else None\n'
+        '        )\n'
+        '        if wgu is None and os.environ.get("' + SINGLE_GATEUP_FLAG + '") == "1":\n'
+        '            # Lever N M3native C1 marker: logged per layer, inside the build it skips.\n'
+        '            from loguru import logger as _qwen_logger\n'
+        '\n'
+        '            load_mlp_weights._qwen_single_gateup = getattr(load_mlp_weights, "_qwen_single_gateup", 0) + 1\n'
+        '            _qwen_logger.info(\n'
+        '                "' + MARKER_SINGLE_GATEUP + ' (layer {} of this process, cache {})",\n'
+        '                load_mlp_weights._qwen_single_gateup,\n'
+        '                tensor_cache_path,\n'
+        '            )\n',
+        'mlp load_mlp_weights single gate/up marker')
+
+    span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '            seq = x.shape[-2]\n',
+        '            seq = x.shape[-2]\n'
+        '            if os.environ.get("' + SINGLE_GATEUP_FLAG + '") == "1" and not getattr(type(self), "_qwen_2d_logged", False):\n'
+        '                # Lever N M3native C1 marker: once per process, inside the branch it names.\n'
+        '                type(self)._qwen_2d_logged = True\n'
+        '                from loguru import logger as _qwen_logger\n'
+        '\n'
+        '                _qwen_logger.info("' + MARKER_PREFILL_2D + ': rows={} fused={}", seq, self._fuse_gateup_agmm)\n',
+        'mlp prefill 2D branch marker')
+    result = ''.join(lines)
+    ast.parse(result)
+    return result
+
+
+def patch_mlp_full(source):
+    """The table maps ONE function per file: the 64-row decode gates, then the C1 markers."""
+    return patch_mlp_single_gateup(patch_mlp(source))
+
+
 PATCHES = {
     'model_config.py': patch_model_config,
     'attention/tp.py': patch_attention_tp,
     'gdn/tp.py': patch_gdn_tp,
-    'mlp.py': patch_mlp,
+    'mlp.py': patch_mlp_full,
+    'tp_common.py': patch_tp_common,
 }
 
 # The M1 files, added for Lever N. They live in TWO image trees, and their patches

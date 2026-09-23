@@ -15,8 +15,9 @@ from unittest.mock import patch
 
 import lever_n_m3native_patch as patcher
 
-from lever_n_m3native_patch import (function_span, patch_attention_tp, patch_gdn_tp,
-                                    patch_mlp, patch_model_config, replace_once)
+from lever_n_m3native_patch import (function_span, module_function_span, patch_attention_tp,
+                                    patch_gdn_tp, patch_mlp, patch_mlp_full, patch_mlp_single_gateup,
+                                    patch_model_config, patch_tp_common, replace_once)
 
 # model_config.py, class Qwen36ModelArgs: real __init__ and _init_tp_config verbatim,
 # plus the real trailing siblings that bound _init_tp_config's AST span.
@@ -805,9 +806,9 @@ class GraftFileSetTests(unittest.TestCase):
     workflow derives all of them from, so these tests pin its shape.
     """
 
-    def test_sources_is_the_decode_side_four_under_the_model_root(self):
+    def test_sources_is_the_decode_side_five_under_the_model_root(self):
         self.assertEqual(sorted(patcher.SOURCES),
-                         ['attention/tp.py', 'gdn/tp.py', 'mlp.py', 'model_config.py'])
+                         ['attention/tp.py', 'gdn/tp.py', 'mlp.py', 'model_config.py', 'tp_common.py'])
         for relative, (directory, apply) in patcher.SOURCES.items():
             self.assertEqual(directory, patcher.MODEL_ROOT, relative)
             self.assertTrue(callable(apply), relative)
@@ -851,6 +852,211 @@ class GraftFileSetTests(unittest.TestCase):
         with patch.dict(patcher.SOURCES, {'model.py': (patcher.MODEL_ROOT, lambda s: s)}):
             with self.assertRaisesRegex(ValueError, 'graft the same file'):
                 patcher.with_lever_n()
+
+
+# tp_common.py (probe run 35503727180, lines 386-398): the switch and its real siblings.
+TP_COMMON = '''import ttnn
+
+
+def agmm_k_block_size(k_local):
+    return 8
+
+
+def mlp_gateup_agmm_enabled(num_devices):
+    """Fuse the ff_norm all-gather into the MLP gate/up matmul (prefill). TP-only (needs the gather)."""
+    return num_devices > 1
+
+
+def all_gather_swiglu_prefill(
+    x, weight, tt_ccl, compute_cfg, topology, grid=(7, 9), cluster_axis=1, out_memory_config=ttnn.DRAM_MEMORY_CONFIG
+):
+    """Fused all-gather + col-parallel gate/up matmul + SwiGLU for prefill (packing gate+up lets ff_norm's AG fuse in)."""
+    return None
+'''
+
+# mlp.py's load_mlp_weights head, verbatim from the image (graft artifact of run
+# 35801010447, mlp.py.orig lines 45-78), closed off so it parses and can be executed.
+LOAD_MLP_WEIGHTS = '''import os
+
+
+def load_mlp_weights(mesh_device, state_dict, tensor_cache_path=None, args=None) -> MLPWeights:
+    """Per-layer MLP state: gate_proj, down_proj, up_proj weights."""
+    tp = getattr(args, "num_devices", 1) if args is not None else 1
+
+    if tp > 1:
+        # TP: w1/w3 column-parallel (shard out dim), w2 row-parallel (shard in dim).
+        # DRAM-sharded memcfgs from args.
+        from models.demos.blackhole.qwen36.tt import tp_common as tpc
+
+        # w1/w3 DRAM-WIDTH_SHARDED for decode (M=1 tile, ~+10% tok/s); w2 interleaved.
+        # Cache uses `.dramshard` suffix — layout incompatible with interleaved cache
+        # (as_tensor ignores requested memcfg on reload). Fallback if memcfgs absent.
+        # 1D-decode (default) uses interleaved weights (its mcast decode matmul needs them).
+        dram_sharded = (
+            args is not None
+            and getattr(args, "mlp_w1_weight_memcfg", None) is not None
+            and not getattr(args, "mlp_1d_decode", False)
+        )
+
+        def cache(name, tag=""):
+            return str(tensor_cache_path / f"mlp.{name}.weight{tag}.tp") if tensor_cache_path else None
+
+        # Prefill-only packed [gate|up] AGMM weight (decode keeps w1/w3; extra DRAM ~w1+w3/layer).
+        wgu = (
+            _build_gate_up(
+                state_dict["gate_proj.weight"],
+                state_dict["up_proj.weight"],
+                mesh_device,
+                tp,
+                cache("gate_up", ".swiglu"),
+            )
+            if tpc.mlp_gateup_agmm_enabled(tp)
+            else None
+        )
+        return wgu
+    return None
+
+
+'''
+
+MLP_MODULE = LOAD_MLP_WEIGHTS + MLP
+
+
+def _run_load(source, agmm, environ):
+    """Execute a (patched) load_mlp_weights with the model tree stubbed out."""
+    import sys
+    import types
+
+    logged = []
+    built = []
+    tpc = types.SimpleNamespace(mlp_gateup_agmm_enabled=lambda tp: agmm)
+    loguru = types.ModuleType('loguru')
+    loguru.logger = types.SimpleNamespace(info=lambda *a: logged.append(a))
+    modules = {'loguru': loguru, 'ttnn': types.SimpleNamespace(TILE_SIZE=32)}
+    for name in ('models', 'models.demos', 'models.demos.blackhole', 'models.demos.blackhole.qwen36',
+                 'models.demos.blackhole.qwen36.tt'):
+        modules[name] = types.ModuleType(name)
+    modules['models.demos.blackhole.qwen36.tt'].tp_common = tpc
+    namespace = {'MLPWeights': object, '_build_gate_up': lambda *a: built.append(a) or 'wgu'}
+    with patch.dict(sys.modules, modules), patch.dict('os.environ', environ, clear=True):
+        exec(compile(source, 'mlp.py', 'exec'), namespace)
+        result = namespace['load_mlp_weights'](None, {'gate_proj.weight': 1, 'up_proj.weight': 2},
+                                               None, types.SimpleNamespace(num_devices=2))
+    return result, built, logged
+
+
+class SingleGateUpGraftTests(unittest.TestCase):
+    """C1 of the 4 x 131k DRAM plan: QWEN_FAST_SINGLE_GATEUP=1 drops the packed w_gate_up
+    copy (~3.21 GB per chip). Unset, every grafted line must behave exactly as before."""
+
+    def _switch(self, source, environ):
+        import sys
+        import types
+        namespace = {}
+        with patch.dict(sys.modules, {'ttnn': types.SimpleNamespace(DRAM_MEMORY_CONFIG=None)}), \
+                patch.dict('os.environ', environ, clear=True):
+            exec(compile(source, 'tp_common.py', 'exec'), namespace)
+            return [namespace['mlp_gateup_agmm_enabled'](n) for n in (1, 2, 4)]
+
+    def test_the_switch_is_unchanged_without_the_flag(self):
+        patched = patch_tp_common(TP_COMMON)
+        self.assertEqual(self._switch(patched, {}), [False, True, True])
+        self.assertEqual(self._switch(patched, {'QWEN_FAST_SINGLE_GATEUP': '0'}), [False, True, True])
+        self.assertEqual(self._switch(TP_COMMON, {}), self._switch(patched, {}))
+
+    def test_the_flag_turns_the_fused_gate_up_off_at_every_width(self):
+        patched = patch_tp_common(TP_COMMON)
+        self.assertEqual(self._switch(patched, {'QWEN_FAST_SINGLE_GATEUP': '1'}), [False, False, False])
+
+    def test_only_the_switch_changes(self):
+        patched = patch_tp_common(TP_COMMON)
+        span = module_function_span(TP_COMMON, 'mlp_gateup_agmm_enabled')
+        before = TP_COMMON.splitlines(keepends=True)
+        after = patched.splitlines(keepends=True)
+        self.assertEqual(after[:span[0]], before[:span[0]])
+        grown = len(after) - len(before)
+        self.assertEqual(after[span[1] + grown:], before[span[1]:])
+
+    def test_the_switch_patch_applies_exactly_once_and_fails_loudly_on_drift(self):
+        with self.assertRaises(ValueError):
+            patch_tp_common(patch_tp_common(TP_COMMON))
+        with self.assertRaises(ValueError):
+            patch_tp_common(TP_COMMON.replace('    return num_devices > 1\n', '    return num_devices >= 2\n'))
+        with self.assertRaisesRegex(ValueError, 'no module function'):
+            patch_tp_common(TP_COMMON.replace('def mlp_gateup_agmm_enabled', 'def gateup_enabled'))
+
+    def test_module_function_span_ends_at_the_next_top_level_statement(self):
+        start, end = module_function_span(TP_COMMON, 'mlp_gateup_agmm_enabled')
+        lines = TP_COMMON.splitlines()
+        self.assertTrue(lines[start].startswith('def mlp_gateup_agmm_enabled'))
+        self.assertTrue(lines[end].startswith('def all_gather_swiglu_prefill'))
+
+    def test_the_weight_is_still_built_and_nothing_is_logged_without_the_flag(self):
+        patched = patch_mlp_full(MLP_MODULE)
+        for environ in ({}, {'QWEN_FAST_SINGLE_GATEUP': '0'}):
+            result, built, logged = _run_load(patched, True, environ)
+            self.assertEqual((result, len(built), logged), ('wgu', 1, []))
+        # A switch that says no, with the flag unset, is some other configuration: no marker.
+        self.assertEqual(_run_load(patched, False, {})[2], [])
+
+    def test_the_marker_fires_inside_the_skipped_build(self):
+        patched = patch_mlp_full(MLP_MODULE)
+        result, built, logged = _run_load(patched, False, {'QWEN_FAST_SINGLE_GATEUP': '1'})
+        self.assertIsNone(result)
+        self.assertEqual(built, [])
+        self.assertEqual(len(logged), 1)
+        self.assertIn('[PINDIAG] single gate/up copy: w_gate_up not built', logged[0][0])
+
+    def test_the_marker_cannot_fire_when_the_weight_was_built(self):
+        """The flag set but the switch not grafted (tp_common unmounted) must be visible:
+        the weight is built and the marker stays silent."""
+        result, built, logged = _run_load(patch_mlp_full(MLP_MODULE), True, {'QWEN_FAST_SINGLE_GATEUP': '1'})
+        self.assertEqual((result, len(built), logged), ('wgu', 1, []))
+
+    def test_the_prefill_marker_sits_inside_the_2d_branch_and_is_flag_gated(self):
+        patched = patch_mlp_full(MLP_MODULE)
+        span = function_span(patched, '_forward_tp')
+        region = ''.join(patched.splitlines(keepends=True)[span[0]:span[1]])
+        branch = region.index('        elif x.shape[-2] > ttnn.TILE_SIZE:\n')
+        marker = region.index('[PINDIAG] prefill MLP via w1/w3 2D branch')
+        next_branch = region.index('        else:\n', branch)
+        self.assertLess(branch, marker)
+        self.assertLess(marker, next_branch)
+        self.assertIn('if os.environ.get("QWEN_FAST_SINGLE_GATEUP") == "1" and not getattr(type(self), "_qwen_2d_logged", False):', region)
+
+    def test_removing_the_two_marker_blocks_gives_back_the_decode_graft(self):
+        """Flag-off equivalence, structurally: the C1 edits are pure insertions."""
+        full = patch_mlp_full(MLP_MODULE)
+        decode_only = patch_mlp(MLP_MODULE)
+        kept = []
+        skipping = None
+        for line in full.splitlines(keepends=True):
+            if skipping is not None:
+                if line.strip() and len(line) - len(line.lstrip()) <= skipping:
+                    skipping = None
+                else:
+                    continue
+            if 'QWEN_FAST_SINGLE_GATEUP' in line and line.lstrip().startswith('if '):
+                skipping = len(line) - len(line.lstrip())
+                continue
+            kept.append(line)
+        self.assertEqual(''.join(kept), decode_only)
+
+    def test_the_mlp_markers_apply_exactly_once(self):
+        with self.assertRaises(ValueError):
+            patch_mlp_single_gateup(patch_mlp_single_gateup(MLP_MODULE))
+
+    def test_the_table_grafts_both_c1_files(self):
+        self.assertIs(patcher.PATCHES['mlp.py'], patch_mlp_full)
+        self.assertIs(patcher.PATCHES['tp_common.py'], patch_tp_common)
+
+    def test_every_decode_side_file_is_mounted_by_the_arm(self):
+        """tp_common.py joins the four hard-coded decode-side mounts; a patched file the arm
+        does not mount is patched and never served."""
+        arm = (Path(__file__).parent / 'lever_n_m3native_run_arm.sh').read_text(encoding='utf-8')
+        for relative in sorted(patcher.SOURCES):
+            with self.subTest(graft=relative):
+                self.assertIn('src=$PWD/graft/%s,dst=$root/%s,readonly' % (relative, relative), arm)
 
 
 if __name__ == '__main__':
