@@ -235,7 +235,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$PWD/graft/attention/tp.py,dst=$root/attention/tp.py,readonly" \
   --mount "type=bind,src=$PWD/graft/gdn/tp.py,dst=$root/gdn/tp.py,readonly" \
   --mount "type=bind,src=$PWD/graft/mlp.py,dst=$root/mlp.py,readonly" \
-  --mount "type=bind,src=$PWD/graft/tp_common.py,dst=$root/tp_common.py,readonly" \
+  --mount "type=bind,src=$PWD/graft/layer.py,dst=$root/layer.py,readonly" \
   "${lever_n_mounts[@]}" \
   --mount "type=bind,src=$PWD/scripts/ci/lever_n_m3native_gate.py,dst=/bench/lever_n_m3native_gate.py,readonly" \
   --mount "type=bind,src=$PWD/scripts/ci/longctx_cycle_bench.py,dst=/bench/longctx_cycle_bench.py,readonly" \
