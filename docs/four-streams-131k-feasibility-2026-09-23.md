@@ -413,3 +413,30 @@ capacity margin shows up as speed. v101's configuration stays.
 only in the last chunk, in sdpa_decode itself (kernel work authorised). The served sources are
 dumped by `scripts/ci/probe_sdpa_decode_sources.py` (cpu-probe-v24, run 35812394787; factory
 tree-scratch patched 3e0a69af). Expected: up to ~70-100 ms off the 340 ms round at 4 x 131k.
+
+## The first cut: 8-row groups, after fixing the graft that blocked them
+
+**The graft had silently dropped a patch.** The KOPGRAFT64 graft mounts its own `_ttnncpp.so` over the image's
+whole binary. It was built in a ttbuild tree whose sdpa_decode factory was the unpatched 05708e6d, so every graft
+run since v84 lacked `QWEN_SDPA_TREE_SCRATCH_ROUNDS` (strings count 0, against 1 in the image's 4b7299c1): the arm's
+flag was inert, and the tree-reduction scratch was full size. That alone is why 8-row groups overflowed L1 in
+v107 (1,724,480 B of CBs + a 111,488 B base = the logged 1,835,968). K64d (`_ttnncpp.so` 06865d8e) is K64c rebuilt
+with the audited patched factory 3e0a69af; v108 on K64d is exact and speed-neutral at 4-row groups.
+
+**8-row groups then fit and are exact** - one batch-2 bundle per user, two KV reads per layer instead of four:
+
+| 4 x 131k | v108 (4-row) | v111 (8-row) |
+|---|---|---|
+| gate | 4/4 exact, 256 tokens | 4/4 exact, 256 tokens |
+| verify trace | 246.3 ms | 184.8 ms |
+| median four-user round | 346 ms | **280 ms** |
+| steady per-user decode (tokens per round / round) | 20.3 tok/s | **24.8 tok/s** |
+| last-admitted user's stream | 17.4 tok/s | 20.7 tok/s |
+
+(v109 and v110 ran the same setting on a slower host - weight loading 99-128 s against 42 s, every host-only stage
+1.5-2x slower - and first showed only half the gain; v111 on a healthy host lands on the predicted ~280 ms. The
+first run of a new graft also paid JIT compiles: up to 1.5 s per first commit shape in v109.)
+
+**Next cuts, in flight:** a tail-only mask in sdpa_decode (stage 1: K64e, card M 180/180 byte-exact, SDPA
+2058 -> 1768 us per user-layer at 131k; A/B/A v111-v114 running), then leader/twin K/V multicast so each user's KV
+is read once (stage 3).
