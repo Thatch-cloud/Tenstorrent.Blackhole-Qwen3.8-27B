@@ -45,12 +45,40 @@ reported. Single device, no CCL.
 
 Every ttnn/torch import is local to the device functions: the helpers import and unit-test under
 plain CPython (test_sdpa_prefill_bench.py).
+
+K0 additions (sdpa-prefill-share-spec.md 3.7 and 7.1; all off by default, so a plain run is the
+bench as it was):
+  --sha           after timing, every (arm, start) is called twice more and the sha256 of the int16
+                  view of ttnn.to_torch(out) is recorded (report 'sha256', 'sha_stable') and printed
+                  as 'M1 SHA <arm>@<start> <hex> stable=0|1'. K0c must equal stock; K0a/b must not.
+  --watchdog-s N  per device call: a call not back within N s prints 'WATCHDOG: ...', writes the
+                  partial report and exits 3 (a faulthandler backstop 60 s later covers a call that
+                  holds the GIL: 'Timeout (...)!' and exit 1). The runner then resets card M.
+                  Budgets on top of N: each arm's FIRST warmup +780 s (it JIT-compiles the
+                  program's kernels on a fresh cache, under rig CI load: a false alarm costs a
+                  session and a card reset), later warmups, open_device (firmware build on a fresh
+                  cache) and build_inputs (host bf8 tilize of two K/V pools) +240 s.
+  --coords-out P  worker_core_from_logical_core for every grid core, as JSON (the fixture
+                  fixtures/cardm_worker_coords.json, captured in the K0 session).
+  --kernel-elf K  after the run, a digest of kernel K's compiled ELFs in $TT_METAL_CACHE
+                  (.../kernels/K/<hash>/<risc>/*.elf; sha256 over the PT_LOAD segments, i.e. what
+                  is loaded on the core, not the debug info), printed as
+                  'M1 KERNEL_ELF K <hex|none> files=N'. K0c's output equals stock by design, so its
+                  proof that the mounted reader was compiled is its reader ELF differing from stock's
+                  (with stock's reproducible run to run: the session's closing stock2).
 """
 
 import argparse
+import contextlib
+import faulthandler
+import hashlib
 import json
 import math
+import os
 import statistics
+import struct
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -61,6 +89,8 @@ BLOCK = 64         # page size
 ROWS = 2048        # prefill chunk
 GRID = (11, 10)    # Blackhole p150 compute_with_storage_grid_size
 STARTS = (0, 32768, 65536, 129024)
+COMPILE_GRACE_S = 240.0         # extra watchdog budget: later warmups, open_device, build_inputs
+FIRST_COMPILE_GRACE_S = 780.0   # each arm's first warmup: the JIT compile of its kernels (900 s at --watchdog-s 120)
 BF8_BYTES_PER_ELEMENT = 1088 / 1024   # bfloat8_b tile: 1024 mantissa bytes + 64 exponent bytes
 BF16_BYTES_PER_ELEMENT = 2.0
 EXPECTED_BF16_RATIO = BF16_BYTES_PER_ELEMENT / BF8_BYTES_PER_ELEMENT   # 1.882
@@ -245,6 +275,180 @@ def schedule(arms, starts, rounds):
     return order
 
 
+class Watchdog:
+    """Per-call host watchdog (spec 3.7 --watchdog-s). A device call still running `seconds` after
+    its guard was entered never returns (a hung kernel): print one WATCHDOG line, run `on_fire`
+    (the partial report) and end the process with exit 3, since nothing after a hung call can run.
+    The poll thread needs the GIL; if a blocking ttnn call holds it, the faulthandler backstop
+    (a C thread) dumps the stacks and exits 1 at seconds + grace. seconds <= 0: no thread, no
+    backstop, guard() is a no-op (the bench as it was)."""
+
+    def __init__(self, seconds, on_fire=None, clock=time.monotonic, exit=os._exit, poll=0.5, grace=60.0,
+                 start=True, backstop=True, out=None):
+        self.seconds = float(seconds or 0)
+        self.on_fire, self.clock, self.exit, self.poll, self.grace = on_fire, clock, exit, poll, grace
+        self.backstop, self.out = backstop and self.seconds > 0, out
+        self.what, self.deadline, self.fired, self.budget = None, None, False, self.seconds
+        self.lock = threading.Lock()
+        if self.seconds > 0 and start:
+            threading.Thread(target=self._loop, name='m1-watchdog', daemon=True).start()
+
+    @contextlib.contextmanager
+    def guard(self, what, extra=0.0):
+        """Arm for one device call; `extra` seconds on top (warmups: the JIT compile is not a hang)."""
+        if self.seconds <= 0:
+            yield
+            return
+        budget = self.seconds + extra
+        with self.lock:
+            self.what, self.deadline, self.budget = what, self.clock() + budget, budget
+        if self.backstop:
+            try:
+                faulthandler.dump_traceback_later(budget + self.grace, exit=True)
+            except (RuntimeError, ValueError, OSError):
+                pass
+        try:
+            yield
+        finally:
+            with self.lock:
+                self.what, self.deadline = None, None
+            if self.backstop:
+                faulthandler.cancel_dump_traceback_later()
+
+    def check(self):
+        with self.lock:
+            due = self.deadline is not None and self.clock() >= self.deadline and not self.fired
+            what, budget = self.what, self.budget
+            if due:
+                self.fired = True
+        if due:
+            print('WATCHDOG: %s did not return within %.0f s; exit 3 (reset card M before the next run)'
+                  % (what, budget), file=self.out or sys.stdout, flush=True)
+            if self.on_fire is not None:
+                try:
+                    self.on_fire(what)
+                except Exception:  # noqa: BLE001 - the exit must happen whatever the report does
+                    pass
+            self.exit(3)
+        return due
+
+    def _loop(self):
+        while True:
+            time.sleep(self.poll)
+            self.check()
+
+
+def output_sha(torch, tensor):
+    """(sha256 of the int16 view, dtype, shape) of one host output (ttnn.to_torch(out)): a bit-exact
+    identity that NaN payloads cannot fool (spec 3.7 --sha)."""
+    host = tensor.contiguous()
+    digest = hashlib.sha256(host.view(torch.int16).numpy().tobytes()).hexdigest()
+    return digest, str(host.dtype), list(host.shape)
+
+
+def sha_lines(report):
+    """'M1 SHA <arm>@<start> <hex> stable=0|1', one per timed pair, for grep-level comparison."""
+    stable = report.get('sha_stable') or {}
+    return ['M1 SHA %s %s stable=%d' % (key, value, int(bool(stable.get(key))))
+            for key, value in sorted((report.get('sha256') or {}).items())]
+
+
+def worker_coords(ttnn, device, grid):
+    """worker_core_from_logical_core for every grid core, in the factory's linear order (core i =
+    {i % grid_x, i // grid_x}, the reader RT-arg loop): the coordinate fixture the G6 chain order
+    (flag 0x4) is costed on (spec 5.1 fixtures/cardm_worker_coords.json)."""
+    cores = []
+    for index in range(grid[0] * grid[1]):
+        logical = ttnn.CoreCoord(index % grid[0], index // grid[0])
+        worker = device.worker_core_from_logical_core(logical)
+        cores.append(dict(i=index, logical=[index % grid[0], index // grid[0]], worker=[int(worker.x), int(worker.y)]))
+    return dict(grid=list(grid), order='i -> logical (i % grid_x, i // grid_x)',
+                source='device.worker_core_from_logical_core', cores=cores)
+
+
+ELF_MAGIC = bytes((0x7F,)) + b'ELF'
+PT_LOAD = 1
+
+
+def elf_load_digest(data):
+    """(sha256, bytes) over an ELF's entry point and PT_LOAD segments (vaddr, filesz, memsz, file
+    bytes): what the core runs, without the debug info, symbol tables or LTO section names that
+    may differ build to build. None if `data` is not a well-formed ELF32/ELF64."""
+    if len(data) < 52 or data[:4] != ELF_MAGIC or data[4] not in (1, 2) or data[5] not in (1, 2):
+        return None
+    end = '<' if data[5] == 1 else '>'
+    try:
+        if data[4] == 1:
+            entry, phoff = struct.unpack_from(end + 'II', data, 24)
+            phentsize, phnum = struct.unpack_from(end + 'HH', data, 42)
+            layout, pick = end + 'IIIIIIII', (0, 1, 2, 4, 5)       # type offset vaddr paddr filesz memsz flags align
+        else:
+            entry, phoff = struct.unpack_from(end + 'QQ', data, 24)
+            phentsize, phnum = struct.unpack_from(end + 'HH', data, 54)
+            layout, pick = end + 'IIQQQQQQ', (0, 2, 3, 5, 6)       # type flags offset vaddr paddr filesz memsz align
+        if phentsize < struct.calcsize(layout):
+            return None
+        digest, loaded = hashlib.sha256(struct.pack('<Q', entry)), 0
+        for index in range(phnum):
+            fields = struct.unpack_from(layout, data, phoff + index * phentsize)
+            p_type, offset, vaddr, filesz, memsz = (fields[i] for i in pick)
+            if p_type != PT_LOAD:
+                continue
+            segment = data[offset:offset + filesz]
+            if len(segment) != filesz:
+                return None
+            digest.update(struct.pack('<QQQ', vaddr, filesz, memsz))
+            digest.update(segment)
+            loaded += filesz
+    except struct.error:
+        return None
+    return digest.hexdigest(), loaded
+
+
+def kernel_elf_report(root, name):
+    """--kernel-elf: every compiled ELF of kernel `name` under the JIT cache `root`
+    (<root>/.../kernels/<name>/<hash>/<risc>/*.elf), each digested by elf_load_digest, and one
+    digest over them keyed by the path from 'kernels/<name>/' on (so the cache's own top-level
+    directory name does not enter it). Never raises: a missing cache or ELF gives digest None."""
+    report = dict(name=name, root=root, digest=None, files=[], other_files=[])
+    try:
+        if not root or not os.path.isdir(root):
+            report['error'] = 'no kernel cache directory %r' % (root,)
+            return report
+        marker = 'kernels/%s/' % name
+        for directory, _, names in os.walk(root):
+            for file_name in names:
+                path = os.path.join(directory, file_name)
+                slashed = '/' + os.path.relpath(path, root).replace(os.sep, '/')
+                at = slashed.rfind('/' + marker)
+                if at < 0:
+                    continue
+                key = slashed[at + 1:]
+                if not file_name.endswith('.elf'):
+                    report['other_files'].append(key)
+                    continue
+                data = Path(path).read_bytes()
+                loaded = elf_load_digest(data)
+                report['files'].append(dict(path=key, file_sha256=hashlib.sha256(data).hexdigest(),
+                                            load_sha256=None if loaded is None else loaded[0],
+                                            load_bytes=None if loaded is None else loaded[1]))
+        report['files'].sort(key=lambda entry: entry['path'])
+        report['other_files'] = sorted(report['other_files'])[:40]
+        if report['files']:
+            combined = hashlib.sha256()
+            for entry in report['files']:
+                combined.update(('%s %s' % (entry['path'], entry['load_sha256'] or 'raw:' + entry['file_sha256'])
+                                 + chr(10)).encode('utf-8'))
+            report['digest'] = combined.hexdigest()
+    except Exception as error:  # noqa: BLE001 - evidence only, never the run's outcome
+        report['error'] = '%s: %s' % (type(error).__name__, error)
+    return report
+
+
+def kernel_elf_line(report):
+    return 'M1 KERNEL_ELF %s %s files=%d' % (report['name'], report.get('digest') or 'none', len(report.get('files') or ()))
+
+
 def format_table(results, table, starts):
     lines = ['%-11s %6s %5s' % ('arm', 'rows', 'cores') + ''.join(' %10s' % ('@%dk' % (s // 1024)) for s in starts)
              + ' %12s %14s' % ('ms/1k keys', 'per 2048 rows')]
@@ -311,14 +515,34 @@ def make_call(ttnn, device, inputs, arm, start, grid, start_mode):
     return lambda: ttnn.transformer.chunked_scaled_dot_product_attention(chunk_start_idx=start, **common)
 
 
-def run(options):
+def output_digests(ttnn, torch, calls, guard):
+    """--sha: two fresh calls per timed (arm, start); the first call's digest, and whether the second
+    matched it (a K0c-vs-stock mismatch means nothing unless stock is stable run to run)."""
+    digests, stable, meta = {}, {}, {}
+    for key in sorted(calls, key=lambda pair: (pair[0], pair[1])):
+        seen = []
+        for attempt in range(2):
+            with guard('%s@%d sha %d' % (key[0], key[1], attempt)):
+                out = calls[key]()
+                host = ttnn.to_torch(out)
+                ttnn.deallocate(out)
+            seen.append(output_sha(torch, host))
+        label = '%s@%d' % key
+        digests[label], stable[label] = seen[0][0], seen[0][0] == seen[1][0]
+        meta[label] = dict(dtype=seen[0][1], shape=seen[0][2])
+    return dict(sha256=digests, sha_stable=stable, sha_meta=meta)
+
+
+def run(options, watchdog=None):
     import torch
     import ttnn
 
+    guard = (watchdog or Watchdog(0)).guard
     arms = [arm_by_name(name) for name in options.arms]
     for arm in arms:
         validate(arm, options.starts)
-    device = ttnn.open_device(device_id=options.device_id, l1_small_size=24576)
+    with guard('open_device', extra=COMPILE_GRACE_S):      # a fresh TT_METAL_CACHE: the firmware builds here
+        device = ttnn.open_device(device_id=options.device_id, l1_small_size=24576)
     report = dict(passed=False, arms=arms, starts=list(options.starts), start_mode=options.start_mode,
                   warmup=options.warmup, rounds=options.rounds)
     try:
@@ -327,26 +551,41 @@ def run(options):
         report['grid'] = list(grid)
         if grid != GRID:
             report['grid_note'] = 'grid %r differs from the served 11 x 10; busy-core figures assume 11 x 10' % (grid,)
-        inputs = build_inputs(ttnn, torch, device, arms, options.starts, seed=options.seed)
+        coords_out = getattr(options, 'coords_out', None)
+        if coords_out:
+            try:
+                with guard('worker coordinates'):
+                    coords = worker_coords(ttnn, device, grid)
+                coords_out.parent.mkdir(parents=True, exist_ok=True)
+                coords_out.write_text(json.dumps(coords, indent=1) + chr(10), encoding='utf-8', newline=chr(10))
+                report['coords_out'] = str(coords_out)
+            except Exception as error:  # noqa: BLE001 - the fixture must never cost the timing run
+                report['coords_error'] = '%s: %s' % (type(error).__name__, error)
+        with guard('build_inputs', extra=COMPILE_GRACE_S):     # host bf8 tilize of two K/V pools, 8 CPUs, CI load
+            inputs = build_inputs(ttnn, torch, device, arms, options.starts, seed=options.seed)
         report['pool_blocks'] = inputs['blocks']
         calls, errors, paths = {}, {}, {}
         for arm in arms:
-            for start in options.starts:
+            for index, start in enumerate(options.starts):
                 key = (arm['name'], start)
                 mode = options.start_mode
                 call = make_call(ttnn, device, inputs, arm, start, grid, mode)
+                # The arm's first warmup JIT-compiles its program on a fresh cache.
+                grace = FIRST_COMPILE_GRACE_S if index == 0 else COMPILE_GRACE_S
                 try:
-                    for _ in range(options.warmup):
-                        ttnn.deallocate(call())
-                    ttnn.synchronize_device(device)
+                    with guard('%s@%d warmup' % key, extra=grace):
+                        for _ in range(options.warmup):
+                            ttnn.deallocate(call())
+                        ttnn.synchronize_device(device)
                 except Exception as error:  # noqa: BLE001 - one bad arm must not end the sweep
                     if mode == 'tensor' and options.fallback_scalar:
                         mode = 'scalar'
                         call = make_call(ttnn, device, inputs, arm, start, grid, mode)
                         try:
-                            for _ in range(options.warmup):
-                                ttnn.deallocate(call())
-                            ttnn.synchronize_device(device)
+                            with guard('%s@%d warmup (scalar)' % key, extra=FIRST_COMPILE_GRACE_S):
+                                for _ in range(options.warmup):
+                                    ttnn.deallocate(call())
+                                ttnn.synchronize_device(device)
                             errors[key] = 'tensor path failed (%s: %s); timed on the scalar path' % (
                                 type(error).__name__, error)
                         except Exception as second:  # noqa: BLE001
@@ -361,19 +600,22 @@ def run(options):
             key = (name, start)
             if key not in calls:
                 continue
-            ttnn.synchronize_device(device)
-            began = time.perf_counter()
-            out = calls[key]()
-            ttnn.synchronize_device(device)
-            samples[key].append((time.perf_counter() - began) * 1e3)
-            ttnn.deallocate(out)
+            with guard('%s@%d timed' % key):
+                ttnn.synchronize_device(device)
+                began = time.perf_counter()
+                out = calls[key]()
+                ttnn.synchronize_device(device)
+                samples[key].append((time.perf_counter() - began) * 1e3)
+                ttnn.deallocate(out)
         finite = {}
         for arm in arms:
             key = (arm['name'], options.starts[0])
             if key in calls:
-                out = calls[key]()
-                finite[arm['name']] = bool(torch.isfinite(ttnn.to_torch(out).float()).all())
-                ttnn.deallocate(out)
+                with guard('%s@%d finite' % key):
+                    out = calls[key]()
+                    finite[arm['name']] = bool(torch.isfinite(ttnn.to_torch(out).float()).all())
+                    ttnn.deallocate(out)
+        digests = output_digests(ttnn, torch, calls, guard) if getattr(options, 'sha', False) else {}
         results = {arm['name']: {str(start): (statistics.median(samples[(arm['name'], start)])
                                               if samples.get((arm['name'], start)) else None)
                                  for start in options.starts} for arm in arms}
@@ -387,9 +629,10 @@ def run(options):
             errors={'%s@%d' % key: value for key, value in errors.items()}, finite_output=finite,
             busy_cores={arm['name']: busy_cores(arm) for arm in arms},
             kv_gbytes_per_call={arm['name']: {str(s): kv_bytes(arm, s) / 1e9 for s in options.starts} for arm in arms},
-            table=format_table(results, table, list(options.starts)))
+            table=format_table(results, table, list(options.starts)), **digests)
     finally:
-        ttnn.close_device(device)
+        with guard('close_device'):
+            ttnn.close_device(device)
     return report
 
 
@@ -410,6 +653,14 @@ def main(argv=None):
                         help='tensor = the served flexible path (device chunk_start_idx_tensor)')
     parser.add_argument('--no-fallback-scalar', dest='fallback_scalar', action='store_false',
                         help='do not retry a failing tensor-path pair on the scalar path')
+    parser.add_argument('--sha', action='store_true',
+                        help='sha256 of every output per (arm, start), int16 view of ttnn.to_torch(out)')
+    parser.add_argument('--watchdog-s', type=float, default=0.0,
+                        help='per device call: WATCHDOG and exit 3 if a call is not back in this many s (0 = off)')
+    parser.add_argument('--coords-out', type=Path, default=None,
+                        help='also write worker_core_from_logical_core for every grid core (JSON) here')
+    parser.add_argument('--kernel-elf', default=None, metavar='KERNEL',
+                        help="after the run, digest this kernel's compiled ELFs in $TT_METAL_CACHE (PT_LOAD bytes)")
     options = parser.parse_args(argv)
     options.arms = parse_list(options.arms)
     options.starts = parse_list(options.starts, int)
@@ -417,18 +668,35 @@ def main(argv=None):
         arm_by_name(name)
     if options.rounds < 1 or options.warmup < 1:
         parser.error('--rounds and --warmup must be at least 1')
+    if options.watchdog_s < 0:
+        parser.error('--watchdog-s must be >= 0')
+
+    def write_report(report):
+        options.out.parent.mkdir(parents=True, exist_ok=True)
+        options.out.write_text(json.dumps(report, indent=2, default=str), encoding='utf-8', newline='\n')
+
+    watchdog = Watchdog(options.watchdog_s, on_fire=lambda what: write_report(
+        dict(passed=False, error='WATCHDOG: %s did not return within %.0f s' % (what, options.watchdog_s),
+             watchdog=what)))
     report = dict(passed=False)
     try:
-        report = run(options)
+        report = run(options, watchdog)
     except Exception as error:  # noqa: BLE001
         report['error'] = '%s: %s' % (type(error).__name__, error)
     finally:
-        options.out.parent.mkdir(parents=True, exist_ok=True)
-        options.out.write_text(json.dumps(report, indent=2, default=str), encoding='utf-8', newline='\n')
+        if options.kernel_elf:
+            report['kernel_elf'] = kernel_elf_report(os.environ.get('TT_METAL_CACHE'), options.kernel_elf)
+        write_report(report)
     if report.get('table'):
         print(report['table'])
     for key, value in sorted((report.get('errors') or {}).items()):
         print('ERROR %s: %s' % (key, value))
+    for line in sha_lines(report):
+        print(line)
+    if report.get('kernel_elf'):
+        print(kernel_elf_line(report['kernel_elf']))
+    if report.get('coords_error'):
+        print('COORDS ERROR: %s' % report['coords_error'])
     print(report.get('verdict_line') or 'M1 VERDICT: incomplete | %s' % report.get('error', 'no result'))
     return 0 if report.get('passed') else 1
 
