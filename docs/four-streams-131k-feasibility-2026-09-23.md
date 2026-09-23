@@ -535,3 +535,20 @@ Steady per-user rates move about +-3% run to run on this host (round time noise)
   prefill scratch, so the move itself loses nothing; the fix and its review are in progress.
 - **The single-stream bar is unchanged** at about 46-47 tok/s (v123 median 45.7 against v98's 47.2 on the same
   prompts). The best four-user rate is therefore about 57% of it.
+
+### v127 and v128: the best config repeats, and Lever N is correct at 131k
+
+- **v127 = v126 repeated:** exact again, trace 164.6 ms, TTFT 63/125/186/247 s. The per-round `[PACKED]`
+  position/prefix lines are NOT bit-deterministic run to run: three users' histories match exactly, one user accepted
+  8 tokens in one round against 7 (re-converging four rounds later, same total, same text). The target output is
+  deterministic; the bf8 draft's proposals are not. Host-phase changes are therefore validated by final text against
+  the references, not by per-round lines.
+- **v128 = v121 (Lever N, 4 x 131k, r=1) on image A'' (eceb2daa, commit 8a362bd2):** all four users byte-exact at full
+  length. The plugin moved the resumed prefill's slot twice (`prefill slot moved: 2 -> 0 at cursor=4096`, then
+  `2 -> 1 at cursor=8192` for a later user) and both were followed; every slot-0 chunk displaced the resident decoder.
+  The gate reports `gate_passed=false` only because no packed four-user round formed (`packed_phase` null, `failures`
+  empty): with 256-token completions each user finishes its output during the next user's 131k prefill. Behaviour:
+  decoders keep producing about 3 tok/s during other users' prefills (worst stall 4.5 s, against up to ~200 s with no
+  interleave), and each prefill stretches from 68.3 to 82.6 s, so the fourth user's first token arrives at 324 s
+  instead of 275 s. Lever N is a latency/fairness trade at 131k, not a throughput gain; a packed round under Lever N at
+  131k needs completions longer than about 1,300 tokens.
