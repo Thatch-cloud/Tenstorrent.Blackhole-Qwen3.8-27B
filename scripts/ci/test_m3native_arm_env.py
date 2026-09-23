@@ -217,7 +217,8 @@ class ArmEnvPassthroughTests(unittest.TestCase):
 class PrefillProfileArmTests(unittest.TestCase):
     """Prefill ranking M2: the profile block honours M3NATIVE_MAX_TOKENS (the single-user 131k
     prefill profile runs --max-tokens 1), takes its op-support count from
-    M3NATIVE_PROFILE_OP_SUPPORT (default 20000), and passes QWEN_PREFILL_PROFILE_FLUSH=1 so the
+    M3NATIVE_PROFILE_OP_SUPPORT (default 20000), and passes QWEN_PREFILL_PROFILE_FLUSH=1 (only under
+    M3NATIVE_PROFILE_FLUSH=1: its mid-prefill drain segfaulted in v131) so the
     grafted layer.py drains the profiler every 16 layers. The C1c/C1d switches cross as
     QWEN_FAST_C1_AGMM / QWEN_FAST_C1_LEGACY."""
 
@@ -275,7 +276,8 @@ class PrefillProfileArmTests(unittest.TestCase):
 
     def test_the_flush_flag_and_the_c1_switches_cross_into_the_container(self):
         text = arm_text()
-        for line in ('${M3NATIVE_PROFILE:+-e QWEN_PREFILL_PROFILE_FLUSH=1}',
+        self.assertNotIn('${M3NATIVE_PROFILE:+-e QWEN_PREFILL_PROFILE_FLUSH=1}', text)
+        for line in ('${M3NATIVE_PROFILE_FLUSH:+-e QWEN_PREFILL_PROFILE_FLUSH=1}',
                      '${M3NATIVE_C1_AGMM:+-e QWEN_FAST_C1_AGMM=1}',
                      '${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1}'):
             with self.subTest(line=line):
@@ -285,6 +287,33 @@ class PrefillProfileArmTests(unittest.TestCase):
         for name in ('QWEN_PREFILL_PROFILE_FLUSH', 'QWEN_FAST_C1_AGMM', 'QWEN_FAST_C1_LEGACY'):
             with self.subTest(read=name):
                 self.assertIn("'%s'" % name, graft)
+
+
+class RoundB1ArmTests(unittest.TestCase):
+    """Build 1 of the round host-phase cuts: M3NATIVE_ROUND_B1=1 crosses as QWEN_FAST_ROUND_B1=1,
+    on its own continued line right after C1_LEGACY's, before the entrypoint; unset, nothing
+    crosses. The modules that read it are baked (test_dflash_round_b1.ShippingTests checks both
+    image copy lists), so the flag does nothing on an image without build 1 - the gate's
+    '[PINDIAG] round b1 engaged' requirement is what catches that."""
+
+    LINE = '${M3NATIVE_ROUND_B1:+-e QWEN_FAST_ROUND_B1=1}'
+
+    def test_the_switch_crosses_before_the_entrypoint_next_to_c1_legacy(self):
+        text = arm_text()
+        self.assertEqual(text.count(self.LINE), 1)
+        self.assertLess(text.index(self.LINE), text.index('--entrypoint python3'))
+        lines = text.split(chr(10))
+        index = next(number for number, line in enumerate(lines) if self.LINE in line)
+        self.assertEqual(lines[index - 1].strip(), '${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1} ' + chr(92))
+        self.assertEqual(lines[index].strip(), self.LINE + ' ' + chr(92), 'nothing else on the continued line')
+
+    def test_baked_modules_read_it(self):
+        for module in ('dflash_device.py', 'draft_kv_history.py', 'dflash_proposal_trace.py',
+                       'dflash_traced_publish.py', 'serving_packed_step.py'):
+            with self.subTest(module=module):
+                source = (HERE / module).read_text(encoding='utf-8')
+                self.assertIn("os.environ.get('QWEN_FAST_ROUND_B1') == '1'", source)
+        self.assertIn("ROUND_B1_FLAG = 'QWEN_FAST_ROUND_B1'", (HERE / 'dflash_packed_proposal.py').read_text(encoding='utf-8'))
 
 
 class LegacyContinuationArmTests(unittest.TestCase):

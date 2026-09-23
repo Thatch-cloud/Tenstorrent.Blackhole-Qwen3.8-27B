@@ -246,7 +246,10 @@ if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
               --disable-device-data-push-to-tracy --dump-device-data-mid-run
               --op-support-count "$op_support" -o /experiment-results-profile
               /bench/lever_n_m3native_gate.py)
-  echo "profile mode: max_tokens=$max_tokens op_support_count=$op_support QWEN_PREFILL_PROFILE_FLUSH=1"
+  # The layer.py mid-prefill profiler drain (QWEN_PREFILL_PROFILE_FLUSH) is its own switch,
+  # M3NATIVE_PROFILE_FLUSH=1: on hardware it segfaulted the dispatch thread's completion-queue
+  # read at its first drain (v131, run 35844616271), so plain profile mode no longer sets it.
+  echo "profile mode: max_tokens=$max_tokens op_support_count=$op_support QWEN_PREFILL_PROFILE_FLUSH=${M3NATIVE_PROFILE_FLUSH:-0}"
 fi
 # Traced proposals cost DRAM: each request uploads its own proposal-trace inputs (the
 # (1,1,context+32,5120) history and per-layer cached K/V), 0.80 GB per engine against
@@ -335,6 +338,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_SINGLE_GATEUP:+-e QWEN_FAST_SINGLE_GATEUP=1} \
   ${M3NATIVE_C1_AGMM:+-e QWEN_FAST_C1_AGMM=1} \
   ${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1} \
+  ${M3NATIVE_ROUND_B1:+-e QWEN_FAST_ROUND_B1=1} \
   ${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1} \
   ${M3NATIVE_GDN_PREFILL_CONV:+-e QWEN_FAST_GDN_PREFILL_CONV=1} \
   ${M3NATIVE_GDN_PREFILL_CONV_AUDIT:+-e QWEN_FAST_GDN_PREFILL_CONV_AUDIT=$M3NATIVE_GDN_PREFILL_CONV_AUDIT} \
@@ -352,7 +356,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PROFILE:+-e TT_METAL_PROFILER_MID_RUN_DUMP=1} \
   ${M3NATIVE_PROFILE:+-e QWEN_FAST_PROFILE_DUMP_ROUND=4} \
   ${M3NATIVE_PROFILE:+-e QWEN_FAST_PROFILED_BLOCK_STREAM=1} \
-  ${M3NATIVE_PROFILE:+-e QWEN_PREFILL_PROFILE_FLUSH=1} \
+  ${M3NATIVE_PROFILE_FLUSH:+-e QWEN_PREFILL_PROFILE_FLUSH=1} \
   -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
   -e QWEN_FAST_FOUR_AS_TWO=0 \
   -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 -e QWEN_DSPARK_REQUEST_CONTEXT=$dspark_context \
