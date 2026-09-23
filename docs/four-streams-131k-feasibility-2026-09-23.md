@@ -499,3 +499,39 @@ Two findings on the way:
 The model-side gate requires one engaged-chunk marker per chunk per user and 48 calls (one per GDN layer) per chunk,
 so a run where full chunks bypass the op (`valid_len=None` takes `ttnn.conv1d` in the served tp.py) fails rather
 than passing on the tail chunks alone. The first model run is v125 (4 x 32k, 64 calls audited against the FIR).
+
+## Image A' results (v117-v126): stage 3, both prefill levers, Lever N
+
+Image A' (`fast-serving-image-v96`, sha256:1b9b6445, commit 8dab9ae8) carries the Lever N routing fix, the v116
+fix and the stage-3 share mode. Every arm is 256 tokens per user against the context-keyed references.
+
+| run | setting | gate | verify trace | steady per user | TTFT users 1-4 |
+|---|---|---|---|---|---|
+| v117 | 4 x 32k control (v115 flags, C1) | exact | 134.1 ms | 28.8 tok/s | 15/30/45/59 s |
+| v118 | v117 + Lever N (r=1) | exact | 134.1 ms | (interleaved) | 17/34/54/74 s |
+| v119 | v118 + legacy continuation order (negative control) | **fails** (2 of 4 diverge) | - | - | - |
+| v124 | v117 with C1c | exact | 134.0 ms | 31.2 tok/s | 14/28/43/56 s |
+| v125 | v117 + GDN prefill conv (64 audited calls, all exact) | exact | 134.0 ms | 30.5 tok/s | 16/28/41/54 s |
+| v120 | 4 x 131k control (v113 flags, C1) | exact | 169.5 ms | 26.3 tok/s | 70/138/206/275 s |
+| v122 | v120 on K64f, tail + KV share (stage 3) | exact | **164.6 ms** | 27.1 tok/s | 132/202/274/343 s (cold graft cache) |
+| v126 | stage 3 + C1c + GDN prefill conv | exact | 164.6 ms | 26.3 tok/s | **64/126/187/249 s** |
+| v121 | v120 + Lever N | **crash** (see below) | - | - | - |
+| v123 | single-stream bar at 131k, tail mask (the v116 re-run) | exact | - | median 45.7 tok/s | ~64.5 s each |
+
+Steady per-user rates move about +-3% run to run on this host (round time noise); the trace is the stable measure.
+
+- **Prefill.** The GDN conv op engages on every chunk (valid_len is passed on full chunks, so the fixer's concern
+  that full chunks take `ttnn.conv1d` does not apply to the served path) and all 64 in-model audits are byte-exact.
+  At 32k it takes about 1.9 s off each prompt and C1c about 0.7 s. Together with stage 3 at 131k (v126) a prompt
+  prefills in about 61.7 s instead of 68.3 s, and the fourth user's first token arrives 26 s earlier (249 vs 275 s).
+  The 32k-to-131k extrapolation (~10 s) was optimistic; 6.6 s is measured.
+- **Stage 3** is exact and takes 4.9 ms off the 131k verify trace, as card M predicted - a small gain.
+- **Lever N at 32k** is correct only with the routing fix: v118 is exact and v119 (the old order) reproduces the v80
+  divergence. The worst decoder stall falls from 44.8 s to 4.1 s; the rest is the per-admission handoff (request
+  construction and capture, 3.4-4.1 s). TTFT rises (74 vs 59 s for the fourth user) because prefill is time-sliced.
+- **Lever N at 131k (v121) exposed a second bug.** A decoder finished during another user's 131k prefill; vLLM
+  compacted its batch, the resumed prefill's plugin row moved from 2 to 0, and `dflash_prefill_window` refused the
+  move ("One prefill slot per capture required; 2 then 0"), killing the engine. The in-flight recurrence lives in the
+  prefill scratch, so the move itself loses nothing; the fix and its review are in progress.
+- **The single-stream bar is unchanged** at about 46-47 tok/s (v123 median 45.7 against v98's 47.2 on the same
+  prompts). The best four-user rate is therefore about 57% of it.
