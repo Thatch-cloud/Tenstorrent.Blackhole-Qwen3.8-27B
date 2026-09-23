@@ -122,6 +122,13 @@ SINGLE_GATEUP_MARKERS = (
 SKIP_BLOCK_STREAM_MARKER = '[PINDIAG] block stream skipped for the 64-row block'
 DRAFT_BF8_MARKER = 'projections dtype=bf8 x36'
 LEDGER_MARKERS = ('[MEMLEDGER] phase=P7 ', ' check=residual status=')
+# QWEN_FAST_SDPA_MODES=tail (optimisation/ttnn-op/sdpa_decode_qwen, stage 1). The two [PINDIAG]
+# lines are emitted inside pooled_attention_replay.apply_sdpa_modes (the loaded _ttnncpp.so was
+# checked for the factory branch; a replay reader's configs were rewritten), never at install or
+# mount time. The [QWEN-SDPA] line is the grafted factory's own log_info (F4), printed when it
+# builds a tail-mode program: the C++ branch itself ran, not just the Python that selects it.
+SDPA_MODES_MARKERS = ('[PINDIAG] sdpa qwen-modes binary ', '[PINDIAG] sdpa qwen-modes modes=tail ',
+                      '[QWEN-SDPA] flags=0x1 ')
 GDN_ALL_BATCHED = re.compile(r'gdn user_batched calls this captured forward: ([1-9][0-9]*) of ([0-9]+) GDN layers')
 LEDGER_RESIDUAL = re.compile(r'\[MEMLEDGER\] phase=P7 [^\n]*check=residual status=([a-zA-Z]+)')
 
@@ -138,7 +145,15 @@ def required_flag_markers(environ, users):
         required['QWEN_FAST_DRAFT_BF8'] = [DRAFT_BF8_MARKER]
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
+    if 'tail' in sdpa_mode_names(environ):
+        required['QWEN_FAST_SDPA_MODES'] = list(SDPA_MODES_MARKERS)
     return required
+
+
+def sdpa_mode_names(environ):
+    """QWEN_FAST_SDPA_MODES as pooled_attention_replay.sdpa_modes splits it (no validation here:
+    a value that reader refuses fails the run on its own)."""
+    return {name.strip() for name in (environ.get('QWEN_FAST_SDPA_MODES') or '').split(',') if name.strip()}
 
 
 def flag_marker_report(environ, users, log_text):

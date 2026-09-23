@@ -46,11 +46,116 @@ every user's word and tables before each verify (packed_verifier.stage_packed).
 """
 
 from contextlib import ExitStack, contextmanager
+import os
+from pathlib import Path
 
 from attention_head_fold import parallel_groups
 from attention_mask_replay import validate_ticket
 from attention_replay import ReplayAttentionReader
 from gdn_multitoken_conv import addresses
+
+
+# QWEN-SDPA DECODE MODES (optimisation/ttnn-op/sdpa_decode_qwen, docs: the one-pass spec,
+# stage 1). The grafted sdpa_decode factory reads a per-call sentinel from
+# SDPAProgramConfig.q_chunk_size - a field the decode path otherwise never reads - and, in
+# 'tail' mode, reads and adds the provided mask on each head's FINAL k-chunk only. The
+# replay mask is +0.0 everywhere else by construction (the pinned refresh kernel writes only
+# the last eight column tiles of a zero-initialised mask), so the skipped adds were adds of
+# +0.0; card-M byte comparison is what proves it (test_sdpa_decode_qwen_card_m.py). The
+# pinned reader's bytes are untouched: only its per-bundle config entries are replaced,
+# before any trace is captured. Unset, nothing here runs and every config is the pinned one.
+SDPA_MODES_ENV = 'QWEN_FAST_SDPA_MODES'
+QWEN_DECODE_MAGIC = 0x51DEC000                    # factory F1; the low byte holds the flags
+QWEN_MASK_TAIL, QWEN_KV_SHARE = 0x1, 0x2
+SDPA_MODE_NAMES = ('tail',)                       # what this build serves
+# Named by the spec, not in this build: refused by name rather than as unknown.
+SDPA_MODES_LATER = {'narrow': 'stage 1b (the narrow (b,1,48,256) tail mask)',
+                    'share': 'stage 3 (K/V leader multicast across twin entries)'}
+QWEN_SDPA_BINARY_MARKER = b'[QWEN-SDPA] flags='   # factory F4's format literal, only in the graft .so
+SDPA_MODES_MARKER = '[PINDIAG] sdpa qwen-modes'
+_binary_checked = []
+
+
+def _pindiag(text):
+    """One server-log line: loguru where the engine has it (as dflash_device.pindiag), print otherwise."""
+    try:
+        from loguru import logger
+    except ImportError:
+        print(text, flush=True)
+        return
+    logger.info('{}', text)
+
+
+def sdpa_modes(environ=None):
+    """The requested decode modes from QWEN_FAST_SDPA_MODES: a comma list, empty when unset."""
+    value = (os.environ if environ is None else environ).get(SDPA_MODES_ENV, '')
+    modes = frozenset(name.strip() for name in value.split(',') if name.strip())
+    later = sorted(modes.intersection(SDPA_MODES_LATER))
+    if later:
+        raise ValueError('%s=%s: %s not in this build (stage 1 serves tail only): %s'
+                         % (SDPA_MODES_ENV, value, ','.join(later), '; '.join(SDPA_MODES_LATER[name] for name in later)))
+    unknown = modes.difference(SDPA_MODE_NAMES)
+    if unknown:
+        raise ValueError('Unknown %s entries: %s' % (SDPA_MODES_ENV, ','.join(sorted(unknown))))
+    return modes
+
+
+def mode_flags(modes, batches):
+    return (QWEN_MASK_TAIL if 'tail' in modes else 0) | (QWEN_KV_SHARE if 'share' in modes and batches > 1 else 0)
+
+
+def loaded_binary_has_modes(maps='/proc/self/maps'):
+    """An old binary ignores q_chunk_size and silently runs the legacy op, so check the
+    _ttnncpp.so this process actually mapped for the [QWEN-SDPA] factory branch."""
+    import mmap
+
+    paths = sorted({line.split()[-1] for line in Path(maps).read_text().splitlines()
+                    if line.rstrip().endswith('_ttnncpp.so')})
+    if len(paths) != 1:
+        raise RuntimeError('Expected exactly one mapped _ttnncpp.so, found %r' % (paths,))
+    with open(paths[0], 'rb') as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as view:
+        return paths[0], view.find(QWEN_SDPA_BINARY_MARKER) >= 0
+
+
+def apply_sdpa_modes(reader, modes, *, log=None, binary_check=None):
+    """Rewrite a built replay reader's per-bundle SDPA config in place, before any trace
+    capture. Only entries of its metadata list are replaced - the bundle, page table and
+    mask objects are the same ones - and the pinned reader's bytes are not touched.
+    Idempotent: a second call (the packed reader over a pooled one) is a no-op."""
+    if not modes:
+        return None
+    if getattr(reader, 'sdpa_modes_applied', None) is not None:
+        return reader.sdpa_modes_applied
+    log = _pindiag if log is None else log
+    binary_check = loaded_binary_has_modes if binary_check is None else binary_check
+    modes = frozenset(modes)
+    if not modes.issubset(SDPA_MODE_NAMES):
+        raise ValueError('Qwen sdpa modes %s are not in this build' % ','.join(sorted(modes.difference(SDPA_MODE_NAMES))))
+    if reader.short_context:
+        raise ValueError('Qwen sdpa modes are long-context only')
+    if not _binary_checked:
+        path, present = binary_check()
+        if not present:
+            raise RuntimeError('%s is set but %s lacks the [QWEN-SDPA] factory branch' % (SDPA_MODES_ENV, path))
+        _binary_checked.append(path)
+        log('%s binary %s carries the [QWEN-SDPA] branch' % (SDPA_MODES_MARKER, path))
+    operations = reader.operations
+    grid = reader.mesh.compute_with_storage_grid_size()
+    replaced, applied = [], []
+    for bundle, pages, mask, config in reader.metadata:
+        flags = mode_flags(modes, len(bundle))
+        if flags:
+            # The pinned reader's own construction (attention_replay.py), with the sentinel.
+            config = operations.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
+                exp_approx_mode=False, q_chunk_size=QWEN_DECODE_MAGIC | flags, k_chunk_size=256)
+        replaced.append((bundle, pages, mask, config))
+        applied.append(flags)
+    reader.metadata[:] = replaced
+    reader.sdpa_modes_applied = tuple(applied)
+    log('%s modes=%s rows=%d capacity=%d bundles=%s flags=%s mask=wide'
+        % (SDPA_MODES_MARKER, ','.join(sorted(modes)), reader.rows, reader.capacity,
+           [len(entry[0]) for entry in reader.metadata], ['0x%x' % value for value in applied]))
+    return reader.sdpa_modes_applied
 
 
 # The largest native chunk family any validate_ticket regime admits (the simulator's
@@ -149,6 +254,7 @@ class PooledReplayAttentionReader(ReplayAttentionReader):
             if len(self.borrowed) != len(tables):
                 raise AssertionError('The pinned reader took %d of the %d lent page tables' % (len(self.borrowed), len(tables)))
             self.stage_pages(pages_host)
+            apply_sdpa_modes(self, sdpa_modes())
         except BaseException:
             self.close()
             raise
@@ -243,6 +349,8 @@ class PackedReplayAttentionReader:
         self.calls = 0
         self.closed = False
         self.audit = None
+        # Read once, before any reader is built: a bad value refuses the block with nothing staged.
+        modes = sdpa_modes()
         try:
             for index, ((first, last), pages_host) in enumerate(zip(self.segments, tables_host, strict=True)):
                 if lent is None:
@@ -253,6 +361,8 @@ class PackedReplayAttentionReader:
                                                          storage=lent[index], max_group_rows=max_group_rows,
                                                          short_context=False)
                 self.readers.append(reader)
+                # Unpooled readers are the pinned class; a pooled one applied it at construction (no-op).
+                apply_sdpa_modes(reader, modes)
         except BaseException:
             self.close()
             raise

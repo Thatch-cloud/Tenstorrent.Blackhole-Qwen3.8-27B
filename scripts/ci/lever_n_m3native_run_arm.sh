@@ -115,15 +115,51 @@ for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
 # over the combined SDPA factory fd8c0676 on 2026-09-21 03:47 UTC, so it passes both
 # runtime_binary_override checks (every pinned path matches, and the factory hash is
 # the combined one) and is admitted for measurement without touching the pin itself.
+#
+# A graft that carries an sdpa_decode op directory (~/opgraft-K64e onward: the [QWEN-SDPA]
+# factory branch in _ttnncpp.so, plus reader_decode_qwen.cpp / sdpa_flash_decode_qwen.cpp,
+# see optimisation/ttnn-op/sdpa_decode_qwen) also mounts that directory over the image's.
+# Device kernels are JIT-compiled from the op directory at dispatch, so without it the new
+# kernel files do not exist in the container. The graft's copy is the image's directory
+# plus those two files only - its factory .cpp is the audited 3e0a69af, not the compiled
+# one, so sdpa_tree_scratch.audit(patched=True) still passes (build_k64e.sh checks this).
+# K64c/K64d have no such directory, so their runs are unchanged. Such a graft also gets
+# its own JIT cache, keyed by the two kernels' bytes: the kernel cache hash is not known to
+# cover file contents, so a revised kernel at the same path could otherwise reuse a stale
+# binary (the default arm keeps /experiment-cache/kernels).
 KM=""
 graft_binary_sha=""
+kernel_cache=/experiment-cache/kernels
 if [ -n "${KOPGRAFT64:-}" ]; then
   KM="$KM -v $KOPGRAFT64/_ttnn.so:/opt/tt-metal/ttnn/ttnn/_ttnn.so:ro"
   KM="$KM -v $KOPGRAFT64/_ttnncpp.so:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so:ro"
   KM="$KM -v $KOPGRAFT64/_ttnncpp.so:/opt/tt-metal/build_Release/lib/_ttnncpp.so:ro"
   KM="$KM -v $KOPGRAFT64/attn_prep:/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/attn_prep:ro"
   KM="$KM -v $KOPGRAFT64/nlp_concat_heads_decode:/opt/tt-metal/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode:ro"
+  if [ -d "$KOPGRAFT64/sdpa_decode" ]; then
+    sdpa_kernels="$KOPGRAFT64/sdpa_decode/device/kernels"
+    for kernel in dataflow/reader_decode_qwen.cpp compute/sdpa_flash_decode_qwen.cpp; do
+      if [ ! -s "$sdpa_kernels/$kernel" ]; then
+        echo "KOPGRAFT64 sdpa_decode directory lacks $kernel" >&2
+        exit 1
+      fi
+    done
+    KM="$KM -v $KOPGRAFT64/sdpa_decode:/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa_decode:ro"
+    kernel_cache="/experiment-cache/kernels-qwen-$(cat "$sdpa_kernels/dataflow/reader_decode_qwen.cpp" \
+      "$sdpa_kernels/compute/sdpa_flash_decode_qwen.cpp" | sha256sum | cut -c1-12)"
+    echo "sdpa_decode op directory grafted from $KOPGRAFT64; kernel cache $kernel_cache"
+  fi
   graft_binary_sha=$(sha256sum "$KOPGRAFT64/_ttnncpp.so" | cut -c1-64)
+fi
+# M3NATIVE_SDPA_MODES (e.g. 'tail') becomes QWEN_FAST_SDPA_MODES, read by
+# pooled_attention_replay.sdpa_modes inside the engine. That module is part of the baked
+# evidence tree (/experiment-scripts/ci), so an image older than this change would never
+# read the flag; the arm therefore also mounts this checkout's copy over that ONE file
+# when the flag is set (it is free to edit - not a pinned source - and in both image copy
+# lists). Unset, neither the env var nor the mount is added.
+sdpa_mode_mounts=()
+if [ -n "${M3NATIVE_SDPA_MODES:-}" ]; then
+  sdpa_mode_mounts+=(--mount "type=bind,src=$PWD/scripts/ci/pooled_attention_replay.py,dst=/experiment-scripts/ci/pooled_attention_replay.py,readonly")
 fi
 
 # Proposals: the fp2u lane runs each request's draft proposal EAGERLY
@@ -242,6 +278,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$PWD/scripts/ci/m3native_ttft_profile.py,dst=/bench/m3native_ttft_profile.py,readonly" \
   --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
   "${mounts[@]}" \
+  "${sdpa_mode_mounts[@]}" \
   $KM \
   ${KOPGRAFT64:+-e QWEN_FAST_NATIVE_ATTN=1} \
   ${KOPGRAFT64:+-e QWEN_FAST_RUNTIME_BINARY_SHA256=$graft_binary_sha} \
@@ -253,6 +290,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_TRACED_PUBLISH:+-e QWEN_FAST_TRACED_PUBLISH=1} \
   ${M3NATIVE_GDN_USER_BATCH:+-e QWEN_FAST_GDN_USER_BATCH=1} \
   ${M3NATIVE_REPLAY_GROUP_ROWS:+-e QWEN_FAST_REPLAY_GROUP_ROWS=$M3NATIVE_REPLAY_GROUP_ROWS} \
+  ${M3NATIVE_SDPA_MODES:+-e QWEN_FAST_SDPA_MODES=$M3NATIVE_SDPA_MODES} \
   ${M3NATIVE_GDN_USER_BATCH_MIN_USERS:+-e QWEN_FAST_GDN_USER_BATCH_MIN_USERS=$M3NATIVE_GDN_USER_BATCH_MIN_USERS} \
   ${M3NATIVE_GDN_STATE_COPY_BATCH:+-e QWEN_FAST_GDN_STATE_COPY_BATCH=1} \
   ${M3NATIVE_MEMORY_LEDGER:+-e QWEN_FAST_MEMORY_LEDGER=1} \
@@ -286,7 +324,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   -e QWEN_GDN_GROUPED_GATHER_ABBA=0 -e QWEN_GDN_GATE_EXP_ABBA=0 \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e VLLM_USE_V2_MODEL_RUNNER=0 \
   -e TT_METAL_HOME=/opt/tt-metal -e MESH_DEVICE=P300 -e OMP_NUM_THREADS=8 \
-  -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
+  -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=$kernel_cache \
   -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
   --entrypoint python3 "$image" "${entry_args[@]}" \
   --users "$users" --context "$context" --prompt-tokens "$prompt_tokens" --max-tokens "$max_tokens" --stream-timeout 600 --trace-region-bytes "$trace_region_bytes" \

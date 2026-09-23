@@ -17,6 +17,8 @@ on CPU, in seconds - instead of on the rig, as a silently stock run.
 """
 
 import ast
+import hashlib
+import os
 from pathlib import Path
 import re
 import unittest
@@ -210,6 +212,95 @@ class ArmEnvPassthroughTests(unittest.TestCase):
             with self.subTest(flag=name):
                 self.assertIn('${M3NATIVE_%s:+-e QWEN_FAST_%s=1}' % (name, name), text)
                 self.assertIn("'QWEN_FAST_%s'" % name, baked)
+
+
+class SdpaModesArmTests(unittest.TestCase):
+    """M3NATIVE_SDPA_MODES and the sdpa_decode op-directory graft (optimisation/ttnn-op/
+    sdpa_decode_qwen). The flag is translated, not passed by name, so the /bench scan above
+    cannot see it; these pin both ends and the mount rules."""
+
+    SDPA_DIR = '/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa_decode'
+    POOLED = 'dst=/experiment-scripts/ci/pooled_attention_replay.py,readonly'
+
+    def test_the_modes_flag_becomes_the_env_var_the_replay_reader_and_the_gate_read(self):
+        text = arm_text()
+        self.assertIn('${M3NATIVE_SDPA_MODES:+-e QWEN_FAST_SDPA_MODES=$M3NATIVE_SDPA_MODES}', text)
+        self.assertIn("SDPA_MODES_ENV = 'QWEN_FAST_SDPA_MODES'", (HERE / 'pooled_attention_replay.py').read_text(encoding='utf-8'))
+        self.assertIn("environ.get('QWEN_FAST_SDPA_MODES')", (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8'))
+        self.assertNotIn('M3NATIVE_SDPA_MODES', passed_through(text), 'translated to QWEN_FAST_SDPA_MODES, not passed by name')
+
+    def test_the_reader_module_is_mounted_only_with_the_flag(self):
+        text = arm_text()
+        self.assertEqual(text.count(self.POOLED), 1)
+        block = text[text.index('if [ -n "${M3NATIVE_SDPA_MODES:-}" ]; then'):]
+        self.assertLess(block.index(self.POOLED), block.index(chr(10) + 'fi' + chr(10)))
+        self.assertIn('"${sdpa_mode_mounts[@]}"', text)
+
+    def test_the_op_directory_is_mounted_only_from_a_graft_that_has_one(self):
+        text = arm_text()
+        mount = '-v $KOPGRAFT64/sdpa_decode:%s:ro' % self.SDPA_DIR
+        self.assertEqual(text.count(mount), 1)
+        start = text.index('if [ -n "${KOPGRAFT64:-}" ]; then')
+        end = text.index(chr(10) + 'fi' + chr(10), start)
+        graft = text[start:end]
+        self.assertIn('if [ -d "$KOPGRAFT64/sdpa_decode" ]; then', graft)
+        self.assertLess(graft.index('if [ -d "$KOPGRAFT64/sdpa_decode" ]; then'), graft.index(mount))
+        self.assertIn('-e TT_METAL_CACHE=$kernel_cache', text)
+        self.assertIn('kernel_cache=/experiment-cache/kernels' + chr(10), text)
+        self.assertNotIn('TT_METAL_CACHE=/experiment-cache/kernels ', text)
+
+    def _run_graft_block(self, graft):
+        """The arm's own KOPGRAFT64 block, executed by bash against a fake graft directory."""
+        import shutil
+        import subprocess
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        text = arm_text()
+        start = text.index('KM=""')
+        end = text.index(chr(10) + 'fi' + chr(10), text.index('if [ -n "${KOPGRAFT64:-}" ]; then')) + 4
+        script = 'set -euo pipefail' + chr(10) + text[start:end] + 'printf "RESULT|%s|%s|%s" "$KM" "$kernel_cache" "$graft_binary_sha"' + chr(10)
+        try:
+            result = subprocess.run([bash, '-c', script], env=dict(PATH=os.environ.get('PATH', ''), KOPGRAFT64=graft),
+                                    capture_output=True, text=True, timeout=60)
+        except OSError as error:
+            self.skipTest('bash unusable: %s' % error)
+        if result.returncode == 127 or 'sha256sum' in result.stderr and 'not found' in result.stderr:
+            self.skipTest('bash lacks coreutils here')
+        return result
+
+    def test_the_graft_block_runs_unchanged_for_k64d_and_adds_the_directory_for_k64e(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).as_posix()
+            old, new = root + '/k64d', root + '/k64e'
+            for graft in (old, new):
+                Path(graft).mkdir()
+                Path(graft, '_ttnncpp.so').write_bytes(b'so')
+            kernels = Path(new, 'sdpa_decode', 'device', 'kernels')
+            for name, body in (('dataflow/reader_decode_qwen.cpp', b'reader'), ('compute/sdpa_flash_decode_qwen.cpp', b'compute')):
+                (kernels / name).parent.mkdir(parents=True, exist_ok=True)
+                (kernels / name).write_bytes(body)
+            result = self._run_graft_block(old)
+            if result.returncode != 0 and 'No such file' in result.stderr and ':' in root[:3]:
+                self.skipTest('bash here does not share this filesystem view: %s' % result.stderr.strip())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            km, cache, sha = result.stdout.split('RESULT|')[-1].split('|')
+            self.assertNotIn('sdpa_decode', km)
+            self.assertEqual(km.count(' -v '), 5)
+            self.assertEqual(cache, '/experiment-cache/kernels')
+            self.assertEqual(sha, hashlib.sha256(b'so').hexdigest())
+            result = self._run_graft_block(new)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            km, cache, sha = result.stdout.split('RESULT|')[-1].split('|')
+            self.assertIn(' -v %s/sdpa_decode:%s:ro' % (new, self.SDPA_DIR), km)
+            self.assertEqual(km.count(' -v '), 6)
+            self.assertEqual(cache, '/experiment-cache/kernels-qwen-' + hashlib.sha256(b'readercompute').hexdigest()[:12])
+            (kernels / 'compute/sdpa_flash_decode_qwen.cpp').unlink()
+            result = self._run_graft_block(new)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('lacks compute/sdpa_flash_decode_qwen.cpp', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

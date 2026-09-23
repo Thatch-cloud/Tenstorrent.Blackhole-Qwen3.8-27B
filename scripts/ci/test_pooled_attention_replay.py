@@ -3,6 +3,7 @@ tables lent by the serving pool instead of uploaded - staged at construction, bo
 never freed here - and the family and bundle geometry the pool needs to size them."""
 
 import inspect
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -445,6 +446,212 @@ class PackedReaderTests(unittest.TestCase):
             self.assertEqual([tuple(entry[1].shape) for entry in own.metadata], [(3, 68), (1, 68)])
             self.assertTrue(all(bool((entry[1].value == 7 + 4 * user).all()) for entry in own.metadata))
             self.assertEqual(len(own.owned), 5)
+
+
+class SdpaModesTests(unittest.TestCase):
+    """QWEN_FAST_SDPA_MODES (stage 1, 'tail'): the per-bundle SDPA configs of a built replay
+    reader carry the grafted factory's q_chunk_size sentinel; unset, nothing changes."""
+
+    # The files this change must not touch (their bytes are gate evidence), at HEAD d21cd875+.
+    PINNED = {
+        'attention_replay.py': '4eff1c51fd42bb04adf68fc40bf74a0cca0cd455c3ae2fc50caf720f5281137a',
+        'attention_batch.py': '64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0',
+        'gdn_multitoken_conv.py': '6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859',
+        'attention_mask_replay.py': '3e431742e35a2b94b4a02a60fa334a93a44a471eaefcacd25e52fbafdf03361f',
+        'attention_mask_replay.cpp': 'e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8',
+        'attention_parallel.py': '7bf5ba445100d184f7b9289fed4c20b4a730dbee29ee382cb97b6c2ad17f0e58',
+    }
+
+    def setUp(self):
+        import pooled_attention_replay
+        patcher = patch.object(pooled_attention_replay, '_binary_checked', [])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def config(**kwargs):
+        return SimpleNamespace(**kwargs)
+
+    def reader(self, batches=(3, 1), short_context=False):
+        """A built replay reader's surface: metadata entries of (bundle, pages, mask, config)."""
+        operations = SimpleNamespace(SDPAProgramConfig=Mock(side_effect=self.config))
+        metadata = [([dict(rows=4, offset=4 * index)] * count, SimpleNamespace(name='pages%d' % index),
+                     SimpleNamespace(name='mask%d' % index),
+                     self.config(compute_with_storage_grid_size=(11, 10), exp_approx_mode=False,
+                                 q_chunk_size=0, k_chunk_size=256))
+                    for index, count in enumerate(batches)]
+        return SimpleNamespace(operations=operations, short_context=short_context, rows=16, capacity=4352,
+                               mesh=SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10)),
+                               metadata=metadata)
+
+    def test_the_environment_parses_to_tail_only_and_refuses_the_later_stages_by_name(self):
+        from pooled_attention_replay import SDPA_MODES_ENV, sdpa_modes
+        self.assertEqual(sdpa_modes({}), frozenset())
+        self.assertEqual(sdpa_modes({SDPA_MODES_ENV: ''}), frozenset())
+        self.assertEqual(sdpa_modes({SDPA_MODES_ENV: ' , '}), frozenset())
+        self.assertEqual(sdpa_modes({SDPA_MODES_ENV: 'tail'}), frozenset({'tail'}))
+        self.assertEqual(sdpa_modes({SDPA_MODES_ENV: ' tail ,tail'}), frozenset({'tail'}))
+        for value, message in (('tail,narrow', 'narrow not in this build'), ('share', 'share not in this build'),
+                               ('tail,share', 'stage 3'), ('narrow', 'stage 1b'), ('tial', 'Unknown'),
+                               ('tail,1', 'Unknown')):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, message):
+                sdpa_modes({SDPA_MODES_ENV: value})
+        with patch.dict('os.environ', {SDPA_MODES_ENV: 'tail'}):
+            self.assertEqual(sdpa_modes(), frozenset({'tail'}))
+
+    def test_tail_flags_every_bundle_and_share_only_multi_entry_ones(self):
+        from pooled_attention_replay import mode_flags
+        self.assertEqual([mode_flags({'tail'}, batches) for batches in (3, 1)], [0x1, 0x1])
+        self.assertEqual([mode_flags({'tail', 'share'}, batches) for batches in (3, 1)], [0x3, 0x1])
+        self.assertEqual(mode_flags(frozenset(), 3), 0)
+
+    def test_tail_rewrites_each_config_with_the_sentinel_and_keeps_every_tensor(self):
+        from pooled_attention_replay import SDPA_MODES_MARKER, apply_sdpa_modes
+        reader = self.reader()
+        before = list(reader.metadata)
+        lines = []
+        result = apply_sdpa_modes(reader, frozenset({'tail'}), log=lines.append,
+                                  binary_check=lambda: ('/opt/x/_ttnncpp.so', True))
+        self.assertEqual(result, (0x1, 0x1))
+        self.assertEqual(reader.sdpa_modes_applied, (0x1, 0x1))
+        for old, new in zip(before, reader.metadata, strict=True):
+            self.assertIs(new[0], old[0])
+            self.assertIs(new[1], old[1], 'the page table (pool-lent or owned) is the same object')
+            self.assertIs(new[2], old[2], 'the wide mask is the same object')
+            self.assertEqual(vars(new[3]), dict(compute_with_storage_grid_size=(11, 10), exp_approx_mode=False,
+                                                q_chunk_size=0x51DEC001, k_chunk_size=256))
+            self.assertEqual(vars(new[3]), dict(vars(old[3]), q_chunk_size=0x51DEC001))
+        self.assertEqual(lines, [
+            SDPA_MODES_MARKER + ' binary /opt/x/_ttnncpp.so carries the [QWEN-SDPA] branch',
+            SDPA_MODES_MARKER + " modes=tail rows=16 capacity=4352 bundles=[3, 1] flags=['0x1', '0x1'] mask=wide"])
+        # A second apply is a no-op, and the binary is checked once per process.
+        self.assertEqual(apply_sdpa_modes(reader, frozenset({'tail'}), log=lines.append,
+                                          binary_check=lambda: self.fail('checked twice')), (0x1, 0x1))
+        self.assertEqual(len(lines), 2)
+        other = self.reader(batches=(2,))
+        apply_sdpa_modes(other, frozenset({'tail'}), log=lines.append, binary_check=lambda: self.fail('checked twice'))
+        self.assertEqual(lines[-1], SDPA_MODES_MARKER + " modes=tail rows=16 capacity=4352 bundles=[2] flags=['0x1'] mask=wide")
+
+    def test_no_modes_is_a_no_op_that_reads_nothing(self):
+        from pooled_attention_replay import apply_sdpa_modes
+        reader = self.reader()
+        before = list(reader.metadata)
+        self.assertIsNone(apply_sdpa_modes(reader, frozenset(), log=self.fail, binary_check=self.fail))
+        self.assertEqual(reader.metadata, before)
+        self.assertFalse(hasattr(reader, 'sdpa_modes_applied'))
+        reader.operations.SDPAProgramConfig.assert_not_called()
+
+    def test_an_old_binary_short_context_or_a_later_mode_applies_nothing(self):
+        from pooled_attention_replay import _binary_checked, apply_sdpa_modes
+        reader = self.reader()
+        before = list(reader.metadata)
+        with self.assertRaisesRegex(RuntimeError, 'lacks the .QWEN-SDPA. factory branch'):
+            apply_sdpa_modes(reader, frozenset({'tail'}), log=self.fail, binary_check=lambda: ('/old/_ttnncpp.so', False))
+        self.assertEqual(_binary_checked, [])
+        with self.assertRaisesRegex(ValueError, 'long-context only'):
+            apply_sdpa_modes(self.reader(short_context=True), frozenset({'tail'}), log=self.fail,
+                             binary_check=lambda: ('/x/_ttnncpp.so', True))
+        for modes in ({'tail', 'share'}, {'tail', 'narrow'}, {'wide'}):
+            with self.subTest(modes=modes), self.assertRaisesRegex(ValueError, 'not in this build'):
+                apply_sdpa_modes(reader, frozenset(modes), log=self.fail, binary_check=lambda: ('/x/_ttnncpp.so', True))
+        self.assertEqual(reader.metadata, before)
+        self.assertFalse(hasattr(reader, 'sdpa_modes_applied'))
+        reader.operations.SDPAProgramConfig.assert_not_called()
+
+    def test_the_config_is_the_pinned_readers_own_construction_but_the_sentinel(self):
+        """If attention_replay.py ever builds its config differently, the rewrite must follow."""
+        import pooled_attention_replay
+        pinned = inspect.getsource(ReplayAttentionReader.__init__)
+        self.assertIn('config = operations.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),', pinned)
+        self.assertIn('exp_approx_mode=False, q_chunk_size=0, k_chunk_size=256)', pinned)
+        ours = inspect.getsource(pooled_attention_replay.apply_sdpa_modes)
+        self.assertIn('config = operations.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),', ours)
+        self.assertIn('exp_approx_mode=False, q_chunk_size=QWEN_DECODE_MAGIC | flags, k_chunk_size=256)', ours)
+
+    def test_the_binary_check_reads_the_one_mapped_ttnncpp(self):
+        import tempfile
+        from pooled_attention_replay import loaded_binary_has_modes
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            graft, stock = root / 'graft' / '_ttnncpp.so', root / 'stock' / '_ttnncpp.so'
+            for path, body in ((graft, b'x' * 4096 + b'[QWEN-SDPA] flags={:#x} B={}' + b'y' * 64),
+                               (stock, b'x' * 4096 + b'[QWEN-SDPA] unknown flags {:#x}')):
+                path.parent.mkdir()
+                path.write_bytes(body)
+            maps = root / 'maps'
+
+            def mapped(*paths):
+                maps.write_text(''.join('7f00-7f10 r-xp 00000000 08:01 1 %s%s' % (path, chr(10)) for path in paths)
+                                + '7f20-7f30 r--p 00000000 08:01 2 /usr/lib/libc.so.6' + chr(10))
+                return loaded_binary_has_modes(str(maps))
+
+            self.assertEqual(mapped(graft, graft), (str(graft), True))
+            self.assertEqual(mapped(stock), (str(stock), False))
+            for paths in ((), (graft, stock)):
+                with self.subTest(paths=paths), self.assertRaisesRegex(RuntimeError, 'exactly one mapped'):
+                    mapped(*paths)
+
+    def test_the_pooled_reader_applies_the_modes_from_the_environment_before_returning(self):
+        from pooled_attention_replay import SDPA_MODES_ENV
+        lines = []
+        with patch.dict('os.environ', {SDPA_MODES_ENV: 'tail'}), \
+                patch('pooled_attention_replay._pindiag', side_effect=lines.append), \
+                patch('pooled_attention_replay.loaded_binary_has_modes', return_value=('/g/_ttnncpp.so', True)):
+            reader, upload, operations, copies = PooledReaderTests.build(PooledReaderTests(), pooled_tables([(3, 68), (1, 68)]))
+        self.assertEqual(reader.sdpa_modes_applied, (0x1, 0x1))
+        calls = operations.SDPAProgramConfig.call_args_list
+        self.assertEqual([call.kwargs['q_chunk_size'] for call in calls], [0, 0, 0x51DEC001, 0x51DEC001])
+        self.assertEqual(len(lines), 2)
+
+    def test_unset_the_pooled_and_packed_readers_keep_the_pinned_configs(self):
+        with patch.dict('os.environ', {}, clear=True), patch('pooled_attention_replay._pindiag', side_effect=self.fail), \
+                patch('pooled_attention_replay.loaded_binary_has_modes', side_effect=self.fail):
+            reader, upload, operations, copies = PooledReaderTests.build(PooledReaderTests(), pooled_tables([(3, 68), (1, 68)]))
+            packed, storage, packed_operations, packed_copies, events = PackedReaderTests.build(PackedReaderTests(), storage=None)
+        self.assertFalse(hasattr(reader, 'sdpa_modes_applied'))
+        self.assertEqual([call.kwargs['q_chunk_size'] for call in operations.SDPAProgramConfig.call_args_list], [0, 0])
+        self.assertFalse(any(hasattr(own, 'sdpa_modes_applied') for own in packed.readers))
+        self.assertEqual([call.kwargs['q_chunk_size'] for call in packed_operations.SDPAProgramConfig.call_args_list], [0] * 4)
+
+    def test_the_packed_block_applies_the_modes_to_every_user_pooled_or_not(self):
+        from pooled_attention_replay import SDPA_MODES_ENV
+        for storage in ('pooled', None):
+            lines = []
+            with self.subTest(storage=storage), patch.dict('os.environ', {SDPA_MODES_ENV: 'tail'}), \
+                    patch('pooled_attention_replay._binary_checked', []), \
+                    patch('pooled_attention_replay._pindiag', side_effect=lines.append), \
+                    patch('pooled_attention_replay.loaded_binary_has_modes', return_value=('/g/_ttnncpp.so', True)):
+                packed, tables, operations, copies, events = PackedReaderTests.build(
+                    PackedReaderTests(), storage=storage, segments=((0, 16), (16, 32), (32, 48), (48, 64)))
+                self.assertEqual([own.sdpa_modes_applied for own in packed.readers], [(0x1, 0x1)] * 4)
+                sentinels = [call.kwargs['q_chunk_size'] for call in operations.SDPAProgramConfig.call_args_list]
+                self.assertEqual(sentinels.count(0x51DEC001), 8, 'two bundles per user, four users, once each')
+                self.assertEqual(sum(_is_modes_marker(line) for line in lines), 5, 'one binary line, one per reader')
+                if storage == 'pooled':
+                    self.assertEqual([entry[1] for entry in packed.metadata], [t for user in tables for t in user])
+
+    def test_a_bad_value_refuses_the_packed_block_before_any_reader_is_built(self):
+        from pooled_attention_replay import SDPA_MODES_ENV
+        with patch.dict('os.environ', {SDPA_MODES_ENV: 'tail,share'}), self.assertRaisesRegex(ValueError, 'stage 3'):
+            PackedReaderTests.build(PackedReaderTests(), storage=None)
+        with patch.dict('os.environ', {SDPA_MODES_ENV: 'tail'}), \
+                patch('pooled_attention_replay.loaded_binary_has_modes', return_value=('/old/_ttnncpp.so', False)), \
+                patch('attention_replay.release_owned') as released, \
+                self.assertRaisesRegex(RuntimeError, 'lacks the .QWEN-SDPA. factory branch'):
+            PackedReaderTests.build(PackedReaderTests(), storage=None)
+        released.assert_called()
+
+    def test_the_pinned_files_keep_their_bytes(self):
+        import hashlib
+        here = Path(__file__).resolve().parent
+        for name, digest in self.PINNED.items():
+            with self.subTest(name=name):
+                self.assertEqual(hashlib.sha256((here / name).read_bytes()).hexdigest(), digest)
+
+
+def _is_modes_marker(line):
+    from pooled_attention_replay import SDPA_MODES_MARKER
+    return line.startswith(SDPA_MODES_MARKER)
 
 
 if __name__ == '__main__':
