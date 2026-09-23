@@ -217,7 +217,9 @@ def sample_shards(operations, logits, rows):
     row_major = operations.to_layout(logits, operations.ROW_MAJOR_LAYOUT, memory_config=dram)
     ids = values = None
     try:
-        ids = operations.argmax(row_major, dim=3, keepdim=True, use_multicore=True, memory_config=dram)
+        # This build's ttnn.argmax has no use_multicore keyword (G0 TypeError, 2026-09-23); a last-dim
+        # reduction over ROW_MAJOR input is multi-core by default.
+        ids = operations.argmax(row_major, dim=3, keepdim=True, memory_config=dram)
         values = operations.max(logits, dim=3, keepdim=True, memory_config=dram)
         return ids, values
     except BaseException:

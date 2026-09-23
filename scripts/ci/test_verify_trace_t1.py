@@ -522,7 +522,7 @@ class ShardSamplingTests(unittest.TestCase):
         self.assertEqual(t1.sample_shards(operations, logits, 64), ('ids', 'values'))
         self.assertEqual(calls, [
             ('to_layout', 'row_major', 'dram'),
-            ('argmax', 'row-major', (('dim', 3), ('keepdim', True), ('memory_config', 'dram'), ('use_multicore', True))),
+            ('argmax', 'row-major', (('dim', 3), ('keepdim', True), ('memory_config', 'dram'))),
             ('max', 'logits', (('dim', 3), ('keepdim', True), ('memory_config', 'dram'))),
             ('free', 'row-major')])
 
