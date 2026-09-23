@@ -15,6 +15,10 @@ relevant unread source - supplies the physical floor.
 
 **Not reachable on the current m3native packed design. Not ruled out by physics.**
 
+> **Update, v101 (run 35809096034): four streams at a 131k window now fit and run** - 4/4
+> token-exact over 256 tokens, 1.30 GB free per chip. Capacity is solved; the per-user rate
+> is not: 17.2 tok/s each against 47.5 single-stream (36%). See the last section.
+
 The DRAM-bandwidth floor for four users at 131k is **75.8 ms per round** at bf8
 (65.2 ms at bf4) - `docs/batch-spec-ceiling-2026-09-19.md:9-10`, every non-bandwidth
 overhead set to zero. The current design is predicted at roughly **355 ms** for that
@@ -280,3 +284,81 @@ the gate, 4/4 token-exact**:
 The -14.6 ms matches the review's -14 ms estimate. The two flags help different buckets
 and hang together; resolving that interaction would recover ~4 ms more. **v91 is the new
 best four-user configuration and the baseline for the next increments.**
+
+## Four streams at 131k now fit, and run token-exact (v101)
+
+**Run 35809096034 (v101): four concurrent streams, each with a 131,328-token window and a
+131,072-token prompt, passed the gate - 4/4 byte-identical to single-stream over all 256
+tokens, against references recorded at 131k.** The KV cache holds 525,568 tokens (9.149 GB
+per chip, the ledger's P0 line). Peak DRAM after the fourth user is 32.61 of 33.91 GB per
+chip: **1.30 GB free**, against a projected 1.26.
+
+What it cost to get there, all measured by the memory ledger (L0) on image A
+(`sha256:0648ca9a...`, commit 0552008b) and each behind its own default-off flag:
+
+| lever | flag | GB per chip | evidence |
+|---|---|---|---|
+| A2 trace region 512 -> 256 MiB | `M3NATIVE_TRACE_REGION_BYTES` | +0.27 usable | v92: total 33.64 -> 33.91, 4/4 exact, round 255.0 vs 257.0 ms |
+| C1 no packed `w_gate_up` | `QWEN_FAST_SINGLE_GATEUP` + mlp/layer graft | -3.209 | ledger P0 item gone |
+| A1/C1 no block-stream copy | (implied by C1) | -3.220 | ledger P1 item gone |
+| B1 bf8 draft projections | `QWEN_FAST_DRAFT_BF8` | -0.811 (1.877 -> 1.066) | ledger P5 item |
+| **total** | | **-7.24 + 0.27** | attach 29.89 -> 22.64 GB at 32k |
+
+The ledger's attach accounting closes: every allocator delta P0..P7 matches its walked
+items, and the P7 residual is 0.016-0.023 GB.
+
+### How C1 got through (three runs)
+
+C1 changes target prefill arithmetic: the fused all-gather + SwiGLU matmul is replaced by
+the model's own unfused w1/w3 path. `tp_common.py`, where the switch lives, cannot be
+grafted - `mlp_down_grid_gate` pins its sha256 and v95 (run 35802496949) died at attach -
+so the flag is applied at the three call sites in `mlp.py` and `layer.py` instead. The
+unfused 2D prefill branch had never run at TP2 and did not fit L1: v100 (run 35807762937)
+found its L1 gate/up outputs (35.7 MB at 2048 rows, N=8704) in the way; with DRAM outputs,
+v102 (run 35808212287) found the program's own circular buffers reaching 1,559,424 bytes
+against persistent L1 buffers. Under the flag the branch now runs 1024-row slices (the
+model's own builder per slice, DRAM outputs, joined on rows). v103 (run 35808667002, 4 x
+32k, every flag) and v101 are both **4/4 exact over 256 tokens**: the unfused prefill
+produces the same tokens as the fused one on these prompts.
+
+### References are now full-length and context-exact
+
+Every tracked reference used to be 64 tokens, so "token-exact" had covered a quarter of
+each stream. v97 and v98 (runs 35803057593, 35803058152) ran bases 1000..1003 one at a time
+on one server, 256 tokens each, at 32k and at 131k. Each extends its old plain-path
+reference exactly, and the 131k and 32k outputs are byte-identical (the prompt is token ids
+base + i % 64). Re-judged against them, v91 and v92 are exact over all 256 tokens too.
+
+### Throughput at 4 x 131k: the fit is not the rate
+
+| | 1 x 131k (v98) | 4 x 32k (v99) | 4 x 131k (v101) |
+|---|---|---|---|
+| verify trace | - | 157.8 ms | **246.3 ms** |
+| median round | - | 250.0 ms | **340.0 ms** |
+| tokens per user per round | - | 7.15 | 6.81 (bf8 draft) |
+| per-user decode, steady state | 45-53 tok/s | 22.2 tok/s | **17.2 tok/s** |
+| aggregate | ~48 tok/s | ~89 tok/s | **~69 tok/s** |
+| TTFT, 4th user | - | 52.9 s | **275.9 s** |
+
+At 131k each concurrent stream decodes at about **36% of the single-stream rate** (17.2 vs
+47.5 tok/s); the four together deliver about 1.45x one stream. The verify trace grows by
+88.5 ms from 32k to 131k (the attention reads the planner priced), and prefill is serial:
+~68 s per 131k prompt, during which the others' decode stalls, so the fourth user waits
+276 s for its first token.
+
+The bf8 draft costs acceptance: 7.15 -> 6.83 tokens per user per round at 32k (-4.5%, over
+the planner's 3% bar). It is 0.81 GB of the 1.30 GB margin, so it cannot simply be dropped
+at 131k without leaving ~0.5 GB. v104 (C1 without B1, 4 x 32k) attributes the rest of
+v103's slower round.
+
+### What remains for "single-stream rate or better"
+
+Capacity was the gate for four streams at 131k, and it is open. The rate is the remaining
+wall and it is the one this note's short answer described: the round at 4 x 131k is
+340 ms against a DRAM floor of 75.8 ms, so it is structure, not bandwidth - per-user
+proposal/commit work that does not overlap (81 ms of the 340: proposals 36.4, commits
+36.2, propose 8.7), a verify that reads each user's KV separately, and serial prefill. The
+levers that would move it are the ones the planner listed as beyond the evidence-backed
+plan: a second command queue / sub-device overlap of the per-user phases, a cross-user
+SDPA kernel, and prefill-decode interleave (Lever N) for TTFT. WY-form GDN is faster but
+not token-exact, which is a user decision.
