@@ -28,6 +28,7 @@ import traceback
 
 import gdn_multitoken as native
 import gdn_user_batch as batch
+import verify_trace_t1
 
 
 def same_bits(torch, left, right):
@@ -66,7 +67,10 @@ def main():
                   iterations=arguments.iterations, seed=arguments.seed,
                   native_sha256=native.HASHES, handoff_sha256=native.HANDOFF_HASHES,
                   module_sha256={name: hashlib.sha256((Path(__file__).with_name(name)).read_bytes()).hexdigest()
-                                 for name in ('gdn_user_batch.py', 'gdn_user_batch_conv.py')},
+                                 for name in ('gdn_user_batch.py', 'gdn_user_batch_conv.py', 'verify_trace_t1.py')},
+                  # QWEN_FAST_VERIFY_T1 (cut #12): both arms built from rectangle ranges, the batched
+                  # one as one descriptor per role; `verify_t1_counts` says which build ran.
+                  verify_t1=verify_trace_t1.enabled(), verify_t1_counts=None,
                   result='did-not-run', stages=[])
 
     def stage(name, **details):
@@ -136,7 +140,9 @@ def main():
         release(control)
 
         stage('batched-arm', launches=1)
+        verify_trace_t1.take()
         candidate = batched()
+        report['verify_t1_counts'] = verify_trace_t1.take()
         ttnn.synchronize_device(mesh)
         candidate_host = [(host(output), host(states)) for output, states in candidate]
         release(candidate)

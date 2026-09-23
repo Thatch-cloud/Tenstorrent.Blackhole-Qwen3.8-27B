@@ -29,6 +29,7 @@ from pathlib import Path
 import struct
 
 import gdn_multitoken as native
+import verify_trace_t1
 
 
 DEFAULT_ROOT = Path('/opt/tt-metal')
@@ -166,6 +167,39 @@ def mesh_chips(mesh):
     return shape[1]
 
 
+def coalesced_descriptors(operations, kernels, configs, planned, union):
+    """QWEN_FAST_VERIFY_T1 (#12): the planned per-user descriptors as few as possible.
+
+    `planned` is `(role, compile_args, user_ranges, [(core, runtime_args), ...])` per user and
+    role, in build order. A role whose users all compile identically - equal row counts, and
+    the interleaved accessors carry no address - becomes ONE descriptor over `union` holding
+    every user's per-core runtime arguments; otherwise each user keeps its own descriptor on
+    its own (rectangle) ranges. Every core runs the same kernel with the same compile-time
+    and runtime arguments either way; only the descriptor and range counts change."""
+    roles = ('reader', 'writer', 'compute')
+    by_role = {role: [entry for entry in planned if entry[0] == role] for role in roles}
+    merged = all(len(entries) > 0 and all(entry[1] == entries[0][1] for entry in entries)
+                 for entries in by_role.values())
+    if merged:
+        parts = [(role, by_role[role][0][1], union, [core for entry in by_role[role] for core in entry[3]])
+                 for role in roles]
+    else:
+        # Never one role merged and another not: a mixed program would still be exact, but
+        # the per-user order is what the flag-off build makes, so keep it whole.
+        parts = [(role, args, cores, runtime) for role, args, cores, runtime in planned]
+    descriptors = []
+    for role, args, cores, runtime_by_core in parts:
+        runtime = operations.RuntimeArgs()
+        for (horizontal, vertical), values in runtime_by_core:
+            runtime[horizontal][vertical] = values
+        descriptor = operations.KernelDescriptor(kernel_source=kernels[role],
+            source_type=operations.KernelDescriptor.SourceType.SOURCE_CODE, core_ranges=cores,
+            compile_time_args=args, config=configs[role])
+        descriptor.runtime_args = runtime
+        descriptors.append(descriptor)
+    return descriptors, merged
+
+
 def build_program(operations, mesh, user_shards, kernels, widths):
     """One mesh program holding every user's reader/writer/compute on its own cores.
 
@@ -177,12 +211,20 @@ def build_program(operations, mesh, user_shards, kernels, widths):
     chips = mesh_chips(mesh)
     grid = mesh.compute_with_storage_grid_size()
     shares = core_shares(grid.x, grid.y, len(widths))
-    ranges = [operations.CoreRangeSet([operations.CoreRange(operations.CoreCoord(*point),
-                                                            operations.CoreCoord(*point))
-                                       for point in share]) for share in shares]
-    union = operations.CoreRangeSet([operations.CoreRange(operations.CoreCoord(*point),
-                                                          operations.CoreCoord(*point))
-                                     for share in shares for point in share])
+    # QWEN_FAST_VERIFY_T1 (#12, verify_trace_t1): rectangle core ranges, and one descriptor
+    # per role over every user's cores (coalesced_descriptors); per core, the same kernel,
+    # compile-time and runtime arguments as the 24 single-core ranges per user below.
+    coalesce = verify_trace_t1.cut('coalesce')
+    if coalesce:
+        ranges = [verify_trace_t1.rectangle_set(operations, share) for share in shares]
+        union = verify_trace_t1.rectangle_set(operations, [point for share in shares for point in share])
+    else:
+        ranges = [operations.CoreRangeSet([operations.CoreRange(operations.CoreCoord(*point),
+                                                                operations.CoreCoord(*point))
+                                           for point in share]) for share in shares]
+        union = operations.CoreRangeSet([operations.CoreRange(operations.CoreCoord(*point),
+                                                              operations.CoreCoord(*point))
+                                         for share in shares for point in share])
     buffers = []
     io, fp32 = native.cb_plan(True)
     for counts, dtype, page in ((io, operations.bfloat16, 2048), (fp32, operations.float32, 4096)):
@@ -198,9 +240,11 @@ def build_program(operations, mesh, user_shards, kernels, widths):
         compute=operations.ComputeConfigDescriptor(math_fidelity=operations.MathFidelity.HiFi4,
                                                    fp32_dest_acc_en=True, math_approx_mode=False))
     program = operations.MeshProgramDescriptor()
+    coalesced = []
     for chip in range(chips):
         descriptors = []
         private, weights = [], []
+        planned = []
         for shards, rows, share, cores in zip(user_shards, widths, shares, ranges, strict=True):
             local = [value[chip] for value in shards]
             addresses = [value.buffer_address() for value in local]
@@ -217,6 +261,10 @@ def build_program(operations, mesh, user_shards, kernels, widths):
                 args = list(compile_args(role, rows))
                 for index in ACCESSORS[role]:
                     args.extend(operations.TensorAccessorArgs(local[index]).get_compile_time_args())
+                if coalesce:
+                    planned.append((role, args, cores, [(point, runtime_args(role, head, rows, addresses))
+                                                        for head, point in enumerate(share)]))
+                    continue
                 runtime = operations.RuntimeArgs()
                 for head, (horizontal, vertical) in enumerate(share):
                     runtime[horizontal][vertical] = runtime_args(role, head, rows, addresses)
@@ -225,11 +273,16 @@ def build_program(operations, mesh, user_shards, kernels, widths):
                     compile_time_args=args, config=configs[role])
                 descriptor.runtime_args = runtime
                 descriptors.append(descriptor)
+        if coalesce:
+            descriptors, merged = coalesced_descriptors(operations, kernels, configs, planned, union)
+            coalesced.append(merged)
         if any(weight in private for weight in weights):
             raise ValueError('The shared norm weight must not alias any packed user buffer')
         coordinate = operations.MeshCoordinate(0, chip)
         program[operations.MeshCoordinateRange(coordinate, coordinate)] = operations.ProgramDescriptor(
             kernels=descriptors, cbs=buffers)
+    if coalesce:
+        verify_trace_t1.note('coalesced' if all(coalesced) else 'coalesce_fallback')
     return program
 
 

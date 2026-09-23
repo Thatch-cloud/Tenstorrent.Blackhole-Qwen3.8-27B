@@ -1856,7 +1856,7 @@ class PrefillProfileFlushTests(unittest.TestCase):
 
     def test_the_flag_name_the_arm_passes_is_the_one_the_graft_reads(self):
         arm = (Path(__file__).parent / 'lever_n_m3native_run_arm.sh').read_text(encoding='utf-8')
-        self.assertIn('${M3NATIVE_PROFILE:+-e QWEN_PREFILL_PROFILE_FLUSH=1}', arm)
+        self.assertIn('${M3NATIVE_PROFILE_FLUSH:+-e QWEN_PREFILL_PROFILE_FLUSH=1}', arm)
         self.assertIn('_QWEN_PREFILL_PROFILE_FLAG = "QWEN_PREFILL_PROFILE_FLUSH"', self.full)
 
 

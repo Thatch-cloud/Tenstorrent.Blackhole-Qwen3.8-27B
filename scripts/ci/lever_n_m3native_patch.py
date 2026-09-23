@@ -146,16 +146,123 @@ NATIVE_64_BLOCK = (
 )
 
 
+# ---------------------------------------------------------------------------------
+# A2. Verify-trace T1 #11 (QWEN_FAST_VERIFY_T1=1): two M = 64 configs on a wider N partition.
+# ---------------------------------------------------------------------------------
+#
+# The verify-trace tuning spec, cut #11 (wave 1, graft only). Of the seven M = 64 configs
+# above, two sit furthest below the DRAM floor on the packed 64-row verify (run 35852642074):
+#   - attn_qkv is the only projection built without grid_w, so it falls back to the legacy
+#     8x8 shape (56 active cores, per_core_N 4, 79% of the floor). Under the flag it takes
+#     the device-wide grid at 44 cores: 11x4, per_core_N 6, 38 active - the per-core shape
+#     gdn_in runs at 92% of the floor.
+#   - the MLP gate (w1) runs its fused-SiLU epilogue on 14 output tiles per core at 44 cores
+#     (59% of the floor; 16.1 us per call slower than up). Under the flag it takes 88 cores:
+#     11x8, per_core_N 4, 68 active, 8 tiles per core.
+# The other five M = 64 configs and all seven M = 1 configs stay exactly as built above.
+#
+# Exactness (class B*: expected bit-exact, proven by a byte compare before any token gate).
+# Both are rebuilt through the SAME builder (tp_common.create_matmul_1d_decode_progcfg) with the
+# same M, K, N and fused activation. The builder derives in0_block_w from k_tiles alone and
+# per_core_M from m alone, and fixes fuse_batch and mcast_in0; the compute kernel config
+# (fidelity, fp32_dest_acc, packer_l1_acc) is the call site's, which nothing here touches. So
+# every output tile is still reduced over K in the same in0_block_w-wide blocks, in the same
+# order, on one core - only which core computes it and the subblock shape move. The helper
+# refuses at construction if in0_block_w, per_core_M, fuse_batch or mcast_in0 came out
+# different (plain ints and bools on the ttnn config). The fused activation is not compared
+# at run time - value equality of the bound ttnn activation object is not something to rely
+# on - so its argument is held to NATIVE_64_BLOCK's by test_verify_trace_t1_graft instead.
+# The G0 byte compare is verify_t1_device_compare.py (card M).
+#
+# Flag unset: one env lookup and a False branch; every config is what it was. With the flag
+# set, QWEN_FAST_VERIFY_T1_SKIP naming matmul_configs leaves both configs as built (the same
+# comma list verify_trace_t1.skipped reads, for bisecting the cuts on one image).
+
+VERIFY_T1_FLAG = 'QWEN_FAST_VERIFY_T1'
+VERIFY_T1_SKIP_FLAG = 'QWEN_FAST_VERIFY_T1_SKIP'
+VERIFY_T1_GRAFT_CUT = 'matmul_configs'
+VERIFY_T1_MARKER = '[PINDIAG] verify t1 engaged'
+VERIFY_T1_SKIPPED = '[PINDIAG] verify t1 matmul configs not applied'
+VERIFY_T1_ATTN_QKV_CORES = 44
+VERIFY_T1_MLP_W1_CORES = 88
+# The builder fields the N re-partition must leave alone (the K reduction and the batch fold).
+VERIFY_T1_KEPT_FIELDS = ('in0_block_w', 'per_core_M', 'fuse_batch', 'mcast_in0')
+MODEL_ARGS_CLASS_ANCHOR = '\n\nclass Qwen36ModelArgs(ModelArgs):\n'
+
+VERIFY_T1_HELPER = (
+    '\n'
+    '\n'
+    '_QWEN_VERIFY_T1_KEPT = ' + repr(VERIFY_T1_KEPT_FIELDS) + '\n'
+    '\n'
+    '\n'
+    'def _qwen_verify_t1_configs(args, mesh_device, tpc, ttnn, m, tp):\n'
+    '    """Verify-trace T1 #11 (' + VERIFY_T1_FLAG + '=1; lever_n_m3native_patch section A2): the\n'
+    '    attn_qkv and MLP gate M = m configs rebuilt on a wider N partition through the same builder.\n'
+    '    Returns None once applied, or why it was not (a grid too small for the gate\'s 88 cores).\n'
+    '    Raises if anything but the N partition or the subblock would change."""\n'
+    '    grid = mesh_device.compute_with_storage_grid_size()\n'
+    '    if -(-' + str(VERIFY_T1_MLP_W1_CORES) + ' // args.decode_grid_w) > grid.y:\n'
+    '        return "worker grid %dx%d cannot hold %d cores %d wide" % (grid.x, grid.y, '
+    + str(VERIFY_T1_MLP_W1_CORES) + ', args.decode_grid_w)\n'
+    '    before = (args.attn_qkv_decode_1d_progcfg_64, args.mlp_w1_decode_1d_progcfg_64)\n'
+    '    after = (\n'
+    '        tpc.create_matmul_1d_decode_progcfg(\n'
+    '            m, args.dim, args.attn_qkv_fused_dim_tp, num_cores=' + str(VERIFY_T1_ATTN_QKV_CORES)
+    + ', grid_w=args.decode_grid_w\n'
+    '        ),\n'
+    '        tpc.create_matmul_1d_decode_progcfg(\n'
+    '            m,\n'
+    '            args.dim,\n'
+    '            args.hidden_dim // tp,\n'
+    '            num_cores=' + str(VERIFY_T1_MLP_W1_CORES) + ',\n'
+    '            fused_activation=ttnn.UnaryOpType.SILU,\n'
+    '            grid_w=args.decode_grid_w,\n'
+    '        ),\n'
+    '    )\n'
+    '    for name, old, new in zip(("attn_qkv", "mlp_w1"), before, after):\n'
+    '        for field in _QWEN_VERIFY_T1_KEPT:\n'
+    '            if getattr(old, field, None) != getattr(new, field, None):\n'
+    '                raise ValueError("verify t1: the %s M=64 config would change %s (%r -> %r); only the N "\n'
+    '                                 "partition and the subblock may move" % (name, field, getattr(old, field, None),\n'
+    '                                                                          getattr(new, field, None)))\n'
+    '    args.attn_qkv_decode_1d_progcfg_64, args.mlp_w1_decode_1d_progcfg_64 = after\n'
+    '    return None\n'
+)
+
+VERIFY_T1_BLOCK = (
+    '        if os.environ.get("' + VERIFY_T1_FLAG + '") == "1" and "' + VERIFY_T1_GRAFT_CUT + '" not in [\n'
+    '            _qwen_name.strip() for _qwen_name in os.environ.get("' + VERIFY_T1_SKIP_FLAG + '", "").split(",")\n'
+    '        ]:\n'
+    '            # Verify-trace T1 #11: the attn_qkv and MLP gate M = 64 configs on a wider N partition\n'
+    '            # (lever_n_m3native_patch section A2); the marker is logged where they are built.\n'
+    '            _qwen_t1_skipped = _qwen_verify_t1_configs(self, mesh_device, tpc, ttnn, M64, tp)\n'
+    '            from loguru import logger as _qwen_logger\n'
+    '\n'
+    '            if _qwen_t1_skipped is None:\n'
+    '                _qwen_logger.info("' + VERIFY_T1_MARKER + ' site=matmul_configs attn_qkv_64_cores='
+    + str(VERIFY_T1_ATTN_QKV_CORES) + ' mlp_w1_64_cores=' + str(VERIFY_T1_MLP_W1_CORES) + ' grid_w={}",\n'
+    '                                  self.decode_grid_w)\n'
+    '            else:\n'
+    '                _qwen_logger.warning("' + VERIFY_T1_SKIPPED + ': {}", _qwen_t1_skipped)\n'
+)
+
+
 def patch_model_config(source):
     """Append the seven M = 64 progcfgs right after kv_update_shard_cfg, inside
-    _init_tp_config. Every M = 1 assignment above stays untouched."""
+    _init_tp_config, then the verify-trace T1 override of two of them (inert unless
+    QWEN_FAST_VERIFY_T1=1, section A2) and its module-level helper. Every M = 1
+    assignment above stays untouched."""
     if 'mlp_w1_decode_1d_progcfg_64' in source:
         raise ValueError('model_config.py already carries the M3native _64 progcfgs')
     lines = source.splitlines(keepends=True)
     span = function_span(source, TP_CONFIG_FUNCTION)
-    lines = replace_once(lines, span, KV_SHARD_ANCHOR, KV_SHARD_ANCHOR + NATIVE_64_BLOCK,
+    lines = replace_once(lines, span, KV_SHARD_ANCHOR, KV_SHARD_ANCHOR + NATIVE_64_BLOCK + VERIFY_T1_BLOCK,
                          'model_config kv_update_shard_cfg anchor')
     result = ''.join(lines)
+    if result.count(MODEL_ARGS_CLASS_ANCHOR) != 1:
+        raise ValueError('model_config verify t1 helper: expected one Qwen36ModelArgs class anchor, found %d'
+                         % result.count(MODEL_ARGS_CLASS_ANCHOR))
+    result = result.replace(MODEL_ARGS_CLASS_ANCHOR, VERIFY_T1_HELPER + MODEL_ARGS_CLASS_ANCHOR)
     ast.parse(result)
     return result
 

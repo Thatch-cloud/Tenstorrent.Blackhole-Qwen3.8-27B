@@ -65,6 +65,9 @@ COPY scripts/ci/ordered_cache.py /experiment-scripts/ci/
 # (QWEN_FAST_MEMORY_LEDGER); serving_startup, serving_runtime and serving_packed_step
 # import it. Every flag defaults off.
 COPY scripts/ci/serving_startup.py scripts/ci/dflash_combined_request.py scripts/ci/memory_ledger.py /experiment-scripts/ci/
+# Verify-trace T1 (QWEN_FAST_VERIFY_T1, default off): packed_verifier, gdn_device_loop_state
+# and gdn_user_batch import it, so it must reach the image beside them.
+COPY scripts/ci/verify_trace_t1.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

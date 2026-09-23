@@ -13,6 +13,13 @@
 # give the container a second --device, to add the real single-user gdn_multitoken.execute
 # as a third arm - that is the launch the serving stack makes today.
 #
+# GDN_USER_BATCH_VERIFY_T1=1 runs both arms with QWEN_FAST_VERIFY_T1=1: the batched program is
+# then built from rectangle core ranges with one descriptor per role over all 96 cores
+# (verify_trace_t1 cut #12), and the byte compare against the per-user launches (and, with
+# --chips 2, the native single-user launch) is that cut's device check. gdn_user_batch.py
+# imports verify_trace_t1.py, so it is mounted beside it whether or not the flag is set - an
+# image built before verify-trace T1 does not carry it.
+#
 # Device: /dev/tenstorrent/2 as given in the task brief. Per tt-rig-hardware-topology
 # memory, device numbers can renumber across a board reset; this script does no reset
 # itself, but if the rig was reset since the device was last confirmed, re-check with
@@ -48,7 +55,7 @@ test -e "$device"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mounts=()
-for name in gdn_user_batch_device_test.py gdn_user_batch.py gdn_user_batch_conv.py gdn_multitoken.py; do
+for name in gdn_user_batch_device_test.py gdn_user_batch.py gdn_user_batch_conv.py gdn_multitoken.py verify_trace_t1.py; do
   test -f "$here/$name"
   mounts+=(--mount "type=bind,src=$here/$name,dst=/bench/$name,readonly")
 done
@@ -67,6 +74,7 @@ timeout -k 30 900 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$outdir,dst=/results" \
   -e TT_METAL_HOME=/opt/tt-metal -e OMP_NUM_THREADS=8 \
   -e TT_METAL_CACHE=/tmp/gdn-user-batch-kernel-cache \
+  ${GDN_USER_BATCH_VERIFY_T1:+-e QWEN_FAST_VERIFY_T1=1} \
   --workdir /opt/tt-metal \
   --entrypoint python3 "$image" -B /bench/gdn_user_batch_device_test.py \
   --out /results/gdn-user-batch.json "${extra_args[@]}" \
@@ -79,7 +87,7 @@ echo "console: $outdir/gdn-user-batch-console.log"
 python3 - "$outdir/gdn-user-batch.json" <<'PY'
 import json, sys
 report = json.load(open(sys.argv[1]))
-print('result:', report.get('result'))
+print('result:', report.get('result'), 'verify_t1:', report.get('verify_t1'))
 print('bit_exact:', report.get('bit_exact'), 'initial_state_immutable:', report.get('initial_state_immutable'))
 if report.get('timings'):
     print('timings:', json.dumps(report['timings'], indent=2))

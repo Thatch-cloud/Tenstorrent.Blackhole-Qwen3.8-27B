@@ -62,6 +62,7 @@ jobs:
           python -B -m unittest test_serving_lifecycle_delegate
           python -B -m unittest test_lever_n_m3native_gate_report
           python -B -m unittest test_lever_n_m3native_gate
+          python -B -m unittest test_verify_trace_t1 test_verify_trace_t1_graft
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
           python -B -m unittest test_lever_n_prefill_profile_report

@@ -173,6 +173,32 @@ ROUND_B1_AUDIT_MISMATCH = '[PINDIAG] round b1 audit mismatch'
 ROUND_B1_AUDIT_LINE = re.compile(r'\[PINDIAG\] round b1 audit ([0-9]+) exact=True select=([0-9]+) rope=([0-9]+) '
                                  r'retain=([0-9]+) borrowed=([0-9]+) release=([0-9]+)')
 ROUND_B1_AUDIT_COUNTS = ('select', 'rope', 'retain', 'borrowed', 'release')
+# QWEN_FAST_VERIFY_T1=1 (M3NATIVE_VERIFY_T1; the verify-trace tuning cuts of waves 1 and 2,
+# verify_trace_t1.py): logged by the model_config graft where the two re-partitioned M = 64
+# matmul configs are built (site=matmul_configs, lever_n_m3native_patch section A2) and by
+# packed_verifier once per captured verify trace with the cuts that capture engaged
+# (site=packed_verify). Either proves the flag reached code that reads it; the report lists
+# which sites logged. At four users the wave-2 cuts must also have ENGAGED, or an ABAB would
+# credit cuts that never ran (a stale image, the user batch off, the sampler guard tripped):
+# every packed_verify line must report mask_once=1, shard_argmax=1 and, per GDN layer,
+# direct_carry, last_carry and coalesced (no coalesce_fallback) - each cut named in
+# QWEN_FAST_VERIFY_T1_SKIP must instead report 0. A wave-1 arm on an image without wave 2
+# declares itself by skipping every VERIFY_T1_WAVE2_CUTS name; then only the graft's line is
+# needed. An unknown skip name fails (the image refuses it too).
+# QWEN_FAST_VERIFY_T1_AUDIT=1 beside it (a correctness arm, never a timed one): packed_verifier
+# runs the pinned sampler beside the per-shard argmax in the same trace and compares every row
+# every round; at four users the first round's line is required and any mismatch line fails.
+VERIFY_T1_FLAG = 'QWEN_FAST_VERIFY_T1'
+VERIFY_T1_AUDIT_FLAG = 'QWEN_FAST_VERIFY_T1_AUDIT'
+VERIFY_T1_SKIP_FLAG = 'QWEN_FAST_VERIFY_T1_SKIP'
+VERIFY_T1_MARKER = '[PINDIAG] verify t1 engaged'
+VERIFY_T1_AUDIT_MARKER = '[PINDIAG] verify t1 audit'
+VERIFY_T1_AUDIT_MISMATCH = '[PINDIAG] verify t1 audit mismatch'
+VERIFY_T1_KEPT_SAMPLER = '[PINDIAG] verify t1 kept the pinned sampler'
+VERIFY_T1_SITE = re.compile(r'\[PINDIAG\] verify t1 engaged site=([a-z_]+)')
+VERIFY_T1_PACKED = re.compile(r'\[PINDIAG\] verify t1 engaged site=packed_verify((?: [a-z_]+=[0-9]+)*)')
+VERIFY_T1_CUTS = ('matmul_configs', 'mask_once', 'direct_carry', 'last_carry', 'coalesce', 'shard_argmax')
+VERIFY_T1_WAVE2_CUTS = ('mask_once', 'direct_carry', 'coalesce', 'shard_argmax')
 DRAFT_BF8_MARKER = 'projections dtype=bf8 x36'
 LEDGER_MARKERS = ('[MEMLEDGER] phase=P7 ', ' check=residual status=')
 # QWEN_FAST_SDPA_MODES (optimisation/ttnn-op/sdpa_decode_qwen: 'tail' stage 1, 'share' stage 3).
@@ -281,6 +307,10 @@ def required_flag_markers(environ, users):
         required['QWEN_FAST_ROUND_B1'] = [ROUND_B1_MARKER]
         if on('QWEN_FAST_ROUND_B1_AUDIT') and users == 4:
             required['QWEN_FAST_ROUND_B1_AUDIT'] = [ROUND_B1_AUDIT_MARKER + ' 1 exact=True']
+    if on(VERIFY_T1_FLAG):
+        required[VERIFY_T1_FLAG] = [VERIFY_T1_MARKER]
+        if on(VERIFY_T1_AUDIT_FLAG) and users == 4:
+            required[VERIFY_T1_AUDIT_FLAG] = [VERIFY_T1_AUDIT_MARKER + ' 1 exact=True']
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
@@ -328,6 +358,14 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
             missing.append('QWEN_FAST_GDN_USER_BATCH: a captured forward batching every GDN layer')
     if environ.get('QWEN_FAST_ROUND_B1') == '1' and environ.get('QWEN_FAST_ROUND_B1_AUDIT') == '1':
         missing.extend(round_b1_audit_problems(log_text))
+    verify_t1_sites = verify_t1_packed = None
+    if environ.get(VERIFY_T1_FLAG) == '1':
+        verify_t1_sites = sorted(set(VERIFY_T1_SITE.findall(log_text)))
+        verify_t1_packed = verify_t1_packed_counts(log_text)
+        missing.extend(verify_t1_problems(environ, users, log_text, gdn_layers))
+        if VERIFY_T1_AUDIT_MISMATCH in log_text:
+            line = log_text[log_text.index(VERIFY_T1_AUDIT_MISMATCH):].split(chr(10), 1)[0]
+            missing.append('%s: no mismatch (%s)' % (VERIFY_T1_AUDIT_FLAG, line[:200]))
     prefill_conv = summary = None
     if environ.get(PREFILL_CONV_FLAG) == '1':
         required_chunks = prefill_conv_required_chunks(users, prompt_tokens)
@@ -336,7 +374,59 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
         prefill_conv = summary['chunk_calls']
     residual = LEDGER_RESIDUAL.search(log_text)
     return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
-                prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary)
+                prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary, verify_t1_sites=verify_t1_sites,
+                verify_t1_packed=verify_t1_packed)
+
+
+def verify_t1_skipped(environ):
+    return {name.strip() for name in (environ.get(VERIFY_T1_SKIP_FLAG) or '').split(',') if name.strip()}
+
+
+def verify_t1_packed_counts(log_text):
+    """Every site=packed_verify line's counts, one dict per captured verify trace."""
+    return [{name: int(value) for name, value in (field.split('=') for field in match.group(1).split())}
+            for match in VERIFY_T1_PACKED.finditer(log_text)]
+
+
+def verify_t1_problems(environ, users, log_text, gdn_layers=GDN_LAYERS):
+    """QWEN_FAST_VERIFY_T1: the skip list names only cuts and, at four users, every wave-2
+    cut not skipped engaged in every captured verify trace (and every skipped one did not)."""
+    skipped = verify_t1_skipped(environ)
+    problems = []
+    unknown = sorted(skipped.difference(VERIFY_T1_CUTS))
+    if unknown:
+        problems.append('%s: names only cuts (%s is none of %s)' % (VERIFY_T1_SKIP_FLAG, ','.join(unknown),
+                                                                     ','.join(VERIFY_T1_CUTS)))
+    if users != 4 or not set(VERIFY_T1_WAVE2_CUTS).difference(skipped):
+        return problems
+    captures = verify_t1_packed_counts(log_text)
+    if not captures:
+        problems.append('%s: a captured packed verify reporting its cuts (site=packed_verify); a wave-1 arm on an '
+                        'image without wave 2 sets %s=%s' % (VERIFY_T1_FLAG, VERIFY_T1_SKIP_FLAG,
+                                                             ','.join(VERIFY_T1_WAVE2_CUTS)))
+        return problems
+    user_batch = environ.get('QWEN_FAST_GDN_USER_BATCH') == '1'
+    per_layer = [name for name in ('direct_carry', 'coalesce') if name not in skipped]
+    if per_layer and not user_batch:
+        problems.append('%s: %s engage only under QWEN_FAST_GDN_USER_BATCH=1 (or skip them)'
+                        % (VERIFY_T1_FLAG, ','.join(per_layer)))
+        return problems
+    direct = 'direct_carry' not in skipped
+    expected = dict(mask_once=int('mask_once' not in skipped), shard_argmax=int('shard_argmax' not in skipped),
+                    direct_carry=gdn_layers if direct else 0,
+                    last_carry=gdn_layers if direct and 'last_carry' not in skipped else 0,
+                    coalesced=gdn_layers if 'coalesce' not in skipped else 0, coalesce_fallback=0)
+    if 'coalesce' in skipped or not user_batch:
+        expected.pop('coalesce_fallback')
+    for index, counts in enumerate(captures):
+        wrong = ['%s=%s (expected %d)' % (name, counts.get(name), value) for name, value in expected.items()
+                 if counts.get(name) != value]
+        if wrong:
+            problems.append('%s: capture %d engaged %s' % (VERIFY_T1_FLAG, index + 1, ', '.join(wrong)))
+    if 'shard_argmax' not in skipped and VERIFY_T1_KEPT_SAMPLER in log_text:
+        line = log_text[log_text.index(VERIFY_T1_KEPT_SAMPLER):].split(chr(10), 1)[0]
+        problems.append('%s: the per-shard argmax engaged (%s)' % (VERIFY_T1_FLAG, line[:200]))
+    return problems
 
 
 def round_b1_audit_problems(log_text):

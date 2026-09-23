@@ -75,6 +75,8 @@ remains. Native slot 0 is left holding the last committed segment's user (or, af
 a prefix-0 commit, whatever the block's recurrence left): `verifier_engine`'s
 residency is cleared before the trace runs and after every packed commit, so a later
 sequential step of any user restores first (`verifier_engine.note_packed_step`).
+Under QWEN_FAST_VERIFY_T1=1 the batched recurrence reads every carry in place and the
+trace writes neither the entries nor slot 0 (verify_trace_t1, cut #3).
 """
 
 from contextlib import ExitStack
@@ -100,6 +102,7 @@ from verifier_engine import note_packed_step, note_prefill
 import verifier_engine
 from verifier_inputs import host_inputs, validate_tokens
 from verifier_pack import GDN_LAYERS, build_pack, participant
+import verify_trace_t1
 
 FEATURE_WIDTH = 5120
 
@@ -383,6 +386,17 @@ class PackedVerifierEngine:
         # stored for the block's whole life so build_fixture (the trace capture) and
         # describe() (the diagnostic dict) always agree on the value actually in use.
         self.replay_group_rows = replay_group_rows()
+        # QWEN_FAST_VERIFY_T1 (verify_trace_t1): read once here, like the flags above, so the
+        # capture and every round's readback agree. #10 shares each reader's mask across the
+        # forward (build_fixture); #8a samples each chip's vocab shard and combines on the host
+        # (operation, shard_predictions) whenever the pinned sampler is plain greedy argmax.
+        # QWEN_FAST_VERIFY_T1_SKIP leaves either out (verify_trace_t1.cut).
+        self.verify_t1 = verify_trace_t1.enabled()
+        self.mask_once = verify_trace_t1.cut('mask_once')
+        shard_cut = verify_trace_t1.cut('shard_argmax')
+        self.shard_problem = verify_trace_t1.shard_sampling_problem(sampler) if shard_cut else None
+        self.shard_argmax = shard_cut and self.shard_problem is None
+        self.shard_audit = self.shard_argmax and verify_trace_t1.audit_enabled()
         self.commit_timings = [0.0] * shape.users
         # This round's per-segment HOST cost of the RetainedGDNBlock.commit_user call
         # itself (gdn_records.py), beyond its device commit trace: call_ms - commit_ms,
@@ -431,7 +445,11 @@ class PackedVerifierEngine:
                 warm.close()
             self.stage = 'verify trace capture'
             self.fixture = self.build_fixture(placeholders)
+            if self.verify_t1:
+                verify_trace_t1.take()  # count only what the captured forward engages
             self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
+            if self.verify_t1:
+                self.note_verify_t1(verify_trace_t1.take())
             retained = self.fixture.retained
             if len(retained.records) != GDN_LAYERS:
                 raise ValueError('The captured packed block must retain every GDN layer')
@@ -488,7 +506,9 @@ class PackedVerifierEngine:
         user, nothing restored or advanced at decode, every decision made by commit_user
         after the readback); replay attention as one bundled reader PER USER over the
         pool's lent table sets (M1b; four-row groups, masks refreshed in-trace per layer as
-        the sequential verify does); and no T16 gate (it pins rows == 16)."""
+        the sequential verify does - or, under QWEN_FAST_VERIFY_T1 (#10), once per forward:
+        each mask is a function of its reader's positions word alone, staged before the
+        replay and written by nothing inside it); and no T16 gate (it pins rows == 16)."""
         pack = build_pack([participant(placeholder, self.rows_per_user, 0, self.checkpoints[user], self.carries[user])
                            for user, placeholder in enumerate(placeholders)], block_rows=self.block_rows)
         return ModelBatch(self.model, [1] * self.block_rows, self.capture_position, placeholders[0].pages, self.helpers,
@@ -496,7 +516,8 @@ class PackedVerifierEngine:
             serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True,
             skip_row_clones=True, hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
             batch_conv=True, packed_checkpoints=True, retain_records=True, ordered_cache=True,
-            norm_batch=True, attention_replay=True, attention_mask_once=False, replay_group_rows=self.replay_group_rows,
+            norm_batch=True, attention_replay=True, attention_mask_once=self.mask_once,
+            replay_group_rows=self.replay_group_rows,
             short_context=False, attention_audit=False, commit_only_gdn=True)
 
     def operation(self, fixture):
@@ -505,12 +526,57 @@ class PackedVerifierEngine:
             with ExitStack() as captures:
                 captures.enter_context(self.feature_capture.capture())
                 logits = fixture.run(sharded_logits=True)
+            if self.shard_argmax:
+                return (logits, *self.sample_shards(logits))
             ids = sample_rows(self.sampler, logits, self.block_rows, self.operations, native_rows=False)
             return logits, ids
         except BaseException:
             if logits is not None:
                 self.operations.deallocate(logits)
             raise
+
+    def sample_shards(self, logits):
+        """QWEN_FAST_VERIFY_T1 (#8a): each chip's argmax and max over its own vocab shard, no
+        gather; under QWEN_FAST_VERIFY_T1_AUDIT also the pinned sampler's ids, for the audit."""
+        ids, values = verify_trace_t1.sample_shards(self.operations, logits, self.block_rows)
+        if not self.shard_audit:
+            return ids, values
+        try:
+            reference = sample_rows(self.sampler, logits, self.block_rows, self.operations, native_rows=False)
+        except BaseException:
+            release_owned(self.operations, [ids, values])
+            raise
+        return ids, values, reference
+
+    def shard_predictions(self):
+        """The block's ids from the per-chip (id, max) pairs: shard 1 only where its max is
+        strictly greater (verify_trace_t1.combine_shards). Audited, every row is compared with
+        the pinned sampler's id from the same replay."""
+        ids, values = self.output[1], self.output[2]
+        id_parts = self.operations.get_device_tensors(ids)
+        value_parts = self.operations.get_device_tensors(values)
+        if len(id_parts) != 2 or len(value_parts) != 2:
+            raise AssertionError('Two chip-local outputs required')
+        chip_ids = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in id_parts]
+        chip_values = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in value_parts]
+        if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
+            raise AssertionError('Missing packed prediction rows')
+        host = verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
+        if self.shard_audit:
+            reference = self.operations.to_torch(self.operations.get_device_tensors(self.output[3])[0])
+            verify_trace_t1.audit_round(host, reference.reshape(-1)[:self.block_rows].tolist())
+        return host
+
+    def note_verify_t1(self, counts):
+        """VERIFY_T1_MARKER once per captured verify trace: which T1 cuts the capture engaged."""
+        fields = dict(mask_once=int(bool(getattr(self.fixture, 'attention_mask_once', False))),
+                      shard_argmax=int(self.shard_argmax), audit=int(self.shard_audit),
+                      direct_carry=counts.get('direct_carry', 0), last_carry=counts.get('last_carry', 0),
+                      coalesced=counts.get('coalesced', 0),
+                      coalesce_fallback=counts.get('coalesce_fallback', 0))
+        diagnostic(verify_trace_t1.engaged_line('packed_verify', **fields))
+        if self.shard_problem is not None:
+            diagnostic('%s: %s' % (verify_trace_t1.KEPT_SAMPLER, self.shard_problem))
 
     def reseed(self):
         """Undo what warming the commit traces wrote: slot 0 from the initial snapshot,
@@ -614,11 +680,14 @@ class PackedVerifierEngine:
             else:
                 self.fixture.retained.replay(operation)
             replayed = time.perf_counter()
-            logits, ids = self.output
-            parts = self.operations.get_device_tensors(ids)
-            if len(parts) != 2:
-                raise AssertionError('Two chip-local outputs required')
-            host = self.operations.to_torch(parts[0]).reshape(-1)[:self.block_rows].tolist()
+            if self.shard_argmax:
+                host = self.shard_predictions()
+            else:
+                logits, ids = self.output
+                parts = self.operations.get_device_tensors(ids)
+                if len(parts) != 2:
+                    raise AssertionError('Two chip-local outputs required')
+                host = self.operations.to_torch(parts[0]).reshape(-1)[:self.block_rows].tolist()
             if len(host) != self.block_rows:
                 raise AssertionError('Missing packed prediction rows')
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]

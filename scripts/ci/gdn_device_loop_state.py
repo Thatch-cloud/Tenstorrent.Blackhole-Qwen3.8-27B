@@ -6,6 +6,7 @@ from gdn_state_copy import batch_enabled, copy_compact, copy_compact_batch
 from gdn_batched_conv import norm_batch_enabled, run_batched_projected
 from gdn_user_batch import enabled as user_batch_enabled, min_users as user_batch_min_users
 from gdn_user_batch_conv import run_user_batched_projected
+from verify_trace_t1 import cut as verify_t1_cut, note as verify_t1_note
 
 TILE = 32
 
@@ -367,26 +368,53 @@ class DeviceLoopState:
         goes through the native buffer, whose full-slot geometry cannot share a page
         layout with a compact-to-compact transfer. Ordering against it does not matter
         for the same reason the segments do not order against each other.
+
+        Under QWEN_FAST_VERIFY_T1=1 none of these moves run: the launch reads every carry
+        in place. Read from the code, the invariant above has no reader - commit_user's DMA
+        only WRITES native slot 0 (gdn_commit_dma.cpp), reads the entry only at prefix 0
+        (never published), and verifier_engine clears residency around every packed step,
+        so an unpacked decode restores its own carry first (verify_trace_t1, #3).
+        QWEN_FAST_VERIFY_T1_SKIP=last_carry keeps the last segment's restore/save (and its
+        entry read) while the others still read in place; =direct_carry keeps every move.
         """
         operations, layer = self.operations, self.gdn
         last = len(spans) - 1
+        # QWEN_FAST_VERIFY_T1 (#3, verify_trace_t1): the launch reads each user's carry
+        # directly. The entry below is a byte copy of that carry which only this launch
+        # reads, and nothing in the verify trace writes a carry, so the recurrence and the
+        # windows read the same bytes from the carry's own address and all five state moves
+        # per layer go. The entries stay allocated for the commit DMA's list (read there only
+        # at prefix 0, which never publishes); native slot 0 is no longer written here, and
+        # nothing trusts it after a packed step (verify_trace_t1's docstring has the readers).
+        direct = verify_t1_cut('direct_carry')
+        direct_last = direct and verify_t1_cut('last_carry')
         pending, batched = [], [] if batch_enabled() else None
         for index, ((start, stop), slot) in enumerate(zip(spans, slots)):
             entry = entries[index]
+            source = entry
             if index == last:
-                self.active.restore(slot)
-                self.active.save(entry)
+                if direct_last:
+                    source = slot
+                else:
+                    self.active.restore(slot)
+                    self.active.save(entry)
+            elif direct:
+                source = slot
             elif batched is not None:
                 batched.append((slot, entry))
             else:
                 copy_compact(slot, entry)
             piece = resident_piece(operations,
                                    operations.slice(projected, (0, start, 0), (1, stop, projected.shape[-1])), owned)
-            pending.append((piece, entry[0], entry[1:]))
+            pending.append((piece, source[0], source[1:]))
         # Every batched entry is read by the launch below, never before it, so deferring
         # the moves to here is exactly as early as they need to be.
         if batched:
             copy_compact_batch(batched)
+        if direct:
+            verify_t1_note('direct_carry')
+        if direct_last:
+            verify_t1_note('last_carry')
         results = run_user_batched_projected(layer.mesh, pending, list(layer.tw['conv_taps']),
             layer.tw['dt_bias'], layer.tw['neg_exp_A'], layer.tw['norm_w'], self.kernels, operations,
             prefix_zero_reuse=self.prefix_zero_reuse)
