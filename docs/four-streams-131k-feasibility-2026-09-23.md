@@ -552,3 +552,27 @@ Steady per-user rates move about +-3% run to run on this host (round time noise)
   interleave), and each prefill stretches from 68.3 to 82.6 s, so the fourth user's first token arrives at 324 s
   instead of 275 s. Lever N is a latency/fairness trade at 131k, not a throughput gain; a packed round under Lever N at
   131k needs completions longer than about 1,300 tokens.
+
+## Prefill lever #1 (chunked-SDPA K/V sharing): K0 cleared it, with a smaller ceiling than the spec
+
+The design workflow (wf_f46300e5-dbd) chose a G6 unicast K/V chain: the six cores that share a KV head and a pair
+index read byte-identical K/V streams, so one of them (the injector) can read from DRAM and forward to the other five
+with no compute or CB-order change. K0, one card-M session with no C++ build (probe readers mounted over the served
+reader in the M1 bench, image A', `optimisation/ttnn-op/sdpa_prefill_bench/k0_session.sh`), measured the ceiling:
+
+| variant | slope (ms per 1k keys) | vs stock |
+|---|---|---|
+| stock / stock2 (bracket) | 0.2838 / 0.2839 | 1.000 (0.0% drift) |
+| k0a: K/V from DRAM only for the first two k chunks (compute floor) | 0.2111 | 0.744 |
+| k0b4: only the 16 would-be injectors read, served read-ahead | 0.2114 | 0.745 |
+| k0b32: injectors at read-ahead 32 | 0.2116 | 0.746 |
+| k0c: every core at read-ahead 32 (must be exact; it is) | 0.3798 | 1.338 |
+
+- The compute floor is t_c = 13.5 us per (q-chunk, k-chunk) step, so the pre-registered kill rules K-1/K-2 are clear;
+  one injector per six feeds its group at the floor (K-3 clear), and it does so at the served read-ahead - the deeper
+  injector read-ahead is unnecessary (the session summary's K-4 sentence misreads its own numbers).
+- K0c shows the op is at the DRAM/NoC ceiling today: more reads in flight on every core is 34% slower.
+- The ceiling is lower than the spec's 7-10 s: its table assumed a 21.76 us served step (M1's earlier 0.340 slope),
+  while the controlled stock step here is 18.2 us. Sharing removes about 25.6% of the attention prefill term:
+  about 4.9 s per 131k prompt on the bench's slope, about 5.8 s on the 22.7 s term fitted from model prefills.
+  It remains the largest prefill lever left (C1d 2-3 s, GDN scan 1.2-1.8 s); the K64g graft build is in progress.
