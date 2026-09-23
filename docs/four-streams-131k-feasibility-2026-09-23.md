@@ -258,3 +258,25 @@ the same 131,072-token prompt under two physical block maps must give bit-identi
 Housekeeping: `ordered_cache.py`'s comment still says 2,052 is not yet qualified on
 hardware. Updating it changes the file's sha256 and so forces an image rebuild for the
 baked-copy check; it will be corrected with the next functional change to that file.
+
+## Increment 0: GDN_USER_BATCH, and the flag interaction that hid it
+
+`M3NATIVE_GDN_USER_BATCH` had hung in warmup in v77 and v79, which were blamed on the
+Lever N model graft. v89 (run 35798375001) - v34's exact flags, no Lever N, image v94 -
+hung identically, so Lever N was not the cause. `GDN_STATE_COPY_BATCH` was dead code in
+v34's image (e41ef884) and is live now: v34 effectively ran `GDN_USER_BATCH` alone, v83
+runs `GDN_STATE_COPY_BATCH` alone, and v89 was the first run with both live.
+
+v91 (run 35799760385) runs `GDN_USER_BATCH` without `GDN_STATE_COPY_BATCH`. It **passes
+the gate, 4/4 token-exact**:
+
+| | v83 (STATE_COPY_BATCH) | v91 (USER_BATCH) | delta |
+|---|---|---|---|
+| verify trace (packed_phase) | 172.4 ms | **157.8 ms** | **-14.6** |
+| packed_commit | 35.9 ms | 40.1 ms | +4.2 |
+| median round | 267.5 ms | **257.0 ms** | **-10.5** |
+| TTFT | 13.6 / 26.5 / 39.6 / 52.5 | 13.6 / 26.6 / 39.7 / 52.8 | - |
+
+The -14.6 ms matches the review's -14 ms estimate. The two flags help different buckets
+and hang together; resolving that interaction would recover ~4 ms more. **v91 is the new
+best four-user configuration and the baseline for the next increments.**
