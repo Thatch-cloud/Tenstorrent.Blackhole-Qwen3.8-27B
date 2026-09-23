@@ -810,6 +810,60 @@ class PackedFixtureTests(unittest.TestCase):
             fixture.run()
 
 
+class UserBatchedMarkerTests(unittest.TestCase):
+    """QWEN_FAST_GDN_USER_BATCH: one line per captured forward (run() executes its Python
+    only when a forward is captured or run eagerly, never on a trace replay) saying how many
+    of the 48 GDN layers took the user-batched launch."""
+
+    TEMPLATE = '[PINDIAG] gdn user_batched calls this captured forward: {} of {} GDN layers'
+
+    def run_forward(self, environ, batched):
+        import os
+
+        fixture = ModelBatch.__new__(ModelBatch)
+        fixture.retained = fixture.pack = None
+        fixture.rows = 32
+        fixture.gdn_calls = fixture.norm_batch_calls = fixture.user_batched_calls = 0
+        fixture.norm_batch = True
+        fixture.attention_mask_once = fixture.skip_row_clones = False
+        fixture.compact_gdn = fixture.device_loop_gdn = True
+        fixture.writers, fixture.readers, fixture.bindings = [], [], []
+        fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
+        fixture.working_states = [SimpleNamespace(calls=0, checkpoint_calls=0, skipped_clones=0) for layer in range(48)]
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            for state in fixture.working_states:
+                state.calls += 1
+                state.checkpoint_calls += 1
+            fixture.user_batched_calls += batched
+            fixture.norm_batch_calls += 48 - batched
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        clean = {name: value for name, value in os.environ.items() if name != 'QWEN_FAST_GDN_USER_BATCH'}
+        with patch.dict(os.environ, dict(clean, **environ), clear=True), patch('dflash_device.pindiag') as marker:
+            self.assertEqual(fixture.run(), 'logits')
+        return [call.args for call in marker.call_args_list if call.args[0] == self.TEMPLATE]
+
+    def test_with_the_flag_every_captured_forward_reports_its_batched_layers(self):
+        self.assertEqual(self.run_forward({'QWEN_FAST_GDN_USER_BATCH': '1'}, 48), [(self.TEMPLATE, 48, 48)])
+
+    def test_with_the_flag_a_forward_that_batched_nothing_says_zero(self):
+        self.assertEqual(self.run_forward({'QWEN_FAST_GDN_USER_BATCH': '1'}, 0), [(self.TEMPLATE, 0, 48)])
+
+    def test_unset_and_unbatched_nothing_is_logged(self):
+        self.assertEqual(self.run_forward({}, 0), [])
+        self.assertEqual(self.run_forward({'QWEN_FAST_GDN_USER_BATCH': '0'}, 0), [])
+
+    def test_a_batched_call_is_reported_even_without_the_flag(self):
+        self.assertEqual(self.run_forward({}, 48), [(self.TEMPLATE, 48, 48)])
+
+    def test_the_marker_formats_to_the_gate_string(self):
+        self.assertEqual(self.TEMPLATE.format(48, 48),
+                         '[PINDIAG] gdn user_batched calls this captured forward: 48 of 48 GDN layers')
+
+
 class WideBlockTests(unittest.TestCase):
     """The 64-row M3 block (four T16 users) in the fixture: beyond one 32-row tile the
     pinned per-row serial adapters (attention_batch.py) stop, so the K/V write goes tile by

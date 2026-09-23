@@ -59,6 +59,7 @@ jobs:
           python -B -m unittest test_lever_n_gdn_slot_remap
           python -B -m unittest test_serving_lifecycle_delegate
           python -B -m unittest test_lever_n_m3native_gate_report
+          python -B -m unittest test_lever_n_m3native_gate
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
           python -B -m unittest test_m3native_engine_argv
@@ -72,6 +73,7 @@ jobs:
           python -B -m unittest test_dflash_prefill_window test_gdn_snapshot
           python -B -m unittest test_serving_buffer_pool
           python -B -m unittest test_serving_startup
+          python -B -m unittest test_memory_ledger test_draft_projection_bf8
           python -B -m unittest test_serving_bundle
           python -B -m unittest test_serving_native_install
           python -B -m unittest test_serving_image_preflight

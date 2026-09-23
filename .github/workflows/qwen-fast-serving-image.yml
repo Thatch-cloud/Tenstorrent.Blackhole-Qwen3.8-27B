@@ -73,6 +73,9 @@ jobs:
           for name in two_tile_norm.py two_tile_decode.py serving_runner_bridge.py ordered_cache.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in serving_startup.py dflash_combined_request.py memory_ledger.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
       - name: Build and CPU-test canary without devices or weights
         run: |
           image="qwen-fast-serving:ci-${GITHUB_SHA}"

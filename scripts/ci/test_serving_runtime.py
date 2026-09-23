@@ -27,8 +27,10 @@ class RuntimeAttachmentTests(unittest.TestCase):
                      'scope, the sampler links, the pool) - their exits fence the device, and a hung device blocks '
                      'the first fence')
 
+    STREAM = {'streams': 'serial', 'evidence': 'stream'}
+
     def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None, four_as_two=None,
-                 replay_group_rows=None):
+                 replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False):
         events = []
 
         def diag(template, *values):
@@ -60,8 +62,14 @@ class RuntimeAttachmentTests(unittest.TestCase):
 
         @contextmanager
         def combined(*args, **kwargs):
-            self.assertEqual(kwargs['block_stream'], {'streams': 'serial', 'evidence': 'stream'})
+            # The recipe startup handed over, unchanged: the serial stream by default, None
+            # only where register_reader_reason admits the register-epilogue reader.
+            self.assertEqual(kwargs['block_stream'], block_stream)
             self.assertEqual(kwargs['kv_publication_evidence'], 'dma')
+            # Only the admitted single gate/up shape adds a keyword; otherwise the call's
+            # keywords are exactly the ones it always had.
+            self.combined_keywords = sorted(kwargs)
+            self.single_gateup_admitted = kwargs.get('single_gateup_admitted')
             events.append('runtime_enter')
             try:
                 yield {'admitted': True}
@@ -96,6 +104,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
             env['QWEN_FAST_FOUR_AS_TWO'] = '1' if four_as_two else '0'
         if replay_group_rows is not None:
             env['QWEN_FAST_REPLAY_GROUP_ROWS'] = str(replay_group_rows)
+        env.update(extra_env or {})
         with patch.dict('os.environ', env), \
                 patch.dict(sys.modules, {
                 'models.common.sampling.generator': SimpleNamespace(SamplingGenerator=generator),
@@ -114,7 +123,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
             try:
                 with serving_runtime.attach_combined_runtime(worker, operations, directory='.', runtime_root='.',
                         fixtures=fixtures, native_attention_evidence='native',
-                        block_stream={'streams': 'serial', 'evidence': 'stream'},
+                        block_stream=block_stream,
                         kv_publication_evidence='dma', eos_ids=(99,), cancelled=lambda: False) as attached:
                     # One stage line carrying the pool, the named shared weights and the
                     # device step that serves the rounds - with the block(s) when built,
@@ -227,7 +236,10 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 # attach may have left hung: run 35507675630).
                 block_built = ['block_build'] * len(shapes)
                 block_closed = ['block_close'] * len(shapes)
-                if attach_fail:
+                if refused:
+                    # Refused before the pool, the runtime or anything else was built.
+                    self.assertEqual(events, [])
+                elif attach_fail:
                     self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
                                               *block_built, ('diag', self.ATTACH_FAILED),
                                               *block_closed, 'weights_close', 'runtime_exit',
@@ -322,3 +334,177 @@ class RuntimeAttachmentTests(unittest.TestCase):
         for users in (2, 4):
             with self.subTest(users=users):
                 self.exercise(packed=False, users=users)
+
+    # --- A1 / C1: the register-epilogue reader in place of the serial block stream --------
+
+    SKIP = {'QWEN_FAST_SKIP_BLOCK_STREAM': '1'}
+
+    def test_the_sixty_four_row_block_admits_the_register_reader_with_the_skip_flag(self):
+        # QWEN_FAST_SKIP_BLOCK_STREAM=1 at exactly the M3 shape: four scheduler requests,
+        # QWEN_FAST_FOUR_AS_TWO=0, QWEN_FAST_PACKED_STEP=1. combined_runtime receives
+        # block_stream=None (its scoped_register_epilogue branch) and the attach completes.
+        self.exercise(packed=True, users=4, four_as_two=False, block_stream=None, extra_env=self.SKIP)
+
+    def test_the_serial_stream_is_still_accepted_with_the_skip_flag_set(self):
+        # The flag only ADMITS None at the M3 shape; a stream handed over is used as ever.
+        self.exercise(packed=True, users=4, four_as_two=False, extra_env=self.SKIP)
+
+    def test_without_the_skip_flag_the_serial_stream_is_still_required(self):
+        # Flag unset: exactly the old refusal, at the M3 shape and everywhere else.
+        for users, packed, four_as_two in ((4, True, False), (4, True, None), (2, True, None), (1, False, None)):
+            with self.subTest(users=users, packed=packed, four_as_two=four_as_two), \
+                    self.assertRaisesRegex(ValueError, 'serial weight-stream recipe required'):
+                self.exercise(packed=packed, users=users, four_as_two=four_as_two, block_stream=None, refused=True)
+
+    def test_the_skip_flag_admits_no_other_shape(self):
+        # Two 32-row blocks at four users (the default), two users, one user, or the M3
+        # count without the packed step: the stream is still mandatory.
+        for users, packed, four_as_two in ((4, True, None), (4, True, True), (2, True, None), (1, False, None),
+                                           (4, False, False)):
+            with self.subTest(users=users, packed=packed, four_as_two=four_as_two), \
+                    self.assertRaisesRegex(ValueError, 'serial weight-stream recipe required'):
+                self.exercise(packed=packed, users=users, four_as_two=four_as_two, block_stream=None,
+                              extra_env=self.SKIP, refused=True)
+
+    def test_a_pipelined_stream_recipe_is_still_refused(self):
+        with self.assertRaisesRegex(ValueError, 'serial weight-stream recipe required'):
+            self.exercise(packed=True, users=4, four_as_two=False, extra_env=self.SKIP,
+                          block_stream=dict(self.STREAM, pipeline_evidence='pipe'), refused=True)
+
+    def test_every_flag_unset_passes_combined_runtime_exactly_the_old_keywords(self):
+        self.exercise(packed=True, users=4, four_as_two=False)
+        self.assertEqual(self.combined_keywords, ['block_stream', 'directory', 'kv_publication_evidence',
+                                                  'native_attention_evidence', 'runtime_root'])
+        self.exercise(packed=True, users=4, four_as_two=False, block_stream=None, extra_env=self.SKIP)
+        self.assertIsNone(self.single_gateup_admitted)
+
+    def test_the_single_gate_up_flag_admits_the_register_reader_at_the_sixty_four_row_block(self):
+        self.exercise(packed=True, users=4, four_as_two=False, block_stream=None,
+                      extra_env={'QWEN_FAST_SINGLE_GATEUP': '1'})
+        self.assertIs(self.single_gateup_admitted, True)
+
+    def test_the_single_gate_up_flag_is_refused_at_every_other_shape(self):
+        # There FusedT16Arm serves the 16-row verify MLP (one user beside the M1 block, the
+        # FOUR_AS_TWO rounds), and its BF4 register-epilogue projection is not bit-identical
+        # to the native w1/w3 path that would replace it. Refused before anything is built,
+        # whichever recipe startup handed over.
+        for users, packed, four_as_two in ((1, False, None), (2, True, None), (4, True, None), (4, True, True),
+                                           (4, False, False)):
+            for block_stream in (None, self.STREAM):
+                with self.subTest(users=users, packed=packed, four_as_two=four_as_two, stream=block_stream), \
+                        self.assertRaisesRegex(ValueError, 'admitted only at the 64-row M3 block'):
+                    self.exercise(packed=packed, users=users, four_as_two=four_as_two, block_stream=block_stream,
+                                  extra_env={'QWEN_FAST_SINGLE_GATEUP': '1'}, refused=True)
+
+
+class RegisterReaderReasonTests(unittest.TestCase):
+    """serving_runtime.register_reader_reason: the one predicate startup (skip the stream)
+    and attach (admit block_stream=None) share, so the two can never disagree."""
+
+    M3 = {'QWEN_FAST_SKIP_BLOCK_STREAM': '1', 'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_FOUR_AS_TWO': '0'}
+
+    def reason(self, environ, requests=4):
+        return serving_runtime.register_reader_reason(dict(scheduler_requests=requests), environ)
+
+    def test_every_flag_unset_requires_the_stream(self):
+        for requests in (1, 2, 3, 4, 8):
+            self.assertIsNone(self.reason({}, requests))
+        self.assertIsNone(self.reason({'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_FOUR_AS_TWO': '0'}))
+
+    def test_the_skip_flag_names_the_sixty_four_row_block_only(self):
+        self.assertEqual(self.reason(self.M3), ('the 64-row block', 'register-epilogue reader on native w_gate_up'))
+        for name in ('QWEN_FAST_PACKED_STEP', 'QWEN_FAST_FOUR_AS_TWO'):
+            with self.subTest(dropped=name):
+                self.assertIsNone(self.reason({key: value for key, value in self.M3.items() if key != name}))
+        self.assertIsNone(self.reason(dict(self.M3, QWEN_FAST_FOUR_AS_TWO='1')))
+        self.assertIsNone(self.reason(dict(self.M3, QWEN_FAST_SKIP_BLOCK_STREAM='0')))
+        for requests in (1, 2, 3, 8):
+            with self.subTest(requests=requests):
+                self.assertIsNone(self.reason(self.M3, requests))
+
+    def test_the_policy_is_read_only_once_the_skip_flag_is_set(self):
+        policy = Mock(return_value=dict(scheduler_requests=4))
+        self.assertIsNone(serving_runtime.register_reader_reason(policy, {}))
+        policy.assert_not_called()
+        self.assertIsNotNone(serving_runtime.register_reader_reason(policy, self.M3))
+        policy.assert_called_once_with()
+
+    def test_the_single_gate_up_flag_applies_at_the_sixty_four_row_block_only(self):
+        m3 = {'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_FOUR_AS_TWO': '0'}
+        self.assertEqual(self.reason(m3), ('the single gate/up copy',
+                                           'QWEN_FAST_SINGLE_GATEUP=1 builds no w_gate_up to stream'))
+        # With the skip flag too, the single copy is the reason named.
+        self.assertEqual(self.reason(dict(m3, QWEN_FAST_SKIP_BLOCK_STREAM='1'))[0], 'the single gate/up copy')
+        refused = [(m3, 1), (m3, 2), (dict(m3, QWEN_FAST_FOUR_AS_TWO='1'), 4),
+                   ({'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_PACKED_STEP': '1'}, 4),
+                   ({'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_FOUR_AS_TWO': '0'}, 4)]
+        for environ, requests in refused:
+            with self.subTest(environ=environ, requests=requests), \
+                    self.assertRaisesRegex(ValueError, 'admitted only at the 64-row M3 block .*, not users='):
+                self.reason(environ, requests)
+
+    def test_the_shape_description_names_what_is_configured(self):
+        self.assertEqual(serving_runtime.m3_shape(dict(scheduler_requests=2), {'QWEN_FAST_PACKED_STEP': '1'}),
+                         (False, 'users=2 FOUR_AS_TWO=unset PACKED_STEP=1'))
+        self.assertEqual(serving_runtime.m3_shape(lambda: dict(scheduler_requests=4),
+                                                  {'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_FOUR_AS_TWO': '0'}),
+                         (True, 'users=4 FOUR_AS_TWO=0 PACKED_STEP=1'))
+
+
+class MemoryLedgerHookTests(unittest.TestCase):
+    """The attach's ledger hooks: every phase in order when a ledger is active, and nothing
+    at all when it is not (the default)."""
+
+    def run_attach(self, ledger_active):
+        import memory_ledger
+
+        calls, requests = [], []
+
+        def record(phase, point=None, request=None, **walked):
+            calls.append((phase, point, sorted(walked)))
+            requests.append(request)
+
+        def admitted(request_id, **walked):
+            calls.append(('engine', request_id, sorted(walked)))
+
+        test = RuntimeAttachmentTests()
+
+        def probe(install, diagnostic):
+            capture_factory = install.call_args.kwargs['capture_factory']
+            bridge_factory = install.call_args.kwargs['bridge_factory']
+            serving_runtime.ServingCacheOwner.return_value.physical_pages = 100
+            capture_factory(4096)
+            state = SimpleNamespace(req_id='request-1', block_ids=([3, 4],))
+            with patch.object(serving_runtime, 'from_prefill', return_value=SimpleNamespace(engine=object(), close=Mock())), \
+                    patch.object(serving_runtime, 'VerifierPageBinding'), \
+                    patch.object(serving_runtime, 'FastRunnerBridge', return_value='bridge'):
+                bridge_factory(state, 'capture')
+
+        with patch.object(memory_ledger.MemoryLedger, 'phase', side_effect=AssertionError('no ledger is active')), \
+                patch('dflash_prefill_window.PrefillWindowCapture'):
+            if ledger_active:
+                with patch.object(memory_ledger, 'record', side_effect=record), \
+                        patch.object(memory_ledger, 'engine_admitted', side_effect=admitted):
+                    test.exercise(packed=True, users=4, four_as_two=False, probe=probe)
+            else:
+                self.assertIsNone(memory_ledger.active())
+                test.exercise(packed=True, users=4, four_as_two=False, probe=probe)
+        self.requests = requests
+        return calls
+
+    def test_an_active_ledger_sees_every_attach_phase_in_order(self):
+        calls = self.run_attach(True)
+        # The prefill-after reading carries the full id for the JSON (the label a short one).
+        self.assertEqual([request for request in self.requests if request is not None], ['request-1'])
+        self.assertEqual([(phase, point) for phase, point, _ in calls], [
+            ('P2', None), ('P3', None), ('P4', None), ('P5', None), ('P6', 'block1'), ('P7', 'after_attach'),
+            ('prefill', 'before prompt=4096'), ('prefill', 'after req=request-1'), ('engine', 'request-1'),
+            ('P13', 'before_shutdown')])
+        self.assertEqual([walked for _, _, walked in calls], [
+            ['buffer_pool'], ['gather_experiment', 'serving_collectives', 'serving_sampler'], ['combined_runtime'],
+            ['draft_weights'], ['packed_block'], [], [], ['model_after_prefill'], ['engine_request'], []])
+
+    def test_no_ledger_means_no_phase_runs(self):
+        # memory_ledger.record is the real one here: with no active ledger it returns at
+        # its first line, so MemoryLedger.phase (patched to fail the test) never runs.
+        self.run_attach(False)

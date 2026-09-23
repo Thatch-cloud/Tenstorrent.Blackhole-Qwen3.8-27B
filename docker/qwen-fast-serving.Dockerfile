@@ -58,6 +58,13 @@ COPY scripts/ci/packed_shapes.py scripts/ci/packed_cache_writer.py scripts/ci/fo
 COPY scripts/ci/two_tile_norm.py scripts/ci/two_tile_decode.py /experiment-scripts/ci/
 COPY scripts/ci/serving_runner_bridge.py /experiment-scripts/ci/
 COPY scripts/ci/ordered_cache.py /experiment-scripts/ci/
+# Image A: serving_startup (the block-stream skip, QWEN_FAST_SKIP_BLOCK_STREAM /
+# QWEN_FAST_SINGLE_GATEUP) and dflash_combined_request (the FusedT16Arm skip,
+# QWEN_FAST_SINGLE_GATEUP) were in neither list and shipped at their bundle version;
+# both were byte-identical to 77d6995a when overlaid. memory_ledger is new
+# (QWEN_FAST_MEMORY_LEDGER); serving_startup, serving_runtime and serving_packed_step
+# import it. Every flag defaults off.
+COPY scripts/ci/serving_startup.py scripts/ci/dflash_combined_request.py scripts/ci/memory_ledger.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \
@@ -76,7 +83,7 @@ RUN OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 VLLM_PLUGINS='' python3 -B -m unittest \
     test_serving_fast_request test_serving_vllm_contract test_serving_vllm_state \
     test_serving_page_binding test_serving_runner_bridge test_serving_request_factory \
     test_serving_worker_hook test_serving_lifecycle test_serving_cache_owner test_serving_runtime test_serving_gather_experiment \
-    test_serving_runtime_binary_override test_serving_profiled_block_stream_override
+    test_serving_runtime_binary_override test_serving_profiled_block_stream_override test_serving_startup
 RUN VLLM_PLUGINS='' python3 -c 'import ttnn; from importlib.metadata import version; assert version("vllm").split("+")[0] == "0.25.1"; assert all(callable(getattr(ttnn.transformer, name)) for name in ("attn_decode_prep", "gdn_decode_norm_gate", "gdn_decode_conv_gates", "decode_gated_delta_rule_packed"))'
 WORKDIR /opt/tt-metal
 RUN VLLM_PLUGINS='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python3 -B /experiment-scripts/ci/serving_image_preflight.py --root /opt/tt-metal --output /opt/qwen-serving/startup-preflight.json

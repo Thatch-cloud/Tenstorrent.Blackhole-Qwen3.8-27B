@@ -1,6 +1,7 @@
 """Complete DFlash2 request on the promoted T16 target, without DSpark-only hooks."""
 
 from contextlib import ExitStack, contextmanager
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,9 +14,39 @@ from shared_qk_norm_scatter_gate import qualify as qualify_norm, REPORT_SHA256 a
 from shared_qk_norm_scatter import build as scatter_build
 
 
+SINGLE_GATEUP_FLAG = 'QWEN_FAST_SINGLE_GATEUP'
+
+
+def gate_up_copies(model):
+    """(present, layers): how many of the model's layers still hold a packed w_gate_up."""
+    layers = list(model.layers)
+    present = sum(getattr(getattr(getattr(layer, 'feed_forward', None), 'weights', None), 'w_gate_up', None)
+                  is not None for layer in layers)
+    return present, len(layers)
+
+
 @contextmanager
 def combined_runtime(operations, model, *, directory, runtime_root,
-                     native_attention_evidence=None, block_stream=None, kv_publication_evidence=None):
+                     native_attention_evidence=None, block_stream=None, kv_publication_evidence=None,
+                     single_gateup_admitted=False):
+    """The promoted T16 target's admitted scopes, entered for one DFlash2 run or one
+    serving attachment.
+
+    QWEN_FAST_SINGLE_GATEUP=1 (default off) removes FusedT16Arm, which serves every 16-row
+    target MLP call; that is token-neutral only where no target MLP sees 16 rows, the 64-row
+    M3 block. So the flag is refused here unless the caller admitted that shape
+    (serving_runtime.register_reader_reason, passed as single_gateup_admitted=True) - a
+    direct caller such as measure_combined_dflash (one user, 16-row verify) is refused - and
+    refused if any layer still holds w_gate_up (the model graft was not applied)."""
+    single_gateup = os.environ.get(SINGLE_GATEUP_FLAG) == '1'
+    if single_gateup:
+        if single_gateup_admitted is not True:
+            raise ValueError('QWEN_FAST_SINGLE_GATEUP=1 requires the 64-row M3 block, admitted by the serving '
+                             'attach; this caller did not admit it')
+        present, layers = gate_up_copies(model)
+        if present:
+            raise ValueError('QWEN_FAST_SINGLE_GATEUP=1 but w_gate_up is present on %d of %d layers: the '
+                             'single gate/up model graft is not applied' % (present, layers))
     from fused_t16_scope import FusedT16Arm
     from gdn_shared_qk_scope import scoped_shared_qk
     import gdn_shared_qk_scope
@@ -59,8 +90,20 @@ def combined_runtime(operations, model, *, directory, runtime_root,
                 **{name: block_stream[name] for name in ('pipeline_evidence', 'progressive_evidence')
                     if name in block_stream}))
         shared = stack.enter_context(scoped_shared_qk(operations, norm))
-        fusion = FusedT16Arm(operations, model, tt_all_reduce)
-        stack.enter_context(fusion.install())
+        if single_gateup:
+            # One gate/up copy: the model built no w_gate_up (checked above, per layer), and
+            # FusedT16Arm binds it at construction (qualify_target_weights, FusedProjection,
+            # weight_bindings), so the arm is not built at all and every MLP keeps its
+            # native forward. Admitted at the 64-row M3 block only, where the arm is inert
+            # anyway (no 16-row MLP call: fused_t16_scope.py:49-51). Default off.
+            from dflash_device import pindiag
+
+            fusion = None
+            pindiag('[PINDIAG] single gate/up copy: FusedT16Arm not installed; w_gate_up present on {} of {} '
+                    'layers', *gate_up_copies(model))
+        else:
+            fusion = FusedT16Arm(operations, model, tt_all_reduce)
+            stack.enter_context(fusion.install())
         yield dict(publication=publication, register=register, stream_audit=stream_audit,
             target=target, shared=shared, fusion=fusion, builds=builds,
             windows=windows, down=down, norm=norm)

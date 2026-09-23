@@ -43,6 +43,7 @@ from attention_mask_replay import validate_ticket
 from serving_fast_request import CommittedOutput
 from serving_sequential_step import describe as describe_sequential, sequential_packed_step
 from serving_worker_hook import phase
+import memory_ledger
 import verifier_engine
 
 # Under QWEN_FAST_PACKED_AUDIT=1, one line per user per round for the token-exact gate
@@ -327,6 +328,10 @@ def run_verified_block(entries, *, cancelled, block):
         if publish_stage_timings:
             audit_log(PUBLISH_LINE, round=getattr(block, 'rounds', 0),
                       stages=format_publish_stages(publish_stage_timings))
+        # QWEN_FAST_MEMORY_LEDGER=1 only, and once per process: P12, after the first packed
+        # round's verify and every commit have returned - outside any capture - to catch the
+        # buffers the first round allocates lazily (packed proposals, publication).
+        memory_ledger.first_packed_round(packed_block=block, round_requests=[entry['request'] for entry in entries])
         return outputs
     except BaseException:
         fail_round(entries, block)

@@ -110,6 +110,53 @@ def select_diagnostic(lines, cap=DIAGNOSTIC_CAP):
 GENERIC_REFERENCE_TOKENS = 32768
 
 
+# Image A capacity flags: each one's marker, required whenever the flag reaches this process.
+# With QWEN_FAST_SINGLE_GATEUP set it takes precedence over QWEN_FAST_SKIP_BLOCK_STREAM
+# (serving_runtime.register_reader_reason), so the 64-row skip marker is then not expected.
+SINGLE_GATEUP_MARKERS = (
+    '[PINDIAG] block stream skipped for the single gate/up copy: w_gate_up present on 0 of',
+    '[PINDIAG] single gate/up copy: FusedT16Arm not installed; w_gate_up present on 0 of',
+    '[PINDIAG] single gate/up copy: w_gate_up not built',
+    '[PINDIAG] single gate/up copy: ff_norm gathers its own input',
+)
+SKIP_BLOCK_STREAM_MARKER = '[PINDIAG] block stream skipped for the 64-row block'
+DRAFT_BF8_MARKER = 'projections dtype=bf8 x36'
+LEDGER_MARKERS = ('[MEMLEDGER] phase=P7 ', ' check=residual status=')
+GDN_ALL_BATCHED = re.compile(r'gdn user_batched calls this captured forward: ([1-9][0-9]*) of ([0-9]+) GDN layers')
+LEDGER_RESIDUAL = re.compile(r'\[MEMLEDGER\] phase=P7 [^\n]*check=residual status=([a-zA-Z]+)')
+
+
+def required_flag_markers(environ, users):
+    """The markers the flags in `environ` promise, as {flag: [marker, ...]}."""
+    on = lambda name: environ.get(name) == '1'
+    required = {}
+    if on('QWEN_FAST_SINGLE_GATEUP'):
+        required['QWEN_FAST_SINGLE_GATEUP'] = list(SINGLE_GATEUP_MARKERS)
+    elif on('QWEN_FAST_SKIP_BLOCK_STREAM'):
+        required['QWEN_FAST_SKIP_BLOCK_STREAM'] = [SKIP_BLOCK_STREAM_MARKER]
+    if on('QWEN_FAST_DRAFT_BF8'):
+        required['QWEN_FAST_DRAFT_BF8'] = [DRAFT_BF8_MARKER]
+    if on('QWEN_FAST_MEMORY_LEDGER'):
+        required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
+    return required
+
+
+def flag_marker_report(environ, users, log_text):
+    """Which promised markers the server log carries, and which flags left theirs out."""
+    required = required_flag_markers(environ, users)
+    found = {flag: {marker: marker in log_text for marker in markers} for flag, markers in required.items()}
+    missing = sorted('%s: %s' % (flag, marker) for flag, markers in found.items()
+                     for marker, present in markers.items() if not present)
+    if environ.get('QWEN_FAST_GDN_USER_BATCH') == '1' and users == 4:
+        # At least one captured forward batched EVERY GDN layer (the 64-row block).
+        complete = [m for m in GDN_ALL_BATCHED.finditer(log_text) if m.group(1) == m.group(2)]
+        found['QWEN_FAST_GDN_USER_BATCH'] = {'n of n GDN layers batched': bool(complete)}
+        if not complete:
+            missing.append('QWEN_FAST_GDN_USER_BATCH: a captured forward batching every GDN layer')
+    residual = LEDGER_RESIDUAL.search(log_text)
+    return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None)
+
+
 def load_references(directory, prompt_tokens=GENERIC_REFERENCE_TOKENS):
     """Each user's single-stream reference text, keyed by its prompt base.
 
@@ -344,7 +391,7 @@ def retired_binder_leaks(rounds):
 
 def evaluate_gate(*, ready, users, checked, allow_missing_references, native_m3_marker_present,
                   packed_phase, binder_rounds, retired_binder_calls_nonzero, full_output_required=True,
-                  reference_run=False):
+                  reference_run=False, missing_markers=()):
     """Whether the run passes, given the pieces `main` already computed.
 
     Full reference coverage (`len(checked) == users`) is required unless
@@ -355,7 +402,8 @@ def evaluate_gate(*, ready, users, checked, allow_missing_references, native_m3_
 
     `reference_run` (--sequential-users): lone streams never form a packed round, so the
     native_m3 marker, [PACKED-PHASE] and binder terms cannot apply; every reference term
-    still does."""
+    still does. `missing_markers`: a capacity flag reached the server but its own marker
+    never appeared, so the run did not do what its flags claim - never a pass."""
     coverage_ok = True if allow_missing_references else len(checked) == users
     # A stream that errored, or one cut short of its reference when the arm asked for the
     # full 256 tokens, is not a pass: run 35585107688 died of DRAM after three rounds with
@@ -373,6 +421,8 @@ def evaluate_gate(*, ready, users, checked, allow_missing_references, native_m3_
         # Two references for one base that disagree leave nothing to be exact against.
         and not any(c.get('reference_conflicts') for c in checked)
     )
+    if missing_markers:
+        return False
     if reference_run:
         return references_ok
     return bool(
@@ -519,6 +569,7 @@ def main():
         report['retired_binder_rounds_observed'] = len(binder_rounds)
         report['retired_binder_calls_nonzero'] = retired_binder_leaks(binder_rounds)
 
+        report['flag_markers'] = flag_marker_report(os.environ, streams, log_text)
         checked = [c for c in comparisons if c.get('reference_present')]
         report['users_checked'] = len(checked)
         report['allow_missing_references'] = options.allow_missing_references
@@ -529,7 +580,8 @@ def main():
             packed_phase=report['packed_phase'], binder_rounds=binder_rounds,
             retired_binder_calls_nonzero=report['retired_binder_calls_nonzero'],
             full_output_required=options.max_tokens >= 256,
-            reference_run=bool(options.sequential_users))
+            reference_run=bool(options.sequential_users),
+            missing_markers=report['flag_markers']['missing'])
     except BaseException as error:
         report['fatal'] = '%s: %s' % (type(error).__name__, str(error)[:600])
     finally:

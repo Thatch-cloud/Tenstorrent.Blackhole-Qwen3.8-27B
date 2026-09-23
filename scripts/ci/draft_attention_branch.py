@@ -4,6 +4,7 @@ from draft_attention import composed_draft_attention, draft_sdpa
 from draft_convolution import grouped_causal_convolution
 from feature_collective import gather_add_projection
 from draft_head_layout import split_projected_heads, concatenate_query_heads
+from draft_mlp_branch import draft_projection_dtype
 
 
 def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False, native_head_layout=False, block_rows=8, live_query_qk=False, native_proposal_attention=False):
@@ -30,15 +31,15 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 
         native_kernel = audit_active_kernel(os.environ['TT_METAL_HOME'])
 
-    def upload(value, *, sharded=False, row_major=False):
-        return retain(operations.from_torch(value, device=mesh, dtype=operations.bfloat16,
+    def upload(value, *, sharded=False, row_major=False, dtype=None):
+        return retain(operations.from_torch(value, device=mesh, dtype=operations.bfloat16 if dtype is None else dtype,
             layout=operations.ROW_MAJOR_LAYOUT if row_major else operations.TILE_LAYOUT,
             memory_config=operations.DRAM_MEMORY_CONFIG,
             mesh_mapper=operations.ShardTensorToMesh(mesh, dim=0) if sharded else operations.ReplicateTensorToMesh(mesh)))
 
     def projection(name, dimension):
         parts = [part.T.contiguous() for part in weights[f'layers.0.self_attn.{name}_proj.weight'].chunk(2, dim=dimension)]
-        return upload(torch.cat(parts, dim=0), sharded=True)
+        return upload(torch.cat(parts, dim=0), sharded=True, dtype=draft_projection_dtype(operations))
 
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)

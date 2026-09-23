@@ -8,7 +8,7 @@ from contextlib import nullcontext
 from dflash_attention_mask import draft_attention_mask
 from draft_attention_branch import prepare_attention_branch, execute_attention_branch
 from draft_head_preparation import rope_tables
-from draft_mlp_branch import prepare_mlp_branch, execute_mlp_branch
+from draft_mlp_branch import draft_projection_dtype, prepare_mlp_branch, execute_mlp_branch
 from draft_operation_audit import audit_operations
 from draft_selector import select_active_candidates
 from draft_shared_head import shared_head_candidates, merge_chunk_candidates
@@ -292,8 +292,8 @@ class PreparedDraftWeights:
             self.tensors.append(value)
             return keep(value)
 
-        def upload(value, *, sharded=False, row_major=False):
-            return own(operations.from_torch(value, device=mesh, dtype=operations.bfloat16,
+        def upload(value, *, sharded=False, row_major=False, dtype=None):
+            return own(operations.from_torch(value, device=mesh, dtype=operations.bfloat16 if dtype is None else dtype,
                 layout=operations.ROW_MAJOR_LAYOUT if row_major else operations.TILE_LAYOUT,
                 memory_config=operations.DRAM_MEMORY_CONFIG,
                 mesh_mapper=operations.ShardTensorToMesh(mesh, dim=0) if sharded else operations.ReplicateTensorToMesh(mesh)))
@@ -306,7 +306,7 @@ class PreparedDraftWeights:
                     **(dict(native_proposal_attention=True) if native_proposal_attention else {})),
                     prepare_mlp_branch(operations, mesh, mlp, convolution, own), mlp, convolution))
             shards = projection_shards(projection['fc.weight'])
-            self.projection = upload(torch.cat(shards, dim=0), sharded=True)
+            self.projection = upload(torch.cat(shards, dim=0), sharded=True, dtype=draft_projection_dtype(operations))
             self.feature_norm = upload(projection['hidden_norm.weight'].reshape(1, 1, 160, 32), row_major=True)
             self.final_norm = upload(selector['norm.weight'].reshape(1, 1, 160, 32), row_major=True)
             self.selector_projection = upload(selector['candidate_selector.hidden_projection.weight'].T.contiguous())
@@ -363,10 +363,44 @@ class PreparedDraftWeights:
             raise ValueError('Shared draft weights were prepared from other learned layers')
         if any(borrower is other for other in self.borrowers):
             raise ValueError('Shared draft weights are already lent to this borrower')
+        # The projection dtype as the LENT tensors carry it (QWEN_FAST_DRAFT_BF8 decides it
+        # at upload; this reads the result, not the flag). All BF16 - the default - leaves
+        # the line exactly as it always was. Read before the borrower is registered, so a
+        # failure here cannot leave the bookkeeping holding a borrower the caller never got.
+        dtypes = self.projection_dtypes()
         self.borrowers.append(borrower)
-        pindiag('[PINDIAG] draft weights lent to {} (borrowers={} tensors={})',
-                getattr(borrower, 'name', borrower), len(self.borrowers), len(self.tensors))
+        if set(dtypes) - {'bf16'}:
+            pindiag('[PINDIAG] draft weights lent to {} (borrowers={} tensors={}) projections dtype={}',
+                    getattr(borrower, 'name', borrower), len(self.borrowers), len(self.tensors),
+                    ','.join('%s x%d' % (name, count) for name, count in sorted(dtypes.items())))
+        else:
+            pindiag('[PINDIAG] draft weights lent to {} (borrowers={} tensors={})',
+                    getattr(borrower, 'name', borrower), len(self.borrowers), len(self.tensors))
         return self
+
+    def projection_tensors(self):
+        """The projection matrices this set lends: per layer the attention q/k/v and o and
+        the MLP gate/up/down, then the fc feature projection."""
+        found = []
+        for attention, mlp, _, _ in self.layers:
+            found.extend((attention.get('projections') or {}).values())
+            if attention.get('output_projection') is not None:
+                found.append(attention['output_projection'])
+            found.extend(mlp.get('device_projections') or ())
+        found.append(self.projection)
+        return found
+
+    def projection_dtypes(self):
+        """{dtype name: count} over projection_tensors(), read from each tensor's own dtype."""
+        operations = self.operations
+        names = [(getattr(operations, attribute, None), name) for attribute, name in
+                 (('bfloat16', 'bf16'), ('bfloat8_b', 'bf8'), ('bfloat4_b', 'bf4'), ('float32', 'fp32'))]
+        counts = {}
+        for tensor in self.projection_tensors():
+            dtype = getattr(tensor, 'dtype', None)
+            name = next((label for value, label in names if value is not None and dtype == value), str(dtype))
+            counts[name] = counts.get(name, 0) + 1
+        return counts
 
     def release(self, borrower):
         index = next((position for position, other in enumerate(self.borrowers) if other is borrower), None)

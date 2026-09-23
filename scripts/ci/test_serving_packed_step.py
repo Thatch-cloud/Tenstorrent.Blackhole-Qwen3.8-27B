@@ -362,6 +362,50 @@ class PackedStepTests(unittest.TestCase):
         self.assertEqual([(output.request_id, output.position) for output in outputs], [('A', 119), ('B', 3026)])
         self.assertEqual(self.block.rounds, 2)
 
+    def test_the_memory_ledger_reads_p12_once_after_the_first_rounds_commits(self):
+        # QWEN_FAST_MEMORY_LEDGER=1: P12 after the first packed round's verify AND every
+        # commit have returned (outside any capture), and never again.
+        import memory_ledger
+
+        entries = self.two()
+        ledger = memory_ledger.MemoryLedger(None, None)
+        seen = []
+
+        def phase(name, point=None, **walked):
+            seen.append((name, point, list(self.block.calls), walked))
+
+        with patch.object(memory_ledger, '_active', ledger), patch.object(ledger, 'phase', side_effect=phase):
+            self.step(entries)
+            first, second = entries[1]['request'], entries[0]['request']
+            first.propose(self.block.predictions_for(0), accept=2)
+            second.propose(self.block.predictions_for(1), accept=15)
+            self.step([entry(first), entry(second)])
+        self.assertEqual(len(seen), 1)
+        name, point, calls, walked = seen[0]
+        self.assertEqual((name, point), ('P12', 'first_packed_round'))
+        self.assertEqual(calls, [('verify', ['B', 'A']), ('commit', 1, 10), ('commit', 0, 16)])
+        self.assertIs(walked['packed_block'], self.block)
+        self.assertEqual(len(walked['round_requests']), 2)
+
+    def test_without_a_ledger_the_round_reads_nothing(self):
+        import memory_ledger
+
+        self.assertIsNone(memory_ledger.active())
+        with patch.object(memory_ledger.MemoryLedger, 'phase', side_effect=AssertionError('no ledger')):
+            self.step(self.two())
+
+    def test_a_round_that_fails_its_verify_records_no_p12(self):
+        import memory_ledger
+
+        entries = self.two()
+        self.block.verify = lambda entries: (_ for _ in ()).throw(RuntimeError('device failure'))
+        ledger = memory_ledger.MemoryLedger(None, None)
+        with patch.object(memory_ledger, '_active', ledger), patch.object(ledger, 'phase') as phase, \
+                self.assertRaisesRegex(RuntimeError, 'device failure'):
+            self.step(entries)
+        phase.assert_not_called()
+        self.assertFalse(ledger.first_round_recorded)
+
     def test_a_round_the_block_cannot_serve_goes_to_the_sequential_step_whole(self):
         cases = {}
         cases['a narrow ticket'] = [entry(self.request('B', 1, 3000, accept=7, rows=8)), entry(self.request('A', 0, 100, accept=15))]

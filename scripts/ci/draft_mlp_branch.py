@@ -1,10 +1,24 @@
 """Device-resident learned layer-zero MLP branch and independent stage checks."""
 
+import os
+
 from draft_convolution import grouped_causal_convolution, convolution_reference
 from draft_mlp import split_mlp_weights, swiglu_device, swiglu_reference
 from feature_collective import gather_add_projection
 from feature_normalization import bf16_ulp_distance, rms_reference
 from projection_rounding import grouped_projection_reference
+
+
+DRAFT_BF8_FLAG = 'QWEN_FAST_DRAFT_BF8'
+
+
+def draft_projection_dtype(operations, environ=None):
+    """The upload dtype of the draft's PROJECTION matrices - the five DFlash2 layers' q/k/v/o
+    and gate/up/down, and the fc feature projection: bfloat8_b under QWEN_FAST_DRAFT_BF8=1,
+    bfloat16 otherwise (the default, and every other draft tensor always: norms,
+    convolution kernels and bases, the selector). Read at each upload, never cached."""
+    environ = os.environ if environ is None else environ
+    return operations.bfloat8_b if environ.get(DRAFT_BF8_FLAG) == '1' else operations.bfloat16
 
 
 def prepare_mlp_branch(operations, mesh, weights, convolution, retain):
@@ -15,8 +29,8 @@ def prepare_mlp_branch(operations, mesh, weights, convolution, retain):
     conv_weight = convolution['layers.0.mlp_conv.kernel_projection.weight'].T.contiguous()
     base_weight = convolution['layers.0.mlp_conv.base_kernel']
 
-    def upload(value, sharded=False, layout=None):
-        return retain(operations.from_torch(value, device=mesh, dtype=operations.bfloat16,
+    def upload(value, sharded=False, layout=None, dtype=None):
+        return retain(operations.from_torch(value, device=mesh, dtype=operations.bfloat16 if dtype is None else dtype,
             layout=operations.TILE_LAYOUT if layout is None else layout, memory_config=operations.DRAM_MEMORY_CONFIG,
             mesh_mapper=operations.ShardTensorToMesh(mesh, dim=0) if sharded else operations.ReplicateTensorToMesh(mesh)))
 
@@ -27,7 +41,8 @@ def prepare_mlp_branch(operations, mesh, weights, convolution, retain):
         device_norm=upload(norm_weight.reshape(1, 1, 160, 32), layout=operations.ROW_MAJOR_LAYOUT),
         device_conv=upload(conv_weight),
         bases=[upload(base_weight[phase, offset].reshape(1, 1, 1, 5120)) for phase in range(2) for offset in range(2)],
-        device_projections=[upload(torch.cat([rank[index] for rank in shards], dim=0), True) for index in range(3)])
+        device_projections=[upload(torch.cat([rank[index] for rank in shards], dim=0), True,
+                                   dtype=draft_projection_dtype(operations)) for index in range(3)])
 
 
 def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convolution, retain, *, parameters=None,

@@ -6,6 +6,7 @@ import json
 import os
 
 from dflash_device import PreparedDraftWeights, pindiag
+import memory_ledger
 from serving_buffer_pool import ServingBufferPool, dram_line
 from serving_cache_owner import ServingCacheOwner
 from serving_fast_policy import validate_fast_config
@@ -13,6 +14,59 @@ from serving_lifecycle import FastServingLifecycle
 from serving_page_binding import VerifierPageBinding
 from serving_request_factory import from_prefill
 from serving_runner_bridge import FastRunnerBridge
+
+
+SKIP_BLOCK_STREAM_FLAG = 'QWEN_FAST_SKIP_BLOCK_STREAM'
+SINGLE_GATEUP_FLAG = 'QWEN_FAST_SINGLE_GATEUP'
+SINGLE_GATEUP_SHAPE = 'the single gate/up copy'
+M3_SHAPE = 'the 64-row block'
+
+
+def m3_shape(policy, environ=None):
+    """(met, description): whether this is the 64-row M3 block - four scheduler requests,
+    QWEN_FAST_FOUR_AS_TWO=0 and QWEN_FAST_PACKED_STEP=1 - and a short description of the
+    shape actually configured, for a marker. `policy` is validate_fast_config's dict, or a
+    zero-argument callable returning it."""
+    environ = os.environ if environ is None else environ
+    policy = policy() if callable(policy) else policy
+    users, four_as_two, packed = (policy['scheduler_requests'], environ.get('QWEN_FAST_FOUR_AS_TWO', 'unset'),
+                                  environ.get('QWEN_FAST_PACKED_STEP', 'unset'))
+    met = users == 4 and four_as_two == '0' and packed == '1'
+    return met, 'users=%s FOUR_AS_TWO=%s PACKED_STEP=%s' % (users, four_as_two, packed)
+
+
+def register_reader_reason(policy, environ=None):
+    """Why the serial block stream may be replaced by the register-epilogue reader over the
+    native w_gate_up (combined_runtime's block_stream=None branch), as a (shape, detail)
+    pair for the startup marker - or None, the default, when the stream is required.
+
+    Both flags are default-off and both are admitted at the 64-row M3 block ONLY (four
+    scheduler requests, QWEN_FAST_FOUR_AS_TWO=0, QWEN_FAST_PACKED_STEP=1), the one shape
+    where no target MLP ever sees 16 rows - the per-request engines capture 1, 2 and 4 rows
+    and the block 64 - so FusedT16Arm (fused_t16_scope.py:49-51) and the stream behind it
+    are never read:
+    - QWEN_FAST_SINGLE_GATEUP=1: the model builds no w_gate_up, so there is nothing to
+      stream (and combined_runtime installs no FusedT16Arm either). At any OTHER shape it
+      is REFUSED (ValueError): there the arm serves every 16-row verify, and replacing its
+      BF4 register-epilogue projection with the native w1/w3 path changes the target's
+      arithmetic, so committed tokens could change.
+    - QWEN_FAST_SKIP_BLOCK_STREAM=1: elsewhere None, the stream is built as always (and
+      serving_startup.weight_streams says so in a marker).
+
+    The policy is evaluated only once either flag is set."""
+    environ = os.environ if environ is None else environ
+    single = environ.get(SINGLE_GATEUP_FLAG) == '1'
+    if not single and environ.get(SKIP_BLOCK_STREAM_FLAG) != '1':
+        return None
+    met, shape = m3_shape(policy, environ)
+    if single:
+        if not met:
+            raise ValueError('QWEN_FAST_SINGLE_GATEUP=1 is admitted only at the 64-row M3 block '
+                             '(users=4 FOUR_AS_TWO=0 PACKED_STEP=1), not ' + shape)
+        return (SINGLE_GATEUP_SHAPE, 'QWEN_FAST_SINGLE_GATEUP=1 builds no w_gate_up to stream')
+    if not met:
+        return None
+    return (M3_SHAPE, 'register-epilogue reader on native w_gate_up')
 
 
 @contextmanager
@@ -42,8 +96,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # check runs inside it.
     from profiled_block_stream_override import install as admit_profiled_block_stream
     admit_profiled_block_stream(log=pindiag)
+    # The serial weight stream stays mandatory except at the shape register_reader_reason
+    # admits (each flag default-off), where the register-epilogue reader over the native
+    # w_gate_up replaces it. Read before anything is built: QWEN_FAST_SINGLE_GATEUP=1 at any
+    # other shape is refused here, whatever recipe startup handed over.
+    reader = register_reader_reason(policy)
     if (native_attention_evidence is None or kv_publication_evidence is None
-            or block_stream is None or 'pipeline_evidence' in block_stream):
+            or (block_stream is None and reader is None)
+            or (block_stream is not None and 'pipeline_evidence' in block_stream)):
         raise ValueError('Native T16, direct KV publication and serial weight-stream recipe required')
     runner = worker.model_runner
     model = runner.model.model[0]
@@ -164,6 +224,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 packed_replay_group_rows=replay_group_rows(),
                 **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}))))
         scopes.callback(pool.close)
+        memory_ledger.record('P2', buffer_pool=pool)
         owner = ServingCacheOwner(operations, runner, model)
         # Built once and shared by every request: two TT_CCL objects cycling semaphore
         # handles over one mesh is cross-request interference, not concurrency.
@@ -176,9 +237,13 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         experiment = from_environment(directory, runtime_root)
 
         scopes.enter_context(sampler_links(sampler.tt_sampling, 4))
+        memory_ledger.record('P3', serving_collectives=collectives, serving_sampler=sampler, gather_experiment=experiment)
         audit = scopes.enter_context(combined_runtime(operations, model, directory=directory,
             runtime_root=runtime_root, native_attention_evidence=native_attention_evidence,
-            block_stream=block_stream, kv_publication_evidence=kv_publication_evidence))
+            block_stream=block_stream, kv_publication_evidence=kv_publication_evidence,
+            **({'single_gateup_admitted': True} if reader is not None and reader[0] == SINGLE_GATEUP_SHAPE
+               else {})))
+        memory_ledger.record('P4', combined_runtime=audit)
         # The draft weights, uploaded once for every request: they are the first
         # buffers a request allocates, so they took the lowest hole an earlier
         # request's verify trace left, ahead of the history (PreparedDraftWeights).
@@ -190,6 +255,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         weights = PreparedDraftWeights(operations, model.mesh_device, draft_layers, projection, selector,
             block_rows=16, live_query_qk=False, native_proposal_attention=True)
         scopes.callback(weights.close)
+        memory_ledger.record('P5', draft_weights=weights)
         # The device step. By default the sequential one - correct, not yet fast: one
         # weight pass per user per round - and describe() records that cost so a benchmark
         # reading it is not mistaken for the goal. QWEN_FAST_PACKED_STEP=1 builds the
@@ -220,6 +286,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                                                     **({'pool_slots': tuple(range(slot, slot + shape.users))} if four_as_two else {}))
                 scopes.callback(packed_block.close)
                 packed_blocks.append(packed_block)
+                memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)
                 slot += shape.users
             # The step bound to its block (or blocks), carrying the per-round ticket-width
             # policy the worker hook asks before drafting.
@@ -240,13 +307,19 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # buffer pool, draft weights, the block and its traces - so the log shows the
         # headroom the per-request engines have (run 35509307389 found 214 MB of it).
         pindiag('[PINDIAG] dram after attach: {}', dram_line(pool))
+        memory_ledger.record('P7', point='after_attach')
 
         def capture_factory(position):
             owner.validate()
+            # The allocator just before this user's prefill; the bridge factory reads it
+            # again just after, so the pair bounds what the prefill leaves resident.
+            memory_ledger.record('prefill', point='before prompt=%d' % position)
             return PrefillWindowCapture(operations, model, position, TARGET_TAPS)
 
         def bridge_factory(state, capture):
             owner.validate()
+            memory_ledger.record('prefill', point='after req=%s' % memory_ledger.short_id(state.req_id),
+                                 request=str(state.req_id), model_after_prefill=model)
             if len(state.block_ids) != 1:
                 raise ValueError('One scheduler KV group required')
             blocks = tuple(state.block_ids[0])
@@ -265,6 +338,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # The allocator after this request's engine and its captures: one line per
             # admitted request, so the log shows what each costs and what is left.
             pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))
+            memory_ledger.engine_admitted(str(state.req_id), engine_request=request)
             try:
                 binding = VerifierPageBinding(request.engine, blocks, physical_pages=owner.physical_pages)
                 return FastRunnerBridge(runner, request, binding, validate_storage=owner.validate)
@@ -303,5 +377,6 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         yield dict(lifecycle=lifecycle, runtime=audit, cache_owner=owner,
             serving_qualified=False, performance_qualified=False)
     finally:
+        memory_ledger.record('P13', point='before_shutdown')
         lifecycle.close()
         scopes.close()

@@ -1,6 +1,7 @@
 """Static-fixture full-model batching; no installed or class-global patches."""
 
 from contextlib import contextmanager, nullcontext
+import os
 from types import SimpleNamespace
 
 from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCacheWriter, serial_tail
@@ -765,6 +766,16 @@ class ModelBatch:
             from dflash_device import pindiag
             pindiag('[PINDIAG] native_m3 binder calls this round: {}',
                    {binder.label: binder.calls - before for binder, before in zip(two_tile, before_two_tile)})
+        # QWEN_FAST_GDN_USER_BATCH=1: how many of this forward's GDN layers took the one
+        # user-batched recurrence/norm launch (48 when it engaged everywhere). run() executes
+        # its Python once per captured forward - a replay re-issues the device program and
+        # never comes back here - so this is one line per capture, not per round. Logged
+        # whenever a batched call ran, and always with the flag set (so 0 is reported too).
+        user_batched = self.user_batched_calls - before_user_batched
+        if user_batched or os.environ.get('QWEN_FAST_GDN_USER_BATCH') == '1':
+            from dflash_device import pindiag
+            pindiag('[PINDIAG] gdn user_batched calls this captured forward: {} of {} GDN layers',
+                    user_batched, self.gdn_calls - before_gdn)
         if self.gdn_calls - before_gdn != 48 or any(
             writer.calls - before != 2 for writer, before in zip(self.writers, before_writes, strict=True)
         ):

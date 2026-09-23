@@ -294,5 +294,52 @@ class ReferenceRunVerdictTests(unittest.TestCase):
                 self.assertFalse(evaluate_gate(**dict(self.LONE, reference_run=True, **changes)))
 
 
+
+class FlagMarkerTests(unittest.TestCase):
+    """A capacity flag that reached the server without its marker is not a pass."""
+
+    def _report(self, environ, log, users=4):
+        from lever_n_m3native_gate import flag_marker_report
+        return flag_marker_report(environ, users, log)
+
+    def test_no_flags_require_nothing(self):
+        self.assertEqual(self._report({}, '')['missing'], [])
+
+    def test_a_skip_flag_without_its_marker_is_missing(self):
+        report = self._report({'QWEN_FAST_SKIP_BLOCK_STREAM': '1'}, '[PINDIAG] block stream NOT skipped: ...')
+        self.assertEqual(report['missing'], ['QWEN_FAST_SKIP_BLOCK_STREAM: [PINDIAG] block stream skipped for the 64-row block'])
+        self.assertFalse(evaluate_gate(**dict(COMPLETE_KWARGS, missing_markers=report['missing'])))
+
+    def test_single_gateup_needs_all_four_markers_and_supersedes_the_skip_marker(self):
+        from lever_n_m3native_gate import SINGLE_GATEUP_MARKERS
+        environ = {'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_SKIP_BLOCK_STREAM': '1'}
+        log = chr(10).join(m + ' 64 layers' for m in SINGLE_GATEUP_MARKERS)
+        self.assertEqual(self._report(environ, log)['missing'], [])
+        self.assertEqual(len(self._report(environ, chr(10).join(log.split(chr(10))[:3]))['missing']), 1)
+
+    def test_a_model_that_still_holds_the_copy_does_not_count(self):
+        environ = {'QWEN_FAST_SINGLE_GATEUP': '1'}
+        log = '[PINDIAG] block stream skipped for the single gate/up copy: w_gate_up present on 64 of 64 layers'
+        self.assertIn('QWEN_FAST_SINGLE_GATEUP: [PINDIAG] block stream skipped for the single gate/up copy: '
+                      'w_gate_up present on 0 of', self._report(environ, log)['missing'])
+
+    def test_bf8_and_the_ledger_markers(self):
+        environ = {'QWEN_FAST_DRAFT_BF8': '1', 'QWEN_FAST_MEMORY_LEDGER': '1'}
+        log = ('[PINDIAG] draft weights lent to x (borrowers=1 tensors=40) projections dtype=bf8 x36' + chr(10)
+               + '[MEMLEDGER] phase=P7 point=after_attach check=residual status=passed limit=1.500GB')
+        report = self._report(environ, log)
+        self.assertEqual(report['missing'], [])
+        self.assertEqual(report['ledger_residual'], 'passed')
+        self.assertEqual(len(self._report(environ, '')['missing']), 3)
+
+    def test_gdn_user_batch_needs_one_forward_batching_every_layer_at_four_users(self):
+        environ = {'QWEN_FAST_GDN_USER_BATCH': '1'}
+        partial = '[PINDIAG] gdn user_batched calls this captured forward: 0 of 48 GDN layers'
+        full = '[PINDIAG] gdn user_batched calls this captured forward: 48 of 48 GDN layers'
+        self.assertEqual(len(self._report(environ, partial)['missing']), 1)
+        self.assertEqual(self._report(environ, partial + chr(10) + full)['missing'], [])
+        self.assertEqual(self._report(environ, partial, users=1)['missing'], [])
+
+
 if __name__ == '__main__':
     unittest.main()
