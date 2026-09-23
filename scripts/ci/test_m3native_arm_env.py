@@ -346,6 +346,16 @@ class ServingPairArmTests(unittest.TestCase):
         self.assertIn('readlink -f "/dev/tenstorrent/by-id/$card"', text)
         self.assertIn('expected exactly two serving cards', text)
 
+    def test_the_arm_waits_for_the_pair_after_the_reset(self):
+        # Run 35930349210: the reset step returned before pciehp re-enumerated card A (behind the
+        # PCIe switch) and the arm refused on a missing by-id link one second later.
+        text = arm_text()
+        self.assertIn('card_wait_s="${M3NATIVE_CARD_WAIT_S:-120}"', text)
+        self.assertIn('until resolve_serving_nodes; do', text)
+        self.assertIn('serving pair moved while settling', text)
+        loop = text.index('until resolve_serving_nodes; do')
+        self.assertLess(loop, text.index('expected exactly two serving cards'))
+
 
 class LegacyContinuationArmTests(unittest.TestCase):
     """Lever N's negative control: M3NATIVE_LEGACY_CONTINUATION_ORDER=1 crosses as
