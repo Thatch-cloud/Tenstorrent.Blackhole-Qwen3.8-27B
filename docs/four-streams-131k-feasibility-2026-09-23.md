@@ -598,3 +598,26 @@ two dead 4160-row key-RoPE uploads per pair.
 - Still open from the spec: Build 2 (pair-pipelined commit/propose, pre-staging the next verify; about -12 to -17 ms
   more by the verifier's figures) needs a redesign so no deferred commit outlives the step, and a per-round tensor
   never straddles a trace replay.
+
+## Verify-trace tuning, waves 1-2 (T1): -7.2 ms of trace, exact
+
+A device profile of the packed verify (v138, 4 x 32k, complete replays only - v133-v137 lost the packed rounds to the
+profiler buffer, and every 200000-op buffer segfaulted the dispatch thread) showed the 64-row verify is kernel-bound:
+131.4 ms of kernels, 2.8 ms of gaps, the matmuls near their DRAM floor; the cost is glue around the GDN recurrence
+(~25 ms) and attention (~11 ms). An earlier reading of mine from the first, overflowed profile (large op-to-op gaps,
+"36 single-core matmuls") was an artefact and is withdrawn. The design workflow ranked exact cuts (~-24 ms central for
+all waves); waves 1-2 ship behind `QWEN_FAST_VERIFY_T1=1` (commits 8235cef1, 8148c61a, image A5 126b30df): matmul grid
+configs for attn qkv and the MLP gate, the replay mask refreshed once per forward, GDN carries read in place (no state
+moves), recurrence launch coalescing, and a per-shard argmax with a host combine.
+
+- **Card-M G0 byte compares:** the new matmul configs are exact in all 8 cases (qkv 164 -> 154 us, gate 135 -> 129 us);
+  the per-shard argmax is exact in all 7 cases (ties within and across shards, near ties, all-equal, signed zeros).
+- **v144** (4 x 32k, audited against the pinned sampler every round): 4/4 exact, 34 audited rounds, 0 mismatches; every
+  cut engaged (48/48 GDN layers direct-carry and coalesced, 0 fallbacks).
+- **ABAB at 4 x 131k** on the best config with Build 1: trace 164.6 / 164.5 ms off, 157.4 / 157.4 ms on (-7.2 ms, the
+  spec's corrected central for these waves); round medians 252 / 253 off, 244 / 240 on (about -10 ms); all exact.
+
+**The 4 x 131k best config now:** K64f (tail mask + KV share), C1c, the GDN prefill conv op, round Build 1 and verify T1:
+exact, verify trace 157.4 ms, round ~242 ms, **about 28.3 tok/s per user** (26.0 at the start of 2026-09-23), fourth
+user's first token at 246 s (276 s). Still to land: G6 prefill K/V sharing (card-M qualified, 5.2 s per 131k prompt;
+model gates v149-v155 running), the remaining verify-trace waves 3-4 (new kernels, ~-17 ms central) and host Build 2.
