@@ -1,7 +1,11 @@
 # sdpa_prefill_chain: the G6 K/V chain for the served chunked prefill SDPA (prefill lever #1)
 
 Built from `sdpa-prefill-share-spec.md` (final spec; sections 2-6 are the build contract).
-**Nothing here has run on hardware.** The build is `~/opgraft-K64g` = K64f + this chain.
+The build is `~/opgraft-K64g` = K64f + this chain (`_ttnncpp.so` 134bc834, chain reader eecc1166,
+patched factory bfab8558), **qualified on card M**: the full Q1 exactness sweep passed, the watcher
+pass was clean, and the planted hang was caught with card recovery. Q2 timing is below. The model
+opt-in is wired into the m3native gate behind `QWEN_FAST_SDPA_PF=1` (see "Model gate (Q3)"); the
+model gate itself has not run yet.
 
 ## What it does
 
@@ -27,23 +31,47 @@ read K/V from DRAM, which gives 16 chains of 6.
 | K0b32 | 0.2116 | |
 | K0c (every core at read-ahead 32) | 0.3798 | slower; output exact |
 
-One injector per group at the served cadence already reaches the compute floor. **The production
-value is therefore `0x5EFA0001` (the chain alone).** Flag 0x2 stays as an A/B knob only (see Deviations).
-Expected saving is about 4.9-5.8 s per 131k prompt, because the controlled stock step is 18.2 us, not
-the spec table's 21.76 us.
+At K0's bench config one injector per group at the served cadence already reached the compute
+floor, which suggested `0x5EFA0001` (the chain alone). **Q2 overturned that at the model's config.**
+
+**Q2 on card M** (graft K64g, Q in L1, the model's 2080-block page table; baseline slope 0.335 ms per
+1k keys, against the model's 0.340), per-step time:
+
+| Arm | Flags | Step (us) | vs baseline | Output |
+|---|---|---|---|---|
+| baseline | - | 21.4 | 1.000 | - |
+| chain | 0x1 | 20.7 | 0.967 | exact |
+| **chain_b** | **0x3** | **16.5** | **0.771** (0.770 from the unrounded slopes) | **exact** |
+| chain_o | 0x5 | 22.3 | 1.042 | exact |
+| chain_bo | 0x7 | 18.9 | 0.883 | exact |
+
+**The production value is `0x5EFA0003`** (the chain plus the injector's read-ahead 32): the fastest
+arm, more than 2% faster than 0x1, and 0x7 is not 2% faster than it (it is slower). It is the model
+opt-in's default. In the model's config the injector's read-ahead is what pays, unlike at K0's.
+
+Predicted saving per 131k prompt: 1,049,600 steps x 4.9 us = **5.1 s** (5.2 s at the model's own
+21.76 us step), so the spec's TTFT A/B acceptance, max(3 s, 0.75 x predicted), is about 3.9 s.
+
+Q2's rule (a), "forwarding and lockstep overhead at most 10%", used to compare the chain's absolute
+slope with K0b32's 0.2116. K0b32 came from K0's bench config, whose stock slope was 0.284, not 0.335,
+so the two slopes do not compare. The rule now compares each run's ratio to its own baseline:
+chain / baseline <= 1.10 x K0b32 / K0 stock = 1.10 x 0.746 = 0.820. 0x3's 0.770 passes it; the old
+absolute form would have failed it (0.2578 > 0.2328). `sdpa_prefill_bench.py` implements the ratio
+form (`--k0b32-slope` over `--k0-stock-slope`, both from one K0 session) and prints the production
+choice in its `M1 Q2:` line.
 
 | Flag | Name | Use |
 |---|---|---|
 | 0x1 | kv_chain | required (the tag with no flags is refused) |
-| 0x2 | inj_batch | the injector's K/V barrier every 32 tiles; A/B only |
-| 0x4 | noc_order | chain order by NoC distance (exhaustive over the 720 orders; refused above 8 members) instead of raster; A/B at Q2 |
+| 0x2 | inj_batch | the injector's K/V barrier every 32 tiles; **production** (with 0x1: Q2) |
+| 0x4 | noc_order | chain order by NoC distance (exhaustive over the 720 orders; refused above 8 members) instead of raster; slower at Q2 (0x5, 0x7) |
 | 0x100 | test_mutate | test only: the injector reads the other KV head for k_chunk 0 (M-A) |
 | 0x200 | test_hang | test only: the sink resets its flag but withholds its credit on its last round (Q1.3: the sink waits in QWDV, its upstream in QWDC) |
 
-**Which calls opt in.** `pf_optin` sets the word only for the flexible path, bf8 K/V, q/k chunk 128 and
+**Which calls opt in.** The opt-in sets the word only for the flexible path, bf8 K/V, q/k chunk 128 and
 S in `apply_factory_pf.QUALIFIED_ROWS` = 512, 1024 or 2048: exactly the row counts the card-M Q1 sweep
-runs. The CPU tests keep the two lists and the card test's `ROWS` equal. Any other S (a 256-1792-row tail
-chunk, or S > 2048 with its unequal groups) takes the served path.
+runs. The CPU tests keep the lists (the graft's, the factory's and the card test's `ROWS`) equal. Any
+other S (a 256-1792-row tail chunk, or S > 2048 with its unequal groups) takes the served path.
 
 Test flags are refused unless `QWEN_SDPA_PF_TEST=1` is set in the process that builds the program.
 Every other bit is refused, including 0x1000 (reserved for Plan B).
@@ -95,20 +123,28 @@ The served `reader_interleaved.cpp` is not modified.
 | `apply_factory_pf.py` | F0-F7, the cross-file constants, and `decode_word()` (F1 in Python). Accepts `--out`, `--record` and in-place with `.orig-fd8c0676`. |
 | `make_pf_reader.py`, `reader_interleaved_qwen_chain.cpp` | R1-R9 and the committed output. Modes: `--check DIR`, `--dump`, `--reader FILE`, `--record`. |
 | `pf_protocol_model.py` | The F4 topology port, the round lists, and the discrete-event model checker (spec 5.3 items 2-4). Run it directly for the full grid. |
-| `pf_optin.py` | The Python opt-in of spec 3.6: `TP_HELPERS`, and `patch_tp()` / `unpatch_tp()` for the grafted `attention/tp.py`. |
+| `pf_optin.py` | The Python opt-in of spec 3.6, re-exported from its one copy, `scripts/ci/lever_n_m3native_patch.py` section I (what the gate grafts): `TP_HELPERS`, `patch_tp()` / `unpatch_tp()` / `patch_tp_full()`, and a CLI (`--full` gives the gate's whole `attention/tp.py` graft). |
 | `build_k64g.sh` | The rig build of `~/opgraft-K64g` (spec 5.2). |
 | `run_card_m_pf.sh` | Card M: `reference`, `candidate` (optionally with `WATCHER=1`) and `hang`. |
 | `test_sdpa_prefill_chain_card_m.py` | Q1 on card M: the matrix, M-A, cache/hash, refusals, stress, trace, and the planted hang. |
 | `test_sdpa_prefill_chain_sources.py` | CPU tests (spec 5.3 items 1-7 and 9, the card-M helpers, a fake-ttnn dry run of all three roles, and the stub g++ check). |
 | `stubcheck/` | `stub_compile.py` plus syntax stubs of the dataflow API for `g++ -fsyntax-only`. |
 | `fixtures/` | `sdpa_program_factory.fd8c0676.cpp` (the served factory, for the CPU tests). `cardm_worker_coords.json` goes here too: it was captured in the K0 session (`results/k0-<stamp>/cardm_worker_coords-<stamp>.json` on the rig) and **is not yet copied**. |
-| `../sdpa_prefill_bench/` | `sdpa_prefill_bench.py`: chain arms, `--program-word`, `--q-memory`, `--page-blocks`, `--verify-log`, `--k0b32-slope` and `M1 Q2:` (rules a-c plus d: every chain arm's output equals the baseline's, so Q2 needs `--sha`). `run_m1.sh`: `KOPGRAFT_PF` (only with `IMAGE` set explicitly to an image `build_k64g.sh` compared, and then `M1_REQUIRE_SOURCES=1`), `WATCHER=1` and `QWEN_SDPA_PF_TEST=1`. `test_prefill_chain_bench.py` tests both. |
+| `../sdpa_prefill_bench/` | `sdpa_prefill_bench.py`: chain arms, `--program-word`, `--q-memory`, `--page-blocks`, `--verify-log`, `--k0b32-slope` / `--k0-stock-slope` and `M1 Q2:` (rules a-c plus d: every chain arm's output equals the baseline's, so Q2 needs `--sha`; rule (a) compares ratios to each run's own baseline; the line names the production choice). `run_m1.sh`: `KOPGRAFT_PF` (only with `IMAGE` set explicitly to an image `build_k64g.sh` compared, and then `M1_REQUIRE_SOURCES=1`), `WATCHER=1` and `QWEN_SDPA_PF_TEST=1`. `test_prefill_chain_bench.py` tests both. |
 
 ## Deviations from the spec
 
-1. **Production flags are 0x1, not 0x3.**
-   - The reason is the K0 result above.
-   - Affected: the `pf_optin` default, the card-M stress/trace/cache flag, the bench's `chain` arm and the Q2 choice rule. A flag set beyond 0x1 is chosen only if its slope is at least 2% lower.
+1. **Production flags: the spec's 0x3, after all.**
+   - The build first chose 0x1 from K0. Q2, at the model's config, measured 0x3 fastest (the table
+     above), so the model opt-in's default is 0x3 again.
+   - Still 0x1 from that choice: the card-M test's stress / trace / cache flag (qualification history;
+     the Q1 sweep covered 0x3 too).
+   - The bench's choice rule (`q2_production`) is spec 6.3's, generalised to every timed flag set: a
+     flag set replaces one with fewer flag bits only with a slope at least 2% lower. That is 0x1 unless
+     another set is 2% faster, and 0x7 over 0x3 only if 0x7 is 2% faster than 0x3 (the earlier
+     "fastest of those beating 0x1" would have taken a 1%-faster 0x7). One bench run times one Q
+     placement; spec 6.3 asks for the same answer in both. Q2's recorded choice is the L1 (acceptance)
+     run's.
    - A `chain_o` arm (0x5) was added to Q2, and 0x5 is in the Q1 sweep and the watcher pass (flags 0x1, 0x3, 0x5, 0x7), so every flag set Q2 can choose is exactness-qualified.
 2. **R2 and R4 anchor on the lines the spec's parentheses name.** These are the zigzag CT line (R:97) and `cb_id_chunk_start_idx_writer` (R:196). The spec's line numbers, R:99 and R:203, point at the lines after them. The effect is the same.
 3. **The F7 anchor is at F:832-833, not F:830-831.** It is the same text.
@@ -119,15 +155,31 @@ The served `reader_interleaved.cpp` is not modified.
    - F1 requires `QWEN_SDPA_PF_TEST` to equal `"1"`, not merely to be set.
    - F1 reads the field through `static_cast<uint32_t>`.
 6. **K0 files stay in `../sdpa_prefill_bench/`** (`make_k0_readers.py`, `k0/`), where K0 ran. They are not duplicated here.
-7. **The Python opt-in is delivered but not wired.**
-   - `pf_optin.patch_tp` applies spec 3.6 to `attention/tp.py`. It is tested against the pinned tp.py from the probe 35503727180 dump.
-   - Staging it into the arm's graft (`lever_n_m3native_patch.stage`) is not done: that is a scripts/ci change, and the image copy lists must be checked first (bundle provenance).
-   - The same applies to spec 5.2 step 8, the arm mounting `$KOPGRAFT64/sdpa`.
-   - Both are Q3 prerequisites. Card M reaches the graft through `run_m1.sh KOPGRAFT_PF` and `run_card_m_pf.sh`.
-   - `pf_optin` carries its own self-contained marker check because the image has no copy of `pooled_attention_replay`.
-8. **The model gate now runs on image A'' eceb2daa** (gate v128+, with K64f).
-   - `run_card_m_pf.sh` defaults to A'' ("the image the model gate will use").
-   - `build_k64g.sh` compares the graft's `sdpa/` against A'', A' (the K0 image) and e41ef884 (the arm script's default).
+7. **The Python opt-in is wired, under different names than the spec's.**
+   - The flag is `QWEN_FAST_SDPA_PF=1` (flags `QWEN_FAST_SDPA_PF_FLAGS`, default 0x3), not the spec's
+     `QWEN_SDPA_PREFILL_KVCHAIN(_FLAGS)`: the `QWEN_FAST_*` family the arm translates `M3NATIVE_*` into.
+   - The opt-in lives in `scripts/ci/lever_n_m3native_patch.py` section I and nowhere else
+     (`pf_optin` re-exports it). It composes with the decode graft: `PATCHES['attention/tp.py']` is
+     `patch_attention_tp_full` = `patch_attention_tp`, then `patch_attention_tp_sdpa_pf`.
+   - It is an insertion AFTER the served `SDPAProgramConfig` statement (kept verbatim) rather than the
+     spec's rewrite of it, so flag off runs the served statement itself.
+   - `tp_common.py` is sha-pinned on the serving path and is not touched.
+   - The graft's source is the image's own `attention/tp.py` (sha256 e0c685a4, the file every m3native
+     graft through v143 staged, and v144 on image A5 126b30df too: run 35917834242's graft artifact
+     `attention/tp.py.orig`), committed as `scripts/ci/fixtures/qwen36_attention_tp.py`. On that v144
+     file the composed patch gives section I plus exactly v144's staged decode graft.
+   - None of this is baked into an image. The graft is staged host-side from the checkout and mounted;
+     `lever_n_m3native_patch.py` is in neither image copy list, and must stay importable alone (two rig
+     harnesses copy it by itself), so it keeps its own copies of the factory constants and the CPU
+     tests hold them equal to `apply_factory_pf.py`.
+   - The helpers carry their own `/proc/self/maps` marker check, because the image has no copy of
+     `pooled_attention_replay`.
+8. **Images.** Card M and `run_card_m_pf.sh` use A'' eceb2daa (gate v128-v137).
+   - `build_k64g.sh` step 7 compared the graft's `sdpa/` against A'', A' (the K0 image) and e41ef884
+     (the arm script's default).
+   - The gate's best config has since moved (v144-v148: A5 126b30df), so the arm no longer relies on
+     that list: under `M3NATIVE_SDPA_PF=1` it runs step 7's comparison itself against the run's own
+     image before launching (see "Model gate (Q3)").
 9. **Q1.7 (cache) runs first in the candidate role, and Q1.8 (refusals) before Q1.4 (M-A).** Once the
    sweep has built both programs, "served then chain adds one entry" cannot be observed. The factory
    checks only on a program-cache miss, so once M-A has built 0x103 the test-flag refusal would hit the
@@ -155,19 +207,21 @@ The served `reader_interleaved.cpp` is not modified.
 
 | Command | Result |
 |---|---|
-| `py -3.11 -B -m pytest -q test_sdpa_prefill_chain_sources.py` | 89 passed, 1 skipped (the coordinate fixture), in about 48 s |
-| `py -3.11 -B -m pytest -q ../sdpa_prefill_bench/test_prefill_chain_bench.py` | 16 passed |
+| `py -3.11 -B -m pytest -q test_sdpa_prefill_chain_sources.py` | 91 passed, 1 skipped (the coordinate fixture), in about 30 s |
+| `py -3.11 -B -m pytest -q ../sdpa_prefill_bench/test_prefill_chain_bench.py` | 21 passed |
+| `py -3.11 -B -m pytest -q test_lever_n_m3native_sdpa_pf.py` (in `scripts/ci`) | 31 passed: the model-gate wiring (graft, arm, gate) |
 
 CI-style runs, from the repo root with `PYTHONPATH=scripts/ci`:
 
-- `unittest discover` of this directory: 90 tests OK (1 skipped), about 46 s. With
-  `QWEN_SDPA_PREFILL_SRC=/nonexistent` (no probe tree, as in CI): 90 OK, 4 skipped - the factory tests now
-  run from the committed fixture; only the probe-tree reader compare, the two stub reader compiles and the
-  coordinate fixture skip.
-- `unittest discover` of `../sdpa_prefill_bench`: 101 OK, which is the existing 85 plus the new 16. One
-  existing assertion in `test_k0_readers.py` was updated for the runner's `$timeout_s`.
+- `unittest discover` of this directory: 92 tests OK (1 skipped). With `QWEN_SDPA_PREFILL_SRC=/nonexistent`
+  (no probe tree, as in CI): 92 OK, 4 skipped - the factory tests run from the committed fixture; only the
+  probe-tree reader compare, the two stub reader compiles and the coordinate fixture skip.
+- `unittest discover` of `../sdpa_prefill_bench`: 106 OK.
+- `unittest test_lever_n_m3native_sdpa_pf`: 31 OK, including the whole arm run by bash against a stub
+  docker (which also plays the image for the `sdpa/` comparison).
 
-CI runs this directory through a new discover line in `.github/workflows/qwen-integration-cpu.yml`.
+CI runs this directory and the bench through discover lines in `.github/workflows/qwen-integration-cpu.yml`,
+and `test_lever_n_m3native_sdpa_pf` through its own line.
 
 **Full model-checker grid.** `py -3.11 -B pf_protocol_model.py --seeds 2000 --jobs 8` ran 144,000 runs
 (2,000 seeds x C {0, 1, 15, 16, 33, 64} x m {0, 3, 7} x the four variants) in 502 s, after the
@@ -243,13 +297,85 @@ bash run_card_m_pf.sh hang                      # Q1.3 LAST: PASS = the planted 
 WATCHER=1 bash run_card_m_pf.sh hang            # after reset + smoke: PASS = QWDV/QWDC (or a chain-reader assert)
 ```
 
-**Q3 (model gate) prerequisites, not done here:**
+## Model gate (Q3)
 
-- Copy the coordinate fixture into `fixtures/`.
-- Stage `pf_optin.patch_tp` into the arm's `graft/attention/tp.py`.
-- Mount `$KOPGRAFT64/sdpa` in `lever_n_m3native_run_arm.sh`: check both image copy lists, and that the path is host-side, not baked.
-- Key the arm's JIT cache on the chain reader too. `lever_n_m3native_run_arm.sh` (lines 148-149) names
-  `kernel_cache` after the two decode kernels' bytes only, and the kernel cache hash is not known to cover
-  file contents, so a revised `reader_interleaved_qwen_chain.cpp` at the same path could reuse a stale
-  binary: include it in that hash when the graft has `sdpa/`.
-- Add the gate markers: `[PINDIAG] sdpa prefill kvchain flags=0x5efa0001` and `[QWEN-SDPA-PF] flags=0x1 kv_chain=1 chains=16 members=96`.
+### Wiring (done; CPU-tested by `scripts/ci/test_lever_n_m3native_sdpa_pf.py`)
+
+- **Graft.** `lever_n_m3native_patch.PATCHES['attention/tp.py']` is `patch_attention_tp_full`: the
+  decode graft, then the opt-in (section I). The gate workflow's graft job stages it on every tag. Without
+  the flag it is inert: the grafted `forward_prefill_paged` makes exactly the decode graft's ttnn calls,
+  and the launched `docker run` argv is the arm's without this lever. The grafted *file* is not the
+  decode-only graft, though: section I is in every tag's `attention/tp.py`, so every `graft.sha256`
+  changes, and if the image's `tp.py` ever drifts at section I's two anchors, every tag's graft job
+  fails (loudly, before any hardware), not only tags that set the flag. This follows section H's
+  precedent.
+- **Arm.** `M3NATIVE_SDPA_PF=1` needs `KOPGRAFT64` to be a K64g graft. `M3NATIVE_SDPA_PF_FLAGS` is optional
+  (0x1, 0x3, 0x5 or 0x7; default 0x3) and refused without `M3NATIVE_SDPA_PF=1` (it would pass nothing,
+  and an intended "on" arm would measure the served prefill). Before the run, the arm refuses a graft:
+  - that lacks `sdpa/device/kernels/dataflow/reader_interleaved_qwen_chain.cpp`;
+  - whose `_ttnncpp.so` lacks `[QWEN-SDPA-PF] flags=`;
+  - whose `MANIFEST.sha256` is missing or does not verify;
+  - whose `sdpa/` is not the run image's `sdpa/` plus the chain reader and nothing else. This is
+    `build_k64g.sh` step 7's test (`docker create` the image, `docker cp` its op directory out,
+    `diff -rq`), run against the image the tag actually launches. It matters because every kernel the
+    JIT builds from `sdpa/` then comes from the graft: the served prefill reader and writer, the draft
+    SDPA, and the decode kernel's include of `compute_common.hpp`. The attach pins do not cover
+    `dataflow_common.hpp` or `chain_link.hpp`.
+
+  It mounts the graft's `sdpa/` over the image's op directory (a single directory, never anything
+  under `/experiment-scripts/ci`). The JIT cache is keyed on the whole mounted tree (every file's
+  sha256), because the chain reader includes headers from it.
+- **Gate.** `required_flag_markers` requires, under the flag:
+  - `[PINDIAG] sdpa prefill kvchain flags=0x5efa0003 `: the graft, once per process, after its binary check;
+  - `[QWEN-SDPA-PF] flags=0x3 kv_chain=1 chains=16 members=96 `: the factory, once per chain program,
+    for the 2048-row topology (spec 6.4). It is required whenever a prompt holds a 2048-token chunk,
+    so a run where only 512- or 1024-row tail chunks took the chain does not pass.
+
+  Every factory line must also carry the requested flags and one of the Q1-qualified topologies
+  (512 rows 4/24, 1024 rows 8/48, 2048 rows 16/96). Neither the Python eligibility test nor the
+  factory's envelope pins the grid or the local head counts, so this is the runtime proof of the
+  topology. Without the flag, any `[QWEN-SDPA-PF] flags=` line fails the run, because the off arm of
+  an A/B must be the served prefill.
+
+### A model-gate run
+
+Add to the tag's env line in the workflow's arm step, on top of the best config (for example v146's
+list, with `KOPGRAFT64` changed from K64f to K64g; K64g carries K64f's decode side):
+
+```
+KOPGRAFT64=/home/thatch/opgraft-K64g M3NATIVE_SDPA_PF=1        # M3NATIVE_SDPA_PF_FLAGS=0x3 is the default
+```
+
+The launched `docker run` argv then differs from the same arm without `M3NATIVE_SDPA_PF` by exactly:
+
+```
+-v /home/thatch/opgraft-K64g/sdpa:/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa:ro   (after the sdpa_decode mount)
+-e QWEN_FAST_SDPA_PF=1 -e QWEN_FAST_SDPA_PF_FLAGS=0x3                                         (before QWEN_FAST_NATIVE_ATTN)
+-e TT_METAL_CACHE=/experiment-cache/kernels-qwen-<K64f's 12>-pf-<12 of the sdpa/ tree's hash>   (every file's sha256)
+```
+
+The arm's log then shows `... = image's sdpa/ + reader_interleaved_qwen_chain.cpp; manifest verified`
+and the `SDPA prefill K/V chain (lever #1)` line naming the flags and the cache.
+
+**The image.** Any image works whose `sdpa/` equals the graft's minus the chain reader; the arm checks
+this against the tag's own image before every flag-on run, and refuses with the `diff -rq` output
+otherwise. The v144-v148 best config runs A5 126b30df, which `build_k64g.sh` step 7 never compared, so
+the first flag-on tag on A5 is also that comparison. If it refuses, the graft's `sdpa/` and A5's differ:
+build a K64g whose `sdpa/` is A5's plus the chain reader (ttbuild's tree synced to A5, `K64G_IMAGES`
+naming A5), or tag on an image the check passes for (A'' eceb2daa passed step 7).
+
+Gates, in order (spec 6.4):
+
+1. 32k token-exact against the v95 reference.
+2. 131k token-exact against the v96 reference.
+3. TTFT A/B at 131k on the same graft, with the flag on and off: 3 alternating runs each. Accept a gain
+   of at least max(3 s, 0.75 x 5.1 s) = 3.9 s.
+   - Run one discarded priming run with `M3NATIVE_SDPA_PF=1` first. The flag-on arm has its own JIT
+     cache (`-pf-<tree>`), so its first run compiles every kernel in the model, while the flag-off
+     arm reuses K64f's warm cache. The cache lives in the `qwen-experiments` volume, so one priming
+     run warms it for the A/B.
+   - Compare the medians of the three runs on each side, because rig CI load skews single runs.
+4. 4 x 131k concurrent, token-exact, with the flag on.
+
+**Still not done:** copying the coordinate fixture into `fixtures/`. It is needed only by the 0x4
+(NoC-order) CPU test, not by the production flags.

@@ -151,6 +151,86 @@ if [ -n "${KOPGRAFT64:-}" ]; then
   fi
   graft_binary_sha=$(sha256sum "$KOPGRAFT64/_ttnncpp.so" | cut -c1-64)
 fi
+# M3NATIVE_SDPA_PF=1 (prefill lever #1, optimisation/ttnn-op/sdpa_prefill_chain) becomes QWEN_FAST_SDPA_PF=1,
+# read by the grafted attention/tp.py (lever_n_m3native_patch section I), which then puts the G6 K/V chain
+# word on the chunked prefill SDPA calls card M qualified. It needs a K64g-or-later graft: the factory
+# branch is in its _ttnncpp.so (mounted by the block above), and the chain reader is JIT-compiled from the
+# op directory, so the graft's sdpa/ is mounted over the image's - ONE directory, the way sdpa_decode is,
+# never anything under /experiment-scripts/ci. Every kernel the JIT builds from sdpa/ then comes from the
+# graft's copy: the served prefill reader and writer, the draft SDPA, and sdpa_flash_decode_qwen.cpp's
+# include of compute_common.hpp - and the attach pins cover only some of those files (not
+# dataflow_common.hpp or chain_link.hpp). So, before the run, the graft's sdpa/ must equal THIS run's
+# image's plus reader_interleaved_qwen_chain.cpp and nothing else (build_k64g.sh step 7's own test, here
+# against $image, whichever image the tag names), and the graft must verify against its MANIFEST.sha256.
+# Also refused here: a graft without the chain reader, or whose _ttnncpp.so lacks the factory's
+# '[QWEN-SDPA-PF] flags=' literal (the model refuses such a binary too, but only after attach).
+# M3NATIVE_SDPA_PF_FLAGS (default 0x3, the Q2 choice) must be a production flag set and is always passed,
+# so the launched argv names the flags the gate then requires in the factory's log line; set without
+# M3NATIVE_SDPA_PF=1 it is refused (it would pass nothing and an intended "on" arm would measure off).
+# The JIT cache is also keyed on the whole mounted sdpa/ tree (every file's bytes: the reader includes
+# its headers from that tree). Unset: nothing is mounted, passed or checked, and the cache is unchanged.
+sdpa_pf_env=()
+if [ -n "${M3NATIVE_SDPA_PF:-}" ]; then
+  if [ "$M3NATIVE_SDPA_PF" != "1" ]; then
+    echo "M3NATIVE_SDPA_PF must be 1 or unset, got '$M3NATIVE_SDPA_PF'" >&2
+    exit 1
+  fi
+  if [ -z "${KOPGRAFT64:-}" ]; then
+    echo "M3NATIVE_SDPA_PF=1 needs KOPGRAFT64 (a K64g-or-later graft: the chain factory is in its _ttnncpp.so)" >&2
+    exit 1
+  fi
+  sdpa_pf_flags="${M3NATIVE_SDPA_PF_FLAGS:-0x3}"
+  case "$sdpa_pf_flags" in
+    0x1|0x3|0x5|0x7) ;;
+    *) echo "M3NATIVE_SDPA_PF_FLAGS must be a production flag set (0x1, 0x3, 0x5, 0x7), got '$sdpa_pf_flags'" >&2; exit 1 ;;
+  esac
+  sdpa_pf_reader="$KOPGRAFT64/sdpa/device/kernels/dataflow/reader_interleaved_qwen_chain.cpp"
+  if [ ! -s "$sdpa_pf_reader" ]; then
+    echo "M3NATIVE_SDPA_PF: $KOPGRAFT64 lacks sdpa/device/kernels/dataflow/reader_interleaved_qwen_chain.cpp" >&2
+    exit 1
+  fi
+  if ! grep -a -q -F -- '[QWEN-SDPA-PF] flags=' "$KOPGRAFT64/_ttnncpp.so"; then
+    echo "M3NATIVE_SDPA_PF: $KOPGRAFT64/_ttnncpp.so lacks '[QWEN-SDPA-PF] flags=' (not a K64g-or-later build)" >&2
+    exit 1
+  fi
+  if [ ! -s "$KOPGRAFT64/MANIFEST.sha256" ] || ! (cd "$KOPGRAFT64" && sha256sum -c --quiet MANIFEST.sha256 >&2); then
+    echo "M3NATIVE_SDPA_PF: $KOPGRAFT64/MANIFEST.sha256 is missing or does not verify (not the graft build_k64g.sh made)" >&2
+    exit 1
+  fi
+  sdpa_pf_target=/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa
+  sdpa_pf_work=$(mktemp -d)
+  if ! sdpa_pf_cid=$(docker create --network none --entrypoint true "$image") || [ -z "$sdpa_pf_cid" ]; then
+    rm -rf "$sdpa_pf_work"
+    echo "M3NATIVE_SDPA_PF: could not create a container of $image to compare its sdpa/ with the graft's" >&2
+    exit 1
+  fi
+  if ! docker cp "$sdpa_pf_cid:$sdpa_pf_target" "$sdpa_pf_work/image-sdpa" >/dev/null; then
+    docker rm -f "$sdpa_pf_cid" >/dev/null 2>&1 || true
+    rm -rf "$sdpa_pf_work"
+    echo "M3NATIVE_SDPA_PF: could not copy $sdpa_pf_target out of $image" >&2
+    exit 1
+  fi
+  docker rm -f "$sdpa_pf_cid" >/dev/null 2>&1 || true
+  sdpa_pf_differences=$(diff -rq "$sdpa_pf_work/image-sdpa" "$KOPGRAFT64/sdpa" || true)
+  rm -rf "$sdpa_pf_work"
+  sdpa_pf_expected="Only in $KOPGRAFT64/sdpa/device/kernels/dataflow: reader_interleaved_qwen_chain.cpp"
+  if [ "$sdpa_pf_differences" != "$sdpa_pf_expected" ]; then
+    echo "M3NATIVE_SDPA_PF: $KOPGRAFT64/sdpa is not image $image's sdpa/ plus reader_interleaved_qwen_chain.cpp alone:" >&2
+    echo "$sdpa_pf_differences" >&2
+    exit 1
+  fi
+  echo "SDPA prefill K/V chain (lever #1): $KOPGRAFT64/sdpa = image's sdpa/ + reader_interleaved_qwen_chain.cpp; manifest verified"
+  KM="$KM -v $KOPGRAFT64/sdpa:$sdpa_pf_target:ro"
+  sdpa_pf_tree=$(cd "$KOPGRAFT64/sdpa" && find . -type f | LC_ALL=C sort | while IFS= read -r file; do
+    printf '%s %s\n' "$(sha256sum < "$file" | cut -c1-64)" "$file"
+  done | sha256sum | cut -c1-12)
+  kernel_cache="$kernel_cache-pf-$sdpa_pf_tree"
+  sdpa_pf_env=(-e QWEN_FAST_SDPA_PF=1 -e "QWEN_FAST_SDPA_PF_FLAGS=$sdpa_pf_flags")
+  echo "SDPA prefill K/V chain (lever #1): sdpa op directory grafted from $KOPGRAFT64, flags $sdpa_pf_flags; kernel cache $kernel_cache"
+elif [ -n "${M3NATIVE_SDPA_PF_FLAGS:-}" ]; then
+  echo "M3NATIVE_SDPA_PF_FLAGS='$M3NATIVE_SDPA_PF_FLAGS' without M3NATIVE_SDPA_PF=1 passes nothing (the run would be the served prefill): set both or neither" >&2
+  exit 1
+fi
 # M3NATIVE_SDPA_MODES (e.g. 'tail') becomes QWEN_FAST_SDPA_MODES, read by
 # pooled_attention_replay.sdpa_modes inside the engine. That module is part of the baked
 # evidence tree (/experiment-scripts/ci), so an image older than this change would never
@@ -320,6 +400,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   "${mounts[@]}" \
   "${sdpa_mode_mounts[@]}" \
   $KM \
+  "${sdpa_pf_env[@]}" \
   ${KOPGRAFT64:+-e QWEN_FAST_NATIVE_ATTN=1} \
   ${KOPGRAFT64:+-e QWEN_FAST_RUNTIME_BINARY_SHA256=$graft_binary_sha} \
   ${M3NATIVE_PIPELINED_COMMITS:+-e QWEN_FAST_PIPELINED_COMMITS=1} \

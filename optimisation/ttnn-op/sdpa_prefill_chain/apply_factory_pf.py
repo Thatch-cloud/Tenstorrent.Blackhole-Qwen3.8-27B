@@ -64,7 +64,8 @@ CHAIN_RT_WORDS = ('participates', 'is_injector', 'is_sink', 'batch', 'head', 'q_
 NOC_GRID = (17, 12)            # BH NoC grid: the flag-0x4 order-cost proxy only
 NOC_ORDER_MAX_MEMBERS = 8      # F4 refuses the 0x4 exhaustive search above this (8! = 40,320 orders)
 NOC_ORDER_MARKER = '[QWEN-SDPA-PF] noc_order searches at most'
-# The row counts (S) the Python opt-in may send and the card-M Q1 sweep qualifies (pf_optin.py and
+# The row counts (S) the Python opt-in may send and the card-M Q1 sweep qualifies (the opt-in is
+# scripts/ci/lever_n_m3native_patch.py section I, SDPA_PF_ROWS, re-exported by pf_optin.py; and
 # test_sdpa_prefill_chain_card_m.py ROWS; the CPU tests keep the three equal). Any other S takes the
 # served path: 256-1792-row tail chunks and S > 2048 (unequal groups) are not qualified.
 QUALIFIED_ROWS = (512, 1024, 2048)

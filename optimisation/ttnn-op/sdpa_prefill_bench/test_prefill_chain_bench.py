@@ -76,7 +76,7 @@ class Q2Tests(unittest.TestCase):
 
     def test_the_rules(self):
         arms = ('baseline', 'chain', 'chain_b', 'chain_o')
-        q2 = bench.q2_verdict(self.table(baseline=0.2838, chain=0.2200, chain_b=0.2210, chain_o=0.2150), bench.K0B32_SLOPE,
+        q2 = bench.q2_verdict(self.table(baseline=0.2838, chain=0.2200, chain_b=0.2210, chain_o=0.2150), bench.K0B32_RATIO,
                               self.shas(arms))
         self.assertEqual(q2['best'], 'chain_o')
         self.assertTrue(q2['passed'])
@@ -85,15 +85,15 @@ class Q2Tests(unittest.TestCase):
         self.assertEqual(q2['beat_chain_by_2pct'], ['chain_o'])
         self.assertIn('M1 Q2: PASS | best=chain_o', bench.q2_line(q2))
         self.assertIn('d(exact)=1', bench.q2_line(q2))
-        slow = bench.q2_verdict(self.table(baseline=0.2838, chain=0.2400), bench.K0B32_SLOPE,
+        slow = bench.q2_verdict(self.table(baseline=0.2838, chain=0.2400), bench.K0B32_RATIO,
                                 self.shas(('baseline', 'chain')))
-        self.assertEqual(slow['rules'], dict(a=False, b=True, c=True, d=True))  # 0.2400 > 1.10 x 0.2116
+        self.assertEqual(slow['rules'], dict(a=False, b=True, c=True, d=True))  # 0.2400/0.2838 > 1.10 x 0.746
         self.assertFalse(slow['passed'])
 
     def test_q2_never_passes_an_inexact_or_unchecked_chain(self):
         """Review 2 L3: rule (d), every production chain arm's output equals the baseline's."""
         table = self.table(baseline=0.2838, chain=0.2200, chain_o=0.2150)
-        wrong = bench.q2_verdict(table, bench.K0B32_SLOPE, self.shas(('baseline', 'chain', 'chain_o'),
+        wrong = bench.q2_verdict(table, bench.K0B32_RATIO, self.shas(('baseline', 'chain', 'chain_o'),
                                                                       differ={('chain_o', 128)}))
         self.assertEqual(wrong['rules']['d'], False)
         self.assertFalse(wrong['passed'])
@@ -104,17 +104,92 @@ class Q2Tests(unittest.TestCase):
         self.assertIsNone(unchecked['rules']['d'])
         self.assertFalse(unchecked['passed'])
         self.assertIn('d(exact)=-', bench.q2_line(unchecked))
-        unstable = bench.q2_verdict(table, bench.K0B32_SLOPE, self.shas(('baseline', 'chain', 'chain_o')),
+        unstable = bench.q2_verdict(table, bench.K0B32_RATIO, self.shas(('baseline', 'chain', 'chain_o')),
                                     {'chain@0': False})
         self.assertFalse(unstable['passed'])
-        missing = bench.q2_verdict(table, bench.K0B32_SLOPE, self.shas(('baseline', 'chain')))
+        missing = bench.q2_verdict(table, bench.K0B32_RATIO, self.shas(('baseline', 'chain')))
         self.assertIn('chain_o@0: no digest', missing['exact_problems'])
         self.assertIsNone(bench.q2_verdict(self.table(baseline=0.28)))
         self.assertIsNone(bench.q2_verdict(self.table(chain=0.22)))
         tested = bench.q2_verdict(dict(self.table(baseline=0.28, chain=0.25), **{'word_0x5efa0203': dict(
-            slope_ms_per_1k_keys=0.01, intercept_ms=1.0)}), bench.K0B32_SLOPE, self.shas(('baseline', 'chain')))
+            slope_ms_per_1k_keys=0.01, intercept_ms=1.0)}), bench.K0B32_RATIO, self.shas(('baseline', 'chain')))
         self.assertEqual(tested['best'], 'chain')                     # test-flag words never count
         self.assertTrue(tested['rules']['d'])                         # nor does their (different) output
+
+    # Q2 on card M (graft K64g, Q in L1, the model's 2080-block page table), as per-step times in us.
+    CARD_M_Q2_STEP_US = dict(baseline=21.4, chain=20.7, chain_b=16.5, chain_o=22.3, chain_bo=18.9)
+
+    def test_rule_a_compares_ratios_to_each_runs_own_baseline(self):
+        """K0 (stock 0.2838) and Q2 (baseline 0.335) ran different bench configs. The absolute rule
+        failed Q2's 0x3 arm (16.5 us = 0.2578 > 1.10 x 0.2116 = 0.2328) though it cut the step to
+        0.770x its own baseline - inside 1.10 x K0b32 / stock = 1.10 x 0.746 = 0.820."""
+        self.assertAlmostEqual(bench.K0B32_RATIO, 0.2116 / 0.2838)
+        self.assertAlmostEqual(round(bench.K0B32_RATIO, 3), 0.746)
+        slopes = {name: step / bench.STEP_US_PER_SLOPE for name, step in self.CARD_M_Q2_STEP_US.items()}
+        arms = tuple(slopes)
+        q2 = bench.q2_verdict(self.table(**slopes), bench.K0B32_RATIO, self.shas(arms))
+        self.assertEqual(q2['best'], 'chain_b')
+        self.assertAlmostEqual(q2['best_over_baseline'], 16.5 / 21.4)
+        self.assertAlmostEqual(q2['a_limit'], 1.10 * 0.2116 / 0.2838)
+        self.assertEqual(q2['rules'], dict(a=True, b=True, c=True, d=True))
+        self.assertTrue(q2['passed'])
+        self.assertGreater(q2['best_slope'], 1.10 * bench.K0B32_SLOPE)   # the old absolute rule would FAIL it
+        self.assertEqual(q2['beat_chain_by_2pct'], ['chain_b', 'chain_bo'])
+        self.assertEqual((q2['production'], q2['production_flags']), ('chain_b', 0x3))   # the production default
+        self.assertAlmostEqual(q2['step_us']['chain_b'], 16.5)
+        line = bench.q2_line(q2)
+        self.assertIn('M1 Q2: PASS | best=chain_b', line)
+        self.assertIn('(x0.771 baseline; a: <= 0.820 = 1.10 x K0b32/stock 0.746)', line)
+        self.assertIn('production=chain_b(0x3)', line)
+
+    def test_rule_a_is_scale_free_and_still_bites(self):
+        """Scaling every slope of a run by the same factor (another bench config) cannot change (a);
+        a chain arm whose step is over 1.10 x 0.746 of its baseline still fails it."""
+        slopes = {name: step / bench.STEP_US_PER_SLOPE for name, step in self.CARD_M_Q2_STEP_US.items()}
+        for scale in (0.5, 0.2838 / 0.335, 3.0):
+            with self.subTest(scale=scale):
+                q2 = bench.q2_verdict(self.table(**{k: v * scale for k, v in slopes.items()}), bench.K0B32_RATIO,
+                                      self.shas(tuple(slopes)))
+                self.assertTrue(q2['rules']['a'])
+        slow = bench.q2_verdict(self.table(baseline=0.335, chain=0.335 * 0.83), bench.K0B32_RATIO,
+                                self.shas(('baseline', 'chain')))
+        self.assertEqual(slow['rules'], dict(a=False, b=True, c=True, d=True))
+        self.assertEqual((slow['production'], slow['production_flags']), ('chain', 0x1))
+        edge = bench.q2_verdict(self.table(baseline=1.0, chain=1.10 * bench.K0B32_RATIO), bench.K0B32_RATIO,
+                                self.shas(('baseline', 'chain')))
+        self.assertTrue(edge['rules']['a'])
+        with self.assertRaisesRegex(ValueError, 'must be positive'):
+            bench.q2_verdict(self.table(baseline=1.0, chain=0.5), 0.0)
+
+    def test_the_production_choice_needs_a_2pct_win_over_0x1(self):
+        q2 = bench.q2_verdict(self.table(baseline=0.335, chain=0.250, chain_b=0.246, chain_bo=0.240),
+                              bench.K0B32_RATIO, self.shas(('baseline', 'chain', 'chain_b', 'chain_bo')))
+        self.assertEqual(q2['beat_chain_by_2pct'], ['chain_bo'])       # 0x3 only 1.6% faster than 0x1
+        self.assertEqual((q2['production'], q2['production_flags']), ('chain_bo', 0x7))
+        alone = bench.q2_verdict(self.table(baseline=0.335, chain_b=0.25), bench.K0B32_RATIO,
+                                 self.shas(('baseline', 'chain_b')))
+        self.assertEqual((alone['production'], alone['production_flags']), ('chain_b', 0x3))   # no 0x1 arm timed
+
+    def test_0x7_replaces_0x3_only_with_a_2pct_win(self):
+        """Spec 6.3: '0x7 over 0x3 only if its slope is >= 2% lower'. Both beat 0x1 by >= 2% here; a 0x7
+        only 1.25% under 0x3 is the fastest arm but not the production choice (the old fastest-of-those
+        rule chose it), a 4.2% one is. 0x3 and 0x5 within 2% of each other: the lower flags."""
+        arms = ('baseline', 'chain', 'chain_b', 'chain_bo')
+        near = bench.q2_verdict(self.table(baseline=0.335, chain=0.250, chain_b=0.240, chain_bo=0.237),
+                                bench.K0B32_RATIO, self.shas(arms))
+        self.assertEqual(near['beat_chain_by_2pct'], ['chain_b', 'chain_bo'])
+        self.assertEqual(near['best'], 'chain_bo')
+        self.assertEqual((near['production'], near['production_flags']), ('chain_b', 0x3))
+        self.assertIn('production=chain_b(0x3)', bench.q2_line(near))
+        far = bench.q2_verdict(self.table(baseline=0.335, chain=0.250, chain_b=0.240, chain_bo=0.230),
+                               bench.K0B32_RATIO, self.shas(arms))
+        self.assertEqual((far['production'], far['production_flags']), ('chain_bo', 0x7))
+        pair = bench.q2_verdict(self.table(baseline=0.335, chain=0.250, chain_b=0.240, chain_o=0.238),
+                                bench.K0B32_RATIO, self.shas(('baseline', 'chain', 'chain_b', 'chain_o')))
+        self.assertEqual((pair['production'], pair['production_flags']), ('chain_b', 0x3))
+        flat = bench.q2_verdict(self.table(baseline=0.335, chain=0.240, chain_b=0.237, chain_bo=0.236),
+                                bench.K0B32_RATIO, self.shas(arms))
+        self.assertEqual((flat['production'], flat['production_flags']), ('chain', 0x1))   # nothing 2% under 0x1
 
 
 class FakeTensor:
@@ -192,6 +267,20 @@ class MainTests(unittest.TestCase):
         self.assertTrue(report['q2']['rules']['d'])                   # --sha: exactness checked end to end
         self.assertIn('chain_bo', report['table'])
         self.assertEqual(report['q_memory'], 'dram')
+        self.assertAlmostEqual(report['q2']['k0b32_ratio'], bench.K0B32_RATIO)
+
+    def test_rule_a_takes_its_ratio_from_one_k0_session(self):
+        status, report, stdout, _, _ = self.main(['--arms', 'baseline,chain', '--sha', '--k0b32-slope', '0.2',
+                                                  '--k0-stock-slope', '0.4'])
+        self.assertEqual(status, 0, report.get('error'))
+        self.assertAlmostEqual(report['q2']['k0b32_ratio'], 0.5)
+        self.assertAlmostEqual(report['q2']['a_limit'], 0.55)
+        self.assertIn('1.10 x K0b32/stock 0.500', stdout)
+        for bad in (['--k0b32-slope', '0'], ['--k0-stock-slope', '-1']):
+            with self.subTest(args=bad):
+                with self.assertRaises(SystemExit):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        self.main(['--arms', 'baseline'] + bad)
 
     def test_q_in_l1_and_the_model_page_width(self):
         status, report, _, _, uploads = self.main(['--arms', 'baseline', '--q-memory', 'l1', '--page-blocks', '64'])

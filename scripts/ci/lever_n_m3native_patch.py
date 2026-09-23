@@ -1292,9 +1292,200 @@ def patch_gdn_tp_full(source):
     return patch_gdn_tp_prefill_conv(patch_gdn_tp(source))
 
 
+# ---------------------------------------------------------------------------------
+# I. Prefill lever #1: the per-call opt-in to the G6 K/V chain of the chunked prefill SDPA.
+# ---------------------------------------------------------------------------------
+#
+# optimisation/ttnn-op/sdpa_prefill_chain, graft ~/opgraft-K64g (K64f + the chain: the factory branch
+# in its _ttnncpp.so, the chain reader in its sdpa/ op directory). The factory builds the chain only for
+# a call whose SDPAProgramConfig.max_cores_per_head_batch is 0x5EFA0000 | flags (the prefill factory
+# never reads that field otherwise, and its default 16 never carries the tag), so the model opts in
+# per call, at forward_prefill_paged's own SDPAProgramConfig - built at the call site, so the word can
+# never reach sdpa_decode, which does read the field. Under QWEN_FAST_SDPA_PF=1 that config is rebuilt
+# with the word on exactly the calls card M qualified (Q1): the flexible path (a device chunk_start
+# tensor), bf8 K/V (QWEN_SDPA_BF8=1), q/k chunk 128 and S in 512 / 1024 / 2048. Every other call (a
+# 256-1792-row tail chunk, the legacy int chunk_start path, bf16 mode) keeps the served config.
+#
+# Flags: QWEN_FAST_SDPA_PF_FLAGS, default 0x3 (the chain plus the injector's read-ahead 32). Q2 on card
+# M, Q in L1 and the model's 2080-block page table: baseline 21.4 us per step, 0x1 20.7, 0x3 16.5
+# (0.770x, exact), 0x5 22.3, 0x7 18.9. Any value but a production set (0x1 / 0x3 / 0x5 / 0x7, each
+# swept by Q1) is refused, so the test flags 0x100 / 0x200 cannot be sent from here.
+#
+# A stock _ttnncpp.so silently ignores the word, so under the flag the first attention layer refuses to
+# construct unless the one mapped _ttnncpp.so carries the factory's '[QWEN-SDPA-PF] flags=' literal (the
+# /proc/self/maps probe pooled_attention_replay uses for the decode factory). The check and its
+# [PINDIAG] line run once per process. The factory's own '[QWEN-SDPA-PF] flags=0x3 kv_chain=1 ...' line,
+# logged when it builds a chain program, proves the C++ branch ran; the gate requires both.
+#
+# Flag off: one env lookup per attention layer at construction and one attribute test per prefill
+# call. The served SDPAProgramConfig statement is kept verbatim (the edit inserts after it), so it is
+# the config every call gets. tp_common.py is not touched (sha-pinned on the serving path).
+
+SDPA_PF_FLAG = 'QWEN_FAST_SDPA_PF'
+SDPA_PF_FLAGS_FLAG = 'QWEN_FAST_SDPA_PF_FLAGS'
+SDPA_PF_TAG = 0x5EFA0000
+SDPA_PF_PRODUCTION_FLAGS = (0x1, 0x3, 0x5, 0x7)
+SDPA_PF_DEFAULT_FLAGS = 0x3
+# Kept equal to sdpa_prefill_chain/apply_factory_pf.py (LOG_MARKER, QUALIFIED_ROWS, QUALIFIED_CHUNK, the
+# flag bits) by the tests: that module is not importable here (this one must stay standalone).
+SDPA_PF_BINARY_MARKER = '[QWEN-SDPA-PF] flags='
+SDPA_PF_ROWS = (512, 1024, 2048)
+SDPA_PF_CHUNK = 128
+MARKER_SDPA_PF = '[PINDIAG] sdpa prefill kvchain flags='
+ATTENTION_INIT_FUNCTION = '__init__'
+FORWARD_PREFILL_PAGED_FUNCTION = 'forward_prefill_paged'
+
+SDPA_PF_HELPERS = (
+    '\n'
+    '\n'
+    '# Prefill lever #1 (' + SDPA_PF_FLAG + '=1; lever_n_m3native_patch section I): the per-call opt-in to the\n'
+    '# G6 K/V chain of the chunked prefill SDPA (optimisation/ttnn-op/sdpa_prefill_chain). Inert unless the flag is 1.\n'
+    '_QWEN_PF_TAG = 0x%08X\n'
+    '_QWEN_PF_FLAGS = (%s)  # the production flag sets, each swept by card-M Q1\n'
+    '_QWEN_PF_DEFAULT_FLAGS = 0x%X\n'
+    '_QWEN_PF_MARKER = %r\n'
+    '_QWEN_PF_ROWS = %r  # the card-M-qualified S\n'
+    '_QWEN_PF_CHUNK = %d\n'
+    '_QWEN_PF_STATE = {}\n'
+    '\n'
+    '\n'
+    'def _qwen_pf_log(text):\n'
+    '    try:\n'
+    '        from loguru import logger as _qwen_logger\n'
+    '    except ImportError:\n'
+    '        print(text, flush=True)\n'
+    '        return\n'
+    '    _qwen_logger.info(text)\n'
+    '\n'
+    '\n'
+    'def _qwen_pf_binary_has_marker(maps="/proc/self/maps"):\n'
+    '    """Whether the one _ttnncpp.so this process mapped carries the chain factory (a stock .so ignores the word)."""\n'
+    '    import mmap\n'
+    '\n'
+    '    with open(maps) as handle:\n'
+    '        paths = sorted({line.split()[-1] for line in handle if line.rstrip().endswith("_ttnncpp.so")})\n'
+    '    if len(paths) != 1:\n'
+    '        raise RuntimeError("[QWEN-SDPA-PF] expected exactly one mapped _ttnncpp.so, found %%r" %% (paths,))\n'
+    '    with open(paths[0], "rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as view:\n'
+    '        return view.find(_QWEN_PF_MARKER) >= 0\n'
+    '\n'
+    '\n'
+    'def _qwen_pf_flags(environ):\n'
+    '    """' + SDPA_PF_FLAGS_FLAG + ' (unset or empty: the default), refused unless a production flag set."""\n'
+    '    text = (environ.get("' + SDPA_PF_FLAGS_FLAG + '") or "").strip() or "0x%%X" %% _QWEN_PF_DEFAULT_FLAGS\n'
+    '    try:\n'
+    '        flags = int(text, 0)\n'
+    '    except ValueError:\n'
+    '        flags = None\n'
+    '    if flags not in _QWEN_PF_FLAGS:\n'
+    '        raise RuntimeError("' + SDPA_PF_FLAGS_FLAG + ' must be a production flag set (%%s), got %%r"\n'
+    '                           %% (", ".join("%%#x" %% value for value in _QWEN_PF_FLAGS), text))\n'
+    '    return flags\n'
+    '\n'
+    '\n'
+    'def _qwen_pf_word(environ=None, binary_check=None):\n'
+    '    """None (the served config) unless ' + SDPA_PF_FLAG + '=1, else 0x5EFA0000 | flags. Bad flags and a\n'
+    '    _ttnncpp.so without the chain factory are refused before any config changes. Against the process\n'
+    '    environment the binary check and the marker run once per process (every attention layer shares them)."""\n'
+    '    process = environ is None\n'
+    '    if process:\n'
+    '        environ = os.environ\n'
+    '    if environ.get("' + SDPA_PF_FLAG + '") != "1":\n'
+    '        return None  # flag off: no binary probe, no marker, the served config on every call\n'
+    '    if process and "word" in _QWEN_PF_STATE:\n'
+    '        return _QWEN_PF_STATE["word"]\n'
+    '    flags = _qwen_pf_flags(environ)\n'
+    '    if not (_qwen_pf_binary_has_marker if binary_check is None else binary_check)():\n'
+    '        raise RuntimeError("' + SDPA_PF_FLAG + '=1 but the loaded _ttnncpp.so lacks the [QWEN-SDPA-PF] chain "\n'
+    '                           "factory (mount a K64g-or-later graft: KOPGRAFT64)")\n'
+    '    word = _QWEN_PF_TAG | flags\n'
+    '    rows = "/".join(str(value) for value in _QWEN_PF_ROWS)\n'
+    '    _qwen_pf_log("' + MARKER_SDPA_PF + '%%#x rows=%%s chunk=%%d" %% (word, rows, _QWEN_PF_CHUNK))\n'
+    '    if process:\n'
+    '        _QWEN_PF_STATE["word"] = word\n'
+    '    return word\n'
+    '\n'
+    '\n'
+    'def _qwen_pf_program_config(layer, served, qk_chunk, flexible, S):\n'
+    '    """served, or - on a call the chain is qualified for - the same config plus the chain word."""\n'
+    '    word = getattr(layer, "_sdpa_pf_word", None)\n'
+    '    if (word is None or not flexible or not getattr(layer, "_sdpa_bf8", False) or qk_chunk != _QWEN_PF_CHUNK\n'
+    '            or S not in _QWEN_PF_ROWS):\n'
+    '        return served\n'
+    '    return ttnn.SDPAProgramConfig(\n'
+    '        compute_with_storage_grid_size=layer.mesh.compute_with_storage_grid_size(),\n'
+    '        exp_approx_mode=False,\n'
+    '        q_chunk_size=qk_chunk,\n'
+    '        k_chunk_size=qk_chunk,\n'
+    '        max_cores_per_head_batch=word,\n'
+    '    )\n'
+) % (SDPA_PF_TAG, ', '.join('0x%X' % flags for flags in SDPA_PF_PRODUCTION_FLAGS), SDPA_PF_DEFAULT_FLAGS, SDPA_PF_BINARY_MARKER.encode('ascii'),
+     SDPA_PF_ROWS, SDPA_PF_CHUNK)
+
+SDPA_PF_INIT_OLD = '        self._sdpa_bf8 = os.environ.get("QWEN_SDPA_BF8", "0") == "1"\n'
+SDPA_PF_INIT_NEW = SDPA_PF_INIT_OLD + (
+    '        # Prefill lever #1 (' + SDPA_PF_FLAG + '=1, section I): the chain word, or None (the served config).\n'
+    '        self._sdpa_pf_word = _qwen_pf_word()\n')
+# The served statement, verbatim; the opt-in is inserted AFTER it, so flag off runs exactly this.
+SDPA_PF_CALL_OLD = (
+    '        sdpa_cfg = ttnn.SDPAProgramConfig(\n'
+    '            compute_with_storage_grid_size=self.mesh.compute_with_storage_grid_size(),\n'
+    '            exp_approx_mode=False,\n'
+    '            q_chunk_size=qk_chunk,\n'
+    '            k_chunk_size=qk_chunk,\n'
+    '        )\n'
+)
+SDPA_PF_CALL_NEW = SDPA_PF_CALL_OLD + (
+    '        if getattr(self, "_sdpa_pf_word", None) is not None:\n'
+    '            # Prefill lever #1 (' + SDPA_PF_FLAG + '=1): the same config plus the G6 K/V chain word on the\n'
+    '            # calls card M qualified; every other call keeps the served config above.\n'
+    '            sdpa_cfg = _qwen_pf_program_config(self, sdpa_cfg, qk_chunk, chunk_start_idx_tensor is not None, S)\n'
+)
+
+
+def patch_attention_tp_sdpa_pf(source):
+    """Prefill lever #1 in attention/tp.py: the chain word at __init__, the per-call opt-in after
+    forward_prefill_paged's served SDPAProgramConfig, and the module helpers at the end of the file.
+    Composes with patch_attention_tp (neither touches the other's functions)."""
+    if SDPA_PF_FLAG in source:
+        raise ValueError('attention sdpa prefill chain: already grafted (%s present)' % SDPA_PF_FLAG)
+    lines = source.splitlines(keepends=True)
+    span = function_span(source, ATTENTION_INIT_FUNCTION)
+    lines = replace_once(lines, span, SDPA_PF_INIT_OLD, SDPA_PF_INIT_NEW, 'attention __init__ sdpa prefill chain word')
+    span = function_span(''.join(lines), FORWARD_PREFILL_PAGED_FUNCTION)
+    lines = replace_once(lines, span, SDPA_PF_CALL_OLD, SDPA_PF_CALL_NEW,
+                         'attention forward_prefill_paged sdpa prefill chain opt-in')
+    result = ''.join(lines)
+    if result.count(SDPA_PF_CALL_OLD) != 1:
+        raise ValueError('attention sdpa prefill chain: the served SDPAProgramConfig statement occurs %d times in '
+                         'the file (the forward_prefill_paged one must be the only one)' % result.count(SDPA_PF_CALL_OLD))
+    if not result.endswith('\n'):
+        result += '\n'
+    result += SDPA_PF_HELPERS
+    ast.parse(result)
+    return result
+
+
+def unpatch_attention_tp_sdpa_pf(source):
+    """The inverse of patch_attention_tp_sdpa_pf (for the byte-identity checks and pf_optin's CLI)."""
+    if not source.endswith(SDPA_PF_HELPERS):
+        raise ValueError('attention sdpa prefill chain: the helpers are not at the end of the file')
+    source = source[:-len(SDPA_PF_HELPERS)]
+    for new, old in ((SDPA_PF_INIT_NEW, SDPA_PF_INIT_OLD), (SDPA_PF_CALL_NEW, SDPA_PF_CALL_OLD)):
+        if source.count(new) != 1:
+            raise ValueError('attention sdpa prefill chain: an edit occurs %d times' % source.count(new))
+        source = source.replace(new, old)
+    return source
+
+
+def patch_attention_tp_full(source):
+    """The table maps ONE function per file: the 64-row decode gates, then prefill lever #1's opt-in."""
+    return patch_attention_tp_sdpa_pf(patch_attention_tp(source))
+
+
 PATCHES = {
     'model_config.py': patch_model_config,
-    'attention/tp.py': patch_attention_tp,
+    'attention/tp.py': patch_attention_tp_full,
     'gdn/tp.py': patch_gdn_tp_full,
     'mlp.py': patch_mlp_full,
     'layer.py': patch_layer_full,

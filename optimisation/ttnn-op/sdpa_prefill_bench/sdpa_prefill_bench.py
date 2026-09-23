@@ -84,11 +84,17 @@ all off by default, and the chain arms need the K64g graft: run_m1.sh KOPGRAFT_P
                   '[QWEN-SDPA-PF] flags=' lines are parsed (report 'pf_log') and printed as
                   'M1 PF_LOG ...': exactly one per chain arm's flags (one program per shape, page
                   width and flags), chains=16 members=96 at 2048 rows, none for a flags word no arm used.
-  --k0b32-slope S the K0b32 slope (ms per 1k keys) Q2's rule (a) compares against (default: the K0
-                  session's 0.2116). With the baseline and a chain arm timed, 'M1 Q2: ...' reports the
-                  best chain arm, per-step times (slope x 64 us) and rules (a) best <= 1.10 x K0b32,
-                  (b) best <= 0.85 x baseline, (c) intercept <= baseline + 0.2 ms, (d) every chain arm's
-                  output equals the baseline's at every start (needs --sha; without it Q2 FAILs).
+  --k0b32-slope S, --k0-stock-slope S
+                  the K0b32 and stock slopes (ms per 1k keys) of ONE K0 session (defaults 0.2116 and
+                  0.2838). With the baseline and a chain arm timed, 'M1 Q2: ...' reports the best chain
+                  arm, per-step times (slope x 64 us) and rules (a) best / this run's baseline <= 1.10 x
+                  K0b32 / K0 stock (ratios, each to its own run's baseline: K0's bench config and Q2's
+                  differ, so absolute slopes do not compare), (b) best <= 0.85 x baseline, (c) intercept
+                  <= baseline + 0.2 ms, (d) every chain arm's output equals the baseline's at every
+                  start (needs --sha; without it Q2 FAILs), and the production choice (spec 6.3's
+                  rule, generalised: a flag set replaces one with fewer flag bits only with a >= 2%
+                  lower slope - 0x1 unless another set is >= 2% faster, 0x7 over 0x3 only if >= 2%
+                  faster). One run times one Q placement; spec 6.3 asks for the choice in both.
 """
 
 import argparse
@@ -153,12 +159,17 @@ CHAIN_ARMS = (
     dict(ARMS[0], name='chain_bo', program_word=PF_TAG | 0x7),
 )
 CHAIN_ARM_NAMES = tuple(arm['name'] for arm in CHAIN_ARMS)
-K0B32_SLOPE = 0.2116          # ms per 1k keys: K0b32, card M, image A' 1b9b6445 (Q2 rule (a))
+K0B32_SLOPE = 0.2116          # ms per 1k keys: K0b32, card M, image A' 1b9b6445
+K0_STOCK_SLOPE = 0.2838       # ms per 1k keys: the stock (served) arm of the same K0 session
+# Q2 rule (a) compares RATIOS, each to its own run's baseline. K0 ran its own bench config (stock 0.284),
+# Q2 runs the model's (Q in L1, the 2080-block page table: baseline 0.335), so K0b32's absolute slope is
+# no floor for a Q2 run: rule (a) is best chain / Q2 baseline <= 1.10 x K0b32 / K0 stock (0.746).
+K0B32_RATIO = K0B32_SLOPE / K0_STOCK_SLOPE
 STEP_US_PER_SLOPE = 64.0      # per-step time (us) = slope (ms / 1k keys) x 0.128 k / 2 steps x 1000
 Q2_FORWARD_MAX = 1.10
 Q2_BASELINE_MAX = 0.85
 Q2_INTERCEPT_MAX_MS = 0.2
-Q2_PREFER_MARGIN = 0.02       # a flag set beyond 0x1 wins only with a >= 2% lower slope
+Q2_PREFER_MARGIN = 0.02       # a flag set wins over one with fewer flag bits only with a >= 2% lower slope
 
 
 def word_arm(word):
@@ -522,12 +533,14 @@ def q2_exact(chains, sha256, sha_stable=None):
     return not problems, problems
 
 
-def q2_verdict(table, k0b32_slope=K0B32_SLOPE, sha256=None, sha_stable=None):
-    """Spec 6.3's pass rules on one run's fitted slopes (None without the baseline and a chain arm):
-    the best production chain arm (no test flags) against K0b32 (a), the baseline (b) and the
-    baseline intercept (c); (d) every production chain arm's output equals the baseline's at every
-    start (--sha; without digests d is unchecked and Q2 does not pass); per-step times; and which
-    chain arms beat 'chain' (0x1) by >= 2%."""
+def q2_verdict(table, k0b32_ratio=K0B32_RATIO, sha256=None, sha_stable=None):
+    """Spec 6.3's pass rules on one run's fitted slopes (None without the baseline and a chain arm),
+    the best production chain arm (no test flags) against: (a) forwarding and lockstep overhead - its
+    slope over THIS run's baseline <= 1.10 x K0b32's slope over K0's own stock (k0b32_ratio; the two
+    runs' bench configs differ, so absolute slopes do not compare); (b) the baseline slope; (c) the
+    baseline intercept; (d) every production chain arm's output equals the baseline's at every start
+    (--sha; without digests d is unchecked and Q2 does not pass). Also per-step times, which chain
+    arms beat 'chain' (0x1) by >= 2%, and the production choice (q2_production)."""
     base = table.get('baseline')
     chains = {}
     for name, line in table.items():
@@ -536,32 +549,55 @@ def q2_verdict(table, k0b32_slope=K0B32_SLOPE, sha256=None, sha_stable=None):
             chains[name] = line
     if not base or not chains:
         return None
+    if not k0b32_ratio > 0:
+        raise ValueError('K0b32 / stock ratio must be positive, got %r' % (k0b32_ratio,))
     best = min(chains, key=lambda name: chains[name]['slope_ms_per_1k_keys'])
     slope = chains[best]['slope_ms_per_1k_keys']
+    over_baseline = slope / base['slope_ms_per_1k_keys']
+    a_limit = Q2_FORWARD_MAX * k0b32_ratio
     exact, exact_problems = q2_exact(chains, sha256, sha_stable)
-    rules = dict(a=slope <= Q2_FORWARD_MAX * k0b32_slope, b=slope <= Q2_BASELINE_MAX * base['slope_ms_per_1k_keys'],
+    rules = dict(a=over_baseline <= a_limit, b=slope <= Q2_BASELINE_MAX * base['slope_ms_per_1k_keys'],
                  c=chains[best]['intercept_ms'] <= base['intercept_ms'] + Q2_INTERCEPT_MAX_MS, d=exact)
     step_us = {name: line['slope_ms_per_1k_keys'] * STEP_US_PER_SLOPE for name, line in chains.items()}
     step_us['baseline'] = base['slope_ms_per_1k_keys'] * STEP_US_PER_SLOPE
     reference = chains.get('chain')
     better = sorted(name for name, line in chains.items() if name != 'chain' and reference is not None
                     and line['slope_ms_per_1k_keys'] <= (1 - Q2_PREFER_MARGIN) * reference['slope_ms_per_1k_keys'])
-    return dict(best=best, best_slope=slope, baseline_slope=base['slope_ms_per_1k_keys'], k0b32_slope=k0b32_slope,
-                best_over_k0b32=slope / k0b32_slope, best_over_baseline=slope / base['slope_ms_per_1k_keys'],
+    choice = q2_production(chains)
+    return dict(best=best, best_slope=slope, baseline_slope=base['slope_ms_per_1k_keys'], k0b32_ratio=k0b32_ratio,
+                a_limit=a_limit, best_over_baseline=over_baseline,
                 intercept_delta_ms=chains[best]['intercept_ms'] - base['intercept_ms'], rules=rules,
                 passed=all(value is True for value in rules.values()), step_us=step_us, beat_chain_by_2pct=better,
+                production=choice, production_flags=arm_by_name(choice)['program_word'] & 0xFFFF,
                 exact_problems=exact_problems)
+
+
+def q2_production(chains):
+    """Spec 6.3's choice of production flags ('0x7 over 0x3 only if its slope is >= 2% lower'),
+    generalised to every timed production chain arm: a flag set replaces one with fewer flag bits only
+    with a >= 2% lower slope. So of the arms no other arm beats by >= 2%, the one with the fewest flag
+    bits (then the lowest flags): 0x1 unless another set is >= 2% faster, and never a 1%-faster 0x7 over
+    0x3 (the fastest-of-those rule it replaces would flip production on noise). One run times one Q
+    placement; spec 6.3 wants the same answer from both."""
+    def flags(name):
+        return arm_by_name(name)['program_word'] & 0xFFFF
+
+    fastest = min(line['slope_ms_per_1k_keys'] for line in chains.values())
+    unbeaten = [name for name, line in chains.items()      # the fastest arm is always here (never below itself)
+                if not (fastest < line['slope_ms_per_1k_keys']
+                        and fastest <= (1 - Q2_PREFER_MARGIN) * line['slope_ms_per_1k_keys'])]
+    return min(unbeaten, key=lambda name: (bin(flags(name)).count('1'), flags(name)))
 
 
 def q2_line(q2):
     exact = q2['rules'].get('d')
-    return ('M1 Q2: %s | best=%s slope=%.4f (x%.3f K0b32, x%.3f baseline) intercept%+.3f ms step=%.2f us '
-            '(baseline %.2f us) a=%d b=%d c=%d d(exact)=%s beat_0x1_by_2pct=%s%s' % (
-                'PASS' if q2['passed'] else 'FAIL', q2['best'], q2['best_slope'], q2['best_over_k0b32'],
-                q2['best_over_baseline'], q2['intercept_delta_ms'], q2['step_us'][q2['best']], q2['step_us']['baseline'],
-                q2['rules']['a'], q2['rules']['b'], q2['rules']['c'], '-' if exact is None else int(exact),
-                ','.join(q2['beat_chain_by_2pct']) or '-',
-                '' if not q2.get('exact_problems') else ' | ' + '; '.join(q2['exact_problems'][:4])))
+    return ('M1 Q2: %s | best=%s slope=%.4f (x%.3f baseline; a: <= %.3f = %.2f x K0b32/stock %.3f) intercept%+.3f ms '
+            'step=%.2f us (baseline %.2f us) a=%d b=%d c=%d d(exact)=%s beat_0x1_by_2pct=%s production=%s(%#x)%s' % (
+                'PASS' if q2['passed'] else 'FAIL', q2['best'], q2['best_slope'], q2['best_over_baseline'],
+                q2['a_limit'], Q2_FORWARD_MAX, q2['k0b32_ratio'], q2['intercept_delta_ms'], q2['step_us'][q2['best']],
+                q2['step_us']['baseline'], q2['rules']['a'], q2['rules']['b'], q2['rules']['c'],
+                '-' if exact is None else int(exact), ','.join(q2['beat_chain_by_2pct']) or '-', q2['production'],
+                q2['production_flags'], '' if not q2.get('exact_problems') else ' | ' + '; '.join(q2['exact_problems'][:4])))
 
 
 PF_LOG = '[QWEN-SDPA-PF] flags='
@@ -823,8 +859,9 @@ def run(options, watchdog=None):
                                  for start in options.starts} for arm in arms}
         table = slopes(results)
         outcome = verdict(table)
-        q2 = q2_verdict(table, getattr(options, 'k0b32_slope', K0B32_SLOPE), digests.get('sha256'),
-                        digests.get('sha_stable'))
+        q2 = q2_verdict(table, getattr(options, 'k0b32_slope', K0B32_SLOPE) / getattr(options, 'k0_stock_slope',
+                                                                                          K0_STOCK_SLOPE),
+                        digests.get('sha256'), digests.get('sha_stable'))
         report.update(
             passed=bool(calls) and all(value is not None for value in results.get('baseline', {}).values()),
             median_ms=results, slopes=table, verdict=outcome, verdict_line=verdict_line(outcome),
@@ -873,8 +910,13 @@ def main(argv=None):
     parser.add_argument('--page-blocks', type=int, default=None, help='page-table width in blocks (the model: 2080)')
     parser.add_argument('--verify-log', action='store_true',
                         help="capture fds 1/2 to <out>.native.log and check the factory's [QWEN-SDPA-PF] lines")
-    parser.add_argument('--k0b32-slope', type=float, default=K0B32_SLOPE, help='Q2 rule (a) reference slope')
+    parser.add_argument('--k0b32-slope', type=float, default=K0B32_SLOPE,
+                        help='Q2 rule (a): the K0b32 slope, over --k0-stock-slope (the same K0 session)')
+    parser.add_argument('--k0-stock-slope', type=float, default=K0_STOCK_SLOPE,
+                        help="Q2 rule (a): the K0 session's stock slope (the ratio's denominator)")
     options = parser.parse_args(argv)
+    if not (options.k0b32_slope > 0 and options.k0_stock_slope > 0):
+        parser.error('--k0b32-slope and --k0-stock-slope must be positive')
     options.arms = parse_list(options.arms)
     for word in parse_list(options.program_word, lambda text: int(text, 0)):
         name = word_arm(word)['name']

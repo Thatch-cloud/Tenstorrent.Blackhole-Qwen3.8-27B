@@ -14,8 +14,10 @@
 # patch), so step 7 checks that every distinct QWEN_ / [QWEN- string of K64f's _ttnncpp.so is still
 # present, plus the three new [QWEN-SDPA-PF] literals.
 #
-# The arm (lever_n_m3native_run_arm.sh) does NOT yet mount $KOPGRAFT64/sdpa (spec 5.2 step 8, a
-# scripts/ci change: check both image copy lists first). Card M reaches the graft through
+# The model gate's arm (scripts/ci/lever_n_m3native_run_arm.sh) mounts $KOPGRAFT64/sdpa under
+# M3NATIVE_SDPA_PF=1 (spec 5.2 step 8; host-side, in neither image copy list), and before that run it
+# repeats step 7's sdpa/ comparison against the tag's own image and verifies this MANIFEST.sha256, so a
+# gate image K64G_IMAGES did not name is checked at launch (and refused if it differs). Card M reaches the graft through
 # ../sdpa_prefill_bench/run_m1.sh KOPGRAFT_PF=~/opgraft-K64g and run_card_m_pf.sh here. The factory
 # log line '[QWEN-SDPA-PF] flags=' is the proof the chain ran, not the mount.
 #

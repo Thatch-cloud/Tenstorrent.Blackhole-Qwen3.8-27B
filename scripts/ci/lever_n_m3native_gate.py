@@ -236,6 +236,68 @@ GDN_LAYERS = 48                   # GDN layers per forward: the spec gate steps 
 PREFILL_CONV_CHUNK_TOKENS = 2048  # the model's prefill chunk (forward_prefill T)
 
 
+# Prefill lever #1 (QWEN_FAST_SDPA_PF=1, M3NATIVE_SDPA_PF on the arm; lever_n_m3native_patch section I):
+# the grafted attention/tp.py logs its [PINDIAG] line once per process, after its binary check passed,
+# with the word it sends; the K64g factory logs '[QWEN-SDPA-PF] flags=0x<flags> kv_chain=1 chains=..
+# members=.. order=..' each time it builds a chain program - the C++ branch itself ran, not just the
+# Python that selects it (a stock or pre-K64g _ttnncpp.so never prints it). Both must carry the flag set
+# QWEN_FAST_SDPA_PF_FLAGS names (default 0x3); a value that is not a production set is itself a problem
+# (the graft refuses it at construction). Spec 6.4's factory marker also names the 2048-row topology,
+# 'chains=16 members=96': the model's 2048-token prefill chunks carry almost all of the saving, and
+# neither the Python eligibility test nor the factory's envelope pins the grid or the local head counts,
+# so that tail is the runtime proof the model built the topology card M qualified. It is required
+# whenever a prompt holds a 2048-token chunk, and every factory line must carry the requested flags and
+# one of the Q1-qualified topologies (SDPA_PF_TOPOLOGY, test_sdpa_prefill_chain_card_m.expected_chains).
+SDPA_PF_FLAG = 'QWEN_FAST_SDPA_PF'
+SDPA_PF_FLAGS_FLAG = 'QWEN_FAST_SDPA_PF_FLAGS'
+SDPA_PF_TAG = 0x5EFA0000
+SDPA_PF_PRODUCTION_FLAGS = (0x1, 0x3, 0x5, 0x7)
+SDPA_PF_DEFAULT_FLAGS = 0x3
+SDPA_PF_PINDIAG = '[PINDIAG] sdpa prefill kvchain flags='
+SDPA_PF_FACTORY_MARKER = '[QWEN-SDPA-PF] flags='
+SDPA_PF_TOPOLOGY = {2048: (16, 96), 1024: (8, 48), 512: (4, 24)}   # rows -> (chains, members), card-M Q1
+SDPA_PF_FACTORY_LINE = re.compile(r'\[QWEN-SDPA-PF\] flags=(0x[0-9a-f]+) kv_chain=1 chains=([0-9]+) members=([0-9]+) ')
+
+
+def sdpa_pf_flags(environ):
+    """The flag set QWEN_FAST_SDPA_PF_FLAGS names (unset or empty: 0x3), or None if not a production set."""
+    text = (environ.get(SDPA_PF_FLAGS_FLAG) or '').strip() or '0x%x' % SDPA_PF_DEFAULT_FLAGS
+    try:
+        flags = int(text, 0)
+    except ValueError:
+        return None
+    return flags if flags in SDPA_PF_PRODUCTION_FLAGS else None
+
+
+def sdpa_pf_markers(environ, prompt_tokens=None):
+    """The graft's [PINDIAG] line with the word, and the factory's line with the flags - and, when a
+    prompt of `prompt_tokens` (None: assume one) holds a 2048-token chunk, its 2048-row topology."""
+    flags = sdpa_pf_flags(environ)
+    if flags is None:
+        return [SDPA_PF_PINDIAG, SDPA_PF_FACTORY_MARKER]
+    factory = '%s%#x kv_chain=1 ' % (SDPA_PF_FACTORY_MARKER, flags)
+    if prompt_tokens is None or int(prompt_tokens) >= PREFILL_CONV_CHUNK_TOKENS:
+        factory += 'chains=%d members=%d ' % SDPA_PF_TOPOLOGY[PREFILL_CONV_CHUNK_TOKENS]
+    return ['%s%#x ' % (SDPA_PF_PINDIAG, SDPA_PF_TAG | flags), factory]
+
+
+def sdpa_pf_problems(environ, log_text):
+    """Every factory line carries the requested flags and a card-M-qualified (chains, members)."""
+    flags = sdpa_pf_flags(environ)
+    qualified = set(SDPA_PF_TOPOLOGY.values())
+    problems = set()
+    for match in SDPA_PF_FACTORY_LINE.finditer(log_text):
+        line_flags, chains, members = int(match.group(1), 16), int(match.group(2)), int(match.group(3))
+        if flags is not None and line_flags != flags:
+            problems.add('%s: every chain program carries flags %#x (a factory line has %#x)' % (SDPA_PF_FLAG, flags,
+                                                                                              line_flags))
+        if (chains, members) not in qualified:
+            problems.add('%s: chains=%d members=%d is not a card-M-qualified topology (%s)' % (
+                SDPA_PF_FLAG, chains, members, ', '.join('%d rows %d/%d' % (rows, pair[0], pair[1])
+                                                         for rows, pair in sorted(SDPA_PF_TOPOLOGY.items()))))
+    return sorted(problems)
+
+
 def prefill_conv_markers(environ):
     markers = [PREFILL_CONV_MARKER]
     try:
@@ -293,8 +355,9 @@ def prefill_conv_problems(log_text, gdn_layers=GDN_LAYERS, required_chunks=0):
     return problems
 
 
-def required_flag_markers(environ, users):
-    """The markers the flags in `environ` promise, as {flag: [marker, ...]}."""
+def required_flag_markers(environ, users, prompt_tokens=None):
+    """The markers the flags in `environ` promise, as {flag: [marker, ...]}. prompt_tokens (each user's
+    prompt; None: unknown) decides whether QWEN_FAST_SDPA_PF's 2048-row topology is promised."""
     on = lambda name: environ.get(name) == '1'
     required = {}
     if on('QWEN_FAST_SINGLE_GATEUP'):
@@ -317,6 +380,8 @@ def required_flag_markers(environ, users):
         required['QWEN_PREFILL_PROFILE_FLUSH'] = [PREFILL_FLUSH_MARKER]
     if on(PREFILL_CONV_FLAG):
         required[PREFILL_CONV_FLAG] = prefill_conv_markers(environ)
+    if on(SDPA_PF_FLAG):
+        required[SDPA_PF_FLAG] = sdpa_pf_markers(environ, prompt_tokens)
     markers = sdpa_mode_markers(sdpa_mode_names(environ))
     if markers:
         required['QWEN_FAST_SDPA_MODES'] = markers
@@ -346,7 +411,7 @@ def sdpa_mode_names(environ):
 def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=GDN_LAYERS):
     """Which promised markers the server log carries, and which flags left theirs out.
     prompt_tokens (each user's prompt) sets the engaged-chunk floor of QWEN_FAST_GDN_PREFILL_CONV."""
-    required = required_flag_markers(environ, users)
+    required = required_flag_markers(environ, users, prompt_tokens)
     found = {flag: {marker: marker in log_text for marker in markers} for flag, markers in required.items()}
     missing = sorted('%s: %s' % (flag, marker) for flag, markers in found.items()
                      for marker, present in markers.items() if not present)
@@ -366,6 +431,15 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
         if VERIFY_T1_AUDIT_MISMATCH in log_text:
             line = log_text[log_text.index(VERIFY_T1_AUDIT_MISMATCH):].split(chr(10), 1)[0]
             missing.append('%s: no mismatch (%s)' % (VERIFY_T1_AUDIT_FLAG, line[:200]))
+    if environ.get(SDPA_PF_FLAG) == '1' and sdpa_pf_flags(environ) is None:
+        missing.append('%s: a production flag set (%s), not %r' % (
+            SDPA_PF_FLAGS_FLAG, ', '.join('%#x' % flags for flags in SDPA_PF_PRODUCTION_FLAGS),
+            environ.get(SDPA_PF_FLAGS_FLAG)))
+    if environ.get(SDPA_PF_FLAG) == '1':
+        missing.extend(sdpa_pf_problems(environ, log_text))
+    if environ.get(SDPA_PF_FLAG) != '1' and SDPA_PF_FACTORY_MARKER in log_text:
+        # The off arm of an A/B on a K64g graft must be the served prefill: no call may carry the word.
+        missing.append('%s unset: no chain program (%s logged)' % (SDPA_PF_FLAG, SDPA_PF_FACTORY_MARKER))
     prefill_conv = summary = None
     if environ.get(PREFILL_CONV_FLAG) == '1':
         required_chunks = prefill_conv_required_chunks(users, prompt_tokens)

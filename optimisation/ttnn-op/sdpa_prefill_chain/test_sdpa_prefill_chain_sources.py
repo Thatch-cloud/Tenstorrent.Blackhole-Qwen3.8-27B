@@ -18,8 +18,10 @@
                       QWEN_PF_MODEL_SEEDS sets the 'ok' seeds (default 40 here; README: 2,000)
   5 transcription     R7's K/V/Q calls are the served calls token for token but kv_bt / k_head_rd
   6 flags, envelope   decode_word's refusal table; every spec predicate in the F4 TT_FATAL
-  7 Python opt-in     pf_optin: env off = served kwargs; on = 0x5EFA0001 only on the flexible bf8 even
-                      path; stock binary and bad flags refused first; the tp.py patch inverts
+  7 Python opt-in     pf_optin (= lever_n_m3native_patch section I, the wired graft): env off = the
+                      served config object; on = 0x5EFA0003 (Q2's default) only on the flexible bf8
+                      qualified-S path; stock binary and bad flags refused first; the patch inverts,
+                      alone and composed with the decode graft, on the committed image tp.py
   8 bench             ../sdpa_prefill_bench/test_prefill_chain_bench.py (arms, words, run_m1.sh)
   9 build script      build_k64g.sh's shas equal the Python's and build_k64f.sh's, its string checks are
                       a superset of build_k64f.sh's; run_card_m_pf.sh dry runs
@@ -274,10 +276,30 @@ class ConstantTests(unittest.TestCase):
         for module in (card,):
             self.assertEqual(module.PF_TAG, factory.PF_TAG)
             self.assertEqual(module.TEST_ENV, factory.TEST_ENV)
-        self.assertEqual(optin.DEFAULT_FLAGS, factory.FLAG_KV_CHAIN)
+        # The model's default is Q2's choice, the chain plus the injector read-ahead (0x3); the card-M
+        # test's stress / trace / cache flag stays the 0x1 it was qualified with (Q1 swept all four).
+        self.assertEqual(optin.DEFAULT_FLAGS, factory.FLAG_KV_CHAIN | factory.FLAG_INJ_BATCH)
         self.assertEqual(card.DEFAULT_FLAGS, factory.FLAG_KV_CHAIN)
         self.assertEqual(card.BINARY_MARKER, factory.LOG_MARKER.encode())
         self.assertEqual(optin.BINARY_MARKER, factory.LOG_MARKER.encode())
+
+    def test_the_serving_graft_constants_are_the_factorys(self):
+        """lever_n_m3native_patch section I (scripts/ci) cannot import this directory (it must stay
+        standalone for the rig harnesses that copy it alone), so its constants are held here."""
+        graft = optin.graft
+        self.assertEqual(graft.SDPA_PF_TAG, factory.PF_TAG)
+        self.assertEqual(graft.SDPA_PF_BINARY_MARKER, factory.LOG_MARKER)
+        self.assertEqual(graft.SDPA_PF_ROWS, factory.QUALIFIED_ROWS)
+        self.assertEqual(graft.SDPA_PF_CHUNK, factory.QUALIFIED_CHUNK)
+        self.assertEqual(tuple(sorted(graft.SDPA_PF_PRODUCTION_FLAGS)), tuple(sorted(card.PRODUCTION_FLAGS)))
+        for flags in graft.SDPA_PF_PRODUCTION_FLAGS:
+            with self.subTest(flags=flags):
+                self.assertEqual(flags & ~factory.PRODUCTION_FLAGS, 0)          # never a test or unknown bit
+                self.assertEqual(factory.decode_word(graft.SDPA_PF_TAG | flags), (True, flags))
+        self.assertIn(graft.SDPA_PF_DEFAULT_FLAGS, graft.SDPA_PF_PRODUCTION_FLAGS)
+        import sdpa_prefill_bench as bench
+        chain_b = bench.arm_by_name('chain_b')['program_word']
+        self.assertEqual(chain_b, graft.SDPA_PF_TAG | graft.SDPA_PF_DEFAULT_FLAGS)   # the Q2 arm the default is
 
     def test_the_flags_ct_index_is_cb_arg_offset_plus_8(self):
         self.assertIn('get_compile_time_arg_val(cb_arg_offset + %d)' % factory.FLAGS_CT_OFFSET, chain_text())
@@ -704,11 +726,21 @@ def dumped_tp():
     return NL.join(lines) + NL
 
 
+FIXTURE_TP = HERE.parents[2] / 'scripts' / 'ci' / 'fixtures' / 'qwen36_attention_tp.py'
+SERVED_KWARGS = dict(compute_with_storage_grid_size=(11, 10), exp_approx_mode=False, q_chunk_size=128, k_chunk_size=128)
+
+
 class OptinTests(unittest.TestCase):
+    """The opt-in is lever_n_m3native_patch section I (wired into the gate's attention/tp.py graft);
+    pf_optin re-exports it. scripts/ci/test_lever_n_m3native_sdpa_pf.py drives the whole grafted
+    forward_prefill_paged of the real tp.py; these check the helpers and the patch on an excerpt."""
+
     def setUp(self):
-        self.ns = optin.helpers_namespace()
+        self.built = []
+        ttnn = SimpleNamespace(SDPAProgramConfig=lambda **kw: self.built.append(kw) or dict(kw))
+        self.ns = optin.helpers_namespace(ttnn_module=ttnn)
         self.pindiag = []
-        self.ns['_qwen_pf_pindiag'] = self.pindiag.append
+        self.ns['_qwen_pf_log'] = self.pindiag.append
 
     def word(self, env, has_marker=True):
         calls = []
@@ -718,40 +750,55 @@ class OptinTests(unittest.TestCase):
             return has_marker
         return self.ns['_qwen_pf_word'](env, check), calls
 
-    def kwargs(self, word, flexible=True, bf8=True, S=2048):
-        return self.ns['_qwen_pf_cfg_kwargs']((11, 10), 128, word, flexible, bf8, S)
+    def config(self, word, flexible=True, bf8=True, S=2048, qk_chunk=128):
+        """(served, what the call site sends) for one prefill call."""
+        layer = SimpleNamespace(_sdpa_pf_word=word, _sdpa_bf8=bf8,
+                                mesh=SimpleNamespace(compute_with_storage_grid_size=lambda: (11, 10)))
+        served = dict(SERVED_KWARGS, q_chunk_size=qk_chunk, k_chunk_size=qk_chunk)
+        return served, self.ns['_qwen_pf_program_config'](layer, served, qk_chunk, flexible, S)
 
     def test_environment_off_is_the_served_config(self):
         word, calls = self.word({})
         self.assertIsNone(word)
         self.assertEqual(calls, [])                                     # no binary probe either
-        self.assertEqual(self.kwargs(None), dict(compute_with_storage_grid_size=(11, 10), exp_approx_mode=False,
-                                                 q_chunk_size=128, k_chunk_size=128))
-        self.assertIsNone(self.word({optin.ENV: '0'})[0])
+        self.assertEqual(self.pindiag, [])
+        served, sent = self.config(None)
+        self.assertIs(sent, served)                                     # the served object itself
+        self.assertEqual(self.built, [])                                # and no second config built
+        for value in ('0', '', 'true', '11'):
+            with self.subTest(value=value):
+                self.assertIsNone(self.word({optin.ENV: value})[0])
 
-    def test_on_sets_0x5efa0001_on_the_flexible_bf8_even_path_only(self):
+    def test_on_defaults_to_0x3_on_the_flexible_bf8_path_only(self):
         word, _ = self.word({optin.ENV: '1'})
-        self.assertEqual(word, 0x5EFA0001)
-        self.assertEqual(self.pindiag, ['[PINDIAG] sdpa prefill kvchain flags=0x5efa0001'])
-        self.assertEqual(self.kwargs(word)['max_cores_per_head_batch'], 0x5EFA0001)
-        self.assertNotIn('max_cores_per_head_batch', self.kwargs(word, flexible=False))   # legacy int chunk_start
-        self.assertNotIn('max_cores_per_head_batch', self.kwargs(word, S=1920))           # odd q_num_chunks
-        self.assertNotIn('max_cores_per_head_batch', self.kwargs(word, bf8=False))        # bf16 mode
-        self.assertEqual(self.word({optin.ENV: '1', optin.FLAGS_ENV: '0x7'})[0], 0x5EFA0007)
+        self.assertEqual(word, 0x5EFA0003)                              # Q2's choice: chain + read-ahead 32
+        self.assertEqual(self.pindiag, ['[PINDIAG] sdpa prefill kvchain flags=0x5efa0003 rows=512/1024/2048 chunk=128'])
+        served, sent = self.config(word)
+        self.assertEqual(sent, dict(served, max_cores_per_head_batch=0x5EFA0003))
+        for label, kwargs in (('legacy int chunk_start', dict(flexible=False)), ('odd q_num_chunks', dict(S=1920)),
+                              ('bf16 mode', dict(bf8=False)), ('q/k chunk 64', dict(qk_chunk=64))):
+            with self.subTest(label):
+                served, sent = self.config(word, **kwargs)
+                self.assertIs(sent, served)
+        for text, expected in (('0x7', 0x5EFA0007), ('0x1', 0x5EFA0001), ('5', 0x5EFA0005), ('', 0x5EFA0003),
+                               (' 0x3 ', 0x5EFA0003)):
+            with self.subTest(flags=text):
+                self.assertEqual(self.word({optin.ENV: '1', optin.FLAGS_ENV: text})[0], expected)
 
     def test_only_the_card_m_qualified_row_counts_opt_in(self):
         """Review 1 finding 4: S % 256 == 0 admitted 256-1792-row tail chunks and S > 2048 (unequal
-        groups) that the Q1 sweep never ran. The opt-in now sends exactly the swept row counts."""
-        word = 0x5EFA0001
+        groups) that the Q1 sweep never ran. The opt-in sends exactly the swept row counts."""
+        word = 0x5EFA0003
         for S in (512, 1024, 2048):
-            self.assertEqual(self.kwargs(word, S=S)['max_cores_per_head_batch'], word)
+            self.assertEqual(self.config(word, S=S)[1]['max_cores_per_head_batch'], word)
         for S in (256, 768, 1280, 1536, 1792, 2304, 4096):
             with self.subTest(S=S):
-                self.assertNotIn('max_cores_per_head_batch', self.kwargs(word, S=S))
-        self.assertNotIn('max_cores_per_head_batch', self.ns['_qwen_pf_cfg_kwargs']((11, 10), 64, word, True, True, 2048))
+                served, sent = self.config(word, S=S)
+                self.assertIs(sent, served)
         self.assertEqual(tuple(sorted(card.ROWS)), factory.QUALIFIED_ROWS)
         self.assertEqual(self.ns['_QWEN_PF_ROWS'], factory.QUALIFIED_ROWS)
         self.assertEqual(optin.QUALIFIED_ROWS, factory.QUALIFIED_ROWS)
+        self.assertEqual(self.ns['_QWEN_PF_FLAGS'], tuple(card.PRODUCTION_FLAGS))
         for rows in factory.QUALIFIED_ROWS:                        # every qualified S is a G6 shape
             topo = model.g6_topology(model.geometry(rows=rows))
             self.assertEqual(topo['members'], 6 * topo['chains'])
@@ -760,13 +807,28 @@ class OptinTests(unittest.TestCase):
     def test_a_stock_binary_and_bad_flags_are_refused_first(self):
         with self.assertRaisesRegex(RuntimeError, 'lacks the \\[QWEN-SDPA-PF\\] chain factory'):
             self.word({optin.ENV: '1'}, has_marker=False)
-        for flags in ('0x0', '0x2', '0x8', '0x103', '0x203'):
+        for flags in ('0x0', '0x2', '0x4', '0x6', '0x8', '0xf', '0x103', '0x203', '0x1003', 'junk'):
             with self.subTest(flags=flags):
                 calls = []
-                with self.assertRaisesRegex(RuntimeError, 'production flags 0x1..0x7'):
+                with self.assertRaisesRegex(RuntimeError, 'must be a production flag set \\(0x1, 0x3, 0x5, 0x7\\)'):
                     self.ns['_qwen_pf_word']({optin.ENV: '1', optin.FLAGS_ENV: flags}, lambda: calls.append(1) or True)
                 self.assertEqual(calls, [])                             # refused before the binary probe
         self.assertEqual(self.pindiag, [])
+
+    def test_the_process_environment_is_probed_once_per_process(self):
+        """Every attention layer calls _qwen_pf_word() at construction: one binary probe, one marker."""
+        environ = {optin.ENV: '1'}
+        ns = optin.helpers_namespace(os_module=SimpleNamespace(environ=environ))
+        probes, logged = [], []
+        ns['_qwen_pf_binary_has_marker'] = lambda: probes.append(1) or True
+        ns['_qwen_pf_log'] = logged.append
+        self.assertEqual([ns['_qwen_pf_word']() for _ in range(16)], [0x5EFA0003] * 16)
+        self.assertEqual((len(probes), len(logged)), (1, 1))
+        off = optin.helpers_namespace(os_module=SimpleNamespace(environ={}))
+        off['_qwen_pf_binary_has_marker'] = lambda: probes.append(1) or True
+        self.assertIsNone(off['_qwen_pf_word']())
+        self.assertEqual(off['_QWEN_PF_STATE'], {})
+        self.assertEqual(len(probes), 1)
 
     def test_the_maps_probe_reads_the_one_mapped_ttnncpp(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -781,19 +843,24 @@ class OptinTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'exactly one mapped'):
                 self.ns['_qwen_pf_binary_has_marker'](str(maps))
 
-    def test_the_tp_patch_touches_only_forward_prefill_paged_and_inverts(self):
+    def test_the_tp_patch_touches_only_its_two_sites_and_inverts(self):
         patched = optin.patch_tp(TP_EXCERPT)
         self.assertEqual(optin.unpatch_tp(patched), TP_EXCERPT)
         compile(patched, 'tp.py', 'exec')
         decode = patched[patched.index('def forward_decode'):patched.index('def forward_prefill_paged')]
         self.assertIn('q_chunk_size=0', decode)                         # the decode config untouched
-        self.assertIn('_qwen_pf_cfg_kwargs', patched[patched.index('def forward_prefill_paged'):])
+        self.assertNotIn('_qwen_pf', decode)
+        prefill = patched[patched.index('def forward_prefill_paged'):patched.index(optin.TP_HELPERS)]
+        self.assertIn(optin.graft.SDPA_PF_CALL_OLD, prefill)            # the served statement, verbatim
+        self.assertIn('_qwen_pf_program_config', prefill)
         self.assertIn(optin.INIT_NEW, patched)
-        with self.assertRaisesRegex(ValueError, 'already carries'):
+        with self.assertRaisesRegex(ValueError, 'already grafted'):
             optin.patch_tp(patched)
-        with self.assertRaisesRegex(ValueError, 'call-site anchor'):
+        with self.assertRaisesRegex(ValueError, 'expected one occurrence'):
             optin.patch_tp(TP_EXCERPT.replace('k_chunk_size=qk_chunk,', 'k_chunk_size=64,'))
-        with self.assertRaises(SyntaxError):                       # anchors matched, result unparsable: refused
+        with self.assertRaisesRegex(ValueError, 'expected one occurrence'):
+            optin.patch_tp(TP_EXCERPT.replace('QWEN_SDPA_BF8', 'QWEN_SDPA_BF16'))
+        with self.assertRaises(SyntaxError):                       # an unparsable input is refused
             optin.patch_tp(TP_EXCERPT.replace('        return sdpa_cfg', '        return sdpa_cfg)'))
 
     def test_the_cli_reports_whether_its_input_is_the_pinned_file(self):
@@ -805,8 +872,14 @@ class OptinTests(unittest.TestCase):
                 self.assertEqual(optin.main([str(source), '--out', str(Path(directory) / 'out.py')]), 0)
             self.assertIn('NOT the pinned image file %s' % optin.TP_PINNED_PREFIX, buffer.getvalue())
             self.assertEqual(optin.unpatch_tp((Path(directory) / 'out.py').read_text(encoding='utf-8')), TP_EXCERPT)
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                self.assertEqual(optin.main([str(FIXTURE_TP), '--full', '--out', str(Path(directory) / 'full.py')]), 0)
+            self.assertIn('(the pinned image file) -> the full graft', buffer.getvalue())
+            self.assertEqual((Path(directory) / 'full.py').read_text(encoding='utf-8'),
+                             optin.graft.PATCHES['attention/tp.py'](FIXTURE_TP.read_text(encoding='utf-8')))
 
-    def test_the_patched_call_site_builds_the_served_kwargs_when_off(self):
+    def test_the_patched_call_site_builds_the_served_config_when_off(self):
         patched = optin.patch_tp(TP_EXCERPT)
         seen = []
         namespace = dict(ttnn=SimpleNamespace(SDPAProgramConfig=lambda **kw: seen.append(kw) or kw))
@@ -817,23 +890,29 @@ class OptinTests(unittest.TestCase):
         finally:
             if saved is not None:
                 os.environ[optin.ENV] = saved
+        self.assertIsNone(layer._sdpa_pf_word)
         layer.mesh = SimpleNamespace(compute_with_storage_grid_size=lambda: (11, 10))
         layer._sdpa_bf8 = True
+        out = layer.forward_prefill_paged(SimpleNamespace(shape=(1, 1, 2048, 5120)), None, chunk_start_idx_tensor=object())
+        self.assertEqual(seen, [SERVED_KWARGS])                         # one config, the served one
+        self.assertIs(out, seen[0])
+        layer._sdpa_pf_word = 0x5EFA0003
         layer.forward_prefill_paged(SimpleNamespace(shape=(1, 1, 2048, 5120)), None, chunk_start_idx_tensor=object())
-        self.assertEqual(seen[-1], dict(compute_with_storage_grid_size=(11, 10), exp_approx_mode=False,
-                                        q_chunk_size=128, k_chunk_size=128))
-        layer._sdpa_pf_word = 0x5EFA0001
-        layer.forward_prefill_paged(SimpleNamespace(shape=(1, 1, 2048, 5120)), None, chunk_start_idx_tensor=object())
-        self.assertEqual(seen[-1]['max_cores_per_head_batch'], 0x5EFA0001)
-        layer.forward_prefill_paged(SimpleNamespace(shape=(1, 1, 2048, 5120)), None, chunk_start_idx=2048)
-        self.assertNotIn('max_cores_per_head_batch', seen[-1])
+        self.assertEqual(seen[1:], [SERVED_KWARGS, dict(SERVED_KWARGS, max_cores_per_head_batch=0x5EFA0003)])
+        out = layer.forward_prefill_paged(SimpleNamespace(shape=(1, 1, 2048, 5120)), None, chunk_start_idx=2048)
+        self.assertNotIn('max_cores_per_head_batch', out)
 
-    @unittest.skipUnless(DUMP.is_file(), 'no probe 35503727180 source dump')
     def test_the_patch_applies_to_the_pinned_tp(self):
-        text = dumped_tp()
+        """The committed copy of the image's attention/tp.py (every graft through v143 staged it)."""
+        text = FIXTURE_TP.read_text(encoding='utf-8')
+        self.assertTrue(sha(text.encode('utf-8')).startswith(optin.TP_PINNED_PREFIX))
         patched = optin.patch_tp(text)
         self.assertEqual(optin.unpatch_tp(patched), text)
         compile(patched, 'attention/tp.py', 'exec')
+        full = optin.patch_tp_full(text)
+        self.assertEqual(optin.unpatch_tp(full), optin.graft.patch_attention_tp(text))
+        if DUMP.is_file():
+            self.assertEqual(dumped_tp().rstrip(NL), text.rstrip(NL))   # the probe dump is the same file
 
 
 # ---------------------------------------------------------------------------------------------
