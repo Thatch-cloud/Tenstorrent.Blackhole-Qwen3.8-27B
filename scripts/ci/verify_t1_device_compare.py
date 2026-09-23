@@ -203,34 +203,47 @@ def compare_matmuls(ttnn, mesh, tpc, iterations, captured=None):
         for kind in kinds:
             host = captured[projection['name']].reshape(ROWS, DIM).to(torch.bfloat16) if kind == 'captured' \
                 else activations(kind, generator)
-            x = ttnn.from_torch(host.reshape(1, 1, ROWS, DIM), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
-                                device=mesh, mesh_mapper=replicate,
-                                memory_config=ttnn.L1_MEMORY_CONFIG if projection['input'] == 'l1'
-                                else ttnn.DRAM_MEMORY_CONFIG)
+            def fresh():
+                # tp_common.matmul_1d_decode consumes its input (it moves x to L1 and frees the
+                # original: the first G0 run died on the second call with 'Input Tensor is not
+                # allocated'), so every call gets its own upload, made outside the timed region.
+                return ttnn.from_torch(host.reshape(1, 1, ROWS, DIM), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                                       device=mesh, mesh_mapper=replicate,
+                                       memory_config=ttnn.L1_MEMORY_CONFIG if projection['input'] == 'l1'
+                                       else ttnn.DRAM_MEMORY_CONFIG)
+
+            def release(tensor):
+                if tensor.is_allocated():
+                    ttnn.deallocate(tensor)
+
             outputs, timings = {}, {}
             for side, config in configs.items():
-                def run():
+                def run(x):
                     return tpc.matmul_1d_decode(x, weight, config, compute[projection['compute']],
                                                 out_memory_config=memory)
 
-                result = run()
+                x = fresh()
+                result = run(x)
                 ttnn.synchronize_device(mesh)
                 outputs[side] = [ttnn.to_torch(part) for part in ttnn.get_device_tensors(result)]
                 ttnn.deallocate(result)
+                release(x)
                 samples = []
                 for unused in range(iterations):
+                    x = fresh()
+                    ttnn.synchronize_device(mesh)
                     started = time.perf_counter()
-                    result = run()
+                    result = run(x)
                     ttnn.synchronize_device(mesh)
                     samples.append((time.perf_counter() - started) * 1e6)
                     ttnn.deallocate(result)
+                    release(x)
                 timings[side] = statistics.median(samples) if samples else None
             exact = all(torch.equal(old.view(torch.int16), new.view(torch.int16))
                         for old, new in zip(outputs['before'], outputs['after'], strict=True))
             results.append(dict(projection=projection['name'], kind=kind, exact=exact,
                                 median_us=timings, chips=len(outputs['before']),
                                 shapes={side: config_shape(config) for side, config in configs.items()}))
-            ttnn.deallocate(x)
         ttnn.deallocate(weight)
     return results
 
