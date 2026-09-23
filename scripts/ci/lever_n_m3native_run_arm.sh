@@ -189,6 +189,22 @@ if [ -n "${M3NATIVE_TRACED_PROPOSAL:-}" ] || [ -n "${M3NATIVE_PACKED_PROPOSAL:-}
   # own headroom trim and never less.
   trace_region_bytes=536870912
 fi
+# M3NATIVE_TRACE_REGION_BYTES overrides every default above, including the 512 MiB
+# the traced/packed-proposal block just forced. It has to sit here, last: anywhere
+# earlier it would be silently overwritten by that block. Part of the 4 x 131k DRAM
+# plan (A2): 512 -> 256 MiB is worth ~0.27 GB per chip, but traced proposals, packed
+# pair traces and traced publish have never been shown to fit in 256 MiB.
+if [ -n "${M3NATIVE_TRACE_REGION_BYTES:-}" ]; then
+  case "$M3NATIVE_TRACE_REGION_BYTES" in
+    ''|*[!0-9]*) echo "M3NATIVE_TRACE_REGION_BYTES must be a positive integer, got '$M3NATIVE_TRACE_REGION_BYTES'" >&2; exit 1 ;;
+  esac
+  if [ "$M3NATIVE_TRACE_REGION_BYTES" -le 0 ] || [ $(( M3NATIVE_TRACE_REGION_BYTES % 1048576 )) -ne 0 ]; then
+    echo "M3NATIVE_TRACE_REGION_BYTES must be a positive multiple of 1 MiB" >&2
+    exit 1
+  fi
+  trace_region_bytes="$M3NATIVE_TRACE_REGION_BYTES"
+  echo "trace region overridden: $trace_region_bytes bytes"
+fi
 # The tt-metal watcher (TT_METAL_WATCHER=20, inherited from the fp2u lane's hang diagnosis)
 # compiles NoC sanitisation and waypoints into every kernel. The same folded SDPA decode
 # call costs 0.46 ms on card M without it and 2.05 ms in the gate's device profile with
