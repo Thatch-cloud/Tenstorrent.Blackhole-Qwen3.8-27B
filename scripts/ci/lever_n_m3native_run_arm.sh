@@ -94,9 +94,27 @@ fi
 mkdir -p experiment-results/gate
 chmod 0777 experiment-results/gate
 mounts+=(--mount "type=bind,src=$PWD/experiment-results/gate,dst=/experiment-results-gate")
-mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+# The serving pair, by board id: card M (PCI d1) and card A (PCI f3). Every node used to be mounted,
+# which was right while only two boards were present; with the third board (B) back the container would
+# see three devices. M3NATIVE_CARDS overrides the by-id list (space-separated); a missing card refuses.
+serving_cards="${M3NATIVE_CARDS:-blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67}"
+nodes=()
+for card in $serving_cards; do
+  node=$(readlink -f "/dev/tenstorrent/by-id/$card" 2>/dev/null || true)
+  if [ -z "$node" ] || [ ! -c "$node" ]; then
+    echo "serving card $card has no device node under /dev/tenstorrent/by-id; refusing to guess" >&2
+    exit 1
+  fi
+  nodes+=("${node##*/}")
+done
+if [ "${#nodes[@]}" -ne 2 ]; then
+  echo "expected exactly two serving cards, got ${#nodes[@]} (${serving_cards})" >&2
+  exit 1
+fi
+mapfile -t nodes < <(printf '%s\n' "${nodes[@]}" | sort -n)
 devices=()
 for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+echo "serving pair: ${serving_cards} -> /dev/tenstorrent/{$(IFS=,; echo "${nodes[*]}")}"
 
 # Optional K64 kernel graft (~/opgraft-K64: the batch-64 attn_decode_prep and
 # nlp_concat_heads_decode C++ ops, both proved bit-exact on device). Unlike native_m3

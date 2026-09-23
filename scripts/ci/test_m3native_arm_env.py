@@ -335,6 +335,18 @@ class RoundB1ArmTests(unittest.TestCase):
         self.assertIn("ROUND_B1_FLAG = 'QWEN_FAST_ROUND_B1'", (HERE / 'dflash_packed_proposal.py').read_text(encoding='utf-8'))
 
 
+class ServingPairArmTests(unittest.TestCase):
+    """The gate mounts only the serving pair, found by board id (card M, card A), never every
+    /dev/tenstorrent node: with the third board back a container would otherwise see three devices."""
+
+    def test_the_pair_is_pinned_by_board_id(self):
+        text = arm_text()
+        self.assertIn('serving_cards="${M3NATIVE_CARDS:-blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67}"', text)
+        self.assertNotIn("ls /dev/tenstorrent | grep", text)
+        self.assertIn('readlink -f "/dev/tenstorrent/by-id/$card"', text)
+        self.assertIn('expected exactly two serving cards', text)
+
+
 class LegacyContinuationArmTests(unittest.TestCase):
     """Lever N's negative control: M3NATIVE_LEGACY_CONTINUATION_ORDER=1 crosses as
     QWEN_FAST_LEGACY_CONTINUATION_ORDER=1, which serving_lifecycle (the pre-fix routing order)
