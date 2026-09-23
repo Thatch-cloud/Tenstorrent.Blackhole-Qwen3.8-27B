@@ -582,8 +582,23 @@ def patch_mlp_single_gateup(source):
         '                type(self)._qwen_2d_logged = True\n'
         '                from loguru import logger as _qwen_logger\n'
         '\n'
-        '                _qwen_logger.info("' + MARKER_PREFILL_2D + ': rows={} fused={}", seq, self._fuse_gateup_agmm)\n',
+        '                _qwen_logger.info("' + MARKER_PREFILL_2D + ': rows={} fused={} x={} outputs=DRAM", seq,\n'
+        '                                  self._fuse_gateup_agmm, getattr(x, "memory_config", lambda: None)())\n'
+        '            # Lever N M3native C1: at TP2 the gate/up outputs (N=8704 per device) do not fit L1 (v100).\n'
+        '            _qwen_c1_out = ttnn.L1_MEMORY_CONFIG if ' + FLAG_OFF + ' else ttnn.DRAM_MEMORY_CONFIG\n',
         'mlp prefill 2D branch marker')
+    span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '                x, w.w1, compute_kernel_config=ckc, program_config=pc_gate, memory_config=ttnn.L1_MEMORY_CONFIG\n',
+        '                x, w.w1, compute_kernel_config=ckc, program_config=pc_gate, memory_config=_qwen_c1_out\n',
+        'mlp prefill 2D w1 output placement')
+    span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
+    lines = replace_once(
+        lines, span,
+        '                x, w.w3, compute_kernel_config=ckc, program_config=pc_up, memory_config=ttnn.L1_MEMORY_CONFIG\n',
+        '                x, w.w3, compute_kernel_config=ckc, program_config=pc_up, memory_config=_qwen_c1_out\n',
+        'mlp prefill 2D w3 output placement')
     result = ''.join(lines)
     ast.parse(result)
     return result

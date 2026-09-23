@@ -1022,6 +1022,8 @@ def _strip_c1(text):
             continue
         if stripped.startswith('# Lever N M3native C1'):
             continue
+        if stripped.startswith('_qwen_c1_out = '):
+            continue
         if stripped.startswith('# gate/up copy and never fuses the gather'):
             continue
         if stripped == 'import os\n' and len(line) - len(stripped) > 0:
@@ -1030,7 +1032,8 @@ def _strip_c1(text):
             continue
         if line == '\0':
             continue
-        kept.append(line.replace(' and os.environ.get("QWEN_FAST_SINGLE_GATEUP") != "1"', ''))
+        kept.append(line.replace(' and os.environ.get("QWEN_FAST_SINGLE_GATEUP") != "1"', '')
+                    .replace('memory_config=_qwen_c1_out', 'memory_config=ttnn.L1_MEMORY_CONFIG'))
     return ''.join(kept)
 
 
@@ -1134,6 +1137,38 @@ class SingleGateUpGraftTests(unittest.TestCase):
             with self.subTest(graft=relative):
                 self.assertIn('src=$PWD/graft/%s,dst=$root/%s,readonly' % (relative, relative), arm)
         self.assertNotIn('graft/tp_common.py', arm)
+
+
+
+class SingleGateUpPlacementTests(unittest.TestCase):
+    """v100 (run 35807762937): at TP2 the unfused branch's L1 gate/up outputs collided with
+    the w1 program's circular buffers on the first 2048-row prefill chunk."""
+
+    def test_both_2d_outputs_follow_the_flag_and_nothing_else_moves(self):
+        patched = patch_mlp_full(MLP_MODULE)
+        span = function_span(patched, '_forward_tp')
+        region = ''.join(patched.splitlines(keepends=True)[span[0]:span[1]])
+        self.assertIn('_qwen_c1_out = ttnn.L1_MEMORY_CONFIG if os.environ.get("QWEN_FAST_SINGLE_GATEUP") != "1" '
+                      'else ttnn.DRAM_MEMORY_CONFIG', region)
+        self.assertEqual(region.count('memory_config=_qwen_c1_out'), 2)
+        self.assertIn('program_config=pc_gate, memory_config=_qwen_c1_out', region)
+        self.assertIn('program_config=pc_up, memory_config=_qwen_c1_out', region)
+        # Defined before either use, inside the 2D branch.
+        branch = region.index('        elif x.shape[-2] > ttnn.TILE_SIZE:\n')
+        self.assertLess(branch, region.index('_qwen_c1_out = '))
+        self.assertLess(region.index('_qwen_c1_out = '), region.index('memory_config=_qwen_c1_out'))
+
+    def test_the_placement_evaluates_to_l1_unless_the_flag_is_one(self):
+        import types
+        ttnn = types.SimpleNamespace(L1_MEMORY_CONFIG='L1', DRAM_MEMORY_CONFIG='DRAM')
+        line = [l.strip() for l in patch_mlp_full(MLP_MODULE).splitlines() if l.strip().startswith('_qwen_c1_out = ')][0]
+        for environ, expected in (({}, 'L1'), ({'QWEN_FAST_SINGLE_GATEUP': '0'}, 'L1'),
+                                  ({'QWEN_FAST_SINGLE_GATEUP': '1'}, 'DRAM')):
+            with self.subTest(environ=environ), patch.dict('os.environ', environ, clear=True):
+                import os
+                namespace = {'ttnn': ttnn, 'os': os}
+                exec(line, namespace)
+                self.assertEqual(namespace['_qwen_c1_out'], expected)
 
 
 if __name__ == '__main__':
