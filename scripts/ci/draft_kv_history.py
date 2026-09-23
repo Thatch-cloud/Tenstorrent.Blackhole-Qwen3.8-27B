@@ -1,5 +1,6 @@
 """Double-buffered projected draft history with explicit accepted-prefix publication."""
 
+import os
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -54,6 +55,74 @@ def validate_storage(operations, storage, layers):
 
 def bank_tensors(banks):
     return [bank[side][head] for bank in banks for side in ('active', 'spare') for head in ('k', 'v')]
+
+
+@contextmanager
+def indexed_temporaries(cache, protected):
+    """DraftKVHistory.temporaries under QWEN_FAST_ROUND_B1 (C2): the same scope - the
+    same values kept, refused and queued, released in the same order at the same point -
+    with set lookups instead of list scans, and the lent banks' and query's addresses
+    computed once per borrowed set and kept with the tensors (a lent tensor stays at one
+    address while it is lent).
+
+    The scan it replaces keeps a value whose identity is protected, raises when any one
+    chip's address matches the same chip of any protected identity, and otherwise queues
+    the value; on exit it releases the queued values whose identity is not protected and
+    not one of the cache's own owned tensors, recomputed from cache.owned THEN (the
+    constructor adds to it inside a scope). addresses() gives one address per chip, so
+    "some chip matches" is "that chip's address is in that chip's set".
+
+    QWEN_FAST_ROUND_B1_AUDIT re-reads the cached borrowed addresses on every reuse, makes
+    every retain() decision again by the list scan and every release list again by the
+    list filter, and compares (dflash_packed_proposal.ROUND_B1_AUDIT_FLAG)."""
+    audit = os.environ.get('QWEN_FAST_ROUND_B1_AUDIT') == '1'
+    operations = cache.operations
+    owned = []
+    projection_owned = cache.projection.owned if cache.projection is not None else []
+    identities = [addresses(operations, value) for value in [*cache.owned, *projection_owned]]
+    borrowed = tuple(cache.borrowed)
+    cached = getattr(cache, '_round_b1_borrowed', None)
+    if (cached is None or len(cached[0]) != len(borrowed)
+            or any(mine is not theirs for mine, theirs in zip(cached[0], borrowed))):
+        cached = (borrowed, [addresses(operations, value) for value in borrowed])
+        cache._round_b1_borrowed = cached
+    elif audit and borrowed:
+        from dflash_packed_proposal import audit_borrowed
+
+        audit_borrowed([addresses(operations, value) for value in borrowed], cached[1])
+    identities.extend(cached[1])
+    identities.extend(addresses(operations, value) for value in protected)
+    exact = set(identities)
+    chips = [set() for _ in range(max((len(identity) for identity in identities), default=0))]
+    for identity in identities:
+        for chip, address in enumerate(identity):
+            chips[chip].add(address)
+
+    def retain(value):
+        identity = addresses(operations, value)
+        if identity not in exact:
+            if any(address in known for address, known in zip(identity, chips)):
+                raise ValueError('Draft cache temporary partially aliases borrowed storage')
+            owned.append(value)
+        return value
+    if audit:
+        from dflash_packed_proposal import audit_release, audited_retain
+
+        scoped = audited_retain(retain, owned, lambda value: addresses(operations, value), identities)
+    else:
+        scoped = retain
+    try:
+        yield scoped
+    finally:
+        persistent = set(exact)
+        persistent.update(addresses(operations, value) for value in cache.owned)
+        released = [value for value in owned if addresses(operations, value) not in persistent]
+        if audit:
+            listed = [*identities, *(addresses(operations, value) for value in cache.owned)]
+            expected = [value for value in owned if addresses(operations, value) not in listed]
+        release_owned(operations, released)
+        if audit:
+            audit_release(expected, released)
 
 
 class DraftKVHistory:
@@ -125,6 +194,10 @@ class DraftKVHistory:
 
     @contextmanager
     def temporaries(self, protected):
+        if os.environ.get('QWEN_FAST_ROUND_B1') == '1':
+            with indexed_temporaries(self, protected) as retain:
+                yield retain
+            return
         owned = []
         projection_owned = self.projection.owned if self.projection is not None else []
         identities = [addresses(self.operations, value)

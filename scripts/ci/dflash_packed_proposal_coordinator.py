@@ -366,6 +366,9 @@ class PackedProposalCoordinator:
 
         prepared, fence = [], None
         pair_labels, pair_ms = [], []
+        # QWEN_FAST_ROUND_B1 (C1): the traces this round prepared, selected together after
+        # the fence below. None with the flag off, and nothing then reads it.
+        batched = [] if os.environ.get('QWEN_FAST_ROUND_B1') == '1' else None
 
         def prepare_single(entry):
             device = entry['device']
@@ -434,6 +437,8 @@ class PackedProposalCoordinator:
                             _install(device_a, trace, 'a')
                             _install(device_b, trace, 'b')
                             prepared.extend((device_a, device_b))
+                            if batched is not None:
+                                batched.append(([slot_a, slot_b], trace))
                             if fence is None:
                                 fence = (device_a.operations, device_a.mesh)
                             if started is not None:
@@ -475,7 +480,110 @@ class PackedProposalCoordinator:
             raise
         if fence is not None:
             fence[0].synchronize_device(fence[1])
+        if batched:
+            select_round(batched, prepared, round_number)
         if audit_enabled() and pair_labels:
             audit_log(AUDIT_LINE, round=round_number, pairs=pair_labels,
                       propose_ms=['%.1f' % value for value in pair_ms])
         return prepared
+
+
+# QWEN_FAST_ROUND_B1 (C1), under QWEN_FAST_PACKED_AUDIT=1: one line per round, the host
+# time of the pairs' readback (collect) and of the batched selection, and how many selector
+# calls that took (one unless two pairs lend different codebooks).
+SELECT_LINE = '[PACKED-SELECT] round={round} pairs={pairs} users={users} calls={calls} collect_ms={collect_ms} select_ms={select_ms}'
+
+
+def _discard_round(prepared):
+    """The exception path of PackedProposalCoordinator.prepare, for a failure after its
+    fence: every prepared device's pending work is dropped, a shared pair trace once.
+
+    Unlike that path, a device wearing a _PackedCaptureView also has the view's own
+    single-user capture discarded (the view forwards discard_pending to it): a device whose
+    pair did not pack this round is prepared through prepare_single, and its pending then
+    lives in that capture, not in the pair trace. A no-op for a device the pair prepared
+    (its single-user capture holds nothing pending, or was released)."""
+    discarded_traces = set()
+    for device in prepared:
+        capture = device.proposal_capture
+        if isinstance(capture, _PackedCaptureView):
+            if id(capture._trace) not in discarded_traces:
+                discarded_traces.add(id(capture._trace))
+                capture._trace.discard_pending()
+            capture.discard_pending()
+        else:
+            discard = getattr(capture, 'discard_pending', None)
+            if callable(discard):
+                discard()
+
+
+def select_round(batched, prepared, round_number):
+    """QWEN_FAST_ROUND_B1 (C1): after the round's one fence, read every prepared pair back
+    (PreparedPackedDFlashProposal.collect) and select all of their users in ONE FP64
+    selector call (dflash_packed_proposal.select_packed_batched), where each pair's first
+    finish() in phase B used to select its own two users - and adopt the tokens into each
+    trace, so phase B's finish() returns them unchanged. Pairs are batched only when they
+    select against the very same codebook objects (the lent draft weights), checked by
+    identity; a pair that does not share them gets a call of its own.
+
+    A failure here fails the round as it would have failed in phase B, after dropping
+    every prepared device's pending work - the device queue is already fenced.
+
+    Under QWEN_FAST_ROUND_B1_AUDIT each pair is then read back and selected again through
+    PreparedPackedDFlashProposal.audit_selection (select_device_outputs, the flag-off path)
+    and must give the tokens it adopted (dflash_packed_proposal.ROUND_B1_AUDIT_FLAG)."""
+    from dflash_packed_proposal import note_round_b1, round_b1_audit_enabled, select_packed_batched
+
+    audit = round_b1_audit_enabled()
+    started = time.perf_counter()
+    try:
+        collected = [(labels, trace, trace.collect()) for labels, trace in batched]
+        collected_at = time.perf_counter()
+        groups = []
+        for labels, trace, result in collected:
+            device = trace.device_a
+            for group in groups:
+                if group['predecessors'] is device.predecessors and group['successors'] is device.successors:
+                    group['members'].append((trace, result))
+                    break
+            else:
+                groups.append(dict(predecessors=device.predecessors, successors=device.successors,
+                                   members=[(trace, result)]))
+        for group in groups:
+            parts = [part for _, result in group['members'] for part in result['parts']]
+            seeds = [seed for _, result in group['members'] for seed in result['seeds']]
+            counts = [count for _, result in group['members'] for count in result['counts']]
+            tokens = select_packed_batched(parts, seeds, counts, group['predecessors'], group['successors'])
+            offset = 0
+            for trace, result in group['members']:
+                users = len(result['parts'])
+                trace.adopt(tokens[offset:offset + users])
+                if audit:
+                    _audit_selection(trace, tokens[offset:offset + users])
+                offset += users
+    except BaseException:
+        _discard_round(prepared)
+        raise
+    note_round_b1('batched-select')
+    if audit:
+        from dflash_packed_proposal import note_round_b1_audit
+
+        note_round_b1_audit()
+    if audit_enabled():
+        finished = time.perf_counter()
+        audit_log(SELECT_LINE, round=round_number, pairs=[labels for labels, _, _ in collected],
+                  users=sum(len(result['parts']) for _, _, result in collected), calls=len(groups),
+                  collect_ms='%.2f' % ((collected_at - started) * 1000),
+                  select_ms='%.2f' % ((finished - collected_at) * 1000))
+
+
+def _audit_selection(trace, adopted):
+    """QWEN_FAST_ROUND_B1_AUDIT (C1): the pair's own flag-off selection against the batched
+    tokens it adopted."""
+    from dflash_packed_proposal import round_b1_audit_count, round_b1_audit_mismatch
+
+    reference = tuple(tuple(tokens) for tokens in trace.audit_selection())
+    adopted = tuple(tuple(tokens) for tokens in adopted)
+    if reference != adopted:
+        round_b1_audit_mismatch('C1', 'batched=%s per-user=%s' % (adopted, reference))
+    round_b1_audit_count('select', len(adopted))

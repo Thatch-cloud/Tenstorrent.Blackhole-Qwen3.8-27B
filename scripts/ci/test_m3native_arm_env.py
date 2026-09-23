@@ -307,9 +307,28 @@ class RoundB1ArmTests(unittest.TestCase):
         self.assertEqual(lines[index - 1].strip(), '${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1} ' + chr(92))
         self.assertEqual(lines[index].strip(), self.LINE + ' ' + chr(92), 'nothing else on the continued line')
 
+    def test_its_audit_crosses_on_the_next_line(self):
+        """M3NATIVE_ROUND_B1_AUDIT=1 crosses as QWEN_FAST_ROUND_B1_AUDIT=1 (the correctness arm's
+        shadow check; it does nothing without QWEN_FAST_ROUND_B1), right after the B1 line."""
+        audit = '${M3NATIVE_ROUND_B1_AUDIT:+-e QWEN_FAST_ROUND_B1_AUDIT=1}'
+        text = arm_text()
+        self.assertEqual(text.count(audit), 1)
+        lines = text.split(chr(10))
+        index = next(number for number, line in enumerate(lines) if audit in line)
+        self.assertEqual(lines[index - 1].strip(), self.LINE + ' ' + chr(92))
+        self.assertEqual(lines[index].strip(), audit + ' ' + chr(92), 'nothing else on the continued line')
+        self.assertLess(text.index(audit), text.index('--entrypoint python3'))
+        for module in ('dflash_device.py', 'draft_kv_history.py'):
+            with self.subTest(module=module):
+                self.assertIn("os.environ.get('QWEN_FAST_ROUND_B1_AUDIT') == '1'",
+                              (HERE / module).read_text(encoding='utf-8'))
+        self.assertIn("ROUND_B1_AUDIT_FLAG = 'QWEN_FAST_ROUND_B1_AUDIT'",
+                      (HERE / 'dflash_packed_proposal.py').read_text(encoding='utf-8'))
+
     def test_baked_modules_read_it(self):
         for module in ('dflash_device.py', 'draft_kv_history.py', 'dflash_proposal_trace.py',
-                       'dflash_traced_publish.py', 'serving_packed_step.py'):
+                       'dflash_traced_publish.py', 'serving_packed_step.py',
+                       'dflash_packed_proposal_coordinator.py'):
             with self.subTest(module=module):
                 source = (HERE / module).read_text(encoding='utf-8')
                 self.assertIn("os.environ.get('QWEN_FAST_ROUND_B1') == '1'", source)

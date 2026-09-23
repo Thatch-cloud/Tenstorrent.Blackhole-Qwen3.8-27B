@@ -156,6 +156,23 @@ PREFILL_FLUSH_MARKER = '[PINDIAG] prefill profile flush: first flush'
 
 
 SKIP_BLOCK_STREAM_MARKER = '[PINDIAG] block stream skipped for the 64-row block'
+# QWEN_FAST_ROUND_B1=1 (M3NATIVE_ROUND_B1; build 1 of the round host-phase cuts): logged once
+# per process by dflash_packed_proposal.note_round_b1 at the first B1 path that runs - the
+# first feature publication, pair update or batched selection. Any run that commits a token
+# publishes, so an arm with the flag and without this line ran an image without build 1.
+ROUND_B1_MARKER = '[PINDIAG] round b1 engaged'
+# QWEN_FAST_ROUND_B1_AUDIT=1 beside it (M3NATIVE_ROUND_B1_AUDIT; a correctness arm, never a
+# timed one): dflash_packed_proposal's shadow audit re-does each B1 cut the flag-off way on
+# the host and compares, because a wrong draft only lowers acceptance and the final text
+# cannot see it. At four users the first audited round's line must be there (it says
+# exact=True: a mismatch raises before it); any mismatch line fails, since the pair-proposal
+# fallback can swallow the raise; and the last line's running counts must all be non-zero,
+# so every audited cut was actually compared.
+ROUND_B1_AUDIT_MARKER = '[PINDIAG] round b1 audit'
+ROUND_B1_AUDIT_MISMATCH = '[PINDIAG] round b1 audit mismatch'
+ROUND_B1_AUDIT_LINE = re.compile(r'\[PINDIAG\] round b1 audit ([0-9]+) exact=True select=([0-9]+) rope=([0-9]+) '
+                                 r'retain=([0-9]+) borrowed=([0-9]+) release=([0-9]+)')
+ROUND_B1_AUDIT_COUNTS = ('select', 'rope', 'retain', 'borrowed', 'release')
 DRAFT_BF8_MARKER = 'projections dtype=bf8 x36'
 LEDGER_MARKERS = ('[MEMLEDGER] phase=P7 ', ' check=residual status=')
 # QWEN_FAST_SDPA_MODES (optimisation/ttnn-op/sdpa_decode_qwen: 'tail' stage 1, 'share' stage 3).
@@ -260,6 +277,10 @@ def required_flag_markers(environ, users):
         required['QWEN_FAST_SKIP_BLOCK_STREAM'] = [SKIP_BLOCK_STREAM_MARKER]
     if on('QWEN_FAST_DRAFT_BF8'):
         required['QWEN_FAST_DRAFT_BF8'] = [DRAFT_BF8_MARKER]
+    if on('QWEN_FAST_ROUND_B1'):
+        required['QWEN_FAST_ROUND_B1'] = [ROUND_B1_MARKER]
+        if on('QWEN_FAST_ROUND_B1_AUDIT') and users == 4:
+            required['QWEN_FAST_ROUND_B1_AUDIT'] = [ROUND_B1_AUDIT_MARKER + ' 1 exact=True']
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
@@ -305,6 +326,8 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
         found['QWEN_FAST_GDN_USER_BATCH'] = {'n of n GDN layers batched': bool(complete)}
         if not complete:
             missing.append('QWEN_FAST_GDN_USER_BATCH: a captured forward batching every GDN layer')
+    if environ.get('QWEN_FAST_ROUND_B1') == '1' and environ.get('QWEN_FAST_ROUND_B1_AUDIT') == '1':
+        missing.extend(round_b1_audit_problems(log_text))
     prefill_conv = summary = None
     if environ.get(PREFILL_CONV_FLAG) == '1':
         required_chunks = prefill_conv_required_chunks(users, prompt_tokens)
@@ -314,6 +337,22 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
     residual = LEDGER_RESIDUAL.search(log_text)
     return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
                 prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary)
+
+
+def round_b1_audit_problems(log_text):
+    """QWEN_FAST_ROUND_B1_AUDIT: no mismatch line, and the last audit line compared every cut."""
+    problems = []
+    for line in log_text.splitlines():
+        if ROUND_B1_AUDIT_MISMATCH in line:
+            problems.append('QWEN_FAST_ROUND_B1_AUDIT: no mismatch (%s)' % line[line.index(ROUND_B1_AUDIT_MISMATCH):][:200])
+            break
+    lines = list(ROUND_B1_AUDIT_LINE.finditer(log_text))
+    if lines:
+        counts = dict(zip(ROUND_B1_AUDIT_COUNTS, (int(value) for value in lines[-1].groups()[1:])))
+        idle = [name for name, count in counts.items() if count == 0]
+        if idle:
+            problems.append('QWEN_FAST_ROUND_B1_AUDIT: every cut compared (none for %s)' % ','.join(idle))
+    return problems
 
 
 def load_references(directory, prompt_tokens=GENERIC_REFERENCE_TOKENS):

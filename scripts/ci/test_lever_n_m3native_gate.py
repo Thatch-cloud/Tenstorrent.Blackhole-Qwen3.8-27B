@@ -348,6 +348,75 @@ class FlagMarkerTests(unittest.TestCase):
         self.assertIn('QWEN_FAST_SINGLE_GATEUP: [PINDIAG] block stream skipped for the single gate/up copy: '
                       'w_gate_up present on 0 of', self._report(environ, log)['missing'])
 
+    def test_round_b1_needs_its_engaged_marker(self):
+        """QWEN_FAST_ROUND_B1 (M3NATIVE_ROUND_B1): the image module logs the marker once, at
+        the first build-1 path that runs; the gate's copy of it must be that same text."""
+        from dflash_packed_proposal import ROUND_B1_MARKER as logged
+        from lever_n_m3native_gate import ROUND_B1_MARKER, required_flag_markers
+        self.assertEqual(ROUND_B1_MARKER, logged)
+        environ = {'QWEN_FAST_ROUND_B1': '1'}
+        self.assertEqual(required_flag_markers(environ, 4), {'QWEN_FAST_ROUND_B1': [ROUND_B1_MARKER]})
+        self.assertEqual(required_flag_markers({'QWEN_FAST_ROUND_B1': '0'}, 4), {})
+        self.assertEqual(self._report(environ, '[PINDIAG] draft weights lent')['missing'],
+                         ['QWEN_FAST_ROUND_B1: ' + ROUND_B1_MARKER])
+        log = '2026-09-23 | INFO | ' + ROUND_B1_MARKER + ' site=publication cuts=C1,C2,C7,C8,M0a'
+        self.assertEqual(self._report(environ, log)['missing'], [])
+        self.assertEqual(self._report(environ, log, users=1)['missing'], [])
+
+    def test_round_b1_audit_needs_its_first_line_and_fails_on_a_mismatch(self):
+        """QWEN_FAST_ROUND_B1_AUDIT (M3NATIVE_ROUND_B1_AUDIT): at four users the first audited
+        round's line is required; any mismatch line fails, whatever the user count (the pair
+        fallback can swallow the raise); and the last line's counts must all be non-zero. The
+        gate's copies of the texts are the image module's."""
+        import dflash_packed_proposal as image
+        from lever_n_m3native_gate import (ROUND_B1_AUDIT_COUNTS, ROUND_B1_AUDIT_MARKER, ROUND_B1_AUDIT_MISMATCH,
+                                           ROUND_B1_MARKER, required_flag_markers)
+        self.assertEqual((ROUND_B1_AUDIT_MARKER, ROUND_B1_AUDIT_MISMATCH, ROUND_B1_AUDIT_COUNTS),
+                         (image.ROUND_B1_AUDIT_MARKER, image.ROUND_B1_AUDIT_MISMATCH, image.ROUND_B1_AUDIT_COUNTS))
+        environ = {'QWEN_FAST_ROUND_B1': '1', 'QWEN_FAST_ROUND_B1_AUDIT': '1'}
+        self.assertEqual(required_flag_markers(environ, 4),
+                         {'QWEN_FAST_ROUND_B1': [ROUND_B1_MARKER],
+                          'QWEN_FAST_ROUND_B1_AUDIT': [ROUND_B1_AUDIT_MARKER + ' 1 exact=True']})
+        self.assertEqual(required_flag_markers(environ, 1), {'QWEN_FAST_ROUND_B1': [ROUND_B1_MARKER]})
+        self.assertEqual(required_flag_markers({'QWEN_FAST_ROUND_B1_AUDIT': '1'}, 4), {})
+        engaged = ROUND_B1_MARKER + ' site=publication cuts=C1,C2,C7,C8,M0a'
+        good = chr(10).join([engaged,
+                             '[PINDIAG] round b1 audit 1 exact=True select=4 rope=2 retain=610 borrowed=40 release=8',
+                             '[PINDIAG] round b1 audit 2 exact=True select=8 rope=4 retain=1220 borrowed=80 release=16'])
+        self.assertEqual(self._report(environ, good)['missing'], [])
+        self.assertEqual(self._report(environ, engaged)['missing'],
+                         ['QWEN_FAST_ROUND_B1_AUDIT: ' + ROUND_B1_AUDIT_MARKER + ' 1 exact=True'])
+        self.assertEqual(self._report(environ, engaged, users=1)['missing'], [])
+        mismatch = good + chr(10) + ROUND_B1_AUDIT_MISMATCH + ' cut=C8 live key RoPE differs'
+        for users in (4, 1):
+            with self.subTest(users=users):
+                missing = self._report(environ, mismatch, users=users)['missing']
+                self.assertEqual(len(missing), 1)
+                self.assertTrue(missing[0].startswith('QWEN_FAST_ROUND_B1_AUDIT: no mismatch (' + ROUND_B1_AUDIT_MISMATCH))
+        idle = good + chr(10) + '[PINDIAG] round b1 audit 3 exact=True select=12 rope=0 retain=1830 borrowed=120 release=24'
+        self.assertEqual(self._report(environ, idle)['missing'], ['QWEN_FAST_ROUND_B1_AUDIT: every cut compared (none for rope)'])
+        self.assertEqual(self._report({'QWEN_FAST_ROUND_B1': '1'}, engaged + chr(10) + mismatch)['missing'], [],
+                         'without the audit flag its lines are not judged')
+
+    def test_the_image_audit_line_is_the_one_the_gate_reads(self):
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        import dflash_packed_proposal as image
+        from lever_n_m3native_gate import ROUND_B1_AUDIT_LINE
+
+        lines = []
+        counts = dict(rounds=0, select=4, rope=2, retain=9, borrowed=3, release=1)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(image, '_ROUND_B1_AUDIT', counts))
+            stack.enter_context(patch.dict('sys.modules', {'loguru': None}))
+            stack.enter_context(patch('builtins.print', side_effect=lambda message, **kwargs: lines.append(message)))
+            image.note_round_b1_audit()
+        self.assertEqual(len(lines), 1)
+        match = ROUND_B1_AUDIT_LINE.search(lines[0])
+        self.assertIsNotNone(match, lines[0])
+        self.assertEqual(match.groups(), ('1', '4', '2', '9', '3', '1'))
+
     def test_bf8_and_the_ledger_markers(self):
         environ = {'QWEN_FAST_DRAFT_BF8': '1', 'QWEN_FAST_MEMORY_LEDGER': '1'}
         log = ('[PINDIAG] draft weights lent to x (borrowers=1 tensors=40) projections dtype=bf8 x36' + chr(10)

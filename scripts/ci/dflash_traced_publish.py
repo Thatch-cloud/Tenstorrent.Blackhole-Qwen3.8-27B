@@ -66,9 +66,25 @@ install_fused_kv_history below.
 """
 
 import os
+from contextvars import ContextVar
 
 
 FLAG = 'QWEN_FAST_TRACED_PUBLISH'
+
+# QWEN_FAST_ROUND_B1 (M0a): the host-time split sink of ONE user's packed commit, a dict
+# of {split name: ms}. serving_packed_step.commit_entry sets it (only under
+# QWEN_FAST_PACKED_AUDIT with the flag on) around session.commit and resets it after;
+# dflash_device.DFlashDevice._prepare_publication_round_b1 and
+# _fused_kv_history_prepare_via_slide_timed below add into it. None everywhere else.
+PUBLICATION_SPLITS = ContextVar('qwen_round_b1_publication_splits', default=None)
+# In the order serving_packed_step's '[PACKED-PUBLISH-SPLIT]' line prints them: the
+# prepare_publication phases, then the K/V publication's own.
+PUBLICATION_SPLIT_NAMES = ('proj', 'hist', 'kv', 'sync', 'rel',
+                           'kv_in', 'kv_proj', 'kv_build', 'kv_exec', 'kv_sync', 'kv_rel')
+
+
+def add_split(splits, name, seconds):
+    splits[name] = splits.get(name, 0.0) + seconds * 1000
 
 # Logged under QWEN_FAST_PACKED_AUDIT=1 (dflash_packed_proposal_coordinator.audit_log)
 # whenever install_fused_kv_history declines to install rather than guess at
@@ -212,6 +228,9 @@ def _fused_kv_history_prepare_via_slide(cache, original, transport, features, pr
     this override existed - itself scoped_publication's own wrapper, so the ramping
     case still goes through the qualified candidate, not this module's ttnn-op
     fusion) whenever rows != 2048."""
+    if os.environ.get('QWEN_FAST_ROUND_B1') == '1' and PUBLICATION_SPLITS.get() is not None:
+        return _fused_kv_history_prepare_via_slide_timed(cache, original, transport, features, prefix,
+            position=position, splits=PUBLICATION_SPLITS.get())
     rows = min(2048, cache.history_rows + prefix)
     if rows != 2048:
         return original(features, prefix, position=position)
@@ -234,6 +253,61 @@ def _fused_kv_history_prepare_via_slide(cache, original, transport, features, pr
                     history_rows=cache.history_rows, prefix=prefix)()
         operations.synchronize_device(cache.mesh)
     cache.pending = SimpleNamespace(position=position, prefix=prefix, rows=rows, status='prepared')
+    return cache.pending
+
+
+def _fused_kv_history_prepare_via_slide_timed(cache, original, transport, features, prefix, *, position, splits):
+    """_fused_kv_history_prepare_via_slide with QWEN_FAST_ROUND_B1's M0a host-time splits
+    added into `splits`: project_inputs ('kv_in'), the five layers' K/V projection
+    dispatch ('kv_proj'), building each slide transport ('kv_build') against running it
+    ('kv_exec'), the fence ('kv_sync') and the scope's release ('kv_rel'). The same calls
+    with the same arguments in the same order - `transport(...)()` is only split into
+    its two halves so each can be timed."""
+    import time
+
+    rows = min(2048, cache.history_rows + prefix)
+    if rows != 2048:
+        return original(features, prefix, position=position)
+    if (cache.closed or cache.pending is not None or type(position) is not int or position != cache.position
+            or type(prefix) is not int or not 1 <= prefix <= 32 or position + prefix > 262144):
+        raise ValueError('One accepted-prefix cache update at the current committed frontier required')
+    from types import SimpleNamespace
+
+    from draft_kv_projection import project_key_value
+
+    clock = time.perf_counter
+    operations = cache.operations
+    projection = build = execute = 0.0
+    with cache.temporaries([features]) as retain:
+        started = clock()
+        inputs, tables = cache.project_inputs(features, prefix, position, retain)
+        inputs_at = clock()
+        projected = cache.projection.project(inputs, tables) if cache.projection is not None else None
+        projection += clock() - inputs_at
+        for layer, (parameter, active, spare) in enumerate(zip(cache.parameters, cache.active, cache.spare, strict=True)):
+            begun = clock()
+            result = projected[layer] if projected is not None else project_key_value(
+                operations, inputs, cache.query, tables, retain, parameters=parameter)
+            projection += clock() - begun
+            for name in ('k', 'v'):
+                begun = clock()
+                operation = transport(cache.mesh, active[name], result[name], spare[name],
+                    history_rows=cache.history_rows, prefix=prefix)
+                built = clock()
+                operation()
+                build += built - begun
+                execute += clock() - built
+        synchronizing = clock()
+        operations.synchronize_device(cache.mesh)
+        synchronized = clock()
+    released = clock()
+    cache.pending = SimpleNamespace(position=position, prefix=prefix, rows=rows, status='prepared')
+    add_split(splits, 'kv_in', inputs_at - started)
+    add_split(splits, 'kv_proj', projection)
+    add_split(splits, 'kv_build', build)
+    add_split(splits, 'kv_exec', execute)
+    add_split(splits, 'kv_sync', synchronized - synchronizing)
+    add_split(splits, 'kv_rel', released - synchronized)
     return cache.pending
 
 

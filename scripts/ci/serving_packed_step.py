@@ -328,6 +328,10 @@ def run_verified_block(entries, *, cancelled, block):
         if publish_stage_timings:
             audit_log(PUBLISH_LINE, round=getattr(block, 'rounds', 0),
                       stages=format_publish_stages(publish_stage_timings))
+        if publish_stage_timings and PUBLISH_SPLIT_KEY in publish_stage_timings:
+            for index, splits in enumerate(publish_stage_timings[PUBLISH_SPLIT_KEY]):
+                audit_log(PUBLISH_SPLIT_LINE, round=getattr(block, 'rounds', 0), entry=index,
+                          splits=format_publish_splits(splits))
         # QWEN_FAST_MEMORY_LEDGER=1 only, and once per process: P12, after the first packed
         # round's verify and every commit have returned - outside any capture - to catch the
         # buffers the first round allocates lazily (packed proposals, publication).
@@ -489,6 +493,14 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
         if merge_release or fused_steady_state:
             restore_merge_release = install_publish_options(drafter,
                 merge_release=merge_release, fused_steady_state=fused_steady_state)
+    # QWEN_FAST_ROUND_B1 (M0a): this user's publication splits, only when the stage timer
+    # above is on too (QWEN_FAST_PACKED_AUDIT) - PUBLISH_SPLIT_LINE.
+    split_sink = split_token = None
+    if stage_sink is not None and os.environ.get('QWEN_FAST_ROUND_B1') == '1':
+        from dflash_traced_publish import PUBLICATION_SPLITS
+
+        split_sink = {}
+        split_token = PUBLICATION_SPLITS.set(split_sink)
     try:
         # session.commit and session.abort both end in runtime.publish - DFlashRequestRuntime.
         # publish (dflash_request_runtime.py) - which runs VerifierEngine.publish and, through
@@ -509,6 +521,10 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
             restore_merge_release()
         if restore_stage_timer is not None:
             restore_stage_timer()
+        if split_token is not None:
+            from dflash_traced_publish import PUBLICATION_SPLITS
+
+            PUBLICATION_SPLITS.reset(split_token)
     finished = time.perf_counter()
     if audit_enabled():
         audit_log(AUDIT_LINE, request=str(request_id)[:48], segment=segment, position=ticket.position,
@@ -530,6 +546,8 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
     if publish_stage_timings is not None:
         for name in PUBLISH_STAGES:
             publish_stage_timings.setdefault(name, []).append(stage_sink.get(name, 0.0))
+        if split_sink is not None:
+            publish_stage_timings.setdefault(PUBLISH_SPLIT_KEY, []).append(split_sink)
     return output
 
 
@@ -607,3 +625,22 @@ def describe():
     return dict(name='packed', weight_passes_per_round='one for all users',
                 per_user_rate='the block rate, shared by every user', batched=True,
                 fallback=describe_sequential())
+
+
+# QWEN_FAST_ROUND_B1 (M0a), under QWEN_FAST_PACKED_AUDIT=1: one line per entry of the round,
+# in the same scheduler order as PUBLISH_LINE's arrays, splitting that entry's
+# 'prepare_history' into its phases (dflash_traced_publish.PUBLICATION_SPLIT_NAMES: 'proj'
+# project_features, 'hist' the feature-history write, 'kv' kv_history.prepare, 'sync' and
+# 'rel' prepare_publication's own fence and release; then inside kv_history.prepare on the
+# slide path 'kv_in' project_inputs, 'kv_proj' the K/V projections, 'kv_build'/'kv_exec'
+# the slide transports built and run, 'kv_sync' and 'kv_rel'). Per entry rather than per
+# stage so the line stays under the log capture's ~250 characters. Defined here, at the end,
+# so every line above keeps its number - loguru prints it in each [PACKED*] line's prefix.
+PUBLISH_SPLIT_KEY = 'round_b1_splits'
+PUBLISH_SPLIT_LINE = '[PACKED-PUBLISH-SPLIT] round={round} entry={entry} {splits}'
+
+
+def format_publish_splits(splits):
+    from dflash_traced_publish import PUBLICATION_SPLIT_NAMES
+
+    return ' '.join('%s=%.2f' % (name, splits.get(name, 0.0)) for name in PUBLICATION_SPLIT_NAMES)

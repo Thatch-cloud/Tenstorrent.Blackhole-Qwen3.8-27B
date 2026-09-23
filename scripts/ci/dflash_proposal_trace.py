@@ -1,5 +1,6 @@
 """Pre-verifier capture of fixed-context five-layer proposal computation."""
 
+import os
 from types import SimpleNamespace
 
 from attention_batch import capture_operation
@@ -118,6 +119,11 @@ class PreparedDFlashProposal:
             *(self.kv_history.borrowed if self.kv_history is not None else [])])
         def copy_history_and_cache():
             if self.kv_history is None or device.progress is not None:
+                if getattr(device, 'history_stale', False):
+                    # Set only under QWEN_FAST_ROUND_B1 (C7), which stopped writing the
+                    # feature history this branch would copy (dflash_device.DFlashDevice.
+                    # _prepare_publication_round_b1).
+                    raise ValueError('The feature history is stale (QWEN_FAST_ROUND_B1 C7) and cannot be read')
                 history = retain(operations.slice(device.history, (0, 0, 0, 0), (1, 1, bucket.context, 5120)))
                 padded = retain(operations.pad(history, [(0, 0), (0, 0), (0, 32), (0, 0)], 0.0))
                 operations.copy(padded, bucket.history)
@@ -441,10 +447,28 @@ class PreparedPackedDFlashProposal:
         users = [dict(position=device_a.position, history_rows=context_a),
                  dict(position=device_b.position, history_rows=context_b)]
         identifiers_host = packed_identifiers([seed_a, seed_b], self.block_rows)
-        tables = packed_rope_tables(users, self.block_rows)
-        live = live_key_rope(users, self.block_rows)
-        sources = [identifiers_host, *tables['q'], *tables['k'], *live]
-        destinations = [bucket.identifiers, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k']]
+        if os.environ.get('QWEN_FAST_ROUND_B1') == '1':
+            # QWEN_FAST_ROUND_B1 (C8). The packed cached trace never reads rope['k']:
+            # draft_attention_branch takes rope['live_k'] whenever the block is packed
+            # and only shape-checks rope['k'], so the two (1, 1, 4160, 128) uploads into
+            # it were dead. The key tables are still built in full, once, and the live
+            # rows sliced out of them (live_key_rope_from) - rope_tables at the live
+            # start alone can round differently in bf16.
+            from dflash_batched_mask import live_key_rope_from
+            from dflash_packed_proposal import note_round_b1, round_b1_audit_enabled
+
+            note_round_b1('pair-update')
+            tables = packed_rope_tables(users, self.block_rows)
+            live = live_key_rope_from(tables['k'], users, self.block_rows)
+            if round_b1_audit_enabled():
+                _audit_live_key_rope(live, users, self.block_rows)
+            sources = [identifiers_host, *tables['q'], *live]
+            destinations = [bucket.identifiers, *bucket.rope['q'], *bucket.rope['live_k']]
+        else:
+            tables = packed_rope_tables(users, self.block_rows)
+            live = live_key_rope(users, self.block_rows)
+            sources = [identifiers_host, *tables['q'], *tables['k'], *live]
+            destinations = [bucket.identifiers, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k']]
         for value, destination in zip(sources, destinations, strict=True):
             payload = operations.from_torch(value, dtype=destination.dtype, layout=destination.layout,
                 mesh_mapper=operations.ReplicateTensorToMesh(self.mesh))
@@ -539,6 +563,58 @@ class PreparedPackedDFlashProposal:
             bucket.tokens, bucket.consumed = None, set()
         return tokens[:count]
 
+    def collect(self):
+        """QWEN_FAST_ROUND_B1 (C1): the first finish()'s own tail up to, not including,
+        the selection - the deferred address-identity check, the transient release and
+        the head readback - so the coordinator can select every pair of the round in one
+        call and hand the tokens back through adopt(). Run after the caller's shared
+        fence, exactly as finish() is. Returns this pair's per-user selector parts with
+        the seeds and counts finish() would have selected them with.
+
+        The pending transients are released here, as finish() releases them, and the
+        pending entry keeps an empty list in their place, so a later discard_pending()
+        cannot release them twice."""
+        if self._pending is None:
+            raise ValueError('No prepared packed proposal is pending')
+        seed_a, seed_b, bucket, owned = self._pending
+        if bucket.tokens is not None or bucket.consumed:
+            raise ValueError('This packed proposal was already selected')
+        operations = self.operations
+        self._pending = (seed_a, seed_b, bucket, [])
+        moved = [addresses(operations, value) for value in bucket.inputs] != bucket.addresses
+        release_owned(operations, owned)
+        if moved:
+            raise AssertionError('Prepared packed proposal input addresses moved')
+        from dflash_packed_proposal import read_device_outputs
+
+        parts = read_device_outputs(self.device_a, bucket.outputs, 2, self.block_rows)
+        return dict(parts=parts, seeds=(seed_a, seed_b), counts=(self.block_rows - 1, self.block_rows - 1))
+
+    def audit_selection(self):
+        """QWEN_FAST_ROUND_B1_AUDIT (C1): the tokens finish() would have selected itself
+        for this pending pair - its outputs read back again and selected through
+        select_device_outputs, the flag-off path. Host work only; run after collect(),
+        before either side's finish(), while the outputs still hold this round's replay."""
+        if self._pending is None:
+            raise ValueError('No prepared packed proposal is pending')
+        seed_a, seed_b, bucket, _ = self._pending
+        from dflash_packed_proposal import select_device_outputs
+
+        return select_device_outputs(self.device_a, bucket.outputs, (seed_a, seed_b),
+            (self.block_rows - 1, self.block_rows - 1), 2, self.block_rows)
+
+    def adopt(self, tokens):
+        """QWEN_FAST_ROUND_B1 (C1): take both users' tokens from the round's batched
+        selection. finish() then returns them exactly as if it had selected them itself -
+        it already skips the selection whenever bucket.tokens is set."""
+        if self._pending is None:
+            raise ValueError('No prepared packed proposal is pending')
+        _, _, bucket, _ = self._pending
+        tokens = tuple(tokens)
+        if bucket.tokens is not None or bucket.consumed or len(tokens) != 2:
+            raise ValueError('Both users of one pending packed proposal must adopt one selection')
+        bucket.tokens = tokens
+
     def discard_pending(self):
         """Release a prepare_device() that will never be finish()ed by either side:
         a phase-A failure (PackedProposalCoordinator.prepare), a stale prewarm this
@@ -569,3 +645,15 @@ class PreparedPackedDFlashProposal:
         self.owned.clear()
         self.buckets.clear()
         self.closed = True
+
+
+def _audit_live_key_rope(live, users, block_rows):
+    """QWEN_FAST_ROUND_B1_AUDIT (C8): the live key rows sliced from the pair's one table
+    build against live_key_rope's own build, bit for bit."""
+    from dflash_batched_mask import live_key_rope
+    from dflash_packed_proposal import round_b1_audit_count, round_b1_audit_mismatch, same_bits
+
+    reference = live_key_rope(users, block_rows)
+    if len(live) != len(reference) or not all(same_bits(mine, theirs) for mine, theirs in zip(live, reference)):
+        round_b1_audit_mismatch('C8', 'live key RoPE differs for users %s' % (users,))
+    round_b1_audit_count('rope')

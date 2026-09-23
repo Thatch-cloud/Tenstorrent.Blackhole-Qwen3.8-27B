@@ -211,3 +211,30 @@ def live_key_rope(users, block_rows=16, *, key_multiple=32):
     if any(tuple(table.shape) != (1, 1, 32, 128) for table in packed):
         raise AssertionError('The live key RoPE must cover the whole 32-row proposal block')
     return packed
+
+
+def live_key_rope_from(tables, users, block_rows=16, *, key_multiple=32):
+    """live_key_rope over key tables the caller already built with packed_rope_tables
+    for the SAME users - QWEN_FAST_ROUND_B1 (C8), so a pair update builds its 4160-row
+    key tables once rather than twice. The slicing is live_key_rope's own, row for row;
+    test_dflash_round_b1.py pins the two equal bit for bit."""
+    import torch
+
+    users, contexts = user_contexts(users)
+    spans, key_rows = segments(contexts, block_rows, key_multiple=key_multiple)
+    tables = tuple(tables)
+    if len(tables) != 2 or any(tuple(table.shape) != (1, 1, key_rows, 128) for table in tables):
+        raise ValueError('The packed key RoPE tables of these users required')
+    parts = []
+    for span in spans:
+        start = span['offset'] + span['context']
+        parts.append(tuple(table[:, :, start:start + block_rows] for table in tables))
+    used = len(spans) * block_rows
+    if used < 32:
+        last = spans[-1]
+        start = last['offset'] + last['context'] + block_rows
+        parts.append(tuple(table[:, :, start:start + 32 - used] for table in tables))
+    packed = tuple(torch.cat([part[index] for part in parts], dim=2) for index in (0, 1))
+    if any(tuple(table.shape) != (1, 1, 32, 128) for table in packed):
+        raise AssertionError('The live key RoPE must cover the whole 32-row proposal block')
+    return packed

@@ -801,6 +801,61 @@ class PublishInstrumentationTests(unittest.TestCase):
         self.assertIn('features: [0.00,0.00]', publish_call.kwargs['stages'])
         self.assertIn('prepare_history: [0.00,0.00]', publish_call.kwargs['stages'])
 
+    def split_round(self, *, b1, audit):
+        """One round whose drafters record what the M0a sink holds while they publish."""
+        import os
+
+        from dflash_traced_publish import PUBLICATION_SPLITS, add_split
+
+        entries = self.two()
+        sinks = []
+        for item in entries:
+            drafter = item['request'].runtime.drafter
+            publish = drafter.prepare_publication
+
+            def recording(features, prefix, *, position, publish=publish, **options):
+                sink = PUBLICATION_SPLITS.get()
+                sinks.append(sink)
+                if sink is not None:
+                    add_split(sink, 'proj', 0.001 * len(sinks))
+                    add_split(sink, 'kv_exec', 0.0005)
+                return publish(features, prefix, position=position, **options)
+            drafter.prepare_publication = recording
+        environ = {'QWEN_FAST_PACKED_AUDIT': '1' if audit else '0'}
+        if b1:
+            environ['QWEN_FAST_ROUND_B1'] = '1'
+        with patch.dict('os.environ', environ), patch('serving_packed_step.audit_log') as log:
+            if not b1:
+                os.environ.pop('QWEN_FAST_ROUND_B1', None)
+            self.step(entries)
+        self.assertIsNone(PUBLICATION_SPLITS.get(), 'the sink never outlives one commit')
+        lines = [item for item in log.call_args_list if item.args[0].startswith('[PACKED-PUBLISH-SPLIT]')]
+        return sinks, lines
+
+    def test_round_b1_splits_one_line_per_entry_from_each_drafter_sink(self):
+        """QWEN_FAST_ROUND_B1 (M0a) with the audit: each user's publication sees its own sink,
+        and the round logs one split line per entry in entries order, every split named."""
+        from dflash_traced_publish import PUBLICATION_SPLIT_NAMES
+
+        sinks, lines = self.split_round(b1=True, audit=True)
+        self.assertEqual(len(sinks), 2)
+        self.assertIsNot(sinks[0], sinks[1])
+        self.assertEqual([line.kwargs['entry'] for line in lines], [0, 1])
+        for number, line in enumerate(lines, start=1):
+            splits = line.kwargs['splits']
+            self.assertEqual([part.split('=')[0] for part in splits.split(' ')], list(PUBLICATION_SPLIT_NAMES))
+            self.assertIn('proj=%.2f' % number, splits)
+            self.assertIn('kv_exec=0.50', splits)
+            self.assertIn('hist=0.00', splits)
+            self.assertLess(len(line.args[0].format(**line.kwargs)), 180, 'inside the log capture budget')
+
+    def test_round_b1_splits_need_both_the_flag_and_the_audit(self):
+        for b1, audit in ((False, True), (True, False), (False, False)):
+            with self.subTest(b1=b1, audit=audit):
+                sinks, lines = self.split_round(b1=b1, audit=audit)
+                self.assertEqual(sinks, [None, None])
+                self.assertEqual(lines, [])
+
     def test_pipelined_and_traced_publish_off_by_default_leaves_both_options_false(self):
         import os
 

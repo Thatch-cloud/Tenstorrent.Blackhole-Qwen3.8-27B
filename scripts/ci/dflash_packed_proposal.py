@@ -44,6 +44,174 @@ PACKED_PROPOSAL_FLAG = 'QWEN_FAST_PACKED_PROPOSAL'
 # two packed passes - propose or verify - happens to run first.
 FOUR_AS_TWO_PAIRS = ((0, 1), (2, 3))
 
+# QWEN_FAST_ROUND_B1: build 1 of the round host-phase cuts (the 4 x 131k packed round's
+# ~82 ms outside the verify trace) - only the cuts that are token-exact by construction
+# (E1) and change no lifetime across steps:
+#   C1  one batched FP64 selection for every packed pair after the proposal fence
+#       (select_packed_batched below; dflash_packed_proposal_coordinator);
+#   C2  O(1) retain() bookkeeping (dflash_device.indexed_temporaries,
+#       draft_kv_history.indexed_temporaries);
+#   C7  the fused steady-state feature-history write, which nothing on the served
+#       path reads, is skipped and the history poisoned (dflash_device);
+#   C8  the pair update stops uploading the two key RoPE tables its trace never reads
+#       and builds the pair's RoPE once (dflash_proposal_trace, dflash_batched_mask);
+#   M0a host timing splits inside publication, logged under QWEN_FAST_PACKED_AUDIT.
+# Off by default and read at each use, never at import. With it unset every path is
+# the one that ran before it existed.
+ROUND_B1_FLAG = 'QWEN_FAST_ROUND_B1'
+# Logged once per process, at the first B1 path that runs; the m3native gate requires it
+# whenever the arm passes the flag (lever_n_m3native_gate.required_flag_markers).
+ROUND_B1_MARKER = '[PINDIAG] round b1 engaged'
+_ROUND_B1_NOTED = []
+
+
+def round_b1_enabled(environ=None):
+    """QWEN_FAST_ROUND_B1=1."""
+    return (os.environ if environ is None else environ).get(ROUND_B1_FLAG) == '1'
+
+
+def note_round_b1(site):
+    """ROUND_B1_MARKER, once per process, naming the B1 path that ran first."""
+    if _ROUND_B1_NOTED:
+        return False
+    _ROUND_B1_NOTED.append(site)
+    message = '%s site=%s cuts=C1,C2,C7,C8,M0a' % (ROUND_B1_MARKER, site)
+    try:
+        from loguru import logger
+    except ImportError:
+        print(message, flush=True)
+        return True
+    logger.info('{}', message)
+    return True
+
+
+# QWEN_FAST_ROUND_B1_AUDIT=1, read only on B1 paths (so only with QWEN_FAST_ROUND_B1=1): a
+# shadow check of the B1 cuts the gate's final text cannot see - under exact greedy
+# verification a wrong draft token only lowers acceptance, and the per-round [PACKED] lines
+# differ run to run. Host work only, beside the served result, never instead of it:
+#   C1  each pair is read back and selected again through select_device_outputs - the
+#       flag-off path - and its tokens compared with the batched ones it adopted;
+#   C2  every retain() decision is made again by the list scan it replaced
+#       (scanned_decision), every DraftKVHistory scope's release list again by the list
+#       filter, and the cached borrowed addresses are re-read and compared on every reuse;
+#   C8  live_key_rope is rebuilt and compared bit for bit with the rows sliced from the
+#       pair's one table build.
+# (C7's stale history needs none: every reader of it already raises.) The first mismatch logs
+# ROUND_B1_AUDIT_MISMATCH and raises - a raise the pair-proposal fallback may swallow, which
+# is why the gate fails on the line itself. After each audited batched selection it logs
+# ROUND_B1_AUDIT_MARKER with the running counts, which the gate requires. It spends back
+# what B1 saves, so it belongs on a correctness arm, never a timed one.
+ROUND_B1_AUDIT_FLAG = 'QWEN_FAST_ROUND_B1_AUDIT'
+ROUND_B1_AUDIT_MARKER = '[PINDIAG] round b1 audit'
+ROUND_B1_AUDIT_MISMATCH = '[PINDIAG] round b1 audit mismatch'
+ROUND_B1_AUDIT_COUNTS = ('select', 'rope', 'retain', 'borrowed', 'release')
+_ROUND_B1_AUDIT = dict(rounds=0, **dict.fromkeys(ROUND_B1_AUDIT_COUNTS, 0))
+
+
+def round_b1_audit_enabled(environ=None):
+    """QWEN_FAST_ROUND_B1_AUDIT=1 beside QWEN_FAST_ROUND_B1=1."""
+    environ = os.environ if environ is None else environ
+    return environ.get(ROUND_B1_FLAG) == '1' and environ.get(ROUND_B1_AUDIT_FLAG) == '1'
+
+
+def _log_line(message):
+    try:
+        from loguru import logger
+    except ImportError:
+        print(message, flush=True)
+        return
+    logger.info('{}', message)
+
+
+def round_b1_audit_count(name, count=1):
+    _ROUND_B1_AUDIT[name] += count
+
+
+def round_b1_audit_mismatch(cut, detail):
+    """Log ROUND_B1_AUDIT_MISMATCH for `cut` and raise."""
+    message = '%s cut=%s %s' % (ROUND_B1_AUDIT_MISMATCH, cut, detail)
+    _log_line(message[:280])
+    raise AssertionError(message)
+
+
+def note_round_b1_audit():
+    """ROUND_B1_AUDIT_MARKER once per audited batched selection: '<n> exact=True' and the
+    comparisons made so far, all of which matched (a mismatch raised before this line)."""
+    _ROUND_B1_AUDIT['rounds'] += 1
+    _log_line('%s %d exact=True %s' % (ROUND_B1_AUDIT_MARKER, _ROUND_B1_AUDIT['rounds'], ' '.join(
+        '%s=%d' % (name, _ROUND_B1_AUDIT[name]) for name in ROUND_B1_AUDIT_COUNTS)))
+
+
+def scanned_decision(protected_ids, identity):
+    """The decision the flag-off list scan in DFlashDevice.temporaries and
+    DraftKVHistory.temporaries makes for `identity`, text for text: 'kept' when it is a
+    protected identity, 'refused' when any one chip's address matches the same chip of a
+    protected identity, else 'queued'. The scan zips strictly, so identities of unequal
+    length raise there; that is 'unequal' here, which no set lookup can answer."""
+    if identity not in protected_ids:
+        try:
+            if any(any(left == right for left, right in zip(identity, other, strict=True)) for other in protected_ids):
+                return 'refused'
+        except ValueError:
+            return 'unequal'
+        return 'queued'
+    return 'kept'
+
+
+def audit_borrowed(fresh, cached):
+    """QWEN_FAST_ROUND_B1_AUDIT (C2): the borrowed addresses read now against the cached ones
+    a scope is about to reuse."""
+    if list(fresh) != list(cached):
+        round_b1_audit_mismatch('C2', 'cached borrowed addresses are stale (%d tensors)' % len(fresh))
+    round_b1_audit_count('borrowed')
+
+
+def audit_retain(protected_ids, identity, decided):
+    """QWEN_FAST_ROUND_B1_AUDIT (C2): the set lookups' decision against the list scan's."""
+    expected = scanned_decision(protected_ids, identity)
+    if decided != expected:
+        round_b1_audit_mismatch('C2', 'retain %s where the scan decides %s' % (decided, expected))
+    round_b1_audit_count('retain')
+
+
+def audited_retain(retain, owned, identify, protected_ids):
+    """`retain`, with each decision it makes (kept, queued, refused - read off what it did)
+    checked against scanned_decision over the same protected identities; `identify` is the
+    caller's own addresses(operations, value)."""
+    def audited(value):
+        identity = identify(value)
+        before = len(owned)
+        try:
+            retain(value)
+        except ValueError:
+            audit_retain(protected_ids, identity, 'refused')
+            raise
+        audit_retain(protected_ids, identity, 'queued' if len(owned) > before else 'kept')
+        return value
+    return audited
+
+
+def audit_release(expected, released):
+    """QWEN_FAST_ROUND_B1_AUDIT (C2): a DraftKVHistory scope's release list against the list
+    filter's, value for value and in order."""
+    if len(expected) != len(released) or any(mine is not theirs for mine, theirs in zip(released, expected)):
+        round_b1_audit_mismatch('C2', 'scope releases %d values where the scan releases %d'
+                                % (len(released), len(expected)))
+    round_b1_audit_count('release')
+
+
+def same_bits(left, right):
+    """Equal dtype, shape and bits (a float compared as its integer image)."""
+    import torch
+
+    if left.dtype != right.dtype or tuple(left.shape) != tuple(right.shape):
+        return False
+    image = {torch.bfloat16: torch.int16, torch.float16: torch.int16, torch.float32: torch.int32,
+             torch.float64: torch.int64}.get(left.dtype)
+    if image is None:
+        return torch.equal(left, right)
+    return torch.equal(left.contiguous().view(image), right.contiguous().view(image))
+
 
 def packed_proposal_enabled(environ=None):
     """QWEN_FAST_PACKED_PROPOSAL=1. Read at each round rather than at import, so the
@@ -155,6 +323,37 @@ def select_packed(parts, seeds, counts, predecessors, successors):
     return tuple(chosen)
 
 
+def select_packed_batched(parts, seeds, counts, predecessors, successors):
+    """QWEN_FAST_ROUND_B1 (C1): select_packed's result from ONE selector call over every
+    user in `parts`, instead of one call per user.
+
+    Bit-identical by construction: every step of draft_selector's greedy FP64 search
+    works row by row - the codebook gathers, the elementwise products, the sum over the
+    contiguous rank dimension of one (user, candidate) row, the first-max argmax and the
+    gather - so no user's arithmetic ever sees another user's rows. torch.unique over
+    the union of every user's ids only renumbers them: the rows it gathers out of the
+    codebooks hold the same values. The per-user count check is select_packed's own,
+    run for every user before the call. The price is shared failure: an operand one
+    user's call would have refused refuses them all, where today it fails that round
+    one user later. test_dflash_round_b1.py pins the equality, ties included."""
+    import torch
+
+    from draft_selector import select_active_candidates
+
+    parts, seeds, counts = tuple(parts), tuple(seeds), tuple(counts)
+    if not parts or len(parts) != len(seeds) or len(parts) != len(counts):
+        raise ValueError('One anchor and one proposal count per packed user required')
+    for part, count in zip(parts, counts):
+        if type(count) is not int or not 1 <= count <= part['candidates'].shape[1]:
+            raise ValueError('Bounded proposal count within this user block required')
+    hidden = torch.cat([part['hidden'] for part in parts], dim=0)
+    candidates = torch.cat([part['candidates'] for part in parts], dim=0)
+    unary = torch.cat([part['unary'] for part in parts], dim=0)
+    tokens, _ = select_active_candidates(hidden, candidates, unary, predecessors, successors,
+        torch.tensor(seeds, dtype=torch.int64))
+    return tuple(tuple(int(token) for token in tokens[index, :count]) for index, count in enumerate(counts))
+
+
 def propose_packed(device, slots, seeds, counts, *, stage=None):
     """One proposal pass over every packed user, returning each user's tokens.
 
@@ -253,3 +452,34 @@ def select_device_outputs(device, outputs, seeds, counts, users, block_rows):
     hidden = parts[0].reshape(1, 32, 256)
     return select_packed(split_selection(hidden, candidates, unary, users, block_rows),
         seeds, counts, device.predecessors, device.successors)
+
+
+def read_device_outputs(device, outputs, users, block_rows):
+    """QWEN_FAST_ROUND_B1 (C1): select_device_outputs' readback, merge, replicated-selector
+    check and per-user split, without the selection - so every pair of a round can be read
+    and then all of their users selected in one call. A copy of select_device_outputs'
+    body up to its return, so the flag-off function stays the text that ran before;
+    test_dflash_round_b1.ReadDeviceOutputsTests pins the two bodies statement for statement,
+    and the B1 shadow audit (QWEN_FAST_ROUND_B1_AUDIT) re-reads each pair through
+    select_device_outputs itself."""
+    import torch
+
+    from draft_shared_head import merge_chunk_candidates
+
+    operations = device.operations
+    host_chunks = []
+    for chunk in outputs.chunks:
+        values = operations.get_device_tensors(chunk['values'])
+        indices = operations.get_device_tensors(chunk['indices'])
+        if len(values) != 2 or len(indices) != 2:
+            raise AssertionError('Both learned head shards required')
+        for chip in range(2):
+            host_chunks.append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
+                values=operations.to_torch(values[chip]).float().reshape(32, 16),
+                indices=operations.to_torch(indices[chip]).long().reshape(32, 16)))
+    candidates, unary = merge_chunk_candidates(host_chunks, block_rows=32)
+    parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
+    if len(parts) != 2 or not torch.equal(*parts):
+        raise AssertionError('Replicated learned selector features differ')
+    hidden = parts[0].reshape(1, 32, 256)
+    return split_selection(hidden, candidates, unary, users, block_rows)

@@ -85,6 +85,67 @@ def identity(value):
     return 'none' if value is None else '%s@%x' % (type(value).__name__, id(value))
 
 
+def borrowed_identities(owner, borrowed, *, audit=False):
+    """The addresses of `borrowed`, computed once per distinct borrowed set and kept on
+    `owner` with the tensors themselves - QWEN_FAST_ROUND_B1 (C2). The key is the tensors'
+    identity (`is`), and holding them keeps any of their ids from being reused; a lent
+    tensor stays allocated at one address for as long as it is lent. With `audit`
+    (QWEN_FAST_ROUND_B1_AUDIT) every reuse re-reads them and compares."""
+    borrowed = tuple(borrowed)
+    cached = getattr(owner, '_round_b1_borrowed', None)
+    if (cached is None or len(cached[0]) != len(borrowed)
+            or any(mine is not theirs for mine, theirs in zip(cached[0], borrowed))):
+        cached = (borrowed, [addresses(owner.operations, value) for value in borrowed])
+        owner._round_b1_borrowed = cached
+    elif audit and borrowed:
+        from dflash_packed_proposal import audit_borrowed
+
+        audit_borrowed([addresses(owner.operations, value) for value in borrowed], cached[1])
+    return cached[1]
+
+
+def indexed_retain(operations, protected_ids, owned, message, *, audit=False):
+    """retain() with set lookups instead of list scans - QWEN_FAST_ROUND_B1 (C2).
+
+    The scan it replaces keeps `value` untouched when its identity is one of
+    `protected_ids`, raises when any ONE chip's address matches the same chip of any
+    protected identity (`any(left == right for left, right in zip(identity, other))`),
+    and otherwise queues `value` for release. addresses() always returns one address per
+    chip, so "some chip matches" is exactly "the address is in that chip's set": the
+    same decisions, in the same order, into the same owned list."""
+    exact = set(protected_ids)
+    chips = [set() for _ in range(max((len(identity) for identity in protected_ids), default=0))]
+    for identity in protected_ids:
+        for chip, address in enumerate(identity):
+            chips[chip].add(address)
+
+    def retain(value):
+        identity = addresses(operations, value)
+        if identity not in exact:
+            if any(address in known for address, known in zip(identity, chips)):
+                raise ValueError(message)
+            owned.append(value)
+        return value
+    if not audit:
+        return retain
+    from dflash_packed_proposal import audited_retain
+
+    return audited_retain(retain, owned, lambda value: addresses(operations, value), protected_ids)
+
+
+def indexed_temporaries(device, protected):
+    """DFlashDevice.temporaries under QWEN_FAST_ROUND_B1 (C2): the same (owned, retain)
+    contract, with the borrowed weights' addresses cached (borrowed_identities) and
+    retain() answering from sets (indexed_retain). QWEN_FAST_ROUND_B1_AUDIT checks both
+    against the scans they replace (dflash_packed_proposal.ROUND_B1_AUDIT_FLAG)."""
+    audit = os.environ.get('QWEN_FAST_ROUND_B1_AUDIT') == '1'
+    owned = []
+    protected_ids = [addresses(device.operations, value) for value in protected]
+    protected_ids.extend(borrowed_identities(device, getattr(device, 'borrowed', ()), audit=audit))
+    return owned, indexed_retain(device.operations, protected_ids, owned,
+                                 'Draft temporary must not partially alias protected storage', audit=audit)
+
+
 def collective_state(collectives):
     """The host-side integer state of a collectives object, by attribute name: TT_CCL
     cycles its semaphore handles by index, so a shared object's position is on record."""
@@ -547,6 +608,8 @@ class DFlashDevice:
             mesh_mapper=operations.ShardTensorToMesh(self.mesh, dim=0) if sharded else operations.ReplicateTensorToMesh(self.mesh)))
 
     def temporaries(self, protected):
+        if os.environ.get('QWEN_FAST_ROUND_B1') == '1':
+            return indexed_temporaries(self, protected)
         owned = []
         # getattr, as execute_proposal reads its flags: fixtures stand a bare namespace in for the device.
         protected_ids = [addresses(self.operations, value) for value in [*protected, *getattr(self, 'borrowed', ())]]
@@ -618,6 +681,9 @@ class DFlashDevice:
         return output
 
     def prepare_publication(self, features, prefix, *, position, merge_release=False, fused_steady_state=False):
+        if os.environ.get('QWEN_FAST_ROUND_B1') == '1':
+            return DFlashDevice._prepare_publication_round_b1(self, features, prefix, position=position,
+                merge_release=merge_release, fused_steady_state=fused_steady_state)
         if self.closed or self.pending is not None or position != self.position or type(prefix) is not int or not 1 <= prefix <= 32:
             raise ValueError('One live target-feature publication at the committed frontier required')
         if type(merge_release) is not bool or type(fused_steady_state) is not bool:
@@ -687,6 +753,91 @@ class DFlashDevice:
         release_owned(operations, owned)
         return self.pending
 
+    def _prepare_publication_round_b1(self, features, prefix, *, position, merge_release=False, fused_steady_state=False):
+        """prepare_publication under QWEN_FAST_ROUND_B1: its validation, operations, fences
+        and release in the same order, with two differences.
+
+        C7. In the fused steady state, with a committed K/V cache, no audit (progress is
+        None) and a captured proposal, the feature-history write - the slice of
+        self.history from row `prefix` (history_rows + prefix - rows, NOT full extent: a
+        real (2048 - prefix)-row slice), the concat and the copy into the spare, three
+        dispatches and two ~21 MB transients - is skipped, because nothing on that path
+        reads the history's content: the packed pair trace takes no history at all
+        (draft_attention_branch: `unused_history`), the single-user trace copies it only
+        when kv_history is None or progress is set (PreparedDFlashProposal.update), and
+        the eager proposal runs only without a captured proposal. The pending publication
+        still names the spare and commit_publication still swaps the pair, so every buffer
+        address and the K/V path are unchanged. Each later history would be built from
+        this one, so self.history_stale is set and never cleared, and every reader of the
+        content raises on it instead of reading stale rows: the eager proposal
+        (DFlashDevice.propose), PreparedDFlashProposal.update's history copy and
+        commit_publication's K/V audit.
+
+        M0a. When the packed commit installed a split sink (dflash_traced_publish.
+        PUBLICATION_SPLITS, serving_packed_step.commit_entry under QWEN_FAST_PACKED_AUDIT),
+        the host time of project_features ('proj'), the history write ('hist'),
+        kv_history.prepare ('kv'), this call's own fence ('sync') and the release ('rel')
+        is added into it. perf_counter reads only."""
+        import time
+
+        if self.closed or self.pending is not None or position != self.position or type(prefix) is not int or not 1 <= prefix <= 32:
+            raise ValueError('One live target-feature publication at the committed frontier required')
+        if type(merge_release) is not bool or type(fused_steady_state) is not bool:
+            raise ValueError('Explicit merge_release and fused_steady_state selection required')
+        from dflash_packed_proposal import note_round_b1
+        from dflash_traced_publish import PUBLICATION_SPLITS, add_split
+
+        note_round_b1('publication')
+        splits = PUBLICATION_SPLITS.get()
+        clock = time.perf_counter
+        operations = self.operations
+        owned, retain = self.temporaries([self.history, self.spare_history])
+        output = None
+        cache_publication = None
+        try:
+            started = clock()
+            projected = retain(self.project_features(features, prefix, retain=(retain if merge_release else None)))
+            projected_at = clock()
+            rows = min(2048, self.history_rows + prefix)
+            if fused_steady_state and rows == 2048:
+                if (self.kv_history is not None and getattr(self, 'progress', None) is None
+                        and getattr(self, 'proposal_capture', None) is not None):
+                    self.history_stale = True
+                else:
+                    dropped = retain(operations.slice(self.history, (0, 0, self.history_rows + prefix - rows, 0),
+                        (1, 1, self.history_rows, 5120)))
+                    combined = retain(operations.concat([dropped, projected], dim=2))
+                    operations.copy(combined, self.spare_history)
+            else:
+                valid_history = retain(operations.slice(self.history, (0, 0, 0, 0), (1, 1, self.history_rows, 5120)))
+                combined = retain(operations.concat([valid_history, projected], dim=2))
+                output = retain(operations.slice(combined, (0, 0, combined.shape[2] - rows, 0), (1, 1, combined.shape[2], 5120)))
+                padded = retain(operations.pad(output, [(0, 0), (0, 0), (0, 2048 - rows), (0, 0)], 0.0))
+                operations.copy(padded, self.spare_history)
+            history_at = clock()
+            if self.kv_history is not None:
+                cache_publication = self.kv_history.prepare(projected, prefix, position=position)
+            prepared_at = clock()
+            if not (merge_release and self.kv_history is not None):
+                operations.synchronize_device(self.mesh)
+            fenced_at = clock()
+            self.pending = SimpleNamespace(position=position, prefix=prefix, rows=rows, history=self.spare_history,
+                kv=cache_publication, status='prepared')
+        except BaseException:
+            if cache_publication is not None:
+                self.kv_history.discard(cache_publication)
+            release_owned(operations, owned)
+            raise
+        release_owned(operations, owned)
+        if splits is not None:
+            released_at = clock()
+            add_split(splits, 'proj', projected_at - started)
+            add_split(splits, 'hist', history_at - projected_at)
+            add_split(splits, 'kv', prepared_at - history_at)
+            add_split(splits, 'sync', fenced_at - prepared_at)
+            add_split(splits, 'rel', released_at - fenced_at)
+        return self.pending
+
     def commit_publication(self, publication):
         if self.closed or publication is not self.pending or publication.status != 'prepared' or publication.position != self.position:
             raise ValueError('Only the current prepared feature publication may commit')
@@ -700,6 +851,9 @@ class DFlashDevice:
         publication.status = 'committed'
         self.pending = None
         if self.kv_history is not None and self.progress is not None:
+            if getattr(self, 'history_stale', False):
+                # Set only under QWEN_FAST_ROUND_B1 (C7): _prepare_publication_round_b1.
+                raise ValueError('The feature history is stale (QWEN_FAST_ROUND_B1 C7) and cannot be audited')
             self.kv_history.audit(self.history)
 
     def discard_publication(self, publication):
@@ -888,6 +1042,10 @@ class DFlashDevice:
             tokens = self.proposal_capture.propose(seed, count)
             self.proposal_calls += 1
             return tokens
+        if getattr(self, 'history_stale', False):
+            # Set only under QWEN_FAST_ROUND_B1 (C7): _prepare_publication_round_b1 stopped
+            # writing the history this eager proposal reads.
+            raise ValueError('The feature history is stale (QWEN_FAST_ROUND_B1 C7) and cannot be read')
         operations = self.operations
         audit = ProposalAudit(self) if proposal_audit_enabled() else None
         owned, retain = self.temporaries([self.history, self.spare_history, *self.owned])
