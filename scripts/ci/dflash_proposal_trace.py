@@ -69,6 +69,17 @@ def _live_bank_history(device_a, device_b):
     return live_bank_history(device_a, device_b)
 
 
+def _row_exact(context_a, context_b, block_rows):
+    """QWEN_FAST_PAIR_ROW_EXACT (pair_row_exact.py, default off): whether a pair bucket at these contexts folds
+    its draft SDPA. The flag is read first and pair_row_exact imported only when it is set; a value other than
+    '0' or '1' raises there."""
+    if os.environ.get('QWEN_FAST_PAIR_ROW_EXACT', '0') == '0':
+        return False
+    from pair_row_exact import engages
+
+    return engages((context_a, context_b), block_rows)
+
+
 class PreparedDFlashProposal:
     def __init__(self, device, *, max_new_tokens):
         import torch
@@ -442,11 +453,23 @@ class PreparedPackedDFlashProposal:
             # these same fixed tensors before every replay.
             placeholder_users = [dict(position=context_a, history_rows=context_a),
                                  dict(position=context_b, history_rows=context_b)]
-            host_mask = batched_attention_mask([context_a, context_b], self.block_rows)
-            validate_mask(host_mask, contexts=[context_a, context_b])
+            # QWEN_FAST_PAIR_ROW_EXACT (pair_row_exact.py, default off): this bucket's draft SDPA is folded, one
+            # KV head per user segment, so row 1 attends exactly as it would alone, and its mask is the served
+            # single-user mask (1, 1, 32, 2080), validated by the single-user rule. Decided here, once per
+            # bucket, so the capture and every replay agree; the refresh and the audit copy and compare
+            # whichever host_mask the bucket keeps.
+            row_exact = _row_exact(context_a, context_b, self.block_rows)
+            if row_exact:
+                from pair_row_exact import fold_mask
+
+                host_mask = fold_mask((context_a, context_b), self.block_rows)
+                validate_mask(host_mask)
+            else:
+                host_mask = batched_attention_mask([context_a, context_b], self.block_rows)
+                validate_mask(host_mask, contexts=[context_a, context_b])
             tables = packed_rope_tables(placeholder_users, self.block_rows)
             live = live_key_rope(placeholder_users, self.block_rows)
-            # host_mask is kept (a host tensor, 266 KB at the packable geometry): the
+            # host_mask is kept (a host tensor, 266 KB at the packable geometry, 133 KB folded): the
             # mask depends on the bucket's contexts alone, so it is every round's mask -
             # what QWEN_FAST_PAIR_MASK_REFRESH copies back and QWEN_FAST_PAIR_MASK_AUDIT
             # compares with. Nothing reads it with both flags off.
@@ -468,6 +491,8 @@ class PreparedPackedDFlashProposal:
                 trace=None, outputs=None, owned=[], tokens=None, consumed=set())
             if live_banks is not None:
                 bucket.live_banks = True
+            if row_exact:
+                bucket.row_exact = True
             bucket.inputs = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k'],
                 *(value for cache in bucket.cached_history for layer in cache for value in layer.values())]
             bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
@@ -494,6 +519,10 @@ class PreparedPackedDFlashProposal:
             bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
                 lambda: self._execute(bucket, bucket.owned, retain))
             operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
+            if row_exact:
+                from pair_row_exact import note
+
+                note(self.pair_label(), bucket.context, log=_log_line)
         except BaseException:
             self.buckets.pop(key, None)
             built = locals().get('bucket')
@@ -516,7 +545,8 @@ class PreparedPackedDFlashProposal:
                  dict(position=self.device_b.position, history_rows=bucket.context[1])]
         return self.device_a.execute_proposal(bucket.identifiers, None, bucket.mask, rope, context=None,
             pack=users, cached_history=bucket.cached_history, owned=owned, retain=retain,
-            stage=lambda name, **values: None, audit=False)
+            stage=lambda name, **values: None, audit=False,
+            **(dict(row_exact=True) if getattr(bucket, 'row_exact', False) else {}))
 
     def _update(self, bucket, seed_a, seed_b, *, defer_finish=False):
         from dflash_batched_mask import packed_rope_tables, live_key_rope

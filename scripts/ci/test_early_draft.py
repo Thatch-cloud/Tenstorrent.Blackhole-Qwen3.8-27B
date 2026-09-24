@@ -989,7 +989,9 @@ class ParentTests(unittest.TestCase):
         self.assertEqual(run(serving_worker_hook), run(parent))
 
     def test_the_untouched_modules_are_the_parents(self):
-        result = subprocess.run(['git', 'diff', '--name-only', PARENT, '--', 'serving_runtime.py', 'fused_commit.py',
+        # H2 itself (91869e36) against its parent: later changes (QWEN_FAST_PAIR_ROW_EXACT touches
+        # dflash_device.py and dflash_proposal_trace.py) are not H2's and carry their own parent proofs.
+        result = subprocess.run(['git', 'diff', '--name-only', PARENT, '91869e36', '--', 'serving_runtime.py', 'fused_commit.py',
                                  'verify_prestage.py', 'dflash_proposal_trace.py', 'serving_packed_bridge.py',
                                  'serving_lifecycle.py', 'dflash_traced_publish.py', 'dflash_device.py'],
                                 capture_output=True, cwd=str(HERE), timeout=60)

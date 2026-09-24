@@ -58,7 +58,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 def execute_attention_branch(operations, mesh, collectives, hidden, history, mask, rope, retain, *,
                              parameters, context, pack=None, wide_dot_placement=False, convolution_operation=None,
                              cached_history=None, live_query_mask_validated=False, native_proposal_mask_validated=False,
-                             observe=None):
+                             observe=None, row_exact=False):
     convolve = convolution_operation or grouped_causal_convolution
     # QWEN_FAST_PROPOSAL_AUDIT (dflash_device.ProposalAudit): `observe(name, tensor)` reads
     # a replicated intermediate back from both chips at the stage that made it. None,
@@ -107,6 +107,17 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         seams['boundaries'] = tuple((span['rows'].start, span['rows'].stop) for span in spans)
         if len(cached_history) != len(pack):
             raise ValueError('One committed K/V cache per packed user required')
+    mask_rows = key_rows
+    if row_exact is not False:
+        # QWEN_FAST_PAIR_ROW_EXACT (pair_row_exact.py): the pair's draft SDPA is folded, one KV head per user
+        # segment, so each user's rows attend exactly as they would alone; the mask is then the single-user
+        # mask of one segment, (1, 1, 32, 2080), and the K/V assembly below is unchanged.
+        from pair_row_exact import require_fold
+
+        if row_exact is not True or spans is None or not parameters.get('native_proposal_attention'):
+            raise ValueError('The folded pair SDPA serves a packed pair on the native proposal path only')
+        require_fold([span['context'] for span in spans], block_rows)
+        mask_rows = spans[0]['span']
     # The cached path never reads `history`: keys come from cached_history plus the
     # live block. Packed it would be a 4160-row tensor nobody touches, roughly 42 MB
     # of DRAM, so packed callers may pass None. At one user it stays required, which
@@ -116,7 +127,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             or (not unused_history and (history is None or tuple(history.shape) != (1, 1, key_rows, 5120)
                 or history.dtype != operations.bfloat16))
             or (unused_history and history is not None)
-            or tuple(mask.shape) != (1, 1, 32, key_rows) or mask.dtype != operations.bfloat16):
+            or tuple(mask.shape) != (1, 1, 32, mask_rows) or mask.dtype != operations.bfloat16):
         raise ValueError('Padded BF16 proposal, context and mask geometry required')
     expected = {'q': 32, 'k': key_rows} if spans is None else {'q': 32, 'k': key_rows, 'live_k': 32}
     if set(rope) != set(expected) or any(len(rope[name]) != 2 or any(
@@ -218,7 +229,13 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
                 heads[name] = normalize_head(name, heads[name])
     attention_owned = []
     try:
-        if parameters.get('native_proposal_attention'):
+        if row_exact:
+            from pair_row_exact import fold_attention
+
+            # The same heads, keys and values, read as 32 query and 8 KV heads (pair_row_exact.py).
+            attention = fold_attention(operations, heads['q'], heads['k'], heads['v'], mask, retain,
+                                       mask_validated=True)
+        elif parameters.get('native_proposal_attention'):
             if block_rows == 16:
                 from dflash_t16_native_attention import attention as native_proposal
             else:

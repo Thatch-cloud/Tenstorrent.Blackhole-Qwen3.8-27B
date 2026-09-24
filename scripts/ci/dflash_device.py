@@ -867,7 +867,7 @@ class DFlashDevice:
         self.pending = None
 
     def execute_proposal(self, identifiers, history, mask, rope, *, context, owned, retain, stage, audit=True,
-                         audit_convolution=False, cached_history=None, pack=None, observe=None):
+                         audit_convolution=False, cached_history=None, pack=None, observe=None, row_exact=False):
         operations = self.operations
         live_query_qk = getattr(self, 'live_query_qk', False)
         native_proposal_attention = getattr(self, 'native_proposal_attention', False)
@@ -892,6 +892,10 @@ class DFlashDevice:
                 raise ValueError('Every prepared learned layer requires a committed K/V cache')
         if type(audit_convolution) is not bool or (audit_convolution and not self.fused_convolution):
             raise ValueError('Convolution audit requires the explicit fused candidate')
+        if row_exact is not False and (row_exact is not True or pack is None or len(pack) != 2
+                                       or not native_proposal_attention):
+            # QWEN_FAST_PAIR_ROW_EXACT (pair_row_exact.py): the folded draft SDPA is a packed pair's only.
+            raise ValueError('The folded pair SDPA serves a packed pair on the native proposal path only')
         # After the guards, so an unregistered mask or a bad audit request still fails
         # on its own terms rather than on a missing attribute.
         # Packed, every one of the 32 rows is a live proposal, so there is nothing to
@@ -943,6 +947,7 @@ class DFlashDevice:
                     **scoped('layer%d.attn' % layer),
                     **(dict(live_query_mask_validated=True) if live_query_qk else {}),
                     **(dict(native_proposal_mask_validated=True) if native_proposal_attention else {}),
+                    **(dict(row_exact=True) if row_exact else {}),
                     **(dict(cached_history=[cache[layer] for cache in cached_history] if pack is not None
                     else cached_history[layer]) if cached_history is not None else {}))
             stage('mlp', layer=layer)

@@ -354,8 +354,13 @@ def select_packed_batched(parts, seeds, counts, predecessors, successors):
     return tuple(tuple(int(token) for token in tokens[index, :count]) for index, count in enumerate(counts))
 
 
-def propose_packed(device, slots, seeds, counts, *, stage=None):
+def propose_packed(device, slots, seeds, counts, *, stage=None, row_exact=False):
     """One proposal pass over every packed user, returning each user's tokens.
+
+    row_exact=True folds the draft SDPA (pair_row_exact.py, QWEN_FAST_PAIR_ROW_EXACT's path; two 2048-row
+    users only): the single-user mask is uploaded instead of the packed one, and each user's rows attend
+    exactly as they would alone. The serving pair trace decides it from the flag; this eager path takes it
+    as an argument, for the probes.
 
     `slots` carry the per-user state DFlashDevice holds singly today: the absolute
     frontier, the committed history length, and the per-layer cached K/V. The shared
@@ -389,6 +394,12 @@ def propose_packed(device, slots, seeds, counts, *, stage=None):
     if any(cache is None or len(cache) != len(device.layers) for cache in caches):
         raise ValueError('Every packed slot needs a committed K/V cache for each prepared layer')
 
+    if row_exact is not False:
+        from pair_row_exact import require_fold
+
+        if row_exact is not True:
+            raise ValueError('row_exact is an explicit bool')
+        require_fold(contexts, block_rows)
     stage = stage or (lambda name, **values: None)
     owned, retain = device.temporaries([device.history, device.spare_history, *device.owned])
 
@@ -402,8 +413,14 @@ def propose_packed(device, slots, seeds, counts, *, stage=None):
         stage('upload-packed-anchor-and-mask')
         identifiers = upload(packed_identifiers(seeds, block_rows),
             dtype=operations.uint32, row_major=True)
-        host_mask = batched_attention_mask(contexts, block_rows)
-        validate_mask(host_mask, contexts=contexts)
+        if row_exact:
+            from pair_row_exact import fold_mask
+
+            host_mask = fold_mask(contexts, block_rows)
+            validate_mask(host_mask)
+        else:
+            host_mask = batched_attention_mask(contexts, block_rows)
+            validate_mask(host_mask, contexts=contexts)
         mask = upload(host_mask)
         # execute_proposal refuses a native proposal mask it has not seen validated,
         # and the address is the identity it checks.
@@ -414,7 +431,8 @@ def propose_packed(device, slots, seeds, counts, *, stage=None):
                     k=tuple(upload(value) for value in tables['k']),
                     live_k=tuple(upload(value) for value in live_key_rope(users, block_rows)))
         outputs = device.execute_proposal(identifiers, None, mask, rope, context=None, pack=users,
-            cached_history=caches, owned=owned, retain=retain, stage=stage)
+            cached_history=caches, owned=owned, retain=retain, stage=stage,
+            **(dict(row_exact=True) if row_exact else {}))
         stage('synchronize-packed-head')
         operations.synchronize_device(device.mesh)
         stage('read-packed-candidates')

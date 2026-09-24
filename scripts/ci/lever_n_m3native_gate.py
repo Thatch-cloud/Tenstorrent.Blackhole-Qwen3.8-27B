@@ -1006,6 +1006,21 @@ def h2_report(environ, log_text):
     return summary
 
 
+# The pair drafter's row-1 fix (pair_row_exact.py; default off). QWEN_FAST_PAIR_ROW_EXACT=1 promises
+# '[PINDIAG] pair row exact engaged pair=[a,b] context=2048,2048 heads=32/8 keys=2080', logged once per process
+# when the first (2048, 2048) pair bucket has folded its draft SDPA and captured its trace. Promised with two or
+# more concurrent users only: a single-stream arm builds no pair.
+PAIR_ROW_EXACT_FLAG = 'QWEN_FAST_PAIR_ROW_EXACT'
+PAIR_ROW_EXACT_MARKER = '[PINDIAG] pair row exact engaged'
+
+
+def pair_row_exact_markers(environ, users):
+    """{flag: [marker]} for QWEN_FAST_PAIR_ROW_EXACT when `environ` sets it and the arm packs pairs."""
+    if environ.get(PAIR_ROW_EXACT_FLAG) == '1' and users >= 2:
+        return {PAIR_ROW_EXACT_FLAG: [PAIR_ROW_EXACT_MARKER]}
+    return {}
+
+
 def required_flag_markers(environ, users, prompt_tokens=None):
     """The markers the flags in `environ` promise, as {flag: [marker, ...]}. prompt_tokens (each user's
     prompt; None: unknown) decides whether QWEN_FAST_SDPA_PF's 2048-row topology is promised."""
@@ -1033,6 +1048,7 @@ def required_flag_markers(environ, users, prompt_tokens=None):
     required.update(h1a_markers(environ))
     required.update(h1b_markers(environ))
     required.update(h2_markers(environ))
+    required.update(pair_row_exact_markers(environ, users))
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
@@ -1583,6 +1599,11 @@ def build_parser():
     parser.add_argument('--prompt-base', type=int, default=1000)
     parser.add_argument('--prompt-user-offset', type=int, default=1)
     parser.add_argument('--stagger', type=float, default=0.0)
+    parser.add_argument('--start-order', default=None,
+                        help='comma-separated user indices, a permutation of 0..users-1: the order the request '
+                             'threads start in, --stagger apart (needs --stagger > 0). The admission order fixes '
+                             "each user's slot and pair row; two arms of one flag set in two orders compare each "
+                             "user's packed fingerprints (QWEN_FAST_PAIR_ROW_EXACT's field check). Unset: 0..users-1")
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--results', type=Path, default=Path('/tmp/m3native-gate'))
     parser.add_argument('--trace-region-bytes', type=int, default=1073741824,
@@ -1617,6 +1638,13 @@ def parse_options(argv=None):
     options = parser.parse_args(argv)
     if options.sequential_users and options.users != 1:
         parser.error('--sequential-users needs --users 1: each request must run alone')
+    if options.start_order is not None:
+        try:
+            options.start_order = start_order(options.start_order, options.users)
+        except ValueError as error:
+            parser.error(str(error))
+        if options.sequential_users or not options.stagger > 0:
+            parser.error('--start-order needs --stagger > 0 and concurrent users: without a stagger the requests race')
     real_text = options.prompt_source == 'real-text'
     if options.eos is None:
         options.eos = 'stop' if real_text else 'ignore'
@@ -1635,6 +1663,34 @@ def parse_options(argv=None):
                      'frozen_combined_runtime.validate_target_option refuses any other position)'
                      % (options.prompt_tokens, options.max_tokens, options.context))
     return options
+
+
+def start_order(text, users):
+    """--start-order as a list: a permutation of 0..users-1, or ValueError."""
+    try:
+        order = [int(part) for part in str(text).split(',')]
+    except ValueError:
+        raise ValueError('--start-order must be comma-separated user indices, got %r' % (text,))
+    if sorted(order) != list(range(users)):
+        raise ValueError('--start-order must be a permutation of 0..%d, got %r' % (users - 1, text))
+    return order
+
+
+def request_order(options):
+    """The order the request threads start in: --start-order, or 0..users-1."""
+    return list(options.start_order) if getattr(options, 'start_order', None) else list(range(options.users))
+
+
+def start_order_report(report, options):
+    """With --start-order: the order given and whether the packed fingerprints' admission order (segment ->
+    user, acceptance_report.packed_fingerprints) is that order. Diagnostic; nothing here fails a run."""
+    if not getattr(options, 'start_order', None):
+        return
+    admitted = (report.get('packed_fingerprints') or {}).get('admission_order')
+    report['start_order'] = dict(requested=list(options.start_order), admitted=admitted,
+                                  matches=admitted == list(options.start_order))
+    print('[START-ORDER] requested=%s admitted=%s matches=%s' % (
+        report['start_order']['requested'], admitted, report['start_order']['matches']), flush=True)
 
 
 def real_text_target(options):
@@ -1806,10 +1862,10 @@ def main():
             args=(options.port, prompt(index), options.max_tokens, results, index, options.stream_timeout),
             kwargs=kwargs)
             for index in range(options.users)]
-        for index, thread in enumerate(threads):
-            if index and options.stagger:
+        for position, index in enumerate(request_order(options) if threads else []):
+            if position and options.stagger:
                 time.sleep(options.stagger)
-            thread.start()
+            threads[index].start()
         for thread in threads:
             thread.join()
         report['streams'] = results
@@ -1904,6 +1960,10 @@ def main():
         log_path = options.results / 'server.log'
         if detail:
             add_run_diagnostics(report, log_path, sequential=bool(options.sequential_users))
+        try:
+            start_order_report(report, options)
+        except Exception as error:
+            report['start_order'] = dict(error='%s: %s' % (type(error).__name__, error))
         print(BEGIN)
         print(json.dumps(report, indent=2))
         print(END)

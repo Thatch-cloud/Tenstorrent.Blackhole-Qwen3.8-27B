@@ -584,6 +584,47 @@ if [ -n "${M3NATIVE_EARLY_DRAFT:-}" ]; then
   fi
   echo "round-fence plan H2: early draft 1 gdn after pairs ${M3NATIVE_GDN_AFTER_PAIRS:-0}"
 fi
+# The pair drafter's row-1 fix (pair_row_exact.py; default off). M3NATIVE_PAIR_ROW_EXACT=1 becomes
+# QWEN_FAST_PAIR_ROW_EXACT=1: each packed pair's draft SDPA is folded, one KV head per user segment, so a user in
+# pair row 1 drafts exactly as it would alone (h1a-draft-race.md sections 2-3). It folds the packed pairs only
+# (M3NATIVE_PACKED_PROPOSAL=1, two or more concurrent users); the module is baked, so an image without it fails
+# the gate's '[PINDIAG] pair row exact engaged' requirement. M3NATIVE_START_ORDER (user indices, a permutation
+# of 0..users-1, comma separated; needs M3NATIVE_STAGGER > 0) starts the gate's requests in that order, and so
+# fixes each user's slot and pair row to it: the field check runs one flag set in two orders and compares each
+# user's packed fingerprints. Refused here, before the docker run; unset, nothing is passed.
+pair_row_value="${M3NATIVE_PAIR_ROW_EXACT:-}"
+if [ -n "$pair_row_value" ] && [ "$pair_row_value" != "1" ]; then
+  echo "M3NATIVE_PAIR_ROW_EXACT must be 1 or unset, got '$pair_row_value'" >&2
+  exit 1
+fi
+if [ -n "$pair_row_value" ]; then
+  if [ "$users" -lt 2 ] || [ -n "${M3NATIVE_SEQUENTIAL_USERS:-}" ]; then
+    echo "M3NATIVE_PAIR_ROW_EXACT folds the packed pairs only (users=$users, sequential '${M3NATIVE_SEQUENTIAL_USERS:-}')" >&2
+    exit 1
+  fi
+  if [ "${M3NATIVE_PACKED_PROPOSAL:-}" != "1" ]; then
+    echo "M3NATIVE_PAIR_ROW_EXACT=1 needs M3NATIVE_PACKED_PROPOSAL=1 (it folds the packed pair traces)" >&2
+    exit 1
+  fi
+  echo "pair row exact 1"
+fi
+start_order="${M3NATIVE_START_ORDER:-}"
+if [ -n "$start_order" ]; then
+  if ! printf '%s' "$start_order" | grep -Eq '^[0-9]+(,[0-9]+)*$'; then
+    echo "M3NATIVE_START_ORDER must be comma-separated user indices, got '$start_order'" >&2
+    exit 1
+  fi
+  case "$stagger" in
+    *[1-9]*) ;;
+    *) echo "M3NATIVE_START_ORDER needs M3NATIVE_STAGGER > 0 (got '$stagger'): without a stagger the requests race" >&2
+       exit 1 ;;
+  esac
+  if [ -n "${M3NATIVE_SEQUENTIAL_USERS:-}" ]; then
+    echo "M3NATIVE_START_ORDER orders concurrent requests; a sequential arm has none" >&2
+    exit 1
+  fi
+  echo "start order $start_order (stagger $stagger s)"
+fi
 
 # Proposals: the fp2u lane runs each request's draft proposal EAGERLY
 # (QWEN_FAST_EAGER_PROPOSAL=1) because per-request proposal traces clobbered each
@@ -769,6 +810,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_FUSED_COMMIT_AUDIT:+-e QWEN_FAST_FUSED_COMMIT_AUDIT=1} \
   ${M3NATIVE_EARLY_DRAFT:+-e QWEN_FAST_EARLY_DRAFT=1} \
   ${M3NATIVE_GDN_AFTER_PAIRS:+-e QWEN_FAST_GDN_AFTER_PAIRS=1} \
+  ${M3NATIVE_PAIR_ROW_EXACT:+-e QWEN_FAST_PAIR_ROW_EXACT=1} \
   ${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1} \
   ${M3NATIVE_GDN_PREFILL_CONV:+-e QWEN_FAST_GDN_PREFILL_CONV=1} \
   ${M3NATIVE_GDN_PREFILL_CONV_AUDIT:+-e QWEN_FAST_GDN_PREFILL_CONV_AUDIT=$M3NATIVE_GDN_PREFILL_CONV_AUDIT} \
@@ -806,6 +848,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --entrypoint python3 "$image" "${entry_args[@]}" \
   --users "$users" --context "$context" --prompt-tokens "$prompt_tokens" --max-tokens "$max_tokens" --stream-timeout 600 --trace-region-bytes "$trace_region_bytes" \
   --prompt-base 1000 --prompt-user-offset 1 --stagger "$stagger" ${M3NATIVE_SEQUENTIAL_USERS:+--sequential-users $M3NATIVE_SEQUENTIAL_USERS} \
+  ${M3NATIVE_START_ORDER:+--start-order $M3NATIVE_START_ORDER} \
   ${M3NATIVE_PROMPT_SOURCE:+--prompt-source $M3NATIVE_PROMPT_SOURCE} ${M3NATIVE_EOS:+--eos $M3NATIVE_EOS} \
   --references /bench/packed-gate-reference $allow_missing_references --results /experiment-results-gate \
   > experiment-results/m3native-gate-stdout.log 2>&1 || true

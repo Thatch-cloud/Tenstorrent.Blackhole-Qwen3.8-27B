@@ -86,6 +86,9 @@ COPY scripts/ci/fused_commit.py /experiment-scripts/ci/
 # Round-fence plan H2 (QWEN_FAST_EARLY_DRAFT, QWEN_FAST_GDN_AFTER_PAIRS; both default off): serving_worker_hook
 # and packed_verifier import early_draft when a flag is set, so it must reach the image beside them.
 COPY scripts/ci/early_draft.py /experiment-scripts/ci/
+# The pair drafter's row-1 fix (QWEN_FAST_PAIR_ROW_EXACT, default off): dflash_proposal_trace, draft_attention_branch
+# and dflash_packed_proposal import pair_row_exact when the flag is set, so it must reach the image beside them.
+COPY scripts/ci/pair_row_exact.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

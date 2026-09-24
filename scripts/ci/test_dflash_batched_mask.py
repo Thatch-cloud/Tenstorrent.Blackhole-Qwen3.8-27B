@@ -181,6 +181,27 @@ class PackedRopeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             packed_rope_tables([dict(position=10, history_rows=2048)], block_rows=16)
 
+    def test_the_second_users_rows_are_the_served_single_user_tables_bit_for_bit(self):
+        """Pair row 1 (the second user): its query rows and its live-key rows are what the single-user trace
+        uploads for it (proposal_inputs, not rope_tables at the block width), through the plain build and the
+        B1/C8 build alike - so no row-1 drafting difference can come from its RoPE (h1a-draft-race.md)."""
+        from dflash_batched_mask import live_key_rope, live_key_rope_from, packed_rope_tables
+        from dflash_proposal_inputs import proposal_inputs
+
+        bits = lambda value: value.contiguous().view(torch.int16)
+        for position in (2048, 2049, 4095, 32768, 32768 + 13, 131072, 131072 + 999, 200000, 262000):
+            users = [dict(position=4096 + (position * 31) % 100000, history_rows=2048),
+                     dict(position=position, history_rows=2048)]
+            tables = packed_rope_tables(users, block_rows=16)
+            served = proposal_inputs(0, position, 2048, 16, 2048)['rope']
+            plain, from_tables = live_key_rope(users, 16), live_key_rope_from(tables['k'], users, 16)
+            for index in range(2):
+                with self.subTest(position=position, index=index):
+                    self.assertTrue(torch.equal(bits(tables['q'][index][:, :, 16:32]), bits(served['q'][index][:, :, :16])))
+                    for live in (plain, from_tables):
+                        self.assertTrue(torch.equal(bits(live[index][:, :, 16:32]),
+                                                    bits(served['k'][index][:, :, 2048:2064])))
+
 
 class CachedHistoryPackingTests(unittest.TestCase):
     """The production path: cache_history=True, native_proposal_attention, T16.
