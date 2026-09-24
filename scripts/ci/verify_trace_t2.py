@@ -42,9 +42,15 @@ cache over the served tile metadata and slices, a no-rebuild fallback. Anything 
 QWEN_FAST_VERIFY_T2_AUDIT=1 (a correctness arm, never a timed one): the served windows are
 built beside the packed ones inside the trace and compared, byte for byte, on both chips (G1
 for #1): every GDN layer on the first round, then two layers per round in rotation (every
-layer again within 24 rounds, however few rounds the arm runs). #2 has no in-trace audit -
-both paths would write the same cache - so the audit logs each user's tile-row count per
-round instead.
+layer again within 24 rounds, however few rounds the arm runs). Both sides are compared AFTER
+the per-user gdn_decode_conv_gates: that op advances its windows in place (old slot 1 -> 0,
+2 -> 1, 3 -> 2, the piece's rows -> 3), the audit reads after the replay, and the advanced
+windows are what the commit DMA reads - so the served windows take the same conv gates call
+as the packed ones (gdn_user_batch_conv). v169 compared advanced packed windows with served
+ones nothing had advanced: every row one out. Pre-op slot 0 is read by nothing (the op drops
+it) and G1 cannot see it; card M compares the packed op's raw output, slot 0 included. #2 has
+no in-trace audit - both paths would write the same cache - so the audit logs each user's
+tile-row count per round instead.
 """
 
 import os
@@ -228,7 +234,9 @@ def audit_layers(round_number, layers=GDN_LAYERS):
 def compare_windows(operations, record):
     """One retained GDN layer record's packed windows against the served ones built beside
     them, every user, every slot, every chip: int16 views of to_torch (logical rows; card M
-    covers the padding). Returns (windows compared, [mismatch descriptions])."""
+    covers the padding). Read after the replay, both sides hold the windows as the per-user
+    conv gates left them - advanced in place, each through the same call - which are the rows
+    the commit reads. Returns (windows compared, [mismatch descriptions])."""
     import torch
 
     state, result, checkpoint = record

@@ -22,12 +22,20 @@ configuration the four-user serving round runs in.
 Under QWEN_FAST_VERIFY_T2=1 (verify_trace_t2, cut #1) the four window launches become one
 (gdn_conv_windows_packed.build_windows_packed) ahead of the per-user conv gates: the same
 pieces and histories in, the same 16 window tensors out, so every conv gates op still reads
-its own user's windows and nothing in the layer writes a piece or a history in between.
-An input the packed op does not serve (Unsupported) takes the served per-user path, counted
-as windows_fallback. QWEN_FAST_VERIFY_T2_AUDIT=1 also builds the served windows beside them
-(G1: packed_verifier compares every layer on the first round, then two per round); those are
-handed over as `audit_windows`, outside `owned`, so retain_checkpoint_histories never frees
+(and advances) its own user's windows and nothing in the layer writes a piece or a history in
+between. An input the packed op does not serve (Unsupported) takes the served per-user path,
+counted as windows_fallback. QWEN_FAST_VERIFY_T2_AUDIT=1 also builds the served windows beside
+them (G1: packed_verifier compares every layer on the first round, then two per round); those
+are handed over as `audit_windows`, outside `owned`, so retain_checkpoint_histories never frees
 them inside the trace - ModelBatch releases them with the retained records.
+
+The conv gates op writes its windows as well as reading them: it advances them in place (old
+slot 1 -> 0, 2 -> 1, 3 -> 2, the piece's rows -> 3), and what the commit DMA reads after the
+replay is that advanced state. G1 reads both sides after the replay too, so the audit arm runs
+the served windows through the same `conv_gates` call the packed ones take (its conv/beta/g are
+read by nothing and freed at once): both sides then hold post-op windows. Without it (v169) the
+audit compared advanced packed windows with unadvanced served ones - every row one out, ~76.7k
+of 81,920 elements per window - against a packed op card B had found byte-exact.
 """
 
 from gdn_multitoken_conv import addresses, release_owned, validate_projected
@@ -44,6 +52,16 @@ def validate_options(dma_windows, packed_checkpoints, defer_conv_publication, pr
             raise ValueError('Explicit bool %s option required' % name)
     if not (dma_windows and packed_checkpoints and defer_conv_publication):
         raise ValueError('Batched packed users require DMA windows, packed checkpoints and deferred publication')
+
+
+def conv_gates(operations, projected, windows, taps, dt_bias, neg_exp_A, rows):
+    """A packed user's one gdn_decode_conv_gates call: (conv, beta, g) out, and `windows`
+    advanced in place (old slot 1 -> 0, 2 -> 1, 3 -> 2, the piece's rows -> 3;
+    optimisation/ttnn-op/test_gdn_conv_gates.py:4-7) - the windows the commit DMA later reads.
+    The model's call and the audit's shadow call are both this one, so they cannot drift."""
+    return operations.transformer.gdn_decode_conv_gates(projected, windows, taps, projected, projected,
+        dt_bias, neg_exp_A, batch=rows, memory_config=operations.DRAM_MEMORY_CONFIG,
+        channels=5120, a_col=8192, b_col=8216)
 
 
 def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, kernels, operations=None, *,
@@ -102,10 +120,13 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
                     served = build_windows(mesh, projected, conv_states)
                     audit_owned.extend(served)
                     audit[index] = served
+                    # The conv gates below advances the packed windows in place, and G1 reads
+                    # both sides after the replay: the served windows take the same call, so
+                    # both hold what the commit reads. Its conv/beta/g are read by nothing and
+                    # freed at once (never held, so nothing to free on failure).
+                    release_owned(operations, conv_gates(operations, projected, served, taps, dt_bias, neg_exp_A, rows))
             mine.extend(windows)
-            packed = operations.transformer.gdn_decode_conv_gates(projected, windows, taps, projected, projected,
-                dt_bias, neg_exp_A, batch=rows, memory_config=operations.DRAM_MEMORY_CONFIG,
-                channels=5120, a_col=8192, b_col=8216)
+            packed = conv_gates(operations, projected, windows, taps, dt_bias, neg_exp_A, rows)
             mine.extend(packed)
             z = operations.slice(projected, (0, 0, 5120), (1, rows, 8192),
                                  memory_config=operations.DRAM_MEMORY_CONFIG)

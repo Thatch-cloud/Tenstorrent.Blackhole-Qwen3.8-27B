@@ -9,8 +9,10 @@ cache from the second call, frees its outputs on any failure and refuses what it
 before any kernel runs. And the wiring: flag off the block runs exactly the calls it ran before
 (and never imports the op), flag on one packed launch precedes the per-user conv gates, an
 Unsupported input takes the served path and is counted, the audit builds the served windows beside
-the packed ones outside `owned`. Whether the kernel moves the bytes that way on silicon is card M's
-(optimisation/ttnn-op/verify_t2).
+the packed ones outside `owned` and runs them through the same conv gates call - the op advances its
+windows in place, so G1 compares post-op windows on both sides, which a run over real per-chip bytes
+checks end to end through verify_trace_t2.audit_round. Whether the kernel moves the bytes that way
+on silicon is card M's (optimisation/ttnn-op/verify_t2).
 
 DescriptorTTNN below is a recording fake of the generic_op descriptor API; test_packed_ordered_cache
 and the card-M harness tests reuse it.
@@ -599,19 +601,59 @@ class WiringTests(unittest.TestCase):
 
     def served(self, mesh_, projected, history):
         self.calls.append(('windows', projected.name))
-        return [self.operations.make('window:%s.%d' % (projected.name, slot), (1, projected.shape[1], 5120))
-                for slot in range(4)]
+        return [self.window('window:%s.%d' % (projected.name, slot), projected, history, slot) for slot in range(4)]
 
     def packed(self, mesh_, group, operations=None):
         self.calls.append(('packed', tuple(piece.name for piece, history in group)))
-        return [[self.operations.make('packed:%s.%d' % (piece.name, slot), (1, piece.shape[1], 5120))
-                 for slot in range(4)] for piece, history in group]
+        return [[self.window('packed:%s.%d' % (piece.name, slot), piece, history, slot) for slot in range(4)]
+                for piece, history in group]
+
+    def window(self, name, piece, history, slot):
+        """A (1, rows, 5120) window; name-only unless the piece carries per-chip bytes
+        (carry_bytes), when slot s holds timeline rows s..s+rows-1 on each chip - the served map
+        (test_window_row_r_of_slot_s_is_timeline_row_r_plus_s). Both builders use it, so the packed
+        op is byte-exact here and any audit mismatch is the wiring's."""
+        value = self.operations.make(name, (1, piece.shape[1], 5120))
+        if getattr(piece, 'chips', None) is not None:
+            value.chips = [self.timeline(piece, history, chip)[:, slot:slot + piece.shape[1]].clone()
+                           for chip in range(2)]
+        return value
+
+    @staticmethod
+    def timeline(piece, history, chip):
+        """The four history rows, then the piece's rows (its first 5120 columns)."""
+        return torch.cat([row.chips[chip] for row in history] + [piece.chips[chip][:, :, :5120]], dim=1)
+
+    def carry_bytes(self, seed=0):
+        """Random bf16 payloads on both chips of every user's piece and history rows."""
+        generator = torch.Generator().manual_seed(seed)
+        for projected, initial, history in self.groups:
+            projected.chips = [torch.randn(1, 16, 8256, generator=generator).bfloat16() for _ in range(2)]
+            for row in history:
+                row.chips = [torch.randn(1, 1, 5120, generator=generator).bfloat16() for _ in range(2)]
+
+    def audit(self, results):
+        """verify_trace_t2.audit_round as packed_verifier runs it after the replay: round 1, so all
+        48 GDN layers, each record holding this block. Returns the lines it logged."""
+        lines = []
+        with patch.dict(t2._AUDIT, rounds=0), patch.object(t2, 'log_line', side_effect=lines.append):
+            t2.audit_round(self.operations, [(None, dict(segment_results=tuple(results)), None)] * 48, 1)
+        return lines
+
+    def faulty(self, slot, user=1, chip=0):
+        """The packed builder with one bit flipped in one element of one user's pre-op window."""
+        def packed(mesh_, group, operations=None):
+            windows = self.packed(mesh_, group, operations)
+            windows[user][slot].chips[chip].view(torch.int16)[0, 5, 7] ^= 1
+            return windows
+        return packed
 
     def run_block(self, environ, packed=None, execute=None):
         import gdn_user_batch_conv
 
         def batched(mesh_, inputs, kernels, ops, output_memory=None):
             self.calls.append(('batched', len(inputs)))
+            self.launch_inputs = [tuple(user) for user in inputs]
             return [(self.operations.make('out%d' % index, (1, 16, 3072)),
                      self.operations.make('prefix%d' % index, (16, 24, 128, 128))) for index in range(len(inputs))]
 
@@ -691,19 +733,130 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(self.order(), ['windows', 'conv_gates', 'slice'] * 4 + ['batched'])
 
     def test_the_audit_builds_the_served_windows_beside_them_outside_owned(self):
+        freed = []
+        self.operations.deallocate = Mock(side_effect=lambda value: (freed.append(value),
+                                                                     self.calls.append(('free', value.name))))
         results = self.run_block(dict(ON, QWEN_FAST_VERIFY_T2_AUDIT='1'))
-        self.assertEqual(self.order(), ['packed'] + ['windows', 'conv_gates', 'slice'] * 4 + ['batched'])
+        self.assertEqual(self.order(), ['packed'] + ['windows', 'conv_gates', 'conv_gates', 'slice'] * 4 + ['batched'])
         for index, result in enumerate(results):
             self.assertEqual([w.name for w in result['audit_windows']],
                              ['window:projected%d.%d' % (index, slot) for slot in range(4)])
             self.assertFalse(any(value.name.startswith('window:') for value in result['owned']))
             self.assertEqual(t2.audit_windows_of(result), result['audit_windows'])
         self.assertEqual(len(t2.audit_windows_of(dict(segment_results=results))), 16)
+        # Per user: the served windows take the conv gates first, its conv/beta/g are freed at
+        # once, then the packed windows take the model's own conv gates.
+        expected = []
+        for user in range(4):
+            name = 'projected%d' % user
+            expected += [('conv_gates', name, 16, tuple('window:%s.%d' % (name, slot) for slot in range(4))),
+                         ('free', 'conv:' + name), ('free', 'beta:' + name), ('free', 'gate:' + name),
+                         ('conv_gates', name, 16, tuple('packed:%s.%d' % (name, slot) for slot in range(4)))]
+        self.assertEqual([entry for entry in self.calls if entry[0] in ('conv_gates', 'free')], expected)
+        # What the model consumes is never what was freed.
+        launched = [value for user in self.launch_inputs for value in user[:3]]
+        owned = [value for result in results for value in result['owned']]
+        self.assertFalse(any(value is gone for value in launched + owned for gone in freed))
+
+    def test_the_shadow_conv_gates_is_the_models_call_on_the_served_windows(self):
+        """Same projected, taps, dt_bias, neg_exp_A, batch, memory_config, channels, a_col, b_col:
+        only the windows differ, so the served side is advanced exactly as the packed side is."""
+        self.run_block(dict(ON, QWEN_FAST_VERIFY_T2_AUDIT='1'))
+        gates = self.operations.transformer.gdn_decode_conv_gates.call_args_list
+        self.assertEqual(len(gates), 8)
+        for user, (shadow, model) in enumerate(zip(gates[0::2], gates[1::2])):
+            self.assertEqual(shadow.kwargs, model.kwargs)
+            self.assertEqual(len(shadow.args), len(model.args))
+            for position, (mine, theirs) in enumerate(zip(shadow.args, model.args)):
+                if position == 1:
+                    self.assertEqual([w.name for w in mine], ['window:projected%d.%d' % (user, s) for s in range(4)])
+                    self.assertEqual([w.name for w in theirs], ['packed:projected%d.%d' % (user, s) for s in range(4)])
+                else:
+                    self.assertIs(mine, theirs, 'argument %d' % position)
+        self.assertEqual(gates[1].kwargs, dict(batch=16, memory_config='dram', channels=5120, a_col=8192, b_col=8216))
+
+    def test_with_the_audit_off_nothing_changes(self):
+        """T2 on, audit off: no served windows, no second conv gates, nothing freed in the block,
+        and every result, launch input and packed window byte is what the audit arm's model side
+        holds too - the shadow call touches only the served windows."""
+        self.carry_bytes()
+        results = self.run_block(ON)
+        self.assertEqual(self.order(), ['packed'] + ['conv_gates', 'slice'] * 4 + ['batched'])
+        self.assertEqual(self.operations.transformer.gdn_decode_conv_gates.call_count, 4)
+        self.assertEqual([entry[3] for entry in self.calls if entry[0] == 'conv_gates'],
+                         [tuple('packed:projected%d.%d' % (user, slot) for slot in range(4)) for user in range(4)])
+        self.assertEqual([entry for entry in self.calls if entry[0] in ('windows', 'free')], [])
+        off = self.summary(results)
+
+        self.setUp()
+        self.carry_bytes()
+        on = self.summary(self.run_block(dict(ON, QWEN_FAST_VERIFY_T2_AUDIT='1')))
+        for user, (quiet, audited) in enumerate(zip(off, on)):
+            self.assertEqual(audited.pop('keys'), quiet.pop('keys') | {'audit_windows'})
+            self.assertEqual(audited, quiet, 'user %d' % user)
+
+    def summary(self, results):
+        """What the model side of a block run consumes, by name and by bytes."""
+        summaries = []
+        for index, result in enumerate(results):
+            summaries.append(dict(
+                keys=set(result),
+                owned=[value.name for value in result['owned']],
+                windows=[value.name for value in result['packed_conv_states']],
+                bytes=[[window.chips[chip].view(torch.int16).tolist() for chip in range(2)]
+                       for window in result['packed_conv_states']],
+                launched=[value.name for value in self.launch_inputs[index]],
+                output=(result['output'].name, result['states'].name),
+                flags={key: value for key, value in result.items()
+                       if key not in ('owned', 'packed_conv_states', 'audit_windows', 'output', 'states')}))
+        return summaries
+
+    def test_the_audit_compares_what_the_commit_reads_on_both_sides(self):
+        """gdn_decode_conv_gates advances its windows in place (slot 1 -> 0, 2 -> 1, 3 -> 2, the
+        piece -> 3; optimisation/ttnn-op/test_gdn_conv_gates.py:4-7) and the audit reads both sides
+        after the replay. v169 compared packed windows the model's conv gates had advanced with
+        served windows nothing had advanced: every row one out, ~76.7k of 81,920 elements per
+        window. With the served windows taking the same call, both hold the post-op windows - the
+        rows the commit DMA reads - and a byte-exact packed op audits exact."""
+        self.carry_bytes()
+        results = self.run_block(dict(ON, QWEN_FAST_VERIFY_T2_AUDIT='1'))
+        self.assertEqual(self.audit(results), ['[PINDIAG] verify t2 audit 1 exact=True layers=0-47 windows=768'])
+        for (projected, initial, history), result in zip(self.groups, results):
+            for chip in range(2):
+                timeline = self.timeline(projected, history, chip).view(torch.int16)
+                for slot, (packed, served) in enumerate(zip(result['packed_conv_states'], result['audit_windows'])):
+                    advanced = timeline[:, slot + 1:slot + 17]
+                    self.assertTrue(torch.equal(packed.chips[chip].view(torch.int16), advanced))
+                    self.assertTrue(torch.equal(served.chips[chip].view(torch.int16), advanced))
+
+    def test_a_packed_fault_in_a_window_the_conv_gates_reads_fails_the_audit(self):
+        """Negative controls: one bit in pre-op slot 1 shows as post-op slot 0, one in slot 3 as
+        slot 2 - on that user and chip only, on every audited layer."""
+        for slot, seen in ((1, 0), (3, 2)):
+            with self.subTest(slot=slot):
+                self.setUp()
+                self.carry_bytes()
+                results = self.run_block(dict(ON, QWEN_FAST_VERIFY_T2_AUDIT='1'), packed=self.faulty(slot))
+                with self.assertRaisesRegex(AssertionError,
+                                            r'audit mismatch round=1 layers=0-47 layer 0 user 1 slot %d chip 0: 1; '
+                                            r'layer 1 user 1 slot %d chip 0: 1;' % (seen, seen)):
+                    self.audit(results)
+
+    def test_a_fault_in_pre_op_slot_0_is_invisible_because_nothing_reads_it(self):
+        """What G1 does not cover: the conv gates never reads pre-op slot 0 and overwrites it with
+        slot 1, so neither the conv output nor the commit can see a fault there. Card M
+        (optimisation/ttnn-op/verify_t2) compares the packed op's raw output, slot 0 included."""
+        self.carry_bytes()
+        results = self.run_block(dict(ON, QWEN_FAST_VERIFY_T2_AUDIT='1'), packed=self.faulty(0))
+        self.assertEqual(self.audit(results), ['[PINDIAG] verify t2 audit 1 exact=True layers=0-47 windows=768'])
 
     def test_a_failed_launch_frees_the_packed_and_the_audit_windows(self):
         def explode(*args, **kwargs):
             raise RuntimeError('device')
 
+        objects = []
+        self.operations.deallocate = Mock(side_effect=lambda value: (objects.append(value),
+                                                                     self.calls.append(('free', value.name))))
         with self.assertRaisesRegex(RuntimeError, 'device'):
             self.run_block(dict(ON, QWEN_FAST_VERIFY_T2_AUDIT='1'), execute=explode)
         freed = {entry[1] for entry in self.calls if entry[0] == 'free'}
@@ -711,6 +864,12 @@ class WiringTests(unittest.TestCase):
             for slot in range(4):
                 self.assertIn('packed:projected%d.%d' % (user, slot), freed)
                 self.assertIn('window:projected%d.%d' % (user, slot), freed)
+        # The shadow conv gates' outputs were freed when made; the failure path frees the
+        # model's own conv/beta/g and never any tensor twice.
+        self.assertEqual(len(objects), len({id(value) for value in objects}), 'a tensor freed twice')
+        for user in range(4):
+            for kind in ('conv', 'beta', 'gate'):
+                self.assertEqual(sum(value.name == '%s:projected%d' % (kind, user) for value in objects), 2)
 
     def test_gdn_records_retains_only_states_and_packed_windows(self):
         """The audit key is ignored by the retained block: its histories are the states and the

@@ -16,6 +16,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+import torch
+
 from gdn_device_loop_state import DeviceLoopState
 from gdn_user_batch_conv import run_user_batched_projected, validate_options
 from test_gdn_packed_segments import PackedFixture
@@ -25,7 +27,34 @@ from test_gdn_user_batch import FakeTensor
 ROWS = 16
 
 
+def shift_windows(projected, windows, batch, channels=5120):
+    """gdn_decode_conv_gates' state contract, applied in place to per-chip payloads: old slot 1 ->
+    slot 0, 2 -> 1, 3 -> 2, and the first `batch` rows of x (the projection's first `channels`
+    columns) -> slot 3, its rows past `batch` zero (optimisation/ttnn-op/test_gdn_conv_gates.py:4-7,
+    which reads the same state tensors back after the op: `st_after[j] == [st1, st2, st3, x][j]`).
+
+    A payload is a list of per-chip torch tensors in the tensor's `chips` attribute. Name-only
+    windows (no `chips`) move nothing; payloads on some inputs but not all is a fixture error."""
+    carried = [getattr(window, 'chips', None) for window in windows]
+    if all(chips is None for chips in carried):
+        return
+    source = getattr(projected, 'chips', None)
+    if source is None or any(chips is None for chips in carried):
+        raise AssertionError('conv gates fake: payloads on some inputs but not all')
+    for chip, piece in enumerate(source):
+        old = [chips[chip].clone() for chips in carried]
+        x = old[3].clone().zero_()
+        x[:, :batch] = piece[:, :batch, :channels]
+        for chips, new in zip(carried, old[1:] + [x]):
+            chips[chip].copy_(new)
+
+
 def fake_operations(calls):
+    """A recording ttnn fake. Tensors are name-only unless a test gives one per-chip payloads
+    (`tensor.chips`, a list of torch tensors): then a shard carries its chip's payload as
+    `.value`, `to_torch` returns it, and the conv gates fake moves the bytes of its windows in
+    place exactly as the real op does (shift_windows) - so a test that reads windows after the
+    op sees what the model's later readers see."""
     operations = SimpleNamespace(DRAM_MEMORY_CONFIG='dram', L1_MEMORY_CONFIG='l1')
     counter = [7000]
 
@@ -33,8 +62,13 @@ def fake_operations(calls):
         counter[0] += 16
         return FakeTensor(name, shape, counter[0])
 
-    operations.get_device_tensors = Mock(side_effect=lambda value: [
-        SimpleNamespace(buffer_address=lambda address=value.address + chip: address) for chip in range(2)])
+    def shards(value):
+        chips = getattr(value, 'chips', None)
+        return [SimpleNamespace(buffer_address=lambda address=value.address + chip: address,
+                                value=None if chips is None else chips[chip]) for chip in range(2)]
+
+    operations.get_device_tensors = Mock(side_effect=shards)
+    operations.to_torch = lambda shard: shard.value
     operations.deallocate = Mock(side_effect=lambda value: calls.append(('free', value.name)))
     operations.to_memory_config = Mock(side_effect=lambda value, memory: value)
 
@@ -44,8 +78,9 @@ def fake_operations(calls):
 
     operations.slice = Mock(side_effect=record_slice)
 
-    def conv_gates(projected, windows, taps, a, b, dt_bias, neg_exp_A, batch=None, **kwargs):
+    def conv_gates(projected, windows, taps, a, b, dt_bias, neg_exp_A, batch=None, channels=5120, **kwargs):
         calls.append(('conv_gates', projected.name, batch, tuple(value.name for value in windows)))
+        shift_windows(projected, windows, batch, channels)
         return [make('conv:' + projected.name, (1, batch, 5120)),
                 make('beta:' + projected.name, (1, batch, 24)),
                 make('gate:' + projected.name, (1, batch, 24))]
@@ -239,6 +274,53 @@ class BatchedConvTests(unittest.TestCase):
                                            extras['norm_w'], 'kernels', operations)
         launch.assert_not_called()
         self.assertEqual([entry for entry in calls if entry[0] == 'windows'], [])
+
+
+class FakeConvGatesTests(unittest.TestCase):
+    """The shared fake must write its windows as the real op does. A fake that only reads them
+    hid the G1 audit bug: v169 compared packed windows the model's conv gates had advanced
+    against served windows nothing had advanced, and the CPU suite could not see it."""
+
+    def payloads(self, operations, name, shape, count=2):
+        tensor = operations.make(name, shape)
+        tensor.chips = [torch.randn(*shape).bfloat16() for _ in range(count)]
+        return tensor
+
+    def bits(self, value):
+        return value.contiguous().view(torch.int16)
+
+    def test_the_fake_advances_its_windows_in_place_like_the_real_op(self):
+        for batch in (ROWS, 8):
+            with self.subTest(batch=batch):
+                operations = fake_operations([])
+                projected = self.payloads(operations, 'projected', (1, ROWS, 8256))
+                windows = [self.payloads(operations, 'window%d' % slot, (1, ROWS, 5120)) for slot in range(4)]
+                before = [[chip.clone() for chip in window.chips] for window in windows]
+                storage = [list(window.chips) for window in windows]
+                operations.transformer.gdn_decode_conv_gates(projected, windows, [], projected, projected, None, None,
+                                                             batch=batch, channels=5120)
+                for chip in range(2):
+                    x = before[3][chip].clone().zero_()
+                    x[:, :batch] = projected.chips[chip][:, :batch, :5120]
+                    for slot, expected in enumerate([before[1][chip], before[2][chip], before[3][chip], x]):
+                        self.assertTrue(torch.equal(self.bits(windows[slot].chips[chip]), self.bits(expected)),
+                                        'slot %d chip %d' % (slot, chip))
+                        self.assertIs(windows[slot].chips[chip], storage[slot][chip], 'in place, not rebound')
+                        shard = operations.get_device_tensors(windows[slot])[chip]
+                        self.assertIs(operations.to_torch(shard), windows[slot].chips[chip])
+
+    def test_name_only_windows_move_nothing_and_half_a_payload_is_refused(self):
+        calls = []
+        operations = fake_operations(calls)
+        projected = operations.make('projected', (1, ROWS, 8256))
+        windows = [operations.make('window%d' % slot, (1, ROWS, 5120)) for slot in range(4)]
+        operations.transformer.gdn_decode_conv_gates(projected, windows, [], projected, projected, None, None, batch=ROWS)
+        self.assertEqual(calls, [('conv_gates', 'projected', ROWS, tuple('window%d' % slot for slot in range(4)))])
+        self.assertIsNone(operations.to_torch(operations.get_device_tensors(windows[0])[0]))
+        windows[2] = self.payloads(operations, 'window2', (1, ROWS, 5120))
+        with self.assertRaisesRegex(AssertionError, 'payloads on some inputs but not all'):
+            operations.transformer.gdn_decode_conv_gates(projected, windows, [], projected, projected, None, None,
+                                                         batch=ROWS)
 
 
 class WiringTests(PackedFixture):
