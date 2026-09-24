@@ -507,6 +507,39 @@ if [ -n "${M3NATIVE_FUSED_COMMIT:-}" ]; then
   fi
   echo "round-fence plan H1b: fused commit 1 in place ${M3NATIVE_FUSED_COMMIT_INPLACE:-0} live banks ${M3NATIVE_FUSED_COMMIT_LIVE_BANKS:-0} audit ${M3NATIVE_FUSED_COMMIT_AUDIT:-0}"
 fi
+# Round-fence plan H2 (early_draft.py; every flag default off). M3NATIVE_EARLY_DRAFT=1 becomes
+# QWEN_FAST_EARLY_DRAFT=1: the worker hook drafts the next round inside execute_model and hands vLLM the
+# cached drafts at take_draft_token_ids. M3NATIVE_GDN_AFTER_PAIRS=1 (QWEN_FAST_GDN_AFTER_PAIRS, needs the early
+# draft and M3NATIVE_ROUND_FENCES=1, whose owed fence the next replay pays) enqueues the packed block's GDN
+# commit traces after the next round's pairs have been read back. Both serve the packed block only, through the
+# packed proposal coordinator (M3NATIVE_PACKED_PROPOSAL=1, M3NATIVE_PIPELINED_PROPOSALS=1). Refused here,
+# before the docker run; unset, nothing is passed.
+for h2_flag in M3NATIVE_EARLY_DRAFT M3NATIVE_GDN_AFTER_PAIRS; do
+  h2_value="${!h2_flag:-}"
+  if [ -n "$h2_value" ] && [ "$h2_value" != "1" ]; then
+    echo "$h2_flag must be 1 or unset, got '$h2_value'" >&2
+    exit 1
+  fi
+done
+if [ -n "${M3NATIVE_GDN_AFTER_PAIRS:-}" ] && [ -z "${M3NATIVE_EARLY_DRAFT:-}" ]; then
+  echo "M3NATIVE_GDN_AFTER_PAIRS=1 without M3NATIVE_EARLY_DRAFT=1 defers nothing (nobody flushes inside the step): set both or neither" >&2
+  exit 1
+fi
+if [ -n "${M3NATIVE_GDN_AFTER_PAIRS:-}" ] && [ -z "${M3NATIVE_ROUND_FENCES:-}" ]; then
+  echo "M3NATIVE_GDN_AFTER_PAIRS=1 needs M3NATIVE_ROUND_FENCES=1 (the next replay pays the fence the deferred commits owe)" >&2
+  exit 1
+fi
+if [ -n "${M3NATIVE_EARLY_DRAFT:-}" ]; then
+  if [ "$users" -lt 2 ] || [ -n "${M3NATIVE_SEQUENTIAL_USERS:-}" ]; then
+    echo "M3NATIVE_EARLY_DRAFT serves the packed block only (users=$users, sequential '${M3NATIVE_SEQUENTIAL_USERS:-}')" >&2
+    exit 1
+  fi
+  if [ "${M3NATIVE_PACKED_PROPOSAL:-}" != "1" ] || [ "${M3NATIVE_PIPELINED_PROPOSALS:-}" != "1" ]; then
+    echo "M3NATIVE_EARLY_DRAFT=1 needs M3NATIVE_PACKED_PROPOSAL=1 and M3NATIVE_PIPELINED_PROPOSALS=1 (the coordinator's window is where the pairs are read back)" >&2
+    exit 1
+  fi
+  echo "round-fence plan H2: early draft 1 gdn after pairs ${M3NATIVE_GDN_AFTER_PAIRS:-0}"
+fi
 
 # Proposals: the fp2u lane runs each request's draft proposal EAGERLY
 # (QWEN_FAST_EAGER_PROPOSAL=1) because per-request proposal traces clobbered each
@@ -690,6 +723,8 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_FUSED_COMMIT_INPLACE:+-e QWEN_FAST_FUSED_COMMIT_INPLACE=1} \
   ${M3NATIVE_FUSED_COMMIT_LIVE_BANKS:+-e QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1} \
   ${M3NATIVE_FUSED_COMMIT_AUDIT:+-e QWEN_FAST_FUSED_COMMIT_AUDIT=1} \
+  ${M3NATIVE_EARLY_DRAFT:+-e QWEN_FAST_EARLY_DRAFT=1} \
+  ${M3NATIVE_GDN_AFTER_PAIRS:+-e QWEN_FAST_GDN_AFTER_PAIRS=1} \
   ${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1} \
   ${M3NATIVE_GDN_PREFILL_CONV:+-e QWEN_FAST_GDN_PREFILL_CONV=1} \
   ${M3NATIVE_GDN_PREFILL_CONV_AUDIT:+-e QWEN_FAST_GDN_PREFILL_CONV_AUDIT=$M3NATIVE_GDN_PREFILL_CONV_AUDIT} \

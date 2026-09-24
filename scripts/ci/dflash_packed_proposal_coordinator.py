@@ -370,7 +370,7 @@ class PackedProposalCoordinator:
             audit_log(RECAPTURE_LINE, slot=getattr(getattr(device, 'pool_slot', None), 'index', None))
         return True
 
-    def prepare(self, bridges, packed_round=None, while_waiting=None):
+    def prepare(self, bridges, packed_round=None, while_waiting=None, after_reads=None):
         """Phase A, packed variant: pair eligible bridges by fixed pool slot, run one
         traced pass per full packable pair, prepare_device() unchanged for anything
         left over (an unpaired bridge, a lone survivor of a broken pair, a pair not
@@ -394,7 +394,15 @@ class PackedProposalCoordinator:
         host work hides under their device time - and only when there is a fence to follow
         it. An Exception it raises is handed to its `drop` and never fails the round. Right
         after the fence its `fenced` is called (the fence has drained everything enqueued
-        before it)."""
+        before it).
+
+        `after_reads` (round-fence plan H2, early_draft.EarlyDraft.coordinator_options; passed only
+        under QWEN_FAST_GDN_AFTER_PAIRS): called once every device this round prepared has been read
+        back - inside select_round, after the pairs' collect and before the selection - so the packed
+        block's deferred GDN commit traces queue behind the pairs and their readback, not ahead of
+        them. Only when the batched pairs cover every prepared device (QWEN_FAST_ROUND_B1, no single
+        whose phase-B finish() still reads); otherwise it is not called here and the early draft
+        flushes at its end."""
         from dflash_packed_proposal import pair_slots
         from serving_worker_hook import phase, pipelined_device
 
@@ -540,7 +548,11 @@ class PackedProposalCoordinator:
             if while_waiting is not None:
                 note_fenced(while_waiting)
         if batched:
-            select_round(batched, prepared, round_number)
+            if after_reads is not None and reads_covered(batched, prepared):
+                # Round-fence plan H2: the deferred GDN commits go in after the pairs' readback.
+                select_round(batched, prepared, round_number, after_collect=after_reads)
+            else:
+                select_round(batched, prepared, round_number)
         if audit_enabled() and pair_labels:
             audit_log(AUDIT_LINE, round=round_number, pairs=pair_labels,
                       propose_ms=['%.1f' % value for value in pair_ms])
@@ -576,7 +588,14 @@ def _discard_round(prepared):
                 discard()
 
 
-def select_round(batched, prepared, round_number):
+def reads_covered(batched, prepared):
+    """Round-fence plan H2: whether the batched pairs' collect reads back every device this round
+    prepared - no single left whose phase-B finish() would read behind whatever is enqueued next."""
+    paired = {id(device) for _, trace in batched for device in (trace.device_a, trace.device_b)}
+    return all(id(device) in paired for device in prepared)
+
+
+def select_round(batched, prepared, round_number, after_collect=None):
     """QWEN_FAST_ROUND_B1 (C1): after the round's one fence, read every prepared pair back
     (PreparedPackedDFlashProposal.collect) and select all of their users in ONE FP64
     selector call (dflash_packed_proposal.select_packed_batched), where each pair's first
@@ -590,14 +609,21 @@ def select_round(batched, prepared, round_number):
 
     Under QWEN_FAST_ROUND_B1_AUDIT each pair is then read back and selected again through
     PreparedPackedDFlashProposal.audit_selection (select_device_outputs, the flag-off path)
-    and must give the tokens it adopted (dflash_packed_proposal.ROUND_B1_AUDIT_FLAG)."""
+    and must give the tokens it adopted (dflash_packed_proposal.ROUND_B1_AUDIT_FLAG).
+
+    `after_collect` (round-fence plan H2, the coordinator's after_reads): called right after every
+    pair's readback, before the selection - its time is in neither collect_ms nor select_ms. A failure
+    there fails the round like any other here."""
     from dflash_packed_proposal import note_round_b1, round_b1_audit_enabled, select_packed_batched
 
     audit = round_b1_audit_enabled()
     started = time.perf_counter()
     try:
         collected = [(labels, trace, trace.collect()) for labels, trace in batched]
-        collected_at = time.perf_counter()
+        collected_at = select_started = time.perf_counter()
+        if after_collect is not None:
+            after_collect()
+            select_started = time.perf_counter()
         groups = []
         for labels, trace, result in collected:
             device = trace.device_a
@@ -633,7 +659,7 @@ def select_round(batched, prepared, round_number):
         audit_log(SELECT_LINE, round=round_number, pairs=[labels for labels, _, _ in collected],
                   users=sum(len(result['parts']) for _, _, result in collected), calls=len(groups),
                   collect_ms='%.2f' % ((collected_at - started) * 1000),
-                  select_ms='%.2f' % ((finished - collected_at) * 1000))
+                  select_ms='%.2f' % ((finished - select_started) * 1000))
 
 
 def run_while_waiting(while_waiting):

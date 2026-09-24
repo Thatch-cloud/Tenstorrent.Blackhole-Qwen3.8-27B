@@ -74,6 +74,7 @@ jobs:
           python -B -m unittest test_padded_block
           python -B -m unittest test_verify_prestage test_round_fences
           python -B -m unittest test_fused_commit
+          python -B -m unittest test_early_draft
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
           python -B -m unittest test_qual_card

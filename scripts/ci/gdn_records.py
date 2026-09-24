@@ -261,6 +261,18 @@ class RetainedGDNBlock:
             return True
         return False
 
+    def note_deferred_publications(self):
+        """Round-fence plan H2 (QWEN_FAST_GDN_AFTER_PAIRS; packed_verifier.PackedVerifierEngine.
+        flush_commits): publications decided earlier this round were only now enqueued - after the
+        drafts' fence F9, which may already have armed the replay on the decisions' commit_serial. The
+        fence is owed again (the next replay pays it, fence_at_replay), and the serial moves so that no
+        token taken before this can arm it. Round fences only."""
+        if not self.round_fences:
+            raise ValueError('Deferred publications need the round fences')
+        self.commit_serial += 1
+        self.replay_ready = False
+        self.fence_owed = self.selected_prefix is not None
+
     def fence_at_replay(self):
         """Round fences, no F9 since the last decision: the owed fence, paid here, once."""
         if (self.fence_owed and not self.closed and not self.poisoned and self.selected_prefix is not None

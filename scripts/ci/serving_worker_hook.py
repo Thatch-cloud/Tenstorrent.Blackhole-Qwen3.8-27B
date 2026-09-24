@@ -126,6 +126,18 @@ def window_flags_on(environ=None):
             or environ.get('QWEN_FAST_FUSED_COMMIT') == '1')
 
 
+def early_draft_requested(environ=None):
+    """Round-fence plan H2 (early_draft.py): whether QWEN_FAST_EARLY_DRAFT is set to anything but 0 -
+    the module then validates the value (a bad one is a configuration error) and says whether it is on.
+    Unset, early_draft is never imported and the step is today's."""
+    environ = os.environ if environ is None else environ
+    if environ.get('QWEN_FAST_EARLY_DRAFT', '0') == '0':
+        return False
+    from early_draft import enabled
+
+    return enabled(environ)
+
+
 def note_fixture_writer(reason):
     """Round-fence plan H1a: device work that is not the packed block's own round - a prefill
     or Lever N prefill chunk, an admission, a detach, a bookkeeping step - may write what a
@@ -238,6 +250,12 @@ class FastWorkerHook:
     def _execute(self, runner, scheduled):
         if self.closed or runner is not self.runner or runner._pending_samples:
             raise ValueError('Fast worker ownership or sampler queue changed')
+        early = getattr(self, '_early_draft', None)
+        if early is not None:
+            # Round-fence plan H2 (early_draft.py, QWEN_FAST_EARLY_DRAFT): at every execute_model entry
+            # a cache vLLM never took is dropped, and no deferred GDN commit outlives the step that
+            # decided it (R1's backstop). A hook that never drafted early has no such attribute.
+            early.reconcile(self)
         # A step carrying new requests is a PREFILL step for someone else. This hook
         # owns one request's decode, and TTScheduler never mixes prefill and decode
         # in one batch (probe 35435453374), so such a step contains none of this
@@ -291,6 +309,17 @@ class FastWorkerHook:
             return self.bridge.execute_decode(scheduled, cancelled=self.cancelled)
         from serving_packed_bridge import execute_packed_decode
 
+        if self.packed_step is not None and early_draft_requested():
+            # Round-fence plan H2 (early_draft.py): the packed step, then - inside this same
+            # execute_model - the next round's drafts (this hook's own _drafts), cached for
+            # take_draft_token_ids; under QWEN_FAST_GDN_AFTER_PAIRS the block's GDN commit traces are
+            # enqueued after the pairs' readback. Unset, the call below is today's.
+            if early is None:
+                from early_draft import EarlyDraft
+
+                early = self._early_draft = EarlyDraft()
+            return early.execute(self, lambda: execute_packed_decode(
+                self.bridges, scheduled, cancelled=self.cancelled, packed_step=self.packed_step))
         return execute_packed_decode(self.bridges, scheduled, cancelled=self.cancelled,
                                      packed_step=self.packed_step)
 
@@ -375,6 +404,17 @@ class FastWorkerHook:
             raise ValueError('Live fast worker owner required')
         if len(self.bridges) == 1 and self.packed_step is None:
             return self.bridge.drafts()
+        early = getattr(self, '_early_draft', None)
+        if early is not None and not early.drafting:
+            # Round-fence plan H2 (early_draft.py): this round's drafts were drafted inside the step
+            # that just ran (by this very body); they are handed over when nothing they were drafted
+            # from has changed, else discarded and drafted again below. A kept draft failure is raised
+            # here, where today's would have been. A hook that never drafted early has no attribute.
+            from early_draft import MISSING
+
+            taken = early.take(self)
+            if taken is not MISSING:
+                return taken
         # Each bridge's own drafts(), not a direct read of the tickets: drafts() is
         # where a request PREPARES its ticket when none is pending. Reading the
         # tickets directly skipped that and every packed step was refused with
@@ -480,6 +520,10 @@ class FastWorkerHook:
                     while_waiting = make([bridge.request for bridge in bridges]) if callable(make) else None
                     if while_waiting is not None:
                         options['while_waiting'] = while_waiting
+                if early is not None and early.drafting:
+                    # Round-fence plan H2 (QWEN_FAST_GDN_AFTER_PAIRS): the early draft's flush of the
+                    # block's deferred GDN commits, run after the pairs' readback (after_reads).
+                    options.update(early.coordinator_options(self))
                 if os.environ.get('QWEN_FAST_PAIRS_PACKED_ONLY') == '1':
                     # Variable-user packed rounds, M0's fallback (dflash_packed_proposal_
                     # coordinator.PAIRS_PACKED_ONLY_FLAG): whether the policy serves this

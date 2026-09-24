@@ -345,6 +345,28 @@ class PackedStep:
 
         return WhileWaiting(block, requests)
 
+    def arm_deferred_commits(self):
+        """Round-fence plan H2 (early_draft.py, QWEN_FAST_GDN_AFTER_PAIRS): ask every block to defer its
+        coming round's GDN commit traces (packed_verifier.PackedVerifierEngine.arm_deferred_commits) -
+        asked only by early_draft.EarlyDraft.execute, which flushes them inside the same execute_model.
+        True when a block will defer; a block built without the flag never does."""
+        armed = False
+        for block in self.blocks:
+            arm = getattr(block, 'arm_deferred_commits', None)
+            if callable(arm) and arm():
+                armed = True
+        return armed
+
+    def flush_deferred_commits(self, site):
+        """Round-fence plan H2: enqueue every block's deferred GDN commit traces (flush_commits; a no-op
+        for a block holding none). Returns how many were enqueued."""
+        count = 0
+        for block in self.blocks:
+            flush = getattr(block, 'flush_commits', None)
+            if callable(flush):
+                count += flush(site) or 0
+        return count
+
 
 def ineligible(entries, block):
     """Why the block cannot serve this round as one pass, or None when it can."""

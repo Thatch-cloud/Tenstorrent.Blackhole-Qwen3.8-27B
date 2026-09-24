@@ -145,6 +145,79 @@ def packed_audit(log_text):
     return requests
 
 
+# The whole [PACKED] line (serving_packed_step.AUDIT_LINE), predictions included: the draft-sequence
+# comparison between two arms (packed_sequences, compare_packed).
+PACKED_LINE = re.compile(r'\[PACKED\] request=(\S+) segment=([0-9]+) position=([0-9]+) prefix=([0-9]+) '
+                         r'emitted=([0-9]+) predictions=(\[[^\]\n]*\])')
+
+
+def packed_sequences(log_text, streams):
+    """Each user's packed-round sequence - (position, prefix, emitted, predictions) per [PACKED] line, in
+    log order, with no request id and no segment - and the admission order (the user in each segment, by
+    the segment of the user's first line). A user is its stream's index (audit_owner); a request no stream
+    owns is listed under `unattributed`. Round-fence plan H2's draft check: two arms of one image with the
+    admission order fixed (M3NATIVE_STAGGER) must give every user the same sequence."""
+    users, segments, unattributed = {}, {}, []
+    for match in PACKED_LINE.finditer(log_text):
+        request_id, segment = match.group(1), int(match.group(2))
+        user = audit_owner(request_id, streams)
+        if user is None:
+            if request_id not in unattributed:
+                unattributed.append(request_id)
+            continue
+        users.setdefault(user, []).append((int(match.group(3)), int(match.group(4)), int(match.group(5)),
+                                           match.group(6)))
+        segments.setdefault(user, segment)
+    order = [None] * (max(segments.values()) + 1 if segments else 0)
+    for user, segment in segments.items():
+        order[segment] = user
+    return dict(users=users, admission_order=order, unattributed=unattributed)
+
+
+def packed_fingerprints(log_text, streams):
+    """packed_sequences, hashed: per user its round count and a sha256 of its sequence (12 hex), the
+    admission order, and the [PACKED] line count - small enough for the gate report, so two arms'
+    reports can be compared without their logs."""
+    import hashlib
+
+    found = packed_sequences(log_text, streams)
+    users = {str(user): dict(rounds=len(sequence), sha256=hashlib.sha256(
+        json.dumps(sequence).encode('utf-8')).hexdigest()[:12]) for user, sequence in sorted(found['users'].items())}
+    return dict(lines=len(PACKED_LINE.findall(log_text)), admission_order=found['admission_order'],
+                users=users, unattributed=len(found['unattributed']))
+
+
+def compare_packed(log_a, streams_a, log_b, streams_b):
+    """Two arms' packed-round sequences, user by user (packed_sequences): identical when the admission
+    orders match and every user's whole sequence does; otherwise each differing user's first differing
+    round (its index, and both arms' (position, prefix, emitted, predictions) there - None past a
+    sequence's end). Sequences from different admission orders are not comparable line by line (the pair
+    drafter drafts a user in row 1 differently from row 0): `comparable` says so."""
+    a, b = packed_sequences(log_a, streams_a), packed_sequences(log_b, streams_b)
+    users = []
+    for user in sorted(set(a['users']) | set(b['users'])):
+        left, right = a['users'].get(user, []), b['users'].get(user, [])
+        entry = dict(user=user, rounds_a=len(left), rounds_b=len(right), identical=left == right)
+        if left != right:
+            index = next((i for i, (x, y) in enumerate(zip(left, right)) if x != y), min(len(left), len(right)))
+            entry['first_difference'] = dict(round=index, a=left[index] if index < len(left) else None,
+                                             b=right[index] if index < len(right) else None)
+        users.append(entry)
+    comparable = a['admission_order'] == b['admission_order']
+    return dict(identical=bool(users) and comparable and all(entry['identical'] for entry in users),
+                comparable=comparable, admission_order_a=a['admission_order'], admission_order_b=b['admission_order'],
+                lines_a=sum(len(s) for s in a['users'].values()), lines_b=sum(len(s) for s in b['users'].values()),
+                unattributed_a=len(a['unattributed']), unattributed_b=len(b['unattributed']), users=users)
+
+
+def compare_line(result):
+    """One '[PACKED-COMPARE] ...' line for compare_packed's result."""
+    differing = [entry['user'] for entry in result['users'] if not entry['identical']]
+    return ('[PACKED-COMPARE] identical=%s comparable=%s order_a=%s order_b=%s lines=%d/%d differing_users=%s'
+            % (result['identical'], result['comparable'], result['admission_order_a'], result['admission_order_b'],
+               result['lines_a'], result['lines_b'], differing or '-'))
+
+
 def recover_drafts(mean_text, accepted, drafted, rate_texts, positions=POSITIONS):
     """(drafts, how) for one vLLM interval, from the figures as printed.
 
@@ -830,6 +903,15 @@ def rate_line(rates):
                 _fmt(rates.get('aggregate_tok_s'), '%.1f'), _fmt(rates.get('decode_wall_s'), '%.2f')))
 
 
+def read_gate_report(path):
+    """A gate report: m3native-gate.json, or the gate's stdout with the JSON between BEGIN and END."""
+    text = path.read_text(encoding='utf-8', errors='replace')
+    begin, end = '<<<M3NATIVE_GATE_JSON_BEGIN>>>', '<<<M3NATIVE_GATE_JSON_END>>>'
+    if begin in text and end in text:
+        text = text[text.rindex(begin) + len(begin):text.index(end, text.rindex(begin))]
+    return json.loads(text)
+
+
 def main(argv=None):
     """Offline: the acceptance report and rates of any gate run from its artifacts.
 
@@ -837,7 +919,16 @@ def main(argv=None):
 
     The gate report (m3native-gate.json, or its stdout: the JSON between BEGIN and END) supplies
     the streams and, for a real-text run, the prompt lengths; --sequential defaults to the
-    report's sequential_users."""
+    report's sequential_users.
+
+    Two arms' draft sequences (round-fence plan H2: a B arm against a same-image A arm, admission
+    order fixed by M3NATIVE_STAGGER), user by user over their [PACKED] lines:
+
+        py -3.11 scripts/ci/acceptance_report.py B/server.log B/m3native-gate.json \\
+            --packed-reference A/server.log A/m3native-gate.json
+
+    prints '[PACKED-COMPARE] identical=True ...' when every user's (position, prefix, emitted,
+    predictions) sequence and the admission order match (compare_packed), and exits 3 when not."""
     import argparse
     from pathlib import Path
     parser = argparse.ArgumentParser(description=main.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -845,25 +936,31 @@ def main(argv=None):
     parser.add_argument('gate_report', type=Path, nargs='?')
     parser.add_argument('--sequential', action='store_true', default=None)
     parser.add_argument('--json', type=Path, help='also write {acceptance, decode_rate} here')
+    parser.add_argument('--packed-reference', type=Path, nargs=2, metavar=('SERVER_LOG', 'GATE_REPORT'),
+                        help="a reference arm's server.log and gate report: compare the two arms' [PACKED] "
+                             "sequences user by user (compare_packed)")
     options = parser.parse_args(argv)
-    gate = {}
-    if options.gate_report:
-        text = options.gate_report.read_text(encoding='utf-8', errors='replace')
-        begin, end = '<<<M3NATIVE_GATE_JSON_BEGIN>>>', '<<<M3NATIVE_GATE_JSON_END>>>'
-        if begin in text and end in text:
-            text = text[text.rindex(begin) + len(begin):text.index(end, text.rindex(begin))]
-        gate = json.loads(text)
+    gate = read_gate_report(options.gate_report) if options.gate_report else {}
     sequential = options.sequential if options.sequential is not None else bool(gate.get('sequential_users'))
     streams = gate.get('streams') or []
     lengths = [u['prompt_tokens'] for u in (gate.get('real_text') or {}).get('users') or []] or None
-    accepted = report(options.server_log.read_text(encoding='utf-8', errors='replace'), streams, lengths,
-                      sequential=sequential)
+    log_text = options.server_log.read_text(encoding='utf-8', errors='replace')
+    accepted = report(log_text, streams, lengths, sequential=sequential)
     rates = decode_rates(streams, concurrent=not sequential, acceptance=accepted)
     print(accepted['summary_line'])
     print(rate_line(rates))
+    compared = None
+    if options.packed_reference:
+        reference_log, reference_report = options.packed_reference
+        compared = compare_packed(reference_log.read_text(encoding='utf-8', errors='replace'),
+                                  read_gate_report(reference_report).get('streams') or [], log_text, streams)
+        print(compare_line(compared))
     if options.json:
-        options.json.write_text(json.dumps(dict(acceptance=accepted, decode_rate=rates), indent=2), encoding='utf-8')
-    return 0
+        payload = dict(acceptance=accepted, decode_rate=rates)
+        if compared is not None:
+            payload['packed_compare'] = compared
+        options.json.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+    return 3 if compared is not None and not compared['identical'] else 0
 
 
 if __name__ == '__main__':

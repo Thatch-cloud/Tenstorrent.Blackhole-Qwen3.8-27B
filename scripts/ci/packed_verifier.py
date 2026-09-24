@@ -117,6 +117,15 @@ traces are captured after the GDN commit traces, separate from them. serving_pac
 commit_entry installs the publication overrides (fused_commit.install_fused_commit) around each
 user's commit; the verify, the readback and the GDN commits here are unchanged. Without the flag
 `fused` is None, nothing is allocated or captured, and every path is today's.
+
+ROUND-FENCE PLAN H2 (early_draft.py; QWEN_FAST_GDN_AFTER_PAIRS under QWEN_FAST_EARLY_DRAFT, default
+off; refused without QWEN_FAST_ROUND_FENCES). A round the early draft armed (arm_deferred_commits)
+decides every commit as today but execute_commit only records its (segment, prefix): flush_commits
+enqueues the GDN commit traces, in decision order and today's blocking mode, once the next round's
+pairs have been read back (or at the end of the early draft), inside the same execute_model, and
+re-owes the retained block's fence (gdn_records.RetainedGDNBlock.note_deferred_publications) so the
+next replay pays it. verify() flushes anything still held first (site=verify, R1 broken, logged).
+Without the flags nothing is armed and every path is today's.
 """
 
 from contextlib import ExitStack
@@ -421,6 +430,12 @@ def fused_commit_requested(environ=None):
     return (os.environ if environ is None else environ).get('QWEN_FAST_FUSED_COMMIT') == '1'
 
 
+def gdn_after_pairs_requested(environ=None):
+    """Round-fence plan H2: QWEN_FAST_GDN_AFTER_PAIRS is set to anything but 0 (early_draft validates
+    the value and its parent flag; this only decides whether to import it)."""
+    return (os.environ if environ is None else environ).get('QWEN_FAST_GDN_AFTER_PAIRS', '0') != '0'
+
+
 def page_zero_index(table, start, rows):
     """The first index inside [0, (start + rows + 63) // 64) at which this (1, page_width) page
     table holds physical page 0, or None: every page a user at `start` reads or writes in a
@@ -587,6 +602,21 @@ class PackedVerifierEngine:
         # predate the verify capture (R2) - and captured after the GDN commit traces. None without
         # the flag or when fused_commit refused it; every path below is then today's.
         self.fused = None
+        # Round-fence plan H2 (early_draft.py; QWEN_FAST_GDN_AFTER_PAIRS under QWEN_FAST_EARLY_DRAFT, default
+        # off): read once here, like the flags above. The block defers a round's GDN commit traces only
+        # when the early draft arms it (arm_deferred_commits) and only on the fence diet, whose owed fence
+        # the next replay pays; without QWEN_FAST_ROUND_FENCES it is refused (logged at the end of attach).
+        self.gdn_after_pairs, self.gdn_after_pairs_refusal = False, None
+        self.defer_armed = self.deferring = False
+        self.deferred_commits = []
+        if gdn_after_pairs_requested():
+            import early_draft
+
+            if early_draft.gdn_after_pairs_enabled():
+                if self.round_fences:
+                    self.gdn_after_pairs = True
+                else:
+                    self.gdn_after_pairs_refusal = 'round-fences-off'
         self.commit_timings = [0.0] * shape.users
         # This round's per-segment HOST cost of the RetainedGDNBlock.commit_user call
         # itself (gdn_records.py), beyond its device commit trace: call_ms - commit_ms,
@@ -705,6 +735,15 @@ class PackedVerifierEngine:
                                                      int(self.prestaged.audit)))
             if self.fused is not None:
                 diagnostic(self.fused.engaged_line())
+            if self.gdn_after_pairs or self.gdn_after_pairs_refusal is not None:
+                import early_draft
+
+                if self.gdn_after_pairs:
+                    diagnostic('%s users=%d pipelined=%d' % (early_draft.GDN_ENGAGED_MARKER, self.users,
+                                                             int(self.pipelined_commits)))
+                else:
+                    diagnostic('%s users=%d reason=%s' % (early_draft.GDN_REFUSED_MARKER, self.users,
+                                                          self.gdn_after_pairs_refusal))
         except BaseException as failure:
             self.phase = 'failed'
             # Logged BEFORE close: run 35505708710 (image v50) raised on the host inside the
@@ -972,6 +1011,11 @@ class PackedVerifierEngine:
         """One trace for every entry. Returns (predictions, metrics): predictions[i] is
         entries[i]'s rows_per_user target ids; metrics['segments'][i] is entries[i]'s segment."""
         entries = list(entries)
+        if getattr(self, 'deferred_commits', None):
+            # Round-fence plan H2's backstop: GDN commits deferred by the last round and never flushed
+            # inside its execute_model (R1 broken) go ahead of this round's trace - logged, so the gate
+            # fails the arm - rather than being lost.
+            self.flush_commits('verify')
         if self.phase != 'idle':
             raise ValueError('An idle packed block is required: every segment of the last round must be committed')
         segments = self.segments(entries)
@@ -1072,6 +1116,10 @@ class PackedVerifierEngine:
             self.commit_block_ms = [0.0] * self.users
             self.rounds += 1
             self.phase = 'verified'
+            if getattr(self, 'gdn_after_pairs', False):
+                # Round-fence plan H2: this round's GDN commit traces are deferred when the early draft
+                # armed the block for it (it flushes them inside this execute_model); else today's.
+                self.deferring, self.defer_armed, self.deferred_commits = self.defer_armed, False, []
             for segment in idle:
                 # A padded round's idle segment decides at prefix 0: no commit trace exists for
                 # 0 and the retained block publishes nothing at it - no state, no carry, no K/V -
@@ -1154,10 +1202,65 @@ class PackedVerifierEngine:
         return value, says which of the two the number means)."""
         if not prefix:
             return None
+        if getattr(self, 'deferring', False):
+            # Round-fence plan H2 (QWEN_FAST_GDN_AFTER_PAIRS): decided now, enqueued by flush_commits
+            # after the next round's pairs have been read back.
+            self.deferred_commits.append((segment, prefix))
+            return 0.0
         blocking = not self.pipelined_commits
         started = time.perf_counter()
         self.operations.execute_trace(self.mesh, self.commits[segment][prefix], cq_id=0, blocking=blocking)
         return (time.perf_counter() - started) * 1000
+
+    def arm_deferred_commits(self):
+        """Round-fence plan H2 (early_draft.EarlyDraft.execute, through serving_packed_step.PackedStep):
+        defer the coming round's GDN commit traces - its caller flushes them inside the same
+        execute_model. True when armed; False, and nothing armed, without QWEN_FAST_GDN_AFTER_PAIRS."""
+        if not getattr(self, 'gdn_after_pairs', False):
+            return False
+        self.defer_armed = True
+        return True
+
+    def flush_commits(self, site='end'):
+        """Round-fence plan H2: enqueue the round's deferred GDN commit traces, in decision order and
+        today's blocking mode (QWEN_FAST_PIPELINED_COMMITS: enqueued), then re-owe the retained block's
+        fence (gdn_records.RetainedGDNBlock.note_deferred_publications) so the next replay pays it. Also
+        disarms a round that never verified. `site` says where: 'window' (after the pairs' readback),
+        'end' (the end of the early draft), 'reconcile' or 'verify' (R1's backstops). A block that
+        failed or closed drops what it held (logged): its requests fail with it. Returns how many
+        traces were enqueued."""
+        self.defer_armed = False
+        pending = list(getattr(self, 'deferred_commits', None) or ())
+        self.deferring, self.deferred_commits = False, []
+        if not pending:
+            return 0
+        import early_draft
+
+        fixture = self.fixture
+        retained = getattr(fixture, 'retained', None) if fixture is not None else None
+        segments = ','.join('%d:%d' % pair for pair in pending)
+        if (self.phase in ('failed', 'closed') or retained is None or getattr(retained, 'poisoned', False)
+                or getattr(retained, 'closed', False)):
+            diagnostic('%s round=%d commits=0 site=%s enqueue_ms=0.00 segments=%s dropped=%d reason=block-%s'
+                       % (early_draft.GDN_MARKER, self.rounds, site, segments, len(pending), self.phase))
+            return 0
+        blocking = not self.pipelined_commits
+        started = time.perf_counter()
+        try:
+            for segment, prefix in pending:
+                self.operations.execute_trace(self.mesh, self.commits[segment][prefix], cq_id=0, blocking=blocking)
+        except BaseException:
+            # A half-enqueued round of carries cannot be replayed over (gdn_records' own rule).
+            retained.poisoned = True
+            self.phase = 'failed'
+            raise
+        finally:
+            note_packed_step()
+        retained.note_deferred_publications()
+        diagnostic('%s round=%d commits=%d site=%s enqueue_ms=%.2f segments=%s' % (
+            early_draft.GDN_MARKER, self.rounds, len(pending), site, (time.perf_counter() - started) * 1000,
+            segments))
+        return len(pending)
 
     def commit_user(self, segment, prefix):
         """Commit one user's decision: its own prefix trace writes the accepted state into
@@ -1219,8 +1322,10 @@ class PackedVerifierEngine:
                     # drains the whole round's four enqueued traces; near zero when blocking,
                     # since the trace replay above already drained the queue.
                     sync_ms = self.commit_block_ms[segment]
+                    # mode=deferred: round-fence plan H2 held this round's traces for flush_commits.
                     diagnostic('[PACKED-COMMIT] round=%d mode=%s commit_ms=[%s] sync_ms=%.2f'
-                               % (self.rounds, 'pipelined' if self.pipelined_commits else 'blocking',
+                               % (self.rounds, 'deferred' if getattr(self, 'deferring', False)
+                                  else 'pipelined' if self.pipelined_commits else 'blocking',
                                   ','.join('%.2f' % value for value in self.commit_timings), sync_ms))
         except BaseException:
             self.phase = 'failed'
@@ -1262,7 +1367,8 @@ class PackedVerifierEngine:
                 carries_in_place=self.carries_in_place, rounds=self.padded_rounds))),
             **({} if self.prestaged is None else dict(prestage=dict(self.prestaged.counts, audit=self.prestaged.audit))),
             **({} if not self.round_fences else dict(round_fences=True)),
-            **({} if self.fused is None else dict(fused_commit=self.fused.describe())))
+            **({} if self.fused is None else dict(fused_commit=self.fused.describe())),
+            **({} if not getattr(self, 'gdn_after_pairs', False) else dict(gdn_after_pairs=True)))
 
     def close(self, *, wait=True):
         """Release the block. `wait=False` is the failed construction: the device may still be

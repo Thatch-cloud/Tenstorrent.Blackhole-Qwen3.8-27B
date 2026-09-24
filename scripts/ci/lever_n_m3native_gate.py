@@ -745,8 +745,11 @@ def h1a_report(environ, log_text):
         first = next(match.group(0) for match in PRESTAGE_AUDIT_LINE.finditer(log_text) if match.group(5) != '0')
         problems.append('%s: no mismatch (%d; first: %s)' % (PRESTAGE_AUDIT_FLAG, summary['audit_mismatches'],
                                                              first[:200]))
+    # Round-fence plan H2 (QWEN_FAST_GDN_AFTER_PAIRS): the GDN commits are enqueued after the drafts' fence,
+    # so every replay pays the owed fence itself (fence=replay) - no f9 is expected.
     if (on(ROUND_FENCES_FLAG) and on('QWEN_FAST_PACKED_AUDIT') and on('QWEN_FAST_PACKED_PROPOSAL')
-            and on('QWEN_FAST_PIPELINED_PROPOSALS') and summary['fences'] and not summary['fence_kinds'].get('f9')):
+            and on('QWEN_FAST_PIPELINED_PROPOSALS') and not on(GDN_AFTER_PAIRS_FLAG)
+            and summary['fences'] and not summary['fence_kinds'].get('f9')):
         problems.append('%s: no replay armed by the drafts\' fence (fence kinds %s)' % (
             ROUND_FENCES_FLAG, summary['fence_kinds']))
     summary['problems'] = problems
@@ -885,6 +888,118 @@ def h1b_report(environ, log_text):
     return summary
 
 
+# Round-fence plan H2 (early_draft.py; QWEN_FAST_EARLY_DRAFT, QWEN_FAST_GDN_AFTER_PAIRS; both default off):
+#   QWEN_FAST_EARLY_DRAFT       '[PINDIAG] early draft engaged gdn_after_pairs=G' once, and per round the
+#       drafts were drafted inside the step '[PACKED-EARLY-DRAFT] round=R path=reuse|redo|failed|untaken
+#       live=K draft_ms=X reason=Y' (reuse: take_draft_token_ids handed vLLM the cached drafts; redo: something
+#       they were drafted from changed and they were drafted again, reason names it; failed: the draft raised
+#       and take_draft_token_ids re-raised it; untaken: vLLM never asked). Required: no failed or untaken line
+#       and - over at least EARLY_FLOOR_ROUNDS four-live rounds - reuse in EARLY_REUSE_FLOOR of them (the plan's
+#       H2 bar).
+#   QWEN_FAST_GDN_AFTER_PAIRS   '[PINDIAG] gdn after pairs engaged users=U pipelined=P' at attach (or '...
+#       refused reason=': a problem), and per round whose commits were deferred '[PACKED-GDN-AFTER-PAIRS]
+#       round=R commits=N site=S enqueue_ms=X segments=...' - every site inside the step that decided them
+#       (window: after the pairs' readback; end: the end of the early draft); reconcile or verify is R1
+#       broken, and dropped= a block that failed with commits held. Under QWEN_FAST_ROUND_B1 at least one
+#       flush must come after the pairs' readback (site=window). Without QWEN_FAST_EARLY_DRAFT: does nothing.
+EARLY_DRAFT_FLAG = 'QWEN_FAST_EARLY_DRAFT'
+GDN_AFTER_PAIRS_FLAG = 'QWEN_FAST_GDN_AFTER_PAIRS'
+EARLY_ENGAGED_MARKER = '[PINDIAG] early draft engaged'
+EARLY_MARKER = '[PACKED-EARLY-DRAFT] round='
+GDN_ENGAGED_MARKER = '[PINDIAG] gdn after pairs engaged'
+GDN_REFUSED_MARKER = '[PINDIAG] gdn after pairs refused'
+GDN_MARKER = '[PACKED-GDN-AFTER-PAIRS] round='
+EARLY_LINE = re.compile(r'\[PACKED-EARLY-DRAFT\] round=([0-9]+) path=(reuse|redo|failed|untaken) live=([0-9]+) '
+                        r'draft_ms=([0-9.]+) reason=(\S+)')
+GDN_LINE = re.compile(r'\[PACKED-GDN-AFTER-PAIRS\] round=([0-9]+) commits=([0-9]+) site=(\S+) enqueue_ms=([0-9.]+) '
+                      r'segments=(\S+)(?: dropped=([0-9]+) reason=(\S+))?')
+GDN_IN_STEP_SITES = ('window', 'end')
+EARLY_REUSE_FLOOR = 0.95
+EARLY_FLOOR_ROUNDS = 10
+
+
+def h2_markers(environ):
+    """{flag: [marker]} for the round-fence plan H2 flags set in `environ`."""
+    on = lambda name: environ.get(name) == '1'
+    required = {}
+    if on(EARLY_DRAFT_FLAG):
+        required[EARLY_DRAFT_FLAG] = [EARLY_ENGAGED_MARKER, EARLY_MARKER]
+        if on(GDN_AFTER_PAIRS_FLAG):
+            required[GDN_AFTER_PAIRS_FLAG] = [GDN_ENGAGED_MARKER, GDN_MARKER]
+    return required
+
+
+def h2_summary(log_text):
+    """What the H2 lines say: the early drafts by path (all and four-live), the redo reasons, the drafting
+    time, and the deferred GDN commits by flush site."""
+    drafts = [match.groups() for match in EARLY_LINE.finditer(log_text)]
+    flushes = [match.groups() for match in GDN_LINE.finditer(log_text)]
+    paths, reasons, sites = {}, {}, {}
+    for round_number, path, live, draft_ms, reason in drafts:
+        paths[path] = paths.get(path, 0) + 1
+        if path in ('redo', 'failed', 'untaken'):
+            key = '%s:%s' % (path, reason[:48])
+            reasons[key] = reasons.get(key, 0) + 1
+    for line in flushes:
+        sites[line[2]] = sites.get(line[2], 0) + 1
+    four = [line for line in drafts if line[2] == '4' and line[1] in ('reuse', 'redo')]
+    reuse_ms = sorted(float(line[3]) for line in drafts if line[1] == 'reuse' and line[2] == '4')
+    return dict(
+        drafts=len(drafts), paths=paths, reasons=reasons, four_live=len(four),
+        four_live_reuse=sum(1 for line in four if line[1] == 'reuse'),
+        reuse_share_four_live=(round(sum(1 for line in four if line[1] == 'reuse') / len(four), 4) if four else None),
+        draft_ms_median_four_live=reuse_ms[len(reuse_ms) // 2] if reuse_ms else None,
+        engaged=EARLY_ENGAGED_MARKER in log_text,
+        gdn_engaged=GDN_ENGAGED_MARKER in log_text, gdn_refused=GDN_REFUSED_MARKER in log_text,
+        flushes=len(flushes), flushed_commits=sum(int(line[1]) for line in flushes), flush_sites=sites,
+        dropped=sum(int(line[5]) for line in flushes if line[5]),
+        late=sum(count for site, count in sites.items() if site not in GDN_IN_STEP_SITES))
+
+
+def h2_report(environ, log_text):
+    """Under any H2 flag the summary and its problems (under 'problems'), else None."""
+    on = lambda name: environ.get(name) == '1'
+    if not (on(EARLY_DRAFT_FLAG) or on(GDN_AFTER_PAIRS_FLAG)):
+        return None
+    summary = h2_summary(log_text)
+    problems = []
+    if on(GDN_AFTER_PAIRS_FLAG) and not on(EARLY_DRAFT_FLAG):
+        problems.append('%s=1 without %s=1 does nothing (nobody flushes inside the step)'
+                        % (GDN_AFTER_PAIRS_FLAG, EARLY_DRAFT_FLAG))
+    if on(EARLY_DRAFT_FLAG):
+        if summary['paths'].get('failed'):
+            first = next(match.group(0) for match in EARLY_LINE.finditer(log_text) if match.group(2) == 'failed')
+            problems.append('%s: %d early draft(s) raised (%s)' % (EARLY_DRAFT_FLAG, summary['paths']['failed'],
+                                                                   first[:160]))
+        if summary['paths'].get('untaken'):
+            # vLLM calls take_draft_token_ids after every step that ran the model, so a cache still held at the
+            # next execute_model means the scheduler never saw drafts whose tickets are pending: never expected.
+            first = next(match.group(0) for match in EARLY_LINE.finditer(log_text) if match.group(2) == 'untaken')
+            problems.append('%s: %d early draft(s) never taken by vLLM (%s)' % (
+                EARLY_DRAFT_FLAG, summary['paths']['untaken'], first[:160]))
+        if summary['four_live'] >= EARLY_FLOOR_ROUNDS and summary['reuse_share_four_live'] < EARLY_REUSE_FLOOR:
+            problems.append('%s: early drafts reused in %d of %d four-live rounds (%.2f), under %.2f (reasons %s)' % (
+                EARLY_DRAFT_FLAG, summary['four_live_reuse'], summary['four_live'],
+                summary['reuse_share_four_live'], EARLY_REUSE_FLOOR, summary['reasons']))
+        if on(GDN_AFTER_PAIRS_FLAG):
+            if summary['gdn_refused']:
+                first = next(line for line in log_text.splitlines() if GDN_REFUSED_MARKER in line)
+                problems.append('%s: the block refused it (%s)' % (GDN_AFTER_PAIRS_FLAG, first[-160:]))
+            if summary['late']:
+                first = next(match.group(0) for match in GDN_LINE.finditer(log_text)
+                             if match.group(3) not in GDN_IN_STEP_SITES)
+                problems.append('%s: %d flush(es) outside the step that decided them (R1; first: %s)' % (
+                    GDN_AFTER_PAIRS_FLAG, summary['late'], first[:160]))
+            if summary['dropped']:
+                problems.append('%s: %d deferred commit(s) dropped by a failed block' % (
+                    GDN_AFTER_PAIRS_FLAG, summary['dropped']))
+            if on('QWEN_FAST_ROUND_B1') and summary['flushes'] and not summary['flush_sites'].get('window'):
+                problems.append("%s: no flush after the pairs' readback (sites %s)" % (
+                    GDN_AFTER_PAIRS_FLAG, summary['flush_sites']))
+    summary['problems'] = problems
+    return summary
+
+
 def required_flag_markers(environ, users, prompt_tokens=None):
     """The markers the flags in `environ` promise, as {flag: [marker, ...]}. prompt_tokens (each user's
     prompt; None: unknown) decides whether QWEN_FAST_SDPA_PF's 2048-row topology is promised."""
@@ -911,6 +1026,7 @@ def required_flag_markers(environ, users, prompt_tokens=None):
     required.update(variable_user_markers(environ, users))
     required.update(h1a_markers(environ))
     required.update(h1b_markers(environ))
+    required.update(h2_markers(environ))
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
@@ -1001,6 +1117,11 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
     if h1b is not None:
         missing.extend(h1b.pop('problems'))
         variable_user['round_fence_h1b'] = h1b
+    # Round-fence plan H2: under 'round_fence_h2' only when one of its flags is set.
+    h2 = h2_report(environ, log_text)
+    if h2 is not None:
+        missing.extend(h2.pop('problems'))
+        variable_user['round_fence_h2'] = h2
     residual = LEDGER_RESIDUAL.search(log_text)
     return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
                 prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary, verify_t1_sites=verify_t1_sites,
@@ -1598,6 +1719,15 @@ def add_run_diagnostics(report, log_path, sequential):
     except Exception as error:
         report['decode_rate'] = dict(error='%s: %s' % (type(error).__name__, error))
         print('[RATE] unavailable: %s' % report['decode_rate']['error'], flush=True)
+    try:
+        # Round-fence plan H2's draft check, offline: each user's [PACKED] sequence hashed, with the admission
+        # order - two arms of one image with the order fixed (M3NATIVE_STAGGER) compare report to report, and
+        # acceptance_report.py --packed-reference compares their logs round by round.
+        from acceptance_report import packed_fingerprints
+        log_text = log_path.read_text(errors='replace') if log_path.is_file() else ''
+        report['packed_fingerprints'] = _round_trip(packed_fingerprints(log_text, streams))
+    except Exception as error:
+        report['packed_fingerprints'] = dict(error='%s: %s' % (type(error).__name__, error))
 
 
 def main():

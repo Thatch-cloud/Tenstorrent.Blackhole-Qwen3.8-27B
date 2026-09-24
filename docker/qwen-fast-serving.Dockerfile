@@ -83,6 +83,9 @@ COPY scripts/ci/verify_prestage.py /experiment-scripts/ci/
 # packed_verifier, serving_packed_step and dflash_proposal_trace import fused_commit when a flag is set,
 # so it must reach the image beside them. It drives the bundle's own slide kernel (the served driver's .cpp).
 COPY scripts/ci/fused_commit.py /experiment-scripts/ci/
+# Round-fence plan H2 (QWEN_FAST_EARLY_DRAFT, QWEN_FAST_GDN_AFTER_PAIRS; both default off): serving_worker_hook
+# and packed_verifier import early_draft when a flag is set, so it must reach the image beside them.
+COPY scripts/ci/early_draft.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \
