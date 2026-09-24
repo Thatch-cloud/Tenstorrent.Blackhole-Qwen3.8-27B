@@ -103,6 +103,7 @@ import verifier_engine
 from verifier_inputs import host_inputs, validate_tokens
 from verifier_pack import GDN_LAYERS, build_pack, participant
 import verify_trace_t1
+import verify_trace_t2
 
 FEATURE_WIDTH = 5120
 
@@ -199,6 +200,21 @@ def stage_packed(operations, model, fixture, shape, users):
         raise ValueError('The cache tiles must cover the block in 32-row tiles')
     tokens, positions, cos, sin, pages = packed_host_inputs(users, shape, model.args.rope_head_dim,
                                                             model.args.rope_theta, model.args.vocab_size)
+    if getattr(fixture, 'kv_chains', False):
+        # QWEN_FAST_VERIFY_T2 (#2): the chained K/V write is exact only while no two users write
+        # one (page, tile row). serving_packed_step.proposal_rows drafts such a round for the
+        # sequential step and ineligible refuses one first seen at the step, so neither reaches
+        # here; this is the fail-closed backstop, before any copy.
+        guard = verify_trace_t2.block_users(positions, pages, shape.rows_per_user, shape.users)
+        conflict = verify_trace_t2.kv_conflict(guard)
+        if conflict is not None:
+            verify_trace_t2.log_line('%s site=stage_packed %s' % (verify_trace_t2.KV_SHARED,
+                                                                  verify_trace_t2.kv_conflict_reason(conflict)))
+            raise ValueError('The chained K/V write needs disjoint cache tile rows: %s'
+                             % verify_trace_t2.kv_conflict_reason(conflict))
+        if verify_trace_t2.audit_enabled():
+            verify_trace_t2.log_line('%s kv_rows_per_user=%s' % (verify_trace_t2.AUDIT_MARKER, ','.join(
+                str(len(verify_trace_t2.kv_tile_rows(user_positions, table))) for user_positions, table in guard)))
     values = [(fixture.tokens, tokens, operations.uint32, operations.ROW_MAJOR_LAYOUT),
               (fixture.positions, positions, operations.int32, operations.ROW_MAJOR_LAYOUT),
               (fixture.cos, cos, operations.bfloat16, operations.TILE_LAYOUT),
@@ -397,6 +413,14 @@ class PackedVerifierEngine:
         self.shard_problem = verify_trace_t1.shard_sampling_problem(sampler) if shard_cut else None
         self.shard_argmax = shard_cut and self.shard_problem is None
         self.shard_audit = self.shard_argmax and verify_trace_t1.audit_enabled()
+        # QWEN_FAST_VERIFY_T2 (verify_trace_t2): read once here too. #2 (kv_chains) makes the
+        # warm fixture's K/V write one chain (build_fixture); the fixture decides the writer
+        # (model_batch) and this block reads what it became (kv_chains, warm_kv_chains). The
+        # windows audit runs only if the capture engaged #1.
+        self.verify_t2 = verify_trace_t2.enabled()
+        self.kv_chains_cut = verify_trace_t2.cut('kv_chains')
+        self.warm_kv_chains = False
+        self.windows_audit = False
         self.commit_timings = [0.0] * shape.users
         # This round's per-segment HOST cost of the RetainedGDNBlock.commit_user call
         # itself (gdn_records.py), beyond its device commit trace: call_ms - commit_ms,
@@ -433,7 +457,14 @@ class PackedVerifierEngine:
                                             pages=torch.zeros((1, shape.page_width), dtype=torch.int32))
                             for user in range(shape.users)]
             self.stage = 'warm forward'
-            warm = self.build_fixture(placeholders)
+            # QWEN_FAST_VERIFY_T2 (#2): the placeholders put every user on page 0's first tile
+            # row, which per-user chains would write concurrently; the warm forward - the one
+            # eager forward with placeholders - writes K/V as ONE chain over all rows instead:
+            # the same kernels and compile args (so the capture's per-user chains are the same
+            # programs), the served row order and the served page-0 bytes. The capture is
+            # recorded, never run, with placeholders.
+            warm = self.build_fixture(placeholders, warm=True)
+            self.warm_kv_chains = self.kv_chains_cut and bool(getattr(warm, 'kv_chains', False))
             result = None
             try:
                 result = self.operation(warm)
@@ -447,9 +478,13 @@ class PackedVerifierEngine:
             self.fixture = self.build_fixture(placeholders)
             if self.verify_t1:
                 verify_trace_t1.take()  # count only what the captured forward engages
+            if self.verify_t2:
+                verify_trace_t2.take()
             self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
             if self.verify_t1:
                 self.note_verify_t1(verify_trace_t1.take())
+            if self.verify_t2:
+                self.note_verify_t2(verify_trace_t2.take())
             retained = self.fixture.retained
             if len(retained.records) != GDN_LAYERS:
                 raise ValueError('The captured packed block must retain every GDN layer')
@@ -500,7 +535,7 @@ class PackedVerifierEngine:
         except BaseException:
             pass
 
-    def build_fixture(self, placeholders):
+    def build_fixture(self, placeholders, warm=False):
         """The packed ModelBatch: retained records for the per-user commits; commit-only GDN,
         which packed is the DEFERRED decode (gdn_device_loop_state: one block-start entry per
         user, nothing restored or advanced at decode, every decision made by commit_user
@@ -518,7 +553,8 @@ class PackedVerifierEngine:
             batch_conv=True, packed_checkpoints=True, retain_records=True, ordered_cache=True,
             norm_batch=True, attention_replay=True, attention_mask_once=self.mask_once,
             replay_group_rows=self.replay_group_rows,
-            short_context=False, attention_audit=False, commit_only_gdn=True)
+            short_context=False, attention_audit=False, commit_only_gdn=True,
+            **({'kv_single_chain': True} if warm and self.kv_chains_cut else {}))
 
     def operation(self, fixture):
         logits = None
@@ -577,6 +613,25 @@ class PackedVerifierEngine:
         diagnostic(verify_trace_t1.engaged_line('packed_verify', **fields))
         if self.shard_problem is not None:
             diagnostic('%s: %s' % (verify_trace_t1.KEPT_SAMPLER, self.shard_problem))
+
+    def note_verify_t2(self, counts):
+        """verify_trace_t2.MARKER once per captured verify trace: what the captured forward
+        engaged (#1 per GDN layer, #2 per K/V write), what the capture fixture was built with, and
+        whether the warm forward wrote K/V as one chain (warm_chain=single) or served (none)."""
+        fixture = self.fixture
+        self.windows_audit = verify_trace_t2.audit_enabled() and counts.get('windows', 0) > 0
+        diagnostic(verify_trace_t2.engaged_line(
+            'packed_verify', windows=counts.get('windows', 0), windows_fallback=counts.get('windows_fallback', 0),
+            kv_chains=counts.get('kv_chains', 0), kv_fallback=getattr(fixture, 'kv_fallback', 0),
+            kv_rows=getattr(fixture, 'kv_rows', 0),
+            warm_chain='single' if self.warm_kv_chains else 'none', audit=int(self.windows_audit)))
+
+    @property
+    def kv_chains(self):
+        """Whether the captured fixture writes K/V through per-user chains (verify_trace_t2 #2):
+        serving_packed_step.proposal_rows (before drafting) and ineligible (at the step) then
+        check every round's tile rows before the verify."""
+        return bool(getattr(self.fixture, 'kv_chains', False))
 
     def reseed(self):
         """Undo what warming the commit traces wrote: slot 0 from the initial snapshot,
@@ -690,6 +745,11 @@ class PackedVerifierEngine:
                 host = self.operations.to_torch(parts[0]).reshape(-1)[:self.block_rows].tolist()
             if len(host) != self.block_rows:
                 raise AssertionError('Missing packed prediction rows')
+            if self.windows_audit:
+                # QWEN_FAST_VERIFY_T2_AUDIT (G1 for #1): this replay's packed windows against the
+                # served ones built beside them in the same trace - every GDN layer on round 1,
+                # then two per round in rotation (verify_trace_t2.audit_layers).
+                verify_trace_t2.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
             self.first = False

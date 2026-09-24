@@ -335,6 +335,42 @@ class RoundB1ArmTests(unittest.TestCase):
         self.assertIn("ROUND_B1_FLAG = 'QWEN_FAST_ROUND_B1'", (HERE / 'dflash_packed_proposal.py').read_text(encoding='utf-8'))
 
 
+
+class VerifyT2ArmTests(unittest.TestCase):
+    """Verify-trace T2: M3NATIVE_VERIFY_T2[_AUDIT|_SKIP|_KV_ROWS] cross as QWEN_FAST_VERIFY_T2[...],
+    right after the T1 lines, before the entrypoint; unset, nothing crosses. The modules that read
+    them are baked (test_verify_trace_t2.ShippingTests checks both image copy lists); the gate reads
+    the same names from the container's environment."""
+
+    LINES = ('${M3NATIVE_VERIFY_T2:+-e QWEN_FAST_VERIFY_T2=1}',
+             '${M3NATIVE_VERIFY_T2_AUDIT:+-e QWEN_FAST_VERIFY_T2_AUDIT=1}',
+             '${M3NATIVE_VERIFY_T2_SKIP:+-e QWEN_FAST_VERIFY_T2_SKIP=$M3NATIVE_VERIFY_T2_SKIP}',
+             '${M3NATIVE_VERIFY_T2_KV_ROWS:+-e QWEN_FAST_VERIFY_T2_KV_ROWS=$M3NATIVE_VERIFY_T2_KV_ROWS}')
+
+    def test_the_four_switches_cross_after_t1_before_the_entrypoint(self):
+        text = arm_text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(),
+                         '${M3NATIVE_VERIFY_T1_SKIP:+-e QWEN_FAST_VERIFY_T1_SKIP=$M3NATIVE_VERIFY_T1_SKIP} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92))
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+
+    def test_the_container_side_reads_the_names_that_cross(self):
+        import verify_trace_t2
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        module = (HERE / 'verify_trace_t2.py').read_text(encoding='utf-8')
+        for name in ('QWEN_FAST_VERIFY_T2', 'QWEN_FAST_VERIFY_T2_AUDIT', 'QWEN_FAST_VERIFY_T2_SKIP',
+                     'QWEN_FAST_VERIFY_T2_KV_ROWS'):
+            with self.subTest(name=name):
+                self.assertIn("'%s'" % name, gate)
+                self.assertIn("'%s'" % name, module)
+        self.assertEqual(verify_trace_t2.KV_ROWS_FLAG, 'QWEN_FAST_VERIFY_T2_KV_ROWS')
+
+
 class ServingPairArmTests(unittest.TestCase):
     """The gate mounts only the serving pair, found by board id (card M, card A), never every
     /dev/tenstorrent node: with the third board back a container would otherwise see three devices."""

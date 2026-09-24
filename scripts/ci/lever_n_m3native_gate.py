@@ -199,6 +199,29 @@ VERIFY_T1_SITE = re.compile(r'\[PINDIAG\] verify t1 engaged site=([a-z_]+)')
 VERIFY_T1_PACKED = re.compile(r'\[PINDIAG\] verify t1 engaged site=packed_verify((?: [a-z_]+=[0-9]+)*)')
 VERIFY_T1_CUTS = ('matmul_configs', 'mask_once', 'direct_carry', 'last_carry', 'coalesce', 'shard_argmax')
 VERIFY_T1_WAVE2_CUTS = ('mask_once', 'direct_carry', 'coalesce', 'shard_argmax')
+# QWEN_FAST_VERIFY_T2=1 (M3NATIVE_VERIFY_T2; verify-trace cuts #1 packed conv windows and #2
+# per-user K/V chains, verify_trace_t2.py): packed_verifier logs the engaged line once per
+# captured verify trace with what the captured forward engaged. At four users every line must
+# report windows=48 windows_fallback=0 (windows=0 when QWEN_FAST_VERIFY_T2_SKIP names it; #1
+# engages only on the user-batched path, so it needs QWEN_FAST_GDN_USER_BATCH=1), kv_chains=32
+# kv_fallback=0 kv_rows=<QWEN_FAST_VERIFY_T2_KV_ROWS, default 64> warm_chain=single (the warm
+# forward's one chain; kv_chains=0 kv_rows=0 warm_chain=none when skipped). Any fell-back,
+# kv-shared or audit-mismatch line fails the arm at any user count: a kv-shared round seen
+# before drafting (site=proposal_rows) is served by the exact sequential step, one first seen
+# at the step (site=ineligible) is refused - its requests fail, nothing is written - and
+# either way the premise broke and the timing is contaminated. QWEN_FAST_VERIFY_T2_AUDIT=1 (a
+# correctness arm) needs the first audited round's line at four users.
+VERIFY_T2_FLAG = 'QWEN_FAST_VERIFY_T2'
+VERIFY_T2_AUDIT_FLAG = 'QWEN_FAST_VERIFY_T2_AUDIT'
+VERIFY_T2_SKIP_FLAG = 'QWEN_FAST_VERIFY_T2_SKIP'
+VERIFY_T2_KV_ROWS_FLAG = 'QWEN_FAST_VERIFY_T2_KV_ROWS'
+VERIFY_T2_MARKER = '[PINDIAG] verify t2 engaged'
+VERIFY_T2_AUDIT_MARKER = '[PINDIAG] verify t2 audit'
+VERIFY_T2_AUDIT_MISMATCH = '[PINDIAG] verify t2 audit mismatch'
+VERIFY_T2_FALLBACK = '[PINDIAG] verify t2 fell back'
+VERIFY_T2_KV_SHARED = '[PINDIAG] verify t2 kv shared'
+VERIFY_T2_PACKED = re.compile(r'\[PINDIAG\] verify t2 engaged site=packed_verify((?: [a-z_]+=[a-z0-9_]+)*)')
+VERIFY_T2_CUTS = ('windows', 'kv_chains')
 DRAFT_BF8_MARKER = 'projections dtype=bf8 x36'
 LEDGER_MARKERS = ('[MEMLEDGER] phase=P7 ', ' check=residual status=')
 # QWEN_FAST_SDPA_MODES (optimisation/ttnn-op/sdpa_decode_qwen: 'tail' stage 1, 'share' stage 3).
@@ -374,6 +397,10 @@ def required_flag_markers(environ, users, prompt_tokens=None):
         required[VERIFY_T1_FLAG] = [VERIFY_T1_MARKER]
         if on(VERIFY_T1_AUDIT_FLAG) and users == 4:
             required[VERIFY_T1_AUDIT_FLAG] = [VERIFY_T1_AUDIT_MARKER + ' 1 exact=True']
+    if on(VERIFY_T2_FLAG):
+        required[VERIFY_T2_FLAG] = [VERIFY_T2_MARKER]
+        if on(VERIFY_T2_AUDIT_FLAG) and users == 4 and 'windows' not in verify_t2_skipped(environ):
+            required[VERIFY_T2_AUDIT_FLAG] = [VERIFY_T2_AUDIT_MARKER + ' 1 exact=True']
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
@@ -431,6 +458,10 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
         if VERIFY_T1_AUDIT_MISMATCH in log_text:
             line = log_text[log_text.index(VERIFY_T1_AUDIT_MISMATCH):].split(chr(10), 1)[0]
             missing.append('%s: no mismatch (%s)' % (VERIFY_T1_AUDIT_FLAG, line[:200]))
+    verify_t2_packed = None
+    if environ.get(VERIFY_T2_FLAG) == '1':
+        verify_t2_packed = verify_t2_packed_counts(log_text)
+        missing.extend(verify_t2_problems(environ, users, log_text, gdn_layers))
     if environ.get(SDPA_PF_FLAG) == '1' and sdpa_pf_flags(environ) is None:
         missing.append('%s: a production flag set (%s), not %r' % (
             SDPA_PF_FLAGS_FLAG, ', '.join('%#x' % flags for flags in SDPA_PF_PRODUCTION_FLAGS),
@@ -449,7 +480,7 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
     residual = LEDGER_RESIDUAL.search(log_text)
     return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
                 prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary, verify_t1_sites=verify_t1_sites,
-                verify_t1_packed=verify_t1_packed)
+                verify_t1_packed=verify_t1_packed, verify_t2_packed=verify_t2_packed)
 
 
 def verify_t1_skipped(environ):
@@ -500,6 +531,66 @@ def verify_t1_problems(environ, users, log_text, gdn_layers=GDN_LAYERS):
     if 'shard_argmax' not in skipped and VERIFY_T1_KEPT_SAMPLER in log_text:
         line = log_text[log_text.index(VERIFY_T1_KEPT_SAMPLER):].split(chr(10), 1)[0]
         problems.append('%s: the per-shard argmax engaged (%s)' % (VERIFY_T1_FLAG, line[:200]))
+    return problems
+
+
+def verify_t2_skipped(environ):
+    return {name.strip() for name in (environ.get(VERIFY_T2_SKIP_FLAG) or '').split(',') if name.strip()}
+
+
+def verify_t2_packed_counts(log_text):
+    """Every site=packed_verify T2 line's fields, one dict per captured verify trace (numbers as
+    ints, the warm-chain mode as its word)."""
+    captures = []
+    for match in VERIFY_T2_PACKED.finditer(log_text):
+        fields = {}
+        for field in match.group(1).split():
+            name, value = field.split('=', 1)
+            fields[name] = int(value) if value.isdigit() else value
+        captures.append(fields)
+    return captures
+
+
+def verify_t2_problems(environ, users, log_text, gdn_layers=GDN_LAYERS, kv_writes=32):
+    """QWEN_FAST_VERIFY_T2: the skip list names only cuts; the kv-rows knob is 64 or 32; no
+    fell-back, kv-shared or audit-mismatch line at any user count; and at four users every
+    captured verify trace engaged each cut not skipped in every layer (and no skipped one). Every
+    problem is reported: one never hides another."""
+    skipped = verify_t2_skipped(environ)
+    problems = []
+    unknown = sorted(skipped.difference(VERIFY_T2_CUTS))
+    if unknown:
+        problems.append('%s: names only cuts (%s is none of %s)' % (VERIFY_T2_SKIP_FLAG, ','.join(unknown),
+                                                                     ','.join(VERIFY_T2_CUTS)))
+    knob = environ.get(VERIFY_T2_KV_ROWS_FLAG)
+    if knob not in (None, '64', '32'):
+        problems.append('%s: 64 or 32, not %r' % (VERIFY_T2_KV_ROWS_FLAG, knob))
+    kv_rows = int(knob) if knob in ('64', '32') else 64
+    for marker, flag in ((VERIFY_T2_FALLBACK, VERIFY_T2_FLAG), (VERIFY_T2_KV_SHARED, VERIFY_T2_FLAG),
+                         (VERIFY_T2_AUDIT_MISMATCH, VERIFY_T2_AUDIT_FLAG)):
+        if marker in log_text:
+            line = log_text[log_text.index(marker):].split(chr(10), 1)[0]
+            problems.append('%s: no %s line (%s)' % (flag, marker, line[:200]))
+    if users != 4:
+        return problems
+    captures = verify_t2_packed_counts(log_text)
+    if not captures:
+        problems.append('%s: a captured packed verify reporting its cuts (site=packed_verify)' % VERIFY_T2_FLAG)
+        return problems
+    windows, chains = 'windows' not in skipped, 'kv_chains' not in skipped
+    if windows and environ.get('QWEN_FAST_GDN_USER_BATCH') != '1':
+        # Reported, then the captures are held to what that configuration CAN engage
+        # (windows=0), so the kv fields are still checked.
+        problems.append('%s: windows engages only under QWEN_FAST_GDN_USER_BATCH=1 (or skip it)' % VERIFY_T2_FLAG)
+        windows = False
+    expected = dict(windows=gdn_layers if windows else 0, windows_fallback=0, kv_chains=kv_writes if chains else 0,
+                    kv_fallback=0, kv_rows=kv_rows if chains else 0,
+                    warm_chain='single' if chains else 'none')
+    for index, counts in enumerate(captures):
+        wrong = ['%s=%s (expected %s)' % (name, counts.get(name), value) for name, value in expected.items()
+                 if counts.get(name) != value]
+        if wrong:
+            problems.append('%s: capture %d engaged %s' % (VERIFY_T2_FLAG, index + 1, ', '.join(wrong)))
     return problems
 
 

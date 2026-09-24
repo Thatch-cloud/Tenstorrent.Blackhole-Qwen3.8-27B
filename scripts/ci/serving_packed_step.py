@@ -170,6 +170,12 @@ def proposal_rows(block, requests):
     a ticket drafted for a block that then does not serve it has no capture anywhere
     (`unservable`). The draft returns exactly the rows asked of it
     (dflash_request_runtime.propose), so the decision here is the ticket width.
+
+    A block whose K/V write runs one chain per user (QWEN_FAST_VERIFY_T2 #2, `kv_chains`)
+    serves the round only while no two users write one (physical page, tile row): checked
+    HERE, before drafting, from each request's frontier and its engine's page table
+    (`kv_shared_at_proposal`), so a conflicting round is drafted at the engines' widths and
+    the exact sequential step serves it. The step's own check (`ineligible`) is the backstop.
     """
     blocks = tuple(block) if isinstance(block, (list, tuple)) else (block,)
     live = [request for request in requests if not request.session.finished]
@@ -213,6 +219,8 @@ def proposal_rows(block, requests):
                     validate_ticket(session.position, shape.rows_per_user, capacity, short_context=False)
                 except ValueError:
                     return None
+        if getattr(matched, 'kv_chains', False) and kv_shared_at_proposal(group, matched) is not None:
+            return None
     return width
 
 
@@ -268,7 +276,62 @@ def ineligible(entries, block):
             block.segment_of(entry['request'].engine)
         except ValueError:
             return 'request=%s engine not bound to the block' % str(entry['request_id'])[:48]
+    if getattr(block, 'kv_chains', False):
+        return kv_shared(entries, block)
     return None
+
+
+def kv_guard(owners, block):
+    """QWEN_FAST_VERIFY_T2 (#2, verify_trace_t2): the reason the block's per-user K/V chains
+    cannot serve these owners - [(engine, frontier position)] - or None. The same host values
+    packed_host_inputs stages: each user's rows_per_user positions from its frontier, through
+    its engine's one page table, in SEGMENT order. Fails closed: a position its table cannot
+    map (or an engine with no table) is a reason, never an exception past the step."""
+    import verify_trace_t2
+
+    users = [None] * block.shape.users
+    for engine, position in owners:
+        users[block.segment_of(engine)] = (range(position, position + block.shape.rows_per_user),
+                                           getattr(engine, 'pages', None))
+    if any(user is None for user in users):
+        return None  # two owners through one segment: the block's own checks refuse the round
+    try:
+        conflict = verify_trace_t2.kv_conflict([(positions, table[0]) for positions, table in users])
+    except (IndexError, TypeError, ValueError) as error:
+        return 'verify t2 kv tile rows unmapped: %s' % (error,)
+    return None if conflict is None else verify_trace_t2.kv_conflict_reason(conflict)
+
+
+def kv_shared_at_proposal(requests, block):
+    """`kv_guard` over the live requests' frontiers, before the round is drafted
+    (proposal_rows): a reason there drafts the round at the engines' own widths, so the exact
+    sequential step serves it. The engines' page tables are the last refresh's; a block vLLM
+    appends for this round's rows is that request's own (prefix caching is off, allocations
+    are disjoint), and an unrefreshed entry names the request's own first block
+    (serving_page_binding), so neither can hide a conflict between two users. Logged once
+    per reason: the hook asks every tick."""
+    import verify_trace_t2
+
+    reason = kv_guard([(request.engine, request.session.position) for request in requests], block)
+    if reason is not None:
+        verify_trace_t2.log_once('%s site=proposal_rows %s' % (verify_trace_t2.KV_SHARED, reason))
+    return reason
+
+
+def kv_shared(entries, block):
+    """`kv_guard` over the round's tickets, at the step: the backstop behind proposal_rows.
+    Beside the 64-row block (the only one that chains) the per-request engines capture only
+    the sequential widths (1, 2, 4), so the round's 16-row tickets have no capture anywhere:
+    packed_device_step then refuses the round (`unservable`, `refuse_round` - every request
+    fails, nothing is written). A conflict here means the tables changed between the
+    drafting and the step in a way vLLM's disjoint, append-only allocation does not produce;
+    KV_SHARED fails the gated arm either way."""
+    import verify_trace_t2
+
+    reason = kv_guard([(entry['request'].engine, entry['ticket'].position) for entry in entries], block)
+    if reason is not None:
+        verify_trace_t2.log_line('%s site=ineligible %s' % (verify_trace_t2.KV_SHARED, reason))
+    return reason
 
 
 def validate_packed_entries(entries):

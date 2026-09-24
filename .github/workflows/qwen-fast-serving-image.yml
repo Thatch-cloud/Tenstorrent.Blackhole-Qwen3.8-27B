@@ -79,6 +79,9 @@ jobs:
           for name in verify_trace_t1.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in verify_trace_t2.py gdn_conv_windows_packed.py gdn_conv_windows_packed.cpp packed_ordered_cache.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
       - name: Build and CPU-test canary without devices or weights
         run: |
           image="qwen-fast-serving:ci-${GITHUB_SHA}"

@@ -382,6 +382,20 @@ class CopyClosureTests(unittest.TestCase):
         removed - otherwise KNOWN_STALE rots into a blanket exemption."""
         self.assertEqual(sorted(set(KNOWN_STALE) - stale_in_image()), [])
 
+    def test_the_verify_t2_table_is_in_both_lists(self):
+        """verify_trace_t2.RUNTIME_FILES is the one table of what the T2 cuts load at run time -
+        the card-M harness mounts exactly it - and the packed windows driver loads its kernel as
+        its sibling .cpp, so every entry must reach the image through BOTH lists."""
+        import verify_trace_t2
+
+        docker = dockerfile_modules(dockerfile_text())
+        context = context_modules()
+        self.assertIn('gdn_conv_windows_packed.py', sibling_kernel_modules())
+        for name in verify_trace_t2.RUNTIME_FILES:
+            with self.subTest(file=name):
+                self.assertIn(name, docker)
+                self.assertIn(name, context)
+
     def test_ordered_cache_is_overlaid(self):
         """The file whose absence cost run 35790454545."""
         self.assertIn('ordered_cache.py', dockerfile_modules(dockerfile_text()))

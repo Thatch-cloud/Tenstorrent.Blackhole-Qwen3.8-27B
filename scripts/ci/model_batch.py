@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCacheWriter, serial_tail
 from gdn_prefix import decode_projected, gated_decode, prepare_token_rows, validate_reused_input
 from packed_cache_writer import TILE_ROWS, SegmentedOrderedCacheWriter, tile as cache_tile, tile_rows
+import verify_trace_t2
 
 
 @contextmanager
@@ -243,17 +244,54 @@ def recurrence_rows(rows, pack, norm_batch):
     return widths[0]
 
 
-def cache_writer(ttnn, mesh, kernels, *, ordered_cache, cache_tiles, serial):
+def cache_writer(ttnn, mesh, kernels, *, ordered_cache, cache_tiles, serial, chained=None):
     """One full-attention layer's K/V writer. The serial per-row writer
     (attention_batch.SerialCacheWriter, pinned frozen-recipe evidence, 32 rows at most) is
     built only where it serves; the ordered writer replaces it, and beyond one 32-row tile
     the ordered write runs tile by tile over the fixture's cache tiles
-    (packed_cache_writer.SegmentedOrderedCacheWriter)."""
+    (packed_cache_writer.SegmentedOrderedCacheWriter).
+
+    `chained` (QWEN_FAST_VERIFY_T2 cut #2, verify_trace_t2): the packed block's keyword
+    arguments for packed_ordered_cache.ChainedOrderedCacheWriter - one chained launch per
+    cache, one chain per user. Beyond one tile only; a block it cannot serve (Unsupported:
+    the grid, the page width, the spans) gets the segmented writer, counted as kv_fallback,
+    before any forward runs."""
     if not ordered_cache:
         return serial()
     if cache_tiles:
+        if chained is not None:
+            from packed_ordered_cache import ChainedOrderedCacheWriter, Unsupported
+            try:
+                return ChainedOrderedCacheWriter(mesh, ttnn, kernels, **chained)
+            except Unsupported as reason:
+                verify_trace_t2.note('kv_fallback')
+                verify_trace_t2.fell_back('kv_chains', reason)
         return SegmentedOrderedCacheWriter(mesh, ttnn, kernels, cache_tiles)
     return OrderedCacheWriter(mesh, ttnn, kernels)
+
+
+def chained_writer_options(pack, cache_tiles, positions, pages, single_chain=False):
+    """QWEN_FAST_VERIFY_T2 (#2, verify_trace_t2): the keyword arguments of the packed block's
+    chained K/V writer - the block's own positions word and page-table rows, one chain per
+    user's segment, the tile metadata for the 32-row mode and the launch width - or None: not
+    packed, within one tile, or the cut not selected (flag off: None, today's writers).
+
+    `single_chain` (packed_verifier's warm fixture, whose placeholder users all write page 0's
+    first tile row): ONE chain over every row instead - the same kernels and compile args, so
+    the programs the warm forward compiles are the ones the capture's per-user chains run, in
+    the served row order."""
+    if pack is None or not cache_tiles or not verify_trace_t2.cut('kv_chains'):
+        return None
+    spans = ((pack['segments'][0][0], pack['segments'][-1][1]),) if single_chain else pack['segments']
+    return dict(positions=positions, pages=pages, spans=spans, tiles=cache_tiles,
+                launch_rows=verify_trace_t2.kv_rows())
+
+
+def chained_writer_summary(writers, chained):
+    """(kv_chains, kv_fallback, kv_rows) of the built writers: whether any writes through
+    per-user chains, how many layers fell back to the segmented writer, and the launch width."""
+    count = sum(1 for writer in writers if type(writer).__name__ == 'ChainedOrderedCacheWriter')
+    return count > 0, (len(writers) - count if chained is not None else 0), (chained['launch_rows'] if count else 0)
 
 
 def attention_reader(*, replay_reader, serial_sdpa, grouped_attention, serial, grouped):
@@ -371,7 +409,8 @@ class ModelBatch:
                  retain_records=False, ordered_cache=False, norm_batch=False, grouped_attention=False, attention_dma=False,
                  attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False,
                  replay_group_rows=4, prefix_zero_reuse=False, defer_conv_publication=False, short_context=False,
-                 attention_audit=False, commit_only_gdn=False, pack=None, storage=None, packed_replay_pages=None):
+                 attention_audit=False, commit_only_gdn=False, pack=None, storage=None, packed_replay_pages=None,
+                 kv_single_chain=False):
         import torch
         import ttnn
 
@@ -570,6 +609,19 @@ class ModelBatch:
                     self.replay_reader.stage(starts)
             elif self.replay_reader.start != start:
                 self.replay_reader.stage(start)
+        # QWEN_FAST_VERIFY_T2 (#2, verify_trace_t2): the packed block's K/V write as one chained
+        # launch per cache over the block's own positions word and page-table rows, one chain
+        # per user's segment. Decided here, once, before any forward: the warm forward and the
+        # capture therefore run (and compile) the same writer. Flag off: None, today's writers.
+        # kv_single_chain (the warm fixture): one chain over every row (chained_writer_options).
+        if type(kv_single_chain) is not bool:
+            raise ValueError('kv_single_chain must be a bool')
+        self.kv_single_chain = kv_single_chain
+        chained = chained_writer_options(self.pack, self.cache_tiles, self.positions, self.pages,
+                                         single_chain=kv_single_chain)
+        # QWEN_FAST_VERIFY_T2_AUDIT, read once: only then does gdn_user_batch_conv hand over
+        # served windows outside `owned` for this fixture to release.
+        self.verify_t2_audit = verify_trace_t2.audit_enabled()
         gdn_index = 0
         for layer in model.layers:
             attention = layer.attention
@@ -591,7 +643,8 @@ class ModelBatch:
                 writer = cache_writer(ttnn, model.mesh_device, cache_kernels, ordered_cache=self.ordered_cache,
                     cache_tiles=self.cache_tiles,
                     serial=lambda attention=attention: SerialCacheWriter(ttnn, singleton_positions, self.row_pages,
-                                                                         attention._kv_shard_cfg(1)))
+                                                                         attention._kv_shard_cfg(1)),
+                    **({'chained': chained} if chained is not None else {}))
                 self.writers.append(writer)
                 reader = attention_reader(replay_reader=self.replay_reader, serial_sdpa=serial_sdpa,
                     grouped_attention=self.grouped_attention, grouped=grouped,
@@ -619,6 +672,9 @@ class ModelBatch:
                         self.bindings.append((attention, name, profiler.wrap(category, getattr(attention, name))))
                 self.bindings.append((attention, "forward_decode", forward))
                 gdn_index += 1
+        # QWEN_FAST_VERIFY_T2 (#2): what the K/V write became. packed_verifier reads kv_chains for
+        # its per-round guard (stage_packed) and reports the rest in its marker.
+        self.kv_chains, self.kv_fallback, self.kv_rows = chained_writer_summary(self.writers, chained)
         # Beyond one tile, the model's decode norms, the attention's fused prep path and the
         # MLP's first arm all assume one tile; the block binds its own two-tile forms of
         # each (two_tile_bindings), after the per-layer adapters so a full-attention
@@ -684,6 +740,12 @@ class ModelBatch:
                                          else tuple(user[gdn_slot] for user in self.pack['slots']))
                 else:
                     release_owned(operations, [value for value in result['owned'] if value is not output])
+                    # QWEN_FAST_VERIFY_T2_AUDIT's served windows are held outside `owned`
+                    # (gdn_user_batch_conv); with nothing retained there is nothing to audit.
+                    if self.verify_t2_audit:
+                        audit = verify_trace_t2.audit_windows_of(result)
+                        if audit:
+                            release_owned(operations, audit)
                 self.gdn_calls += 1
                 self.norm_batch_calls += int(result.get('norm_batch', False))
                 self.user_batched_calls += int(result.get('user_batched', False))
@@ -813,6 +875,14 @@ class ModelBatch:
 
     def close(self):
         if self.retained is not None:
+            # QWEN_FAST_VERIFY_T2_AUDIT: the served windows each record holds for the audit are
+            # outside every record's `owned`, so the retained block does not free them.
+            if getattr(self, 'verify_t2_audit', False):
+                audit = [value for state, result, checkpoint in self.retained.records
+                         for value in verify_trace_t2.audit_windows_of(result)]
+                if audit:
+                    from gdn_multitoken_conv import release_owned
+                    release_owned(self.operations, audit)
             self.retained.close()
         for state in self.working_states:
             state.close()

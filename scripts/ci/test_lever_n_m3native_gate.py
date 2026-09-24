@@ -497,5 +497,126 @@ class FlagMarkerTests(unittest.TestCase):
                          ['[PINDIAG] sdpa qwen-modes modes=narrow,tail ', '[QWEN-SDPA] flags=0x1 '])
 
 
+
+class VerifyT2GateTests(unittest.TestCase):
+    """QWEN_FAST_VERIFY_T2 (M3NATIVE_VERIFY_T2): the engaged marker is promised; at four users every
+    captured verify trace engaged each cut not skipped, in every layer, with the knob's launch width
+    and the warm forward's single chain; any fell-back, kv-shared or audit-mismatch line fails the
+    arm at any user count; the audit needs its first line; one problem never hides another. The
+    gate's copies of the texts are the image module's (verify_trace_t2)."""
+
+    BATCH = {'QWEN_FAST_VERIFY_T2': '1', 'QWEN_FAST_GDN_USER_BATCH': '1'}
+
+    BATCHED = '[PINDIAG] gdn user_batched calls this captured forward: 48 of 48 GDN layers'
+
+    def _report(self, environ, log, users=4):
+        from lever_n_m3native_gate import flag_marker_report
+        return flag_marker_report(environ, users, chr(10).join([self.BATCHED, log]))
+
+    @staticmethod
+    def packed(**changes):
+        import verify_trace_t2
+        fields = dict(windows=48, windows_fallback=0, kv_chains=32, kv_fallback=0, kv_rows=64,
+                      warm_chain='single', audit=0)
+        fields.update(changes)
+        return '2026-09-24 | INFO | ' + verify_trace_t2.engaged_line('packed_verify', **fields)
+
+    def test_the_gate_texts_are_the_image_modules(self):
+        import lever_n_m3native_gate as gate
+        import verify_trace_t2 as image
+        self.assertEqual((gate.VERIFY_T2_FLAG, gate.VERIFY_T2_AUDIT_FLAG, gate.VERIFY_T2_SKIP_FLAG,
+                          gate.VERIFY_T2_KV_ROWS_FLAG, gate.VERIFY_T2_MARKER, gate.VERIFY_T2_AUDIT_MARKER,
+                          gate.VERIFY_T2_AUDIT_MISMATCH, gate.VERIFY_T2_FALLBACK, gate.VERIFY_T2_KV_SHARED,
+                          gate.VERIFY_T2_CUTS),
+                         (image.FLAG, image.AUDIT_FLAG, image.SKIP_FLAG, image.KV_ROWS_FLAG, image.MARKER,
+                          image.AUDIT_MARKER, image.AUDIT_MISMATCH, image.FALLBACK, image.KV_SHARED, image.CUTS))
+
+    def test_the_flag_promises_the_marker_and_the_audit_its_first_line(self):
+        from lever_n_m3native_gate import VERIFY_T2_AUDIT_MARKER, VERIFY_T2_MARKER, required_flag_markers
+        self.assertEqual(required_flag_markers({'QWEN_FAST_VERIFY_T2': '1'}, 4),
+                         {'QWEN_FAST_VERIFY_T2': [VERIFY_T2_MARKER]})
+        audit = {'QWEN_FAST_VERIFY_T2': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1'}
+        self.assertEqual(required_flag_markers(audit, 4),
+                         {'QWEN_FAST_VERIFY_T2': [VERIFY_T2_MARKER],
+                          'QWEN_FAST_VERIFY_T2_AUDIT': [VERIFY_T2_AUDIT_MARKER + ' 1 exact=True']})
+        self.assertEqual(required_flag_markers(audit, 1), {'QWEN_FAST_VERIFY_T2': [VERIFY_T2_MARKER]})
+        self.assertEqual(required_flag_markers(dict(audit, QWEN_FAST_VERIFY_T2_SKIP='windows'), 4),
+                         {'QWEN_FAST_VERIFY_T2': [VERIFY_T2_MARKER]}, 'no windows, nothing to audit')
+        self.assertEqual(required_flag_markers({'QWEN_FAST_VERIFY_T2_AUDIT': '1'}, 4), {})
+        self.assertEqual(required_flag_markers({'QWEN_FAST_VERIFY_T2': '0'}, 4), {})
+
+    def test_a_four_user_arm_passes_when_both_cuts_engaged_everywhere(self):
+        report = self._report(self.BATCH, self.packed())
+        self.assertEqual(report['missing'], [])
+        self.assertEqual(report['verify_t2_packed'], [dict(windows=48, windows_fallback=0, kv_chains=32, kv_fallback=0,
+                                                           kv_rows=64, warm_chain='single', audit=0)])
+        self.assertIsNone(self._report({}, self.packed())['verify_t2_packed'])
+        self.assertEqual(self._report(self.BATCH, '', users=1)['missing'],
+                         ['QWEN_FAST_VERIFY_T2: [PINDIAG] verify t2 engaged'])
+
+    def test_a_cut_that_did_not_engage_everywhere_fails(self):
+        for changes, field in ((dict(windows=47), 'windows=47'), (dict(windows_fallback=1), 'windows_fallback=1'),
+                               (dict(kv_chains=0), 'kv_chains=0'), (dict(kv_fallback=16), 'kv_fallback=16'),
+                               (dict(kv_rows=32), 'kv_rows=32'), (dict(warm_chain='none'), 'warm_chain=none')):
+            with self.subTest(changes=changes):
+                missing = self._report(self.BATCH, self.packed(**changes))['missing']
+                self.assertEqual(len(missing), 1)
+                self.assertIn('capture 1 engaged ' + field + ' (expected', missing[0])
+        missing = self._report(self.BATCH, chr(10).join([self.packed(), self.packed(kv_chains=16)]))['missing']
+        self.assertEqual(len(missing), 1)
+        self.assertIn('capture 2 engaged kv_chains=16', missing[0])
+        self.assertIn('site=packed_verify', self._report(self.BATCH, '[PINDIAG] verify t2 engaged site=other')['missing'][0])
+
+    def test_skips_and_the_knob_move_the_expectation(self):
+        skip = dict(self.BATCH, QWEN_FAST_VERIFY_T2_SKIP='kv_chains')
+        self.assertEqual(self._report(skip, self.packed(kv_chains=0, kv_rows=0, warm_chain='none'))['missing'], [])
+        self.assertEqual(len(self._report(skip, self.packed())['missing']), 1)
+        windows = {'QWEN_FAST_VERIFY_T2': '1', 'QWEN_FAST_VERIFY_T2_SKIP': 'windows'}
+        self.assertEqual(self._report(windows, self.packed(windows=0))['missing'], [], 'no user batch needed')
+        knob = dict(self.BATCH, QWEN_FAST_VERIFY_T2_KV_ROWS='32')
+        self.assertEqual(self._report(knob, self.packed(kv_rows=32))['missing'], [])
+        bad = dict(self.BATCH, QWEN_FAST_VERIFY_T2_SKIP='windows,chains', QWEN_FAST_VERIFY_T2_KV_ROWS='16')
+        missing = self._report(bad, self.packed(windows=0))['missing']
+        self.assertTrue(any(line.startswith('QWEN_FAST_VERIFY_T2_SKIP: names only cuts (chains') for line in missing))
+        self.assertTrue(any(line.startswith("QWEN_FAST_VERIFY_T2_KV_ROWS: 64 or 32, not '16'") for line in missing))
+        # a knob that is not a number is reported, not a crash of the gate
+        words = dict(self.BATCH, QWEN_FAST_VERIFY_T2_KV_ROWS='sixty-four')
+        self.assertEqual(self._report(words, self.packed())['missing'],
+                         ["QWEN_FAST_VERIFY_T2_KV_ROWS: 64 or 32, not 'sixty-four'"])
+
+    def test_the_windows_cut_needs_the_user_batch(self):
+        missing = self._report({'QWEN_FAST_VERIFY_T2': '1'}, self.packed(windows=0))['missing']
+        self.assertEqual(missing, ['QWEN_FAST_VERIFY_T2: windows engages only under QWEN_FAST_GDN_USER_BATCH=1 '
+                                   '(or skip it)'])
+
+    def test_the_user_batch_problem_does_not_hide_the_kv_fields(self):
+        missing = self._report({'QWEN_FAST_VERIFY_T2': '1'}, self.packed(windows=0, kv_chains=16,
+                                                                         warm_chain='none'))['missing']
+        self.assertEqual(len(missing), 2, missing)
+        self.assertTrue(missing[0].startswith('QWEN_FAST_VERIFY_T2: windows engages only under'))
+        self.assertIn('capture 1 engaged kv_chains=16 (expected 32), warm_chain=none (expected single)', missing[1])
+
+    def test_fell_back_kv_shared_and_mismatch_lines_fail_at_any_user_count(self):
+        lines = ('[PINDIAG] verify t2 fell back site=kv_chains reason=grid',
+                 '[PINDIAG] verify t2 kv shared site=ineligible verify t2 kv tile rows shared: users 0,2 page 7 tile row 0',
+                 '[PINDIAG] verify t2 kv shared site=proposal_rows verify t2 kv tile rows shared: users 0,2 page 7 '
+                 'tile row 0',
+                 '[PINDIAG] verify t2 audit mismatch round=3 layers=2,3 layer 2 user 0 slot 1 chip 0: 4')
+        for line in lines:
+            for users in (4, 1):
+                with self.subTest(line=line[:40], users=users):
+                    missing = self._report(self.BATCH, chr(10).join([self.packed(), line]), users=users)['missing']
+                    self.assertTrue(any(line[:30] in entry for entry in missing), missing)
+
+    def test_the_audit_needs_its_first_line_and_the_kv_audit_line_is_not_it(self):
+        audit = dict(self.BATCH, QWEN_FAST_VERIFY_T2_AUDIT='1')
+        kv = '[PINDIAG] verify t2 audit kv_rows_per_user=1,1,2,1'
+        engaged = chr(10).join([self.packed(audit=1), kv])
+        self.assertEqual(self._report(audit, engaged)['missing'],
+                         ['QWEN_FAST_VERIFY_T2_AUDIT: [PINDIAG] verify t2 audit 1 exact=True'])
+        good = chr(10).join([engaged, '[PINDIAG] verify t2 audit 1 exact=True layers=0-47 windows=768'])
+        self.assertEqual(self._report(audit, good)['missing'], [])
+
+
 if __name__ == '__main__':
     unittest.main()

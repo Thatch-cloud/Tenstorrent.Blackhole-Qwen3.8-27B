@@ -68,6 +68,10 @@ COPY scripts/ci/serving_startup.py scripts/ci/dflash_combined_request.py scripts
 # Verify-trace T1 (QWEN_FAST_VERIFY_T1, default off): packed_verifier, gdn_device_loop_state
 # and gdn_user_batch import it, so it must reach the image beside them.
 COPY scripts/ci/verify_trace_t1.py /experiment-scripts/ci/
+# Verify-trace T2 (QWEN_FAST_VERIFY_T2, default off): verify_trace_t2.RUNTIME_FILES, the one table.
+# gdn_user_batch_conv, model_batch, packed_verifier and serving_packed_step import it; the
+# packed windows kernel is the SIBLING .cpp of its driver, so the pair travels together.
+COPY scripts/ci/verify_trace_t2.py scripts/ci/gdn_conv_windows_packed.py scripts/ci/gdn_conv_windows_packed.cpp scripts/ci/packed_ordered_cache.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

@@ -18,11 +18,22 @@ launch cannot reproduce: hoisting the four state moves ahead of one launch would
 every user reading the LAST user's convolution state. Deferred packed decode does not do
 that copy at all, which is why it is the only configuration accepted here - and it is the
 configuration the four-user serving round runs in.
+
+Under QWEN_FAST_VERIFY_T2=1 (verify_trace_t2, cut #1) the four window launches become one
+(gdn_conv_windows_packed.build_windows_packed) ahead of the per-user conv gates: the same
+pieces and histories in, the same 16 window tensors out, so every conv gates op still reads
+its own user's windows and nothing in the layer writes a piece or a history in between.
+An input the packed op does not serve (Unsupported) takes the served per-user path, counted
+as windows_fallback. QWEN_FAST_VERIFY_T2_AUDIT=1 also builds the served windows beside them
+(G1: packed_verifier compares every layer on the first round, then two per round); those are
+handed over as `audit_windows`, outside `owned`, so retain_checkpoint_histories never frees
+them inside the trace - ModelBatch releases them with the retained records.
 """
 
 from gdn_multitoken_conv import addresses, release_owned, validate_projected
 
 import gdn_user_batch
+from verify_trace_t2 import audit_enabled as t2_audit, cut as t2_cut, fell_back as t2_fell_back, note as t2_note
 
 
 def validate_options(dma_windows, packed_checkpoints, defer_conv_publication, prefix_zero_reuse):
@@ -57,17 +68,40 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
 
     owned, shared = [], []
     per_user, widths, bindings = [], [], []
+    # QWEN_FAST_VERIFY_T2 (#1): the served windows the audit builds beside the packed ones,
+    # per user. Never in `owned` (see the module docstring); freed here only on failure.
+    audit, audit_owned = {}, []
+    packed_windows = None
     try:
         weights = operations.to_memory_config(norm_w, operations.DRAM_MEMORY_CONFIG)
         if addresses(operations, weights) != addresses(operations, norm_w):
             shared.append(weights)
-        for projected, initial, conv_states in groups:
+        if t2_cut('windows'):
+            from gdn_conv_windows_packed import Unsupported, build_windows_packed
+            try:
+                packed_windows = build_windows_packed(mesh, [(projected, conv_states)
+                                                             for projected, initial, conv_states in groups],
+                                                      operations=operations)
+            except Unsupported as reason:
+                t2_note('windows_fallback')
+                t2_fell_back('windows', reason)
+            else:
+                owned.extend(window for user in packed_windows for window in user)
+                t2_note('windows')
+        for index, (projected, initial, conv_states) in enumerate(groups):
             rows = validate_projected(tuple(projected.shape), conv_states)
             if rows < 2:
                 raise ValueError('A batched packed user is a multirow segment; T1 uses the native path')
             bindings.append([addresses(operations, state) for state in conv_states])
             mine = []
-            windows = build_windows(mesh, projected, conv_states)
+            if packed_windows is None:
+                windows = build_windows(mesh, projected, conv_states)
+            else:
+                windows = list(packed_windows[index])
+                if t2_audit():
+                    served = build_windows(mesh, projected, conv_states)
+                    audit_owned.extend(served)
+                    audit[index] = served
             mine.extend(windows)
             packed = operations.transformer.gdn_decode_conv_gates(projected, windows, taps, projected, projected,
                 dt_bias, neg_exp_A, batch=rows, memory_config=operations.DRAM_MEMORY_CONFIG,
@@ -100,8 +134,9 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
                 prefix_zero_reuse=prefix_zero_reuse, materialized_conv_prefixes=(),
                 available_conv_prefixes=tuple(range(1, rows + 1)), hoisted_input=True,
                 batched_convolution=True, dma_windows=True, norm_batch=False,
-                deferred_conv_publication=True, user_batched=True, packed_users=len(groups)))
+                deferred_conv_publication=True, user_batched=True, packed_users=len(groups),
+                **({'audit_windows': audit[index]} if index in audit else {})))
         return results
     except BaseException:
-        release_owned(operations, owned + shared)
+        release_owned(operations, owned + shared + audit_owned)
         raise
