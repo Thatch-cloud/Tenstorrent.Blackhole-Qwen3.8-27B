@@ -202,8 +202,9 @@ jobs:
       - name: Reset the serving pair (card M and card A together) before this job opens it
         working-directory: m3native
         # 8 minutes for the reset, plus the self-heal's bound (60 s wait, then per card up to two
-        # re-probes of ~80 s each): a step killed between an unbind and its bind leaves a card unbound.
-        # The heal starts no unbind after 720 s (serving_pair_heal 60 720, below): keep it 120 s under this.
+        # rescans of ~30 s and a 60 s link wait, and two re-probes of ~80 s each): a step killed
+        # between an unbind and its bind leaves a card unbound. The heal starts no rescan and no
+        # unbind after 720 s (serving_pair_heal 60 720, below): keep it 120 s under this.
         timeout-minutes: 14
         shell: bash
         run: |
@@ -239,14 +240,19 @@ jobs:
           status=0
           timeout -k 20 420 "${prefix[@]}" "$smi" -r "${SERVING_PAIR_NODES[@]}" >> experiment-results/reset.log 2>&1 || status=$?
           if [ "$status" != 0 ]; then
-            # The nodes may have renumbered, and card A is absent for seconds after a reset: each
-            # card is resolved again by board id and PCI address right before its own reset,
-            # waiting up to 120 s as the arm does. A pair that does not come back resets nothing
-            # more and fails the job.
+            # A failed pair reset can leave a serving card off the bus (run v217: card A's switch
+            # port could not train its link, 0000:f3:00.0 vanished, and the resolve refused) or
+            # without its by-id link: before each card is resolved, the self-heal (serving_pair_heal,
+            # described below) brings it back - a rescan of that card's own upstream port, a driver
+            # re-probe. The nodes may have renumbered, and card A is absent for seconds after a
+            # reset: each card is resolved again by board id and PCI address right before its own
+            # reset, waiting up to 120 s as the arm does. A heal that refuses, or a pair that does
+            # not come back, resets nothing more and fails the job.
             echo "pair reset exited $status; resetting card M, then card A, each resolved again by board id" \
               | tee -a experiment-results/reset.log
             status=0
             for i in 0 1; do
+              if ! serving_pair_heal 60 720 >> experiment-results/reset.log 2>&1; then status=1; break; fi
               if ! serving_pair_resolve 120 >> experiment-results/reset.log 2>&1; then status=1; break; fi
               timeout -k 20 300 "${prefix[@]}" "$smi" -r "${SERVING_PAIR_NODES[$i]}" >> experiment-results/reset.log 2>&1 || status=$?
             done
@@ -258,8 +264,11 @@ jobs:
           # then re-probes the driver (unbind, 3 s, bind) of a serving card whose link is still
           # missing: only card M's or card A's own PCI address, only while that device is present,
           # bound to the tenstorrent driver and held by no process, at most twice per card, waiting
-          # up to 60 s for the link after each. No further reset. A link that does not come back
-          # fails this step (heal.status); it never guesses. No unbind starts after 720 s of this
+          # up to 60 s for the link after each. A serving card whose PCI device is absent (its link
+          # did not train, run v217) is first rescanned at its own upstream port only (0000:d0:01.1
+          # for card M, 0000:f2:00.0 for card A), at most twice, waiting up to 30 s for the device
+          # after each. No further reset. A link that does not come back fails this step
+          # (heal.status); it never guesses. No rescan and no unbind starts after 720 s of this
           # step (timeout-minutes 14 = 840 s, less 120 s): a slow reset must not leave the runner's
           # timeout to kill the heal between an unbind and its bind, which would leave a card unbound.
           heal=0

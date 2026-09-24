@@ -25,10 +25,15 @@
 #                              which renumbers across resets), resolving them again before every call.
 # serving_pair_heal [wait] [last] the reset step's self-heal right after the pair reset: a serving card
 #                              whose by-id link is still missing is re-probed at the driver, never
-#                              reset again (the telemetry race; see below).
+#                              reset again (the telemetry race; see below); one whose PCI device is
+#                              absent is first rescanned at its own upstream port (a link that did not
+#                              train; see below).
 serving_pair_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$serving_pair_dir/qual_card.sh"
 SERVING_PAIR_EXPECTED_PCI='0000:d1:00.0 0000:f3:00.0'
+# Each serving card's own upstream port, index-aligned with the addresses above: card M's AMD root port,
+# and card A's PCIe switch downstream port (its secondary bus, f3, holds card A alone).
+SERVING_PAIR_UPSTREAM_PORTS='0000:d0:01.1 0000:f2:00.0'
 
 # One attempt (nodes|pci). Returns 1 for what a wait may cure (a missing node, an unreadable PCI
 # address), 2 for what it cannot; the reason on stderr.
@@ -95,7 +100,7 @@ serving_pair_resolve() {
   serving_pair_wait pci "${1:-0}"
 }
 
-# The self-heal after the pair reset: the telemetry race.
+# The self-heal after the pair reset: the telemetry race, and a link that did not train.
 #
 # After a tt-smi reset a board behind the PCIe switch (card A, 0000:f3:00.0) can re-enumerate before its
 # ARC firmware is ready. The driver logs 'tenstorrent 0000:f3:00.0: Telemetry not available'; the board's
@@ -104,8 +109,22 @@ serving_pair_resolve() {
 # driver for that one PCI device - unbind, 3 s, bind - brings the link back within seconds, without
 # another reset (proven on the qualification card, 2026-09-24 06:09 UTC).
 #
-# serving_pair_heal [wait]  waits up to [wait] s (default 60) for both serving cards' by-id links. For a
-#   serving card whose link is still missing it re-probes that card's driver and waits up to
+# Or the board does not re-enumerate at all (run v217): card A's switch port logged 'pciehp 0000:f2:00.0:
+# Slot(1): Cannot train link' after the reset, and 0000:f3:00.0 was gone - no PCI device, no node, no
+# by-id link - so there was nothing to re-probe. A rescan of that card's own upstream port (1 into
+# /sys/bus/pci/devices/0000:f2:00.0/rescan) brought it back within ~5 s: enumerated, bound to the driver,
+# telemetry fine, its by-id link made by udev (verified by hand on the rig after v217). A rescan only
+# adds what the kernel does not have: no device already enumerated is removed, reset or re-probed.
+#
+# serving_pair_heal [wait]  waits up to [wait] s (default 60) for both serving cards' by-id links. A
+#   serving card whose link is still missing and whose PCI device is absent is rescanned first: only its
+#   own upstream port (0000:d0:01.1 for card M, 0000:f2:00.0 for card A; serving_pair_rescan_write
+#   refuses any other), only while that port is in sysfs, at most SERVING_PAIR_RESCANS times, each
+#   followed by a wait of up to SERVING_PAIR_RESCAN_WAIT s for the device to be present and bound; then
+#   up to SERVING_PAIR_REPROBE_WAIT s for its link. A device still absent after the last rescan refuses
+#   (a power-cycle of the PCIe switch or a host reboot is a human's call); one back without its link
+#   goes on to the driver re-probe, with every check below.
+#   For a serving card whose link is still missing it re-probes that card's driver and waits up to
 #   SERVING_PAIR_REPROBE_WAIT s for the link, at most SERVING_PAIR_REPROBES times per card. It re-probes
 #   only card M's or card A's own PCI address (0000:d1:00.0, 0000:f3:00.0: the addresses the reset step
 #   checked the pair against right before its reset; serving_pair_driver_write refuses any other), and
@@ -115,12 +134,15 @@ serving_pair_resolve() {
 #   the re-check). Anything else, or a link still missing after the last re-probe, refuses: return 1,
 #   "refusing: ..." on stderr, nothing guessed. Every step is logged on stdout with a [reset] prefix.
 # serving_pair_heal [wait] [last]  with [last], the caller's $SECONDS (the step shell's clock, which the
-#   pipeline subshell inherits) after which no unbind starts: a re-probe that would begin later is refused,
-#   never started, so the runner's step timeout cannot kill the heal between an unbind and its bind and
-#   leave the card unbound. Empty: no limit (by hand). Anything but digits refuses.
+#   pipeline subshell inherits) after which no rescan and no unbind starts: a rescan or re-probe that
+#   would begin later is refused, never started, so the runner's step timeout cannot kill the heal between
+#   an unbind and its bind and leave the card unbound. Empty: no limit (by hand). Anything but digits
+#   refuses.
 SERVING_PAIR_DRIVER=tenstorrent
 SERVING_PAIR_REPROBES=2
 SERVING_PAIR_REPROBE_WAIT=60
+SERVING_PAIR_RESCANS=2
+SERVING_PAIR_RESCAN_WAIT=30
 
 # "card A (blackhole-..., PCI 0000:f3:00.0)"
 serving_pair_card_name() {  # board-id pci
@@ -172,8 +194,9 @@ serving_pair_unheld() {  # node
   return 1
 }
 
-# Writes a PCI address to the tenstorrent driver's unbind or bind file: the only write this file makes.
-# It refuses (2), touching nothing, any address that is not card M's or card A's.
+# Writes a PCI address to the tenstorrent driver's unbind or bind file: one of the two writes this file
+# makes (the other is serving_pair_rescan_write). It refuses (2), touching nothing, any address that is
+# not card M's or card A's.
 serving_pair_driver_write() {  # pci unbind|bind
   local known ok=0
   for known in $SERVING_PAIR_EXPECTED_PCI; do
@@ -188,6 +211,34 @@ serving_pair_driver_write() {  # pci unbind|bind
     *) echo "refusing: '$2' is not unbind or bind" >&2; return 2 ;;
   esac
   echo "$1" | serving_pair_sudo tee "$QUAL_SYS_ROOT/bus/pci/drivers/$SERVING_PAIR_DRIVER/$2" > /dev/null
+}
+
+# Writes 1 to an upstream port's rescan file: the other write this file makes. It refuses (2), touching
+# nothing, any port that is not card M's or card A's own upstream port.
+serving_pair_rescan_write() {  # port
+  local known ok=0
+  for known in $SERVING_PAIR_UPSTREAM_PORTS; do
+    if [ "$1" = "$known" ]; then ok=1; fi
+  done
+  if [ "$ok" != 1 ]; then
+    echo "refusing: '$1' is not card M's or card A's upstream port ($SERVING_PAIR_UPSTREAM_PORTS); no rescan" >&2
+    return 2
+  fi
+  echo 1 | serving_pair_sudo tee "$QUAL_SYS_ROOT/bus/pci/devices/$1/rescan" > /dev/null
+}
+
+# The upstream port of card M's or card A's PCI address; nothing for any other address.
+serving_pair_upstream_of() {  # pci
+  local expected ports i
+  read -r -a expected <<< "$SERVING_PAIR_EXPECTED_PCI"
+  read -r -a ports <<< "$SERVING_PAIR_UPSTREAM_PORTS"
+  for i in "${!expected[@]}"; do
+    if [ "$1" = "${expected[$i]}" ]; then echo "${ports[$i]:-}"; fi
+  done
+}
+
+serving_pair_present() {  # pci
+  [ -e "$QUAL_SYS_ROOT/bus/pci/devices/$1" ]
 }
 
 serving_pair_bound() {  # pci
@@ -231,11 +282,74 @@ serving_pair_reprobe_check() {  # board-id pci
   serving_pair_heal_node=$node
 }
 
-# One card: at most SERVING_PAIR_REPROBES driver re-probes, each checked first, each followed by a wait
-# for the by-id link.
-serving_pair_heal_card() {  # board-id pci [last]
-  local card=$1 pci=$2 last=${3:-} name attempt=1 waited
+# One card whose PCI device is absent: at most SERVING_PAIR_RESCANS rescans of its upstream port, each
+# checked first, each followed by a wait for the device (present and bound); then a wait for its by-id
+# link. Returns 0 when the link is back, 3 when the device is back without it (the caller goes on to the
+# driver re-probe, which checks everything again), 1 when it refuses.
+serving_pair_rescan_card() {  # board-id pci [last]
+  local card=$1 pci=$2 last=${3:-} name port rescan=1 waited
   name=$(serving_pair_card_name "$card" "$pci")
+  port=$(serving_pair_upstream_of "$pci")
+  while ! serving_pair_present "$pci"; do
+    if [ "$rescan" -gt "$SERVING_PAIR_RESCANS" ]; then
+      echo "refusing: $name PCI device $pci still absent after $SERVING_PAIR_RESCANS rescans of its upstream port $port; no driver re-probe." >&2
+      echo "  Its link did not train (dmesg: pciehp 'Cannot train link'): a power-cycle of the PCIe switch or a host reboot" >&2
+      echo "  brings it back - a human action, never this step's." >&2
+      return 1
+    fi
+    if [ -z "$port" ] || [ ! -e "$QUAL_SYS_ROOT/bus/pci/devices/$port" ]; then
+      echo "refusing: $name PCI device $pci absent after reset, and its upstream port ${port:-(none known)} is not in sysfs; no rescan" >&2
+      return 1
+    fi
+    if [ -n "$last" ] && [ "$SECONDS" -gt "$last" ]; then
+      echo "refusing: $name PCI device $pci absent after reset, but the step is ${SECONDS} s in and no rescan may start after ${last} s;" >&2
+      echo "  no rescan $rescan/$SERVING_PAIR_RESCANS" >&2
+      return 1
+    fi
+    echo "[reset] $name PCI device absent after reset (link did not train); rescan of its upstream port $port $rescan/$SERVING_PAIR_RESCANS"
+    if ! serving_pair_rescan_write "$port"; then
+      echo "refusing: the rescan of $port failed; $name PCI device $pci is still absent" >&2
+      return 1
+    fi
+    waited=0
+    while ! { serving_pair_present "$pci" && serving_pair_bound "$pci"; } && [ "$waited" -lt "$SERVING_PAIR_RESCAN_WAIT" ]; do
+      sleep 2
+      waited=$((waited + 2))
+    done
+    if serving_pair_present "$pci"; then
+      if ! serving_pair_bound "$pci"; then
+        echo "[reset]   $pci is back ${waited} s after rescan $rescan/$SERVING_PAIR_RESCANS, but not bound to $SERVING_PAIR_DRIVER"
+        return 3
+      fi
+      echo "[reset]   $pci is back ${waited} s after rescan $rescan/$SERVING_PAIR_RESCANS, bound to $SERVING_PAIR_DRIVER"
+      break
+    fi
+    echo "[reset]   $pci still absent ${waited} s after rescan $rescan/$SERVING_PAIR_RESCANS"
+    rescan=$((rescan + 1))
+  done
+  waited=0
+  while ! serving_pair_linked "$card" && [ "$waited" -lt "$SERVING_PAIR_REPROBE_WAIT" ]; do
+    sleep 2
+    waited=$((waited + 2))
+  done
+  if serving_pair_linked "$card"; then
+    echo "[reset] $name by-id link back ${waited} s after rescan $rescan/$SERVING_PAIR_RESCANS -> $(readlink -f -- "$QUAL_BYID_ROOT/$card")"
+    return 0
+  fi
+  echo "[reset] $name by-id link still missing ${waited} s after rescan $rescan/$SERVING_PAIR_RESCANS; on to the driver re-probe"
+  return 3
+}
+
+# One card: if its PCI device is absent, the rescans above first; then at most SERVING_PAIR_REPROBES
+# driver re-probes, each checked first, each followed by a wait for the by-id link.
+serving_pair_heal_card() {  # board-id pci [last]
+  local card=$1 pci=$2 last=${3:-} name attempt=1 waited st
+  name=$(serving_pair_card_name "$card" "$pci")
+  if ! serving_pair_present "$pci"; then
+    st=0
+    serving_pair_rescan_card "$card" "$pci" "$last" || st=$?
+    if [ "$st" != 3 ]; then return "$st"; fi
+  fi
   while [ "$attempt" -le "$SERVING_PAIR_REPROBES" ]; do
     if serving_pair_linked "$card"; then
       echo "[reset] $name by-id link is present now; no re-probe"
@@ -319,5 +433,5 @@ serving_pair_heal() {  # [seconds] [last]
     echo "[reset] $(serving_pair_card_name "${cards[$i]}" "${expected[$i]}") by-id link still missing ${waited} s after the reset"
     serving_pair_heal_card "${cards[$i]}" "${expected[$i]}" "$last" || return 1
   done
-  echo "[reset] both serving cards' by-id links present after the driver re-probe"
+  echo "[reset] both serving cards' by-id links present after the self-heal"
 }

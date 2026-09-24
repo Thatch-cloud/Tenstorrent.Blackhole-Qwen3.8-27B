@@ -8,7 +8,8 @@ when it is run (never a bare index, which tt-smi reads as its own renumbering bo
 single-card harness under optimisation/ttnn-op embeds it byte for byte; the scripts/ci rig runners
 source it. scripts/ci/serving_pair.sh gives the m3native gate its holder-check and reset targets: card
 M and card A only, by board id, checked against their PCI addresses, and the reset step's self-heal (a
-driver re-probe of a serving card that came back from the reset without its by-id link). The gate's two
+driver re-probe of a serving card that came back from the reset without its by-id link, and a rescan of
+the upstream port of one whose PCI device did not come back at all). The gate's two
 steps are run here as the runner would run them, against a fake rig with fake sudo, fuser and tt-smi, a
 fake /sys and a fake driver.
 
@@ -76,6 +77,8 @@ CARD_M = 'blackhole-CEF5729692C19E6D'
 CARD_A = 'blackhole-3707293C249A5E67'
 CARD_B = 'blackhole-F36F768B9A5CAFA0'
 PCI_M, PCI_A, PCI_B = '0000:d1:00.0', '0000:f3:00.0', '0000:f4:00.0'
+# Their upstream ports: card M's AMD root port, card A's and card B's PCIe switch downstream ports.
+PORT_M, PORT_A, PORT_B = '0000:d0:01.1', '0000:f2:00.0', '0000:f2:01.0'
 RUNNER = 'thatch-build-amd64-02-cp-temp'
 BEGIN, END = '# >>> qual_card.sh', '# <<< qual_card.sh'
 NL = chr(10)
@@ -208,14 +211,16 @@ class FakeRig:
 
     def sysfs(self):
         """Shell lines that build the fake /sys the self-heal reads (FAKE_DIR/sys): a PCI device per board
-        with an address, each bound to the tenstorrent driver. Built by bash, not Python: the addresses
-        hold ':', which only the shell's own path mapping stores on Windows."""
+        with an address, each bound to the tenstorrent driver, and the three boards' upstream ports. Built
+        by bash, not Python: the addresses hold ':', which only the shell's own path mapping stores on
+        Windows."""
         pci = self.dir / 'sys' / 'bus' / 'pci'
         lines = ['mkdir -p %s' % q(pci / 'drivers' / 'tenstorrent'),
                  ': > %s' % q(pci / 'drivers' / 'tenstorrent' / 'bind'),
                  ': > %s' % q(pci / 'drivers' / 'tenstorrent' / 'unbind')]
         for address in sorted(set(filter(None, self.pci.values()))):
             lines.append('mkdir -p %s %s' % (q(pci / 'devices' / address), q(pci / 'drivers' / 'tenstorrent' / address)))
+        lines.append('mkdir -p %s' % ' '.join(q(pci / 'devices' / port) for port in (PORT_M, PORT_A, PORT_B)))
         return lines
 
     def stubs(self):
@@ -772,11 +777,37 @@ class ServingPairTests(unittest.TestCase):
                          ['sudo -n tee %s/unbind <- %s' % (sysfs, PCI_A), 'sudo -n tee %s/bind <- %s' % (sysfs, PCI_M)])
         self.assertIn("is not card M's or card A's PCI address", (rig.dir / 'err.log').read_text())
 
+    def test_the_rescan_write_names_only_card_m_and_card_a_upstream_ports(self):
+        # The self-heal's other write: card B's port, a device address, or anything but the pair's own
+        # upstream ports is refused before sudo is even called.
+        rig = self.rig()
+        body = NL.join([
+            'sudo() { echo "sudo $* <- $(cat)" >> "$FAKE_DIR/sudo.log"; }',
+            'for port in %s %s %s "" "%s %s" "*" %s/../%s %s:extra; do' % (PORT_B, PCI_A, PCI_M, PORT_M, PORT_A,
+                                                                          PORT_A, PORT_B, PORT_A),
+            '  st=0; serving_pair_rescan_write "$port" 2>> "$FAKE_DIR/err.log" || st=$?; echo "[$port]=$st"',
+            'done',
+            'serving_pair_rescan_write %s' % PORT_A,
+            'serving_pair_rescan_write %s' % PORT_M,
+            'echo "upstream=[$(serving_pair_upstream_of %s)] [$(serving_pair_upstream_of %s)] [$(serving_pair_upstream_of %s)]"'
+            % (PCI_M, PCI_A, PCI_B),
+        ])
+        result = self.run_pair(rig, body)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for port in (PORT_B, PCI_A, PCI_M, '', PORT_M + ' ' + PORT_A, '*', PORT_A + '/../' + PORT_B, PORT_A + ':extra'):
+            self.assertIn('[%s]=2' % port, result.stdout)
+        self.assertIn('upstream=[%s] [%s] []' % (PORT_M, PORT_A), result.stdout)
+        devices = (rig.dir / 'sys' / 'bus' / 'pci' / 'devices').as_posix()
+        self.assertEqual((rig.dir / 'sudo.log').read_text().splitlines(),
+                         ['sudo -n tee %s/%s/rescan <- 1' % (devices, PORT_A), 'sudo -n tee %s/%s/rescan <- 1' % (devices, PORT_M)])
+        self.assertIn("is not card M's or card A's upstream port", (rig.dir / 'err.log').read_text())
+
     def test_the_serving_pair_file_never_names_card_b(self):
         text = read(SERVING_PAIR)
-        for name in (CARD_B, PCI_B, 'f4:00'):
+        for name in (CARD_B, PCI_B, 'f4:00', PORT_B, 'f2:01'):
             self.assertNotIn(name, text)
         self.assertIn("SERVING_PAIR_EXPECTED_PCI='%s %s'" % (PCI_M, PCI_A), text)
+        self.assertIn("SERVING_PAIR_UPSTREAM_PORTS='%s %s'" % (PORT_M, PORT_A), text)
         self.assertNotIn(chr(13), text)
 
     def test_the_heal_refuses_a_wait_or_a_limit_that_is_not_a_number(self):
@@ -850,25 +881,36 @@ class GateWorkflowTests(unittest.TestCase):
     def test_the_reset_heals_right_after_the_pair_reset_and_fails_when_the_heal_fails(self):
         text = self.reset
         heal = text.index('serving_pair_heal 60 720 2>&1 | tee -a experiment-results/reset.log || heal=$?')
-        code = [line for line in text.splitlines() if not line.lstrip().startswith('#')]
-        self.assertEqual(len([line for line in code if 'serving_pair_heal' in line]), 1)
+        code = [line.strip() for line in text.splitlines() if not line.lstrip().startswith('#')]
+        # Two heals: the fallback's, before each card is resolved again, and the one after the reset.
+        fallback_heal = 'if ! serving_pair_heal 60 720 >> experiment-results/reset.log 2>&1; then status=1; break; fi'
+        self.assertEqual([line for line in code if 'serving_pair_heal' in line],
+                         [fallback_heal, 'serving_pair_heal 60 720 2>&1 | tee -a experiment-results/reset.log || heal=$?'])
         self.assertLess(text.index('"$smi" -r "${SERVING_PAIR_NODES[@]}"'), heal)       # after the pair reset
         self.assertLess(text.index('"$smi" -r "${SERVING_PAIR_NODES[$i]}"'), heal)      # and its fallback
         self.assertEqual(text[:heal].rstrip().splitlines()[-1].strip(), 'if [ "$status" = 0 ]; then')
         self.assertLess(heal, text.index('echo "heal_exit=$heal" | tee experiment-results/heal.status'))
         self.assertEqual(text.rstrip().splitlines()[-2:], ['test "$status" = 0', 'test "$heal" = 0'])
+        # The fallback's heal is the first thing in its per-card loop, before the resolve and the reset.
+        loop = code[code.index('for i in 0 1; do') + 1:code.index('done')]
+        self.assertEqual(loop, [fallback_heal,
+                                'if ! serving_pair_resolve 120 >> experiment-results/reset.log 2>&1; then status=1; break; fi',
+                                'timeout -k 20 300 "${prefix[@]}" "$smi" -r "${SERVING_PAIR_NODES[$i]}" '
+                                '>> experiment-results/reset.log 2>&1 || status=$?'])
+        self.assertLess(text.index('"$smi" -r "${SERVING_PAIR_NODES[@]}"'), text.index(fallback_heal))
         step = self.steps['Reset the serving pair (card M and card A together) before this job opens it']
         self.assertGreaterEqual(step['timeout-minutes'], 14)
-        # No unbind may start in the step's last two minutes: the runner's timeout must never land
-        # between an unbind and its bind.
-        last = int(re.search(r'serving_pair_heal 60 (\d+) ', text).group(1))
-        self.assertEqual(last, step['timeout-minutes'] * 60 - 120)
+        # No rescan and no unbind may start in the step's last two minutes: the runner's timeout must
+        # never land between an unbind and its bind.
+        lasts = [int(last) for last in re.findall(r'serving_pair_heal 60 (\d+) ', text)]
+        self.assertEqual(lasts, [step['timeout-minutes'] * 60 - 120] * 2)
 
     def test_no_step_of_the_gate_touches_every_node_or_card_b(self):
         text = read(GATE)
         self.assertNotIn('ls /dev/tenstorrent', text)
         self.assertNotIn(CARD_B, text)
         self.assertNotIn(PCI_B, text)
+        self.assertNotIn(PORT_B, text)
 
     @unittest.skipUnless(BASH, 'bash not found')
     def test_both_steps_parse(self):
@@ -884,8 +926,10 @@ FAKE_TT_SMI = '''#!/usr/bin/env bash
 # tt-smi as the gate calls it: logs every call; -r accepts only existing /dev/tenstorrent node paths.
 # Scenario (FAKE_DIR/scenario): ok; renumber - the first reset fails its re-init and the pair
 # re-enumerates, card M at once as node 3, card A only after three polls as node 4 (card B keeps
-# node 0); gone - the same, but card A never comes back. A reset that succeeds then runs
-# FAKE_DIR/after-reset.sh, if there is one (what the boards look like when it returns).
+# node 0); gone - the same, but card A never comes back; untrained - the first reset fails (a traceback)
+# and card A's switch port cannot train its link: its PCI device is gone, with its driver binding, node and
+# by-id link (run v217), until a rescan of its port brings it back (FAKE_KERNEL). A reset that succeeds
+# then runs FAKE_DIR/after-reset.sh, if there is one (what the boards look like when it returns).
 FAKE_DIR={fake}
 TT={tt}
 echo "$*" >> "$FAKE_DIR/smi.log"
@@ -904,6 +948,13 @@ done
 calls=$(( $(cat "$FAKE_DIR/resets" 2>/dev/null || echo 0) + 1 ))
 echo "$calls" > "$FAKE_DIR/resets"
 scenario=$(cat "$FAKE_DIR/scenario" 2>/dev/null || echo ok)
+if [ "$calls" = 1 ] && [ "$scenario" = untrained ]; then
+  a=$(cat "$TT/by-id/{card_a}")
+  rm -rf "$a" "$TT/by-id/{card_a}" "$FAKE_DIR/pci/${{a##*/}}" "$FAKE_DIR/sys/bus/pci/devices/{pci_a}" \\
+    "$FAKE_DIR/sys/bus/pci/drivers/tenstorrent/{pci_a}"
+  echo 'Traceback (most recent call last):'
+  exit 1
+fi
 if [ "$calls" = 1 ] && [ "$scenario" != ok ]; then
   rm -f "$TT/1" "$TT/2" "$TT/by-id/{card_m}" "$TT/by-id/{card_a}" "$FAKE_DIR/pci/1" "$FAKE_DIR/pci/2"
   : > "$TT/3"; printf '%s' "$TT/3" > "$TT/by-id/{card_m}"; echo {pci_m} > "$FAKE_DIR/pci/3"
@@ -933,9 +984,10 @@ exit $found
 '''
 
 FAKE_SUDO = '''#!/usr/bin/env bash
-# sudo -n: runs the command. A tee into the fake driver's unbind or bind file is logged
-# (FAKE_DIR/driver.log: "<file> <address>") and handed to the fake kernel; a tee into any other sys
-# tree is refused and logged, so no test can ever write the host's real /sys.
+# sudo -n: runs the command. A tee into the fake driver's unbind or bind file, or into a fake PCI
+# device's rescan file, is logged (FAKE_DIR/driver.log: "<file> <address>", "rescan <port>") and handed
+# to the fake kernel; a tee into any other sys tree is refused and logged, so no test can ever write the
+# host's real /sys.
 FAKE_DIR={fake}
 [ "${{1:-}}" = -n ] && shift
 if [ "${{1:-}}" = tee ]; then
@@ -944,6 +996,13 @@ if [ "${{1:-}}" = tee ]; then
       value=$(cat)
       echo "${{2##*/}} $value" >> "$FAKE_DIR/driver.log"
       . "$FAKE_DIR/kernel.sh" "${{2##*/}}" "$value"
+      exit $? ;;
+    "$FAKE_DIR"/sys/bus/pci/devices/*/rescan)
+      value=$(cat)
+      port=${{2%/rescan}}
+      port=${{port##*/}}
+      if [ "$value" = 1 ]; then echo "rescan $port" >> "$FAKE_DIR/driver.log"; else echo "rescan $port <- $value" >> "$FAKE_DIR/driver.log"; exit 1; fi
+      . "$FAKE_DIR/kernel.sh" rescan "$port"
       exit $? ;;
     */sys/*|/sys*) echo "REAL SYS WRITE $*" >> "$FAKE_DIR/driver.log"; exit 97 ;;
   esac
@@ -957,10 +1016,41 @@ FAKE_KERNEL = '''# The fake tenstorrent driver, sourced by the fake sudo for a w
 # FAKE_DIR/heal-after times (never without that file: the ARC still does not answer). FAKE_DIR/bind-fails
 # makes that many bind writes fail; FAKE_DIR/unbind-refused makes every unbind fail, writing nothing (sudo
 # refused).
+# A write to an upstream port's rescan file ($1 rescan, $2 the port) is additive, as the kernel's: a board
+# whose PCI device is present is left alone. One whose device is absent re-enumerates from the
+# FAKE_DIR/rescan-after-th rescan of its port on (never without that file: its link does not train), one
+# poll later, bound, on the lowest free node; udev makes its by-id link two polls after that if
+# FAKE_DIR/rescan-link exists (otherwise it comes back without it, the telemetry race).
 op=$1
 pci=$2
 tt={tt}
 drv=$FAKE_DIR/sys/bus/pci/drivers/tenstorrent
+if [ "$op" = rescan ]; then
+  case $2 in
+    {port_m}) pci={pci_m}; card={card_m} ;;
+    {port_a}) pci={pci_a}; card={card_a} ;;
+    {port_b}) pci={pci_b}; card={card_b} ;;
+    *) echo "tee: $2: No such file or directory" >&2; return 1 ;;
+  esac
+  [ -d "$FAKE_DIR/sys/bus/pci/devices/$2" ] || {{ echo "tee: $2: No such file or directory" >&2; return 1; }}
+  rescans=$(( $(cat "$FAKE_DIR/rescans-$card" 2>/dev/null || echo 0) + 1 ))
+  echo "$rescans" > "$FAKE_DIR/rescans-$card"
+  after=$(cat "$FAKE_DIR/rescan-after" 2>/dev/null || echo 0)
+  if [ -e "$FAKE_DIR/sys/bus/pci/devices/$pci" ] || [ "$after" = 0 ] || [ "$rescans" -lt "$after" ]; then return 0; fi
+  n=0
+  while [ -e "$tt/$n" ]; do n=$((n + 1)); done
+  {{
+    echo "mkdir -p '$FAKE_DIR/sys/bus/pci/devices/$pci' '$drv/$pci'"
+    echo ": > '$tt/$n'"
+    echo "echo $pci > '$FAKE_DIR/pci/$n'"
+    if [ -f "$FAKE_DIR/rescan-link" ]; then
+      echo "echo 2 > '$FAKE_DIR/pending'"
+      echo "echo \\"printf '%s' '$tt/$n' > '$tt/by-id/$card'\\" > '$FAKE_DIR/comeback.sh'"
+    fi
+  }} > "$FAKE_DIR/comeback.sh"
+  echo 1 > "$FAKE_DIR/pending"
+  return 0
+fi
 case $pci in
   {pci_m}) card={card_m} ;;
   {pci_a}) card={card_a} ;;
@@ -1007,8 +1097,8 @@ class GateStepExecutionTests(unittest.TestCase):
     """The gate's two steps, run as the runner runs them (bash, in the checkout), against a FakeRig:
     scripts/ci/serving_pair.sh is a shim that sources the real one and then the rig's stubs, and
     sudo, fuser and tt-smi are fakes first on PATH. The reset step's self-heal reads a fake /sys and
-    writes the fake driver's unbind and bind files through the fake sudo, which hands them to a fake
-    kernel (FAKE_KERNEL)."""
+    writes the fake driver's unbind and bind files, and the upstream ports' rescan files, through the
+    fake sudo, which hands them to a fake kernel (FAKE_KERNEL)."""
 
     @classmethod
     def setUpClass(cls):
@@ -1026,11 +1116,13 @@ class GateStepExecutionTests(unittest.TestCase):
         return FakeRig(tempfile.mkdtemp(dir=self.tmp.name), **options)
 
     def run_step(self, rig, text, scenario='ok', held=(), after_reset=(), heal_after=0, bind_fails=0, clock=None,
-                 unbind_refused=False):
+                 unbind_refused=False, rescan_after=0, rescan_link=True):
         """after_reset: shell lines the fake tt-smi runs once a reset succeeds. heal_after: the bind (of a
         board's address) from which udev makes its by-id link again; 0, never. bind_fails: bind writes
         that fail before one succeeds. clock: the step's $SECONDS when it sources serving_pair.sh (the fake
-        sleep never advances it: a slow reset). unbind_refused: every unbind write fails."""
+        sleep never advances it: a slow reset). unbind_refused: every unbind write fails. rescan_after: the
+        rescan (of a board's upstream port) from which its absent PCI device re-enumerates; 0, never.
+        rescan_link: whether udev then makes its by-id link (False: the telemetry race follows)."""
         work = rig.dir / 'm3native'
         (work / 'scripts' / 'ci').mkdir(parents=True)
         # id: the shim runs as the unprivileged runner does, so every privileged write goes through sudo.
@@ -1041,7 +1133,7 @@ class GateStepExecutionTests(unittest.TestCase):
         fakes = rig.dir / 'bin'
         fakes.mkdir()
         values = dict(fake=q(rig.dir), tt=q(rig.tt), card_m=CARD_M, card_a=CARD_A, card_b=CARD_B, pci_m=PCI_M,
-                      pci_a=PCI_A, pci_b=PCI_B)
+                      pci_a=PCI_A, pci_b=PCI_B, port_m=PORT_M, port_a=PORT_A, port_b=PORT_B)
         for name, body in (('tt-smi', FAKE_TT_SMI.format(**values)), ('fuser', FAKE_FUSER.format(**values)),
                            ('sudo', FAKE_SUDO.format(**values))):
             (fakes / name).write_bytes(body.encode('utf-8'))
@@ -1053,6 +1145,9 @@ class GateStepExecutionTests(unittest.TestCase):
         (rig.dir / 'bind-fails').write_text('%d' % bind_fails + NL)
         if unbind_refused:
             (rig.dir / 'unbind-refused').write_text('1' + NL)
+        (rig.dir / 'rescan-after').write_text('%d' % rescan_after + NL)
+        if rescan_link:
+            (rig.dir / 'rescan-link').write_text('1' + NL)
         if after_reset:
             (rig.dir / 'after-reset.sh').write_bytes((NL.join(after_reset) + NL).encode('utf-8'))
         wrapper = rig.dir / 'runner.sh'
@@ -1080,6 +1175,16 @@ class GateStepExecutionTests(unittest.TestCase):
         but without their by-id link (the ARC firmware was not ready when udev looked)."""
         return ['rm -f %s' % q(rig.byid(card)) for card in cards]
 
+    def untrained(self, rig, card):
+        """after_reset lines: the card's switch port cannot train its link (run v217): its PCI device is
+        gone, with its driver binding, node and by-id link."""
+        return ['rm -f %s %s %s' % (q(rig.byid(card)), q(rig.node(card)), q(rig.dir / 'pci' / rig.nodes[card])),
+                'rm -rf %s %s' % (self.sys_path(rig, 'devices', rig.pci[card]),
+                                  self.sys_path(rig, 'drivers', 'tenstorrent', rig.pci[card]))]
+
+    def rescan(self, n):
+        return 'PCI device absent after reset (link did not train); rescan of its upstream port %s %d/2' % (PORT_A, n)
+
     def sys_path(self, rig, *parts):
         return q(rig.dir.joinpath('sys', 'bus', 'pci', *parts))
 
@@ -1095,6 +1200,7 @@ class GateStepExecutionTests(unittest.TestCase):
         for call in calls:
             self.assertNotIn(rig.node(CARD_B), call.split())
             self.assertNotIn('f4:00', call)
+            self.assertNotIn(PORT_B, call)
             self.assertNotIn('BARE RESET', call)
             if call.startswith('-r'):
                 self.assertTrue(call.split()[1:], 'tt-smi -r with no board resets every board')
@@ -1131,7 +1237,9 @@ class GateStepExecutionTests(unittest.TestCase):
         self.assertEqual(calls, ['-r %s/2 %s/1' % (tt, tt), '-r %s/3' % tt, '-r %s/4' % tt, '-ls'])
         self.assert_never_card_b(rig, calls)
         log = (rig.dir / 'm3native' / 'experiment-results' / 'reset.log').read_text()
-        self.assertIn('both board ids resolved after 6 s', log)
+        # The fallback's heal, before card M is resolved, waited for card A (and re-probed nothing).
+        self.assertIn("[reset] both serving cards' by-id links present 6 s after the reset; no re-probe", log)
+        self.assertEqual(self.driver_calls(rig), [])
 
     def test_a_pair_that_does_not_come_back_resets_nothing_more_and_fails(self):
         rig = self.rig()
@@ -1142,6 +1250,9 @@ class GateStepExecutionTests(unittest.TestCase):
         self.assertEqual(calls, ['-r %s/2 %s/1' % (tt, tt), '-ls'])
         self.assert_never_card_b(rig, calls)
         self.assertIn('reset_exit=1', (rig.dir / 'm3native' / 'experiment-results' / 'reset.status').read_text())
+        # The fallback's heal refused card A (bound, but no node at its address), before any resolve.
+        self.assertIn('0 device nodes are at PCI %s, not one' % PCI_A, self.results(rig, 'reset.log'))
+        self.assertEqual(self.driver_calls(rig), [])
 
     def test_a_changed_mapping_resets_nothing(self):
         rig = self.rig(pci={CARD_M: PCI_B, CARD_A: PCI_A, CARD_B: PCI_M})
@@ -1244,18 +1355,21 @@ class GateStepExecutionTests(unittest.TestCase):
 
     def test_a_missing_pci_device_refuses_without_a_re_probe(self):
         for case, parts, why in (
-                ('absent', (('devices', PCI_A), ('drivers', 'tenstorrent', PCI_A)), 'PCI device %s is absent' % PCI_A),
+                ('absent', (('devices', PCI_A), ('drivers', 'tenstorrent', PCI_A)),
+                 'PCI device %s still absent after 2 rescans of its upstream port %s' % (PCI_A, PORT_A)),
                 ('unbound', (('drivers', 'tenstorrent', PCI_A),),
                  'PCI device %s is not bound to the tenstorrent driver' % PCI_A)):
             with self.subTest(case=case):
                 rig = self.rig()
                 # Card A comes back from the reset without its by-id link and node, and without its PCI
-                # device (the board did not re-enumerate) or without its driver.
+                # device (the board did not re-enumerate, and the rescans below do not bring it back) or
+                # without its driver.
                 gone = self.race(rig, CARD_A) + ['rm -f %s %s' % (q(rig.node(CARD_A)), q(rig.dir / 'pci' / '1'))]
                 gone += ['rm -rf %s' % self.sys_path(rig, *part) for part in parts]
                 result = self.run_step(rig, self.reset, after_reset=gone, heal_after=1)
                 self.assertEqual(result.returncode, 1)
-                self.assertEqual(self.driver_calls(rig), [])
+                # No unbind or bind: an absent device is only rescanned at its port, an unbound one not even that.
+                self.assertEqual(self.driver_calls(rig), ['rescan ' + PORT_A] * 2 if case == 'absent' else [])
                 log = self.results(rig, 'reset.log')
                 self.assertIn(why, log)
                 self.assertIn('no driver re-probe', log)
@@ -1305,6 +1419,145 @@ class GateStepExecutionTests(unittest.TestCase):
         result = self.run_step(early, self.reset, after_reset=self.race(early, CARD_A), heal_after=1, clock=690)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.driver_calls(early), ['unbind ' + PCI_A, 'bind ' + PCI_A])
+
+    # A link that did not train (run v217: card A's PCI device was gone after the reset).
+
+    def test_an_absent_card_is_brought_back_by_one_rescan_of_its_own_upstream_port(self):
+        rig = self.rig()
+        node_a = rig.node(CARD_A)
+        result = self.run_step(rig, self.reset, after_reset=self.untrained(rig, CARD_A), rescan_after=1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # One rescan of card A's own switch port; no driver re-probe, no further reset.
+        self.assertEqual(self.driver_calls(rig), ['rescan ' + PORT_A])
+        calls = self.smi_calls(rig)
+        self.assertEqual(calls, ['-r %s %s' % (rig.node(CARD_M), node_a), '-ls'])
+        self.assert_never_card_b(rig, calls)
+        log = self.results(rig, 'reset.log')
+        name = 'card A (%s, PCI %s)' % (CARD_A, PCI_A)
+        self.assertIn('[reset] %s by-id link still missing 60 s after the reset' % name, log)
+        self.assertIn('[reset] %s %s' % (name, self.rescan(1)), log)
+        self.assertIn('[reset]   %s is back 2 s after rescan 1/2, bound to tenstorrent' % PCI_A, log)
+        self.assertIn('[reset] %s by-id link back 4 s after rescan 1/2 -> %s' % (name, node_a), log)
+        self.assertIn("[reset] both serving cards' by-id links present after the self-heal", log)
+        self.assertNotIn(self.rescan(2), log)
+        self.assertNotIn('driver re-probe', log)
+        self.assertNotIn('card M (', log.replace('card M and card A', ''))        # card M was never touched
+        self.assertIn('heal_exit=0', self.results(rig, 'heal.status'))
+        self.assertIn('reset_exit=0', self.results(rig, 'reset.status'))
+        self.assertIn('%s (card A, half of the serving pair) -> %s, PCI %s' % (CARD_A, node_a, PCI_A),
+                      self.results(rig, 'serving-pair-after-reset.txt'))
+        self.assertTrue(self.bound(rig, PCI_A))
+        self.assertTrue(self.bound(rig, PCI_B))
+        # Card M absent instead: its own port, the root port, is the one rescanned.
+        card_m = self.rig()
+        result = self.run_step(card_m, self.reset, after_reset=self.untrained(card_m, CARD_M), rescan_after=1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.driver_calls(card_m), ['rescan ' + PORT_M])
+        self.assertIn('[reset] card M (%s, PCI %s) PCI device absent after reset (link did not train); rescan of its '
+                      'upstream port %s 1/2' % (CARD_M, PCI_M, PORT_M), self.results(card_m, 'reset.log'))
+        # Card A back only after the second rescan: two rescans, still no re-probe.
+        late = self.rig()
+        result = self.run_step(late, self.reset, after_reset=self.untrained(late, CARD_A), rescan_after=2)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.driver_calls(late), ['rescan ' + PORT_A] * 2)
+        log = self.results(late, 'reset.log')
+        self.assertIn('[reset]   %s still absent 30 s after rescan 1/2' % PCI_A, log)
+        self.assertIn('[reset] %s by-id link back 4 s after rescan 2/2 -> %s' % (name, late.node(CARD_A)), log)
+
+    def test_a_card_rescanned_back_without_its_link_goes_on_to_one_driver_re_probe(self):
+        rig = self.rig()
+        node_a = rig.node(CARD_A)
+        result = self.run_step(rig, self.reset, after_reset=self.untrained(rig, CARD_A), rescan_after=1,
+                               rescan_link=False, heal_after=1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The rescan brings the device back, bound, but udev makes no link (the telemetry race after it):
+        # one driver re-probe, with every check it makes (its node re-checked for holders first).
+        self.assertEqual(self.driver_calls(rig), ['rescan ' + PORT_A, 'unbind ' + PCI_A, 'bind ' + PCI_A])
+        self.assertIn('-v ' + node_a, rig.fuser_calls())
+        log = self.results(rig, 'reset.log')
+        name = 'card A (%s, PCI %s)' % (CARD_A, PCI_A)
+        self.assertIn('[reset] %s %s' % (name, self.rescan(1)), log)
+        self.assertIn('[reset] %s by-id link still missing 60 s after rescan 1/2; on to the driver re-probe' % name, log)
+        self.assertIn('[reset] %s %s' % (name, self.reprobe(1)), log)
+        self.assertIn('[reset] %s by-id link back 4 s after driver re-probe 1/2 -> %s' % (name, node_a), log)
+        self.assertLess(log.index(self.rescan(1)), log.index(self.reprobe(1)))
+        self.assertNotIn(self.rescan(2), log)
+        self.assertNotIn(self.reprobe(2), log)
+        self.assertIn('heal_exit=0', self.results(rig, 'heal.status'))
+        self.assertTrue(self.bound(rig, PCI_A))
+
+    def test_a_card_no_rescan_brings_back_is_refused_after_two_and_fails_the_step(self):
+        rig = self.rig()
+        result = self.run_step(rig, self.reset, after_reset=self.untrained(rig, CARD_A), rescan_after=0, heal_after=1)
+        self.assertEqual(result.returncode, 1)
+        # Exactly SERVING_PAIR_RESCANS rescans of card A's port, nothing else written: no re-probe, and
+        # never card B's port.
+        self.assertEqual(self.driver_calls(rig), ['rescan ' + PORT_A] * 2)
+        self.assertFalse((rig.dir / ('rescans-' + CARD_B)).exists())
+        log = self.results(rig, 'reset.log')
+        name = 'card A (%s, PCI %s)' % (CARD_A, PCI_A)
+        for n in (1, 2):
+            self.assertIn('[reset] %s %s' % (name, self.rescan(n)), log)
+            self.assertIn('[reset]   %s still absent 30 s after rescan %d/2' % (PCI_A, n), log)
+        self.assertNotIn('rescan of its upstream port %s 3/' % PORT_A, log)
+        self.assertIn('refusing: %s PCI device %s still absent after 2 rescans of its upstream port %s; no driver re-probe.'
+                      % (name, PCI_A, PORT_A), log)
+        self.assertIn('a power-cycle of the PCIe switch or a host reboot', log)
+        self.assertNotIn(self.reprobe(1), log)
+        self.assertNotIn(PORT_B, log)
+        self.assertIn('heal_exit=1', self.results(rig, 'heal.status'))
+        self.assertIn('reset_exit=0', self.results(rig, 'reset.status'))
+        calls = self.smi_calls(rig)
+        self.assertEqual(calls, ['-r %s %s' % (rig.node(CARD_M), rig.node(CARD_A)), '-ls'])     # no further reset
+        self.assert_never_card_b(rig, calls)
+        self.assertTrue(self.bound(rig, PCI_B))
+
+    def test_no_rescan_starts_in_the_steps_last_two_minutes(self):
+        rig = self.rig()
+        result = self.run_step(rig, self.reset, after_reset=self.untrained(rig, CARD_A), rescan_after=1, clock=721)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.driver_calls(rig), [])
+        log = self.results(rig, 'reset.log')
+        self.assertIn('no rescan may start after 720 s', log)
+        self.assertNotIn(self.rescan(1), log)
+        self.assertIn('heal_exit=1', self.results(rig, 'heal.status'))
+        # Inside the limit the same card is rescanned back.
+        early = self.rig()
+        result = self.run_step(early, self.reset, after_reset=self.untrained(early, CARD_A), rescan_after=1, clock=690)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.driver_calls(early), ['rescan ' + PORT_A])
+
+    def test_a_failed_pair_reset_that_lost_card_a_heals_it_before_each_card_is_reset_again(self):
+        # Run v217: the pair reset exits 1 and card A's switch port cannot train its link, so card A's PCI
+        # device is gone. The fallback's heal, before card M is resolved, rescans card A's port; then card
+        # M and card A are each resolved and reset alone, and the step passes.
+        rig = self.rig()
+        tt = rig.tt.as_posix()
+        result = self.run_step(rig, self.reset, scenario='untrained', rescan_after=1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.smi_calls(rig)
+        # The pair by its nodes (2, 1); then card M alone, then card A alone, back on node 1.
+        self.assertEqual(calls, ['-r %s/2 %s/1' % (tt, tt), '-r %s/2' % tt, '-r %s/1' % tt, '-ls'])
+        self.assert_never_card_b(rig, calls)
+        self.assertEqual(self.driver_calls(rig), ['rescan ' + PORT_A])
+        lines = self.results(rig, 'reset.log').splitlines()
+        self.assertIn('pair reset exited 1; resetting card M, then card A, each resolved again by board id', lines)
+        rescan = lines.index('[reset] card A (%s, PCI %s) %s' % (CARD_A, PCI_A, self.rescan(1)))
+        self.assertLess(rescan, lines.index('reset %s/2' % tt))                     # healed before card M's reset
+        self.assertLess(lines.index('reset %s/2' % tt), lines.index('reset %s/1' % tt))
+        self.assertIn('heal_exit=0', self.results(rig, 'heal.status'))
+        self.assertIn('reset_exit=0', self.results(rig, 'reset.status'))
+        self.assertIn('%s (card A, half of the serving pair) -> %s/1, PCI %s' % (CARD_A, tt, PCI_A),
+                      self.results(rig, 'serving-pair-after-reset.txt'))
+        self.assertTrue(self.bound(rig, PCI_A))
+        # The same failure with card A never coming back: no resolve, no further reset, the step fails.
+        gone = self.rig()
+        result = self.run_step(gone, self.reset, scenario='untrained', rescan_after=0)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.smi_calls(gone), ['-r %s %s' % (gone.node(CARD_M), gone.node(CARD_A)), '-ls'])
+        self.assertEqual(self.driver_calls(gone), ['rescan ' + PORT_A] * 2)
+        self.assertIn('still absent after 2 rescans of its upstream port %s' % PORT_A, self.results(gone, 'reset.log'))
+        self.assertIn('reset_exit=1', self.results(gone, 'reset.status'))
 
 
 @unittest.skipUnless(BASH, 'bash not found')
