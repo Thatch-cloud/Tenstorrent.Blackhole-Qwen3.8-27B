@@ -10,13 +10,15 @@
 # ttnn) follows. The explicit hardware allocation the harness demands is passed with -e, so it
 # is set INSIDE the container, not only on the host.
 #
-# Card M is half of the serving pair (tt-rig-hardware-topology memory): this refuses while any
-# running container can reach a card, and does no reset. Device nodes renumber across a board
-# reset, so the cards are resolved by by-id right before `docker run`.
-#
-# One card by default (--mesh 1x1: the two vocab shards run one after the other on card M).
-# Pass `--mesh 1x2` to open the pair with the fabric, as the model does - the only run that
-# also proves the chip-to-vocab-offset order the host combine assumes (chip_order_proven).
+# One card by default (--mesh 1x1: the two vocab shards run one after the other on it): the
+# qualification card, QUAL_CARD (a board id; default card B, blackhole-F36F768B9A5CAFA0), via
+# scripts/ci/qual_card.sh. Card M and card A are the serving pair (tt-rig-hardware-topology
+# memory): QUAL_CARD may name one only with ALLOW_SERVING_CARD=1. Pass `--mesh 1x2` to open the
+# pair with the fabric, as the model does - the only run that also proves the chip-to-vocab-offset
+# order the host combine assumes (chip_order_proven). That IS the serving pair (card B has no
+# Ethernet cable), so it needs ALLOW_SERVING_CARD=1 and ignores QUAL_CARD. Device nodes renumber
+# across a board reset, so the cards are resolved by board id right before `docker run`; the run
+# is refused while a container or a host process can reach a card it opens. It does no reset.
 #
 # Usage:
 #   scripts/ci/verify-t1-g0-rig.sh <host-output-dir> <image-sha> [extra verify_t1_device_compare.py args...]
@@ -43,30 +45,29 @@ for arg in "${extra_args[@]}"; do
   previous=$arg
 done
 
-running=$(docker ps -q)
-if [ -n "$running" ]; then
-  docker inspect $running | python3 -c '
-import json, sys
-for container in json.load(sys.stdin):
-    config = container["HostConfig"]
-    mapped = [item.get("PathOnHost", "") for item in config.get("Devices") or []]
-    mounts = [item.get("Source", "") for item in container.get("Mounts", [])]
-    if config.get("Privileged") or any(path == "/dev" or path.startswith("/dev/tenstorrent") for path in mapped + mounts):
-        raise SystemExit("Refusing G0: running container can reach a card: " + container["Name"])
-'
-fi
-
-card_m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
-test -e "$card_m"
-devices=(--device "$card_m")
-if [ "$pair" = 1 ]; then
-  card_a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
-  test -e "$card_a"
-  devices+=(--device "$card_a")
-fi
-
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for name in verify_t1_device_compare.py verify_trace_t1.py lever_n_m3native_patch.py gdn_prefill_conv_exact.py; do
+. "$here/qual_card.sh"
+devices=()
+opened=()   # "<board id> <node>" of every card the container is given, for the recheck before docker run
+if [ "$pair" = 1 ]; then
+  # G0: refuse while anything can reach either card (serving targets: any container on any card).
+  for card in $QUAL_SERVING_CARDS; do
+    QUAL_CARD=$card
+    qual_card_select
+    qual_card_resolve
+    qual_refuse_holders
+    devices+=(--device "$QUAL_NODE")
+    opened+=("$QUAL_CARD $QUAL_NODE")
+  done
+else
+  qual_card_select
+  qual_card_resolve
+  qual_refuse_holders
+  devices+=(--device "$QUAL_NODE")
+  opened+=("$QUAL_CARD $QUAL_NODE")
+fi
+
+for name in verify_t1_device_compare.py verify_trace_t1.py lever_n_m3native_patch.py gdn_prefill_conv_exact.py qual_card.sh; do
   test -f "$here/$name"
 done
 
@@ -75,6 +76,9 @@ outdir=$(cd "$outdir" && pwd)
 chmod 0777 "$outdir"
 
 name="verify-t1-g0-$(date -u +%Y%m%d%H%M%S)-$$"
+for card in "${opened[@]}"; do
+  qual_card_recheck "${card%% *}" "${card#* }"   # still on the node its holder check cleared
+done
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 
 timeout -k 30 1200 docker run --rm --name "$name" --network none \

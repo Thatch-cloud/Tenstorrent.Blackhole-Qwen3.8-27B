@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# K0 (sdpa-prefill-share-spec.md 7.1): the no-build compute-floor probes, one card-M session.
+# K0 (sdpa-prefill-share-spec.md 7.1): the no-build compute-floor probes, one session on the qualification
+# card (QUAL_CARD, default card B; card M or card A only with ALLOW_SERVING_CARD=1 - run_m1.sh's rules).
 #
 #   bash k0_session.sh                    # from the staged directory: sdpa_prefill_bench.py, run_m1.sh, k0/
 #   K0_Q4096=1 bash k0_session.sh         # also the q256_4096 second opinion on t_c (a seventh, separate run)
@@ -14,7 +15,8 @@
 # warmup +780 s for the fresh-cache JIT compile, open_device/build_inputs/other warmups +240 s), and
 # M1_REQUIRE_SOURCES=1 (the seven sdpa sources in the container must be the probe-v25 ones, the
 # reader replaced by the mounted file). The stock run also captures the worker-coordinate fixture
-# (spec 7.1 / 5.1) into fixtures/cardm_worker_coords.json.
+# (spec 7.1 / 5.1): fixtures/cardm_worker_coords.json when the session ran on card M (the board the
+# model's G6 groups are costed on), else fixtures/worker_coords-<card tag>.json (harvesting may differ).
 #
 # Image (spec 6 ground rules: the image the model gate will use): image A', the image of the
 # v117-v127 model gates, whose sdpa sources are the probe-v25 ones. IMAGE=<id> overrides; the image is
@@ -24,11 +26,12 @@
 #   3   a hang: the run printed WATCHDOG or a faulthandler 'Timeout (', or exited 3/124/137
 #   97  the container's sdpa sources, bench or reader mount are not what was asked (checked before
 #       the bench starts: nothing ran on the device)
-#   4   any other failure after a container was launched on card M
+#   4   any other failure after a container was launched on the card
 #   1   a failure before any container was launched (a refusal, a missing image, or docker could not
 #       start the container: exit 125)
-# On 3 and 4 it prints the recovery (spec 6: docker rm -f, tt-smi -r card M only, then a passing stock
-# smoke run) without running it. It never resets a card itself.
+# On 3 and 4 it prints the recovery (spec 6: docker rm -f, a reset of the target card only - its tt-smi
+# index derived from its PCI address - then a passing stock smoke run) without running it. It never
+# resets a card itself.
 #
 # Summary: slope per run, stock drift (stock2/stock), t_c = K0a slope x 0.064 ms, K0b4/K0a,
 # K0b32/K0a, K0b4/stock, K0c/stock; the per-variant proof that the mounted reader ran (K0a/b4/b32:
@@ -40,7 +43,7 @@
 # Env: M1_SRC (default: this script's directory), K0_DIR (default $M1_SRC/k0), RESULTS (default
 # $M1_SRC/results), IMAGE (default image A' 1b9b6445), K0_ROUNDS (7), K0_STARTS
 # (0,32768,65536,126976), K0_WATCHDOG_S (120), K0_ONLY (e.g. "stock k0c stock2"), K0_Q4096 (0),
-# K0_DRY_RUN (1: run_m1.sh prints its argv only).
+# K0_DRY_RUN (1: run_m1.sh prints its argv only), QUAL_CARD and ALLOW_SERVING_CARD (passed to every run).
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 S=${M1_SRC:-$HERE}
@@ -54,7 +57,285 @@ WATCHDOG_S=${K0_WATCHDOG_S:-120}
 # (qwen-lever-n-m3native-gate.yml); its sdpa/ tree is the probe-v25 one run_m1.sh checks.
 IMAGE_A1=sha256:1b9b644549d4409c4fc80e2f92c183e665e7e693c37cccc95b4bb760a6d7d537
 IMAGE=${IMAGE:-$IMAGE_A1}
-CARD_M=/dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D
+# >>> qual_card.sh: which board a qualification harness runs on (canonical copy scripts/ci/qual_card.sh)
+# Every single-card harness under optimisation/ttnn-op embeds this block byte for byte (the scripts in
+# scripts/ci source the file); scripts/ci/test_qual_card.py fails when a copy drifts, and
+# `py -3.11 -B scripts/ci/test_qual_card.py --sync` re-copies the canonical text into every harness.
+#
+# The rig has three p150a. Card M (blackhole-CEF5729692C19E6D) and card A (blackhole-3707293C249A5E67)
+# are the serving pair: Ethernet-linked, mounted by every CI gate arm (lever_n_m3native_run_arm.sh), and
+# reset together by the gate. Card B (blackhole-F36F768B9A5CAFA0, PCIe only) is the qualification card.
+# /dev/tenstorrent/N numbers change across resets and switch power-cycles, and tt-smi's own board index
+# is a different numbering again, so nothing here hard-codes either: the target is a board id, its node
+# is resolved with readlink -f at launch and again right before the container starts, and the reset
+# hint prints commands that resolve the board id when they are run (never a bare index) plus the PCI
+# address that identifies the board's row in tt-smi -ls.
+#
+# Only the m3native gate (qwen-lever-n-m3native-gate.yml) is scoped to the serving pair. qwen-card-reset.yml
+# and most other qwen-* hardware workflows still act on every node, or on fixed node numbers, in the same
+# qwen-two-p150a-exclusive group: check gh run list for that group before and during a card-B session.
+#
+#   QUAL_CARD=<board id>    the target, a name under /dev/tenstorrent/by-id (default: card B)
+#   ALLOW_SERVING_CARD=1    required to target card M or card A (half of the serving pair); loud warning
+#
+#   qual_card_select      sets QUAL_CARD, QUAL_BYID, QUAL_TAG, QUAL_SERVING; refuses a serving card
+#                         without the override. Touches no device: dry runs call it too.
+#   qual_card_resolve     sets QUAL_NODE (readlink -f, now) and QUAL_PCI; refuses a missing board and
+#                         treats a board id that resolves to a serving card's node as that serving card.
+#   qual_refuse_holders   refuses while a container or a host process can reach the target.
+#   qual_card_recheck     readlink -f again right before the container starts; refuses if the node moved.
+#   qual_reset_hint       the recovery lines after a hang, on stdout; it never resets anything itself.
+QUAL_CARD_B=blackhole-F36F768B9A5CAFA0
+QUAL_SERVING_CARDS='blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67'
+QUAL_TT_ROOT=/dev/tenstorrent
+QUAL_BYID_ROOT=$QUAL_TT_ROOT/by-id
+QUAL_SYS_ROOT=/sys
+
+qual_card_label() {
+  case ${1:-$QUAL_CARD} in
+    blackhole-CEF5729692C19E6D) echo 'card M, half of the serving pair' ;;
+    blackhole-3707293C249A5E67) echo 'card A, half of the serving pair' ;;
+    "$QUAL_CARD_B") echo 'card B, the qualification card' ;;
+    *) echo 'a board this harness does not name' ;;
+  esac
+}
+
+qual_card_select() {
+  QUAL_CARD=${QUAL_CARD:-$QUAL_CARD_B}
+  case $QUAL_CARD in
+    .*|*/*|*[!A-Za-z0-9._-]*)
+      echo "refusing: QUAL_CARD=$QUAL_CARD is not a board id under $QUAL_BYID_ROOT (default $QUAL_CARD_B, card B)" >&2
+      exit 1 ;;
+  esac
+  QUAL_BYID=$QUAL_BYID_ROOT/$QUAL_CARD
+  case $QUAL_CARD in
+    blackhole-CEF5729692C19E6D) QUAL_TAG=card-m ;;
+    blackhole-3707293C249A5E67) QUAL_TAG=card-a ;;
+    "$QUAL_CARD_B") QUAL_TAG=card-b ;;
+    *) QUAL_TAG=$QUAL_CARD ;;
+  esac
+  QUAL_SERVING=0
+  case " $QUAL_SERVING_CARDS " in
+    *" $QUAL_CARD "*) qual_serving_override ;;
+  esac
+}
+
+qual_serving_override() {
+  QUAL_SERVING=1
+  if [ "${ALLOW_SERVING_CARD:-0}" != 1 ]; then
+    echo "refusing: QUAL_CARD=$QUAL_CARD is $(qual_card_label), which the CI gate and the endpoint use." >&2
+    echo "  Qualify on card B (unset QUAL_CARD, or QUAL_CARD=$QUAL_CARD_B); ALLOW_SERVING_CARD=1 overrides." >&2
+    exit 1
+  fi
+  echo '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!' >&2
+  echo "!!! WARNING: ALLOW_SERVING_CARD=1: this run is on $QUAL_CARD, $(qual_card_label)." >&2
+  echo '!!! A CI gate that starts meanwhile fails its holder check, or resets the pair under this run before' >&2
+  echo '!!! it opens the card; a hang here keeps the pair down until card M and card A are reset together.' >&2
+  echo '!!! Check gh run list for the qwen-two-p150a-exclusive group before and after.' >&2
+  echo '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!' >&2
+}
+
+qual_is_char() {
+  test -c "$1"
+}
+
+qual_card_resolve() {
+  local card node
+  QUAL_NODE=$(readlink -f -- "$QUAL_BYID" 2>/dev/null || true)
+  if [ -z "$QUAL_NODE" ] || ! qual_is_char "$QUAL_NODE"; then
+    echo "refusing: $QUAL_CARD ($(qual_card_label)) has no device node here: $QUAL_BYID does not resolve to one" >&2
+    exit 1
+  fi
+  if [ "$QUAL_SERVING" != 1 ]; then
+    for card in $QUAL_SERVING_CARDS; do
+      node=$(readlink -f -- "$QUAL_BYID_ROOT/$card" 2>/dev/null || true)
+      if [ "$node" = "$QUAL_NODE" ]; then
+        echo "### $QUAL_CARD resolves to $node, the node of $card ($(qual_card_label "$card"))" >&2
+        qual_serving_override
+      fi
+    done
+  fi
+  QUAL_PCI=$(qual_pci_of "$QUAL_NODE")
+  echo "### target card: $QUAL_CARD ($(qual_card_label)) -> $QUAL_NODE, PCI ${QUAL_PCI:-unknown}"
+  if [ "$QUAL_SERVING" != 1 ]; then
+    echo "### note: only the m3native gate spares this card; qwen-card-reset.yml and most other hardware workflows"
+    echo "###   still act on every node - check gh run list for the qwen-two-p150a-exclusive group"
+  fi
+}
+
+# A path's device numbers (major:minor, hex, following symlinks), or nothing.
+qual_majmin_of() {
+  stat -L -c '%t:%T' -- "$1" 2>/dev/null || true
+}
+
+# A device node's PCI address (0000:f4:00.0) from sysfs, or nothing.
+qual_pci_of() {
+  local majmin dev
+  majmin=$(qual_majmin_of "${1:-}")
+  case $majmin in
+    *[!0-9a-f:]*|:*|*:|*:*:*) return 0 ;;
+    *:*) ;;
+    *) return 0 ;;
+  esac
+  dev=$(readlink -e -- "$QUAL_SYS_ROOT/dev/char/$((16#${majmin%%:*})):$((16#${majmin##*:}))/device" 2>/dev/null) || return 0
+  case ${dev##*/} in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f].[0-7]) echo "${dev##*/}" ;;
+  esac
+}
+
+# Why a container (qual_refuse_holders' docker inspect lines) can reach the target; nothing when it cannot.
+# A non-privileged container reaches a device only through its device list, its device cgroup rules and
+# its device requests: a bind mount of /dev or /dev/tenstorrent shows node files it cannot open (every CI
+# gate arm mounts /dev/tenstorrent read-only for its board-mapping check and is given card M and card A
+# only). So for a non-serving target it names: --privileged; any device cgroup rule; a device request
+# naming Tenstorrent (CDI); a mapped device path that is the target's node, has the target's device
+# numbers, is a directory holding the node, or is a /dev/tenstorrent path that is not a device node now
+# (which board it was given is unknowable); a mount of the target's node itself. For a serving target
+# (ALLOW_SERVING_CARD=1) it names any container that can reach any Tenstorrent device: --privileged, a
+# device cgroup rule, a Tenstorrent device request, or /dev or a tenstorrent path among its devices or
+# mounts.
+qual_container_reach() {
+  local head=${1%%$'\n'*} line kind path resolved
+  case $head in
+    *' true') echo 'is --privileged (it can open every device)'; return 0 ;;
+  esac
+  while IFS= read -r line; do
+    kind=${line%% *}
+    path=${line#* }
+    case $kind in
+      rule) echo "has a device cgroup rule ($path)"; return 0 ;;
+      req)
+        case $path in
+          *[Tt]enstorrent*) echo "has a device request for a Tenstorrent device ($path)"; return 0 ;;
+        esac
+        continue ;;
+      dev|mnt) ;;
+      *) continue ;;
+    esac
+    resolved=$(readlink -f -- "$path" 2>/dev/null || true)
+    if [ "$QUAL_SERVING" = 1 ]; then
+      case "$path $resolved" in
+        "${QUAL_TT_ROOT%/*} "*|"${QUAL_TT_ROOT%/*}/ "*|*" ${QUAL_TT_ROOT%/*}"|*tenstorrent*)
+          echo "has $path among its ${kind}s (a Tenstorrent device; the target is a serving card)"; return 0 ;;
+      esac
+      continue
+    fi
+    if [ "$resolved" = "$QUAL_NODE" ]; then
+      echo "has $path among its ${kind}s, which is $QUAL_NODE (the target)"; return 0
+    fi
+    [ "$kind" = dev ] || continue
+    if [ -n "${QUAL_MAJMIN:-}" ] && [ "$(qual_majmin_of "$path")" = "$QUAL_MAJMIN" ]; then
+      echo "is given $path, a device with the target's numbers ($QUAL_MAJMIN)"; return 0
+    fi
+    case $QUAL_NODE in
+      "$resolved"/*) echo "is given $path, a directory holding the target's node"; return 0 ;;
+    esac
+    case $path in
+      "$QUAL_TT_ROOT"|"$QUAL_TT_ROOT"/*)
+        if [ -z "$resolved" ] || ! qual_is_char "$resolved"; then
+          echo "is given $path, which is not a device node now (it may be the target)"; return 0
+        fi ;;
+    esac
+  done <<< "${1#*$'\n'}"
+}
+
+# Refuses while anything else can reach the target. Containers: qual_container_reach. Host processes:
+# fuser on the target's node (with sudo -n when that works, else this user's processes, said so) - which
+# also sees a process in a container holding it, however the container was given it - up to five tries
+# two seconds apart (the rig's telemetry exporter holds every card for a moment every 30 s), refusing
+# while any holder persists.
+qual_refuse_holders() {
+  local id info why st out try scope
+  local pre=()
+  QUAL_MAJMIN=$(qual_majmin_of "$QUAL_NODE")
+  for id in $(docker ps -q); do
+    info=$(docker inspect "$id" --format '{{.Name}} {{.HostConfig.Privileged}}{{println}}{{range .HostConfig.Devices}}dev {{println .PathOnHost}}{{end}}{{range .HostConfig.DeviceCgroupRules}}rule {{println .}}{{end}}{{range .HostConfig.DeviceRequests}}req {{.Driver}} {{println .DeviceIDs}}{{end}}{{range .Mounts}}mnt {{println .Source}}{{end}}') || continue
+    why=$(qual_container_reach "$info")
+    if [ -n "$why" ]; then
+      echo "refusing: container ${info%% *} $why" >&2
+      exit 1
+    fi
+  done
+  echo "### containers: none can reach $QUAL_NODE ($QUAL_CARD)"
+  if ! command -v fuser >/dev/null 2>&1; then
+    echo "WARN: fuser is not installed; host processes holding $QUAL_NODE were not checked" >&2
+    return 0
+  fi
+  scope="this user's processes only (no passwordless sudo)"
+  if [ "$(id -u)" = 0 ]; then
+    scope=all
+  elif sudo -n true >/dev/null 2>&1; then
+    pre=(sudo -n)
+    scope=all
+  fi
+  for try in 1 2 3 4 5; do
+    st=0
+    out=$(${pre[@]+"${pre[@]}"} fuser -v "$QUAL_NODE" 2>&1) || st=$?
+    if [ "$st" != 0 ] && [ -z "$out" ]; then
+      echo "### device holders on $QUAL_NODE: none ($scope)"
+      return 0
+    fi
+    [ "$try" = 5 ] || sleep 2
+  done
+  echo "refusing: host processes hold $QUAL_NODE (or fuser failed):" >&2
+  echo "$out" >&2
+  exit 1
+}
+
+# readlink -f again right before the container starts: refuses when a board is not on the node the holder
+# check cleared (the boards re-enumerated in between - a switch event, or the gate resetting card A on the
+# switch card B shares - so the old node may now be another board's). Args: [board id] [node]; the
+# target by default.
+qual_card_recheck() {
+  local card=${1:-$QUAL_CARD} was=${2:-$QUAL_NODE} now
+  now=$(readlink -f -- "$QUAL_BYID_ROOT/$card" 2>/dev/null || true)
+  if [ -z "$now" ] || [ "$now" != "$was" ] || ! qual_is_char "$now"; then
+    echo "refusing: $card ($(qual_card_label "$card")) was $was at the holder check and is ${now:-gone} now" >&2
+    echo "  (the boards re-enumerated); nothing was launched - check the boards, then run again" >&2
+    exit 1
+  fi
+  echo "### $card is still $now"
+}
+
+# The recovery lines after a hang. The node and PCI address are looked up again now (nodes renumber),
+# and the reset command resolves the board id again when it is run: tt-smi -r takes a /dev/tenstorrent
+# path, while a bare number there is tt-smi's own board index, which renumbers too - so none is printed.
+# The command runs tt-smi only when readlink -e resolved every board id (an empty argument would make
+# tt-smi -r reset every board). The PCI address is what identifies the board's row in tt-smi -ls.
+qual_reset_hint() {
+  local node pci card n p var vars='m a' cmd= args=
+  node=$(readlink -f -- "$QUAL_BYID" 2>/dev/null || true)
+  pci=$(qual_pci_of "$node")
+  echo "HANG RECOVERY for $QUAL_CARD ($(qual_card_label)), once the container is gone; nothing here resets a card."
+  echo "  It is ${node:-absent} now, PCI ${pci:-unknown}; nodes renumber, so the reset below resolves the board id"
+  echo "  when it is run. Never a bare number: tt-smi -r reads one as tt-smi's own board index, which renumbers too."
+  if [ "$QUAL_SERVING" = 1 ]; then
+    for card in $QUAL_SERVING_CARDS; do
+      n=$(readlink -f -- "$QUAL_BYID_ROOT/$card" 2>/dev/null || true)
+      p=$(qual_pci_of "$n")
+      echo "  $card ($(qual_card_label "$card")) is ${n:-absent} now, PCI ${p:-unknown}."
+      var=${vars%% *}
+      vars=${vars#* }
+      cmd="$cmd$var=\$(readlink -e $QUAL_BYID_ROOT/$card) && "
+      args="$args \"\$$var\""
+    done
+    echo "  It is half of the serving pair: one link end reset alone leaves the mesh at 1x1. Check gh run list for the"
+    echo "  qwen-two-p150a-exclusive group, confirm both PCI addresses in ~/.local/bin/tt-smi -ls, then reset card M and"
+    echo "  card A TOGETHER, in one call:"
+    echo "    $cmd~/.local/bin/tt-smi -r$args"
+    echo "  then a passing smoke run."
+  else
+    if [ -n "$pci" ]; then
+      echo "  CONFIRM its row (PCI BDF $pci): ~/.local/bin/tt-smi -ls | grep -i '${pci#0000:}'; then reset it alone:"
+    else
+      echo "  CONFIRM in ~/.local/bin/tt-smi -ls which row is ${node:-this board} (its PCI address is unknown here); then reset it alone:"
+    fi
+    echo "    n=\$(readlink -e $QUAL_BYID) && ~/.local/bin/tt-smi -r \"\$n\""
+    echo "  then a passing smoke run. Never card M or card A: they are the serving pair, and this card needs neither."
+  fi
+}
+# <<< qual_card.sh
+qual_card_select
 KERNEL=reader_interleaved
 RUNS=(stock k0a k0b4 k0b32 k0c stock2)
 IFS=, read -r -a STARTS_A <<< "$STARTS"
@@ -68,7 +349,10 @@ declare -A READER_SHA=(
 )
 sstamp=$(date +%Y%m%dT%H%M%S)
 L=$R/k0-$sstamp
-COORDS=cardm_worker_coords-$sstamp.json
+COORDS=worker_coords-$QUAL_TAG-$sstamp.json
+# The committed fixture the G6 noc-order test reads is card M's; another board's goes beside it.
+FIXTURE=cardm_worker_coords.json
+[ "$QUAL_TAG" = card-m ] || FIXTURE=worker_coords-$QUAL_TAG.json
 
 test -s "$RUN_M1" || { echo "run_m1.sh missing next to $0" >&2; exit 1; }
 test -s "$S/sdpa_prefill_bench.py" || { echo "$S/sdpa_prefill_bench.py missing (set M1_SRC)" >&2; exit 1; }
@@ -81,15 +365,14 @@ for v in k0a k0b4 k0b32 k0c; do
   fi
 done
 mkdir -p "$L"
-echo "### K0 session $sstamp: image $IMAGE; runs ${K0_ONLY:-${RUNS[*]}}; starts $STARTS; rounds $ROUNDS; watchdog ${WATCHDOG_S}s; logs $L"
+echo "### K0 session $sstamp: card $QUAL_CARD ($(qual_card_label)); image $IMAGE; runs ${K0_ONLY:-${RUNS[*]}}; starts $STARTS; rounds $ROUNDS; watchdog ${WATCHDOG_S}s; logs $L"
 
 recovery() {   # [log of the failed run]
-  local idx log=${1:-} stamp
-  idx=$(basename "$(readlink -f "$CARD_M" 2>/dev/null || echo unknown)")
-  echo "### recovery (spec 6), card M only:"
-  echo "###   timeout 20 docker rm -f qwen-sdpa-m1"
-  echo "###   ~/.local/bin/tt-smi -r $idx      # card M = $CARD_M -> /dev/tenstorrent/$idx; confirm with tt-smi -ls"
-  echo "###   IMAGE=$IMAGE M1_SRC=$S RESULTS=$R M1_ARGS='--arms baseline --starts 0 --rounds 1 --watchdog-s 120 --no-fallback-scalar' bash $RUN_M1   # stock smoke; must exit 0"
+  local log=${1:-} stamp
+  echo "### recovery (spec 6), $QUAL_CARD ($(qual_card_label)) only:"
+  echo "###   timeout 20 docker rm -f qwen-sdpa-m1-$QUAL_TAG"
+  qual_reset_hint | sed 's/^/###   /'
+  echo "###   QUAL_CARD=$QUAL_CARD ALLOW_SERVING_CARD=${ALLOW_SERVING_CARD:-0} IMAGE=$IMAGE M1_SRC=$S RESULTS=$R M1_ARGS='--arms baseline --starts 0 --rounds 1 --watchdog-s 120 --no-fallback-scalar' bash $RUN_M1   # stock smoke; must exit 0"
   if [ -n "$log" ] && grep -q -E '^WATCHDOG: .* warmup' "$log" 2>/dev/null; then
     stamp=$(sed -n -E 's/^### M1 ([0-9]{8}T[0-9]{6}) node=.*/\1/p' "$log" | head -n 1)
     echo "###   (it fired in a warmup, whose budget includes the JIT compile: the newest file under"
@@ -267,7 +550,7 @@ summary() {
       echo "  q256_4096: no per-token slope"
     fi
   fi
-  if [ -s "$S/fixtures/cardm_worker_coords.json" ]; then echo "  coordinate fixture: $S/fixtures/cardm_worker_coords.json"; fi
+  if [ -s "$S/fixtures/$FIXTURE" ]; then echo "  coordinate fixture ($QUAL_CARD): $S/fixtures/$FIXTURE"; fi
   echo "======================================================================"
 }
 
@@ -275,7 +558,7 @@ run_one() {    # <label> <reader file or empty> <bench args>
   local label=$1 reader=$2 args=$3 log=$L/$1.log status hang=0
   echo
   echo "### K0 run $label: reader=${reader:-served} image=$IMAGE args: $args"
-  IMAGE=$IMAGE M1_SRC=$S RESULTS=$R M1_REQUIRE_SOURCES=1 M1_READER=$reader M1_ARGS=$args M1_DRY_RUN=${K0_DRY_RUN:-0} \
+  QUAL_CARD=$QUAL_CARD ALLOW_SERVING_CARD=${ALLOW_SERVING_CARD:-0} IMAGE=$IMAGE M1_SRC=$S RESULTS=$R M1_REQUIRE_SOURCES=1 M1_READER=$reader M1_ARGS=$args M1_DRY_RUN=${K0_DRY_RUN:-0} \
     bash "$RUN_M1" 2>&1 | tee "$log"
   status=${PIPESTATUS[0]}
   echo "$status" > "$L/$label.status"
@@ -283,7 +566,7 @@ run_one() {    # <label> <reader file or empty> <bench args>
   case $status in 3|124|137) hang=1 ;; esac
   if [ "$hang" = 1 ]; then
     echo "### K0 STOPPED at $label: a hang (exit $status): $(grep -m 1 -E '^WATCHDOG|^Timeout \(' "$log" || echo 'no WATCHDOG line; the container was killed')"
-    echo "### Nothing further runs on card M."
+    echo "### Nothing further runs on $QUAL_CARD."
     recovery "$log"
     summary
     exit 3
@@ -295,11 +578,11 @@ run_one() {    # <label> <reader file or empty> <bench args>
     exit 97
   fi
   if [ "$status" = 125 ] || ! grep -q -E '^### M1 [0-9]{8}T[0-9]{6} node=' "$log"; then
-    echo "### K0 STOPPED at $label: exit $status before any container ran on card M (see $log); nothing to recover"
+    echo "### K0 STOPPED at $label: exit $status before any container ran on $QUAL_CARD (see $log); nothing to recover"
     summary
     exit 1
   fi
-  echo "### K0 STOPPED at $label: exit $status after a container ran on card M. Not a recognised hang, but every clean K0 run exits 0; the card may be in any state."
+  echo "### K0 STOPPED at $label: exit $status after a container ran on $QUAL_CARD. Not a recognised hang, but every clean K0 run exits 0; the card may be in any state."
   recovery "$log"
   summary
   exit 4
@@ -312,8 +595,8 @@ for v in "${RUNS[@]}"; do
     stock)
       run_one stock "" "$common --coords-out /results/$COORDS"
       if [ -s "$R/$COORDS" ]; then
-        mkdir -p "$S/fixtures" && cp "$R/$COORDS" "$S/fixtures/cardm_worker_coords.json" \
-          && echo "### coordinate fixture -> $S/fixtures/cardm_worker_coords.json (copy it into the repo)"
+        mkdir -p "$S/fixtures" && cp "$R/$COORDS" "$S/fixtures/$FIXTURE" \
+          && echo "### coordinate fixture ($QUAL_CARD) -> $S/fixtures/$FIXTURE (copy it into the repo)"
       fi ;;
     stock2) run_one stock2 "" "$common" ;;
     *) run_one "$v" "$K0_DIR/reader_$v.cpp" "$common" ;;

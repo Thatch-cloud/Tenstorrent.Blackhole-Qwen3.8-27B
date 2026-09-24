@@ -290,4 +290,5 @@ The only cost anywhere is 32 KB more L1 per participating core for the second ri
      whose operands share a ring or span two pushed blocks. Nothing in this patch introduces one.
    * reader `CRBW` → a ring too small for the per-core instance count; raise the `nbuf` on that CB.
    Recovery: `docker rm -f` the test container first (a `timeout` on `docker run` does not stop it),
-   then `~/.local/bin/tt-smi -r`.
+   then reset that card only with the `tt-smi -r` command `build-and-test-b64.sh` prints. A bare
+   `~/.local/bin/tt-smi -r` resets every board, the serving pair included.

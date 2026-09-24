@@ -9,11 +9,13 @@
 # no offline-env requirement - --network none is still set because nothing here should ever
 # need the network, not because anything would otherwise reach for it.
 #
-# Device: /dev/tenstorrent/2 as given in the task brief. Per tt-rig-hardware-topology memory,
-# device numbers can renumber across a board reset; this script does no reset itself and runs
-# right before the docker invocation, so the ordering is safe, but if the rig was reset since
-# the device was last confirmed, re-check with `ls -la /dev/tenstorrent/by-id/` before trusting
-# device 2 unchanged.
+# Device: the qualification card, QUAL_CARD (a board id; default card B,
+# blackhole-F36F768B9A5CAFA0; card M or card A, the serving pair, only with
+# ALLOW_SERVING_CARD=1), via scripts/ci/qual_card.sh. It used to be /dev/tenstorrent/2, a node
+# number - card M after the 2026-09-23 renumbering, half of the serving pair. Device numbers
+# renumber across a board reset and a switch power-cycle, so the card is resolved by board id
+# at run time and checked again right before `docker run`; the run is refused while a
+# container or a host process can reach that card. This script does no reset itself.
 #
 # Usage:
 #   scripts/ci/sdpa_bench_rig.sh <host-output-dir> <image-sha> [extra bench.py args...]
@@ -34,13 +36,18 @@ extra_args=("$@")
 mkdir -p "$outdir"
 outdir=$(cd "$outdir" && pwd)
 
-device=/dev/tenstorrent/2
-test -e "$device"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/qual_card.sh"
+qual_card_select
+qual_card_resolve
+qual_refuse_holders
+device=$QUAL_NODE
 
-script_src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sdpa_verify_prefill_style_bench.py"
+script_src="$here/sdpa_verify_prefill_style_bench.py"
 test -f "$script_src"
 
 name="sdpa-bench-$(date -u +%Y%m%d%H%M%S)-$$"
+qual_card_recheck   # the board is still on the node the holder check cleared
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 
 chmod 0777 "$outdir"

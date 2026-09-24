@@ -62,7 +62,8 @@ the stock binary's bytes (the graft's legacy branch did not regress).
 not returned within S seconds prints WATCHDOG, writes the partial report and os._exit(3)s, so
 a hung multicast handshake ends the container instead of wedging it (run_card_m.sh WATCHER=1).
 
-RUN on card M only (never the serving cards), inside the serving image with the graft
+RUN on the qualification card only (run_card_m.sh: QUAL_CARD, default card B; never the serving
+pair without ALLOW_SERVING_CARD=1), inside the serving image with the graft
 mounted exactly as the arm mounts it and a FRESH kernel cache (run_card_m.sh does this):
 
     python3 -B test_sdpa_decode_qwen_card_m.py --out /results/card-m.json
@@ -344,7 +345,7 @@ class Watchdog:
         stream = self.stream or sys.stdout
         try:
             stream.write('WATCHDOG: %r did not return within %ss; exiting 3 (docker rm -f, then tt-smi -r '
-                         'card M only)\n' % (label, self.seconds))
+                         'this card only, by the runner\'s printed reset command)\n' % (label, self.seconds))
             stream.flush()
             if self.on_fire is not None:
                 self.on_fire(label)
@@ -398,7 +399,7 @@ class NativeLog:
 
 
 # ---------------------------------------------------------------------------------------
-# Device part: card M only.
+# Device part: the qualification card only.
 # ---------------------------------------------------------------------------------------
 
 class Case:

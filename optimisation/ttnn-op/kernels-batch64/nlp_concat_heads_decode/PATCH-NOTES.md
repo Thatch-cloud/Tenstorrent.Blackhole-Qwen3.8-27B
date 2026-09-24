@@ -214,10 +214,15 @@ They are present byte-exact so the directory can replace the op wholesale.
   `/opt/tt-metal/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode`,
   `ninja -C build_Release ttnn/_ttnncpp.so ttnn/_ttnn.so` (~25 s; the binding is
   `build_Release/ttnn/_ttnn.so`, not the stale source-tree copy), refreshes `~/opgraft-K64`, then
-  runs the test through `~/kwork64/test-k64.sh` when present (card M, `timeout 900`,
-  `TT_METAL_WATCHER=5`) or directly otherwise. The op is already in the experimental/transformer
-  CMake glob, so nothing has to be registered. On a hang: `docker rm -f k64concat` (timeout does not
-  stop the container), then `~/.local/bin/tt-smi -r`.
+  runs the test directly (`timeout 900`, `TT_METAL_WATCHER=5`) on the qualification card: `QUAL_CARD`,
+  a board id, default card B (`blackhole-F36F768B9A5CAFA0`); card M or card A, the serving pair, only
+  with `ALLOW_SERVING_CARD=1`. Its node is resolved by board id right before the run, which is refused
+  while a container or a host process can reach it. It no longer hands the run to
+  `~/kwork64/test-k64.sh`, which picks its own card. The op is already in the experimental/transformer
+  CMake glob, so nothing has to be registered. On a hang: `docker rm -f k64concat-<card tag>` (timeout
+  does not stop the container), then reset that card only with the `tt-smi -r` command the script
+  prints (it resolves the board id when run; never a bare index); a bare `~/.local/bin/tt-smi -r`
+  resets every board, the serving pair included.
 
 ## Residual risks
 

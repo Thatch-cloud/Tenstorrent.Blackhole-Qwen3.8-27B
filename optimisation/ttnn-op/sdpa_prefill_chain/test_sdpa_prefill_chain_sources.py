@@ -1041,7 +1041,7 @@ def find_bash():
 
 BASH = find_bash()
 SCRUB = ('KOPGRAFT_PF', 'IMAGE', 'RESULTS', 'PF_SRC', 'WATCHER', 'WATCHDOG_S', 'CARD_M_ARGS', 'PF_DRY_RUN', 'REFERENCE',
-         'PF_PYTHON')
+         'PF_PYTHON', 'QUAL_CARD', 'ALLOW_SERVING_CARD')
 IMAGE_A2 = 'sha256:eceb2daa744c3345368a638488a804f0ffe8b76f6b0680945a47bb527bdb55a9'
 
 
@@ -1076,7 +1076,8 @@ class CardMRunnerTests(unittest.TestCase):
         self.assertNotIn('QWEN_SDPA_PF_TEST', argv)
         self.assertIn('--role reference', argv)
         self.assertIn('eceb2daa744c3345368a638488a804f0ffe8b76f6b0680945a47bb527bdb55a9', argv)
-        self.assertIn('--device /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D', argv)
+        self.assertIn('--device /dev/tenstorrent/by-id/blackhole-F36F768B9A5CAFA0', argv)     # card B, the default
+        self.assertIn('card=blackhole-F36F768B9A5CAFA0 (card-b)', result.stdout)
 
     def test_candidate_mounts_the_graft_like_the_arm_and_sets_the_test_env(self):
         argv = self.argv(self.run_script('candidate'))
@@ -1112,18 +1113,19 @@ class CardMRunnerTests(unittest.TestCase):
         self.assertIn('[ "$status" = 124 ] || [ "$status" = 137 ]', hang)
         self.assertIn('QWD[CV]', hang)
         self.assertIn('grep -qF reader_interleaved_qwen_chain "$wlog"', hang)   # an assert must be the chain's
-        self.assertIn('card_m_reset_hint', hang)
+        self.assertIn('qual_reset_hint >&2', hang)
         self.assertLess(hang.index("grep -qF '%s'" % card.HANG_ARMED), hang.index('QWD[CV]'))
 
     def test_holders_and_the_reset_hint(self):
         text = (HERE / 'run_card_m_pf.sh').read_text(encoding='utf-8')
-        for token in ('privileged={{.HostConfig.Privileged}}', '"Source":"/dev"', 'fuser -v "$node"', 'sudo -n true',
-                      'refuse_device_holders "$node"'):
+        for token in ('{{.HostConfig.Privileged}}', 'fuser -v "$QUAL_NODE"', 'sudo -n true',
+                      '\n  qual_refuse_holders\n'):
             self.assertIn(token, text)
-        hint = text[text.index('card_m_reset_hint() {'):text.index('refuse_device_holders() {')]
-        self.assertIn('/sys/dev/char/', hint)
-        self.assertIn('not the', hint)
+        hint = text[text.index('qual_pci_of() {'):text.index('# <<< qual_card.sh')]
+        self.assertIn('$QUAL_SYS_ROOT/dev/char/', hint)       # the PCI address, from sysfs, at hang time
+        self.assertIn('Never a bare number', hint)            # the reset resolves the board id when run
         self.assertIn('tt-smi -ls', hint)
+        self.assertIn('\nqual_card_recheck   #', text)          # the node read again right before the launch
         tail = text[text.rindex('hung=0'):]
         self.assertIn("1) grep -qF 'Timeout (' \"$log\" && hung=1 ;;", tail)
 

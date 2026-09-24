@@ -125,11 +125,11 @@ The served `reader_interleaved.cpp` is not modified.
 | `pf_protocol_model.py` | The F4 topology port, the round lists, and the discrete-event model checker (spec 5.3 items 2-4). Run it directly for the full grid. |
 | `pf_optin.py` | The Python opt-in of spec 3.6, re-exported from its one copy, `scripts/ci/lever_n_m3native_patch.py` section I (what the gate grafts): `TP_HELPERS`, `patch_tp()` / `unpatch_tp()` / `patch_tp_full()`, and a CLI (`--full` gives the gate's whole `attention/tp.py` graft). |
 | `build_k64g.sh` | The rig build of `~/opgraft-K64g` (spec 5.2). |
-| `run_card_m_pf.sh` | Card M: `reference`, `candidate` (optionally with `WATCHER=1`) and `hang`. |
-| `test_sdpa_prefill_chain_card_m.py` | Q1 on card M: the matrix, M-A, cache/hash, refusals, stress, trace, and the planted hang. |
+| `run_card_m_pf.sh` | The qualification card (`QUAL_CARD`, default card B): `reference`, `candidate` (optionally with `WATCHER=1`) and `hang`. Results default to `card-b/` (one directory per board, so a candidate only reads references from its own board). |
+| `test_sdpa_prefill_chain_card_m.py` | Q1 on one card: the matrix, M-A, cache/hash, refusals, stress, trace, and the planted hang. |
 | `test_sdpa_prefill_chain_sources.py` | CPU tests (spec 5.3 items 1-7 and 9, the card-M helpers, a fake-ttnn dry run of all three roles, and the stub g++ check). |
 | `stubcheck/` | `stub_compile.py` plus syntax stubs of the dataflow API for `g++ -fsyntax-only`. |
-| `fixtures/` | `sdpa_program_factory.fd8c0676.cpp` (the served factory, for the CPU tests). `cardm_worker_coords.json` goes here too: it was captured in the K0 session (`results/k0-<stamp>/cardm_worker_coords-<stamp>.json` on the rig) and **is not yet copied**. |
+| `fixtures/` | `sdpa_program_factory.fd8c0676.cpp` (the served factory, for the CPU tests). `cardm_worker_coords.json` goes here too: it was captured in the K0 session on card M (`results/k0-<stamp>/cardm_worker_coords-<stamp>.json` on the rig) and **is not yet copied**. A K0 session on another board writes `worker_coords-<card tag>.json` instead: its harvesting may differ from card M's. |
 | `../sdpa_prefill_bench/` | `sdpa_prefill_bench.py`: chain arms, `--program-word`, `--q-memory`, `--page-blocks`, `--verify-log`, `--k0b32-slope` / `--k0-stock-slope` and `M1 Q2:` (rules a-c plus d: every chain arm's output equals the baseline's, so Q2 needs `--sha`; rule (a) compares ratios to each run's own baseline; the line names the production choice). `run_m1.sh`: `KOPGRAFT_PF` (only with `IMAGE` set explicitly to an image `build_k64g.sh` compared, and then `M1_REQUIRE_SOURCES=1`), `WATCHER=1` and `QWEN_SDPA_PF_TEST=1`. `test_prefill_chain_bench.py` tests both. |
 
 ## Deviations from the spec
@@ -174,7 +174,7 @@ The served `reader_interleaved.cpp` is not modified.
      tests hold them equal to `apply_factory_pf.py`.
    - The helpers carry their own `/proc/self/maps` marker check, because the image has no copy of
      `pooled_attention_replay`.
-8. **Images.** Card M and `run_card_m_pf.sh` use A'' eceb2daa (gate v128-v137).
+8. **Images.** The card test (`run_card_m_pf.sh`) uses A'' eceb2daa (gate v128-v137).
    - `build_k64g.sh` step 7 compared the graft's `sdpa/` against A'', A' (the K0 image) and e41ef884
      (the arm script's default).
    - The gate's best config has since moved (v144-v148: A5 126b30df), so the arm no longer relies on
@@ -242,7 +242,18 @@ planted-hang fix (the model's credit step now mirrors `credit_prev`):
 - The harness catches a misspelt API call and an unmarked orphan.
 - This is evidence only; the first JIT compile on card M is the proof (spec Q-6 WAYPOINT include, Q-12 code size).
 
-## Build and qualify on the rig (card M only)
+## Build and qualify on the rig (the qualification card only)
+
+Every single-card harness here runs on the **qualification card**: `QUAL_CARD`, a board id under
+`/dev/tenstorrent/by-id`, default card B (`blackhole-F36F768B9A5CAFA0`, PCIe only). Card M and card A
+are the serving pair; `QUAL_CARD` may name one only with `ALLOW_SERVING_CARD=1`, which prints a loud
+warning. The node is resolved by board id at launch, and a run is refused only while a container or a
+host process can reach *that* card, so a CI gate on the serving pair does not block a card-B run
+(`scripts/ci/qual_card.sh`, embedded in each runner). The node is read again right before `docker run`,
+and the run is refused if it moved. Only the m3native gate is scoped to the serving pair:
+`qwen-card-reset.yml` and most other hardware workflows still act on every node, card B included, so
+check `gh run list` for the qwen-two-p150a-exclusive group before and during a card-B session. The file
+names keep `card_m` from when card M was the only bench card.
 
 ### Ship
 
@@ -267,9 +278,14 @@ Each step must pass before the next. After any exit 3, 124 or 137 (or 1 with `Ti
 the faulthandler backstop):
 
 1. `docker rm -f` the container (the scripts' EXIT trap does it).
-2. Reset card M only: `~/.local/bin/tt-smi -r <index>`. The index is tt-smi's BOARD index, **not** the
-   `/dev/tenstorrent` number; the scripts print card M's PCI address and a probable index - confirm it in
-   `~/.local/bin/tt-smi -ls` and check `gh run list` for the qwen-two-p150a-exclusive group first.
+2. Reset that card only, with the command the scripts print:
+   `n=$(readlink -e /dev/tenstorrent/by-id/<board id>) && ~/.local/bin/tt-smi -r "$n"`. It resolves the
+   board id when it is run (nodes renumber across resets) and runs nothing when the board is gone (an
+   empty argument would reset every board); confirm the card's row in `~/.local/bin/tt-smi -ls` by the
+   PCI address the scripts print. Never a bare number: tt-smi reads it as its own board index, which
+   renumbers too. A bare `tt-smi -r` resets every board, the serving pair included. Only for card M or
+   card A (`ALLOW_SERVING_CARD=1` runs): check `gh run list` for the qwen-two-p150a-exclusive group
+   first, and reset M and A together, in one call.
 3. Run a passing stock smoke call.
 
 The smoke call:

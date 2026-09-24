@@ -20,10 +20,10 @@
 # imports verify_trace_t1.py, so it is mounted beside it whether or not the flag is set - an
 # image built before verify-trace T1 does not carry it.
 #
-# Device: /dev/tenstorrent/2 as given in the task brief. Per tt-rig-hardware-topology
-# memory, device numbers can renumber across a board reset; this script does no reset
-# itself, but if the rig was reset since the device was last confirmed, re-check with
-# `ls -la /dev/tenstorrent/by-id/` before trusting device 2 unchanged.
+# Device: the qualification card, QUAL_CARD (a board id, default card B), resolved by board
+# id right before the run - never a /dev/tenstorrent number, which renumbers across a board
+# reset (tt-rig-hardware-topology memory). This script does no reset itself. The --chips 2
+# arm needs a second, linked card: that is the serving pair, which this runner does not open.
 #
 # Usage:
 #   scripts/ci/gdn-user-batch-rig.sh <host-output-dir> <image-sha> [extra device-test args...]
@@ -46,14 +46,22 @@ outdir=$(cd "$outdir" && pwd)
 
 # Device nodes RENUMBER across a board reset, and tt-smi indices do not track them: on
 # 2026-09-21 after a reset, tt-smi index 1 (PCI 0000:f3:00) was /dev/tenstorrent/0 while
-# tt-smi index 0 (PCI 0000:d1:00) was /dev/tenstorrent/2. Always map before trusting a
-# number: `ls -la /dev/tenstorrent/by-id/` and
-# `cat /sys/class/tenstorrent/tenstorrent!<n>/device/uevent | grep PCI_SLOT_NAME`
-# against `tt-smi -ls`. Override with GDN_USER_BATCH_DEVICE when the mapping has moved.
-device=${GDN_USER_BATCH_DEVICE:-/dev/tenstorrent/2}
-test -e "$device"
-
+# tt-smi index 0 (PCI 0000:d1:00) was /dev/tenstorrent/2. So no number is trusted: the card
+# is QUAL_CARD, a board id (default card B, blackhole-F36F768B9A5CAFA0; card M or card A, the
+# serving pair, only with ALLOW_SERVING_CARD=1), resolved by readlink -f right before the run
+# (scripts/ci/qual_card.sh), which is refused while a container or a host process can reach
+# it. GDN_USER_BATCH_DEVICE (a node path) is retired.
+if [ -n "${GDN_USER_BATCH_DEVICE:-}" ]; then
+  echo "refusing: GDN_USER_BATCH_DEVICE is retired (a node number); set QUAL_CARD to a board id" >&2
+  exit 2
+fi
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/qual_card.sh"
+qual_card_select
+qual_card_resolve
+qual_refuse_holders
+device=$QUAL_NODE
+
 mounts=()
 for name in gdn_user_batch_device_test.py gdn_user_batch.py gdn_user_batch_conv.py gdn_multitoken.py verify_trace_t1.py; do
   test -f "$here/$name"
@@ -61,6 +69,7 @@ for name in gdn_user_batch_device_test.py gdn_user_batch.py gdn_user_batch_conv.
 done
 
 name="gdn-user-batch-$(date -u +%Y%m%d%H%M%S)-$$"
+qual_card_recheck   # the board is still on the node the holder check cleared
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 
 chmod 0777 "$outdir"

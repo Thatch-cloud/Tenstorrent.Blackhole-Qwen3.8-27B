@@ -64,7 +64,7 @@ Each packed verify at 4 × 131k spends about 128 ms per round in decode SDPA.
 | `apply_factory_qwen.py` | Applies F1–F8 (`--stage 1`, the default, output 1b54abd3…) or F1–F12 (`--stage 3`, output **06167779a979ba1f…**) to the 3e0a69af factory and refuses any other input. Both stages invert to the base, and stage 3 also inverts to stage 1. It keeps `.orig-3e0a69af` when patching in place. |
 | `build_k64e.sh` | The rig build of `~/opgraft-K64e` (stage 1). Unchanged. |
 | `build_k64f.sh` | The rig build of `~/opgraft-K64f` (stage 3). Details below. |
-| `run_card_m.sh` | Runs the card-M test in the serving image, in `reference` or `candidate` mode, with an optional `WATCHER=1` first pass. |
+| `run_card_m.sh` | Runs the card test in the serving image on the qualification card (`QUAL_CARD`, default card B), in `reference` or `candidate` mode, with an optional `WATCHER=1` first pass. |
 | `test_sdpa_decode_qwen_card_m.py` | The card-M unit test for both stages. The stage is read off the loaded binary. |
 | `test_sdpa_decode_qwen_sources.py` | CPU checks: the edits invert to the bases for both stages, the factory patches reproduce their recorded shas, every constant that crosses a file boundary agrees, the card-M host helpers work, and a full dry run of the card-M flow runs against a fake ttnn with the graft's share semantics. That dry run includes a broken fake whose twins read their own rows, which N1, N4 and N5 must catch. |
 
@@ -122,7 +122,8 @@ Under `scripts/ci`:
 py -3.11 -B -m unittest test_pooled_attention_replay test_lever_n_m3native_gate test_m3native_arm_env
 ```
 
-On card M:
+On the qualification card (card B unless `QUAL_CARD` says otherwise; references land in
+`~/kwork64/k64f/card-b/`, one directory per board):
 
 ```
 bash run_card_m.sh reference                      # stock image: legacy calls only, records every output's sha256
@@ -132,7 +133,8 @@ bash run_card_m.sh candidate                      # the full sweep, with timing
 
 - **Environment.** Both roles set `QWEN_SDPA_TREE_SCRATCH_ROUNDS=1`, as the arm does. The legacy G8 (PNHt=3) call does not fit L1 with the full tree scratch: 1,827,904 B at 2,304 keys, found on the simulator. The test refuses to run the share section without that variable.
 - **`WATCHER=1`.** `TT_METAL_WATCHER=5`, capacities 2,304 and 33,024, seed 0, variants `normal` and `zeroq`, starts +0 and +240, no timing. Each device call gets a 120 s watchdog (`WATCHDOG_S`) that prints `WATCHDOG` and `os._exit(3)`s. The container timeout is 900 s, and the watcher log goes to `$RESULTS/watcher-<stamp>/`.
-- **On exit 3, 124 or 137.** The container is removed. Reset **card M only** with `~/.local/bin/tt-smi -r`; the script never resets anything itself.
+- **Which card.** Every single-card harness here runs on the **qualification card**: `QUAL_CARD`, a board id under `/dev/tenstorrent/by-id`, default card B (`blackhole-F36F768B9A5CAFA0`, PCIe only). Card M and card A are the serving pair; `QUAL_CARD` may name one only with `ALLOW_SERVING_CARD=1`, which prints a loud warning. The node is resolved by board id at launch, and a run is refused only while a container or a host process can reach *that* card, so a CI gate on the serving pair does not block a card-B run (`scripts/ci/qual_card.sh`, embedded in each runner). Only the m3native gate is scoped to the serving pair: `qwen-card-reset.yml` and most other hardware workflows still act on every node, card B included, so check `gh run list` for the qwen-two-p150a-exclusive group before and during a card-B session. The file names keep `card_m` from when card M was the only bench card.
+- **On exit 3, 124 or 137.** The container is removed. Reset **that card only** with the command the script prints, `n=$(readlink -e /dev/tenstorrent/by-id/<board id>) && ~/.local/bin/tt-smi -r "$n"`: it resolves the board id when it is run, since nodes renumber, and runs nothing when the board is gone (an empty argument would reset every board). Confirm the card's row in `~/.local/bin/tt-smi -ls` by the PCI address the script prints. Never a bare number, which tt-smi reads as its own board index (that renumbers too), and never a bare `tt-smi -r`, which resets every board. The script never resets anything itself.
 
 `test_sdpa_decode_qwen_card_m.py`, on one p150a:
 

@@ -36,7 +36,9 @@ STARTS = '0,32768,65536,126976'
 IMAGE_A1 = 'sha256:1b9b644549d4409c4fc80e2f92c183e665e7e693c37cccc95b4bb760a6d7d537'
 # The caller's environment must not steer the scripts under test.
 SCRUB = ('M1_READER', 'IMAGE', 'K64F_IMAGE', 'M1_ARGS', 'M1_DRY_RUN', 'M1_REQUIRE_SOURCES', 'K0_ONLY', 'K0_STARTS',
-         'K0_ROUNDS', 'K0_WATCHDOG_S', 'K0_Q4096', 'K0_DRY_RUN', 'K0_DIR', 'RESULTS', 'M1_SRC')
+         'K0_ROUNDS', 'K0_WATCHDOG_S', 'K0_Q4096', 'K0_DRY_RUN', 'K0_DIR', 'RESULTS', 'M1_SRC', 'QUAL_CARD',
+         'ALLOW_SERVING_CARD')
+CARD_B = 'blackhole-F36F768B9A5CAFA0'           # the default qualification card (scripts/ci/qual_card.sh)
 
 
 def sha(data):
@@ -478,7 +480,7 @@ class RunnerTests(unittest.TestCase):
     def test_a_missing_image_is_refused_before_the_launch_line(self):
         text = RUN_M1.read_text(encoding='utf-8')
         refusal = text.index('docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "refusing: image')
-        self.assertLess(text.index('holds a Tenstorrent device'), refusal)
+        self.assertLess(text.index('  qual_refuse_holders\n'), refusal)
         self.assertLess(refusal, text.index('echo "### M1 $stamp node='))
         self.assertLess(text.index('echo "### M1 $stamp node='), text.index('timeout -k 30 "$timeout_s" "${argv[@]}"'))
         self.assertIn('timeout_s=1800', text)             # 900 only under WATCHER=1 (the prefill-chain pass)
@@ -588,7 +590,7 @@ class SessionTests(unittest.TestCase):
                 if label in ('stock', 'stock2'):
                     self.assertEqual(reader, 'served')
                     self.assertEqual(mounts, [])
-                    self.assertEqual('--coords-out /results/cardm_worker_coords-' in args, label == 'stock')
+                    self.assertEqual('--coords-out /results/worker_coords-card-b-' in args, label == 'stock')
                 else:
                     self.assertEqual(len(mounts), 1)
                     self.assertTrue(mounts[0].split(',')[1].endswith('/k0/reader_%s.cpp' % label))
@@ -636,6 +638,10 @@ class SessionTests(unittest.TestCase):
         self.assertIn('IMAGE=%s M1_SRC=%s RESULTS=' % (IMAGE_A1, posix(HERE)), smoke[0])
         self.assertIn('--no-fallback-scalar', smoke[0])
         self.assertIn('kcache-m1-20260923T120000', out)          # the warmup hint names the run's cache
+        self.assertIn('### recovery (spec 6), %s (card B, the qualification card) only:' % CARD_B, out)
+        self.assertIn('docker rm -f qwen-sdpa-m1-card-b', out)
+        self.assertIn('QUAL_CARD=%s ALLOW_SERVING_CARD=0 IMAGE=' % CARD_B, smoke[0])   # the smoke run: same card
+        self.assertIn('Never card M or card A', out)
         self.assertIn('K0 SUMMARY', out)
 
     def test_any_other_failure_after_launch_stops_the_session_with_the_recovery(self):
@@ -643,7 +649,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 4)
         out = result.stdout
         self.assertEqual(self.fake_runs(out), ['stock', 'k0a'])
-        self.assertIn('K0 STOPPED at k0a: exit 1 after a container ran on card M', out)
+        self.assertIn('K0 STOPPED at k0a: exit 1 after a container ran on %s' % CARD_B, out)
         self.assertIn('tt-smi -r', out)
         self.assertIn('K0 SUMMARY', out)
         self.assertNotIn('continuing', out)
@@ -653,7 +659,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         out = result.stdout
         self.assertEqual(self.fake_runs(out), ['stock', 'k0a', 'k0b4'])
-        self.assertIn('K0 STOPPED at k0b32: exit 1 before any container ran on card M', out)
+        self.assertIn('K0 STOPPED at k0b32: exit 1 before any container ran on %s' % CARD_B, out)
         self.assertNotIn('tt-smi', out)
 
     def test_kill_rules_are_withheld_when_k0a_is_not_shown_to_have_run(self):

@@ -1,6 +1,6 @@
 """CPU tests for the card-M harness of gdn_prefill_conv_exact: its case matrix, data kinds, byte
 comparison and verdict helpers, the section drivers (equality, chain, negative controls, the
-denormal-setting selection) against a torch-only fake Bench, and run_card_m.sh (card M only, the
+denormal-setting selection) against a torch-only fake Bench, and run_card_m.sh (the qualification card, the
 pinned image, the op mounted file by file from the one table). The device half runs on the rig only."""
 
 import contextlib
@@ -173,7 +173,7 @@ class CompareTests(unittest.TestCase):
 
     def test_no_device_import_at_module_level(self):
         source = (HERE / 'gdn_prefill_conv_card_m.py').read_text(encoding='utf-8')
-        head = source[:source.index('# Device part: card M only.')]
+        head = source[:source.index('# Device part: the qualification card only.')]
         self.assertIsNone(re.search(r'^(import|from) (ttnn|torch)', head, re.M))
 
 
@@ -387,14 +387,17 @@ class DriverTests(unittest.TestCase):
 
 
 class RunScriptTests(unittest.TestCase):
-    def test_card_m_only_the_pinned_image_and_the_refusal(self):
+    def test_the_qualification_card_the_pinned_image_and_the_refusal(self):
         text = script_text()
-        self.assertIn('CARD_M=/dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D', text)
+        self.assertNotIn('CARD_M=', text)
+        self.assertIn('QUAL_CARD_B=blackhole-F36F768B9A5CAFA0', text)          # the embedded qual_card.sh block
+        self.assertIn('R=${RESULTS:-$HOME/kwork64/pcx/$QUAL_TAG}', text)
         self.assertIn('IMAGE=${IMAGE:-sha256:0648ca9ad663acc72e7d8ea59d9cde0f9218b583ad74a60d58ff2f31bddd6fae}', text)
         self.assertIn('--device "$node"', text)
         self.assertEqual(text.count('--device '), 1)
-        self.assertIn('holds a Tenstorrent device', text)
-        self.assertLess(text.index('holds a Tenstorrent device'), text.index('docker run --rm'))
+        self.assertIn('\nqual_card_resolve\nnode=$QUAL_NODE\nqual_refuse_holders\n', text)
+        self.assertLess(text.index('\nqual_refuse_holders\n'), text.index('docker run --rm'))
+        self.assertIn('qual_reset_hint >&2', text[text.index('docker run --rm'):])
         self.assertNotIn('tt-smi -r', [line.strip() for line in text.splitlines() if not line.lstrip().startswith(('#', 'echo', '"'))])
 
     def test_the_op_is_mounted_file_by_file_from_the_table(self):

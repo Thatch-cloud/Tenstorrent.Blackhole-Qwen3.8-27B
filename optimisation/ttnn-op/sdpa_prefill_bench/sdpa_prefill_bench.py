@@ -53,7 +53,7 @@ bench as it was):
                   as 'M1 SHA <arm>@<start> <hex> stable=0|1'. K0c must equal stock; K0a/b must not.
   --watchdog-s N  per device call: a call not back within N s prints 'WATCHDOG: ...', writes the
                   partial report and exits 3 (a faulthandler backstop 60 s later covers a call that
-                  holds the GIL: 'Timeout (...)!' and exit 1). The runner then resets card M.
+                  holds the GIL: 'Timeout (...)!' and exit 1). The runner then prints the target card's reset hint.
                   Budgets on top of N: each arm's FIRST warmup +780 s (it JIT-compiles the
                   program's kernels on a fresh cache, under rig CI load: a false alarm costs a
                   session and a card reset), later warmups, open_device (firmware build on a fresh
@@ -383,7 +383,7 @@ class Watchdog:
             if due:
                 self.fired = True
         if due:
-            print('WATCHDOG: %s did not return within %.0f s; exit 3 (reset card M before the next run)'
+            print('WATCHDOG: %s did not return within %.0f s; exit 3 (reset the target card before the next run)'
                   % (what, budget), file=self.out or sys.stdout, flush=True)
             if self.on_fire is not None:
                 try:

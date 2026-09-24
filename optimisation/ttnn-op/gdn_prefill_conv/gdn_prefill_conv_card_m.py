@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Card-M unit test and microbenches for gdn_prefill_conv_exact (GDN prefill conv lever #2).
 
-WHAT IT PROVES. On card M, in the serving image, the op returns the SAME BYTES as the path it
+WHAT IT PROVES. On one p150a, in the serving image, the op returns the SAME BYTES as the path it
 replaces in gdn/tp.py forward_prefill - the image's own
 
     conv, new_state = _causal_conv1d_fir(qkv_L1, None, None, 4, device, memory_config=L1,
@@ -43,7 +43,8 @@ PROFILE=1 in run_card_m.sh, which also calls ttnn.ReadDeviceProfiler):
   full       the op vs the composed FIR + 3 slices at T=2048. Gate <= 0.4 ms (served 2.28 ms)
   host       the wrapper's Python time per call on a program-cache hit, median of 200. Gate <= 50 us
 
-RUN on card M only, inside the serving image, with a fresh kernel cache: run_card_m.sh does this.
+RUN on the qualification card only (run_card_m.sh: QUAL_CARD, default card B; never the serving
+pair without ALLOW_SERVING_CARD=1), inside the serving image, with a fresh kernel cache.
 The helpers above `Device part` import no ttnn and are unit-tested on CPU
 (test_gdn_prefill_conv_card_m.py).
 """
@@ -322,7 +323,7 @@ class Watchdog:
                 label, deadline = self.label, self.deadline
             if label is not None and time.monotonic() >= deadline:
                 sys.stdout.write('WATCHDOG: %r did not return within %ss; exiting 3 (docker rm -f, then '
-                                 'tt-smi -r card M only)\n' % (label, self.seconds))
+                                 'reset this card only, by the runner\'s printed reset command)\n' % (label, self.seconds))
                 sys.stdout.flush()
                 try:
                     if self.on_fire is not None:
@@ -335,7 +336,7 @@ WATCHDOG = Watchdog(0)
 
 
 # ---------------------------------------------------------------------------------------------
-# Device part: card M only.
+# Device part: the qualification card only.
 # ---------------------------------------------------------------------------------------------
 
 class Bench:

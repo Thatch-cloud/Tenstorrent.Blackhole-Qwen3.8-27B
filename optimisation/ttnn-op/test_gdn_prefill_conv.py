@@ -156,7 +156,7 @@ def main():
     if options.reference_only:
         print('\nreference pinned.')
         return 0
-    print('the device half is optimisation/ttnn-op/gdn_prefill_conv/run_card_m.sh (card M only)')
+    print('the device half is optimisation/ttnn-op/gdn_prefill_conv/run_card_m.sh (QUAL_CARD, default card B)')
     return 2
 
 

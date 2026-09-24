@@ -5,7 +5,8 @@ heads, head dim 256, q/k chunk 128, bf8 Q/K/V, HiFi2 with fp32 dest, the flexibl
 device chunk_start tensor) against the same call with SDPAProgramConfig.max_cores_per_head_batch =
 0x5EFA0000 | flags on the K64g graft. Byte-for-byte (sha256 of the int16 view of ttnn.to_torch).
 
-ROLES (run_card_m_pf.sh runs each in its own container on card M only):
+ROLES (run_card_m_pf.sh runs each in its own container on the qualification card only: QUAL_CARD,
+default card B):
   reference   the stock image, no graft: the sha of every served output in the matrix
   candidate   the graft mounted, in this order: Q1.7 program cache (served then chain at one fresh
               shape adds exactly one cache entry, no entry across chunk_start); Q1.6 served ==
@@ -21,7 +22,7 @@ ROLES (run_card_m_pf.sh runs each in its own container on card M only):
               DRAM and L1 Q are separate programs - none for a served one, chains=16 members=96 at
               2048 rows). The watcher pass (WATCHER=1) is this role narrowed by the runner.
   hang        Q1.3, LAST in its session: a served pre-check call on the same shape must return
-              first (card M healthy, inputs uploaded, compute and writer JIT-warm), then
+              first (the card healthy, inputs uploaded, compute and writer JIT-warm), then
               QWEN_SDPA_PF_TEST=1, flags 0x203 (the sink withholds its last credit), rows 2048,
               start 2048. It must never return: the per-call watchdog prints WATCHDOG on the planted
               call or its read back and exits 3 (a faulthandler backstop exits 1 with 'Timeout ('
@@ -286,8 +287,8 @@ class Watchdog:
         self.fired = True
         stream = self.stream or sys.stdout
         try:
-            stream.write('WATCHDOG: %r did not return within %ss; exiting 3 (docker rm -f, then tt-smi -r card M '
-                         'only, then a passing stock smoke call)\n' % (label, self.seconds))
+            stream.write('WATCHDOG: %r did not return within %ss; exiting 3 (docker rm -f, then reset this card '
+                         'only, by the runner\'s printed reset command, then a passing stock smoke call)\n' % (label, self.seconds))
             stream.flush()
             if self.on_fire is not None:
                 self.on_fire(label)
@@ -340,7 +341,7 @@ class NativeLog:
 
 
 # ---------------------------------------------------------------------------------------------
-# Device part: card M only.
+# Device part: the qualification card only.
 # ---------------------------------------------------------------------------------------------
 
 class Bench:
@@ -670,7 +671,7 @@ def planted_hang(bench, args, report):
         report['failures'].append('the planted hang needs %s=1 in the container' % TEST_ENV)
         return
     shape = (2048, page_width('fit', 2048, args.starts), 'perm', 'dram', 0, 'normal', 2048)
-    # The served pre-check: card M runs and the inputs are uploaded (a watchdog on 'open device' or an
+    # The served pre-check: the card runs and the inputs are uploaded (a watchdog on 'open device' or an
     # upload is then never mistaken for the planted hang), and compute + writer are JIT-warm (the
     # chain program shares their binaries), so the planted call compiles only the chain reader.
     served = bench.sha(*shape)
@@ -832,7 +833,7 @@ def main(argv=None):
         except Exception:  # noqa: BLE001 - the WATCHDOG line stands
             pass
 
-    if report['failures']:                      # a bad reference: refuse before touching card M
+    if report['failures']:                      # a bad reference: refuse before touching the card
         write_report()
         for failure in report['failures']:
             print('FAIL', failure)

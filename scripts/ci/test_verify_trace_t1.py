@@ -643,7 +643,12 @@ class RigRunnerTests(unittest.TestCase):
                       .split(' in ', 1)[1].split(';', 1)[0].split())
         needed = self.local_imports('verify_t1_device_compare.py') | self.local_imports('lever_n_m3native_patch.py')
         self.assertLessEqual(needed, checked)
-        self.assertIn('Refusing G0: running container can reach a card', text)
+        # The card: QUAL_CARD (default card B) via qual_card.sh; --mesh 1x2 opens the serving pair and
+        # needs ALLOW_SERVING_CARD=1 (test_qual_card.py runs the refusals).
+        self.assertIn('. "$here/qual_card.sh"', text)
+        self.assertIn('for card in $QUAL_SERVING_CARDS; do', text)
+        self.assertEqual(text.count('qual_refuse_holders'), 2)
+        self.assertNotIn('blackhole-CEF5729692C19E6D', text)
 
 
 # ---------------------------------------------------------------------------------------
