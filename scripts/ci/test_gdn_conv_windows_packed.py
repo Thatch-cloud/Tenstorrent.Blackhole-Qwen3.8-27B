@@ -371,7 +371,9 @@ class ArgsTests(unittest.TestCase):
         sha = vtw.source_sha()
         self.assertRegex(sha, '^[0-9a-f]{8}$')
         reader = dict(vtw.kernel_defines(sha, 'VTW_ROLE_READER', None))
-        self.assertEqual(reader, {'VTW_SRC_SHA': '0x' + sha, 'VTW_ROLE_READER': '1', 'VTW_HIST_ROW': '1'})
+        # DEFAULTS (hist_row, NOC copies since card B run vt2-20260924T012053) reach both roles
+        self.assertEqual(reader, {'VTW_SRC_SHA': '0x' + sha, 'VTW_ROLE_READER': '1', 'VTW_HIST_ROW': '1',
+                                  'VTW_COPY_NOC': '1'})
         writer = dict(vtw.kernel_defines(sha, 'VTW_ROLE_WRITER', dict(copy_noc=True, hist_row=False), 'pad'))
         self.assertEqual(writer, {'VTW_SRC_SHA': '0x' + sha, 'VTW_ROLE_WRITER': '1', 'VTW_COPY_NOC': '1',
                                   'VTW_NEG_PAD': '1'})
@@ -415,7 +417,7 @@ class KernelTextTests(unittest.TestCase):
         self.assertEqual(len(re.findall(r'get_common_arg_val<uint32_t>\(piece_user<USERS>\(user\)\)', self.TEXT)), 2)
         # the compile-time args the host sends: USERS, PAGES, ROWS, NBUF, then the accessors at 5
         self.assertIn('TensorAccessorArgs<5>()', self.TEXT)
-        self.assertEqual(vtw.compile_args(4, None, [7, 1, 7, 1, 7, 1])[:5], [4, 160, 16, 2, 640])
+        self.assertEqual(vtw.compile_args(4, None, [7, 1, 7, 1, 7, 1])[:5], [4, 160, 16, vtw.DEFAULTS['nbuf'], 640])
 
     def test_the_writer_invalidates_its_data_cache_before_reading_cb_in_by_words(self):
         """Blackhole's cb_wait_front does not invalidate the RISC's L1 data cache; the word copies
@@ -466,14 +468,14 @@ class DriverTests(unittest.TestCase):
         self.assertEqual([dict(kernel['defines'])['VTW_ROLE_READER' if index == 0 else 'VTW_ROLE_WRITER']
                           for index, kernel in enumerate(chip0['kernels'])], ['1', '1'])
         self.assertEqual(chip0['kernels'][0]['cores'], ('set', (('range', (0, 0), (10, 9)),)))
-        self.assertEqual(chip0['kernels'][0]['compile'][:5], [4, 160, 16, 2, 640])
+        self.assertEqual(chip0['kernels'][0]['compile'][:5], [4, 160, 16, vtw.DEFAULTS['nbuf'], 640])
         self.assertEqual(chip0['kernels'][0]['compile'][5:], [9, 1, 7, 1, 7, 1], 'L1 pieces, DRAM histories and outputs')
         runtime = chip0['kernels'][1]['runtime']
         self.assertEqual(len(runtime), 110)
         self.assertEqual(sorted(args for x, y, args in runtime)[:2], [(0, 6), (6, 6)])
         self.assertEqual(sum(args[1] for x, y, args in runtime), 640)
         self.assertEqual([(cb.format_descriptors[0].buffer_index, cb.total_size) for cb in chip0['cbs']],
-                         [(0, 20480), (1, 16384)])
+                         [(0, 20480), (1, 2048 * vtw.SLOTS * vtw.DEFAULTS['nbuf'])])
 
     def test_each_chip_gets_its_own_addresses_in_the_kernel_layout(self):
         group = users(self.ttnn)

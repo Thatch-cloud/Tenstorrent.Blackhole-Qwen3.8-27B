@@ -578,13 +578,13 @@ class SectionTests(unittest.TestCase):
         self.assertTrue(all(entry['r1_r2'] and entry['inputs_unchanged'] for entry in report['windows_cases']))
         self.assertEqual([entry['case'] for entry in report['windows_refusals']], ['rows8', 'rows32', 'mixed_history'])
         self.assertTrue(all(entry['refused'] for entry in report['windows_refusals']))
-        self.assertEqual(report['windows_exact_by_setting'], {'port': True, 'hist1_noc0_nbuf2': True})
+        self.assertEqual(report['windows_exact_by_setting'], {'port': True, 'hist1_noc1_nbuf1': True})
 
     def test_a_setting_that_flips_one_bit_fails_by_name(self):
-        passed, report = run_section('windows', FakeBench(fault='hist1_noc0_nbuf2'))
+        passed, report = run_section('windows', FakeBench(fault='hist1_noc1_nbuf1'))
         self.assertFalse(passed)
-        self.assertEqual(report['windows_exact_by_setting'], {'port': True, 'hist1_noc0_nbuf2': False})
-        self.assertTrue(all('hist1_noc0_nbuf2' in failure for failure in report['failures']))
+        self.assertEqual(report['windows_exact_by_setting'], {'port': True, 'hist1_noc1_nbuf1': False})
+        self.assertTrue(all('hist1_noc1_nbuf1' in failure for failure in report['failures']))
 
     def test_the_slice_canonicalisation_is_recorded_not_judged(self):
         passed, report = run_section('windows', FakeBench(canonicalise=True))

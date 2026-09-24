@@ -59,10 +59,12 @@ NBUF_IN = 2            # CB_IN depth in tasks
 CB_IN, CB_SCRATCH = 0, 1
 SOURCE_NAME = 'gdn_conv_windows_packed.cpp'
 RUNTIME_FILES = ('gdn_conv_windows_packed.py', SOURCE_NAME)
-# What the model path runs. copy_noc is the served primitive (word copies) until card M
-# measures the NOC copies faster and exact; the card-M settings verdict fails the run while
+# What the model path runs: the fastest exact combination on hardware. Card B, run
+# vt2-20260924T012053 (A5 image, every setting exact on every case): hist1_noc1_nbuf1 37.6 us per
+# launch against 62.5 us for the previous default (hist1_noc0_nbuf2) and 105.9 us for the port;
+# the NOC copies are ~25 us faster than word copies. The card settings verdict fails the run while
 # DEFAULTS is not within 2 us of the fastest exact combination.
-DEFAULTS = dict(port=False, hist_row=True, copy_noc=False, nbuf=2)
+DEFAULTS = dict(port=False, hist_row=True, copy_noc=True, nbuf=1)
 NEGATIVE_CONTROLS = {'slot': 'VTW_NEG_SLOT', 'user': 'VTW_NEG_USER', 'hist': 'VTW_NEG_HIST', 'pad': 'VTW_NEG_PAD'}
 ROLES = ('VTW_ROLE_READER', 'VTW_ROLE_WRITER', 'VTW_PORT')
 
