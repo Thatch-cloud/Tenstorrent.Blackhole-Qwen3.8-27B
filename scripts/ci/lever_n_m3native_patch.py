@@ -946,8 +946,9 @@ def patch_mlp_c1_fused(source):
 
 
 def patch_mlp_full(source):
-    """The table maps ONE function per file: the 64-row decode gates, then C1, then C1c/C1d."""
-    return patch_mlp_c1_fused(patch_mlp_single_gateup(patch_mlp(source)))
+    """The table maps ONE function per file: the 64-row decode gates, then C1, then C1c/C1d, then C1e
+    (section J; defined further down, resolved when the table runs)."""
+    return patch_mlp_c1_exact(patch_mlp_c1_fused(patch_mlp_single_gateup(patch_mlp(source))))
 
 
 def patch_layer(source):
@@ -1123,8 +1124,9 @@ def patch_layer_profile_flush(source):
 
 
 def patch_layer_full(source):
-    """The table maps ONE function per file: C1 (and C1d) in __init__, then the M2 flush hook."""
-    return patch_layer_profile_flush(patch_layer(source))
+    """The table maps ONE function per file: C1 (and C1d) in __init__, then C1e's ff_norm switch (section
+    J), then the M2 flush hook."""
+    return patch_layer_profile_flush(patch_layer_c1_exact(patch_layer(source)))
 
 
 # ---------------------------------------------------------------------------------
@@ -1481,6 +1483,268 @@ def unpatch_attention_tp_sdpa_pf(source):
 def patch_attention_tp_full(source):
     """The table maps ONE function per file: the 64-row decode gates, then prefill lever #1's opt-in."""
     return patch_attention_tp_sdpa_pf(patch_attention_tp(source))
+
+
+# ---------------------------------------------------------------------------------
+# J. C1e: the served prefill gate/up, bit for bit, under QWEN_FAST_SINGLE_GATEUP=1.
+# ---------------------------------------------------------------------------------
+#
+# The real-text bisect on image A5 (4 x 32k, 2026-09-24) found QWEN_FAST_SINGLE_GATEUP the only lever
+# that changes output: v177 (the plain packed path) is byte-identical to the one-at-a-time v158, and
+# v178 = v177 + SINGLE_GATEUP diverges from it at user 1's first token - in prefill, where C1/C1c
+# replace the served fused all_gather_minimal_matmul_async(fuse_swiglu=True) on the packed w_gate_up
+# with separate w1 (SiLU) and w3 matmuls and a bf16 mul. No such formulation can be exact: the served
+# op forms silu(gate) * up from its fp32 accumulators and rounds ONCE, and rounding the same fp32 gate
+# and up to bf16 first already changes ~36% of the products (test_mlp_c1e_pack.CompareTests); it also
+# runs a different program, K schedule and compute kernel config (C1c uses the decode config).
+#
+# C1e (QWEN_FAST_C1_EXACT=1, only with QWEN_FAST_SINGLE_GATEUP=1; refused with QWEN_FAST_C1_AGMM or
+# QWEN_FAST_C1_LEGACY) keeps the served op and replaces only where its weight comes from:
+#   - load: the first MLP allocates ONE scratch per mesh, made exactly as _build_gate_up makes
+#     w_gate_up ([K, 2N x chips] bfloat4_b, TILE, DRAM, ShardTensorToMesh(dim=-1): 50.1 MB per chip at
+#     TP2 instead of the 64 x 50.1 MB the served copies cost), before any KV cache exists;
+#   - layer.py: the ff_norm skips its all-gather again, as served (the fused op gathers x);
+#   - mlp.py _forward_tp, right after the served fused branch: for a K-sharded prefill x, one
+#     generic_op (mlp_c1e_pack.pack_gate_up) rewrites the scratch as this layer's served packing of its
+#     w1/w3 - whole 576-byte bfloat4_b pages, packed page r*2C + 2c + g = (w1, w3)[g] page r*C + c, the
+#     inverse of packed_weight_check.cpp's map, whose byte equality with the served w_gate_up run
+#     33996306217 found on all 64 layers x 2 chips - and then the served call,
+#     tpc.all_gather_swiglu_prefill(x, <scratch>, self.tt_ccl, self.compute_kernel_config_agmm,
+#     args.ccl_topology()), runs unchanged. _silu_fused and _fused_gu are set as the served branch sets
+#     them, so the down projection and the reduce are the served ones too.
+# Same bytes, same tensor spec and placement, same program config, compute kernel config, gather and
+# epilogue: the served output by construction, whatever the kernel does inside. Nothing is allocated
+# per call and generic_op hashes its runtime-arg count, not the values, so every call after the first
+# is a program-cache hit - safe inside the prefill chunk trace. The cost is the copy: 50.1 MB read and
+# 50.1 MB written per layer per chip, ~16-26 ms per 2048-row chunk against C1c's +71-76 ms.
+#
+# QWEN_FAST_C1_EXACT_AUDIT=n (0..64; a correctness arm, never a timed one) byte-checks two things with
+# packed_weight_check.cpp, raising on any difference: at load, for the first n layers, the premise -
+# the packed weight _build_gate_up makes (from its own cache, as the served path would) is the
+# interleave of the w1/w3 that layer loads; and in the first, eager, forward, the scratch after each of
+# the first n packs against that layer's w1/w3. Together: the scratch the fused op reads is the served
+# weight. Both allocate and read back, so n is capped at 64 (one forward) and never reaches a capture.
+#
+# Flag unset: one env lookup per MLP construction, per layer construction and (under SINGLE_GATEUP)
+# per load; _qwen_c1e is never set, so the new branch is never taken. The op files are mounted beside
+# mlp.py from C1E_FILES, the one table the graft job stages, the arm mounts and the card-B harness
+# (optimisation/ttnn-op/c1e_gateup) reads.
+
+C1_EXACT_FLAG = 'QWEN_FAST_C1_EXACT'
+C1_EXACT_AUDIT_FLAG = 'QWEN_FAST_C1_EXACT_AUDIT'
+C1_EXACT_AUDIT_MAX = 64
+C1E_ON = ('os.environ.get("' + SINGLE_GATEUP_FLAG + '") == "1" and os.environ.get("'
+          + C1_EXACT_FLAG + '") == "1"')
+MARKER_C1E_SCRATCH = '[PINDIAG] C1e scratch allocated'
+MARKER_C1E = '[PINDIAG] prefill MLP C1e: the served fused SwiGLU AGMM on the per-layer packed scratch'
+MARKER_C1E_FF_NORM = '[PINDIAG] C1e: ff_norm skips its all-gather for the served fused op'
+MARKER_C1E_AUDIT = '[PINDIAG] C1e audit'
+MARKER_C1E_PREMISE = '[PINDIAG] C1e premise audit'
+C1E_MODULE = 'models.demos.blackhole.qwen36.tt.mlp_c1e_pack'
+
+# The unpatched files the graft mounts next to the patched mlp.py: {graft-relative path: scripts/ci
+# source}. mlp_c1e_pack.RUNTIME_FILES beside mlp.py (the module finds its kernels next to itself);
+# kept literal so this module imports nothing new, and held equal to RUNTIME_FILES by the tests.
+C1E_FILES = {'mlp_c1e_pack.py': 'mlp_c1e_pack.py', 'mlp_c1e_pack.cpp': 'mlp_c1e_pack.cpp',
+             'packed_weight_check.cpp': 'packed_weight_check.cpp'}
+
+_C1E_IMPORT = ('from ' + C1E_MODULE.rsplit('.', 1)[0] + ' import ' + C1E_MODULE.rsplit('.', 1)[1] + ' as _c1e\n')
+
+C1E_HELPERS = (
+    '\n'
+    '\n'
+    '# Lever N M3native C1e (' + C1_EXACT_FLAG + '=1 with ' + SINGLE_GATEUP_FLAG + '=1; lever_n_m3native_patch\n'
+    '# section J): the served fused gate/up + SwiGLU AGMM, fed each layer\'s packed weight rebuilt in ONE scratch.\n'
+    '_QWEN_C1E = {"packs": 0, "audited": 0, "premise": 0}\n'
+    '_QWEN_C1E_AUDIT_MAX = ' + str(C1_EXACT_AUDIT_MAX) + '\n'
+    '\n'
+    '\n'
+    'def _qwen_c1e_audit_count():\n'
+    '    """' + C1_EXACT_AUDIT_FLAG + '=n (unset or empty: 0): how many layers\' served weights (at load) and how\n'
+    '    many packs (in the first forward) are byte-checked. Refused outside 0..64: the audit reads back, so it\n'
+    '    must finish inside the first forward - an eager warmup - and never reach a trace capture."""\n'
+    '    text = (os.environ.get("' + C1_EXACT_AUDIT_FLAG + '") or "").strip() or "0"\n'
+    '    try:\n'
+    '        count = int(text)\n'
+    '    except ValueError:\n'
+    '        count = -1\n'
+    '    if not 0 <= count <= _QWEN_C1E_AUDIT_MAX:\n'
+    '        raise ValueError("' + C1_EXACT_AUDIT_FLAG + ' must be an integer 0..64, got " + repr(text))\n'
+    '    return count\n'
+    '\n'
+    '\n'
+    'def _qwen_c1e_scratch(mesh_device, args, num_devices):\n'
+    '    """C1e at construction: refuse the other prefill gate/up paths, then return the mesh\'s ONE packed-weight\n'
+    '    scratch (the first MLP allocates it, before any KV cache) - or None where the served path never fused."""\n'
+    '    for _qwen_other in ("' + C1_AGMM_FLAG + '", "' + C1_LEGACY_FLAG + '"):\n'
+    '        if os.environ.get(_qwen_other) == "1":\n'
+    '            raise ValueError("' + C1_EXACT_FLAG + '=1 excludes " + _qwen_other + "=1: each replaces the prefill gate/up")\n'
+    '    from models.demos.blackhole.qwen36.tt import tp_common as tpc\n'
+    '\n'
+    '    if not tpc.mlp_gateup_agmm_enabled(num_devices):\n'
+    '        return None\n'
+    '    audit = _qwen_c1e_audit_count()\n'
+    '    ' + _C1E_IMPORT +
+    '\n'
+    '    shape = (args.dim, args.hidden_dim // num_devices)\n'
+    '    first = not _c1e.has_scratch(mesh_device, shape)\n'
+    '    scratch = _c1e.allocate_scratch(ttnn, mesh_device, shape)\n'
+    '    if first:\n'
+    '        from loguru import logger as _qwen_logger\n'
+    '\n'
+    '        _qwen_logger.info("' + MARKER_C1E_SCRATCH + ': per chip {} for w1/w3 {}, {} bytes; audit={}",\n'
+    '                          tuple(scratch.shape), shape, _c1e.traffic_bytes(shape)[1], audit)\n'
+    '    return scratch\n'
+    '\n'
+    '\n'
+    'def _qwen_c1e_pack(mlp, w, x):\n'
+    '    """C1e per prefill call: this layer\'s served packed gate/up, rebuilt in the shared scratch (one generic_op;\n'
+    '    nothing allocated, so trace-safe once compiled). The first ' + C1_EXACT_AUDIT_FLAG + ' packs are then\n'
+    '    byte-checked against w1/w3, raising on any difference."""\n'
+    '    ' + _C1E_IMPORT +
+    '\n'
+    '    scratch = _c1e.pack_gate_up(mlp.device, w.w1, w.w3, mlp._qwen_c1e)\n'
+    '    state = _QWEN_C1E\n'
+    '    state["packs"] += 1\n'
+    '    if state["packs"] == 1:\n'
+    '        # Once per process, inside the branch it names.\n'
+    '        from loguru import logger as _qwen_logger\n'
+    '\n'
+    '        read, written = _c1e.traffic_bytes(w.w1.shape)\n'
+    '        _qwen_logger.info("' + MARKER_C1E + ': rows={} k_local={} scratch={} copy read={} written={} bytes per layer per chip",\n'
+    '                          x.shape[-2], x.shape[-1], tuple(scratch.shape), read, written)\n'
+    '    if state["audited"] < _qwen_c1e_audit_count():\n'
+    '        state["audited"] += 1\n'
+    '        report = _c1e.audit_pairs(ttnn, mlp.device, scratch, w.w1, w.w3)\n'
+    '        from loguru import logger as _qwen_logger\n'
+    '\n'
+    '        _qwen_logger.info("' + MARKER_C1E_AUDIT + ' {} exact={} pages={} mismatched_words={} rows={}",\n'
+    '                          state["audited"], report["exact"], report["pages"], report["mismatched_words"], x.shape[-2])\n'
+    '        if not report["exact"]:\n'
+    '            raise AssertionError("C1e: the packed scratch differs from this layer\'s w1/w3: " + repr(report))\n'
+    '    return scratch\n'
+    '\n'
+    '\n'
+    'def _qwen_c1e_premise(mesh_device, state_dict, tp, cache, dram_sharded, layer):\n'
+    '    """C1e premise, at load, for the first ' + C1_EXACT_AUDIT_FLAG + ' layers: the packed weight the served\n'
+    '    path builds (_build_gate_up, from its own cache) is the tile-pair interleave of the w1/w3 this layer loads\n'
+    '    (tp_common.shard_w, from theirs), byte for byte on every chip - so a scratch equal to that interleave is\n'
+    '    the served weight. All three are freed again before the layer\'s own weights load."""\n'
+    '    if layer > _qwen_c1e_audit_count():\n'
+    '        return\n'
+    '    if dram_sharded:\n'
+    '        raise ValueError("C1e needs DRAM-interleaved w1/w3 (mlp_1d_decode); this configuration shards them")\n'
+    '    ' + _C1E_IMPORT +
+    '    from models.demos.blackhole.qwen36.tt import tp_common as tpc\n'
+    '\n'
+    '    served = _build_gate_up(\n'
+    '        state_dict["gate_proj.weight"], state_dict["up_proj.weight"], mesh_device, tp, cache("gate_up", ".swiglu")\n'
+    '    )\n'
+    '    w1 = tpc.shard_w(state_dict["gate_proj.weight"], mesh_device, dim=-1, memory_config=ttnn.DRAM_MEMORY_CONFIG,\n'
+    '                     cache_path=cache("gate_proj"), dtype=ttnn.bfloat4_b)\n'
+    '    w3 = tpc.shard_w(state_dict["up_proj.weight"], mesh_device, dim=-1, memory_config=ttnn.DRAM_MEMORY_CONFIG,\n'
+    '                     cache_path=cache("up_proj"), dtype=ttnn.bfloat4_b)\n'
+    '    try:\n'
+    '        report = _c1e.audit_pairs(ttnn, mesh_device, served, w1, w3)\n'
+    '    finally:\n'
+    '        for tensor in (served, w1, w3):\n'
+    '            ttnn.deallocate(tensor)\n'
+    '    _QWEN_C1E["premise"] += 1\n'
+    '    from loguru import logger as _qwen_logger\n'
+    '\n'
+    '    _qwen_logger.info("' + MARKER_C1E_PREMISE + ' {} exact={} layer={} pages={} mismatched_words={}",\n'
+    '                      _QWEN_C1E["premise"], report["exact"], layer, report["pages"], report["mismatched_words"])\n'
+    '    if not report["exact"]:\n'
+    '        raise AssertionError("C1e premise: the served packed gate/up is not the interleave of w1/w3: " + repr(report))\n'
+)
+
+C1E_INIT_BLOCK = (
+    '        if ' + C1E_ON + ':\n'
+    '            # Lever N M3native C1e (' + C1_EXACT_FLAG + '=1): the served fused gate/up AGMM on a per-layer\n'
+    '            # rebuild of its packed weight in one shared scratch (layer.py skips the ff_norm gather again).\n'
+    '            self._qwen_c1e = _qwen_c1e_scratch(mesh_device, args, self.num_devices)\n'
+)
+
+# The C1 marker block in load_mlp_weights ends here; the premise audit is nested inside it (it only runs
+# where the packed copy was not built).
+C1E_LOAD_ANCHOR = (
+    '                load_mlp_weights._qwen_single_gateup,\n'
+    '                tensor_cache_path,\n'
+    '            )\n'
+)
+C1E_LOAD_BLOCK = (
+    '            if ' + C1E_ON + ':\n'
+    '                # Lever N M3native C1e premise audit (' + C1_EXACT_AUDIT_FLAG + '=n, section J): for the first n\n'
+    '                # layers, the packed weight the served path builds is checked against the w1/w3 loaded here.\n'
+    '                _qwen_c1e_premise(mesh_device, state_dict, tp, cache, dram_sharded, load_mlp_weights._qwen_single_gateup)\n'
+)
+
+C1E_BRANCH = (
+    '        elif getattr(self, "_qwen_c1e", None) is not None and x.shape[-2] > ttnn.TILE_SIZE and x.shape[-1] < w.w1.shape[-2]:\n'
+    '            # Lever N M3native C1e (' + C1_EXACT_FLAG + '=1): x is K-sharded (the ff_norm skipped its gather, as\n'
+    '            # served). This layer\'s w1/w3 are rebuilt in the served packing into the shared scratch, then the\n'
+    '            # served fused call runs on it unchanged: the served arithmetic on the served bytes.\n'
+    '            _qwen_c1e_weight = _qwen_c1e_pack(self, w, x)\n'
+    '            hidden = tpc.all_gather_swiglu_prefill(\n'
+    '                x, _qwen_c1e_weight, self.tt_ccl, self.compute_kernel_config_agmm, args.ccl_topology()\n'
+    '            )\n'
+    '            _silu_fused = True\n'
+    '            _fused_gu = True\n'
+)
+
+C1E_LAYER_BLOCK = (
+    '        if ' + C1E_ON + ':\n'
+    '            # Lever N M3native C1e: the MLP runs the served fused SwiGLU AGMM again (on its per-layer packed\n'
+    '            # scratch, mlp.py\'s _qwen_c1e), so the ff_norm skips its all-gather exactly as served.\n'
+    '            self._fuse_ff_agmm = tpc.mlp_gateup_agmm_enabled(self.num_devices)\n'
+    '            if self._fuse_ff_agmm:\n'
+    '                from loguru import logger as _qwen_logger\n'
+    '\n'
+    '                _qwen_logger.info("' + MARKER_C1E_FF_NORM + ' (layer {})", layer_num)\n'
+)
+
+
+def patch_mlp_c1_exact(source):
+    """C1e in mlp.py, on top of C1, C1c and C1d: the scratch at construction, the premise audit in the
+    load, the branch right after the served fused one, and the module helpers. Inert unless both flags."""
+    if C1_EXACT_FLAG in source:
+        raise ValueError('mlp C1e: already grafted (%s present)' % C1_EXACT_FLAG)
+    if C1_AGMM_FLAG not in source:
+        raise ValueError('mlp C1e: needs the C1, C1c and C1d grafts first (%s absent)' % C1_AGMM_FLAG)
+    lines = source.splitlines(keepends=True)
+    span = function_span(source, INIT_FUNCTION)
+    lines = replace_once(lines, span, C1D_INIT_BLOCK, C1E_INIT_BLOCK + C1D_INIT_BLOCK, 'mlp __init__ C1e switch')
+    span = module_function_span(''.join(lines), LOAD_WEIGHTS_FUNCTION)
+    lines = replace_once(lines, span, C1E_LOAD_ANCHOR, C1E_LOAD_ANCHOR + C1E_LOAD_BLOCK,
+                         'mlp load_mlp_weights C1e premise audit')
+    c1d_first = C1D_BRANCH.splitlines(keepends=True)[0]
+    span = function_span(''.join(lines), FORWARD_TP_FUNCTION)
+    lines = replace_once(lines, span, c1d_first, C1E_BRANCH + c1d_first,
+                         'mlp C1e branch (right after the served fused gate/up branch)')
+    result = ''.join(lines)
+    anchor = '\n\nclass Qwen36MLP:\n'
+    if result.count(anchor) != 1 or result.count('\ndef _qwen_c1_swiglu(') != 1:
+        raise ValueError('mlp C1e helpers: expected one Qwen36MLP class anchor after _qwen_c1_swiglu')
+    if result.index('\ndef _qwen_c1_swiglu(') > result.index(anchor):
+        raise ValueError('mlp C1e helpers: _qwen_c1_swiglu must precede Qwen36MLP')
+    result = result.replace(anchor, C1E_HELPERS + anchor)
+    ast.parse(result)
+    return result
+
+
+def patch_layer_c1_exact(source):
+    """C1e in layer.py, on top of C1/C1d: the ff_norm skips its gather again under both flags."""
+    if C1_EXACT_FLAG in source:
+        raise ValueError('layer C1e: already grafted (%s present)' % C1_EXACT_FLAG)
+    anchor = '        if self.num_devices > 1 and not self._fuse_ff_agmm and not ' + FLAG_OFF + ':\n'
+    if C1_AGMM_FLAG not in source:
+        raise ValueError('layer C1e: needs the C1/C1d graft first (%s absent)' % C1_AGMM_FLAG)
+    lines = source.splitlines(keepends=True)
+    span = function_span(source, INIT_FUNCTION)
+    lines = replace_once(lines, span, anchor, C1E_LAYER_BLOCK + anchor, 'layer ff_norm C1e switch')
+    result = ''.join(lines)
+    ast.parse(result)
+    return result
 
 
 PATCHES = {

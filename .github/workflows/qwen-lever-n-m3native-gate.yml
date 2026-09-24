@@ -116,6 +116,21 @@ jobs:
             cp "scripts/ci/$source" "graft/$relative"
             sha256sum "graft/$relative" >> experiment-results/graft.sha256
           done < graft/prefill-conv-manifest.txt
+          # C1e (lever_n_m3native_patch section J): the unpatched op files the arm mounts beside mlp.py
+          # under M3NATIVE_C1_EXACT=1, staged from lever_n_m3native_patch.C1E_FILES (the same table the
+          # arm derives its mounts from). Staged on every tag; mounted only on the flag.
+          python3 -B - <<'PY' > graft/c1e-manifest.txt
+          import sys
+          sys.path.insert(0, 'scripts/ci')
+          import lever_n_m3native_patch as patcher
+          for relative, source in sorted(patcher.C1E_FILES.items()):
+              print('%s %s' % (source, relative))
+          PY
+          while read -r source relative; do
+            mkdir -p "graft/$(dirname "$relative")"
+            cp "scripts/ci/$source" "graft/$relative"
+            sha256sum "graft/$relative" >> experiment-results/graft.sha256
+          done < graft/c1e-manifest.txt
           cat experiment-results/graft.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

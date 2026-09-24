@@ -1018,8 +1018,9 @@ def _strip_c1(text):
             else:
                 continue
         stripped = line.lstrip()
-        # C1d's branch is an elif keyed on the attribute its own flag-gated block sets.
-        gated = 'QWEN_FAST_SINGLE_GATEUP' in line or (stripped.startswith('elif ') and '_qwen_c1_agmm' in line)
+        # C1d's and C1e's branches are elifs keyed on the attribute their own flag-gated blocks set.
+        gated = 'QWEN_FAST_SINGLE_GATEUP' in line or (stripped.startswith('elif ') and (
+            '_qwen_c1_agmm' in line or '"_qwen_c1e"' in line))
         if gated and stripped.startswith(('if ', 'elif ')) and line.rstrip().endswith(':'):
             skipping = len(line) - len(stripped)
             continue
@@ -1099,9 +1100,10 @@ class SingleGateUpGraftTests(unittest.TestCase):
         self.assertLess(marker, next_branch)
 
     def test_removing_the_c1_edits_gives_back_the_originals(self):
-        """Flag-off equivalence, structurally: C1 only inserts gated blocks and a flag term."""
+        """Flag-off equivalence, structurally: C1 (and C1c/C1d/C1e) only insert gated blocks and a flag term."""
         self.assertEqual(_strip_c1(patch_mlp_full(MLP_MODULE)), patch_mlp(MLP_MODULE))
         self.assertEqual(_strip_c1(patch_layer(LAYER)), LAYER)
+        self.assertEqual(_strip_c1(patcher.patch_layer_c1_exact(patch_layer(LAYER))), LAYER)
 
     def test_each_c1_patch_applies_exactly_once_and_fails_loudly_on_drift(self):
         with self.assertRaises(ValueError):
@@ -1239,13 +1241,24 @@ class SingleGateUpSlicingTests(unittest.TestCase):
 # C1c / C1d (prefill ranking levers 3a and 3) and the M2 prefill profile flush hook.
 # ---------------------------------------------------------------------------------
 
-def _mlp_env(environ, *, numeric=True):
-    """A fake ttnn / tp_common / ccl for executing a grafted mlp.py's _forward_tp.
+def _interleave(w1, w3):
+    """The served per-chip packing (prepare_for_fused_swiglu's shard): column tile 2t = w1 tile t, 2t+1 = w3 tile t."""
+    import numpy as np
+
+    k, n = w1.shape
+    return np.stack((w1.reshape(k, n // 32, 32), w3.reshape(k, n // 32, 32)), axis=-2).reshape(k, 2 * n)
+
+
+def _mlp_env(environ, *, numeric=True, corrupt_pack=False):
+    """A fake ttnn / tp_common / ccl / mlp_c1e_pack for executing a grafted mlp.py's _forward_tp.
 
     Tensors are numpy float32 arrays, so the fakes also compute: linear is x @ w with the
-    program config's fused SiLU, mul is elementwise, slice and concat are numpy's. Every
-    call is recorded (with names, not ids) so a test can compare the op sequence of two
-    sources, or the values two branches produce."""
+    program config's fused SiLU, mul is elementwise, slice and concat are numpy's, the fused
+    SwiGLU AGMM gathers a K-sharded x (the fake's two chips hold the same shard) and forms
+    silu(gate) * up from a tile-pair-interleaved weight, and the C1e pack writes that
+    interleave of w1/w3 into the scratch (one element off with corrupt_pack). Every call is
+    recorded (with names, not ids) so a test can compare the op sequence of two sources, or
+    the values two branches produce."""
     import sys
     import types
     import numpy as np
@@ -1291,9 +1304,29 @@ def _mlp_env(environ, *, numeric=True):
                       out_memory_config))
         return np.zeros(x.shape[:-1] + (weight.shape[-1],), dtype=np.float32)
 
-    def swiglu_agmm(x, weight, tt_ccl, compute_cfg, topology, **_):
-        calls.append(('agmm_swiglu', x.shape[-2], name(weight), compute_cfg))
-        return np.zeros(x.shape[:-1] + (weight.shape[-1] // 2,), dtype=np.float32)
+    def swiglu_agmm(x, weight, tt_ccl, compute_cfg, topology, **options):
+        calls.append(('agmm_swiglu', x.shape[-2], name(weight), compute_cfg, tt_ccl, topology, tuple(sorted(options))))
+        if weight.shape[-1] % 64 or 2 * x.shape[-1] != weight.shape[-2]:
+            return np.zeros(x.shape[:-1] + (weight.shape[-1] // 2,), dtype=np.float32)
+        product = np.matmul(np.concatenate([x, x], axis=-1), weight)
+        pairs = product.reshape(product.shape[:-1] + (weight.shape[-1] // 64, 2, 32))
+        return (silu(pairs[..., 0, :]) * pairs[..., 1, :]).reshape(product.shape[:-1] + (weight.shape[-1] // 2,))
+
+    def pack_gate_up(mesh, w1, w3, scratch):
+        calls.append(('c1e_pack', mesh, name(w1), name(w3), name(scratch)))
+        scratch[...] = _interleave(w1, w3)
+        if corrupt_pack:
+            scratch[0, 0] += 1.0
+        return scratch
+
+    def audit_pairs(operations, mesh, packed, w1, w3):
+        calls.append(('c1e_audit', mesh, name(packed), name(w1), name(w3)))
+        wrong = int(np.count_nonzero(packed != _interleave(w1, w3)))
+        return dict(exact=wrong == 0, pages=w1.size // 1024, mismatched_words=wrong)
+
+    c1e = types.ModuleType('models.demos.blackhole.qwen36.tt.mlp_c1e_pack')
+    c1e.pack_gate_up, c1e.audit_pairs = pack_gate_up, audit_pairs
+    c1e.traffic_bytes = lambda shape: (2 * shape[0] * shape[1] // 1024 * 576,) * 2
 
     tpc = types.SimpleNamespace(
         TILE_SIZE=32,
@@ -1306,27 +1339,36 @@ def _mlp_env(environ, *, numeric=True):
     logged = []
     loguru = types.ModuleType('loguru')
     loguru.logger = types.SimpleNamespace(info=lambda *a: logged.append(a))
-    modules = {'ttnn': ttnn, 'loguru': loguru, 'models.tt_transformers.tt.ccl': ccl}
+    modules = {'ttnn': ttnn, 'loguru': loguru, 'models.tt_transformers.tt.ccl': ccl,
+               'models.demos.blackhole.qwen36.tt.mlp_c1e_pack': c1e}
     for module in ('models', 'models.demos', 'models.demos.blackhole', 'models.demos.blackhole.qwen36',
                    'models.demos.blackhole.qwen36.tt', 'models.tt_transformers', 'models.tt_transformers.tt'):
         modules[module] = types.ModuleType(module)
     modules['models.demos.blackhole.qwen36.tt'].tp_common = tpc
+    modules['models.demos.blackhole.qwen36.tt'].mlp_c1e_pack = c1e
     return calls, names, logged, patch.dict(sys.modules, modules), patch.dict('os.environ', environ, clear=True)
 
 
-def _run_mlp(source, environ, x, *, fuse_agmm=False, packed=False, c1_agmm=None, seed=0):
-    """Execute `source`'s Qwen36MLP._forward_tp on x; return (output, calls, logged)."""
+def _run_mlp(source, environ, x, *, fuse_agmm=False, packed=False, c1_agmm=None, seed=0, hidden=48, c1e=False,
+             repeat=1, corrupt_pack=False):
+    """Execute `source`'s Qwen36MLP._forward_tp on x (`repeat` times, one module instance); return
+    (last output, calls, logged). packed='interleave' makes w_gate_up the served packing of w1/w3 (the
+    fake SwiGLU needs hidden a multiple of 32); c1e=True gives the MLP the C1e scratch its __init__ would."""
     import types
     import numpy as np
 
-    calls, names, logged, modules, env = _mlp_env(environ)
+    calls, names, logged, modules, env = _mlp_env(environ, corrupt_pack=corrupt_pack)
     rng = np.random.default_rng(seed)
-    dim, hidden = 64, 48
+    dim = 64
     w1 = rng.standard_normal((dim, hidden)).astype(np.float32)
     w3 = rng.standard_normal((dim, hidden)).astype(np.float32)
     w2 = rng.standard_normal((hidden, dim)).astype(np.float32)
-    wgu = rng.standard_normal((dim, 2 * hidden)).astype(np.float32) if packed else None
-    for tensor, label in ((w1, 'w1'), (w2, 'w2'), (w3, 'w3'), (wgu, 'w_gate_up')):
+    if packed == 'interleave':
+        wgu = _interleave(w1, w3)
+    else:
+        wgu = rng.standard_normal((dim, 2 * hidden)).astype(np.float32) if packed else None
+    scratch = np.zeros((dim, 2 * hidden), dtype=np.float32) if c1e else None
+    for tensor, label in ((w1, 'w1'), (w2, 'w2'), (w3, 'w3'), (wgu, 'w_gate_up'), (scratch, 'scratch')):
         if tensor is not None:
             names[id(tensor)] = label
     with modules, env:
@@ -1346,7 +1388,10 @@ def _run_mlp(source, environ, x, *, fuse_agmm=False, packed=False, c1_agmm=None,
         mlp._mlp_1d_decode, mlp._dram_sharded, mlp._fuse_gateup_agmm = True, False, fuse_agmm
         if c1_agmm is not None:
             mlp._qwen_c1_agmm = c1_agmm
-        out = mlp._forward_tp(x)
+        if c1e:
+            mlp._qwen_c1e = scratch
+        for _ in range(repeat):
+            out = mlp._forward_tp(x)
     return out, calls, logged
 
 
@@ -1432,7 +1477,8 @@ class FlagOffEquivalenceTests(unittest.TestCase):
             dict(x=_x(32), fuse_agmm=True, packed=True),                # one-tile decode
         )
         for case in cases:
-            for environ in ({}, {'QWEN_FAST_C1_AGMM': '1'}, {'QWEN_FAST_C1_LEGACY': '1'}):
+            for environ in ({}, {'QWEN_FAST_C1_AGMM': '1'}, {'QWEN_FAST_C1_LEGACY': '1'}, {'QWEN_FAST_C1_EXACT': '1'},
+                            {'QWEN_FAST_C1_EXACT': '1', 'QWEN_FAST_C1_EXACT_AUDIT': '4'}):
                 with self.subTest(rows=case['x'].shape[-2], environ=environ):
                     kwargs = dict(case)
                     x = kwargs.pop('x')
@@ -1786,7 +1832,9 @@ class PrefillProfileFlushTests(unittest.TestCase):
                 self.assertEqual({e[0] for e in events}, {'add'})
 
     def test_removing_the_m2_edits_gives_back_the_c1_graft(self):
-        self.assertEqual(_strip_profile(self.full), patch_layer(LAYER_MODULE))
+        # patch_layer_full = C1 (and C1d), then C1e's ff_norm switch (section J), then the M2 hook.
+        self.assertEqual(_strip_profile(self.full), patcher.patch_layer_c1_exact(patch_layer(LAYER_MODULE)))
+        self.assertEqual(_strip_c1(_strip_profile(self.full)), LAYER_MODULE)
 
     def test_every_16th_prefill_layer_syncs_then_reads(self):
         events = _run_layer_forward(self.full, {'QWEN_PREFILL_PROFILE_FLUSH': '1'},
@@ -1858,6 +1906,503 @@ class PrefillProfileFlushTests(unittest.TestCase):
         arm = (Path(__file__).parent / 'lever_n_m3native_run_arm.sh').read_text(encoding='utf-8')
         self.assertIn('${M3NATIVE_PROFILE_FLUSH:+-e QWEN_PREFILL_PROFILE_FLUSH=1}', arm)
         self.assertIn('_QWEN_PREFILL_PROFILE_FLAG = "QWEN_PREFILL_PROFILE_FLUSH"', self.full)
+
+
+# ---------------------------------------------------------------------------------
+# C1e (section J): the served fused gate/up on a per-layer rebuild of its packed weight.
+# ---------------------------------------------------------------------------------
+
+C1E = {'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_C1_EXACT': '1'}
+TP_ARGS = dict(dim=5120, hidden_dim=17408)
+
+
+def _c1e_module_env(environ, *, agmm=True, exact=True):
+    """sys.modules / os.environ for constructing a grafted Qwen36MLP and running its load_mlp_weights
+    under C1e: loguru, ttnn, tp_common (with shard_w) and mlp_c1e_pack fakes that record every call."""
+    import sys
+    import types
+
+    events, logged, scratches = [], [], {}
+    tpc = types.SimpleNamespace(
+        mlp_gateup_agmm_enabled=lambda n: agmm and n > 1,
+        shard_w=lambda weight, mesh, dim, memory_config, cache_path, dtype: events.append(
+            ('shard_w', weight, mesh, dim, memory_config, cache_path, dtype)) or ('loaded', cache_path))
+    ttnn = types.SimpleNamespace(TILE_SIZE=32, DRAM_MEMORY_CONFIG='DRAM', bfloat4_b='bf4',
+                                 deallocate=lambda tensor: events.append(('deallocate', tensor)))
+    c1e = types.ModuleType('models.demos.blackhole.qwen36.tt.mlp_c1e_pack')
+    c1e.has_scratch = lambda mesh, shape: (mesh, tuple(shape)) in scratches
+
+    def allocate_scratch(operations, mesh, shape):
+        key = (mesh, tuple(shape))
+        if key not in scratches:
+            events.append(('allocate_scratch', operations is ttnn, mesh, tuple(shape)))
+            scratches[key] = types.SimpleNamespace(shape=(shape[0], 2 * shape[1]))
+        return scratches[key]
+
+    def audit_pairs(operations, mesh, packed, w1, w3):
+        events.append(('audit_pairs', mesh, packed, w1, w3))
+        return dict(exact=exact, pages=43520, mismatched_words=0 if exact else 9)
+
+    c1e.allocate_scratch, c1e.audit_pairs = allocate_scratch, audit_pairs
+    c1e.traffic_bytes = lambda shape: (50135040, 50135040)
+    loguru = types.ModuleType('loguru')
+    loguru.logger = types.SimpleNamespace(info=lambda *a: logged.append(a))
+    modules = {'loguru': loguru, 'ttnn': ttnn, 'models.demos.blackhole.qwen36.tt.mlp_c1e_pack': c1e}
+    for name in ('models', 'models.demos', 'models.demos.blackhole', 'models.demos.blackhole.qwen36',
+                 'models.demos.blackhole.qwen36.tt'):
+        modules[name] = types.ModuleType(name)
+    modules['models.demos.blackhole.qwen36.tt'].tp_common = tpc
+    modules['models.demos.blackhole.qwen36.tt'].mlp_c1e_pack = c1e
+    return events, logged, patch.dict(sys.modules, modules), patch.dict('os.environ', environ, clear=True)
+
+
+def _c1e_construct(source, environ, *, devices=2, count=1, agmm=True):
+    """Construct `count` grafted Qwen36MLPs on one mesh; (mlps, events, logged)."""
+    import types
+    events, logged, modules, env = _c1e_module_env(environ, agmm=agmm)
+    namespace = {'MLPWeights': object, '_build_gate_up': lambda *a: 'wgu'}
+    args = types.SimpleNamespace(num_devices=devices, **TP_ARGS)
+    with modules, env:
+        exec(compile(source, 'mlp.py', 'exec'), namespace)
+        mlps = [namespace['Qwen36MLP']('mesh', {}, None, args) for _ in range(count)]
+    return mlps, events, logged
+
+
+def _c1e_load(source, environ, layers=3, *, exact=True, dram_sharded=False):
+    """Run the grafted load_mlp_weights for `layers` layers; (results, events, logged)."""
+    import types
+    from pathlib import PurePosixPath
+
+    events, logged, modules, env = _c1e_module_env(environ, exact=exact)
+
+    def build_gate_up(gate, up, mesh, tp, cache_path):
+        events.append(('build_gate_up', gate, up, mesh, tp, cache_path))
+        return ('served', cache_path)
+
+    namespace = {'MLPWeights': object, '_build_gate_up': build_gate_up}
+    args = types.SimpleNamespace(num_devices=2, **({'mlp_w1_weight_memcfg': 'sharded'} if dram_sharded else {}))
+    results = []
+    with modules, env:
+        exec(compile(source, 'mlp.py', 'exec'), namespace)
+        for layer in range(layers):
+            results.append(namespace['load_mlp_weights'](
+                'mesh', {'gate_proj.weight': 'G%d' % layer, 'up_proj.weight': 'U%d' % layer},
+                PurePosixPath('/cache/layers.%d' % layer), args))
+    return results, events, logged
+
+
+def _formatted(logged):
+    return [entry[0].format(*entry[1:]) for entry in logged]
+
+
+class C1eGraftTests(unittest.TestCase):
+    """C1e (QWEN_FAST_C1_EXACT=1 with QWEN_FAST_SINGLE_GATEUP=1): the prefill MLP makes the served fused
+    call again, on one shared scratch rewritten per layer as that layer's served packing of w1/w3."""
+
+    def setUp(self):
+        self.full = patch_mlp_full(MLP_MODULE)
+        self.layer = patcher.patch_layer_c1_exact(patch_layer(LAYER))
+
+    def forward_region(self):
+        span = function_span(self.full, '_forward_tp')
+        return ''.join(self.full.splitlines(keepends=True)[span[0]:span[1]])
+
+    # --- the patch itself -------------------------------------------------------------------
+
+    def test_the_patch_lands_once_on_its_anchors_and_needs_c1_c1c_c1d_first(self):
+        fused = patcher.patch_mlp_c1_fused(patch_mlp_single_gateup(patch_mlp(MLP_MODULE)))
+        self.assertEqual(patcher.patch_mlp_c1_exact(fused), self.full)
+        with self.assertRaisesRegex(ValueError, 'already grafted'):
+            patcher.patch_mlp_c1_exact(self.full)
+        with self.assertRaisesRegex(ValueError, 'needs the C1, C1c and C1d grafts first'):
+            patcher.patch_mlp_c1_exact(patch_mlp_single_gateup(patch_mlp(MLP_MODULE)))
+        with self.assertRaisesRegex(ValueError, 'already grafted'):
+            patcher.patch_layer_c1_exact(self.layer)
+        with self.assertRaisesRegex(ValueError, 'needs the C1/C1d graft first'):
+            patcher.patch_layer_c1_exact(LAYER)
+        for text in (patcher.C1E_INIT_BLOCK, patcher.C1E_LOAD_BLOCK, patcher.C1E_BRANCH):
+            self.assertEqual(self.full.count(text), 1)
+        self.assertEqual(self.layer.count(patcher.C1E_LAYER_BLOCK), 1)
+        self.assertIs(patcher.PATCHES['mlp.py'], patch_mlp_full)
+        self.assertIs(patcher.PATCHES['layer.py'], patcher.patch_layer_full)
+        # The helpers sit with C1/C1c's, ahead of the class; tp_common is still never grafted.
+        self.assertLess(self.full.index('def _qwen_c1_swiglu('), self.full.index('def _qwen_c1e_pack('))
+        self.assertLess(self.full.index('def _qwen_c1e_pack('), self.full.index('class Qwen36MLP:'))
+        self.assertNotIn('tp_common.py', patcher.PATCHES)
+
+    def test_the_branch_sits_right_after_the_served_one_and_before_c1d(self):
+        region = self.forward_region()
+        served = region.index('        if _fused_gu:\n')
+        c1e = region.index('        elif getattr(self, "_qwen_c1e", None) is not None')
+        c1d = region.index('        elif getattr(self, "_qwen_c1_agmm", False)')
+        self.assertLess(served, c1e)
+        self.assertLess(c1e, c1d)
+        self.assertEqual(region[served:c1e].count('\n        elif '), 0)
+
+    def test_the_call_is_the_served_branchs_with_only_the_weight_renamed(self):
+        """The same function, the same positional arguments in the same order, the same keywords (none):
+        only w.w_gate_up becomes the scratch the pack returned."""
+        served_call = ('            hidden = tpc.all_gather_swiglu_prefill(\n'
+                       '                x, w.w_gate_up, self.tt_ccl, self.compute_kernel_config_agmm, args.ccl_topology()\n'
+                       '            )\n')
+        self.assertIn(served_call, MLP)
+        self.assertIn(served_call.replace('w.w_gate_up', '_qwen_c1e_weight'), patcher.C1E_BRANCH)
+        self.assertIn('            _qwen_c1e_weight = _qwen_c1e_pack(self, w, x)\n', patcher.C1E_BRANCH)
+        # The served branch sets _silu_fused (and its condition is _fused_gu): C1e sets both.
+        self.assertTrue(patcher.C1E_BRANCH.endswith('            _silu_fused = True\n            _fused_gu = True\n'))
+
+    def test_no_top_level_import_of_the_op(self):
+        head = self.full[:self.full.index('class Qwen36MLP:')]
+        for line in head.splitlines():
+            if 'mlp_c1e_pack' in line and 'import' in line:
+                self.assertTrue(line.startswith('    '), line)   # inside the helpers only
+        dotted = patcher.MODEL_ROOT.replace('/opt/tt-metal/', '').replace('/', '.') + '.mlp_c1e_pack'
+        self.assertEqual(dotted, patcher.C1E_MODULE)
+        self.assertIn('from models.demos.blackhole.qwen36.tt import mlp_c1e_pack as _c1e', self.full)
+
+    # --- construction ---------------------------------------------------------------------
+
+    def test_the_first_mlp_allocates_the_one_scratch_and_every_later_one_shares_it(self):
+        mlps, events, logged = _c1e_construct(self.full, C1E, count=3)
+        self.assertEqual(events, [('allocate_scratch', True, 'mesh', (5120, 8704))])
+        self.assertTrue(all(mlp._qwen_c1e is mlps[0]._qwen_c1e for mlp in mlps))
+        self.assertEqual(mlps[0]._qwen_c1e.shape, (5120, 17408))
+        self.assertEqual(_formatted(logged), ['[PINDIAG] C1e scratch allocated: per chip (5120, 17408) for w1/w3 '
+                                              '(5120, 8704), 50135040 bytes; audit=0'])
+        # The served fused branch stays off (no packed copy exists under SINGLE_GATEUP).
+        self.assertFalse(any(mlp._fuse_gateup_agmm for mlp in mlps))
+        self.assertFalse(any(hasattr(mlp, '_qwen_c1_agmm') for mlp in mlps))
+
+    def test_c1e_refuses_the_other_prefill_paths_and_a_bad_audit_count(self):
+        for extra, pattern in (({'QWEN_FAST_C1_AGMM': '1'}, 'excludes QWEN_FAST_C1_AGMM=1'),
+                               ({'QWEN_FAST_C1_LEGACY': '1'}, 'excludes QWEN_FAST_C1_LEGACY=1'),
+                               ({'QWEN_FAST_C1_EXACT_AUDIT': '65'}, 'must be an integer 0..64'),
+                               ({'QWEN_FAST_C1_EXACT_AUDIT': '-1'}, 'must be an integer 0..64'),
+                               ({'QWEN_FAST_C1_EXACT_AUDIT': 'two'}, 'must be an integer 0..64')):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, pattern):
+                _c1e_construct(self.full, dict(C1E, **extra))
+        for audit in ('', '0', '64', ' 3 '):
+            with self.subTest(audit=audit):
+                mlps, events, _ = _c1e_construct(self.full, dict(C1E, QWEN_FAST_C1_EXACT_AUDIT=audit))
+                self.assertIsNotNone(mlps[0]._qwen_c1e)
+
+    def test_c1e_is_inert_without_single_gateup_and_where_nothing_ever_fused(self):
+        for environ in ({}, {'QWEN_FAST_C1_EXACT': '1'}, {'QWEN_FAST_C1_EXACT': '1', 'QWEN_FAST_C1_EXACT_AUDIT': '3'},
+                        {'QWEN_FAST_SINGLE_GATEUP': '1'}):
+            with self.subTest(environ=environ):
+                mlps, events, logged = _c1e_construct(self.full, environ)
+                self.assertFalse(hasattr(mlps[0], '_qwen_c1e'))
+                self.assertEqual((events, logged), ([], []))
+        # One device (or a switch that never fused): the attribute exists and is None, so no branch.
+        for devices, agmm in ((1, True), (2, False)):
+            with self.subTest(devices=devices, agmm=agmm):
+                mlps, events, logged = _c1e_construct(self.full, C1E, devices=devices, agmm=agmm)
+                self.assertIsNone(mlps[0]._qwen_c1e)
+                self.assertEqual((events, logged), ([], []))
+
+    # --- the load: the premise audit ------------------------------------------------------
+
+    def test_the_premise_audit_checks_the_first_n_layers_served_weight_at_load(self):
+        results, events, logged = _c1e_load(self.full, dict(C1E, QWEN_FAST_C1_EXACT_AUDIT='2'), layers=3)
+        self.assertEqual(results, [None, None, None])     # still no packed copy is built for the model
+        expected = []
+        for layer in (0, 1):
+            root = '/cache/layers.%d/' % layer
+            served = ('served', root + 'mlp.gate_up.weight.swiglu.tp')
+            w1, w3 = ('loaded', root + 'mlp.gate_proj.weight.tp'), ('loaded', root + 'mlp.up_proj.weight.tp')
+            expected += [('build_gate_up', 'G%d' % layer, 'U%d' % layer, 'mesh', 2, served[1]),
+                         ('shard_w', 'G%d' % layer, 'mesh', -1, 'DRAM', w1[1], 'bf4'),
+                         ('shard_w', 'U%d' % layer, 'mesh', -1, 'DRAM', w3[1], 'bf4'),
+                         ('audit_pairs', 'mesh', served, w1, w3),
+                         ('deallocate', served), ('deallocate', w1), ('deallocate', w3)]
+        self.assertEqual(events, expected)
+        lines = _formatted(logged)
+        self.assertEqual([line for line in lines if line.startswith(patcher.MARKER_C1E_PREMISE)], [
+            '[PINDIAG] C1e premise audit 1 exact=True layer=1 pages=43520 mismatched_words=0',
+            '[PINDIAG] C1e premise audit 2 exact=True layer=2 pages=43520 mismatched_words=0'])
+        self.assertEqual(sum(line.startswith(patcher.MARKER_SINGLE_GATEUP) for line in lines), 3)
+
+    def test_a_premise_difference_raises_after_freeing_what_it_loaded(self):
+        import types
+        from pathlib import PurePosixPath
+
+        events, logged, modules, env = _c1e_module_env(dict(C1E, QWEN_FAST_C1_EXACT_AUDIT='1'), exact=False)
+        namespace = {'MLPWeights': object, '_build_gate_up': lambda *a: ('served', a[-1])}
+        with modules, env:
+            exec(compile(self.full, 'mlp.py', 'exec'), namespace)
+            with self.assertRaisesRegex(AssertionError, 'not the interleave of w1/w3'):
+                namespace['load_mlp_weights']('mesh', {'gate_proj.weight': 'G', 'up_proj.weight': 'U'},
+                                              PurePosixPath('/c'), types.SimpleNamespace(num_devices=2))
+        self.assertEqual([event[0] for event in events], ['shard_w', 'shard_w', 'audit_pairs', 'deallocate',
+                                                          'deallocate', 'deallocate'])
+        self.assertIn('[PINDIAG] C1e premise audit 1 exact=False layer=1 pages=43520 mismatched_words=9',
+                      _formatted(logged))
+
+    def test_the_premise_refuses_dram_sharded_weights_and_is_silent_without_the_audit(self):
+        with self.assertRaisesRegex(ValueError, 'DRAM-interleaved'):
+            _c1e_load(self.full, dict(C1E, QWEN_FAST_C1_EXACT_AUDIT='1'), layers=1, dram_sharded=True)
+        results, events, logged = _c1e_load(self.full, C1E, layers=2)
+        self.assertEqual(events, [])
+        self.assertFalse(any(line.startswith(patcher.MARKER_C1E_PREMISE) for line in _formatted(logged)))
+        # Without SINGLE_GATEUP the served copy is built and nothing C1e runs, audit or not.
+        results, events, logged = _c1e_load(self.full, {'QWEN_FAST_C1_EXACT': '1', 'QWEN_FAST_C1_EXACT_AUDIT': '2'},
+                                            layers=2)
+        self.assertEqual([e[0] for e in events], ['build_gate_up', 'build_gate_up'])
+        self.assertEqual(logged, [])
+
+    # --- the forward ----------------------------------------------------------------------
+
+    def test_k_sharded_prefill_packs_then_makes_the_served_call_and_gets_the_served_values(self):
+        import numpy as np
+        for rows in (2048, 1056, 128):
+            with self.subTest(rows=rows):
+                x = _x(rows, width=32)
+                served_out, served, served_logged = _run_mlp(self.full, {}, x, fuse_agmm=True, packed='interleave',
+                                                             hidden=64)
+                out, calls, logged = _run_mlp(self.full, C1E, x, hidden=64, c1e=True)
+                self.assertEqual(calls[0], ('c1e_pack', 'mesh', 'w1', 'w3', 'scratch'))
+                rename = lambda call: tuple('w_gate_up' if part == 'scratch' else part for part in call)
+                self.assertEqual([rename(call) for call in calls[1:]], served)
+                self.assertEqual(served[0], ('agmm_swiglu', rows, 'w_gate_up', 'ckc_agmm', 'ccl', 'ring', ()))
+                self.assertTrue(np.array_equal(out, served_out))
+                self.assertEqual(served_logged, [])
+                self.assertEqual([entry[0].split(':')[0] for entry in logged], ['[PINDIAG] prefill MLP C1e'])
+
+    def test_each_prefill_call_packs_once_and_the_marker_fires_once(self):
+        calls, logged = _run_mlp(self.full, C1E, _x(2048, width=32), hidden=64, c1e=True, repeat=3)[1:]
+        self.assertEqual([c for c in calls if c[0] == 'c1e_pack'], [('c1e_pack', 'mesh', 'w1', 'w3', 'scratch')] * 3)
+        self.assertEqual([c[0] for c in calls if c[0] != 'linear'],
+                         ['c1e_pack', 'agmm_swiglu', 'all_reduce'] * 3)
+        self.assertEqual(len(logged), 1)
+        self.assertFalse(any(c[0] in ('slice', 'concat', 'mul', 'agmm', 'c1e_audit') for c in calls))
+
+    def test_decode_rows_never_pack(self):
+        """Rows 1-64 are replicated at full K: the 1D decode branch, exactly as under C1c."""
+        for rows in (32, 64):
+            with self.subTest(rows=rows):
+                c1e = _run_mlp(self.full, C1E, _x(rows), hidden=64, c1e=True)[1]
+                self.assertEqual(c1e, _run_mlp(self.full, SINGLE, _x(rows), hidden=64)[1])
+                self.assertFalse(any(c[0] == 'c1e_pack' for c in c1e))
+
+    def test_a_full_k_prefill_input_falls_through_to_c1c_and_logs_it(self):
+        """What the gate forbids under C1e: a prefill MLP that did not take the C1e branch logs C1c's marker."""
+        calls, logged = _run_mlp(self.full, C1E, _x(2048), hidden=64, c1e=True)[1:]
+        self.assertFalse(any(c[0] == 'c1e_pack' for c in calls))
+        self.assertEqual([entry[0].split(':')[0] for entry in logged], ['[PINDIAG] prefill MLP C1c'])
+
+    def test_the_audit_checks_the_first_n_packs_against_w1_w3(self):
+        calls, logged = _run_mlp(self.full, dict(C1E, QWEN_FAST_C1_EXACT_AUDIT='2'), _x(2048, width=32), hidden=64,
+                                 c1e=True, repeat=3)[1:]
+        self.assertEqual([c[0] for c in calls if c[0] in ('c1e_pack', 'c1e_audit')],
+                         ['c1e_pack', 'c1e_audit', 'c1e_pack', 'c1e_audit', 'c1e_pack'])
+        self.assertIn(('c1e_audit', 'mesh', 'scratch', 'w1', 'w3'), calls)
+        audits = [line for line in _formatted(logged) if line.startswith(patcher.MARKER_C1E_AUDIT)]
+        self.assertEqual(audits, ['[PINDIAG] C1e audit 1 exact=True pages=4 mismatched_words=0 rows=2048',
+                                  '[PINDIAG] C1e audit 2 exact=True pages=4 mismatched_words=0 rows=2048'])
+
+    def test_an_audited_difference_raises(self):
+        with self.assertRaisesRegex(AssertionError, 'packed scratch differs'):
+            _run_mlp(self.full, dict(C1E, QWEN_FAST_C1_EXACT_AUDIT='1'), _x(2048, width=32), hidden=64, c1e=True,
+                     corrupt_pack=True)
+        # Unaudited, the same corruption is only a wrong value (which the M + A gate's byte compare sees).
+        out = _run_mlp(self.full, C1E, _x(2048, width=32), hidden=64, c1e=True, corrupt_pack=True)[0]
+        served = _run_mlp(self.full, {}, _x(2048, width=32), fuse_agmm=True, packed='interleave', hidden=64)[0]
+        self.assertFalse((out == served).all())
+
+    # --- layer.py -------------------------------------------------------------------------
+
+    def test_the_ff_norm_skips_its_gather_exactly_when_c1e_fuses_it(self):
+        self.assertEqual(_run_layer(self.layer, True, {}), (True, False, []))
+        fused, gathers, logged = _run_layer(self.layer, True, C1E)
+        self.assertEqual((fused, gathers), (True, False))
+        self.assertEqual([entry[0] for entry in logged], [patcher.MARKER_C1E_FF_NORM + ' (layer {})'])
+        # SINGLE_GATEUP alone keeps C1/C1c's gather; one device never fused; C1_EXACT alone is the served path.
+        self.assertEqual(_run_layer(self.layer, True, SINGLE)[:2], (False, True))
+        self.assertEqual(_run_layer(self.layer, True, C1E, devices=1), (False, True, []))
+        self.assertEqual(_run_layer(self.layer, True, {'QWEN_FAST_C1_EXACT': '1'}), (True, False, []))
+
+    def test_layer_and_mlp_flip_together(self):
+        """The ff_norm skips its gather iff the MLP fuses one: the served copy, C1d's two AGMMs or C1e's."""
+        for environ in ({}, SINGLE, C1E, {'QWEN_FAST_C1_EXACT': '1'}, LEGACY, C1D):
+            with self.subTest(environ=environ):
+                layer_fused, gathers, _ = _run_layer(self.layer, True, environ)
+                mlp = _c1e_construct(self.full, environ)[0][0]
+                fuses = (mlp._fuse_gateup_agmm or getattr(mlp, '_qwen_c1_agmm', False)
+                         or getattr(mlp, '_qwen_c1e', None) is not None)
+                self.assertEqual(layer_fused, fuses)
+                self.assertEqual(gathers, not layer_fused)
+
+    # --- the gate -------------------------------------------------------------------------
+
+    def graft_log(self, environ, rows=2048):
+        """The lines this graft logs in one C1e process: construction, load, the layer and the forward."""
+        mlp_lines = _formatted(_c1e_construct(self.full, environ)[2])
+        load_lines = _formatted(_c1e_load(self.full, environ, layers=4)[2])
+        layer_lines = _formatted(_run_layer(self.layer, True, environ)[2])
+        forward_lines = _formatted(_run_mlp(self.full, environ, _x(rows, width=32), hidden=64, c1e=True, repeat=4)[2])
+        from lever_n_m3native_gate import SINGLE_GATEUP_MARKERS
+        serving = [m + ' 64 layers' for m in SINGLE_GATEUP_MARKERS[:2]]
+        return chr(10).join(serving + mlp_lines + load_lines + layer_lines + forward_lines)
+
+    def test_the_gate_requires_exactly_the_markers_the_graft_emits(self):
+        from lever_n_m3native_gate import SINGLE_GATEUP_MARKERS, flag_marker_report, required_flag_markers
+        required = required_flag_markers(C1E, 4)['QWEN_FAST_SINGLE_GATEUP']
+        self.assertNotIn(patcher.MARKER_FF_NORM_GATHER, required)
+        self.assertEqual(required[:3], list(SINGLE_GATEUP_MARKERS[:3]))
+        for marker, emitted in zip(required[3:], (patcher.MARKER_C1E_SCRATCH, patcher.MARKER_C1E_FF_NORM,
+                                                  patcher.MARKER_C1E)):
+            self.assertTrue(emitted.startswith(marker), (marker, emitted))
+        self.assertEqual(flag_marker_report(C1E, 4, self.graft_log(C1E))['missing'], [])
+        # Read as a C1c run (SINGLE_GATEUP alone), the same log lacks C1c's marker and the ff_norm gather.
+        self.assertEqual(flag_marker_report(SINGLE, 4, self.graft_log(C1E))['missing'], sorted(
+            'QWEN_FAST_SINGLE_GATEUP: ' + m for m in (patcher.MARKER_FF_NORM_GATHER,
+                                                       '[PINDIAG] prefill MLP C1c: one slice of x per 1024 rows')))
+
+    def test_the_gate_requires_the_nth_audit_lines(self):
+        from lever_n_m3native_gate import flag_marker_report, required_flag_markers
+        audited = dict(C1E, QWEN_FAST_C1_EXACT_AUDIT='3')
+        self.assertEqual(required_flag_markers(audited, 4)['QWEN_FAST_SINGLE_GATEUP'][-2:],
+                         ['[PINDIAG] C1e premise audit 3 exact=True', '[PINDIAG] C1e audit 3 exact=True'])
+        self.assertEqual(flag_marker_report(audited, 4, self.graft_log(audited))['missing'], [])
+        # A log from an unaudited run does not satisfy an audited arm.
+        self.assertEqual(flag_marker_report(audited, 4, self.graft_log(C1E))['missing'], sorted([
+            'QWEN_FAST_SINGLE_GATEUP: [PINDIAG] C1e audit 3 exact=True',
+            'QWEN_FAST_SINGLE_GATEUP: [PINDIAG] C1e premise audit 3 exact=True']))
+
+    def test_the_gate_fails_a_fall_through_and_the_refused_combinations(self):
+        from lever_n_m3native_gate import flag_marker_report
+        log = self.graft_log(C1E)
+        fell = log + chr(10) + '[PINDIAG] prefill MLP C1c: one slice of x per 1024 rows, product-only concat: rows=2048'
+        self.assertEqual(flag_marker_report(C1E, 4, fell)['missing'], [
+            'QWEN_FAST_C1_EXACT: every prefill MLP takes the C1e branch '
+            '([PINDIAG] prefill MLP C1c: one slice of x per 1024 rows logged)'])
+        self.assertIn('QWEN_FAST_C1_EXACT: needs QWEN_FAST_SINGLE_GATEUP=1 (alone it is inert and the served path runs)',
+                      flag_marker_report({'QWEN_FAST_C1_EXACT': '1'}, 4, log)['missing'])
+        for other in ('QWEN_FAST_C1_AGMM', 'QWEN_FAST_C1_LEGACY'):
+            with self.subTest(other=other):
+                self.assertIn('QWEN_FAST_C1_EXACT: excludes %s=1 (the graft refuses the pair)' % other,
+                              flag_marker_report(dict(C1E, **{other: '1'}), 4, log)['missing'])
+        self.assertIn("QWEN_FAST_C1_EXACT_AUDIT: an integer 0..64, not '65'",
+                      flag_marker_report(dict(C1E, QWEN_FAST_C1_EXACT_AUDIT='65'), 4, log)['missing'])
+        # Without C1_EXACT nothing C1e is asked for, and a C1c run is not failed by C1e's rules.
+        self.assertEqual(flag_marker_report({}, 4, log)['missing'], [])
+
+    # --- the mount table, the arm, the workflow, the CPU suite -----------------------------
+
+    def test_the_table_is_the_op_module_and_its_two_kernels_beside_mlp_py(self):
+        import mlp_c1e_pack
+        self.assertEqual(patcher.C1E_FILES, {name: name for name in mlp_c1e_pack.RUNTIME_FILES})
+        self.assertEqual(sorted(patcher.C1E_FILES), ['mlp_c1e_pack.cpp', 'mlp_c1e_pack.py', 'packed_weight_check.cpp'])
+        here = Path(__file__).parent
+        for relative, source in patcher.C1E_FILES.items():
+            self.assertTrue((here / source).is_file(), source)
+        self.assertEqual(sorted(set(patcher.C1E_FILES) & set(patcher.with_lever_n())), [])
+        self.assertEqual(sorted(set(patcher.C1E_FILES) & set(patcher.PREFILL_CONV_FILES)), [])
+
+    def _arm_block(self, environ, staged):
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        arm = (Path(__file__).parent / 'lever_n_m3native_run_arm.sh').read_text(encoding='utf-8')
+        start = arm.index('c1e_mounts=()')
+        end = arm.index(chr(10) + 'fi' + chr(10), start) + 4
+        script = ('set -euo pipefail' + chr(10) + 'root=/opt/tt-metal/models/demos/blackhole/qwen36/tt' + chr(10)
+                  + arm[start:end] + 'printf "RESULT|%s" "${c1e_mounts[*]:-}"' + chr(10))
+        with tempfile.TemporaryDirectory() as directory:
+            ci = Path(directory, 'scripts', 'ci')
+            ci.mkdir(parents=True)
+            for name in ('lever_n_m3native_patch.py', 'gdn_prefill_conv_exact.py'):
+                shutil.copy(Path(__file__).parent / name, ci / name)
+            for relative in staged:
+                target = Path(directory, 'graft', relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('staged', encoding='utf-8')
+            env = {k: v for k, v in os.environ.items() if not k.startswith('M3NATIVE_')}
+            env.update(environ)
+            try:
+                return subprocess.run([bash, '-c', script], env=env, cwd=directory, capture_output=True, text=True,
+                                      timeout=120)
+            except OSError as error:
+                self.skipTest('bash unusable: %s' % error)
+
+    def test_the_arm_refuses_what_the_graft_would_before_any_docker_run(self):
+        files = sorted(patcher.C1E_FILES)
+        cases = (
+            ({'M3NATIVE_C1_EXACT': '1'}, 'needs M3NATIVE_SINGLE_GATEUP=1'),
+            ({'M3NATIVE_C1_EXACT': 'yes', 'M3NATIVE_SINGLE_GATEUP': '1'}, 'must be 1 or unset'),
+            ({'M3NATIVE_C1_EXACT': '1', 'M3NATIVE_SINGLE_GATEUP': '1', 'M3NATIVE_C1_AGMM': '1'}, 'excludes'),
+            ({'M3NATIVE_C1_EXACT': '1', 'M3NATIVE_SINGLE_GATEUP': '1', 'M3NATIVE_C1_LEGACY': '1'}, 'excludes'),
+            ({'M3NATIVE_C1_EXACT': '1', 'M3NATIVE_SINGLE_GATEUP': '1', 'M3NATIVE_C1_EXACT_AUDIT': '65'}, '0..64'),
+            ({'M3NATIVE_C1_EXACT': '1', 'M3NATIVE_SINGLE_GATEUP': '1', 'M3NATIVE_C1_EXACT_AUDIT': 'x'}, '0..64'),
+            ({'M3NATIVE_C1_EXACT_AUDIT': '2'}, 'without M3NATIVE_C1_EXACT=1 audits nothing'),
+        )
+        for environ, message in cases:
+            with self.subTest(environ=environ):
+                result = self._arm_block(environ, files)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(message, result.stderr)
+        result = self._arm_block({}, files)
+        self.assertEqual((result.returncode, result.stdout.split('RESULT|')[-1]), (0, ''), result.stderr)
+
+    def test_the_arm_mounts_every_file_of_the_table_one_by_one(self):
+        import re
+        import shutil
+        if shutil.which('python3') is None:
+            self.skipTest('no python3')
+        files = sorted(patcher.C1E_FILES)
+        flags = {'M3NATIVE_C1_EXACT': '1', 'M3NATIVE_SINGLE_GATEUP': '1', 'M3NATIVE_C1_EXACT_AUDIT': '64'}
+        result = self._arm_block(flags, files)
+        if result.returncode != 0 and ('No module named' in result.stderr or 'No such file' in result.stderr):
+            self.skipTest('python3 here cannot import from the temp tree: %s' % result.stderr.strip())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        mounts = [m.replace('--mount ', '') for m in result.stdout.split('RESULT|')[-1].split(' --mount ')]
+        self.assertEqual(len(mounts), len(files))
+        for mount, relative in zip(mounts, files):
+            self.assertRegex(mount, '^type=bind,src=.*/graft/%s,dst=/opt/tt-metal/models/demos/blackhole/qwen36/tt/%s,'
+                                    'readonly$' % (re.escape(relative), re.escape(relative)))
+        missing = self._arm_block(flags, files[1:])
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn('graft/%s was not staged' % files[0], missing.stderr)
+
+    def test_the_arm_wires_the_mounts_and_both_env_vars_into_the_docker_run(self):
+        arm = (Path(__file__).parent / 'lever_n_m3native_run_arm.sh').read_text(encoding='utf-8')
+        run = arm[arm.index('timeout -k 30 2200 docker run'):arm.index('--entrypoint python3')]
+        lines = [line.strip() for line in run.splitlines()]
+        mlp = lines.index('--mount "type=bind,src=$PWD/graft/mlp.py,dst=$root/mlp.py,readonly" ' + chr(92))
+        self.assertEqual(lines[mlp + 1], '"${c1e_mounts[@]}" ' + chr(92))
+        agmm = lines.index('${M3NATIVE_C1_AGMM:+-e QWEN_FAST_C1_AGMM=1} ' + chr(92))
+        self.assertEqual(lines[agmm + 1:agmm + 4], [
+            '${M3NATIVE_C1_EXACT:+-e QWEN_FAST_C1_EXACT=1} ' + chr(92),
+            '${M3NATIVE_C1_EXACT_AUDIT:+-e QWEN_FAST_C1_EXACT_AUDIT=$M3NATIVE_C1_EXACT_AUDIT} ' + chr(92),
+            '${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1} ' + chr(92)])
+        self.assertEqual(run.count('c1e_mounts'), 1)
+        self.assertIn('p.C1E_FILES', arm)
+        self.assertNotIn('dst=$root,', arm)
+        graft = (Path(__file__).parent / 'lever_n_m3native_patch.py').read_text(encoding='utf-8')
+        self.assertIn("C1_EXACT_FLAG = 'QWEN_FAST_C1_EXACT'", graft)
+        self.assertIn("C1_EXACT_AUDIT_FLAG = 'QWEN_FAST_C1_EXACT_AUDIT'", graft)
+
+    def test_the_workflow_stages_the_same_table_and_hashes_it(self):
+        workflow = (Path(__file__).parent.parent.parent / '.github' / 'workflows'
+                    / 'qwen-lever-n-m3native-gate.yml').read_text(encoding='utf-8')
+        self.assertIn('for relative, source in sorted(patcher.C1E_FILES.items()):', workflow)
+        stage = workflow[workflow.index('graft/c1e-manifest.txt'):]
+        stage = stage[:stage.index('cat experiment-results/graft.sha256')]
+        self.assertIn('cp "scripts/ci/$source" "graft/$relative"', stage)
+        self.assertIn('sha256sum "graft/$relative" >> experiment-results/graft.sha256', stage)
+        self.assertLess(workflow.index('graft/c1e-manifest.txt'),
+                        workflow.index('name: m3native-graft-${{ github.run_id }}'))
+
+    def test_the_c1e_tests_are_allowlisted_in_the_cpu_suite(self):
+        cpu = (Path(__file__).parent.parent.parent / '.github' / 'workflows'
+               / 'qwen-integration-cpu.yml').read_text(encoding='utf-8')
+        for name in ('test_lever_n_m3native_patch', 'test_mlp_c1e_pack'):
+            self.assertRegex(cpu, r'python -B -m unittest [^\n]*\b%s\b' % name)
+        self.assertIn("python -B -m unittest discover -s optimisation/ttnn-op/c1e_gateup -p 'test_*.py'", cpu)
 
 
 if __name__ == '__main__':
