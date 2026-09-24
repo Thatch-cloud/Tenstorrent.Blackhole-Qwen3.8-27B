@@ -34,6 +34,19 @@ Every user's commit runs in entries order; the last one is the round's fence. Th
 knows it is last - `PackedVerifierEngine.commit_user` fences exactly the commit that
 empties its pending segments - so this step adds nothing for that beyond committing every
 segment, even on cancellation (prefix 0) or after a failure (prefix 0 for what was left).
+
+Variable-user rounds (M2, QWEN_FAST_PADDED_BLOCK=1 at the 64-row block, default off): a block
+built with `padded_min_users` also serves padded_min_users <= n < users live requests as one
+pass, the other segments idle (packed_verifier.py, VARIABLE-USER ROUNDS). proposal_rows drafts
+such a round at the block's width once every live request passes the usual per-request checks
+AND the padded ones (`padded_refusal`: the idle slot rule and no page 0 in a live table's used
+range - a page-0 hit drafts the round narrow, fail closed); kv_guard fills the idle segments
+from the block's idle_inputs before the T2 tile-row check, so it never skips a padded round;
+ineligible repeats all of it at the step. Every round of that many live users that goes
+sequential instead logs why, and whether it was eligible (`note_padded_skip`). Nothing else
+here changes: the verify stages the idle segments and commits them at prefix 0 itself, and
+every entry of the round is a live one, committed as always. Without the flag no path below
+differs from before it existed.
 """
 
 import os
@@ -203,7 +216,8 @@ def proposal_rows(block, requests):
     for key in order:
         matched, group = members[key]
         shape = matched.shape
-        if len(group) != shape.users:
+        padded = len(group) != shape.users and pads(matched, len(group))
+        if len(group) != shape.users and not padded:
             return None
         if width is None:
             width = shape.rows_per_user
@@ -219,9 +233,63 @@ def proposal_rows(block, requests):
                     validate_ticket(session.position, shape.rows_per_user, capacity, short_context=False)
                 except ValueError:
                     return None
+        # QWEN_FAST_PADDED_BLOCK: the idle slot rule and page 0, before the T2 tile rows (a
+        # page-0 hit would otherwise surface there as a shared tile row).
+        if padded and padded_refused_at_proposal(group, matched) is not None:
+            return None
         if getattr(matched, 'kv_chains', False) and kv_shared_at_proposal(group, matched) is not None:
             return None
     return width
+
+
+def pads(block, count):
+    """Whether `block` serves a round of `count` live requests padded (QWEN_FAST_PADDED_BLOCK:
+    packed_verifier.PackedVerifierEngine.pads, padded_min_users <= count < users). False for a
+    block without the method or built without the flag, so every caller is today's."""
+    padded = getattr(block, 'pads', None)
+    return callable(padded) and bool(padded(count))
+
+
+def padded_log(text, once=False):
+    """One padded-path line into the server log (loguru, else stdout); `once`: once per process
+    per text, for the lines the hook's every-tick policy question would otherwise repeat."""
+    import verify_trace_t2
+
+    if once:
+        verify_trace_t2.log_once(text, key=('padded', text))
+    else:
+        verify_trace_t2.log_line(text)
+
+
+def padded_refusal(owners, block):
+    """Why the block cannot serve these owners - [(engine, frontier position)], a padded round's
+    live requests - as one padded round, or None: the block's own padded_refusal over what it
+    would stage (the count, the idle slot rule, page 0 in a live table's used range), each
+    owner at the segment its engine is bound to, None for every idle segment. Fails closed:
+    two owners through one segment are a reason."""
+    users = [None] * block.shape.users
+    for engine, position in owners:
+        segment = block.segment_of(engine)
+        if users[segment] is not None:
+            return 'padded round with two live requests through segment %d' % segment
+        users[segment] = (None, position, getattr(engine, 'pages', None))
+    return block.padded_refusal(users)
+
+
+def padded_marker(reason):
+    from packed_verifier import PADDED_PAGE0_MARKER, PADDED_REFUSED_MARKER
+
+    return PADDED_PAGE0_MARKER if reason.startswith('page0') else PADDED_REFUSED_MARKER
+
+
+def padded_refused_at_proposal(requests, block):
+    """`padded_refusal` over the live requests' frontiers, before the round is drafted: a reason
+    drafts it at the engines' own widths, for the exact sequential step. Logged once per reason
+    (the hook asks every tick)."""
+    reason = padded_refusal([(request.engine, request.session.position) for request in requests], block)
+    if reason is not None:
+        padded_log('%s site=proposal_rows %s' % (padded_marker(reason), reason), once=True)
+    return reason
 
 
 def unservable(entries):
@@ -266,7 +334,8 @@ class PackedStep:
 def ineligible(entries, block):
     """Why the block cannot serve this round as one pass, or None when it can."""
     shape = block.shape
-    if len(entries) != shape.users:
+    padded = len(entries) != shape.users and pads(block, len(entries))
+    if len(entries) != shape.users and not padded:
         return 'entries=%d block_users=%d' % (len(entries), shape.users)
     for entry in entries:
         rows = len(entry['ticket'].tokens)
@@ -276,6 +345,12 @@ def ineligible(entries, block):
             block.segment_of(entry['request'].engine)
         except ValueError:
             return 'request=%s engine not bound to the block' % str(entry['request_id'])[:48]
+    if padded:
+        # QWEN_FAST_PADDED_BLOCK: the backstop behind proposal_rows, over the round's tickets.
+        reason = padded_refusal([(entry['request'].engine, entry['ticket'].position) for entry in entries], block)
+        if reason is not None:
+            padded_log('%s site=ineligible %s' % (padded_marker(reason), reason))
+            return reason
     if getattr(block, 'kv_chains', False):
         return kv_shared(entries, block)
     return None
@@ -286,13 +361,28 @@ def kv_guard(owners, block):
     cannot serve these owners - [(engine, frontier position)] - or None. The same host values
     packed_host_inputs stages: each user's rows_per_user positions from its frontier, through
     its engine's one page table, in SEGMENT order. Fails closed: a position its table cannot
-    map (or an engine with no table) is a reason, never an exception past the step."""
+    map (or an engine with no table) is a reason, never an exception past the step.
+
+    A padded round (QWEN_FAST_PADDED_BLOCK: fewer owners than segments, a count the block
+    pads) is checked with its idle segments filled from the block's own idle_inputs - their
+    page-0 tile rows are written in the same chain as the live ones - rather than skipped as a
+    round with an empty segment would be."""
     import verify_trace_t2
 
     users = [None] * block.shape.users
     for engine, position in owners:
         users[block.segment_of(engine)] = (range(position, position + block.shape.rows_per_user),
                                            getattr(engine, 'pages', None))
+    if any(user is None for user in users) and pads(block, len(owners)):
+        live = tuple(segment for segment, user in enumerate(users) if user is not None)
+        if len(live) != len(owners):
+            return 'verify t2 kv padded round with two owners through one segment'
+        try:
+            fills = block.idle_inputs(live)
+        except ValueError as refusal:
+            return 'verify t2 kv padded idle segments refused: %s' % (refusal,)
+        for segment, (tokens, start, table) in fills.items():
+            users[segment] = (range(start, start + block.shape.rows_per_user), table)
     if any(user is None for user in users):
         return None  # two owners through one segment: the block's own checks refuse the round
     try:
@@ -436,8 +526,51 @@ def packed_device_step(entries, *, cancelled, block):
         # Each request's own step answers a cancellation without touching the device.
         reason = 'cancelled before the verify'
     if reason is not None:
+        if pads(block, len(entries)):
+            note_padded_skip(entries, block, reason)
         return sequential_packed_step(entries, cancelled=cancelled)
     return run_verified_block(entries, cancelled=cancelled, block=block)
+
+
+def remaining_budget(entry):
+    """The tokens this entry's request may still emit: its session's own budget (what
+    proposal_rows reads), and no more than vLLM's (serving_worker_hook.real_remaining_budget,
+    what the hook narrows a round on) when the entry carries its bridge."""
+    from serving_worker_hook import real_remaining_budget
+
+    session = entry['request'].session
+    remaining = session.max_new_tokens - len(session.emitted)
+    bridge = entry.get('bridge')
+    real = real_remaining_budget(bridge) if bridge is not None else None
+    return remaining if real is None else min(remaining, real)
+
+
+def note_padded_skip(entries, block, reason):
+    """QWEN_FAST_PADDED_BLOCK: one line for a round of padded_min_users..users-1 live requests
+    that the block did not serve, with whether it could have. eligible=1 when every entry had a
+    block round of budget left and a frontier inside the block's family - what proposal_rows
+    asks before anything padded-specific - so the gate can hold the padded rounds against every
+    eligible round (a narrow tail round is eligible=0). Never raises."""
+    try:
+        from packed_verifier import PADDED_SKIPPED_MARKER
+
+        rows = block.shape.rows_per_user
+        capacity = getattr(block, 'replay_capacity', None)
+        eligible = True
+        for entry in entries:
+            if remaining_budget(entry) < rows:
+                eligible = False
+                break
+            if capacity is not None:
+                try:
+                    validate_ticket(entry['request'].session.position, rows, capacity, short_context=False)
+                except ValueError:
+                    eligible = False
+                    break
+        padded_log('%s live=%d eligible=%d reason=%s' % (PADDED_SKIPPED_MARKER, len(entries), int(eligible),
+                                                         str(reason).replace(' ', '_')[:120]))
+    except Exception:
+        pass
 
 
 def group_by_block(entries, blocks):

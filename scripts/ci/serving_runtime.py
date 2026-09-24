@@ -20,6 +20,7 @@ SKIP_BLOCK_STREAM_FLAG = 'QWEN_FAST_SKIP_BLOCK_STREAM'
 SINGLE_GATEUP_FLAG = 'QWEN_FAST_SINGLE_GATEUP'
 SINGLE_GATEUP_SHAPE = 'the single gate/up copy'
 M3_SHAPE = 'the 64-row block'
+PADDED_BLOCK_FLAG = 'QWEN_FAST_PADDED_BLOCK'
 
 
 def m3_shape(policy, environ=None):
@@ -69,6 +70,27 @@ def register_reader_reason(policy, environ=None):
     return (M3_SHAPE, 'register-epilogue reader on native w_gate_up')
 
 
+def padded_block_admission(policy, environ=None):
+    """QWEN_FAST_PADDED_BLOCK (variable-user packed rounds M2, default off): None while the flag
+    is off - the policy is not even read - else the fewest live users a round of the block may
+    serve (QWEN_FAST_PADDED_BLOCK_MIN_USERS, default 2; packed_verifier.padded_block_min_users),
+    which the 64-row block is then built with. Admitted at the 64-row M3 block ONLY, by the same
+    rule as QWEN_FAST_SINGLE_GATEUP (m3_shape): every other shape is REFUSED (ValueError). The
+    padded round is the M3 trace with idle segments on page 0 - measured exact at that trace
+    (v188) and nowhere else - and two idle segments are all page 0's two tile rows hold."""
+    environ = os.environ if environ is None else environ
+    if environ.get(PADDED_BLOCK_FLAG, '0') == '0':
+        return None
+    from packed_verifier import padded_block_min_users
+
+    minimum = padded_block_min_users(environ)   # refuses any value but '1' here
+    met, shape = m3_shape(policy, environ)
+    if not met:
+        raise ValueError('QWEN_FAST_PADDED_BLOCK=1 is admitted only at the 64-row M3 block '
+                         '(users=4 FOUR_AS_TWO=0 PACKED_STEP=1), not ' + shape)
+    return minimum
+
+
 @contextmanager
 def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixtures,
                             native_attention_evidence, block_stream, kv_publication_evidence,
@@ -101,6 +123,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # w_gate_up replaces it. Read before anything is built: QWEN_FAST_SINGLE_GATEUP=1 at any
     # other shape is refused here, whatever recipe startup handed over.
     reader = register_reader_reason(policy)
+    # QWEN_FAST_PADDED_BLOCK (default off): the 64-row block's fewest live users per round, or
+    # None. Refused here at any other shape, before anything is built, like the single copy.
+    padded_min_users = padded_block_admission(policy)
     if (native_attention_evidence is None or kv_publication_evidence is None
             or (block_stream is None and reader is None)
             or (block_stream is not None and 'pipeline_evidence' in block_stream)):
@@ -283,7 +308,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             for shape in packed_shapes:
                 packed_block = PackedVerifierEngine(operations, model, helpers, sampler, pool=pool, shared_weights=weights,
                                                     shape=shape, feature_taps=TARGET_TAPS,
-                                                    **({'pool_slots': tuple(range(slot, slot + shape.users))} if four_as_two else {}))
+                                                    **({'pool_slots': tuple(range(slot, slot + shape.users))} if four_as_two else {}),
+                                                    **({'padded_min_users': padded_min_users}
+                                                       if padded_min_users is not None else {}))
                 scopes.callback(packed_block.close)
                 packed_blocks.append(packed_block)
                 memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)

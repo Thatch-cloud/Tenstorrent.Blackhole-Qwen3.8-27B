@@ -146,6 +146,28 @@ until resolve_serving_nodes; do
   if [ "$card_waited" -ge "$card_wait_s" ]; then
     echo "serving card $missing_card has no device node under /dev/tenstorrent/by-id after ${card_waited}s; refusing to guess" >&2
     ls -la /dev/tenstorrent/by-id >&2 || true
+    # The likely cause (run v190): the telemetry race after the reset. Named, never acted on here.
+    case $missing_card in
+      blackhole-CEF5729692C19E6D) missing_pci=0000:d1:00.0 ;;
+      blackhole-3707293C249A5E67) missing_pci=0000:f3:00.0 ;;
+      *) missing_pci='<its PCI address>' ;;
+    esac
+    {
+      echo "hint: likely the telemetry race after a reset: the board re-enumerated before its ARC firmware was ready."
+      echo "hint:   The driver logs 'tenstorrent $missing_pci: Telemetry not available'; its node exists and tt-smi -ls"
+      echo "hint:   lists it, but udev never creates its by-id link, so no wait here brings it back. The gate's reset"
+      echo "hint:   step re-probes the driver for this (serving_pair_heal, scripts/ci/serving_pair.sh); if it ran, see"
+      echo "hint:   its [reset] lines in experiment-results/reset.log. By hand, once no process holds the node:"
+      echo "hint:     echo $missing_pci | sudo -n tee /sys/bus/pci/drivers/tenstorrent/unbind; sleep 3"
+      echo "hint:     echo $missing_pci | sudo -n tee /sys/bus/pci/drivers/tenstorrent/bind"
+      telemetry=$({ dmesg 2>/dev/null || sudo -n dmesg 2>/dev/null || true; } | grep -F 'Telemetry not available' | tail -n 4 || true)
+      if [ -n "$telemetry" ]; then
+        echo "hint: dmesg, last 'Telemetry not available' lines:"
+        printf '%s\n' "$telemetry" | sed 's/^/hint:   /'
+      else
+        echo "hint: no 'Telemetry not available' line readable in dmesg here: the cause may be another."
+      fi
+    } >&2
     exit 1
   fi
   sleep 2
@@ -381,6 +403,30 @@ elif [ -n "${M3NATIVE_C1_EXACT_AUDIT:-}" ]; then
   echo "M3NATIVE_C1_EXACT_AUDIT='$M3NATIVE_C1_EXACT_AUDIT' without M3NATIVE_C1_EXACT=1 audits nothing: set both or neither" >&2
   exit 1
 fi
+# M3NATIVE_PADDED_BLOCK=1 (variable-user packed rounds M2) becomes QWEN_FAST_PADDED_BLOCK=1: the 64-row
+# block also serves two or three live users as one pass, the missing segments idle on page 0
+# (packed_verifier.py, VARIABLE-USER ROUNDS). M3NATIVE_PADDED_BLOCK_MIN_USERS=<2|3> becomes
+# QWEN_FAST_PADDED_BLOCK_MIN_USERS (default 2: two idle segments are all page 0 holds). serving_runtime
+# admits the flag at the four-user M3 block only and refuses it at attach anywhere else; refused here
+# first, before the docker run. Unset, nothing is passed.
+if [ -n "${M3NATIVE_PADDED_BLOCK:-}" ]; then
+  if [ "$M3NATIVE_PADDED_BLOCK" != "1" ]; then
+    echo "M3NATIVE_PADDED_BLOCK must be 1 or unset, got '$M3NATIVE_PADDED_BLOCK'" >&2
+    exit 1
+  fi
+  if [ "$users" != "4" ] || [ -n "${M3NATIVE_SEQUENTIAL_USERS:-}" ]; then
+    echo "M3NATIVE_PADDED_BLOCK=1 serves the four-user 64-row block only (users=$users, sequential '${M3NATIVE_SEQUENTIAL_USERS:-}')" >&2
+    exit 1
+  fi
+  case "${M3NATIVE_PADDED_BLOCK_MIN_USERS:-2}" in
+    2|3) ;;
+    *) echo "M3NATIVE_PADDED_BLOCK_MIN_USERS must be 2 or 3, got '$M3NATIVE_PADDED_BLOCK_MIN_USERS'" >&2; exit 1 ;;
+  esac
+  echo "padded block (variable-user rounds M2): min_users ${M3NATIVE_PADDED_BLOCK_MIN_USERS:-2}"
+elif [ -n "${M3NATIVE_PADDED_BLOCK_MIN_USERS:-}" ]; then
+  echo "M3NATIVE_PADDED_BLOCK_MIN_USERS='$M3NATIVE_PADDED_BLOCK_MIN_USERS' without M3NATIVE_PADDED_BLOCK=1 pads nothing: set both or neither" >&2
+  exit 1
+fi
 
 # Proposals: the fp2u lane runs each request's draft proposal EAGERLY
 # (QWEN_FAST_EAGER_PROPOSAL=1) because per-request proposal traces clobbered each
@@ -555,6 +601,8 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PAIR_MASK_AUDIT:+-e QWEN_FAST_PAIR_MASK_AUDIT=1} \
   ${M3NATIVE_PAIRS_PACKED_ONLY:+-e QWEN_FAST_PAIRS_PACKED_ONLY=1} \
   ${M3NATIVE_PADDED_PROBE:+-e QWEN_FAST_PADDED_PROBE=1} \
+  ${M3NATIVE_PADDED_BLOCK:+-e QWEN_FAST_PADDED_BLOCK=1} \
+  ${M3NATIVE_PADDED_BLOCK_MIN_USERS:+-e QWEN_FAST_PADDED_BLOCK_MIN_USERS=$M3NATIVE_PADDED_BLOCK_MIN_USERS} \
   ${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1} \
   ${M3NATIVE_GDN_PREFILL_CONV:+-e QWEN_FAST_GDN_PREFILL_CONV=1} \
   ${M3NATIVE_GDN_PREFILL_CONV_AUDIT:+-e QWEN_FAST_GDN_PREFILL_CONV_AUDIT=$M3NATIVE_GDN_PREFILL_CONV_AUDIT} \

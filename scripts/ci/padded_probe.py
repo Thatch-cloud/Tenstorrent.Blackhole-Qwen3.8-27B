@@ -24,7 +24,8 @@ readback and before its commit (packed_verifier.verify):
 A pattern needing three idle segments is refused by idle_inputs (page 0 holds two tile rows;
 the T2 chained K/V write refuses a shared one) and logged exact=refused, never run. A round
 whose live table holds page 0 inside its used range [0, (position + rows + 63) // 64) is not
-probed. The page-0 check itself runs on EVERY packed round while the flag is on.
+probed, nor is a padded round (QWEN_FAST_PADDED_BLOCK, M2: some segments already idle). The
+page-0 check itself runs on EVERY packed round while the flag is on, over the live segments.
 
 What it can change: nothing a user sees. The predictions are read before step 2; the final
 replay restages the round's inputs and step 4 proves it bit-identical, down to the states the
@@ -264,6 +265,13 @@ def after_readback(engine, users, round_number):
     everyone = tuple(range(engine.users))
     if hits:
         log_line(line(round_number, everyone, 'refused', None, None, (), [], 'page0 in a live table'))
+        return []
+    idle = tuple(segment for segment, user in enumerate(users) if user is None)
+    if idle:
+        # A padded round (QWEN_FAST_PADDED_BLOCK, M2): the patterns are compared with an all-live
+        # round, which this is not, and its own inputs cannot be restaged without its idle ones.
+        log_line(line(round_number, tuple(segment for segment in everyone if segment not in idle), 'refused', None,
+                      None, idle, [], 'a padded round'))
         return []
     baseline = snapshot(engine, everyone)
     carries = {segment: carry_digest(engine, segment) for segment in everyone}

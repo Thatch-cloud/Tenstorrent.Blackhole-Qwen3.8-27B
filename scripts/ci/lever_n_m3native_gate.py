@@ -481,7 +481,7 @@ PADDED_PROBE_PAGE0_HIT = '[PINDIAG] padded probe page0 hit'
 
 
 def variable_user_markers(environ, users):
-    """{flag: [marker]} for the M0/M1 flags set in `environ` (see above)."""
+    """{flag: [marker]} for the M0/M1 flags set in `environ` (see above), and M2's (below)."""
     on = lambda name: environ.get(name) == '1'
     required = {}
     if users >= 2:
@@ -491,6 +491,11 @@ def variable_user_markers(environ, users):
                              (PADDED_PROBE_FLAG, PADDED_PROBE_MARKER)):
             if on(flag):
                 required[flag] = [marker]
+    if on(PADDED_BLOCK_FLAG):
+        # M2: the block's admission at attach, at any stream count (refused off the M3 block), and at
+        # least one round it served padded - an arm that never padded a round has not tested M2, even
+        # when nothing else it logged is wrong (the admission alone proves the block was built, not used).
+        required[PADDED_BLOCK_FLAG] = [PADDED_ADMITTED_MARKER, PADDED_ROUND_MARKER]
     return required
 
 
@@ -515,7 +520,8 @@ def padded_probe_lines(log_text):
 
 
 def variable_user_report(environ, users, log_text):
-    """What the M0/M1 flags' lines say, and their problems (under 'problems', for the caller)."""
+    """What the M0/M1 flags' lines say, and M2's under 'padded_block' when its flag is set; their
+    problems under 'problems', for the caller."""
     problems = []
     audit = pair_mask_audit_summary(log_text) if environ.get(PAIR_MASK_AUDIT_FLAG) == '1' else None
     probe = None
@@ -532,7 +538,107 @@ def variable_user_report(environ, users, log_text):
         if hits:
             problems.append('%s: no live table holds page 0 in its used range (%d %s lines)' % (
                 PADDED_PROBE_FLAG, hits, PADDED_PROBE_PAGE0_HIT))
-    return dict(pair_mask_audit=audit, padded_probe=probe, problems=problems)
+    report = dict(pair_mask_audit=audit, padded_probe=probe, problems=problems)
+    padded = padded_block_report(environ, log_text)
+    if padded is not None:
+        problems.extend(padded.pop('problems'))
+        if padded:
+            report['padded_block'] = padded
+    return report
+
+
+# Variable-user packed rounds, M2 (QWEN_FAST_PADDED_BLOCK=1; arms R3, G1 and G2): the 64-row block also
+# serves padded_min_users..3 live users as one pass, the missing segments idle on page 0 (packed_verifier.py,
+# VARIABLE-USER ROUNDS). The block logs its admission once at attach - required, and its min_users must be
+# the QWEN_FAST_PADDED_BLOCK_MIN_USERS asked for (default 2) - and one line per padded round (at least one
+# required: variable_user_markers); each round of
+# that many live users served sequentially instead logs why, and whether it was eligible (every live user
+# with a block round of budget left, inside the block's family: serving_packed_step.note_padded_skip).
+# Failures: any page-0 line (a live table holding page 0 in its used range, or one the check could not
+# map), any idle segment asked to commit a prefix, any refusal by a backstop (site=ineligible or
+# site=verify: that round's requests failed), any round refused outright (serving_packed_step.
+# refuse_round), and padded rounds under PADDED_ENGAGEMENT of the eligible rounds (the padded ones plus the
+# eligible skips). A refusal at site=proposal_rows by the idle slot rule is a skip, never a failure.
+PADDED_BLOCK_FLAG = 'QWEN_FAST_PADDED_BLOCK'
+PADDED_MIN_USERS_FLAG = 'QWEN_FAST_PADDED_BLOCK_MIN_USERS'
+PADDED_MIN_USERS_DEFAULT = 2
+PADDED_ADMITTED_MARKER = '[PINDIAG] packed padded block admitted'
+PADDED_ADMITTED_LINE = re.compile(r'\[PINDIAG\] packed padded block admitted min_users=([0-9]+) users=([0-9]+) '
+                                  r'max_idle=([0-9]+) carries_in_place=([01])')
+PADDED_ROUND_MARKER = '[PINDIAG] packed padded round'
+PADDED_ROUND_LINE = re.compile(r'\[PINDIAG\] packed padded round live=([0-9]+) round=([0-9]+) segments=(\S+) '
+                               r'idle=(\S+) padded=([0-9]+)')
+PADDED_SKIPPED_MARKER = '[PINDIAG] packed padded skipped'
+PADDED_SKIPPED_LINE = re.compile(r'\[PINDIAG\] packed padded skipped live=([0-9]+) eligible=([01]) reason=(\S*)')
+PADDED_REFUSED_MARKER = '[PINDIAG] packed padded refused'
+PADDED_REFUSED_LINE = re.compile(r'\[PINDIAG\] packed padded refused site=(\S+) ([^\n]*)')
+PADDED_PAGE0_MARKER = '[PINDIAG] packed padded page0'
+PADDED_IDLE_COMMIT_MARKER = '[PINDIAG] packed padded idle commit'
+REFUSED_ROUND_MARKER = 'A round the block cannot serve'
+PADDED_ENGAGEMENT = 0.8
+
+
+def _first_line(log_text, marker):
+    return log_text[log_text.index(marker):].split(chr(10), 1)[0][:200]
+
+
+def padded_block_summary(log_text):
+    """What the M2 lines say: the admission, the padded rounds by live count, the sequential rounds of
+    that many live users (eligible or not, and why), and the padded share of the eligible rounds."""
+    admitted = PADDED_ADMITTED_LINE.search(log_text)
+    rounds = [match.groups() for match in PADDED_ROUND_LINE.finditer(log_text)]
+    skipped = [match.groups() for match in PADDED_SKIPPED_LINE.finditer(log_text)]
+    by_live, reasons = {}, {}
+    for live, *rest in rounds:
+        by_live[live] = by_live.get(live, 0) + 1
+    for live, eligible, reason in skipped:
+        kind = re.match(r'[a-z0-9]*', reason).group(0) or '-'
+        key = '%s:%s' % ('eligible' if eligible == '1' else 'ineligible', kind)
+        reasons[key] = reasons.get(key, 0) + 1
+    missed = sum(1 for live, eligible, reason in skipped if eligible == '1')
+    eligible_rounds = len(rounds) + missed
+    return dict(admitted=None if admitted is None else dict(
+                    min_users=int(admitted.group(1)), users=int(admitted.group(2)), max_idle=int(admitted.group(3)),
+                    carries_in_place=admitted.group(4) == '1'),
+                padded_rounds=len(rounds), padded_by_live={live: by_live[live] for live in sorted(by_live, reverse=True)},
+                skipped_eligible=missed, skipped_ineligible=len(skipped) - missed, skip_reasons=reasons,
+                eligible_rounds=eligible_rounds,
+                engagement=round(len(rounds) / eligible_rounds, 4) if eligible_rounds else None)
+
+
+def padded_block_report(environ, log_text):
+    """Under QWEN_FAST_PADDED_BLOCK=1 the summary and its problems (under 'problems'), else None -
+    and a minimum set without the flag is itself a problem (it pads nothing)."""
+    if environ.get(PADDED_BLOCK_FLAG) != '1':
+        if environ.get(PADDED_MIN_USERS_FLAG):
+            return dict(problems=['%s=%s without %s=1 pads nothing' % (PADDED_MIN_USERS_FLAG,
+                                                                       environ.get(PADDED_MIN_USERS_FLAG),
+                                                                       PADDED_BLOCK_FLAG)])
+        return None
+    summary = padded_block_summary(log_text)
+    problems = []
+    wanted = (environ.get(PADDED_MIN_USERS_FLAG) or str(PADDED_MIN_USERS_DEFAULT)).strip()
+    if summary['admitted'] is not None and str(summary['admitted']['min_users']) != wanted:
+        problems.append('%s: the block admitted min_users=%d, not the %s asked for' % (
+            PADDED_MIN_USERS_FLAG, summary['admitted']['min_users'], wanted))
+    for marker, what in ((PADDED_PAGE0_MARKER, 'no live table holds page 0 in its used range'),
+                         (PADDED_IDLE_COMMIT_MARKER, 'no idle segment commits'),
+                         (REFUSED_ROUND_MARKER, 'no round refused outright')):
+        count = log_text.count(marker)
+        if count:
+            problems.append('%s: %s (%d lines; first: %s)' % (PADDED_BLOCK_FLAG, what, count,
+                                                               _first_line(log_text, marker)))
+    backstops = [match.group(0)[:200] for match in PADDED_REFUSED_LINE.finditer(log_text)
+                 if match.group(1) != 'proposal_rows']
+    if backstops:
+        problems.append('%s: no refusal past proposal_rows (%d lines; first: %s)' % (PADDED_BLOCK_FLAG, len(backstops),
+                                                                                  backstops[0]))
+    if summary['eligible_rounds'] and summary['engagement'] < PADDED_ENGAGEMENT:
+        problems.append('%s: padded rounds %d of %d eligible (%.2f), under %.2f' % (
+            PADDED_BLOCK_FLAG, summary['padded_rounds'], summary['eligible_rounds'], summary['engagement'],
+            PADDED_ENGAGEMENT))
+    summary['problems'] = problems
+    return summary
 
 
 def required_flag_markers(environ, users, prompt_tokens=None):

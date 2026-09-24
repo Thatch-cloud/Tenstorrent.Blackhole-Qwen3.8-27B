@@ -77,6 +77,26 @@ residency is cleared before the trace runs and after every packed commit, so a l
 sequential step of any user restores first (`verifier_engine.note_packed_step`).
 Under QWEN_FAST_VERIFY_T1=1 the batched recurrence reads every carry in place and the
 trace writes neither the entries nor slot 0 (verify_trace_t1, cut #3).
+
+VARIABLE-USER ROUNDS (M2, QWEN_FAST_PADDED_BLOCK=1, default off; admitted by serving_runtime at
+the 64-row M3 block only, which passes `padded_min_users`). A round with padded_min_users <= n
+< users live entries is served by the SAME captured trace: each live entry in its own segment
+as always, every other segment staged idle (`idle_inputs`: tokens 1 at the family start, an
+all-zero page table, so its K/V lands in physical page 0 - vLLM's null block - on a tile row of
+its own). Run v188 (R1, image P1) replayed live patterns {0,1}, {1,3} and {0,1,2} this way and
+found the live rows bit-identical to the all-live replay on both chips, every idle carry intact
+and 140.2 ms per replay. Page 0 holds two 32-row tile rows, so at most two segments are idle
+(MAX_IDLE_SEGMENTS) and padded_min_users is at least users - 2. What an idle segment must never
+do is commit: after the readback it decides at prefix 0 (`commit_user(idle, 0)`), which writes
+no state, no carry and no K/V - it only gives the retained block the decision every segment
+owes before the next replay - and it runs before any live commit, so the round's last LIVE
+commit keeps the fence. Its pool slot must be unlent, or the trace must read every carry in
+place (QWEN_FAST_VERIFY_T1 #3, both halves: `carries_in_place`), in which case the trace writes
+neither that carry nor native slot 0 and a request admitted into the slot meanwhile is safe.
+No live table may hold page 0 inside the range it reads and writes (`padded_refusal`, fail
+closed). serving_packed_step decides the round (proposal_rows, ineligible, kv_guard); `verify`
+repeats the checks before anything is staged, as the backstop. With the flag off every path
+here is the one that ran before it existed.
 """
 
 from contextlib import ExitStack
@@ -309,17 +329,83 @@ def replay_group_rows(environ=None):
     return int(value)
 
 
+PADDED_BLOCK_FLAG = 'QWEN_FAST_PADDED_BLOCK'
+PADDED_MIN_USERS_FLAG = 'QWEN_FAST_PADDED_BLOCK_MIN_USERS'
+PADDED_MIN_USERS_DEFAULT = 2
+# The lines the variable-user M2 path logs (lever_n_m3native_gate reads every one): the block's
+# admission once at attach; one line per padded round, and one per round of padded_min_users..
+# users-1 live users the block did NOT serve padded (serving_packed_step.note_padded_skip, with
+# whether it was eligible); a refusal by the idle slot rule or the count, a page-0 refusal, and
+# an idle segment asked to commit a prefix (never: the block refuses it).
+PADDED_ADMITTED_MARKER = '[PINDIAG] packed padded block admitted'
+PADDED_ROUND_MARKER = '[PINDIAG] packed padded round'
+PADDED_SKIPPED_MARKER = '[PINDIAG] packed padded skipped'
+PADDED_REFUSED_MARKER = '[PINDIAG] packed padded refused'
+PADDED_PAGE0_MARKER = '[PINDIAG] packed padded page0'
+PADDED_IDLE_COMMIT_MARKER = '[PINDIAG] packed padded idle commit'
+
+
+def padded_block_min_users(environ=None):
+    """QWEN_FAST_PADDED_BLOCK (variable-user packed rounds M2): None unless the flag is '1', else
+    QWEN_FAST_PADDED_BLOCK_MIN_USERS as an int (default 2), which the block then checks against
+    its own users. A flag value other than '0' or '1', or a minimum that is not a decimal integer,
+    is a configuration error rather than a silent fallback (the gdn_user_batch.enabled pattern).
+    The minimum is not read at all while the flag is off."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(PADDED_BLOCK_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1' % PADDED_BLOCK_FLAG)
+    if value != '1':
+        return None
+    text = environ.get(PADDED_MIN_USERS_FLAG, str(PADDED_MIN_USERS_DEFAULT))
+    if type(text) is not str or not text.isdigit() or text != str(int(text)):
+        raise ValueError('%s must be a decimal integer' % PADDED_MIN_USERS_FLAG)
+    return int(text)
+
+
+def page_zero_index(table, start, rows):
+    """The first index inside [0, (start + rows + 63) // 64) at which this (1, page_width) page
+    table holds physical page 0, or None: every page a user at `start` reads or writes in a
+    `rows`-row round (padded_probe.used_pages). Raises ValueError when the table cannot map that
+    range, and whatever indexing raises for a table that is not one."""
+    used = (int(start) + int(rows) + 63) // 64
+    values = table[0][:used]
+    values = values.tolist() if hasattr(values, 'tolist') else list(values)
+    if len(values) < used:
+        raise ValueError('a %d-entry page table cannot map positions [0, %d)' % (len(values), int(start) + int(rows)))
+    for index, value in enumerate(values):
+        if int(value) == 0:
+            return index
+    return None
+
+
 class PackedVerifierEngine:
     """Owner of one packed verify block: build at attach, then per round
     `verify(entries)` -> per-entry predictions, `features(segment)` for each user's
     publication, `commit_user(segment, prefix)` for each user's decision."""
 
     def __init__(self, operations, model, helpers, sampler, *, pool, shared_weights, shape, feature_taps,
-                 capture_position=None, pool_slots=None):
+                 capture_position=None, pool_slots=None, padded_min_users=None):
         import torch
 
         self.shape = validate_shape(shape)
         self.rows_per_user, self.block_rows, self.users = shape.rows_per_user, shape.block_rows, shape.users
+        # QWEN_FAST_PADDED_BLOCK (variable-user rounds M2): the fewest live users a round of this
+        # block may serve, the rest of its segments idle; None, the default, serves exactly
+        # `users`, as always. Passed by serving_runtime only where it admits the flag. At most
+        # MAX_IDLE_SEGMENTS idle segments fit page 0, and at least one user must be live.
+        if padded_min_users is not None and (
+                type(padded_min_users) is not int
+                or not max(1, shape.users - self.MAX_IDLE_SEGMENTS) <= padded_min_users < shape.users):
+            raise ValueError('padded_min_users must be an integer in [%d, %d) for a %d-user block; got %r'
+                             % (max(1, shape.users - self.MAX_IDLE_SEGMENTS), shape.users, shape.users,
+                                padded_min_users))
+        self.padded_min_users = padded_min_users
+        self.padded_rounds = 0
+        self.idle_segments = frozenset()
+        # Whether the captured trace reads every carry in place (QWEN_FAST_VERIFY_T1 #3, both
+        # halves, in every GDN layer): set from the capture's own counts (note_verify_t1).
+        self.carries_in_place = False
         helpers = tuple(helpers)
         if len(helpers) != GDN_LAYERS or sampler is None:
             raise ValueError('All native GDN helpers and the pinned force-argmax sampler are required')
@@ -355,6 +441,9 @@ class PackedVerifierEngine:
                 or any(type(index) is not int or not 0 <= index < len(pool.slots) for index in pool_slots)):
             raise ValueError('One distinct pool slot per packed user, within the pool, is required')
         self.pool_slots = pool_slots
+        # Each segment's pool slot itself, for the padded idle slot rule (padded_refusal):
+        # whether a request holds it now.
+        self.segment_slots = tuple(pool.slots[index] for index in pool_slots)
         if (getattr(shared_weights, 'closed', True) or not callable(getattr(shared_weights, 'lend', None))
                 or not getattr(shared_weights, 'tensors', None)):
             raise ValueError('The packed block must be built after the shared draft weights are uploaded')
@@ -517,6 +606,10 @@ class PackedVerifierEngine:
             note_prefill()
             self.setup_ms = (time.perf_counter() - started) * 1000
             self.phase = 'idle'
+            if self.padded_min_users is not None:
+                diagnostic('%s min_users=%d users=%d max_idle=%d carries_in_place=%d'
+                           % (PADDED_ADMITTED_MARKER, self.padded_min_users, self.users, self.MAX_IDLE_SEGMENTS,
+                              int(self.carries_in_place)))
         except BaseException as failure:
             self.phase = 'failed'
             # Logged BEFORE close: run 35505708710 (image v50) raised on the host inside the
@@ -609,6 +702,9 @@ class PackedVerifierEngine:
 
     def note_verify_t1(self, counts):
         """VERIFY_T1_MARKER once per captured verify trace: which T1 cuts the capture engaged."""
+        # #3 in every GDN layer, both halves: the trace writes no carry and not native slot 0
+        # (the padded idle slot rule, padded_refusal).
+        self.carries_in_place = (counts.get('direct_carry') == GDN_LAYERS and counts.get('last_carry') == GDN_LAYERS)
         fields = dict(mask_once=int(bool(getattr(self.fixture, 'attention_mask_once', False))),
                       shard_argmax=int(self.shard_argmax), audit=int(self.shard_audit),
                       direct_carry=counts.get('direct_carry', 0), last_carry=counts.get('last_carry', 0),
@@ -672,29 +768,80 @@ class PackedVerifierEngine:
         raise ValueError('The request engine borrows no carry this block restores: it was not admitted '
                          'through a pool slot the block was captured against')
 
+    def pads(self, count):
+        """Whether a round of `count` live users is one this block serves padded
+        (QWEN_FAST_PADDED_BLOCK): padded_min_users <= count < users. Always False without it."""
+        return self.padded_min_users is not None and self.padded_min_users <= count < self.users
+
     def segments(self, entries):
-        """One segment per entry, in entries order; every segment exactly once."""
+        """One segment per entry, in entries order; every segment exactly once - or, for a
+        padded round (`pads`), at most once, the segments no entry holds idle."""
         entries = list(entries)
-        if len(entries) != self.users:
+        if len(entries) != self.users and not self.pads(len(entries)):
+            if self.padded_min_users is not None:
+                raise ValueError('The padded packed block serves %d to %d users; %d entries given'
+                                 % (self.padded_min_users, self.users, len(entries)))
             raise ValueError('The packed block serves exactly %d users; %d entries given' % (self.users, len(entries)))
         segments = tuple(self.segment_of(entry['request'].engine) for entry in entries)
-        if sorted(segments) != list(range(self.users)):
+        if len(entries) == self.users:
+            if sorted(segments) != list(range(self.users)):
+                raise ValueError('Two packed entries were admitted through the same pool slot')
+        elif len(set(segments)) != len(segments):
             raise ValueError('Two packed entries were admitted through the same pool slot')
         return segments
 
     def segment_users(self, entries, segments):
-        """Each entry's (tokens, start, pages) at its segment: what stage_packed stages."""
+        """Each entry's (tokens, start, pages) at its segment: what stage_packed stages. A
+        segment no entry holds (a padded round's idle one) is None."""
         users = [None] * self.users
         for entry, segment in zip(entries, segments):
             ticket, engine = entry['ticket'], entry['request'].engine
             users[segment] = (tuple(ticket.tokens), ticket.position, engine.pages)
         return users
 
+    def padded_users(self, users, live_segments):
+        """`users` (segment_users) with every idle segment filled from idle_inputs."""
+        fills = self.idle_inputs(live_segments)
+        return [fills[segment] if user is None else user for segment, user in enumerate(users)]
+
     def stage_packed_inputs(self, entries):
         entries = list(entries)
         segments = self.segments(entries)
         users = self.segment_users(entries, segments)
+        if len(segments) < self.users:
+            # A padded round (QWEN_FAST_PADDED_BLOCK): every segment no entry holds is staged idle.
+            users = self.padded_users(users, segments)
         return stage_packed(self.operations, self.model, self.fixture, self.shape, users)
+
+    def padded_refusal(self, users):
+        """Why these users - in segment order, (tokens, start, table) for each live segment and
+        None for each idle one - cannot be served as one padded round, or None. Host only, and
+        nothing is staged. The rules (module docstring, VARIABLE-USER ROUNDS):
+          - the count: `pads(live)`;
+          - the idle slot rule: each idle segment's pool slot is unlent, or the captured trace
+            reads every carry in place (`carries_in_place`, VERIFY_T1 #3 in every layer);
+          - page 0: no live table holds physical page 0 inside its used range [0, (start + rows
+            + 63) // 64), which the idle segments write. Fails closed: a table that cannot map
+            that range is a page-0 reason too.
+        Every page-0 reason starts 'page0', the marker its callers log it under."""
+        users = list(users)
+        live = [segment for segment, user in enumerate(users) if user is not None]
+        if len(users) != self.users or not self.pads(len(live)):
+            return 'padded round of %d live users outside [%s, %d)' % (len(live), self.padded_min_users, self.users)
+        if not self.carries_in_place:
+            for segment, user in enumerate(users):
+                if user is None and getattr(self.segment_slots[segment], 'lent', True):
+                    return ('idle segment %d: pool slot %d is lent and the verify trace moves carries '
+                            '(QWEN_FAST_VERIFY_T1 #3 not in every layer)' % (segment, self.pool_slots[segment]))
+        for segment in live:
+            tokens, start, table = users[segment]
+            try:
+                index = page_zero_index(table, start, self.rows_per_user)
+            except (IndexError, TypeError, ValueError, AttributeError) as error:
+                return 'page0 unmapped: segment %d position %s: %s' % (segment, start, error)
+            if index is not None:
+                return 'page0 in a live table: segment %d position %d page_index %d' % (segment, int(start), index)
+        return None
 
     # Variable-user packed rounds (M1): the most idle segments one block can hold. An idle
     # segment writes its rows' K/V through an all-zero page table - physical page 0, vLLM's
@@ -749,6 +896,16 @@ class PackedVerifierEngine:
                 raise ValueError("Packed ticket of request %s at %d leaves the block's native chunk family [%d, %d)"
                                  % (str(entry['request_id'])[:48], ticket.position, self.replay_capacity - 256,
                                     self.replay_capacity)) from None
+        idle = tuple(segment for segment in range(self.users) if segment not in segments)
+        if idle:
+            # A padded round (QWEN_FAST_PADDED_BLOCK): the fail-closed backstop behind
+            # serving_packed_step's proposal_rows and ineligible - host only, before anything is
+            # staged or claimed, so a refusal leaves the block idle.
+            reason = self.padded_refusal(self.segment_users(entries, segments))
+            if reason is not None:
+                diagnostic('%s site=verify %s' % (PADDED_PAGE0_MARKER if reason.startswith('page0')
+                                                  else PADDED_REFUSED_MARKER, reason))
+                raise ValueError('The padded packed block cannot serve this round: %s' % reason)
         self.phase = 'verifying'
         try:
             binding_started = time.perf_counter()
@@ -799,17 +956,35 @@ class PackedVerifierEngine:
 
                 padded_probe.after_readback(self, self.segment_users(entries, segments), self.rounds + 1)
             self.first = False
-            self.pending_segments = set(segments)
+            self.pending_segments = set(segments) | set(idle)
+            self.idle_segments = frozenset(idle)
             self.commit_timings = [0.0] * self.users
             self.commit_block_ms = [0.0] * self.users
             self.rounds += 1
             self.phase = 'verified'
+            for segment in idle:
+                # A padded round's idle segment decides at prefix 0: no commit trace exists for
+                # 0 and the retained block publishes nothing at it - no state, no carry, no K/V -
+                # so this only gives the retained block the decision each segment owes before
+                # the next replay. Before any live commit, so the round's last LIVE commit keeps
+                # the synchronize=last fence (commit_user: the one that empties the pending set).
+                self.commit_user(segment, 0)
             dump_device_profiler_after_round(self.operations, self.mesh, self.rounds)
             metrics = dict(segments=segments, staged_buffers=staged,
                 binding_validation_ms=(started - binding_started) * 1000,
                 input_ms=(staged_at - started) * 1000, verify_readback_ms=(finished - staged_at) * 1000,
                 blocking_trace_host_ms=trace_ms, replay_checks_sync_ms=(replayed - staged_at) * 1000 - trace_ms,
                 output_readback_host_ms=(finished - replayed) * 1000, users=self.users)
+            if self.padded_min_users is not None:
+                # QWEN_FAST_PADDED_BLOCK only: the round's live and idle segments (every round, the
+                # all-live ones included), into each user's phase-timing record.
+                metrics.update(live=len(segments), idle=list(idle))
+            if idle:
+                self.padded_rounds += 1
+                diagnostic('%s live=%d round=%d segments=%s idle=%s padded=%d'
+                           % (PADDED_ROUND_MARKER, len(segments), self.rounds,
+                              ','.join(str(segment) for segment in sorted(segments)),
+                              ','.join(str(segment) for segment in idle), self.padded_rounds))
             # Under QWEN_FAST_PACKED_AUDIT=1: the round's host-visible phase split, so a slow
             # round's log says whether the cost sits in staging, the blocking trace replay
             # (attention, GDN, MLP, norm and the LM head are one opaque number here - a
@@ -817,11 +992,15 @@ class PackedVerifierEngine:
             # cannot attribute time inside it) or readback. Pure logging: the returned dict
             # is unchanged in keys or values.
             if os.environ.get('QWEN_FAST_PACKED_AUDIT') == '1':
+                # Under QWEN_FAST_PADDED_BLOCK the live and idle segments close the line, after
+                # every field the existing parsers read (lever_n_m3native_profile_report).
                 diagnostic('[PACKED-PHASE] round=%d users=%d bind_ms=%.2f input_ms=%.2f trace_ms=%.2f '
                            'sync_ms=%.2f readback_ms=%.2f'
                            % (self.rounds, self.users, metrics['binding_validation_ms'], metrics['input_ms'],
                               metrics['blocking_trace_host_ms'], metrics['replay_checks_sync_ms'],
-                              metrics['output_readback_host_ms']))
+                              metrics['output_readback_host_ms'])
+                           + ('' if self.padded_min_users is None else ' live=%d idle=%s' % (
+                               len(segments), ','.join(str(segment) for segment in idle) or '-')))
             return predictions, metrics
         except BaseException:
             self.phase = 'failed'
@@ -873,6 +1052,12 @@ class PackedVerifierEngine:
         time `self.fixture.retained.commit_user(...)` returns below, every enqueued commit
         trace of the round has completed - no separate trailing sync is added here; the
         existing `synchronize=last` plumbing already provides it."""
+        if self.idle_segments and segment in self.idle_segments and prefix != 0:
+            # A padded round's idle segment commits nothing, ever (verify decides it at 0), and
+            # an attempt is logged for the gate before anything else is checked.
+            diagnostic('%s refused segment=%s prefix=%s round=%d' % (PADDED_IDLE_COMMIT_MARKER, segment, prefix,
+                                                                      self.rounds))
+            raise ValueError('Idle segment %s of a padded round commits nothing; prefix %r refused' % (segment, prefix))
         self.check_segment(segment)
         if type(prefix) is not int or not 0 <= prefix <= self.rows_per_user:
             raise ValueError('Selected prefix outside the user segment')
@@ -929,7 +1114,10 @@ class PackedVerifierEngine:
             attention=dict(reader='per-user bundled replay', family=self.replay_capacity, replay_group_rows=self.replay_group_rows,
                            bundles_per_user=[len(tables) for tables in self.replay_tables],
                            tables=[[list(address) for address in tables] for tables in self.replay_addresses]),
-            setup_ms=getattr(self, 'setup_ms', None), rounds=self.rounds)
+            setup_ms=getattr(self, 'setup_ms', None), rounds=self.rounds,
+            **({} if self.padded_min_users is None else dict(padded=dict(
+                min_users=self.padded_min_users, max_idle=self.MAX_IDLE_SEGMENTS,
+                carries_in_place=self.carries_in_place, rounds=self.padded_rounds))))
 
     def close(self, *, wait=True):
         """Release the block. `wait=False` is the failed construction: the device may still be

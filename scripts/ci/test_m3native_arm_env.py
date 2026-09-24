@@ -486,6 +486,91 @@ class ServingPairArmTests(unittest.TestCase):
         self.assertLess(loop, text.index('expected exactly two serving cards'))
 
 
+class CardWaitHintArmTests(unittest.TestCase):
+    """Run v190: card A came back from the reset without its by-id link (the telemetry race: the ARC
+    firmware was not ready when udev looked) and the arm refused after 120 s with nothing naming the
+    cause. On that timeout the arm now names it and the driver re-probe that cures it - it never acts."""
+
+    START = 'card_wait_s="${M3NATIVE_CARD_WAIT_S:-120}"'
+
+    @staticmethod
+    def _bash():
+        import shutil
+        if os.name == 'nt':
+            for root in (os.environ.get('ProgramW6432'), os.environ.get('ProgramFiles'), 'C:/Program Files'):
+                if root and Path(root, 'Git', 'bin', 'bash.exe').is_file():
+                    return str(Path(root, 'Git', 'bin', 'bash.exe'))
+        found = shutil.which('bash')
+        if found and os.name == 'nt' and ('system32' in found.lower() or 'windowsapps' in found.lower()):
+            return None
+        return found
+
+    def _wait_block(self, cards, dmesg):
+        """The arm's own by-id wait, from its first line to the end of its loop, with every by-id link
+        missing and no wait allowed."""
+        import subprocess
+        bash = self._bash()
+        if bash is None:
+            self.skipTest('no bash')
+        text = arm_text()
+        start = text.index(self.START)
+        end = text.index(chr(10) + 'done' + chr(10), text.index('until resolve_serving_nodes; do')) + 6
+        script = chr(10).join([
+            'set -euo pipefail',
+            'serving_cards=%s' % shlex_quote(cards),
+            'M3NATIVE_CARD_WAIT_S=0',
+            'readlink() { return 1; }',
+            'ls() { :; }',
+            'sleep() { :; }',
+            'sudo() { return 1; }',
+            'dmesg() { %s; }' % dmesg,
+            text[start:end],
+            'echo WAITED',
+        ])
+        try:
+            return subprocess.run([bash, '-c', script], env=dict(PATH=os.environ.get('PATH', '')),
+                                  capture_output=True, text=True, timeout=60)
+        except OSError as error:
+            self.skipTest('bash unusable: %s' % error)
+
+    def test_the_timeout_names_the_telemetry_race_and_the_re_probe(self):
+        lines = ('[  11.5] tenstorrent 0000:f3:00.0: Telemetry not available', '[  12.0] unrelated')
+        result = self._wait_block('blackhole-3707293C249A5E67', "printf '%s\\n' " + ' '.join(shlex_quote(l) for l in lines))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('WAITED', result.stdout)
+        err = result.stderr
+        self.assertIn('serving card blackhole-3707293C249A5E67 has no device node under /dev/tenstorrent/by-id after 0s', err)
+        self.assertIn('hint: likely the telemetry race after a reset', err)
+        self.assertIn("'tenstorrent 0000:f3:00.0: Telemetry not available'", err)
+        self.assertIn('serving_pair_heal, scripts/ci/serving_pair.sh', err)
+        self.assertIn('echo 0000:f3:00.0 | sudo -n tee /sys/bus/pci/drivers/tenstorrent/unbind; sleep 3', err)
+        self.assertIn('echo 0000:f3:00.0 | sudo -n tee /sys/bus/pci/drivers/tenstorrent/bind', err)
+        self.assertIn('hint:   [  11.5] tenstorrent 0000:f3:00.0: Telemetry not available', err)
+        self.assertNotIn('unrelated', err)
+        self.assertLess(err.index('has no device node'), err.index('hint: likely the telemetry race'))
+
+    def test_card_m_gets_its_own_address_and_an_unknown_card_none(self):
+        result = self._wait_block('blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67', 'return 1')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('echo 0000:d1:00.0 | sudo -n tee /sys/bus/pci/drivers/tenstorrent/bind', result.stderr)
+        self.assertIn("no 'Telemetry not available' line readable in dmesg here", result.stderr)
+        other = self._wait_block('blackhole-0000000000000000', 'return 1')
+        self.assertEqual(other.returncode, 1, other.stdout + other.stderr)
+        self.assertIn('echo <its PCI address> | sudo -n tee', other.stderr)
+        self.assertNotIn('0000:f3:00.0', other.stderr)
+
+    def test_the_arm_only_prints_the_re_probe(self):
+        # Every mention of the driver's sysfs files is inside a printed hint line: the arm never writes one.
+        for line in arm_text().splitlines():
+            if '/sys/bus/pci/drivers' in line:
+                self.assertTrue(line.strip().startswith('echo "hint:'), line)
+
+
+def shlex_quote(text):
+    import shlex
+    return shlex.quote(text)
+
+
 class LegacyContinuationArmTests(unittest.TestCase):
     """Lever N's negative control: M3NATIVE_LEGACY_CONTINUATION_ORDER=1 crosses as
     QWEN_FAST_LEGACY_CONTINUATION_ORDER=1, which serving_lifecycle (the pre-fix routing order)

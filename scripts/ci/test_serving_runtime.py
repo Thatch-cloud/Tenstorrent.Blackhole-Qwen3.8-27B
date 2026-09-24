@@ -30,7 +30,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
     STREAM = {'streams': 'serial', 'evidence': 'stream'}
 
     def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None, four_as_two=None,
-                 replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False):
+                 replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None):
         events = []
 
         def diag(template, *values):
@@ -198,6 +198,9 @@ class RuntimeAttachmentTests(unittest.TestCase):
                                                     feature_taps=(5, 19, 33, 47, 61))
                             if two_blocks:
                                 expected_options['pool_slots'] = tuple(range(2 * index, 2 * index + 2))
+                            if padded is not None:
+                                # QWEN_FAST_PADDED_BLOCK: the one keyword it adds, only where admitted.
+                                expected_options['padded_min_users'] = padded
                             self.assertEqual(call.kwargs, expected_options)
                         self.assertIsInstance(packed_step, serving_packed_step.PackedStep)
                         if two_blocks:
@@ -395,6 +398,31 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         self.assertRaisesRegex(ValueError, 'admitted only at the 64-row M3 block'):
                     self.exercise(packed=packed, users=users, four_as_two=four_as_two, block_stream=block_stream,
                                   extra_env={'QWEN_FAST_SINGLE_GATEUP': '1'}, refused=True)
+
+    # --- Variable-user packed rounds M2: QWEN_FAST_PADDED_BLOCK ----------------------------
+
+    def test_the_padded_block_flag_builds_the_sixty_four_row_block_with_its_minimum(self):
+        # serving_runtime.padded_block_admission: the M3 block alone, built with the minimum asked for
+        # (default 2); every other keyword of the block, the pool and the recipe unchanged.
+        self.exercise(packed=True, users=4, four_as_two=False, extra_env={'QWEN_FAST_PADDED_BLOCK': '1'}, padded=2)
+        self.exercise(packed=True, users=4, four_as_two=False, padded=3,
+                      extra_env={'QWEN_FAST_PADDED_BLOCK': '1', 'QWEN_FAST_PADDED_BLOCK_MIN_USERS': '3'})
+        self.assertEqual(self.combined_keywords, ['block_stream', 'directory', 'kv_publication_evidence',
+                                                  'native_attention_evidence', 'runtime_root'])
+
+    def test_the_padded_block_flag_is_refused_at_every_other_shape(self):
+        # Two 32-row blocks at four users (the default), two users, one user, or the M3 count without
+        # the packed step: refused before anything is built, as the single gate/up copy is.
+        for users, packed, four_as_two in ((1, False, None), (2, True, None), (4, True, None), (4, True, True),
+                                           (4, False, False)):
+            with self.subTest(users=users, packed=packed, four_as_two=four_as_two), \
+                    self.assertRaisesRegex(ValueError, 'QWEN_FAST_PADDED_BLOCK=1 is admitted only at the 64-row M3 block'):
+                self.exercise(packed=packed, users=users, four_as_two=four_as_two,
+                              extra_env={'QWEN_FAST_PADDED_BLOCK': '1'}, refused=True)
+
+    def test_the_padded_block_minimum_alone_changes_nothing(self):
+        # Unread while the flag is off: the attach is exactly today's.
+        self.exercise(packed=True, users=4, four_as_two=False, extra_env={'QWEN_FAST_PADDED_BLOCK_MIN_USERS': '3'})
 
 
 class RegisterReaderReasonTests(unittest.TestCase):

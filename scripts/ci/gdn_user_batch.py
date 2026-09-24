@@ -55,12 +55,15 @@ def min_users(environ=None):
     Above `MAX_USERS` the batched path can never engage, which is the clean off switch
     for a bisect that keeps every other part of the arm identical.
 
-    Two notes for whoever sets this. The packed serving block always carries
-    `shape.users` segments - placeholder users fill the slots no live request holds
-    (packed_verifier.py:415-421) - so in serving the threshold is a straight on/off at 5,
-    not a live-user count. And on the measured single-user numbers the fused 24-core
-    launch is SLOWER than the per-user value split it replaces, so 2 is the throughput
-    optimum even though 1 is the compatible default.
+    Two notes for whoever sets this. The packed serving block's verify trace is captured
+    once, at attach, over `shape.users` segments (the capture's placeholder users,
+    packed_verifier.PackedVerifierEngine.__init__), and every replay runs all of them: a
+    round with fewer live requests either goes to the sequential step or, under
+    QWEN_FAST_PADDED_BLOCK, replays the same trace with the missing segments staged idle
+    (PackedVerifierEngine.idle_inputs). The threshold is read when that trace is built, so
+    in serving it is a straight on/off at 5, not a live-user count. And on the measured
+    single-user numbers the fused 24-core launch is SLOWER than the per-user value split
+    it replaces, so 2 is the throughput optimum even though 1 is the compatible default.
     """
     value = (os.environ if environ is None else environ).get(MIN_USERS_FLAG, '1')
     if type(value) is not str or not value.isdigit() or value != str(int(value)):

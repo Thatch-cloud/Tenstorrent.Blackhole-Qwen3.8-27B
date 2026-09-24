@@ -64,6 +64,13 @@ four tokens). So C=4 does not mean packed: `decode_steps_by_active_users` counts
 `rounds_by_live` (round_split) splits them by live count AND by whether the step was packed (its
 blocks carry verifier.packed), with each group's median round (the time to the next step's line)
 and the tokens each live user took per round - the view that shows where the decode wall goes.
+Under QWEN_FAST_PADDED_BLOCK (variable-user rounds M2) the 64-row step also serves two or three
+live users as one padded pass, so those rounds split as '3p' / '2p' too; `rounds.packed_by_live`
+counts the packed rounds by the live users the verifier itself reported ([PACKED-PHASE] ... live=k,
+logged only under that flag), and `rounds.padded` the padded rounds against the eligible ones the
+runtime logged (lever_n_m3native_gate.padded_block_summary's reading of the same lines). The
+completion rate and aggregate below are the figures that show the gain; the steady rate, which
+now includes the padded rounds, does not.
 
 Stdlib only (json, re, statistics, datetime): mounted at /bench beside the gate, imported by the
 offline real_text_compare.py too. Python 3.10 compatible.
@@ -87,6 +94,12 @@ EXECUTE_LINE = re.compile(r'\[PHASE\] execute total=([0-9]+) new=([0-9]+) cached
 TIMED_EXECUTE_LINE = re.compile(r'([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?) \|[^\n]*?'
                                 r'\[PHASE\] execute total=([0-9]+) new=([0-9]+) cached=([0-9]+) spec=([0-9]+)')
 PACKED_PHASE_LINE = re.compile(r'\[PACKED-PHASE\] round=([0-9]+) users=([0-9]+)')
+# QWEN_FAST_PADDED_BLOCK only: the same line closed by the round's live and idle segments, and the
+# runtime's padded-round and skipped-round lines (packed_verifier.PADDED_ROUND_MARKER and
+# PADDED_SKIPPED_MARKER).
+PACKED_PHASE_LIVE = re.compile(r'\[PACKED-PHASE\] round=([0-9]+) users=([0-9]+)[^\n]*? live=([0-9]+) idle=(\S+)')
+PADDED_ROUND_LINE = re.compile(r'\[PINDIAG\] packed padded round live=([0-9]+) ')
+PADDED_SKIPPED_LINE = re.compile(r'\[PINDIAG\] packed padded skipped live=([0-9]+) eligible=([01]) ')
 SHUTDOWN_MARKER = 'trigger received signal=SIGTERM'
 STALL_FACTOR = 3.0             # a round gap over 3 x the median is a capture/warm-up stall, not a round
 
@@ -214,6 +227,26 @@ def execute_steps(log_text):
             mixed += 1
     return dict(decode_steps_by_active_users={str(k): decode[k] for k in sorted(decode, reverse=True)},
                 prefill_steps=prefill, mixed_steps=mixed)
+
+
+def padded_rounds(log_text):
+    """QWEN_FAST_PADDED_BLOCK: {'packed_by_live': packed rounds by the verifier's own live count,
+    'padded': padded rounds by live count, 'eligible_skipped' / 'ineligible_skipped': rounds of that
+    many live users served sequentially, and 'engagement': padded / (padded + eligible skips)}, or
+    None when the log carries none of those lines (the flag off: nothing is added to the report)."""
+    phases = [match.groups() for match in PACKED_PHASE_LIVE.finditer(log_text)]
+    padded = [match.group(1) for match in PADDED_ROUND_LINE.finditer(log_text)]
+    skipped = [match.groups() for match in PADDED_SKIPPED_LINE.finditer(log_text)]
+    if not phases and not padded and not skipped:
+        return None
+    by_live = Counter(live for _round, _users, live, _idle in phases)
+    by_padded = Counter(padded)
+    eligible = sum(1 for _live, flag in skipped if flag == '1')
+    total = len(padded) + eligible
+    return dict(packed_by_live={live: by_live[live] for live in sorted(by_live, reverse=True)},
+                padded={live: by_padded[live] for live in sorted(by_padded, reverse=True)},
+                eligible_skipped=eligible, ineligible_skipped=len(skipped) - eligible,
+                engagement=round(len(padded) / total, 4) if total else None)
 
 
 def timed_steps(log_text):
@@ -575,6 +608,7 @@ def report(log_text, streams=None, prompt_lengths=None, sequential=None):
                                and totals['accepted'] <= phases_totals['accepted'])
     audit_agree = sum(1 for m in audit_matches.values() if isinstance(m, int))
     stream_checks = [u.get('stream_agreement') for u in users if u.get('stream_agreement') is not None]
+    padded = padded_rounds(log_text)
     result = dict(
         sources=dict(phases_records=len(records), phases_unparsed=unparsed,
                      phases_after_shutdown=sum(1 for c in compact if c['after_shutdown']),
@@ -582,7 +616,8 @@ def report(log_text, streams=None, prompt_lengths=None, sequential=None):
                      packed_audit_lines=sum(len(v) for v in audit.values()),
                      spec_decoding_intervals=len(intervals)),
         overall=section(everything), packed=section(packed) if packed else None,
-        rounds=dict(execute_steps(log_text), packed_rounds=len(PACKED_PHASE_LINE.findall(log_text))),
+        rounds=dict(execute_steps(log_text), packed_rounds=len(PACKED_PHASE_LINE.findall(log_text)),
+                    **(padded or {})),
         rounds_by_live=round_split(log_text, records),
         users=users, records=compact,
         vllm=dict(totals, phases=phases_totals,
@@ -622,7 +657,19 @@ def summary_line(result):
                 _fmt(vllm.get('mean_acceptance_length'), '%.2f'), vllm.get('drafts'),
                 agreement.get('packed_audit_vs_phases'), agreement.get('vllm_consistent_with_phases'),
                 agreement.get('stream_vs_phases'), agreement.get('users_attributed'),
-                by_live_label(result.get('rounds_by_live'))))
+                by_live_label(result.get('rounds_by_live')))) + padded_label(result.get('rounds'))
+
+
+def padded_label(rounds):
+    """' | padded 3:40 2:12 of 55 eligible (0.95)' under QWEN_FAST_PADDED_BLOCK; '' otherwise, so a
+    run without the flag keeps exactly its summary line."""
+    rounds = rounds or {}
+    if 'padded' not in rounds:
+        return ''
+    padded = rounds['padded']
+    eligible = sum(padded.values()) + rounds.get('eligible_skipped', 0)
+    return ' | padded %s of %d eligible (%s)' % (' '.join('%s:%d' % item for item in padded.items()) or '0', eligible,
+                                                 _fmt(rounds.get('engagement'), '%.2f'))
 
 
 def by_live_label(split):
