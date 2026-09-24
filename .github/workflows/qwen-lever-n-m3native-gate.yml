@@ -196,7 +196,10 @@ jobs:
           fi
       - name: Reset the serving pair (card M and card A together) before this job opens it
         working-directory: m3native
-        timeout-minutes: 8
+        # 8 minutes for the reset, plus the self-heal's bound (60 s wait, then per card up to two
+        # re-probes of ~80 s each): a step killed between an unbind and its bind leaves a card unbound.
+        # The heal starts no unbind after 720 s (serving_pair_heal 60 720, below): keep it 120 s under this.
+        timeout-minutes: 14
         shell: bash
         run: |
           set -euo pipefail
@@ -243,6 +246,22 @@ jobs:
               timeout -k 20 300 "${prefix[@]}" "$smi" -r "${SERVING_PAIR_NODES[$i]}" >> experiment-results/reset.log 2>&1 || status=$?
             done
           fi
+          # The telemetry race (run v190): card A, behind the PCIe switch, can come back from the
+          # reset before its ARC firmware is ready - the driver logs 'Telemetry not available', the
+          # node exists and tt-smi -ls lists the board, but udev never creates its by-id link, and
+          # the arm refuses after its 120 s wait. serving_pair_heal waits up to 60 s for both links,
+          # then re-probes the driver (unbind, 3 s, bind) of a serving card whose link is still
+          # missing: only card M's or card A's own PCI address, only while that device is present,
+          # bound to the tenstorrent driver and held by no process, at most twice per card, waiting
+          # up to 60 s for the link after each. No further reset. A link that does not come back
+          # fails this step (heal.status); it never guesses. No unbind starts after 720 s of this
+          # step (timeout-minutes 14 = 840 s, less 120 s): a slow reset must not leave the runner's
+          # timeout to kill the heal between an unbind and its bind, which would leave a card unbound.
+          heal=0
+          if [ "$status" = 0 ]; then
+            serving_pair_heal 60 720 2>&1 | tee -a experiment-results/reset.log || heal=$?
+          fi
+          echo "heal_exit=$heal" | tee experiment-results/heal.status
           echo "reset_exit=$status" | tee experiment-results/reset.status
           tail -20 experiment-results/reset.log || true
           # A board that does not answer -ls must not hide the reset's own status.
@@ -252,6 +271,7 @@ jobs:
           serving_pair_resolve > experiment-results/serving-pair-after-reset.txt 2>&1 || true
           cat experiment-results/serving-pair-after-reset.txt || true
           test "$status" = 0
+          test "$heal" = 0
       - name: Run the native M3 gate
         working-directory: m3native
         timeout-minutes: 40
