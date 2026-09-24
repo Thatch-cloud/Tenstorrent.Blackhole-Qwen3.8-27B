@@ -67,6 +67,9 @@ Each packed verify at 4 × 131k spends about 128 ms per round in decode SDPA.
 | `run_card_m.sh` | Runs the card test in the serving image on the qualification card (`QUAL_CARD`, default card B), in `reference` or `candidate` mode, with an optional `WATCHER=1` first pass. |
 | `test_sdpa_decode_qwen_card_m.py` | The card-M unit test for both stages. The stage is read off the loaded binary. |
 | `test_sdpa_decode_qwen_sources.py` | CPU checks: the edits invert to the bases for both stages, the factory patches reproduce their recorded shas, every constant that crosses a file boundary agrees, the card-M host helpers work, and a full dry run of the card-M flow runs against a fake ttnn with the graft's share semantics. That dry run includes a broken fake whose twins read their own rows, which N1, N4 and N5 must catch. |
+| `probe_k1_card_b.py` | The S0.K1 probe (K1 design sections 3, 7, 8): per-call timing of the served K64g decode SDPA for the G8 B2 tail+share call and its K1a proxy, G4 B2 tail+share, with controls, per-chunk slopes, output checksums and one `K1_PROBE` go/no-go line. It imports the card test's host helpers. |
+| `run_probe_k1.sh` | Runs the probe on the qualification card with K64g mounted as the arm mounts it (including `sdpa/`, as under `M3NATIVE_SDPA_PF=1`). It checks the graft's binary, kernels and manifest before launching. `WATCHER=1` is the first pass; `PROBE_DRY_RUN=1` prints the argv. |
+| `test_probe_k1.py` | CPU checks for the probe: the slopes against the design's card-M figures, the decision table at every edge, the contract with the gate and the arm, the runner's dry run and refusals, and a full dry run on a fake ttnn (DRAM reuse, model clock) whose broken variants the controls must catch. |
 
 Python-side wiring lives outside this directory:
 
@@ -161,6 +164,51 @@ bash run_card_m.sh candidate                      # the full sweep, with timing
   - **Log:** exactly the requested qwen programs have factory lines, with `kv_share` true only for `0x2` with B>1, `scratch_slots=4`, and the spec's `cb_bytes`.
   - **Timing:** the spec's acceptance ratios are recorded. G8+tail B2 must be ≤ 0.6 × legacy (B3+B1) at 131k, and share+tail B3 ≤ 1.6 × tail B1.
 - **Output.** `<out>.json` and `<out>.json.native.log`, which holds all C++ output.
+
+## S0.K1 probe (K1 head-sliced Q, no build)
+
+The K1 design (`k1-sdpa-head-slice-design.md`, sections 3, 7 and 8) needs one number before any C++:
+whether a head-sliced G8 call stays compute-bound. The **G4 batch-2 tail+share** call does exactly the
+head-sliced G8 call's per-core work (2 row tiles, 16 cores per head, 32 leaders reading 142.9 MB, one twin
+each), so its time on the served binary is K1a's per-call time.
+
+```
+PROBE_DRY_RUN=1 bash run_probe_k1.sh     # the argv, nothing launched
+WATCHER=1 bash run_probe_k1.sh           # first pass: NoC sanitiser, checksums at 2,304 and 33,024, no timing
+bash run_probe_k1.sh                     # the probe: 2,304 / 33,024 / 66,048 / 131,328 keys
+```
+
+- **Shapes.** G8 B2 tail+share (the served call, and the control that re-anchors card B against card
+  M), G4 B2 tail+share (the proxy), G4 B2 tail (the DRAM reference), G4 B1 tail (the compute
+  reference), and G8 B2 tail (G8's DRAM-bound reference).
+- **Per capacity and shape.**
+  - One poisoned call: a NaN tensor of the output's shape is freed first, so an unwritten row shows as
+    NaN (design N-S0).
+  - One legacy call. Both outputs' sha256 are recorded.
+  - Eager timing: the median of 20 calls per round, over two rounds that interleave the shapes.
+  - A 16-call trace, replayed, per call.
+- **Slopes.** Per chunk on the busiest core (1 / 9 / 17 / 33 chunks), two-point and least-squares, with
+  the rise the design reads for linearity.
+- **Verdict.** Section 3's table, relative to card B's own controls at 131,328 keys:
+  - **A:** the proxy is ≤ 1.08 × G4 B1 tail, with a slope within 5%. Enable `0x4`.
+  - **C:** the proxy is ≥ 0.93 × the served call. Enable `0x4,0x8`, and also time `0xB`.
+  - **B:** anything in between. Enable `0x4,0x8`.
+  - **NO-DECISION:** the measurement is invalid, the controls do not separate A from C, or the proxy
+    failed the spot check (rows left unwritten, or bytes that differ from legacy: a share protocol that
+    is wrong can also be fast). The numbers are still printed.
+- **Also printed.** K1a alone against section 7's 0.78 / 0.90 rules; the saving per replay (×64 calls):
+  on the eager basis as `(card)`, `(trace-scaled)` (×761/815.8, section 3's scaling) and the measured
+  `(trace)`, and on `--basis trace` the measured figure only; and the spot check (G4 B2 tail+share ==
+  legacy; B=2 share on G4 was never qualified). `equal-unpoisoned(k/n)` means equal, but k outputs did
+  not take the poisoned address. The JSON also records section 3's 4 × 32k cross-check at 33,024 keys.
+- **Failures.**
+  - The loaded binary is not K64g's (134bc834…), or the kernels are not 280a847f / 8776fcc7.
+  - No compact scratch.
+  - A requested program without its factory line.
+  - A qualified shape that differs from legacy.
+  - The watchdog.
+
+Results land in `~/kwork64/k1probe/<card tag>/probe-<stamp>.json` (and `.log`, `.json.native.log`).
 
 ## Evidence (stage 3, before hardware)
 

@@ -48,6 +48,7 @@ EMBEDDING = [
     OPS / 'verify_t2' / 'run_card_m.sh',
     OPS / 'c1e_gateup' / 'run_card_b.sh',
     OPS / 'draft_slide_inplace' / 'run_card_b.sh',
+    OPS / 'sdpa_decode_qwen' / 'run_probe_k1.sh',
     OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh',
     OPS / 'kernels-batch64' / 'nlp_concat_heads_decode' / 'build-and-test-b64.sh',
 ]
@@ -64,6 +65,7 @@ LAUNCH = {
     OPS / 'verify_t2' / 'run_card_m.sh': r'^timeout -k 30 "\$timeout_s" docker run',
     OPS / 'c1e_gateup' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" docker run',
     OPS / 'draft_slide_inplace' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" docker run',
+    OPS / 'sdpa_decode_qwen' / 'run_probe_k1.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh': r'^docker run -d --name "\$CONTAINER"',
     OPS / 'kernels-batch64' / 'nlp_concat_heads_decode' / 'build-and-test-b64.sh': r'^timeout 900 docker run',
 }
@@ -77,7 +79,8 @@ BEGIN, END = '# >>> qual_card.sh', '# <<< qual_card.sh'
 NL = chr(10)
 SCRUB = ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'M1_READER', 'IMAGE', 'M1_ARGS', 'M1_DRY_RUN', 'M1_REQUIRE_SOURCES',
          'RESULTS', 'M1_SRC', 'KOPGRAFT_PF', 'PF_SRC', 'PF_DRY_RUN', 'WATCHER', 'REFERENCE', 'CARD', 'NAME',
-         'CONTAINER', 'GDN_USER_BATCH_DEVICE', 'K64F_SRC', 'KOPGRAFT64', 'REPO', 'RUNNER_NAME', 'FAKE_HELD', 'MSYS')
+         'CONTAINER', 'GDN_USER_BATCH_DEVICE', 'K64F_SRC', 'KOPGRAFT64', 'REPO', 'RUNNER_NAME', 'FAKE_HELD', 'MSYS',
+         'PROBE_DRY_RUN', 'EXPECT_TTNNCPP_SHA256')
 
 
 def read(path):
@@ -1318,7 +1321,8 @@ class HarnessTests(unittest.TestCase):
     # Scripts whose node resolution follows the selection directly (no build or docker step between).
     RESOLVE_FIRST = [OPS / 'gdn_prefill_conv' / 'run_card_m.sh', OPS / 'sdpa_decode_qwen' / 'run_card_m.sh',
                      OPS / 'verify_t2' / 'run_card_m.sh', OPS / 'c1e_gateup' / 'run_card_b.sh',
-                     OPS / 'draft_slide_inplace' / 'run_card_b.sh'] + SOURCING
+                     OPS / 'draft_slide_inplace' / 'run_card_b.sh',
+                     OPS / 'sdpa_decode_qwen' / 'run_probe_k1.sh'] + SOURCING
 
     def invoke(self, path, directory, **env):
         args = [arg.replace('{out}', Path(directory, 'out').as_posix()) for arg in self.ARGS.get(path, [])]
@@ -1357,6 +1361,7 @@ class HarnessTests(unittest.TestCase):
         runs = (
             (OPS / 'sdpa_prefill_bench' / 'run_m1.sh', dict(M1_DRY_RUN='1', M1_ARGS='--arms baseline'), 'qwen-sdpa-m1-card-b'),
             (OPS / 'sdpa_prefill_chain' / 'run_card_m_pf.sh', dict(PF_DRY_RUN='1'), 'qwen-sdpa-pf-card-b'),
+            (OPS / 'sdpa_decode_qwen' / 'run_probe_k1.sh', dict(PROBE_DRY_RUN='1'), 'qwen-k1probe-card-b'),
         )
         for path, env, name in runs:
             with self.subTest(path=path.name), tempfile.TemporaryDirectory() as directory:
