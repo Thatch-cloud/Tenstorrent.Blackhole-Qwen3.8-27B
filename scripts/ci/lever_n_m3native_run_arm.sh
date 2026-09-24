@@ -584,6 +584,61 @@ if [ -n "${M3NATIVE_EARLY_DRAFT:-}" ]; then
   fi
   echo "round-fence plan H2: early draft 1 gdn after pairs ${M3NATIVE_GDN_AFTER_PAIRS:-0}"
 fi
+# K5-A (gdn_seq_block.py; default off). M3NATIVE_GDN_SEQ_BLOCK=1 becomes QWEN_FAST_GDN_SEQ_BLOCK=1: the packed
+# verify's one batched GDN launch runs the sequential-block kernels (the build QUALIFIED holds for the level)
+# wherever every packed user is a 16-row segment. It replaces the user-batched launch, so it needs
+# M3NATIVE_GDN_USER_BATCH=1 (the image raises without it when the verify trace is built) and the packed block.
+# M3NATIVE_GDN_SEQ_BLOCK_LEVEL=<n> becomes QWEN_FAST_GDN_SEQ_BLOCK_LEVEL (a decimal bitmask below 16, default 0;
+# the image refuses a level QUALIFIED does not hold), M3NATIVE_GDN_SEQ_BLOCK_AUDIT=<layers> becomes
+# QWEN_FAST_GDN_SEQ_BLOCK_AUDIT (distinct GDN layers 0..47, comma separated, e.g. 0,23,47; a correctness arm,
+# never a timed one); both need the flag. The modules are baked, so an image without them fails the gate's
+# every-layer requirement. Refused here, before the docker run; unset, nothing is passed.
+seq_block_value="${M3NATIVE_GDN_SEQ_BLOCK:-}"
+if [ -n "$seq_block_value" ] && [ "$seq_block_value" != "1" ]; then
+  echo "M3NATIVE_GDN_SEQ_BLOCK must be 1 or unset, got '$seq_block_value'" >&2
+  exit 1
+fi
+if [ -z "$seq_block_value" ] && [ -n "${M3NATIVE_GDN_SEQ_BLOCK_LEVEL:-}${M3NATIVE_GDN_SEQ_BLOCK_AUDIT:-}" ]; then
+  echo "M3NATIVE_GDN_SEQ_BLOCK_LEVEL / _AUDIT without M3NATIVE_GDN_SEQ_BLOCK=1 do nothing: set it or neither" >&2
+  exit 1
+fi
+if [ -n "$seq_block_value" ]; then
+  if [ "${M3NATIVE_GDN_USER_BATCH:-}" != "1" ]; then
+    echo "M3NATIVE_GDN_SEQ_BLOCK=1 needs M3NATIVE_GDN_USER_BATCH=1 (it replaces the user-batched GDN launch)" >&2
+    exit 1
+  fi
+  if [ "$users" -lt 2 ] || [ -n "${M3NATIVE_SEQUENTIAL_USERS:-}" ]; then
+    echo "M3NATIVE_GDN_SEQ_BLOCK serves the packed block only (users=$users, sequential '${M3NATIVE_SEQUENTIAL_USERS:-}')" >&2
+    exit 1
+  fi
+  seq_block_level="${M3NATIVE_GDN_SEQ_BLOCK_LEVEL:-0}"
+  if ! printf '%s' "$seq_block_level" | grep -Eq '^(0|[1-9][0-9]?)$' || [ "$seq_block_level" -ge 16 ]; then
+    echo "M3NATIVE_GDN_SEQ_BLOCK_LEVEL must be a decimal bitmask 0..15, got '$seq_block_level'" >&2
+    exit 1
+  fi
+  seq_block_audit="${M3NATIVE_GDN_SEQ_BLOCK_AUDIT:-}"
+  if [ -n "$seq_block_audit" ]; then
+    if ! printf '%s' "$seq_block_audit" | grep -Eq '^(0|[1-9][0-9]?)(,(0|[1-9][0-9]?))*$'; then
+      echo "M3NATIVE_GDN_SEQ_BLOCK_AUDIT must list distinct GDN layers 0..47 (e.g. 0,23,47), got '$seq_block_audit'" >&2
+      exit 1
+    fi
+    seq_block_seen=","
+    for seq_block_layer in ${seq_block_audit//,/ }; do
+      if [ "$seq_block_layer" -ge 48 ] || [ "${seq_block_seen#*,"$seq_block_layer",}" != "$seq_block_seen" ]; then
+        echo "M3NATIVE_GDN_SEQ_BLOCK_AUDIT must list distinct GDN layers 0..47 (e.g. 0,23,47), got '$seq_block_audit'" >&2
+        exit 1
+      fi
+      seq_block_seen="$seq_block_seen$seq_block_layer,"
+    done
+    # Below QWEN_FAST_GDN_USER_BATCH_MIN_USERS a block keeps the per-user launches, so K5-A never runs there
+    # and the after-replay audit, which finds no K5-A launch to compare, raises inside the round.
+    if [ -n "${M3NATIVE_GDN_USER_BATCH_MIN_USERS:-}" ] && [ "${M3NATIVE_GDN_USER_BATCH_MIN_USERS}" != "1" ]; then
+      echo "M3NATIVE_GDN_SEQ_BLOCK_AUDIT needs every packed block batched: unset M3NATIVE_GDN_USER_BATCH_MIN_USERS (got '${M3NATIVE_GDN_USER_BATCH_MIN_USERS}')" >&2
+      exit 1
+    fi
+  fi
+  echo "K5-A seq block 1 level $seq_block_level audit ${seq_block_audit:-none}"
+fi
 # The pair drafter's row-1 fix (pair_row_exact.py; default off). M3NATIVE_PAIR_ROW_EXACT=1 becomes
 # QWEN_FAST_PAIR_ROW_EXACT=1: each packed pair's draft SDPA is folded, one KV head per user segment, so a user in
 # pair row 1 drafts exactly as it would alone (h1a-draft-race.md sections 2-3). It folds the packed pairs only
@@ -775,6 +830,9 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PIPELINED_PUBLISH:+-e QWEN_FAST_PIPELINED_PUBLISH=1} \
   ${M3NATIVE_TRACED_PUBLISH:+-e QWEN_FAST_TRACED_PUBLISH=1} \
   ${M3NATIVE_GDN_USER_BATCH:+-e QWEN_FAST_GDN_USER_BATCH=1} \
+  ${M3NATIVE_GDN_SEQ_BLOCK:+-e QWEN_FAST_GDN_SEQ_BLOCK=1} \
+  ${M3NATIVE_GDN_SEQ_BLOCK_LEVEL:+-e QWEN_FAST_GDN_SEQ_BLOCK_LEVEL=$M3NATIVE_GDN_SEQ_BLOCK_LEVEL} \
+  ${M3NATIVE_GDN_SEQ_BLOCK_AUDIT:+-e QWEN_FAST_GDN_SEQ_BLOCK_AUDIT=$M3NATIVE_GDN_SEQ_BLOCK_AUDIT} \
   ${M3NATIVE_REPLAY_GROUP_ROWS:+-e QWEN_FAST_REPLAY_GROUP_ROWS=$M3NATIVE_REPLAY_GROUP_ROWS} \
   ${M3NATIVE_SDPA_MODES:+-e QWEN_FAST_SDPA_MODES=$M3NATIVE_SDPA_MODES} \
   ${M3NATIVE_GDN_USER_BATCH_MIN_USERS:+-e QWEN_FAST_GDN_USER_BATCH_MIN_USERS=$M3NATIVE_GDN_USER_BATCH_MIN_USERS} \

@@ -36,10 +36,22 @@ the served windows through the same `conv_gates` call the packed ones take (its 
 read by nothing and freed at once): both sides then hold post-op windows. Without it (v169) the
 audit compared advanced packed windows with unadvanced served ones - every row one out, ~76.7k
 of 81,920 elements per window - against a packed op card B had found byte-exact.
+
+Under QWEN_FAST_GDN_SEQ_BLOCK=1 (K5-A, gdn_seq_block; default off) the one recurrence launch is
+gdn_seq_block.execute with the qualified sequential-block build for QWEN_FAST_GDN_SEQ_BLOCK_LEVEL,
+when every packed user is a 16-row segment; a block with any other width keeps the served launch.
+Read at each call, so when the verify trace is built. The results then also carry
+seq_block=True and seq_block_level=<the build's level>, set only after the launch returned (the
+execution proof model_batch counts). QWEN_FAST_GDN_SEQ_BLOCK_AUDIT=<layers>: on a layer it lists
+(model_batch names the layer through gdn_seq_block.audit_scope) a DRAM copy of each user's K5-A
+output and the served launch on the same inputs follow it (gdn_seq_block.audit_launches) and are
+handed over as `seq_block_audit`, outside `owned`, like the T2 audit's windows. Flag off, nothing
+here differs.
 """
 
 from gdn_multitoken_conv import addresses, release_owned, validate_projected
 
+import gdn_seq_block
 import gdn_user_batch
 from verify_trace_t2 import audit_enabled as t2_audit, cut as t2_cut, fell_back as t2_fell_back, note as t2_note
 
@@ -136,13 +148,32 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
             widths.append(rows)
             per_user.append(dict(windows=windows, owned=mine,
                                  inputs=(packed[0], packed[1], packed[2], initial, z, weights)))
-        produced = gdn_user_batch.execute(mesh, [user['inputs'] for user in per_user], kernels, operations,
-                                          output_memory=output_memory)
+        inputs = [user['inputs'] for user in per_user]
+        # QWEN_FAST_GDN_SEQ_BLOCK (K5-A): the same one launch with the qualified sequential-block
+        # build, only when every packed user is a 16-row segment.
+        seq_block = gdn_seq_block.enabled() and all(rows == gdn_seq_block.ROWS for rows in widths)
+        if seq_block:
+            build = gdn_seq_block.served_kernels()
+            produced = gdn_seq_block.execute(mesh, inputs, operations, output_memory=output_memory, kernels=build)
+        else:
+            produced = gdn_user_batch.execute(mesh, inputs, kernels, operations, output_memory=output_memory)
         # Owned BEFORE anything below can raise. The per-user loop asserts on state
         # addresses, and a raise part way through it would otherwise strand the outputs
         # of every user it had not reached yet: `execute` has already handed ownership
         # over, so nothing else would ever free them.
         owned.extend(value for pair in produced for value in pair)
+        # QWEN_FAST_GDN_SEQ_BLOCK_AUDIT: on an audited layer, a DRAM copy of each user's K5-A
+        # output (live until the layer is done) and the served launch (`kernels`, the served
+        # build) on the same inputs; held outside `owned`, freed here only on failure.
+        seq_audit = []
+        audited = gdn_seq_block.audit_layer() if seq_block else None
+        if audited is not None:
+            seq_audit = gdn_seq_block.audit_launches(mesh, inputs, kernels, audited,
+                                                     [output for output, states in produced], operations)
+            audit_owned.extend(value for held in seq_audit
+                               for value in (held['output'], held['served_output'], held['served_states']))
+            if len(seq_audit) != len(groups):
+                raise AssertionError('The K5-A audit returned %d of %d packed users' % (len(seq_audit), len(groups)))
         results = []
         for index, ((projected, initial, conv_states), user, rows, (output, states)) in enumerate(
                 zip(groups, per_user, widths, produced, strict=True)):
@@ -156,7 +187,9 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
                 available_conv_prefixes=tuple(range(1, rows + 1)), hoisted_input=True,
                 batched_convolution=True, dma_windows=True, norm_batch=False,
                 deferred_conv_publication=True, user_batched=True, packed_users=len(groups),
-                **({'audit_windows': audit[index]} if index in audit else {})))
+                **({'audit_windows': audit[index]} if index in audit else {}),
+                **(dict(seq_block=True, seq_block_level=build.level) if seq_block else {}),
+                **({'seq_block_audit': seq_audit[index]} if seq_audit else {})))
         return results
     except BaseException:
         release_owned(operations, owned + shared + audit_owned)

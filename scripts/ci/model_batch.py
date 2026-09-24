@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCacheWriter, serial_tail
 from gdn_prefix import decode_projected, gated_decode, prepare_token_rows, validate_reused_input
 from packed_cache_writer import TILE_ROWS, SegmentedOrderedCacheWriter, tile as cache_tile, tile_rows
+import gdn_seq_block
 import verify_trace_t2
 
 
@@ -515,6 +516,10 @@ class ModelBatch:
         self.norm_batch = norm_batch_enabled(recurrence_rows(self.rows, self.pack, norm_batch), norm_batch)
         self.norm_batch_calls = 0
         self.user_batched_calls = 0
+        # QWEN_FAST_GDN_SEQ_BLOCK (K5-A): the layers whose result says the sequential-block launch
+        # ran, and the level each ran at (gdn_user_batch_conv marks them after the launch returned).
+        self.seq_block_calls = 0
+        self.seq_block_levels = []
         if retain_records and not self.packed_checkpoints:
             raise ValueError('Retained records require active packed checkpoints')
         from gdn_records import RetainedGDNBlock
@@ -622,6 +627,10 @@ class ModelBatch:
         # QWEN_FAST_VERIFY_T2_AUDIT, read once: only then does gdn_user_batch_conv hand over
         # served windows outside `owned` for this fixture to release.
         self.verify_t2_audit = verify_trace_t2.audit_enabled()
+        # QWEN_FAST_GDN_SEQ_BLOCK_AUDIT (K5-A), read once: the layers whose decode runs inside
+        # gdn_seq_block.audit_scope, so gdn_user_batch_conv hands their audit tensors over outside
+        # `owned` for this fixture to release. () without QWEN_FAST_GDN_SEQ_BLOCK=1.
+        self.seq_block_audit = gdn_seq_block.audit_active()
         gdn_index = 0
         for layer in model.layers:
             attention = layer.attention
@@ -721,12 +730,16 @@ class ModelBatch:
                     # One recurrence per user, each from its own carried state, over
                     # its own slice of the single input projection. Deferred, the
                     # pack's prefixes are placeholders: the readback decides them.
-                    result = state.decode(packed,
-                        [user[gdn_slot] for user in self.pack['checkpoints']],
-                        list(self.pack['prefixes']),
-                        segments=self.pack['segments'],
-                        slots=[user[gdn_slot] for user in self.pack['slots']],
-                        deferred=deferred)
+                    # QWEN_FAST_GDN_SEQ_BLOCK_AUDIT names this layer to the launch inside.
+                    scope = (gdn_seq_block.audit_scope(gdn_slot) if getattr(self, 'seq_block_audit', ())
+                             else nullcontext())
+                    with scope:
+                        result = state.decode(packed,
+                            [user[gdn_slot] for user in self.pack['checkpoints']],
+                            list(self.pack['prefixes']),
+                            segments=self.pack['segments'],
+                            slots=[user[gdn_slot] for user in self.pack['slots']],
+                            deferred=deferred)
                 if result.get('commit_only_gdn', False) != self.commit_only_gdn:
                     raise AssertionError('Commit-only GDN must engage in every selected layer')
                 finish_output(layer, result, operations, tt_all_reduce)
@@ -746,9 +759,17 @@ class ModelBatch:
                         audit = verify_trace_t2.audit_windows_of(result)
                         if audit:
                             release_owned(operations, audit)
+                    # QWEN_FAST_GDN_SEQ_BLOCK_AUDIT's tensors, likewise held outside `owned`.
+                    if getattr(self, 'seq_block_audit', ()):
+                        held = gdn_seq_block.audit_held_of(result)
+                        if held:
+                            release_owned(operations, held)
                 self.gdn_calls += 1
                 self.norm_batch_calls += int(result.get('norm_batch', False))
                 self.user_batched_calls += int(result.get('user_batched', False))
+                if result.get('seq_block', False):
+                    self.seq_block_calls += 1
+                    self.seq_block_levels.append(result.get('seq_block_level'))
                 return output
 
             return device_forward
@@ -806,6 +827,7 @@ class ModelBatch:
         before_gdn = self.gdn_calls
         before_norm_batch = self.norm_batch_calls
         before_user_batched = self.user_batched_calls
+        before_seq_block = getattr(self, 'seq_block_calls', 0)
         before_compact = [(state.calls, state.checkpoint_calls) for state in self.working_states]
         before_clones = [state.skipped_clones for state in self.working_states]
         before_writes = [writer.calls for writer in self.writers]
@@ -846,6 +868,18 @@ class ModelBatch:
             from dflash_device import pindiag
             pindiag('[PINDIAG] gdn user_batched calls this captured forward: {} of {} GDN layers',
                     user_batched, self.gdn_calls - before_gdn)
+        # QWEN_FAST_GDN_SEQ_BLOCK=1 (K5-A): the same, for the sequential-block launch, with the level
+        # it ran at. Counted from the result dicts, which gdn_user_batch_conv marks only after the
+        # launch returned: proof that it executed, not merely that the flag was read. Logged
+        # whenever one ran, and always with the flag set (so 0 is reported too, at the flag's level).
+        seq_block = getattr(self, 'seq_block_calls', 0) - before_seq_block
+        if seq_block or os.environ.get(gdn_seq_block.FLAG) == '1':
+            from dflash_device import pindiag
+            levels = (set(self.seq_block_levels[len(self.seq_block_levels) - seq_block:]) if seq_block
+                      else {gdn_seq_block.level()})
+            if len(levels) != 1:
+                raise AssertionError('K5-A ran at more than one level in one forward: %s' % sorted(levels, key=str))
+            pindiag(gdn_seq_block.MARKER_TEMPLATE, seq_block, self.gdn_calls - before_gdn, levels.pop())
         if self.gdn_calls - before_gdn != 48 or any(
             writer.calls - before != 2 for writer, before in zip(self.writers, before_writes, strict=True)
         ):
@@ -883,6 +917,13 @@ class ModelBatch:
                 if audit:
                     from gdn_multitoken_conv import release_owned
                     release_owned(self.operations, audit)
+            # QWEN_FAST_GDN_SEQ_BLOCK_AUDIT: the audit tensors each record holds, outside `owned` too.
+            if getattr(self, 'seq_block_audit', ()):
+                held = [value for state, result, checkpoint in self.retained.records
+                        for value in gdn_seq_block.audit_held_of(result)]
+                if held:
+                    from gdn_multitoken_conv import release_owned
+                    release_owned(self.operations, held)
             self.retained.close()
         for state in self.working_states:
             state.close()

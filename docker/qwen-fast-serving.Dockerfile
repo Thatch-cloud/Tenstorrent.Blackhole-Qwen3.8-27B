@@ -19,7 +19,7 @@ COPY scripts/ci/serving_worker_hook.py /experiment-scripts/ci/
 COPY scripts/ci/serving_one_in_flight.py /experiment-scripts/ci/
 COPY scripts/ci/runtime_binary_override.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_proposal_trace.py /experiment-scripts/ci/
-COPY scripts/ci/gdn_user_batch.py scripts/ci/gdn_user_batch_conv.py /experiment-scripts/ci/
+COPY scripts/ci/gdn_user_batch.py scripts/ci/gdn_user_batch_conv.py scripts/ci/gdn_seq_block.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_packed_proposal.py scripts/ci/dflash_packed_proposal_coordinator.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_pipelined_publish.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_traced_publish.py /experiment-scripts/ci/
@@ -49,7 +49,10 @@ COPY scripts/ci/packed_verifier.py scripts/ci/serving_packed_step.py scripts/ci/
 # kernel, which read a count where an address belongs, issued a DMA that never
 # completed, and wedged the core - so the NEXT generic_op hung, which is why runs
 # 35684239068 and 35685401900 hung at two different ops in the same warmup pass.
-COPY scripts/ci/gdn_state_copy.py scripts/ci/gdn_state_copy.cpp /experiment-scripts/ci/
+# K5-A (QWEN_FAST_GDN_SEQ_BLOCK, default off) is the same shape: gdn_seq_block.py (above, beside
+# gdn_user_batch_conv, which imports it, as model_batch and packed_verifier do) generates its kernels
+# from the SIBLING gdn_seq_block_{compute,reader,writer}.cpp (gdn_seq_block.SOURCES), so they travel here.
+COPY scripts/ci/gdn_state_copy.py scripts/ci/gdn_state_copy.cpp scripts/ci/gdn_seq_block_compute.cpp scripts/ci/gdn_seq_block_reader.cpp scripts/ci/gdn_seq_block_writer.cpp /experiment-scripts/ci/
 COPY scripts/ci/gdn_snapshot.py scripts/ci/dflash_prefill_window.py /experiment-scripts/ci/
 COPY scripts/ci/pooled_attention_replay.py /experiment-scripts/ci/
 COPY scripts/ci/target_packed_pages.py /experiment-scripts/ci/

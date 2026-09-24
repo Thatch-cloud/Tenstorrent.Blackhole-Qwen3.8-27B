@@ -151,6 +151,7 @@ from verifier_engine import note_packed_step, note_prefill
 import verifier_engine
 from verifier_inputs import host_inputs, validate_tokens
 from verifier_pack import GDN_LAYERS, build_pack, participant
+import gdn_seq_block
 import verify_prestage
 import verify_trace_t1
 import verify_trace_t2
@@ -583,6 +584,10 @@ class PackedVerifierEngine:
         self.kv_chains_cut = verify_trace_t2.cut('kv_chains')
         self.warm_kv_chains = False
         self.windows_audit = False
+        # QWEN_FAST_GDN_SEQ_BLOCK_AUDIT (K5-A, gdn_seq_block): read once here too. The captured
+        # forward's audited layers hold the audit's tensors (gdn_user_batch_conv), and every replay
+        # compares them (gdn_seq_block.audit_round). () without QWEN_FAST_GDN_SEQ_BLOCK=1.
+        self.seq_block_audit = gdn_seq_block.audit_active()
         # QWEN_FAST_PADDED_PROBE (variable-user packed rounds M1, padded_probe.py): read once
         # here, like the flags above. Off, padded_probe is never imported and verify() is
         # today's.
@@ -1100,6 +1105,11 @@ class PackedVerifierEngine:
                 # served ones built beside them in the same trace - every GDN layer on round 1,
                 # then two per round in rotation (verify_trace_t2.audit_layers).
                 verify_trace_t2.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
+            if getattr(self, 'seq_block_audit', ()):
+                # QWEN_FAST_GDN_SEQ_BLOCK_AUDIT: this replay's K5-A prefix states and gated output
+                # against the served launch's on the same inputs, every audited layer.
+                gdn_seq_block.audit_round(self.operations, self.fixture.retained.records, self.seq_block_audit,
+                                          self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
             if self.padded_probe:

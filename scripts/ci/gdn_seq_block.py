@@ -45,17 +45,43 @@ Flags (all read when the verify trace is built):
   QWEN_FAST_GDN_SEQ_BLOCK_AUDIT  audited arms only: layers (e.g. 0,23,47) whose served launch also
                                  runs on the same inputs (served_audit_launch, which keeps it out
                                  of the T1 gate's one-'coalesced'-per-layer count), both results
-                                 compared after the replay.
+                                 compared after the replay (the audit, below).
 
-QUALIFIED starts empty: only the card-B probe builds, and it does so with the explicit
-`unqualified=True` builder argument, never from the environment. The probe-only builds A0 (T5/T6
-unfused, bisection) and N (the SFPU state add, the negative control), and the timing diagnostics
-('nosnap', 'passthrough'), are builder arguments too, and can never be qualified.
+QUALIFIED holds level 0 of variant A only: the triple card B's P0 passed at full plan coverage
+(A 142/142 cases byte-identical to the served launch, N 0/14; probe run p0full, 2026-09-24).
+The card-B probe builds anything else with the explicit `unqualified=True` builder argument,
+never from the environment. The probe-only builds A0 (T5/T6 unfused, bisection) and N (the SFPU
+state add, the negative control), and the timing diagnostics ('nosnap', 'passthrough'), are
+builder arguments too, and can never be qualified.
 
-Uncertified: host construction only. Nothing here has run on a device; the equality and timing
-evidence is gdn_seq_block_device_test.py (card B, scripts/ci/gdn-seq-block-rig.sh).
+The audit (QWEN_FAST_GDN_SEQ_BLOCK_AUDIT). gdn_user_batch_conv runs, for an audited layer, inside
+the capture and right after that layer's own K5-A launch: a DRAM copy of each user's K5-A gated
+output (ttnn.clone, which for an unchanged dtype is a reader -> writer page copy with no compute
+kernel; attention_replay_audit snapshots its candidate the same way), then the served launch
+(gdn_user_batch.execute, the served build) on the SAME input tensors with its output in DRAM,
+not counted by the T1 gate. All of it is held outside `owned` (model_batch frees it with the
+retained block). The model's own output is an L1 tensor the capture frees as scratch once the
+layer has used it; the copy is taken while it is live, so no L1 is held across layers (holding
+it once made a static CB/L1 clash, buffer start 736512 against CB end 742272,
+docs/experiment-execution.md:1554-1558), and the served reference goes to DRAM for the same
+reason. After every replay packed_verifier calls audit_round, which compares, per audited layer
+and per user, on both chips:
+  states   the model's own K5-A prefix states (the retained history the commit reads) against
+           the served launch's - all 16 x 24 snapshots, exact bf16 bit patterns of the logical
+           elements;
+  output   the model's own K5-A gated output (its DRAM copy, written by the same replay) against
+           the served launch's.
+The compare reads through ttnn.to_torch, like verify_trace_t2's G1: on 9f9cd4f that readback
+turns -0.0 and bf16 denormals into +0.0 and NaN into -Inf, so a difference in those alone is
+invisible here (card B's P0 moved every byte raw and covered them). Padded tile rows are not
+compared. One '[GDN-SEQ-BLOCK-AUDIT] layer=L user=U mismatches=N' line per (layer, user) per
+round; any mismatch raises after the round's lines are logged.
+
+Card B qualified the level-0 triple (P0 exact, P1 383.9 us against 526.2 us per launch); the
+in-model evidence is the gate's (48 of 48 layers at level 0, every audit line mismatches=0).
 """
 
+from contextlib import contextmanager
 import hashlib
 import os
 from pathlib import Path
@@ -105,16 +131,25 @@ VARIANTS = ('A', 'A0', 'N')    # A: served candidate; A0: bisection only; N: neg
 DIAGNOSTICS = (None, 'nosnap', 'passthrough')  # P1 (iii) timing builds; never exact, never served
 
 # level -> {'reader': sha256, 'writer': sha256, 'compute': sha256} of the generated variant-A
-# sources. Empty until card-B P0 shows 0 differing bytes (then commit that level's triple here, the
-# fused_commit.QUALIFIED_KERNEL_SHA256 pattern).
-QUALIFIED = {}
+# sources, committed only after card-B P0 shows 0 differing bytes at full plan coverage (the
+# fused_commit.QUALIFIED_KERNEL_SHA256 pattern). Level 0: probe run p0full on image P5 (tt-metal
+# 9f9cd4fd, native compute b59314e0), 'pass', may_commit_qualified true.
+QUALIFIED = {
+    0: dict(reader='c9becdc5c6ffafb4aba9e3fd2c49d2c6d16fd26e2ee1f70c9dbfa2ded23e5253',
+            writer='277082a8d10e0e35ed4a5670170cd100cc53a3539f91f1e51fe9f62e78ea3311',
+            compute='5275b2cc766d40e595d3fd4122d655a8bc511c0ef7d2f42b748975ecf5b2cf78'),
+}
 
 # model_batch's per-capture marker (K5 plan 3.1) and the gate's regex for it (3.9).
 MARKER = '[PINDIAG] gdn seq_block calls this captured forward:'
+MARKER_TEMPLATE = MARKER + ' {} of {} GDN layers level={}'   # model_batch's pindiag template
 GATE_PATTERN = re.compile(r'gdn seq_block calls this captured forward: ([1-9][0-9]*) of ([0-9]+) GDN layers '
                           r'level=([0-9]+)')
 AUDIT_MARKER = '[GDN-SEQ-BLOCK-AUDIT]'
 AUDIT_PATTERN = re.compile(r'\[GDN-SEQ-BLOCK-AUDIT\] layer=([0-9]+) user=([0-9]+) mismatches=([0-9]+)')
+# The per-user result key gdn_user_batch_conv sets when K5-A ran (and the level it ran at), and
+# the one holding an audited layer's launches (outside `owned`).
+RESULT_KEY, LEVEL_KEY, AUDIT_KEY = 'seq_block', 'seq_block_level', 'seq_block_audit'
 
 # ---- the CB plan: index -> (name, pages, dtype, producer RISC, consumer RISC) ----
 # The K5 plan's section 3.3 table, with one change: its W (8 pages, reader -> compute for norm_w,
@@ -209,11 +244,56 @@ def audit_layers(environ=None):
 
 def marker(calls, layers, built_level):
     """model_batch's line after a captured forward: how many GDN layers ran this launch."""
-    return '%s %d of %d GDN layers level=%d' % (MARKER, calls, layers, built_level)
+    return MARKER_TEMPLATE.format(int(calls), int(layers), int(built_level))
 
 
-def audit_line(layer, user, mismatches):
-    return '%s layer=%d user=%d mismatches=%d' % (AUDIT_MARKER, layer, user, mismatches)
+def audit_line(layer, user, mismatches, **fields):
+    """The audit's per-(layer, user) line; `fields` follow in the order given (round, output, states)."""
+    return '%s layer=%d user=%d mismatches=%d%s' % (AUDIT_MARKER, layer, user, mismatches,
+                                                   ''.join(' %s=%s' % item for item in fields.items()))
+
+
+def audit_active(environ=None):
+    """QWEN_FAST_GDN_SEQ_BLOCK_AUDIT's layers when QWEN_FAST_GDN_SEQ_BLOCK=1, else (): what
+    model_batch and packed_verifier read once, at construction."""
+    return audit_layers(environ) if enabled(environ) else ()
+
+
+_AUDIT_LAYER = [None]
+
+
+@contextmanager
+def audit_scope(layer):
+    """model_batch names the GDN layer (0..47) whose decode runs inside; gdn_user_batch_conv asks
+    audit_layer() whether QWEN_FAST_GDN_SEQ_BLOCK_AUDIT covers it. The previous layer comes back
+    on exit, whatever the decode raised."""
+    if type(layer) is not int or not 0 <= layer < LAYERS:
+        raise ValueError('A GDN layer 0..%d required' % (LAYERS - 1))
+    previous = _AUDIT_LAYER[0]
+    _AUDIT_LAYER[0] = layer
+    try:
+        yield layer
+    finally:
+        _AUDIT_LAYER[0] = previous
+
+
+def audit_layer(environ=None):
+    """The GDN layer in audit_scope when QWEN_FAST_GDN_SEQ_BLOCK_AUDIT lists it, else None."""
+    layer = _AUDIT_LAYER[0]
+    return layer if layer is not None and layer in audit_layers(environ) else None
+
+
+def log_line(message):
+    """One line into the server log: loguru where it exists, stdout otherwise. Never raises."""
+    try:
+        try:
+            from loguru import logger
+        except ImportError:
+            print(message, flush=True)
+        else:
+            logger.info('{}', message)
+    except BaseException:
+        pass
 
 
 # ---- CB plan ----
@@ -480,10 +560,11 @@ def execute(mesh, users, operations=None, *, output_memory=None, kernels=None):
 
     The return is gdn_user_batch.execute's; the signature is the plan's (section 3.1), which is
     gdn_user_batch.execute's less its positional `kernels`: the build is the qualified one for
-    QWEN_FAST_GDN_SEQ_BLOCK_LEVEL unless the card-B probe passes its own BY KEYWORD. So the served
-    call site `gdn_user_batch.execute(mesh, users, kernels, operations, output_memory=...)`
-    (gdn_user_batch_conv.py:139) becomes `execute(mesh, users, operations, output_memory=...)`; a
-    build or a source dict in the `operations` slot (the drop-in mistake) is refused.
+    QWEN_FAST_GDN_SEQ_BLOCK_LEVEL unless a build is passed BY KEYWORD (the card-B probe's own, or
+    gdn_user_batch_conv's served_kernels(), taken once so it can report the level). So the served
+    call `gdn_user_batch.execute(mesh, users, kernels, operations, output_memory=...)` becomes
+    `execute(mesh, users, operations, output_memory=...)`; a build or a source dict in the
+    `operations` slot (the drop-in mistake) is refused.
     `users` is a sequence of `(qkv, beta, gate, initial, z, norm_w)` tuples; returns
     `[(output, states), ...]` in user order, each the served shape, dtype, layout and placement -
     `(1, 16, 3072)` gated output in `output_memory` (L1 by default), `(16, 24, 128, 128)` bf16
@@ -552,13 +633,126 @@ def served_audit_launch(mesh, users, served, operations=None, *, output_memory=N
     GDN layer per capture (lever_n_m3native_gate.py:1190-1194): counted, three audited layers would
     log 51 of 48 and fail an arm whose launches were all correct. So the counts are taken before
     the launch and restored after it, whatever it raises."""
+    return _uncounted(lambda: batch.execute(mesh, users, served, operations, output_memory=output_memory))
+
+
+def _uncounted(launch):
+    """launch() with the verify_trace_t1 counts it notes dropped and the earlier ones kept."""
     kept = verify_trace_t1.take()
     try:
-        return batch.execute(mesh, users, served, operations, output_memory=output_memory)
+        return launch()
     finally:
         verify_trace_t1.take()
         for name, count in kept.items():
             verify_trace_t1.note(name, count)
+
+
+def audit_launches(mesh, users, served, layer, outputs, operations=None):
+    """QWEN_FAST_GDN_SEQ_BLOCK_AUDIT for one audited layer, inside the capture, right after that
+    layer's own K5-A launch: `outputs`, that launch's gated outputs (one per user, still live),
+    each copied to DRAM (ttnn.clone; an unchanged dtype is a page copy, no compute kernel), then
+    the served launch (`served`, the served build) on the same `users` inputs with its outputs in
+    DRAM, not counted by the T1 gate. Nothing here launches K5-A: the model's own output and its
+    own retained states are what audit_round compares.
+
+    Returns one dict per user, {'layer', 'output' (the copy of the model's own K5-A output),
+    'served_output', 'served_states'}, held outside `owned`: the caller frees them (model_batch,
+    with the retained block). On a raise everything allocated here is freed first."""
+    if operations is None:
+        import ttnn as operations
+    outputs, groups = list(outputs), list(users)
+    if len(outputs) != len(groups):
+        raise ValueError('One K5-A output per audited user required (%d for %d)' % (len(outputs), len(groups)))
+    dram = operations.DRAM_MEMORY_CONFIG
+    copies, theirs = [], None
+    try:
+        for output in outputs:
+            copies.append(operations.clone(output, memory_config=dram))
+            if copies[-1] is output:
+                copies.pop()
+                raise AssertionError('The audit copy of a K5-A output must be a new tensor')
+        theirs = served_audit_launch(mesh, groups, served, operations, output_memory=dram)
+        if len(theirs) != len(copies):
+            raise AssertionError('The served audit launch returned %d of %d users' % (len(theirs), len(copies)))
+    except BaseException:
+        for value in copies + [value for pair in theirs or () for value in pair]:
+            operations.deallocate(value)
+        raise
+    return [dict(layer=layer, output=copy, served_output=served_output, served_states=served_states)
+            for copy, (served_output, served_states) in zip(copies, theirs)]
+
+
+def audit_held_of(result):
+    """Every tensor the audit holds for a GDN layer result, every user's, in user order (the
+    verify_trace_t2.audit_windows_of shape: a packed result lists its users in segment_results)."""
+    pieces = result.get('segment_results') or (result,)
+    return [value for piece in pieces if piece.get(AUDIT_KEY)
+            for value in (piece[AUDIT_KEY]['output'], piece[AUDIT_KEY]['served_output'],
+                          piece[AUDIT_KEY]['served_states'])]
+
+
+def differing(operations, mine, theirs):
+    """Differing bf16 elements of two device tensors, summed over chips: int16 views of to_torch
+    (logical elements; see the module docstring for what that readback cannot see). A shape or
+    chip-count difference counts every element; no chip, or an empty readback, counts as one
+    (nothing compared is not a match)."""
+    import torch
+
+    left, right = operations.get_device_tensors(mine), operations.get_device_tensors(theirs)
+    count = 0 if len(left) == len(right) and left else 1
+    for one, two in zip(left, right):
+        a = operations.to_torch(one).contiguous().view(torch.int16)
+        b = operations.to_torch(two).contiguous().view(torch.int16)
+        count += int((a != b).sum()) if a.shape == b.shape and a.numel() else max(a.numel(), b.numel(), 1)
+    return count
+
+
+def compare_record(operations, record, layer):
+    """One retained GDN layer record, (state, result, checkpoint): per user, (user, output
+    mismatches, states mismatches) - the model's own K5-A output (its DRAM copy) against the served
+    one, and the model's own K5-A prefix states against the served ones. A user without the
+    audit's launch for this layer, or a side compared with itself, raises: an audit that compared
+    nothing must not read as a pass."""
+    state, result, checkpoint = record
+    pieces = result.get('segment_results') or (result,)
+    found = []
+    for user, piece in enumerate(pieces):
+        held = piece.get(AUDIT_KEY)
+        if not held or held.get('layer') != layer or not piece.get(RESULT_KEY):
+            raise AssertionError('%s GDN layer %d user %d holds no K5-A audit launch' % (AUDIT_MARKER, layer, user))
+        if held['output'] is held['served_output'] or piece['states'] is held['served_states'] or any(
+                value is piece.get('output') for value in (held['output'], held['served_output'])):
+            raise AssertionError('%s GDN layer %d user %d compares a tensor with itself or with the freed '
+                                 'L1 output' % (AUDIT_MARKER, layer, user))
+        found.append((user, differing(operations, held['output'], held['served_output']),
+                      differing(operations, piece['states'], held['served_states'])))
+    return found
+
+
+def audit_round(operations, records, layers, round_number):
+    """After a replay (packed_verifier): every audited layer's retained record through
+    compare_record. One audit_line per (layer, user); if any element differed, raises after the
+    whole round's lines are logged. Returns the number of (layer, user) pairs compared."""
+    compared, total = 0, 0
+    for layer in layers:
+        if not 0 <= layer < len(records):
+            message = '%s round=%d layer=%d: the block retains %d GDN layers' % (AUDIT_MARKER, round_number,
+                                                                                  layer, len(records))
+            log_line(message)
+            raise AssertionError(message)
+        try:
+            found = compare_record(operations, records[layer], layer)
+        except AssertionError as error:
+            log_line('%s round=%d' % (error, round_number))
+            raise
+        for user, output, states in found:
+            log_line(audit_line(layer, user, output + states, round=round_number, output=output, states=states))
+            total += output + states
+            compared += 1
+    if total:
+        raise AssertionError('%s round=%d: %d differing elements (K5-A against the served launch)'
+                             % (AUDIT_MARKER, round_number, total))
+    return compared
 
 
 def audit(root=DEFAULT_ROOT, users=batch.MAX_USERS, built_level=0, variant='A', diag=None):

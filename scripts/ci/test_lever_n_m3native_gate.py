@@ -143,7 +143,8 @@ class DiagnosticFilterTests(unittest.TestCase):
                  'x [PACKED-COMMIT-HOST] round=1', 'x [PACKED-PROPOSE] round=1', 'x [PHASE] step a begin',
                  'x [PINDIAG] dram after', 'plain server chatter', 'x ERROR boom', 'Traceback (most recent call last):',
                  'TT_FATAL @ llrt.cpp:594: Timed out', 'Segmentation fault (core dumped)', 'terminate called after throwing',
-                 'Engine core proc EngineCore_0 died unexpectedly']
+                 'Engine core proc EngineCore_0 died unexpectedly',
+                 'x [GDN-SEQ-BLOCK-AUDIT] layer=23 user=1 mismatches=0 round=4 output=0 states=0']
         kept = select_diagnostic(lines)
         self.assertEqual(kept, [line for line in lines if line != 'plain server chatter'])
 
@@ -433,6 +434,20 @@ class FlagMarkerTests(unittest.TestCase):
         self.assertEqual(len(self._report(environ, partial)['missing']), 1)
         self.assertEqual(self._report(environ, partial + chr(10) + full)['missing'], [])
         self.assertEqual(self._report(environ, partial, users=1)['missing'], [])
+
+    def test_gdn_seq_block_needs_every_layer_at_its_level_and_clean_audits(self):
+        """K5-A (the gate half; test_gdn_seq_block.GateWiringTests has the rest)."""
+        environ = {'QWEN_FAST_GDN_USER_BATCH': '1', 'QWEN_FAST_GDN_SEQ_BLOCK': '1',
+                   'QWEN_FAST_GDN_SEQ_BLOCK_AUDIT': '0'}
+        batched = '[PINDIAG] gdn user_batched calls this captured forward: 48 of 48 GDN layers'
+        full = '[PINDIAG] gdn seq_block calls this captured forward: 48 of 48 GDN layers level=0'
+        audits = ['[GDN-SEQ-BLOCK-AUDIT] layer=0 user=%d mismatches=0 round=1' % user for user in range(4)]
+        self.assertEqual(self._report(environ, chr(10).join([batched, full] + audits))['missing'], [])
+        self.assertEqual(len(self._report(environ, chr(10).join([batched] + audits))['missing']), 1)
+        bad = audits[:3] + ['[GDN-SEQ-BLOCK-AUDIT] layer=0 user=3 mismatches=2 round=1']
+        self.assertEqual(len(self._report(environ, chr(10).join([batched, full] + bad))['missing']), 1)
+        self.assertEqual(self._report({'QWEN_FAST_GDN_USER_BATCH': '1'}, batched)['missing'], [])
+        self.assertNotIn('gdn_seq_block', self._report({}, ''))
 
     def test_the_tail_sdpa_mode_needs_its_in_path_and_factory_markers(self):
         from lever_n_m3native_gate import SDPA_MODES_MARKERS, required_flag_markers

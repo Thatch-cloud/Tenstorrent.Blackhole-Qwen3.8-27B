@@ -405,6 +405,42 @@ class VerifyT2ArmTests(unittest.TestCase):
         self.assertEqual(verify_trace_t2.KV_ROWS_FLAG, 'QWEN_FAST_VERIFY_T2_KV_ROWS')
 
 
+class SeqBlockArmTests(unittest.TestCase):
+    """K5-A: M3NATIVE_GDN_SEQ_BLOCK[_LEVEL|_AUDIT] cross as QWEN_FAST_GDN_SEQ_BLOCK[...], right after the
+    user-batch line, before the entrypoint; unset, nothing crosses. gdn_seq_block reads them (baked: both
+    image copy lists, test_gdn_seq_block.ShippingTests) and so does the gate; the arm's refusals are
+    test_gdn_seq_block.ArmWiringTests."""
+
+    LINES = ('${M3NATIVE_GDN_SEQ_BLOCK:+-e QWEN_FAST_GDN_SEQ_BLOCK=1}',
+             '${M3NATIVE_GDN_SEQ_BLOCK_LEVEL:+-e QWEN_FAST_GDN_SEQ_BLOCK_LEVEL=$M3NATIVE_GDN_SEQ_BLOCK_LEVEL}',
+             '${M3NATIVE_GDN_SEQ_BLOCK_AUDIT:+-e QWEN_FAST_GDN_SEQ_BLOCK_AUDIT=$M3NATIVE_GDN_SEQ_BLOCK_AUDIT}')
+
+    def test_the_three_switches_cross_after_the_user_batch_before_the_entrypoint(self):
+        text = arm_text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(), '${M3NATIVE_GDN_USER_BATCH:+-e QWEN_FAST_GDN_USER_BATCH=1} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92))
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+
+    def test_the_container_side_reads_the_names_that_cross(self):
+        import gdn_seq_block
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        module = (HERE / 'gdn_seq_block.py').read_text(encoding='utf-8')
+        for name in ('QWEN_FAST_GDN_SEQ_BLOCK', 'QWEN_FAST_GDN_SEQ_BLOCK_LEVEL', 'QWEN_FAST_GDN_SEQ_BLOCK_AUDIT'):
+            with self.subTest(name=name):
+                self.assertIn("'%s'" % name, gate)
+                self.assertIn("'%s'" % name, module)
+        self.assertEqual((gdn_seq_block.FLAG, gdn_seq_block.LEVEL_FLAG, gdn_seq_block.AUDIT_FLAG),
+                         ('QWEN_FAST_GDN_SEQ_BLOCK', 'QWEN_FAST_GDN_SEQ_BLOCK_LEVEL', 'QWEN_FAST_GDN_SEQ_BLOCK_AUDIT'))
+        through = re.findall(r'-e (QWEN_FAST_GDN_SEQ_BLOCK\w*)=', arm_text())
+        self.assertEqual(sorted(through), ['QWEN_FAST_GDN_SEQ_BLOCK', 'QWEN_FAST_GDN_SEQ_BLOCK_AUDIT',
+                                           'QWEN_FAST_GDN_SEQ_BLOCK_LEVEL'])
+
+
 class VariableUserArmTests(unittest.TestCase):
     """Variable-user packed rounds M0/M1: M3NATIVE_PAIR_MASK_REFRESH, _PAIR_MASK_AUDIT,
     _PAIRS_PACKED_ONLY and _PADDED_PROBE cross as QWEN_FAST_<name>=1, right after the T2 lines,

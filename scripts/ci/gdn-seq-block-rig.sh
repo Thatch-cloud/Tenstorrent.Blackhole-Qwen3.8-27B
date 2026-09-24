@@ -48,6 +48,20 @@ outdir=$1
 shift 1
 extra_args=("$@")
 
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The card first, before docker or any file is touched (test_qual_card: every harness refuses the
+# serving pair, and the default card B's missing node, before anything else).
+. "$here/qual_card.sh"
+ALLOW_SERVING_CARD=0   # never card M or card A, whatever the caller's environment says
+qual_card_select
+qual_card_resolve
+if [ "$QUAL_CARD" != "$QUAL_CARD_B" ] || [ "$QUAL_SERVING" != 0 ]; then
+  echo "refusing: this probe runs on card B ($QUAL_CARD_B) only, not $QUAL_CARD ($(qual_card_label))" >&2
+  exit 2
+fi
+qual_refuse_holders
+device=$QUAL_NODE
+
 P5=sha256:0fd9ad1f14a4e5d3d4464be55465cb6bb8d52e1b533c430d1c2f7f219df2b0e8
 image=${GDN_SEQ_BLOCK_IMAGE:-$P5}
 if [ "$image" != "$P5" ]; then
@@ -60,7 +74,6 @@ if [ -z "$image_id" ]; then
 fi
 echo "### image: $image -> $image_id"
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mounts=()
 for name in gdn_seq_block.py gdn_seq_block_compute.cpp gdn_seq_block_reader.cpp gdn_seq_block_writer.cpp \
     gdn_seq_block_device_test.py gdn_user_batch.py verify_trace_t1.py; do
@@ -75,17 +88,6 @@ sha256sum "$here"/gdn_seq_block* "$here/gdn_user_batch.py" "$here/verify_trace_t
 
 mkdir -p "$outdir"
 outdir=$(cd "$outdir" && pwd)
-
-. "$here/qual_card.sh"
-ALLOW_SERVING_CARD=0   # never card M or card A, whatever the caller's environment says
-qual_card_select
-qual_card_resolve
-if [ "$QUAL_CARD" != "$QUAL_CARD_B" ] || [ "$QUAL_SERVING" != 0 ]; then
-  echo "refusing: this probe runs on card B ($QUAL_CARD_B) only, not $QUAL_CARD ($(qual_card_label))" >&2
-  exit 2
-fi
-qual_refuse_holders
-device=$QUAL_NODE
 
 name="gdn-seq-block-$(date -u +%Y%m%d%H%M%S)-$$"
 qual_card_recheck   # the board is still on the node the holder check cleared

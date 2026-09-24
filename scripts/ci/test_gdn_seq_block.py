@@ -11,15 +11,22 @@ What is held here, all on the host:
   - descriptor parity with gdn_user_batch over the same recording fake;
   - the model_batch marker and the gate regex; the audit launch kept out of the T1 gate's count;
   - the rig runner's pins (card B only, the hang hint); the probe's compare helpers and its P0,
-    traced and P1 verdicts, as pure functions.
-The wiring (gdn_user_batch_conv's dispatch, the model_batch counter, the flag-off call-for-call
-proof) comes with the model wiring, not here.
+    traced and P1 verdicts, as pure functions;
+  - QUALIFIED: the card-B level-0 triple, and (where the evidence export is checked out) that the
+    pinned sources generate exactly it;
+  - the wiring: gdn_user_batch_conv's dispatch (K5-A only with the flag and every width 16), the
+    model_batch counter, level and marker, the audit (scope, launches, holds, the after-replay
+    compare, packed_verifier's call), the arm's refusals and passthroughs, the gate's checks,
+    both image copy lists and the CPU allowlist; flag off, gdn_user_batch_conv and model_batch
+    are the parent's (e7bfd324), call for call, and packed_verifier's served rounds are its
+    parent's byte for byte (test_padded_probe's fixture).
 
 gdn_seq_block.execute checks the served runtime pin (gdn_multitoken.validate_handoff_runtime) as
 gdn_user_batch.execute does; it reads tt-metal files, so this module patches it out for every test
 (setUpModule) and HandoffPinTests holds the call itself.
 """
 
+from contextlib import nullcontext
 import hashlib
 import math
 import os
@@ -29,12 +36,13 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import gdn_multitoken as native
 import gdn_seq_block as seq
 import gdn_user_batch as batch
 from test_gdn_user_batch import FakeTTNN, FakeTensor, KERNELS, mesh, user_inputs
+import test_padded_probe
 from test_qual_card import BASH, CARD_B, CARD_M, q, run as run_bash
 import verify_trace_t1
 
@@ -436,8 +444,9 @@ class SourceTests(unittest.TestCase):
 
 
 class QualifiedTests(unittest.TestCase):
-    def test_qualified_starts_empty(self):
-        self.assertEqual(seq.QUALIFIED, {})
+    def test_qualified_holds_level_0_only(self):
+        self.assertEqual(sorted(seq.QUALIFIED), [0])
+        self.assertEqual(sorted(seq.QUALIFIED[0]), sorted(seq.ROLES))
 
     def test_an_unqualified_triple_is_refused_without_the_probes_builder_argument(self):
         with SyntheticRoot() as root:
@@ -1091,6 +1100,923 @@ class ProbeVerdictTests(unittest.TestCase):
                         kernels=build())
         self.assertEqual(sorted(broken.freed), sorted(value.name for value in broken.allocated))
         self.assertEqual(broken.launches, [])
+
+
+# ---------------------------------------------------------------------------------------------
+# The wiring (K5 plan 3.1, 3.9, 5 G-CPU): gdn_user_batch_conv's dispatch, the model_batch counter
+# and marker, the audit, the arm, the gate, the copy lists and the CPU allowlist.
+# ---------------------------------------------------------------------------------------------
+
+ROOT = HERE.parent.parent
+# The wiring's parent: the K5-A files committed, nothing wired. Flag off, every module this change
+# touches must be that commit's, call for call.
+PARENT = 'e7bfd324'
+CPU_WORKFLOW = ROOT / '.github' / 'workflows' / 'qwen-integration-cpu.yml'
+ARM = HERE / 'lever_n_m3native_run_arm.sh'
+TRIPLE = dict(reader='c9becdc5c6ffafb4aba9e3fd2c49d2c6d16fd26e2ee1f70c9dbfa2ded23e5253',
+              writer='277082a8d10e0e35ed4a5670170cd100cc53a3539f91f1e51fe9f62e78ea3311',
+              compute='5275b2cc766d40e595d3fd4122d655a8bc511c0ef7d2f42b748975ecf5b2cf78')
+
+
+def clean_environment(**flags):
+    """No QWEN_FAST_* flag but the ones given."""
+    environment = {name: value for name, value in os.environ.items() if not name.startswith('QWEN_FAST_')}
+    environment.update(flags)
+    return patch.dict(os.environ, environment, clear=True)
+
+
+def parent_module(relative, name):
+    from test_dflash_proposal_trace import pinned_module
+
+    module = pinned_module(relative, name, commit=PARENT)
+    if module is None:
+        raise unittest.SkipTest('no git history for %s' % PARENT)
+    return module
+
+
+def plain(value, operations=None):
+    """A result or call argument as something two runs compare: fakes by name, containers by element,
+    `operations` (a fixture's own fake) by role, a DeviceLoopState by its type."""
+    if operations is not None and value is operations:
+        return 'operations'
+    if type(value).__name__ == 'DeviceLoopState':
+        return 'DeviceLoopState'
+    if isinstance(value, dict):
+        return {key: plain(item, operations) for key, item in value.items()}
+    if isinstance(value, list):
+        return [plain(item, operations) for item in value]
+    if isinstance(value, tuple):
+        return tuple(plain(item, operations) for item in value)
+    return getattr(value, 'name', value)
+
+
+def calls_of(mock, operations=None):
+    """A mock's calls as (args, kwargs) pairs through plain()."""
+    return [(plain(tuple(call.args), operations), plain(dict(call.kwargs), operations)) for call in mock.call_args_list]
+
+
+class QualifiedLevelTests(unittest.TestCase):
+    def test_qualified_holds_the_card_b_level_0_variant_a_triple_only(self):
+        self.assertEqual(seq.QUALIFIED, {0: TRIPLE})
+
+    @unittest.skipUnless(NATIVE_ROOT, 'the pinned native kernels are not in this checkout')
+    def test_the_pinned_sources_generate_exactly_the_qualified_triple(self):
+        self.assertEqual(seq.sha256(seq.generate(NATIVE_ROOT)), TRIPLE)
+        kernels = seq.load_kernels(NATIVE_ROOT)
+        self.assertTrue(kernels.qualified)
+        self.assertEqual((kernels.level, kernels.variant, kernels.diag), (0, 'A', None))
+        for variant, diag in (('A0', None), ('N', None), ('A', 'nosnap'), ('A', 'passthrough')):
+            with self.subTest(variant=variant, diag=diag), self.assertRaisesRegex(ValueError, 'not qualified'):
+                seq.load_kernels(NATIVE_ROOT, variant=variant, diag=diag)
+        with patch.dict(seq._SERVED, clear=True):
+            self.assertIs(seq.served_kernels(NATIVE_ROOT, {}), seq.served_kernels(NATIVE_ROOT, {}))
+            with self.assertRaisesRegex(ValueError, 'not implemented'):
+                seq.served_kernels(NATIVE_ROOT, {seq.LEVEL_FLAG: '1'})
+
+
+class DispatchTests(unittest.TestCase):
+    """gdn_user_batch_conv.run_user_batched_projected: K5-A only with the flag and only when every
+    packed user is a 16-row segment; flag off, the parent's calls exactly."""
+
+    def launch(self, module=None, widths=(16, 16, 16, 16), seq_execute=None, audit=None):
+        import gdn_user_batch_conv
+        from test_gdn_user_batch_conv import fake_operations, user_group
+
+        module = module or gdn_user_batch_conv
+        calls = []
+        operations = fake_operations(calls)
+        groups = [user_group(index, operations, rows) for index, rows in enumerate(widths)]
+        taps = [operations.make('tap%d' % tap, (1, 1, 5120)) for tap in range(4)]
+        extras = [operations.make('dt', (1, 1, 24)), operations.make('nega', (1, 1, 24)),
+                  operations.make('norm_w', (1, 1, 128))]
+
+        def windows(mesh, projected, history):
+            calls.append(('windows', projected.name, tuple(value.name for value in history)))
+            return [operations.make('window:%s.%d' % (projected.name, slot), (1, projected.shape[1], 5120))
+                    for slot in range(4)]
+
+        def launched(tag):
+            def run(mesh, inputs, *args, **kwargs):
+                calls.append((tag, plain(inputs), plain(args, operations), plain(kwargs, operations)))
+                return [(operations.make('%s-out%d' % (tag, index), (1, user[0].shape[1], 3072)),
+                         operations.make('%s-prefix%d' % (tag, index), (user[0].shape[1], 24, 128, 128)))
+                        for index, user in enumerate(inputs)]
+            return run
+
+        build = SimpleNamespace(level=0, name='k5a-build')
+        with patch('gdn_conv_windows.build_windows', side_effect=windows), \
+                patch('gdn_user_batch.execute', side_effect=launched('served')) as served, \
+                patch('gdn_seq_block.execute', side_effect=seq_execute or launched('k5a')) as candidate, \
+                patch('gdn_seq_block.served_kernels', return_value=build), \
+                patch('gdn_seq_block.audit_launches', side_effect=audit) as audited:
+            self.mocks = (served, candidate, audited)
+            results = module.run_user_batched_projected('mesh', groups, taps, *extras, 'kernels', operations)
+        return calls, operations, results, served, candidate, audited
+
+    def test_flag_off_the_dispatch_is_the_parents_call_for_call(self):
+        parent = parent_module('gdn_user_batch_conv.py', 'gdn_user_batch_conv_k5a_parent')
+        for environ in ({}, {seq.FLAG: '0'}, {seq.FLAG: '0', batch.FLAG: '1', seq.AUDIT_FLAG: '0,23'}):
+            for widths in ((16, 16, 16, 16), (16, 8)):
+                with self.subTest(environ=environ, widths=widths), clean_environment(**environ):
+                    mine = self.launch(widths=widths)
+                    theirs = self.launch(parent, widths=widths)
+                    self.assertEqual(mine[0], theirs[0])                       # every call, in order
+                    self.assertEqual(plain(mine[2]), plain(theirs[2]))         # every result, key for key
+                    self.assertEqual(mine[3].call_count, 1)
+                    mine[4].assert_not_called()
+                    mine[5].assert_not_called()
+                    for result in mine[2]:
+                        self.assertNotIn('seq_block', result)
+                        self.assertNotIn('seq_block_audit', result)
+
+    def test_flag_on_every_16_row_block_takes_k5a_with_the_served_calls_inputs(self):
+        with clean_environment():
+            served_calls = self.launch()[0]
+        with clean_environment(**{seq.FLAG: '1', batch.FLAG: '1'}):
+            calls, operations, results, served, candidate, audited = self.launch()
+        served.assert_not_called()
+        self.assertEqual(candidate.call_count, 1)
+        k5a = [entry for entry in calls if entry[0] == 'k5a']
+        served_entry = [entry for entry in served_calls if entry[0] == 'served']
+        self.assertEqual(k5a[0][1], served_entry[0][1], 'the same per-user input tuples')
+        self.assertEqual(k5a[0][2], ('operations',))
+        self.assertEqual(k5a[0][3], dict(output_memory=None, kernels='k5a-build'))
+        # Everything before the launch is the served path's, call for call.
+        self.assertEqual(calls[:calls.index(k5a[0])], served_calls[:served_calls.index(served_entry[0])])
+        for index, result in enumerate(results):
+            self.assertIs(result['seq_block'], True)
+            self.assertEqual(result['seq_block_level'], 0)
+            self.assertEqual(result['output'].name, 'k5a-out%d' % index)
+            self.assertIn(result['states'], result['owned'])
+            self.assertTrue(result['user_batched'] and not result['norm_batch'])
+            self.assertNotIn('seq_block_audit', result)
+        audited.assert_not_called()
+        self.assertEqual((seq.RESULT_KEY, seq.LEVEL_KEY, seq.AUDIT_KEY),
+                         ('seq_block', 'seq_block_level', 'seq_block_audit'))
+
+    def test_any_other_width_keeps_the_served_launch(self):
+        for widths in ((16, 8), (8, 8, 8, 8), (16, 16, 16, 32), (32,)):
+            with self.subTest(widths=widths), clean_environment(**{seq.FLAG: '1', batch.FLAG: '1'}):
+                calls, operations, results, served, candidate, audited = self.launch(widths=widths)
+                self.assertEqual(served.call_count, 1)
+                candidate.assert_not_called()
+                self.assertTrue(all('seq_block' not in result for result in results))
+
+    def test_the_flag_without_the_user_batch_or_a_bad_value_raises_before_any_launch(self):
+        for environ, message in (({seq.FLAG: '1'}, 'requires QWEN_FAST_GDN_USER_BATCH=1'),
+                                 ({seq.FLAG: 'yes', batch.FLAG: '1'}, 'must be 0 or 1')):
+            released = []
+            with self.subTest(environ=environ), clean_environment(**environ), \
+                    patch('gdn_user_batch_conv.release_owned', side_effect=lambda ops, values: released.extend(values)):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.launch()
+                for mock in self.mocks:
+                    mock.assert_not_called()
+                # every user's windows and conv outputs, built before the dispatch, are released
+                names = {value.name for value in released}
+                self.assertEqual(len([name for name in names if name.startswith('window:')]), 16)
+                self.assertEqual(len([name for name in names if name.startswith('conv:')]), 4)
+
+    def test_an_audited_layer_holds_the_audit_launches_outside_owned(self):
+        held = []
+
+        def audit(mesh, inputs, served, layer, outputs, operations):
+            held.append((plain(inputs), served, layer, [output.name for output in outputs]))
+            return [dict(layer=layer, output=operations.make('audit-out%d' % index, (1, 16, 3072)),
+                         served_output=operations.make('served-out%d' % index, (1, 16, 3072)),
+                         served_states=operations.make('served-prefix%d' % index, (16, 24, 128, 128)))
+                    for index in range(len(inputs))]
+
+        environ = {seq.FLAG: '1', batch.FLAG: '1', seq.AUDIT_FLAG: '0,23,47'}
+        with clean_environment(**environ), seq.audit_scope(23):
+            calls, operations, results, served, candidate, audited = self.launch(audit=audit)
+        self.assertEqual(len(held), 1)
+        k5a = [entry for entry in calls if entry[0] == 'k5a'][0]
+        self.assertEqual(held[0], (k5a[1], 'kernels', 23, ['k5a-out%d' % index for index in range(4)]),
+                         "the same inputs, the served build, the model's own K5-A outputs")
+        for index, result in enumerate(results):
+            hold = result['seq_block_audit']
+            self.assertEqual(hold['layer'], 23)
+            self.assertEqual((hold['output'].name, hold['served_output'].name, hold['served_states'].name),
+                             ('audit-out%d' % index, 'served-out%d' % index, 'served-prefix%d' % index))
+            owned = {value.name for value in result['owned']}
+            self.assertFalse(owned & {'audit-out%d' % index, 'served-out%d' % index, 'served-prefix%d' % index})
+        self.assertEqual(seq.audit_held_of(dict(results[0], segment_results=tuple(results))),
+                         [value for result in results for value in (result['seq_block_audit']['output'],
+                                                                     result['seq_block_audit']['served_output'],
+                                                                     result['seq_block_audit']['served_states'])])
+        # A layer the list does not name, no scope at all, or the audit without the flag: no audit.
+        for scope, flags in ((5, environ), (None, environ), (23, {seq.AUDIT_FLAG: '23'})):
+            with self.subTest(scope=scope, flags=flags), clean_environment(**flags), \
+                    (seq.audit_scope(scope) if scope is not None else nullcontext()):
+                calls, operations, results, served, candidate, audited = self.launch()
+                audited.assert_not_called()
+                self.assertTrue(all('seq_block_audit' not in result for result in results))
+
+    def test_a_failed_audit_releases_the_layers_outputs(self):
+        released = []
+
+        def explode(*args, **kwargs):
+            raise RuntimeError('audit launch')
+
+        with clean_environment(**{seq.FLAG: '1', batch.FLAG: '1', seq.AUDIT_FLAG: '3'}), seq.audit_scope(3), \
+                patch('gdn_user_batch_conv.release_owned', side_effect=lambda ops, values: released.extend(values)):
+            with self.assertRaisesRegex(RuntimeError, 'audit launch'):
+                self.launch(audit=explode)
+        names = {value.name for value in released}
+        for index in range(4):
+            self.assertIn('k5a-out%d' % index, names)
+            self.assertIn('k5a-prefix%d' % index, names)
+
+
+class AuditScopeTests(unittest.TestCase):
+    def test_the_scope_names_the_layer_and_restores_the_previous_one(self):
+        environ = {seq.AUDIT_FLAG: '0,23,47'}
+        self.assertIsNone(seq.audit_layer(environ))
+        with seq.audit_scope(23):
+            self.assertEqual(seq.audit_layer(environ), 23)
+            with seq.audit_scope(5):
+                self.assertIsNone(seq.audit_layer(environ), 'not listed')
+            self.assertEqual(seq.audit_layer(environ), 23)
+            with self.assertRaisesRegex(RuntimeError, 'decode'):
+                with seq.audit_scope(47):
+                    raise RuntimeError('decode')
+            self.assertEqual(seq.audit_layer(environ), 23)
+        self.assertIsNone(seq.audit_layer(environ))
+        for layer in (48, -1, '3', None, 2.0):
+            with self.subTest(layer=layer), self.assertRaisesRegex(ValueError, 'GDN layer'):
+                with seq.audit_scope(layer):
+                    pass
+
+    def test_the_audit_is_active_only_with_the_flag(self):
+        self.assertEqual(seq.audit_active({}), ())
+        self.assertEqual(seq.audit_active({seq.AUDIT_FLAG: '0,23,47'}), ())
+        self.assertEqual(seq.audit_active({seq.FLAG: '1', batch.FLAG: '1', seq.AUDIT_FLAG: '0,23,47'}), (0, 23, 47))
+        self.assertEqual(seq.audit_active({seq.FLAG: '1', batch.FLAG: '1'}), ())
+        with self.assertRaisesRegex(ValueError, 'distinct GDN layers'):
+            seq.audit_active({seq.FLAG: '1', batch.FLAG: '1', seq.AUDIT_FLAG: '0,0'})
+        with self.assertRaisesRegex(ValueError, 'requires'):
+            seq.audit_active({seq.FLAG: '1', seq.AUDIT_FLAG: '0'})
+
+
+class CloningFake(AddressFreeFake):
+    """AddressFreeFake with ttnn.clone: a new tensor in `memory_config`, recorded in `clones`."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.clones = []
+
+    def clone(self, value, memory_config=None):
+        copy = self.empty(value.shape, dtype=value.dtype, layout=value.layout, memory_config=memory_config)
+        self.clones.append((value, copy))
+        return copy
+
+
+class AuditLaunchPairTests(unittest.TestCase):
+    """audit_launches: a DRAM copy of each of the model's own K5-A outputs, then the served launch on
+    the same inputs with its outputs in DRAM, not counted by the T1 gate. Nothing launches K5-A again."""
+
+    def launch_layer(self, fake, groups):
+        return seq.execute(mesh(), groups, fake, output_memory=fake.L1_MEMORY_CONFIG, kernels=build())
+
+    def test_the_models_own_outputs_are_copied_and_the_served_launch_runs_uncounted(self):
+        verify_trace_t1.take()
+        groups = [user_inputs(index) for index in range(4)]
+        with patch('verify_trace_t1.cut', lambda name: name == 'coalesce'):
+            fake = CloningFake()
+            produced = self.launch_layer(fake, groups)
+            held = seq.audit_launches(mesh(), groups, KERNELS, 23, [output for output, states in produced], fake)
+            self.assertEqual(verify_trace_t1.take(), {'coalesced': 1}, 'the layer launch only')
+        self.assertEqual(len(fake.launches), 2, 'the layer launch and the served launch; no second K5-A launch')
+        inputs = [value.name for group in groups for value in group]
+        self.assertEqual([name for name in fake.launches[1][0] if name in inputs],
+                         [name for name in fake.launches[0][0] if name in inputs])
+        self.assertEqual({kernel.kernel_source for kernel in fake.launches[1][1][((0, 0), (0, 0))].kernels},
+                         set(KERNELS.values()))
+        self.assertEqual([source for source, copy in fake.clones], [output for output, states in produced])
+        self.assertEqual({copy._memory for source, copy in fake.clones}, {'dram'})
+        self.assertEqual({output._memory for output, states in produced}, {'l1'})
+        self.assertEqual(fake.freed, [])
+        self.assertEqual(len(held), 4)
+        served = fake.allocated[12:]
+        self.assertEqual({value._memory for value in served}, {'dram'})
+        for index, hold in enumerate(held):
+            self.assertEqual(hold['layer'], 23)
+            self.assertIs(hold['output'], fake.clones[index][1])
+            self.assertIsNot(hold['output'], produced[index][0])
+            self.assertIs(hold['served_output'], served[2 * index])
+            self.assertIs(hold['served_states'], served[2 * index + 1])
+            self.assertEqual(hold['served_states'].shape, (16, 24, 128, 128))
+
+    def test_a_failure_frees_everything_it_allocated_and_nothing_of_the_models(self):
+        groups = [user_inputs(index) for index in range(4)]
+        for failing in ('clone', 'launch', 'alias'):
+            with self.subTest(failing=failing):
+                fake = CloningFake()
+                produced = self.launch_layer(fake, groups)
+                before = len(fake.allocated)
+                if failing == 'launch':
+                    fake.generic_op = lambda tensors, program: (_ for _ in ()).throw(RuntimeError('device'))
+                else:
+                    original = fake.clone
+
+                    def clone(value, memory_config=None, original=original, failing=failing):
+                        if len(fake.clones) == 2:
+                            if failing == 'alias':
+                                return value
+                            raise RuntimeError('device')
+                        return original(value, memory_config=memory_config)
+
+                    fake.clone = clone
+                with self.assertRaisesRegex((RuntimeError, AssertionError), 'device|new tensor'):
+                    seq.audit_launches(mesh(), groups, KERNELS, 0, [output for output, states in produced], fake)
+                self.assertEqual(sorted(fake.freed), sorted(value.name for value in fake.allocated[before:]))
+                self.assertGreater(len(fake.freed), 0)
+        with self.assertRaisesRegex(ValueError, 'One K5-A output per audited user'):
+            seq.audit_launches(mesh(), groups, KERNELS, 0, [], CloningFake())
+
+
+class ComparisonFake:
+    """to_torch and get_device_tensors over per-chip torch payloads (`chips`)."""
+
+    @staticmethod
+    def get_device_tensors(value):
+        return list(value.chips)
+
+    @staticmethod
+    def to_torch(value):
+        return value
+
+
+class AuditRoundTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import torch
+        cls.torch = torch
+
+    def tensor(self, shape, seed):
+        generator = self.torch.Generator().manual_seed(seed)
+        return SimpleNamespace(chips=[self.torch.randn(shape, generator=generator).bfloat16() for chip in range(2)])
+
+    def copy(self, value):
+        return SimpleNamespace(chips=[chip.clone() for chip in value.chips])
+
+    def record(self, layer, users=4, held=True, flip=None):
+        pieces = []
+        for user in range(users):
+            states = self.tensor((16, 24, 4, 8), 100 * layer + user)
+            output = self.tensor((1, 16, 32), 1000 + 100 * layer + user)
+            hold = dict(layer=layer, output=output, served_output=self.copy(output), served_states=self.copy(states))
+            if flip and flip[0] == user:
+                target = hold['served_states'] if flip[1] == 'states' else hold['served_output']
+                bits = target.chips[1].view(self.torch.int16)
+                bits.view(-1)[7] ^= 1
+            pieces.append(dict(states=states, seq_block=True, seq_block_level=0,
+                               **({'seq_block_audit': hold} if held else {})))
+        result = dict(pieces[0], segment_results=tuple(pieces))
+        return ('state', result, 'checkpoint')
+
+    def run_round(self, records, layers=(0, 2), round_number=1):
+        lines = []
+        with patch('gdn_seq_block.log_line', side_effect=lines.append):
+            try:
+                return seq.audit_round(ComparisonFake(), records, layers, round_number), lines
+            except AssertionError as error:
+                return error, lines
+
+    def test_an_exact_round_logs_one_zero_line_per_layer_and_user(self):
+        records = [self.record(layer) for layer in range(3)]
+        compared, lines = self.run_round(records)
+        self.assertEqual(compared, 8)
+        self.assertEqual(lines, [seq.audit_line(layer, user, 0, round=1, output=0, states=0)
+                                 for layer in (0, 2) for user in range(4)])
+        self.assertEqual([seq.AUDIT_PATTERN.search(line).groups() for line in lines][:2],
+                         [('0', '0', '0'), ('0', '1', '0')])
+
+    def test_a_differing_element_is_counted_logged_and_raised_after_the_whole_round(self):
+        for where in ('states', 'output'):
+            with self.subTest(where=where):
+                records = [self.record(0), self.record(1), self.record(2, flip=(2, where))]
+                error, lines = self.run_round(records)
+                self.assertIsInstance(error, AssertionError)
+                self.assertIn('1 differing elements', str(error))
+                self.assertEqual(len(lines), 8, 'every line of the round is logged first')
+                self.assertEqual(lines[6], seq.audit_line(2, 2, 1, round=1, output=int(where == 'output'),
+                                                          states=int(where == 'states')))
+                import lever_n_m3native_gate as gate
+                report = gate.gdn_seq_block_report({seq.FLAG: '1', batch.FLAG: '1', seq.AUDIT_FLAG: '0,2'}, 4,
+                                                   '\n'.join(lines + [seq.marker(48, 48, 0)]))
+                self.assertEqual(len(report['problems']), 1)
+                self.assertIn('mismatches', report['problems'][0])
+
+    def test_an_audit_that_holds_nothing_or_names_another_layer_is_not_a_pass(self):
+        for records, message in (([self.record(0, held=False)], 'holds no K5-A audit launch'),
+                                 ([self.record(5)], 'holds no K5-A audit launch'),
+                                 ([self.record(0)] * 2, 'retains 2 GDN layers')):
+            with self.subTest(message=message):
+                error, lines = self.run_round(records, layers=(0,) if message != 'retains 2 GDN layers' else (7,))
+                self.assertIsInstance(error, AssertionError)
+                self.assertIn(message, str(error))
+                self.assertTrue(lines and message in lines[-1])
+
+    def test_a_shape_or_chip_difference_counts(self):
+        torch = self.torch
+        left = SimpleNamespace(chips=[torch.zeros(2, 3).bfloat16()] * 2)
+        self.assertEqual(seq.differing(ComparisonFake(), left, SimpleNamespace(chips=[torch.zeros(3, 2).bfloat16()] * 2)), 12)
+        self.assertEqual(seq.differing(ComparisonFake(), left, SimpleNamespace(chips=[torch.zeros(2, 3).bfloat16()])), 1)
+        minus = SimpleNamespace(chips=[torch.full((2, 3), -0.0).bfloat16()] * 2)
+        self.assertEqual(seq.differing(ComparisonFake(), left, minus), 12, 'bit patterns, not values')
+        none = SimpleNamespace(chips=[])
+        self.assertEqual(seq.differing(ComparisonFake(), none, none), 1, 'no chip compared is not a match')
+        empty = SimpleNamespace(chips=[torch.zeros(0, 3).bfloat16()] * 2)
+        self.assertEqual(seq.differing(ComparisonFake(), empty, empty), 2, 'an empty readback is not a match')
+
+    def test_a_side_compared_with_itself_or_with_the_freed_l1_output_is_not_a_pass(self):
+        for alias in ('output', 'states', 'freed'):
+            with self.subTest(alias=alias):
+                record = self.record(0)
+                piece = record[1]['segment_results'][1]
+                hold = piece['seq_block_audit']
+                if alias == 'output':
+                    hold['served_output'] = hold['output']
+                elif alias == 'states':
+                    hold['served_states'] = piece['states']
+                else:
+                    piece['output'] = hold['output']
+                error, lines = self.run_round([record], layers=(0,))
+                self.assertIsInstance(error, AssertionError)
+                self.assertIn('GDN layer 0 user 1 compares a tensor with itself', str(error))
+                self.assertFalse(any(seq.AUDIT_PATTERN.search(line) for line in lines), 'no line reads as a pass')
+
+
+class ModelBatchWiringTests(unittest.TestCase):
+    """model_batch: the counter and the level come from the result dict, the marker is one line per
+    captured forward, the audit scope names the GDN layer, and the audit holds are released; flag
+    off, gdn_forward and run are the parent's, call for call."""
+
+    def fixture(self, module, retained=True, audit=()):
+        import torch
+        from model_batch import validate_pack
+
+        packs = [dict(start=100 * (index + 1), rows=16, pages=torch.full((1, 4), index + 1, dtype=torch.int32),
+                      prefix=0, checkpoints=['ck%d.%d' % (index, layer) for layer in range(48)],
+                      slots=[['slot%d.%d.%d' % (index, layer, part) for part in range(5)] for layer in range(48)])
+                 for index in range(2)]
+        fixture = module.ModelBatch.__new__(module.ModelBatch)
+        fixture.rows = 32
+        fixture.pack = validate_pack(packs)
+        fixture.device_loop_gdn = fixture.compact_prologue = fixture.batch_conv = fixture.packed_checkpoints = True
+        fixture.commit_only_gdn = True
+        fixture.norm_batch = fixture.prefix_zero_reuse = fixture.defer_conv_publication = False
+        fixture.verify_t2_audit = False
+        fixture.operations = SimpleNamespace(reshape=lambda value, shape: SimpleNamespace(shape=shape),
+            get_device_tensors=lambda value: [SimpleNamespace(buffer_address=lambda: id(value))] * 2)
+        fixture.working_states, fixture.gdn_calls, fixture.norm_batch_calls, fixture.user_batched_calls = [], 0, 0, 0
+        if module.__name__ == 'model_batch':
+            fixture.seq_block_calls, fixture.seq_block_levels, fixture.seq_block_audit = 0, [], audit
+        fixture.retained = SimpleNamespace(append=Mock()) if retained else None
+        return fixture
+
+    def forward(self, module, decoded, retained=True, audit=(), slot=3, environ=None):
+        fixture = self.fixture(module, retained, audit)
+        layer = SimpleNamespace(B=8, _stable_state=True, rec_state='rec', conv_states=['c0', 'c1', 'c2', 'c3'])
+        helper = SimpleNamespace(direct=True, gdn=layer, live=['rec', 'c0', 'c1', 'c2', 'c3'],
+                                 allocate=Mock(side_effect=lambda: ['part%d' % part for part in range(5)]))
+        scopes = []
+
+        def decode(*args, **kwargs):
+            scopes.append(seq._AUDIT_LAYER[0])
+            return decoded
+
+        with clean_environment(**(environ or {})), \
+                patch.dict(sys.modules, {'models.tt_transformers.tt.ccl': SimpleNamespace(tt_all_reduce='reduce')}), \
+                patch('gdn_multitoken.load_kernels', return_value='kernels'), \
+                patch('gdn_device_loop_state.DeviceLoopState.decode', side_effect=decode) as decode_mock, \
+                patch('gdn_multitoken_conv.finish_output') as finish, \
+                patch('gdn_multitoken_conv.release_owned') as release, \
+                patch('gdn_records.retain_checkpoint_histories') as retain:
+            output = fixture.gdn_forward(layer, helper, 'ck%d' % slot, slot)(SimpleNamespace(shape=(1, 1, 32, 5120)))
+        ops = fixture.operations
+        calls = dict(output=output, decode=calls_of(decode_mock, ops), finish=calls_of(finish, ops),
+                     release=calls_of(release, ops), retain=calls_of(retain, ops),
+                     append=calls_of(fixture.retained.append, ops) if retained else None,
+                     counts=(fixture.gdn_calls, fixture.norm_batch_calls, fixture.user_batched_calls))
+        return fixture, calls, scopes
+
+    @staticmethod
+    def decoded(**extra):
+        return dict(commit_only_gdn=True, owned=[], layer_output='reduced', user_batched=True, norm_batch=False,
+                    **extra)
+
+    def test_flag_off_gdn_forward_is_the_parents_call_for_call(self):
+        import model_batch
+
+        parent = parent_module('model_batch.py', 'model_batch_k5a_parent')
+        for retained in (True, False):
+            with self.subTest(retained=retained):
+                mine = self.forward(model_batch, self.decoded(), retained)
+                theirs = self.forward(parent, self.decoded(), retained)
+                self.assertEqual(mine[1], theirs[1])
+                self.assertEqual(mine[2], [None])
+                self.assertEqual((mine[0].seq_block_calls, mine[0].seq_block_levels), (0, []))
+
+    def run_forward(self, module, environ, seq_calls, levels=None, user_batched=48):
+        fixture = module.ModelBatch.__new__(module.ModelBatch)
+        fixture.retained = fixture.pack = None
+        fixture.rows = 32
+        fixture.gdn_calls = fixture.norm_batch_calls = fixture.user_batched_calls = 0
+        if module.__name__ == 'model_batch':
+            fixture.seq_block_calls, fixture.seq_block_levels = 0, []
+        fixture.norm_batch = True
+        fixture.attention_mask_once = fixture.skip_row_clones = False
+        fixture.compact_gdn = fixture.device_loop_gdn = True
+        fixture.writers, fixture.readers, fixture.bindings = [], [], []
+        fixture.tokens, fixture.cos, fixture.sin, fixture.positions, fixture.pages = range(5)
+        fixture.working_states = [SimpleNamespace(calls=0, checkpoint_calls=0, skipped_clones=0) for layer in range(48)]
+
+        def forward(*args, **kwargs):
+            fixture.gdn_calls += 48
+            for state in fixture.working_states:
+                state.calls += 1
+                state.checkpoint_calls += 1
+            fixture.user_batched_calls += user_batched
+            fixture.norm_batch_calls += 48 - user_batched
+            if seq_calls:
+                fixture.seq_block_calls += seq_calls
+                fixture.seq_block_levels.extend(levels or [0] * seq_calls)
+            return 'logits'
+
+        fixture.model = SimpleNamespace(_forward_decode=Mock(side_effect=forward))
+        with clean_environment(**environ), patch('dflash_device.pindiag') as marker:
+            result = fixture.run()
+        return result, [call.args for call in marker.call_args_list]
+
+    def test_flag_off_run_logs_what_the_parent_logs(self):
+        import model_batch
+
+        parent = parent_module('model_batch.py', 'model_batch_k5a_parent_run')
+        for environ in ({}, {batch.FLAG: '1'}, {seq.FLAG: '0', batch.FLAG: '1'}):
+            for user_batched in (0, 48):
+                with self.subTest(environ=environ, user_batched=user_batched):
+                    self.assertEqual(self.run_forward(model_batch, environ, 0, user_batched=user_batched),
+                                     self.run_forward(parent, environ, 0, user_batched=user_batched))
+
+    def test_the_marker_counts_the_forwards_k5a_layers_at_their_level(self):
+        import lever_n_m3native_gate as gate
+        import model_batch
+
+        on = {seq.FLAG: '1', batch.FLAG: '1'}
+        result, lines = self.run_forward(model_batch, on, 48)
+        self.assertEqual(result, 'logits')
+        self.assertIn((seq.MARKER_TEMPLATE, 48, 48, 0), lines)
+        text = seq.MARKER_TEMPLATE.format(48, 48, 0)
+        self.assertEqual(text, '[PINDIAG] gdn seq_block calls this captured forward: 48 of 48 GDN layers level=0')
+        self.assertEqual(gate.GDN_SEQ_BLOCK.search(text).groups(), ('48', '48', '0'))
+        # With the flag and nothing engaged: 0, at the level the flag asks for.
+        self.assertIn((seq.MARKER_TEMPLATE, 0, 48, 0), self.run_forward(model_batch, on, 0)[1])
+        self.assertIn((seq.MARKER_TEMPLATE, 0, 48, 5), self.run_forward(model_batch, dict(on, **{seq.LEVEL_FLAG: '5'}), 0)[1])
+        # An engaged layer is reported even without the flag; two levels in one forward are refused.
+        self.assertIn((seq.MARKER_TEMPLATE, 12, 48, 0), self.run_forward(model_batch, {}, 12)[1])
+        with self.assertRaisesRegex(AssertionError, 'more than one level'):
+            self.run_forward(model_batch, on, 2, levels=[0, 1])
+        self.assertEqual([line for line in self.run_forward(model_batch, {}, 0)[1] if line[0] == seq.MARKER_TEMPLATE], [])
+
+    def test_the_count_and_level_come_from_the_result_dict(self):
+        import model_batch
+
+        fixture, calls, scopes = self.forward(model_batch, self.decoded(seq_block=True, seq_block_level=0))
+        self.assertEqual((fixture.seq_block_calls, fixture.seq_block_levels), (1, [0]))
+        fixture, calls, scopes = self.forward(model_batch, self.decoded())
+        self.assertEqual((fixture.seq_block_calls, fixture.seq_block_levels), (0, []))
+
+    def test_the_audit_scope_names_the_gdn_layer_to_the_launch_inside(self):
+        import model_batch
+
+        self.forward(model_batch, self.decoded(), audit=(0, 23), slot=23)
+        fixture, calls, scopes = self.forward(model_batch, self.decoded(), audit=(0, 23), slot=23)
+        self.assertEqual(scopes, [23])
+        self.assertIsNone(seq._AUDIT_LAYER[0], 'restored after the decode')
+        fixture, calls, scopes = self.forward(model_batch, self.decoded(), audit=(), slot=23)
+        self.assertEqual(scopes, [None])
+
+    def test_the_audit_holds_are_released_with_the_layer_or_the_retained_block(self):
+        import model_batch
+
+        holds = [dict(layer=3, output=SimpleNamespace(name='a%d' % user), served_output=SimpleNamespace(name='s%d' % user),
+                      served_states=SimpleNamespace(name='p%d' % user)) for user in range(2)]
+        pieces = tuple(dict(seq_block=True, seq_block_level=0, seq_block_audit=hold) for hold in holds)
+        decoded = self.decoded(segment_results=pieces, seq_block=True, seq_block_level=0)
+        fixture, calls, scopes = self.forward(model_batch, decoded, retained=False, audit=(3,))
+        self.assertEqual([args for args, kwargs in calls['release']],
+                         [('operations', []), ('operations', ['a0', 's0', 'p0', 'a1', 's1', 'p1'])])
+        fixture, calls, scopes = self.forward(model_batch, decoded, retained=False, audit=())
+        self.assertEqual([args for args, kwargs in calls['release']], [('operations', [])],
+                         'only with the audit read at construction')
+        # Retained: close() releases them, and only with the audit read at construction.
+        fixture = self.fixture(model_batch, retained=True, audit=(3,))
+        fixture.retained = SimpleNamespace(records=[('state', decoded, 'carry')], close=Mock())
+        fixture.working_states, fixture.grouped_readers, fixture.buffers = [], [], []
+        with patch('gdn_multitoken_conv.release_owned') as release:
+            fixture.close()
+        self.assertEqual(plain(release.call_args_list[0][0][1]), ['a0', 's0', 'p0', 'a1', 's1', 'p1'])
+        fixture.retained.close.assert_called_once_with()
+        fixture = self.fixture(model_batch, retained=True, audit=())
+        fixture.retained = SimpleNamespace(records=[('state', decoded, 'carry')], close=Mock())
+        fixture.working_states, fixture.grouped_readers, fixture.buffers = [], [], []
+        with patch('gdn_multitoken_conv.release_owned') as release:
+            fixture.close()
+        release.assert_not_called()
+
+
+class PackedVerifierFlagTests(test_padded_probe.ProbeFixture):
+    """packed_verifier over test_packed_verifier's four-user block with test_padded_probe's fake
+    device model (every replay writes what is staged): flag off, three served rounds are the
+    parent's (e7bfd324) byte for byte; flag on with an audit, every replay is followed by exactly
+    one audit_round over that fixture's retained records, after the replay has run."""
+
+    def test_flag_off_three_rounds_are_the_parents_byte_for_byte(self):
+        import packed_verifier
+
+        parent = parent_module('packed_verifier.py', 'packed_verifier_k5a_parent')
+        run_rounds = test_padded_probe.FlagOffTests.run_rounds
+        for environ in ({}, {seq.FLAG: '0'}, {seq.FLAG: '0', batch.FLAG: '1', seq.AUDIT_FLAG: '0,23'}):
+            with self.subTest(environ=environ), patch.dict(os.environ, environ), \
+                    patch('gdn_seq_block.audit_round') as audit:
+                before = run_rounds(self, parent)
+                today = run_rounds(self, packed_verifier)
+                audit.assert_not_called()
+                self.assertGreater(len(before['copies']), 400)
+                self.assertEqual(today, before)
+
+    def test_flag_on_every_replay_is_followed_by_one_audit_round(self):
+        os.environ.update({seq.FLAG: '1', batch.FLAG: '1', seq.AUDIT_FLAG: '0,23'})
+        calls, blocks = [], []
+
+        def audit_round(operations, records, layers, round_number):
+            calls.append((operations is self.ttnn, records is blocks[0].fixture.retained.records, layers,
+                          round_number, self.model_hook.replays))
+            return 8
+
+        with patch('gdn_seq_block.audit_round', side_effect=audit_round):
+            blocks.append(self.probed_block(probe=False))
+            self.assertEqual(blocks[0].seq_block_audit, (0, 23))
+            self.serve(blocks[0], 3)
+        self.assertEqual(calls, [(True, True, (0, 23), number, number) for number in (1, 2, 3)])
+        with patch('gdn_seq_block.audit_round', side_effect=AssertionError('[GDN-SEQ-BLOCK-AUDIT] round=4')):
+            with self.assertRaisesRegex(AssertionError, 'round=4'):
+                blocks[0].verify(self.four())
+
+    def test_every_replay_compares_the_audited_layers_after_the_windows_audit(self):
+        source = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
+        self.assertIn('import gdn_seq_block\n', source)
+        self.assertIn('        self.seq_block_audit = gdn_seq_block.audit_active()\n', source)
+        windows = source.index('verify_trace_t2.audit_round(self.operations, self.fixture.retained.records, '
+                               'self.rounds + 1)')
+        call = source.index('gdn_seq_block.audit_round(self.operations, self.fixture.retained.records, '
+                            'self.seq_block_audit,')
+        self.assertLess(windows, call)
+        self.assertLess(call, source.index('predictions = [host[slice(*segment_rows(self.shape, segment))]'))
+        self.assertIn("if getattr(self, 'seq_block_audit', ()):", source[windows:call])
+
+
+class GateWiringTests(unittest.TestCase):
+    ON = {seq.FLAG: '1', batch.FLAG: '1'}
+    BATCHED = '[PINDIAG] gdn user_batched calls this captured forward: 48 of 48 GDN layers'
+
+    def report(self, environ, lines, users=4):
+        import lever_n_m3native_gate as gate
+        return gate.flag_marker_report(environ, users, '\n'.join(['2026-09-25 | INFO | ' + line for line in lines]))
+
+    def test_the_gate_reads_the_modules_names_and_patterns(self):
+        import lever_n_m3native_gate as gate
+        self.assertEqual((gate.GDN_SEQ_BLOCK_FLAG, gate.GDN_SEQ_BLOCK_LEVEL_FLAG, gate.GDN_SEQ_BLOCK_AUDIT_FLAG),
+                         (seq.FLAG, seq.LEVEL_FLAG, seq.AUDIT_FLAG))
+        self.assertEqual(gate.GDN_SEQ_BLOCK.pattern, seq.GATE_PATTERN.pattern)
+        self.assertEqual(gate.GDN_SEQ_BLOCK_AUDIT_LINE.pattern, seq.AUDIT_PATTERN.pattern)
+        self.assertEqual(gate.GDN_SEQ_BLOCK_LEVEL_BITS, seq.LEVEL_BITS)
+        self.assertEqual(gate.select_diagnostic(['x ' + seq.audit_line(0, 1, 0, round=3), 'chatter']),
+                         ['x ' + seq.audit_line(0, 1, 0, round=3)])
+
+    def test_no_flag_asks_nothing(self):
+        report = self.report({}, [])
+        self.assertEqual(report['missing'], [])
+        self.assertNotIn('gdn_seq_block', report)
+        self.assertNotIn(seq.FLAG, report['found'])
+        self.assertEqual(self.report({seq.FLAG: '0'}, [])['missing'], [])
+
+    def test_four_users_need_every_layer_at_the_requested_level(self):
+        self.assertEqual(self.report(self.ON, [self.BATCHED, seq.marker(48, 48, 0)])['missing'], [])
+        report = self.report(self.ON, [self.BATCHED, seq.marker(0, 48, 0), seq.marker(48, 48, 0)])
+        self.assertEqual(report['gdn_seq_block']['captures'], [(48, 48, 0)], 'a 0-count line is not a capture')
+        self.assertTrue(report['found'][seq.FLAG]['n of n GDN layers at the level'])
+        for lines in ([self.BATCHED], [self.BATCHED, seq.marker(47, 48, 0)], [self.BATCHED, seq.marker(48, 48, 1)]):
+            with self.subTest(lines=lines):
+                missing = self.report(self.ON, lines)['missing']
+                self.assertTrue(any(entry.startswith(seq.FLAG + ': a captured forward running K5-A in all 48')
+                                    for entry in missing), missing)
+        level = dict(self.ON, **{seq.LEVEL_FLAG: '5'})
+        self.assertEqual(self.report(level, [self.BATCHED, seq.marker(48, 48, 5)])['missing'], [])
+        self.assertEqual(self.report(level, [self.BATCHED, seq.marker(48, 48, 5)])['gdn_seq_block']['level'], 5)
+        mixed = self.report(self.ON, [self.BATCHED, seq.marker(48, 48, 0), seq.marker(48, 48, 3)])['missing']
+        self.assertEqual(mixed, [seq.FLAG + ': captures at level 3, not the 0 requested'])
+        # A capture that ran K5-A in only some layers fails beside a complete one, at any user count.
+        for users in (4, 2):
+            with self.subTest(users=users):
+                partial = self.report(self.ON, [self.BATCHED, seq.marker(48, 48, 0), seq.marker(47, 48, 0)],
+                                      users=users)['missing']
+                self.assertEqual(partial, [seq.FLAG + ': captures running K5-A in only some GDN layers: 47 of 48 level=0'])
+        self.assertEqual(len(self.report(self.ON, [self.BATCHED, seq.marker(48, 47, 0)])['missing']), 2)
+        # One or two users need no every-layer capture (the 64-row block is the four-user one).
+        self.assertEqual(self.report(self.ON, [], users=1)['missing'], [])
+
+    def test_configuration_errors_fail_the_arm(self):
+        cases = (({seq.FLAG: '1'}, 'needs QWEN_FAST_GDN_USER_BATCH=1'),
+                 ({seq.FLAG: 'yes', batch.FLAG: '1'}, '0 or 1'),
+                 (dict(self.ON, **{seq.LEVEL_FLAG: '16'}), 'a decimal bitmask below 16'),
+                 (dict(self.ON, **{seq.LEVEL_FLAG: '01'}), 'a decimal bitmask below 16'),
+                 (dict(self.ON, **{seq.AUDIT_FLAG: '0,0'}), 'distinct GDN layers 0..47'),
+                 (dict(self.ON, **{seq.AUDIT_FLAG: '48'}), 'distinct GDN layers 0..47'),
+                 ({seq.AUDIT_FLAG: '0'}, 'without QWEN_FAST_GDN_SEQ_BLOCK=1 do nothing'),
+                 ({seq.LEVEL_FLAG: '0'}, 'without QWEN_FAST_GDN_SEQ_BLOCK=1 do nothing'))
+        for environ, message in cases:
+            with self.subTest(environ=environ):
+                missing = self.report(environ, [self.BATCHED, seq.marker(48, 48, 0)], users=1)['missing']
+                self.assertTrue(any(message in entry for entry in missing), missing)
+
+    def test_every_audit_line_must_be_zero_and_every_listed_layer_audited_for_every_user(self):
+        environ = dict(self.ON, **{seq.AUDIT_FLAG: '0,23,47'})
+        lines = [self.BATCHED, seq.marker(48, 48, 0)] + [
+            seq.audit_line(layer, user, 0, round=round_number, output=0, states=0)
+            for round_number in (1, 2) for layer in (0, 23, 47) for user in range(4)]
+        report = self.report(environ, lines)
+        self.assertEqual(report['missing'], [])
+        self.assertEqual(report['gdn_seq_block']['audit_lines'], 24)
+        bad = list(lines)
+        bad[9] = seq.audit_line(23, 3, 17, round=1, output=0, states=17)
+        missing = self.report(environ, bad)['missing']
+        self.assertEqual(len(missing), 1)
+        self.assertIn('1 audit line(s) with mismatches', missing[0])
+        self.assertIn('layer=23 user=3 mismatches=17', missing[0])
+        # a mismatch fails at any user count
+        self.assertEqual(len(self.report(dict(environ), bad, users=1)['missing']), 1)
+        absent = [line for line in lines if 'layer=47 user=2 ' not in line]
+        self.assertEqual(self.report(environ, absent)['missing'],
+                         [seq.AUDIT_FLAG + ': no audit line for layer/user 47/2'])
+        self.assertEqual(self.report(environ, lines[:2])['missing'],
+                         [seq.AUDIT_FLAG + ': no audit line for layer/user ' + ','.join(
+                             '%d/%d' % (layer, user) for layer in (0, 23, 47) for user in range(4))])
+
+
+class ArmWiringTests(unittest.TestCase):
+    START = '# K5-A (gdn_seq_block.py; default off).'
+    END = '  echo "K5-A seq block 1 level $seq_block_level audit ${seq_block_audit:-none}"' + chr(10) + 'fi' + chr(10)
+    LINES = ('${M3NATIVE_GDN_SEQ_BLOCK:+-e QWEN_FAST_GDN_SEQ_BLOCK=1}',
+             '${M3NATIVE_GDN_SEQ_BLOCK_LEVEL:+-e QWEN_FAST_GDN_SEQ_BLOCK_LEVEL=$M3NATIVE_GDN_SEQ_BLOCK_LEVEL}',
+             '${M3NATIVE_GDN_SEQ_BLOCK_AUDIT:+-e QWEN_FAST_GDN_SEQ_BLOCK_AUDIT=$M3NATIVE_GDN_SEQ_BLOCK_AUDIT}')
+
+    def text(self):
+        return ARM.read_text(encoding='utf-8')
+
+    def bash(self, script, **environ):
+        import shutil
+        import subprocess
+
+        found = shutil.which('bash')
+        if found is None:
+            self.skipTest('no bash')
+        try:
+            return subprocess.run([found, '-c', script], capture_output=True, text=True, timeout=60,
+                                  env=dict(PATH=os.environ.get('PATH', ''), **environ))
+        except OSError as error:
+            self.skipTest('bash unusable: %s' % error)
+
+    def validate(self, **environ):
+        text = self.text()
+        start = text.index(self.START)
+        end = text.index(self.END, start) + len(self.END)
+        script = 'set -euo pipefail' + chr(10) + 'users="${USERS_UNDER_TEST}"' + chr(10) + text[start:end] + 'echo VALID' + chr(10)
+        return self.bash(script, USERS_UNDER_TEST=environ.pop('users', '4'), **environ)
+
+    def test_the_arm_refuses_what_the_image_or_the_gate_would(self):
+        on = dict(M3NATIVE_GDN_SEQ_BLOCK='1', M3NATIVE_GDN_USER_BATCH='1')
+        for environ in ({}, on, dict(on, M3NATIVE_GDN_SEQ_BLOCK_LEVEL='0'), dict(on, M3NATIVE_GDN_SEQ_BLOCK_LEVEL='15'),
+                        dict(on, M3NATIVE_GDN_SEQ_BLOCK_AUDIT='0,23,47'), dict(on, M3NATIVE_GDN_SEQ_BLOCK_AUDIT='5'),
+                        dict(on, users='2'), dict(M3NATIVE_GDN_USER_BATCH='1'),
+                        dict(on, M3NATIVE_GDN_USER_BATCH_MIN_USERS='3'),
+                        dict(on, M3NATIVE_GDN_SEQ_BLOCK_AUDIT='0', M3NATIVE_GDN_USER_BATCH_MIN_USERS='1')):
+            with self.subTest(accepted=environ):
+                result = self.validate(**dict(environ))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('VALID', result.stdout)
+        for environ, message in (
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK='yes'), 'must be 1 or unset'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK='0'), 'must be 1 or unset'),
+                (dict(M3NATIVE_GDN_SEQ_BLOCK='1'), 'needs M3NATIVE_GDN_USER_BATCH=1'),
+                (dict(M3NATIVE_GDN_SEQ_BLOCK='1', M3NATIVE_GDN_USER_BATCH='yes'), 'needs M3NATIVE_GDN_USER_BATCH=1'),
+                (dict(M3NATIVE_GDN_SEQ_BLOCK_LEVEL='0'), 'without M3NATIVE_GDN_SEQ_BLOCK=1 do nothing'),
+                (dict(M3NATIVE_GDN_USER_BATCH='1', M3NATIVE_GDN_SEQ_BLOCK_AUDIT='0'), 'without M3NATIVE_GDN_SEQ_BLOCK=1'),
+                (dict(on, users='1'), 'serves the packed block only'),
+                (dict(on, M3NATIVE_SEQUENTIAL_USERS='4'), 'serves the packed block only'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK_LEVEL='16'), 'decimal bitmask 0..15'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK_LEVEL='01'), 'decimal bitmask 0..15'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK_LEVEL='x'), 'decimal bitmask 0..15'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK_AUDIT='48'), 'distinct GDN layers 0..47'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK_AUDIT='0,0'), 'distinct GDN layers 0..47'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK_AUDIT='23,5,23'), 'distinct GDN layers 0..47'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK_AUDIT='01'), 'distinct GDN layers 0..47'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK_AUDIT='0,,1'), 'distinct GDN layers 0..47'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK_AUDIT='all'), 'distinct GDN layers 0..47'),
+                (dict(on, M3NATIVE_GDN_SEQ_BLOCK_AUDIT='0', M3NATIVE_GDN_USER_BATCH_MIN_USERS='2'),
+                 'unset M3NATIVE_GDN_USER_BATCH_MIN_USERS')):
+            with self.subTest(refused=environ):
+                result = self.validate(**dict(environ))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn('VALID', result.stdout)
+
+    def test_the_three_switches_cross_right_after_the_user_batch_before_the_entrypoint(self):
+        text = self.text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(), '${M3NATIVE_GDN_USER_BATCH:+-e QWEN_FAST_GDN_USER_BATCH=1} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92), 'nothing else on the line')
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+        self.assertLess(text.index(self.START), text.index('docker run --rm --name "$name"'))
+        self.assertNotIn(b'\r', ARM.read_bytes())
+
+    def test_unset_nothing_crosses_and_set_each_crosses_as_given(self):
+        script = 'printf "%s|" ' + ' '.join(self.LINES) + chr(10)
+        self.assertEqual(self.bash(script).stdout.strip('|'), '')
+        both = self.bash(script, M3NATIVE_GDN_SEQ_BLOCK='1', M3NATIVE_GDN_SEQ_BLOCK_LEVEL='0',
+                         M3NATIVE_GDN_SEQ_BLOCK_AUDIT='0,23,47')
+        self.assertEqual(both.stdout, '-e|QWEN_FAST_GDN_SEQ_BLOCK=1|-e|QWEN_FAST_GDN_SEQ_BLOCK_LEVEL=0|'
+                                      '-e|QWEN_FAST_GDN_SEQ_BLOCK_AUDIT=0,23,47|')
+
+
+class ShippingTests(unittest.TestCase):
+    FILES = ('gdn_seq_block.py', 'gdn_seq_block_compute.cpp', 'gdn_seq_block_reader.cpp', 'gdn_seq_block_writer.cpp')
+
+    def test_the_module_and_its_three_kernels_reach_the_image_through_both_copy_lists(self):
+        from test_serving_image_copy_closure import WORKFLOW, context_modules, dockerfile_modules, dockerfile_text
+
+        docker = dockerfile_text()
+        for name in self.FILES + ('gdn_user_batch_conv.py', 'model_batch.py', 'packed_verifier.py',
+                                  'gdn_user_batch.py', 'verify_trace_t1.py'):
+            with self.subTest(module=name):
+                self.assertIn(name, dockerfile_modules(docker))
+                self.assertIn(name, context_modules())
+        # The kernels travel beside gdn_state_copy.cpp, in both lists.
+        copy = [line for line in docker.splitlines() if line.startswith('COPY ') and 'gdn_state_copy.cpp' in line]
+        loop = [line for line in WORKFLOW.read_text(encoding='utf-8').splitlines()
+                if 'for name in' in line and 'gdn_state_copy.cpp' in line]
+        for lines in (copy, loop):
+            self.assertEqual(len(lines), 1)
+            for name in self.FILES[1:]:
+                self.assertIn(name, lines[0])
+        self.assertEqual(seq.SOURCES, dict(reader='gdn_seq_block_reader.cpp', writer='gdn_seq_block_writer.cpp',
+                                           compute='gdn_seq_block_compute.cpp'))
+
+    def test_the_cpu_suite_runs_this_file(self):
+        self.assertRegex(CPU_WORKFLOW.read_text(encoding='utf-8'), r'python -B -m unittest [^\n]*\btest_gdn_seq_block\b')
+
+    def test_every_touched_file_is_lf(self):
+        for relative in ('scripts/ci/gdn_seq_block.py', 'scripts/ci/gdn_user_batch_conv.py', 'scripts/ci/model_batch.py',
+                         'scripts/ci/packed_verifier.py', 'scripts/ci/lever_n_m3native_gate.py',
+                         'scripts/ci/lever_n_m3native_run_arm.sh', 'scripts/ci/gdn-seq-block-rig.sh',
+                         'scripts/ci/test_gdn_seq_block.py', 'docker/qwen-fast-serving.Dockerfile',
+                         '.github/workflows/qwen-fast-serving-image.yml', '.github/workflows/qwen-integration-cpu.yml',
+                         'scripts/ci/test_lever_n_m3native_gate.py', 'scripts/ci/test_m3native_arm_env.py',
+                         'scripts/ci/test_qual_card.py'):
+            with self.subTest(file=relative):
+                self.assertNotIn(b'\r', (ROOT / relative).read_bytes())
+
+    def test_the_kernel_sources_are_the_bytes_card_b_qualified(self):
+        """QUALIFIED[0] is the hash of what these generate (with the pinned native prefix, which CI
+        does not have); the sources themselves are pinned here so CI sees a change too. Probe run
+        p0full shipped exactly these (ship1)."""
+        probed = dict(compute='b442d14cf81b6c94d78249c030fb86508263fd17629eb3db964e2c7bd3fa0853',
+                      reader='8e56ca95de8c862e18507e50c848851637f6de5cf6731015f933133c93b0f760',
+                      writer='6870bedf95cdca293bddf3b8ebeb85f92af00a185d4de3237a3cf40627a34511')
+        self.assertEqual({role: hashlib.sha256((HERE / seq.SOURCES[role]).read_bytes()).hexdigest() for role in seq.ROLES},
+                         probed)
+
+    def test_the_pinned_sources_are_untouched_since_the_parent(self):
+        import subprocess
+
+        pinned = ['scripts/ci/gdn_multitoken.py', 'scripts/ci/gdn_multitoken_conv.py', 'scripts/ci/gdn_device_loop_state.py',
+                  'scripts/ci/gdn_user_batch.py', 'scripts/ci/gdn_records.py', 'scripts/ci/gdn_commit_dma.py',
+                  'scripts/ci/gdn_commit_dma.cpp']
+        try:
+            result = subprocess.run(['git', 'diff', '--name-only', PARENT, '--', *pinned], capture_output=True,
+                                    cwd=str(ROOT), timeout=60, text=True)
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest('no git')
+        if result.returncode != 0:
+            self.skipTest('no git history for %s' % PARENT)
+        self.assertEqual(result.stdout.strip(), '')
 
 
 if __name__ == '__main__':

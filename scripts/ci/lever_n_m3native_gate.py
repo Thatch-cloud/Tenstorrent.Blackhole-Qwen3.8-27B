@@ -114,7 +114,7 @@ CRASH_TEXT = ('FATAL', 'Segmentation', 'Aborted', 'Killed', 'terminate called', 
 
 def select_diagnostic(lines, cap=DIAGNOSTIC_CAP):
     diagnostic = [line[:300] for line in lines
-                  if '[PINDIAG]' in line or '[PACKED' in line or '[PHASE]' in line
+                  if '[PINDIAG]' in line or '[PACKED' in line or '[PHASE]' in line or '[GDN-SEQ-BLOCK' in line
                   or 'ERROR' in line or 'Traceback' in line or any(crash in line for crash in CRASH_TEXT)]
     if len(diagnostic) > cap:
         omitted = len(diagnostic) - cap
@@ -315,6 +315,22 @@ SDPA_MODE_FLAGS = {'tail': 0x1, 'share': 0x2, 'slice': 0x4, 'readahead': 0x8}
 SDPA_SLICE_MARKER = '[QWEN-SDPA] q-slice rows_per_kv='   # apply_factory_slice.SLICE_LOG_MARKER (F18)
 SDPA_STAGE4_MODES = frozenset({'slice', 'readahead'})
 GDN_ALL_BATCHED = re.compile(r'gdn user_batched calls this captured forward: ([1-9][0-9]*) of ([0-9]+) GDN layers')
+# K5-A (QWEN_FAST_GDN_SEQ_BLOCK=1, gdn_seq_block; needs QWEN_FAST_GDN_USER_BATCH=1): model_batch logs how
+# many of a captured forward's GDN layers ran the sequential-block launch, and at which level,
+# counted from the result dicts gdn_user_batch_conv marks only after the launch returned (execution,
+# not just a flag read). At four users one capture must show every GDN layer at
+# QWEN_FAST_GDN_SEQ_BLOCK_LEVEL (default 0), and no capture may show another level or only some layers.
+# QWEN_FAST_GDN_SEQ_BLOCK_AUDIT=<layers> (a correctness arm): packed_verifier logs
+# '[GDN-SEQ-BLOCK-AUDIT] layer=L user=U mismatches=N' per audited layer and user after every replay;
+# every line must say 0 at any user count, and at four users each listed layer needs lines for all
+# four users (an audit that logged nothing is not a pass).
+GDN_SEQ_BLOCK_FLAG = 'QWEN_FAST_GDN_SEQ_BLOCK'
+GDN_SEQ_BLOCK_LEVEL_FLAG = 'QWEN_FAST_GDN_SEQ_BLOCK_LEVEL'
+GDN_SEQ_BLOCK_AUDIT_FLAG = 'QWEN_FAST_GDN_SEQ_BLOCK_AUDIT'
+GDN_SEQ_BLOCK = re.compile(r'gdn seq_block calls this captured forward: ([1-9][0-9]*) of ([0-9]+) GDN layers '
+                           r'level=([0-9]+)')
+GDN_SEQ_BLOCK_AUDIT_LINE = re.compile(r'\[GDN-SEQ-BLOCK-AUDIT\] layer=([0-9]+) user=([0-9]+) mismatches=([0-9]+)')
+GDN_SEQ_BLOCK_LEVEL_BITS = 4
 LEDGER_RESIDUAL = re.compile(r'\[MEMLEDGER\] phase=P7 [^\n]*check=residual status=([a-zA-Z]+)')
 
 
@@ -1100,6 +1116,11 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
         found['QWEN_FAST_GDN_USER_BATCH'] = {'n of n GDN layers batched': bool(complete)}
         if not complete:
             missing.append('QWEN_FAST_GDN_USER_BATCH: a captured forward batching every GDN layer')
+    seq_block = gdn_seq_block_report(environ, users, log_text, gdn_layers)
+    if seq_block is not None:
+        if environ.get(GDN_SEQ_BLOCK_FLAG) == '1' and users == 4:
+            found[GDN_SEQ_BLOCK_FLAG] = {'n of n GDN layers at the level': seq_block['complete']}
+        missing.extend(seq_block['problems'])
     if environ.get(C1E_FLAG) == '1':
         missing.extend(c1e_problems(environ, log_text))
     if environ.get('QWEN_FAST_ROUND_B1') == '1' and environ.get('QWEN_FAST_ROUND_B1_AUDIT') == '1':
@@ -1148,10 +1169,74 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
     if h2 is not None:
         missing.extend(h2.pop('problems'))
         variable_user['round_fence_h2'] = h2
+    # K5-A: under 'gdn_seq_block' only when one of its flags is set.
+    if seq_block is not None:
+        variable_user['gdn_seq_block'] = {key: value for key, value in seq_block.items() if key != 'problems'}
     residual = LEDGER_RESIDUAL.search(log_text)
     return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
                 prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary, verify_t1_sites=verify_t1_sites,
                 verify_t1_packed=verify_t1_packed, verify_t2_packed=verify_t2_packed, **variable_user)
+
+
+def gdn_seq_block_report(environ, users, log_text, gdn_layers=GDN_LAYERS):
+    """Under any K5-A flag (QWEN_FAST_GDN_SEQ_BLOCK, _LEVEL, _AUDIT): the captures' K5-A counts and
+    levels, the audit lines, and every problem (under 'problems'); None when no flag is set."""
+    flag = environ.get(GDN_SEQ_BLOCK_FLAG)
+    level_text = environ.get(GDN_SEQ_BLOCK_LEVEL_FLAG)
+    audit_text = environ.get(GDN_SEQ_BLOCK_AUDIT_FLAG) or ''
+    if flag in (None, '', '0') and not level_text and not audit_text:
+        return None
+    on = flag == '1'
+    problems = []
+    if flag not in (None, '', '0', '1'):
+        problems.append('%s: 0 or 1, not %r' % (GDN_SEQ_BLOCK_FLAG, flag))
+    if on and environ.get('QWEN_FAST_GDN_USER_BATCH') != '1':
+        problems.append('%s=1 needs QWEN_FAST_GDN_USER_BATCH=1 (it replaces the user-batched launch)'
+                        % GDN_SEQ_BLOCK_FLAG)
+    level = level_text or '0'
+    if not (level.isdigit() and level == str(int(level)) and int(level) < 1 << GDN_SEQ_BLOCK_LEVEL_BITS):
+        problems.append('%s: a decimal bitmask below %d, not %r' % (GDN_SEQ_BLOCK_LEVEL_FLAG,
+                                                                     1 << GDN_SEQ_BLOCK_LEVEL_BITS, level_text))
+        level = None
+    else:
+        level = int(level)
+    items = audit_text.split(',') if audit_text else []
+    layers = [int(item) for item in items if item.isdigit() and item == str(int(item)) and int(item) < gdn_layers]
+    if len(layers) != len(items) or len(set(layers)) != len(layers):
+        problems.append('%s: distinct GDN layers 0..%d, not %r' % (GDN_SEQ_BLOCK_AUDIT_FLAG, gdn_layers - 1,
+                                                                  audit_text))
+    if (level_text or audit_text) and not on:
+        problems.append('%s / %s without %s=1 do nothing: set it or neither' % (
+            GDN_SEQ_BLOCK_LEVEL_FLAG, GDN_SEQ_BLOCK_AUDIT_FLAG, GDN_SEQ_BLOCK_FLAG))
+    captures = [(int(calls), int(total), int(built)) for calls, total, built in GDN_SEQ_BLOCK.findall(log_text)]
+    complete = level is not None and any(calls == total == gdn_layers and built == level
+                                         for calls, total, built in captures)
+    if on and users == 4 and not complete:
+        problems.append('%s: a captured forward running K5-A in all %d GDN layers at level %s (captures %s)' % (
+            GDN_SEQ_BLOCK_FLAG, gdn_layers, level, ['%d of %d level=%d' % capture for capture in captures]))
+    # Every GDN layer of one forward has the same segment widths, so K5-A runs in all of them or in
+    # none (a 0 is not a capture); a partial count is a per-layer fallback, whatever else passed.
+    partial = ['%d of %d level=%d' % capture for capture in captures if not capture[0] == capture[1] == gdn_layers]
+    if partial:
+        problems.append('%s: captures running K5-A in only some GDN layers: %s' % (GDN_SEQ_BLOCK_FLAG,
+                                                                                ', '.join(partial)))
+    other = sorted({built for calls, total, built in captures if built != level})
+    if other:
+        problems.append('%s: captures at level %s, not the %s requested' % (
+            GDN_SEQ_BLOCK_FLAG, ','.join(str(value) for value in other), level))
+    lines = [(int(layer), int(user), int(count)) for layer, user, count in GDN_SEQ_BLOCK_AUDIT_LINE.findall(log_text)]
+    bad = [line for line in lines if line[2]]
+    if bad:
+        first = next(match.group(0) for match in GDN_SEQ_BLOCK_AUDIT_LINE.finditer(log_text) if match.group(3) != '0')
+        problems.append('%s: %d audit line(s) with mismatches (first: %s)' % (GDN_SEQ_BLOCK_AUDIT_FLAG, len(bad),
+                                                                                first[:200]))
+    if on and audit_text and users == 4:
+        seen = {(layer, user) for layer, user, count in lines}
+        absent = ['%d/%d' % (layer, user) for layer in layers for user in range(users) if (layer, user) not in seen]
+        if absent:
+            problems.append('%s: no audit line for layer/user %s' % (GDN_SEQ_BLOCK_AUDIT_FLAG, ','.join(absent)))
+    return dict(level=level, captures=captures, complete=complete, audit_layers=layers, audit_lines=len(lines),
+                audit_mismatch_lines=len(bad), audit_mismatches=sum(line[2] for line in lines), problems=problems)
 
 
 def verify_t1_skipped(environ):

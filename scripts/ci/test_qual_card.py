@@ -57,7 +57,7 @@ EMBEDDING = [
 ]
 # Rig runners in scripts/ci: they source the file beside them.
 SOURCING = [HERE / 'verify-t1-g0-rig.sh', HERE / 'matmul64_sweep_rig.sh', HERE / 'gdn-user-batch-rig.sh',
-            HERE / 'sdpa_bench_rig.sh']
+            HERE / 'sdpa_bench_rig.sh', HERE / 'gdn-seq-block-rig.sh']
 # The line each embedding harness launches its device container with (k0_session.sh launches none:
 # every run goes through run_m1.sh).
 LAUNCH = {
@@ -87,7 +87,8 @@ NL = chr(10)
 SCRUB = ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'M1_READER', 'IMAGE', 'M1_ARGS', 'M1_DRY_RUN', 'M1_REQUIRE_SOURCES',
          'RESULTS', 'M1_SRC', 'KOPGRAFT_PF', 'PF_SRC', 'PF_DRY_RUN', 'WATCHER', 'REFERENCE', 'CARD', 'NAME',
          'CONTAINER', 'GDN_USER_BATCH_DEVICE', 'K64F_SRC', 'KOPGRAFT64', 'REPO', 'RUNNER_NAME', 'FAKE_HELD', 'MSYS',
-         'PROBE_DRY_RUN', 'EXPECT_TTNNCPP_SHA256', 'K64I_DRY_RUN', 'KOPGRAFT64_REFERENCE', 'PAIR_ROW_DRY_RUN')
+         'PROBE_DRY_RUN', 'EXPECT_TTNNCPP_SHA256', 'K64I_DRY_RUN', 'KOPGRAFT64_REFERENCE', 'PAIR_ROW_DRY_RUN',
+         'GDN_SEQ_BLOCK_IMAGE')
 
 
 def read(path):
@@ -1574,6 +1575,7 @@ class HarnessTests(unittest.TestCase):
         HERE / 'matmul64_sweep_rig.sh': ['{out}', 'sha256:' + '0' * 64],
         HERE / 'gdn-user-batch-rig.sh': ['{out}', 'sha256:' + '0' * 64],
         HERE / 'sdpa_bench_rig.sh': ['{out}', 'sha256:' + '0' * 64],
+        HERE / 'gdn-seq-block-rig.sh': ['{out}'],
     }
     # Scripts whose node resolution follows the selection directly (no build or docker step between).
     RESOLVE_FIRST = [OPS / 'gdn_prefill_conv' / 'run_card_m.sh', OPS / 'sdpa_decode_qwen' / 'run_card_m.sh',
