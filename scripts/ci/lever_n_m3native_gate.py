@@ -753,6 +753,138 @@ def h1a_report(environ, log_text):
     return summary
 
 
+# Round-fence plan H1b (fused_commit.py; QWEN_FAST_FUSED_COMMIT, _INPLACE, _LIVE_BANKS, _AUDIT; every one
+# default off). The block logs its engagement once at attach (or '[PINDIAG] fused commit refused reason=' -
+# a host check turned it down and today's publication served every round), one line per packed user's
+# publication and, under the audit, one per audited publication:
+#   QWEN_FAST_FUSED_COMMIT          '[PINDIAG] fused commit engaged ... inplace=I live_banks=L audit=A ...' and
+#       '[PACKED-FUSED] round=R segment=S prefix=P path=fused|today reason=-|WHY tables=window|late|-'.
+#       Required: at least one fused publication, no refusal, and every path=today publication's reason
+#       one of FUSED_EXPECTED_REFUSALS (the prefill ramp; one parity normalisation per device) - any other
+#       reason (slot, weights, scope, features, ...) is a round the fused path should have served.
+#   QWEN_FAST_FUSED_COMMIT_INPLACE  engaged with inplace=1.
+#   QWEN_FAST_FUSED_COMMIT_LIVE_BANKS  '[PINDIAG] pair live banks engaged' (the first pair bound to the live
+#       banks); needs _INPLACE.
+#   QWEN_FAST_FUSED_COMMIT_AUDIT    '[PACKED-FUSED-AUDIT] round=R segment=S prefix=P mode=M checked=N
+#       mismatches=0' for every fused publication - one per path=fused line - and no mismatch anywhere
+#       ('[PINDIAG] fused commit audit mismatch'), on either chip, in any round.
+#   Any flag: no '[PINDIAG] fused commit discard after in-place slide' (an in-place publication discarded
+#       after its slide moved the live banks: its request failed mid-commit, and the line names why the
+#       segment refused that request's later rounds as 'poisoned').
+# Every sub-flag without QWEN_FAST_FUSED_COMMIT (and _LIVE_BANKS without _INPLACE) is inert: a problem.
+FUSED_FLAG = 'QWEN_FAST_FUSED_COMMIT'
+FUSED_INPLACE_FLAG = 'QWEN_FAST_FUSED_COMMIT_INPLACE'
+FUSED_LIVE_BANKS_FLAG = 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS'
+FUSED_AUDIT_FLAG = 'QWEN_FAST_FUSED_COMMIT_AUDIT'
+FUSED_ENGAGED_MARKER = '[PINDIAG] fused commit engaged'
+FUSED_REFUSED_MARKER = '[PINDIAG] fused commit refused'
+FUSED_MARKER = '[PACKED-FUSED] round='
+FUSED_AUDIT_MARKER = '[PACKED-FUSED-AUDIT] round='
+FUSED_AUDIT_MISMATCH_MARKER = '[PINDIAG] fused commit audit mismatch'
+FUSED_LIVE_BANKS_MARKER = '[PINDIAG] pair live banks engaged'
+FUSED_DISCARD_MARKER = '[PINDIAG] fused commit discard after in-place slide'
+FUSED_EXPECTED_REFUSALS = ('ramp', 'parity')
+FUSED_ENGAGED_LINE = re.compile(r'\[PINDIAG\] fused commit engaged users=([0-9]+) rows=([0-9]+) inplace=([01]) '
+                                r'live_banks=([01]) audit=([01]) kernel=(\S+) traces=([0-9]+)')
+FUSED_LINE = re.compile(r'\[PACKED-FUSED\] round=([0-9]+) segment=([0-9]+) prefix=(\S+) path=(fused|today) '
+                        r'reason=(\S+) tables=(\S+)')
+FUSED_AUDIT_LINE = re.compile(r'\[PACKED-FUSED-AUDIT\] round=([0-9]+) segment=([0-9]+) prefix=([0-9]+) mode=(\S+) '
+                              r'checked=([0-9]+) mismatches=([0-9]+)')
+
+
+def h1b_markers(environ):
+    """{flag: [marker]} for the round-fence plan H1b flags set in `environ`."""
+    on = lambda name: environ.get(name) == '1'
+    required = {}
+    if not on(FUSED_FLAG):
+        return required
+    required[FUSED_FLAG] = [FUSED_ENGAGED_MARKER, FUSED_MARKER]
+    if on(FUSED_INPLACE_FLAG):
+        required[FUSED_INPLACE_FLAG] = [FUSED_ENGAGED_MARKER]
+        if on(FUSED_LIVE_BANKS_FLAG):
+            required[FUSED_LIVE_BANKS_FLAG] = [FUSED_LIVE_BANKS_MARKER]
+    if on(FUSED_AUDIT_FLAG):
+        required[FUSED_AUDIT_FLAG] = [FUSED_AUDIT_MARKER]
+    return required
+
+
+def h1b_summary(log_text):
+    """What the H1b lines say: the engagement, the publications by path and refusal reason, the rounds
+    whose every publication was fused, where the RoPE tables were staged, and the audit."""
+    engaged = FUSED_ENGAGED_LINE.search(log_text)
+    lines = [match.groups() for match in FUSED_LINE.finditer(log_text)]
+    audits = [match.groups() for match in FUSED_AUDIT_LINE.finditer(log_text)]
+    reasons, tables, rounds = {}, {}, {}
+    for round_number, segment, prefix, path, reason, staged in lines:
+        rounds.setdefault(round_number, []).append(path)
+        if path == 'today':
+            reasons[reason] = reasons.get(reason, 0) + 1
+        else:
+            tables[staged] = tables.get(staged, 0) + 1
+    unexpected = {reason: count for reason, count in reasons.items() if reason not in FUSED_EXPECTED_REFUSALS}
+    fused_rounds = [paths for paths in rounds.values() if all(path == 'fused' for path in paths)]
+    return dict(
+        engaged=None if engaged is None else dict(users=int(engaged.group(1)), rows=int(engaged.group(2)),
+                                                  inplace=int(engaged.group(3)), live_banks=int(engaged.group(4)),
+                                                  audit=int(engaged.group(5)), kernel=engaged.group(6),
+                                                  traces=int(engaged.group(7))),
+        refused=FUSED_REFUSED_MARKER in log_text,
+        publications=len(lines), fused=sum(1 for line in lines if line[3] == 'fused'),
+        today=sum(1 for line in lines if line[3] == 'today'), today_reasons=reasons, unexpected_reasons=unexpected,
+        rounds=len(rounds), fused_rounds=len(fused_rounds),
+        four_fused_rounds=sum(1 for paths in fused_rounds if len(paths) == 4), tables=tables,
+        audits=len(audits), audit_checked=sum(int(line[4]) for line in audits),
+        audit_mismatches=sum(int(line[5]) for line in audits),
+        audit_mismatch_lines=log_text.count(FUSED_AUDIT_MISMATCH_MARKER),
+        live_banks=FUSED_LIVE_BANKS_MARKER in log_text, discards=log_text.count(FUSED_DISCARD_MARKER),
+        live_banks_normalised=log_text.count('[PACKED-PROPOSE] live banks pair='))
+
+
+def h1b_report(environ, log_text):
+    """Under any H1b flag the summary and its problems (under 'problems'), else None."""
+    on = lambda name: environ.get(name) == '1'
+    flags = (FUSED_FLAG, FUSED_INPLACE_FLAG, FUSED_LIVE_BANKS_FLAG, FUSED_AUDIT_FLAG)
+    if not any(on(flag) for flag in flags):
+        return None
+    summary = h1b_summary(log_text)
+    problems = []
+    for flag in flags[1:]:
+        if on(flag) and not on(FUSED_FLAG):
+            problems.append('%s=1 without %s=1 does nothing' % (flag, FUSED_FLAG))
+    if on(FUSED_LIVE_BANKS_FLAG) and not on(FUSED_INPLACE_FLAG):
+        problems.append('%s=1 without %s=1 does nothing (the live bank moves every commit)'
+                        % (FUSED_LIVE_BANKS_FLAG, FUSED_INPLACE_FLAG))
+    if on(FUSED_FLAG):
+        if summary['refused']:
+            first = next(line for line in log_text.splitlines() if FUSED_REFUSED_MARKER in line)
+            problems.append('%s: the block refused the fused commit (%s)' % (FUSED_FLAG, first[-200:]))
+        engaged = summary['engaged']
+        if engaged is not None and engaged['inplace'] != int(on(FUSED_INPLACE_FLAG)):
+            problems.append('%s: engaged inplace=%d with the flag %s' % (FUSED_INPLACE_FLAG, engaged['inplace'],
+                                                                         environ.get(FUSED_INPLACE_FLAG, 'unset')))
+        if summary['publications'] and not summary['fused']:
+            problems.append('%s: no publication took the fused path (%d today; reasons %s)' % (
+                FUSED_FLAG, summary['today'], summary['today_reasons']))
+        if summary['unexpected_reasons']:
+            problems.append('%s: publications took today\'s path for reasons outside %s: %s' % (
+                FUSED_FLAG, FUSED_EXPECTED_REFUSALS, summary['unexpected_reasons']))
+        if summary['discards']:
+            first = next(line for line in log_text.splitlines() if FUSED_DISCARD_MARKER in line)
+            problems.append('%s: %d in-place publication(s) discarded after the slide moved the live banks (%s)' % (
+                FUSED_FLAG, summary['discards'], first[-160:]))
+        if on(FUSED_AUDIT_FLAG):
+            if summary['audits'] != summary['fused']:
+                problems.append('%s: %d audits for %d fused publications' % (FUSED_AUDIT_FLAG, summary['audits'],
+                                                                           summary['fused']))
+            if summary['audit_mismatches'] or summary['audit_mismatch_lines']:
+                first = next((match.group(0) for match in FUSED_AUDIT_LINE.finditer(log_text)
+                              if match.group(6) != '0'), '')
+                problems.append('%s: no mismatch (%d; %d mismatch lines; first: %s)' % (
+                    FUSED_AUDIT_FLAG, summary['audit_mismatches'], summary['audit_mismatch_lines'], first[:200]))
+    summary['problems'] = problems
+    return summary
+
+
 def required_flag_markers(environ, users, prompt_tokens=None):
     """The markers the flags in `environ` promise, as {flag: [marker, ...]}. prompt_tokens (each user's
     prompt; None: unknown) decides whether QWEN_FAST_SDPA_PF's 2048-row topology is promised."""
@@ -778,6 +910,7 @@ def required_flag_markers(environ, users, prompt_tokens=None):
             required[VERIFY_T2_AUDIT_FLAG] = [VERIFY_T2_AUDIT_MARKER + ' 1 exact=True']
     required.update(variable_user_markers(environ, users))
     required.update(h1a_markers(environ))
+    required.update(h1b_markers(environ))
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
@@ -863,6 +996,11 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
     if h1a is not None:
         missing.extend(h1a.pop('problems'))
         variable_user['round_fence_h1a'] = h1a
+    # Round-fence plan H1b: under 'round_fence_h1b' only when one of its flags is set.
+    h1b = h1b_report(environ, log_text)
+    if h1b is not None:
+        missing.extend(h1b.pop('problems'))
+        variable_user['round_fence_h1b'] = h1b
     residual = LEDGER_RESIDUAL.search(log_text)
     return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
                 prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary, verify_t1_sites=verify_t1_sites,

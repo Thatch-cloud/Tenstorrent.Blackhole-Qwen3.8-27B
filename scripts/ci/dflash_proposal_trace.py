@@ -58,6 +58,17 @@ def _slot_of(device):
     return getattr(getattr(device, 'pool_slot', None), 'index', None)
 
 
+def _live_bank_history(device_a, device_b):
+    """Round-fence plan H1b, F4: the pair's cached_history as the pool's active banks under
+    QWEN_FAST_FUSED_COMMIT_LIVE_BANKS (fused_commit.live_bank_history), else None. The flag is read
+    first and fused_commit imported only when it is set."""
+    if os.environ.get('QWEN_FAST_FUSED_COMMIT_LIVE_BANKS') != '1':
+        return None
+    from fused_commit import live_bank_history
+
+    return live_bank_history(device_a, device_b)
+
+
 class PreparedDFlashProposal:
     def __init__(self, device, *, max_new_tokens):
         import torch
@@ -439,31 +450,47 @@ class PreparedPackedDFlashProposal:
             # mask depends on the bucket's contexts alone, so it is every round's mask -
             # what QWEN_FAST_PAIR_MASK_REFRESH copies back and QWEN_FAST_PAIR_MASK_AUDIT
             # compares with. Nothing reads it with both flags off.
+            # Round-fence plan H1b, F4 (QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, default off): the pair
+            # reads the two pool slots' ACTIVE banks - which the in-place fused commit slides and
+            # never swaps - instead of per-round copies into ~40 MB of its own placeholders. None
+            # without the flag: the placeholders below, exactly as before.
+            live_banks = _live_bank_history(self.device_a, self.device_b) if context_a == context_b == 2048 else None
             bucket = SimpleNamespace(context=(context_a, context_b), host_mask=host_mask,
                 identifiers=self._upload(packed_identifiers([0, 0], self.block_rows), identifiers=True),
                 mask=self._upload(host_mask),
                 rope=dict(q=tuple(self._upload(value) for value in tables['q']),
                           k=tuple(self._upload(value) for value in tables['k']),
                           live_k=tuple(self._upload(value) for value in live)),
-                cached_history=[[{name: self._upload(torch.zeros((1, 4, context, 128), dtype=torch.bfloat16))
-                        for name in ('k', 'v')} for _ in self.device_a.kv_history.active]
+                cached_history=live_banks if live_banks is not None else [
+                    [{name: self._upload(torch.zeros((1, 4, context, 128), dtype=torch.bfloat16))
+                      for name in ('k', 'v')} for _ in self.device_a.kv_history.active]
                     for context in (context_a, context_b)],
                 trace=None, outputs=None, owned=[], tokens=None, consumed=set())
+            if live_banks is not None:
+                bucket.live_banks = True
             bucket.inputs = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k'],
                 *(value for cache in bucket.cached_history for layer in cache for value in layer.values())]
             bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
             device.validated_native_proposal_masks.add(addresses(operations, bucket.mask))
             self.buckets[key] = bucket
+            if live_banks is not None:
+                from fused_commit import note_live_banks
+
+                note_live_banks(self.pair_label(), bucket.context)
             self._update(bucket, 0, 0)
+            # F4: the lent banks are protected like the placeholders they replace, so no temporary
+            # of the pass can ever queue one for release. Without the flag this list is today's.
+            lent = [] if live_banks is None else [value for cache in live_banks for layer in cache
+                                                  for value in layer.values()]
             transient, retain = device.temporaries([device.history, device.spare_history,
-                self.device_b.history, self.device_b.spare_history, *self.owned])
+                self.device_b.history, self.device_b.spare_history, *self.owned, *lent])
             try:
                 self._execute(bucket, transient, retain)
                 operations.synchronize_device(self.mesh)
             finally:
                 release_owned(operations, transient)
             bucket.owned, retain = device.temporaries([device.history, device.spare_history,
-                self.device_b.history, self.device_b.spare_history, *self.owned])
+                self.device_b.history, self.device_b.spare_history, *self.owned, *lent])
             bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
                 lambda: self._execute(bucket, bucket.owned, retain))
             operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
@@ -549,13 +576,27 @@ class PreparedPackedDFlashProposal:
             *device_a.kv_history.owned, *device_a.kv_history.borrowed,
             *device_b.kv_history.owned, *device_b.kv_history.borrowed])
 
+        live_banks = getattr(bucket, 'live_banks', False)
+
         def copy_cache():
+            normalised = 0
             for index, device in enumerate((device_a, device_b)):
                 context = bucket.context[index]
                 for active, destination in zip(device.kv_history.active, bucket.cached_history[index], strict=True):
                     for name in ('k', 'v'):
+                        if live_banks and active[name] is destination[name]:
+                            # F4: the pair reads this live bank itself - nothing to copy.
+                            continue
+                        # F4 with the device's live bank on the pool's spare side (the ramp left an
+                        # odd swap count, before its first in-place commit): the live rows go into
+                        # the pool's active bank - the device's free spare - which the pair reads.
                         value = retain(operations.slice(active[name], (0, 0, 0, 0), (1, 4, context, 128)))
                         operations.copy(value, destination[name])
+                        normalised += 1
+            if live_banks and normalised:
+                from fused_commit import LIVE_BANKS_NORMALISED, log_line
+
+                log_line('%s pair=%s normalised=%d' % (LIVE_BANKS_NORMALISED, self.pair_label(), normalised))
         if defer_finish:
             try:
                 copy_cache()

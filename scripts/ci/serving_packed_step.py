@@ -333,11 +333,13 @@ class PackedStep:
     def while_waiting(self, requests):
         """Round-fence plan H1a: the drafts' fence-window callable for this step's one block
         (verify_prestage.WhileWaiting: the next verify's pre-stage under QWEN_FAST_PRESTAGE, the
-        arming of its replay under QWEN_FAST_ROUND_FENCES), for the live `requests` the hook's
-        policy just drafted a block round for. None with several blocks (QWEN_FAST_FOUR_AS_TWO)
-        or a block built with neither flag - the hook then passes nothing."""
+        arming of its replay under QWEN_FAST_ROUND_FENCES, and - H1b, QWEN_FAST_FUSED_COMMIT - the
+        next round's T_proj RoPE tables), for the live `requests` the hook's policy just drafted a
+        block round for. None with several blocks (QWEN_FAST_FOUR_AS_TWO) or a block built with
+        none of the flags - the hook then passes nothing."""
         block = self.block
-        if block is None or (getattr(block, 'prestaged', None) is None and not getattr(block, 'round_fences', False)):
+        if block is None or (getattr(block, 'prestaged', None) is None and not getattr(block, 'round_fences', False)
+                             and getattr(block, 'fused', None) is None):
             return None
         from verify_prestage import WhileWaiting
 
@@ -703,7 +705,16 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
         from dflash_traced_publish import traced_publish_enabled, install_publish_options
 
         merge_release, fused_steady_state = pipelined_publish_enabled(), traced_publish_enabled()
-        if merge_release or fused_steady_state:
+        # Round-fence plan H1b (fused_commit.py, QWEN_FAST_FUSED_COMMIT): a block that built its
+        # fused commit wraps the same installers - today's publication for any round its guards
+        # refuse. Without it (every block built without the flag) this is today's call.
+        fused = getattr(block, 'fused', None)
+        if fused is not None:
+            from fused_commit import install_fused_commit
+
+            restore_merge_release = install_fused_commit(drafter, fused, segment, merge_release=merge_release,
+                                                         fused_steady_state=fused_steady_state)
+        elif merge_release or fused_steady_state:
             restore_merge_release = install_publish_options(drafter,
                 merge_release=merge_release, fused_steady_state=fused_steady_state)
     # QWEN_FAST_ROUND_B1 (M0a): this user's publication splits, only when the stage timer

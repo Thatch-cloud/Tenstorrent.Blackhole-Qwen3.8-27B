@@ -48,6 +48,10 @@ round's last commit no longer fences; the replay is armed by the drafts' fence F
 (`WhileWaiting.fenced` -> note_round_fence) or, when no draft fenced, by one fence at replay. The
 first commit skips its validate when the round's replay validated (validated_this_round). A replay
 still needs every segment decided, and a poisoned block still refuses.
+
+H1b (fused_commit.py, QWEN_FAST_FUSED_COMMIT): the same window also writes each live segment's
+T_proj RoPE tables for its next frontier (WhileWaiting -> FusedCommit.stage_window), before the
+pre-stage; they are not fixture inputs and move no epoch.
 """
 
 import os
@@ -345,6 +349,12 @@ class WhileWaiting:
         if getattr(block, 'round_fences', False):
             # Taken before the fence: only commits enqueued before it may be armed by it.
             self.token = block.fence_token()
+        fused = getattr(block, 'fused', None)
+        if fused is not None:
+            # Round-fence plan H1b (fused_commit.py): the next round's T_proj RoPE tables for each
+            # live segment. Never raises (a segment that fails is staged at its commit), so the
+            # pre-stage below always runs.
+            fused.stage_window(self.requests)
         prestaged = getattr(block, 'prestaged', None)
         if prestaged is not None:
             prestaged.prestage_requests(self.requests)

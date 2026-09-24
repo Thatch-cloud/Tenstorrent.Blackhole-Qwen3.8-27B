@@ -79,6 +79,10 @@ COPY scripts/ci/padded_probe.py /experiment-scripts/ci/
 # off): packed_verifier imports verify_prestage at module level, serving_packed_step, serving_worker_hook
 # and serving_lifecycle reach it too, so it must reach the image beside them.
 COPY scripts/ci/verify_prestage.py /experiment-scripts/ci/
+# Round-fence plan H1b (QWEN_FAST_FUSED_COMMIT, _INPLACE, _LIVE_BANKS, _AUDIT; every flag default off):
+# packed_verifier, serving_packed_step and dflash_proposal_trace import fused_commit when a flag is set,
+# so it must reach the image beside them. It drives the bundle's own slide kernel (the served driver's .cpp).
+COPY scripts/ci/fused_commit.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

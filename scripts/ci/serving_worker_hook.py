@@ -118,10 +118,12 @@ def pipelined_device(bridge):
 
 
 def window_flags_on(environ=None):
-    """Round-fence plan H1a: whether QWEN_FAST_PRESTAGE or QWEN_FAST_ROUND_FENCES is 1 (the
-    block validates the values at attach; this only decides whether to ask for a window)."""
+    """Round-fence plan H1a: whether QWEN_FAST_PRESTAGE or QWEN_FAST_ROUND_FENCES is 1 - or, H1b,
+    QWEN_FAST_FUSED_COMMIT (the window stages the next round's T_proj RoPE tables). The block
+    validates the values at attach; this only decides whether to ask for a window."""
     environ = os.environ if environ is None else environ
-    return environ.get('QWEN_FAST_PRESTAGE') == '1' or environ.get('QWEN_FAST_ROUND_FENCES') == '1'
+    return (environ.get('QWEN_FAST_PRESTAGE') == '1' or environ.get('QWEN_FAST_ROUND_FENCES') == '1'
+            or environ.get('QWEN_FAST_FUSED_COMMIT') == '1')
 
 
 def note_fixture_writer(reason):

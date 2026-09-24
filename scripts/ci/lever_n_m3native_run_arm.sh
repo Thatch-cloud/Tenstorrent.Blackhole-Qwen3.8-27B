@@ -457,6 +457,46 @@ if [ -n "${M3NATIVE_PRESTAGE:-}${M3NATIVE_ROUND_FENCES:-}" ]; then
   fi
   echo "round-fence plan H1a: prestage ${M3NATIVE_PRESTAGE:-0} audit ${M3NATIVE_PRESTAGE_AUDIT:-0} round fences ${M3NATIVE_ROUND_FENCES:-0} pipelined publish ${M3NATIVE_PIPELINED_PUBLISH:-0}"
 fi
+# Round-fence plan H1b (fused_commit.py; every flag default off). M3NATIVE_FUSED_COMMIT=1 becomes
+# QWEN_FAST_FUSED_COMMIT=1: each packed segment's feature and K/V projection as one captured trace
+# (T_proj) and the publication overrides. M3NATIVE_FUSED_COMMIT_INPLACE=1 (QWEN_FAST_FUSED_COMMIT_INPLACE)
+# slides the live K/V banks in place through per-(segment, prefix) traces; M3NATIVE_FUSED_COMMIT_LIVE_BANKS=1
+# (QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, needs _INPLACE) binds the packed pair traces to the live banks (F4);
+# M3NATIVE_FUSED_COMMIT_AUDIT=1 (QWEN_FAST_FUSED_COMMIT_AUDIT) shadows every fused publication with today's
+# eager one and compares (a correctness arm). The block serves the packed block only; the fused path needs a
+# captured proposal (C7's condition: M3NATIVE_TRACED_PROPOSAL=1) and, because T_proj is one more trace that
+# replays every round, the pair's per-round mask refresh (M3NATIVE_PAIR_MASK_REFRESH=1); F4 needs the packed
+# pairs (M3NATIVE_PACKED_PROPOSAL=1). Refused here, before the docker run; unset, nothing is passed.
+for h1b_flag in M3NATIVE_FUSED_COMMIT M3NATIVE_FUSED_COMMIT_INPLACE M3NATIVE_FUSED_COMMIT_LIVE_BANKS M3NATIVE_FUSED_COMMIT_AUDIT; do
+  h1b_value="${!h1b_flag:-}"
+  if [ -n "$h1b_value" ] && [ "$h1b_value" != "1" ]; then
+    echo "$h1b_flag must be 1 or unset, got '$h1b_value'" >&2
+    exit 1
+  fi
+done
+if [ -z "${M3NATIVE_FUSED_COMMIT:-}" ] && [ -n "${M3NATIVE_FUSED_COMMIT_INPLACE:-}${M3NATIVE_FUSED_COMMIT_LIVE_BANKS:-}${M3NATIVE_FUSED_COMMIT_AUDIT:-}" ]; then
+  echo "M3NATIVE_FUSED_COMMIT_INPLACE / _LIVE_BANKS / _AUDIT without M3NATIVE_FUSED_COMMIT=1 do nothing: set it or none" >&2
+  exit 1
+fi
+if [ -n "${M3NATIVE_FUSED_COMMIT_LIVE_BANKS:-}" ] && [ -z "${M3NATIVE_FUSED_COMMIT_INPLACE:-}" ]; then
+  echo "M3NATIVE_FUSED_COMMIT_LIVE_BANKS=1 needs M3NATIVE_FUSED_COMMIT_INPLACE=1 (out of place the live bank moves every commit)" >&2
+  exit 1
+fi
+if [ -n "${M3NATIVE_FUSED_COMMIT:-}" ]; then
+  if [ "$users" -lt 2 ] || [ -n "${M3NATIVE_SEQUENTIAL_USERS:-}" ]; then
+    echo "M3NATIVE_FUSED_COMMIT serves the packed block only (users=$users, sequential '${M3NATIVE_SEQUENTIAL_USERS:-}')" >&2
+    exit 1
+  fi
+  if [ "${M3NATIVE_TRACED_PROPOSAL:-}" != "1" ] || [ "${M3NATIVE_PAIR_MASK_REFRESH:-}" != "1" ]; then
+    echo "M3NATIVE_FUSED_COMMIT=1 needs M3NATIVE_TRACED_PROPOSAL=1 (a captured proposal) and M3NATIVE_PAIR_MASK_REFRESH=1 (T_proj replays every round)" >&2
+    exit 1
+  fi
+  if [ -n "${M3NATIVE_FUSED_COMMIT_LIVE_BANKS:-}" ] && [ "${M3NATIVE_PACKED_PROPOSAL:-}" != "1" ]; then
+    echo "M3NATIVE_FUSED_COMMIT_LIVE_BANKS=1 needs M3NATIVE_PACKED_PROPOSAL=1 (it binds the packed pair traces)" >&2
+    exit 1
+  fi
+  echo "round-fence plan H1b: fused commit 1 in place ${M3NATIVE_FUSED_COMMIT_INPLACE:-0} live banks ${M3NATIVE_FUSED_COMMIT_LIVE_BANKS:-0} audit ${M3NATIVE_FUSED_COMMIT_AUDIT:-0}"
+fi
 
 # Proposals: the fp2u lane runs each request's draft proposal EAGERLY
 # (QWEN_FAST_EAGER_PROPOSAL=1) because per-request proposal traces clobbered each
@@ -636,6 +676,10 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PRESTAGE:+-e QWEN_FAST_PRESTAGE=1} \
   ${M3NATIVE_PRESTAGE_AUDIT:+-e QWEN_FAST_PRESTAGE_AUDIT=1} \
   ${M3NATIVE_ROUND_FENCES:+-e QWEN_FAST_ROUND_FENCES=1} \
+  ${M3NATIVE_FUSED_COMMIT:+-e QWEN_FAST_FUSED_COMMIT=1} \
+  ${M3NATIVE_FUSED_COMMIT_INPLACE:+-e QWEN_FAST_FUSED_COMMIT_INPLACE=1} \
+  ${M3NATIVE_FUSED_COMMIT_LIVE_BANKS:+-e QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1} \
+  ${M3NATIVE_FUSED_COMMIT_AUDIT:+-e QWEN_FAST_FUSED_COMMIT_AUDIT=1} \
   ${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1} \
   ${M3NATIVE_GDN_PREFILL_CONV:+-e QWEN_FAST_GDN_PREFILL_CONV=1} \
   ${M3NATIVE_GDN_PREFILL_CONV_AUDIT:+-e QWEN_FAST_GDN_PREFILL_CONV_AUDIT=$M3NATIVE_GDN_PREFILL_CONV_AUDIT} \

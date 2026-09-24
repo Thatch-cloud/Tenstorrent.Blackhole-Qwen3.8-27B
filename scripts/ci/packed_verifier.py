@@ -108,6 +108,15 @@ differs, with no fence; anything else takes today's full path. Under QWEN_FAST_R
 retained block drops the fence and the second validate after the blocking trace (F3), the last
 commit leaves its fence to the drafts' F9 or the next replay (F8), and the first commit skips
 its validate when the round's replay ran one (validated_this_round).
+
+ROUND-FENCE PLAN H1b (fused_commit.py; QWEN_FAST_FUSED_COMMIT and its _INPLACE, _LIVE_BANKS and
+_AUDIT sub-flags, every one default off). The block owns the fused commit: each segment's RoPE
+tables and K/V deltas are allocated right after the taps - before the warm forward and every
+capture (R2) - and each segment's projection trace (T_proj) and, in place, its sixteen slide
+traces are captured after the GDN commit traces, separate from them. serving_packed_step's
+commit_entry installs the publication overrides (fused_commit.install_fused_commit) around each
+user's commit; the verify, the readback and the GDN commits here are unchanged. Without the flag
+`fused` is None, nothing is allocated or captured, and every path is today's.
 """
 
 from contextlib import ExitStack
@@ -406,6 +415,12 @@ def padded_block_min_users(environ=None):
     return int(text)
 
 
+def fused_commit_requested(environ=None):
+    """Round-fence plan H1b: QWEN_FAST_FUSED_COMMIT is '1' (fused_commit validates the value when it
+    builds; this only decides whether to import it)."""
+    return (os.environ if environ is None else environ).get('QWEN_FAST_FUSED_COMMIT') == '1'
+
+
 def page_zero_index(table, start, rows):
     """The first index inside [0, (start + rows + 63) // 64) at which this (1, page_width) page
     table holds physical page 0, or None: every page a user at `start` reads or writes in a
@@ -428,7 +443,7 @@ class PackedVerifierEngine:
     publication, `commit_user(segment, prefix)` for each user's decision."""
 
     def __init__(self, operations, model, helpers, sampler, *, pool, shared_weights, shape, feature_taps,
-                 capture_position=None, pool_slots=None, padded_min_users=None):
+                 capture_position=None, pool_slots=None, padded_min_users=None, collectives=None):
         import torch
 
         self.shape = validate_shape(shape)
@@ -567,6 +582,11 @@ class PackedVerifierEngine:
         self.prestaged = (verify_prestage.BlockPrestage(self, audit=verify_prestage.audit_enabled())
                           if verify_prestage.enabled() else None)
         self.validated_this_round = False
+        # Round-fence plan H1b (fused_commit.py; QWEN_FAST_FUSED_COMMIT and its sub-flags, every one
+        # default off): the fused commit, built right after the taps - its RoPE tables and deltas
+        # predate the verify capture (R2) - and captured after the GDN commit traces. None without
+        # the flag or when fused_commit refused it; every path below is then today's.
+        self.fused = None
         self.commit_timings = [0.0] * shape.users
         # This round's per-segment HOST cost of the RetainedGDNBlock.commit_user call
         # itself (gdn_records.py), beyond its device commit trace: call_ms - commit_ms,
@@ -596,6 +616,14 @@ class PackedVerifierEngine:
                 self.taps.append(tap)
             self.feature_capture = PreparedTargetFeatures(model, self.feature_taps, self.taps, copy=operations.copy,
                 storage_ids=lambda value: tuple(enumerate(addresses(operations, value))))
+            if fused_commit_requested():
+                # H1b, R2: allocated here, before the warm forward and every capture.
+                import fused_commit
+
+                self.stage = 'fused commit storage'
+                self.fused = fused_commit.build(self, operations=operations, mesh=self.mesh, pool=pool,
+                                                shared_weights=shared_weights, collectives=collectives,
+                                                diagnostic=diagnostic)
             # The capture's placeholder users: every row reads physical page 0 at the
             # capture position. Positions, rotary tables and every page table are
             # restaged before each verify; only the addresses and shapes are baked.
@@ -646,6 +674,11 @@ class PackedVerifierEngine:
                 operations.synchronize_device(self.mesh)
                 for prefix, publication in publications.items():
                     self.commits[user][prefix], unused = capture_operation(operations, self.mesh, publication)
+            if self.fused is not None:
+                # H1b: every segment's T_proj, then (in place) every (segment, prefix) slide trace,
+                # next to the GDN commit traces and after the verify trace.
+                self.stage = 'fused commit capture'
+                self.fused.capture(capture_operation)
             # Warming the commit traces wrote every carry and slot 0 (as verifier_engine's
             # own warming does): slot 0 goes back to what attach found, and the carries go
             # back to the zeros the pool lends - a request's engine seeds its own on
@@ -670,6 +703,8 @@ class PackedVerifierEngine:
             if self.prestaged is not None:
                 diagnostic('%s users=%d audit=%d' % (verify_prestage.ENGAGED_MARKER, self.users,
                                                      int(self.prestaged.audit)))
+            if self.fused is not None:
+                diagnostic(self.fused.engaged_line())
         except BaseException as failure:
             self.phase = 'failed'
             # Logged BEFORE close: run 35505708710 (image v50) raised on the host inside the
@@ -1226,7 +1261,8 @@ class PackedVerifierEngine:
                 min_users=self.padded_min_users, max_idle=self.MAX_IDLE_SEGMENTS,
                 carries_in_place=self.carries_in_place, rounds=self.padded_rounds))),
             **({} if self.prestaged is None else dict(prestage=dict(self.prestaged.counts, audit=self.prestaged.audit))),
-            **({} if not self.round_fences else dict(round_fences=True)))
+            **({} if not self.round_fences else dict(round_fences=True)),
+            **({} if self.fused is None else dict(fused_commit=self.fused.describe())))
 
     def close(self, *, wait=True):
         """Release the block. `wait=False` is the failed construction: the device may still be
@@ -1257,6 +1293,11 @@ class PackedVerifierEngine:
             if wait:
                 operations.release_trace(self.mesh, self.trace)
             self.trace = None
+        if getattr(self, 'fused', None) is not None:
+            # H1b: its traces (abandoned without the fence, like the block's own) and its buffers.
+            abandoned += self.fused.trace_count()
+            self.fused.close(wait=wait)
+            self.fused = None
         if not wait:
             diagnostic('[PINDIAG] packed block closed without the device fence at stage %s; %d captured trace(s) abandoned'
                        % (self.stage, abandoned))

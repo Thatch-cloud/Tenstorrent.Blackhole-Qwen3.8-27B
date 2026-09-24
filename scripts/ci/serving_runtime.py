@@ -310,7 +310,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                                                     shape=shape, feature_taps=TARGET_TAPS,
                                                     **({'pool_slots': tuple(range(slot, slot + shape.users))} if four_as_two else {}),
                                                     **({'padded_min_users': padded_min_users}
-                                                       if padded_min_users is not None else {}))
+                                                       if padded_min_users is not None else {}),
+                                                    # Round-fence plan H1b (QWEN_FAST_FUSED_COMMIT, default
+                                                    # off): the block's T_proj traces use the one shared
+                                                    # TT_CCL every request's device uses.
+                                                    **({'collectives': collectives}
+                                                       if os.environ.get('QWEN_FAST_FUSED_COMMIT') == '1' else {}))
                 scopes.callback(packed_block.close)
                 packed_blocks.append(packed_block)
                 memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)
