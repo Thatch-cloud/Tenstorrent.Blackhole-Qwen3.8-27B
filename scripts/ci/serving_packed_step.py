@@ -330,6 +330,19 @@ class PackedStep:
     def proposal_rows(self, requests):
         return proposal_rows(self.blocks, requests)
 
+    def while_waiting(self, requests):
+        """Round-fence plan H1a: the drafts' fence-window callable for this step's one block
+        (verify_prestage.WhileWaiting: the next verify's pre-stage under QWEN_FAST_PRESTAGE, the
+        arming of its replay under QWEN_FAST_ROUND_FENCES), for the live `requests` the hook's
+        policy just drafted a block round for. None with several blocks (QWEN_FAST_FOUR_AS_TWO)
+        or a block built with neither flag - the hook then passes nothing."""
+        block = self.block
+        if block is None or (getattr(block, 'prestaged', None) is None and not getattr(block, 'round_fences', False)):
+            return None
+        from verify_prestage import WhileWaiting
+
+        return WhileWaiting(block, requests)
+
 
 def ineligible(entries, block):
     """Why the block cannot serve this round as one pass, or None when it can."""
@@ -485,6 +498,10 @@ def run_verified_block(entries, *, cancelled, block):
             for index, splits in enumerate(publish_stage_timings[PUBLISH_SPLIT_KEY]):
                 audit_log(PUBLISH_SPLIT_LINE, round=getattr(block, 'rounds', 0), entry=index,
                           splits=format_publish_splits(splits))
+        if commit_host_timings is not None and ('replay_fence' in metrics or 'prestage' in metrics):
+            # Round-fence plan H1a only (a block built with QWEN_FAST_PRESTAGE or
+            # QWEN_FAST_ROUND_FENCES puts these in its metrics): FENCES_LINE, once per round.
+            audit_log(FENCES_LINE, **fences_fields(metrics, block, segments))
         # QWEN_FAST_MEMORY_LEDGER=1 only, and once per process: P12, after the first packed
         # round's verify and every commit have returned - outside any capture - to catch the
         # buffers the first round allocates lazily (packed proposals, publication).
@@ -840,3 +857,34 @@ def format_publish_splits(splits):
     from dflash_traced_publish import PUBLICATION_SPLIT_NAMES
 
     return ' '.join('%s=%.2f' % (name, splits.get(name, 0.0)) for name in PUBLICATION_SPLIT_NAMES)
+
+
+# Round-fence plan H1a (verify_prestage.py), under QWEN_FAST_PACKED_AUDIT=1 and only for a block
+# built with QWEN_FAST_PRESTAGE or QWEN_FAST_ROUND_FENCES: one line per ROUND, after its commits,
+# in the key=value form round_timeline.py parses. fence: how this round's replay was armed - 'f9'
+# (the drafts' fence, verify_prestage.WhileWaiting.fenced), 'replay' (one fence at replay, its
+# cost in replay_ms), 'first' (the block's first round runs its trace plainly) or '-' without
+# QWEN_FAST_ROUND_FENCES; validated: whether the round's commits skipped their first validate
+# (validated_this_round, plumbed from the verify's replay into packed_verifier.commit_user);
+# commit_sync_ms: the round's last commit beyond its own trace (its fence, ~0 once F8 moves);
+# path/prestage_ms/diff_ms/write_ms: the verify's input path under QWEN_FAST_PRESTAGE ('off'
+# without) - the window's pre-stage cost that this round used, the verify-time recompute and
+# diff, and the verify-time write. Defined here, at the end, like PUBLISH_SPLIT_LINE.
+FENCES_LINE = ('[PACKED-FENCES] round={round} fence={fence} validated={validated} replay_ms={replay_ms} '
+               'commit_sync_ms={commit_sync_ms} path={path} prestage_ms={prestage_ms} diff_ms={diff_ms} '
+               'write_ms={write_ms}')
+
+
+def fences_fields(metrics, block, segments):
+    """FENCES_LINE's fields for this round, from the verify's metrics and the block."""
+    prestage = metrics.get('prestage') or {}
+    commit_block_ms = getattr(block, 'commit_block_ms', None)
+    last = segments[-1] if segments else None
+    commit_sync = commit_block_ms[last] if commit_block_ms is not None and last is not None else 0.0
+    return dict(round=getattr(block, 'rounds', 0), fence=metrics.get('replay_fence') or '-',
+                validated=int(bool(metrics.get('validated_this_round', False))),
+                replay_ms='%.2f' % float(metrics.get('replay_fence_ms') or 0.0),
+                commit_sync_ms='%.2f' % float(commit_sync), path=prestage.get('path', 'off'),
+                prestage_ms='%.2f' % float(prestage.get('prestage_ms', 0.0)),
+                diff_ms='%.2f' % float(prestage.get('diff_ms', 0.0)),
+                write_ms='%.2f' % float(prestage.get('write_ms', 0.0)))

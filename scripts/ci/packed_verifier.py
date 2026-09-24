@@ -97,6 +97,17 @@ No live table may hold page 0 inside the range it reads and writes (`padded_refu
 closed). serving_packed_step decides the round (proposal_rows, ineligible, kv_guard); `verify`
 repeats the checks before anything is staged, as the backstop. With the flag off every path
 here is the one that ran before it existed.
+
+ROUND-FENCE PLAN H1a (verify_prestage.py; QWEN_FAST_PRESTAGE, _PRESTAGE_AUDIT and
+QWEN_FAST_ROUND_FENCES, every one default off). stage_packed is split into packed_values (host)
+and write_packed (copies); with the flags off it is the same calls in the same order. Under
+QWEN_FAST_PRESTAGE the drafts' fence window pre-stages every input of the next verify but its
+tokens (verify_prestage.BlockPrestage.prestage), and verify() - while the fixture write epoch
+has not moved - skips validate_bindings and writes only the buffers whose recomputed value
+differs, with no fence; anything else takes today's full path. Under QWEN_FAST_ROUND_FENCES the
+retained block drops the fence and the second validate after the blocking trace (F3), the last
+commit leaves its fence to the drafts' F9 or the next replay (F8), and the first commit skips
+its validate when the round's replay ran one (validated_this_round).
 """
 
 from contextlib import ExitStack
@@ -122,6 +133,7 @@ from verifier_engine import note_packed_step, note_prefill
 import verifier_engine
 from verifier_inputs import host_inputs, validate_tokens
 from verifier_pack import GDN_LAYERS, build_pack, participant
+import verify_prestage
 import verify_trace_t1
 import verify_trace_t2
 
@@ -205,7 +217,27 @@ def stage_packed(operations, model, fixture, shape, users):
     each cache tile's own positions word and page-table rows for the tile-by-tile K/V
     write (packed_cache_writer.py). One fence for all of it. Returns the number of
     buffers written.
+
+    Round-fence plan H1a (verify_prestage.py): split into `packed_values` (every host check
+    and value, the T2 K/V guard included) and `write_packed` (the copies), which the
+    pre-stage and the verify-time diff also use; this whole-block write is the same calls in
+    the same order as before the split. Every call bumps the fixture write epoch
+    (verify_prestage.bump): a snapshot taken before it no longer describes the buffers.
     """
+    verify_prestage.bump('stage_packed')
+    values, readers = packed_values(operations, model, fixture, shape, users)
+    write_packed(operations, model, values, readers)
+    for own, (user_tokens, start, table) in zip(readers, users, strict=True):
+        own.start = start
+    return len(values)
+
+
+def packed_values(operations, model, fixture, shape, users, *, guard=True):
+    """stage_packed's host half: every check it makes before its first copy, and the
+    (destination, value, dtype, layout) list it writes, in its order, with the readers whose
+    words and tables are in it. `guard=False` (the pre-stage only: its tokens are placeholders
+    and its tables may predate the execute-time refresh) leaves out the T2 K/V guard, which
+    every verify-time call keeps."""
     import torch
 
     if fixture.rows != shape.block_rows or len(fixture.singleton_positions) != shape.block_rows \
@@ -220,13 +252,13 @@ def stage_packed(operations, model, fixture, shape, users):
         raise ValueError('The cache tiles must cover the block in 32-row tiles')
     tokens, positions, cos, sin, pages = packed_host_inputs(users, shape, model.args.rope_head_dim,
                                                             model.args.rope_theta, model.args.vocab_size)
-    if getattr(fixture, 'kv_chains', False):
+    if guard and getattr(fixture, 'kv_chains', False):
         # QWEN_FAST_VERIFY_T2 (#2): the chained K/V write is exact only while no two users write
         # one (page, tile row). serving_packed_step.proposal_rows drafts such a round for the
         # sequential step and ineligible refuses one first seen at the step, so neither reaches
         # here; this is the fail-closed backstop, before any copy.
-        guard = verify_trace_t2.block_users(positions, pages, shape.rows_per_user, shape.users)
-        conflict = verify_trace_t2.kv_conflict(guard)
+        guarded = verify_trace_t2.block_users(positions, pages, shape.rows_per_user, shape.users)
+        conflict = verify_trace_t2.kv_conflict(guarded)
         if conflict is not None:
             verify_trace_t2.log_line('%s site=stage_packed %s' % (verify_trace_t2.KV_SHARED,
                                                                   verify_trace_t2.kv_conflict_reason(conflict)))
@@ -234,7 +266,7 @@ def stage_packed(operations, model, fixture, shape, users):
                              % verify_trace_t2.kv_conflict_reason(conflict))
         if verify_trace_t2.audit_enabled():
             verify_trace_t2.log_line('%s kv_rows_per_user=%s' % (verify_trace_t2.AUDIT_MARKER, ','.join(
-                str(len(verify_trace_t2.kv_tile_rows(user_positions, table))) for user_positions, table in guard)))
+                str(len(verify_trace_t2.kv_tile_rows(user_positions, table))) for user_positions, table in guarded)))
     values = [(fixture.tokens, tokens, operations.uint32, operations.ROW_MAJOR_LAYOUT),
               (fixture.positions, positions, operations.int32, operations.ROW_MAJOR_LAYOUT),
               (fixture.cos, cos, operations.bfloat16, operations.TILE_LAYOUT),
@@ -259,29 +291,40 @@ def stage_packed(operations, model, fixture, shape, users):
     if any(tuple(destination.shape) != tuple(value.shape) or destination.dtype != dtype or destination.layout != layout
            for destination, value, dtype, layout in values):
         raise ValueError('Staged packed inputs must preserve every captured tensor signature')
-    destinations = [destination for destination, value, dtype, layout in values]
+    return values, readers
+
+
+def write_packed(operations, model, values, readers, *, indices=None, fence=True, poison=True):
+    """stage_packed's device half: copy `values` (every one, or the `indices` of them) into
+    their captured buffers, the addresses checked unmoved, one fence unless `fence=False` (the
+    pre-stage, whose window fence F9 follows; the verify-time diff, whose trace follows on the
+    same in-order CQ0). A failed copy poisons the readers unless `poison=False` (the pre-stage:
+    its failure only drops its snapshot, and the verify then restages everything). Returns the
+    staged host tensors, which the caller keeps alive while a copy may be unfenced."""
+    chosen = values if indices is None else [values[index] for index in indices]
+    destinations = [destination for destination, value, dtype, layout in chosen]
     before = [addresses(operations, destination) for destination in destinations]
     if any(len({pair[chip] for pair in before}) != len(before) for chip in range(2)):
         raise ValueError('Two independent chip-local buffers per packed input required')
     staged = [operations.from_torch(value, device=None, dtype=dtype, layout=layout,
                                     mesh_mapper=operations.ReplicateTensorToMesh(model.mesh_device))
-              for destination, value, dtype, layout in values]
+              for destination, value, dtype, layout in chosen]
     try:
         try:
             for source, destination in zip(staged, destinations, strict=True):
                 operations.copy_host_to_device_tensor(source, destination)
         finally:
-            operations.synchronize_device(model.mesh_device)
+            if fence:
+                operations.synchronize_device(model.mesh_device)
         if [addresses(operations, destination) for destination in destinations] != before:
             raise AssertionError('Packed input staging replaced a captured buffer')
     except BaseException:
         # A half-staged word or table poisons the readers, as stage_inputs poisons one.
-        for own in readers:
-            own.failed = True
+        if poison:
+            for own in readers:
+                own.failed = True
         raise
-    for own, (user_tokens, start, table) in zip(readers, users, strict=True):
-        own.start = start
-    return len(destinations)
+    return staged
 
 
 PROFILE_DUMP_ROUND = 'QWEN_FAST_PROFILE_DUMP_ROUND'
@@ -514,6 +557,16 @@ class PackedVerifierEngine:
         # here, like the flags above. Off, padded_probe is never imported and verify() is
         # today's.
         self.padded_probe = os.environ.get('QWEN_FAST_PADDED_PROBE') == '1'
+        # Round-fence plan H1a (verify_prestage.py; every flag default off): read once here, like
+        # the flags above. QWEN_FAST_PRESTAGE gives the block its pre-stage state (the drafts'
+        # window writes every input of the next verify but its tokens; verify() then writes only
+        # what differs), QWEN_FAST_PRESTAGE_AUDIT its read-back audit; QWEN_FAST_ROUND_FENCES puts
+        # the captured retained block on the fence diet (F3, F8; set after the capture, below).
+        # Off, `prestaged` is None, `round_fences` False, and every path below is today's.
+        self.round_fences = verify_prestage.round_fences_enabled()
+        self.prestaged = (verify_prestage.BlockPrestage(self, audit=verify_prestage.audit_enabled())
+                          if verify_prestage.enabled() else None)
+        self.validated_this_round = False
         self.commit_timings = [0.0] * shape.users
         # This round's per-segment HOST cost of the RetainedGDNBlock.commit_user call
         # itself (gdn_records.py), beyond its device commit trace: call_ms - commit_ms,
@@ -610,6 +663,13 @@ class PackedVerifierEngine:
                 diagnostic('%s min_users=%d users=%d max_idle=%d carries_in_place=%d'
                            % (PADDED_ADMITTED_MARKER, self.padded_min_users, self.users, self.MAX_IDLE_SEGMENTS,
                               int(self.carries_in_place)))
+            if self.round_fences:
+                # Only this block's retained records: a sequential engine's never take the diet.
+                self.fixture.retained.use_round_fences()
+                diagnostic('%s users=%d' % (verify_prestage.FENCES_ENGAGED_MARKER, self.users))
+            if self.prestaged is not None:
+                diagnostic('%s users=%d audit=%d' % (verify_prestage.ENGAGED_MARKER, self.users,
+                                                     int(self.prestaged.audit)))
         except BaseException as failure:
             self.phase = 'failed'
             # Logged BEFORE close: run 35505708710 (image v50) raised on the host inside the
@@ -907,11 +967,22 @@ class PackedVerifierEngine:
                                                   else PADDED_REFUSED_MARKER, reason))
                 raise ValueError('The padded packed block cannot serve this round: %s' % reason)
         self.phase = 'verifying'
+        self.validated_this_round = False
         try:
             binding_started = time.perf_counter()
-            self.validate_bindings()
+            # QWEN_FAST_PRESTAGE (verify_prestage): a snapshot the fixture write epoch still vouches
+            # for skips the binding check (the drafts' window ran it) and writes only what differs;
+            # anything else is today's check and full stage_packed.
+            snapshot = reason = None
+            if self.prestaged is not None:
+                snapshot, reason = self.prestaged.usable()
+            if snapshot is None:
+                self.validate_bindings()
             started = time.perf_counter()
-            staged = self.stage_packed_inputs(entries)
+            if self.prestaged is None:
+                staged = self.stage_packed_inputs(entries)
+            else:
+                staged = self.prestaged.stage(entries, segments, snapshot, reason)
             staged_at = time.perf_counter()
             # Claimed before the trace: its segment restores rewrite slot 0, so no engine
             # may trust its residency from here on, even if the trace fails part way.
@@ -925,11 +996,15 @@ class PackedVerifierEngine:
                 trace_ms += (time.perf_counter() - trace_started) * 1000
                 return result
 
-            if self.first:
+            first = self.first
+            if first:
                 operation()
                 self.operations.synchronize_device(self.mesh)
             else:
                 self.fixture.retained.replay(operation)
+                # QWEN_FAST_ROUND_FENCES: the replay validated every native binding right before
+                # this trace, and nothing moves one between here and the round's commits.
+                self.validated_this_round = self.round_fences
             replayed = time.perf_counter()
             if self.shard_argmax:
                 host = self.shard_predictions()
@@ -979,6 +1054,18 @@ class PackedVerifierEngine:
                 # QWEN_FAST_PADDED_BLOCK only: the round's live and idle segments (every round, the
                 # all-live ones included), into each user's phase-timing record.
                 metrics.update(live=len(segments), idle=list(idle))
+            if self.round_fences:
+                # QWEN_FAST_ROUND_FENCES only: how this round's replay was armed - by the drafts'
+                # fence F9 ('f9'), by one fence at replay ('replay', its cost in replay_fence_ms),
+                # or the first round's plain trace ('first') - and whether its commits may skip
+                # the first validate (serving_packed_step's FENCES_MARKER line).
+                retained = self.fixture.retained
+                metrics.update(validated_this_round=self.validated_this_round,
+                               replay_fence='first' if first else getattr(retained, 'replay_fence', None),
+                               replay_fence_ms=0.0 if first else getattr(retained, 'replay_fence_ms', 0.0))
+            if self.prestaged is not None:
+                # QWEN_FAST_PRESTAGE only: this verify's path and split (verify_prestage.BlockPrestage.last).
+                metrics.update(prestage=dict(self.prestaged.last))
             if idle:
                 self.padded_rounds += 1
                 diagnostic('%s live=%d round=%d segments=%s idle=%s padded=%d'
@@ -1072,7 +1159,13 @@ class PackedVerifierEngine:
 
         try:
             call_started = time.perf_counter()
-            self.fixture.retained.commit_user(segment, prefix, dma=True, synchronize=last, publication=publish)
+            if self.round_fences:
+                # QWEN_FAST_ROUND_FENCES: the last commit leaves its fence to the drafts' F9 (or the
+                # next replay), and the first skips its validate when this round's replay ran one.
+                self.fixture.retained.commit_user(segment, prefix, dma=True, synchronize=last, publication=publish,
+                                                  validated_this_round=self.validated_this_round)
+            else:
+                self.fixture.retained.commit_user(segment, prefix, dma=True, synchronize=last, publication=publish)
             call_ms = (time.perf_counter() - call_started) * 1000
             self.commit_timings[segment] = commit_ms
             # This segment's own call cost beyond its device commit trace: bookkeeping
@@ -1101,6 +1194,20 @@ class PackedVerifierEngine:
             # Slot 0 holds this segment's user, or after prefix 0 nobody's committed state.
             note_packed_step()
 
+    def fence_token(self):
+        """QWEN_FAST_ROUND_FENCES: the retained block's commit count, taken by the drafts' window
+        (verify_prestage.WhileWaiting) BEFORE its fence F9, so that fence arms only the commits
+        enqueued ahead of it."""
+        return self.fixture.retained.commit_serial
+
+    def note_round_fence(self, token):
+        """QWEN_FAST_ROUND_FENCES: F9 has just drained CQ0 behind every commit `token` counted -
+        arm the next replay (gdn_records.RetainedGDNBlock.note_round_fence). False, and nothing
+        armed, without the flag or when anything moved since the token."""
+        if not self.round_fences or self.fixture is None:
+            return False
+        return self.fixture.retained.note_round_fence(token)
+
     def describe(self):
         operations = self.operations
         return dict(name='packed', shape=self.shape._asdict(), capture_position=self.capture_position,
@@ -1117,7 +1224,9 @@ class PackedVerifierEngine:
             setup_ms=getattr(self, 'setup_ms', None), rounds=self.rounds,
             **({} if self.padded_min_users is None else dict(padded=dict(
                 min_users=self.padded_min_users, max_idle=self.MAX_IDLE_SEGMENTS,
-                carries_in_place=self.carries_in_place, rounds=self.padded_rounds))))
+                carries_in_place=self.carries_in_place, rounds=self.padded_rounds))),
+            **({} if self.prestaged is None else dict(prestage=dict(self.prestaged.counts, audit=self.prestaged.audit))),
+            **({} if not self.round_fences else dict(round_fences=True)))
 
     def close(self, *, wait=True):
         """Release the block. `wait=False` is the failed construction: the device may still be

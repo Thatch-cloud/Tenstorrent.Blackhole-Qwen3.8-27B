@@ -76,6 +76,18 @@ class RetainedGDNBlock:
         self.replay_ready = False
         self.replay_epoch = 0
         self.closed = False
+        # QWEN_FAST_ROUND_FENCES (round-fence plan H1a, verify_prestage.py): off unless the packed
+        # verifier that owns this block turns it on (use_round_fences) - a sequential engine's
+        # block never is. `fence_owed`: every user has decided and the round's last commit left
+        # its fence (F8) to the drafts' fence F9 (note_round_fence) or to the next replay.
+        # `commit_serial` counts decisions, so a fence arms only the commits issued before it.
+        # `replay_fence` says how the last replay was armed ('f9' or 'replay'), and
+        # `replay_fence_ms` what a fence at replay cost.
+        self.round_fences = False
+        self.fence_owed = False
+        self.commit_serial = 0
+        self.replay_fence = None
+        self.replay_fence_ms = 0.0
 
     def append(self, state, result, checkpoint):
         """Record one layer. Unpacked, `checkpoint` is where the block's one decision is
@@ -153,7 +165,16 @@ class RetainedGDNBlock:
                  state.gdn.rec_state, *state.gdn.conv_states, *carries[segment]]
                 for state, result, carries in self.records for piece in (result['segment_results'][segment],)]
 
-    def commit_user(self, segment, prefix, *, dma=False, publication=None, synchronize=False):
+    def use_round_fences(self):
+        """QWEN_FAST_ROUND_FENCES (round-fence plan H1a), for the packed verifier's own block:
+        replay() drops the fence after its blocking trace and the second validate (F3), and a
+        `synchronize=True` commit_user leaves its fence to note_round_fence or the next replay
+        (F8). A replay still needs every user decided and a fence after the last decision, and
+        a poisoned block still refuses."""
+        self.round_fences = True
+
+    def commit_user(self, segment, prefix, *, dma=False, publication=None, synchronize=False,
+                    validated_this_round=False):
         """Commit ONE packed user's accepted prefix into that user's own carry.
 
         Every user decides once per block, in any order. The block is ready to replay
@@ -162,6 +183,11 @@ class RetainedGDNBlock:
 
         Prefix zero is a no-op on the carry: the decode restored this user from it and
         never advanced it, and the entry the DMA would copy back is that same state.
+
+        Under round fences (use_round_fences) the `synchronize=True` decision does not fence:
+        it owes the fence, which note_round_fence (the drafts' F9) or the next replay pays,
+        and `validated_this_round` (this round's replay validated every binding) skips the
+        first decision's validate.
         """
         if self.closed or self.poisoned or len(self.records) != 48:
             raise ValueError('Exactly one decision per user on a complete live block required')
@@ -186,13 +212,18 @@ class RetainedGDNBlock:
         # of the round - and skip the three repeats that only re-confirm what verify()
         # already established. Default (fast_commit False) behaviour is unchanged: every
         # commit_user call validates, exactly as before.
-        if not self.fast_commit or not self.decisions:
+        # QWEN_FAST_ROUND_FENCES: the round's first decision re-checks what this round's replay
+        # validated right before its trace; nothing between the two moves a native buffer.
+        skip_first = self.round_fences and validated_this_round and not self.decisions
+        if (not self.fast_commit or not self.decisions) and not skip_first:
             self.validate_bindings()
         mesh = self.bound_mesh() if dma or synchronize else None
         self.decisions[segment] = prefix
+        self.commit_serial += 1
         if len(self.decisions) == len(self.segments):
             self.selected_prefix = tuple(self.decisions[index] for index in range(len(self.segments)))
         self.replay_ready = False
+        self.fence_owed = False
         try:
             if prefix == 0:
                 pass
@@ -211,10 +242,40 @@ class RetainedGDNBlock:
             self.poisoned = True
             raise
         if synchronize:
-            self.operations.synchronize_device(mesh)
-            self.replay_ready = self.selected_prefix is not None
+            if self.round_fences:
+                # F8: owed, never skipped - and only once every user has decided.
+                self.fence_owed = self.selected_prefix is not None
+            else:
+                self.operations.synchronize_device(mesh)
+                self.replay_ready = self.selected_prefix is not None
+
+    def note_round_fence(self, token):
+        """Round fences: a fence the caller has just completed on this block's queue (the drafts'
+        F9) pays the owed one - but only if no decision came after `token` (commit_serial read
+        before that fence), and never for a poisoned, closed or undecided block. True when armed."""
+        if (self.round_fences and self.fence_owed and token == self.commit_serial and not self.closed
+                and not self.poisoned and self.selected_prefix is not None and len(self.records) == 48):
+            self.fence_owed = False
+            self.replay_ready = True
+            self.replay_fence, self.replay_fence_ms = 'f9', 0.0
+            return True
+        return False
+
+    def fence_at_replay(self):
+        """Round fences, no F9 since the last decision: the owed fence, paid here, once."""
+        if (self.fence_owed and not self.closed and not self.poisoned and self.selected_prefix is not None
+                and len(self.records) == 48):
+            import time
+
+            started = time.perf_counter()
+            self.operations.synchronize_device(self.bound_mesh())
+            self.fence_owed = False
+            self.replay_ready = True
+            self.replay_fence, self.replay_fence_ms = 'replay', (time.perf_counter() - started) * 1000
 
     def replay(self, operation):
+        if self.round_fences and not self.replay_ready:
+            self.fence_at_replay()
         if self.closed or not self.replay_ready or self.selected_prefix is None or len(self.records) != 48:
             raise ValueError('A successfully synchronized commit is required before replay')
         if not callable(operation):
@@ -224,8 +285,11 @@ class RetainedGDNBlock:
         mesh = self.bound_mesh()
         if operation() is not None:
             raise RuntimeError('Replay operation must return None after enqueueing the bound trace')
-        self.operations.synchronize_device(mesh)
-        self.validate_bindings()
+        if not self.round_fences:
+            self.operations.synchronize_device(mesh)
+            self.validate_bindings()
+        # Round fences (F3): the operation is the packed verifier's BLOCKING trace, so the host
+        # already waited for it, and nothing between it and here can move a native binding.
         self.selected_prefix = None
         self.decisions = {}
         self.replay_epoch += 1
@@ -236,4 +300,5 @@ class RetainedGDNBlock:
             self.records.clear()
             self.decisions = {}
             self.replay_ready = False
+            self.fence_owed = False
             self.closed = True

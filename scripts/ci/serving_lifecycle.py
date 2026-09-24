@@ -3,7 +3,7 @@
 from types import MethodType
 
 from serving_fast_policy import validate_fast_config, validate_request_sampling
-from serving_worker_hook import FastWorkerHook
+from serving_worker_hook import FastWorkerHook, note_fixture_writer
 
 # The scheduler cannot see the lifecycle: one is the mounted plugin, the other the
 # baked evidence tree. They do share the EngineCore process, so a module parked
@@ -26,6 +26,10 @@ def prefill_gate():
 
 
 def note_prefill():
+    # Round-fence plan H1a: a prefill may write what a pre-staged packed verify relies on, so
+    # it bumps the fixture write epoch (verify_prestage.bump; host only, and absent from a tree
+    # without the module).
+    note_fixture_writer('prefill')
     # verifier_engine is only importable where the target model is; elsewhere a
     # prefill has no resident engine to displace.
     try:
@@ -341,6 +345,9 @@ class FastServingLifecycle:
                 f"hook={self.hook is not None}")
         except BaseException:
             pass
+        # Round-fence plan H1a: every Lever N chunk, whichever GDN slot it writes, bumps the
+        # packed fixture write epoch (a pre-staged verify then restages in full).
+        note_fixture_writer('prefill-chunk')
         with self.capture.segment():
             result = self.original_execute(scheduled)
         self._displace_after_continuation()

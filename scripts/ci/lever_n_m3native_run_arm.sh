@@ -427,6 +427,36 @@ elif [ -n "${M3NATIVE_PADDED_BLOCK_MIN_USERS:-}" ]; then
   echo "M3NATIVE_PADDED_BLOCK_MIN_USERS='$M3NATIVE_PADDED_BLOCK_MIN_USERS' without M3NATIVE_PADDED_BLOCK=1 pads nothing: set both or neither" >&2
   exit 1
 fi
+# Round-fence plan H1a (verify_prestage.py; every flag default off). M3NATIVE_PRESTAGE=1 becomes
+# QWEN_FAST_PRESTAGE=1: the drafts' fence window pre-stages the next packed verify and the verify
+# writes only what differs (value diff). M3NATIVE_PRESTAGE_AUDIT=1 becomes QWEN_FAST_PRESTAGE_AUDIT=1:
+# a rotating 8 staged buffers read back after every verify-time write. M3NATIVE_ROUND_FENCES=1 becomes
+# QWEN_FAST_ROUND_FENCES=1: the fence diet (F3, F8, the first-commit validate). The window exists only
+# under the packed proposal coordinator, so the pre-stage needs M3NATIVE_PACKED_PROPOSAL=1 and
+# M3NATIVE_PIPELINED_PROPOSALS=1; all three serve the packed block only. Refused here, before the
+# docker run; unset, nothing is passed.
+for h1a_flag in M3NATIVE_PRESTAGE M3NATIVE_PRESTAGE_AUDIT M3NATIVE_ROUND_FENCES; do
+  h1a_value="${!h1a_flag:-}"
+  if [ -n "$h1a_value" ] && [ "$h1a_value" != "1" ]; then
+    echo "$h1a_flag must be 1 or unset, got '$h1a_value'" >&2
+    exit 1
+  fi
+done
+if [ -n "${M3NATIVE_PRESTAGE_AUDIT:-}" ] && [ -z "${M3NATIVE_PRESTAGE:-}" ]; then
+  echo "M3NATIVE_PRESTAGE_AUDIT=1 without M3NATIVE_PRESTAGE=1 audits nothing: set both or neither" >&2
+  exit 1
+fi
+if [ -n "${M3NATIVE_PRESTAGE:-}${M3NATIVE_ROUND_FENCES:-}" ]; then
+  if [ "$users" -lt 2 ] || [ -n "${M3NATIVE_SEQUENTIAL_USERS:-}" ]; then
+    echo "M3NATIVE_PRESTAGE / M3NATIVE_ROUND_FENCES serve the packed block only (users=$users, sequential '${M3NATIVE_SEQUENTIAL_USERS:-}')" >&2
+    exit 1
+  fi
+  if [ -n "${M3NATIVE_PRESTAGE:-}" ] && { [ "${M3NATIVE_PACKED_PROPOSAL:-}" != "1" ] || [ "${M3NATIVE_PIPELINED_PROPOSALS:-}" != "1" ]; }; then
+    echo "M3NATIVE_PRESTAGE=1 needs M3NATIVE_PACKED_PROPOSAL=1 and M3NATIVE_PIPELINED_PROPOSALS=1 (the coordinator's fence window is where it runs)" >&2
+    exit 1
+  fi
+  echo "round-fence plan H1a: prestage ${M3NATIVE_PRESTAGE:-0} audit ${M3NATIVE_PRESTAGE_AUDIT:-0} round fences ${M3NATIVE_ROUND_FENCES:-0} pipelined publish ${M3NATIVE_PIPELINED_PUBLISH:-0}"
+fi
 
 # Proposals: the fp2u lane runs each request's draft proposal EAGERLY
 # (QWEN_FAST_EAGER_PROPOSAL=1) because per-request proposal traces clobbered each
@@ -603,6 +633,9 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PADDED_PROBE:+-e QWEN_FAST_PADDED_PROBE=1} \
   ${M3NATIVE_PADDED_BLOCK:+-e QWEN_FAST_PADDED_BLOCK=1} \
   ${M3NATIVE_PADDED_BLOCK_MIN_USERS:+-e QWEN_FAST_PADDED_BLOCK_MIN_USERS=$M3NATIVE_PADDED_BLOCK_MIN_USERS} \
+  ${M3NATIVE_PRESTAGE:+-e QWEN_FAST_PRESTAGE=1} \
+  ${M3NATIVE_PRESTAGE_AUDIT:+-e QWEN_FAST_PRESTAGE_AUDIT=1} \
+  ${M3NATIVE_ROUND_FENCES:+-e QWEN_FAST_ROUND_FENCES=1} \
   ${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1} \
   ${M3NATIVE_GDN_PREFILL_CONV:+-e QWEN_FAST_GDN_PREFILL_CONV=1} \
   ${M3NATIVE_GDN_PREFILL_CONV_AUDIT:+-e QWEN_FAST_GDN_PREFILL_CONV_AUDIT=$M3NATIVE_GDN_PREFILL_CONV_AUDIT} \

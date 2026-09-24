@@ -370,7 +370,7 @@ class PackedProposalCoordinator:
             audit_log(RECAPTURE_LINE, slot=getattr(getattr(device, 'pool_slot', None), 'index', None))
         return True
 
-    def prepare(self, bridges, packed_round=None):
+    def prepare(self, bridges, packed_round=None, while_waiting=None):
         """Phase A, packed variant: pair eligible bridges by fixed pool slot, run one
         traced pass per full packable pair, prepare_device() unchanged for anything
         left over (an unpaired bridge, a lone survivor of a broken pair, a pair not
@@ -386,7 +386,15 @@ class PackedProposalCoordinator:
         `packed_round` (QWEN_FAST_PAIRS_PACKED_ONLY only; the hook passes nothing
         otherwise): False when the packed step's policy serves this round sequentially,
         and then, with the flag on, no pair forms - every member prepares on its own
-        (unpair_groups)."""
+        (unpair_groups).
+
+        `while_waiting` (round-fence plan H1a, verify_prestage.WhileWaiting; the hook passes
+        it only when a flag is on and the coming round is the block's packed round): called
+        just before this round's one fence, after every pair and single is enqueued, so its
+        host work hides under their device time - and only when there is a fence to follow
+        it. An Exception it raises is handed to its `drop` and never fails the round. Right
+        after the fence its `fenced` is called (the fence has drained everything enqueued
+        before it)."""
         from dflash_packed_proposal import pair_slots
         from serving_worker_hook import phase, pipelined_device
 
@@ -525,8 +533,12 @@ class PackedProposalCoordinator:
                     if callable(discard):
                         discard()
             raise
+        if fence is not None and while_waiting is not None:
+            run_while_waiting(while_waiting)
         if fence is not None:
             fence[0].synchronize_device(fence[1])
+            if while_waiting is not None:
+                note_fenced(while_waiting)
         if batched:
             select_round(batched, prepared, round_number)
         if audit_enabled() and pair_labels:
@@ -622,6 +634,36 @@ def select_round(batched, prepared, round_number):
                   users=sum(len(result['parts']) for _, _, result in collected), calls=len(groups),
                   collect_ms='%.2f' % ((collected_at - started) * 1000),
                   select_ms='%.2f' % ((finished - collected_at) * 1000))
+
+
+def run_while_waiting(while_waiting):
+    """Round-fence plan H1a: the window's callable, just before the round's fence. An Exception
+    goes to its `drop` (the pre-stage's snapshot is dropped, the next verify takes the full
+    path) and never fails the round; a failing `drop` is swallowed too."""
+    try:
+        while_waiting()
+    except Exception as failure:
+        drop = getattr(while_waiting, 'drop', None)
+        if callable(drop):
+            try:
+                drop(failure)
+            except Exception:
+                pass
+
+
+def note_fenced(while_waiting):
+    """Round-fence plan H1a: right after the round's fence, the window callable's `fenced` (it
+    arms the packed block's next replay under QWEN_FAST_ROUND_FENCES). A failure only leaves
+    that replay to pay its own fence, so it never fails the round."""
+    fenced = getattr(while_waiting, 'fenced', None)
+    if callable(fenced):
+        try:
+            fenced()
+        except Exception as failure:
+            try:
+                audit_log('[PACKED-PRESTAGE-WINDOW] fenced failed: {failure}', failure=repr(failure)[:160])
+            except Exception:
+                pass
 
 
 def _audit_selection(trace, adopted):

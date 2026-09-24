@@ -117,6 +117,26 @@ def pipelined_device(bridge):
     return device if device is not None and callable(getattr(device, 'prepare_device', None)) else None
 
 
+def window_flags_on(environ=None):
+    """Round-fence plan H1a: whether QWEN_FAST_PRESTAGE or QWEN_FAST_ROUND_FENCES is 1 (the
+    block validates the values at attach; this only decides whether to ask for a window)."""
+    environ = os.environ if environ is None else environ
+    return environ.get('QWEN_FAST_PRESTAGE') == '1' or environ.get('QWEN_FAST_ROUND_FENCES') == '1'
+
+
+def note_fixture_writer(reason):
+    """Round-fence plan H1a: device work that is not the packed block's own round - a prefill
+    or Lever N prefill chunk, an admission, a detach, a bookkeeping step - may write what a
+    pre-staged verify relies on, so it bumps the packed fixture write epoch
+    (verify_prestage.bump) and the next verify restages in full. Host only; a tree without the
+    module has no pre-stage to invalidate."""
+    try:
+        from verify_prestage import bump
+    except ImportError:
+        return
+    bump(reason)
+
+
 def prepare_pipelined_drafts(bridges):
     """QWEN_FAST_PIPELINED_PROPOSALS phase A: enqueue every eligible bridge's
     proposal device work (DFlashDevice.prepare_device -> dflash_proposal_trace.
@@ -188,6 +208,7 @@ class FastWorkerHook:
         self._replace(runner, 'execute_model', MethodType(self._execute, runner))
         self._replace(runner, 'sample_tokens', MethodType(self._sample, runner))
         self._replace(worker, 'take_draft_token_ids', MethodType(self._drafts, worker))
+        note_fixture_writer('admission')
 
     def _replace(self, owner, name, value):
         self.saved.append((owner, name, name in vars(owner), vars(owner).get(name)))
@@ -201,6 +222,7 @@ class FastWorkerHook:
         if request_id in self.bridges:
             raise ValueError('That request already decodes on this worker')
         self.bridges[request_id] = bridge
+        note_fixture_writer('admission')
         return self
 
     def detach(self, request_id):
@@ -208,6 +230,7 @@ class FastWorkerHook:
         if bridge is None:
             raise ValueError('That request does not decode on this worker')
         bridge.close()
+        note_fixture_writer('detach')
         return self.bridges
 
     def _execute(self, runner, scheduled):
@@ -233,6 +256,7 @@ class FastWorkerHook:
                         sorted(getattr(scheduled, 'finished_req_ids', None) or (), key=str),
                         sorted(getattr(scheduled, 'preempted_req_ids', None) or (), key=str))
         if getattr(scheduled, 'scheduled_new_reqs', None):
+            note_fixture_writer('prefill')
             return self.original_execute(scheduled)
         # ... and under CHUNKED prefill only the first chunk is new. Every later
         # chunk of someone else's prompt is a CACHED request, so the guard above
@@ -252,12 +276,14 @@ class FastWorkerHook:
             bridged = set(cached_ids) & set(self.bridges)
             if bridged and self._carries_tokens(scheduled, unbridged):
                 self._refuse_mixed_step(scheduled, bridged, unbridged)
+            note_fixture_writer('prefill-chunk')
             return self.original_execute(scheduled)
         # A step that schedules no tokens is a bookkeeping step - a request
         # finishing, for instance - not this hook's decode. With one bridge the
         # lifecycle released the hook before such a step could arrive; holding
         # several, it does not, so the pass-through has to be here.
         if not getattr(scheduled, 'total_num_scheduled_tokens', 1):
+            note_fixture_writer('bookkeeping')
             return self.original_execute(scheduled)
         if len(self.bridges) == 1 and self.packed_step is None:
             return self.bridge.execute_decode(scheduled, cancelled=self.cancelled)
@@ -441,14 +467,26 @@ class FastWorkerHook:
                     from dflash_packed_proposal_coordinator import PackedProposalCoordinator
 
                     coordinator = self._packed_coordinator = PackedProposalCoordinator()
+                # Round-fence plan H1a (verify_prestage.py; QWEN_FAST_PRESTAGE or
+                # QWEN_FAST_ROUND_FENCES, default off): the coordinator's fence window pre-stages
+                # the next verify and its fence arms that verify's replay - passed only when the
+                # coming round is the block's packed round (packed_rows). With both flags off
+                # nothing is asked and the calls below are today's, argument for argument.
+                options = {}
+                if packed_rows is not None and window_flags_on():
+                    make = getattr(self.packed_step, 'while_waiting', None)
+                    while_waiting = make([bridge.request for bridge in bridges]) if callable(make) else None
+                    if while_waiting is not None:
+                        options['while_waiting'] = while_waiting
                 if os.environ.get('QWEN_FAST_PAIRS_PACKED_ONLY') == '1':
                     # Variable-user packed rounds, M0's fallback (dflash_packed_proposal_
                     # coordinator.PAIRS_PACKED_ONLY_FLAG): whether the policy serves this
                     # round as one pass. Unset, the call below is today's, argument for argument.
                     packed_round = packed_rows is not None
-                    phase('prepare_proposals', ids, lambda: coordinator.prepare(bridges, packed_round=packed_round))
+                    phase('prepare_proposals', ids, lambda: coordinator.prepare(bridges, packed_round=packed_round,
+                                                                                **options))
                 else:
-                    phase('prepare_proposals', ids, lambda: coordinator.prepare(bridges))
+                    phase('prepare_proposals', ids, lambda: coordinator.prepare(bridges, **options))
             else:
                 phase('prepare_proposals', ids, lambda: prepare_pipelined_drafts(bridges))
         request_ids, tokens = [], []

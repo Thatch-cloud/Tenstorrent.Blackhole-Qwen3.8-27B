@@ -70,6 +70,7 @@ jobs:
           python -B -m unittest discover -s optimisation/ttnn-op/verify_t2 -p 'test_*.py'
           python -B -m unittest test_dflash_proposal_trace test_padded_probe
           python -B -m unittest test_padded_block
+          python -B -m unittest test_verify_prestage test_round_fences
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
           python -B -m unittest test_qual_card

@@ -75,6 +75,10 @@ COPY scripts/ci/verify_trace_t2.py scripts/ci/gdn_conv_windows_packed.py scripts
 # Variable-user packed rounds M1 (QWEN_FAST_PADDED_PROBE, default off): packed_verifier imports
 # padded_probe when the flag is set. M0 changes only modules already listed above.
 COPY scripts/ci/padded_probe.py /experiment-scripts/ci/
+# Round-fence plan H1a (QWEN_FAST_PRESTAGE, _PRESTAGE_AUDIT, QWEN_FAST_ROUND_FENCES; every flag default
+# off): packed_verifier imports verify_prestage at module level, serving_packed_step, serving_worker_hook
+# and serving_lifecycle reach it too, so it must reach the image beside them.
+COPY scripts/ci/verify_prestage.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

@@ -641,6 +641,118 @@ def padded_block_report(environ, log_text):
     return summary
 
 
+# Round-fence plan H1a (verify_prestage.py; QWEN_FAST_PRESTAGE, QWEN_FAST_PRESTAGE_AUDIT,
+# QWEN_FAST_ROUND_FENCES; every one default off). Each flag's block logs its engagement once at attach
+# and one line per round once its path ran, so a flag set on an image without it fails here:
+#   QWEN_FAST_PRESTAGE        '[PINDIAG] verify prestage engaged', '[PACKED-PRESTAGE-WINDOW] round=' per
+#       drafts window (or 'dropped=' when the pre-stage raised: the verify then goes full), and
+#       '[PACKED-PRESTAGE] round=R path=diff|full buffers=N reason=R live=K' per verify. Required: at least
+#       one diff round, and - over at least PRESTAGE_FLOOR_ROUNDS four-live rounds - the diff path in
+#       PRESTAGE_DIFF_FLOOR of them (the plan's H1a threshold; every full round names its reason).
+#   QWEN_FAST_PRESTAGE_AUDIT  '[PACKED-PRESTAGE-AUDIT] round=R path=P checked=8 first=I mismatches=M' after
+#       every verify-time write; any mismatch fails the arm (the round itself was restaged in full, so its
+#       text stays exact). Without QWEN_FAST_PRESTAGE it audits nothing: a problem.
+#   QWEN_FAST_ROUND_FENCES    '[PINDIAG] round fences engaged' and, under QWEN_FAST_PACKED_AUDIT,
+#       '[PACKED-FENCES] round=R fence=f9|replay|first validated=0|1 ...' per round. With the packed
+#       proposal coordinator's window (QWEN_FAST_PACKED_PROPOSAL and QWEN_FAST_PIPELINED_PROPOSALS) at
+#       least one replay must be armed by the drafts' fence (fence=f9).
+PRESTAGE_FLAG = 'QWEN_FAST_PRESTAGE'
+PRESTAGE_AUDIT_FLAG = 'QWEN_FAST_PRESTAGE_AUDIT'
+ROUND_FENCES_FLAG = 'QWEN_FAST_ROUND_FENCES'
+PRESTAGE_ENGAGED_MARKER = '[PINDIAG] verify prestage engaged'
+PRESTAGE_WINDOW_MARKER = '[PACKED-PRESTAGE-WINDOW] round='
+PRESTAGE_MARKER = '[PACKED-PRESTAGE] round='
+PRESTAGE_AUDIT_MARKER = '[PACKED-PRESTAGE-AUDIT] round='
+FENCES_ENGAGED_MARKER = '[PINDIAG] round fences engaged'
+FENCES_MARKER = '[PACKED-FENCES] round='
+PRESTAGE_LINE = re.compile(r'\[PACKED-PRESTAGE\] round=([0-9]+) path=(diff|full) buffers=([0-9]+) reason=(\S+) '
+                           r'live=([0-9]+)')
+PRESTAGE_WINDOW_LINE = re.compile(r'\[PACKED-PRESTAGE-WINDOW\] round=([0-9]+) (?:buffers=([0-9]+) ms=([0-9.]+)'
+                                  r'|dropped=(\S+))')
+PRESTAGE_AUDIT_LINE = re.compile(r'\[PACKED-PRESTAGE-AUDIT\] round=([0-9]+) path=(diff|full) checked=([0-9]+) '
+                                 r'first=(-?[0-9]+) mismatches=([0-9]+)')
+FENCES_LINE = re.compile(r'\[PACKED-FENCES\] round=([0-9]+) fence=(\S+) validated=([01]) replay_ms=([0-9.]+) '
+                         r'commit_sync_ms=([0-9.]+) path=(\S+) prestage_ms=([0-9.]+) diff_ms=([0-9.]+) '
+                         r'write_ms=([0-9.]+)')
+PRESTAGE_DIFF_FLOOR = 0.65
+PRESTAGE_FLOOR_ROUNDS = 10
+
+
+def h1a_markers(environ):
+    """{flag: [marker]} for the round-fence plan H1a flags set in `environ`."""
+    on = lambda name: environ.get(name) == '1'
+    required = {}
+    if on(PRESTAGE_FLAG):
+        required[PRESTAGE_FLAG] = [PRESTAGE_ENGAGED_MARKER, PRESTAGE_WINDOW_MARKER, PRESTAGE_MARKER]
+        if on(PRESTAGE_AUDIT_FLAG):
+            required[PRESTAGE_AUDIT_FLAG] = [PRESTAGE_AUDIT_MARKER]
+    if on(ROUND_FENCES_FLAG):
+        required[ROUND_FENCES_FLAG] = [FENCES_ENGAGED_MARKER]
+        if on('QWEN_FAST_PACKED_AUDIT'):
+            required[ROUND_FENCES_FLAG].append(FENCES_MARKER)
+    return required
+
+
+def h1a_summary(log_text):
+    """What the H1a lines say: the verify paths (all rounds and four-live rounds), the full-path
+    reasons, the window's pre-stages and drops, the audit, and how each replay was armed."""
+    rounds = [match.groups() for match in PRESTAGE_LINE.finditer(log_text)]
+    windows = [match.groups() for match in PRESTAGE_WINDOW_LINE.finditer(log_text)]
+    audits = [match.groups() for match in PRESTAGE_AUDIT_LINE.finditer(log_text)]
+    fences = [match.groups() for match in FENCES_LINE.finditer(log_text)]
+    reasons = {}
+    for round_number, path, buffers, reason, live in rounds:
+        if path == 'full':
+            reasons[reason[:48]] = reasons.get(reason[:48], 0) + 1
+    four = [line for line in rounds if line[4] == '4']
+    diff_buffers = sorted(int(line[2]) for line in rounds if line[1] == 'diff')
+    by_fence = {}
+    for line in fences:
+        by_fence[line[1]] = by_fence.get(line[1], 0) + 1
+    return dict(
+        rounds=len(rounds), diff=sum(1 for line in rounds if line[1] == 'diff'),
+        full=sum(1 for line in rounds if line[1] == 'full'), full_reasons=reasons,
+        four_live=len(four), four_live_diff=sum(1 for line in four if line[1] == 'diff'),
+        diff_share_four_live=(round(sum(1 for line in four if line[1] == 'diff') / len(four), 4) if four else None),
+        diff_buffers_median=diff_buffers[len(diff_buffers) // 2] if diff_buffers else None,
+        windows=sum(1 for line in windows if line[3] is None), dropped=[line[3] for line in windows if line[3]][:8],
+        window_ms_median=(statistics.median(float(line[2]) for line in windows if line[3] is None)
+                          if any(line[3] is None for line in windows) else None),
+        audits=len(audits), audited_buffers=sum(int(line[2]) for line in audits),
+        audit_mismatches=sum(int(line[4]) for line in audits),
+        fences=len(fences), fence_kinds=by_fence, validated=sum(1 for line in fences if line[2] == '1'))
+
+
+def h1a_report(environ, log_text):
+    """Under any H1a flag the summary and its problems (under 'problems'), else None."""
+    on = lambda name: environ.get(name) == '1'
+    if not (on(PRESTAGE_FLAG) or on(PRESTAGE_AUDIT_FLAG) or on(ROUND_FENCES_FLAG)):
+        return None
+    summary = h1a_summary(log_text)
+    problems = []
+    if on(PRESTAGE_AUDIT_FLAG) and not on(PRESTAGE_FLAG):
+        problems.append('%s=1 without %s=1 audits nothing' % (PRESTAGE_AUDIT_FLAG, PRESTAGE_FLAG))
+    if on(PRESTAGE_FLAG):
+        if summary['rounds'] and not summary['diff']:
+            problems.append('%s: no verify took the diff path (%d full; reasons %s)' % (
+                PRESTAGE_FLAG, summary['full'], summary['full_reasons']))
+        if (summary['four_live'] >= PRESTAGE_FLOOR_ROUNDS
+                and summary['diff_share_four_live'] < PRESTAGE_DIFF_FLOOR):
+            problems.append('%s: diff path in %d of %d four-live rounds (%.2f), under %.2f (full reasons %s)' % (
+                PRESTAGE_FLAG, summary['four_live_diff'], summary['four_live'], summary['diff_share_four_live'],
+                PRESTAGE_DIFF_FLOOR, summary['full_reasons']))
+    if on(PRESTAGE_FLAG) and on(PRESTAGE_AUDIT_FLAG) and summary['audit_mismatches']:
+        first = next(match.group(0) for match in PRESTAGE_AUDIT_LINE.finditer(log_text) if match.group(5) != '0')
+        problems.append('%s: no mismatch (%d; first: %s)' % (PRESTAGE_AUDIT_FLAG, summary['audit_mismatches'],
+                                                             first[:200]))
+    if (on(ROUND_FENCES_FLAG) and on('QWEN_FAST_PACKED_AUDIT') and on('QWEN_FAST_PACKED_PROPOSAL')
+            and on('QWEN_FAST_PIPELINED_PROPOSALS') and summary['fences'] and not summary['fence_kinds'].get('f9')):
+        problems.append('%s: no replay armed by the drafts\' fence (fence kinds %s)' % (
+            ROUND_FENCES_FLAG, summary['fence_kinds']))
+    summary['problems'] = problems
+    return summary
+
+
 def required_flag_markers(environ, users, prompt_tokens=None):
     """The markers the flags in `environ` promise, as {flag: [marker, ...]}. prompt_tokens (each user's
     prompt; None: unknown) decides whether QWEN_FAST_SDPA_PF's 2048-row topology is promised."""
@@ -665,6 +777,7 @@ def required_flag_markers(environ, users, prompt_tokens=None):
         if on(VERIFY_T2_AUDIT_FLAG) and users == 4 and 'windows' not in verify_t2_skipped(environ):
             required[VERIFY_T2_AUDIT_FLAG] = [VERIFY_T2_AUDIT_MARKER + ' 1 exact=True']
     required.update(variable_user_markers(environ, users))
+    required.update(h1a_markers(environ))
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
@@ -745,6 +858,11 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
         prefill_conv = summary['chunk_calls']
     variable_user = variable_user_report(environ, users, log_text)
     missing.extend(variable_user.pop('problems'))
+    # Round-fence plan H1a: under 'round_fence_h1a' only when one of its flags is set.
+    h1a = h1a_report(environ, log_text)
+    if h1a is not None:
+        missing.extend(h1a.pop('problems'))
+        variable_user['round_fence_h1a'] = h1a
     residual = LEDGER_RESIDUAL.search(log_text)
     return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
                 prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary, verify_t1_sites=verify_t1_sites,

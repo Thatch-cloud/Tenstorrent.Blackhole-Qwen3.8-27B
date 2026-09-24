@@ -85,6 +85,9 @@ jobs:
           for name in padded_probe.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in verify_prestage.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
       - name: Build and CPU-test canary without devices or weights
         run: |
           image="qwen-fast-serving:ci-${GITHUB_SHA}"
