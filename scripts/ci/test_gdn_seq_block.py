@@ -154,15 +154,53 @@ class FlagTests(unittest.TestCase):
 
 
 class PlanTests(unittest.TestCase):
-    def test_the_totals_are_the_plans_and_under_todays_plan(self):
+    def test_the_totals_are_the_plans_and_within_todays_budget(self):
         io, fp32 = seq.cb_plan()
-        self.assertEqual(sum(io.values()), 78)
-        self.assertEqual(sum(io.values()) * 2048, 159744)
-        self.assertEqual(sum(fp32.values()), 109)
-        self.assertEqual(sum(fp32.values()) * 4096, 446464)
-        self.assertEqual(seq.cb_bytes(), 606208)
+        # The plan's 78 bf16 pages plus SOUT2 (14); its 109 fp32 pages less FAC_K (1).
+        self.assertEqual(sum(io.values()), 92)
+        self.assertEqual(sum(io.values()) * 2048, 188416)
+        self.assertEqual(sum(fp32.values()), 108)
+        self.assertEqual(sum(fp32.values()) * 4096, 442368)
+        self.assertEqual(seq.cb_bytes(), 630784)
         self.assertEqual(seq.SERVED_CB_BYTES, 630784)
-        self.assertEqual(seq.SERVED_CB_BYTES - seq.cb_bytes(), 24576)
+        self.assertEqual(seq.SERVED_CB_BYTES - seq.cb_bytes(), 0)
+
+    def test_the_snapshot_leaves_in_two_halves_one_per_noc(self):
+        # SOUT (compute -> writer, NoC 0) carries K rows 0-1, SOUT2 (compute -> reader, NoC 1) rows
+        # 2-3: 8 pages a token each, pushed and popped two pages (a column) at a time.
+        self.assertEqual(seq.CB_PLAN[7], ('SOUT', 16, 'bf16', 'compute', 'writer'))
+        self.assertEqual(seq.CB_PLAN[21], ('SOUT2', 14, 'bf16', 'compute', 'reader'))
+        self.assertNotIn('FAC_K', [entry[0] for entry in seq.CB_PLAN.values()])
+        for index in (7, 21):
+            self.assertEqual(seq.CB_PLAN[index][1] % 2, 0)
+            self.assertGreaterEqual(seq.CB_PLAN[index][1], 8)
+        compute = (HERE / seq.SOURCES['compute']).read_text()
+        self.assertIn('pack_tile(0, i < SB_KT_HALF ? out : out2, i % SB_KT_HALF);', compute)
+        self.assertEqual(compute.count('l2_norm_rows(SB_X, SB_FAC_Q, SB_QKN'), 2)
+        # Mirror of the kernels' page maps: every states page of a token written exactly once, by
+        # the RISC whose ring holds that tile, from the CB page the compute packed it to; each half
+        # walks the 8 banks (page mod 8) once from a per-core start.
+        Kt = Vt = 4
+        rows, half = Kt // 2, Kt // 2 * Vt
+        for h in range(24):
+            written = []
+            for role, start, offset in (('writer', h % half, 0), ('reader', (h + half // 2) % half, half)):
+                banks = []
+                for k in range(half):
+                    q = (start + k) % half
+                    slot = (q % Vt) * rows + q // Vt           # CB page 2j + i (i within the half)
+                    i, j = q // Vt + offset // Vt, q % Vt        # the tile (i, j)
+                    self.assertEqual(slot, 2 * j + (i % rows))
+                    written.append(offset + q)
+                    self.assertEqual(offset + q, 4 * i + j)     # the served page 4i + j
+                    banks.append((offset + q) % 8)
+                self.assertEqual(sorted(banks), list(range(8)), (h, role))
+            self.assertEqual(sorted(written), list(range(16)), h)
+        for role, name in (('writer', 'sout'), ('reader', 'sout2')):
+            source = (HERE / seq.SOURCES[role]).read_text()
+            self.assertIn('const uint32_t slot = (q % Vt) * rows + q / Vt;', source)
+            self.assertIn('%s.pop_front(rows);' % name, source)
+            self.assertIn('if (addr >= %s_limit) {' % name, source)
 
     def test_the_bisection_build_adds_only_its_outer_ring(self):
         io, fp32 = seq.cb_plan('A0')
@@ -240,7 +278,7 @@ class PlanTests(unittest.TestCase):
         declared = {role: cb_constants((HERE / seq.SOURCES[role]).read_text()) for role in seq.ROLES}
         self.assertEqual({name: declared['compute'][name] for name in by_name}, by_name)
         for role, expected in (('reader', ('IN_QK', 'IN_V', 'IN_Z', 'IN_GB', 'S0', 'ONES', 'W', 'QKN', 'VF',
-                                           'BF', 'GEXP', 'TOKA', 'TOKB')),
+                                           'BF', 'GEXP', 'TOKA', 'TOKB', 'SOUT2')),
                                ('writer', ('SOUT', 'OUT', 'OT', 'O'))):
             cbs = {name: value for name, value in declared[role].items() if name in by_name}
             self.assertEqual(sorted(cbs), sorted(expected), role)
@@ -301,10 +339,10 @@ class ArgsTests(unittest.TestCase):
 
     def test_runtime_args_place_every_address_where_the_kernels_read_it(self):
         addresses = list(range(10, 90, 10))  # qkv, beta, gate, initial, output, states, z, norm_w
-        self.assertEqual(seq.runtime_args('reader', 5, addresses), [5, 10, 20, 30, 40, 70, 80])
+        self.assertEqual(seq.runtime_args('reader', 5, addresses), [5, 10, 20, 30, 40, 70, 80, 60])
         self.assertEqual(seq.runtime_args('writer', 5, addresses), [5, 50, 60])
         self.assertEqual(seq.runtime_args('compute', 5, addresses), [16])
-        self.assertEqual(seq.ACCESSORS, dict(reader=(0, 1, 2, 3, 6, 7), writer=(4, 5), compute=()))
+        self.assertEqual(seq.ACCESSORS, dict(reader=(0, 1, 2, 3, 6, 7, 5), writer=(4, 5), compute=()))
         for role in seq.ROLES:
             with self.assertRaises(ValueError):
                 seq.runtime_args(role, 24, addresses)
@@ -596,9 +634,11 @@ class ParityTests(unittest.TestCase):
         chip = fake.launches[-1][1][((0, 0), (0, 0))]
         for user in range(4):
             qkv, beta, gate, initial, z, norm_w = user_inputs(user)
+            states = {args[2] for unused, unused_too, args in chip.kernels[3 * user + 1].runtime_args.flattened()}
+            self.assertEqual(len(states), 1)  # the writer's states buffer: this user's own
             for unused, unused_too, args in chip.kernels[3 * user].runtime_args.flattened():
                 self.assertEqual(args[1:], (qkv.address, beta.address, gate.address, initial.address,
-                                            z.address, norm_w.address))
+                                            z.address, norm_w.address) + tuple(states))
 
     def test_the_bisection_build_carries_its_outer_ring(self):
         fake = FakeTTNN()
@@ -720,7 +760,7 @@ class AuditTests(unittest.TestCase):
             report = seq.audit(root)
             self.assertEqual(report['generated_sha256'], seq.sha256(seq.generate(root)))
         self.assertFalse(report['qualified'])
-        self.assertEqual(report['cb_bytes_per_worker'], 606208)
+        self.assertEqual(report['cb_bytes_per_worker'], 630784)
         self.assertEqual(report['served_cb_bytes_per_worker'], 630784)
         self.assertEqual(report['cb_indices'], list(range(31)))
         self.assertEqual(report['cb_owners'][30]['name'], 'RT')
@@ -1113,9 +1153,9 @@ ROOT = HERE.parent.parent
 PARENT = 'e7bfd324'
 CPU_WORKFLOW = ROOT / '.github' / 'workflows' / 'qwen-integration-cpu.yml'
 ARM = HERE / 'lever_n_m3native_run_arm.sh'
-TRIPLE = dict(reader='c9becdc5c6ffafb4aba9e3fd2c49d2c6d16fd26e2ee1f70c9dbfa2ded23e5253',
-              writer='277082a8d10e0e35ed4a5670170cd100cc53a3539f91f1e51fe9f62e78ea3311',
-              compute='5275b2cc766d40e595d3fd4122d655a8bc511c0ef7d2f42b748975ecf5b2cf78')
+TRIPLE = dict(reader='784deb4e398cfaa5a7c2b415c1a8be71925ccfd61fe18d801b11fb138dbc45c0',
+              writer='215ef7da5d01d5c5fa720e8f6218481f27491c075151140376b457d760e1870d',
+              compute='a9782f1434673d05fb7270b810836101ef38b51becfbd5c13d67880a937deffe')
 
 
 def clean_environment(**flags):
@@ -1996,10 +2036,10 @@ class ShippingTests(unittest.TestCase):
     def test_the_kernel_sources_are_the_bytes_card_b_qualified(self):
         """QUALIFIED[0] is the hash of what these generate (with the pinned native prefix, which CI
         does not have); the sources themselves are pinned here so CI sees a change too. Probe run
-        p0full shipped exactly these (ship1)."""
-        probed = dict(compute='b442d14cf81b6c94d78249c030fb86508263fd17629eb3db964e2c7bd3fa0853',
-                      reader='8e56ca95de8c862e18507e50c848851637f6de5cf6731015f933133c93b0f760',
-                      writer='6870bedf95cdca293bddf3b8ebeb85f92af00a185d4de3237a3cf40627a34511')
+        r2 (the split-NoC writer, W4) shipped exactly these (ship2)."""
+        probed = dict(compute='6373114a211bb57ece4ce3517b7c35bd91b50aedd11b6864d69ae47b8772aa45',
+                      reader='2423c67cbbeab03249d61fb260faa23af6af6a412e091a2b20b67252ef20945e',
+                      writer='1016497072c14fedcb240476c34c645275733fc981843c4de4744ceff142ef13')
         self.assertEqual({role: hashlib.sha256((HERE / seq.SOURCES[role]).read_bytes()).hexdigest() for role in seq.ROLES},
                          probed)
 

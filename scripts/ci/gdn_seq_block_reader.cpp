@@ -20,6 +20,13 @@
 //          critical path): row 0 copied into rows 1-15 so that row t of xn * w is the served row-0
 //          product; rows 16-31 zeroed as served (reader.cpp:230-247).
 //
+//   SOUT2  the snapshot's K rows 2, 3 (tile (i, j) at CB page 2(j) + i - 2, two per column), which
+//          this RISC writes on NoC 1 while the writer writes rows 0, 1 on NoC 0: tile (i, j) of token
+//          t to states page (h + H*t)*16 + 4i + j, the served layout. Token t's half is issued once
+//          TOKA(t + 1) is staged, in page order q = 4(i - 2) + j rotated by a per-core start (the
+//          writer's bank walk, started four banks away), and flushed and popped after TOKB(t + 1):
+//          the compute needs TOKA and TOKB before it packs SOUT2 again, so neither waits on the other.
+//
 // TOKA and TOKB are NOT zeroed: only what is staged each token is ever read. The scalars are read
 // at [0,0] only (scalar broadcast); the v and k~ rows and the q~ row feed ops whose output row 0
 // depends on input row 0 alone (T3b elementwise, T3a/T7 matmul rows), and rows 1-31 of those
@@ -30,7 +37,7 @@
 // Element (r, c) of a tile is word ((r/16)*2 + c/16)*256 + (r%16)*16 + c%16 (reader.cpp:7-10).
 //
 // Compile args: {Kt, Vt, H, RF, Ct, QOT, KOT, VOT, WTZ, ZOT, SRC_TAG} + accessor args for
-// (qkv, beta, g, carry, z, norm_w). Runtime args: {h, qkv, beta, g, carry, z, norm_w}.
+// (qkv, beta, g, carry, z, norm_w, states). Runtime args: {h, qkv, beta, g, carry, z, norm_w, states}.
 
 #include <cstdint>
 
@@ -48,7 +55,10 @@ constexpr uint32_t SB_IN_QK = 0, SB_IN_V = 1, SB_IN_Z = 2, SB_IN_GB = 3, SB_S0 =
 constexpr uint32_t SB_ONES = 6, SB_W = 8;
 constexpr uint32_t SB_QKN = 11, SB_VF = 12, SB_BF = 15, SB_GEXP = 16;
 constexpr uint32_t SB_TOKA = 22, SB_TOKB = 23;
+constexpr uint32_t SB_SOUT2 = 21;
 constexpr uint32_t SB_T = 16;
+constexpr uint32_t SB_DIAG_NOSNAP = 1;
+constexpr uint32_t SB_DIAG = GDN_SEQ_BLOCK_DIAG;
 constexpr uint32_t TOKA_A = 0, TOKA_BETA = 1, TOKA_V = 2, TOKA_K = 6, TOKA_PAGES = 10;
 constexpr uint32_t TOKB_KCOL = 0, TOKB_Q = 4, TOKB_PAGES = 8;
 constexpr uint32_t FP32_WORDS = 1024;  // words per fp32 tile
@@ -84,6 +94,7 @@ void kernel_main() {
     constexpr auto s0_a = TensorAccessorArgs<g_a.next_compile_time_args_offset()>();
     constexpr auto z_a = TensorAccessorArgs<s0_a.next_compile_time_args_offset()>();
     constexpr auto w_a = TensorAccessorArgs<z_a.next_compile_time_args_offset()>();
+    constexpr auto s_a = TensorAccessorArgs<w_a.next_compile_time_args_offset()>();
 
     const uint32_t h = get_arg_val<uint32_t>(0);
     const uint32_t qkv_addr = get_arg_val<uint32_t>(1);
@@ -92,6 +103,7 @@ void kernel_main() {
     const uint32_t s0_addr = get_arg_val<uint32_t>(4);
     const uint32_t z_addr = get_arg_val<uint32_t>(5);
     const uint32_t w_addr = get_arg_val<uint32_t>(6);
+    const uint32_t s_addr = get_arg_val<uint32_t>(7);
 
     const uint32_t tb = get_tile_size(SB_IN_QK);  // bf16 page
     const uint32_t tf = get_tile_size(SB_TOKA);   // fp32 page
@@ -101,8 +113,43 @@ void kernel_main() {
     const auto s0_acc = TensorAccessor(s0_a, s0_addr, tb);
     const auto z_acc = TensorAccessor(z_a, z_addr, tb);
     const auto w_acc = TensorAccessor(w_a, w_addr, tb);
+    const auto s_acc = TensorAccessor(s_a, s_addr, tb);
 
     Noc noc;
+
+    // SOUT2: token t's K rows 2, 3 -> states pages (h + H*t)*16 + 8 + q, q = 4(i - 2) + j, from CB
+    // page 2j + i - 2. Issue walks the banks from a per-core start four banks from the writer's.
+    constexpr uint32_t kv = Kt * Vt;
+    constexpr uint32_t rows = Kt / 2;
+    constexpr uint32_t half = rows * Vt;
+    const uint32_t start = (h + half / 2) % half;
+    CircularBuffer sout2(SB_SOUT2);
+    const uint32_t sout2_limit = get_local_cb_interface(SB_SOUT2).fifo_limit;
+    const uint32_t sout2_size = get_local_cb_interface(SB_SOUT2).fifo_size;
+    auto issue_snapshot = [&](uint32_t t) {
+        sout2.wait_front(half);
+        if constexpr (SB_DIAG != SB_DIAG_NOSNAP) {
+            const uint32_t base_page = (h + H * t) * kv + half;
+            const uint32_t src = sout2.get_read_ptr();
+            for (uint32_t k = 0; k < half; k++) {
+                const uint32_t q = (start + k) % half;
+                const uint32_t slot = (q % Vt) * rows + q / Vt;
+                uint32_t addr = src + slot * tb;
+                if (addr >= sout2_limit) {
+                    addr -= sout2_size;
+                }
+                noc.async_write(CoreLocalMem<uint32_t>(addr), s_acc, tb, {}, {.page_id = base_page + q});
+            }
+        }
+    };
+    auto retire_snapshot = [&]() {
+        if constexpr (SB_DIAG != SB_DIAG_NOSNAP) {
+            noc.async_writes_flushed();
+        }
+        for (uint32_t j = 0; j < Vt; j++) {
+            sout2.pop_front(rows);  // a column at a time: the ring (14) is a multiple of 2, not of 8
+        }
+    };
 
     // n full pages first_page.. into `cb` at page offset `slot` of the caller's reservation.
     auto read_pages = [&](const auto& acc, CircularBuffer& cb, uint32_t first_page, uint32_t n, uint32_t slot) {
@@ -204,6 +251,10 @@ void kernel_main() {
         asm volatile("" ::: "memory");
         toka.push_back(TOKA_PAGES);
 
+        if (t > 0) {
+            issue_snapshot(t - 1);  // packed at T6(t - 1), before T7(t - 1) frees TOKB below
+        }
+
         tokb.reserve_back(TOKB_PAGES);
         const uint32_t pb = tokb.get_write_ptr();
         asm volatile("" ::: "memory");
@@ -215,6 +266,10 @@ void kernel_main() {
         }
         asm volatile("" ::: "memory");
         tokb.push_back(TOKB_PAGES);
+
+        if (t > 0) {
+            retire_snapshot();
+        }
     }
 
     gexp.pop_front(1);
@@ -240,4 +295,9 @@ void kernel_main() {
     }
     asm volatile("" ::: "memory");
     w.push_back(Vt);
+
+    // The last token's half, then every snapshot write acknowledged before the kernel ends.
+    issue_snapshot(SB_T - 1);
+    retire_snapshot();
+    noc.async_write_barrier();
 }

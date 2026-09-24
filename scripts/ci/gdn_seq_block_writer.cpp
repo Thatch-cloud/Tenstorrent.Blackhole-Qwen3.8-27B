@@ -1,15 +1,24 @@
 // gdn_seq_block writer (RISCV_0, K5-A). See gdn_seq_block.py and the K5 plan, section 3.6.
 //
 // One core, one (user, head), one T=16 block:
-//   per token t: the 16 bf16 snapshot tiles from SOUT, one column (4 pages) at a time, each page
-//     written to states page (h + H*t)*16 + 4i + j - the served order (writer.cpp:161-164 under
-//     gdn_multitoken's token transform) - then flushed and popped so the compute can refill it;
-//     then OT: row 0 of the four fp32 o tiles (faces 0 and 1, 16 words each) copied into row t of
-//     the fp32 O block, which is pushed to the compute's epilogue once all 16 rows are in.
+//   per token t: HALF the snapshot - the 8 bf16 tiles (i, j) with K row i = 0, 1, which the
+//     compute packs into SOUT at CB page 2j + i, two per column; the reader writes the other half
+//     (rows 2, 3, from SOUT2) on NoC 1, so the token's 32 KiB leave on both NoCs at once. Each tile
+//     goes to states page (h + H*t)*16 + 4i + j - the served layout (writer.cpp:161-164 under
+//     gdn_multitoken's token transform), which the commit DMA reads. The half-token is waited for,
+//     then its pages go out in token-page order q = 4i + j (0..7) rotated by a per-core start,
+//     q = (start + k) mod 8: an interleaved page's DRAM bank is page mod NUM_DRAM_BANKS and the
+//     token base is a multiple of 16, so each core walks the banks in turn and the 96 cores,
+//     started on different banks, keep every bank busy (written column by column, a column's pages
+//     sit on two banks only, the same two on every core at once).
+//     Then OT: row 0 of the four fp32 o tiles (faces 0 and 1, 16 words each) copied into row t of
+//     the fp32 O block, which is pushed to the compute's epilogue once all 16 rows are in. Only then
+//     are the snapshot writes flushed and SOUT popped, so they drain while the compute runs T7.
+//     SOUT is 16 pages (two half-tokens); page addresses wrap by hand and SOUT is popped a column
+//     (2 pages) at a time, so any even ring size works - a pop may only land on the limit.
 //   end: the four bf16 gated tiles from OUT, faces 2-3 (rows 16-31) zeroed as the served zeroed
 //     assembly leaves them (gdn_multitoken.py:47), written at page 4h + tile (gdn_multitoken.py:65-72).
-// SOUT is drained before OT each token (the plan lists OT first): the compute pushes SOUT (T6)
-// before OT (T7), so the snapshot writes overlap T7. Nothing here computes.
+// Nothing here computes.
 //
 // Compile args: {Kt, Vt, H, SRC_TAG} + accessor args for (out, states).
 // Runtime args: {h, out, states}.
@@ -55,6 +64,10 @@ void kernel_main() {
     const auto s_acc = TensorAccessor(s_a, s_addr, tb);
 
     constexpr uint32_t kv = Kt * Vt;
+    constexpr uint32_t rows = Kt / 2;     // K rows per half: 0, 1 here (2, 3 on the reader)
+    constexpr uint32_t half = rows * Vt;  // pages per half-token
+    // The core's first page: heads 0..23 start on every bank equally often.
+    const uint32_t start = h % half;
 
     Noc noc;
 
@@ -86,18 +99,22 @@ void kernel_main() {
     }
 
     CircularBuffer sout(SB_SOUT), ot(SB_OT);
+    const uint32_t sout_limit = get_local_cb_interface(SB_SOUT).fifo_limit;
+    const uint32_t sout_size = get_local_cb_interface(SB_SOUT).fifo_size;
     for (uint32_t t = 0; t < SB_T; t++) {
         const uint32_t base_page = (h + H * t) * kv;
-        for (uint32_t j = 0; j < Vt; j++) {
-            sout.wait_front(Kt);
-            if constexpr (SB_DIAG != SB_DIAG_NOSNAP) {
-                auto src = use<CircularBuffer::AddrSelector::READ_PTR>(sout);
-                for (uint32_t i = 0; i < Kt; i++) {
-                    noc.async_write(src, s_acc, tb, {.offset_bytes = i * tb}, {.page_id = base_page + i * Vt + j});
+        sout.wait_front(half);  // this half of the token
+        if constexpr (SB_DIAG != SB_DIAG_NOSNAP) {
+            const uint32_t src = sout.get_read_ptr();
+            for (uint32_t k = 0; k < half; k++) {
+                const uint32_t q = (start + k) % half;             // token page 4i + j, i = 0, 1
+                const uint32_t slot = (q % Vt) * rows + q / Vt;    // CB page 2j + i
+                uint32_t addr = src + slot * tb;
+                if (addr >= sout_limit) {
+                    addr -= sout_size;
                 }
-                noc.async_writes_flushed();
+                noc.async_write(CoreLocalMem<uint32_t>(addr), s_acc, tb, {}, {.page_id = base_page + q});
             }
-            sout.pop_front(Kt);
         }
 
         ot.wait_front(Vt);
@@ -107,6 +124,13 @@ void kernel_main() {
             copy_words(src + tile * tf + 256 * 4, o_base + tile * tf + (256 + t * 16) * 4, 16);  // cols 16-31
         }
         ot.pop_front(Vt);
+
+        if constexpr (SB_DIAG != SB_DIAG_NOSNAP) {
+            noc.async_writes_flushed();
+        }
+        for (uint32_t j = 0; j < Vt; j++) {
+            sout.pop_front(rows);
+        }
     }
     o.push_back(Vt);
 

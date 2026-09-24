@@ -14,7 +14,10 @@ row-independent out of it:
             and the state copy unpacked once and packed twice;
   epilogue  (once per block) the fused rms_norm * w * silu(z) over the 16 rows.
 The reader stages each token's operands as bit copies of the prologue's packed fp32 words, so a
-core reads 38 DRAM pages per block instead of 308.
+core reads 38 DRAM pages per block instead of 308. The 32 KiB bf16 snapshot of each token leaves on
+both NoCs: K rows 0-1 from the writer (NoC 0), K rows 2-3 from the reader (NoC 1), each half in a
+per-core rotated DRAM-bank order, into the served states layout. On one NoC the writes bound the
+launch (card B: 383.8 us against 211.8 us with them compiled out); split, it runs at ~214.7 us.
 
 Exactness class B* (K5 plan, 1.1 A1): every step is either the served call on the same values or
 a property shown exact on this pinned tt-metal (the DEST_TO_SRCB add, docs/gdn-outer-add-
@@ -132,12 +135,15 @@ DIAGNOSTICS = (None, 'nosnap', 'passthrough')  # P1 (iii) timing builds; never e
 
 # level -> {'reader': sha256, 'writer': sha256, 'compute': sha256} of the generated variant-A
 # sources, committed only after card-B P0 shows 0 differing bytes at full plan coverage (the
-# fused_commit.QUALIFIED_KERNEL_SHA256 pattern). Level 0: probe run p0full on image P5 (tt-metal
-# 9f9cd4fd, native compute b59314e0), 'pass', may_commit_qualified true.
+# fused_commit.QUALIFIED_KERNEL_SHA256 pattern). Level 0 is the split-NoC snapshot writer (W4):
+# probe run r2 on image P5 (tt-metal 9f9cd4fd, native compute b59314e0), 'pass' at full plan
+# coverage (142/142, R4 128/128, traced exact), may_commit_qualified true; 214.8 us per launch
+# against the served 526.2 us. It replaces the single-NoC build (c9becdc5 / 277082a8 / 5275b2cc,
+# run p0full, 383.9 us), which was never served.
 QUALIFIED = {
-    0: dict(reader='c9becdc5c6ffafb4aba9e3fd2c49d2c6d16fd26e2ee1f70c9dbfa2ded23e5253',
-            writer='277082a8d10e0e35ed4a5670170cd100cc53a3539f91f1e51fe9f62e78ea3311',
-            compute='5275b2cc766d40e595d3fd4122d655a8bc511c0ef7d2f42b748975ecf5b2cf78'),
+    0: dict(reader='784deb4e398cfaa5a7c2b415c1a8be71925ccfd61fe18d801b11fb138dbc45c0',
+            writer='215ef7da5d01d5c5fa720e8f6218481f27491c075151140376b457d760e1870d',
+            compute='a9782f1434673d05fb7270b810836101ef38b51becfbd5c13d67880a937deffe'),
 }
 
 # model_batch's per-capture marker (K5 plan 3.1) and the gate's regex for it (3.9).
@@ -152,12 +158,16 @@ AUDIT_PATTERN = re.compile(r'\[GDN-SEQ-BLOCK-AUDIT\] layer=([0-9]+) user=([0-9]+
 RESULT_KEY, LEVEL_KEY, AUDIT_KEY = 'seq_block', 'seq_block_level', 'seq_block_audit'
 
 # ---- the CB plan: index -> (name, pages, dtype, producer RISC, consumer RISC) ----
-# The K5 plan's section 3.3 table, with one change: its W (8 pages, reader -> compute for norm_w,
-# then compute -> compute for the epilogue's round trips, the served full ring) is split into W
-# (4 pages, reader -> compute) and RT (4 pages, compute -> compute). Same bytes, and no CB with two
+# The K5 plan's section 3.3 table, with two changes. (1) Its W (8 pages, reader -> compute for
+# norm_w, then compute -> compute for the epilogue's round trips, the served full ring) is split into
+# W (4 pages, reader -> compute) and RT (4 pages, compute -> compute). Same bytes, and no CB with two
 # producer RISCs: in the served pattern the packer's local tiles_received never counts the reader's
 # push, so the second round trip's wait passes before its pack lands (llk_io_pack.h:58,68;
-# llk_io_unpack.h:30) and only pipeline depth kept it safe.
+# llk_io_unpack.h:30) and only pipeline depth kept it safe. (2) The snapshot ring is split so both
+# data-movement RISCs write it, one NoC each: SOUT (K rows 0-1, compute -> writer) and SOUT2 (K rows
+# 2-3, compute -> reader), 8 pages a token each; SOUT2 takes index 21, freed by running the k norm
+# through FAC_Q after the q norm has popped it (FAC_K is gone). SOUT holds two half-tokens and SOUT2
+# 14 pages, so the total is today's 630,784 B exactly; both are popped two pages (a column) at a time.
 PAGE_BYTES = dict(bf16=2048, fp32=4096)
 RISCS = ('reader', 'compute', 'writer')
 ONES = 6
@@ -169,7 +179,7 @@ CB_PLAN = {
     4: ('S0', 16, 'bf16', 'reader', 'compute'),
     5: ('FB', 16, 'bf16', 'compute', 'compute'),
     6: ('ONES', 1, 'fp32', 'reader', 'compute'),
-    7: ('SOUT', 16, 'bf16', 'compute', 'writer'),
+    7: ('SOUT', 16, 'bf16', 'compute', 'writer'),    # snapshot K rows 0-1, NoC 0: 8 pages a token
     8: ('W', 4, 'bf16', 'reader', 'compute'),
     9: ('OUT', 4, 'bf16', 'compute', 'writer'),
     10: ('X', 8, 'fp32', 'compute', 'compute'),
@@ -183,7 +193,7 @@ CB_PLAN = {
     18: ('NSQ', 4, 'fp32', 'compute', 'compute'),
     19: ('SUM', 1, 'fp32', 'compute', 'compute'),
     20: ('FAC_Q', 1, 'fp32', 'compute', 'compute'),
-    21: ('FAC_K', 1, 'fp32', 'compute', 'compute'),
+    21: ('SOUT2', 14, 'bf16', 'compute', 'reader'),  # snapshot K rows 2-3, NoC 1: 8 pages a token
     22: ('TOKA', 10, 'fp32', 'reader', 'compute'),
     23: ('TOKB', 8, 'fp32', 'reader', 'compute'),
     24: ('S', 16, 'fp32', 'compute', 'compute'),
@@ -443,8 +453,9 @@ def compile_args(role, kernels):
     raise ValueError('Unknown kernel role')
 
 
-# Indices into the per-user eight [qkv, beta, gate, initial, output, states, z, norm_w].
-ACCESSORS = dict(reader=(0, 1, 2, 3, 6, 7), writer=(4, 5), compute=())
+# Indices into the per-user eight [qkv, beta, gate, initial, output, states, z, norm_w]. Both
+# data-movement kernels write states: the writer K rows 0-1 of each token, the reader K rows 2-3.
+ACCESSORS = dict(reader=(0, 1, 2, 3, 6, 7, 5), writer=(4, 5), compute=())
 
 
 def runtime_args(role, head, addresses):
@@ -455,7 +466,8 @@ def runtime_args(role, head, addresses):
     if len(addresses) != 8:
         raise ValueError('Eight per-user buffer addresses required')
     if role == 'reader':
-        return [head, addresses[0], addresses[1], addresses[2], addresses[3], addresses[6], addresses[7]]
+        return [head, addresses[0], addresses[1], addresses[2], addresses[3], addresses[6], addresses[7],
+                addresses[5]]
     if role == 'writer':
         return [head, addresses[4], addresses[5]]
     if role == 'compute':

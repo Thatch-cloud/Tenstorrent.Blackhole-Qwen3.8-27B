@@ -19,8 +19,11 @@
 // prologue packed; nothing is re-read from DRAM per token.
 //
 // State CBs are column-major: tile (i, j) (K tile i, V tile j) sits at page 4j + i, so a column
-// is four contiguous pages and SOUT can be pushed and written per column. The served kernel
-// holds tile (i, j) at 4i + j; each per-tile op below names the same tile (i, j) it does.
+// is four contiguous pages. The served kernel holds tile (i, j) at 4i + j; each per-tile op below
+// names the same tile (i, j) it does. The bf16 snapshot leaves in two halves, one per NoC: K rows
+// 0-1 through SOUT to the writer (NoC 0), K rows 2-3 through SOUT2 to the reader (NoC 1), two pages
+// per column each - one NoC alone held the launch to its write rate (~384 us against ~212 us
+// compute-bound, card B). SOUT2 takes index 21: the q and k norms share FAC_Q, one after the other.
 //
 // Every CB has ONE producer RISC and ONE consumer RISC (gdn_seq_block.CB_PLAN), with no
 // exception: norm_w arrives in W (reader -> compute, read once, in the epilogue), and the
@@ -44,7 +47,8 @@ constexpr uint32_t SB_IN_QK = 0, SB_IN_V = 1, SB_IN_Z = 2, SB_IN_GB = 3, SB_S0 =
 constexpr uint32_t SB_ONES = 6;
 constexpr uint32_t SB_SOUT = 7, SB_W = 8, SB_OUT = 9;
 constexpr uint32_t SB_X = 10, SB_QKN = 11, SB_VF = 12, SB_ZF = 13, SB_GF = 14, SB_BF = 15, SB_GEXP = 16;
-constexpr uint32_t SB_WF = 17, SB_NSQ = 18, SB_SUM = 19, SB_FAC_Q = 20, SB_FAC_K = 21;
+constexpr uint32_t SB_WF = 17, SB_NSQ = 18, SB_SUM = 19, SB_FAC_Q = 20;
+constexpr uint32_t SB_SOUT2 = 21;  // the snapshot's K rows 2-3, compute -> reader
 constexpr uint32_t SB_TOKA = 22, SB_TOKB = 23, SB_S = 24, SB_H = 25, SB_UD = 26, SB_DL = 27;
 constexpr uint32_t SB_OT = 28, SB_O = 29, SB_RT = 30;
 constexpr uint32_t SB_OUTER = 31;  // probe build A0 only
@@ -204,12 +208,17 @@ void outer_add_sfpu_cols(uint32_t dprime, uint32_t kcol, uint32_t state, uint32_
 
 // T6: the served copy_tiles(snew, sout) [563] and copy_tiles(snew, feedback)
 // (gdn_multitoken.py:81-82) as ONE unpack packed twice (gdn_dual_state_copy.py). Per column.
-void state_out(uint32_t s, uint32_t out, uint32_t feedback, bool more) {
+// The snapshot is split by K row so that both data-movement RISCs write it, each on its own NoC:
+// tiles (0, j) and (1, j) go to `out` (the writer), tiles (2, j) and (3, j) to `out2` (the
+// reader), two pages per column each. Same packs, same values; only the destination ring differs.
+constexpr uint32_t SB_KT_HALF = SB_KT / 2;
+void state_out(uint32_t s, uint32_t out, uint32_t out2, uint32_t feedback, bool more) {
     pack_reconfig_data_format(out);
     reconfig_data_format_srca(s);
     copy_tile_to_dst_init_short(s);
     for (uint32_t j = 0; j < SB_VT; j++) {
-        cb_reserve_back(out, SB_KT);
+        cb_reserve_back(out, SB_KT_HALF);
+        cb_reserve_back(out2, SB_KT_HALF);
         if (more) {
             cb_reserve_back(feedback, SB_KT);
         }
@@ -218,13 +227,14 @@ void state_out(uint32_t s, uint32_t out, uint32_t feedback, bool more) {
             copy_tile(s, j * SB_KT + i, 0);
             tile_regs_commit();
             tile_regs_wait();
-            pack_tile(0, out, i);
+            pack_tile(0, i < SB_KT_HALF ? out : out2, i % SB_KT_HALF);
             if (more) {
                 pack_tile(0, feedback, i);
             }
             tile_regs_release();
         }
-        cb_push_back(out, SB_KT);
+        cb_push_back(out, SB_KT_HALF);
+        cb_push_back(out2, SB_KT_HALF);
         if (more) {
             cb_push_back(feedback, SB_KT);
         }
@@ -268,7 +278,7 @@ void kernel_main() {
     WAIT(SB_ONES, 1);
     l2_norm_rows(SB_X, SB_FAC_Q, SB_QKN, EPS_BITS, SCALE_BITS, true);  // q~ -> QKN pages 0-3 [434-446]
     POP(SB_X, SB_KT);
-    l2_norm_rows(SB_X, SB_FAC_K, SB_QKN, EPS_BITS, SCALE_BITS, false);  // k~ -> QKN pages 4-7 [448-460]
+    l2_norm_rows(SB_X, SB_FAC_Q, SB_QKN, EPS_BITS, SCALE_BITS, false);  // k~ -> QKN pages 4-7 [448-460]; FAC_Q again (popped)
     POP(SB_X, SB_KT);
 
     // ---- the chain, token by token ----
@@ -287,7 +297,7 @@ void kernel_main() {
             // Diagnostic only: the chain's math replaced by pass-through (bytes-bound timing).
             POP(SB_TOKA, TOKA_PAGES);
             WAIT(SB_TOKB, TOKB_PAGES);
-            state_out(SB_S, SB_SOUT, SB_FB, more);
+            state_out(SB_S, SB_SOUT, SB_SOUT2, SB_FB, more);
             copy_tiles(SB_TOKB, SB_OT, SB_VT);
             POP(SB_S, SB_KV);
             POP(SB_TOKB, TOKB_PAGES);
@@ -333,12 +343,12 @@ void kernel_main() {
         WAIT(SB_S, SB_KV);
         // T6: the bf16 snapshot for the writer and, before the last token, the bf16 feedback.
         if constexpr (SB_VARIANT == SB_VARIANT_A0) {
-            copy_tiles(SB_S, SB_SOUT, SB_KV);
+            state_out(SB_S, SB_SOUT, SB_SOUT2, SB_FB, false);  // the snapshot pass alone
             if (more) {
                 copy_tiles(SB_S, SB_FB, SB_KV);
             }
         } else {
-            state_out(SB_S, SB_SOUT, SB_FB, more);
+            state_out(SB_S, SB_SOUT, SB_SOUT2, SB_FB, more);
         }
         // T7: o = q~ @ h_new [506] (fp32, row 0) -> the writer assembles row t of O.
         mm_cols(SB_TOKB, TOKB_Q, SB_S, SB_OT);
