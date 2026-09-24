@@ -47,6 +47,7 @@ EMBEDDING = [
     OPS / 'sdpa_decode_qwen' / 'run_card_m.sh',
     OPS / 'verify_t2' / 'run_card_m.sh',
     OPS / 'c1e_gateup' / 'run_card_b.sh',
+    OPS / 'draft_slide_inplace' / 'run_card_b.sh',
     OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh',
     OPS / 'kernels-batch64' / 'nlp_concat_heads_decode' / 'build-and-test-b64.sh',
 ]
@@ -62,6 +63,7 @@ LAUNCH = {
     OPS / 'sdpa_decode_qwen' / 'run_card_m.sh': r'^timeout -k 30 "\$timeout_s" docker run',
     OPS / 'verify_t2' / 'run_card_m.sh': r'^timeout -k 30 "\$timeout_s" docker run',
     OPS / 'c1e_gateup' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" docker run',
+    OPS / 'draft_slide_inplace' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" docker run',
     OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh': r'^docker run -d --name "\$CONTAINER"',
     OPS / 'kernels-batch64' / 'nlp_concat_heads_decode' / 'build-and-test-b64.sh': r'^timeout 900 docker run',
 }
@@ -1315,7 +1317,8 @@ class HarnessTests(unittest.TestCase):
     }
     # Scripts whose node resolution follows the selection directly (no build or docker step between).
     RESOLVE_FIRST = [OPS / 'gdn_prefill_conv' / 'run_card_m.sh', OPS / 'sdpa_decode_qwen' / 'run_card_m.sh',
-                     OPS / 'verify_t2' / 'run_card_m.sh', OPS / 'c1e_gateup' / 'run_card_b.sh'] + SOURCING
+                     OPS / 'verify_t2' / 'run_card_m.sh', OPS / 'c1e_gateup' / 'run_card_b.sh',
+                     OPS / 'draft_slide_inplace' / 'run_card_b.sh'] + SOURCING
 
     def invoke(self, path, directory, **env):
         args = [arg.replace('{out}', Path(directory, 'out').as_posix()) for arg in self.ARGS.get(path, [])]
