@@ -72,6 +72,9 @@ COPY scripts/ci/verify_trace_t1.py /experiment-scripts/ci/
 # gdn_user_batch_conv, model_batch, packed_verifier and serving_packed_step import it; the
 # packed windows kernel is the SIBLING .cpp of its driver, so the pair travels together.
 COPY scripts/ci/verify_trace_t2.py scripts/ci/gdn_conv_windows_packed.py scripts/ci/gdn_conv_windows_packed.cpp scripts/ci/packed_ordered_cache.py /experiment-scripts/ci/
+# Variable-user packed rounds M1 (QWEN_FAST_PADDED_PROBE, default off): packed_verifier imports
+# padded_probe when the flag is set. M0 changes only modules already listed above.
+COPY scripts/ci/padded_probe.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

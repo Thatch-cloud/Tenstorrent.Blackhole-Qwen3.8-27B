@@ -150,12 +150,71 @@ C1C_MARKER = '[PINDIAG] prefill MLP C1c: one slice of x per 1024 rows'
 C1_LEGACY_MARKER = '[PINDIAG] prefill MLP via w1/w3 2D branch'
 
 
+# C1e (QWEN_FAST_C1_EXACT=1 with QWEN_FAST_SINGLE_GATEUP=1, lever_n_m3native_patch section J): the
+# served fused SwiGLU AGMM on a per-layer rebuild of its packed weight in one scratch. The ff_norm skips
+# its gather again, so its gathers-for-itself marker cannot fire; the scratch allocation (once, at
+# load), the layer's C1e marker and the MLP's C1e branch marker (once, inside the branch) take its
+# place. Every K-sharded prefill MLP call must take the C1e branch: one that fell through runs C1c (the
+# default under SINGLE_GATEUP) and logs its marker, so under C1e the C1c, C1 and C1d markers are
+# failures. QWEN_FAST_C1_EXACT_AUDIT=n (0..64) byte-checks the served weight of the first n layers at
+# load and the scratch after the first n packs: the n-th line of each must say exact=True (a mismatch
+# raises in the engine, before its line). C1e needs SINGLE_GATEUP (alone it is inert: the served path
+# runs) and excludes C1_AGMM and C1_LEGACY (the graft refuses them at construction).
+C1E_FLAG = 'QWEN_FAST_C1_EXACT'
+C1E_AUDIT_FLAG = 'QWEN_FAST_C1_EXACT_AUDIT'
+C1E_AUDIT_MAX = 64
+C1E_MARKERS = ('[PINDIAG] C1e scratch allocated',
+               '[PINDIAG] C1e: ff_norm skips its all-gather for the served fused op',
+               '[PINDIAG] prefill MLP C1e: the served fused SwiGLU AGMM')
+C1E_AUDIT_MARKER = '[PINDIAG] C1e audit'
+C1E_PREMISE_MARKER = '[PINDIAG] C1e premise audit'
+C1E_FORBIDDEN = (C1C_MARKER, C1_LEGACY_MARKER) + C1D_MARKERS
+
+
+def c1e_audit_count(environ):
+    """QWEN_FAST_C1_EXACT_AUDIT as the graft reads it (unset or empty: 0), or None if it would refuse it."""
+    text = (environ.get(C1E_AUDIT_FLAG) or '').strip() or '0'
+    try:
+        count = int(text)
+    except ValueError:
+        return None
+    return count if 0 <= count <= C1E_AUDIT_MAX else None
+
+
+def c1e_markers(environ):
+    markers = list(C1E_MARKERS)
+    audit = c1e_audit_count(environ)
+    if audit:
+        markers += ['%s %d exact=True' % (C1E_PREMISE_MARKER, audit), '%s %d exact=True' % (C1E_AUDIT_MARKER, audit)]
+    return markers
+
+
+def c1e_problems(environ, log_text):
+    """What a QWEN_FAST_C1_EXACT=1 run must not show, beyond its missing markers."""
+    problems = []
+    if environ.get('QWEN_FAST_SINGLE_GATEUP') != '1':
+        problems.append('%s: needs QWEN_FAST_SINGLE_GATEUP=1 (alone it is inert and the served path runs)' % C1E_FLAG)
+    for other in ('QWEN_FAST_C1_AGMM', 'QWEN_FAST_C1_LEGACY'):
+        if environ.get(other) == '1':
+            problems.append('%s: excludes %s=1 (the graft refuses the pair)' % (C1E_FLAG, other))
+    if c1e_audit_count(environ) is None:
+        problems.append('%s: an integer 0..%d, not %r' % (C1E_AUDIT_FLAG, C1E_AUDIT_MAX, environ.get(C1E_AUDIT_FLAG)))
+    for marker in C1E_FORBIDDEN:
+        if marker in log_text:
+            problems.append('%s: every prefill MLP takes the C1e branch (%s logged)' % (C1E_FLAG, marker))
+    return problems
+
+
 def single_gateup_markers(environ):
     """SINGLE_GATEUP_MARKERS plus the executed prefill MLP branch's marker: C1c by default, C1's
     2D branch under QWEN_FAST_C1_LEGACY=1, or (QWEN_FAST_C1_AGMM=1) C1d's two in place of the
-    ff_norm's gathers-for-itself marker."""
+    ff_norm's gathers-for-itself marker, or (QWEN_FAST_C1_EXACT=1) C1e's three (and its audit lines)
+    in place of it."""
     markers = list(SINGLE_GATEUP_MARKERS)
-    if environ.get('QWEN_FAST_C1_AGMM') == '1':
+    if environ.get(C1E_FLAG) == '1':
+        markers.remove('[PINDIAG] single gate/up copy: ff_norm gathers its own input')
+        markers.extend(c1e_markers(environ))
+    elif environ.get('QWEN_FAST_C1_AGMM') == '1':
         markers.remove('[PINDIAG] single gate/up copy: ff_norm gathers its own input')
         markers.extend(C1D_MARKERS)
     elif environ.get('QWEN_FAST_C1_LEGACY') == '1':
@@ -393,6 +452,89 @@ def prefill_conv_problems(log_text, gdn_layers=GDN_LAYERS, required_chunks=0):
     return problems
 
 
+# Variable-user packed rounds, M0 and M1 (arms R1, diagnostic, and R2, timed). Each line is logged
+# only once the path its flag names has run, so a flag set on an image without it fails here:
+#   QWEN_FAST_PAIR_MASK_REFRESH=1  dflash_proposal_trace logs '[PINDIAG] pair mask refresh' once per
+#       process, at the first refresh of a packed pair's mask (a pair exists from two users).
+#   QWEN_FAST_PAIR_MASK_AUDIT=1    '[PACKED-PROPOSE] mask round=R pair=[a,b] intact=0|1 mismatched=N
+#       chip=K' per chip per pair update. A clobbered mask is the finding, never a failure: the report
+#       lists it (pair_mask_audit: the first round each pair read intact=0).
+#   QWEN_FAST_PAIRS_PACKED_ONLY=1  dflash_packed_proposal_coordinator logs '[PINDIAG] pairs packed
+#       only' once, the first round it splits a pair the policy serves sequentially.
+#   QWEN_FAST_PADDED_PROBE=1       padded_probe's lines on packed rounds 3 and 20; round 3's are
+#       required. Any exact=0 or exact=error pattern, any idle_carry_intact=0 and any page-0 hit fails
+#       the arm (G-pad: a mismatch stops Option A). exact=refused - a pattern needing three idle
+#       segments, which page 0 cannot hold - is listed, never a failure.
+PAIR_MASK_REFRESH_FLAG = 'QWEN_FAST_PAIR_MASK_REFRESH'
+PAIR_MASK_AUDIT_FLAG = 'QWEN_FAST_PAIR_MASK_AUDIT'
+PAIRS_PACKED_ONLY_FLAG = 'QWEN_FAST_PAIRS_PACKED_ONLY'
+PADDED_PROBE_FLAG = 'QWEN_FAST_PADDED_PROBE'
+PAIR_MASK_REFRESH_MARKER = '[PINDIAG] pair mask refresh'
+PAIR_MASK_AUDIT_MARKER = '[PACKED-PROPOSE] mask round='
+PAIR_MASK_AUDIT_LINE = re.compile(r'\[PACKED-PROPOSE\] mask round=([0-9]+|None) pair=\[([0-9]+|None),([0-9]+|None)\] '
+                                  r'intact=([01]) mismatched=([0-9]+) chip=([0-9]+)')
+PAIRS_PACKED_ONLY_MARKER = '[PINDIAG] pairs packed only'
+PADDED_PROBE_MARKER = '[PINDIAG] padded probe round=3 '
+PADDED_PROBE_LINE = re.compile(r'\[PINDIAG\] padded probe round=([0-9]+) live=([0-9,]+) exact=([a-z0-9]+) '
+                               r'trace_ms=(\S+) idle_carry_intact=(\S+)(?: idle=(\S+))?(?: differ=(\S+))?')
+PADDED_PROBE_PAGE0_HIT = '[PINDIAG] padded probe page0 hit'
+
+
+def variable_user_markers(environ, users):
+    """{flag: [marker]} for the M0/M1 flags set in `environ` (see above)."""
+    on = lambda name: environ.get(name) == '1'
+    required = {}
+    if users >= 2:
+        for flag, marker in ((PAIR_MASK_REFRESH_FLAG, PAIR_MASK_REFRESH_MARKER),
+                             (PAIR_MASK_AUDIT_FLAG, PAIR_MASK_AUDIT_MARKER),
+                             (PAIRS_PACKED_ONLY_FLAG, PAIRS_PACKED_ONLY_MARKER),
+                             (PADDED_PROBE_FLAG, PADDED_PROBE_MARKER)):
+            if on(flag):
+                required[flag] = [marker]
+    return required
+
+
+def pair_mask_audit_summary(log_text):
+    """The audit lines: how many, how many read intact=0, and per pair the first clobbered round."""
+    lines = [match.groups() for match in PAIR_MASK_AUDIT_LINE.finditer(log_text)]
+    if not lines:
+        return None
+    first = {}
+    for round_number, slot_a, slot_b, intact, mismatched, chip in lines:
+        if intact == '0':
+            first.setdefault('%s,%s' % (slot_a, slot_b), round_number)
+    return dict(lines=len(lines), clobbered=sum(1 for line in lines if line[3] == '0'),
+                max_mismatched=max(int(line[4]) for line in lines), first_clobbered_round=first)
+
+
+def padded_probe_lines(log_text):
+    """Every probe line as a dict (round, live, exact, trace_ms, idle_carry_intact, idle, differ)."""
+    return [dict(round=int(match.group(1)), live=match.group(2), exact=match.group(3), trace_ms=match.group(4),
+                 idle_carry_intact=match.group(5), idle=match.group(6), differ=match.group(7))
+            for match in PADDED_PROBE_LINE.finditer(log_text)]
+
+
+def variable_user_report(environ, users, log_text):
+    """What the M0/M1 flags' lines say, and their problems (under 'problems', for the caller)."""
+    problems = []
+    audit = pair_mask_audit_summary(log_text) if environ.get(PAIR_MASK_AUDIT_FLAG) == '1' else None
+    probe = None
+    if environ.get(PADDED_PROBE_FLAG) == '1':
+        probe = padded_probe_lines(log_text)
+        for line in probe:
+            if line['exact'] in ('0', 'error'):
+                problems.append('%s: round %d live=%s exact=%s differ=%s' % (
+                    PADDED_PROBE_FLAG, line['round'], line['live'], line['exact'], line['differ']))
+            if line['idle_carry_intact'] == '0':
+                problems.append('%s: round %d live=%s idle_carry_intact=0' % (PADDED_PROBE_FLAG, line['round'],
+                                                                              line['live']))
+        hits = log_text.count(PADDED_PROBE_PAGE0_HIT)
+        if hits:
+            problems.append('%s: no live table holds page 0 in its used range (%d %s lines)' % (
+                PADDED_PROBE_FLAG, hits, PADDED_PROBE_PAGE0_HIT))
+    return dict(pair_mask_audit=audit, padded_probe=probe, problems=problems)
+
+
 def required_flag_markers(environ, users, prompt_tokens=None):
     """The markers the flags in `environ` promise, as {flag: [marker, ...]}. prompt_tokens (each user's
     prompt; None: unknown) decides whether QWEN_FAST_SDPA_PF's 2048-row topology is promised."""
@@ -416,6 +558,7 @@ def required_flag_markers(environ, users, prompt_tokens=None):
         required[VERIFY_T2_FLAG] = [VERIFY_T2_MARKER]
         if on(VERIFY_T2_AUDIT_FLAG) and users == 4 and 'windows' not in verify_t2_skipped(environ):
             required[VERIFY_T2_AUDIT_FLAG] = [VERIFY_T2_AUDIT_MARKER + ' 1 exact=True']
+    required.update(variable_user_markers(environ, users))
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
@@ -463,6 +606,8 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
         found['QWEN_FAST_GDN_USER_BATCH'] = {'n of n GDN layers batched': bool(complete)}
         if not complete:
             missing.append('QWEN_FAST_GDN_USER_BATCH: a captured forward batching every GDN layer')
+    if environ.get(C1E_FLAG) == '1':
+        missing.extend(c1e_problems(environ, log_text))
     if environ.get('QWEN_FAST_ROUND_B1') == '1' and environ.get('QWEN_FAST_ROUND_B1_AUDIT') == '1':
         missing.extend(round_b1_audit_problems(log_text))
     verify_t1_sites = verify_t1_packed = None
@@ -492,10 +637,12 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
         missing.extend(prefill_conv_problems(log_text, gdn_layers, required_chunks))
         summary = prefill_conv_summary(log_text, gdn_layers, required_chunks)
         prefill_conv = summary['chunk_calls']
+    variable_user = variable_user_report(environ, users, log_text)
+    missing.extend(variable_user.pop('problems'))
     residual = LEDGER_RESIDUAL.search(log_text)
     return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
                 prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary, verify_t1_sites=verify_t1_sites,
-                verify_t1_packed=verify_t1_packed, verify_t2_packed=verify_t2_packed)
+                verify_t1_packed=verify_t1_packed, verify_t2_packed=verify_t2_packed, **variable_user)
 
 
 def verify_t1_skipped(environ):

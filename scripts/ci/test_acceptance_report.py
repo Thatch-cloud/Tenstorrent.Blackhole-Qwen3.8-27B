@@ -194,6 +194,91 @@ class SequentialRunTests(unittest.TestCase):
         self.assertEqual(overall['all']['tokens'], 4 * 255)
 
 
+class VariableUserRunTests(unittest.TestCase):
+    """v185 (run 35950414318, 4 x 131k real text, image A7): the baseline the variable-user arms
+    (R1, R2) are read against. Its decode wall is mostly NOT the packed round: 26 packed rounds
+    hold 17% of it; three live users on their 4-row engines hold 52%."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.log, cls.streams = fixture('v185')
+        cls.report = ar.report(cls.log, cls.streams)
+        cls.rates = ar.decode_rates(cls.streams, acceptance=cls.report)
+
+    def test_rounds_split_by_live_count_and_packing(self):
+        split = self.report['rounds_by_live']
+        self.assertTrue(split['aligned'], split['alignment'])
+        self.assertEqual(split['decode_steps'], 134)
+        groups = [(g['live'], g['packed'], g['rounds'], g['timed_rounds'], g['median_round_ms'],
+                   g['tokens_per_user_per_round'], g['rows_per_user']) for g in split['groups']]
+        self.assertEqual(groups, [(4, True, 26, 26, 246.5, 5.327, 16.0), (4, False, 3, 3, 521.0, 2.0, 3.583),
+                                  (3, False, 55, 55, 376.0, 1.867, 3.988), (2, False, 38, 38, 242.5, 1.171, 3.934),
+                                  (1, False, 12, 11, 122.0, 3.75, 3.75)])
+        by = {(g['live'], g['packed']): g for g in split['groups']}
+        self.assertEqual(by[(3, False)]['per_user_tok_s'], 4.96, 'the plan: 5.0 tok/s per user at three live')
+        self.assertAlmostEqual(sum(g['wall_share'] for g in split['groups'] if not g['packed']), 0.8266, places=3)
+        self.assertEqual(sum(g['tokens'] for g in split['groups']), 4 * 255, 'every decode token, seeds apart')
+        self.assertEqual(self.report['rounds']['decode_steps_by_active_users'], {'4': 29, '3': 55, '2': 38, '1': 12})
+        self.assertIn(' | by live 4p:26x246ms/5.33 4s:3x521ms/2.00 3s:55x376ms/1.87 2s:38x242ms/1.17 '
+                      '1s:12x122ms/3.75', self.report['summary_line'])
+        json.dumps(self.report)
+
+    def test_completion_rates_and_the_aggregate(self):
+        completion = self.rates['completion']
+        self.assertEqual(completion['decode_start'], 'the last seed chunk')
+        self.assertEqual([u['completion_tok_s'] for u in completion['users']], [6.65, 6.39, 8.74, 30.29])
+        self.assertEqual([u['finish_s'] for u in completion['users']], [38.4904, 40.0622, 29.276, 8.4516])
+        self.assertEqual((completion['tokens'], completion['decode_wall_s']), (1024, 40.0622))
+        self.assertEqual((self.rates['mean_completion_tok_s'], self.rates['aggregate_tok_s']), (13.02, 25.56))
+        self.assertEqual([u['completion_tok_s'] for u in self.rates['users']], [6.65, 6.39, 8.74, 30.29])
+        # the steady rate reads the packed round alone
+        self.assertGreater(self.rates['mean_steady_tok_s'], 20.0)
+        self.assertIn('| completion 6.7 6.4 8.7 30.3 (mean 13.0) aggregate 25.6 over a 40.06 s decode wall',
+                      ar.rate_line(self.rates))
+
+    def test_a_sequential_reference_is_timed_by_live_count_but_not_split(self):
+        log, streams = fixture('v149')
+        split = ar.report(log, streams, sequential=True)['rounds_by_live']
+        self.assertFalse(split['aligned'])
+        self.assertTrue(split['alignment'].startswith('step 1: 1 live over 16 rows, the records hold 4 blocks'))
+        self.assertEqual([(g['live'], g['packed'], g['rounds'], g['tokens']) for g in split['groups']],
+                         [(1, None, 146, None)])
+        # the excerpt holds no prefill lines: only the last step has no successor to time it by
+        self.assertEqual(split['groups'][0]['timed_rounds'], 145)
+        self.assertTrue(100.0 < split['groups'][0]['median_round_ms'] < 120.0)
+
+    def test_a_step_the_records_do_not_explain_withholds_the_token_split(self):
+        stamp = '(EngineCore pid=1) 2026-09-24 03:18:%06.3f | INFO     | serving_worker_hook:_execute:229 - '
+        execute = stamp + '[PHASE] execute total=%d new=%d cached=%d spec=%d finished=[] preempted=[]'
+        records = [phases_line([block(10, 16, 5, packed=True), block(15, 4, 2)]),
+                   phases_line([block(10, 16, 7, packed=True), block(17, 4, 4)])]
+        good = [execute % (1.0, 32, 0, 2, 2), execute % (1.25, 8, 0, 2, 2), execute % (2.0, 2048, 1, 0, 0)]
+        split = ar.round_split('\n'.join(good + records), ar.phase_records('\n'.join(records))[0])
+        self.assertTrue(split['aligned'])
+        # the second step is followed by a prefill (new=1), which in a sequential reference would
+        # also hold the client's wait for its next request: counted, never timed
+        self.assertEqual([(g['live'], g['packed'], g['timed_rounds'], g['median_round_ms'], g['tokens']) for g in split['groups']],
+                         [(2, True, 1, 250.0, 12), (2, False, 0, None, 6)])
+        bad = [execute % (1.0, 32, 0, 2, 2), execute % (1.25, 9, 0, 2, 2)]
+        split = ar.round_split('\n'.join(bad), ar.phase_records('\n'.join(records))[0])
+        self.assertEqual((split['aligned'], split['alignment']),
+                         (False, 'step 2: 2 live over 9 rows, the records hold 2 blocks over 8 rows'))
+        self.assertIsNone(ar.round_split('\n'.join(records), ar.phase_records('\n'.join(records))[0]))
+
+    def test_completion_rates_need_every_streams_chunk_times(self):
+        a = dict(started_s=0.0, chunk_s=[1.0, 2.0, 3.0], completion_tokens=9)
+        b = dict(started_s=0.5, chunk_s=[2.0, 3.0, 4.5], completion_tokens=12)
+        concurrent = ar.completion_rates([a, b])
+        self.assertEqual(concurrent['decode_wall_s'], 2.5, 'from b\'s seed at 2.5 s to its last chunk at 5.0 s')
+        self.assertEqual([u['completion_tok_s'] for u in concurrent['users']], [18.0, 4.8])
+        self.assertEqual(concurrent['aggregate_tok_s'], 8.4)
+        alone = ar.completion_rates([a, b], concurrent=False)
+        self.assertEqual([u['completion_tok_s'] for u in alone['users']], [4.5, 4.8])
+        self.assertIsNone(alone['aggregate_tok_s'])
+        self.assertIsNone(ar.completion_rates([a, dict(b, chunk_s=None)]))
+        self.assertIsNone(ar.completion_rates([]))
+
+
 def detail_stream(request_id, committed, start, round_s=0.25, finish='length'):
     """A detail stream as stream_once(detail=True) records it: the seed chunk, then one per round."""
     tokens = [1] + list(committed)

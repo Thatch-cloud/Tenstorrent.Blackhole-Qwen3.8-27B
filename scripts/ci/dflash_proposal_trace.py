@@ -8,6 +8,56 @@ from dflash_proposal_inputs import proposal_contexts, proposal_inputs
 from gdn_multitoken_conv import addresses, release_owned
 
 
+# Variable-user packed rounds, M0 (the pair-mask audit and refresh). A packed pair's bucket
+# uploads its mask once, at the lazy bucket build, and every replay reads it from then on;
+# every other input the pair trace reads is re-uploaded (identifiers, rope.q, rope.live_k) or
+# re-copied (cached_history) each round. v185 builds the pair buckets after every engine's
+# 4-row verify traces were captured, and serving_buffer_pool documents what that order does
+# to a buffer allocated into an earlier trace's freed holes: that trace's replay overwrites
+# it. The 4-row traces first replay at the first sequential round, where the pair users'
+# acceptance collapses (1.0-1.5 tokens per step against 2.76-3.0 for single-proposal users).
+# Both flags are read at each use, never at import; with both unset nothing below runs.
+#   QWEN_FAST_PAIR_MASK_REFRESH=1  copy the kept host mask into bucket.mask on every
+#       _update, beside the other per-round copies (266 KB per pair), deferred path included.
+#       PAIR_MASK_REFRESH_MARKER is logged once per process at the first refresh.
+#   QWEN_FAST_PAIR_MASK_AUDIT=1    a diagnostic arm's read-back: before any copy of the
+#       round, bucket.mask is read from both chips and compared with the host mask, bit for
+#       bit; one PAIR_MASK_AUDIT_LINE per chip. The round is the coordinator's
+#       ([PACKED-PROPOSE] round=, set on the trace as round_number), the pair its pool slots.
+PAIR_MASK_REFRESH_FLAG = 'QWEN_FAST_PAIR_MASK_REFRESH'
+PAIR_MASK_AUDIT_FLAG = 'QWEN_FAST_PAIR_MASK_AUDIT'
+PAIR_MASK_REFRESH_MARKER = '[PINDIAG] pair mask refresh'
+PAIR_MASK_AUDIT_LINE = '[PACKED-PROPOSE] mask round=%s pair=[%s,%s] intact=%d mismatched=%d chip=%d'
+_PAIR_MASK_REFRESH_NOTED = []
+
+
+def pair_mask_refresh_enabled():
+    """QWEN_FAST_PAIR_MASK_REFRESH=1."""
+    return os.environ.get(PAIR_MASK_REFRESH_FLAG) == '1'
+
+
+def pair_mask_audit_enabled():
+    """QWEN_FAST_PAIR_MASK_AUDIT=1."""
+    return os.environ.get(PAIR_MASK_AUDIT_FLAG) == '1'
+
+
+def _log_line(message):
+    """One INFO line into the server log: loguru where it exists, stdout otherwise. Never raises."""
+    try:
+        try:
+            from loguru import logger
+        except ImportError:
+            print(message, flush=True)
+        else:
+            logger.info('{}', message)
+    except BaseException:
+        pass
+
+
+def _slot_of(device):
+    return getattr(getattr(device, 'pool_slot', None), 'index', None)
+
+
 class PreparedDFlashProposal:
     def __init__(self, device, *, max_new_tokens):
         import torch
@@ -337,6 +387,10 @@ class PreparedPackedDFlashProposal:
         # but one shared pending covers both users: the trace replay is one device
         # call, not two.
         self._pending = None
+        # QWEN_FAST_PAIR_MASK_AUDIT: the coordinator's round, which it sets here before
+        # prepare_device() only while the audit is on, for PAIR_MASK_AUDIT_LINE. Read by
+        # nothing else.
+        self.round_number = None
 
     def _upload(self, value, *, identifiers=False):
         operations = self.operations
@@ -381,7 +435,11 @@ class PreparedPackedDFlashProposal:
             validate_mask(host_mask, contexts=[context_a, context_b])
             tables = packed_rope_tables(placeholder_users, self.block_rows)
             live = live_key_rope(placeholder_users, self.block_rows)
-            bucket = SimpleNamespace(context=(context_a, context_b),
+            # host_mask is kept (a host tensor, 266 KB at the packable geometry): the
+            # mask depends on the bucket's contexts alone, so it is every round's mask -
+            # what QWEN_FAST_PAIR_MASK_REFRESH copies back and QWEN_FAST_PAIR_MASK_AUDIT
+            # compares with. Nothing reads it with both flags off.
+            bucket = SimpleNamespace(context=(context_a, context_b), host_mask=host_mask,
                 identifiers=self._upload(packed_identifiers([0, 0], self.block_rows), identifiers=True),
                 mask=self._upload(host_mask),
                 rope=dict(q=tuple(self._upload(value) for value in tables['q']),
@@ -446,6 +504,10 @@ class PreparedPackedDFlashProposal:
             raise ValueError('Packed proposal replay requires a fully committed matching K/V frontier')
         users = [dict(position=device_a.position, history_rows=context_a),
                  dict(position=device_b.position, history_rows=context_b)]
+        if pair_mask_audit_enabled():
+            # Before any copy of this round: what every replay since the last refresh (or
+            # since the build) left in the mask.
+            self.audit_mask(bucket)
         identifiers_host = packed_identifiers([seed_a, seed_b], self.block_rows)
         if os.environ.get('QWEN_FAST_ROUND_B1') == '1':
             # QWEN_FAST_ROUND_B1 (C8). The packed cached trace never reads rope['k']:
@@ -469,6 +531,15 @@ class PreparedPackedDFlashProposal:
             live = live_key_rope(users, self.block_rows)
             sources = [identifiers_host, *tables['q'], *tables['k'], *live]
             destinations = [bucket.identifiers, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k']]
+        if pair_mask_refresh_enabled():
+            # QWEN_FAST_PAIR_MASK_REFRESH (M0): the build's own mask again, every round,
+            # through the same copy as every other per-round input - on the deferred path
+            # too - so whatever overwrote it since is healed before this round's replay.
+            # The address-identity check below covers it unchanged (bucket.mask is one of
+            # bucket.inputs).
+            sources.append(bucket.host_mask)
+            destinations.append(bucket.mask)
+            self._note_refresh(bucket)
         for value, destination in zip(sources, destinations, strict=True):
             payload = operations.from_torch(value, dtype=destination.dtype, layout=destination.layout,
                 mesh_mapper=operations.ReplicateTensorToMesh(self.mesh))
@@ -502,6 +573,43 @@ class PreparedPackedDFlashProposal:
                 raise AssertionError('Prepared packed proposal input addresses moved')
         finally:
             release_owned(operations, owned)
+
+    def pair_label(self):
+        """This pair's pool slots, as the coordinator labels it ([slot_a, slot_b])."""
+        return [_slot_of(self.device_a), _slot_of(self.device_b)]
+
+    def _note_refresh(self, bucket):
+        """PAIR_MASK_REFRESH_MARKER, once per process, at the first refresh."""
+        if _PAIR_MASK_REFRESH_NOTED:
+            return False
+        _PAIR_MASK_REFRESH_NOTED.append(True)
+        slot_a, slot_b = self.pair_label()
+        _log_line('%s engaged pair=[%s,%s] context=%s,%s bytes=%d' % (
+            PAIR_MASK_REFRESH_MARKER, slot_a, slot_b, bucket.context[0], bucket.context[1],
+            bucket.host_mask.numel() * bucket.host_mask.element_size()))
+        return True
+
+    def audit_mask(self, bucket):
+        """QWEN_FAST_PAIR_MASK_AUDIT: bucket.mask read back from each chip and compared with
+        the kept host mask, bit for bit (int16 views of both). Logs one PAIR_MASK_AUDIT_LINE
+        per chip and returns [(chip, intact, mismatched)]. A chip whose read-back has another
+        shape counts every element as mismatched. Host reads only: it changes nothing."""
+        import torch
+
+        operations = self.operations
+        expected = bucket.host_mask.contiguous().view(torch.int16)
+        slot_a, slot_b = self.pair_label()
+        results = []
+        for chip, part in enumerate(operations.get_device_tensors(bucket.mask)):
+            actual = operations.to_torch(part).contiguous().view(torch.int16)
+            if tuple(actual.shape) != tuple(expected.shape):
+                mismatched = max(int(actual.numel()), int(expected.numel()))
+            else:
+                mismatched = int((actual != expected).sum())
+            intact = int(mismatched == 0)
+            results.append((chip, intact, mismatched))
+            _log_line(PAIR_MASK_AUDIT_LINE % (self.round_number, slot_a, slot_b, intact, mismatched, chip))
+        return results
 
     def prepare_device(self, seed_a, seed_b):
         """Enqueue this pair's copies and its trace replay without waiting on the

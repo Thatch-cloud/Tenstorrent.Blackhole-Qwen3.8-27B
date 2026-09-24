@@ -421,6 +421,10 @@ class PackedVerifierEngine:
         self.kv_chains_cut = verify_trace_t2.cut('kv_chains')
         self.warm_kv_chains = False
         self.windows_audit = False
+        # QWEN_FAST_PADDED_PROBE (variable-user packed rounds M1, padded_probe.py): read once
+        # here, like the flags above. Off, padded_probe is never imported and verify() is
+        # today's.
+        self.padded_probe = os.environ.get('QWEN_FAST_PADDED_PROBE') == '1'
         self.commit_timings = [0.0] * shape.users
         # This round's per-segment HOST cost of the RetainedGDNBlock.commit_user call
         # itself (gdn_records.py), beyond its device commit trace: call_ms - commit_ms,
@@ -678,14 +682,49 @@ class PackedVerifierEngine:
             raise ValueError('Two packed entries were admitted through the same pool slot')
         return segments
 
-    def stage_packed_inputs(self, entries):
-        entries = list(entries)
-        segments = self.segments(entries)
+    def segment_users(self, entries, segments):
+        """Each entry's (tokens, start, pages) at its segment: what stage_packed stages."""
         users = [None] * self.users
         for entry, segment in zip(entries, segments):
             ticket, engine = entry['ticket'], entry['request'].engine
             users[segment] = (tuple(ticket.tokens), ticket.position, engine.pages)
+        return users
+
+    def stage_packed_inputs(self, entries):
+        entries = list(entries)
+        segments = self.segments(entries)
+        users = self.segment_users(entries, segments)
         return stage_packed(self.operations, self.model, self.fixture, self.shape, users)
+
+    # Variable-user packed rounds (M1): the most idle segments one block can hold. An idle
+    # segment writes its rows' K/V through an all-zero page table - physical page 0, vLLM's
+    # null block, which the capture's placeholders already write - and page 0 has two 32-row
+    # tile rows. Two idle segments sit on disjoint ones, as the T2 chained K/V write needs
+    # (verify_trace_t2.kv_conflict: one writer per (page, tile row)); a third would share one.
+    MAX_IDLE_SEGMENTS = 2
+
+    def idle_inputs(self, live_segments):
+        """{segment: (tokens, start, pages)} for every segment of the block NOT in
+        `live_segments`, the j-th of them (in segment order) as tokens (1,) * rows_per_user
+        from start F + 32 * (j % 2), F = replay_capacity - 256 (the start of the block's
+        native chunk family, so every reader accepts it), through an all-zero (1, page_width)
+        int32 table: page 0, tile row j % 2 - two idle segments never share a tile row. Host
+        only; what stage_packed takes in an idle segment's place. Refuses live segments that
+        are not distinct segments of this block, and a third idle segment."""
+        import torch
+
+        live = tuple(live_segments)
+        if len(set(live)) != len(live) or any(type(segment) is not int or not 0 <= segment < self.users
+                                              for segment in live):
+            raise ValueError('Live segments must be distinct segments of this %d-user block: %r' % (self.users, live))
+        idle = [segment for segment in range(self.users) if segment not in live]
+        if len(idle) > self.MAX_IDLE_SEGMENTS:
+            raise ValueError('At most %d idle segments: page 0 holds two 32-row tile rows, so idle segments %s '
+                             'would share one' % (self.MAX_IDLE_SEGMENTS, idle))
+        first = self.replay_capacity - 256
+        return {segment: ((1,) * self.rows_per_user, first + 32 * (index % 2),
+                          torch.zeros((1, self.shape.page_width), dtype=torch.int32))
+                for index, segment in enumerate(idle)}
 
     def verify(self, entries):
         """One trace for every entry. Returns (predictions, metrics): predictions[i] is
@@ -752,6 +791,13 @@ class PackedVerifierEngine:
                 verify_trace_t2.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
+            if self.padded_probe:
+                # QWEN_FAST_PADDED_PROBE (M1): after this round's readback, before its commit.
+                # The predictions above are already on the host; the probe ends with this
+                # round's own inputs restaged and replayed, and proves the replay bit-identical.
+                import padded_probe
+
+                padded_probe.after_readback(self, self.segment_users(entries, segments), self.rounds + 1)
             self.first = False
             self.pending_segments = set(segments)
             self.commit_timings = [0.0] * self.users

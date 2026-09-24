@@ -54,6 +54,8 @@ jobs:
           python -B -m unittest test_frozen_combined_adapters
           python -B -m unittest test_lever_n_m3native_patch
           python -B -m unittest test_gdn_prefill_conv_exact test_lever_n_m3native_prefill_conv
+          python -B -m unittest test_mlp_c1e_pack
+          python -B -m unittest discover -s optimisation/ttnn-op/c1e_gateup -p 'test_*.py'
           python -B -m unittest discover -s optimisation/ttnn-op/gdn_prefill_conv -p 'test_*.py'
           python -B -m unittest test_lever_n_scheduler_graft
           python -B -m unittest test_lever_n_alternation
@@ -66,6 +68,7 @@ jobs:
           python -B -m unittest test_verify_trace_t1 test_verify_trace_t1_graft
           python -B -m unittest test_verify_trace_t2 test_gdn_conv_windows_packed test_packed_ordered_cache
           python -B -m unittest discover -s optimisation/ttnn-op/verify_t2 -p 'test_*.py'
+          python -B -m unittest test_dflash_proposal_trace test_padded_probe
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
           python -B -m unittest test_qual_card

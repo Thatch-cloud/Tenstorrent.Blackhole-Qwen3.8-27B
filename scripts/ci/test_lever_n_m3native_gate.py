@@ -618,5 +618,93 @@ class VerifyT2GateTests(unittest.TestCase):
         self.assertEqual(self._report(audit, good)['missing'], [])
 
 
+class VariableUserMarkerTests(unittest.TestCase):
+    """Variable-user packed rounds M0/M1: each flag needs the line its module logs once its path
+    ran, and the lines are built here by the modules themselves, so a format drift fails."""
+
+    def _report(self, environ, log, users=4):
+        from lever_n_m3native_gate import flag_marker_report
+        return flag_marker_report(environ, users, log)
+
+    @staticmethod
+    def probe_line(round_number, live, exact, trace_ms=140.2, intact=True, idle=(), differ=(), reason=None):
+        import padded_probe
+        return padded_probe.line(round_number, live, exact, trace_ms, intact, idle, differ, reason)
+
+    def test_the_gate_reads_the_names_the_modules_use(self):
+        import dflash_packed_proposal_coordinator as coordinator
+        import dflash_proposal_trace as trace
+        import lever_n_m3native_gate as gate
+        import padded_probe
+        self.assertEqual((gate.PAIR_MASK_REFRESH_FLAG, gate.PAIR_MASK_AUDIT_FLAG),
+                         (trace.PAIR_MASK_REFRESH_FLAG, trace.PAIR_MASK_AUDIT_FLAG))
+        self.assertEqual(gate.PAIR_MASK_REFRESH_MARKER, trace.PAIR_MASK_REFRESH_MARKER)
+        self.assertEqual((gate.PAIRS_PACKED_ONLY_FLAG, gate.PAIRS_PACKED_ONLY_MARKER),
+                         (coordinator.PAIRS_PACKED_ONLY_FLAG, coordinator.PAIRS_PACKED_ONLY_MARKER))
+        self.assertEqual(gate.PADDED_PROBE_FLAG, padded_probe.FLAG)
+        self.assertEqual(gate.PADDED_PROBE_PAGE0_HIT, padded_probe.PAGE0_HIT)
+        self.assertTrue(gate.PADDED_PROBE_MARKER.startswith(padded_probe.MARKER + ' round=%d ' % padded_probe.ROUNDS[0]))
+
+    def test_each_flag_needs_its_line_from_two_users(self):
+        from lever_n_m3native_gate import variable_user_markers
+        flags = ('QWEN_FAST_PAIR_MASK_REFRESH', 'QWEN_FAST_PAIR_MASK_AUDIT', 'QWEN_FAST_PAIRS_PACKED_ONLY',
+                 'QWEN_FAST_PADDED_PROBE')
+        environ = {flag: '1' for flag in flags}
+        self.assertEqual(sorted(variable_user_markers(environ, 4)), sorted(flags))
+        self.assertEqual(variable_user_markers(environ, 1), {}, 'one user: no pair, no padded segment')
+        self.assertEqual(variable_user_markers({flag: '0' for flag in flags}, 4), {})
+        self.assertEqual(sorted(self._report(environ, '')['missing']), sorted(
+            '%s: %s' % (flag, marker) for flag, [marker] in variable_user_markers(environ, 4).items()))
+
+    def test_the_refresh_and_fallback_markers_pass_as_the_modules_log_them(self):
+        import dflash_proposal_trace as trace
+        refresh = '%s engaged pair=[0,1] context=2048,2048 bytes=266240' % trace.PAIR_MASK_REFRESH_MARKER
+        fallback = '[PINDIAG] pairs packed only: round=31 unpaired=[[0, 1], [2, 3]] (the policy serves this round sequentially)'
+        environ = {'QWEN_FAST_PAIR_MASK_REFRESH': '1', 'QWEN_FAST_PAIRS_PACKED_ONLY': '1'}
+        self.assertEqual(self._report(environ, chr(10).join([refresh, fallback]))['missing'], [])
+        self.assertEqual(self._report(environ, refresh)['missing'],
+                         ['QWEN_FAST_PAIRS_PACKED_ONLY: [PINDIAG] pairs packed only'])
+
+    def test_a_clobbered_mask_is_reported_not_failed(self):
+        import dflash_proposal_trace as trace
+        line = trace.PAIR_MASK_AUDIT_LINE
+        log = chr(10).join([line % (4, 0, 1, 1, 0, 0), line % (4, 0, 1, 1, 0, 1), line % (30, 0, 1, 1, 0, 0),
+                            line % (30, 0, 1, 0, 212, 1), line % (31, 0, 1, 0, 212, 1), line % (None, 2, 3, 1, 0, 0)])
+        report = self._report({'QWEN_FAST_PAIR_MASK_AUDIT': '1'}, log)
+        self.assertEqual(report['missing'], [])
+        self.assertEqual(report['pair_mask_audit'], dict(lines=6, clobbered=2, max_mismatched=212,
+                                                         first_clobbered_round={'0,1': '30'}))
+        self.assertIsNone(self._report({}, log)['pair_mask_audit'], 'read only under the flag')
+
+    def test_the_probe_passes_exact_and_refused_patterns(self):
+        lines = [self.probe_line(3, (0,), 'refused', None, None, (1, 2, 3), reason='At most 2 idle segments'),
+                 self.probe_line(3, (0, 1), 1, idle=(2, 3)), self.probe_line(3, (1, 3), 1, idle=(0, 2)),
+                 self.probe_line(3, (0, 1, 2), 1, idle=(3,)), self.probe_line(3, (0, 1, 2, 3), 1),
+                 '[PINDIAG] padded probe page0 rounds=3 hits=0']
+        report = self._report({'QWEN_FAST_PADDED_PROBE': '1'}, chr(10).join(lines))
+        self.assertEqual(report['missing'], [])
+        self.assertEqual([(line['live'], line['exact'], line['idle']) for line in report['padded_probe']],
+                         [('0', 'refused', '1,2,3'), ('0,1', '1', '2,3'), ('1,3', '1', '0,2'), ('0,1,2', '1', '3'),
+                          ('0,1,2,3', '1', '-')])
+
+    def test_a_mismatch_an_error_a_written_carry_or_a_page_zero_hit_fails(self):
+        good = self.probe_line(3, (0, 1, 2, 3), 1)
+        cases = {'mismatch': self.probe_line(3, (0, 1), 0, idle=(2, 3), differ=['logits:0+1', 'states:1']),
+                 'error': self.probe_line(3, (1, 3), 'error', None, None, (0, 2), reason='RuntimeError: x'),
+                 'carry': self.probe_line(20, (0, 1, 2), 1, intact=False, idle=(3,)),
+                 'page0': '[PINDIAG] padded probe page0 hit round=7 segment=2 position=131100 page_index=3'}
+        for name, line in cases.items():
+            with self.subTest(case=name):
+                missing = self._report({'QWEN_FAST_PADDED_PROBE': '1'}, chr(10).join([good, line]))['missing']
+                self.assertEqual(len(missing), 1, missing)
+                self.assertTrue(missing[0].startswith('QWEN_FAST_PADDED_PROBE: '), missing)
+        self.assertEqual(self._report({'QWEN_FAST_PADDED_PROBE': '1'}, cases['mismatch'])['missing'],
+                         ['QWEN_FAST_PADDED_PROBE: round 3 live=0,1 exact=0 differ=logits:0+1,states:1'])
+        # a run whose probe never reached round 3 (or an image without it) names the line it lacks
+        self.assertEqual(self._report({'QWEN_FAST_PADDED_PROBE': '1'}, cases['carry'])['missing'],
+                         ['QWEN_FAST_PADDED_PROBE: [PINDIAG] padded probe round=3 ',
+                          'QWEN_FAST_PADDED_PROBE: round 20 live=0,1,2 idle_carry_intact=0'])
+
+
 if __name__ == '__main__':
     unittest.main()

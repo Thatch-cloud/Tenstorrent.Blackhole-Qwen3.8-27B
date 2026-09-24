@@ -41,6 +41,40 @@ PACKED_CONTEXT = 2048
 DRAM_RESERVE_FLAG = 'QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB'
 DRAM_RESERVE_DEFAULT_MB = 256
 
+# Variable-user packed rounds, M0's fallback (QWEN_FAST_PAIRS_PACKED_ONLY=1, default off): in a
+# round the packed step's policy will not serve as one pass (serving_worker_hook._drafts'
+# packed_rows is None: a user finished, or one is within a block round of its budget), every
+# member of a slot pair proposes on its own single-user capture, as an unpaired bridge does -
+# the pair trace runs only in packed rounds. For the case M0's mask audit finds the mask intact
+# while the pair users' tail acceptance still collapses: single-proposal users hold 2.76-4.0
+# tokens per step in those same steps. The hook passes packed_round only while the flag is on;
+# PAIRS_PACKED_ONLY_MARKER is logged once per process, the first round it unpairs a pair.
+PAIRS_PACKED_ONLY_FLAG = 'QWEN_FAST_PAIRS_PACKED_ONLY'
+PAIRS_PACKED_ONLY_MARKER = '[PINDIAG] pairs packed only'
+_PAIRS_PACKED_ONLY_NOTED = []
+
+
+def pairs_packed_only_enabled(environ=None):
+    """QWEN_FAST_PAIRS_PACKED_ONLY=1."""
+    return (os.environ if environ is None else environ).get(PAIRS_PACKED_ONLY_FLAG) == '1'
+
+
+def unpair_groups(groups, round_number):
+    """QWEN_FAST_PAIRS_PACKED_ONLY: every member of every group on its own, in group order.
+    Logs PAIRS_PACKED_ONLY_MARKER once per process, the first time a full pair is split."""
+    pairs = [list(group) for group in groups if len(group) == 2]
+    if pairs and not _PAIRS_PACKED_ONLY_NOTED:
+        _PAIRS_PACKED_ONLY_NOTED.append(round_number)
+        message = '%s: round=%s unpaired=%s (the policy serves this round sequentially)' % (
+            PAIRS_PACKED_ONLY_MARKER, round_number, pairs)
+        try:
+            from loguru import logger
+        except ImportError:
+            print(message, flush=True)
+        else:
+            logger.info('{}', message)
+    return [(slot,) for group in groups for slot in group]
+
 # One packed pair's own placeholder buffers at the only packable geometry (steady
 # state, 2048-row context, T16 block_rows=16): identifiers (1,32) uint32 (~128 B,
 # negligible), mask (1,1,32,4160) bf16 (~266 KB), rope.q (2x(1,1,32,128) bf16,
@@ -336,7 +370,7 @@ class PackedProposalCoordinator:
             audit_log(RECAPTURE_LINE, slot=getattr(getattr(device, 'pool_slot', None), 'index', None))
         return True
 
-    def prepare(self, bridges):
+    def prepare(self, bridges, packed_round=None):
         """Phase A, packed variant: pair eligible bridges by fixed pool slot, run one
         traced pass per full packable pair, prepare_device() unchanged for anything
         left over (an unpaired bridge, a lone survivor of a broken pair, a pair not
@@ -347,7 +381,12 @@ class PackedProposalCoordinator:
         A device that raises while being prepared fails the round exactly as its own
         drafts() call would have, but only after every other already-prepared
         device's enqueued work is fenced and its pending discarded - mirroring
-        prepare_pipelined_drafts' own exception path."""
+        prepare_pipelined_drafts' own exception path.
+
+        `packed_round` (QWEN_FAST_PAIRS_PACKED_ONLY only; the hook passes nothing
+        otherwise): False when the packed step's policy serves this round sequentially,
+        and then, with the flag on, no pair forms - every member prepares on its own
+        (unpair_groups)."""
         from dflash_packed_proposal import pair_slots
         from serving_worker_hook import phase, pipelined_device
 
@@ -363,6 +402,8 @@ class PackedProposalCoordinator:
         by_slot = {entry['slot']: entry for entry in entries if entry['slot'] is not None}
         unpaired = [entry for entry in entries if entry['slot'] is None]
         groups = pair_slots(by_slot) if by_slot else []
+        if packed_round is False and pairs_packed_only_enabled():
+            groups = unpair_groups(groups, round_number)
 
         prepared, fence = [], None
         pair_labels, pair_ms = [], []
@@ -404,6 +445,12 @@ class PackedProposalCoordinator:
                         if headroom_ok:
                             started = time.perf_counter() if audit_enabled() else None
                             trace = self._trace_for(group, device_a, device_b)
+                            from dflash_proposal_trace import pair_mask_audit_enabled
+
+                            if pair_mask_audit_enabled():
+                                # QWEN_FAST_PAIR_MASK_AUDIT (M0): this round's number for the
+                                # trace's '[PACKED-PROPOSE] mask round=' lines.
+                                trace.round_number = round_number
                             ids = '%s,%s' % (entry_a['bridge'].request.session.request_id,
                                              entry_b['bridge'].request.session.request_id)
                             try:

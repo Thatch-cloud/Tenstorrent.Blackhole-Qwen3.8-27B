@@ -334,6 +334,53 @@ if [ -n "${M3NATIVE_GDN_PREFILL_CONV:-}" ]; then
   done
   echo "GDN prefill conv (lever #2): mounting ${prefill_conv_files[*]}"
 fi
+# M3NATIVE_C1_EXACT=1 (C1e, lever_n_m3native_patch section J) becomes QWEN_FAST_C1_EXACT=1, read by the
+# grafted mlp.py and layer.py: under QWEN_FAST_SINGLE_GATEUP=1 the prefill MLP runs the served fused op
+# again, on a per-layer rebuild of its packed weight in one scratch. The op is mounted beside mlp.py,
+# ONE FILE EACH, from the graft job's staging; the list is lever_n_m3native_patch.C1E_FILES itself.
+# M3NATIVE_C1_EXACT_AUDIT=<n> (0..64) byte-checks the first n layers' served weight at load and the
+# first n packs (QWEN_FAST_C1_EXACT_AUDIT; a correctness arm). C1e needs M3NATIVE_SINGLE_GATEUP (alone
+# the served path runs and the arm would measure nothing new) and excludes M3NATIVE_C1_AGMM and
+# M3NATIVE_C1_LEGACY (the graft refuses the pair at construction): refused here, before the docker run
+# rather than minutes into the model load. Unset, nothing is mounted or passed.
+c1e_mounts=()
+if [ -n "${M3NATIVE_C1_EXACT:-}" ]; then
+  if [ "$M3NATIVE_C1_EXACT" != "1" ]; then
+    echo "M3NATIVE_C1_EXACT must be 1 or unset, got '$M3NATIVE_C1_EXACT'" >&2
+    exit 1
+  fi
+  if [ -z "${M3NATIVE_SINGLE_GATEUP:-}" ]; then
+    echo "M3NATIVE_C1_EXACT=1 needs M3NATIVE_SINGLE_GATEUP=1 (alone the served packed copy is built and C1e never runs)" >&2
+    exit 1
+  fi
+  if [ -n "${M3NATIVE_C1_AGMM:-}" ] || [ -n "${M3NATIVE_C1_LEGACY:-}" ]; then
+    echo "M3NATIVE_C1_EXACT=1 excludes M3NATIVE_C1_AGMM and M3NATIVE_C1_LEGACY (each replaces the same prefill gate/up)" >&2
+    exit 1
+  fi
+  case "${M3NATIVE_C1_EXACT_AUDIT:-0}" in
+    ''|*[!0-9]*) echo "M3NATIVE_C1_EXACT_AUDIT must be an integer 0..64, got '$M3NATIVE_C1_EXACT_AUDIT'" >&2; exit 1 ;;
+  esac
+  if [ "${M3NATIVE_C1_EXACT_AUDIT:-0}" -gt 64 ]; then
+    echo "M3NATIVE_C1_EXACT_AUDIT must be an integer 0..64, got '$M3NATIVE_C1_EXACT_AUDIT'" >&2
+    exit 1
+  fi
+  mapfile -t c1e_files < <(python3 -B -c 'import sys; sys.path.insert(0, "scripts/ci"); import lever_n_m3native_patch as p; print(chr(10).join(sorted(p.C1E_FILES)))' | tr -d '\r')
+  if [ "${#c1e_files[@]}" -eq 0 ]; then
+    echo "M3NATIVE_C1_EXACT: lever_n_m3native_patch.C1E_FILES is empty or unreadable" >&2
+    exit 1
+  fi
+  for relative in "${c1e_files[@]}"; do
+    if [ ! -s "$PWD/graft/$relative" ]; then
+      echo "M3NATIVE_C1_EXACT: graft/$relative was not staged" >&2
+      exit 1
+    fi
+    c1e_mounts+=(--mount "type=bind,src=$PWD/graft/$relative,dst=$root/$relative,readonly")
+  done
+  echo "C1e (exact prefill gate/up under the single copy): mounting ${c1e_files[*]}; audit ${M3NATIVE_C1_EXACT_AUDIT:-0}"
+elif [ -n "${M3NATIVE_C1_EXACT_AUDIT:-}" ]; then
+  echo "M3NATIVE_C1_EXACT_AUDIT='$M3NATIVE_C1_EXACT_AUDIT' without M3NATIVE_C1_EXACT=1 audits nothing: set both or neither" >&2
+  exit 1
+fi
 
 # Proposals: the fp2u lane runs each request's draft proposal EAGERLY
 # (QWEN_FAST_EAGER_PROPOSAL=1) because per-request proposal traces clobbered each
@@ -462,6 +509,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$PWD/graft/gdn/tp.py,dst=$root/gdn/tp.py,readonly" \
   "${prefill_conv_mounts[@]}" \
   --mount "type=bind,src=$PWD/graft/mlp.py,dst=$root/mlp.py,readonly" \
+  "${c1e_mounts[@]}" \
   --mount "type=bind,src=$PWD/graft/layer.py,dst=$root/layer.py,readonly" \
   "${lever_n_mounts[@]}" \
   --mount "type=bind,src=$PWD/scripts/ci/lever_n_m3native_gate.py,dst=/bench/lever_n_m3native_gate.py,readonly" \
@@ -491,6 +539,8 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_SKIP_BLOCK_STREAM:+-e QWEN_FAST_SKIP_BLOCK_STREAM=1} \
   ${M3NATIVE_SINGLE_GATEUP:+-e QWEN_FAST_SINGLE_GATEUP=1} \
   ${M3NATIVE_C1_AGMM:+-e QWEN_FAST_C1_AGMM=1} \
+  ${M3NATIVE_C1_EXACT:+-e QWEN_FAST_C1_EXACT=1} \
+  ${M3NATIVE_C1_EXACT_AUDIT:+-e QWEN_FAST_C1_EXACT_AUDIT=$M3NATIVE_C1_EXACT_AUDIT} \
   ${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1} \
   ${M3NATIVE_ROUND_B1:+-e QWEN_FAST_ROUND_B1=1} \
   ${M3NATIVE_ROUND_B1_AUDIT:+-e QWEN_FAST_ROUND_B1_AUDIT=1} \
@@ -501,6 +551,10 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_VERIFY_T2_AUDIT:+-e QWEN_FAST_VERIFY_T2_AUDIT=1} \
   ${M3NATIVE_VERIFY_T2_SKIP:+-e QWEN_FAST_VERIFY_T2_SKIP=$M3NATIVE_VERIFY_T2_SKIP} \
   ${M3NATIVE_VERIFY_T2_KV_ROWS:+-e QWEN_FAST_VERIFY_T2_KV_ROWS=$M3NATIVE_VERIFY_T2_KV_ROWS} \
+  ${M3NATIVE_PAIR_MASK_REFRESH:+-e QWEN_FAST_PAIR_MASK_REFRESH=1} \
+  ${M3NATIVE_PAIR_MASK_AUDIT:+-e QWEN_FAST_PAIR_MASK_AUDIT=1} \
+  ${M3NATIVE_PAIRS_PACKED_ONLY:+-e QWEN_FAST_PAIRS_PACKED_ONLY=1} \
+  ${M3NATIVE_PADDED_PROBE:+-e QWEN_FAST_PADDED_PROBE=1} \
   ${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1} \
   ${M3NATIVE_GDN_PREFILL_CONV:+-e QWEN_FAST_GDN_PREFILL_CONV=1} \
   ${M3NATIVE_GDN_PREFILL_CONV_AUDIT:+-e QWEN_FAST_GDN_PREFILL_CONV_AUDIT=$M3NATIVE_GDN_PREFILL_CONV_AUDIT} \

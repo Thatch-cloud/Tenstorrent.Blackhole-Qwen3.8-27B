@@ -46,16 +46,27 @@ position, and in vLLM's convention (over all drafting blocks) for comparison wit
 
 Rates (decode_rates). Per user: `steady` - its own packed rounds (concurrent) or 16-row rounds
 (sequential) joined chunk to block, minus the first decode round, the terminal one and capture
-stalls (steady_rate) - is the figure to set against the programme's ~28.3 / 47.5 tok/s; the
-median-gap and all-active figures are kept for comparison and read low (tail rounds, stalls).
+stalls (steady_rate) - measures the packed round alone, so it cannot see how long the run spends
+outside it (v185, 4 x 131k: a 21.1 tok/s mean where the users' completion rates were 6.4-30.3). The
+completion-based figures are the user-facing ones and the ones to set against a goal:
+`completion_tok_s` - each user's completion tokens over the time from the decode start (the
+moment the LAST prefill ended: its seed chunk) to that user's last chunk - their mean, and
+`aggregate_tok_s`, every user's completion tokens over the decode wall (decode start to the last
+chunk of any user). The median-gap and all-active figures are kept for comparison.
 
-Active users per round: every '[PHASE] execute total= new=0 cached=C spec=S' line
-(serving_worker_hook) is one engine decode step with C running requests. A round with fewer than
-four leaves the packed 64-row step and runs the survivors sequentially at four rows each (at most
-four tokens), so these counts say how much of the run was the packed round being measured.
+Active users per round: every '[PHASE] execute total=T new=0 cached=C spec=S' line
+(serving_worker_hook, logged as the step begins) is one engine decode step with C live requests.
+The packed 64-row step serves a round only when all four users are live and each has at least a
+block round (16 tokens) of budget left (serving_packed_step.proposal_rows); every other round -
+fewer than four live, or the narrow transition where four are live but one is within 16 tokens of
+its budget - runs each live user on its own engine at the sequential widths (four rows, at most
+four tokens). So C=4 does not mean packed: `decode_steps_by_active_users` counts steps, and
+`rounds_by_live` (round_split) splits them by live count AND by whether the step was packed (its
+blocks carry verifier.packed), with each group's median round (the time to the next step's line)
+and the tokens each live user took per round - the view that shows where the decode wall goes.
 
-Stdlib only (json, re, statistics): mounted at /bench beside the gate, imported by the offline
-real_text_compare.py too. Python 3.10 compatible.
+Stdlib only (json, re, statistics, datetime): mounted at /bench beside the gate, imported by the
+offline real_text_compare.py too. Python 3.10 compatible.
 """
 
 from collections import Counter
@@ -72,6 +83,9 @@ SPEC_LINE = re.compile(r'SpecDecoding metrics: Mean acceptance length: ([0-9.]+|
                        r'tokens, Drafted: ([0-9]+) tokens, Per-position acceptance rate: ([0-9., na]*?), '
                        r'Avg Draft acceptance rate: ([0-9.]+|nan)%')
 EXECUTE_LINE = re.compile(r'\[PHASE\] execute total=([0-9]+) new=([0-9]+) cached=([0-9]+) spec=([0-9]+)')
+# The same line with its loguru timestamp ('2026-09-24 03:18:37.311 | INFO | ...').
+TIMED_EXECUTE_LINE = re.compile(r'([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?) \|[^\n]*?'
+                                r'\[PHASE\] execute total=([0-9]+) new=([0-9]+) cached=([0-9]+) spec=([0-9]+)')
 PACKED_PHASE_LINE = re.compile(r'\[PACKED-PHASE\] round=([0-9]+) users=([0-9]+)')
 SHUTDOWN_MARKER = 'trigger received signal=SIGTERM'
 STALL_FACTOR = 3.0             # a round gap over 3 x the median is a capture/warm-up stall, not a round
@@ -200,6 +214,103 @@ def execute_steps(log_text):
             mixed += 1
     return dict(decode_steps_by_active_users={str(k): decode[k] for k in sorted(decode, reverse=True)},
                 prefill_steps=prefill, mixed_steps=mixed)
+
+
+def timed_steps(log_text):
+    """[(seconds since the first line, total, new, cached)] for every timestamped '[PHASE] execute'
+    line, in log order."""
+    from datetime import datetime
+    steps, origin = [], None
+    for match in TIMED_EXECUTE_LINE.finditer(log_text):
+        stamp = match.group(1)
+        moment = datetime.strptime(stamp, '%Y-%m-%d %H:%M:%S.%f' if '.' in stamp else '%Y-%m-%d %H:%M:%S')
+        origin = moment if origin is None else origin
+        total, new, cached, _spec = (int(value) for value in match.groups()[1:])
+        steps.append(((moment - origin).total_seconds(), total, new, cached))
+    return steps
+
+
+def round_split(log_text, records):
+    """Decode rounds split by live count and by packed or not: the view of where the decode wall
+    goes (module docstring, 'Active users per round'), or None without timestamped steps.
+
+    Every '[PHASE] execute ... new=0 cached=C' line is one decode step with C live users, timed to
+    the next line when that is a decode step too (each line is logged as its step begins). A step
+    followed by anything else - a prefill, which in a sequential reference also holds the client's
+    wait for the next request, or the end of the log - is counted but left out of the times.
+    Tokens: in the benchmark every user is admitted
+    before the first decode step and takes part in every step while it is live, so the k-th
+    decode step is every live record's k-th block. That is checked step by step - C must be the
+    number of records with a k-th block and T the sum of those blocks' rows - and on the first
+    disagreement (a staggered or Lever N run, a sequential reference) the token split and the
+    packed/sequential split are withheld (`aligned` False, `alignment` says where) while the
+    per-live-count times stay. Per group: rounds, the median and mean round, its wall and share of
+    the timed decode wall, the tokens each live user took per round (mean committed) and its rows,
+    and per_user_tok_s = those tokens over the mean round."""
+    lines = timed_steps(log_text)
+    steps = []
+    for index, (at, total, new, cached) in enumerate(lines):
+        if new == 0 and cached > 0:
+            following = lines[index + 1] if index + 1 < len(lines) else None
+            decoding = following is not None and following[2] == 0 and following[3] > 0
+            steps.append(dict(at=at, total=total, live=cached, seconds=following[0] - at if decoding else None,
+                              blocks=None))
+    if not steps:
+        return None
+    histories = [record['blocks'] for record in records]
+    aligned, reason = bool(histories), None if histories else 'no phases records'
+    if aligned:
+        for index, step in enumerate(steps):
+            present = [blocks[index] for blocks in histories if len(blocks) > index]
+            rows = sum(block['rows'] for block in present)
+            if len(present) != step['live'] or rows != step['total']:
+                aligned = False
+                reason = 'step %d: %d live over %d rows, the records hold %d blocks over %d rows' % (
+                    index + 1, step['live'], step['total'], len(present), rows)
+                break
+            step['blocks'] = present
+        if aligned and max(len(blocks) for blocks in histories) != len(steps):
+            aligned = False
+            reason = '%d decode steps, the longest record %d blocks' % (len(steps), max(len(b) for b in histories))
+    groups = {}
+    for step in steps:
+        packed = all(block['packed'] for block in step['blocks']) if aligned else None
+        group = groups.setdefault((step['live'], packed), dict(live=step['live'], packed=packed, rounds=0, times=[],
+                                                               tokens=0, rows=0, user_rounds=0, timed_tokens=0,
+                                                               timed_user_rounds=0))
+        group['rounds'] += 1
+        if step['seconds'] is not None:
+            group['times'].append(step['seconds'])
+        if aligned:
+            committed = sum(block['committed'] for block in step['blocks'])
+            group['tokens'] += committed
+            group['rows'] += sum(block['rows'] for block in step['blocks'])
+            group['user_rounds'] += step['live']
+            if step['seconds'] is not None:
+                group['timed_tokens'] += committed
+                group['timed_user_rounds'] += step['live']
+    timed_wall = sum(step['seconds'] for step in steps if step['seconds'] is not None)
+    out = []
+    for key in sorted(groups, key=lambda key: (-key[0], not key[1])):
+        group = groups[key]
+        times = group.pop('times')
+        wall = sum(times)
+        mean_round = statistics.fmean(times) if times else None
+        per_round = group['tokens'] / group['user_rounds'] if aligned and group['user_rounds'] else None
+        timed_per_round = (group['timed_tokens'] / group['timed_user_rounds']
+                           if aligned and group['timed_user_rounds'] else None)
+        out.append(dict(live=group['live'], packed=group['packed'], rounds=group['rounds'], timed_rounds=len(times),
+                        median_round_ms=round(statistics.median(times) * 1000.0, 2) if times else None,
+                        mean_round_ms=round(mean_round * 1000.0, 2) if mean_round else None,
+                        wall_s=round(wall, 3), wall_share=round(wall / timed_wall, 4) if timed_wall else None,
+                        tokens=group['tokens'] if aligned else None,
+                        tokens_per_user_per_round=round(per_round, 3) if per_round is not None else None,
+                        rows_per_user=round(group['rows'] / group['user_rounds'], 3)
+                        if aligned and group['user_rounds'] else None,
+                        per_user_tok_s=round(timed_per_round / mean_round, 2)
+                        if timed_per_round is not None and mean_round else None))
+    return dict(aligned=aligned, alignment=reason or 'every decode step is its live records\' next block',
+                decode_steps=len(steps), timed_decode_s=round(timed_wall, 3), groups=out)
 
 
 def block_stats(blocks, positions=POSITIONS):
@@ -472,6 +583,7 @@ def report(log_text, streams=None, prompt_lengths=None, sequential=None):
                      spec_decoding_intervals=len(intervals)),
         overall=section(everything), packed=section(packed) if packed else None,
         rounds=dict(execute_steps(log_text), packed_rounds=len(PACKED_PHASE_LINE.findall(log_text))),
+        rounds_by_live=round_split(log_text, records),
         users=users, records=compact,
         vllm=dict(totals, phases=phases_totals,
                   coverage_of_drafting_blocks=round(totals['drafts'] / phases_totals['drafts'], 3)
@@ -501,7 +613,7 @@ def summary_line(result):
                         for u in result.get('users') or [])
     return ('[ACCEPT] full-draft rounds=%s mean=%s P>8=%s P>11=%s P16=%s max=%s | all rounds=%s mean=%s | '
             'pos1-15=%s | %s | active-user steps %s | vLLM mean=%s over %s drafts | agree audit=%s vllm=%s stream=%s '
-            'attributed=%s' % (
+            'attributed=%s | by live %s' % (
                 full.get('rounds'), _fmt(full.get('mean_emitted'), '%.2f'), _fmt(full.get('p_emitted_gt_8')),
                 _fmt(full.get('p_emitted_gt_11')), _fmt(full.get('p_emitted_eq_16')), full.get('max_emitted'),
                 every.get('rounds'), _fmt(every.get('mean_emitted'), '%.2f'),
@@ -509,13 +621,65 @@ def summary_line(result):
                 ' '.join('%s:%s' % (k, v) for k, v in steps.items()) or '-',
                 _fmt(vllm.get('mean_acceptance_length'), '%.2f'), vllm.get('drafts'),
                 agreement.get('packed_audit_vs_phases'), agreement.get('vllm_consistent_with_phases'),
-                agreement.get('stream_vs_phases'), agreement.get('users_attributed')))
+                agreement.get('stream_vs_phases'), agreement.get('users_attributed'),
+                by_live_label(result.get('rounds_by_live'))))
+
+
+def by_live_label(split):
+    """'4p:25x247ms/5.33 4s:4x520ms/3.19 3s:55x376ms/2.87 ...': per group, live count, p(acked) /
+    s(equential) / ? (not aligned), rounds x median round / tokens per user per round."""
+    if not split:
+        return '-'
+    kind = {True: 'p', False: 's', None: '?'}
+    return ' '.join('%d%s:%dx%sms/%s' % (group['live'], kind[group['packed']], group['rounds'],
+                                          _fmt(group['median_round_ms'], '%.0f'),
+                                          _fmt(group['tokens_per_user_per_round'], '%.2f'))
+                    for group in split['groups'])
+
+
+def completion_rates(streams, concurrent=True):
+    """The user-facing rates, from the detail streams' absolute chunk times (started_s + chunk_s),
+    or None without them for every stream.
+
+    Concurrent: decode_start is the moment the LAST stream got its seed chunk - the end of the last
+    prefill; the benchmark holds every user's first decode round until then, so it is when decode
+    begins for everyone. Each user's completion_tok_s is its completion_tokens (the seed included:
+    256 for a full budget) over its finish_s, the time from decode_start to its last chunk. The
+    decode wall runs from decode_start to the last chunk of any stream; aggregate_tok_s is every
+    stream's completion tokens over it. Sequential (a reference run of lone streams): each user's
+    own window, seed chunk to last chunk; no decode wall and no aggregate."""
+    timelines = []
+    for stream in streams:
+        stream = stream or {}
+        started, offsets, completion = stream.get('started_s'), stream.get('chunk_s'), stream.get('completion_tokens')
+        if started is None or not offsets or len(offsets) < 2 or not completion:
+            return None
+        timelines.append((started + offsets[0], started + offsets[-1], completion))
+    if not timelines:
+        return None
+    start = max(seed for seed, _, _ in timelines)
+    users = []
+    for index, (seed, last, completion) in enumerate(timelines):
+        begin = start if concurrent else seed
+        finish = last - begin
+        users.append(dict(user=index, completion_tokens=completion, finish_s=round(finish, 4),
+                          completion_tok_s=round(completion / finish, 2) if finish > 0 else None))
+    rates = [user['completion_tok_s'] for user in users if user['completion_tok_s']]
+    wall = max(last for _, last, _ in timelines) - start if concurrent else None
+    tokens = sum(completion for _, _, completion in timelines)
+    return dict(decode_start='the last seed chunk' if concurrent else "each stream's own seed chunk",
+                decode_wall_s=round(wall, 4) if wall is not None else None, tokens=tokens,
+                aggregate_tok_s=round(tokens / wall, 2) if wall else None,
+                mean_completion_tok_s=round(statistics.fmean(rates), 2) if rates else None, users=users)
 
 
 def decode_rates(streams, concurrent=True, acceptance=None):
-    """Per-user decode tok/s, three ways; `steady` is the one to set against the programme's
-    ~28.3 tok/s (4 x 131k) and 47.5 tok/s (single stream) figures.
+    """Per-user decode tok/s, four ways. `completion` (completion_rates) is what the users got and
+    the figure a goal is judged by; `steady` is the packed round alone, the one to set against the
+    programme's earlier ~28.3 tok/s (4 x 131k) and 47.5 tok/s (single stream) figures.
 
+    completion - each user's completion tokens over its finish time from the decode start, their
+      mean, and the aggregate over the decode wall (completion_rates).
     steady - from the acceptance report (`acceptance`, report() above): each user's own packed
       rounds (concurrent) or 16-row rounds (sequential), joined chunk to block, minus the first
       decode round, the terminal one and capture stalls (steady_rate). steady_tok_s = tokens /
@@ -585,6 +749,11 @@ def decode_rates(streams, concurrent=True, acceptance=None):
                 entry.update(all_active_tokens=None, all_active_seconds=None, all_active_chunks=len(inside),
                              all_active_tok_s=None)
 
+    completion = completion_rates(streams, concurrent)
+    for entry in users:
+        mine = (completion or {}).get('users', [])[entry['user']] if completion else {}
+        entry.update(completion_tok_s=mine.get('completion_tok_s'), finish_s=mine.get('finish_s'))
+
     def mean_of(key):
         values = [u.get(key) for u in users if u.get(key)]
         return round(statistics.fmean(values), 2) if values else None
@@ -594,6 +763,9 @@ def decode_rates(streams, concurrent=True, acceptance=None):
                 mean_mean_over_median_tok_s=mean_of('mean_over_median_tok_s'),
                 mean_all_active_tok_s=mean_of('all_active_tok_s'),
                 mean_median_gap_tok_s=mean_of('median_gap_tok_s'),
+                mean_completion_tok_s=(completion or {}).get('mean_completion_tok_s'),
+                aggregate_tok_s=(completion or {}).get('aggregate_tok_s'),
+                decode_wall_s=(completion or {}).get('decode_wall_s'), completion=completion,
                 scope=decode_rates.__doc__.strip().split('\n')[0])
 
 
@@ -601,12 +773,14 @@ def rate_line(rates):
     """One '[RATE] ...' line."""
     per_user = lambda key: ' '.join(_fmt(u.get(key), '%.1f') for u in rates['users'])
     return ('[RATE] per-user tok/s steady %s (mean %s; mean/median %s) | median-gap %s (mean %s) | '
-            'all-active %s (mean %s) window %s s' % (
+            'all-active %s (mean %s) window %s s | completion %s (mean %s) aggregate %s over a %s s decode wall' % (
                 per_user('steady_tok_s'), _fmt(rates.get('mean_steady_tok_s'), '%.1f'),
                 _fmt(rates.get('mean_mean_over_median_tok_s'), '%.1f'),
                 per_user('median_gap_tok_s'), _fmt(rates.get('mean_median_gap_tok_s'), '%.1f'),
                 per_user('all_active_tok_s'), _fmt(rates.get('mean_all_active_tok_s'), '%.1f'),
-                _fmt((rates.get('window') or {}).get('seconds'), '%.2f')))
+                _fmt((rates.get('window') or {}).get('seconds'), '%.2f'),
+                per_user('completion_tok_s'), _fmt(rates.get('mean_completion_tok_s'), '%.1f'),
+                _fmt(rates.get('aggregate_tok_s'), '%.1f'), _fmt(rates.get('decode_wall_s'), '%.2f')))
 
 
 def main(argv=None):

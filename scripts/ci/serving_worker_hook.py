@@ -441,7 +441,14 @@ class FastWorkerHook:
                     from dflash_packed_proposal_coordinator import PackedProposalCoordinator
 
                     coordinator = self._packed_coordinator = PackedProposalCoordinator()
-                phase('prepare_proposals', ids, lambda: coordinator.prepare(bridges))
+                if os.environ.get('QWEN_FAST_PAIRS_PACKED_ONLY') == '1':
+                    # Variable-user packed rounds, M0's fallback (dflash_packed_proposal_
+                    # coordinator.PAIRS_PACKED_ONLY_FLAG): whether the policy serves this
+                    # round as one pass. Unset, the call below is today's, argument for argument.
+                    packed_round = packed_rows is not None
+                    phase('prepare_proposals', ids, lambda: coordinator.prepare(bridges, packed_round=packed_round))
+                else:
+                    phase('prepare_proposals', ids, lambda: coordinator.prepare(bridges))
             else:
                 phase('prepare_proposals', ids, lambda: prepare_pipelined_drafts(bridges))
         request_ids, tokens = [], []

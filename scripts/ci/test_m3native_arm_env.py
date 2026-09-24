@@ -289,6 +289,40 @@ class PrefillProfileArmTests(unittest.TestCase):
                 self.assertIn("'%s'" % name, graft)
 
 
+class C1eArmTests(unittest.TestCase):
+    """C1e (lever_n_m3native_patch section J): M3NATIVE_C1_EXACT=1 crosses as QWEN_FAST_C1_EXACT=1 and
+    M3NATIVE_C1_EXACT_AUDIT=<n> as QWEN_FAST_C1_EXACT_AUDIT=<n>, between the C1d and C1 legacy
+    switches, before the entrypoint; unset, nothing crosses. Both are read by the grafted mlp.py (and
+    layer.py), and by the gate, which requires C1e's markers under them - so a name drifting on either
+    side fails here, not on the rig as a silently served-path run."""
+
+    LINES = ('${M3NATIVE_C1_EXACT:+-e QWEN_FAST_C1_EXACT=1}',
+             '${M3NATIVE_C1_EXACT_AUDIT:+-e QWEN_FAST_C1_EXACT_AUDIT=$M3NATIVE_C1_EXACT_AUDIT}')
+
+    def test_the_two_switches_cross_between_c1_agmm_and_c1_legacy(self):
+        text = arm_text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(), '${M3NATIVE_C1_AGMM:+-e QWEN_FAST_C1_AGMM=1} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92))
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+        self.assertEqual(lines[start + 2].strip(), '${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1} ' + chr(92))
+
+    def test_the_container_side_reads_the_names_that_cross(self):
+        graft = (HERE / 'lever_n_m3native_patch.py').read_text(encoding='utf-8')
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        for name in ('QWEN_FAST_C1_EXACT', 'QWEN_FAST_C1_EXACT_AUDIT'):
+            with self.subTest(name=name):
+                self.assertIn("'%s'" % name, graft)
+                self.assertIn("'%s'" % name, gate)
+        import lever_n_m3native_patch as patcher
+        self.assertIn('os.environ.get("QWEN_FAST_C1_EXACT") == "1"', patcher.C1E_ON)
+        self.assertIn('os.environ.get("QWEN_FAST_C1_EXACT_AUDIT")', patcher.C1E_HELPERS)
+
+
 class RoundB1ArmTests(unittest.TestCase):
     """Build 1 of the round host-phase cuts: M3NATIVE_ROUND_B1=1 crosses as QWEN_FAST_ROUND_B1=1,
     on its own continued line right after C1_LEGACY's, before the entrypoint; unset, nothing
@@ -369,6 +403,65 @@ class VerifyT2ArmTests(unittest.TestCase):
                 self.assertIn("'%s'" % name, gate)
                 self.assertIn("'%s'" % name, module)
         self.assertEqual(verify_trace_t2.KV_ROWS_FLAG, 'QWEN_FAST_VERIFY_T2_KV_ROWS')
+
+
+class VariableUserArmTests(unittest.TestCase):
+    """Variable-user packed rounds M0/M1: M3NATIVE_PAIR_MASK_REFRESH, _PAIR_MASK_AUDIT,
+    _PAIRS_PACKED_ONLY and _PADDED_PROBE cross as QWEN_FAST_<name>=1, right after the T2 lines,
+    before the entrypoint; unset, nothing crosses. The modules that read them are baked (both
+    image copy lists: test_dflash_proposal_trace / test_padded_probe ShippingTests), and the gate
+    requires the line each one logs once its path ran - so an image without M0/M1, or a name
+    drifting on either side, fails there or here, never as a silently stock arm."""
+
+    LINES = ('${M3NATIVE_PAIR_MASK_REFRESH:+-e QWEN_FAST_PAIR_MASK_REFRESH=1}',
+             '${M3NATIVE_PAIR_MASK_AUDIT:+-e QWEN_FAST_PAIR_MASK_AUDIT=1}',
+             '${M3NATIVE_PAIRS_PACKED_ONLY:+-e QWEN_FAST_PAIRS_PACKED_ONLY=1}',
+             '${M3NATIVE_PADDED_PROBE:+-e QWEN_FAST_PADDED_PROBE=1}')
+    READERS = {'QWEN_FAST_PAIR_MASK_REFRESH': ('dflash_proposal_trace.py',),
+               'QWEN_FAST_PAIR_MASK_AUDIT': ('dflash_proposal_trace.py',),
+               'QWEN_FAST_PAIRS_PACKED_ONLY': ('dflash_packed_proposal_coordinator.py', 'serving_worker_hook.py'),
+               'QWEN_FAST_PADDED_PROBE': ('packed_verifier.py', 'padded_probe.py')}
+
+    def test_the_four_switches_cross_after_t2_before_the_entrypoint(self):
+        text = arm_text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(),
+                         '${M3NATIVE_VERIFY_T2_KV_ROWS:+-e QWEN_FAST_VERIFY_T2_KV_ROWS=$M3NATIVE_VERIFY_T2_KV_ROWS} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92), 'nothing else on the line')
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+
+    def test_the_container_side_reads_the_names_that_cross(self):
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        for name, modules in self.READERS.items():
+            with self.subTest(name=name):
+                self.assertIn("'%s'" % name, gate)
+                for module in modules:
+                    self.assertIn(name, (HERE / module).read_text(encoding='utf-8'), module)
+        # the four are the arm's names with the prefix swapped, nothing else crosses for them
+        through = re.findall(r'-e (QWEN_FAST_(?:PAIR_MASK_\w+|PAIRS_PACKED_ONLY|PADDED_PROBE))=1', arm_text())
+        self.assertEqual(sorted(through), sorted(self.READERS))
+
+    def test_unset_nothing_crosses(self):
+        import shutil
+        import subprocess
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        script = 'printf "%s|" ' + ' '.join(self.LINES) + chr(10)
+        try:
+            unset = subprocess.run([bash, '-c', script], env=dict(PATH=os.environ.get('PATH', '')),
+                                   capture_output=True, text=True, timeout=60)
+            both = subprocess.run([bash, '-c', script], env=dict(PATH=os.environ.get('PATH', ''), M3NATIVE_PAIR_MASK_REFRESH='1',
+                                                                 M3NATIVE_PADDED_PROBE='1'),
+                                  capture_output=True, text=True, timeout=60)
+        except OSError as error:
+            self.skipTest('bash unusable: %s' % error)
+        self.assertEqual(unset.stdout.strip('|'), '')
+        self.assertEqual(both.stdout, '-e|QWEN_FAST_PAIR_MASK_REFRESH=1|-e|QWEN_FAST_PADDED_PROBE=1|')
 
 
 class ServingPairArmTests(unittest.TestCase):
