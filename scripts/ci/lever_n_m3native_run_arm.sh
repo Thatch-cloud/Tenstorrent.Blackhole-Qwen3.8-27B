@@ -121,6 +121,16 @@ mounts+=(--mount "type=bind,src=$PWD/experiment-results/gate,dst=/experiment-res
 # The serving pair, by board id: card M (PCI d1) and card A (PCI f3). Every node used to be mounted,
 # which was right while only two boards were present; with the third board (B) back the container would
 # see three devices. M3NATIVE_CARDS overrides the by-id list (space-separated); a missing card refuses.
+# M3NATIVE_STAGGER (seconds, default 0) spaces the gate's request starts so vLLM admits the users in order
+# 0,1,2,3. With 0 the four threads race and the admission order - which fixes each user's slot and pair row -
+# changes from run to run; the pair drafter drafts row 1 differently from row 0 (h1a-draft-race.md), so draft
+# sequences and acceptance then differ between identical runs. Timed ABAB arms should set it.
+stagger="${M3NATIVE_STAGGER:-0}"
+if ! printf '%s' "$stagger" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+  echo "M3NATIVE_STAGGER must be a non-negative number of seconds, got '$stagger'" >&2
+  exit 1
+fi
+
 serving_cards="${M3NATIVE_CARDS:-blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67}"
 # The reset step hot-cycles the boards behind the PCIe switch and returns before pciehp has
 # re-enumerated them, so a by-id link can be missing for a few seconds (run 35930349210 refused
@@ -716,7 +726,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
   --entrypoint python3 "$image" "${entry_args[@]}" \
   --users "$users" --context "$context" --prompt-tokens "$prompt_tokens" --max-tokens "$max_tokens" --stream-timeout 600 --trace-region-bytes "$trace_region_bytes" \
-  --prompt-base 1000 --prompt-user-offset 1 --stagger 0 ${M3NATIVE_SEQUENTIAL_USERS:+--sequential-users $M3NATIVE_SEQUENTIAL_USERS} \
+  --prompt-base 1000 --prompt-user-offset 1 --stagger "$stagger" ${M3NATIVE_SEQUENTIAL_USERS:+--sequential-users $M3NATIVE_SEQUENTIAL_USERS} \
   ${M3NATIVE_PROMPT_SOURCE:+--prompt-source $M3NATIVE_PROMPT_SOURCE} ${M3NATIVE_EOS:+--eos $M3NATIVE_EOS} \
   --references /bench/packed-gate-reference $allow_missing_references --results /experiment-results-gate \
   > experiment-results/m3native-gate-stdout.log 2>&1 || true

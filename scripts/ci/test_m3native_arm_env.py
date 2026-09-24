@@ -748,5 +748,17 @@ class SdpaModesArmTests(unittest.TestCase):
             self.assertIn('lacks compute/sdpa_flash_decode_qwen.cpp', result.stderr)
 
 
+
+class StaggerArmTests(unittest.TestCase):
+    """M3NATIVE_STAGGER spaces the request starts so the admission order (slot and pair row) is fixed."""
+
+    def test_the_stagger_reaches_the_gate_and_is_validated(self):
+        text = arm_text()
+        self.assertIn('stagger="${M3NATIVE_STAGGER:-0}"', text)
+        self.assertIn('--stagger "$stagger"', text)
+        self.assertNotIn('--stagger 0 ', text)
+        self.assertIn('M3NATIVE_STAGGER must be a non-negative number', text)
+        self.assertLess(text.index('stagger="${M3NATIVE_STAGGER:-0}"'), text.index('--stagger "$stagger"'))
+
 if __name__ == '__main__':
     unittest.main()
