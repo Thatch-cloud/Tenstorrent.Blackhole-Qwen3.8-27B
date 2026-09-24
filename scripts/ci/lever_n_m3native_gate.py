@@ -38,6 +38,21 @@ the container). Not part of the pass/fail criteria above - this gate is run once
 without it (the plain graft) and once with it, so `native_attn_engaged`
 (NATIVE_ATTN_MARKER, the "[PINDIAG] native_attn engaged" line two_tile_bindings logs
 once) is recorded in the JSON for the run to be read against, not asserted here.
+
+REAL TEXT (--prompt-source real-text; default synthetic, which leaves every request, the
+server argv, the report and the verdict exactly as before). Each user's prompt is a real coding
+request built in the container by real_text_prompts.py from the image's own vLLM source, EXACTLY
+--prompt-tokens long: the image pins every request's position to the arm's request context
+(QWEN_DSPARK_REQUEST_CONTEXT = --prompt-tokens; frozen_combined_runtime.validate_target_option
+refuses any other length), so --prompt-tokens + --max-tokens must fit --context. The
+single-user-*.json references are synthetic, so none is loaded (--allow-missing-references is
+required) and exactness is checked OFFLINE: each stream, its finish_reason, its completion and
+served prompt token counts and its prompt's sha256 go into the report, and real_text_compare.py
+compares a concurrent arm against a sequential (--users 1 --sequential-users N) arm on the same
+image. --eos stop (the real-text default, and required there) lets a stream end at EOS. Outside
+the default mode (real text, or --eos stop) the report also carries the acceptance report
+(acceptance_report.py, from the full server.log after the server has stopped), the per-user
+decode rate and the QWEN_* configuration, all diagnostic: none can fail an otherwise passing arm.
 """
 
 import argparse
@@ -567,15 +582,26 @@ def load_references(directory, prompt_tokens=GENERIC_REFERENCE_TOKENS):
     return references
 
 
-def write_candidate(directory, base, prompt_tokens, entry):
+def write_candidate(directory, base, prompt_tokens, entry, prompt_sha256=None):
     """This run's stream for `base`, in the tracked reference format, for promotion to
-    scripts/ci/references/packed-gate after review. Never read back by the gate."""
+    scripts/ci/references/packed-gate after review. Never read back by the gate.
+
+    With `prompt_sha256` (a real-text prompt) the file is named by that hash instead of the
+    base, reference-candidate-realtext-<sha12>-p<tokens>.json, which REFERENCE_NAME never
+    matches: a real-text stream promoted by mistake can never become a synthetic base's
+    reference."""
     if not entry or entry.get('error') or not entry.get('text'):
         return None
-    path = Path(directory) / ('reference-candidate-%d-p%d.json' % (base, prompt_tokens))
+    if prompt_sha256:
+        name = 'reference-candidate-realtext-%s-p%d.json' % (prompt_sha256[:12], prompt_tokens)
+        fields = dict(label='candidate', prompt_source='real-text', prompt_sha256=prompt_sha256,
+                      prompt_tokens=prompt_tokens, streams=[entry])
+    else:
+        name = 'reference-candidate-%d-p%d.json' % (base, prompt_tokens)
+        fields = dict(label='candidate', prompt_base=base, prompt_tokens=prompt_tokens, streams=[entry])
+    path = Path(directory) / name
     try:
-        path.write_text(json.dumps(dict(label='candidate', prompt_base=base, prompt_tokens=prompt_tokens,
-                                        streams=[entry]), indent=2), encoding='utf-8')
+        path.write_text(json.dumps(fields, indent=2), encoding='utf-8')
     except OSError:
         return None
     return path
@@ -811,7 +837,12 @@ def retired_binder_rounds(text):
     return rounds
 
 
-def main():
+PROMPT_SOURCES = ('synthetic', 'real-text')
+EOS_MODES = ('ignore', 'stop')
+REAL_TEXT_PROMPTS = 'real-text-prompts.json'
+
+
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--users', type=int, default=4)
     parser.add_argument('--context', type=int, default=33024)
@@ -836,9 +867,142 @@ def main():
                              'require every user to have a reference for gate_passed. Comparisons '
                              'still record reference_present, and any reference that IS present '
                              'must still match exactly; the dram/packed_phase reporting is unchanged.')
-    options = parser.parse_args()
+    parser.add_argument('--prompt-source', choices=PROMPT_SOURCES, default='synthetic',
+                        help='synthetic (default): token ids [base + i %% 64] per user, exactly as before. '
+                             'real-text: a real coding request per user from the image\'s own vLLM source '
+                             '(real_text_prompts.py), exactly --prompt-tokens tokens (the image pins the request '
+                             'position), so --prompt-tokens + --max-tokens must fit --context; needs '
+                             '--allow-missing-references and --eos stop')
+    parser.add_argument('--eos', choices=EOS_MODES, default=None,
+                        help='ignore: ignore_eos=True, every stream runs to --max-tokens (the synthetic '
+                             'default). stop: ignore_eos=False, a stream may end at EOS (the real-text '
+                             'default, and the only mode real text accepts)')
+    return parser
+
+
+def parse_options(argv=None):
+    """The gate's options, with --eos resolved and the real-text combinations it refuses refused."""
+    parser = build_parser()
+    options = parser.parse_args(argv)
     if options.sequential_users and options.users != 1:
         parser.error('--sequential-users needs --users 1: each request must run alone')
+    real_text = options.prompt_source == 'real-text'
+    if options.eos is None:
+        options.eos = 'stop' if real_text else 'ignore'
+    if real_text and not options.allow_missing_references:
+        parser.error('--prompt-source real-text needs --allow-missing-references: the single-user-*.json '
+                     'references are synthetic (base-keyed [base + i % 64] prompts), so no real-text prompt has '
+                     'one; exactness is checked offline against a sequential real-text arm (real_text_compare.py)')
+    if real_text and options.eos != 'stop':
+        parser.error('--prompt-source real-text needs --eos stop: the fast path\'s GreedySession finishes a '
+                     'request at the snapshot EOS whatever ignore_eos says (serving_request_factory passes eos_ids, '
+                     'greedy_verify.select_prefix stops there), and real text reaches EOS')
+    if real_text and real_text_target(options) != options.prompt_tokens:
+        parser.error('--prompt-source real-text needs --prompt-tokens + --max-tokens <= --context (got %d + %d > %d): '
+                     'every prompt must be exactly --prompt-tokens long, because the image pins each request\'s '
+                     'position to the request context the arm sets from it (QWEN_DSPARK_REQUEST_CONTEXT; '
+                     'frozen_combined_runtime.validate_target_option refuses any other position)'
+                     % (options.prompt_tokens, options.max_tokens, options.context))
+    return options
+
+
+def real_text_target(options):
+    """A real-text prompt's length: min(--prompt-tokens, --context - --max-tokens), which
+    parse_options requires to BE --prompt-tokens (33024 - 256 = 32768, 131328 - 256 = 131072).
+    The arms keep their --context: KV sizing and the 4 x 131k fit are computed from it."""
+    return min(options.prompt_tokens, options.context - options.max_tokens)
+
+
+def detail_mode(options):
+    """Anything but the default mode (synthetic prompts, --eos ignore). Only here does the gate
+    ask for detail streams and add the acceptance, rate and configuration diagnostics; the
+    default mode's requests, report and stdout stay exactly what they were."""
+    return not (options.prompt_source == 'synthetic' and options.eos == 'ignore')
+
+
+def stream_kwargs(options):
+    """stream_once's keywords. None at all in the default mode (synthetic, --eos ignore), so every
+    existing call is unchanged - the payload stream_once sends and the fields it records."""
+    if not detail_mode(options):
+        return {}
+    return dict(ignore_eos=options.eos == 'ignore', detail=True)
+
+
+def real_text_stream_problems(results, prompt_lengths=None):
+    """A real-text arm has no reference to fail a bad stream, so each stream must itself have
+    completed: no error, some text, a finish_reason of stop (EOS) or length (the budget), and -
+    given the built lengths - a usage.prompt_tokens equal to its prompt's length, the cheap proof
+    that the server served the built ids with no template or truncation of its own."""
+    problems = []
+    for index, entry in enumerate(results):
+        entry = entry or {}
+        if entry.get('error'):
+            problems.append('user %d: stream error %s' % (index, str(entry['error'])[:200]))
+        elif not entry.get('text'):
+            problems.append('user %d: no text' % index)
+        elif entry.get('finish_reason') not in ('stop', 'length'):
+            problems.append('user %d: finish_reason %r, not stop or length' % (index, entry.get('finish_reason')))
+        elif prompt_lengths is not None and entry.get('prompt_tokens') != prompt_lengths[index]:
+            problems.append('user %d: the server reports usage.prompt_tokens %r for a %d-token prompt'
+                            % (index, entry.get('prompt_tokens'), prompt_lengths[index]))
+    return problems
+
+
+def marker_prompt_tokens(options, report):
+    """The ONE prompt length the flag-marker floors are computed from. Synthetic: --prompt-tokens.
+    Real text: the shortest built prompt, which parse_options and real_text_prompts make every
+    prompt's length, --prompt-tokens (the image pins it), so the floors are the synthetic arm's:
+    users x ceil(L / 2048) engaged QWEN_FAST_GDN_PREFILL_CONV chunks (16 per user at 32k, 64 at
+    131k) and the SDPA_PF 2048-row topology iff L >= 2048. The minimum is kept so a prompt set
+    that ever differed per user could only lower a floor, never over-require one."""
+    lengths = (report.get('real_text') or {}).get('prompt_lengths')
+    if options.prompt_source == 'real-text' and lengths:
+        return min(lengths)
+    return options.prompt_tokens
+
+
+def qwen_configuration(environ):
+    """The QWEN_* flags the server process inherits: what real_text_compare.py diffs between a
+    concurrent and a sequential arm, whose flag sets differ (v157/v159 vs v158/v160)."""
+    return {name: environ[name] for name in sorted(environ) if name.startswith('QWEN_')}
+
+
+def _round_trip(value):
+    """`value` as JSON would carry it; raises (inside the caller's guard) if it cannot."""
+    return json.loads(json.dumps(value))
+
+
+def add_run_diagnostics(report, log_path, sequential):
+    """The acceptance report and the per-user decode rate (acceptance_report.py), from the FULL
+    server log once the server has stopped: the last requests' fast_serving_phases records print
+    after SIGTERM. Diagnostic, like the TTFT profile: a failure here - including a value JSON
+    cannot carry, which would otherwise break the report print after BEGIN - is recorded in the
+    report and never reaches gate_passed."""
+    streams = report.get('streams')
+    if streams is None:
+        return
+    try:
+        from acceptance_report import report as acceptance
+        log_text = log_path.read_text(errors='replace') if log_path.is_file() else ''
+        lengths = [entry['prompt_tokens'] for entry in (report.get('real_text') or {}).get('users') or []] or None
+        report['acceptance'] = _round_trip(acceptance(log_text, streams, lengths, sequential=sequential))
+        print(report['acceptance']['summary_line'], flush=True)
+    except Exception as error:
+        report['acceptance'] = dict(error='%s: %s' % (type(error).__name__, error))
+        print('[ACCEPT] report unavailable: %s' % report['acceptance']['error'], flush=True)
+    try:
+        from acceptance_report import decode_rates, rate_line
+        accepted = report['acceptance'] if 'error' not in report['acceptance'] else None
+        report['decode_rate'] = _round_trip(decode_rates(streams, concurrent=not sequential, acceptance=accepted))
+        print(rate_line(report['decode_rate']), flush=True)
+    except Exception as error:
+        report['decode_rate'] = dict(error='%s: %s' % (type(error).__name__, error))
+        print('[RATE] unavailable: %s' % report['decode_rate']['error'], flush=True)
+
+
+def main():
+    options = parse_options()
+    real_text = options.prompt_source == 'real-text'
     try:
         options.results.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -847,11 +1011,41 @@ def main():
     report = dict(scope=__doc__, users=options.users, context=options.context,
                  prompt_tokens=options.prompt_tokens, prompt_base=options.prompt_base,
                  prompt_user_offset=options.prompt_user_offset, ready=False)
+    detail = detail_mode(options)
+    if detail:
+        # Only outside the default mode: a default arm's report keeps exactly today's keys.
+        report.update(prompt_source=options.prompt_source, eos=options.eos, max_tokens=options.max_tokens,
+                      qwen_configuration=qwen_configuration(os.environ))
     process = handle = None
+    streams = options.sequential_users or options.users
+    prompts = None
     try:
-        references = load_references(options.references, options.prompt_tokens)
+        # Real text: the references are synthetic, so none is loaded (parse_options required
+        # --allow-missing-references).
+        references = {} if real_text else load_references(options.references, options.prompt_tokens)
         report['sequential_users'] = options.sequential_users
         report['references_loaded'] = sorted(references)
+        if real_text:
+            # Built before the server starts, so a tokenizer or corpus problem fails in seconds
+            # rather than after the engine's startup. N is the number of streams either way, so a
+            # concurrent arm and a sequential arm of the same N on one image build the same set.
+            import real_text_prompts
+            report['real_text_target'] = real_text_target(options)
+            built = real_text_prompts.build_prompts(streams, report['real_text_target'], model=MODEL,
+                                                    log=lambda line: print(line, flush=True))
+            real_text_prompts.write_prompts(options.results / REAL_TEXT_PROMPTS, built)
+            report['real_text'] = real_text_prompts.summary(built)
+            prompts = [entry['tokens'] for entry in built['users']]
+            print('[REALTEXT] %d prompts of %s tokens (target %d) in %.1f s, %d tokenizer calls; corpus %s files, '
+                  '%s characters, sha256 %s' % (
+                      streams, report['real_text']['prompt_lengths'], report['real_text_target'],
+                      built['seconds']['total'], built['tokenizer_calls'], built['corpus'].get('files'),
+                      built['corpus'].get('characters'), str(built['corpus'].get('sha256'))[:16]), flush=True)
+
+        def prompt(index):
+            if prompts is not None:
+                return prompts[index]
+            return prompt_for(options.prompt_base, options.prompt_user_offset, index, options.prompt_tokens)
 
         process, handle, log_path, command = start_server(
             options.port, options.users, options.context, options.results, 'server.log',
@@ -859,20 +1053,18 @@ def main():
         report['command'] = command
         report['ready'] = True
 
-        streams = options.sequential_users or options.users
         results = [None] * streams
+        kwargs = stream_kwargs(options)
         if options.sequential_users:
             # One request at a time: each is the only stream on the server, which is
             # what a single-stream reference means.
             for index in range(streams):
-                stream_once(options.port, prompt_for(options.prompt_base, options.prompt_user_offset,
-                                                     index, options.prompt_tokens),
-                            options.max_tokens, results, index, options.stream_timeout)
+                stream_once(options.port, prompt(index), options.max_tokens, results, index, options.stream_timeout,
+                            **kwargs)
         threads = [] if options.sequential_users else [threading.Thread(
             target=stream_once,
-            args=(options.port, prompt_for(options.prompt_base, options.prompt_user_offset, index,
-                                           options.prompt_tokens),
-                  options.max_tokens, results, index, options.stream_timeout))
+            args=(options.port, prompt(index), options.max_tokens, results, index, options.stream_timeout),
+            kwargs=kwargs)
             for index in range(options.users)]
         for index, thread in enumerate(threads):
             if index and options.stagger:
@@ -903,9 +1095,25 @@ def main():
             base = options.prompt_base + index * options.prompt_user_offset
             reference = references.get(base)
             comparison = dict(user=index, prompt_base=base, reference_present=bool(reference))
+            user_prompt = report['real_text']['users'][index] if real_text else None
+            if user_prompt is not None:
+                # What real_text_compare.py matches the sequential arm's stream on.
+                comparison.update(prompt_sha256=user_prompt['prompt_sha256'],
+                                  prompt_tokens=user_prompt['prompt_tokens'],
+                                  served_prompt_tokens=(entry or {}).get('prompt_tokens'),
+                                  completion_tokens=(entry or {}).get('completion_tokens'),
+                                  max_tokens=options.max_tokens,
+                                  finish_reason=(entry or {}).get('finish_reason'),
+                                  actual_len=len((entry or {}).get('text') or ''))
+                if entry and entry.get('error'):
+                    comparison['error'] = entry['error']
             if options.users == 1:
                 # Only a stream that ran alone is a single-stream reference candidate.
-                write_candidate(options.results, base, options.prompt_tokens, entry)
+                if user_prompt is not None:
+                    write_candidate(options.results, base, user_prompt['prompt_tokens'], entry,
+                                    prompt_sha256=user_prompt['prompt_sha256'])
+                else:
+                    write_candidate(options.results, base, options.prompt_tokens, entry)
             if reference:
                 comparison['reference_path'] = reference['path']
                 comparison['reference_context'] = reference['context']
@@ -932,7 +1140,7 @@ def main():
         report['retired_binder_calls_nonzero'] = retired_binder_leaks(binder_rounds)
 
         report['flag_markers'] = flag_marker_report(os.environ, streams, log_text,
-                                                    prompt_tokens=options.prompt_tokens)
+                                                    prompt_tokens=marker_prompt_tokens(options, report))
         checked = [c for c in comparisons if c.get('reference_present')]
         report['users_checked'] = len(checked)
         report['allow_missing_references'] = options.allow_missing_references
@@ -945,15 +1153,21 @@ def main():
             full_output_required=options.max_tokens >= 256,
             reference_run=bool(options.sequential_users),
             missing_markers=report['flag_markers']['missing'])
+        if real_text:
+            report['real_text_stream_problems'] = real_text_stream_problems(
+                results, report['real_text']['prompt_lengths'])
+            report['gate_passed'] = bool(report['gate_passed'] and not report['real_text_stream_problems'])
     except BaseException as error:
         report['fatal'] = '%s: %s' % (type(error).__name__, str(error)[:600])
     finally:
         stop_server(process, handle)
+        log_path = options.results / 'server.log'
+        if detail:
+            add_run_diagnostics(report, log_path, sequential=bool(options.sequential_users))
         print(BEGIN)
         print(json.dumps(report, indent=2))
         print(END)
         print(LOG_BEGIN)
-        log_path = options.results / 'server.log'
         if log_path.is_file():
             lines = log_path.read_text(errors='replace').splitlines()
             for line in select_diagnostic(lines):

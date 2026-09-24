@@ -55,6 +55,30 @@ allow_missing_references=""
 if [ "${M3NATIVE_ALLOW_MISSING_REFERENCES:-}" = "1" ]; then
   allow_missing_references="--allow-missing-references"
 fi
+# M3NATIVE_PROMPT_SOURCE (synthetic | real-text) and M3NATIVE_EOS (ignore | stop) pass through as the
+# gate's --prompt-source / --eos, the same way M3NATIVE_SEQUENTIAL_USERS does. real-text builds each
+# user's prompt inside the container from the image's own vLLM source (real_text_prompts.py, mounted
+# at /bench below); it has no single-stream reference, so it needs M3NATIVE_ALLOW_MISSING_REFERENCES=1,
+# and it needs EOS honoured (the gate refuses --eos ignore with it). Refused here as well, before the
+# draft download and the card checks. Unset: neither flag is passed and the gate keeps its defaults.
+case "${M3NATIVE_PROMPT_SOURCE:-}" in
+  ''|synthetic|real-text) ;;
+  *) echo "M3NATIVE_PROMPT_SOURCE must be synthetic or real-text, got '$M3NATIVE_PROMPT_SOURCE'" >&2; exit 1 ;;
+esac
+case "${M3NATIVE_EOS:-}" in
+  ''|ignore|stop) ;;
+  *) echo "M3NATIVE_EOS must be ignore or stop, got '$M3NATIVE_EOS'" >&2; exit 1 ;;
+esac
+if [ "${M3NATIVE_PROMPT_SOURCE:-}" = "real-text" ]; then
+  if [ "${M3NATIVE_ALLOW_MISSING_REFERENCES:-}" != "1" ]; then
+    echo "M3NATIVE_PROMPT_SOURCE=real-text needs M3NATIVE_ALLOW_MISSING_REFERENCES=1 (no real-text prompt has a single-stream reference)" >&2
+    exit 1
+  fi
+  if [ "${M3NATIVE_EOS:-stop}" != "stop" ]; then
+    echo "M3NATIVE_PROMPT_SOURCE=real-text needs M3NATIVE_EOS=stop or unset (the fast path finishes at EOS whatever ignore_eos says)" >&2
+    exit 1
+  fi
+fi
 
 mkdir -p experiment-results draft-config
 if [ ! -s draft-config/config.json ]; then
@@ -443,6 +467,8 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$PWD/scripts/ci/lever_n_m3native_gate.py,dst=/bench/lever_n_m3native_gate.py,readonly" \
   --mount "type=bind,src=$PWD/scripts/ci/longctx_cycle_bench.py,dst=/bench/longctx_cycle_bench.py,readonly" \
   --mount "type=bind,src=$PWD/scripts/ci/m3native_ttft_profile.py,dst=/bench/m3native_ttft_profile.py,readonly" \
+  --mount "type=bind,src=$PWD/scripts/ci/acceptance_report.py,dst=/bench/acceptance_report.py,readonly" \
+  --mount "type=bind,src=$PWD/scripts/ci/real_text_prompts.py,dst=/bench/real_text_prompts.py,readonly" \
   --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
   "${mounts[@]}" \
   "${sdpa_mode_mounts[@]}" \
@@ -508,6 +534,7 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   --entrypoint python3 "$image" "${entry_args[@]}" \
   --users "$users" --context "$context" --prompt-tokens "$prompt_tokens" --max-tokens "$max_tokens" --stream-timeout 600 --trace-region-bytes "$trace_region_bytes" \
   --prompt-base 1000 --prompt-user-offset 1 --stagger 0 ${M3NATIVE_SEQUENTIAL_USERS:+--sequential-users $M3NATIVE_SEQUENTIAL_USERS} \
+  ${M3NATIVE_PROMPT_SOURCE:+--prompt-source $M3NATIVE_PROMPT_SOURCE} ${M3NATIVE_EOS:+--eos $M3NATIVE_EOS} \
   --references /bench/packed-gate-reference $allow_missing_references --results /experiment-results-gate \
   > experiment-results/m3native-gate-stdout.log 2>&1 || true
 

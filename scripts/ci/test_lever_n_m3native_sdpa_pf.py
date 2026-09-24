@@ -580,6 +580,30 @@ def strip_pf(text):
     return text.replace(PF_ARGV, '')
 
 
+DEV_READLINK = 'readlink -f "/dev/tenstorrent/by-id/$card"'
+DEV_CHAR_TEST = '[ ! -c "$node" ]'
+SERVING_CARDS = ('blackhole-CEF5729692C19E6D', 'blackhole-3707293C249A5E67')
+
+
+def hermetic(text, directory):
+    """The arm with its serving-pair lookup pointed at a fake /dev/tenstorrent under `directory`.
+
+    Since c31d620e the arm resolves the pair by board id and refuses without a real device node,
+    and since 28e688ba it waits up to M3NATIVE_CARD_WAIT_S (120 s) for one first, so off the rig
+    every whole-arm run waited two minutes and then skipped. Here the pair's by-id entries are
+    plain files (no root for mknod, no symlink privilege) accepted by -e instead of -c; nothing
+    after the lookup changes, the launched argv least of all. The two lines must each appear
+    exactly once, so a changed lookup fails loudly instead of skipping."""
+    if text.count(DEV_READLINK) != 1 or text.count(DEV_CHAR_TEST) != 1:
+        raise AssertionError('the arm no longer resolves the serving pair with %r and %r' % (DEV_READLINK, DEV_CHAR_TEST))
+    by_id = Path(directory) / 'dev-tenstorrent' / 'by-id'
+    by_id.mkdir(parents=True, exist_ok=True)
+    for card in SERVING_CARDS:
+        (by_id / card).write_bytes(b'')
+    return (text.replace(DEV_READLINK, 'readlink -f "%s/$card"' % by_id.as_posix())
+            .replace(DEV_CHAR_TEST, '[ ! -e "$node" ]'))
+
+
 @unittest.skipUnless(BASH, 'bash not found')
 class ArmBlockTests(unittest.TestCase):
     """The arm's KOPGRAFT64 block and this lever's block, executed by bash against fake grafts."""
@@ -744,7 +768,7 @@ class ArmLaunchedArgvTests(unittest.TestCase):
         image = Path(directory) / 'image' / 'sdpa'
         if not image.is_dir():
             make_image_sdpa(image)
-        (work / 'arm.sh').write_bytes(text.encode('utf-8'))
+        (work / 'arm.sh').write_bytes(hermetic(text, directory).encode('utf-8'))
         argv = work / 'argv.bin'
         if argv.exists():
             argv.unlink()
@@ -759,8 +783,7 @@ class ArmLaunchedArgvTests(unittest.TestCase):
                                     timeout=120)
         except OSError as error:
             self.skipTest('bash unusable: %s' % error)
-        if not argv.is_file():
-            self.skipTest('the stub docker did not run here: %s' % (result.stderr.strip()[-300:],))
+        self.assertTrue(argv.is_file(), 'the stub docker never ran: %s' % (result.stderr.strip()[-600:],))
         self.assertEqual(result.returncode, 0, result.stderr)
         return argv.read_bytes().decode('utf-8').split(chr(0))[:-1], result.stdout
 
@@ -797,6 +820,29 @@ class ArmLaunchedArgvTests(unittest.TestCase):
             self.assertEqual(Path(directory, 'docker.create').read_text(encoding='utf-8'),
                              'create|--network|none|--entrypoint|true|%s|' % image)
 
+    def test_real_text_adds_its_two_flags_after_the_image_and_nothing_else(self):
+        """v157-v160 (memory: read the launched argv): M3NATIVE_PROMPT_SOURCE / M3NATIVE_EOS cross into
+        the container as the gate's --prompt-source / --eos, after the image and before --references,
+        and the real-text modules are mounted at /bench like every other single-file mount."""
+        with tempfile.TemporaryDirectory() as directory:
+            graft = make_graft(Path(directory) / 'k64g')
+            base = dict(KOPGRAFT64=graft, M3NATIVE_SDPA_PF='1', M3NATIVE_ALLOW_MISSING_REFERENCES='1')
+            plain, _ = self.launch(directory, base, arm_text())
+            real, _ = self.launch(directory, dict(base, M3NATIVE_PROMPT_SOURCE='real-text', M3NATIVE_EOS='stop'),
+                                  arm_text())
+            at = plain.index('--references')
+            self.assertEqual(real, plain[:at] + ['--prompt-source', 'real-text', '--eos', 'stop'] + plain[at:])
+            self.assertLess(real.index('--entrypoint'), real.index('--prompt-source'))
+            self.assertEqual(real[real.index('--references'):real.index('--references') + 3],
+                             ['--references', '/bench/packed-gate-reference', '--allow-missing-references'])
+            for module in ('acceptance_report.py', 'real_text_prompts.py'):
+                mounts = [arg for arg in real if arg.endswith('dst=/bench/%s,readonly' % module)]
+                self.assertEqual(len(mounts), 1, module)
+                self.assertLess(real.index(mounts[0]), real.index('--entrypoint'))
+            self.assertFalse(any('dst=/experiment-scripts/ci' in arg and arg.endswith(('acceptance_report.py,readonly',
+                                                                                         'real_text_prompts.py,readonly'))
+                                 for arg in real))
+
     def test_the_flags_alone_are_refused_before_any_docker_run(self):
         with tempfile.TemporaryDirectory() as directory:
             graft = make_graft(Path(directory) / 'k64g')
@@ -804,7 +850,7 @@ class ArmLaunchedArgvTests(unittest.TestCase):
             (work / 'draft-config').mkdir(parents=True)
             (work / 'draft-config' / 'config.json').write_text('{}', encoding='utf-8')
             stubs = write_stubs(directory, docker=DOCKER_STUB, timeout=self.TIMEOUT)
-            (work / 'arm.sh').write_bytes(arm_text().encode('utf-8'))
+            (work / 'arm.sh').write_bytes(hermetic(arm_text(), directory).encode('utf-8'))
             argv = work / 'argv.bin'
             env = dict(PATH=str(stubs) + os.pathsep + os.environ.get('PATH', ''), GITHUB_RUN_ID='1',
                        GITHUB_RUN_ATTEMPT='1', ARGV_OUT=argv.as_posix(), DOCKER_LOG=(Path(directory) / 'docker').as_posix(),
@@ -817,8 +863,6 @@ class ArmLaunchedArgvTests(unittest.TestCase):
                                         timeout=120)
             except OSError as error:
                 self.skipTest('bash unusable: %s' % error)
-            if 'without M3NATIVE_SDPA_PF=1' not in result.stderr and not argv.is_file():
-                self.skipTest('the arm did not reach the block here: %s' % (result.stderr.strip()[-300:],))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('without M3NATIVE_SDPA_PF=1 passes nothing', result.stderr)
             self.assertFalse(argv.is_file())

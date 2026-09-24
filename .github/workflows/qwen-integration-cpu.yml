@@ -66,6 +66,7 @@ jobs:
           python -B -m unittest test_verify_trace_t1 test_verify_trace_t1_graft
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
+          python -B -m unittest test_real_text_prompts test_acceptance_report test_real_text_compare test_real_text_gate
           python -B -m unittest test_lever_n_prefill_profile_report
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_bench -p 'test_*.py'
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_chain -p 'test_*.py'
