@@ -305,9 +305,15 @@ LEDGER_MARKERS = ('[MEMLEDGER] phase=P7 ', ' check=residual status=')
 # log_info (F4), printed when it builds a program in that mode: the C++ branch itself ran, not
 # just the Python that selects it. With share the line must carry flag 0x2 (0x3 with tail),
 # which the reader sets only on bundles of more than one entry, so kv_share=true was built.
+# Stage 4 (optimisation/ttnn-op/sdpa_decode_slice, graft K64i): 'slice' is flag 0x4 (0x7 with
+# tail,share), 'readahead' 0x8 (needs share). With either, the factory's F18 line, logged once
+# per program built with 0x4 or 0x8, is required as well: the stage-4 branch that selects the
+# slice kernels ran (a stage-3 .so refuses both flags by TT_FATAL and never logs it).
 SDPA_MODES_MARKERS = ('[PINDIAG] sdpa qwen-modes binary ', '[PINDIAG] sdpa qwen-modes modes=tail ',
                       '[QWEN-SDPA] flags=0x1 ')
-SDPA_MODE_FLAGS = {'tail': 0x1, 'share': 0x2}
+SDPA_MODE_FLAGS = {'tail': 0x1, 'share': 0x2, 'slice': 0x4, 'readahead': 0x8}
+SDPA_SLICE_MARKER = '[QWEN-SDPA] q-slice rows_per_kv='   # apply_factory_slice.SLICE_LOG_MARKER (F18)
+SDPA_STAGE4_MODES = frozenset({'slice', 'readahead'})
 GDN_ALL_BATCHED = re.compile(r'gdn user_batched calls this captured forward: ([1-9][0-9]*) of ([0-9]+) GDN layers')
 LEDGER_RESIDUAL = re.compile(r'\[MEMLEDGER\] phase=P7 [^\n]*check=residual status=([a-zA-Z]+)')
 
@@ -1042,17 +1048,21 @@ def required_flag_markers(environ, users, prompt_tokens=None):
 
 
 def sdpa_mode_markers(names):
-    """The three markers a QWEN_FAST_SDPA_MODES value promises, or [] when it names no served
-    mode. The modes line is apply_sdpa_modes' sorted join; the factory line carries every
-    requested flag (tail alone: 0x1, the stage-1 markers exactly; tail,share: 0x3)."""
+    """The markers a QWEN_FAST_SDPA_MODES value promises, or [] when it names no served mode.
+    The modes line is apply_sdpa_modes' sorted join; the factory line carries every requested
+    flag (tail alone: 0x1, the stage-1 markers exactly; tail,share: 0x3; tail,share,slice: 0x7);
+    slice or readahead adds the stage-4 factory's q-slice line as a fourth."""
     served = sorted(names.intersection(SDPA_MODE_FLAGS))
     if not served:
         return []
     flags = 0
     for name in served:
         flags |= SDPA_MODE_FLAGS[name]
-    return [SDPA_MODES_MARKERS[0], '[PINDIAG] sdpa qwen-modes modes=%s ' % ','.join(sorted(names)),
-            '[QWEN-SDPA] flags=0x%x ' % flags]
+    markers = [SDPA_MODES_MARKERS[0], '[PINDIAG] sdpa qwen-modes modes=%s ' % ','.join(sorted(names)),
+               '[QWEN-SDPA] flags=0x%x ' % flags]
+    if SDPA_STAGE4_MODES.intersection(served):
+        markers.append(SDPA_SLICE_MARKER)
+    return markers
 
 
 def sdpa_mode_names(environ):

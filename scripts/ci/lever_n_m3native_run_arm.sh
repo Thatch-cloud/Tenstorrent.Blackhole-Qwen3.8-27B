@@ -227,12 +227,30 @@ echo "serving pair: ${serving_cards} -> /dev/tenstorrent/{$(IFS=,; echo "${nodes
 # plus those two files only - its factory .cpp is the audited 3e0a69af, not the compiled
 # one, so sdpa_tree_scratch.audit(patched=True) still passes (build_k64e.sh checks this).
 # K64c/K64d have no such directory, so their runs are unchanged. Such a graft also gets
-# its own JIT cache, keyed by the two kernels' bytes: the kernel cache hash is not known to
+# its own JIT cache, keyed by its kernels' bytes: the kernel cache hash is not known to
 # cover file contents, so a revised kernel at the same path could otherwise reuse a stale
 # binary (the default arm keeps /experiment-cache/kernels).
+#
+# Stage 4 (~/opgraft-K64i onward, optimisation/ttnn-op/sdpa_decode_slice) adds
+# reader_decode_qwen_slice.cpp and writer_decode_qwen_slice.cpp, which the factory selects for
+# flag 0x4 / 0x8 (M3NATIVE_SDPA_MODES slice / readahead). Both must be present when the graft
+# carries either one, or when either mode is requested; those modes are refused before the
+# run without a grafted sdpa_decode directory (no image serves the stage-4 factory) and without
+# the stage-4 literal in the graft's _ttnncpp.so (pooled_attention_replay would refuse it too,
+# but only after the model had loaded). The cache key covers EVERY *qwen*.cpp in the kernels
+# tree: the two stage-3 kernels' bytes first - exactly the key's input before stage 4 - then
+# one '<sha256> <path>' line per further *qwen*.cpp in byte order. A graft with no others
+# (K64e..K64g) therefore keeps its key and its warm cache, and a revised slice kernel (or one
+# added, removed or renamed) gets a fresh one.
 KM=""
 graft_binary_sha=""
 kernel_cache=/experiment-cache/kernels
+sdpa_kernels=""
+sdpa_stage4_modes=""
+sdpa_modes_compact="${M3NATIVE_SDPA_MODES:-}"
+case ",${sdpa_modes_compact//[[:space:]]/}," in
+  *,slice,*|*,readahead,*) sdpa_stage4_modes=1 ;;
+esac
 if [ -n "${KOPGRAFT64:-}" ]; then
   KM="$KM -v $KOPGRAFT64/_ttnn.so:/opt/tt-metal/ttnn/ttnn/_ttnn.so:ro"
   KM="$KM -v $KOPGRAFT64/_ttnncpp.so:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so:ro"
@@ -241,18 +259,43 @@ if [ -n "${KOPGRAFT64:-}" ]; then
   KM="$KM -v $KOPGRAFT64/nlp_concat_heads_decode:/opt/tt-metal/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode:ro"
   if [ -d "$KOPGRAFT64/sdpa_decode" ]; then
     sdpa_kernels="$KOPGRAFT64/sdpa_decode/device/kernels"
-    for kernel in dataflow/reader_decode_qwen.cpp compute/sdpa_flash_decode_qwen.cpp; do
+    sdpa_required=(dataflow/reader_decode_qwen.cpp compute/sdpa_flash_decode_qwen.cpp)
+    sdpa_slice=(dataflow/reader_decode_qwen_slice.cpp dataflow/writer_decode_qwen_slice.cpp)
+    if [ -n "$sdpa_stage4_modes" ] || [ -e "$sdpa_kernels/${sdpa_slice[0]}" ] || [ -e "$sdpa_kernels/${sdpa_slice[1]}" ]; then
+      sdpa_required+=("${sdpa_slice[@]}")
+    fi
+    for kernel in "${sdpa_required[@]}"; do
       if [ ! -s "$sdpa_kernels/$kernel" ]; then
         echo "KOPGRAFT64 sdpa_decode directory lacks $kernel" >&2
         exit 1
       fi
     done
+    if [ -n "$sdpa_stage4_modes" ] && ! grep -a -q -F -- '[QWEN-SDPA] q-slice rows_per_kv=' "$KOPGRAFT64/_ttnncpp.so"; then
+      echo "M3NATIVE_SDPA_MODES='$M3NATIVE_SDPA_MODES' names slice or readahead, but $KOPGRAFT64/_ttnncpp.so lacks" \
+        "'[QWEN-SDPA] q-slice rows_per_kv=' (not a K64i-or-later build)" >&2
+      exit 1
+    fi
     KM="$KM -v $KOPGRAFT64/sdpa_decode:/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa_decode:ro"
-    kernel_cache="/experiment-cache/kernels-qwen-$(cat "$sdpa_kernels/dataflow/reader_decode_qwen.cpp" \
-      "$sdpa_kernels/compute/sdpa_flash_decode_qwen.cpp" | sha256sum | cut -c1-12)"
-    echo "sdpa_decode op directory grafted from $KOPGRAFT64; kernel cache $kernel_cache"
+    sdpa_qwen_others=$(cd "$sdpa_kernels" && find . -type f -name '*qwen*.cpp' ! -path ./dataflow/reader_decode_qwen.cpp \
+      ! -path ./compute/sdpa_flash_decode_qwen.cpp | LC_ALL=C sort | while IFS= read -r file; do
+        printf '%s %s\n' "$(sha256sum < "$file" | cut -c1-64)" "$file"
+      done)
+    kernel_cache="/experiment-cache/kernels-qwen-$({ cat "$sdpa_kernels/dataflow/reader_decode_qwen.cpp" \
+      "$sdpa_kernels/compute/sdpa_flash_decode_qwen.cpp"; printf '%s' "$sdpa_qwen_others"; } | sha256sum | cut -c1-12)"
+    sdpa_qwen_named="none"
+    [ -z "$sdpa_qwen_others" ] || sdpa_qwen_named=$(printf '%s\n' "$sdpa_qwen_others" | cut -d' ' -f2- | tr '\n' ' ')
+    echo "sdpa_decode op directory grafted from $KOPGRAFT64; kernel cache $kernel_cache" \
+      "(keyed on the stage-3 pair and further *qwen*.cpp: ${sdpa_qwen_named% })"
+  elif [ -n "$sdpa_stage4_modes" ]; then
+    echo "M3NATIVE_SDPA_MODES='$M3NATIVE_SDPA_MODES' names slice or readahead, but $KOPGRAFT64 has no sdpa_decode directory" \
+      "(the slice kernels are JIT-compiled from a K64i-or-later graft's)" >&2
+    exit 1
   fi
   graft_binary_sha=$(sha256sum "$KOPGRAFT64/_ttnncpp.so" | cut -c1-64)
+elif [ -n "$sdpa_stage4_modes" ]; then
+  echo "M3NATIVE_SDPA_MODES='$M3NATIVE_SDPA_MODES' names slice or readahead, which needs KOPGRAFT64 (a K64i-or-later graft:" \
+    "no image serves the stage-4 factory or its slice kernels)" >&2
+  exit 1
 fi
 # M3NATIVE_SDPA_PF=1 (prefill lever #1, optimisation/ttnn-op/sdpa_prefill_chain) becomes QWEN_FAST_SDPA_PF=1,
 # read by the grafted attention/tp.py (lever_n_m3native_patch section I), which then puts the G6 K/V chain
@@ -339,7 +382,8 @@ fi
 # evidence tree (/experiment-scripts/ci), so an image older than this change would never
 # read the flag; the arm therefore also mounts this checkout's copy over that ONE file
 # when the flag is set (it is free to edit - not a pinned source - and in both image copy
-# lists). Unset, neither the env var nor the mount is added.
+# lists). Unset, neither the env var nor the mount is added. 'slice' and 'readahead' (stage 4)
+# were already checked against the graft above: K64i-or-later binary and slice kernels.
 sdpa_mode_mounts=()
 if [ -n "${M3NATIVE_SDPA_MODES:-}" ]; then
   sdpa_mode_mounts+=(--mount "type=bind,src=$PWD/scripts/ci/pooled_attention_replay.py,dst=/experiment-scripts/ci/pooled_attention_replay.py,readonly")

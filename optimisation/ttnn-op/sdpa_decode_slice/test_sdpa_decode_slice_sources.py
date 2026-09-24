@@ -400,6 +400,37 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(bool(flags & 0x4), refusal is None, (rows, batches))
                 self.assertFalse(flags & 0x8 and not flags & 0x2)
 
+    def test_the_m3native_arm_and_gate_use_the_factorys_flags_literal_and_kernel_names(self):
+        """scripts/ci/lever_n_m3native_gate.py demands the F4 line with every requested flag (0x7 for
+        tail,share,slice) and F18's q-slice line; lever_n_m3native_run_arm.sh greps the graft binary for the same
+        literal and requires both slice kernels by the names F17 selects."""
+        ci = str(ROOT / 'scripts' / 'ci')
+        if ci not in sys.path:
+            sys.path.insert(0, ci)
+        import lever_n_m3native_gate as gate
+        self.assertEqual(gate.SDPA_SLICE_MARKER, factory.SLICE_LOG_MARKER)
+        self.assertEqual(gate.SDPA_MODE_FLAGS, dict(tail=factory.FLAG_TAIL, share=factory.FLAG_SHARE,
+                                                     slice=factory.FLAG_SLICE, readahead=factory.FLAG_READAHEAD))
+        markers = gate.sdpa_mode_markers({'tail', 'share', 'slice'})
+        self.assertEqual(markers[2:], ['[QWEN-SDPA] flags=0x7 ', factory.SLICE_LOG_MARKER])
+        # The factory's own lines as fmt prints them ({:#x} and {} format as Python's do) carry both markers:
+        # F4 is apply_factory_qwen's (stage 4 adds no second 'flags=' format), F18 the stage-4 one.
+        f4 = re.search(r'"(\[QWEN-SDPA\] flags=[^"]*)"', qwen_factory.F4).group(1)
+        f18 = re.search(r'"(\[QWEN-SDPA\] q-slice [^"]*)"', new_text('F18')).group(1)
+        self.assertTrue(f4.format(0x7, 2, 2, 4104, 4104, 'true', 4, 837696).startswith(markers[2]))
+        self.assertFalse(f4.format(0x3, 2, 3, 4104, 4104, 'true', 4, 837696).startswith(markers[2]))
+        self.assertTrue(f18.format(48, 3, 2, 'false').startswith(markers[3]))
+        arm = read(ROOT / 'scripts' / 'ci' / 'lever_n_m3native_run_arm.sh')
+        self.assertIn("grep -a -q -F -- '%s' \"$KOPGRAFT64/_ttnncpp.so\"" % factory.SLICE_LOG_MARKER, arm)
+        self.assertIn('sdpa_slice=(dataflow/%s dataflow/%s)' % (factory.READER_SLICE_NAME, factory.WRITER_SLICE_NAME), arm)
+
+    def test_the_cpu_workflow_runs_both_suites(self):
+        workflow = read(ROOT / '.github' / 'workflows' / 'qwen-integration-cpu.yml')
+        self.assertIn("python -B -m unittest discover -s optimisation/ttnn-op/sdpa_decode_slice -p 'test_sdpa_decode_slice_*.py'",
+                      workflow)
+        self.assertEqual(sorted(path.name for path in HERE.glob('test_sdpa_decode_slice_*.py')),
+                         ['test_sdpa_decode_slice_card_b.py', 'test_sdpa_decode_slice_sources.py'])
+
     def test_the_runner_and_build_are_lf_and_the_build_is_byte_collated(self):
         for path in (BUILD, RUNNER):
             self.assertNotIn(b'\r', path.read_bytes())
@@ -557,6 +588,26 @@ class StubCompileTests(unittest.TestCase):
             self.skipTest('no dump or prefill tree for the kernel stubs')
         failed = [(label, detail) for label, ok, detail in stub_compile.check_kernels(gxx, DUMP, PREFILL_SRC) if not ok]
         self.assertEqual(failed, [])
+
+    def test_a_runner_without_a_compiler_skips_rather_than_fails(self):
+        """The CPU workflow's runner may have no g++: find_gxx then returns None (nothing on PATH, no QWEN_PF_GXX,
+        no local arm-none-eabi-g++) and the compile test skips; the CLI says so and exits 2."""
+        import io
+        from contextlib import redirect_stderr
+        from unittest import mock
+        import stub_compile
+        missing = str(Path(tempfile.gettempdir()) / 'no-such-compiler-dir' / 'g++')
+        with mock.patch.dict(os.environ, {'QWEN_PF_GXX': ''}), mock.patch.object(stub_compile.shutil, 'which', return_value=None), \
+                mock.patch.object(stub_compile, 'LOCAL_ARM_GXX', missing):
+            self.assertIsNone(stub_compile.find_gxx())
+            result = unittest.TestResult()
+            StubCompileTests('test_the_kernels_and_factory_blocks_compile_against_the_stubs').run(result)
+            self.assertEqual((result.errors, result.failures), ([], []))
+            self.assertEqual([reason for _case, reason in result.skipped], ['no g++ (set QWEN_PF_GXX)'])
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                self.assertEqual(stub_compile.main([]), 2)
+            self.assertIn('no g++ found', stderr.getvalue())
 
 
 if __name__ == '__main__':

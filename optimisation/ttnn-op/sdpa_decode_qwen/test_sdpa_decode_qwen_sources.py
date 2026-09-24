@@ -431,8 +431,9 @@ class ContractTests(unittest.TestCase):
             self.assertIn('docker cp ttbuild:$D "$G/sdpa_decode"', build)
         arm = (CI / 'lever_n_m3native_run_arm.sh').read_text(encoding='utf-8')
         self.assertIn('$KOPGRAFT64/sdpa_decode:%s:ro' % target, arm)
-        # The arm's kernel cache is keyed by the two kernels' bytes: K64f never reuses K64e's reader.
-        self.assertIn('kernel_cache="/experiment-cache/kernels-qwen-$(cat "$sdpa_kernels/dataflow/reader_decode_qwen.cpp"', arm)
+        # The arm's kernel cache is keyed by the two kernels' bytes (then any further *qwen*.cpp, stage 4 on):
+        # K64f never reuses K64e's reader.
+        self.assertIn('kernel_cache="/experiment-cache/kernels-qwen-$({ cat "$sdpa_kernels/dataflow/reader_decode_qwen.cpp"', arm)
         self.assertIn('-e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1', arm)
         runner = (HERE / 'run_card_m.sh').read_text(encoding='utf-8')
         self.assertIn('$G/sdpa_decode:%s:ro' % target, runner)

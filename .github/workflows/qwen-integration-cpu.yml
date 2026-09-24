@@ -70,6 +70,7 @@ jobs:
           python -B -m unittest discover -s optimisation/ttnn-op/verify_t2 -p 'test_*.py'
           python -B -m unittest discover -s optimisation/ttnn-op/draft_slide_inplace -p 'test_*.py'
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_decode_qwen -p 'test_probe_k1.py'
+          python -B -m unittest discover -s optimisation/ttnn-op/sdpa_decode_slice -p 'test_sdpa_decode_slice_*.py'
           python -B -m unittest test_dflash_proposal_trace test_padded_probe
           python -B -m unittest test_padded_block
           python -B -m unittest test_verify_prestage test_round_fences

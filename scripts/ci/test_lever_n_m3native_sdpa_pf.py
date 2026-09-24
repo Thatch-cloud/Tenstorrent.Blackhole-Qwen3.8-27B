@@ -631,7 +631,11 @@ class ArmBlockTests(unittest.TestCase):
                 env[name] = os.environ[name]
         env.update(environ)
         try:
-            result = subprocess.run([BASH, '-c', script], env=env, capture_output=True, text=True, timeout=60)
+            # From a file, not -c: Git for Windows' bash truncates a -c argument near 8 KiB, and the two
+            # blocks (the graft's, with stage 4's checks, and this lever's) are longer than that.
+            path = Path(self.tmp.name) / 'arm-blocks.sh'
+            path.write_text(script, encoding='utf-8', newline=NL)
+            result = subprocess.run([BASH, path.as_posix()], env=env, capture_output=True, text=True, timeout=60)
         except OSError as error:
             self.skipTest('bash unusable: %s' % error)
         if 'sha256sum' in result.stderr and 'not found' in result.stderr:

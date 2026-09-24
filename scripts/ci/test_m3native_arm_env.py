@@ -695,8 +695,8 @@ class SdpaModesArmTests(unittest.TestCase):
         self.assertIn('kernel_cache=/experiment-cache/kernels' + chr(10), text)
         self.assertNotIn('TT_METAL_CACHE=/experiment-cache/kernels ', text)
 
-    def _run_graft_block(self, graft):
-        """The arm's own KOPGRAFT64 block, executed by bash against a fake graft directory."""
+    def _run_graft_block(self, graft, **environ):
+        """The arm's own KOPGRAFT64 block, executed by bash against a fake graft directory (None: unset)."""
         import shutil
         import subprocess
         bash = shutil.which('bash')
@@ -706,9 +706,11 @@ class SdpaModesArmTests(unittest.TestCase):
         start = text.index('KM=""')
         end = text.index(chr(10) + 'fi' + chr(10), text.index('if [ -n "${KOPGRAFT64:-}" ]; then')) + 4
         script = 'set -euo pipefail' + chr(10) + text[start:end] + 'printf "RESULT|%s|%s|%s" "$KM" "$kernel_cache" "$graft_binary_sha"' + chr(10)
+        env = dict(PATH=os.environ.get('PATH', ''), **environ)
+        if graft is not None:
+            env['KOPGRAFT64'] = graft
         try:
-            result = subprocess.run([bash, '-c', script], env=dict(PATH=os.environ.get('PATH', ''), KOPGRAFT64=graft),
-                                    capture_output=True, text=True, timeout=60)
+            result = subprocess.run([bash, '-c', script], env=env, capture_output=True, text=True, timeout=60)
         except OSError as error:
             self.skipTest('bash unusable: %s' % error)
         if result.returncode == 127 or 'sha256sum' in result.stderr and 'not found' in result.stderr:
@@ -746,6 +748,194 @@ class SdpaModesArmTests(unittest.TestCase):
             result = self._run_graft_block(new)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('lacks compute/sdpa_flash_decode_qwen.cpp', result.stderr)
+
+
+class SdpaSliceGraftTests(unittest.TestCase):
+    """Stage 4 (graft K64i, optimisation/ttnn-op/sdpa_decode_slice): the JIT cache key covers every *qwen*.cpp
+    in the graft's kernels tree, yet a K64e..K64g graft keeps the key (and the warm cache) it had before; the
+    slice kernels are required when the graft carries either one or slice / readahead is requested."""
+
+    _run_graft_block = SdpaModesArmTests._run_graft_block
+    OPS = HERE.resolve().parents[1] / 'optimisation' / 'ttnn-op'
+    STAGE3 = OPS / 'sdpa_decode_qwen' / 'stage3'
+    STAGE1 = OPS / 'sdpa_decode_qwen'
+    SLICE = OPS / 'sdpa_decode_slice'
+    # The image's own sdpa_decode kernels (the decode sources dump): none is a *qwen*.cpp.
+    IMAGE_KERNELS = ('compute/sdpa_flash_decode.cpp', 'dataflow/dataflow_common.hpp', 'dataflow/reader_decode_all.cpp',
+                     'dataflow/writer_decode_all.cpp', 'rt_args_common.hpp')
+    SLICE_KERNELS = ('dataflow/reader_decode_qwen_slice.cpp', 'dataflow/writer_decode_qwen_slice.cpp')
+    # The arm's key before stage 4, verbatim (lever_n_m3native_run_arm.sh at 91869e36).
+    OLD_KEY = ('kernel_cache="/experiment-cache/kernels-qwen-$(cat "$sdpa_kernels/dataflow/reader_decode_qwen.cpp" \\' + chr(10)
+               + '      "$sdpa_kernels/compute/sdpa_flash_decode_qwen.cpp" | sha256sum | cut -c1-12)"')
+    SLICE_LITERAL = b'..[QWEN-SDPA] q-slice rows_per_kv={} pnht_full={} slice_tiles={} readahead={}..'
+
+    def _graft(self, root, name, reader, slice_kernels=(), stage4_binary=False):
+        """A fake graft over the committed kernel sources: the image's kernels, the served pair, the slice ones."""
+        graft = Path(root, name)
+        kernels = graft / 'sdpa_decode' / 'device' / 'kernels'
+        for relative in self.IMAGE_KERNELS:
+            (kernels / relative).parent.mkdir(parents=True, exist_ok=True)
+            (kernels / relative).write_bytes(b'image ' + relative.encode())
+        (kernels / 'dataflow' / 'reader_decode_qwen.cpp').write_bytes(reader.read_bytes())
+        (kernels / 'compute' / 'sdpa_flash_decode_qwen.cpp').write_bytes((self.STAGE3 / 'sdpa_flash_decode_qwen.cpp').read_bytes())
+        for relative in slice_kernels:
+            (kernels / relative).write_bytes((self.SLICE / Path(relative).name).read_bytes())
+        (graft / '_ttnncpp.so').write_bytes(b'so' + (self.SLICE_LITERAL if stage4_binary else b''))
+        self._require_visible(graft)
+        return graft.as_posix(), kernels
+
+    def _require_visible(self, graft):
+        """Skip only where bash cannot see this temp tree at all (WSL's bash.exe given a Windows path). The probe
+        is separate from the arm block so that a 'No such file' from the block itself (a broken find, cd or
+        sha256sum in the key) fails the test instead of skipping it."""
+        import shutil
+        import subprocess
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        probe = subprocess.run([bash, '-c', 'test -s "$1"', 'probe', (Path(graft) / '_ttnncpp.so').as_posix()],
+                               env=dict(PATH=os.environ.get('PATH', '')), capture_output=True, text=True, timeout=60)
+        if probe.returncode != 0:
+            self.skipTest('bash here does not share this filesystem view: %s' % Path(graft).as_posix())
+
+    def _ok(self, result):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split('RESULT|')[-1].split('|')[1]
+
+    def _old_key(self, kernels):
+        import shutil
+        import subprocess
+        script = 'set -euo pipefail' + chr(10) + "sdpa_kernels='%s'" % Path(kernels).as_posix() + chr(10) + self.OLD_KEY + chr(10) + 'printf "%s" "$kernel_cache"'
+        result = subprocess.run([shutil.which('bash'), '-c', script], env=dict(PATH=os.environ.get('PATH', '')),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_the_old_key_is_quoted_from_the_last_revision_that_had_it(self):
+        """OLD_KEY is the pre-stage-4 formula; the new block still feeds sha256sum those two files first."""
+        text = arm_text()
+        self.assertNotIn(self.OLD_KEY, text)
+        self.assertIn('kernel_cache="/experiment-cache/kernels-qwen-$({ cat "$sdpa_kernels/dataflow/reader_decode_qwen.cpp" \\'
+                      + chr(10) + '      "$sdpa_kernels/compute/sdpa_flash_decode_qwen.cpp"; printf \'%s\' "$sdpa_qwen_others"; }', text)
+
+    def test_k64e_to_k64g_grafts_keep_the_key_they_had(self):
+        """Proof that no K64e/K64f/K64g arm rebuilds: over the committed stage-1 and stage-3 kernels (what those
+        grafts mount), the new block's key is byte for byte the old formula's, run by the same bash."""
+        import tempfile
+        # K64e serves the stage-1 reader, K64f and K64g the stage-3 one (build_k64g.sh READER_QWEN_STAGE3).
+        for name, reader, digest in (('K64e', self.STAGE1 / 'reader_decode_qwen.cpp', '9da05bf17acc'),
+                                     ('K64g', self.STAGE3 / 'reader_decode_qwen.cpp', '51a3070723c1')):
+            with self.subTest(graft=name), tempfile.TemporaryDirectory() as directory:
+                graft, kernels = self._graft(directory, name, reader)
+                for environ in ({}, {'M3NATIVE_SDPA_MODES': 'tail'}, {'M3NATIVE_SDPA_MODES': 'tail,share'}):
+                    cache = self._ok(self._run_graft_block(graft, **environ))
+                    self.assertEqual(cache, '/experiment-cache/kernels-qwen-' + digest)
+                    self.assertEqual(cache, self._old_key(kernels))
+                    expected = hashlib.sha256(reader.read_bytes() + (self.STAGE3 / 'sdpa_flash_decode_qwen.cpp').read_bytes())
+                    self.assertEqual(cache, '/experiment-cache/kernels-qwen-' + expected.hexdigest()[:12])
+
+    def test_a_k64i_graft_keys_on_every_qwen_kernel(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            graft, kernels = self._graft(directory, 'K64i', self.STAGE3 / 'reader_decode_qwen.cpp', self.SLICE_KERNELS,
+                                         stage4_binary=True)
+            cache = self._ok(self._run_graft_block(graft))
+            self.assertEqual(cache, '/experiment-cache/kernels-qwen-a7704ab5e038')
+            self.assertNotEqual(cache, self._old_key(kernels))           # the old key ignored the slice kernels
+            others = chr(10).join('%s ./%s' % (hashlib.sha256((kernels / relative).read_bytes()).hexdigest(), relative)
+                                  for relative in self.SLICE_KERNELS)
+            base = (kernels / 'dataflow' / 'reader_decode_qwen.cpp').read_bytes() + (kernels / 'compute' / 'sdpa_flash_decode_qwen.cpp').read_bytes()
+            self.assertEqual(cache, '/experiment-cache/kernels-qwen-' + hashlib.sha256(base + others.encode()).hexdigest()[:12])
+            self.assertEqual(self._ok(self._run_graft_block(graft, M3NATIVE_SDPA_MODES='tail,share,slice')), cache)
+            # A revised slice kernel at the same path, a further *qwen*.cpp anywhere in the tree, or a renamed one:
+            # each a fresh key. The image's own kernels are not *qwen*.cpp and stay out of it.
+            seen = {cache}
+            writer = kernels / self.SLICE_KERNELS[1]
+            writer.write_bytes(writer.read_bytes() + b'// revised' + chr(10).encode())
+            seen.add(self._ok(self._run_graft_block(graft)))
+            (kernels / 'compute' / 'sdpa_flash_decode_qwen_slice.cpp').write_bytes(b'extra')
+            seen.add(self._ok(self._run_graft_block(graft)))
+            (kernels / 'compute' / 'sdpa_flash_decode_qwen_slice.cpp').rename(kernels / 'compute' / 'sdpa_flash_decode_qwen_b.cpp')
+            seen.add(self._ok(self._run_graft_block(graft)))
+            self.assertEqual(len(seen), 4)
+            (kernels / 'dataflow' / 'reader_decode_all.cpp').write_bytes(b'image, edited')
+            self.assertIn(self._ok(self._run_graft_block(graft)), seen)
+
+    def test_the_slice_kernels_are_required_when_the_graft_has_either_or_slice_is_requested(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            graft, kernels = self._graft(directory, 'K64i', self.STAGE3 / 'reader_decode_qwen.cpp', self.SLICE_KERNELS,
+                                         stage4_binary=True)
+            self._ok(self._run_graft_block(graft))
+            bodies = {relative: (kernels / relative).read_bytes() for relative in self.SLICE_KERNELS}
+            for relative in self.SLICE_KERNELS:
+                # Half staged: one slice kernel missing or empty beside the other.
+                for broken in ('missing', 'empty'):
+                    with self.subTest(kernel=relative, broken=broken):
+                        if broken == 'missing':
+                            (kernels / relative).unlink()
+                        else:
+                            (kernels / relative).write_bytes(b'')
+                        result = self._run_graft_block(graft)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn('KOPGRAFT64 sdpa_decode directory lacks %s' % relative, result.stderr)
+                        (kernels / relative).write_bytes(bodies[relative])
+            self._ok(self._run_graft_block(graft))
+            # Neither (a stage-3 tree under a stage-4 binary): nothing to require unless slice is requested.
+            for relative in self.SLICE_KERNELS:
+                (kernels / relative).unlink()
+            self._ok(self._run_graft_block(graft, M3NATIVE_SDPA_MODES='tail,share'))
+            result = self._run_graft_block(graft, M3NATIVE_SDPA_MODES='tail,share,slice')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('KOPGRAFT64 sdpa_decode directory lacks dataflow/reader_decode_qwen_slice.cpp', result.stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            # A stage-3 graft (K64g): fine for tail,share; refused before the run for slice or readahead.
+            graft, _kernels = self._graft(directory, 'K64g', self.STAGE3 / 'reader_decode_qwen.cpp')
+            for value in ('tail', 'tail,share', 'slices', 'tail,share,noslice'):
+                with self.subTest(value=value):
+                    self._ok(self._run_graft_block(graft, M3NATIVE_SDPA_MODES=value))
+            for value in ('slice', 'tail,share,slice', ' tail , share , slice ', 'share,readahead', 'tail,share,slice,readahead'):
+                with self.subTest(value=value):
+                    result = self._run_graft_block(graft, M3NATIVE_SDPA_MODES=value)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('KOPGRAFT64 sdpa_decode directory lacks dataflow/reader_decode_qwen_slice.cpp', result.stderr)
+
+    def test_slice_or_readahead_is_refused_without_a_stage_4_graft(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            # The kernels are there but the binary is not stage 4 (a K64g .so beside K64i kernels).
+            graft, _kernels = self._graft(directory, 'mixed', self.STAGE3 / 'reader_decode_qwen.cpp', self.SLICE_KERNELS)
+            self._ok(self._run_graft_block(graft, M3NATIVE_SDPA_MODES='tail,share'))
+            result = self._run_graft_block(graft, M3NATIVE_SDPA_MODES='tail,share,slice')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("lacks '[QWEN-SDPA] q-slice rows_per_kv=' (not a K64i-or-later build)", result.stderr)
+            # K64c/K64d: no sdpa_decode directory at all.
+            old = Path(directory, 'k64d')
+            old.mkdir()
+            (old / '_ttnncpp.so').write_bytes(b'so' + self.SLICE_LITERAL)
+            self._ok(self._run_graft_block(old.as_posix(), M3NATIVE_SDPA_MODES='tail'))
+            result = self._run_graft_block(old.as_posix(), M3NATIVE_SDPA_MODES='share,readahead')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('has no sdpa_decode directory', result.stderr)
+        # No graft at all: the default arm is untouched, and a stage-4 mode is refused.
+        self.assertEqual(self._ok(self._run_graft_block(None)), '/experiment-cache/kernels')
+        self.assertEqual(self._ok(self._run_graft_block(None, M3NATIVE_SDPA_MODES='tail,share')), '/experiment-cache/kernels')
+        result = self._run_graft_block(None, M3NATIVE_SDPA_MODES='tail,share,slice')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('which needs KOPGRAFT64 (a K64i-or-later graft', result.stderr)
+
+    def test_the_stage_4_literal_is_the_factorys_and_the_replay_readers(self):
+        import pooled_attention_replay as replay
+        text = arm_text()
+        literal = "grep -a -q -F -- '[QWEN-SDPA] q-slice rows_per_kv=' \"$KOPGRAFT64/_ttnncpp.so\""
+        self.assertIn(literal, text)
+        self.assertEqual(replay.QWEN_SDPA_SLICE_MARKER, b'[QWEN-SDPA] q-slice rows_per_kv=')
+        self.assertIn(replay.QWEN_SDPA_SLICE_MARKER, self.SLICE_LITERAL)
+        factory = (self.SLICE / 'apply_factory_slice.py').read_text(encoding='utf-8')
+        self.assertIn("SLICE_LOG_MARKER = '[QWEN-SDPA] q-slice rows_per_kv='", factory)
+        for relative in self.SLICE_KERNELS:
+            self.assertIn(Path(relative).name, factory)
+            self.assertIn(relative, text)
 
 
 

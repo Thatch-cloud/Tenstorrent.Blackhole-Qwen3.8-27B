@@ -496,6 +496,68 @@ class FlagMarkerTests(unittest.TestCase):
         self.assertEqual(required_flag_markers({'QWEN_FAST_SDPA_MODES': 'narrow,tail'}, 4)['QWEN_FAST_SDPA_MODES'][1:],
                          ['[PINDIAG] sdpa qwen-modes modes=narrow,tail ', '[QWEN-SDPA] flags=0x1 '])
 
+    def test_the_slice_sdpa_mode_needs_the_0x7_factory_line_and_the_stage_4_q_slice_line(self):
+        """tail,share,slice (stage 4, graft K64i): the factory must have built a program with flag 0x7
+        (twins, head-sliced) and logged its F18 q-slice line; a stage-3 run (0x3, no q-slice line) fails."""
+        from lever_n_m3native_gate import SDPA_MODES_MARKERS, SDPA_SLICE_MARKER, required_flag_markers
+        log = chr(10).join((
+            '2026-09-25 | INFO | [PINDIAG] sdpa qwen-modes binary /opt/tt-metal/build_Release/lib/_ttnncpp.so '
+            'carries the [QWEN-SDPA] branch with KV share and the stage-4 q-slice',
+            "2026-09-25 | INFO | [PINDIAG] sdpa qwen-modes modes=share,slice,tail rows=16 capacity=131328 bundles=[2] "
+            "flags=['0x7'] mask=wide",
+            '                 Op | INFO     | [QWEN-SDPA] flags=0x7 B=2 PNHt=2 St=4104 mask_width_t=4104 kv_share=true '
+            'scratch_slots=4 cb_bytes=837696',
+            '                 Op | INFO     | [QWEN-SDPA] q-slice rows_per_kv=48 pnht_full=3 slice_tiles=2 readahead=false'))
+        expected = [SDPA_MODES_MARKERS[0], '[PINDIAG] sdpa qwen-modes modes=share,slice,tail ', '[QWEN-SDPA] flags=0x7 ',
+                    SDPA_SLICE_MARKER]
+        self.assertEqual(SDPA_SLICE_MARKER, '[QWEN-SDPA] q-slice rows_per_kv=')
+        for value in ('tail,share,slice', 'slice,share,tail', ' tail , share , slice '):
+            with self.subTest(value=value):
+                environ = {'QWEN_FAST_SDPA_MODES': value}
+                self.assertEqual(required_flag_markers(environ, 4), {'QWEN_FAST_SDPA_MODES': expected})
+                self.assertEqual(self._report(environ, log)['missing'], [])
+        environ = {'QWEN_FAST_SDPA_MODES': 'tail,share,slice'}
+        for index, marker in enumerate(expected):
+            with self.subTest(dropped=marker):
+                partial = chr(10).join(line for number, line in enumerate(log.split(chr(10))) if number != index)
+                report = self._report(environ, partial)
+                self.assertEqual(report['missing'], ['QWEN_FAST_SDPA_MODES: ' + marker])
+                self.assertFalse(evaluate_gate(**dict(COMPLETE_KWARGS, missing_markers=report['missing'])))
+        # Only stage-3 programs were built (every bundle's groups outside 6-8 rows): share, not slice.
+        stage3 = chr(10).join(log.split(chr(10))[:3]).replace('flags=0x7 B=2 PNHt=2', 'flags=0x3 B=2 PNHt=3')
+        self.assertEqual(self._report(environ, stage3)['missing'],
+                         ['QWEN_FAST_SDPA_MODES: [QWEN-SDPA] flags=0x7 ', 'QWEN_FAST_SDPA_MODES: ' + SDPA_SLICE_MARKER])
+        # The tail,share run's markers (and the tail,share run's modes line) do not satisfy a slice run.
+        self.assertIn('QWEN_FAST_SDPA_MODES: [PINDIAG] sdpa qwen-modes modes=share,slice,tail ',
+                      self._report(environ, log.replace('modes=share,slice,tail', 'modes=share,tail'))['missing'])
+        # tail,share keeps its three markers: no q-slice line is promised without slice or readahead.
+        self.assertNotIn(SDPA_SLICE_MARKER, required_flag_markers({'QWEN_FAST_SDPA_MODES': 'tail,share'}, 4)['QWEN_FAST_SDPA_MODES'])
+        # slice alone: 0x4 (0x5 with tail); readahead (needs share) also logs the q-slice line, and its flag joins the set.
+        for value, flags in (('slice', '0x4'), ('tail,slice', '0x5'), ('share,readahead', '0xa'),
+                             ('tail,share,readahead', '0xb'), ('tail,share,slice,readahead', '0xf')):
+            with self.subTest(value=value):
+                markers = required_flag_markers({'QWEN_FAST_SDPA_MODES': value}, 4)['QWEN_FAST_SDPA_MODES']
+                self.assertEqual(markers[2:], ['[QWEN-SDPA] flags=%s ' % flags, SDPA_SLICE_MARKER])
+
+    def test_the_gate_and_the_replay_reader_agree_on_the_stage_4_flags_and_literal(self):
+        """The gate's flag table and q-slice marker are pooled_attention_replay's (the module the arm mounts):
+        the flags line the gate demands is the one a batch-2 bundle of 8-row groups is sent, and the modes
+        line is apply_sdpa_modes' sorted join."""
+        import pooled_attention_replay as replay
+        from lever_n_m3native_gate import SDPA_MODE_FLAGS, SDPA_SLICE_MARKER, sdpa_mode_markers
+        self.assertEqual(set(SDPA_MODE_FLAGS), set(replay.SDPA_MODE_NAMES))
+        self.assertEqual((SDPA_MODE_FLAGS['tail'], SDPA_MODE_FLAGS['share'], SDPA_MODE_FLAGS['slice'],
+                          SDPA_MODE_FLAGS['readahead']),
+                         (replay.QWEN_MASK_TAIL, replay.QWEN_KV_SHARE, replay.QWEN_Q_SLICE, replay.QWEN_KV_READAHEAD))
+        self.assertEqual(SDPA_SLICE_MARKER.encode(), replay.QWEN_SDPA_SLICE_MARKER)
+        for value in ('tail', 'tail,share', 'tail,share,slice', 'share,readahead', 'tail,share,slice,readahead'):
+            with self.subTest(value=value):
+                modes = replay.sdpa_modes({'QWEN_FAST_SDPA_MODES': value})
+                markers = sdpa_mode_markers(set(modes))
+                self.assertEqual(markers[1], '%s modes=%s ' % (replay.SDPA_MODES_MARKER, ','.join(sorted(modes))))
+                self.assertEqual(markers[2], '[QWEN-SDPA] flags=0x%x ' % replay.mode_flags(modes, 2, 8))
+                self.assertEqual(SDPA_SLICE_MARKER in markers, bool(modes & {'slice', 'readahead'}))
+
 
 
 class VerifyT2GateTests(unittest.TestCase):
