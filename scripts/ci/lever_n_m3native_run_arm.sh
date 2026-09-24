@@ -98,15 +98,44 @@ mounts+=(--mount "type=bind,src=$PWD/experiment-results/gate,dst=/experiment-res
 # which was right while only two boards were present; with the third board (B) back the container would
 # see three devices. M3NATIVE_CARDS overrides the by-id list (space-separated); a missing card refuses.
 serving_cards="${M3NATIVE_CARDS:-blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67}"
-nodes=()
-for card in $serving_cards; do
-  node=$(readlink -f "/dev/tenstorrent/by-id/$card" 2>/dev/null || true)
-  if [ -z "$node" ] || [ ! -c "$node" ]; then
-    echo "serving card $card has no device node under /dev/tenstorrent/by-id; refusing to guess" >&2
+# The reset step hot-cycles the boards behind the PCIe switch and returns before pciehp has
+# re-enumerated them, so a by-id link can be missing for a few seconds (run 35930349210 refused
+# on card A one second after the reset). Wait up to M3NATIVE_CARD_WAIT_S for every link, then
+# settle and resolve again: a node that moved while we waited is refused, not guessed.
+card_wait_s="${M3NATIVE_CARD_WAIT_S:-120}"
+resolve_serving_nodes() {
+  nodes=()
+  local card node
+  for card in $serving_cards; do
+    node=$(readlink -f "/dev/tenstorrent/by-id/$card" 2>/dev/null || true)
+    if [ -z "$node" ] || [ ! -c "$node" ]; then
+      missing_card="$card"
+      return 1
+    fi
+    nodes+=("${node##*/}")
+  done
+  return 0
+}
+card_waited=0
+missing_card=
+until resolve_serving_nodes; do
+  if [ "$card_waited" -ge "$card_wait_s" ]; then
+    echo "serving card $missing_card has no device node under /dev/tenstorrent/by-id after ${card_waited}s; refusing to guess" >&2
+    ls -la /dev/tenstorrent/by-id >&2 || true
     exit 1
   fi
-  nodes+=("${node##*/}")
+  sleep 2
+  card_waited=$((card_waited + 2))
 done
+if [ "$card_waited" -gt 0 ]; then
+  echo "serving pair by-id links present after ${card_waited}s; settling"
+  first_nodes="${nodes[*]}"
+  sleep 5
+  if ! resolve_serving_nodes || [ "${nodes[*]}" != "$first_nodes" ]; then
+    echo "serving pair moved while settling (${first_nodes} -> ${nodes[*]:-missing}); refusing to guess" >&2
+    exit 1
+  fi
+fi
 if [ "${#nodes[@]}" -ne 2 ]; then
   echo "expected exactly two serving cards, got ${#nodes[@]} (${serving_cards})" >&2
   exit 1
