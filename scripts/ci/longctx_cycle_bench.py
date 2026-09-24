@@ -37,13 +37,25 @@ BLOCK_SIZE = 64
 TARGET_TOKS_PER_USER = 200.0
 
 
-def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180):
-    """One streaming completion; record the gap between successive tokens."""
+def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *, ignore_eos=True, detail=False):
+    """One streaming completion; record the gap between successive tokens.
+
+    The defaults send exactly the payload every existing caller always sent (ignore_eos=True,
+    usage in the final chunk only) and record exactly the same fields. ignore_eos=False lets a
+    stream end at the snapshot's EOS (real text reaches it; the fast path's GreedySession
+    finishes there whatever vLLM is told). detail=True also asks vLLM for continuous usage stats
+    and records, per chunk that carries tokens, its completion-token count (chunk_tokens) and its
+    arrival offset from started_s (chunk_s, one time.perf_counter clock shared by the gate's
+    threads), plus the stream's id (request_id: the engine id cmpl-<hex>-0-<sfx> extends it, which
+    is how a '[PACKED] request=' line is tied to its user) and its finish_reason."""
+    stream_options = dict(include_usage=True)
+    if detail:
+        stream_options['continuous_usage_stats'] = True
     payload = json.dumps(dict(model='qwen-longctx', prompt=prompt,
                               max_tokens=max_tokens, temperature=0.0,
                               stream=True,
-                              stream_options=dict(include_usage=True),
-                              ignore_eos=True)).encode()
+                              stream_options=stream_options,
+                              ignore_eos=ignore_eos)).encode()
     request = Request('http://127.0.0.1:%d/v1/completions' % port, data=payload,
                       headers={'Content-Type': 'application/json'})
     gaps, tokens, started = [], 0, time.perf_counter()
@@ -53,6 +65,8 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180):
     pieces = []
     first_token_at = None
     entry = {}
+    details = dict(request_id=None, finish_reason=None, started_s=started, chunk_s=[], chunk_tokens=[]) if detail else None
+    completed = 0
     try:
         # The socket timeout is the inactivity limit between chunks. At 900 s a hung
         # decode sat for fifteen minutes (run 35481903377) and produced no log; 180 s
@@ -85,6 +99,20 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180):
                     entry['prompt_tokens'] = usage.get('prompt_tokens')
                     entry['completion_tokens'] = usage.get('completion_tokens')
                 text = (chunk.get('choices') or [{}])[0].get('text', '')
+                if details is not None:
+                    if details['request_id'] is None and chunk.get('id'):
+                        details['request_id'] = chunk['id']
+                    choices = chunk.get('choices') or []
+                    if choices:
+                        if choices[0].get('finish_reason'):
+                            details['finish_reason'] = choices[0]['finish_reason']
+                        count = (usage or {}).get('completion_tokens')
+                        delta = None if count is None else count - completed
+                        if count is not None:
+                            completed = count
+                        if text or delta:
+                            details['chunk_s'].append(round(time.perf_counter() - started, 6))
+                            details['chunk_tokens'].append(delta)
                 if not text:
                     continue
                 now = time.perf_counter()
@@ -98,6 +126,8 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180):
         entry.update(tokens=tokens, gaps_ms=[1000.0 * g for g in gaps], text=''.join(pieces),
                      ttft_s=(first_token_at - started) if first_token_at else None,
                      wall_s=time.perf_counter() - started)
+        if details is not None:
+            entry.update(details)
         results[index] = entry
     except BaseException as error:
         # Keep what arrived before the failure: a hang after N tokens and a refusal
@@ -106,6 +136,8 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180):
                               tokens=tokens, gaps_ms=[1000.0 * g for g in gaps], text=''.join(pieces),
                               ttft_s=(first_token_at - started) if first_token_at else None,
                               wall_s=time.perf_counter() - started)
+        if details is not None:
+            results[index].update(details)
 
 
 def main():

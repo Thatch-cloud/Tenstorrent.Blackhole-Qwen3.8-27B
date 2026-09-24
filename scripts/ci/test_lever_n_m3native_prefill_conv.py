@@ -902,7 +902,13 @@ class GateTests(unittest.TestCase):
         import lever_n_m3native_gate as gate
         source = Path(gate.__file__).read_text(encoding='utf-8')
         self.assertIn('flag_marker_report(os.environ, streams, log_text,' + chr(10)
-                      + '                                                    prompt_tokens=options.prompt_tokens)', source)
+                      + '                                                    prompt_tokens=marker_prompt_tokens(options, report))',
+                      source)
+        # A synthetic arm still passes --prompt-tokens; a real-text arm its shortest prompt.
+        options = gate.parse_options(['--prompt-tokens', '131072'])
+        self.assertEqual(gate.marker_prompt_tokens(options, {}), 131072)
+        real = gate.parse_options(['--prompt-source', 'real-text', '--allow-missing-references'])
+        self.assertEqual(gate.marker_prompt_tokens(real, dict(real_text=dict(prompt_lengths=[32741, 32709]))), 32709)
         self.assertEqual(gate.prefill_conv_required_chunks(4, 32768), 64)
         self.assertEqual(gate.prefill_conv_required_chunks(1, 2049), 2)
         self.assertEqual(gate.prefill_conv_required_chunks(4, None), 0)

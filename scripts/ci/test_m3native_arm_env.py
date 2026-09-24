@@ -412,6 +412,76 @@ class LegacyContinuationArmTests(unittest.TestCase):
                 self.assertIn("os.environ.get('QWEN_FAST_LEGACY_CONTINUATION_ORDER') == '1'", source)
 
 
+class RealTextArmTests(unittest.TestCase):
+    """M3NATIVE_PROMPT_SOURCE / M3NATIVE_EOS become the gate's --prompt-source / --eos, the way
+    M3NATIVE_SEQUENTIAL_USERS becomes --sequential-users: gate arguments after the image, never
+    container env. The prompt builder and the acceptance report are mounted at /bench beside the
+    gate (single files, never anything under /experiment-scripts/ci). The arm refuses a value the
+    gate would refuse, before any card is touched."""
+
+    ARGS = ('${M3NATIVE_PROMPT_SOURCE:+--prompt-source $M3NATIVE_PROMPT_SOURCE} '
+            '${M3NATIVE_EOS:+--eos $M3NATIVE_EOS} ' + chr(92))
+    START = 'case "${M3NATIVE_PROMPT_SOURCE:-}" in'
+    IF = 'if [ "${M3NATIVE_PROMPT_SOURCE:-}" = "real-text" ]; then'
+
+    def test_the_flags_are_gate_arguments_after_the_image(self):
+        text = arm_text()
+        self.assertEqual(text.count(self.ARGS), 1)
+        self.assertGreater(text.index(self.ARGS), text.index('--entrypoint python3 "$image" "${entry_args[@]}"'))
+        self.assertLess(text.index(self.ARGS), text.index('--references /bench/packed-gate-reference'))
+        self.assertNotIn('M3NATIVE_PROMPT_SOURCE', passed_through(text))
+        self.assertNotIn('M3NATIVE_EOS', passed_through(text))
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        for option in ("'--prompt-source'", "'--eos'"):
+            self.assertIn(option, gate)
+
+    def test_both_modules_are_mounted_at_bench_and_read_no_environment(self):
+        text = arm_text()
+        for name in ('real_text_prompts.py', 'acceptance_report.py'):
+            with self.subTest(module=name):
+                mount = '--mount "type=bind,src=$PWD/scripts/ci/%s,dst=/bench/%s,readonly"' % (name, name)
+                self.assertEqual(text.count(mount), 1)
+                self.assertLess(text.index(mount), text.index('--entrypoint python3'))
+                self.assertIn(name, bench_scripts(text))
+                self.assertEqual(reads(HERE / name), set())
+        self.assertNotIn('dst=/experiment-scripts/ci/real_text', text)
+
+    def _validate(self, **environ):
+        import shutil
+        import subprocess
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        text = arm_text()
+        start = text.index(self.START)
+        end = text.index(chr(10) + 'fi' + chr(10), text.index(self.IF, start)) + 4
+        script = 'set -euo pipefail' + chr(10) + text[start:end] + 'echo VALID' + chr(10)
+        try:
+            return subprocess.run([bash, '-c', script], env=dict(PATH=os.environ.get('PATH', ''), **environ),
+                                  capture_output=True, text=True, timeout=60)
+        except OSError as error:
+            self.skipTest('bash unusable: %s' % error)
+
+    def test_the_arm_refuses_what_the_gate_would(self):
+        for environ in ({}, dict(M3NATIVE_PROMPT_SOURCE='synthetic'), dict(M3NATIVE_EOS='stop'),
+                        dict(M3NATIVE_PROMPT_SOURCE='real-text', M3NATIVE_ALLOW_MISSING_REFERENCES='1'),
+                        dict(M3NATIVE_PROMPT_SOURCE='real-text', M3NATIVE_ALLOW_MISSING_REFERENCES='1',
+                             M3NATIVE_EOS='stop')):
+            with self.subTest(accepted=environ):
+                result = self._validate(**environ)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('VALID', result.stdout)
+        for environ, message in ((dict(M3NATIVE_PROMPT_SOURCE='prose'), 'must be synthetic or real-text'),
+                                 (dict(M3NATIVE_EOS='maybe'), 'must be ignore or stop'),
+                                 (dict(M3NATIVE_PROMPT_SOURCE='real-text'), 'needs M3NATIVE_ALLOW_MISSING_REFERENCES=1'),
+                                 (dict(M3NATIVE_PROMPT_SOURCE='real-text', M3NATIVE_ALLOW_MISSING_REFERENCES='1',
+                                       M3NATIVE_EOS='ignore'), 'needs M3NATIVE_EOS=stop')):
+            with self.subTest(refused=environ):
+                result = self._validate(**environ)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
+
 class SdpaModesArmTests(unittest.TestCase):
     """M3NATIVE_SDPA_MODES and the sdpa_decode op-directory graft (optimisation/ttnn-op/
     sdpa_decode_qwen). The flag is translated, not passed by name, so the /bench scan above

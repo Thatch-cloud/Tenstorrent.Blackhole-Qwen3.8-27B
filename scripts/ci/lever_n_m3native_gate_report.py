@@ -43,6 +43,33 @@ def main():
             print('TTFT profile render unavailable: %s' % error)
     elif admission:
         print('TTFT profile unavailable: %s' % admission.get('error'))
+    real_text = report.get('real_text')
+    if real_text:
+        corpus = real_text.get('corpus') or {}
+        print('real text: prompts %s tokens (target %s), corpus %s files sha256 %s, built in %s s'
+              % (real_text.get('prompt_lengths'), real_text.get('target'), corpus.get('files'),
+                 str(corpus.get('sha256'))[:16], (real_text.get('seconds') or {}).get('total')))
+        padding = {u.get('user'): u.get('padding_tokens') for u in real_text.get('users') or []}
+        for entry in report.get('comparisons') or []:
+            print('  user %-2s prompt %s tokens=%s served=%s padding=%s finish=%s completion=%s text_len=%s%s'
+                  % (entry.get('user'), str(entry.get('prompt_sha256'))[:16], entry.get('prompt_tokens'),
+                     entry.get('served_prompt_tokens'), padding.get(entry.get('user')), entry.get('finish_reason'),
+                     entry.get('completion_tokens'), entry.get('actual_len'),
+                     (' ERROR ' + str(entry['error'])[:120]) if entry.get('error') else ''))
+        for problem in report.get('real_text_stream_problems') or []:
+            print('  STREAM PROBLEM %s' % problem)
+    acceptance = report.get('acceptance')
+    if acceptance:
+        print(acceptance.get('summary_line') or '[ACCEPT] report unavailable: %s' % acceptance.get('error'))
+    rates = report.get('decode_rate')
+    if rates and not rates.get('error'):
+        try:
+            from acceptance_report import rate_line
+            print(rate_line(rates))
+        except Exception as error:
+            print('[RATE] render unavailable: %s' % error)
+    elif rates:
+        print('[RATE] unavailable: %s' % rates.get('error'))
     phase = report.get('packed_phase')
     if phase:
         print('[PACKED-PHASE] trace_ms rounds=%s min=%s mean=%s max=%s'
