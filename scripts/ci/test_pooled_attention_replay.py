@@ -449,8 +449,9 @@ class PackedReaderTests(unittest.TestCase):
 
 
 class SdpaModesTests(unittest.TestCase):
-    """QWEN_FAST_SDPA_MODES ('tail', stage 1; 'share', stage 3): the per-bundle SDPA configs of a
-    built replay reader carry the grafted factory's q_chunk_size sentinel; unset, nothing changes."""
+    """QWEN_FAST_SDPA_MODES ('tail', stage 1; 'share', stage 3; 'slice' and 'readahead', stage 4): the per-bundle
+    SDPA configs of a built replay reader carry the grafted factory's q_chunk_size sentinel; unset, nothing
+    changes."""
 
     # The files this change must not touch (their bytes are gate evidence), at HEAD d21cd875+.
     PINNED = {
@@ -711,6 +712,76 @@ class SdpaModesTests(unittest.TestCase):
         self.assertEqual(lines, [
             '[PINDIAG] sdpa qwen-modes binary /k64f/_ttnncpp.so carries the [QWEN-SDPA] branch with KV share',
             "[PINDIAG] sdpa qwen-modes modes=share,tail rows=16 capacity=4352 bundles=[2] flags=['0x3'] mask=wide"])
+
+    def test_slice_and_readahead_parse_and_readahead_needs_share(self):
+        from pooled_attention_replay import SDPA_MODES_ENV, sdpa_modes
+        self.assertEqual(sdpa_modes({SDPA_MODES_ENV: 'tail,share,slice'}), frozenset({'tail', 'share', 'slice'}))
+        self.assertEqual(sdpa_modes({SDPA_MODES_ENV: 'readahead,share,slice,tail'}),
+                         frozenset({'tail', 'share', 'slice', 'readahead'}))
+        self.assertEqual(sdpa_modes({SDPA_MODES_ENV: 'slice'}), frozenset({'slice'}))
+        for value in ('readahead', 'tail,slice,readahead'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'readahead needs share'):
+                sdpa_modes({SDPA_MODES_ENV: value})
+
+    def test_slice_flags_only_groups_the_factory_saves_a_tile_on(self):
+        """The stage-4 rule (K1 design section 2): 6-8-row groups 3 -> 2 tiles, 16 rows 6 -> 3; 1-5 rows none."""
+        from pooled_attention_replay import mode_flags, q_slice_saves
+        self.assertEqual([rows for rows in range(1, 9) if q_slice_saves(rows)], [6, 7, 8])
+        self.assertTrue(q_slice_saves(16))
+        modes = frozenset({'tail', 'share', 'slice', 'readahead'})
+        self.assertEqual(mode_flags(modes, 2, 8), 0xF)
+        self.assertEqual(mode_flags(modes - {'readahead'}, 2, 8), 0x7)
+        self.assertEqual(mode_flags(modes, 1, 8), 0x5, '0x2 and 0x8 are inert at one entry')
+        self.assertEqual(mode_flags(modes, 3, 4), 0xB, 'no saving at 4-row groups: no 0x4')
+        self.assertEqual(mode_flags(modes, 1, 4), 0x1)
+        self.assertEqual(mode_flags(modes, 2), 0xB, 'no rows: no slice')
+        self.assertEqual(mode_flags(frozenset({'tail', 'share'}), 2, 8), 0x3, 'the served modes are unchanged')
+
+    def test_slice_on_four_row_groups_keeps_the_served_flags(self):
+        from pooled_attention_replay import apply_sdpa_modes
+        lines = []
+        reader = self.reader(batches=(3, 1))
+        self.assertEqual(apply_sdpa_modes(reader, frozenset({'tail', 'share', 'slice'}), log=lines.append,
+                                          binary_check=lambda markers: ('/k64i/_ttnncpp.so', True)), (0x3, 0x1))
+        self.assertEqual(lines, [
+            '[PINDIAG] sdpa qwen-modes binary /k64i/_ttnncpp.so carries the [QWEN-SDPA] branch with KV share and the '
+            'stage-4 q-slice',
+            "[PINDIAG] sdpa qwen-modes modes=share,slice,tail rows=16 capacity=4352 bundles=[3, 1] flags=['0x3', '0x1'] "
+            "mask=wide"])
+
+    def test_slice_on_a_stage_three_binary_is_refused_before_any_config_changes(self):
+        from pooled_attention_replay import QWEN_SDPA_SLICE_MARKER, _binary_checked, apply_sdpa_modes, required_binary_markers
+        self.assertEqual(required_binary_markers(frozenset({'tail', 'share', 'slice'})),
+                         (b'[QWEN-SDPA] flags=', b'[QWEN-SDPA] KV-share twin bands', b'[QWEN-SDPA] q-slice rows_per_kv='))
+        self.assertEqual(required_binary_markers(frozenset({'share', 'readahead'}))[-1], QWEN_SDPA_SLICE_MARKER)
+        reader = self.reader(batches=(2,))
+        before = list(reader.metadata)
+
+        def stage3(markers):
+            return '/k64g/_ttnncpp.so', QWEN_SDPA_SLICE_MARKER not in markers
+
+        for modes in ({'tail', 'share', 'slice'}, {'tail', 'share', 'readahead'}):
+            with self.subTest(modes=modes),                     self.assertRaisesRegex(RuntimeError, 'needs the stage-4 .QWEN-SDPA. q-slice factory .K64i onward.'):
+                apply_sdpa_modes(reader, frozenset(modes), log=self.fail, binary_check=stage3)
+        self.assertEqual(reader.metadata, before)
+        self.assertFalse(hasattr(reader, 'sdpa_modes_applied'))
+        self.assertEqual(_binary_checked, [])
+
+    def test_the_packed_block_at_eight_row_groups_slices_and_reads_ahead_for_every_user(self):
+        """M3NATIVE_REPLAY_GROUP_ROWS=8 + tail,share,slice,readahead: each T16 user is one batch-2 bundle -> 0xF."""
+        from pooled_attention_replay import SDPA_MODES_ENV
+        lines = []
+        with patch.dict('os.environ', {SDPA_MODES_ENV: 'tail,share,slice,readahead', 'QWEN_SDPA_TREE_SCRATCH_ROUNDS': '1'}),                 patch('pooled_attention_replay._binary_checked', []),                 patch('pooled_attention_replay._pindiag', side_effect=lines.append),                 patch('pooled_attention_replay.loaded_binary_has_modes', return_value=('/g/_ttnncpp.so', True)) as check:
+            packed, tables, operations, copies, events = PackedReaderTests.build(
+                PackedReaderTests(), storage=None, segments=((0, 16), (16, 32), (32, 48), (48, 64)), max_group_rows=8)
+        self.assertEqual([own.sdpa_modes_applied for own in packed.readers], [(0xF,)] * 4)
+        sentinels = [call.kwargs['q_chunk_size'] for call in operations.SDPAProgramConfig.call_args_list]
+        self.assertEqual(sentinels.count(0x51DEC00F), 4)
+        check.assert_called_once_with((b'[QWEN-SDPA] flags=', b'[QWEN-SDPA] KV-share twin bands',
+                                       b'[QWEN-SDPA] q-slice rows_per_kv='))
+        self.assertEqual(sum(_is_modes_marker(line) for line in lines), 5)
+        self.assertIn("modes=readahead,share,slice,tail rows=16 capacity=4352 bundles=[2] flags=['0xf'] mask=wide",
+                      lines[-1])
 
     def test_the_packed_block_at_eight_row_groups_shares_every_user(self):
         """M3NATIVE_REPLAY_GROUP_ROWS=8 + tail,share: each T16 user is one batch-2 bundle -> 0x3."""

@@ -97,7 +97,9 @@ VARIANTS = ('normal', 'peaky', 'zeroq')
 LEGACY = 0
 MAGIC = 0x51DEC000
 QWEN_PLAIN, TAIL, SHARE, TAIL_SHARE = MAGIC, MAGIC | 0x1, MAGIC | 0x2, MAGIC | 0x3
-UNKNOWN_FLAG = MAGIC | 0x4
+# 0x10: unknown to the stage-1, stage-3 and stage-4 factories alike (K64i's stage 4 serves 0x4 and 0x8; K1 design
+# section 7, N-S3), so the same refusal runs on every graft. It was 0x4 until K64i.
+UNKNOWN_FLAG = MAGIC | 0x10
 SHARE_STAGE3, NO_FLAGS = SHARE, QWEN_PLAIN   # stage-1 names
 SCALE = 1.0 / 16
 # Per (capacity, PNHt): the spec's L1 table (compact c_19; KV share adds no CB bytes).
@@ -113,7 +115,7 @@ FACTORY_LINE = re.compile(r'\[QWEN-SDPA\] flags=(0x[0-9a-f]+) B=([0-9]+) PNHt=([
 REFUSALS = (
     ('share flag (stage 1)', SHARE, 'KV share is not in this build', 'wide', 3, False, (1,)),
     ('twin bands for B=4', SHARE, 'twin bands do not fit', 'wide', 4, False, (3,)),
-    ('unknown flag 0x4', UNKNOWN_FLAG, 'unknown flags', 'wide', 3, False, (1, 3)),
+    ('unknown flag 0x10', UNKNOWN_FLAG, 'unknown flags', 'wide', 3, False, (1, 3)),
     ('tail with a 512-wide mask', TAIL, 'tail mask must be full width', 'half', 3, False, (1, 3)),
     ('narrow mask without tail', QWEN_PLAIN, 'a narrow mask needs the tail flag', 'narrow', 3, False, (1, 3)),
     ('sentinel on a causal call', TAIL, 'modes are non-causal', None, 3, True, (1, 3)),

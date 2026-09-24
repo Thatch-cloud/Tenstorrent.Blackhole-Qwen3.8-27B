@@ -281,7 +281,9 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(card.SHARE, magic | replay.QWEN_KV_SHARE)
         self.assertEqual(card.TAIL_SHARE, magic | replay.QWEN_MASK_TAIL | replay.QWEN_KV_SHARE)
         self.assertEqual((card.SHARE_STAGE3, card.NO_FLAGS, card.QWEN_PLAIN), (card.SHARE, magic, magic))
-        self.assertEqual(replay.SDPA_MODE_NAMES, ('tail', 'share'))
+        # 'slice' (0x4) and 'readahead' (0x8) are stage 4 (K64i): ../sdpa_decode_slice checks them against its factory.
+        self.assertEqual(replay.SDPA_MODE_NAMES, ('tail', 'share', 'slice', 'readahead'))
+        self.assertEqual((replay.QWEN_Q_SLICE, replay.QWEN_KV_READAHEAD), (0x4, 0x8))
         self.assertEqual(set(replay.SDPA_MODES_LATER), {'narrow'})
 
     def test_the_share_arguments_and_semaphores_line_up(self):
@@ -349,7 +351,7 @@ class ContractTests(unittest.TestCase):
                 with self.subTest(refusal=name, stage=stage):
                     self.assertIn(needle, stage_text(stage))
         self.assertEqual([entry[0] for entry in card.refusals_for(1)],
-                         ['share flag (stage 1)', 'unknown flag 0x4', 'tail with a 512-wide mask',
+                         ['share flag (stage 1)', 'unknown flag 0x10', 'tail with a 512-wide mask',
                           'narrow mask without tail', 'sentinel on a causal call'])
         self.assertEqual([entry[0] for entry in card.refusals_for(3)][0], 'twin bands for B=4')
         self.assertNotIn('KV share is not in this build', stage_text(3))

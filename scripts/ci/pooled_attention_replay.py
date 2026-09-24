@@ -67,16 +67,25 @@ from gdn_multitoken_conv import addresses
 #     reads each K/V chunk from DRAM and multicasts it to the others. Exact by construction;
 #     a bundle of one entry gets no 0x2. At eight-row groups each T16 user is one batch-2
 #     bundle, so share halves the K/V bytes again on top of the eight-row fold.
+#   'slice' (flag 0x4, stage 4, K64i onward; optimisation/ttnn-op/sdpa_decode_slice, the K1 design): each KV
+#     head's cores compute only the Q row tiles that hold its folded rows (3 -> 2 tiles at 8-row groups).
+#     Given only to bundles whose groups the factory's rule saves a tile on (q_slice_saves: 6-8 rows; 1-5
+#     rows keep their config). Exact by construction; card-B byte comparison proves it.
+#   'readahead' (flag 0x8, stage 4): the share leader reads chunk n+1 while chunk n's multicast is in
+#     flight. Needs 'share' and, like 0x2, only bundles of more than one entry get it.
 # The pinned reader's bytes are untouched: only its per-bundle config entries are replaced,
 # before any trace is captured. Unset, nothing here runs and every config is the pinned one.
 SDPA_MODES_ENV = 'QWEN_FAST_SDPA_MODES'
 QWEN_DECODE_MAGIC = 0x51DEC000                    # factory F1; the low byte holds the flags
 QWEN_MASK_TAIL, QWEN_KV_SHARE = 0x1, 0x2
-SDPA_MODE_NAMES = ('tail', 'share')               # what this build serves
+QWEN_Q_SLICE, QWEN_KV_READAHEAD = 0x4, 0x8        # stage 4 (K64i)
+SDPA_MODE_NAMES = ('tail', 'share', 'slice', 'readahead')   # what this build serves
 # Named by the spec, not in this build: refused by name rather than as unknown.
 SDPA_MODES_LATER = {'narrow': 'stage 1b (the narrow (b,1,48,256) tail mask)'}
 QWEN_SDPA_BINARY_MARKER = b'[QWEN-SDPA] flags='   # factory F4's format literal, only in a graft .so
 QWEN_SDPA_SHARE_MARKER = b'[QWEN-SDPA] KV-share twin bands'   # factory F9's, only in the stage-3 .so
+QWEN_SDPA_SLICE_MARKER = b'[QWEN-SDPA] q-slice rows_per_kv='  # factory F18's, only in the stage-4 .so
+FOLDED_ROWS_PER_TOKEN, KV_HEADS_PER_CHIP, TILE_ROWS = 12, 2, 32  # attention_head_fold.fold_query's layout
 SDPA_MODES_MARKER = '[PINDIAG] sdpa qwen-modes'
 _binary_checked = []
 
@@ -97,23 +106,43 @@ def sdpa_modes(environ=None):
     modes = frozenset(name.strip() for name in value.split(',') if name.strip())
     later = sorted(modes.intersection(SDPA_MODES_LATER))
     if later:
-        raise ValueError('%s=%s: %s not in this build (it serves tail and share): %s'
+        raise ValueError('%s=%s: %s not in this build (it serves tail, share, slice and readahead): %s'
                          % (SDPA_MODES_ENV, value, ','.join(later), '; '.join(SDPA_MODES_LATER[name] for name in later)))
     unknown = modes.difference(SDPA_MODE_NAMES)
     if unknown:
         raise ValueError('Unknown %s entries: %s' % (SDPA_MODES_ENV, ','.join(sorted(unknown))))
+    if 'readahead' in modes and 'share' not in modes:
+        raise ValueError('%s=%s: readahead needs share (the factory refuses 0x8 without 0x2)' % (SDPA_MODES_ENV, value))
     return modes
 
 
-def mode_flags(modes, batches):
-    return (QWEN_MASK_TAIL if 'tail' in modes else 0) | (QWEN_KV_SHARE if 'share' in modes and batches > 1 else 0)
+def q_slice_saves(rows, per_token=FOLDED_ROWS_PER_TOKEN, kv_heads=KV_HEADS_PER_CHIP):
+    """The stage-4 factory's rule (F14/F15) for a bundle of `rows`-row groups: each KV head's G folded rows
+    span row tiles [floor(h*G/32), ceil((h+1)*G/32)); the slice is the widest span, and the factory builds 0x4
+    only when it is narrower than Q's own row tiles (6-8 rows: 2 of 3; 1-5 rows: no saving, refused)."""
+    folded = rows * per_token
+    if kv_heads <= 1 or folded % kv_heads:
+        return False
+    per_kv = folded // kv_heads
+    widest = max(-(-((head + 1) * per_kv) // TILE_ROWS) - (head * per_kv) // TILE_ROWS for head in range(kv_heads))
+    return widest < -(-folded // TILE_ROWS)
+
+
+def mode_flags(modes, batches, rows=None):
+    """The sentinel's flags for one bundle of `batches` entries of `rows`-row groups (rows None: no slice)."""
+    share = 'share' in modes and batches > 1
+    return ((QWEN_MASK_TAIL if 'tail' in modes else 0) | (QWEN_KV_SHARE if share else 0)
+            | (QWEN_Q_SLICE if 'slice' in modes and rows is not None and q_slice_saves(rows) else 0)
+            | (QWEN_KV_READAHEAD if 'readahead' in modes and share else 0))
 
 
 def required_binary_markers(modes):
     """The factory format literals the loaded binary must carry for these modes: the
     [QWEN-SDPA] branch always, and the stage-3 KV-share branch for 'share' (a stage-1 .so
-    such as K64e would refuse flag 0x2 by TT_FATAL at the first capture)."""
-    return (QWEN_SDPA_BINARY_MARKER,) + ((QWEN_SDPA_SHARE_MARKER,) if 'share' in modes else ())
+    such as K64e would refuse flag 0x2 by TT_FATAL at the first capture), and the stage-4 q-slice factory
+    for 'slice' or 'readahead' (K64g and older refuse 0x4 / 0x8 as unknown flags)."""
+    return ((QWEN_SDPA_BINARY_MARKER,) + ((QWEN_SDPA_SHARE_MARKER,) if 'share' in modes else ())
+            + ((QWEN_SDPA_SLICE_MARKER,) if modes & {'slice', 'readahead'} else ()))
 
 
 def loaded_binary_has_modes(markers=(QWEN_SDPA_BINARY_MARKER,), maps='/proc/self/maps'):
@@ -149,18 +178,22 @@ def apply_sdpa_modes(reader, modes, *, log=None, binary_check=None):
     if not any(checked == markers for _path, checked in _binary_checked):
         path, present = binary_check(markers)
         if not present:
+            if modes & {'slice', 'readahead'}:
+                raise RuntimeError('%s=%s needs the stage-4 [QWEN-SDPA] q-slice factory (K64i onward); %s lacks it'
+                                   % (SDPA_MODES_ENV, ','.join(sorted(modes)), path))
             if 'share' in modes:
                 raise RuntimeError('%s=%s needs the stage-3 [QWEN-SDPA] KV-share factory branch (K64f onward); '
                                    '%s lacks it' % (SDPA_MODES_ENV, ','.join(sorted(modes)), path))
             raise RuntimeError('%s is set but %s lacks the [QWEN-SDPA] factory branch' % (SDPA_MODES_ENV, path))
         _binary_checked.append((path, markers))
-        log('%s binary %s carries the [QWEN-SDPA] branch%s'
-            % (SDPA_MODES_MARKER, path, ' with KV share' if 'share' in modes else ''))
+        log('%s binary %s carries the [QWEN-SDPA] branch%s%s'
+            % (SDPA_MODES_MARKER, path, ' with KV share' if 'share' in modes else '',
+               ' and the stage-4 q-slice' if modes & {'slice', 'readahead'} else ''))
     operations = reader.operations
     grid = reader.mesh.compute_with_storage_grid_size()
     replaced, applied = [], []
     for bundle, pages, mask, config in reader.metadata:
-        flags = mode_flags(modes, len(bundle))
+        flags = mode_flags(modes, len(bundle), bundle[0]['rows'])
         if flags:
             # The pinned reader's own construction (attention_replay.py), with the sentinel.
             config = operations.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),

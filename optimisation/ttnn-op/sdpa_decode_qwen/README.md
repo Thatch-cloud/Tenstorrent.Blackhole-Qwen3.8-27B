@@ -10,6 +10,9 @@ the replay attention reader can opt into one call at a time. Legacy calls are un
   in the factory and R4-R5 in the reader. Its kernels are in `stage3/` and it is built by
   `build_k64f.sh`. It is **built and proven on the TT-Sim simulator only, not yet on hardware**
   (see "Evidence" below).
+- **Stage 4 (K1: `0x4` head-sliced Q, `0x8` the share leader's K/V read-ahead)** is `~/opgraft-K64i`, built over
+  K64g. It lives in `../sdpa_decode_slice` (its factory patch, kernels, build and card-B harness), and imports this
+  directory's scripts read-only. On K64i, `0x4` is a known flag, so N3's unknown-flag control here is `0x10`.
 
 ## What it changes and why
 
@@ -158,7 +161,7 @@ bash run_card_m.sh candidate                      # the full sweep, with timing
   - **E4** (stage 2's question, recorded, not failed on): G8 unfolded equals G4 unfolded, per token, for legacy and tail.
   - **N1:** page-table rows 1.. are other permutations. Share must equal legacy on the leader's row, and each twin must differ from legacy on its own row.
   - **N2:** a planted `-inf` does not move tail+share.
-  - **N3:** the stage's refusals: B=4 twin bands, unknown flag, 512-wide mask under tail, narrow without tail, the sentinel on a causal call. A stage-1 binary refuses `0x2` instead.
+  - **N3:** the stage's refusals: B=4 twin bands, unknown flag (`0x10`: it was `0x4` until K64i made `0x4` the q-slice flag; `0x10` is unknown to stages 1, 3 and 4 alike), 512-wide mask under tail, narrow without tail, the sentinel on a causal call. A stage-1 binary refuses `0x2` instead.
   - **N4:** 1,000 calls alternating legacy and tail+share on the distinct page table, where the two modes differ.
   - **N5:** one trace (legacy and tail+share G8, legacy and tail+share G4 B3, legacy and tail G4 B1) replayed 200 times, each replay bit-equal to eager.
   - **Log:** exactly the requested qwen programs have factory lines, with `kv_share` true only for `0x2` with B>1, `scratch_slots=4`, and the spec's `cb_bytes`.
