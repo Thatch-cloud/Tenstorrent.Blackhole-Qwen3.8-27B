@@ -541,6 +541,18 @@ class Session:
             except Exception:  # noqa: BLE001 - a view already freed with its buffer
                 pass
 
+    def retainer(self, owned, *inputs):
+        """owned.append for a tensor a variant made. A view of an input (ttnn.reshape of the assembled K/V or the query
+        shares its buffer) is never owned: free() would deallocate the input under every later variant and round."""
+        kept = {tensor.buffer_address() for tensor in inputs}
+
+        def retain(tensor):
+            if tensor.buffer_address() not in kept:
+                owned.append(tensor)
+            return tensor
+
+        return retain
+
     def sync(self):
         with WATCHDOG.op('synchronize'):
             self.ttnn.synchronize_device(self.device)
@@ -617,11 +629,11 @@ class Session:
             from pair_row_exact import fold_attention
 
             with WATCHDOG.op('fold_attention'):
-                return fold_attention(ttnn, query, key, value, masks['single'], lambda tensor: owned.append(tensor)
-                                      or tensor, mask_validated=True)
+                return fold_attention(ttnn, query, key, value, masks['single'], self.retainer(owned, query, key, value),
+                                      mask_validated=True)
         from pair_row_exact import fold_keys
 
-        retain = lambda tensor: owned.append(tensor) or tensor
+        retain = self.retainer(owned, query, key, value)
         if variant == 'r1g-noshift':
             grouped = retain(ttnn.reshape(query, (KV_HEADS, 4, 32, HEAD_DIM)))
             doubled = retain(ttnn.concat([grouped, grouped], dim=1, memory_config=ttnn.DRAM_MEMORY_CONFIG))

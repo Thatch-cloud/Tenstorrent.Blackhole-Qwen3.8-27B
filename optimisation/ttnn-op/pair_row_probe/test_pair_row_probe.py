@@ -28,6 +28,7 @@
 """
 
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -66,12 +67,22 @@ def bits(tensor):
 # ---------------------------------------------------------------------------------------------
 
 class FakeTensor:
-    def __init__(self, value, dtype, layout='tile'):
+    """A device tensor. `base` is the buffer it lives in: a reshape is a view that shares its source's buffer, as in
+    ttnn, so deallocating the view frees the source (the card-B watcher pass lost its K/V that way)."""
+
+    buffers = itertools.count(1)
+
+    def __init__(self, value, dtype, layout='tile', base=None):
         self.value, self.dtype, self.layout = value, dtype, layout
         self.shape = tuple(value.shape)
+        # a buffer number, never reused (id() is, once an object is collected)
+        self.base = next(FakeTensor.buffers) if base is None else base
 
     def memory_config(self):
         return 'dram'
+
+    def buffer_address(self):
+        return self.base
 
 
 class FakeTtnn:
@@ -90,6 +101,7 @@ class FakeTtnn:
 
     def __init__(self, mode='exact'):
         self.mode, self.calls, self.freed, self.captures = mode, [], 0, 0
+        self.freed_buffers = set()
         self.transformer = SimpleNamespace(scaled_dot_product_attention=self.sdpa)
         self.experimental = SimpleNamespace(rotary_embedding_hf=self.rotary)
         self.device = None
@@ -137,17 +149,26 @@ class FakeTtnn:
     def from_torch(self, value, dtype=None, layout=None, device=None, memory_config=None):
         return FakeTensor(self.cast(value.clone(), dtype or self.bfloat16), dtype or self.bfloat16, layout)
 
+    def live(self, *tensors):
+        for tensor in tensors:
+            if tensor.base in self.freed_buffers:
+                raise RuntimeError('TT_THROW: Tensor is not allocated')
+
     def to_torch(self, tensor):
+        self.live(tensor)
         return tensor.value.clone()
 
     def deallocate(self, tensor):
         self.freed += 1
+        self.freed_buffers.add(tensor.base)
 
     def slice(self, tensor, start, end, steps=None):
+        self.live(tensor)
         index = tuple(slice(low, high) for low, high in zip(start, end))
         return FakeTensor(tensor.value[index].clone(), tensor.dtype)
 
     def concat(self, parts, dim, memory_config=None):
+        self.live(*parts)
         value = torch.cat([part.value for part in parts], dim=dim)
         if self.mode == 'dm' and len(parts) == 6:
             value = value.clone()
@@ -155,7 +176,13 @@ class FakeTtnn:
         return FakeTensor(value, parts[0].dtype)
 
     def reshape(self, tensor, shape):
-        return FakeTensor(tensor.value.reshape(shape), tensor.dtype)
+        # ttnn's rule: a tile-layout reshape is a view (the same buffer) when the last dim is kept and the
+        # second-last dims are equal or both tile-aligned; otherwise it is a copy.
+        self.live(tensor)
+        old, new = tuple(tensor.shape), tuple(shape)
+        view = (tensor.layout == 'tile' and old[-1] == new[-1]
+                and (old[-2] == new[-2] or (old[-2] % 32 == 0 and new[-2] % 32 == 0)))
+        return FakeTensor(tensor.value.reshape(shape), tensor.dtype, tensor.layout, base=tensor.base if view else None)
 
     def pad(self, tensor, padding, value):
         pads = []
@@ -210,6 +237,7 @@ class FakeTtnn:
 
     def sdpa(self, query, key, value, *, attn_mask, is_causal, scale, program_config, compute_kernel_config,
              memory_config):
+        self.live(query, key, value, attn_mask)
         q, k, v, mask = query.value, key.value, value.value, attn_mask.value
         batches, heads, rows = q.shape[0], q.shape[1], q.shape[2]
         kv_heads = k.shape[1]
