@@ -1,0 +1,173 @@
+name: Qwen C2 serving image
+# Build, smoke and publish the C2 serving base (docker/qwen-c2-serving.Dockerfile) on the rig,
+# driven by .github/c2-serving-job.env at the tagged commit. The rig's LAN is not always
+# reachable; its runners reach GitHub outbound, so this is the way in from offsite.
+# Actions (C2_ACTIONS, space-separated, run in this order):
+#   status - what the rig holds: the last manual build log, C2 images, card holders, the agent
+#   build  - build tt-vllm:qwen38-c2-$C2_IMAGE_TAG unless present (waits for a build in flight)
+#   smoke  - run it on cards M+A shaped like the node agent's container, then the API smoke
+#            (scripts/ci/c2_serving_smoke.py); the container is always removed
+#   push   - push it to zot and print the digest
+# The smoke opens M+A, so it shares the two-card concurrency group and refuses if anything
+# holds either card or a platform serving container exists.
+on:
+  push:
+    tags: ['experiment/c2-serving-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  c2-serving:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: c2
+          persist-credentials: false
+      - name: Read the job file
+        id: job
+        working-directory: c2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import re
+          values = {}
+          for line in open('.github/c2-serving-job.env', encoding='utf-8'):
+              line = line.strip()
+              if line and not line.startswith('#'):
+                  key, _, value = line.partition('=')
+                  values[key.strip()] = value.strip()
+          actions = values.get('C2_ACTIONS', 'status').split()
+          assert set(actions) <= {'status', 'build', 'smoke', 'push'}, actions
+          assert re.fullmatch(r'[0-9a-z.-]{3,40}', values.get('C2_IMAGE_TAG', '')), 'C2_IMAGE_TAG'
+          assert values.get('C2_PROFILE', 'coding') in ('coding', 'exact')
+          print('actions=' + ' '.join(actions))
+          print('tag=' + values['C2_IMAGE_TAG'])
+          print('profile=' + values.get('C2_PROFILE', 'coding'))
+          print('tests=' + values.get('C2_SMOKE_TESTS', ''))
+          PY
+          cat "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/c2-results"
+      - name: Status
+        if: contains(steps.job.outputs.actions, 'status')
+        shell: bash
+        run: |
+          set +e
+          echo "=== manual build log"; tail -40 /home/thatch/c2-build.log 2>&1
+          echo "=== build in flight"; pgrep -af build-c2-serving-image || echo none
+          echo "=== images"; docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}} {{.Size}}' | grep -E 'qwen38-c2|thatch-serving-tt' | head
+          echo "=== persistent cache"; sudo -n du -sh /home/thatch/hf-cache/hub/.qwen-c2 /home/thatch/hf-cache/hub/.qwen-c2.partial 2>&1
+          echo "=== cards"; ls -l /dev/tenstorrent/by-id/; sudo -n fuser -v /dev/tenstorrent/* 2>&1
+          echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
+          echo "=== agent"; journalctl --user -u thatch-node-agent --since -3h --no-pager 2>&1 | grep -v -i heartbeat | tail -15
+      - name: Build
+        if: contains(steps.job.outputs.actions, 'build')
+        working-directory: c2
+        timeout-minutes: 75
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          for i in $(seq 1 60); do
+            pgrep -f build-c2-serving-image >/dev/null || break
+            echo "a build is in flight ($i): waiting"; tail -2 /home/thatch/c2-build.log || true; sleep 60
+          done
+          if docker image inspect "$image" >/dev/null 2>&1; then
+            echo "$image present: $(docker image inspect "$image" --format '{{.Id}}')"
+            exit 0
+          fi
+          ctx="$RUNNER_TEMP/c2ctx"
+          rm -rf "$ctx"; mkdir -p "$ctx/ci"
+          cp docker/qwen-c2-serving.Dockerfile "$ctx/Dockerfile"
+          for file in serving_fast_policy.py packed_verifier.py serving_request_factory.py pooled_attention_replay.py \
+              serving_c2_contract.py test_serving_c2_contract.py test_serving_fast_policy.py qwen_c2_profiles.json \
+              qwen_c2_boot.py; do
+            cp "scripts/ci/$file" "$ctx/ci/"
+          done
+          cp -r docker/qwen-c2-graft/graft "$ctx/graft"
+          cp docker/qwen-c2-graft/graft.sha256 docker/qwen-c2-graft/source.sha256 "$ctx/"
+          tar -czf "$RUNNER_TEMP/c2ctx.tgz" -C "$ctx" .
+          bash scripts/ci/build-c2-serving-image.sh "$RUNNER_TEMP/c2ctx.tgz" "$TAG" 2>&1 | tee "$RUNNER_TEMP/c2-results/build.log"
+      - name: Smoke on cards M+A
+        if: contains(steps.job.outputs.actions, 'smoke')
+        working-directory: c2
+        timeout-minutes: 70
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+          PROFILE: ${{ steps.job.outputs.profile }}
+          TESTS: ${{ steps.job.outputs.tests }}
+        run: |
+          set -euo pipefail
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          results="$RUNNER_TEMP/c2-results"
+          name=qwen-c2-smoke
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
+          echo "card M $m, card A $a"
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to open M+A under it" >&2; exit 1
+          fi
+          docker rm -f "$name" >/dev/null 2>&1 || true
+          holders=$(sudo -n fuser "$m" "$a" 2>/dev/null | tr -s ' ' || true)
+          if [ -n "${holders// /}" ]; then
+            echo "M or A is held by: $holders" >&2; sudo -n fuser -v "$m" "$a" >&2 || true; exit 1
+          fi
+          trap 'docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          # The node agent's container shape (Thatch.Server.Compute container/adapter.rs), with a p300
+          # descriptor and QWEN36_BATCHED_DECODE_MODE the contract must undo, and a platform-style argv.
+          docker run -d --name "$name" --read-only \
+            --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
+            --tmpfs /root/.cache/ttnn:rw,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,size=8g \
+            --shm-size 4g --memory 80g --cpus 8 --device "$m" --device "$a" \
+            -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
+            -v /home/thatch/hf-cache/hub:/models -e HF_HOME=/models -e HF_HUB_CACHE=/models \
+            -e MESH_DEVICE=P300 -e QWEN36_BATCHED_DECODE_MODE=host -e VLLM_RPC_TIMEOUT=100000 \
+            -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto \
+            -e QWEN_C2_PROFILE="$PROFILE" -p 127.0.0.1:8010:8000 \
+            --entrypoint python3 "$image" -m vllm.entrypoints.openai.api_server \
+            --model Qwen/Qwen3.8-27B --served-model-name Qwen/Qwen3.8-27B --host 0.0.0.0 --port 8000 \
+            --reasoning-parser qwen3 --tool-call-parser qwen3_xml --enable-auto-tool-choice \
+            --max-model-len 65536 --max-num-seqs 2 --block-size 64 --no-enable-prefix-caching \
+            --additional-config '{"tt": {"l1_small_size": 24576, "fabric_config": "FABRIC_1D", "trace_region_size": 1073741824}}'
+          started=$(date +%s); ready=0
+          for i in $(seq 1 240); do
+            if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" != true ]; then
+              echo "container exited: $(docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' "$name")" >&2
+              docker logs --tail 80 "$name" >&2 || true; exit 1
+            fi
+            if curl -fsS -m 5 http://127.0.0.1:8010/v1/models > "$results/models.json" 2>/dev/null; then ready=1; break; fi
+            sleep 15
+          done
+          echo "ready=$ready after $(( $(date +%s) - started )) s"; cat "$results/models.json" || true
+          docker logs "$name" 2>&1 | grep -F '[QWEN-C2]' || true
+          [ "$ready" = 1 ] || { docker logs --tail 120 "$name" >&2; exit 1; }
+          python3 scripts/ci/c2_serving_smoke.py http://127.0.0.1:8010 Qwen/Qwen3.8-27B "$TESTS" \
+            "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')/typing.py" \
+            scripts/ci/build-c2-serving-image.sh 2>&1 | tee "$results/smoke.log"
+          docker stats --no-stream "$name" | tee "$results/stats.txt" || true
+          grep -F '[PINDIAG] dram after' <(docker logs "$name" 2>&1) | tail -8 || true
+      - name: Push
+        if: contains(steps.job.outputs.actions, 'push')
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          docker push "$image" | tail -3
+          echo "pushed $(docker image inspect "$image" --format '{{index .RepoDigests 0}}')"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: c2-serving-${{ github.run_id }}
+          path: ${{ runner.temp }}/c2-results
+          if-no-files-found: ignore
