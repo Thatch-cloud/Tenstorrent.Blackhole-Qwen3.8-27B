@@ -500,6 +500,41 @@ class VariableUserArmTests(unittest.TestCase):
         self.assertEqual(both.stdout, '-e|QWEN_FAST_PAIR_MASK_REFRESH=1|-e|QWEN_FAST_PADDED_PROBE=1|')
 
 
+class QuadDraftArmTests(unittest.TestCase):
+    """Q4: M3NATIVE_QUAD_DRAFT[_AUDIT], _QUAD_SDPA and _QUAD_CONV cross as QWEN_FAST_QUAD_DRAFT[...], right after the
+    pair fold's line, before the entrypoint; unset, nothing crosses. quad_draft reads them (baked: both image copy
+    lists, test_quad_draft.ShippingTests) and so does the gate; the arm's refusals are test_quad_draft.ArmTests."""
+
+    LINES = ('${M3NATIVE_QUAD_DRAFT:+-e QWEN_FAST_QUAD_DRAFT=1}',
+             '${M3NATIVE_QUAD_DRAFT_AUDIT:+-e QWEN_FAST_QUAD_DRAFT_AUDIT=$M3NATIVE_QUAD_DRAFT_AUDIT}',
+             '${M3NATIVE_QUAD_SDPA:+-e QWEN_FAST_QUAD_SDPA=$M3NATIVE_QUAD_SDPA}',
+             '${M3NATIVE_QUAD_CONV:+-e QWEN_FAST_QUAD_CONV=$M3NATIVE_QUAD_CONV}')
+    NAMES = ('QWEN_FAST_QUAD_DRAFT', 'QWEN_FAST_QUAD_DRAFT_AUDIT', 'QWEN_FAST_QUAD_SDPA', 'QWEN_FAST_QUAD_CONV')
+
+    def test_the_four_switches_cross_after_the_pair_fold_before_the_entrypoint(self):
+        text = arm_text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(), '${M3NATIVE_PAIR_ROW_EXACT:+-e QWEN_FAST_PAIR_ROW_EXACT=1} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92))
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+
+    def test_the_container_side_reads_the_names_that_cross(self):
+        import quad_draft
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        module = (HERE / 'quad_draft.py').read_text(encoding='utf-8')
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                self.assertIn("'%s'" % name, gate)
+                self.assertIn("'%s'" % name, module)
+        self.assertEqual((quad_draft.FLAG, quad_draft.AUDIT_FLAG, quad_draft.SDPA_FLAG, quad_draft.CONV_FLAG), self.NAMES)
+        through = re.findall(r'-e (QWEN_FAST_QUAD_\w*)=', arm_text())
+        self.assertEqual(sorted(through), sorted(self.NAMES))
+
+
 class ServingPairArmTests(unittest.TestCase):
     """The gate mounts only the serving pair, found by board id (card M, card A), never every
     /dev/tenstorrent node: with the third board back a container would otherwise see three devices."""

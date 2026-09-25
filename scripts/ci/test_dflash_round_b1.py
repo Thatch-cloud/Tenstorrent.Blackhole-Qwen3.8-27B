@@ -1356,7 +1356,7 @@ class ShippingTests(unittest.TestCase):
 
     CHANGED = ('dflash_packed_proposal.py', 'dflash_packed_proposal_coordinator.py', 'dflash_proposal_trace.py',
                'dflash_batched_mask.py', 'dflash_device.py', 'draft_kv_history.py', 'dflash_traced_publish.py',
-               'serving_packed_step.py')
+               'serving_packed_step.py', 'quad_draft.py')
     # Carries B1 code but is not an image module: the arm bind-mounts the checkout's gate.
     GATE = ('lever_n_m3native_gate.py',)
     # Ship from the frozen bundle, in neither copy list: an edit to one never reaches the rig.
@@ -1426,12 +1426,20 @@ class ShippingTests(unittest.TestCase):
             source = (HERE / name).read_text(encoding='utf-8')
             if name == 'dflash_batched_mask.py':
                 continue
+            if name == 'quad_draft.py':
+                # Q4 runs only under QWEN_FAST_QUAD_DRAFT, which refuses (disables the quad) unless every one of
+                # its REQUIRED_FLAGS, QWEN_FAST_ROUND_B1 among them, is 1.
+                with self.subTest(module=name):
+                    self.assertIn("REQUIRED_FLAGS = ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PAIR_ROW_EXACT', "
+                                  "'QWEN_FAST_ROUND_B1',", source)
+                continue
             with self.subTest(module=name):
                 self.assertTrue("os.environ.get('QWEN_FAST_ROUND_B1') == '1'" in source or 'round_b1_enabled()' in source
                                 or 'ROUND_B1_FLAG' in source)
         callers = sorted(path.name for path in HERE.glob('*.py')
                          if not path.name.startswith('test_') and 'live_key_rope_from' in path.read_text(encoding='utf-8'))
-        self.assertEqual(callers, ['dflash_batched_mask.py', 'dflash_proposal_trace.py'])
+        # quad_draft.quad_rope: the quad's own update, which runs only with QWEN_FAST_ROUND_B1 required.
+        self.assertEqual(callers, ['dflash_batched_mask.py', 'dflash_proposal_trace.py', 'quad_draft.py'])
 
 
 if __name__ == '__main__':

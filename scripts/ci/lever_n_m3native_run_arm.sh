@@ -663,6 +663,52 @@ if [ -n "$pair_row_value" ]; then
   fi
   echo "pair row exact 1"
 fi
+# Q4, the four-user 64-row draft pass (quad_draft.py; default off). M3NATIVE_QUAD_DRAFT=1 becomes
+# QWEN_FAST_QUAD_DRAFT=1: in a round with all four users live and packable one 64-row pass replaces the two pair
+# passes; 3-live and 2-live rounds keep the pairs. It serves four concurrent users only and needs the pairs it
+# replaces and what it reads: M3NATIVE_PACKED_PROPOSAL=1, M3NATIVE_PAIR_ROW_EXACT=1 (its SDPA is built from the pair
+# fold), M3NATIVE_ROUND_B1=1 (the batched selection) and M3NATIVE_FUSED_COMMIT_LIVE_BANKS=1 (the pool's live banks).
+# M3NATIVE_QUAD_SDPA=fold|pairs, M3NATIVE_QUAD_CONV=110|80|halves (defaults fold and 110, what Q0 proved on card B)
+# and M3NATIVE_QUAD_DRAFT_AUDIT=all|<N> (the shadow audit: a correctness arm, never a timed one) need the flag. The
+# module is baked, so an image without it fails the gate's '[PINDIAG] quad draft engaged' requirement. Refused here,
+# before the docker run; unset, nothing is passed.
+quad_value="${M3NATIVE_QUAD_DRAFT:-}"
+if [ -n "$quad_value" ] && [ "$quad_value" != "1" ]; then
+  echo "M3NATIVE_QUAD_DRAFT must be 1 or unset, got '$quad_value'" >&2
+  exit 1
+fi
+if [ -z "$quad_value" ] && [ -n "${M3NATIVE_QUAD_SDPA:-}${M3NATIVE_QUAD_CONV:-}${M3NATIVE_QUAD_DRAFT_AUDIT:-}" ]; then
+  echo "M3NATIVE_QUAD_SDPA / _CONV / _DRAFT_AUDIT without M3NATIVE_QUAD_DRAFT=1 do nothing: set it or none" >&2
+  exit 1
+fi
+if [ -n "$quad_value" ]; then
+  if [ "$users" != "4" ] || [ -n "${M3NATIVE_SEQUENTIAL_USERS:-}" ]; then
+    echo "M3NATIVE_QUAD_DRAFT serves four concurrent users only (users=$users, sequential '${M3NATIVE_SEQUENTIAL_USERS:-}')" >&2
+    exit 1
+  fi
+  for quad_need in M3NATIVE_PACKED_PROPOSAL M3NATIVE_PAIR_ROW_EXACT M3NATIVE_ROUND_B1 M3NATIVE_FUSED_COMMIT_LIVE_BANKS; do
+    if [ "${!quad_need:-}" != "1" ]; then
+      echo "M3NATIVE_QUAD_DRAFT=1 needs $quad_need=1 (the pairs it replaces and what it reads)" >&2
+      exit 1
+    fi
+  done
+  case "${M3NATIVE_QUAD_SDPA:-fold}" in
+    fold|pairs) ;;
+    *) echo "M3NATIVE_QUAD_SDPA must be fold or pairs, got '${M3NATIVE_QUAD_SDPA}'" >&2
+       exit 1 ;;
+  esac
+  case "${M3NATIVE_QUAD_CONV:-110}" in
+    110|80|halves) ;;
+    *) echo "M3NATIVE_QUAD_CONV must be 110, 80 or halves, got '${M3NATIVE_QUAD_CONV}'" >&2
+       exit 1 ;;
+  esac
+  quad_audit="${M3NATIVE_QUAD_DRAFT_AUDIT:-}"
+  if [ -n "$quad_audit" ] && [ "$quad_audit" != "all" ] && ! printf '%s' "$quad_audit" | grep -Eq '^[1-9][0-9]*$'; then
+    echo "M3NATIVE_QUAD_DRAFT_AUDIT must be all or a positive count, got '$quad_audit'" >&2
+    exit 1
+  fi
+  echo "quad draft 1 sdpa ${M3NATIVE_QUAD_SDPA:-fold} conv ${M3NATIVE_QUAD_CONV:-110} audit ${quad_audit:-none}"
+fi
 start_order="${M3NATIVE_START_ORDER:-}"
 if [ -n "$start_order" ]; then
   if ! printf '%s' "$start_order" | grep -Eq '^[0-9]+(,[0-9]+)*$'; then
@@ -869,6 +915,10 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_EARLY_DRAFT:+-e QWEN_FAST_EARLY_DRAFT=1} \
   ${M3NATIVE_GDN_AFTER_PAIRS:+-e QWEN_FAST_GDN_AFTER_PAIRS=1} \
   ${M3NATIVE_PAIR_ROW_EXACT:+-e QWEN_FAST_PAIR_ROW_EXACT=1} \
+  ${M3NATIVE_QUAD_DRAFT:+-e QWEN_FAST_QUAD_DRAFT=1} \
+  ${M3NATIVE_QUAD_DRAFT_AUDIT:+-e QWEN_FAST_QUAD_DRAFT_AUDIT=$M3NATIVE_QUAD_DRAFT_AUDIT} \
+  ${M3NATIVE_QUAD_SDPA:+-e QWEN_FAST_QUAD_SDPA=$M3NATIVE_QUAD_SDPA} \
+  ${M3NATIVE_QUAD_CONV:+-e QWEN_FAST_QUAD_CONV=$M3NATIVE_QUAD_CONV} \
   ${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1} \
   ${M3NATIVE_GDN_PREFILL_CONV:+-e QWEN_FAST_GDN_PREFILL_CONV=1} \
   ${M3NATIVE_GDN_PREFILL_CONV_AUDIT:+-e QWEN_FAST_GDN_PREFILL_CONV_AUDIT=$M3NATIVE_GDN_PREFILL_CONV_AUDIT} \

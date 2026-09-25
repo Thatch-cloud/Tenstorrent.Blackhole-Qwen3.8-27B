@@ -1037,6 +1037,145 @@ def pair_row_exact_markers(environ, users):
     return {}
 
 
+# Q4, the four-user 64-row draft pass (quad_draft.py; QWEN_FAST_QUAD_DRAFT, default off; needs four users and
+# QWEN_FAST_PACKED_PROPOSAL, _PAIR_ROW_EXACT, _ROUND_B1 and _FUSED_COMMIT_LIVE_BANKS). It promises
+# '[PINDIAG] quad draft engaged slots=[0,1,2,3] heads=64/16 rows=64 sdpa=S conv=C', logged EXACTLY once, after the
+# first quad bucket captured and replayed, and under QWEN_FAST_PACKED_AUDIT one '[QUAD-DRAFT] round=R built=B ms=X'
+# per quad round. A fallback ('[QUAD-DRAFT] fallback round=R reason=...': a failed build or replay, or too little
+# DRAM for a fresh build) or '[PINDIAG] quad draft disabled' (two failures in a row, or a missing requirement)
+# fails the arm: a quad that quietly served pairs would otherwise pass as a quad arm. The quad serves every round
+# with four packable users, so over at least QUAD_FLOOR_ROUNDS four-user rounds ('[PACKED-SELECT] ... users=4')
+# it must serve QUAD_SHARE_FLOOR of them, and at least one as soon as there is one. Both kinds of line are logged
+# only under QWEN_FAST_PACKED_AUDIT=1 (the arm always passes it), so the flag needs it: without it this count
+# would pass on no lines at all. The marker must name the modes the arm asked for (QWEN_FAST_QUAD_SDPA, default
+# fold; QWEN_FAST_QUAD_CONV, default 110), over slots 0-3 at 64 rows: an image whose defaults differ, or a sub-flag
+# that never reached the server, would otherwise pass as the arm it was not. '0' or unset with no sub-flag is off:
+# no report, the parent's output.
+# QWEN_FAST_QUAD_DRAFT_AUDIT=all|N: one '[QUAD-AUDIT] round=R equal=E stage=S users=4 checks=C' per audited quad
+# round (all of them, or the first N): every line equal=1, and as many lines as audited rounds. The audited rounds
+# are counted from the round lines, so the audit needs QWEN_FAST_PACKED_AUDIT=1 (without it zero lines would match
+# zero counted rounds), and it must cover at least QUAD_AUDIT_FLOOR rounds (N, if N is smaller): plan Q3.1's
+# '[QUAD-AUDIT] lines = quad rounds, at least 20' - a run with a handful of four-user rounds proves nothing.
+QUAD_DRAFT_FLAG = 'QWEN_FAST_QUAD_DRAFT'
+QUAD_SDPA_FLAG = 'QWEN_FAST_QUAD_SDPA'
+QUAD_CONV_FLAG = 'QWEN_FAST_QUAD_CONV'
+QUAD_AUDIT_FLAG = 'QWEN_FAST_QUAD_DRAFT_AUDIT'
+QUAD_MARKER = '[PINDIAG] quad draft engaged'
+QUAD_DISABLED_MARKER = '[PINDIAG] quad draft disabled'
+QUAD_FALLBACK_MARKER = '[QUAD-DRAFT] fallback'
+QUAD_ROUND_LINE = re.compile(r'\[QUAD-DRAFT\] round=([0-9]+) built=([01]) ms=([0-9.]+)')
+QUAD_AUDIT_LINE = re.compile(r'\[QUAD-AUDIT\] round=([0-9]+|None) equal=([01]) stage=(\S+) users=([0-9]+) checks=([0-9]+)')
+QUAD_MASK_LINE = re.compile(r'\[QUAD-DRAFT\] mask round=(\S+) intact=([01]) mismatched=([0-9]+) chip=([0-9]+)')
+QUAD_ENGAGED_LINE = re.compile(r'\[PINDIAG\] quad draft engaged slots=\[([0-9,]+)\] heads=(\S+) rows=([0-9]+) '
+                               r'sdpa=(\S+) conv=(\S+)')
+FOUR_USER_SELECT = re.compile(r'\[PACKED-SELECT\] round=([0-9]+) pairs=.*? users=4 ')
+QUAD_FLOOR_ROUNDS = 10
+QUAD_SHARE_FLOOR = 0.95
+QUAD_AUDIT_FLOOR = 20
+
+
+def quad_draft_markers(environ, users):
+    """{flag: [marker]} for QWEN_FAST_QUAD_DRAFT when `environ` sets it on a four-user arm."""
+    if environ.get(QUAD_DRAFT_FLAG) == '1' and users == 4:
+        return {QUAD_DRAFT_FLAG: [QUAD_MARKER]}
+    return {}
+
+
+def quad_draft_summary(log_text):
+    """What the quad's lines say: the marker count, its rounds (and builds), the four-user rounds, fallbacks,
+    disables, the audit lines and the mask read-backs."""
+    rounds = [match.groups() for match in QUAD_ROUND_LINE.finditer(log_text)]
+    audits = [match.groups() for match in QUAD_AUDIT_LINE.finditer(log_text)]
+    masks = [match.groups() for match in QUAD_MASK_LINE.finditer(log_text)]
+    ms = sorted(float(line[2]) for line in rounds if line[1] == '0')
+    return dict(
+        markers=log_text.count(QUAD_MARKER), rounds=len(rounds), builds=sum(1 for line in rounds if line[1] == '1'),
+        four_user_rounds=len(FOUR_USER_SELECT.findall(log_text)),
+        fallbacks=log_text.count(QUAD_FALLBACK_MARKER), disabled=log_text.count(QUAD_DISABLED_MARKER),
+        audits=len(audits), audits_equal=sum(1 for line in audits if line[1] == '1'),
+        audit_stages=sorted({line[2] for line in audits if line[1] != '1'}),
+        prepare_ms_median=ms[len(ms) // 2] if ms else None,
+        masks=len(masks), masks_clobbered=sum(1 for line in masks if line[1] == '0'))
+
+
+def quad_draft_report(environ, users, log_text):
+    """The summary and its problems (under 'problems'); None with the flag off ('0' or unset) and no sub-flag."""
+    names = (QUAD_DRAFT_FLAG, QUAD_SDPA_FLAG, QUAD_CONV_FLAG, QUAD_AUDIT_FLAG)
+    if environ.get(QUAD_DRAFT_FLAG) in (None, '', '0') and not any(environ.get(name) for name in names[1:]):
+        return None
+    summary = quad_draft_summary(log_text)
+    problems = []
+    flag = environ.get(QUAD_DRAFT_FLAG)
+    if flag not in (None, '0', '1'):
+        problems.append('%s: 0 or 1, not %r' % (QUAD_DRAFT_FLAG, flag))
+    if flag != '1':
+        if any(environ.get(name) for name in names[1:]):
+            problems.append('%s / %s / %s without %s=1 do nothing' % (QUAD_SDPA_FLAG, QUAD_CONV_FLAG, QUAD_AUDIT_FLAG,
+                                                                       QUAD_DRAFT_FLAG))
+        summary['problems'] = problems
+        return summary
+    if users != 4:
+        problems.append('%s serves four users only (users=%d)' % (QUAD_DRAFT_FLAG, users))
+    for name in ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PAIR_ROW_EXACT', 'QWEN_FAST_ROUND_B1',
+                 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS'):
+        if environ.get(name) != '1':
+            problems.append('%s needs %s=1' % (QUAD_DRAFT_FLAG, name))
+    if environ.get('QWEN_FAST_PACKED_AUDIT') != '1':
+        problems.append('%s needs QWEN_FAST_PACKED_AUDIT=1: its [QUAD-DRAFT] round lines and the four-user '
+                        '[PACKED-SELECT] rounds they are counted against are logged only under it' % QUAD_DRAFT_FLAG)
+    if summary['markers'] > 1:
+        problems.append('%s: the marker is logged %d times, not once' % (QUAD_DRAFT_FLAG, summary['markers']))
+    engaged = QUAD_ENGAGED_LINE.search(log_text)
+    if engaged is not None:
+        sdpa = environ.get(QUAD_SDPA_FLAG) or 'fold'
+        wanted = dict(slots='0,1,2,3', heads='64/16' if sdpa == 'fold' else '32/8x2', rows='64', sdpa=sdpa,
+                      conv=environ.get(QUAD_CONV_FLAG) or '110')
+        summary['engaged'] = dict(zip(('slots', 'heads', 'rows', 'sdpa', 'conv'), engaged.groups()))
+        differ = [name for name in wanted if summary['engaged'][name] != wanted[name]]
+        if differ:
+            problems.append('%s: the marker reads %s, not the %s the arm asked for' % (
+                QUAD_DRAFT_FLAG, ' '.join('%s=%s' % (name, summary['engaged'][name]) for name in differ),
+                ' '.join('%s=%s' % (name, wanted[name]) for name in differ)))
+    elif summary['markers']:
+        problems.append('%s: the marker does not name its slots, heads, rows, sdpa and conv' % QUAD_DRAFT_FLAG)
+    if summary['disabled']:
+        first = next(line for line in log_text.splitlines() if QUAD_DISABLED_MARKER in line)
+        problems.append('%s: the quad gave up (%s)' % (QUAD_DRAFT_FLAG, first[-160:]))
+    if summary['fallbacks']:
+        first = next(line for line in log_text.splitlines() if QUAD_FALLBACK_MARKER in line)
+        problems.append('%s: %d round(s) fell back to the pairs (first: %s)' % (QUAD_DRAFT_FLAG, summary['fallbacks'],
+                                                                                first[-160:]))
+    four = summary['four_user_rounds']
+    if environ.get('QWEN_FAST_PACKED_AUDIT') == '1' and four:
+        if not summary['rounds']:
+            problems.append('%s: no quad round in %d four-user round(s)' % (QUAD_DRAFT_FLAG, four))
+        elif four >= QUAD_FLOOR_ROUNDS and summary['rounds'] < QUAD_SHARE_FLOOR * four:
+            problems.append('%s: %d quad rounds in %d four-user rounds (%.2f), under %.2f' % (
+                QUAD_DRAFT_FLAG, summary['rounds'], four, summary['rounds'] / four, QUAD_SHARE_FLOOR))
+    audit = environ.get(QUAD_AUDIT_FLAG)
+    if audit:
+        if audit != 'all' and not (audit.isdigit() and audit == str(int(audit)) and int(audit) >= 1):
+            problems.append("%s: 'all' or a positive count, not %r" % (QUAD_AUDIT_FLAG, audit))
+        elif environ.get('QWEN_FAST_PACKED_AUDIT') != '1':
+            problems.append('%s needs QWEN_FAST_PACKED_AUDIT=1: its [QUAD-DRAFT] round lines count the audited '
+                            'rounds' % QUAD_AUDIT_FLAG)
+        else:
+            expected = summary['rounds'] if audit == 'all' else min(int(audit), summary['rounds'])
+            if summary['audits'] != expected:
+                problems.append('%s: %d audit lines for %d audited quad rounds' % (QUAD_AUDIT_FLAG, summary['audits'],
+                                                                                  expected))
+            floor = QUAD_AUDIT_FLOOR if audit == 'all' else min(QUAD_AUDIT_FLOOR, int(audit))
+            if summary['audits'] < floor:
+                problems.append('%s: %d audited quad round(s), under the %d an audit arm needs' % (
+                    QUAD_AUDIT_FLAG, summary['audits'], floor))
+            if summary['audits_equal'] != summary['audits']:
+                first = next(match.group(0) for match in QUAD_AUDIT_LINE.finditer(log_text) if match.group(2) != '1')
+                problems.append('%s: %d audit line(s) not equal (first: %s)' % (
+                    QUAD_AUDIT_FLAG, summary['audits'] - summary['audits_equal'], first[:200]))
+    summary['problems'] = problems
+    return summary
+
+
 def required_flag_markers(environ, users, prompt_tokens=None):
     """The markers the flags in `environ` promise, as {flag: [marker, ...]}. prompt_tokens (each user's
     prompt; None: unknown) decides whether QWEN_FAST_SDPA_PF's 2048-row topology is promised."""
@@ -1065,6 +1204,7 @@ def required_flag_markers(environ, users, prompt_tokens=None):
     required.update(h1b_markers(environ))
     required.update(h2_markers(environ))
     required.update(pair_row_exact_markers(environ, users))
+    required.update(quad_draft_markers(environ, users))
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
@@ -1172,6 +1312,11 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
     # K5-A: under 'gdn_seq_block' only when one of its flags is set.
     if seq_block is not None:
         variable_user['gdn_seq_block'] = {key: value for key, value in seq_block.items() if key != 'problems'}
+    # Q4: under 'quad_draft' only when one of its flags is set.
+    quad = quad_draft_report(environ, users, log_text)
+    if quad is not None:
+        missing.extend(quad.pop('problems'))
+        variable_user['quad_draft'] = quad
     residual = LEDGER_RESIDUAL.search(log_text)
     return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
                 prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary, verify_t1_sites=verify_t1_sites,

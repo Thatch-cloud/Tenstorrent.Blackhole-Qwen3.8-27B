@@ -92,6 +92,11 @@ COPY scripts/ci/early_draft.py /experiment-scripts/ci/
 # The pair drafter's row-1 fix (QWEN_FAST_PAIR_ROW_EXACT, default off): dflash_proposal_trace, draft_attention_branch
 # and dflash_packed_proposal import pair_row_exact when the flag is set, so it must reach the image beside them.
 COPY scripts/ci/pair_row_exact.py /experiment-scripts/ci/
+# Q4, the four-user 64-row draft pass (QWEN_FAST_QUAD_DRAFT, default off): the packed proposal coordinator,
+# dflash_device and the draft branches import quad_draft when the flag is set, and it drives the SIBLING
+# quad_conv_io.cpp (the card-B probed 64-row conv I/O kernel, sha256-pinned in quad_draft.CONV_KERNEL_SHA256),
+# so both travel here.
+COPY scripts/ci/quad_draft.py scripts/ci/quad_conv_io.cpp /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

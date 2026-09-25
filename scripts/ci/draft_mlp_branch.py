@@ -46,7 +46,7 @@ def prepare_mlp_branch(operations, mesh, weights, convolution, retain):
 
 
 def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convolution, retain, *, parameters=None,
-                       trace_safe=False, convolution_operation=None, boundaries=None, observe=None):
+                       trace_safe=False, convolution_operation=None, boundaries=None, observe=None, quad=None):
     convolve = convolution_operation or grouped_causal_convolution
     # QWEN_FAST_PROPOSAL_AUDIT (dflash_device.ProposalAudit): `observe(name, tensor)` reads
     # a replicated intermediate back from both chips at the stage that made it. None,
@@ -57,7 +57,14 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
         return value
 
     seams = {} if boundaries is None else dict(boundaries=boundaries)
-    if tuple(hidden.shape) != (1, 1, 32, 5120) or hidden.dtype != operations.bfloat16:
+    # QWEN_FAST_QUAD_DRAFT (quad_draft.py): the 64-row block of four packed users, trace-owned only; None, the
+    # default and the only value with the flag off, keeps every call below as it was.
+    rows = 32
+    if quad is not None:
+        if not trace_safe or boundaries is None:
+            raise ValueError('The quad draft pass is a trace-owned packed block')
+        rows = quad.rows
+    if tuple(hidden.shape) != (1, 1, rows, 5120) or hidden.dtype != operations.bfloat16:
         raise ValueError('A padded32-row BF16 hidden block is required')
     if parameters is None:
         parameters = prepare_mlp_branch(operations, mesh, weights, convolution, retain)
@@ -69,7 +76,7 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
 
     def project(value, weight, grid, columns):
         program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=grid,
-            in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=columns,
+            in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=rows // 32, per_core_N=columns,
             fuse_batch=True, fused_activation=None, mcast_in0=True)
         return retain(operations.matmul(value, weight, dtype=operations.float32, program_config=program,
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
@@ -78,7 +85,7 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
         compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
     projected = project(normalized, parameters['device_conv'], (8, 5), 1)
     rounded = watch('conv-kernels', retain(operations.typecast(projected, operations.bfloat16)))
-    dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, 32, (offset + 1) * 320)))
+    dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, rows, (offset + 1) * 320)))
         for offset in range(4)]
     bases = parameters['bases']
     prepared = watch('conv-in', retain(convolve(operations, mesh, normalized, dynamic[:2], bases[:2], fp32_intermediates=True, **ownership, **seams)))
@@ -86,7 +93,8 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
         for index in range(2)]
     activation = swiglu_device(operations, *projections, retain)
     partial = project(activation, parameters['device_projections'][2], (8, 10), 2)
-    reduced = watch('reduced', retain(gather_add_projection(operations, mesh, collectives, partial, **ownership,
+    gather = gather_add_projection if quad is None else quad.gather_add_projection
+    reduced = watch('reduced', retain(gather(operations, mesh, collectives, partial, **ownership,
         **(dict(observe=observe) if observe is not None else {}))))
     rounded_output = retain(operations.typecast(reduced, operations.bfloat16))
     finished = watch('conv-out', retain(convolve(operations, mesh, rounded_output, dynamic[2:], bases[2:], fp32_intermediates=True, **ownership, **seams)))

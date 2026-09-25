@@ -58,7 +58,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 def execute_attention_branch(operations, mesh, collectives, hidden, history, mask, rope, retain, *,
                              parameters, context, pack=None, wide_dot_placement=False, convolution_operation=None,
                              cached_history=None, live_query_mask_validated=False, native_proposal_mask_validated=False,
-                             observe=None, row_exact=False):
+                             observe=None, row_exact=False, quad=None):
     convolve = convolution_operation or grouped_causal_convolution
     # QWEN_FAST_PROPOSAL_AUDIT (dflash_device.ProposalAudit): `observe(name, tensor)` reads
     # a replicated intermediate back from both chips at the stage that made it. None,
@@ -103,11 +103,20 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         if context is not None or cached_history is None or not parameters.get('native_proposal_attention'):
             raise ValueError('Packed users replace the single context and require the cached native proposal path')
         pack, contexts = user_contexts(pack)
-        plan, spans, key_rows = key_value_plan(contexts, block_rows)
+        # QWEN_FAST_QUAD_DRAFT (quad_draft.py): four users' 12-piece plan, each pad from its own pair's rows.
+        plan, spans, key_rows = (key_value_plan if quad is None else quad.key_value_plan)(contexts, block_rows)
         seams['boundaries'] = tuple((span['rows'].start, span['rows'].stop) for span in spans)
         if len(cached_history) != len(pack):
             raise ValueError('One committed K/V cache per packed user required')
     mask_rows = key_rows
+    proposal_rows = 32
+    if quad is not None:
+        # QWEN_FAST_QUAD_DRAFT (quad_draft.py): the 64-row block of four packed users, its SDPA folded from the
+        # pair fold (quad.attention), so the mask is again the single-user (1, 1, 32, 2080) one. None, the default
+        # and the only value with the flag off, changes nothing here.
+        if spans is None or row_exact is not False or not parameters.get('native_proposal_attention'):
+            raise ValueError('The quad draft pass serves four packed users on the native proposal path only')
+        proposal_rows, mask_rows = quad.rows, quad.mask_rows
     if row_exact is not False:
         # QWEN_FAST_PAIR_ROW_EXACT (pair_row_exact.py): the pair's draft SDPA is folded, one KV head per user
         # segment, so each user's rows attend exactly as they would alone; the mask is then the single-user
@@ -123,13 +132,16 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     # of DRAM, so packed callers may pass None. At one user it stays required, which
     # keeps the shipped path's geometry check exactly as it was.
     unused_history = pack is not None and cached_history is not None
-    if (tuple(hidden.shape) != (1, 1, 32, 5120) or hidden.dtype != operations.bfloat16
+    if (tuple(hidden.shape) != (1, 1, proposal_rows, 5120) or hidden.dtype != operations.bfloat16
             or (not unused_history and (history is None or tuple(history.shape) != (1, 1, key_rows, 5120)
                 or history.dtype != operations.bfloat16))
             or (unused_history and history is not None)
             or tuple(mask.shape) != (1, 1, 32, mask_rows) or mask.dtype != operations.bfloat16):
         raise ValueError('Padded BF16 proposal, context and mask geometry required')
     expected = {'q': 32, 'k': key_rows} if spans is None else {'q': 32, 'k': key_rows, 'live_k': 32}
+    if quad is not None:
+        # Nothing reads rope['k'] on the packed cached path (the pair's C8 cut), and the quad uploads none.
+        expected = {'q': proposal_rows, 'live_k': proposal_rows}
     if set(rope) != set(expected) or any(len(rope[name]) != 2 or any(
             tuple(table.shape) != (1, 1, expected[name], 128)
             or table.dtype != operations.bfloat16 for table in rope[name]) for name in expected):
@@ -157,9 +169,9 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
 
     normalized = watch('normalized', retain(operations.rms_norm(hidden, epsilon=1e-6, weight=parameters['norm'],
         compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
-    projected = project(normalized, parameters['convolution'], (8, 5), 32, 1)
+    projected = project(normalized, parameters['convolution'], (8, 5), proposal_rows, 1)
     rounded = watch('conv-kernels', retain(operations.typecast(projected, operations.bfloat16)))
-    dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, 32, (offset + 1) * 320)))
+    dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, proposal_rows, (offset + 1) * 320)))
         for offset in range(4)]
     prepared = watch('conv-in', retain(convolve(operations, mesh, normalized, dynamic[:2], parameters['bases'][:2],
         fp32_intermediates=True, retain_temporaries=retain, **seams)))
@@ -173,7 +185,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     if cached_history is not None:
         from draft_kv_projection import project_key_value
 
-        query = retain(operations.typecast(project(prepared, parameters['projections']['q'], (8, 8), 32, 1), operations.bfloat16))
+        query = retain(operations.typecast(project(prepared, parameters['projections']['q'], (8, 8), proposal_rows, 1), operations.bfloat16))
         if spans is None:
             valid = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
             proposal = retain(operations.pad(valid, [(0, 0), (0, 0), (0, 32 - block_rows), (0, 0)], 0.0))
@@ -183,7 +195,8 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             # is nothing to pad away and the caller supplies the 32 rows of key RoPE
             # already laid out in block order.
             proposal, tables = prepared, rope['live_k']
-        live = project_key_value(operations, proposal, query, tables, retain, parameters=parameters)
+        live = (project_key_value if quad is None else quad.project_key_value)(operations, proposal, query, tables,
+            retain, parameters=parameters)
         heads = dict(q=normalize_head('q', live['q']))
         for name in ('k', 'v'):
             if spans is None:
@@ -198,8 +211,9 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
                 # 'live' takes this user's own rows out of the shared block. 'pad'
                 # fills the tail of the segment, and any rows do: the mask covers
                 # them, exactly as it already covers the live rows beyond block_rows
-                # at one user today.
-                start = part['source'].start if part['kind'] == 'live' else 0
+                # at one user today. A pair's pads carry no 'source' (rows 0-15); the
+                # quad's name their pair's rows, so every segment is its pair's bytes.
+                start = part['source'].start if 'source' in part else 0
                 pieces.append(retain(operations.slice(live[name], (0, 0, start, 0),
                     (1, 4, start + part['rows'], 128))))
             heads[name] = retain(operations.concat(pieces, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
@@ -229,7 +243,11 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
                 heads[name] = normalize_head(name, heads[name])
     attention_owned = []
     try:
-        if row_exact:
+        if quad is not None:
+            # The four-way fold (or the pair fold per half) of quad_draft, on the assembled heads.
+            attention = quad.attention(operations, heads['q'], heads['k'], heads['v'], mask, retain,
+                                       mask_validated=True)
+        elif row_exact:
             from pair_row_exact import fold_attention
 
             # The same heads, keys and values, read as 32 query and 8 KV heads (pair_row_exact.py).
@@ -263,12 +281,13 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             retain(value)
     rounded = retain(operations.typecast(attention, operations.bfloat16))
     if parameters.get('native_head_layout'):
-        merged = concatenate_query_heads(operations, rounded, retain)
+        merged = (concatenate_query_heads if quad is None else quad.concatenate_query_heads)(operations, rounded, retain)
     else:
         transposed = retain(operations.transpose(rounded, 1, 2))
         merged = retain(operations.reshape(transposed, (1, 1, 32, 2048)))
-    partial = project(merged, parameters['output_projection'], (8, 10), 32, 2)
-    reduced = watch('reduced', retain(gather_add_projection(operations, mesh, collectives, partial, retain_temporaries=retain,
+    partial = project(merged, parameters['output_projection'], (8, 10), proposal_rows, 2)
+    gather = gather_add_projection if quad is None else quad.gather_add_projection
+    reduced = watch('reduced', retain(gather(operations, mesh, collectives, partial, retain_temporaries=retain,
         **(dict(observe=observe) if observe is not None else {}))))
     rounded = retain(operations.typecast(reduced, operations.bfloat16))
     finished = watch('conv-out', retain(convolve(operations, mesh, rounded, dynamic[2:], parameters['bases'][2:],

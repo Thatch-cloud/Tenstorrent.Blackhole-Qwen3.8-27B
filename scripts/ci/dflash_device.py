@@ -867,7 +867,8 @@ class DFlashDevice:
         self.pending = None
 
     def execute_proposal(self, identifiers, history, mask, rope, *, context, owned, retain, stage, audit=True,
-                         audit_convolution=False, cached_history=None, pack=None, observe=None, row_exact=False):
+                         audit_convolution=False, cached_history=None, pack=None, observe=None, row_exact=False,
+                         quad=None):
         operations = self.operations
         live_query_qk = getattr(self, 'live_query_qk', False)
         native_proposal_attention = getattr(self, 'native_proposal_attention', False)
@@ -896,12 +897,20 @@ class DFlashDevice:
                                        or not native_proposal_attention):
             # QWEN_FAST_PAIR_ROW_EXACT (pair_row_exact.py): the folded draft SDPA is a packed pair's only.
             raise ValueError('The folded pair SDPA serves a packed pair on the native proposal path only')
+        if quad is not None and (pack is None or len(pack) != 4 or row_exact is not False or cached_history is None
+                                 or not native_proposal_attention or audit_convolution
+                                 or not getattr(self, 'fused_convolution', False)):
+            # QWEN_FAST_QUAD_DRAFT (quad_draft.py): the 64-row pass of four packed users; None, the default and
+            # the only value with the flag off, changes nothing below.
+            raise ValueError('The quad draft pass serves four packed users on the native cached fused path only')
         # After the guards, so an unregistered mask or a bad audit request still fails
         # on its own terms rather than on a missing attribute.
         # Packed, every one of the 32 rows is a live proposal, so there is nothing to
         # pad away and nothing to trim off before the vocabulary head; and the causal
         # convolution must restart at each user's first row.
         rows = 32 if pack is not None else self.block_rows
+        if quad is not None:
+            rows = quad.rows
         seams = None if pack is None else tuple(
             (index * self.block_rows, (index + 1) * self.block_rows) for index in range(len(pack)))
         # QWEN_FAST_PROPOSAL_AUDIT (ProposalAudit): `observe(name, tensor)` reads a
@@ -928,11 +937,14 @@ class DFlashDevice:
             memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Linear,
             chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2))
         watch('embedding.gathered', hidden)
-        if rows != 32:
+        if rows < 32:
             hidden = watch('embedding.padded', retain(operations.pad(hidden, [(0, 0), (0, 0), (0, 32 - rows), (0, 0)], 0.0)))
         for layer, (attention, mlp, weights, convolution) in enumerate(self.layers):
             convolution_options = {}
-            if getattr(self, 'fused_convolution', False):
+            if quad is not None:
+                # E1b / E1 / halves at 64 rows (quad_draft.QuadPass.convolution); the fused path is required.
+                convolution_options['convolution_operation'] = quad.convolution
+            elif getattr(self, 'fused_convolution', False):
                 from draft_convolution_fused import checked_convolution
 
                 def convolve(*args, **kwargs):
@@ -948,21 +960,28 @@ class DFlashDevice:
                     **(dict(live_query_mask_validated=True) if live_query_qk else {}),
                     **(dict(native_proposal_mask_validated=True) if native_proposal_attention else {}),
                     **(dict(row_exact=True) if row_exact else {}),
+                    **(dict(quad=quad) if quad is not None else {}),
                     **(dict(cached_history=[cache[layer] for cache in cached_history] if pack is not None
                     else cached_history[layer]) if cached_history is not None else {}))
             stage('mlp', layer=layer)
             hidden = execute_mlp_branch(operations, self.mesh, self.collectives, hidden, weights, convolution,
                 retain, parameters=mlp, trace_safe=True, **convolution_options, **scoped('layer%d.mlp' % layer),
-                **(dict(boundaries=seams) if pack is not None else {}))['output']
+                **(dict(boundaries=seams) if pack is not None else {}),
+                **(dict(quad=quad) if quad is not None else {}))['output']
         stage('final-norm-and-selector-projection')
         normalized = watch('selector.normalized', retain(operations.rms_norm(hidden, epsilon=1e-6, weight=self.final_norm,
             compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
         program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 1),
-            in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=1,
-            fuse_batch=True, fused_activation=None, mcast_in0=True)
+            in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=1 if quad is None else rows // 32,
+            per_core_N=1, fuse_batch=True, fused_activation=None, mcast_in0=True)
         projected = watch('selector.projected-fp32', retain(operations.matmul(normalized, self.selector_projection, dtype=operations.float32,
             program_config=program, compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
         projected = watch('selector.features', retain(operations.typecast(projected, operations.bfloat16)))
+        if quad is not None:
+            # H0: today's head on each tile-aligned 32-row half, the candidates concatenated on dim 2.
+            stage('shared-full-vocabulary-head')
+            chunks = quad.head_candidates(operations, self.model, normalized, owned, retain)
+            return SimpleNamespace(projected=projected, chunks=chunks)
         block = watch('head.input', retain(operations.slice(normalized, (0, 0, 0, 0), (1, 1, rows, 5120))))
         stage('shared-full-vocabulary-head')
         chunks = shared_head_candidates(operations, self.model, block, owned)

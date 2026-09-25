@@ -77,6 +77,7 @@ jobs:
           python -B -m unittest test_fused_commit
           python -B -m unittest test_early_draft
           python -B -m unittest test_pair_row_exact
+          python -B -m unittest test_quad_draft
           python -B -m unittest discover -s optimisation/ttnn-op/pair_row_probe -p 'test_*.py'
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
