@@ -87,8 +87,8 @@ jobs:
           echo "=== diagnostics $d"; ls -lat "$d" 2>&1 | head -12
           for f in $(ls -t "$d" 2>/dev/null | head -4); do
             echo "--- $f"; cp "$d/$f" "$results/" 2>/dev/null || sudo -n cp "$d/$f" "$results/"
-            sed 's/\n/
-/g' "$d/$f" | grep -v -E '^\[[0-9a-f]+:[0-9]+\] \[ *[0-9]+\]' | tail -80
+            python3 -c 'import sys; sys.stdout.write(open(sys.argv[1], errors="replace").read().replace(chr(92) + "n", chr(10)))' "$d/$f" \
+              | grep -v -E '^\[[0-9a-f]+:[0-9]+\] \[ *[0-9]+\]' | tail -80
           done
           echo "=== agent"; journalctl --user -u thatch-node-agent --since -30min --no-pager 2>&1 | grep -v -i heartbeat | tail -40
       - name: Build
