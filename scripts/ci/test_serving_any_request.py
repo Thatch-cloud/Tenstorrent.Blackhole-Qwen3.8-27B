@@ -66,6 +66,26 @@ class FactoryTests(unittest.TestCase):
     """from_prefill through the existing factory fixture (fake engine, device and proposal, the
     real GreedySession and DFlashRequestRuntime)."""
 
+    def setUp(self):
+        # The attach-time source check has run in this process, as serving_runtime makes sure.
+        serving_request_factory._ATTACH_QUALIFICATION.clear()
+        serving_request_factory._ATTACH_QUALIFICATION['/attached'] = dict(report_sha256='r')
+        self.addCleanup(serving_request_factory._ATTACH_QUALIFICATION.clear)
+
+    def test_on_phase_zero_is_refused_for_the_engine_until_the_attach_check_has_run(self):
+        """An image whose serving_runtime predates attach_source_check would otherwise serve
+        with no source check at all. Configuration, so a plain ValueError (fatal), and before
+        the drafter or any other device work."""
+        serving_request_factory._ATTACH_QUALIFICATION.clear()
+        with self.assertRaisesRegex(ValueError, 'attach-time check never ran') as caught:
+            self.build(ON, capture_rows=4)
+        self.assertNotIsInstance(caught.exception, RequestRefused)
+        # the gate still guards engines that keep it, and off nothing changes
+        request, _, _, _ = self.build(ON, capture_rows=None)
+        request.close('request')
+        request, _, _, _ = self.build(OFF, capture_rows=4)
+        request.close('request')
+
     def build(self, environ, *, capture_rows=4, max_tokens=256, ignore_eos=False, blocks=65, prompt=4096,
               pages=None):
         case = test_serving_request_factory.RequestFactoryTests()

@@ -203,6 +203,16 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         budget = (request_budget(state.sampling_params, prompt_tokens=len(prompt), capacity=int(pages.shape[1]) * 64)
                   if any_request else OUTPUT_BUDGET)
         validate_initial_capture_pages(pages, state.block_ids[0], position=len(prompt), output_budget=budget)
+    # Phase 0 (below) builds the engine without the per-request T16 gate, whose source
+    # qualification then runs only at attach (attach_source_check, from serving_runtime). An
+    # image whose serving_runtime predates that call would serve without any source check at
+    # all, so Phase 0 is refused - for the engine, not the request: it is configuration - until
+    # the check has run in this process. Before any device work.
+    sequential = any_request and sequential_captures(capture_rows)
+    if sequential and not _ATTACH_QUALIFICATION:
+        raise ValueError('QWEN_FAST_ANY_REQUEST=1 builds engines without the per-request T16 source check, but '
+                         'the attach-time check never ran in this process (serving_runtime.attach_combined_runtime '
+                         'must call serving_request_factory.attach_source_check)')
     # After the host-side refusals, so a rejected request touches no device state, and
     # before the drafter, the engine and every other reader of slot 0.
     adopt_prefill_slot(helpers, capture, state.req_id)
@@ -309,7 +319,6 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         # instead (attach_source_check). The pool lends buckets by width alone
         # (serving_buffer_pool.VerifierSlot.take) and its replay tables exist only for rows
         # >= 8, so the engine borrows exactly what it did. Anywhere else, unchanged.
-        sequential = any_request and sequential_captures(capture_rows)
         if sequential:
             _log('[PINDIAG] any-request engine for {}: captures <= {} rows, replay attention and the T16 gate '
                  'off, budget {} of max_tokens {} at position {}{}', state.req_id, capture_rows, budget,
