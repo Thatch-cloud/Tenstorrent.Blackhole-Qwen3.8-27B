@@ -43,7 +43,7 @@ jobs:
                   key, _, value = line.partition('=')
                   values[key.strip()] = value.strip()
           actions = values.get('C2_ACTIONS', 'status').split()
-          assert set(actions) <= {'status', 'platform', 'priority', 'reset', 'build', 'smoke', 'replay', 'push'}, actions
+          assert set(actions) <= {'status', 'platform', 'unserve', 'priority', 'reset', 'build', 'smoke', 'replay', 'push'}, actions
           assert re.fullmatch(r'[0-9a-z.-]{3,40}', values.get('C2_IMAGE_TAG', '')), 'C2_IMAGE_TAG'
           assert values.get('C2_PROFILE', 'general') in ('general', 'coding', 'exact')
           print('actions=' + ' '.join(actions))
@@ -94,6 +94,22 @@ jobs:
               | grep -v -E '^\[[0-9a-f]+:[0-9]+\] \[ *[0-9]+\]' | tail -80
           done
           echo "=== agent"; journalctl --user -u thatch-node-agent --since -30min --no-pager 2>&1 | grep -v -i heartbeat | tail -40
+      - name: Take the platform serving container down
+        if: contains(steps.job.outputs.actions, 'unserve')
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Frees cards M+A for development: a graceful stop (the image's engine skips tt-metal's
+          # teardown, so the pair reopens cleanly), then removal. The placement itself is removed
+          # through the admin API; until then the platform may try to load it again.
+          for c in $(docker ps -a --format '{{.Names}}' | grep '^thatch-inference-'); do
+            echo "stopping $c ($(docker inspect -f '{{.State.Status}} {{.Config.Image}}' "$c"))"
+            docker stop -t 60 "$c"
+            docker rm "$c"
+          done
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
+          echo "holders of M ($m) and A ($a):"; sudo -n fuser -v "$m" "$a" 2>&1 || echo "none"
       - name: CPU priority for the serving container
         if: contains(steps.job.outputs.actions, 'priority')
         working-directory: c2
