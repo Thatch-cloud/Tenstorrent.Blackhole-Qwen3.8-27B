@@ -54,6 +54,16 @@ coding_context_request records it) and the task index; per corpus: its sha256 be
 neutralisation, file count and characters. write_prompts puts the whole set, tokens included,
 in results/real-text-prompts.json.
 
+A LENGTH PER USER (targets=[...], the C2 serving gate's real-text matrix: once the fast path
+takes any prompt length, S1's G4 needs users at {60, 255, 2047, 2048, 2049, 4k, 32k, ~60k,
+~120k} in one arm). Opt-in: without `targets` every prompt is `target` long exactly as above,
+byte for byte. With it, user i's prompt is exactly targets[i] tokens, from the same disjoint
+window of the corpus. A target too short for make_context_prompt's framing (its template is
+115-133 tokens on the served tokenizer, plus MIN_EXCERPT_TOKENS of context) takes the COMPACT
+framing instead: one user turn, COMPACT_TASKS[i % 4] (stand-alone tasks that still ask for a
+long answer), then COMPACT_HEADER and the excerpt, fitted and padded the same way. Each entry
+then records its framing and the top level its targets.
+
 The tokenizer (transformers AutoTokenizer on the served snapshot) is imported lazily, so the CPU
 tests inject a fake one. Python 3.10 compatible: the container's interpreter is /opt/venv 3.10.
 """
@@ -92,6 +102,20 @@ TASKS = (
     'then a numbered list of every change you made and why it preserves the behaviour.',
 )
 TASK_NAMES = ('pytest_tests', 'code_review', 'explain_files', 'refactor_function')
+
+# The compact framing, for a per-user target too short for the repository framing: stand-alone
+# tasks (no "repository context above" to point at) that still ask for a long answer, then the
+# excerpt. Short, so a 60-token prompt still carries a few tokens of real code.
+COMPACT_HEADER = '\n\nRelated code, which may end mid-file:\n'
+COMPACT_TASKS = (
+    'Write a complete Python LRU cache with per-entry expiry and thread safety, then a full pytest suite.',
+    'Implement a JSON parser in pure Python without the json module, then tests for every edge case.',
+    'Explain in depth how an asyncio event loop schedules coroutines, with annotated code examples.',
+    'Write a token-bucket rate limiter in Python with docstrings, then review its design at length.',
+)
+COMPACT_TASK_NAMES = ('lru_cache', 'json_parser', 'asyncio_explainer', 'rate_limiter')
+MIN_EXCERPT_TOKENS = 64   # of real code below which a per-user target takes the compact framing
+FRAMINGS = ('repository', 'compact')
 
 SAMPLE_CHARACTERS = 65536
 MAX_CALLS = 40            # per user; a converging search needs a handful
@@ -204,10 +228,47 @@ def encode_prompt(tokenizer, excerpt, task):
         {'role': 'system', 'content': SYSTEM},
         {'role': 'user', 'content': content}], tokenize=True, add_generation_prompt=True,
         return_dict=False, enable_thinking=False)
+    return flat_tokens(encoded)
+
+
+def flat_tokens(encoded):
     tokens = encoded['input_ids'] if isinstance(encoded, Mapping) else encoded
     if not isinstance(tokens, list) or not tokens or any(type(token) is not int or token < 0 for token in tokens):
         raise ValueError('Expected nonempty flat token IDs')
     return tokens
+
+
+def encode_compact(tokenizer, excerpt, task):
+    """The compact framing around `excerpt`: one user turn, the task, then the code; the same
+    template call as encode_prompt otherwise (generation prompt, thinking off)."""
+    encoded = tokenizer.apply_chat_template([
+        {'role': 'user', 'content': task + COMPACT_HEADER + excerpt}], tokenize=True, add_generation_prompt=True,
+        return_dict=False, enable_thinking=False)
+    return flat_tokens(encoded)
+
+
+def parse_targets(text):
+    """A per-user target list from 'L1,L2,...' (or a list of ints): positive integers, at least one."""
+    parts = text if isinstance(text, (list, tuple)) else [part.strip() for part in str(text).split(',')]
+    targets = []
+    for part in parts:
+        try:
+            value = part if type(part) is int else int(str(part).strip())
+        except ValueError:
+            raise ValueError('prompt lengths must be comma-separated positive integers, got %r' % (text,))
+        if type(value) is not int or value < 1:
+            raise ValueError('prompt lengths must be positive integers, got %r' % (text,))
+        targets.append(value)
+    if not targets:
+        raise ValueError('at least one prompt length is required')
+    return targets
+
+
+def choose_framing(tokenizer, target, task_index, tasks=TASKS, min_excerpt=MIN_EXCERPT_TOKENS):
+    """'repository' when make_context_prompt's framing leaves `min_excerpt` tokens of context at
+    `target`, else 'compact' (only ever asked in the per-user mode)."""
+    overhead = len(encode_prompt(tokenizer, '', tasks[task_index % len(tasks)]))
+    return 'repository' if target >= overhead + min_excerpt else 'compact'
 
 
 class CountingEncoder:
@@ -302,8 +363,10 @@ def pad_to(tokens, template, target, filler, *, max_padding=MAX_PADDING):
 
 
 def build_prompts(users, target, *, tokenizer=None, model=None, corpus=None, corpus_info=None, tasks=TASKS,
-                  max_padding=MAX_PADDING, log=None):
-    """The real-text prompt set for `users` users of exactly `target` tokens each.
+                  max_padding=MAX_PADDING, log=None, targets=None):
+    """The real-text prompt set for `users` users of exactly `target` tokens each - or, with
+    `targets` (one length per user, len(targets) == users; `target` is then ignored and may be
+    None), of exactly targets[i] tokens for user i, short ones in the compact framing.
 
     `tokenizer` and `corpus` are injectable (CPU tests); in the container they default to
     AutoTokenizer on `model` and the installed vLLM source. Returns a dict with the corpus
@@ -311,7 +374,11 @@ def build_prompts(users, target, *, tokenizer=None, model=None, corpus=None, cor
     started = time.perf_counter()
     if type(users) is not int or users < 1:
         raise ValueError('users must be a positive integer')
-    if type(target) is not int or target < 1:
+    if targets is not None:
+        targets = parse_targets(targets)
+        if len(targets) != users:
+            raise ValueError('%d prompt lengths for %d users' % (len(targets), users))
+    elif type(target) is not int or target < 1:
         raise ValueError('target must be a positive integer')
     if tokenizer is None:
         if model is None:
@@ -331,7 +398,16 @@ def build_prompts(users, target, *, tokenizer=None, model=None, corpus=None, cor
     for user in range(users):
         start, end = user * len(cleaned) // users, (user + 1) * len(cleaned) // users
         task_index = user % len(tasks)
-        encoder = CountingEncoder(lambda excerpt, task=tasks[task_index]: encode_prompt(tokenizer, excerpt, task))
+        framing = 'repository'
+        if targets is not None:
+            target = targets[user]
+            framing = choose_framing(tokenizer, target, task_index, tasks)
+        if framing == 'compact':
+            task_index = user % len(COMPACT_TASKS)
+            encoder = CountingEncoder(lambda excerpt, task=COMPACT_TASKS[task_index]: encode_compact(
+                tokenizer, excerpt, task))
+        else:
+            encoder = CountingEncoder(lambda excerpt, task=tasks[task_index]: encode_prompt(tokenizer, excerpt, task))
         window = cleaned[start:end]
         characters, tokens, template = fit_prefix(encoder, window, target)
         if len(tokens) != target and filler is None:
@@ -345,13 +421,19 @@ def build_prompts(users, target, *, tokenizer=None, model=None, corpus=None, cor
             raise ValueError('user %d prompt carries special/added token ids %s, the template alone %s: '
                              'special-token text survived neutralisation' % (user, dict(carried), dict(expected)))
         excerpt = window[:characters]
-        entry = dict(user=user, task_index=task_index, task=TASK_NAMES[task_index] if tasks is TASKS else None,
+        if framing == 'compact':
+            task_name = COMPACT_TASK_NAMES[task_index]
+        else:
+            task_name = TASK_NAMES[task_index] if tasks is TASKS else None
+        entry = dict(user=user, task_index=task_index, task=task_name,
                      target=target, prompt_tokens=len(tokens), template_tokens=len(template),
                      window_start=start, window_end=end, excerpt_start=start, excerpt_end=start + characters,
                      excerpt_characters=characters, excerpt_sha256=sha256_text(excerpt),
                      prompt_sha256=prompt_sha256(tokens), chunks_of_2048=-(-len(tokens) // 2048),
                      padding_tokens=padding, padding_token_id=filler if padding else None, padding_at=padding_at,
                      tokenizer_calls=encoder.calls, tokenizer_seconds=round(encoder.seconds, 3), tokens=tokens)
+        if targets is not None:
+            entry['framing'] = framing
         entries.append(entry)
         if log is not None:
             log('[REALTEXT] user=%d task=%s prompt_tokens=%d padding=%d excerpt=[%d,%d) calls=%d seconds=%.2f sha=%s'
@@ -360,12 +442,16 @@ def build_prompts(users, target, *, tokenizer=None, model=None, corpus=None, cor
     finished = time.perf_counter()
     info = dict(corpus_info, cleaned_sha256=sha256_text(cleaned), cleaned_characters=len(cleaned),
                 neutralised=neutralised)
-    return dict(scope=__doc__.split('\n\n')[0], corpus=info, target=target, max_padding=max_padding, users=entries,
-                system=SYSTEM, header=HEADER, footer=FOOTER, tasks=list(tasks),
-                tokenizer_calls=sum(e['tokenizer_calls'] for e in entries),
-                tokenizer_seconds=round(sum(e['tokenizer_seconds'] for e in entries), 3),
-                seconds=dict(tokenizer_load=round(loaded - started, 3), corpus=round(corpus_built - loaded, 3),
-                             prompts=round(finished - corpus_built, 3), total=round(finished - started, 3)))
+    built = dict(scope=__doc__.split('\n\n')[0], corpus=info, target=target, max_padding=max_padding, users=entries,
+                 system=SYSTEM, header=HEADER, footer=FOOTER, tasks=list(tasks),
+                 tokenizer_calls=sum(e['tokenizer_calls'] for e in entries),
+                 tokenizer_seconds=round(sum(e['tokenizer_seconds'] for e in entries), 3),
+                 seconds=dict(tokenizer_load=round(loaded - started, 3), corpus=round(corpus_built - loaded, 3),
+                              prompts=round(finished - corpus_built, 3), total=round(finished - started, 3)))
+    if targets is not None:
+        built.update(target=None, targets=list(targets), compact_header=COMPACT_HEADER,
+                     compact_tasks=list(COMPACT_TASKS))
+    return built
 
 
 def summary(built):
