@@ -1,0 +1,135 @@
+name: Qwen card B job
+# One job per tag on the dedicated card-B runner (its only label is thatch-qwen-p150a-card-b; org runner group
+# qwen-card-b, open to every private org repository; runner thatch-qwen-cardb-01 on the control-plane rig). Card B is the PCIe-only qualification
+# card (board blackhole-F36F768B9A5CAFA0, PCI 0000:f4:00.0); cards M and A, the serving pair, belong to the
+# p150a-pair runner and are never opened here.
+#
+# There is deliberately NO concurrency group: the one runner runs one job at a time and GitHub queues the
+# rest in push order without cancelling any (a concurrency group keeps one pending run and cancels the others).
+# To queue a test: edit .github/card-b-job.env, commit, push tag experiment/card-b-vN (docs/card-b-runner.md).
+on:
+  push:
+    tags: ['experiment/card-b-v*']
+permissions:
+  contents: read
+jobs:
+  card-b:
+    # The runner was registered with --no-default-labels: a job must name this label alone, and no generic
+    # [self-hosted, linux, x64] job from any org repository can land on card B's runner.
+    runs-on: [thatch-qwen-p150a-card-b]
+    timeout-minutes: 150
+    env:
+      CARD_B_ID: blackhole-F36F768B9A5CAFA0
+      CARD_B_PCI: '0000:f4:00.0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: card-b
+          persist-credentials: false
+      - name: Read the job file and check the harness
+        id: job
+        working-directory: card-b
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-qwen-cardb-01
+          python3 -B - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          allowed = {'CARD_B_HARNESS', 'CARD_B_ARGS', 'CARD_B_ENV'}
+          values = {}
+          for number, line in enumerate(Path('.github/card-b-job.env').read_text(encoding='utf-8').splitlines(), 1):
+              line = line.strip()
+              if not line or line.startswith('#'):
+                  continue
+              key, sep, value = line.partition('=')
+              if not sep or key not in allowed:
+                  raise SystemExit('card-b-job.env line %d: expected one of %s' % (number, sorted(allowed)))
+              values[key] = value.strip()
+          harness = values.get('CARD_B_HARNESS', '')
+          if not re.fullmatch(r'(optimisation/ttnn-op/[A-Za-z0-9_.-]+|scripts/ci)/[A-Za-z0-9_.-]+\.sh', harness):
+              raise SystemExit('CARD_B_HARNESS must be a .sh under optimisation/ttnn-op/<dir>/ or scripts/ci/: %r' % harness)
+          text = Path(harness).read_text(encoding='utf-8')
+          if '# >>> qual_card.sh' not in text and 'qual_card.sh' not in text:
+              raise SystemExit('%s does not use the qual_card board selection; refusing to run it on card B' % harness)
+          pairs = values.get('CARD_B_ENV', '').split()
+          for pair in pairs:
+              name, sep, _ = pair.partition('=')
+              if not sep or not re.fullmatch(r'[A-Z][A-Z0-9_]*', name):
+                  raise SystemExit('CARD_B_ENV entries are NAME=value: %r' % pair)
+              if name in ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'RESULTS'):
+                  raise SystemExit('CARD_B_ENV may not set %s: this runner only ever uses card B' % name)
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              out.write('harness=%s\n' % harness)
+              out.write('args=%s\n' % values.get('CARD_B_ARGS', ''))
+              out.write('env=%s\n' % ' '.join(pairs))
+          print('harness %s | args %r | env %r' % (harness, values.get('CARD_B_ARGS', ''), pairs))
+          PY
+      - name: Resolve card B and confirm nothing holds it
+        working-directory: card-b
+        shell: bash
+        run: |
+          set -euo pipefail
+          . scripts/ci/qual_card.sh
+          node=$(readlink -f -- "$QUAL_BYID_ROOT/$CARD_B_ID")
+          qual_is_char "$node"
+          pci=$(qual_pci_of "$node")
+          echo "card B: $CARD_B_ID -> $node, PCI $pci"
+          test "$pci" = "$CARD_B_PCI"
+          # The rig's telemetry exporter opens every board for a moment every 30 s: five tries, 2 s apart.
+          for try in 1 2 3 4 5; do
+            status=0
+            out=$(sudo -n fuser -v "$node" 2>&1) || status=$?
+            if [ "$status" != 0 ] && [ -z "$out" ]; then break; fi
+            if [ "$try" = 5 ]; then echo "card B is held; not starting"; echo "$out"; exit 1; fi
+            sleep 2
+          done
+          docker ps --format '{{.ID}}' | sort > "$RUNNER_TEMP/containers-before.txt"
+      - name: Run the harness on card B
+        working-directory: card-b
+        shell: bash
+        env:
+          HARNESS: ${{ steps.job.outputs.harness }}
+          HARNESS_ARGS: ${{ steps.job.outputs.args }}
+          HARNESS_ENV: ${{ steps.job.outputs.env }}
+        run: |
+          set -euo pipefail
+          results="/tmp/card-b-results/$GITHUB_RUN_ID"
+          mkdir -p "$results"
+          chmod 0777 "$results"
+          echo "results: $results"
+          read -r -a extra <<< "$HARNESS_ENV"
+          env ${extra[@]+"${extra[@]}"} QUAL_CARD="$CARD_B_ID" RESULTS="$results" CARD_B_ARGS="$HARNESS_ARGS" \
+            bash "$HARNESS" 2>&1 | tee "$results/harness-console.log"
+      - name: Remove containers this job started
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          test -f "$RUNNER_TEMP/containers-before.txt" || exit 0
+          docker ps --format '{{.ID}}' | sort > "$RUNNER_TEMP/containers-after.txt"
+          for id in $(comm -13 "$RUNNER_TEMP/containers-before.txt" "$RUNNER_TEMP/containers-after.txt"); do
+            echo "removing $id $(docker inspect -f '{{.Name}}' "$id" 2>/dev/null)"
+            docker rm -f "$id" > /dev/null 2>&1 || true
+          done
+      - name: Collect results
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          results="/tmp/card-b-results/$GITHUB_RUN_ID"
+          mkdir -p card-b-results
+          if [ -d "$results" ]; then
+            sudo -n cp -a "$results/." card-b-results/ 2>/dev/null || cp -a "$results/." card-b-results/ || true
+            sudo -n chown -R "$(id -u):$(id -g)" card-b-results || true
+            sudo -n rm -rf "$results" || true
+          fi
+          ls -la card-b-results | head -40
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: card-b-${{ github.run_id }}
+          path: card-b-results
+          if-no-files-found: warn

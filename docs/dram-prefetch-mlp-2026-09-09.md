@@ -4,6 +4,46 @@
 about 62 ms; draft-only improvements cannot deliver the 200-TG target at the
 measured 4K acceptance rate. Projection execution and weight movement are next.
 
+## Prerequisite diagnosis: 18 September
+
+The latest combined run **35348721064** reports firmware bundle **19.8.1** in
+`server.log`, line 47. Log SHA256:
+`6f1d3ecf8175cfffa61afd4f39fd9558e0884c75df77c69d620f5913fb5b39c4`.
+This supplies a concrete firmware barrier without another hardware launch.
+
+At the pinned runtime revision, [firmware_capability.cpp](https://github.com/tenstorrent/tt-metal/blob/9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9/tt_metal/llrt/firmware_capability.cpp#L35)
+requires bundle **19.12.0.0 or newer** for programmable DRAM cores. Older firmware
+uses a DRAM core needed by the application; forcing support risks colliding with
+system firmware. Missing bundle information also fails this check.
+
+[metal_env.cpp](https://github.com/tenstorrent/tt-metal/blob/9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9/tt_metal/impl/context/metal_env.cpp#L116)
+adds a separate topology condition: a multi-device cluster must have no harvested
+DRAM channels. The actual pair's masks still need confirmation. A firmware upgrade
+alone therefore does **not** establish that this prefetcher will be available.
+
+The environment setting `TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES=1`
+is a force-enable override, **not** an ordinary safe feature opt-in. Leave it
+unset. Do not modify firmware, spoof topology or remove capability checks.
+
+> **Resolved 19 September — see [dram-prefetch-verdict-2026-09-19.md](dram-prefetch-verdict-2026-09-19.md).**
+> All four gates below were run. The first three cleared: firmware is 19.12.0.0, no
+> DRAM harvesting, capability native, upstream validator 30/30. The fourth failed —
+> the prefetched path measured 24.7% slower than the native 1D control at matched
+> core count, so this route is not being pursued.
+
+| Next gate | Required evidence |
+|---|---|
+| Maintenance feasibility | Supported P150A bundle, runtime/KMD compatibility, recovery procedure and user-approved window |
+| Pair eligibility | Per-card identity, firmware and actual DRAM harvesting masks; native capability returns true without override |
+| Kernel qualification | Weight-free simulator or explicitly documented simulator capability limit; exact transport/replay and projection checks |
+| Combined value | Same T16 recipe and precision, native-reference correctness, matched whole-cycle TG and verifier measurements |
+
+This is an unqualified architectural option, not a promised route to 200 TG.
+It differs from increasing local weight buffers: dedicated DRAM cores would feed
+the consumer without spending Tensix producer cores. Existing worker-producer
+streaming was slower and is not being rerun unchanged. The old 39/68-worker
+geometry below is historical, not the current 91-worker fused gate/up recipe.
+
 ## Proposed comparison
 
 | Arm | Gate/up workers | Down workers | Weight delivery |
@@ -36,7 +76,8 @@ PCIe loading, QSFP weight loading or spare Tensix producer kernels.
   Do not assume this is available on our pair or bypass its capability check.
 - Local simulator capability is false; no prefetch kernel has run there.
   Hardware run34314276820 also reports false with the API present. No DRISC
-  kernel ran on the pair, and the specific firmware/harvesting cause is unproven.
+  kernel ran on the pair. The later firmware-floor diagnosis above identifies
+  a current blocker; the pair's harvesting eligibility remains unproven.
 
 The programmable-DRAM route stops at its capability gate. The worker alternative
 below must separately qualify transport, unchanged projection math, complete-MLP

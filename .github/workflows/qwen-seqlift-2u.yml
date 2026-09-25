@@ -1,0 +1,207 @@
+name: Qwen fast path two users, seqs lifted with users
+on:
+  push:
+    tags: ['experiment/seqlift-2u-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  graft:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: sl
+          persist-credentials: false
+      - name: Lift the max_num_seqs clause in the plugin policy
+        working-directory: sl
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p graft experiment-results
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          name="qwen-seqlift-extract-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          src=$(docker run --rm --entrypoint bash "$image" -lc "grep -rl 'Synchronous single-request' / --include=*.py 2>/dev/null | grep -v /experiment-scripts/ | head -1")
+          if [ -z "$src" ]; then
+            echo 'policy module not found outside the evidence tree'
+            docker run --rm --entrypoint bash "$image" -lc "grep -rl 'Synchronous single-request' / --include=*.py 2>/dev/null | head -10" || true
+            exit 1
+          fi
+          echo "policy at $src"
+          echo "$src" > graft/policy-path.txt
+          docker cp "$name:$src" graft/policy.py.orig
+          sha256sum graft/policy.py.orig > experiment-results/source.sha256
+          python3 -B scripts/ci/seqs_lift_patch.py graft/policy.py.orig graft/policy.py
+          sha256sum graft/policy.py >> experiment-results/source.sha256
+          grep -n 'SEQLIFT' graft/policy.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qwen-seqlift-graft-${{ github.run_id }}
+          path: sl/graft/
+
+  bench:
+    needs: graft
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - {users: 2, context: 4352, product: 8704, prompt: 3072}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: cycle
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qwen-seqlift-graft-${{ github.run_id }}
+          path: cycle/graft/
+      - name: Stage the draft config and check the fixtures
+        working-directory: cycle
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results draft-config
+          revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
+          cache=/home/thatch/.cache/qwen-experiments
+          curl -fsSL --max-time 30 \
+            "https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/resolve/$revision/config.json" \
+            > draft-config/config.json
+          python3 -B - <<'PY'
+          import json
+          from pathlib import Path
+          config = json.loads(Path('draft-config/config.json').read_text())
+          assert config['architectures'] == ['DFlash2DraftModel']
+          assert config['num_hidden_layers'] == 5 and config['hidden_size'] == 5120
+          assert config['vocab_size'] == 248320 and config['sliding_window'] == 2048
+          assert config['dflash_config']['target_layer_ids'] == [5, 19, 33, 47, 61]
+          print('draft config verified')
+          PY
+          for component in attention convolution mlp projection selector; do
+            test -f "$cache/dflash2-$component-$revision/manifest.json"
+          done
+          for layer in 1 2 3 4; do
+            test -f "$cache/dflash2-stack-$revision/layer-$layer/manifest.json"
+          done
+          echo 'fixtures present'
+      - name: Reset the boards before opening the mesh
+        working-directory: cycle
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/pre-reset.log 2>&1 || status=$?
+          echo "pre_reset_exit=$status" | tee experiment-results/pre-reset.status
+          tail -5 experiment-results/pre-reset.log || true
+      - name: Confirm no process holds a card
+        working-directory: cycle
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+          for metric in cpu memory io; do cat "/proc/pressure/$metric"; done \
+            > experiment-results/host-pressure-before.txt
+          cat experiment-results/host-pressure-before.txt
+      - name: Decode at ${{ matrix.users }} users x ${{ matrix.context }} ctx, plain path
+        working-directory: cycle
+        timeout-minutes: 34
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # The serving image, not the experiment image the probes used.
+          # Image built from this branch by qwen-fast-serving-image.yml, so it carries the
+          # lifted context pin. The pinned canary image does not.
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          policy=$(cat graft/policy-path.txt)
+          target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
+          cache=/home/thatch/.cache/qwen-experiments
+          revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
+          test -d "$target/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+          mounts=()
+          for component in attention convolution mlp projection selector; do
+            mounts+=(--mount "type=bind,src=$cache/dflash2-$component-$revision,dst=/experiment-dflash-fixture/$component,readonly")
+          done
+          for layer in 1 2 3 4; do
+            mounts+=(--mount "type=bind,src=$cache/dflash2-stack-$revision/layer-$layer,dst=/experiment-dflash-fixture/layer-$layer,readonly")
+          done
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          devices=()
+          for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
+          name="qwen-cycle-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 30 1900 docker run --rm --name "$name" --network none \
+            --hostname qwen-cycle --add-host qwen-cycle:127.0.0.1 \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
+            --pids-limit 4096 --memory 96g --cpus 16 --shm-size 8g \
+            "${devices[@]}" \
+            --mount type=bind,src=/dev/tenstorrent,dst=/host-dev/tenstorrent,readonly \
+            --mount "type=bind,src=$PWD/graft/policy.py,dst=$policy,readonly" --mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G \
+            --mount "type=bind,src=$target,dst=/models/hub/models--Qwen--Qwen3.8-27B,readonly" \
+            --mount "type=bind,src=$PWD/draft-config,dst=/draft-config,readonly" \
+            --mount "type=bind,src=$PWD/scripts/ci/longctx_cycle_bench.py,dst=/bench/longctx_cycle_bench.py,readonly" \
+            --mount type=volume,src=qwen-experiments-f1e9b1a64b4f,dst=/experiment-cache \
+            "${mounts[@]}" \
+            -e QWEN_HARDWARE_TESTS=1 -e QWEN_CARDS_ALLOCATED=1 -e QWEN_PROJECTION_LINKS=4 \
+            -e QWEN_FABRIC_LINK_PROBE=1 -e QWEN_FROZEN_COMBINED_RUNTIME=1 \
+            -e QWEN_GDN_DIRECT_WINDOW=1 -e QWEN_GDN_SHARED_QK_EXPERIMENT=1 \
+            -e QWEN_MLP_BLOCK_STREAM_EXPERIMENT=1 -e QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 \
+            -e QWEN_SDPA_BF8=1 -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 \
+            -e QWEN_SKIP_UNUSED_SINGLETON_POSITIONS=1 -e QWEN_FAST_PHASE_TIMING=1 \
+            -e QWEN_GDN_GROUPED_GATHER_ABBA=0 -e QWEN_GDN_GATE_EXP_ABBA=0 \
+            -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e VLLM_USE_V2_MODEL_RUNNER=0 \
+            -e TT_METAL_HOME=/opt/tt-metal -e MESH_DEVICE=P300 -e OMP_NUM_THREADS=8 \
+            -e TT_CACHE_PATH=/experiment-cache/weights -e TT_METAL_CACHE=/experiment-cache/kernels \
+            -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto \
+            --entrypoint python3 "$image" -B /bench/longctx_cycle_bench.py \
+            --users ${{ matrix.users }} --context ${{ matrix.context }} --prompt-tokens ${{ matrix.prompt }} --max-tokens 64 \
+            > experiment-results/cycle-stdout.log 2>&1 || true
+          sed -n '/CYCLE_BENCH_JSON_BEGIN/,/CYCLE_BENCH_JSON_END/p' \
+            experiment-results/cycle-stdout.log | sed '1d;$d' \
+            > experiment-results/cycle.json || true
+          sed -n '/CYCLE_BENCH_LOG_BEGIN/,/CYCLE_BENCH_LOG_END/p' \
+            experiment-results/cycle-stdout.log | sed '1d;$d' \
+            > experiment-results/server-tail.log || true
+          for metric in cpu memory io; do cat "/proc/pressure/$metric"; done \
+            > experiment-results/host-pressure-after.txt
+          python3 -B scripts/ci/cycle_bench_report.py \
+            --report experiment-results/cycle.json \
+            --log experiment-results/cycle-stdout.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-seqlift-2u-${{ matrix.users }}u-${{ matrix.context }}c-${{ github.run_id }}
+          path: cycle/experiment-results/

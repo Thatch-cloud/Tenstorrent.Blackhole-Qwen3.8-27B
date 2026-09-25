@@ -2,6 +2,24 @@
 
 ## Choose the right recipe
 
+The active experimental baseline is now the user-promoted five-component stack:
+tag `experiment/cumulative-t16-full-v3`, orchestration commit
+`239c7c15d35c9d0f06c05b215cdf8f78b0662fae`, workflow
+`.github/workflows/qwen-cumulative-t16.yml`. It stages the frozen runtime below
+and applies all five source-qualified components; the frozen checkout alone is
+not the promoted recipe. Replay it with:
+
+```powershell
+gh run rerun 35281976597 --repo Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B
+```
+
+This runs real hardware at CTX 4,096, one stream, unchanged precision, with fresh
+audits and ABBA controls. Keep the I/O gate and source/numerical admissions.
+The repeat's automatic improvement gate did not pass; promotion is an explicit
+user decision for experimentation, not serving qualification.
+[Results and caveats](cumulative-candidate-review.md#experimental-promotion-2026-09-18).
+The context rows below remain evidence for the earlier recipe, not this stack.
+
 The measured ladder uses the **T16 combined offline runtime**, not the historical
 vLLM serving command and not the newly integrated T32 experiments. The unchanged
 recipe varies `QWEN_DSPARK_REQUEST_CONTEXT`; each geometry still needs its own
@@ -36,6 +54,7 @@ coordinate card ownership and a quiet disk window first.
 | 16,384 | 35165321998 | 105024997143 |
 | 32,768 | 35165321998 | 105024997082 |
 | 65,536 | 35172072077 | Rerun the single-context workflow |
+| 131,072 | 35173979225, attempt 2 | 105090186482 |
 
 ```bash
 REPO=Thatch-cloud/Tenstorrent.Blackhole-Qwen3.8-27B
@@ -69,7 +88,7 @@ all staged kernels.
 
 The exclusive hardware concurrency group prevents two experiment jobs using the
 cards together. It does not prevent other CI jobs from saturating the host disk.
-The 131K retry was paused while registry-related CI caught up.
+Earlier 131K retries were delayed by disk pressure; attempt 2 subsequently passed.
 
 ## Evidence and acceptance
 
@@ -84,11 +103,14 @@ then two timed complete requests. Recompute PP and committed TG from those
 requests. A green simulator gate or kernel speedup is not a model TG result.
 See [ladder results](combined-context-ladder.md) for report hashes and limitations.
 
-131K has no qualified TG: the page-table guard was repaired, then the eager
-feature audit ran out of device memory. The bounded audit-memory fix has not
-yet reached hardware because host-I/O admission rejected its retries.
+131K passes with **2,124.78 PP tok/s and 53.69 committed TG tok/s**. The bounded
+audit-memory fix reached hardware; the report closes cleanly with one audited
+and two timed complete requests. Its SHA-256 is
+`8ee07d6f794999d0a3684722b174bcae99abdaac84a0b45b75ef25809e768104`.
 262,144 prompt tokens plus 256 generation tokens exceed the model limit;
-261,888 + 256 would be a different explicitly labelled full-window test.
+the **261,888 + 256** full-window test is being qualified separately. It retains
+the T16 recipe and adds target-only routing at the final positional boundary;
+see [full-window qualification](full-window-262k.md). No 262K TG is qualified yet.
 
 ## Build versus replay
 

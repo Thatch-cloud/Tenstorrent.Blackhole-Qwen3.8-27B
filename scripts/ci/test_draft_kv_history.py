@@ -6,7 +6,17 @@ from unittest.mock import Mock, patch
 import torch
 
 from draft_head_preparation import rope_reference, rope_tables
-from draft_kv_history import DraftKVHistory
+from draft_kv_history import KV_SHAPE, QUERY_SHAPE, DraftKVHistory, bank_tensors
+
+
+def pooled_storage(layers=2):
+    """Zeroed banks as the serving pool hands them over: per layer, active and spare k and v."""
+    return [{side: {head: torch.zeros(KV_SHAPE, dtype=torch.bfloat16) for head in ('k', 'v')}
+             for side in ('active', 'spare')} for layer in range(layers)]
+
+
+def freed(operations):
+    return [call.args[0] for call in operations.deallocate.call_args_list]
 
 
 class DraftKVHistoryTests(unittest.TestCase):
@@ -27,21 +37,27 @@ class DraftKVHistoryTests(unittest.TestCase):
         value = (features[..., :512] * (layer + 1)).reshape(1, rows, 4, 128).transpose(1, 2).contiguous()
         return dict(k=rope_reference(value, *rope_tables(start, rows)), v=value)
 
+    @staticmethod
+    def address(operations, value):
+        pointer = value.untyped_storage().data_ptr()
+        return pointer, pointer + 1
+
     @contextmanager
-    def fixture(self, features, position, *, layers=2):
+    def fixture(self, features, position, *, layers=2, storage=None, query=None):
         operations = self.operations()
         def project(operations, inputs, query, tables, retain, *, parameters):
             rows = inputs.shape[2]
+            if torch.count_nonzero(query).item():
+                raise AssertionError('The projection reads a zero query')
             value = (inputs[..., :512] * (parameters['layer'] + 1)).reshape(1, rows, 4, 128).transpose(1, 2).contiguous()
             return dict(k=retain(rope_reference(value, *tables)), v=retain(value))
-        def address(operations, value):
-            pointer = value.untyped_storage().data_ptr()
-            return pointer, pointer + 1
         with patch('draft_kv_history.project_key_value', side_effect=project), \
-                patch('draft_kv_history.addresses', side_effect=address), \
+                patch('draft_kv_history.addresses', side_effect=self.address), \
                 patch('draft_kv_history.release_owned', side_effect=lambda operations, owned: [operations.deallocate(value) for value in owned]):
             cache = DraftKVHistory(operations, object(), [dict(layer=layer) for layer in range(layers)],
-                features, position=position, history_rows=min(position, 2048))
+                features, position=position, history_rows=min(position, 2048),
+                **(dict(storage=storage) if storage is not None else {}),
+                **(dict(query=query) if query is not None else {}))
             try:
                 yield cache, operations
             finally:
@@ -60,7 +76,7 @@ class DraftKVHistoryTests(unittest.TestCase):
             features = self.features(min(position, 2048), position)
             with self.fixture(features, position) as (cache, operations):
                 self.assert_history(cache, features)
-                for prefix in (1, 7, 8, 32):
+                for prefix in range(1, 33):
                     candidate = self.features(32, cache.position)
                     old_active = cache.active
                     saved = [{name: value.clone() for name, value in pair.items()} for pair in cache.active]
@@ -131,6 +147,116 @@ class DraftKVHistoryTests(unittest.TestCase):
             cache.active[1]['k'][..., 7, 0] = 300
             with self.assertRaisesRegex(AssertionError, 'historical K/V differs'):
                 cache.audit(features)
+
+    def test_without_storage_nothing_is_borrowed_and_the_banks_are_owned_and_freed(self):
+        with self.fixture(self.features(170, 5), 170) as (cache, operations):
+            self.assertEqual(cache.borrowed, [])
+            banks = [pair[name] for pairs in (cache.active, cache.spare) for pair in pairs for name in ('k', 'v')]
+            self.assertEqual(len(cache.owned), 1 + len(banks))
+            self.assertTrue(all(any(value is owned for owned in cache.owned) for value in banks))
+        self.assertTrue(all(any(value is released for released in freed(operations)) for value in banks))
+
+    def test_lent_banks_are_adopted_in_place_swapped_by_commits_and_never_freed(self):
+        for position in (170, 4093):
+            features = self.features(min(position, 2048), position)
+            storage = pooled_storage()
+            banks = bank_tensors(storage)
+            with self.fixture(features, position, storage=storage) as (cache, operations):
+                self.assertEqual(cache.borrowed, banks)
+                self.assertEqual(cache.owned, [cache.query])
+                for layer, bank in enumerate(storage):
+                    for name in ('k', 'v'):
+                        self.assertIs(cache.active[layer][name], bank['active'][name])
+                        self.assertIs(cache.spare[layer][name], bank['spare'][name])
+                # Written in place: the lent active banks hold the projected history and a zero tail.
+                self.assert_history(cache, features)
+                self.assertTrue(all(torch.count_nonzero(bank['spare'][name]).item() == 0
+                                    for bank in storage for name in ('k', 'v')))
+                # The padded sources were temporaries, freed with the scope; no bank was.
+                self.assertTrue(freed(operations))
+                self.assertFalse(any(any(released is value for value in banks) for released in freed(operations)))
+                for prefix in (5, 32):
+                    candidate = self.features(32, cache.position)
+                    cache.commit(cache.prepare(candidate, prefix, position=cache.position))
+                    features = torch.cat((features, candidate[..., :prefix, :]), dim=2)[..., -2048:, :]
+                    self.assert_history(cache, features)
+                cache.audit(features)
+                # Two commits: the banks are back the way round they were lent.
+                for layer, bank in enumerate(storage):
+                    for name in ('k', 'v'):
+                        self.assertIs(cache.active[layer][name], bank['active'][name])
+                        self.assertIs(cache.spare[layer][name], bank['spare'][name])
+                self.assertEqual(cache.owned, [cache.query])
+            self.assertEqual(cache.borrowed, [])
+            self.assertFalse(any(any(released is value for value in banks) for released in freed(operations)))
+            self.assertTrue(any(released is cache.query for released in freed(operations)))
+
+    def test_lent_banks_are_protected_from_the_temporaries(self):
+        storage = pooled_storage()
+        with self.fixture(self.features(170, 3), 170, storage=storage) as (cache, operations):
+            operations.deallocate.reset_mock()
+            with cache.temporaries([]) as retain:
+                self.assertIs(retain(storage[1]['spare']['v']), storage[1]['spare']['v'])
+                self.assertIs(retain(cache.query), cache.query)
+                scratch = retain(torch.zeros(4))
+            self.assertEqual(freed(operations), [scratch])
+
+    def test_a_lent_query_is_borrowed_read_only_used_by_every_projection_and_never_freed(self):
+        features = self.features(170, 5)
+        storage, query = pooled_storage(), torch.zeros(QUERY_SHAPE, dtype=torch.bfloat16)
+        banks = bank_tensors(storage)
+        with self.fixture(features, 170, storage=storage, query=query) as (cache, operations):
+            self.assertIs(cache.query, query)
+            # Nothing uploaded and nothing owned: the slot lends everything persistent.
+            self.assertEqual(cache.owned, [])
+            self.assertEqual(cache.borrowed, [*banks, query])
+            self.assert_history(cache, features)
+            operations.deallocate.reset_mock()
+            with cache.temporaries([]) as retain:
+                self.assertIs(retain(query), query)
+                scratch = retain(torch.zeros(4))
+            self.assertEqual(freed(operations), [scratch])
+            for prefix in (3, 32):
+                candidate = self.features(32, cache.position)
+                cache.commit(cache.prepare(candidate, prefix, position=cache.position))
+                features = torch.cat((features, candidate[..., :prefix, :]), dim=2)[..., -2048:, :]
+                self.assert_history(cache, features)
+            cache.audit(features)
+            self.assertEqual(torch.count_nonzero(query).item(), 0)
+        self.assertEqual(cache.borrowed, [])
+        self.assertFalse(any(released is query for released in freed(operations)))
+        self.assertFalse(any(any(released is value for value in banks) for released in freed(operations)))
+        # Without the query the cache uploads and owns its own, exactly as before.
+        with self.fixture(self.features(170, 5), 170, storage=pooled_storage()) as (cache, operations):
+            self.assertEqual(cache.owned, [cache.query])
+            self.assertEqual(tuple(cache.query.shape), QUERY_SHAPE)
+        self.assertTrue(any(released is cache.query for released in freed(operations)))
+
+    def test_a_query_of_another_geometry_is_refused_before_anything_is_uploaded(self):
+        for query in (torch.zeros((1, 1, 16, 2048), dtype=torch.bfloat16), torch.zeros(QUERY_SHAPE), 'query'):
+            operations = self.operations()
+            operations.from_torch = Mock(side_effect=AssertionError('uploaded before the query was checked'))
+            with self.subTest(query=type(query).__name__), patch('draft_kv_history.addresses', side_effect=self.address), \
+                    self.assertRaises(ValueError):
+                DraftKVHistory(operations, object(), [dict(layer=layer) for layer in range(2)], self.features(170, 3),
+                               position=170, history_rows=170, storage=pooled_storage(), query=query)
+            operations.from_torch.assert_not_called()
+
+    def test_storage_geometry_is_checked_before_anything_is_uploaded(self):
+        bad_shape, bad_dtype, missing, aliased = (pooled_storage() for _ in range(4))
+        bad_shape[0]['active']['k'] = torch.zeros((1, 4, 2048, 64), dtype=torch.bfloat16)
+        bad_dtype[1]['spare']['v'] = torch.zeros(KV_SHAPE)
+        del missing[1]['spare']['v']
+        aliased[1]['spare']['v'] = aliased[0]['active']['k']
+        for storage in (pooled_storage()[:1], pooled_storage(3), bad_shape, bad_dtype, missing, aliased,
+                        [dict(active=bank['active']) for bank in pooled_storage()], [['k', 'v'], ['k', 'v']]):
+            operations = self.operations()
+            operations.from_torch = Mock(side_effect=AssertionError('uploaded before the banks were checked'))
+            with self.subTest(storage=storage), patch('draft_kv_history.addresses', side_effect=self.address), \
+                    self.assertRaises(ValueError):
+                DraftKVHistory(operations, object(), [dict(layer=layer) for layer in range(2)], self.features(170, 3),
+                               position=170, history_rows=170, storage=storage)
+            operations.from_torch.assert_not_called()
 
 
 if __name__ == '__main__':

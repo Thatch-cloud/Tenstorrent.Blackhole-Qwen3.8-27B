@@ -9,13 +9,14 @@ from pathlib import Path
 from attention_batch import capture_operation
 from frozen_context_geometry import geometry
 from frozen_ladder_ordered_cache import page_geometry
+from ladder_cache_reference import snapshot as reference_snapshot
 from ordered_cache import HASHES, load_kernels, update
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--context', type=int, choices=(65536, 131072), required=True)
+    parser.add_argument('--context', type=int, choices=(65536, 131072, 261888), required=True)
     options = parser.parse_args()
     if (os.environ.get('QWEN_SIM_ONLY') != '1' or not os.environ.get('TT_METAL_SIMULATOR')
             or Path('/dev/tenstorrent').exists() or options.output.exists()):
@@ -24,7 +25,7 @@ def main():
     import ttnn
 
     names = ('ladder-cache-probe.py', 'frozen_ladder_ordered_cache.py', 'frozen_context_geometry.py',
-        'ordered_cache.py', 'attention_batch.py')
+        'ordered_cache.py', 'attention_batch.py', 'ladder_cache_reference.py')
     fingerprints = lambda: {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
         for name in names}
     kernels = load_kernels(os.environ['TT_METAL_HOME'])
@@ -89,6 +90,7 @@ def main():
             sharding = ttnn.create_sharded_memory_config([32, 256], ttnn.CoreGrid(y=1, x=1),
                 ttnn.ShardStrategy.HEIGHT, ttnn.ShardOrientation.ROW_MAJOR, use_height_and_width_as_shard_shape=True)
             references = []
+            written_pages = set()
             for seed in (0, 1):
                 stage('native-reference', context=context, seed=seed)
                 torch.manual_seed(seed)
@@ -101,7 +103,10 @@ def main():
                     ttnn.experimental.paged_update_cache(serial, sharded,
                         update_idxs_tensor=singleton_position, page_table=singleton_pages)
                     ttnn.deallocate(sharded)
-                references.append((inputs, indexes, snapshot(serial)))
+                written_pages.update(int(page_values[0, int(position) // 64]) for position in indexes)
+                references.append((inputs, indexes, reference_snapshot(ttnn, serial, initial, written_pages)))
+                report.setdefault('reference_pages', []).append(dict(seed=seed, pages=sorted(written_pages),
+                    candidate_comparison='complete allocated cache on both chips'))
             with page_geometry(context) as evidence:
                 for seed, (inputs, indexes, expected) in enumerate(references):
                     stage('candidate', context=context, seed=seed)

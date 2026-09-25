@@ -1,0 +1,1025 @@
+"""Every env var the container-side scripts read must cross into the container.
+
+Run 35679222511 is why this file exists. The v36 arm set M3NATIVE_PREFILL_CHUNK_TOKENS
+=2048 on the runner host, mounted the three grafted M1 files, and passed
+TT_M1_FORCE_CHUNKED_PREFILL=1 - everything needed for the resumable prefill path. The
+docker run never passed CHUNK_TOKENS itself, so lever_n_m3native_gate.py inside the
+container saw it unset, took the byte-identical-without-it branch, and launched the
+server with --no-enable-chunked-prefill --max-num-batched-tokens 33024. Every prompt
+was prefilled whole, the resumable path never ran, and the run looked like a Lever N
+measurement while testing nothing about Lever N. The same hole had already made the two
+TTFT ceilings unassertable.
+
+The invariant is one-directional and derived, not listed: whatever the arm mounts at
+/bench is read for env access, and every M3NATIVE_* name it reads must appear as a
+docker -e passthrough. Adding a flag to a /bench script without wiring it fails here,
+on CPU, in seconds - instead of on the rig, as a silently stock run.
+"""
+
+import ast
+import hashlib
+import os
+from pathlib import Path
+import re
+import unittest
+
+HERE = Path(__file__).parent
+ARM = HERE / 'lever_n_m3native_run_arm.sh'
+
+# A read this script performs on the HOST, deliberately not passed through: it selects
+# mounts and other env vars rather than being consumed inside the container.
+HOST_ONLY = frozenset()
+
+# Image A capacity flags: host M3NATIVE_<X> becomes container QWEN_FAST_<X>=1.
+CAPACITY_FLAGS = ('MEMORY_LEDGER', 'SKIP_BLOCK_STREAM', 'SINGLE_GATEUP', 'DRAFT_BF8')
+
+
+def arm_text():
+    return ARM.read_text(encoding='utf-8').replace(chr(13) + chr(10), chr(10))
+
+
+def bench_scripts(text):
+    """The scripts the arm mounts at /bench, from the arm itself so it cannot drift."""
+    names = re.findall(r'dst=/bench/([A-Za-z0-9_]+[.]py)', text)
+    if not names:
+        raise AssertionError('no /bench mounts found in the arm - the regex has drifted')
+    return sorted(set(names))
+
+
+def passed_through(text):
+    """Every M3NATIVE_* name the docker run hands the container as -e NAME=..."""
+    return set(re.findall(r'-e (M3NATIVE_[A-Z0-9_]+)=', text))
+
+
+def _is_environ(node):
+    if isinstance(node, ast.Attribute):
+        return node.attr == 'environ'
+    return isinstance(node, ast.Name) and node.id == 'environ'
+
+
+class _KeyParameters(ast.NodeVisitor):
+    """Module-level functions that use a parameter as an environment key, by position.
+
+    m3native_ttft_profile reads its two ceilings through a helper:
+
+        def _threshold(environ, name):
+            value = (os.environ if environ is None else environ).get(name)
+        ...
+        ceiling = _threshold(environ, FLAG_MAX_STALL)
+
+    so the name never appears at an environ access. Resolving the helper is what makes
+    the scan see them. Chasing the call is also what keeps the scan HONEST: a blanket
+    "any module constant starting with M3NATIVE_" rule would drag in the gate's
+    M3NATIVE_GATE_JSON_BEGIN stdout markers and demand a -e passthrough for a sentinel
+    that is printed, never read.
+    """
+
+    def __init__(self):
+        self.positions = {}
+
+    def visit_FunctionDef(self, node):
+        names = [a.arg for a in node.args.args]
+        used = set()
+        for inner in ast.walk(node):
+            key = _environ_key(inner)
+            if isinstance(key, ast.Name) and key.id in names:
+                used.add(names.index(key.id))
+        if used:
+            self.positions[node.name] = used
+        self.generic_visit(node)
+
+
+def _environ_key(node):
+    """The key expression of an environment access, or None."""
+    if isinstance(node, ast.Subscript) and _is_environ(node.value):
+        return node.slice
+    if not isinstance(node, ast.Call) or not node.args:
+        return None
+    func = node.func
+    if isinstance(func, ast.Name) and func.id == 'getenv':
+        return node.args[0]
+    if not isinstance(func, ast.Attribute):
+        return None
+    if func.attr == 'getenv' and isinstance(func.value, ast.Name) and func.value.id == 'os':
+        return node.args[0]
+    if func.attr != 'get':
+        return None
+    target = func.value
+    if isinstance(target, ast.IfExp):
+        if any(_is_environ(part) for part in (target.body, target.orelse)):
+            return node.args[0]
+        return None
+    return node.args[0] if _is_environ(target) else None
+
+
+class EnvReads(ast.NodeVisitor):
+    """M3NATIVE_* names read from the environment, directly or through a helper."""
+
+    def __init__(self, module):
+        self.names = set()
+        self.constants = {}
+        for node in module.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and isinstance(node.value.value, str):
+                        self.constants[target.id] = node.value.value
+        finder = _KeyParameters()
+        finder.visit(module)
+        self.positions = finder.positions
+
+    def _record(self, node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            self.names.add(node.value)
+        elif isinstance(node, ast.Name):
+            resolved = self.constants.get(node.id)
+            if resolved is not None:
+                self.names.add(resolved)
+
+    def visit_Call(self, node):
+        key = _environ_key(node)
+        if key is not None:
+            self._record(key)
+        callee = node.func.id if isinstance(node.func, ast.Name) else None
+        for index in self.positions.get(callee, ()):
+            if index < len(node.args):
+                self._record(node.args[index])
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node):
+        key = _environ_key(node)
+        if key is not None:
+            self._record(key)
+        self.generic_visit(node)
+
+
+def reads(path):
+    module = ast.parse(path.read_text(encoding='utf-8'))
+    visitor = EnvReads(module)
+    visitor.visit(module)
+    return {n for n in visitor.names if n.startswith('M3NATIVE_')}
+
+
+class ArmEnvPassthroughTests(unittest.TestCase):
+    def test_every_bench_env_read_is_passed_into_the_container(self):
+        text = arm_text()
+        through = passed_through(text)
+        missing = {}
+        for name in bench_scripts(text):
+            for flag in sorted(reads(HERE / name) - through - HOST_ONLY):
+                missing.setdefault(flag, []).append(name)
+        self.assertEqual(missing, {}, 'read inside the container but never passed to it: %s'
+                         % '; '.join('%s (%s)' % (k, ', '.join(v)) for k, v in sorted(missing.items())))
+
+    def test_the_three_flags_that_run_35679222511_lost_are_wired(self):
+        through = passed_through(arm_text())
+        for name in ('M3NATIVE_PREFILL_CHUNK_TOKENS', 'M3NATIVE_TTFT_MAX_S',
+                     'M3NATIVE_TTFT_MAX_STALL_S'):
+            with self.subTest(flag=name):
+                self.assertIn(name, through)
+
+    def test_the_chunk_flag_actually_reaches_the_server_argv(self):
+        """CHUNK_TOKENS is only worth passing because the gate turns it into the flag.
+        If the gate stops building --enable-chunked-prefill from it, the passthrough is
+        cargo and this says so."""
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        self.assertIn("os.environ.get('M3NATIVE_PREFILL_CHUNK_TOKENS')", gate)
+        self.assertIn("'--enable-chunked-prefill'", gate)
+        self.assertIn("'--no-enable-chunked-prefill'", gate)
+
+    def test_the_scanner_finds_a_read_hidden_behind_a_constant(self):
+        """The guard against the guard: a literal-only scan passes the broken arm."""
+        found = reads(HERE / 'm3native_ttft_profile.py')
+        self.assertIn('M3NATIVE_TTFT_MAX_STALL_S', found)
+        self.assertIn('M3NATIVE_TTFT_MAX_S', found)
+
+    def test_bench_scripts_are_derived_and_all_exist(self):
+        names = bench_scripts(arm_text())
+        self.assertIn('lever_n_m3native_gate.py', names)
+        self.assertIn('m3native_ttft_profile.py', names)
+        for name in names:
+            with self.subTest(script=name):
+                self.assertTrue((HERE / name).is_file(), '%s is mounted but absent' % name)
+
+
+    def test_image_a_capacity_flags_reach_the_container_and_are_read_there(self):
+        """The four 4 x 131k capacity flags (docs/four-streams-131k-feasibility-2026-09-23.md).
+        Each host name must become its QWEN_FAST_* name at the docker run, and that name must
+        be read by a module the image bakes - so a rename on either side fails here."""
+        text = arm_text()
+        baked = ''.join(path.read_text(encoding='utf-8') for path in sorted(HERE.glob('*.py'))
+                        if not path.name.startswith('test_'))
+        for name in CAPACITY_FLAGS:
+            with self.subTest(flag=name):
+                self.assertIn('${M3NATIVE_%s:+-e QWEN_FAST_%s=1}' % (name, name), text)
+                self.assertIn("'QWEN_FAST_%s'" % name, baked)
+
+
+class PrefillProfileArmTests(unittest.TestCase):
+    """Prefill ranking M2: the profile block honours M3NATIVE_MAX_TOKENS (the single-user 131k
+    prefill profile runs --max-tokens 1), takes its op-support count from
+    M3NATIVE_PROFILE_OP_SUPPORT (default 20000), and passes QWEN_PREFILL_PROFILE_FLUSH=1 (only under
+    M3NATIVE_PROFILE_FLUSH=1: its mid-prefill drain segfaulted in v131) so the
+    grafted layer.py drains the profiler every 16 layers. The C1c/C1d switches cross as
+    QWEN_FAST_C1_AGMM / QWEN_FAST_C1_LEGACY."""
+
+    START = 'max_tokens="${M3NATIVE_MAX_TOKENS:-256}"'
+    IF = 'if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then'
+
+    def _profile_block(self, environ):
+        import shutil
+        import subprocess
+        import tempfile
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        text = arm_text()
+        start = text.index(self.START)
+        end = text.index(chr(10) + 'fi' + chr(10), text.index(self.IF, start)) + 4
+        script = ('set -euo pipefail' + chr(10) + text[start:end]
+                  + 'printf "RESULT|%s|%s" "$max_tokens" "${entry_args[*]}"' + chr(10))
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(PATH=os.environ.get('PATH', ''), **environ)
+            try:
+                result = subprocess.run([bash, '-c', script], env=env, cwd=directory,
+                                        capture_output=True, text=True, timeout=60)
+            except OSError as error:
+                self.skipTest('bash unusable: %s' % error)
+        return result
+
+    def _run(self, **environ):
+        result = self._profile_block(environ)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        tokens, argv = result.stdout.split('RESULT|')[-1].split('|')
+        return int(tokens), argv
+
+    def test_max_tokens_is_honoured_in_profile_mode_and_defaults_are_kept(self):
+        self.assertEqual(self._run()[0], 256)
+        self.assertEqual(self._run(M3NATIVE_MAX_TOKENS='96')[0], 96)
+        self.assertEqual(self._run(M3NATIVE_PROFILE='1')[0], 48)
+        self.assertEqual(self._run(M3NATIVE_PROFILE='1', M3NATIVE_MAX_TOKENS='1')[0], 1)
+
+    def test_op_support_count_defaults_to_20000_and_is_overridable(self):
+        self.assertIn('--op-support-count 20000 ', self._run(M3NATIVE_PROFILE='1')[1])
+        self.assertIn('--op-support-count 200000 ',
+                      self._run(M3NATIVE_PROFILE='1', M3NATIVE_PROFILE_OP_SUPPORT='200000')[1])
+        self.assertNotIn('tracy', self._run(M3NATIVE_PROFILE_OP_SUPPORT='200000')[1])
+        code = [line for line in arm_text().splitlines() if not line.lstrip().startswith('#')]
+        self.assertEqual([line for line in code if '--op-support-count' in line],
+                         ['              --op-support-count "$op_support" -o /experiment-results-profile'])
+
+    def test_a_bad_op_support_count_is_refused(self):
+        for value in ('abc', '0', '-5', '2e5'):
+            with self.subTest(value=value):
+                result = self._profile_block(dict(M3NATIVE_PROFILE='1', M3NATIVE_PROFILE_OP_SUPPORT=value))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('M3NATIVE_PROFILE_OP_SUPPORT must be a positive integer', result.stderr)
+
+    def test_the_flush_flag_and_the_c1_switches_cross_into_the_container(self):
+        text = arm_text()
+        self.assertNotIn('${M3NATIVE_PROFILE:+-e QWEN_PREFILL_PROFILE_FLUSH=1}', text)
+        for line in ('${M3NATIVE_PROFILE_FLUSH:+-e QWEN_PREFILL_PROFILE_FLUSH=1}',
+                     '${M3NATIVE_C1_AGMM:+-e QWEN_FAST_C1_AGMM=1}',
+                     '${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1}'):
+            with self.subTest(line=line):
+                self.assertEqual(text.count(line), 1)
+                self.assertLess(text.index(line), text.index('--entrypoint python3'))
+        graft = (HERE / 'lever_n_m3native_patch.py').read_text(encoding='utf-8')
+        for name in ('QWEN_PREFILL_PROFILE_FLUSH', 'QWEN_FAST_C1_AGMM', 'QWEN_FAST_C1_LEGACY'):
+            with self.subTest(read=name):
+                self.assertIn("'%s'" % name, graft)
+
+
+class C1eArmTests(unittest.TestCase):
+    """C1e (lever_n_m3native_patch section J): M3NATIVE_C1_EXACT=1 crosses as QWEN_FAST_C1_EXACT=1 and
+    M3NATIVE_C1_EXACT_AUDIT=<n> as QWEN_FAST_C1_EXACT_AUDIT=<n>, between the C1d and C1 legacy
+    switches, before the entrypoint; unset, nothing crosses. Both are read by the grafted mlp.py (and
+    layer.py), and by the gate, which requires C1e's markers under them - so a name drifting on either
+    side fails here, not on the rig as a silently served-path run."""
+
+    LINES = ('${M3NATIVE_C1_EXACT:+-e QWEN_FAST_C1_EXACT=1}',
+             '${M3NATIVE_C1_EXACT_AUDIT:+-e QWEN_FAST_C1_EXACT_AUDIT=$M3NATIVE_C1_EXACT_AUDIT}')
+
+    def test_the_two_switches_cross_between_c1_agmm_and_c1_legacy(self):
+        text = arm_text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(), '${M3NATIVE_C1_AGMM:+-e QWEN_FAST_C1_AGMM=1} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92))
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+        self.assertEqual(lines[start + 2].strip(), '${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1} ' + chr(92))
+
+    def test_the_container_side_reads_the_names_that_cross(self):
+        graft = (HERE / 'lever_n_m3native_patch.py').read_text(encoding='utf-8')
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        for name in ('QWEN_FAST_C1_EXACT', 'QWEN_FAST_C1_EXACT_AUDIT'):
+            with self.subTest(name=name):
+                self.assertIn("'%s'" % name, graft)
+                self.assertIn("'%s'" % name, gate)
+        import lever_n_m3native_patch as patcher
+        self.assertIn('os.environ.get("QWEN_FAST_C1_EXACT") == "1"', patcher.C1E_ON)
+        self.assertIn('os.environ.get("QWEN_FAST_C1_EXACT_AUDIT")', patcher.C1E_HELPERS)
+
+
+class RoundB1ArmTests(unittest.TestCase):
+    """Build 1 of the round host-phase cuts: M3NATIVE_ROUND_B1=1 crosses as QWEN_FAST_ROUND_B1=1,
+    on its own continued line right after C1_LEGACY's, before the entrypoint; unset, nothing
+    crosses. The modules that read it are baked (test_dflash_round_b1.ShippingTests checks both
+    image copy lists), so the flag does nothing on an image without build 1 - the gate's
+    '[PINDIAG] round b1 engaged' requirement is what catches that."""
+
+    LINE = '${M3NATIVE_ROUND_B1:+-e QWEN_FAST_ROUND_B1=1}'
+
+    def test_the_switch_crosses_before_the_entrypoint_next_to_c1_legacy(self):
+        text = arm_text()
+        self.assertEqual(text.count(self.LINE), 1)
+        self.assertLess(text.index(self.LINE), text.index('--entrypoint python3'))
+        lines = text.split(chr(10))
+        index = next(number for number, line in enumerate(lines) if self.LINE in line)
+        self.assertEqual(lines[index - 1].strip(), '${M3NATIVE_C1_LEGACY:+-e QWEN_FAST_C1_LEGACY=1} ' + chr(92))
+        self.assertEqual(lines[index].strip(), self.LINE + ' ' + chr(92), 'nothing else on the continued line')
+
+    def test_its_audit_crosses_on_the_next_line(self):
+        """M3NATIVE_ROUND_B1_AUDIT=1 crosses as QWEN_FAST_ROUND_B1_AUDIT=1 (the correctness arm's
+        shadow check; it does nothing without QWEN_FAST_ROUND_B1), right after the B1 line."""
+        audit = '${M3NATIVE_ROUND_B1_AUDIT:+-e QWEN_FAST_ROUND_B1_AUDIT=1}'
+        text = arm_text()
+        self.assertEqual(text.count(audit), 1)
+        lines = text.split(chr(10))
+        index = next(number for number, line in enumerate(lines) if audit in line)
+        self.assertEqual(lines[index - 1].strip(), self.LINE + ' ' + chr(92))
+        self.assertEqual(lines[index].strip(), audit + ' ' + chr(92), 'nothing else on the continued line')
+        self.assertLess(text.index(audit), text.index('--entrypoint python3'))
+        for module in ('dflash_device.py', 'draft_kv_history.py'):
+            with self.subTest(module=module):
+                self.assertIn("os.environ.get('QWEN_FAST_ROUND_B1_AUDIT') == '1'",
+                              (HERE / module).read_text(encoding='utf-8'))
+        self.assertIn("ROUND_B1_AUDIT_FLAG = 'QWEN_FAST_ROUND_B1_AUDIT'",
+                      (HERE / 'dflash_packed_proposal.py').read_text(encoding='utf-8'))
+
+    def test_baked_modules_read_it(self):
+        for module in ('dflash_device.py', 'draft_kv_history.py', 'dflash_proposal_trace.py',
+                       'dflash_traced_publish.py', 'serving_packed_step.py',
+                       'dflash_packed_proposal_coordinator.py'):
+            with self.subTest(module=module):
+                source = (HERE / module).read_text(encoding='utf-8')
+                self.assertIn("os.environ.get('QWEN_FAST_ROUND_B1') == '1'", source)
+        self.assertIn("ROUND_B1_FLAG = 'QWEN_FAST_ROUND_B1'", (HERE / 'dflash_packed_proposal.py').read_text(encoding='utf-8'))
+
+
+
+class VerifyT2ArmTests(unittest.TestCase):
+    """Verify-trace T2: M3NATIVE_VERIFY_T2[_AUDIT|_SKIP|_KV_ROWS] cross as QWEN_FAST_VERIFY_T2[...],
+    right after the T1 lines, before the entrypoint; unset, nothing crosses. The modules that read
+    them are baked (test_verify_trace_t2.ShippingTests checks both image copy lists); the gate reads
+    the same names from the container's environment."""
+
+    LINES = ('${M3NATIVE_VERIFY_T2:+-e QWEN_FAST_VERIFY_T2=1}',
+             '${M3NATIVE_VERIFY_T2_AUDIT:+-e QWEN_FAST_VERIFY_T2_AUDIT=1}',
+             '${M3NATIVE_VERIFY_T2_SKIP:+-e QWEN_FAST_VERIFY_T2_SKIP=$M3NATIVE_VERIFY_T2_SKIP}',
+             '${M3NATIVE_VERIFY_T2_KV_ROWS:+-e QWEN_FAST_VERIFY_T2_KV_ROWS=$M3NATIVE_VERIFY_T2_KV_ROWS}')
+
+    def test_the_four_switches_cross_after_t1_before_the_entrypoint(self):
+        text = arm_text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(),
+                         '${M3NATIVE_VERIFY_T1_SKIP:+-e QWEN_FAST_VERIFY_T1_SKIP=$M3NATIVE_VERIFY_T1_SKIP} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92))
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+
+    def test_the_container_side_reads_the_names_that_cross(self):
+        import verify_trace_t2
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        module = (HERE / 'verify_trace_t2.py').read_text(encoding='utf-8')
+        for name in ('QWEN_FAST_VERIFY_T2', 'QWEN_FAST_VERIFY_T2_AUDIT', 'QWEN_FAST_VERIFY_T2_SKIP',
+                     'QWEN_FAST_VERIFY_T2_KV_ROWS'):
+            with self.subTest(name=name):
+                self.assertIn("'%s'" % name, gate)
+                self.assertIn("'%s'" % name, module)
+        self.assertEqual(verify_trace_t2.KV_ROWS_FLAG, 'QWEN_FAST_VERIFY_T2_KV_ROWS')
+
+
+class SeqBlockArmTests(unittest.TestCase):
+    """K5-A: M3NATIVE_GDN_SEQ_BLOCK[_LEVEL|_AUDIT] cross as QWEN_FAST_GDN_SEQ_BLOCK[...], right after the
+    user-batch line, before the entrypoint; unset, nothing crosses. gdn_seq_block reads them (baked: both
+    image copy lists, test_gdn_seq_block.ShippingTests) and so does the gate; the arm's refusals are
+    test_gdn_seq_block.ArmWiringTests."""
+
+    LINES = ('${M3NATIVE_GDN_SEQ_BLOCK:+-e QWEN_FAST_GDN_SEQ_BLOCK=1}',
+             '${M3NATIVE_GDN_SEQ_BLOCK_LEVEL:+-e QWEN_FAST_GDN_SEQ_BLOCK_LEVEL=$M3NATIVE_GDN_SEQ_BLOCK_LEVEL}',
+             '${M3NATIVE_GDN_SEQ_BLOCK_AUDIT:+-e QWEN_FAST_GDN_SEQ_BLOCK_AUDIT=$M3NATIVE_GDN_SEQ_BLOCK_AUDIT}')
+
+    def test_the_three_switches_cross_after_the_user_batch_before_the_entrypoint(self):
+        text = arm_text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(), '${M3NATIVE_GDN_USER_BATCH:+-e QWEN_FAST_GDN_USER_BATCH=1} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92))
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+
+    def test_the_container_side_reads_the_names_that_cross(self):
+        import gdn_seq_block
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        module = (HERE / 'gdn_seq_block.py').read_text(encoding='utf-8')
+        for name in ('QWEN_FAST_GDN_SEQ_BLOCK', 'QWEN_FAST_GDN_SEQ_BLOCK_LEVEL', 'QWEN_FAST_GDN_SEQ_BLOCK_AUDIT'):
+            with self.subTest(name=name):
+                self.assertIn("'%s'" % name, gate)
+                self.assertIn("'%s'" % name, module)
+        self.assertEqual((gdn_seq_block.FLAG, gdn_seq_block.LEVEL_FLAG, gdn_seq_block.AUDIT_FLAG),
+                         ('QWEN_FAST_GDN_SEQ_BLOCK', 'QWEN_FAST_GDN_SEQ_BLOCK_LEVEL', 'QWEN_FAST_GDN_SEQ_BLOCK_AUDIT'))
+        through = re.findall(r'-e (QWEN_FAST_GDN_SEQ_BLOCK\w*)=', arm_text())
+        self.assertEqual(sorted(through), ['QWEN_FAST_GDN_SEQ_BLOCK', 'QWEN_FAST_GDN_SEQ_BLOCK_AUDIT',
+                                           'QWEN_FAST_GDN_SEQ_BLOCK_LEVEL'])
+
+
+class VariableUserArmTests(unittest.TestCase):
+    """Variable-user packed rounds M0/M1: M3NATIVE_PAIR_MASK_REFRESH, _PAIR_MASK_AUDIT,
+    _PAIRS_PACKED_ONLY and _PADDED_PROBE cross as QWEN_FAST_<name>=1, right after the T2 lines,
+    before the entrypoint; unset, nothing crosses. The modules that read them are baked (both
+    image copy lists: test_dflash_proposal_trace / test_padded_probe ShippingTests), and the gate
+    requires the line each one logs once its path ran - so an image without M0/M1, or a name
+    drifting on either side, fails there or here, never as a silently stock arm."""
+
+    LINES = ('${M3NATIVE_PAIR_MASK_REFRESH:+-e QWEN_FAST_PAIR_MASK_REFRESH=1}',
+             '${M3NATIVE_PAIR_MASK_AUDIT:+-e QWEN_FAST_PAIR_MASK_AUDIT=1}',
+             '${M3NATIVE_PAIRS_PACKED_ONLY:+-e QWEN_FAST_PAIRS_PACKED_ONLY=1}',
+             '${M3NATIVE_PADDED_PROBE:+-e QWEN_FAST_PADDED_PROBE=1}')
+    READERS = {'QWEN_FAST_PAIR_MASK_REFRESH': ('dflash_proposal_trace.py',),
+               'QWEN_FAST_PAIR_MASK_AUDIT': ('dflash_proposal_trace.py',),
+               'QWEN_FAST_PAIRS_PACKED_ONLY': ('dflash_packed_proposal_coordinator.py', 'serving_worker_hook.py'),
+               'QWEN_FAST_PADDED_PROBE': ('packed_verifier.py', 'padded_probe.py')}
+
+    def test_the_four_switches_cross_after_t2_before_the_entrypoint(self):
+        text = arm_text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(),
+                         '${M3NATIVE_VERIFY_T2_KV_ROWS:+-e QWEN_FAST_VERIFY_T2_KV_ROWS=$M3NATIVE_VERIFY_T2_KV_ROWS} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92), 'nothing else on the line')
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+
+    def test_the_container_side_reads_the_names_that_cross(self):
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        for name, modules in self.READERS.items():
+            with self.subTest(name=name):
+                self.assertIn("'%s'" % name, gate)
+                for module in modules:
+                    self.assertIn(name, (HERE / module).read_text(encoding='utf-8'), module)
+        # the four are the arm's names with the prefix swapped, nothing else crosses for them
+        through = re.findall(r'-e (QWEN_FAST_(?:PAIR_MASK_\w+|PAIRS_PACKED_ONLY|PADDED_PROBE))=1', arm_text())
+        self.assertEqual(sorted(through), sorted(self.READERS))
+
+    def test_unset_nothing_crosses(self):
+        import shutil
+        import subprocess
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        script = 'printf "%s|" ' + ' '.join(self.LINES) + chr(10)
+        try:
+            unset = subprocess.run([bash, '-c', script], env=dict(PATH=os.environ.get('PATH', '')),
+                                   capture_output=True, text=True, timeout=60)
+            both = subprocess.run([bash, '-c', script], env=dict(PATH=os.environ.get('PATH', ''), M3NATIVE_PAIR_MASK_REFRESH='1',
+                                                                 M3NATIVE_PADDED_PROBE='1'),
+                                  capture_output=True, text=True, timeout=60)
+        except OSError as error:
+            self.skipTest('bash unusable: %s' % error)
+        self.assertEqual(unset.stdout.strip('|'), '')
+        self.assertEqual(both.stdout, '-e|QWEN_FAST_PAIR_MASK_REFRESH=1|-e|QWEN_FAST_PADDED_PROBE=1|')
+
+
+class QuadDraftArmTests(unittest.TestCase):
+    """Q4: M3NATIVE_QUAD_DRAFT[_AUDIT], _QUAD_SDPA and _QUAD_CONV cross as QWEN_FAST_QUAD_DRAFT[...], right after the
+    pair fold's line, before the entrypoint; unset, nothing crosses. quad_draft reads them (baked: both image copy
+    lists, test_quad_draft.ShippingTests) and so does the gate; the arm's refusals are test_quad_draft.ArmTests."""
+
+    LINES = ('${M3NATIVE_QUAD_DRAFT:+-e QWEN_FAST_QUAD_DRAFT=1}',
+             '${M3NATIVE_QUAD_DRAFT_AUDIT:+-e QWEN_FAST_QUAD_DRAFT_AUDIT=$M3NATIVE_QUAD_DRAFT_AUDIT}',
+             '${M3NATIVE_QUAD_SDPA:+-e QWEN_FAST_QUAD_SDPA=$M3NATIVE_QUAD_SDPA}',
+             '${M3NATIVE_QUAD_CONV:+-e QWEN_FAST_QUAD_CONV=$M3NATIVE_QUAD_CONV}')
+    NAMES = ('QWEN_FAST_QUAD_DRAFT', 'QWEN_FAST_QUAD_DRAFT_AUDIT', 'QWEN_FAST_QUAD_SDPA', 'QWEN_FAST_QUAD_CONV')
+
+    def test_the_four_switches_cross_after_the_pair_fold_before_the_entrypoint(self):
+        text = arm_text()
+        lines = text.split(chr(10))
+        start = next(number for number, line in enumerate(lines) if self.LINES[0] in line)
+        self.assertEqual(lines[start - 1].strip(), '${M3NATIVE_PAIR_ROW_EXACT:+-e QWEN_FAST_PAIR_ROW_EXACT=1} ' + chr(92))
+        for offset, expected in enumerate(self.LINES):
+            with self.subTest(line=expected):
+                self.assertEqual(text.count(expected), 1)
+                self.assertEqual(lines[start + offset].strip(), expected + ' ' + chr(92))
+                self.assertLess(text.index(expected), text.index('--entrypoint python3'))
+
+    def test_the_container_side_reads_the_names_that_cross(self):
+        import quad_draft
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        module = (HERE / 'quad_draft.py').read_text(encoding='utf-8')
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                self.assertIn("'%s'" % name, gate)
+                self.assertIn("'%s'" % name, module)
+        self.assertEqual((quad_draft.FLAG, quad_draft.AUDIT_FLAG, quad_draft.SDPA_FLAG, quad_draft.CONV_FLAG), self.NAMES)
+        through = re.findall(r'-e (QWEN_FAST_QUAD_\w*)=', arm_text())
+        self.assertEqual(sorted(through), sorted(self.NAMES))
+
+
+class ServingPairArmTests(unittest.TestCase):
+    """The gate mounts only the serving pair, found by board id (card M, card A), never every
+    /dev/tenstorrent node: with the third board back a container would otherwise see three devices."""
+
+    def test_the_pair_is_pinned_by_board_id(self):
+        text = arm_text()
+        self.assertIn('serving_cards="${M3NATIVE_CARDS:-blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67}"', text)
+        self.assertNotIn("ls /dev/tenstorrent | grep", text)
+        self.assertIn('readlink -f "/dev/tenstorrent/by-id/$card"', text)
+        self.assertIn('expected exactly two serving cards', text)
+
+    def test_the_arm_waits_for_the_pair_after_the_reset(self):
+        # Run 35930349210: the reset step returned before pciehp re-enumerated card A (behind the
+        # PCIe switch) and the arm refused on a missing by-id link one second later.
+        text = arm_text()
+        self.assertIn('card_wait_s="${M3NATIVE_CARD_WAIT_S:-120}"', text)
+        self.assertIn('until resolve_serving_nodes; do', text)
+        self.assertIn('serving pair moved while settling', text)
+        loop = text.index('until resolve_serving_nodes; do')
+        self.assertLess(loop, text.index('expected exactly two serving cards'))
+
+
+class CardWaitHintArmTests(unittest.TestCase):
+    """Run v190: card A came back from the reset without its by-id link (the telemetry race: the ARC
+    firmware was not ready when udev looked) and the arm refused after 120 s with nothing naming the
+    cause. On that timeout the arm now names it and the driver re-probe that cures it - it never acts."""
+
+    START = 'card_wait_s="${M3NATIVE_CARD_WAIT_S:-120}"'
+
+    @staticmethod
+    def _bash():
+        import shutil
+        if os.name == 'nt':
+            for root in (os.environ.get('ProgramW6432'), os.environ.get('ProgramFiles'), 'C:/Program Files'):
+                if root and Path(root, 'Git', 'bin', 'bash.exe').is_file():
+                    return str(Path(root, 'Git', 'bin', 'bash.exe'))
+        found = shutil.which('bash')
+        if found and os.name == 'nt' and ('system32' in found.lower() or 'windowsapps' in found.lower()):
+            return None
+        return found
+
+    def _wait_block(self, cards, dmesg):
+        """The arm's own by-id wait, from its first line to the end of its loop, with every by-id link
+        missing and no wait allowed."""
+        import subprocess
+        bash = self._bash()
+        if bash is None:
+            self.skipTest('no bash')
+        text = arm_text()
+        start = text.index(self.START)
+        end = text.index(chr(10) + 'done' + chr(10), text.index('until resolve_serving_nodes; do')) + 6
+        script = chr(10).join([
+            'set -euo pipefail',
+            'serving_cards=%s' % shlex_quote(cards),
+            'M3NATIVE_CARD_WAIT_S=0',
+            'readlink() { return 1; }',
+            'ls() { :; }',
+            'sleep() { :; }',
+            'sudo() { return 1; }',
+            'dmesg() { %s; }' % dmesg,
+            text[start:end],
+            'echo WAITED',
+        ])
+        try:
+            return subprocess.run([bash, '-c', script], env=dict(PATH=os.environ.get('PATH', '')),
+                                  capture_output=True, text=True, timeout=60)
+        except OSError as error:
+            self.skipTest('bash unusable: %s' % error)
+
+    def test_the_timeout_names_the_telemetry_race_and_the_re_probe(self):
+        lines = ('[  11.5] tenstorrent 0000:f3:00.0: Telemetry not available', '[  12.0] unrelated')
+        result = self._wait_block('blackhole-3707293C249A5E67', "printf '%s\\n' " + ' '.join(shlex_quote(l) for l in lines))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('WAITED', result.stdout)
+        err = result.stderr
+        self.assertIn('serving card blackhole-3707293C249A5E67 has no device node under /dev/tenstorrent/by-id after 0s', err)
+        self.assertIn('hint: likely the telemetry race after a reset', err)
+        self.assertIn("'tenstorrent 0000:f3:00.0: Telemetry not available'", err)
+        self.assertIn('serving_pair_heal, scripts/ci/serving_pair.sh', err)
+        self.assertIn('echo 0000:f3:00.0 | sudo -n tee /sys/bus/pci/drivers/tenstorrent/unbind; sleep 3', err)
+        self.assertIn('echo 0000:f3:00.0 | sudo -n tee /sys/bus/pci/drivers/tenstorrent/bind', err)
+        self.assertIn('hint:   [  11.5] tenstorrent 0000:f3:00.0: Telemetry not available', err)
+        self.assertNotIn('unrelated', err)
+        self.assertLess(err.index('has no device node'), err.index('hint: likely the telemetry race'))
+
+    def test_card_m_gets_its_own_address_and_an_unknown_card_none(self):
+        result = self._wait_block('blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67', 'return 1')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('echo 0000:d1:00.0 | sudo -n tee /sys/bus/pci/drivers/tenstorrent/bind', result.stderr)
+        self.assertIn("no 'Telemetry not available' line readable in dmesg here", result.stderr)
+        other = self._wait_block('blackhole-0000000000000000', 'return 1')
+        self.assertEqual(other.returncode, 1, other.stdout + other.stderr)
+        self.assertIn('echo <its PCI address> | sudo -n tee', other.stderr)
+        self.assertNotIn('0000:f3:00.0', other.stderr)
+
+    def test_the_arm_only_prints_the_re_probe(self):
+        # Every mention of the driver's sysfs files is inside a printed hint line: the arm never writes one.
+        for line in arm_text().splitlines():
+            if '/sys/bus/pci/drivers' in line:
+                self.assertTrue(line.strip().startswith('echo "hint:'), line)
+
+
+def shlex_quote(text):
+    import shlex
+    return shlex.quote(text)
+
+
+class LegacyContinuationArmTests(unittest.TestCase):
+    """Lever N's negative control: M3NATIVE_LEGACY_CONTINUATION_ORDER=1 crosses as
+    QWEN_FAST_LEGACY_CONTINUATION_ORDER=1, which serving_lifecycle (the pre-fix routing order)
+    and serving_worker_hook (the mixed-step pass-through) read. Unset, nothing crosses."""
+
+    LINE = '${M3NATIVE_LEGACY_CONTINUATION_ORDER:+-e QWEN_FAST_LEGACY_CONTINUATION_ORDER=1}'
+
+    def test_the_switch_crosses_before_the_entrypoint(self):
+        text = arm_text()
+        self.assertEqual(text.count(self.LINE), 1)
+        self.assertLess(text.index(self.LINE), text.index('--entrypoint python3'))
+
+    def test_both_image_modules_read_it(self):
+        for module in ('serving_lifecycle.py', 'serving_worker_hook.py'):
+            with self.subTest(module=module):
+                source = (HERE / module).read_text(encoding='utf-8')
+                self.assertIn("os.environ.get('QWEN_FAST_LEGACY_CONTINUATION_ORDER') == '1'", source)
+
+
+class RealTextArmTests(unittest.TestCase):
+    """M3NATIVE_PROMPT_SOURCE / M3NATIVE_EOS become the gate's --prompt-source / --eos, the way
+    M3NATIVE_SEQUENTIAL_USERS becomes --sequential-users: gate arguments after the image, never
+    container env. The prompt builder and the acceptance report are mounted at /bench beside the
+    gate (single files, never anything under /experiment-scripts/ci). The arm refuses a value the
+    gate would refuse, before any card is touched."""
+
+    ARGS = ('${M3NATIVE_PROMPT_SOURCE:+--prompt-source $M3NATIVE_PROMPT_SOURCE} '
+            '${M3NATIVE_EOS:+--eos $M3NATIVE_EOS} ' + chr(92))
+    START = 'case "${M3NATIVE_PROMPT_SOURCE:-}" in'
+    IF = 'if [ "${M3NATIVE_PROMPT_SOURCE:-}" = "real-text" ]; then'
+
+    def test_the_flags_are_gate_arguments_after_the_image(self):
+        text = arm_text()
+        self.assertEqual(text.count(self.ARGS), 1)
+        self.assertGreater(text.index(self.ARGS), text.index('--entrypoint python3 "$image" "${entry_args[@]}"'))
+        self.assertLess(text.index(self.ARGS), text.index('--references /bench/packed-gate-reference'))
+        self.assertNotIn('M3NATIVE_PROMPT_SOURCE', passed_through(text))
+        self.assertNotIn('M3NATIVE_EOS', passed_through(text))
+        gate = (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8')
+        for option in ("'--prompt-source'", "'--eos'"):
+            self.assertIn(option, gate)
+
+    def test_both_modules_are_mounted_at_bench_and_read_no_environment(self):
+        text = arm_text()
+        for name in ('real_text_prompts.py', 'acceptance_report.py'):
+            with self.subTest(module=name):
+                mount = '--mount "type=bind,src=$PWD/scripts/ci/%s,dst=/bench/%s,readonly"' % (name, name)
+                self.assertEqual(text.count(mount), 1)
+                self.assertLess(text.index(mount), text.index('--entrypoint python3'))
+                self.assertIn(name, bench_scripts(text))
+                self.assertEqual(reads(HERE / name), set())
+        self.assertNotIn('dst=/experiment-scripts/ci/real_text', text)
+
+    def _validate(self, **environ):
+        import shutil
+        import subprocess
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        text = arm_text()
+        start = text.index(self.START)
+        end = text.index(chr(10) + 'fi' + chr(10), text.index(self.IF, start)) + 4
+        script = 'set -euo pipefail' + chr(10) + text[start:end] + 'echo VALID' + chr(10)
+        try:
+            return subprocess.run([bash, '-c', script], env=dict(PATH=os.environ.get('PATH', ''), **environ),
+                                  capture_output=True, text=True, timeout=60)
+        except OSError as error:
+            self.skipTest('bash unusable: %s' % error)
+
+    def test_the_arm_refuses_what_the_gate_would(self):
+        for environ in ({}, dict(M3NATIVE_PROMPT_SOURCE='synthetic'), dict(M3NATIVE_EOS='stop'),
+                        dict(M3NATIVE_PROMPT_SOURCE='real-text', M3NATIVE_ALLOW_MISSING_REFERENCES='1'),
+                        dict(M3NATIVE_PROMPT_SOURCE='real-text', M3NATIVE_ALLOW_MISSING_REFERENCES='1',
+                             M3NATIVE_EOS='stop')):
+            with self.subTest(accepted=environ):
+                result = self._validate(**environ)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('VALID', result.stdout)
+        for environ, message in ((dict(M3NATIVE_PROMPT_SOURCE='prose'), 'must be synthetic or real-text'),
+                                 (dict(M3NATIVE_EOS='maybe'), 'must be ignore or stop'),
+                                 (dict(M3NATIVE_PROMPT_SOURCE='real-text'), 'needs M3NATIVE_ALLOW_MISSING_REFERENCES=1'),
+                                 (dict(M3NATIVE_PROMPT_SOURCE='real-text', M3NATIVE_ALLOW_MISSING_REFERENCES='1',
+                                       M3NATIVE_EOS='ignore'), 'needs M3NATIVE_EOS=stop')):
+            with self.subTest(refused=environ):
+                result = self._validate(**environ)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
+
+class SdpaModesArmTests(unittest.TestCase):
+    """M3NATIVE_SDPA_MODES and the sdpa_decode op-directory graft (optimisation/ttnn-op/
+    sdpa_decode_qwen). The flag is translated, not passed by name, so the /bench scan above
+    cannot see it; these pin both ends and the mount rules."""
+
+    SDPA_DIR = '/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa_decode'
+    POOLED = 'dst=/experiment-scripts/ci/pooled_attention_replay.py,readonly'
+
+    def test_the_modes_flag_becomes_the_env_var_the_replay_reader_and_the_gate_read(self):
+        text = arm_text()
+        self.assertIn('${M3NATIVE_SDPA_MODES:+-e QWEN_FAST_SDPA_MODES=$M3NATIVE_SDPA_MODES}', text)
+        self.assertIn("SDPA_MODES_ENV = 'QWEN_FAST_SDPA_MODES'", (HERE / 'pooled_attention_replay.py').read_text(encoding='utf-8'))
+        self.assertIn("environ.get('QWEN_FAST_SDPA_MODES')", (HERE / 'lever_n_m3native_gate.py').read_text(encoding='utf-8'))
+        self.assertNotIn('M3NATIVE_SDPA_MODES', passed_through(text), 'translated to QWEN_FAST_SDPA_MODES, not passed by name')
+
+    def test_the_reader_module_is_mounted_only_with_the_flag(self):
+        text = arm_text()
+        self.assertEqual(text.count(self.POOLED), 1)
+        block = text[text.index('if [ -n "${M3NATIVE_SDPA_MODES:-}" ]; then'):]
+        self.assertLess(block.index(self.POOLED), block.index(chr(10) + 'fi' + chr(10)))
+        self.assertIn('"${sdpa_mode_mounts[@]}"', text)
+
+    def test_the_op_directory_is_mounted_only_from_a_graft_that_has_one(self):
+        text = arm_text()
+        mount = '-v $KOPGRAFT64/sdpa_decode:%s:ro' % self.SDPA_DIR
+        self.assertEqual(text.count(mount), 1)
+        start = text.index('if [ -n "${KOPGRAFT64:-}" ]; then')
+        end = text.index(chr(10) + 'fi' + chr(10), start)
+        graft = text[start:end]
+        self.assertIn('if [ -d "$KOPGRAFT64/sdpa_decode" ]; then', graft)
+        self.assertLess(graft.index('if [ -d "$KOPGRAFT64/sdpa_decode" ]; then'), graft.index(mount))
+        self.assertIn('-e TT_METAL_CACHE=$kernel_cache', text)
+        self.assertIn('kernel_cache=/experiment-cache/kernels' + chr(10), text)
+        self.assertNotIn('TT_METAL_CACHE=/experiment-cache/kernels ', text)
+
+    def _run_graft_block(self, graft, **environ):
+        """The arm's own KOPGRAFT64 block, executed by bash against a fake graft directory (None: unset)."""
+        import shutil
+        import subprocess
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        text = arm_text()
+        start = text.index('KM=""')
+        end = text.index(chr(10) + 'fi' + chr(10), text.index('if [ -n "${KOPGRAFT64:-}" ]; then')) + 4
+        script = 'set -euo pipefail' + chr(10) + text[start:end] + 'printf "RESULT|%s|%s|%s" "$KM" "$kernel_cache" "$graft_binary_sha"' + chr(10)
+        env = dict(PATH=os.environ.get('PATH', ''), **environ)
+        if graft is not None:
+            env['KOPGRAFT64'] = graft
+        try:
+            result = subprocess.run([bash, '-c', script], env=env, capture_output=True, text=True, timeout=60)
+        except OSError as error:
+            self.skipTest('bash unusable: %s' % error)
+        if result.returncode == 127 or 'sha256sum' in result.stderr and 'not found' in result.stderr:
+            self.skipTest('bash lacks coreutils here')
+        return result
+
+    def test_the_graft_block_runs_unchanged_for_k64d_and_adds_the_directory_for_k64e(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).as_posix()
+            old, new = root + '/k64d', root + '/k64e'
+            for graft in (old, new):
+                Path(graft).mkdir()
+                Path(graft, '_ttnncpp.so').write_bytes(b'so')
+            kernels = Path(new, 'sdpa_decode', 'device', 'kernels')
+            for name, body in (('dataflow/reader_decode_qwen.cpp', b'reader'), ('compute/sdpa_flash_decode_qwen.cpp', b'compute')):
+                (kernels / name).parent.mkdir(parents=True, exist_ok=True)
+                (kernels / name).write_bytes(body)
+            result = self._run_graft_block(old)
+            if result.returncode != 0 and 'No such file' in result.stderr and ':' in root[:3]:
+                self.skipTest('bash here does not share this filesystem view: %s' % result.stderr.strip())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            km, cache, sha = result.stdout.split('RESULT|')[-1].split('|')
+            self.assertNotIn('sdpa_decode', km)
+            self.assertEqual(km.count(' -v '), 5)
+            self.assertEqual(cache, '/experiment-cache/kernels')
+            self.assertEqual(sha, hashlib.sha256(b'so').hexdigest())
+            result = self._run_graft_block(new)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            km, cache, sha = result.stdout.split('RESULT|')[-1].split('|')
+            self.assertIn(' -v %s/sdpa_decode:%s:ro' % (new, self.SDPA_DIR), km)
+            self.assertEqual(km.count(' -v '), 6)
+            self.assertEqual(cache, '/experiment-cache/kernels-qwen-' + hashlib.sha256(b'readercompute').hexdigest()[:12])
+            (kernels / 'compute/sdpa_flash_decode_qwen.cpp').unlink()
+            result = self._run_graft_block(new)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('lacks compute/sdpa_flash_decode_qwen.cpp', result.stderr)
+
+
+class SdpaSliceGraftTests(unittest.TestCase):
+    """Stage 4 (graft K64i, optimisation/ttnn-op/sdpa_decode_slice): the JIT cache key covers every *qwen*.cpp
+    in the graft's kernels tree, yet a K64e..K64g graft keeps the key (and the warm cache) it had before; the
+    slice kernels are required when the graft carries either one or slice / readahead is requested."""
+
+    _run_graft_block = SdpaModesArmTests._run_graft_block
+    OPS = HERE.resolve().parents[1] / 'optimisation' / 'ttnn-op'
+    STAGE3 = OPS / 'sdpa_decode_qwen' / 'stage3'
+    STAGE1 = OPS / 'sdpa_decode_qwen'
+    SLICE = OPS / 'sdpa_decode_slice'
+    # The image's own sdpa_decode kernels (the decode sources dump): none is a *qwen*.cpp.
+    IMAGE_KERNELS = ('compute/sdpa_flash_decode.cpp', 'dataflow/dataflow_common.hpp', 'dataflow/reader_decode_all.cpp',
+                     'dataflow/writer_decode_all.cpp', 'rt_args_common.hpp')
+    SLICE_KERNELS = ('dataflow/reader_decode_qwen_slice.cpp', 'dataflow/writer_decode_qwen_slice.cpp')
+    # The arm's key before stage 4, verbatim (lever_n_m3native_run_arm.sh at 91869e36).
+    OLD_KEY = ('kernel_cache="/experiment-cache/kernels-qwen-$(cat "$sdpa_kernels/dataflow/reader_decode_qwen.cpp" \\' + chr(10)
+               + '      "$sdpa_kernels/compute/sdpa_flash_decode_qwen.cpp" | sha256sum | cut -c1-12)"')
+    SLICE_LITERAL = b'..[QWEN-SDPA] q-slice rows_per_kv={} pnht_full={} slice_tiles={} readahead={}..'
+
+    def _graft(self, root, name, reader, slice_kernels=(), stage4_binary=False):
+        """A fake graft over the committed kernel sources: the image's kernels, the served pair, the slice ones."""
+        graft = Path(root, name)
+        kernels = graft / 'sdpa_decode' / 'device' / 'kernels'
+        for relative in self.IMAGE_KERNELS:
+            (kernels / relative).parent.mkdir(parents=True, exist_ok=True)
+            (kernels / relative).write_bytes(b'image ' + relative.encode())
+        (kernels / 'dataflow' / 'reader_decode_qwen.cpp').write_bytes(reader.read_bytes())
+        (kernels / 'compute' / 'sdpa_flash_decode_qwen.cpp').write_bytes((self.STAGE3 / 'sdpa_flash_decode_qwen.cpp').read_bytes())
+        for relative in slice_kernels:
+            (kernels / relative).write_bytes((self.SLICE / Path(relative).name).read_bytes())
+        (graft / '_ttnncpp.so').write_bytes(b'so' + (self.SLICE_LITERAL if stage4_binary else b''))
+        self._require_visible(graft)
+        return graft.as_posix(), kernels
+
+    def _require_visible(self, graft):
+        """Skip only where bash cannot see this temp tree at all (WSL's bash.exe given a Windows path). The probe
+        is separate from the arm block so that a 'No such file' from the block itself (a broken find, cd or
+        sha256sum in the key) fails the test instead of skipping it."""
+        import shutil
+        import subprocess
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('no bash')
+        probe = subprocess.run([bash, '-c', 'test -s "$1"', 'probe', (Path(graft) / '_ttnncpp.so').as_posix()],
+                               env=dict(PATH=os.environ.get('PATH', '')), capture_output=True, text=True, timeout=60)
+        if probe.returncode != 0:
+            self.skipTest('bash here does not share this filesystem view: %s' % Path(graft).as_posix())
+
+    def _ok(self, result):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split('RESULT|')[-1].split('|')[1]
+
+    def _old_key(self, kernels):
+        import shutil
+        import subprocess
+        script = 'set -euo pipefail' + chr(10) + "sdpa_kernels='%s'" % Path(kernels).as_posix() + chr(10) + self.OLD_KEY + chr(10) + 'printf "%s" "$kernel_cache"'
+        result = subprocess.run([shutil.which('bash'), '-c', script], env=dict(PATH=os.environ.get('PATH', '')),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_the_old_key_is_quoted_from_the_last_revision_that_had_it(self):
+        """OLD_KEY is the pre-stage-4 formula; the new block still feeds sha256sum those two files first."""
+        text = arm_text()
+        self.assertNotIn(self.OLD_KEY, text)
+        self.assertIn('kernel_cache="/experiment-cache/kernels-qwen-$({ cat "$sdpa_kernels/dataflow/reader_decode_qwen.cpp" \\'
+                      + chr(10) + '      "$sdpa_kernels/compute/sdpa_flash_decode_qwen.cpp"; printf \'%s\' "$sdpa_qwen_others"; }', text)
+
+    def test_k64e_to_k64g_grafts_keep_the_key_they_had(self):
+        """Proof that no K64e/K64f/K64g arm rebuilds: over the committed stage-1 and stage-3 kernels (what those
+        grafts mount), the new block's key is byte for byte the old formula's, run by the same bash."""
+        import tempfile
+        # K64e serves the stage-1 reader, K64f and K64g the stage-3 one (build_k64g.sh READER_QWEN_STAGE3).
+        for name, reader, digest in (('K64e', self.STAGE1 / 'reader_decode_qwen.cpp', '9da05bf17acc'),
+                                     ('K64g', self.STAGE3 / 'reader_decode_qwen.cpp', '51a3070723c1')):
+            with self.subTest(graft=name), tempfile.TemporaryDirectory() as directory:
+                graft, kernels = self._graft(directory, name, reader)
+                for environ in ({}, {'M3NATIVE_SDPA_MODES': 'tail'}, {'M3NATIVE_SDPA_MODES': 'tail,share'}):
+                    cache = self._ok(self._run_graft_block(graft, **environ))
+                    self.assertEqual(cache, '/experiment-cache/kernels-qwen-' + digest)
+                    self.assertEqual(cache, self._old_key(kernels))
+                    expected = hashlib.sha256(reader.read_bytes() + (self.STAGE3 / 'sdpa_flash_decode_qwen.cpp').read_bytes())
+                    self.assertEqual(cache, '/experiment-cache/kernels-qwen-' + expected.hexdigest()[:12])
+
+    def test_a_k64i_graft_keys_on_every_qwen_kernel(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            graft, kernels = self._graft(directory, 'K64i', self.STAGE3 / 'reader_decode_qwen.cpp', self.SLICE_KERNELS,
+                                         stage4_binary=True)
+            cache = self._ok(self._run_graft_block(graft))
+            self.assertEqual(cache, '/experiment-cache/kernels-qwen-a7704ab5e038')
+            self.assertNotEqual(cache, self._old_key(kernels))           # the old key ignored the slice kernels
+            others = chr(10).join('%s ./%s' % (hashlib.sha256((kernels / relative).read_bytes()).hexdigest(), relative)
+                                  for relative in self.SLICE_KERNELS)
+            base = (kernels / 'dataflow' / 'reader_decode_qwen.cpp').read_bytes() + (kernels / 'compute' / 'sdpa_flash_decode_qwen.cpp').read_bytes()
+            self.assertEqual(cache, '/experiment-cache/kernels-qwen-' + hashlib.sha256(base + others.encode()).hexdigest()[:12])
+            self.assertEqual(self._ok(self._run_graft_block(graft, M3NATIVE_SDPA_MODES='tail,share,slice')), cache)
+            # A revised slice kernel at the same path, a further *qwen*.cpp anywhere in the tree, or a renamed one:
+            # each a fresh key. The image's own kernels are not *qwen*.cpp and stay out of it.
+            seen = {cache}
+            writer = kernels / self.SLICE_KERNELS[1]
+            writer.write_bytes(writer.read_bytes() + b'// revised' + chr(10).encode())
+            seen.add(self._ok(self._run_graft_block(graft)))
+            (kernels / 'compute' / 'sdpa_flash_decode_qwen_slice.cpp').write_bytes(b'extra')
+            seen.add(self._ok(self._run_graft_block(graft)))
+            (kernels / 'compute' / 'sdpa_flash_decode_qwen_slice.cpp').rename(kernels / 'compute' / 'sdpa_flash_decode_qwen_b.cpp')
+            seen.add(self._ok(self._run_graft_block(graft)))
+            self.assertEqual(len(seen), 4)
+            (kernels / 'dataflow' / 'reader_decode_all.cpp').write_bytes(b'image, edited')
+            self.assertIn(self._ok(self._run_graft_block(graft)), seen)
+
+    def test_the_slice_kernels_are_required_when_the_graft_has_either_or_slice_is_requested(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            graft, kernels = self._graft(directory, 'K64i', self.STAGE3 / 'reader_decode_qwen.cpp', self.SLICE_KERNELS,
+                                         stage4_binary=True)
+            self._ok(self._run_graft_block(graft))
+            bodies = {relative: (kernels / relative).read_bytes() for relative in self.SLICE_KERNELS}
+            for relative in self.SLICE_KERNELS:
+                # Half staged: one slice kernel missing or empty beside the other.
+                for broken in ('missing', 'empty'):
+                    with self.subTest(kernel=relative, broken=broken):
+                        if broken == 'missing':
+                            (kernels / relative).unlink()
+                        else:
+                            (kernels / relative).write_bytes(b'')
+                        result = self._run_graft_block(graft)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn('KOPGRAFT64 sdpa_decode directory lacks %s' % relative, result.stderr)
+                        (kernels / relative).write_bytes(bodies[relative])
+            self._ok(self._run_graft_block(graft))
+            # Neither (a stage-3 tree under a stage-4 binary): nothing to require unless slice is requested.
+            for relative in self.SLICE_KERNELS:
+                (kernels / relative).unlink()
+            self._ok(self._run_graft_block(graft, M3NATIVE_SDPA_MODES='tail,share'))
+            result = self._run_graft_block(graft, M3NATIVE_SDPA_MODES='tail,share,slice')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('KOPGRAFT64 sdpa_decode directory lacks dataflow/reader_decode_qwen_slice.cpp', result.stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            # A stage-3 graft (K64g): fine for tail,share; refused before the run for slice or readahead.
+            graft, _kernels = self._graft(directory, 'K64g', self.STAGE3 / 'reader_decode_qwen.cpp')
+            for value in ('tail', 'tail,share', 'slices', 'tail,share,noslice'):
+                with self.subTest(value=value):
+                    self._ok(self._run_graft_block(graft, M3NATIVE_SDPA_MODES=value))
+            for value in ('slice', 'tail,share,slice', ' tail , share , slice ', 'share,readahead', 'tail,share,slice,readahead'):
+                with self.subTest(value=value):
+                    result = self._run_graft_block(graft, M3NATIVE_SDPA_MODES=value)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('KOPGRAFT64 sdpa_decode directory lacks dataflow/reader_decode_qwen_slice.cpp', result.stderr)
+
+    def test_slice_or_readahead_is_refused_without_a_stage_4_graft(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            # The kernels are there but the binary is not stage 4 (a K64g .so beside K64i kernels).
+            graft, _kernels = self._graft(directory, 'mixed', self.STAGE3 / 'reader_decode_qwen.cpp', self.SLICE_KERNELS)
+            self._ok(self._run_graft_block(graft, M3NATIVE_SDPA_MODES='tail,share'))
+            result = self._run_graft_block(graft, M3NATIVE_SDPA_MODES='tail,share,slice')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("lacks '[QWEN-SDPA] q-slice rows_per_kv=' (not a K64i-or-later build)", result.stderr)
+            # K64c/K64d: no sdpa_decode directory at all.
+            old = Path(directory, 'k64d')
+            old.mkdir()
+            (old / '_ttnncpp.so').write_bytes(b'so' + self.SLICE_LITERAL)
+            self._ok(self._run_graft_block(old.as_posix(), M3NATIVE_SDPA_MODES='tail'))
+            result = self._run_graft_block(old.as_posix(), M3NATIVE_SDPA_MODES='share,readahead')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('has no sdpa_decode directory', result.stderr)
+        # No graft at all: the default arm is untouched, and a stage-4 mode is refused.
+        self.assertEqual(self._ok(self._run_graft_block(None)), '/experiment-cache/kernels')
+        self.assertEqual(self._ok(self._run_graft_block(None, M3NATIVE_SDPA_MODES='tail,share')), '/experiment-cache/kernels')
+        result = self._run_graft_block(None, M3NATIVE_SDPA_MODES='tail,share,slice')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('which needs KOPGRAFT64 (a K64i-or-later graft', result.stderr)
+
+    def test_the_stage_4_literal_is_the_factorys_and_the_replay_readers(self):
+        import pooled_attention_replay as replay
+        text = arm_text()
+        literal = "grep -a -q -F -- '[QWEN-SDPA] q-slice rows_per_kv=' \"$KOPGRAFT64/_ttnncpp.so\""
+        self.assertIn(literal, text)
+        self.assertEqual(replay.QWEN_SDPA_SLICE_MARKER, b'[QWEN-SDPA] q-slice rows_per_kv=')
+        self.assertIn(replay.QWEN_SDPA_SLICE_MARKER, self.SLICE_LITERAL)
+        factory = (self.SLICE / 'apply_factory_slice.py').read_text(encoding='utf-8')
+        self.assertIn("SLICE_LOG_MARKER = '[QWEN-SDPA] q-slice rows_per_kv='", factory)
+        for relative in self.SLICE_KERNELS:
+            self.assertIn(Path(relative).name, factory)
+            self.assertIn(relative, text)
+
+
+
+class StaggerArmTests(unittest.TestCase):
+    """M3NATIVE_STAGGER spaces the request starts so the admission order (slot and pair row) is fixed."""
+
+    def test_the_stagger_reaches_the_gate_and_is_validated(self):
+        text = arm_text()
+        self.assertIn('stagger="${M3NATIVE_STAGGER:-0}"', text)
+        self.assertIn('--stagger "$stagger"', text)
+        self.assertNotIn('--stagger 0 ', text)
+        self.assertIn('M3NATIVE_STAGGER must be a non-negative number', text)
+        self.assertLess(text.index('stagger="${M3NATIVE_STAGGER:-0}"'), text.index('--stagger "$stagger"'))
+
+if __name__ == '__main__':
+    unittest.main()

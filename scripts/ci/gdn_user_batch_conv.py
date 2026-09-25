@@ -1,0 +1,196 @@
+"""The packed users' convolution/gates per user, then ONE recurrence launch for all four.
+
+`gdn_batched_conv.run_batched_projected` is the per-user block: DMA windows, the K-stack
+conv+gates op, then the recurrence and norm/gate. Run once per packed user it costs four
+of everything. This runs the convolution half unchanged, per user - the windows kernel
+reads one history per launch (gdn_conv_windows.cpp) and the conv+gates op is a compiled
+op that cannot be multi-instanced from the host - and then hands all four users'
+`(conv, beta, g, initial, z)` sets to one `gdn_user_batch.execute`, which places each
+user on its own 24-core share of the grid inside a single program.
+
+Every tensor the caller gets back has the per-user shape the per-user path produces, and
+the result dictionaries carry the same keys, so `restore_prefix`, `gdn_conv_prefix_copy`,
+`gdn_records` and `gdn_commit_dma` see nothing new.
+
+Deferred publication only. The per-user path writes the block-start entry into the shared
+working state before each segment runs (`DeviceLoopState._recurrence`), which a batched
+launch cannot reproduce: hoisting the four state moves ahead of one launch would leave
+every user reading the LAST user's convolution state. Deferred packed decode does not do
+that copy at all, which is why it is the only configuration accepted here - and it is the
+configuration the four-user serving round runs in.
+
+Under QWEN_FAST_VERIFY_T2=1 (verify_trace_t2, cut #1) the four window launches become one
+(gdn_conv_windows_packed.build_windows_packed) ahead of the per-user conv gates: the same
+pieces and histories in, the same 16 window tensors out, so every conv gates op still reads
+(and advances) its own user's windows and nothing in the layer writes a piece or a history in
+between. An input the packed op does not serve (Unsupported) takes the served per-user path,
+counted as windows_fallback. QWEN_FAST_VERIFY_T2_AUDIT=1 also builds the served windows beside
+them (G1: packed_verifier compares every layer on the first round, then two per round); those
+are handed over as `audit_windows`, outside `owned`, so retain_checkpoint_histories never frees
+them inside the trace - ModelBatch releases them with the retained records.
+
+The conv gates op writes its windows as well as reading them: it advances them in place (old
+slot 1 -> 0, 2 -> 1, 3 -> 2, the piece's rows -> 3), and what the commit DMA reads after the
+replay is that advanced state. G1 reads both sides after the replay too, so the audit arm runs
+the served windows through the same `conv_gates` call the packed ones take (its conv/beta/g are
+read by nothing and freed at once): both sides then hold post-op windows. Without it (v169) the
+audit compared advanced packed windows with unadvanced served ones - every row one out, ~76.7k
+of 81,920 elements per window - against a packed op card B had found byte-exact.
+
+Under QWEN_FAST_GDN_SEQ_BLOCK=1 (K5-A, gdn_seq_block; default off) the one recurrence launch is
+gdn_seq_block.execute with the qualified sequential-block build for QWEN_FAST_GDN_SEQ_BLOCK_LEVEL,
+when every packed user is a 16-row segment; a block with any other width keeps the served launch.
+Read at each call, so when the verify trace is built. The results then also carry
+seq_block=True and seq_block_level=<the build's level>, set only after the launch returned (the
+execution proof model_batch counts). QWEN_FAST_GDN_SEQ_BLOCK_AUDIT=<layers>: on a layer it lists
+(model_batch names the layer through gdn_seq_block.audit_scope) a DRAM copy of each user's K5-A
+output and the served launch on the same inputs follow it (gdn_seq_block.audit_launches) and are
+handed over as `seq_block_audit`, outside `owned`, like the T2 audit's windows. Flag off, nothing
+here differs.
+"""
+
+from gdn_multitoken_conv import addresses, release_owned, validate_projected
+
+import gdn_seq_block
+import gdn_user_batch
+from verify_trace_t2 import audit_enabled as t2_audit, cut as t2_cut, fell_back as t2_fell_back, note as t2_note
+
+
+def validate_options(dma_windows, packed_checkpoints, defer_conv_publication, prefix_zero_reuse):
+    for name, value in (('dma_windows', dma_windows), ('packed_checkpoints', packed_checkpoints),
+                        ('defer_conv_publication', defer_conv_publication),
+                        ('prefix_zero_reuse', prefix_zero_reuse)):
+        if type(value) is not bool:
+            raise ValueError('Explicit bool %s option required' % name)
+    if not (dma_windows and packed_checkpoints and defer_conv_publication):
+        raise ValueError('Batched packed users require DMA windows, packed checkpoints and deferred publication')
+
+
+def conv_gates(operations, projected, windows, taps, dt_bias, neg_exp_A, rows):
+    """A packed user's one gdn_decode_conv_gates call: (conv, beta, g) out, and `windows`
+    advanced in place (old slot 1 -> 0, 2 -> 1, 3 -> 2, the piece's rows -> 3;
+    optimisation/ttnn-op/test_gdn_conv_gates.py:4-7) - the windows the commit DMA later reads.
+    The model's call and the audit's shadow call are both this one, so they cannot drift."""
+    return operations.transformer.gdn_decode_conv_gates(projected, windows, taps, projected, projected,
+        dt_bias, neg_exp_A, batch=rows, memory_config=operations.DRAM_MEMORY_CONFIG,
+        channels=5120, a_col=8192, b_col=8216)
+
+
+def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, kernels, operations=None, *,
+                               dma_windows=True, packed_checkpoints=True, defer_conv_publication=True,
+                               prefix_zero_reuse=False, output_memory=None):
+    """`users` is one `(projected, initial, conv_states)` triple per packed user.
+
+    Returns one result dictionary per user, in user order, each shaped exactly like
+    `run_batched_projected`'s and owning only its own tensors.
+    """
+    if operations is None:
+        import ttnn as operations
+    from gdn_conv_windows import build_windows
+
+    validate_options(dma_windows, packed_checkpoints, defer_conv_publication, prefix_zero_reuse)
+    groups = [tuple(user) for user in users]
+    if not 1 <= len(groups) <= gdn_user_batch.MAX_USERS or any(len(user) != 3 for user in groups):
+        raise ValueError('One to %d packed (projected, initial, conv_states) users required'
+                         % gdn_user_batch.MAX_USERS)
+    if len(taps) != 4 or any(tuple(tap.shape) != (1, 1, 5120) for tap in taps):
+        raise ValueError('Four channel-wise convolution taps required')
+
+    owned, shared = [], []
+    per_user, widths, bindings = [], [], []
+    # QWEN_FAST_VERIFY_T2 (#1): the served windows the audit builds beside the packed ones,
+    # per user. Never in `owned` (see the module docstring); freed here only on failure.
+    audit, audit_owned = {}, []
+    packed_windows = None
+    try:
+        weights = operations.to_memory_config(norm_w, operations.DRAM_MEMORY_CONFIG)
+        if addresses(operations, weights) != addresses(operations, norm_w):
+            shared.append(weights)
+        if t2_cut('windows'):
+            from gdn_conv_windows_packed import Unsupported, build_windows_packed
+            try:
+                packed_windows = build_windows_packed(mesh, [(projected, conv_states)
+                                                             for projected, initial, conv_states in groups],
+                                                      operations=operations)
+            except Unsupported as reason:
+                t2_note('windows_fallback')
+                t2_fell_back('windows', reason)
+            else:
+                owned.extend(window for user in packed_windows for window in user)
+                t2_note('windows')
+        for index, (projected, initial, conv_states) in enumerate(groups):
+            rows = validate_projected(tuple(projected.shape), conv_states)
+            if rows < 2:
+                raise ValueError('A batched packed user is a multirow segment; T1 uses the native path')
+            bindings.append([addresses(operations, state) for state in conv_states])
+            mine = []
+            if packed_windows is None:
+                windows = build_windows(mesh, projected, conv_states)
+            else:
+                windows = list(packed_windows[index])
+                if t2_audit():
+                    served = build_windows(mesh, projected, conv_states)
+                    audit_owned.extend(served)
+                    audit[index] = served
+                    # The conv gates below advances the packed windows in place, and G1 reads
+                    # both sides after the replay: the served windows take the same call, so
+                    # both hold what the commit reads. Its conv/beta/g are read by nothing and
+                    # freed at once (never held, so nothing to free on failure).
+                    release_owned(operations, conv_gates(operations, projected, served, taps, dt_bias, neg_exp_A, rows))
+            mine.extend(windows)
+            packed = conv_gates(operations, projected, windows, taps, dt_bias, neg_exp_A, rows)
+            mine.extend(packed)
+            z = operations.slice(projected, (0, 0, 5120), (1, rows, 8192),
+                                 memory_config=operations.DRAM_MEMORY_CONFIG)
+            if addresses(operations, z) != addresses(operations, projected):
+                mine.append(z)
+            owned.extend(mine)
+            widths.append(rows)
+            per_user.append(dict(windows=windows, owned=mine,
+                                 inputs=(packed[0], packed[1], packed[2], initial, z, weights)))
+        inputs = [user['inputs'] for user in per_user]
+        # QWEN_FAST_GDN_SEQ_BLOCK (K5-A): the same one launch with the qualified sequential-block
+        # build, only when every packed user is a 16-row segment.
+        seq_block = gdn_seq_block.enabled() and all(rows == gdn_seq_block.ROWS for rows in widths)
+        if seq_block:
+            build = gdn_seq_block.served_kernels()
+            produced = gdn_seq_block.execute(mesh, inputs, operations, output_memory=output_memory, kernels=build)
+        else:
+            produced = gdn_user_batch.execute(mesh, inputs, kernels, operations, output_memory=output_memory)
+        # Owned BEFORE anything below can raise. The per-user loop asserts on state
+        # addresses, and a raise part way through it would otherwise strand the outputs
+        # of every user it had not reached yet: `execute` has already handed ownership
+        # over, so nothing else would ever free them.
+        owned.extend(value for pair in produced for value in pair)
+        # QWEN_FAST_GDN_SEQ_BLOCK_AUDIT: on an audited layer, a DRAM copy of each user's K5-A
+        # output (live until the layer is done) and the served launch (`kernels`, the served
+        # build) on the same inputs; held outside `owned`, freed here only on failure.
+        seq_audit = []
+        audited = gdn_seq_block.audit_layer() if seq_block else None
+        if audited is not None:
+            seq_audit = gdn_seq_block.audit_launches(mesh, inputs, kernels, audited,
+                                                     [output for output, states in produced], operations)
+            audit_owned.extend(value for held in seq_audit
+                               for value in (held['output'], held['served_output'], held['served_states']))
+            if len(seq_audit) != len(groups):
+                raise AssertionError('The K5-A audit returned %d of %d packed users' % (len(seq_audit), len(groups)))
+        results = []
+        for index, ((projected, initial, conv_states), user, rows, (output, states)) in enumerate(
+                zip(groups, per_user, widths, produced, strict=True)):
+            user['owned'].extend((output, states))
+            if [addresses(operations, state) for state in conv_states] != bindings[index]:
+                raise AssertionError('Batched convolution changed stable state addresses')
+            results.append(dict(output=output, states=states, conv_prefixes=[None] * rows,
+                owned=user['owned'] + (shared if index == 0 else []),
+                packed_conv_states=user['windows'], mesh=mesh, packed_checkpoints=True,
+                prefix_zero_reuse=prefix_zero_reuse, materialized_conv_prefixes=(),
+                available_conv_prefixes=tuple(range(1, rows + 1)), hoisted_input=True,
+                batched_convolution=True, dma_windows=True, norm_batch=False,
+                deferred_conv_publication=True, user_batched=True, packed_users=len(groups),
+                **({'audit_windows': audit[index]} if index in audit else {}),
+                **(dict(seq_block=True, seq_block_level=build.level) if seq_block else {}),
+                **({'seq_block_audit': seq_audit[index]} if seq_audit else {})))
+        return results
+    except BaseException:
+        release_owned(operations, owned + shared + audit_owned)
+        raise

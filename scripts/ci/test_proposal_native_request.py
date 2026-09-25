@@ -159,7 +159,8 @@ class NativeProposalMaskLifecycleTests(unittest.TestCase):
             copy=Mock(side_effect=lambda source, destination: destination.copy_(source)), synchronize_device=Mock())
         active = [dict(k=torch.ones((1, 4, 256, 128), dtype=torch.bfloat16),
             v=torch.ones((1, 4, 256, 128), dtype=torch.bfloat16))]
-        cache = SimpleNamespace(position=100, history_rows=100, active=active, pending=None, owned=list(active[0].values()))
+        cache = SimpleNamespace(position=100, history_rows=100, active=active, pending=None,
+            owned=list(active[0].values()), borrowed=[])
         device = SimpleNamespace(operations=operations, mesh=object(), position=100, history_rows=100, block_rows=8,
             history=torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16),
             spare_history=torch.zeros((1, 1, 2048, 5120), dtype=torch.bfloat16), progress=None,

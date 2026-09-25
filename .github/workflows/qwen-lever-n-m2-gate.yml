@@ -1,0 +1,239 @@
+name: Qwen Lever N M2 alternation gate
+on:
+  push:
+    tags: ['experiment/lever-n-m2-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  graft:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: m2
+          persist-credentials: false
+      - name: Graft M1's resumable-prefill patch and M2's scheduler patch onto the pinned sources
+        working-directory: m2
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results graft
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
+          plugin=/opt/qwen-fast-plugin/src/vllm_tt_plugin
+          name="qwen-m2-extract-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          for file in model.py qwen36_vllm.py; do
+            docker cp "$name:$root/$file" "graft/$file.orig"
+            sha256sum "graft/$file.orig" >> experiment-results/source.sha256
+          done
+          for file in platform.py scheduler.py lane_scheduler.py; do
+            docker cp "$name:$plugin/$file" "graft/$file.orig"
+            sha256sum "graft/$file.orig" >> experiment-results/source.sha256
+          done
+          python3 -B - <<'PY'
+          import ast, io, sys
+          sys.path.insert(0, 'scripts/ci')
+          import lever_n_model_patch as model_patcher
+          import lever_n_scheduler_patch as sched_patcher
+          for name, apply in (('model.py', model_patcher.patch_model),
+                              ('qwen36_vllm.py', model_patcher.patch_vllm_entry),
+                              ('platform.py', model_patcher.patch_platform),
+                              ('scheduler.py', sched_patcher.patch_scheduler),
+                              ('lane_scheduler.py', sched_patcher.patch_lane_scheduler)):
+              source = io.open('graft/%s.orig' % name, encoding='utf-8').read()
+              patched = apply(source)
+              ast.parse(patched)
+              io.open('graft/%s' % name, 'w', encoding='utf-8', newline='\n').write(patched)
+              print('%s: %d -> %d bytes' % (name, len(source), len(patched)))
+          PY
+          sha256sum graft/model.py graft/qwen36_vllm.py graft/platform.py \
+            graft/scheduler.py graft/lane_scheduler.py >> experiment-results/graft.sha256
+          cat experiment-results/graft.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m2-graft-${{ github.run_id }}
+          path: m2/graft/
+          retention-days: 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m2-graft-sha-${{ github.run_id }}
+          path: m2/experiment-results/
+
+  m2-arm:
+    needs: graft
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: m2
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m2-graft-${{ github.run_id }}
+          path: m2/graft/
+      - name: Confirm no process holds a card
+        working-directory: m2
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Reset every board before this job opens the pair
+        working-directory: m2
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # A long four-user run leaves an active ethernet core on device 0 that the next
+          # open cannot bring back: llrt.cpp:594 "Timed out while waiting for active
+          # ethernet core 31-25 to become active again" (runs 35560086522 and 35560086573,
+          # the latter twice - once right after the former had passed). Reset EVERY board
+          # before the job opens the pair, exactly as qwen-card-reset.yml does: both link
+          # ends must come back together (resetting one board alone left the mesh at 1x1,
+          # run 35414390308). No firmware is written and no host reboot happens. The
+          # preceding step already proved no process holds a card.
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/reset.log 2>&1 || status=$?
+          if [ "$status" != 0 ]; then
+            echo "multi-board reset exited $status; resetting each in turn" >> experiment-results/reset.log
+            status=0
+            for path in "${paths[@]}"; do
+              timeout -k 20 300 "${prefix[@]}" "$smi" -r "$path" >> experiment-results/reset.log 2>&1 || status=$?
+            done
+          fi
+          echo "reset_exit=$status" | tee experiment-results/reset.status
+          tail -20 experiment-results/reset.log || true
+          timeout -k 5 30 "${prefix[@]}" "$smi" -ls 2>&1 | tee experiment-results/boards-after-reset.txt | tail -8
+          test "$status" = 0
+      - name: Serve the m2 arm (M1 + M2 grafted)
+        working-directory: m2
+        timeout-minutes: 30
+        shell: bash
+        run: bash scripts/ci/lever_n_m2_run_arm.sh m2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: m2-arm-${{ github.run_id }}
+          path: m2/experiment-results/
+
+  baseline-arm:
+    needs: m2-arm
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: m2
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m2-graft-${{ github.run_id }}
+          path: m2/graft/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: m2-arm-${{ github.run_id }}
+          path: m2/peer/
+      - name: Confirm no process holds a card
+        working-directory: m2
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+          if [ "$status" != 1 ] || [ -s experiment-results/holders.txt ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Reset every board before this job opens the pair
+        working-directory: m2
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # A long four-user run leaves an active ethernet core on device 0 that the next
+          # open cannot bring back: llrt.cpp:594 "Timed out while waiting for active
+          # ethernet core 31-25 to become active again" (runs 35560086522 and 35560086573,
+          # the latter twice - once right after the former had passed). Reset EVERY board
+          # before the job opens the pair, exactly as qwen-card-reset.yml does: both link
+          # ends must come back together (resetting one board alone left the mesh at 1x1,
+          # run 35414390308). No firmware is written and no host reboot happens. The
+          # preceding step already proved no process holds a card.
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/reset.log 2>&1 || status=$?
+          if [ "$status" != 0 ]; then
+            echo "multi-board reset exited $status; resetting each in turn" >> experiment-results/reset.log
+            status=0
+            for path in "${paths[@]}"; do
+              timeout -k 20 300 "${prefix[@]}" "$smi" -r "$path" >> experiment-results/reset.log 2>&1 || status=$?
+            done
+          fi
+          echo "reset_exit=$status" | tee experiment-results/reset.status
+          tail -20 experiment-results/reset.log || true
+          timeout -k 5 30 "${prefix[@]}" "$smi" -ls 2>&1 | tee experiment-results/boards-after-reset.txt | tail -8
+          test "$status" = 0
+      - name: Serve the baseline arm (M1 only, stock scheduler)
+        working-directory: m2
+        timeout-minutes: 30
+        shell: bash
+        run: bash scripts/ci/lever_n_m2_run_arm.sh baseline peer/m2-m2.json
+      - name: Report the gate
+        working-directory: m2
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/ci/lever_n_m2_gate_report.py \
+            --report experiment-results/m2-baseline.json \
+            --log experiment-results/m2-baseline-stdout.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: m2-baseline-${{ github.run_id }}
+          path: m2/experiment-results/

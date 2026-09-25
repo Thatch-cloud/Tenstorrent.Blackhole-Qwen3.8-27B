@@ -16,9 +16,12 @@ class SimulatorTargetTests(unittest.TestCase):
             from_torch=Mock(side_effect=['embedding', 'head']), synchronize_device=Mock(), embedding=Mock())
         mesh = SimpleNamespace(shape=[1, 2])
         owned = []
+        stages = []
         with patch.object(target, 'TargetWeights', return_value=reader), \
                 patch.object(target, 'VOCABULARY', 4), patch.object(target, 'HIDDEN_WIDTH', 2):
-            model, manifest = target.load(operations, mesh, '/target', owned)
+            model, manifest = target.load(operations, mesh, '/target', owned, on_stage=stages.append)
+        self.assertEqual(stages, ['target_metadata', 'target_embedding_convert_upload',
+            'target_head_transpose', 'target_head_convert_upload', 'target_upload_synchronize', 'target_loaded'])
         calls = operations.from_torch.call_args_list
         self.assertEqual(tuple(calls[0].args[0].shape), (1, 1, 4, 2))
         self.assertEqual(tuple(calls[1].args[0].shape), (1, 1, 2, 4))

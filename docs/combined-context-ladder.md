@@ -31,8 +31,34 @@ Workflow: `.github/workflows/qwen-combined-ladder.yml`, triggered by `experiment
 | 16,384 | 1 | 3,170.94 | **87.11** | Passed |
 | 32,768 | 1 | 2,968.87 | **89.96** | Passed |
 | 65,536 | 1 | 2,564.54 | **50.45** | Passed after exact-prompt and page-table fixes |
-| 131,072 | 1 | — | — | Cache guard repaired; eager audit OOM fix awaits hardware after host-I/O rejections |
+| 131,072 | 1 | 2,124.78 | **53.69** | Passed; bounded eager-audit memory fix |
+| 261,888 | 1 | — | — | 262,144 total-window qualification underway; includes 256 output headroom |
 | 262,144 | 1 | — | — | Prompt plus output exceeds target positional limit |
+
+### 131K completed hardware result
+
+Run **35173979225**, attempt **2**, revision `506af16`, passes on the two P150A
+cards. One complete fresh feature/state audit and both timed requests pass;
+output, active state and inactive state are exact. The container exits zero,
+without OOM, and device shutdown is clean.
+
+| Timed request | Committed tokens | Decode ms | TG tok/s |
+| --- | ---: | ---: | ---: |
+| First | 120 | 2,232.41 | 53.75 |
+| Second | 120 | 2,237.47 | 53.63 |
+| Combined | 240 | 4,469.88 | **53.69** |
+
+PP is **2,124.78 tok/s** at **131,072 prompt tokens**, one stream. The audited
+request's 774-second decode includes expensive correctness work and is excluded
+from TG. The two timed requests reproduce its proposal sequence. Independent
+artifact checks confirm all 864 script and 1,520 native source entries are
+unchanged. The eager-audit scope executes 65 layers across 13 calls and restores
+its hooks; captured execution is unchanged. The roughly 29-minute CI duration
+is not generation latency.
+
+Report SHA256:
+`8ee07d6f794999d0a3684722b174bcae99abdaac84a0b45b75ef25809e768104`.
+The [262K total-window case](full-window-262k.md) remains unqualified.
 
 ### 16K evidence and next bottleneck
 

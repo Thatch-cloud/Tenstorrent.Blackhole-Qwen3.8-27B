@@ -14,22 +14,53 @@ def validate_shapes(hidden, dynamic, base):
     return shape[2]
 
 
-def convolution_reference(hidden, dynamic, base):
+def convolution_reference(hidden, dynamic, base, *, boundaries=None):
     import torch
 
     rows = validate_shapes(hidden, dynamic, base)
+    boundaries = validate_boundaries(boundaries, rows)
     if any(value.dtype != torch.bfloat16 or not torch.isfinite(value).all() for value in (hidden, *dynamic, *base)):
         raise ValueError('Finite BF16 operands required')
     output = torch.zeros_like(hidden)
     for offset in range(2):
-        values = hidden if offset == 0 else torch.cat((torch.zeros_like(hidden[..., :1, :]), hidden[..., :rows - 1, :]), dim=2)
+        if offset == 0:
+            values = hidden
+        else:
+            parts = []
+            for start, stop in (boundaries or ((0, rows),)):
+                parts.append(torch.zeros_like(hidden[..., :1, :]))
+                if stop - start > 1:
+                    parts.append(hidden[..., start:stop - 1, :])
+            values = torch.cat(parts, dim=2)
         output = output + base[offset] * values
         output = output + dynamic[offset].repeat_interleave(16, dim=-1) * values
     return output
 
 
-def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_intermediates=False, inspect=None, retain_temporaries=None):
+def validate_boundaries(boundaries, rows):
+    """Segment spans of a packed block, or None for one continuous sequence.
+
+    The convolution is causal over the ROW axis: row r reads row r-1. Packed, the
+    rows of the block belong to different users, so without segment spans user B's
+    first row would convolve against user A's last draft. Only that one row per
+    segment is wrong, and it is the anchor, so it corrupts the whole block below it.
+    """
+    if boundaries is None:
+        return None
+    spans = tuple(tuple(span) for span in boundaries)
+    if (not spans or any(len(span) != 2 for span in spans) or spans[0][0] != 0
+            or spans[-1][1] != rows
+            or any(type(value) is not int for span in spans for value in span)
+            or any(start >= stop for start, stop in spans)
+            or any(spans[index][1] != spans[index + 1][0] for index in range(len(spans) - 1))):
+        raise ValueError('Ordered contiguous packed segment spans covering the block required')
+    return spans
+
+
+def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_intermediates=False, inspect=None,
+                               retain_temporaries=None, boundaries=None):
     rows = validate_shapes(hidden, dynamic, base)
+    boundaries = validate_boundaries(boundaries, rows)
     borrowed = (hidden, *dynamic, *base)
     if list(mesh.shape) != [1, 2] or any(value.dtype != operations.bfloat16 for value in borrowed):
         raise ValueError('TP2 BF16 operands required')
@@ -62,9 +93,16 @@ def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_
             if offset:
                 values = zero
                 if rows > 1:
-                    leading = retain(operations.slice(zero, (0, 0, 0, 0), (1, 1, 1, 5120)))
-                    previous = retain(operations.slice(hidden, (0, 0, 0, 0), (1, 1, rows - 1, 5120)))
-                    values = retain(operations.concat((leading, previous), dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
+                    spans = boundaries or ((0, rows),)
+                    parts = []
+                    for start, stop in spans:
+                        # Each segment starts from zero, exactly as row 0 does for a
+                        # single sequence, so no user reads the user packed above it.
+                        parts.append(retain(operations.slice(zero, (0, 0, 0, 0), (1, 1, 1, 5120))))
+                        if stop - start > 1:
+                            parts.append(retain(operations.slice(hidden, (0, 0, start, 0), (1, 1, stop - 1, 5120))))
+                    values = parts[0] if len(parts) == 1 else retain(operations.concat(tuple(parts), dim=2,
+                        memory_config=operations.DRAM_MEMORY_CONFIG))
             expanded = retain(operations.repeat_interleave(dynamic[offset], 16, dim=3,
                 memory_config=operations.DRAM_MEMORY_CONFIG))
             static_term = arithmetic(operations.multiply, base[offset], values)

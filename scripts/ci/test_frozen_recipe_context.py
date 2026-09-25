@@ -9,9 +9,28 @@ import sys
 from unittest.mock import patch
 
 import frozen_recipe_context
-from frozen_recipe_context import REVISION, adapt_probe_sources, adapt_cache_launcher, adapt_scalar_reciprocal, adapt_eager_only, geometry
+from frozen_recipe_context import (REVISION, adapt_probe_sources, adapt_cache_launcher,
+    adapt_scalar_reciprocal, adapt_eager_only, geometry, COMBINED_RUNTIME_CONTEXTS,
+    combined_runtime_directory, PROBE_SECONDS_CHOICES)
 from frozen_context_geometry import CONTEXTS, selected_geometry, factory_selector
 from frozen_runtime_context import FILES
+
+
+# frozen_wide_chunk_replay.py reads attention_replay.py straight off the
+# --checkout directory (it is not otherwise staged by frozen_recipe_context.py
+# at all) and only for context 65536; a real checkout always has the file,
+# these synthetic ones below do not unless this is written in. Minimal, not
+# the real file, but carries both anchors _patch_attention_replay needs.
+MINIMAL_ATTENTION_REPLAY = '''"""Minimal fixture carrying the two frozen_wide_chunk_replay.py anchors."""
+
+
+class ReplayAttentionReader:
+    def __init__(self, operations, mesh, rows, capacity, pages_host, upload, *, max_group_rows=4,
+                 short_context=False):
+        grid = mesh.compute_with_storage_grid_size()
+        config = operations.SDPAProgramConfig(compute_with_storage_grid_size=(grid.x, grid.y),
+            exp_approx_mode=False, q_chunk_size=0, k_chunk_size=256)
+'''
 
 
 class FrozenRecipeContextTests(unittest.TestCase):
@@ -47,8 +66,8 @@ timeout() {
 
     def test_deployment_preserves_historical_hardware_runtime(self):
         names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh',
-            'simulator-suite.sh', 'dspark_runtime_cache.py') + FILES
+            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'dspark_fp32_build.py',
+            'run-simulator.sh', 'simulator-suite.sh', 'dspark_runtime_cache.py') + FILES
         originals = {name: subprocess.check_output(
             ['git', 'show', f'{REVISION}:scripts/ci/{name}']) for name in names}
         with tempfile.TemporaryDirectory() as temporary:
@@ -57,6 +76,7 @@ timeout() {
             scripts.mkdir(parents=True)
             for name, source in originals.items():
                 (scripts / name).write_bytes(source)
+            (scripts / 'attention_replay.py').write_text(MINIMAL_ATTENTION_REPLAY)
             manifest = checkout / 'deployment.json'
 
             def git(command):
@@ -87,7 +107,18 @@ timeout() {
             self.assertEqual(set(report['after']), set(names) - {'dspark_runtime_cache.py'} |
                 {'frozen_binary_cache.py', 'frozen_context_geometry.py',
                  'frozen_sim_build_cache.py', 'frozen_sim_phase.py', 'frozen_sim_assets.py',
-                 'frozen_probe_evidence.py'})
+                 'frozen_probe_evidence.py', 'fused_1d_input.cpp', 'fused_t16_admission.py',
+                 'fused-t16-target-simulator.json', 'fused-t16-target-simulator.exit-status',
+                 # 65536-only: adapt_replay_k_chunk stages attention_replay.py (not otherwise
+                 # part of `names`, see MINIMAL_ATTENTION_REPLAY above) and
+                 # adapt_wide_chunk_normalization's KERNEL_FIX_MODULES loop stages the three
+                 # ladder precision fix modules verbatim (SKT-patched) alongside the probe.
+                 # dspark_ladder_backend.py does not exist at REVISION at all; the hardware
+                 # admission graft stages it verbatim from the working tree.
+                 'attention_replay.py', 'frozen_wide_chunk_scratch.py',
+                 'frozen_wide_chunk_sum_update.py', 'frozen_wide_chunk_score_center.py',
+                 'dspark_ladder_backend.py', 'frozen_hardware_build.py',
+                 'frozen-hardware-suite.sh', 'run-frozen-hardware.sh'})
 
     def test_cache_launcher_preserves_bounded_original_probe(self):
         names = ('run-simulator.sh', 'simulator-suite.sh')
@@ -183,6 +214,181 @@ timeout() {
         broken[names[0]] += '\nPADDED_KEYS = 8704\n'
         with self.assertRaises(ValueError):
             adapt_probe_sources(broken, 32768)
+
+
+class ProbeSecondsTests(unittest.TestCase):
+    """QWEN_FROZEN_65536_SKT's full precision set (TR0 scalar sum-update +
+    score-centering, ported alongside the scratch-CB fix) is much slower in
+    the simulator than the plain scratch-CB-only v2/v3 runs - run 35598117412
+    timed out at the 1020s budget inside eager_0. 3000 is the new, third
+    accepted --probe-seconds value; 510 and 1020 must stay byte-identical."""
+
+    def test_probe_seconds_choices_includes_3000_without_removing_existing_values(self):
+        self.assertEqual(set(PROBE_SECONDS_CHOICES), {510, 1020, 3000})
+
+    def test_adapt_cache_launcher_default_output_unchanged(self):
+        names = ('run-simulator.sh', 'simulator-suite.sh')
+        sources = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
+        default_call = adapt_cache_launcher(sources)
+        explicit_510 = adapt_cache_launcher(sources, probe_seconds=510)
+        self.assertEqual(default_call, explicit_510)
+
+    def test_adapt_cache_launcher_threads_3000_into_the_probe_phase_only(self):
+        names = ('run-simulator.sh', 'simulator-suite.sh')
+        sources = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
+        for probe_seconds in PROBE_SECONDS_CHOICES:
+            with self.subTest(probe_seconds=probe_seconds):
+                result = adapt_cache_launcher(sources, probe_seconds=probe_seconds)
+                self.assertIn(f'--phase probe --seconds {probe_seconds} ', result['simulator-suite.sh'])
+                # prepare_seconds (the ninja-build-cache phase, unrelated to
+                # the probe's own timeout - see the port report) is untouched
+                # by probe_seconds at every accepted value, including 3000.
+                self.assertIn('prepare_seconds=120\n', result['simulator-suite.sh'])
+                self.assertIn('prepare_seconds=510', result['simulator-suite.sh'])
+                self.assertNotIn('prepare_seconds=3000', result['simulator-suite.sh'])
+
+    def test_adapt_cache_launcher_rejects_unsupported_values(self):
+        names = ('run-simulator.sh', 'simulator-suite.sh')
+        sources = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}'], text=True) for name in names}
+        for bad in (0, 511, 1021, 2999, 3001, -3000):
+            with self.subTest(probe_seconds=bad):
+                with self.assertRaises(ValueError):
+                    adapt_cache_launcher(sources, probe_seconds=bad)
+
+    def test_real_pipeline_run_with_probe_seconds_3000(self):
+        """End-to-end: frozen_recipe_context.main() with --probe-seconds 3000
+        against a real historical checkout, not just adapt_cache_launcher()
+        called directly."""
+        names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
+            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'dspark_fp32_build.py',
+            'run-simulator.sh', 'simulator-suite.sh') + FILES
+        originals = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}']) for name in names}
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            scripts = checkout / 'scripts/ci'
+            scripts.mkdir(parents=True)
+            for name, source in originals.items():
+                (scripts / name).write_bytes(source)
+            manifest = checkout / 'deployment-3000.json'
+
+            def git(command):
+                arguments = command[3:]
+                if arguments == ['rev-parse', 'HEAD']:
+                    return REVISION.encode() + b'\n'
+                if arguments == ['status', '--porcelain', '--untracked-files=no']:
+                    return b''
+                if arguments[0] == 'show':
+                    return originals[arguments[1].rsplit('/', 1)[1]]
+                raise AssertionError(command)
+
+            with patch('sys.argv', ['adapter', '--checkout', str(checkout), '--context', '32768',
+                    '--probe-seconds', '3000', '--manifest', str(manifest)]), \
+                    patch.object(frozen_recipe_context.subprocess, 'check_output', side_effect=git):
+                frozen_recipe_context.main()
+            self.assertIn('--phase probe --seconds 3000 ', (scripts / 'simulator-suite.sh').read_text())
+            report = json.loads(manifest.read_text())
+            self.assertEqual(report['probe_seconds'], 3000)
+
+
+class Rung65536CombinedRuntimeStagingTests(unittest.TestCase):
+    """--combined-runtime at context 65536: the argparse guard, and where the staged
+    tree lands on disk. See docs/t16-recipe-rung-65k.md."""
+
+    def test_combined_runtime_contexts_are_32768_and_65536_only(self):
+        self.assertEqual(COMBINED_RUNTIME_CONTEXTS, (32768, 65536))
+
+    def test_staged_directory_is_unsuffixed_only_for_the_32768_default(self):
+        checkout = Path('/checkout')
+        self.assertEqual(combined_runtime_directory(checkout, 32768), checkout / 'scripts/ci')
+        self.assertEqual(combined_runtime_directory(checkout, 65536), checkout / 'scripts/ci-65536')
+        for context in (4096, 8192, 16384, 131072, 262144):
+            with self.subTest(context=context), self.assertRaises(ValueError):
+                combined_runtime_directory(checkout, context)
+
+    def _run_main(self, checkout, manifest, *, context, combined_runtime):
+        from frozen_runtime_context import FILES as RUNTIME_FILES
+        from frozen_combined_adapters import FILES as COMBINED_FILES
+        names = ('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
+            'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'dspark_fp32_build.py',
+            'run-simulator.sh', 'simulator-suite.sh') + RUNTIME_FILES
+        if combined_runtime:
+            names += ('target-t16-attention-8k-probe.py', 'attention_mask_replay.py') + COMBINED_FILES
+        originals = {name: subprocess.check_output(
+            ['git', 'show', f'{REVISION}:scripts/ci/{name}']) for name in names}
+        scripts = checkout / 'scripts/ci'
+        scripts.mkdir(parents=True)
+        for name, source in originals.items():
+            (scripts / name).write_bytes(source)
+        if context == 65536:
+            (scripts / 'attention_replay.py').write_text(MINIMAL_ATTENTION_REPLAY)
+
+        def git(command):
+            arguments = command[3:]
+            if arguments == ['rev-parse', 'HEAD']:
+                return REVISION.encode() + b'\n'
+            if arguments == ['status', '--porcelain', '--untracked-files=no']:
+                return b''
+            if arguments[0] == 'show':
+                return originals[arguments[1].rsplit('/', 1)[1]]
+            raise AssertionError(command)
+
+        argv = ['adapter', '--checkout', str(checkout), '--context', str(context), '--manifest', str(manifest)]
+        if combined_runtime:
+            argv += ['--scalar-reciprocal', '--target-replay', '--combined-runtime']
+        with patch('sys.argv', argv), \
+                patch.object(frozen_recipe_context.subprocess, 'check_output', side_effect=git):
+            frozen_recipe_context.main()
+        return json.loads(manifest.read_text())
+
+    def test_combined_runtime_65536_lands_in_its_own_directory_32768_stays_put(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            report = self._run_main(checkout, checkout / 'deployment-65536.json',
+                context=65536, combined_runtime=True)
+            self.assertEqual(report['staged_directory'], 'scripts/ci-65536')
+            self.assertTrue((checkout / 'scripts/ci-65536/dspark_8k_admission.py').exists())
+            # The 32768 path (the historical input checkout itself) must be untouched by a
+            # 65536 combined-runtime run - both trees can coexist under one checkout.
+            self.assertNotIn('enabled=request_context() == 65536',
+                (checkout / 'scripts/ci/dspark_runtime_cache.py').read_text())
+            self.assertIn('enabled=request_context() == 65536',
+                (checkout / 'scripts/ci-65536/dspark_runtime_cache.py').read_text())
+            for name, checksum in report['after'].items():
+                self.assertEqual(hashlib.sha256(
+                    (checkout / 'scripts/ci-65536' / name).read_bytes()).hexdigest(), checksum, name)
+
+    def test_combined_runtime_32768_default_still_lands_at_the_historical_unsuffixed_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            report = self._run_main(checkout, checkout / 'deployment-32768.json',
+                context=32768, combined_runtime=True)
+            self.assertEqual(report['staged_directory'], 'scripts/ci')
+            self.assertFalse((checkout / 'scripts/ci-32768').exists())
+            self.assertIn('enabled=request_context() == 32768',
+                (checkout / 'scripts/ci/dspark_runtime_cache.py').read_text())
+
+    def test_non_combined_runtime_staging_is_unaffected_by_this_change(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            report = self._run_main(checkout, checkout / 'deployment-plain.json',
+                context=65536, combined_runtime=False)
+            self.assertEqual(report['staged_directory'], 'scripts/ci')
+            self.assertFalse((checkout / 'scripts/ci-65536').exists())
+
+    def test_combined_runtime_still_refuses_unsupported_contexts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            (checkout / 'scripts/ci').mkdir(parents=True)
+            manifest = checkout / 'deployment-rejected.json'
+            argv = ['adapter', '--checkout', str(checkout), '--context', '131072',
+                '--manifest', str(manifest), '--scalar-reciprocal', '--target-replay', '--combined-runtime']
+            with patch('sys.argv', argv), self.assertRaises(SystemExit):
+                frozen_recipe_context.main()
+            self.assertFalse(manifest.exists())
 
 
 if __name__ == '__main__':

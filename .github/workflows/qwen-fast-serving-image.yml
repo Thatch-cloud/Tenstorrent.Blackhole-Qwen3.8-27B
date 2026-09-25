@@ -1,0 +1,117 @@
+name: Qwen fast serving canary image build
+on:
+  push:
+    tags: ['experiment/fast-serving-image-v*']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: serving-build-orchestrator
+          persist-credentials: false
+      - name: Restore hash-bound source bundle and cache provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          context=$(mktemp -d "$RUNNER_TEMP/qwen-fast-image.XXXXXX")
+          echo "QWEN_IMAGE_CONTEXT=$context" >> "$GITHUB_ENV"
+          mkdir -p "$context/results" "$context/bundle" "$context/scripts/ci" "$context/docker"
+          gh run download 35489235797 --repo "$GITHUB_REPOSITORY" \
+            --name qwen-fast-serving-bundle-35489235797 --dir "$context/archive"
+          gh run download 35489185444 --repo "$GITHUB_REPOSITORY" \
+            --name qwen-serving-image-inventory-35489185444 --dir "$context/inventory"
+          echo "826ea8f04ae12dcc7f3000f30cc4bd714320e3da8402378990ab94043ab6e0f2  $context/inventory/serving-image-inventory.json" | sha256sum -c -
+          python3 - "$context" <<'PY'
+          import hashlib, json, pathlib, sys, tarfile
+          root = pathlib.Path(sys.argv[1])
+          archive = root / 'archive/fast-serving-bundle.tar'
+          expected = (root / 'archive/bundle.sha256').read_text().split()[0]
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected
+          with tarfile.open(archive) as bundle:
+              for member in bundle.getmembers():
+                  path = pathlib.PurePosixPath(member.name)
+                  assert not path.is_absolute() and '..' not in path.parts
+                  assert member.isfile() or member.isdir()
+              bundle.extractall(root / 'bundle')
+          report = json.loads((root / 'inventory/serving-image-inventory.json').read_text())
+          (root / 'native-cache-manifest.json').write_text(json.dumps(report['cache_manifest']))
+          PY
+          cp serving-build-orchestrator/docker/qwen-fast-serving.Dockerfile "$context/docker/"
+          cp serving-build-orchestrator/scripts/ci/serving_native_install.py "$context/scripts/ci/"
+          cp serving-build-orchestrator/scripts/ci/serving_image_preflight.py "$context/scripts/ci/"
+          for name in serving_fast_policy.py serving_lifecycle.py serving_request_factory.py serving_plugin_patch.py serving_dflash_registry.py serving_canary_runner.py serving_fast_request.py serving_worker_hook.py serving_one_in_flight.py serving_vllm_packed.py serving_vllm_contract.py model_batch.py serving_packed_bridge.py serving_sequential_step.py serving_vllm_state.py serving_buffer_pool.py runtime_binary_override.py dflash_proposal_trace.py gdn_user_batch.py gdn_user_batch_conv.py gdn_seq_block.py dflash_packed_proposal.py dflash_packed_proposal_coordinator.py dflash_pipelined_publish.py dflash_traced_publish.py profiled_block_stream_override.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          cp serving-build-orchestrator/scripts/ci/test_serving_*.py "$context/scripts/ci/"
+          for name in dflash_device.py draft_attention_branch.py draft_mlp_branch.py draft_convolution.py draft_convolution_fused.py draft_convolution_fused_io.cpp verifier_engine.py verifier_pack.py draft_kv_history.py dflash_request_runtime.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in serving_runtime.py serving_gather_experiment.py gdn_grouped_gather.py gdn_grouped_gather_gate.py gdn_grouped_gather_scope.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in packed_verifier.py serving_packed_step.py gdn_device_loop_state.py gdn_records.py gdn_state_copy.py gdn_state_copy.cpp gdn_seq_block_compute.cpp gdn_seq_block_reader.cpp gdn_seq_block_writer.cpp test_packed_verifier.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in gdn_snapshot.py dflash_prefill_window.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in pooled_attention_replay.py target_packed_pages.py dflash_batched_mask.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in packed_shapes.py packed_cache_writer.py force_argmax.py gdn_prefix.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in two_tile_norm.py two_tile_decode.py serving_runner_bridge.py ordered_cache.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in serving_startup.py dflash_combined_request.py memory_ledger.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in verify_trace_t1.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in verify_trace_t2.py gdn_conv_windows_packed.py gdn_conv_windows_packed.cpp packed_ordered_cache.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in padded_probe.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in verify_prestage.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in fused_commit.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in early_draft.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in pair_row_exact.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+          for name in quad_draft.py quad_conv_io.cpp publish_prewarm.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
+      - name: Build and CPU-test canary without devices or weights
+        run: |
+          image="qwen-fast-serving:ci-${GITHUB_SHA}"
+          set -o pipefail
+          docker build --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            -f "$QWEN_IMAGE_CONTEXT/docker/qwen-fast-serving.Dockerfile" \
+            -t "$image" "$QWEN_IMAGE_CONTEXT" 2>&1 | tee "$QWEN_IMAGE_CONTEXT/results/build.log"
+          docker image inspect "$image" --format '{{json .Id}}' > "$QWEN_IMAGE_CONTEXT/results/image-id.json"
+          printf '{"image":"%s","built":true,"devices_accessed":false,"serving_qualified":false,"performance_qualified":false}\n' \
+            "$image" > "$QWEN_IMAGE_CONTEXT/results/build-result.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-fast-serving-image-${{ github.run_id }}
+          path: ${{ env.QWEN_IMAGE_CONTEXT }}/results/

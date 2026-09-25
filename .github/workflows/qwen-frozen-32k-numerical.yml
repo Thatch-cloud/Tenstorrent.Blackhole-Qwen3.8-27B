@@ -1,7 +1,7 @@
 name: Qwen frozen recipe 32K numerical check
 on:
   push:
-    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1', 'experiment/frozen-32k-reciprocal-diagnostics-v1', 'experiment/frozen-32k-target-replay-v1', 'experiment/frozen-32k-target-replay-v2', 'experiment/frozen-32k-target-replay-scratch-v1', 'experiment/frozen-32k-target-replay-scratch-v2', 'experiment/frozen-32k-target-replay-scratch-v3', 'experiment/frozen-32k-target-replay-scratch-v4']
+    tags: ['experiment/frozen-32k-numerical-v1', 'experiment/frozen-32k-reciprocal-eager-v1', 'experiment/frozen-32k-reciprocal-replay-v1', 'experiment/frozen-32k-reciprocal-diagnostics-v1', 'experiment/frozen-32k-target-replay-v1', 'experiment/frozen-32k-target-replay-v2', 'experiment/frozen-32k-target-replay-scratch-v1', 'experiment/frozen-32k-target-replay-scratch-v2', 'experiment/frozen-32k-target-replay-scratch-v3', 'experiment/frozen-32k-target-replay-scratch-v4', 'experiment/frozen-64k-numerical-v1', 'experiment/frozen-64k-reciprocal-eager-v1', 'experiment/frozen-64k-reciprocal-replay-v1', 'experiment/frozen-64k-reciprocal-replay-v2', 'experiment/frozen-64k-reciprocal-replay-v3', 'experiment/frozen-64k-reciprocal-replay-v4', 'experiment/frozen-64k-reciprocal-replay-v5', 'experiment/frozen-64k-reciprocal-replay-v6', 'experiment/frozen-64k-reciprocal-replay-v7', 'experiment/frozen-64k-reciprocal-diagnostics-v1', 'experiment/frozen-64k-target-replay-v1', 'experiment/frozen-64k-target-replay-v2', 'experiment/frozen-64k-target-replay-v3', 'experiment/frozen-64k-target-replay-v4', 'experiment/frozen-64k-target-replay-scratch-v1', 'experiment/frozen-64k-target-replay-scratch-v2', 'experiment/frozen-64k-target-replay-scratch-v3', 'experiment/frozen-64k-target-replay-scratch-v4', 'experiment/frozen-64k-target-replay-scratch-v5', 'experiment/frozen-64k-target-replay-scratch-v6', 'experiment/frozen-64k-target-replay-scratch-v7', 'experiment/frozen-64k-target-replay-scratch-v8', 'experiment/frozen-64k-target-replay-scratch-v9', 'experiment/frozen-64k-target-replay-scratch-v10']
 permissions:
   contents: read
 concurrency:
@@ -10,7 +10,7 @@ concurrency:
 jobs:
   numerical:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: ${{ contains(github.ref, 'target-replay-') && !endsWith(github.ref, 'scratch-v4') && 12 || 20 }}
+    timeout-minutes: ${{ contains(github.ref, 'frozen-64k-') && 65 || (contains(github.ref, 'target-replay-') && !contains(github.ref, 'scratch-v4') && !contains(github.ref, 'scratch-v5') && !contains(github.ref, 'scratch-v6') && 12 || 20) }}
     steps:
       - name: Restore ownership of prior simulator artifacts
         run: |
@@ -34,42 +34,55 @@ jobs:
         run: |
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p frozen-recipe/experiment-results
+          # frozen_context_geometry.CONTEXTS carries 65536; frozen_recipe_context.py's
+          # --context accepts it unconditionally (only --combined-runtime restricts to
+          # COMBINED_RUNTIME_CONTEXTS, and this lane never passes --combined-runtime).
+          # 32768 stays the default so an unrecognised ref can never silently drift.
+          context=32768
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-64k-* ]]; then
+            context=65536
+          fi
+          echo "context=$context"
           candidate=()
-          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-* ]]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-* || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-* ]]; then
             candidate=(--target-replay)
-            if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-scratch-v4 ]]; then
+            if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-target-replay-scratch-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v4 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v5 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v6 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v7 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v8 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v9 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v10 ]]; then
               candidate+=(--probe-seconds 1020)
+              if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v9 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-target-replay-scratch-v10 ]]; then candidate=(--target-replay --probe-seconds 3000); fi
             fi
           fi
-          if [ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-eager-v1 ]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-eager-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-reciprocal-eager-v1 ]]; then
             candidate=(--scalar-reciprocal --eager-only)
           fi
-          if [ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-replay-v1 ]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-replay-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-reciprocal-replay-v* ]]; then
             candidate=(--scalar-reciprocal --probe-seconds 1020)
+            if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-64k-* ]]; then candidate=(--scalar-reciprocal --probe-seconds 3000); fi
           fi
-          if [ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-diagnostics-v1 ]; then
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-32k-reciprocal-diagnostics-v1 || "$GITHUB_REF" = refs/tags/experiment/frozen-64k-reciprocal-diagnostics-v1 ]]; then
             candidate=(--scalar-reciprocal)
           fi
           python3 -B frozen-orchestrator/scripts/ci/frozen_recipe_context.py \
-            --checkout frozen-recipe --context 32768 \
+            --checkout frozen-recipe --context "$context" \
             "${candidate[@]}" \
             --manifest frozen-recipe/experiment-results/frozen-geometry.json
           git -C frozen-recipe diff --check
           git -C frozen-recipe diff > frozen-recipe/experiment-results/geometry.patch
       - name: Cache-required 32K numerical probe without model weights
-        timeout-minutes: 19
+        timeout-minutes: ${{ contains(github.ref, 'frozen-64k-') && 60 || 19 }}
         working-directory: frozen-recipe
         env:
           QWEN_SIM_ONLY: '1'
           QWEN_LEARNED_STACK: '1'
           QWEN_SIM_CASE: ${{ contains(github.ref, 'target-replay-') && 'target-t16-attention-8k' || 'dspark-native-8k-attention' }}
-          QWEN_DSPARK_REQUEST_CONTEXT: '32768'
+          QWEN_DSPARK_REQUEST_CONTEXT: ${{ contains(github.ref, 'frozen-64k-') && '65536' || '32768' }}
           QWEN_FROZEN_PROBE_PART: ${{ endsWith(github.ref, 'reciprocal-diagnostics-v1') && 'diagnostics' || 'numerical' }}
           QWEN_FROZEN_BUILD_ONLY: '0'
           QWEN_FROZEN_TARGET_SCRATCH: ${{ contains(github.ref, 'target-replay-scratch-') && '1' || '0' }}
+          QWEN_FROZEN_65536_REPLAY_K_CHUNK: ${{ endsWith(github.ref, 'target-replay-scratch-v10') && '128' || '256' }}
         run: |
           limit=1090
-          if [[ "$QWEN_SIM_CASE" = target-t16-attention-8k && "$GITHUB_REF" != refs/tags/experiment/frozen-32k-target-replay-scratch-v4 ]]; then limit=620; fi
+          if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-64k-* ]]; then limit=3400; fi
+          if [[ "$QWEN_SIM_CASE" = target-t16-attention-8k && "$GITHUB_REF" != refs/tags/experiment/frozen-32k-target-replay-scratch-v4 && "$GITHUB_REF" != refs/tags/experiment/frozen-64k-target-replay-scratch-v4 && "$GITHUB_REF" != refs/tags/experiment/frozen-64k-target-replay-scratch-v5 && "$GITHUB_REF" != refs/tags/experiment/frozen-64k-target-replay-scratch-v6 && "$GITHUB_REF" != refs/tags/experiment/frozen-64k-target-replay-scratch-v7 && "$GITHUB_REF" != refs/tags/experiment/frozen-64k-target-replay-scratch-v8 && "$GITHUB_REF" != refs/tags/experiment/frozen-64k-target-replay-scratch-v9 && "$GITHUB_REF" != refs/tags/experiment/frozen-64k-target-replay-scratch-v10 ]]; then limit=620; fi
           timeout -k 45 "$limit" bash scripts/ci/run-simulator.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

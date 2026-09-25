@@ -1,0 +1,121 @@
+name: Qwen frozen recipe 64K numerical hardware check
+
+on:
+  push:
+    tags: ['experiment/frozen-64k-numerical-hw-v1', 'experiment/frozen-64k-numerical-hw-v2', 'experiment/frozen-64k-numerical-hw-v3', 'experiment/frozen-64k-numerical-hw-v4', 'experiment/frozen-64k-numerical-hw-v5', 'experiment/frozen-64k-numerical-hw-v6', 'experiment/frozen-64k-numerical-hw-v7', 'experiment/frozen-64k-numerical-hw-v8', 'experiment/frozen-64k-numerical-hw-v9', 'experiment/frozen-64k-numerical-hw-v10']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+
+jobs:
+  numerical-hardware:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 80
+    steps:
+      - name: Restore ownership of prior simulator artifacts
+        run: |
+          workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          results="$workspace/frozen-recipe/experiment-results"
+          if [ -e "$results" ]; then
+            test ! -L "$results"
+            test "$(realpath -e "$results")" = "$results"
+            sudo -n chown -R -h "$(id -u):$(id -g)" "$results"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: frozen-orchestrator
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c102b20df22329106955b4006bf4d650bb94e40
+          path: frozen-recipe
+          persist-credentials: false
+      - name: Apply shared recipe geometry, staged for hardware
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p frozen-recipe/experiment-results
+          python3 -B frozen-orchestrator/scripts/ci/frozen_recipe_context.py \
+            --checkout frozen-recipe --context 65536 --scalar-reciprocal --probe-seconds 3000 \
+            --manifest frozen-recipe/experiment-results/frozen-geometry.json
+          git -C frozen-recipe diff --check
+          git -C frozen-recipe diff > frozen-recipe/experiment-results/geometry.patch
+      - name: Confirm no process holds a card
+        working-directory: frozen-recipe
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          # The rig's telemetry exporter opens every card for a tt-smi snapshot every 30 s
+          # (run 35582967265 failed here on exactly that: 'tt-smi' as the only holder). A
+          # tt-smi holder is read-only and gone within seconds, so it is ignored and the
+          # check retries; any other holder still fails the job.
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            "${prefix[@]}" fuser -v "${paths[@]}" > experiment-results/holders.txt 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s experiment-results/holders.txt ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' experiment-results/holders.txt | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then
+            echo 'Device ownership not clear'
+            cat experiment-results/holders.txt || true
+            exit 1
+          fi
+      - name: Reset every board before this job opens the pair
+        working-directory: frozen-recipe
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          # A long four-user run leaves an active ethernet core on device 0 that the next
+          # open cannot bring back: llrt.cpp:594 "Timed out while waiting for active
+          # ethernet core 31-25 to become active again" (runs 35560086522 and 35560086573,
+          # the latter twice - once right after the former had passed). Reset EVERY board
+          # before the job opens the pair, exactly as qwen-card-reset.yml does: both link
+          # ends must come back together (resetting one board alone left the mesh at 1x1,
+          # run 35414390308). No firmware is written and no host reboot happens. The
+          # preceding step already proved no process holds a card.
+          mkdir -p experiment-results
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
+          paths=()
+          for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${paths[@]}" > experiment-results/reset.log 2>&1 || status=$?
+          if [ "$status" != 0 ]; then
+            echo "multi-board reset exited $status; resetting each in turn" >> experiment-results/reset.log
+            status=0
+            for path in "${paths[@]}"; do
+              timeout -k 20 300 "${prefix[@]}" "$smi" -r "$path" >> experiment-results/reset.log 2>&1 || status=$?
+            done
+          fi
+          echo "reset_exit=$status" | tee experiment-results/reset.status
+          tail -20 experiment-results/reset.log || true
+          timeout -k 5 30 "${prefix[@]}" "$smi" -ls 2>&1 | tee experiment-results/boards-after-reset.txt | tail -8
+          test "$status" = 0
+      - name: Run the frozen-recipe 65536 numerics probe on hardware
+        working-directory: frozen-recipe
+        timeout-minutes: 50
+        env:
+          QWEN_CARDS_ALLOCATED: '1'
+        run: bash scripts/ci/run-frozen-hardware.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-frozen-64k-numerical-hardware-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-recipe/experiment-results/

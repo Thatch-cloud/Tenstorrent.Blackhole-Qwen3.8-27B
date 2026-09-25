@@ -80,9 +80,19 @@ class EngineLifecycleTests(unittest.TestCase):
     def test_width_cap_excludes_unused_large_traces(self):
         self.assertEqual(capture_widths(170, 65536, 32, 512, 8), (1, 2, 4, 8))
         self.assertEqual(capture_widths(170, 65536, 32, 3, 8), (1, 2))
-        for cap in (True, 3, 8.0, 0, 64):
+        for cap in (True, 3, 8.0, 0, 128):
             with self.assertRaises(ValueError):
                 capture_widths(170, 65536, 32, 512, cap)
+
+    def test_the_sixty_four_row_block_is_reachable_only_through_an_explicit_cap(self):
+        """M3: 64 is a legal verify width, but the default cap keeps every per-request
+        engine at the widths it captured before."""
+        self.assertEqual(capture_widths(170, 65536, 64, 512, 64), (1, 2, 4, 8, 16, 32, 64))
+        self.assertEqual(capture_widths(170, 65536, 64, 512), (1, 2, 4, 8, 16, 32))
+        self.assertEqual(capture_widths(170, 65536, 32, 512, 64), (1, 2, 4, 8, 16, 32))
+        self.assertEqual(capture_widths(170, 65536, 16, 512, 64), (1, 2, 4, 8, 16))
+        self.assertEqual(capture_widths(65535, 65536, 64, 1, 64), (1,))
+        self.assertEqual(capture_widths(170, 65536, 64, 40, 64), (1, 2, 4, 8, 16, 32))
     def test_replay_options_reach_all_warm_and_retained_buckets(self):
         engine = VerifierEngine.__new__(VerifierEngine)
         engine.model, engine.pages, engine.helpers = object(), object(), []
@@ -149,9 +159,49 @@ class EngineLifecycleTests(unittest.TestCase):
         self.assertEqual(capture_widths(65531, 65536, 32, 5), (1, 2, 4))
         self.assertEqual(capture_widths(4095, 65536, 32, 128), (1, 2, 4, 8, 16, 32))
         for geometry in ((65535, 65536, 32, 2), (-1, 65536, 32, 1),
-                         (0, 65536, 32, 0), (0, 65536, 64, 1), (True, 65536, 32, 1)):
+                         (0, 65536, 32, 0), (0, 65536, 128, 1), (0, 65536, 48, 1), (True, 65536, 32, 1)):
             with self.assertRaises(ValueError):
                 capture_widths(*geometry)
+
+    def test_the_capture_cap_bounds_the_widths_and_the_plan_and_must_be_a_supported_width_within_the_verifier_width(self):
+        """Beside the 64-row block the serving runtime caps the engine's captures at 4
+        (packed_shapes.sequential_capture_rows): the widths and the replay plan follow the
+        cap, the qualified verifier width (max_verify_rows) does not, and a cap that is not
+        a supported width within it is refused before anything is allocated."""
+        import verifier_engine
+
+        def attempt(**options):
+            # a long-context frontier, so the replay plan (native chunk families) accepts it
+            session = GreedySession('request', [0] * 4096, 0, vocab_size=100, max_new_tokens=33)
+            helpers = [SimpleNamespace(live=[object()] * 5, allocate=Mock(return_value=[object()] * 5),
+                                       save=Mock()) for index in range(48)]
+            operations = SimpleNamespace(synchronize_device=Mock())
+            with patch.dict(sys.modules, ttnn=operations), patch('verifier_engine.addresses', return_value=(1, 2)), \
+                    patch('verifier_engine.release_owned'), \
+                    patch.object(VerifierEngine, 'fixture', side_effect=RuntimeError('fixture failure')), \
+                    patch('verifier_engine.capture_widths', wraps=verifier_engine.capture_widths) as widths, \
+                    patch('attention_request_plan.capture_plan', wraps=__import__('attention_request_plan').capture_plan) as plan:
+                try:
+                    VerifierEngine(SimpleNamespace(mesh_device=object()), session, SimpleNamespace(shape=(1, 1024)), helpers,
+                                   **options)
+                except RuntimeError as failure:
+                    if str(failure) != 'fixture failure':
+                        raise
+            return widths, plan, helpers
+
+        widths, plan, helpers = attempt(capture_rows=4)
+        self.assertEqual(widths.call_args.args[-1], 4)
+        plan.assert_not_called()
+        widths, plan, helpers = attempt()
+        self.assertEqual(widths.call_args.args[-1], 32, 'without a cap the qualified width bounds the captures as before')
+        widths, plan, helpers = attempt(norm_batch=True, attention_replay=True, capture_rows=4)
+        self.assertEqual(widths.call_args.args[-1], 4)
+        self.assertEqual(plan.call_args.kwargs['max_verify_rows'], 4)
+        widths, plan, helpers = attempt(norm_batch=True, attention_replay=True)
+        self.assertEqual(plan.call_args.kwargs['max_verify_rows'], 32)
+        for cap in (3, 64, 4.0, True, 0):
+            with self.subTest(cap=cap), self.assertRaisesRegex(ValueError, 'capture cap'):
+                attempt(capture_rows=cap)
 
     def test_constructor_failure_poisoning_prevents_device_state_retry(self):
         for fail in ('allocate', 'fixture'):

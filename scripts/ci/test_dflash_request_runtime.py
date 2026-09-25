@@ -6,6 +6,18 @@ from dflash_request_runtime import DFlashRequestRuntime, TARGET_TAPS
 
 
 class DFlashRequestRuntimeTests(unittest.TestCase):
+    def test_t16_geometry_accepts_fifteen_proposals(self):
+        runtime, drafter, session, engine = self.fixture()
+        drafter.max_drafts = 15
+        drafter.propose.return_value = tuple(range(11, 26))
+        runtime = DFlashRequestRuntime(drafter, position=170)
+        runtime.bind(session, engine)
+        session.phase = 'drafting'
+        self.assertEqual(runtime('request', (9, 10), 15), tuple(range(11, 26)))
+        drafter.max_drafts = 16
+        with self.assertRaises(ValueError):
+            DFlashRequestRuntime(drafter, position=170)
+
     def fixture(self):
         drafter = SimpleNamespace(position=170, propose=Mock(return_value=(11, 12, 13)),
             prepare_publication=Mock(side_effect=lambda features, prefix, **kwargs: (features, prefix)),
@@ -81,6 +93,43 @@ class DFlashRequestRuntimeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runtime.publish(prefix)
             drafter.prepare_publication.assert_not_called()
+
+    def test_discard_proposal_resets_an_unpublished_proposal_to_idle(self):
+        runtime, drafter, session, engine = self.fixture()
+        session.phase = 'drafting'
+        self.assertEqual(runtime('request', (9, 10), 3), (11, 12, 13))
+        self.assertEqual((runtime.phase, runtime.proposed), ('proposed', (11, 12, 13)))
+        runtime.discard_proposal()
+        self.assertEqual((runtime.phase, runtime.proposed), ('idle', ()))
+        # a fresh proposal runs exactly as if the discarded one had never happened
+        session.phase = 'drafting'
+        self.assertEqual(runtime('request', (9, 10), 3), (11, 12, 13))
+
+    def test_discard_proposal_is_a_no_op_when_nothing_was_proposed(self):
+        runtime, drafter, session, engine = self.fixture()
+        self.assertEqual(runtime.phase, 'idle')
+        runtime.discard_proposal()
+        self.assertEqual(runtime.phase, 'idle')
+
+    def test_discard_proposal_rejects_a_failed_runtime(self):
+        runtime, drafter, session, engine = self.fixture()
+        drafter.propose.return_value = (11, True, 13)
+        session.phase = 'drafting'
+        with self.assertRaises(ValueError):
+            runtime('request', (10,), 3)
+        self.assertEqual(runtime.phase, 'failed')
+        with self.assertRaises(ValueError):
+            runtime.discard_proposal()
+
+    def test_discard_proposal_after_publish_is_a_no_op(self):
+        """publish() already leaves the runtime idle - nothing outstanding left to
+        discard - so this is the same no-op as never having proposed at all."""
+        runtime, drafter, session, engine = self.fixture()
+        self.pending(runtime, session, engine)
+        runtime.publish(2)
+        self.assertEqual(runtime.phase, 'idle')
+        runtime.discard_proposal()
+        self.assertEqual(runtime.phase, 'idle')
 
     def test_bad_proposal_ids_fail_before_verification(self):
         for result in ((11, 12), (11, True, 13), (11, 100, 13)):
