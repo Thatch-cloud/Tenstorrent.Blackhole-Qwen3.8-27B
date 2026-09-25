@@ -8,7 +8,7 @@ parallel with the serving-pair gates on cards M and A.
 | --- | --- |
 | Runner | `thatch-qwen-cardb-01`, systemd service on `thatch-control-plane-prod`, install dir `/opt/thatch-actions-runner-cardb` |
 | Labels | `thatch-qwen-p150a-card-b` only (registered with `--no-default-labels`, so generic `[self-hosted, linux, x64]` jobs never land here) |
-| Runner group | `qwen-card-b` (org, id 4): every private repository in the org, no workflow restriction, public repositories excluded |
+| Runner group | `qwen-card-b` (org, id 4): visible to every org repository, public ones included, and restricted to allowlisted `workflow@ref` entries (as group 3 is) |
 | Workflow | `.github/workflows/qwen-card-b.yml`, triggered by tags `experiment/card-b-v*` |
 
 ## Queueing a test
@@ -40,8 +40,22 @@ Results come back as the run's `card-b-<run id>` artifact (the harness's `RESULT
 The group is open org-wide, so any private Thatch-cloud repository can queue card-B work with
 `runs-on: [thatch-qwen-p150a-card-b]`. The guards above live in this repository's workflow, not in the runner:
 a job from elsewhere must do the same itself - select card B by board id (`qual_card`), never open cards M or A
-(the serving pair), never reset a card, keep results out of the workspace and remove its containers. Unlike
-runner group 3 there is no per-tag allowlist.
+(the serving pair), never reset a card, keep results out of the workspace and remove its containers.
+
+## Allowlist
+
+This repository is public, so the group keeps a per-`workflow@ref` allowlist, exactly like runner group 3: only
+listed entries can run, which keeps fork pull requests off the production host. A job whose entry is missing
+queues forever with no error. The group was created with `qwen-card-b.yml@refs/tags/experiment/card-b-v1` to
+`v200`. Another repository's workflow needs its own entries added:
+
+```bash
+gh api orgs/Thatch-cloud/actions/runner-groups/4 --jq '.selected_workflows[]'     # what is allowed
+gh api --method PATCH orgs/Thatch-cloud/actions/runner-groups/4 --input payload.json   # the FULL merged list
+```
+
+The PATCH replaces `selected_workflows` wholesale, so send the merged list; the group is visible to all
+repositories, so group 3's repository-wipe trap does not apply here.
 
 ## Undo
 
