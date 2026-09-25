@@ -369,7 +369,11 @@ class OneListTests(unittest.TestCase):
 
     def test_the_ci_build_step_stages_from_the_manifest(self):
         text = code_lines(C2_WORKFLOW)
-        self.assertIn('python3 -B scripts/ci/c2_overlay.py stage --repo . --out "$ctx"', text)
+        stage = text.index('python3 -B scripts/ci/c2_overlay.py stage --repo . --out "$ctx"')
+        closure = text.index('python3 -B -m unittest test_serving_image_copy_closure test_c2_image_overlay')
+        self.assertLess(closure, stage, 'the closure tests gate the build: images come from tags, '
+                                        'which the CPU suite never runs on')
+        self.assertIn('fetch-depth: 0', text)
         self.assertNotIn('for file in', text)
         for entry in manifest_entries():
             with self.subTest(source=entry.source):

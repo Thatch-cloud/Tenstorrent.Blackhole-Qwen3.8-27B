@@ -29,6 +29,7 @@ jobs:
         with:
           path: c2
           persist-credentials: false
+          fetch-depth: 0  # the build's closure tests read the bundle and P8 base commits
       - name: Read the job file
         id: job
         working-directory: c2
@@ -204,6 +205,9 @@ jobs:
           # The overlay is docker/qwen-c2-overlay.txt, the one list; the build tags the image only
           # after G1 provenance (c2_image_provenance.py) passes. A tag present above skipped it:
           # images built before the manifest (v6-teardown and older) were never checked.
+          # G1 closure, from git: no file the image carries may ship older than this commit unless
+          # KNOWN_STALE says why. The CPU suite runs these on pull requests only; images come from tags.
+          (cd scripts/ci && python3 -B -m unittest test_serving_image_copy_closure test_c2_image_overlay)
           ctx="$RUNNER_TEMP/c2ctx"
           rm -rf "$ctx"
           python3 -B scripts/ci/c2_overlay.py stage --repo . --out "$ctx"
