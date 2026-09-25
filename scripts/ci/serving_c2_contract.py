@@ -18,7 +18,9 @@ process match it:
 4. requests: the fast path decodes greedily and holds OUTPUT_BUDGET tokens per request, so
    the API edge coerces sampling to greedy, clamps max_tokens, and refuses what it cannot
    serve before the engine sees it. A refusal inside the engine (serving_fast_policy.
-   validate_request_sampling) fails the engine, not the request.
+   validate_request_sampling) fails the engine, not the request - except under the c2
+   profile (QWEN_FAST_ANY_REQUEST=1), where a host-side refusal ends only that request, as
+   FINISHED_ABORTED (serving_request_quarantine).
 
 Nothing here changes a gate: every step is off unless QWEN_C2_SERVING=1.
 """
@@ -149,8 +151,45 @@ def prompt_length(prompt):
     return None
 
 
-def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids, max_prompt_tokens=None):
-    """Refuse what the fast path cannot serve; coerce the rest to its greedy contract."""
+def prompt_room(max_model_len, budget, max_prompt_tokens=None, min_answer_tokens=None):
+    """The longest prompt the edge admits.
+
+    By default a prompt must leave room for the whole output budget, max_model_len - budget,
+    and a profile's max_prompt_tokens can only lower that: the KV cache is sized for
+    max-num-seqs x (max_prompt_tokens + budget), and the fast path has no preemption to fall
+    back on when a request outgrows it. That blocks a 123,136-token cap under a 16,384 ceiling
+    (the largest prompt would be 114,944), so a profile may name min_answer_tokens instead: every
+    admitted prompt then keeps at least that much answer room, the cap is max_model_len -
+    min_answer_tokens (lowered, never raised, by max_prompt_tokens), and max_tokens is clamped
+    to what is left (enforce_request). A prompt plus its clamped answer never exceeds
+    max_model_len either way, so a cache of max-num-seqs x max_model_len still holds every
+    admitted request at once."""
+    if min_answer_tokens is not None and (type(min_answer_tokens) is not int
+                                          or not 1 <= min_answer_tokens <= budget):
+        raise ValueError('min_answer_tokens must be an integer from 1 to the output budget %d, got %r'
+                         % (budget, min_answer_tokens))
+    room = max_model_len - (budget if min_answer_tokens is None else min_answer_tokens)
+    return room if max_prompt_tokens is None else min(room, max_prompt_tokens)
+
+
+def omitted_max_tokens(max_tokens, *, prompt_tokens, max_model_len):
+    """Whether the client left max_tokens unset. The engine API passes None; vLLM's OpenAI
+    server fills an omitted max_tokens with the whole remaining context, max_model_len - prompt
+    (its get_max_tokens), before this contract sees the request - UNVERIFIED for the pinned
+    vLLM 0.25.1 and for any platform get_max_output_tokens override, in which case an omitted
+    value simply reads as explicit and is clamped as before. A client that explicitly asks for
+    exactly the remaining context is read as omitting it."""
+    return max_tokens is None or (prompt_tokens is not None and max_tokens == max_model_len - prompt_tokens)
+
+
+def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids, max_prompt_tokens=None,
+                    min_answer_tokens=None, default_max_tokens=None):
+    """Refuse what the fast path cannot serve; coerce the rest to its greedy contract.
+
+    min_answer_tokens and default_max_tokens are the c2 profile's (both None elsewhere, and
+    then this is exactly the contract every earlier profile ran): the answer room every
+    admitted prompt keeps (prompt_room), and the max_tokens a request gets when the client
+    omits it (omitted_max_tokens) - within the same clamp."""
     if getattr(params, 'n', 1) != 1:
         raise ContractError('n must be 1 on this model')
     if getattr(params, 'logprobs', None) is not None or getattr(params, 'prompt_logprobs', None) is not None:
@@ -169,11 +208,14 @@ def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids, ma
         raise ContractError('stop_token_ids other than the model end-of-sequence tokens are not supported')
     # The profile may cap prompts below context less budget: the KV cache is sized for
     # max-num-seqs x (max_prompt_tokens + budget), not x max_model_len, and the fast path
-    # has no preemption to fall back on when a request outgrows it.
-    room = max_model_len - budget if max_prompt_tokens is None else min(max_model_len - budget, max_prompt_tokens)
+    # has no preemption to fall back on when a request outgrows it (prompt_room).
+    room = prompt_room(max_model_len, budget, max_prompt_tokens, min_answer_tokens)
     if prompt_tokens is not None and prompt_tokens > room:
-        raise ContractError('prompt of %d tokens exceeds the %d-token prompt limit of this model (%d-token '
-                            'output budget)' % (prompt_tokens, room, budget))
+        if min_answer_tokens is None:
+            raise ContractError('prompt of %d tokens exceeds the %d-token prompt limit of this model (%d-token '
+                                'output budget)' % (prompt_tokens, room, budget))
+        raise ContractError('prompt of %d tokens exceeds the %d-token prompt limit of this model (at least %d '
+                            'tokens of answer room)' % (prompt_tokens, room, min_answer_tokens))
     # Greedy: the fast path's verifier commits argmax tokens whatever these say, and the
     # first token is sampled by vLLM from them, so they must agree with it.
     params.temperature = 0.0
@@ -185,12 +227,35 @@ def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids, ma
     params.repetition_penalty = 1.0
     params.seed = None
     limit = budget if prompt_tokens is None else min(budget, max_model_len - prompt_tokens)
-    if params.max_tokens is None or params.max_tokens > limit:
+    if default_max_tokens is not None and omitted_max_tokens(params.max_tokens, prompt_tokens=prompt_tokens,
+                                                             max_model_len=max_model_len):
+        params.max_tokens = min(default_max_tokens, limit)
+    elif params.max_tokens is None or params.max_tokens > limit:
         params.max_tokens = limit
     return params
 
 
-def install_request_contract(module, *, budget, eos_ids, max_prompt_tokens=None):
+def request_limits(profile):
+    """The request contract's numbers from a profile, checked once at boot: the output budget,
+    and the optional max_prompt_tokens, min_answer_tokens and default_max_tokens."""
+    budget = int(profile['env']['QWEN_FAST_OUTPUT_BUDGET'])
+    limits = dict(budget=budget, max_prompt_tokens=profile.get('max_prompt_tokens'),
+                  min_answer_tokens=profile.get('min_answer_tokens'),
+                  default_max_tokens=profile.get('default_max_tokens'))
+    default = limits['default_max_tokens']
+    if default is not None and (type(default) is not int or not 1 <= default <= budget):
+        raise ValueError('default_max_tokens must be an integer from 1 to the output budget %d, got %r'
+                         % (budget, default))
+    max_model_len = profile.get('engine', {}).get('max-model-len')
+    if type(max_model_len) is int:
+        # Validates min_answer_tokens; the cap must leave a prompt of at least one token.
+        if prompt_room(max_model_len, budget, limits['max_prompt_tokens'], limits['min_answer_tokens']) < 1:
+            raise ValueError('The profile admits no prompt at all')
+    return limits
+
+
+def install_request_contract(module, *, budget, eos_ids, max_prompt_tokens=None, min_answer_tokens=None,
+                             default_max_tokens=None):
     processor = module.InputProcessor
     if getattr(processor, '_qwen_c2_contract', False):
         return
@@ -200,13 +265,18 @@ def install_request_contract(module, *, budget, eos_ids, max_prompt_tokens=None)
         if hasattr(params, 'temperature'):
             enforce_request(params, prompt_tokens=prompt_length(prompt),
                             max_model_len=self.model_config.max_model_len, budget=budget, eos_ids=eos_ids,
-                            max_prompt_tokens=max_prompt_tokens)
+                            max_prompt_tokens=max_prompt_tokens, min_answer_tokens=min_answer_tokens,
+                            default_max_tokens=default_max_tokens)
         return original(self, request_id, prompt, params, *args, **kwargs)
 
     processor.process_inputs = process_inputs
     processor._qwen_c2_contract = True
     log('request contract installed: greedy, max_tokens <= %d, prompt <= %s, eos %s', budget,
         max_prompt_tokens or 'context - budget', sorted(eos_ids))
+    if min_answer_tokens is not None or default_max_tokens is not None:
+        log('request contract: every prompt keeps >= %s answer tokens, max_tokens defaults to %s when omitted',
+            min_answer_tokens if min_answer_tokens is not None else budget,
+            default_max_tokens if default_max_tokens is not None else 'the clamp')
 
 
 def exit_without_device_teardown(modules=None, parent=None, exit=None, streams=None):
@@ -288,7 +358,8 @@ def boot(environ=None, orig_argv=None):
     if profile.get('skip_device_teardown', True):
         # Registered at interpreter start, so it runs after every other atexit handler.
         install_teardown_skip()
-    budget = int(profile['env']['QWEN_FAST_OUTPUT_BUDGET'])
+    limits = request_limits(profile)
+    budget = limits['budget']
     eos_ids = frozenset(int(token) for token in profile['eos_ids'])
     orig_argv = getattr(sys, 'orig_argv', None) if orig_argv is None else orig_argv
     if is_api_server(orig_argv):
@@ -302,5 +373,6 @@ def boot(environ=None, orig_argv=None):
             return profile
         sys.meta_path.insert(0, PostImportHook(
             INPUT_PROCESSOR, lambda module: install_request_contract(
-                module, budget=budget, eos_ids=eos_ids, max_prompt_tokens=profile.get('max_prompt_tokens'))))
+                module, budget=budget, eos_ids=eos_ids, max_prompt_tokens=limits['max_prompt_tokens'],
+                min_answer_tokens=limits['min_answer_tokens'], default_max_tokens=limits['default_max_tokens'])))
     return profile

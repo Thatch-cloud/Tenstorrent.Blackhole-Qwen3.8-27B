@@ -24,10 +24,10 @@ class Params(object):
             setattr(self, key, value)
 
 
-def enforce(params, prompt_tokens=1000, max_model_len=131328, budget=4096, max_prompt_tokens=61440):
+def enforce(params, prompt_tokens=1000, max_model_len=131328, budget=4096, max_prompt_tokens=61440, **c2):
     return contract.enforce_request(params, prompt_tokens=prompt_tokens, max_model_len=max_model_len,
                                     budget=budget, eos_ids=frozenset((248046, 248044)),
-                                    max_prompt_tokens=max_prompt_tokens)
+                                    max_prompt_tokens=max_prompt_tokens, **c2)
 
 
 class ProfileTest(unittest.TestCase):
@@ -51,7 +51,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(exact['env']['QWEN_FAST_OUTPUT_BUDGET'], '256')
 
     def test_profile_geometry_is_consistent(self):
-        for name in ('exact', 'coding'):
+        for name in ('exact', 'coding', 'c2'):
             profile = contract.load_profile(PROFILES, name)
             engine, env = profile['engine'], profile['env']
             self.assertIs(engine['additional-config']['qwen_fast_t16'], True, name)
@@ -63,9 +63,51 @@ class ProfileTest(unittest.TestCase):
             self.assertIn(capacity // 64, (2052,) + tuple(range(1, 1025)), name)
             self.assertEqual(budget % 256, 0, name)
             # Every admitted request fits the KV cache at once: no preemption on the fast path.
-            longest = min(capacity - budget, profile.get('max_prompt_tokens') or capacity) + budget
+            # The longest request is the longest admitted prompt plus the most the contract lets
+            # it answer, which is the budget clamped to the context left after the prompt.
+            room = contract.prompt_room(capacity, budget, profile.get('max_prompt_tokens'),
+                                        profile.get('min_answer_tokens'))
+            longest = min(room + budget, capacity)
             self.assertGreaterEqual(engine['num-gpu-blocks-override'],
                                     engine['max-num-seqs'] * -(-longest // 64), name)
+            # The request contract's numbers load and check at boot.
+            self.assertEqual(contract.request_limits(profile)['budget'], budget, name)
+
+    def test_the_c2_profile_is_the_exact_geometry_serving_any_request(self):
+        exact, c2 = contract.load_profile(PROFILES, 'exact'), contract.load_profile(PROFILES, 'c2')
+        # The same engine argv, byte for byte: 131328 positions, 2052-page tables, 8208 blocks.
+        self.assertEqual(contract.engine_arguments(c2, '/snap'), contract.engine_arguments(exact, '/snap'))
+        self.assertEqual(c2['engine']['num-gpu-blocks-override'], 4 * 2052)
+        env = c2['env']
+        self.assertEqual(env['QWEN_FAST_OUTPUT_BUDGET'], '16384')
+        self.assertEqual((env['QWEN_FAST_MAX_POSITION'], env['QWEN_DSPARK_REQUEST_CONTEXT']), ('131328', '131072'))
+        self.assertEqual(env['QWEN_FAST_ANY_REQUEST'], '1')
+        self.assertEqual(env['QWEN_FAST_FAULTHANDLER'], '0')
+        limits = contract.request_limits(c2)
+        self.assertEqual(limits, dict(budget=16384, max_prompt_tokens=123136, min_answer_tokens=8192,
+                                      default_max_tokens=8192))
+        room = contract.prompt_room(131328, 16384, 123136, 8192)
+        self.assertEqual(room, 123136)
+        self.assertGreaterEqual(131328 - room, 8192, 'every admitted prompt keeps at least 8k of answer room')
+
+    def test_no_other_profile_turns_the_any_request_path_on(self):
+        for name in ('exact', 'coding', 'general'):
+            profile = contract.load_profile(PROFILES, name)
+            self.assertNotIn('QWEN_FAST_ANY_REQUEST', profile['env'], name)
+            self.assertNotIn('QWEN_FAST_FAULTHANDLER', profile['env'], name)
+            for key in ('min_answer_tokens', 'default_max_tokens'):
+                self.assertNotIn(key, profile, name)
+        exact = contract.load_profile(PROFILES, 'exact')
+        self.assertEqual(exact['env'], {'QWEN_FAST_OUTPUT_BUDGET': '256', 'QWEN_FAST_MAX_POSITION': '131328',
+                                        'QWEN_DSPARK_REQUEST_CONTEXT': '131072'})
+
+    @unittest.skipUnless(os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'docker',
+                                                     'qwen-c2-serving.Dockerfile')), 'repository checkout only')
+    def test_the_image_does_not_bake_the_any_request_flag(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'docker',
+                            'qwen-c2-serving.Dockerfile')
+        with open(path, encoding='utf-8') as handle:
+            self.assertNotIn('QWEN_FAST_ANY_REQUEST', handle.read(), 'only the c2 profile may set it')
 
     def test_default_profile_is_general(self):
         environ = dict(os.environ)
@@ -158,6 +200,85 @@ class RequestTest(unittest.TestCase):
         enforce(Params(), prompt_tokens=65792 - 4096, max_model_len=65792, max_prompt_tokens=None)
         with self.assertRaises(contract.ContractError):
             enforce(Params(), prompt_tokens=65792 - 4095, max_model_len=65792, max_prompt_tokens=None)
+
+    def test_the_prompt_cap_can_rise_to_leave_only_the_minimum_answer_room(self):
+        """room = max_model_len - budget blocked a 123,136-token cap under a 16,384 ceiling
+        (114,944 was the most); with min_answer_tokens the cap is what leaves 8,192."""
+        c2 = dict(max_model_len=131328, budget=16384, max_prompt_tokens=123136)
+        self.assertEqual(contract.prompt_room(131328, 16384, 123136), 131328 - 16384, 'the old formula')
+        enforce(Params(), prompt_tokens=123136, min_answer_tokens=8192, **c2)
+        with self.assertRaisesRegex(contract.ContractError, 'at least 8192 tokens of answer room'):
+            enforce(Params(), prompt_tokens=123137, min_answer_tokens=8192, **c2)
+        # max_prompt_tokens still lowers it, never raises it past the answer room
+        self.assertEqual(contract.prompt_room(131328, 16384, 100000, 8192), 100000)
+        self.assertEqual(contract.prompt_room(131328, 16384, 130000, 8192), 123136)
+        self.assertEqual(contract.prompt_room(131328, 16384, None, 8192), 123136)
+        for bad in (0, 16385, 8192.0, '8192'):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'min_answer_tokens'):
+                contract.prompt_room(131328, 16384, None, bad)
+
+    def test_max_tokens_is_clamped_to_the_room_left_and_never_below_the_minimum_answer(self):
+        c2 = dict(max_model_len=131328, budget=16384, max_prompt_tokens=123136, min_answer_tokens=8192)
+        self.assertEqual(enforce(Params(max_tokens=16384), prompt_tokens=123136, **c2).max_tokens, 8192)
+        self.assertEqual(enforce(Params(max_tokens=16384), prompt_tokens=60, **c2).max_tokens, 16384)
+        self.assertEqual(enforce(Params(max_tokens=100000), prompt_tokens=60, **c2).max_tokens, 16384)
+        self.assertEqual(enforce(Params(max_tokens=10000), prompt_tokens=60, **c2).max_tokens, 10000)
+        self.assertEqual(enforce(Params(max_tokens=1), prompt_tokens=60, **c2).max_tokens, 1)
+        for prompt in (1, 60, 2048, 65536, 114945, 123136):
+            limit = enforce(Params(max_tokens=100000), prompt_tokens=prompt, **c2).max_tokens
+            self.assertGreaterEqual(limit, 8192, prompt)
+            self.assertLessEqual(prompt + limit, 131328, prompt)
+
+    def test_an_omitted_max_tokens_defaults_to_the_profiles_value_within_the_clamp(self):
+        c2 = dict(max_model_len=131328, budget=16384, max_prompt_tokens=123136, min_answer_tokens=8192,
+                  default_max_tokens=8192)
+        # the engine API leaves it None; vLLM's OpenAI server fills max_model_len - prompt
+        self.assertEqual(enforce(Params(max_tokens=None), prompt_tokens=60, **c2).max_tokens, 8192)
+        self.assertEqual(enforce(Params(max_tokens=131328 - 60), prompt_tokens=60, **c2).max_tokens, 8192)
+        self.assertEqual(enforce(Params(max_tokens=None), prompt_tokens=None, **c2).max_tokens, 8192)
+        # an explicit value is the client's, within the clamp
+        self.assertEqual(enforce(Params(max_tokens=12000), prompt_tokens=60, **c2).max_tokens, 12000)
+        self.assertEqual(enforce(Params(max_tokens=131328 - 61), prompt_tokens=60, **c2).max_tokens, 16384)
+        # without a default nothing changes: omitted means the clamp, as before
+        self.assertEqual(enforce(Params(max_tokens=None), prompt_tokens=60, max_model_len=131328, budget=16384,
+                                 max_prompt_tokens=123136, min_answer_tokens=8192).max_tokens, 16384)
+        self.assertTrue(contract.omitted_max_tokens(None, prompt_tokens=5, max_model_len=10))
+        self.assertTrue(contract.omitted_max_tokens(5, prompt_tokens=5, max_model_len=10))
+        self.assertFalse(contract.omitted_max_tokens(4, prompt_tokens=5, max_model_len=10))
+        self.assertFalse(contract.omitted_max_tokens(5, prompt_tokens=None, max_model_len=10))
+
+    def test_request_limits_refuse_a_default_outside_the_budget(self):
+        profile = contract.load_profile(PROFILES, 'c2')
+        for bad in (0, 16385, '8192', 8192.0):
+            broken = dict(profile, default_max_tokens=bad)
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'default_max_tokens'):
+                contract.request_limits(broken)
+        with self.assertRaisesRegex(ValueError, 'min_answer_tokens'):
+            contract.request_limits(dict(profile, min_answer_tokens=20000))
+        coding = contract.request_limits(contract.load_profile(PROFILES, 'coding'))
+        self.assertEqual(coding, dict(budget=4096, max_prompt_tokens=61440, min_answer_tokens=None,
+                                      default_max_tokens=None))
+
+    def test_the_installed_contract_applies_the_c2_limits(self):
+        calls = []
+
+        class InputProcessor(object):
+            model_config = types.SimpleNamespace(max_model_len=131328)
+
+            def process_inputs(self, request_id, prompt, params, *args, **kwargs):
+                calls.append((request_id, params.max_tokens))
+                return 'request'
+
+        module = types.ModuleType('fake_input_processor_c2')
+        module.InputProcessor = InputProcessor
+        contract.install_request_contract(module, budget=16384, eos_ids=frozenset((248046,)), max_prompt_tokens=123136,
+                                          min_answer_tokens=8192, default_max_tokens=8192)
+        InputProcessor().process_inputs('r1', {'prompt_token_ids': [1] * 123136}, Params(max_tokens=16384))
+        InputProcessor().process_inputs('r2', {'prompt_token_ids': [1] * 60}, Params(max_tokens=131328 - 60))
+        InputProcessor().process_inputs('r3', {'prompt_token_ids': [1] * 60}, Params(max_tokens=12000))
+        self.assertEqual(calls, [('r1', 8192), ('r2', 8192), ('r3', 12000)])
+        with self.assertRaises(contract.ContractError):
+            InputProcessor().process_inputs('r4', {'prompt_token_ids': [1] * 123137}, Params())
 
     def test_what_the_fast_path_cannot_serve_is_refused(self):
         for values in (dict(n=2), dict(logprobs=1), dict(prompt_logprobs=0), dict(structured_outputs=object()),

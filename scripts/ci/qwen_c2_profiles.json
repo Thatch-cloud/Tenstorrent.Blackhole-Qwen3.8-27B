@@ -56,6 +56,66 @@
         }
       }
     },
+    "c2": {
+      "description": "C2-any (plan stage S1, internal): the exact geometry (131328 positions, 2052-page tables, 8208 KV blocks = 4 x 2052) serving ANY request the edge admits. QWEN_FAST_ANY_REQUEST=1 builds the engines beside the four-user block without replay attention and the per-request T16 gate (their captures are 1, 2 and 4 rows, which never replay), runs the gate's source qualification once at attach, gives each request its own max_tokens as its budget, and ends a host-side refusal as that request's FINISHED_ABORTED instead of the engine's death. Output ceiling 16384; prompts up to 123136, so every admitted prompt keeps at least 8192 tokens of answer room; max_tokens 8192 when the client omits it. Decode is 4-row sequential (the packed block needs every live user inside [131072, 131328)). Not qualified for production traffic.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_graph_descriptor": "/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "max_prompt_tokens": 123136,
+      "min_answer_tokens": 8192,
+      "default_max_tokens": 8192
+    },
     "coding": {
       "description": "NOT SERVABLE: the fast path refuses any request whose prompt is not exactly the frozen context or whose remaining budget exceeds 256 (frozen_combined_runtime.validate_target_option; smoke v3, run 36099730091). Kept for the record.",
       "eos_ids": [
