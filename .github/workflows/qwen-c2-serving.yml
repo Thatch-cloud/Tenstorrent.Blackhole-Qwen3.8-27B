@@ -45,7 +45,7 @@ jobs:
           actions = values.get('C2_ACTIONS', 'status').split()
           assert set(actions) <= {'status', 'platform', 'unserve', 'priority', 'reset', 'build', 'smoke', 'replay', 'push'}, actions
           assert re.fullmatch(r'[0-9a-z.-]{3,40}', values.get('C2_IMAGE_TAG', '')), 'C2_IMAGE_TAG'
-          assert values.get('C2_PROFILE', 'general') in ('general', 'coding', 'exact')
+          assert values.get('C2_PROFILE', 'general') in ('general', 'general-p300', 'general-lean', 'general-p300-lean', 'coding', 'exact')
           print('actions=' + ' '.join(actions))
           print('tag=' + values['C2_IMAGE_TAG'])
           print('profile=' + values.get('C2_PROFILE', 'general'))
@@ -268,6 +268,7 @@ jobs:
           python3 scripts/ci/c2_serving_smoke.py http://127.0.0.1:8010 Qwen/Qwen3.8-27B "$TESTS" \
             "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')/typing.py" \
             scripts/ci/build-c2-serving-image.sh 2>&1 | tee "$results/smoke.log"
+          python3 scripts/ci/c2_decode_probe.py http://127.0.0.1:8010 "$PROFILE" 3 2>&1 | tee -a "$results/smoke.log" || true
           docker stats --no-stream "$name" | tee "$results/stats.txt" || true
           grep -F '[PINDIAG] dram after' <(docker logs "$name" 2>&1) | tail -8 || true
       - name: Replay the node agent's serving sequence

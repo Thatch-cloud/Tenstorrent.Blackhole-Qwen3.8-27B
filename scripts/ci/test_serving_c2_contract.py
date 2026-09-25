@@ -89,6 +89,25 @@ class GeneralProfileTest(unittest.TestCase):
         self.assertEqual(environ['QWEN36_BATCHED_DECODE_MODE'], 'host')
 
 
+class GeneralVariantTest(unittest.TestCase):
+    def test_p300_keeps_the_agents_mesh_and_additional_config(self):
+        profile = contract.load_profile(PROFILES, 'general-p300')
+        environ = contract.apply_environment(profile, {'TT_MESH_GRAPH_DESC_PATH': '/p300.textproto'})
+        self.assertEqual(environ['TT_MESH_GRAPH_DESC_PATH'], '/p300.textproto')
+        argv = contract.rewrite_argv(['-m', '--additional-config', '{"tt": {"fabric_config": "FABRIC_1D"}}',
+                                      '--max-model-len', '1'], profile, '/snap')
+        self.assertEqual(argv.count('--additional-config'), 1)
+        self.assertIn('FABRIC_1D', ' '.join(argv))
+        self.assertEqual(argv[argv.index('--max-model-len') + 1], '65536')
+
+    def test_lean_unsets_fast_path_flags_and_keeps_the_k_stack(self):
+        profile = contract.load_profile(PROFILES, 'general-lean')
+        environ = contract.apply_environment(profile, {'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_OUTPUT_BUDGET': '256',
+                                                       'QWEN_MLP_BLOCK_STREAM_EXPERIMENT': '1', 'QWEN_GDN_FUSED_DECODE': '1',
+                                                       'QWEN_SDPA_BF8': '1'})
+        self.assertEqual(sorted(environ), ['QWEN_GDN_FUSED_DECODE', 'QWEN_SDPA_BF8', 'TT_MESH_GRAPH_DESC_PATH'])
+
+
 class ArgvTest(unittest.TestCase):
     def test_platform_engine_flags_are_replaced_and_its_own_kept(self):
         profile = contract.load_profile(PROFILES, 'coding')

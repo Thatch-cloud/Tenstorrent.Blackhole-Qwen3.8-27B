@@ -91,9 +91,17 @@ def resolve_snapshot(profile, exists=os.path.isdir):
 
 def apply_environment(profile, environ=None):
     environ = os.environ if environ is None else environ
+    # unset_env: names, or prefixes ending in '*', removed before the profile's own values -
+    # a profile can switch off flags the image bakes for the fast path.
+    patterns = tuple(profile.get('unset_env', ()))
+    for key in list(environ):
+        if any(key == pattern or (pattern.endswith('*') and key.startswith(pattern[:-1])) for pattern in patterns):
+            environ.pop(key)
     for key, value in profile['env'].items():
         environ[key] = str(value)
-    environ['TT_MESH_GRAPH_DESC_PATH'] = profile['mesh_graph_descriptor']
+    # None keeps whatever the launcher set (the node agent's descriptor).
+    if profile.get('mesh_graph_descriptor') is not None:
+        environ['TT_MESH_GRAPH_DESC_PATH'] = profile['mesh_graph_descriptor']
     # The fast path was measured without it; the stock decode path (general profile) is what
     # it configures, and the platform bakes it =host, so that profile keeps it.
     if profile.get('drop_batched_decode_mode', True):
@@ -119,6 +127,8 @@ def engine_arguments(profile, snapshot):
 
 def rewrite_argv(argv, profile, snapshot):
     """argv[0] kept; every owned flag (and its value) dropped; the profile's appended."""
+    # platform_flags: owned flags a profile leaves to the launcher (e.g. the agent's additional-config).
+    owned = {name: takes for name, takes in OWNED_FLAGS.items() if name not in profile.get('platform_flags', ())}
     kept, skip = [argv[0]], False
     for token in argv[1:]:
         if skip:
@@ -127,8 +137,8 @@ def rewrite_argv(argv, profile, snapshot):
         if token.startswith('--'):
             name, separator, _ = token[2:].partition('=')
             name = name.replace('_', '-')
-            if name in OWNED_FLAGS:
-                skip = OWNED_FLAGS[name] and not separator
+            if name in owned:
+                skip = owned[name] and not separator
                 continue
         kept.append(token)
     return kept + engine_arguments(profile, snapshot)
@@ -288,7 +298,7 @@ def boot(environ=None, orig_argv=None):
     if profile.get('skip_device_teardown', True):
         # Registered at interpreter start, so it runs after every other atexit handler.
         install_teardown_skip()
-    budget = int(profile['env']['QWEN_FAST_OUTPUT_BUDGET'])
+    budget = int(profile['env'].get('QWEN_FAST_OUTPUT_BUDGET', '256'))
     eos_ids = frozenset(int(token) for token in profile['eos_ids'])
     orig_argv = getattr(sys, 'orig_argv', None) if orig_argv is None else orig_argv
     if is_api_server(orig_argv):
