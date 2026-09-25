@@ -420,15 +420,17 @@ class OverlayToolTests(unittest.TestCase):
 
     def test_check_refuses_a_context_that_is_not_the_manifest(self):
         out = self.tmp / 'ctx'
-        c2_overlay.stage(ROOT, out)
+        entries = c2_overlay.stage(ROOT, out)
+        edited, removed = entries[0].source, entries[-1].source
         (out / 'overlay' / 'scripts/ci/extra.py').write_text('x = 1\n')
-        victim = out / 'overlay' / 'scripts/ci/serving_lifecycle.py'
+        victim = out / 'overlay' / edited
         victim.write_bytes(victim.read_bytes() + b'# edited\n')
-        (out / 'overlay' / 'speculative-decoding/harness/greedy_session.py').unlink()
+        (out / 'overlay' / removed).unlink()
         problems = c2_overlay.check_context(out)
-        self.assertTrue(any('greedy_session.py is in the manifest but not in overlay/' in p for p in problems))
-        self.assertTrue(any('overlay/scripts/ci/extra.py is not in the manifest' in p for p in problems))
-        self.assertTrue(any('serving_lifecycle.py differs from overlay.sha256' in p for p in problems))
+        self.assertIn('%s is in the manifest but not in overlay/' % removed, problems)
+        self.assertIn('overlay/scripts/ci/extra.py is not in the manifest', problems)
+        self.assertIn('overlay/%s differs from overlay.sha256' % edited, problems)
+        self.assertEqual(len(problems), 3, problems)
         self.assertEqual(c2_overlay.main(['check', '--context', str(out)]), 1)
 
     def test_install_records_what_changed(self):
