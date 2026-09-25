@@ -2,7 +2,7 @@
 
 from types import MethodType
 
-from serving_fast_policy import validate_fast_config, validate_request_sampling
+from serving_fast_policy import any_request_enabled, validate_fast_config, validate_request_sampling
 from serving_worker_hook import FastWorkerHook, note_fixture_writer
 
 # The scheduler cannot see the lifecycle: one is the mounted plugin, the other the
@@ -40,6 +40,13 @@ def note_prefill():
 
 
 class FastServingLifecycle:
+    # The C2-any state (QWEN_FAST_ANY_REQUEST, set per instance in __init__), defaulted on the
+    # class so an instance built without __init__ behaves exactly as before the flag existed.
+    any_request = False
+    quarantine = None
+    refused = None
+    max_model_len = None
+
     # request_id is assigned at five sites - construction, reset, the
     # EOS-at-first-token release, the prefill-to-decode handoff, and admission.
     # A property catches all of them and any added later. Patching the sites
@@ -95,6 +102,21 @@ class FastServingLifecycle:
         # and a change of behaviour mid-prompt is refused, so the first rig run says
         # which it is instead of a guess deciding it here.
         self.chunk_deferred = []
+        # QWEN_FAST_ANY_REQUEST (C2-any; default off), read once for the lifecycle's life.
+        # Off, `quarantine` stays None and every path below is exactly what it was: a
+        # refusal fails the engine, and only an EOS first token skips the bridge. On:
+        # - D2: a host-side refusal of one request (the sampling contract at admission, or
+        #   serving_request_factory.RequestRefused from the bridge) ends that request as
+        #   FINISHED_ABORTED through serving_request_quarantine, and the engine lives on;
+        # - D4: a first token that already exhausts max_tokens (or the context) is terminal
+        #   like EOS - no bridge; the platform's warmup is max_tokens 1.
+        self.any_request = any_request_enabled()
+        self.max_model_len = getattr(getattr(config, 'model_config', None), 'max_model_len', None)
+        self.quarantine = None
+        # The admission refusal of the request in the prefill phase, served at its sampler.
+        self.refused = None
+        if self.any_request:
+            self.quarantine = self._install_quarantine(config)
         self.original_execute, self.original_sample = worker.execute_model, worker.sample_tokens
         self.saved = []
         for name, value in (('_qwen_fast_lifecycle', self),
@@ -107,6 +129,74 @@ class FastServingLifecycle:
     def _check(self):
         if self.failed or self.closed:
             raise ValueError('Serving lifecycle is failed or closed')
+
+    @staticmethod
+    def _install_quarantine(config):
+        """The scheduler-side consumer for D2 (serving_request_quarantine.install), or None when
+        it cannot be installed - then a refusal stays fatal, exactly as without the flag,
+        rather than strand a request the scheduler never aborts."""
+        try:
+            import serving_request_quarantine
+
+            serving_request_quarantine.install(config)
+            return serving_request_quarantine
+        except Exception as failure:
+            try:
+                from loguru import logger
+                logger.warning(
+                    f"[PINDIAG] request quarantine NOT installed ({type(failure).__name__}: "
+                    f"{str(failure)[:200]}); host-side refusals still fail the engine")
+            except BaseException:
+                pass
+            return None
+
+    def _quarantinable(self, failure):
+        """Whether `failure` ends only this request: a host-side refusal with a live consumer."""
+        if self.quarantine is None:
+            return False
+        from serving_request_factory import RequestRefused
+
+        return isinstance(failure, RequestRefused)
+
+    def _terminal_at_seed(self, state):
+        """D4: why vLLM stops this request at its first token anyway (so building a verifier
+        for it would be wasted - and at max_tokens 1, fatal: the session is finished before
+        the engine that requires an unfinished one is built), or None. vLLM's own stop check
+        reads num_output_tokens >= max_tokens and num_tokens >= max_model_len."""
+        emitted = len(state.output_token_ids)
+        max_tokens = getattr(getattr(state, 'sampling_params', None), 'max_tokens', None)
+        if type(max_tokens) is int and emitted >= max_tokens:
+            return 'max_tokens %d reached at the first token' % max_tokens
+        prompt = getattr(state, 'prompt_token_ids', None)
+        if prompt is not None and type(self.max_model_len) is int and len(prompt) + emitted >= self.max_model_len:
+            return 'context %d reached at the first token' % self.max_model_len
+        return None
+
+    def _end_at_seed(self, result):
+        """The request is done with its first token: no bridge, no hook, the capture released
+        and the prefill slot freed for the next arrival (the EOS branch's release)."""
+        self.capture.close()
+        self.capture = None
+        self.request_id = None
+        self.refused = None
+        return result
+
+    def _quarantine_request(self, result, reason):
+        """D2: end the request in the prefill phase as FINISHED_ABORTED and keep the engine.
+        Its seed is in `result`; the scheduler aborts it right after this step's output
+        (serving_request_quarantine.abort_quarantined). Nothing of it reached the device beyond
+        its prefill: a quarantined refusal is raised before the drafter, the slot adoption and
+        the engine (serving_request_factory.RequestRefused)."""
+        request_id = self.request_id
+        self.quarantine.register(request_id, reason)
+        try:
+            from loguru import logger
+            logger.warning(
+                f"[PINDIAG] request quarantined: {request_id!r} ends as FINISHED_ABORTED, engine kept "
+                f"({len(self.decoding_ids)} decoding): {str(reason)[:300]}")
+        except BaseException:
+            pass
+        return self._end_at_seed(result)
 
     def _release_request(self):
         """Everything: the decode side and the prefill side. Only close() wants both
@@ -153,6 +243,16 @@ class FastServingLifecycle:
         try:
             if self.prefill_pending:
                 raise ValueError('Prefill must be sampled before another execution')
+            if self.quarantine is not None:
+                # The step that quarantined a request ran the scheduler's update_from_output
+                # after it, which aborts every registered request. One still registered and
+                # scheduled here means that consumer is not the scheduler this engine runs:
+                # fail loudly, before an unbridged request decodes on the stock path.
+                stranded = self.quarantine.unconsumed(scheduled)
+                if stranded:
+                    raise ValueError('Quarantined requests %r are still scheduled: the scheduler never aborted '
+                                     'them (request quarantine consumer on %s did not run)'
+                                     % (stranded, self.quarantine.holder().installed))
             finished = set(scheduled.finished_req_ids)
             for request_id in [value for value in self.decoding_ids if value in finished]:
                 # One finishing request must not tear down the hook the others are
@@ -270,9 +370,20 @@ class FastServingLifecycle:
                                  % (getattr(new, 'num_computed_tokens', None), chunk,
                                     None if new.prompt_token_ids is None else len(new.prompt_token_ids),
                                     scheduled.total_num_scheduled_tokens))
-            validate_request_sampling(new.sampling_params, prompt_tokens=len(new.prompt_token_ids), eos_ids=self.eos_ids)
+            refused = None
+            try:
+                validate_request_sampling(new.sampling_params, prompt_tokens=len(new.prompt_token_ids),
+                                          eos_ids=self.eos_ids)
+            except ValueError as refusal:
+                # D2 (C2-any): this request's contract, not the engine's. It still prefills -
+                # the runner has to account the step it was scheduled in - and is ended at its
+                # first token instead of being bridged (_sample).
+                if self.quarantine is None:
+                    raise
+                refused = 'sampling contract: %s' % refusal
             # A terminal first token only ends the request when EOS is honoured.
             self.ignore_eos = bool(getattr(new.sampling_params, 'ignore_eos', False))
+            self.refused = refused
             self.request_id = new.req_id
             self.capture = self.capture_factory(len(new.prompt_token_ids))
             # Per-request, not per-process: without this the mid-prompt sampler
@@ -447,7 +558,26 @@ class FastServingLifecycle:
                 self.capture = None
                 self.request_id = None
                 return result
-            bridge = self.bridge_factory(state, self.capture)
+            if self.any_request:
+                # D4: vLLM stops it at this token (max_tokens 1 - the platform's warmup - or the
+                # context): the EOS branch's release, no bridge. Checked before a refusal, since
+                # a request that is finished anyway needs no abort.
+                terminal = self._terminal_at_seed(state)
+                if terminal is not None:
+                    try:
+                        from loguru import logger
+                        logger.info(f"[PINDIAG] request {self.request_id!r} ends at its first token: {terminal}")
+                    except BaseException:
+                        pass
+                    return self._end_at_seed(result)
+                if self.refused is not None:
+                    return self._quarantine_request(result, self.refused)
+            try:
+                bridge = self.bridge_factory(state, self.capture)
+            except BaseException as failure:
+                if not self._quarantinable(failure):
+                    raise
+                return self._quarantine_request(result, 'bridge refused: %s' % failure)
             try:
                 if self.hook is None:
                     self.hook = FastWorkerHook(self.worker, bridge, cancelled=self.cancelled,
