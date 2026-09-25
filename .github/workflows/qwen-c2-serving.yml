@@ -10,7 +10,8 @@ name: Qwen C2 serving image
 #   gate   - the m3native gate harness inside the image, in the agent's container shape, serving
 #            the contract's argv (scripts/ci/c2_serving_gate.py): C2_GATE_PLAN bringup (4 x 131072
 #            real text against v235's texts), matrix (a prompt length per user, solo vs concurrent
-#            under the exactness policy), memory (G5's DRAM lines); C2_PROFILE picks the profile
+#            under the exactness policy), memory (G5's DRAM lines), lifecycle (drops, cancels,
+#            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile
 #   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py)
 #   push   - push it to zot and print the digest
 # (status, platform, unserve, priority and reset are described at their steps.) The job file is

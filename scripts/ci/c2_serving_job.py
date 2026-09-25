@@ -28,7 +28,7 @@ import re
 import sys
 
 ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'build', 'smoke', 'gate', 'replay', 'push')
-GATE_PLANS = ('bringup', 'matrix', 'memory')
+GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S1's G4 ladder (c2-serve-for-real-plan 2.2, gate table row G4 part 1): both sides of every page and
 # chunk boundary the fast path has (2048 = the draft window and the prefill chunk), a short prompt
 # far below any of them, and long ones up to the ~123k prompt cap.

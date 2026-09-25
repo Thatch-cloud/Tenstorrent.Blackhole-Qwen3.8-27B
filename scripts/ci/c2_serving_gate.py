@@ -28,6 +28,12 @@ PLANS (C2_GATE_PLAN, run in order):
            exactness_policy). Gate table row G4 part 1.
   memory   4 users x the profile's largest admitted prompt x its output ceiling, concurrent: every
            '[PINDIAG] dram after engine' line recorded, and the floor printed. Gate table row G5.
+  lifecycle  six users on four seats, two event arms (LIFECYCLE_EVENTS: drops at about 4, 3 and 2 live
+           users and during the engine build, a triple drop, a cancel during prefill, max_tokens=1,
+           ignore_eos, the 5th and 6th requests into freed slots) and a solo reference: what each event
+           leaves must agree with the solo text (real_text_compare.lifecycle_pass, under the policy),
+           the engine must answer afterwards, the memory ledger's residual is reported. Gate table row
+           Lifecycle.
 Every arm prints the contract's launched-argv line (read-the-launched-argv) and its DRAM lines.
 Writes <results>/<arm>/ (the gate's stdout, report, server.log, prompts, docker argv) and
 <results>/c2-gate-summary.json; exits 0 only when every plan passed.
@@ -62,8 +68,22 @@ BRINGUP_USERS, BRINGUP_PROMPT, BRINGUP_MAX_TOKENS = 4, 131072, 256
 MEMORY_USERS = 4
 STAGGER = 0.25            # v235's M3NATIVE_STAGGER: admission in user order
 READINESS_SECONDS = 1800
-ARM_SECONDS = dict(bringup=3600, matrix=7200, memory=5400)
-STREAM_SECONDS = dict(bringup=900, matrix=3600, memory=3600)
+ARM_SECONDS = dict(bringup=3600, matrix=7200, memory=5400, lifecycle=3600)
+STREAM_SECONDS = dict(bringup=900, matrix=3600, memory=3600, lifecycle=1800)
+# Lifecycle (gate table row Lifecycle): six users on four seats, so users 4 and 5 are the 5th and 6th
+# requests and take slots others free. Two event arms and one solo reference build the same prompts.
+#   drops: user 0 leaves after its first chunk (during the engine build), users 1-3 after 40/80/120
+#          chunks (drops at about 4, 3 and 2 live users), user 5 asks ignore_eos;
+#   edges: users 0-2 leave together after 60 chunks (a triple drop), user 3 is cancelled if no byte
+#          came within 2 s (during its prefill or queue wait), user 4 asks max_tokens=1.
+# Each event arm then asks the engine once more (--alive-check). EOS is on throughout, so a user that
+# reaches EOS mid-round is the ordinary case.
+LIFECYCLE_LENGTHS = (2048, 4096, 8192, 2049, 16384, 255)
+LIFECYCLE_MAX_TOKENS = 1024
+LIFECYCLE_EVENTS = (
+    ('lifecycle-drops', ['--drops', '0:1,1:40,2:80,3:120', '--user-ignore-eos', '5']),
+    ('lifecycle-edges', ['--drops', '0:60,1:60,2:60,3:@2', '--user-max-tokens', '4:1']),
+)
 
 
 # The agent's own container (references/c2-serving/agent-container-36104200953.json, the replay's copy of
@@ -149,6 +169,14 @@ def plan_arms(plan, profile, profiles, lengths=c2_serving_job.LADDER, max_tokens
             '--users', str(MEMORY_USERS), '--prompt-lengths', ','.join([str(prompt)] * MEMORY_USERS),
             '--max-tokens', str(ceiling), '--stagger', str(STAGGER)]
         return [('memory-concurrent', args, ARM_SECONDS[plan])]
+    if plan == 'lifecycle':
+        base = common_args(profile, context, STREAM_SECONDS[plan]) + [
+            '--prompt-lengths', ','.join(str(length) for length in LIFECYCLE_LENGTHS),
+            '--max-tokens', str(LIFECYCLE_MAX_TOKENS)]
+        users = str(len(LIFECYCLE_LENGTHS))
+        arms = [(arm, base + ['--users', users, '--stagger', str(STAGGER), '--alive-check'] + events, ARM_SECONDS[plan])
+                for arm, events in LIFECYCLE_EVENTS]
+        return arms + [('lifecycle-solo', base + ['--users', '1', '--sequential-users', users], ARM_SECONDS[plan])]
     raise ValueError('unknown plan %r' % plan)
 
 
@@ -215,6 +243,41 @@ def matrix_verdict(concurrent, solo, rerun=None):
                 lines=real_text_compare.render_policy(result).split('\n'))
 
 
+def lifecycle_verdict(event, solo, rerun=None):
+    """One lifecycle event arm against the solo reference, under the exactness policy (a dropped or
+    budget-cut user must be a prefix of its solo text, an ignore_eos user must extend it, every other
+    user identical), plus what the row asks beyond the texts: the engine answered afterwards, every
+    stream that was not dropped completed, the contract served the expected profile. The memory
+    ledger's residual status is reported, not judged."""
+    if event is None or solo is None:
+        return dict(verdict='FAIL', reason='an arm left no gate report', lines=[])
+    policy = real_text_compare.exactness_policy(event, solo, rerun, real_text_compare.lifecycle_pass)
+    problems = []
+    for label, report in (('event', event), ('solo', solo)) + ((('event re-run', rerun[0]),
+                                                               ('solo re-run', rerun[1])) if rerun else ()):
+        problems += ['%s: %s' % (label, p) for p in ((report.get('platform') or {}).get('problems') or [])]
+        problems += ['%s: %s' % (label, p) for p in stream_problems(report)]
+        if report.get('fatal'):
+            problems.append('%s: fatal: %s' % (label, report['fatal']))
+    for label, report in (('event', event),) + ((('event re-run', rerun[0]),) if rerun else ()):
+        if not report.get('alive'):
+            problems.append('%s: the engine did not answer after the streams (%s)' % (
+                label, ((report.get('alive_after') or {}).get('error') or 'no alive check')))
+    ledger = ((event.get('flag_markers') or {}).get('ledger_residual'))
+    verdict = 'FAIL' if problems else policy['verdict']
+    lines = real_text_compare.render_policy(policy).split('\n') + ['problem: %s' % p for p in problems] + [
+        'memory ledger residual: %s' % ledger]
+    return dict(verdict=verdict, policy=policy, problems=problems, ledger_residual=ledger,
+                events=event.get('user_events'), lines=lines)
+
+
+def worst(verdicts):
+    for verdict in ('FAIL', 'RERUN', 'NOT_COMPARABLE', 'UNSTABLE'):
+        if verdict in verdicts:
+            return verdict
+    return 'PASS' if verdicts else 'FAIL'
+
+
 def extract(stdout_text):
     try:
         return real_text_compare.extract_report(stdout_text)
@@ -272,15 +335,52 @@ class Runner(object):
         return report
 
 
+def bringup_warning(profiles, profile):
+    """Why v235's shape may be refused at this profile's edge, or None. Today's contract caps a prompt
+    at context less the output ceiling (or max_prompt_tokens): a c2 profile with a 16,384 ceiling admits
+    at most 114,944 (123,136 with the plan's cap), so 131,072-token prompts come back as 400s unless the
+    contract track's per-request budget lands first."""
+    context, ceiling, room = profile_limits(profiles, profile)
+    if room >= BRINGUP_PROMPT and context >= BRINGUP_PROMPT + BRINGUP_MAX_TOKENS:
+        return None
+    return ('profile %s admits prompts up to %d tokens (context %d, output ceiling %d) under today\'s contract '
+            'formula; the bring-up sends %d-token prompts, which its edge may refuse' % (
+                profile, room, context, ceiling, BRINGUP_PROMPT))
+
+
 def run_plan(plan, runner, profiles, reference=None, lengths=c2_serving_job.LADDER,
              max_tokens=c2_serving_job.DEFAULT_MAX_TOKENS, memory_prompt=None):
     arms = plan_arms(plan, runner.profile, profiles, lengths, max_tokens, memory_prompt)
     if plan == 'bringup':
+        warning = bringup_warning(profiles, runner.profile)
+        if warning:
+            runner.log('[C2-GATE] bringup WARNING: %s' % warning)
         (arm, args, timeout), = arms
         result = bringup_verdict(runner.run(arm, args, timeout), reference)
+        if warning:
+            result['warning'] = warning
     elif plan == 'memory':
         (arm, args, timeout), = arms
         result = memory_verdict(runner.run(arm, args, timeout))
+    elif plan == 'lifecycle':
+        reports = [(arm, args, timeout, runner.run(arm, args, timeout)) for arm, args, timeout in arms]
+        (s_arm, s_args, s_timeout, solo) = reports[-1]
+        arms_results = dict((arm, lifecycle_verdict(report, solo)) for arm, _, _, report in reports[:-1])
+        again = [(arm, args, timeout) for arm, args, timeout, _ in reports[:-1] if arms_results[arm]['verdict'] == 'RERUN']
+        if again:
+            runner.log('[C2-GATE] lifecycle: a first divergence - re-running %s and the solo arm once (the exactness '
+                       'policy)' % ', '.join(arm for arm, _, _ in again))
+            solo_again = runner.run(s_arm + '-rerun', s_args, s_timeout)
+            first = dict((arm, report) for arm, _, _, report in reports)
+            for arm, args, timeout in again:
+                event_again = runner.run(arm + '-rerun', args, timeout)
+                rerun = (event_again, solo_again) if event_again is not None and solo_again is not None else None
+                arms_results[arm] = lifecycle_verdict(first[arm], solo, rerun)
+                if rerun is None:
+                    arms_results[arm].update(verdict='FAIL', reason='a re-run arm left no gate report')
+        result = dict(verdict=worst([r['verdict'] for r in arms_results.values()]), arms=arms_results,
+                      lines=['%s: %s' % (arm, line) for arm, r in arms_results.items() for line in r['lines']] +
+                      ['%s %s' % (arm, r['verdict']) for arm, r in arms_results.items()])
     else:
         (c_arm, c_args, c_timeout), (s_arm, s_args, s_timeout) = arms
         concurrent, solo = runner.run(c_arm, c_args, c_timeout), runner.run(s_arm, s_args, s_timeout)

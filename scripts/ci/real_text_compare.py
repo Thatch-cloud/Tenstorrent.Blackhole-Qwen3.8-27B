@@ -277,16 +277,67 @@ def texts(report):
     return [(stream or {}).get('text') for stream in report.get('streams') or []]
 
 
-def exactness_policy(concurrent, single, rerun=None):
+def lifecycle_user(concurrent, single, budgets=(None, None), ignore_eos=False):
+    """One user of a lifecycle arm (the gate's --drops / --user-max-tokens / --user-ignore-eos)
+    against its solo run on the same prompt at the arm's full budget, EOS on. What each event leaves
+    must agree with the solo text as far as it goes: a dropped stream, and one cut by its own smaller
+    budget, must be a PREFIX of it; an ignore_eos stream must EXTEND it when the solo run stopped at
+    EOS. A user with no event is compared in full (compare_user). -> (policy verdict, detail)."""
+    concurrent, single = concurrent or {}, single or {}
+    if not single or single.get('error') or concurrent.get('error'):
+        return 'ERROR', 'error'
+    actual, reference = concurrent.get('text') or '', single.get('text') or ''
+    if concurrent.get('dropped'):
+        return ('IDENTICAL' if reference.startswith(actual) else 'DIVERGED'), 'dropped %s' % concurrent['dropped']
+    if ignore_eos and single.get('finish_reason') == 'stop':
+        return ('IDENTICAL' if actual.startswith(reference) else 'DIVERGED'), 'ignore_eos past the solo EOS'
+    if None not in budgets and budgets[0] < budgets[1]:
+        consistent = reference.startswith(actual) and concurrent.get('finish_reason') in ('stop', 'length')
+        return ('IDENTICAL' if consistent else 'DIVERGED'), 'its own budget %d' % budgets[0]
+    detail = compare_user(concurrent, single, budgets)['verdict']
+    return policy_user(detail), detail
+
+
+def lifecycle_pass(concurrent, single):
+    """policy_pass for a lifecycle arm: each user through lifecycle_user, the same shape out."""
+    streams_c, streams_s = concurrent.get('streams') or [], single.get('streams') or []
+    shas_c, shas_s = prompt_shas(concurrent), prompt_shas(single)
+    budgets_c, budgets_s = stream_budgets(concurrent), stream_budgets(single)
+    comparisons = concurrent.get('comparisons') or []
+    arithmetic = arithmetic_diff(concurrent, single)
+    users = []
+    for user in range(max(len(streams_c), len(streams_s))):
+        sha_c = shas_c[user] if user < len(shas_c) else None
+        sha_s = shas_s[user] if user < len(shas_s) else None
+        mine = streams_c[user] if user < len(streams_c) else None
+        theirs = streams_s[user] if user < len(streams_s) else None
+        entry = dict(user=user, prompt_sha256=sha_c, first_divergence=first_divergence(
+            (mine or {}).get('text') or '', (theirs or {}).get('text') or ''))
+        if not sha_c or sha_c != sha_s:
+            entry.update(verdict='NOT_COMPARABLE', detail='prompt-mismatch', reason='the arms served different prompts')
+        else:
+            ignore = bool((comparisons[user] if user < len(comparisons) else {}).get('ignore_eos'))
+            verdict, detail = lifecycle_user(mine, theirs, (budgets_c[user] if user < len(budgets_c) else None,
+                                                            budgets_s[user] if user < len(budgets_s) else None), ignore)
+            entry.update(verdict=verdict, detail=detail)
+            if verdict == 'DIVERGED' and arithmetic:
+                entry.update(verdict='NOT_COMPARABLE', reason='arithmetic flags differ: %s' % ', '.join(sorted(arithmetic)))
+        users.append(entry)
+    return dict(users=users, arithmetic_diff=arithmetic, configuration_recorded=arithmetic is not None)
+
+
+def exactness_policy(concurrent, single, rerun=None, pass_function=None):
     """The policy's verdict for a concurrent arm against its solo reference, given the first pass
     and, after a first divergence, the re-run of both arms (rerun = (concurrent2, single2)).
 
     Per user: IDENTICAL; DIVERGED (in both passes: reproduced); UNSTABLE (in one pass only);
     NOT_COMPARABLE; ERROR; RERUN (diverged in the first pass, no re-run yet). Overall: FAIL on any
     DIVERGED or ERROR, else RERUN, else NOT_COMPARABLE, else UNSTABLE, else PASS. 'reproducible'
-    says, per arm, whether the re-run repeated the first run's texts byte for byte."""
-    first = policy_pass(concurrent, single)
-    second = policy_pass(*rerun) if rerun is not None else None
+    says, per arm, whether the re-run repeated the first run's texts byte for byte. `pass_function`
+    (default policy_pass; lifecycle_pass for the gate's lifecycle arms) makes one pass's verdicts."""
+    pass_function = pass_function or policy_pass
+    first = pass_function(concurrent, single)
+    second = pass_function(*rerun) if rerun is not None else None
     users = []
     for index, entry in enumerate(first['users']):
         again = second['users'][index] if second and index < len(second['users']) else None

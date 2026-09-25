@@ -197,6 +197,13 @@ class PlanTests(unittest.TestCase):
         (_, args, _), = driver.plan_arms('memory', 'exact', CHECKOUT_PROFILES)
         self.assertEqual((parse_harness(args).prompt_lengths, parse_harness(args).max_tokens), ([131072] * 4, 256))
 
+    def test_a_profile_whose_edge_refuses_v235s_prompts_is_warned_about(self):
+        self.assertIsNone(driver.bringup_warning(CHECKOUT_PROFILES, 'exact'))
+        warning = driver.bringup_warning(profiles_with_c2(), 'c2')
+        self.assertIn('admits prompts up to 114944 tokens', warning)
+        self.assertIn('131072-token prompts', warning)
+        self.assertIsNotNone(driver.bringup_warning(CHECKOUT_PROFILES, 'general'))
+
     def test_an_unknown_plan_is_refused(self):
         with self.assertRaises(ValueError):
             driver.plan_arms('soak', 'exact', CHECKOUT_PROFILES)
@@ -382,6 +389,87 @@ class DriverTests(unittest.TestCase):
                 self.skipTest('no symlinks here')
             self.assertEqual(driver.serving_pair(by_id), [os.path.realpath(os.path.join(directory, '3')),
                                                           os.path.realpath(os.path.join(directory, '1'))])
+
+
+def lifecycle_report(events, alive=True, texts=None, profile='c2'):
+    """A lifecycle arm's report: six users, the solo texts cut or extended the way `events` says."""
+    texts = texts or ['lifecycle answer %d ' % i * 40 for i in range(6)]
+    shas = ['%064x' % (i + 7) for i in range(6)]
+    streams, comparisons = [], []
+    for index, text in enumerate(texts):
+        kind = events.get(index)
+        if kind == 'drop':
+            stream = dict(text=text[:30], dropped='after 5 chunks')
+        elif kind == 'cancel':
+            stream = dict(text='', dropped='no byte within 2 s')
+        elif kind == 'one':
+            stream = dict(text=text[:8], finish_reason='length', completion_tokens=1)
+        else:
+            stream = dict(text=text, finish_reason='stop', completion_tokens=300, prompt_tokens=100)
+        streams.append(stream)
+        comparisons.append(dict(user=index, prompt_sha256=shas[index], max_tokens=1 if kind == 'one' else 1024,
+                                ignore_eos=kind == 'ignore'))
+    return dict(streams=streams, comparisons=comparisons, qwen_configuration=dict(QWEN_C2_PROFILE=profile),
+                real_text=dict(users=[dict(user=i, prompt_sha256=s) for i, s in enumerate(shas)]),
+                platform=dict(served_profile=profile, served_argv=['--x'], problems=[]),
+                real_text_stream_problems=[], alive=alive, alive_after=dict(text='OK') if alive else dict(error='refused'),
+                flag_markers=dict(missing=[], ledger_residual='ok'), user_events=dict(drops={}))
+
+
+class LifecycleTests(unittest.TestCase):
+    def test_the_arms_parse_and_share_one_prompt_set(self):
+        arms = driver.plan_arms('lifecycle', 'c2', profiles_with_c2())
+        self.assertEqual([arm for arm, _, _ in arms], ['lifecycle-drops', 'lifecycle-edges', 'lifecycle-solo'])
+        options = [parse_harness(args) for _, args, _ in arms]
+        self.assertEqual({tuple(o.prompt_lengths) for o in options}, {driver.LIFECYCLE_LENGTHS})
+        self.assertEqual({o.max_tokens for o in options}, {driver.LIFECYCLE_MAX_TOKENS})
+        drops, edges, solo = options
+        self.assertEqual(drops.events['drops'], {0: ('chunks', 1), 1: ('chunks', 40), 2: ('chunks', 80),
+                                                 3: ('chunks', 120)})
+        self.assertEqual(drops.events['ignore_eos'], [5])
+        self.assertEqual(edges.events, dict(drops={0: ('chunks', 60), 1: ('chunks', 60), 2: ('chunks', 60),
+                                                   3: ('seconds', 2.0)}, max_tokens={4: 1}, ignore_eos=[]))
+        self.assertTrue(drops.alive_check and edges.alive_check)
+        self.assertEqual((solo.users, solo.sequential_users, any(solo.events.values()), solo.alive_check),
+                         (1, 6, False, False))
+        self.assertGreater(len(driver.LIFECYCLE_LENGTHS), 4, 'more users than seats: the 5th request takes a freed slot')
+
+    def test_consistent_events_and_a_live_engine_pass(self):
+        solo = lifecycle_report({})
+        drops = lifecycle_report({0: 'drop', 1: 'drop', 2: 'drop', 3: 'drop', 5: 'ignore'})
+        edges = lifecycle_report({0: 'drop', 1: 'drop', 2: 'drop', 3: 'cancel', 4: 'one'})
+        self.assertEqual(driver.lifecycle_verdict(drops, solo)['verdict'], 'PASS')
+        result = driver.lifecycle_verdict(edges, solo)
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertIn('memory ledger residual: ok', result['lines'])
+
+    def test_a_dead_engine_or_a_failed_survivor_fails(self):
+        solo = lifecycle_report({})
+        dead = driver.lifecycle_verdict(lifecycle_report({0: 'drop'}, alive=False), solo)
+        self.assertEqual(dead['verdict'], 'FAIL')
+        self.assertIn('did not answer after the streams (refused)', dead['problems'][0])
+        broken = lifecycle_report({0: 'drop'})
+        broken['real_text_stream_problems'] = ['user 4: stream error HTTP 500']
+        self.assertEqual(driver.lifecycle_verdict(broken, solo)['verdict'], 'FAIL')
+        self.assertEqual(driver.lifecycle_verdict(None, solo)['verdict'], 'FAIL')
+
+    def test_the_plan_reruns_a_divergent_arm_with_the_solo_once(self):
+        texts = ['lifecycle answer %d ' % i * 40 for i in range(6)]
+        bad = list(texts)
+        bad[5] = 'something else entirely ' * 30
+        reports = {'lifecycle-drops': lambda n: lifecycle_report({0: 'drop'}, texts=bad),
+                   'lifecycle-edges': lambda n: lifecycle_report({4: 'one'}),
+                   'lifecycle-solo': lambda n: lifecycle_report({}),
+                   'lifecycle-drops-rerun': lambda n: lifecycle_report({0: 'drop'}),
+                   'lifecycle-solo-rerun': lambda n: lifecycle_report({})}
+        code, summary, calls, lines, _ = DriverTests().run_driver(['--profile', 'c2', '--plan', 'lifecycle'], reports)
+        self.assertEqual([c['arm'] for c in calls], ['lifecycle-drops', 'lifecycle-edges', 'lifecycle-solo',
+                                                     'lifecycle-solo-rerun', 'lifecycle-drops-rerun'])
+        result = summary['results']['lifecycle']
+        self.assertEqual((result['arms']['lifecycle-drops']['verdict'], result['arms']['lifecycle-edges']['verdict']),
+                         ('UNSTABLE', 'PASS'))
+        self.assertEqual((result['verdict'], code), ('UNSTABLE', 1))
+        self.assertTrue(any('re-running lifecycle-drops and the solo arm once' in line for line in lines))
 
 
 class WorkflowTests(unittest.TestCase):

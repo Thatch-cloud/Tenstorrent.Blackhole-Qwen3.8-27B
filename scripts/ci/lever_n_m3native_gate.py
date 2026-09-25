@@ -2013,7 +2013,73 @@ def build_parser():
                         help='real text only: comma-separated prompt lengths, one per stream (--users, or '
                              '--sequential-users), replacing --prompt-tokens for every user (a length per user, '
                              'real_text_prompts targets). Needs an image that serves any prompt length')
+    parser.add_argument('--drops', default=None,
+                        help='lifecycle, detail mode only: U:N closes user U\'s stream after N text chunks '
+                             '(N=1: during the engine build after the prefill\'s token), U:@S if no byte arrived '
+                             'within S seconds (a cancel during prefill); comma-separated')
+    parser.add_argument('--user-max-tokens', default=None,
+                        help='lifecycle, detail mode only: U:M gives user U its own max_tokens; comma-separated')
+    parser.add_argument('--user-ignore-eos', default=None,
+                        help='lifecycle, detail mode only: comma-separated users sent with ignore_eos=True')
+    parser.add_argument('--alive-check', action='store_true',
+                        help='after every stream, one more request (user 0\'s prompt, 8 tokens): the engine '
+                             'survived what the streams did (report[\'alive_after\'])')
     return parser
+
+
+def user_events(options, streams):
+    """--drops, --user-max-tokens and --user-ignore-eos as {user: value}, or ValueError."""
+    def pairs(text, name):
+        out = {}
+        for part in [p.strip() for p in (text or '').split(',') if p.strip()]:
+            user, _, value = part.partition(':')
+            try:
+                user = int(user)
+            except ValueError:
+                raise ValueError('%s: %r is not USER:VALUE' % (name, part))
+            if not 0 <= user < streams or user in out or not value:
+                raise ValueError('%s: %r names no stream of 0..%d once' % (name, part, streams - 1))
+            out[user] = value
+        return out
+
+    drops = {}
+    for user, value in pairs(options.drops, '--drops').items():
+        try:
+            drops[user] = ('seconds', float(value[1:])) if value.startswith('@') else ('chunks', int(value))
+        except ValueError:
+            raise ValueError('--drops: %r is not N or @S' % value)
+        if drops[user][1] <= 0:
+            raise ValueError('--drops: %r must be positive' % value)
+    budgets = {}
+    for user, value in pairs(options.user_max_tokens, '--user-max-tokens').items():
+        try:
+            budgets[user] = int(value)
+        except ValueError:
+            raise ValueError('--user-max-tokens: %r is not an integer' % value)
+        if budgets[user] < 1:
+            raise ValueError('--user-max-tokens: %r must be positive' % value)
+    ignore_eos = set()
+    for part in [p.strip() for p in (options.user_ignore_eos or '').split(',') if p.strip()]:
+        try:
+            user = int(part)
+        except ValueError:
+            raise ValueError('--user-ignore-eos: %r is not a user' % part)
+        if not 0 <= user < streams:
+            raise ValueError('--user-ignore-eos: %r names no stream of 0..%d' % (part, streams - 1))
+        ignore_eos.add(user)
+    return dict(drops=drops, max_tokens=budgets, ignore_eos=sorted(ignore_eos))
+
+
+def user_stream(options, index, kwargs):
+    """(max_tokens, stream_once keywords) for one user: the arm's, with that user's events applied."""
+    events = getattr(options, 'events', None) or {}
+    kwargs = dict(kwargs)
+    drop = (events.get('drops') or {}).get(index)
+    if drop is not None:
+        kwargs['drop_after' if drop[0] == 'chunks' else 'drop_after_s'] = drop[1]
+    if index in (events.get('ignore_eos') or ()):
+        kwargs['ignore_eos'] = True
+    return (events.get('max_tokens') or {}).get(index, options.max_tokens), kwargs
 
 
 def parse_options(argv=None):
@@ -2045,6 +2111,12 @@ def parse_options(argv=None):
         parser.error('--expect-profile needs --server-argv platform: only the C2 contract reports a profile')
     if options.readiness_seconds < 1:
         parser.error('--readiness-seconds must be positive')
+    try:
+        options.events = user_events(options, options.sequential_users or options.users)
+    except ValueError as error:
+        parser.error(str(error))
+    if any(options.events.values()) and not detail_mode(options):
+        parser.error('--drops, --user-max-tokens and --user-ignore-eos need detail streams (real text or --eos stop)')
     if options.prompt_lengths is not None:
         if not real_text:
             parser.error('--prompt-lengths needs --prompt-source real-text')
@@ -2137,6 +2209,8 @@ def real_text_stream_problems(results, prompt_lengths=None):
     problems = []
     for index, entry in enumerate(results):
         entry = entry or {}
+        if entry.get('dropped') and not entry.get('error'):
+            continue   # a lifecycle drop (--drops): the client went away on purpose
         if entry.get('error'):
             problems.append('user %d: stream error %s' % (index, str(entry['error'])[:200]))
         elif not entry.get('text'):
@@ -2281,16 +2355,24 @@ def main():
 
         results = [None] * streams
         kwargs = stream_kwargs(options)
+        events = options.events if any(options.events.values()) else None
+        if events:
+            report['user_events'] = dict(drops={str(u): '%s %s' % (kind, value) for u, (kind, value)
+                                                in sorted(events['drops'].items())},
+                                         max_tokens={str(u): m for u, m in sorted(events['max_tokens'].items())},
+                                         ignore_eos=events['ignore_eos'])
         if options.sequential_users:
             # One request at a time: each is the only stream on the server, which is
             # what a single-stream reference means.
             for index in range(streams):
-                stream_once(options.port, prompt(index), options.max_tokens, results, index, options.stream_timeout,
-                            **kwargs)
+                budget, user_kwargs = user_stream(options, index, kwargs)
+                stream_once(options.port, prompt(index), budget, results, index, options.stream_timeout,
+                            **user_kwargs)
         threads = [] if options.sequential_users else [threading.Thread(
             target=stream_once,
-            args=(options.port, prompt(index), options.max_tokens, results, index, options.stream_timeout),
-            kwargs=kwargs)
+            args=(options.port, prompt(index), user_stream(options, index, kwargs)[0], results, index,
+                  options.stream_timeout),
+            kwargs=user_stream(options, index, kwargs)[1])
             for index in range(options.users)]
         for position, index in enumerate(request_order(options) if threads else []):
             if position and options.stagger:
@@ -2299,6 +2381,14 @@ def main():
         for thread in threads:
             thread.join()
         report['streams'] = results
+        if options.alive_check:
+            # The engine outlived what the streams did (drops, a cancel, a one-token request): one
+            # more request, user 0's prompt, 8 tokens, after every stream has ended.
+            alive = [None]
+            stream_once(options.port, prompt(0), 8, alive, 0, options.stream_timeout, **kwargs)
+            report['alive_after'] = alive[0]
+            report['alive'] = bool(alive[0] and not alive[0].get('error') and alive[0].get('text'))
+            print('[ALIVE] after the streams: %s' % report['alive'], flush=True)
         # Derived, not measured: the gate already records ttft_s and gaps_ms per
         # stream, and run 35658854824 showed those carry a precise serial-prefill
         # story no gate asserted. Reporting is unconditional; the thresholds are
@@ -2328,11 +2418,14 @@ def main():
                                   prompt_tokens=user_prompt['prompt_tokens'],
                                   served_prompt_tokens=(entry or {}).get('prompt_tokens'),
                                   completion_tokens=(entry or {}).get('completion_tokens'),
-                                  max_tokens=options.max_tokens,
+                                  max_tokens=user_stream(options, index, {})[0],
                                   finish_reason=(entry or {}).get('finish_reason'),
                                   actual_len=len((entry or {}).get('text') or ''))
                 if entry and entry.get('error'):
                     comparison['error'] = entry['error']
+                if events:
+                    comparison.update(dropped=(entry or {}).get('dropped'),
+                                      ignore_eos=index in events['ignore_eos'])
             if options.users == 1:
                 # Only a stream that ran alone is a single-stream reference candidate.
                 if user_prompt is not None:
@@ -2397,6 +2490,8 @@ def main():
             report['gate_passed'] = bool(report['gate_passed'] and not report['real_text_stream_problems'])
         if platform:
             report['gate_passed'] = bool(report['gate_passed'] and not report['platform']['problems'])
+        if options.alive_check:
+            report['gate_passed'] = bool(report['gate_passed'] and report['alive'])
     except BaseException as error:
         report['fatal'] = '%s: %s' % (type(error).__name__, str(error)[:600])
     finally:

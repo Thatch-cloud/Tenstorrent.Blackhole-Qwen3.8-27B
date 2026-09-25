@@ -271,6 +271,55 @@ class PolicyTests(unittest.TestCase):
                     sys.stderr = stderr
 
 
+class LifecycleTests(unittest.TestCase):
+    """lifecycle_pass: what each event leaves must agree with the solo text as far as it goes."""
+
+    def solo(self, finish=('stop', 'length', 'length', 'length')):
+        return report(users=1, sequential=4, max_tokens=1024, finish=finish)
+
+    def event(self, streams, budgets=(1024,) * 4, ignore_eos=(False,) * 4):
+        base = report(max_tokens=1024)
+        base['streams'] = streams
+        base['comparisons'] = [dict(user=i, prompt_sha256=SHAS[i], max_tokens=budgets[i], ignore_eos=ignore_eos[i])
+                               for i in range(4)]
+        return base
+
+    def full(self, index, finish='length'):
+        return dict(text=TEXTS[index], finish_reason=finish, completion_tokens=256)
+
+    def test_drops_budgets_and_ignore_eos_are_consistent_prefixes(self):
+        streams = [dict(text=TEXTS[0][:17], dropped='after 3 chunks'),                    # dropped mid-answer
+                   dict(text='', dropped='no byte within 2 s'),                            # cancelled in prefill
+                   dict(text=TEXTS[2][:3], finish_reason='length', completion_tokens=1),   # max_tokens=1
+                   dict(text=TEXTS[3] + ' and on past EOS', finish_reason='length', completion_tokens=300)]
+        result = rtc.lifecycle_pass(self.event(streams, budgets=(1024, 1024, 1, 1024),
+                                               ignore_eos=(False, False, False, True)),
+                                    self.solo(finish=('stop', 'length', 'length', 'stop')))
+        self.assertEqual([u['verdict'] for u in result['users']], ['IDENTICAL'] * 4)
+        self.assertEqual([u['detail'] for u in result['users']],
+                         ['dropped after 3 chunks', 'dropped no byte within 2 s', 'its own budget 1', 'ignore_eos past the solo EOS'])
+
+    def test_a_drop_or_a_cut_that_disagrees_diverges(self):
+        streams = [dict(text='Xdef', dropped='after 1 chunks'), self.full(1), self.full(2),
+                   dict(text=TEXTS[3][:5] + '!', finish_reason='length', completion_tokens=1)]
+        result = rtc.lifecycle_pass(self.event(streams, budgets=(1024, 1024, 1024, 1)), self.solo())
+        self.assertEqual([u['verdict'] for u in result['users']], ['DIVERGED', 'IDENTICAL', 'IDENTICAL', 'DIVERGED'])
+        policy = rtc.exactness_policy(self.event(streams, budgets=(1024, 1024, 1024, 1)), self.solo(),
+                                      pass_function=rtc.lifecycle_pass)
+        self.assertEqual(policy['verdict'], 'RERUN')
+
+    def test_a_survivor_is_compared_in_full_and_an_error_is_an_error(self):
+        streams = [self.full(0, 'stop'), dict(text=TEXTS[1][:-1] + '?', finish_reason='length', completion_tokens=256),
+                   dict(error='HTTP 500'), self.full(3)]
+        result = rtc.lifecycle_pass(self.event(streams), self.solo())
+        self.assertEqual([u['verdict'] for u in result['users']], ['IDENTICAL', 'DIVERGED', 'ERROR', 'IDENTICAL'])
+        # ignore_eos when the solo run never reached EOS: the two must be identical.
+        streams = [self.full(0, 'stop'), self.full(1), self.full(2), dict(text=TEXTS[3] + 'x', finish_reason='length',
+                                                                          completion_tokens=256)]
+        result = rtc.lifecycle_pass(self.event(streams, ignore_eos=(False, False, False, True)), self.solo())
+        self.assertEqual(result['users'][3]['verdict'], 'DIVERGED')
+
+
 V235 = Path(__file__).resolve().parent / 'references' / 'c2-serving' / 'v235-real-text-4x131072.json'
 
 

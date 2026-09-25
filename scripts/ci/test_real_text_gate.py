@@ -144,6 +144,36 @@ class StreamOnceTests(unittest.TestCase):
         legacy, _ = self.run_stream()
         self.assertEqual(json.loads(payload), dict(json.loads(legacy), model='Qwen/Qwen3.8-27B'))
 
+    def test_a_drop_after_n_chunks_closes_the_stream_and_is_not_an_error(self):
+        _, entry = self.run_stream(ignore_eos=False, detail=True, drop_after=1)
+        self.assertEqual((entry['dropped'], entry['text'], entry['tokens']), ('after 1 chunks', 'Hel', 1))
+        self.assertNotIn('error', entry)
+        _, entry = self.run_stream(ignore_eos=False, detail=True, drop_after=5)
+        self.assertNotIn('dropped', entry, 'fewer chunks than the drop: the stream ran to its end')
+
+    def test_a_drop_before_the_first_byte_is_a_cancel(self):
+        timeouts = []
+
+        def urlopen(request, timeout):
+            timeouts.append(timeout)
+            raise longctx_cycle_bench.URLError(TimeoutError('timed out'))
+
+        results = [None]
+        with mock.patch.object(longctx_cycle_bench, 'urlopen', side_effect=urlopen):
+            longctx_cycle_bench.stream_once(8000, [1], 8, results, 0, 600, ignore_eos=False, detail=True,
+                                            drop_after_s=2.5)
+        self.assertEqual(timeouts, [2.5])
+        self.assertEqual((results[0]['dropped'], results[0]['text']), ('no byte within 2.5 s', ''))
+        self.assertNotIn('error', results[0])
+        # A first byte that beat the cancel: the stream ran on, and says it was not dropped.
+        _, entry = self.run_stream(ignore_eos=False, detail=True, drop_after_s=2.5)
+        self.assertIsNone(entry['dropped'])
+        self.assertEqual(entry['text'], 'Hello wor')
+        # Any other failure is still an error.
+        with mock.patch.object(longctx_cycle_bench, 'urlopen', side_effect=ConnectionResetError('reset')):
+            longctx_cycle_bench.stream_once(8000, [1], 8, results, 0, 600, drop_after_s=2.5)
+        self.assertIn('ConnectionResetError', results[0]['error'])
+
     def test_a_failed_detail_stream_keeps_what_arrived(self):
         def urlopen(request, timeout):
             raise TimeoutError('timed out')
@@ -476,6 +506,87 @@ class PlatformArgvTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('RuntimeError', report['fatal'])
         self.assertEqual(report['platform']['served_profile'], 'exact')
+
+
+class LifecycleOptionTests(unittest.TestCase):
+    """--drops, --user-max-tokens, --user-ignore-eos and --alive-check (the C2 serving gate's lifecycle arms)."""
+
+    REAL = ('--prompt-source', 'real-text', '--allow-missing-references', '--server-argv', 'platform',
+            '--context', '131328', '--users', '6', '--prompt-lengths', '2048,4096,8192,2049,16384,255')
+
+    def test_events_parse_per_user(self):
+        options = parse(*self.REAL + ('--drops', '0:1,1:40,3:@2.5', '--user-max-tokens', '4:1',
+                                      '--user-ignore-eos', '5'))
+        self.assertEqual(options.events, dict(drops={0: ('chunks', 1), 1: ('chunks', 40), 3: ('seconds', 2.5)},
+                                              max_tokens={4: 1}, ignore_eos=[5]))
+        base = gate.stream_kwargs(options)
+        self.assertEqual(gate.user_stream(options, 0, base), (256, dict(base, drop_after=1)))
+        self.assertEqual(gate.user_stream(options, 3, base), (256, dict(base, drop_after_s=2.5)))
+        self.assertEqual(gate.user_stream(options, 4, base), (1, base))
+        self.assertEqual(gate.user_stream(options, 5, base), (256, dict(base, ignore_eos=True)))
+        self.assertEqual(gate.user_stream(options, 2, base), (256, base))
+
+    def test_no_events_is_every_existing_call(self):
+        options = parse()
+        self.assertEqual(options.events, dict(drops={}, max_tokens={}, ignore_eos=[]))
+        self.assertEqual(gate.user_stream(options, 3, {}), (256, {}))
+
+    def test_bad_events_are_refused(self):
+        for argv in (('--drops', '6:1'), ('--drops', '0:0'), ('--drops', '0:x'), ('--drops', '0:1,0:2'),
+                     ('--drops', '0'), ('--user-max-tokens', '1:0'), ('--user-ignore-eos', '9'),
+                     ('--user-ignore-eos', 'a')):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                parse(*self.REAL + argv)
+        with self.assertRaises(SystemExit):
+            parse('--drops', '0:1')   # the default mode has no detail streams to record a drop
+
+    def test_a_dropped_stream_is_not_a_stream_problem(self):
+        self.assertEqual(gate.real_text_stream_problems([dict(dropped='after 1 chunks', text='x'),
+                                                         dict(dropped='no byte within 2 s', text=''),
+                                                         dict(dropped=None, text='y', finish_reason='stop')]), [])
+        self.assertEqual(len(gate.real_text_stream_problems([dict(dropped='after 1 chunks', error='boom')])), 1)
+
+    def test_a_lifecycle_run_records_its_events_and_asks_the_engine_once_more(self):
+        calls = []
+
+        def stream(port, prompt, max_tokens, results, index, timeout, **kwargs):
+            calls.append(dict(index=index, max_tokens=max_tokens, kwargs=kwargs, length=len(prompt)))
+            entry = dict(text='answer %d' % index, finish_reason='stop', tokens=3, completion_tokens=5,
+                         gaps_ms=[250.0], ttft_s=1.0, prompt_tokens=len(prompt))
+            if kwargs.get('drop_after') or kwargs.get('drop_after_s'):
+                entry = dict(text='ans', dropped='after 1 chunks', tokens=1, gaps_ms=[], ttft_s=1.0)
+            results[index] = entry
+
+        with tempfile.TemporaryDirectory() as directory:
+            results = Path(directory, 'results')
+            results.mkdir()
+            (results / 'server.log').write_text(C2_ARGV_LINE + '\n', encoding='utf-8')
+            package = write_package(Path(directory, 'site'), code_corpus(files=200))
+            argv = ['gate'] + list(self.REAL[:-1]) + ['200,3000,2049,300,500,700', '--drops', '0:1,1:@2',
+                                                        '--user-max-tokens', '2:1', '--user-ignore-eos', '3',
+                                                        '--alive-check', '--results', str(results)]
+            with mock.patch.object(gate, 'start_server', return_value=(None, None, results / 'server.log', ['x'])), \
+                    mock.patch.object(gate, 'stop_server'), \
+                    mock.patch.object(gate, 'stream_once', side_effect=stream), \
+                    mock.patch.object(real_text_prompts, 'load_tokenizer', return_value=FakeTokenizer()), \
+                    mock.patch.object(real_text_prompts, 'package_root', return_value=package), \
+                    mock.patch.object(sys, 'argv', argv), redirect_stdout(io.StringIO()) as out:
+                gate.main()
+            text = out.getvalue()
+        report = json.loads(text[text.index(gate.BEGIN) + len(gate.BEGIN):text.index(gate.END)])
+        self.assertEqual(len(calls), 7, 'six streams and the alive check')
+        self.assertEqual(calls[-1]['max_tokens'], 8)
+        self.assertEqual(calls[-1]['length'], 200, 'the alive check sends user 0\'s prompt')
+        self.assertNotIn('drop_after', calls[-1]['kwargs'])
+        self.assertIs(report['alive'], True)
+        self.assertEqual(report['user_events'], dict(drops={'0': 'chunks 1', '1': 'seconds 2.0'},
+                                                     max_tokens={'2': 1}, ignore_eos=[3]))
+        comparisons = report['comparisons']
+        self.assertEqual([c['max_tokens'] for c in comparisons], [256, 256, 1, 256, 256, 256])
+        self.assertEqual([c['dropped'] for c in comparisons][:3], ['after 1 chunks', 'after 1 chunks', None])
+        self.assertEqual([c['ignore_eos'] for c in comparisons], [False, False, False, True, False, False])
+        self.assertEqual(report['real_text_stream_problems'], [])
+        self.assertIn('[ALIVE] after the streams: True', text)
 
 
 class MarkerFloorTests(unittest.TestCase):
