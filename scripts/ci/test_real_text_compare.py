@@ -165,5 +165,181 @@ class CompareTests(unittest.TestCase):
                     sys.stderr = stderr
 
 
+def diverged(index=0, at=5):
+    texts = list(TEXTS)
+    texts[index] = texts[index][:at] + 'X' + texts[index][at + 1:]
+    return texts
+
+
+class PolicyTests(unittest.TestCase):
+    """The exactness policy (c2-serve-for-real-plan 2.2 item 5): a solo reference on the same image and
+    arithmetic, full answers, one re-run of both arms on a first divergence."""
+
+    def solo(self, **kwargs):
+        return report(users=1, sequential=4, **kwargs)
+
+    def test_identical_arms_pass_without_a_rerun(self):
+        result = rtc.exactness_policy(report(), self.solo())
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertEqual([u['verdict'] for u in result['users']], ['IDENTICAL'] * 4)
+        self.assertIsNone(result['reproducible'])
+
+    def test_a_first_divergence_asks_for_the_rerun(self):
+        result = rtc.exactness_policy(report(texts=diverged(1)), self.solo())
+        self.assertEqual(result['verdict'], 'RERUN')
+        self.assertEqual(result['users'][1]['verdict'], 'RERUN')
+        self.assertEqual(result['users'][1]['first_divergence'], 5)
+
+    def test_a_divergence_that_reproduces_fails(self):
+        result = rtc.exactness_policy(report(texts=diverged(1)), self.solo(),
+                                      rerun=(report(texts=diverged(1)), self.solo()))
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertEqual(result['users'][1], dict(user=1, verdict='DIVERGED', first='DIVERGED', rerun='DIVERGED',
+                                                  first_divergence=5, rerun_divergence=5, reason=None))
+        self.assertEqual(result['reproducible'], dict(concurrent=True, single=True))
+
+    def test_a_divergence_that_does_not_reproduce_is_unstable_not_a_pass(self):
+        result = rtc.exactness_policy(report(texts=diverged(2)), self.solo(), rerun=(report(), self.solo()))
+        self.assertEqual(result['verdict'], 'UNSTABLE')
+        self.assertEqual(result['users'][2]['verdict'], 'UNSTABLE')
+        self.assertEqual(result['reproducible'], dict(concurrent=False, single=True))
+        # A user identical first and divergent in the re-run is nondeterministic too.
+        late = rtc.exactness_policy(report(texts=diverged(2)), self.solo(),
+                                    rerun=(report(texts=diverged(3)), self.solo()))
+        self.assertEqual([u['verdict'] for u in late['users']], ['IDENTICAL', 'IDENTICAL', 'UNSTABLE', 'UNSTABLE'])
+
+    def test_an_arithmetic_difference_makes_a_divergence_not_comparable(self):
+        other = dict(CONFIGURATION, QWEN_FAST_SINGLE_GATEUP='1')
+        result = rtc.exactness_policy(report(texts=diverged(0), configuration=other), self.solo())
+        self.assertEqual(result['verdict'], 'NOT_COMPARABLE')
+        self.assertIn('QWEN_FAST_SINGLE_GATEUP', result['users'][0]['reason'])
+        # Identical text under different arithmetic is still identical.
+        self.assertEqual(rtc.exactness_policy(report(configuration=other), self.solo())['verdict'], 'PASS')
+
+    def test_logging_audit_and_serving_flags_are_not_arithmetic(self):
+        noisy = dict(CONFIGURATION, QWEN_FAST_PHASE_LOG='1', QWEN_FAST_VERIFY_T2_AUDIT='1', QWEN_C2_PROFILE='c2',
+                     QWEN_FAST_FAULTHANDLER='0', QWEN_C2_SERVING='1')
+        self.assertEqual(rtc.arithmetic_diff(report(configuration=noisy), self.solo()), {})
+        self.assertEqual(sorted(rtc.configuration_diff(report(configuration=noisy), self.solo())),
+                         ['QWEN_C2_PROFILE', 'QWEN_C2_SERVING', 'QWEN_FAST_FAULTHANDLER', 'QWEN_FAST_PHASE_LOG',
+                          'QWEN_FAST_VERIFY_T2_AUDIT'])
+        result = rtc.exactness_policy(report(texts=diverged(0), configuration=noisy), self.solo())
+        self.assertEqual(result['verdict'], 'RERUN', 'a divergence under neutral flags is still a divergence')
+        self.assertIsNone(rtc.arithmetic_diff(report(configuration=None), self.solo()))
+
+    def test_errors_fail_and_prompt_or_budget_differences_are_not_comparable(self):
+        streams = report()
+        streams['streams'][3] = dict(error='HTTP 400')
+        self.assertEqual(rtc.exactness_policy(streams, self.solo())['verdict'], 'FAIL')
+        shas = list(SHAS)
+        shas[1] = 'e' * 64
+        self.assertEqual(rtc.exactness_policy(report(shas=shas), self.solo())['users'][1]['verdict'], 'NOT_COMPARABLE')
+        short = [text[:40] for text in TEXTS]
+        budget = rtc.exactness_policy(report(texts=short, completion=(64,) * 4, max_tokens=64), self.solo())
+        self.assertEqual(budget['verdict'], 'NOT_COMPARABLE', 'a prefix: the arms ran different budgets')
+        self.assertEqual(rtc.exactness_policy(report(users=0, texts=()), self.solo(texts=()))['verdict'], 'FAIL')
+
+    def test_full_answers_are_compared_not_prefixes(self):
+        """The same budget ending in an earlier EOS on one side only is a divergence (eos-mismatch)."""
+        texts = list(TEXTS)
+        texts[0] = TEXTS[0][:100]
+        result = rtc.exactness_policy(report(texts=texts, finish=('stop', 'length', 'length', 'length'),
+                                             completion=(40, 256, 256, 256)), self.solo())
+        self.assertEqual(result['users'][0]['verdict'], 'RERUN')
+
+    def test_main_policy_exit_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory, name) for name in ('c.json', 's.json', 'c2.json', 's2.json', 'out.json')]
+            paths[0].write_text(json.dumps(report(texts=diverged(1))), encoding='utf-8')
+            for path in paths[1:4]:
+                path.write_text(json.dumps(self.solo()), encoding='utf-8')
+            with redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(rtc.main([str(paths[0]), str(paths[1]), '--policy']), 5)
+                self.assertEqual(rtc.main([str(paths[0]), str(paths[1]), '--policy', '--rerun', str(paths[2]),
+                                           str(paths[3]), '--json', str(paths[4])]), 4)
+                self.assertEqual(rtc.main([str(paths[2]), str(paths[1]), '--policy']), 0)
+            self.assertIn('POLICY UNSTABLE', printed.getvalue())
+            self.assertEqual(json.loads(paths[4].read_text(encoding='utf-8'))['verdict'], 'UNSTABLE')
+            with redirect_stdout(io.StringIO()), open(os.devnull, 'w') as sink:
+                stderr, sys.stderr = sys.stderr, sink
+                try:
+                    with self.assertRaises(SystemExit):
+                        rtc.main([str(paths[0]), str(paths[1]), '--rerun', str(paths[2]), str(paths[3])])
+                    with self.assertRaises(SystemExit):
+                        rtc.main([str(paths[0])])
+                finally:
+                    sys.stderr = stderr
+
+
+V235 = Path(__file__).resolve().parent / 'references' / 'c2-serving' / 'v235-real-text-4x131072.json'
+
+
+class ReferenceTests(unittest.TestCase):
+    """The bring-up: a served arm against the tracked v235 texts."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reference = json.loads(V235.read_text(encoding='utf-8'))
+
+    def served(self, texts=None, configuration=None, shas=None):
+        streams = self.reference['streams']
+        texts = texts or [s['text'] for s in streams]
+        served = report(texts=texts, shas=shas or [s['prompt_sha256'] for s in streams],
+                        completion=[s['completion_tokens'] for s in streams],
+                        finish=[s['finish_reason'] for s in streams],
+                        configuration=configuration if configuration is not None else dict(
+                            self.reference['qwen_configuration'], QWEN_C2_SERVING='1', QWEN_C2_PROFILE='exact'))
+        return served
+
+    def test_the_tracked_reference_is_v235s_four_complete_streams(self):
+        self.assertEqual(self.reference['source']['run_id'], 36087022223)
+        self.assertEqual((self.reference['users'], self.reference['prompt_tokens'], self.reference['max_tokens']),
+                         (4, 131072, 256))
+        self.assertEqual(len(self.reference['streams']), 4)
+        for stream in self.reference['streams']:
+            self.assertEqual((stream['finish_reason'], stream['completion_tokens'], stream['prompt_tokens']),
+                             ('length', 256, 131072))
+            self.assertEqual(stream['text_sha256'], __import__('hashlib').sha256(
+                stream['text'].encode('utf-8')).hexdigest())
+        self.assertEqual([s['prompt_sha256'] for s in self.reference['streams']],
+                         [u['prompt_sha256'] for u in self.reference['real_text']['users']])
+
+    def test_an_identical_bring_up(self):
+        result = rtc.reference_verdicts(self.served(), self.reference)
+        self.assertEqual(result['verdict'], 'IDENTICAL')
+        self.assertEqual([u['verdict'] for u in result['users']], ['IDENTICAL'] * 4)
+        self.assertEqual(result['arithmetic_diff'], {}, 'the serving flags are not arithmetic')
+        self.assertIn('BRING-UP IDENTICAL', rtc.render_reference(result))
+
+    def test_a_divergent_user_is_named_with_its_character(self):
+        texts = [s['text'] for s in self.reference['streams']]
+        texts[2] = texts[2][:300] + '#' + texts[2][301:]
+        result = rtc.reference_verdicts(self.served(texts=texts), self.reference)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertEqual(result['users'][2]['verdict'], 'DIVERGED')
+        self.assertEqual(result['users'][2]['first_divergence'], 300)
+        self.assertIn('user 2: DIVERGED at character 300', rtc.render_reference(result))
+
+    def test_another_prompt_or_arithmetic_is_not_comparable(self):
+        shas = [s['prompt_sha256'] for s in self.reference['streams']]
+        shas[0] = '0' * 64
+        result = rtc.reference_verdicts(self.served(shas=shas), self.reference)
+        self.assertEqual((result['verdict'], result['users'][0]['verdict']), ('NOT_COMPARABLE', 'NOT_COMPARABLE'))
+        texts = [s['text'] for s in self.reference['streams']]
+        texts[1] = 'x' + texts[1][1:]
+        configuration = dict(self.reference['qwen_configuration'], QWEN_FAST_SDPA_BF8='1')
+        result = rtc.reference_verdicts(self.served(texts=texts, configuration=configuration), self.reference)
+        self.assertEqual(result['users'][1]['verdict'], 'NOT_COMPARABLE')
+        self.assertIn('QWEN_FAST_SDPA_BF8', result['users'][1]['reason'])
+
+    def test_main_against_the_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, 'served.json')
+            path.write_text(json.dumps(self.served()), encoding='utf-8')
+            with redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(rtc.main([str(path), '--against-reference', str(V235)]), 0)
+            self.assertIn('user 3: IDENTICAL', printed.getvalue())
+
+
 if __name__ == '__main__':
     unittest.main()
