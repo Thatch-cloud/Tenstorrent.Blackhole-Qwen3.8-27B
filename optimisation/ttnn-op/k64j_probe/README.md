@@ -28,8 +28,10 @@ hash in the container.
 | `rt_args_common.hpp` | 1b52c60d | the split |
 | factory | 3e0a69af | the program factory |
 
-The qwen kernels (`../sdpa_decode_qwen`, `../sdpa_decode_slice`) inherit the same `cur_pos` code line for line
-(`reader_decode_qwen.cpp:124-190`).
+The qwen kernels (`../sdpa_decode_qwen`, `../sdpa_decode_slice`) carry the stock `cur_pos` block byte for byte:
+the readers' block hashes to bce6424f, the slice writer's to e741ca9c and the qwen compute kernel's to a7a3964c, the
+stock kernels' own hashes (`ServedKernelTextTests`). So the causal path the probe runs on hardware is the code a K64j
+flag would lift out of `if constexpr (is_causal)`.
 
 ### R1: the split is a function of `nearest_n(cur_pos + 1, 256)` only
 

@@ -6,6 +6,8 @@
     probe or the replay uses and every cur_pos in [E - 256, E - 1] the runtime split IS the compile-time call's at
     capacity E; the fixed chunk ignores max_dynamic_chunk_size (served value 8); the stale-writer hazard is exactly
     E / 256 < cores per head, and every skip;
+  - the served qwen readers, the slice writer and the qwen compute kernel carry the stock cur_pos block byte for
+    byte (read only under is_causal, both CB copies pushed before the UINT32_MAX return);
   - the flag bit: 0x20 is none of the flags any factory generator, the served reader, the gate or a card test uses
     (0x10 is the card tests' unknown-flag control);
   - the probe's helpers: the position plans, the poisoned table, the masks against the causal writer's
@@ -158,6 +160,62 @@ class SplitModelTests(unittest.TestCase):
             self.assertTrue(model.same_split(model.extent_cur_pos(start), model.extent(start), 16))
         with self.assertRaises(ValueError):
             model.compile_time_cur_pos(100)
+
+
+# The cur_pos block (from '    // Get cur_pos' to the split) of the STOCK kernels, hashed from tt-metal 9f9cd4fd:
+# reader_decode_all.cpp (49a05926), writer_decode_all.cpp (734c90c0), sdpa_flash_decode.cpp (d24769bd).
+STOCK_CUR_POS_BLOCKS = {
+    'reader': 'bce6424f2d0b83cab0bda3cf3171769941f0a508991b6b98020b677f59bfbd45',
+    'writer': 'e741ca9cd5acf90fcee12ebd61b89a9c617ac72637a143eb5690a706c5421d2f',
+    'compute': 'a7a3964ccc20cae2cf17d65bdb2a864018c88c049f5937a9c92effdb87fede9c',
+}
+
+
+def cur_pos_block(path, end):
+    text = read(path)
+    start = text.index('    // Get cur_pos')
+    return text[start:text.index(end, start)]
+
+
+class ServedKernelTextTests(unittest.TestCase):
+    """The served qwen kernels in this repository carry the stock cur_pos block byte for byte, so the causal
+    path this probe runs on hardware is the code a K64j flag would lift out of `if constexpr (is_causal)`."""
+
+    def test_every_served_reader_writer_and_compute_carries_the_stock_block(self):
+        split = '    auto Sk_chunk_t_dynamic'
+        for path in (QWEN / 'reader_decode_qwen.cpp', QWEN / 'stage3' / 'reader_decode_qwen.cpp',
+                     SLICE / 'reader_decode_qwen_slice.cpp'):
+            self.assertEqual(sha(cur_pos_block(path, split).encode()), STOCK_CUR_POS_BLOCKS['reader'], path.name)
+        self.assertEqual(sha(cur_pos_block(SLICE / 'writer_decode_qwen_slice.cpp', split).encode()),
+                         STOCK_CUR_POS_BLOCKS['writer'])
+        for path in (QWEN / 'sdpa_flash_decode_qwen.cpp', QWEN / 'stage3' / 'sdpa_flash_decode_qwen.cpp'):
+            self.assertEqual(sha(cur_pos_block(path, '    // Get dynamic chunk size').encode()),
+                             STOCK_CUR_POS_BLOCKS['compute'], path.name)
+
+    def test_the_block_reads_cur_pos_only_when_causal_and_skips_on_uint32_max(self):
+        reader = cur_pos_block(SLICE / 'reader_decode_qwen_slice.cpp', '    auto Sk_chunk_t_dynamic')
+        writer = cur_pos_block(SLICE / 'writer_decode_qwen_slice.cpp', '    auto Sk_chunk_t_dynamic')
+        compute = cur_pos_block(QWEN / 'stage3' / 'sdpa_flash_decode_qwen.cpp', '    // Get dynamic chunk size')
+        for name, block, read_line in (
+                ('reader', reader, 'cur_pos = index_ptr[cur_batch / q_heads_parallel_factor];'),
+                ('writer', writer, 'cur_pos = index_ptr[(uint32_t)(cur_batch / q_heads_parallel_factor)];'),
+                ('compute', compute, 'cur_pos = read_tile_value(cb_cur_pos, 0, cur_batch / q_heads_parallel_factor);')):
+            with self.subTest(kernel=name):
+                self.assertIn('constexpr uint32_t cur_pos_base = St * 32 - 1;', block)
+                self.assertIn('if constexpr (is_causal) {', block)
+                self.assertLess(block.index('if constexpr (is_causal) {'), block.index(read_line))
+                self.assertLess(block.index(read_line), block.index('if (cur_pos == UINT32_MAX) {'))
+                self.assertIn('return;', block[block.index('if (cur_pos == UINT32_MAX) {'):])
+        # The reader pushes both copies before its skip test, so the writer and compute always find their word.
+        self.assertLess(reader.index('cb_compute.push_back(1);'), reader.index('if (cur_pos == UINT32_MAX) {'))
+        self.assertIn('cb_index.pop_front(1);', writer)
+        self.assertIn('CircularBuffer(cb_cur_pos).pop_front(1);', compute)
+        # The writer's tree and its causal mask follow its own cur_pos.
+        text = read(SLICE / 'writer_decode_qwen_slice.cpp')
+        self.assertIn('if (child_id != UINT32_MAX && child_id < k_num_chunks) {', text)
+        self.assertIn('generate_mask<cb_mask_in, PNHt>(k_num_chunks, Sk_chunk_t_dynamic, cur_pos);', text)
+        self.assertIn('const bool apply_mask_at_last_chunk = do_reduce && is_causal;',
+                      read(QWEN / 'stage3' / 'sdpa_flash_decode_qwen.cpp'))
 
 
 def find_gxx():
