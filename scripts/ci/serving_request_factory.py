@@ -199,6 +199,14 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             **(dict(storage=verifier_storage) if verifier_storage is not None else {}),
             **(dict(capture_rows=capture_rows) if capture_rows is not None else {}))
         owned.callback(engine.close)
+        # QWEN_FAST_PUBLISH_PREWARM (M3NATIVE_PUBLISH_PREWARM; default off): the drafter's
+        # publication prepared and discarded once per process per captured (rows, prefix),
+        # so its eager programs exist before the first sequential commit needs them
+        # (publish_prewarm.py). Unset, nothing is imported or called.
+        if os.environ.get('QWEN_FAST_PUBLISH_PREWARM') == '1':
+            import publish_prewarm
+
+            publish_prewarm.warm(device, engine)
         request = FastRequest(session, engine, runtime, release_drafter=device.close,
             collect_timings=os.environ.get('QWEN_FAST_PHASE_TIMING') == '1')
         owned.pop_all()

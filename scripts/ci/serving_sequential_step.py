@@ -77,7 +77,7 @@ def sequential_packed_step(entries, *, cancelled):
             raise ValueError('Each packed entry must carry its own prepared ticket')
         # Under QWEN_FAST_PHASE_LOG the same begin/end lines the hook writes around
         # each proposal, so a hang says which phase stalled and whose.
-        output = phase('step', ticket.request_id, lambda: request.step(ticket.request_id, cancelled=cancelled))
+        output = phase('step', ticket.request_id, lambda: step_request(request, ticket, cancelled))
         if output is None or output.request_id != entry['request_id']:
             raise ValueError('A packed request must commit its own output')
         outputs.append(output)
@@ -308,3 +308,94 @@ def describe():
     return dict(name='sequential', weight_passes_per_round='one per user',
                 per_user_rate='single-user rate divided by users',
                 batched=False)
+
+
+# QWEN_FAST_SEQ_PUBLISH_LOG=1 (M3NATIVE_SEQ_PUBLISH_LOG; default off, read once at import like
+# QWEN_FAST_SHARD_CHECK above): '[SEQ-PUBLISH]' lines for every sequential step, the confirming
+# experiment for the slow first sequential commits of the K5-A B arms (k5dbg verdict section 3).
+# Logging only - the step is the same call: around it, a stage timer on DFlashRequestRuntime.
+# publish's own publication_stage seam (serving_packed_step.install_stage_timer, the packed
+# commit's QWEN_FAST_PACKED_AUDIT timer), under QWEN_FAST_ROUND_B1 a publication split sink
+# (dflash_traced_publish.PUBLICATION_SPLITS, as serving_packed_step.commit_entry sets one), and
+# the mesh's program-cache entry count read before and after. A flag of its own rather than
+# QWEN_FAST_PACKED_AUDIT: every m3native arm sets that one, so gating on it would change the
+# sequential step of every existing arm. Defined here, at the end, so every line above keeps its
+# number.
+SEQ_PUBLISH_LOG_FLAG = 'QWEN_FAST_SEQ_PUBLISH_LOG'
+SEQ_PUBLISH_LOG = os.environ.get(SEQ_PUBLISH_LOG_FLAG, '0')
+if SEQ_PUBLISH_LOG not in ('0', '1'):
+    raise ValueError('QWEN_FAST_SEQ_PUBLISH_LOG must be unset, 0 or 1')
+SEQ_PUBLISH_LOG = SEQ_PUBLISH_LOG == '1'
+# Two short lines per step, three under QWEN_FAST_ROUND_B1 (the log capture truncates around 250
+# characters and loguru's prefix takes some: dflash_device.AUDIT_LINE_BUDGET), each naming the
+# request as the packed '[PACKED] request=' audit does. The first is the step's: its ticket rows,
+# the prefix it published, its wall time and the program-cache entries before and after (the
+# gate matches one per '[PHASE] step' end). The stages are serving_packed_step.PUBLISH_STAGES
+# (0.00 for a stage publish() skipped, as the packed line reports it); the splits are the
+# prepare_publication phases _prepare_publication_round_b1 adds, only under QWEN_FAST_ROUND_B1.
+SEQ_PUBLISH_LINE = ('[SEQ-PUBLISH] request={request} rows={rows} prefix={prefix} step_ms={step_ms:.2f} '
+                    'cache={before}->{after}')
+SEQ_PUBLISH_STAGES_LINE = '[SEQ-PUBLISH] request={request} stages {stages}'
+SEQ_PUBLISH_SPLIT_LINE = '[SEQ-PUBLISH] request={request} splits {splits}'
+SEQ_PUBLISH_SPLITS = ('proj', 'hist', 'kv', 'sync', 'rel')
+
+
+def step_request(request, ticket, cancelled):
+    """sequential_packed_step's call of one request's step: without QWEN_FAST_SEQ_PUBLISH_LOG
+    exactly request.step(ticket.request_id, cancelled=cancelled), nothing before or after."""
+    if not SEQ_PUBLISH_LOG:
+        return request.step(ticket.request_id, cancelled=cancelled)
+    return logged_step(request, ticket, cancelled)
+
+
+def program_cache(device):
+    """mesh.num_program_cache_entries(), as dflash_device's proposal audit reads it, or 'n/a'."""
+    count = getattr(getattr(device, 'mesh', None), 'num_program_cache_entries', None)
+    if not callable(count):
+        return 'n/a'
+    try:
+        return int(count())
+    except Exception:
+        return 'n/a'
+
+
+def logged_step(request, ticket, cancelled):
+    """request.step between the stage timer, the B1 split sink and two program-cache reads; its
+    '[SEQ-PUBLISH]' lines after it returns. The timer and the sink are restored whatever the step
+    does; a step that raises logs nothing."""
+    import time
+
+    from dflash_traced_publish import PUBLICATION_SPLITS
+    from serving_packed_step import PUBLISH_STAGES, audit_log, install_stage_timer
+
+    runtime = getattr(request, 'runtime', None)
+    drafter = getattr(runtime, 'drafter', None)
+    stage_sink = {}
+    split_sink = {} if os.environ.get('QWEN_FAST_ROUND_B1') == '1' else None
+    position = getattr(runtime, 'position', None)
+    before = program_cache(drafter)
+    # Everything that can refuse runs above; from the install on, the finally restores both.
+    restore_stage_timer = install_stage_timer(runtime, stage_sink) if runtime is not None else None
+    split_token = PUBLICATION_SPLITS.set(split_sink) if split_sink is not None else None
+    started = time.perf_counter()
+    try:
+        output = request.step(ticket.request_id, cancelled=cancelled)
+    finally:
+        step_ms = (time.perf_counter() - started) * 1000
+        if split_token is not None:
+            PUBLICATION_SPLITS.reset(split_token)
+        if restore_stage_timer is not None:
+            restore_stage_timer()
+    after = program_cache(drafter)
+    moved = getattr(runtime, 'position', None)
+    prefix = moved - position if type(position) is int and type(moved) is int else 'n/a'
+    tokens = getattr(ticket, 'tokens', None)
+    request_id = str(ticket.request_id)[:48]
+    audit_log(SEQ_PUBLISH_LINE, request=request_id, rows='n/a' if tokens is None else len(tokens), prefix=prefix,
+              step_ms=step_ms, before=before, after=after)
+    audit_log(SEQ_PUBLISH_STAGES_LINE, request=request_id,
+              stages=' '.join('%s=%.2f' % (name, stage_sink.get(name, 0.0)) for name in PUBLISH_STAGES))
+    if split_sink is not None:
+        audit_log(SEQ_PUBLISH_SPLIT_LINE, request=request_id,
+                  splits=' '.join('%s=%.2f' % (name, split_sink.get(name, 0.0)) for name in SEQ_PUBLISH_SPLITS))
+    return output

@@ -97,6 +97,9 @@ COPY scripts/ci/pair_row_exact.py /experiment-scripts/ci/
 # quad_conv_io.cpp (the card-B probed 64-row conv I/O kernel, sha256-pinned in quad_draft.CONV_KERNEL_SHA256),
 # so both travel here.
 COPY scripts/ci/quad_draft.py scripts/ci/quad_conv_io.cpp /experiment-scripts/ci/
+# Publish prewarm (QWEN_FAST_PUBLISH_PREWARM, default off): serving_request_factory imports publish_prewarm when the
+# flag is set, so it must reach the image beside it.
+COPY scripts/ci/publish_prewarm.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \
