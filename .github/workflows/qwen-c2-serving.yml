@@ -43,7 +43,7 @@ jobs:
                   key, _, value = line.partition('=')
                   values[key.strip()] = value.strip()
           actions = values.get('C2_ACTIONS', 'status').split()
-          assert set(actions) <= {'status', 'platform', 'unserve', 'priority', 'reset', 'build', 'smoke', 'replay', 'push'}, actions
+          assert set(actions) <= {'status', 'metering', 'platform', 'unserve', 'priority', 'reset', 'build', 'smoke', 'replay', 'push'}, actions
           assert re.fullmatch(r'[0-9a-z.-]{3,40}', values.get('C2_IMAGE_TAG', '')), 'C2_IMAGE_TAG'
           assert values.get('C2_PROFILE', 'general') in ('general', 'general-p300', 'general-lean', 'general-p300-lean', 'coding', 'exact')
           print('actions=' + ' '.join(actions))
@@ -53,6 +53,9 @@ jobs:
           platform_image = values.get('C2_PLATFORM_IMAGE', '')
           assert not platform_image or re.fullmatch(r'[0-9a-z.:/@_-]{10,200}', platform_image), 'C2_PLATFORM_IMAGE'
           print('platform_image=' + platform_image)
+          smoke_image = values.get('C2_SMOKE_IMAGE', '')
+          assert not smoke_image or re.fullmatch(r'[0-9a-z.:/@_-]{10,200}', smoke_image), 'C2_SMOKE_IMAGE'
+          print('smoke_image=' + smoke_image)
           PY
           cat "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/c2-results"
@@ -68,6 +71,14 @@ jobs:
           echo "=== cards"; ls -l /dev/tenstorrent/by-id/; sudo -n fuser -v /dev/tenstorrent/* 2>&1
           echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
           echo "=== agent"; journalctl --user -u thatch-node-agent --since -3h --no-pager 2>&1 | grep -v -i heartbeat | tail -15
+      - name: Serving metering from the control plane's Prometheus (read-only)
+        if: contains(steps.job.outputs.actions, 'metering')
+        working-directory: c2
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -uo pipefail
+          python3 scripts/ci/rig/serving_metering.py 14 2>&1 | tee "$RUNNER_TEMP/c2-results/metering.log"
       - name: Platform serving container (read-only)
         if: contains(steps.job.outputs.actions, 'platform')
         shell: bash
@@ -220,9 +231,11 @@ jobs:
           TAG: ${{ steps.job.outputs.tag }}
           PROFILE: ${{ steps.job.outputs.profile }}
           TESTS: ${{ steps.job.outputs.tests }}
+          SMOKE_IMAGE: ${{ steps.job.outputs.smoke_image }}
         run: |
           set -euo pipefail
-          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          image=${SMOKE_IMAGE:-zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG}
+          echo "smoke image: $image"
           results="$RUNNER_TEMP/c2-results"
           name=qwen-c2-smoke
           m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
