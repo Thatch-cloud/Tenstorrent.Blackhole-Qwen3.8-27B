@@ -54,6 +54,7 @@ class ProfileTest(unittest.TestCase):
         for name in ('exact', 'coding'):
             profile = contract.load_profile(PROFILES, name)
             engine, env = profile['engine'], profile['env']
+            self.assertIs(engine['additional-config']['qwen_fast_t16'], True, name)
             budget = int(env['QWEN_FAST_OUTPUT_BUDGET'])
             capacity = int(env['QWEN_DSPARK_REQUEST_CONTEXT']) + 256
             self.assertEqual(engine['max-model-len'], capacity, name)
@@ -66,14 +67,24 @@ class ProfileTest(unittest.TestCase):
             self.assertGreaterEqual(engine['num-gpu-blocks-override'],
                                     engine['max-num-seqs'] * -(-longest // 64), name)
 
-    def test_default_profile_is_coding(self):
+    def test_default_profile_is_general(self):
         environ = dict(os.environ)
         os.environ.pop('QWEN_C2_PROFILE', None)
         try:
-            self.assertEqual(contract.load_profile(PROFILES)['name'], 'coding')
+            self.assertEqual(contract.load_profile(PROFILES)['name'], 'general')
         finally:
             os.environ.clear()
             os.environ.update(environ)
+
+
+class GeneralProfileTest(unittest.TestCase):
+    def test_general_turns_the_fast_path_off(self):
+        profile = contract.load_profile(PROFILES, 'general')
+        argv = contract.engine_arguments(profile, '/snap')
+        self.assertNotIn('--speculative-config', argv)
+        additional = json.loads(argv[argv.index('--additional-config') + 1])
+        self.assertNotIn('qwen_fast_t16', additional)
+        self.assertIs(profile['request_contract'], False)
 
 
 class ArgvTest(unittest.TestCase):

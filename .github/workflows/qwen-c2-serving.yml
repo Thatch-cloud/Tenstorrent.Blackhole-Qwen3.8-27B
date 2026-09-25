@@ -45,10 +45,10 @@ jobs:
           actions = values.get('C2_ACTIONS', 'status').split()
           assert set(actions) <= {'status', 'build', 'smoke', 'push'}, actions
           assert re.fullmatch(r'[0-9a-z.-]{3,40}', values.get('C2_IMAGE_TAG', '')), 'C2_IMAGE_TAG'
-          assert values.get('C2_PROFILE', 'coding') in ('coding', 'exact')
+          assert values.get('C2_PROFILE', 'general') in ('general', 'coding', 'exact')
           print('actions=' + ' '.join(actions))
           print('tag=' + values['C2_IMAGE_TAG'])
-          print('profile=' + values.get('C2_PROFILE', 'coding'))
+          print('profile=' + values.get('C2_PROFILE', 'general'))
           print('tests=' + values.get('C2_SMOKE_TESTS', ''))
           PY
           cat "$GITHUB_OUTPUT"

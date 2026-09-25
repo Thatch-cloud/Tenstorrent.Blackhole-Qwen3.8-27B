@@ -248,6 +248,9 @@ def boot(environ=None, orig_argv=None):
         log('profile %s: vLLM argv %s', profile['name'], json.dumps(sys.argv[1:]))
         log('mesh %s, output budget %d, context %s', environ['TT_MESH_GRAPH_DESC_PATH'], budget,
             profile['engine'].get('max-model-len'))
+        if profile.get('request_contract', True) is False:
+            log('profile %s: no request contract (the fast path is off)', profile['name'])
+            return profile
         sys.meta_path.insert(0, PostImportHook(
             INPUT_PROCESSOR, lambda module: install_request_contract(
                 module, budget=budget, eos_ids=eos_ids, max_prompt_tokens=profile.get('max_prompt_tokens'))))
