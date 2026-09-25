@@ -5,7 +5,7 @@ import os
 from types import SimpleNamespace
 
 from serving_fast_request import FastRequest
-from serving_fast_policy import validate_request_sampling
+from serving_fast_policy import OUTPUT_BUDGET, validate_request_sampling
 from serving_page_binding import validate_initial_capture_pages
 
 
@@ -95,7 +95,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         raise ValueError('Terminal prefill must finish without allocating a verifier')
     if len(state.block_ids) != 1:
         raise ValueError('One scheduler-owned KV group required')
-    validate_initial_capture_pages(pages, state.block_ids[0], position=len(prompt), output_budget=256)
+    validate_initial_capture_pages(pages, state.block_ids[0], position=len(prompt), output_budget=OUTPUT_BUDGET)
     # After the host-side refusals, so a rejected request touches no device state, and
     # before the drafter, the engine and every other reader of slot 0.
     adopt_prefill_slot(helpers, capture, state.req_id)
@@ -120,7 +120,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             from loguru import logger as _qwen_logger
             _qwen_logger.info(
                 "[PINDIAG] position={} feature_start={} features={} block_ids={}",
-                len(prompt), len(prompt) - 2048,
+                len(prompt), max(0, len(prompt) - 2048),
                 [tuple(getattr(v, 'shape', ())) for v in _qwen_outputs],
                 getattr(state, 'block_ids', None))
         except BaseException:
@@ -143,8 +143,8 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         device = components.device(operations, model,
             collectives if collectives is not None and shared_ccl else components.collectives(model.mesh_device),
             layers, projection, selector, _qwen_outputs, position=len(prompt),
-            block_rows=16, proposal_capture=True, max_new_tokens=256,
-            fused_convolution=True, feature_start=len(prompt) - 2048,
+            block_rows=16, proposal_capture=True, max_new_tokens=OUTPUT_BUDGET,
+            fused_convolution=True, feature_start=max(0, len(prompt) - 2048),
             cache_history=True, cache_projection_capture=False, live_query_qk=False,
             native_proposal_attention=True, defer_proposal_capture=True, buffer_pool=buffer_pool,
             shared_weights=shared_weights)
@@ -152,7 +152,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         release_capture()
         runtime = components.runtime(device, position=len(prompt))
         session = components.session(state.req_id, prompt, seed, vocab_size=model.args.vocab_size,
-            max_new_tokens=256, eos_ids=eos_ids, neural={'dflash2': runtime},
+            max_new_tokens=OUTPUT_BUDGET, eos_ids=eos_ids, neural={'dflash2': runtime},
             verifier_rows=16, lookup_enabled=False)
 
         def prepare_proposal(engine):
@@ -166,7 +166,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                 # like. DFlashDevice.propose already runs eagerly when this is None,
                 # so leaving it unset isolates the trace as a variable.
                 return
-            device.proposal_capture = components.proposal(device, max_new_tokens=256)
+            device.proposal_capture = components.proposal(device, max_new_tokens=OUTPUT_BUDGET)
 
         # The T16 gate compares these four for equality and run 35474038724 passed
         # position=32768 from len(prompt) yet still failed, so report what the gate

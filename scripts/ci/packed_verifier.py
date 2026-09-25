@@ -146,7 +146,7 @@ from packed_cache_writer import tile_rows
 # the names stay importable from here.
 from packed_shapes import PackedShape, ROWS_PER_USER as LEGAL_WIDTHS, m1_shape, m3_shape, segment_rows, validate_shape
 from prepared_target_features import PreparedTargetFeatures
-from serving_fast_policy import OUTPUT_BUDGET
+from serving_fast_policy import PACKED_FAMILY_TOKENS
 from verifier_engine import note_packed_step, note_prefill
 import verifier_engine
 from verifier_inputs import host_inputs, validate_tokens
@@ -488,7 +488,9 @@ class PackedVerifierEngine:
                 or any(type(index) is not int or not 0 <= index < len(model.layers) for index in self.feature_taps)):
             raise ValueError('Unique native target-layer feature taps required')
         if capture_position is None:
-            capture_position = shape.capacity - OUTPUT_BUDGET
+            # The packed block's one native chunk family is the last 256 positions
+            # (attention_mask_replay.validate_ticket), whatever the per-request budget.
+            capture_position = shape.capacity - PACKED_FAMILY_TOKENS
         if type(capture_position) is not int or capture_position < 0 or capture_position + shape.rows_per_user > shape.capacity:
             raise ValueError('Capture position must leave one segment within the page capacity')
         self.capture_position = capture_position

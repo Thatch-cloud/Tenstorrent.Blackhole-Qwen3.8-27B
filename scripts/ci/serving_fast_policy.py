@@ -22,7 +22,30 @@ data parallel are all still required to be 1, and every sampler equality that ma
 output bit-comparable is untouched.
 """
 
-OUTPUT_BUDGET = 256
+import os
+
+# The per-request output budget. Every request's verifier captures are allocated for it up
+# front, one set per 256-position mask family it can touch (verifier_engine.capture_bucket_rows),
+# so it costs device memory per admitted request rather than being a free policy number.
+# 256 is the measured C2 contract; a serving image may raise it (QWEN_FAST_OUTPUT_BUDGET, a
+# whole number of 256-token families up to 16384) and pay for it with a shorter context.
+PACKED_FAMILY_TOKENS = 256
+
+
+def _output_budget(value):
+    if value in (None, ''):
+        return PACKED_FAMILY_TOKENS
+    try:
+        budget = int(value)
+    except ValueError:
+        budget = 0
+    if budget < PACKED_FAMILY_TOKENS or budget > 16384 or budget % PACKED_FAMILY_TOKENS:
+        raise ValueError('QWEN_FAST_OUTPUT_BUDGET must be a multiple of %d from %d to 16384, got %r'
+                         % (PACKED_FAMILY_TOKENS, PACKED_FAMILY_TOKENS, value))
+    return budget
+
+
+OUTPUT_BUDGET = _output_budget(os.environ.get('QWEN_FAST_OUTPUT_BUDGET'))
 NATIVE_GDN_SLOTS = 8
 # The proposal block is 32 rows and the verify block is 32 or 64. capture_widths caps a
 # per-request bucket at 32 and dflash_device accepts block_rows in (8, 16, 32), so the
@@ -47,7 +70,7 @@ def packed_geometry(users, block_rows=PACKED_BLOCK_ROWS):
         raise ValueError('Each packed user needs a supported T8/T16/T32 share of the block')
     return dict(users=users, block_rows=rows, verifier_rows=block_rows,
                 proposals_per_user=rows - 1)
-MINIMUM_MODEL_LEN = 4352
+MINIMUM_MODEL_LEN = 4096 + OUTPUT_BUDGET
 # Prompts are bounded by the served context rather than pinned to 4096; the server
 # still rejects anything past max_model_len before a request reaches this check.
 MAXIMUM_PROMPT_TOKENS = 1 << 20
