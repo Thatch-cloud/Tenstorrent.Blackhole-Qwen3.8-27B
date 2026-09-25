@@ -43,7 +43,7 @@ jobs:
                   key, _, value = line.partition('=')
                   values[key.strip()] = value.strip()
           actions = values.get('C2_ACTIONS', 'status').split()
-          assert set(actions) <= {'status', 'build', 'smoke', 'push'}, actions
+          assert set(actions) <= {'status', 'platform', 'build', 'smoke', 'push'}, actions
           assert re.fullmatch(r'[0-9a-z.-]{3,40}', values.get('C2_IMAGE_TAG', '')), 'C2_IMAGE_TAG'
           assert values.get('C2_PROFILE', 'general') in ('general', 'coding', 'exact')
           print('actions=' + ' '.join(actions))
@@ -65,6 +65,30 @@ jobs:
           echo "=== cards"; ls -l /dev/tenstorrent/by-id/; sudo -n fuser -v /dev/tenstorrent/* 2>&1
           echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
           echo "=== agent"; journalctl --user -u thatch-node-agent --since -3h --no-pager 2>&1 | grep -v -i heartbeat | tail -15
+      - name: Platform serving container (read-only)
+        if: contains(steps.job.outputs.actions, 'platform')
+        shell: bash
+        run: |
+          set +e
+          results="$RUNNER_TEMP/c2-results"
+          for c in $(docker ps -a --format '{{.Names}}' | grep '^thatch-inference-'); do
+            echo "=== $c"
+            docker inspect -f '{{.State.Status}} started={{.State.StartedAt}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} image={{.Image}}' "$c"
+            docker inspect -f '{{json .Config.Env}}' "$c" | tr ',' '\n' | grep -E 'QWEN_C2|THATCH_VLLM_KWARGS|MESH|TT_MESH|THATCH_MODEL_ENGINE|QWEN36' | cut -c1-300
+            port=$(docker port "$c" 8000/tcp | head -1 | sed 's/.*://')
+            echo "published port: $port"
+            curl -sS -m 10 "http://127.0.0.1:$port/healthz"; echo
+            curl -sS -m 10 "http://127.0.0.1:$port/v1/models" | head -c 600; echo
+            curl -sS -m 120 "http://127.0.0.1:$port/v1/chat/completions" -H 'content-type: application/json' \
+              -d '{"model":"Qwen/Qwen3.8-27B","max_tokens":24,"messages":[{"role":"user","content":"Say hello."}]}' | head -c 1200; echo
+            docker stats --no-stream "$c"
+          done
+          d=/home/thatch/.local/state/thatch/serving-diagnostics
+          echo "=== diagnostics $d"; ls -lat "$d" 2>&1 | head -12
+          for f in $(ls -t "$d" 2>/dev/null | head -4); do
+            echo "--- $f"; tail -c 6000 "$d/$f" | tee -a "$results/diagnostics-tail.log" | tail -60
+          done
+          echo "=== agent"; journalctl --user -u thatch-node-agent --since -30min --no-pager 2>&1 | grep -v -i heartbeat | tail -40
       - name: Build
         if: contains(steps.job.outputs.actions, 'build')
         working-directory: c2
