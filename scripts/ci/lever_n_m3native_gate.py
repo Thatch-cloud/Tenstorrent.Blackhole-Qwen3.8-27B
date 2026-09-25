@@ -103,7 +103,8 @@ REFERENCE_NAME = re.compile(r'^single-user-(?:(\d{4})-)?(?:p(\d+)-)?\d+\.json$')
 # any later '[PACKED-...]' line): run 35578180747 lost the commit-host attribution and the
 # per-user audit because the old filter named four exact prefixes. The cap keeps a whole
 # 33-round four-user run (about 50 kept lines per round) instead of cutting rounds 16-21
-# out of the middle at 800.
+# out of the middle at 800. '[SEQ-PUBLISH]' is the sequential step's publication log, only
+# under QWEN_FAST_SEQ_PUBLISH_LOG (serving_sequential_step): without it no line carries it.
 DIAGNOSTIC_CAP = 4000
 # A native death leaves no Python traceback: TT_FATAL / TT_THROW text, the C++ runtime's
 # terminate message, the shell's signal report, or vLLM's engine-death notice are the
@@ -115,6 +116,7 @@ CRASH_TEXT = ('FATAL', 'Segmentation', 'Aborted', 'Killed', 'terminate called', 
 def select_diagnostic(lines, cap=DIAGNOSTIC_CAP):
     diagnostic = [line[:300] for line in lines
                   if '[PINDIAG]' in line or '[PACKED' in line or '[PHASE]' in line or '[GDN-SEQ-BLOCK' in line
+                  or '[SEQ-PUBLISH]' in line
                   or 'ERROR' in line or 'Traceback' in line or any(crash in line for crash in CRASH_TEXT)]
     if len(diagnostic) > cap:
         omitted = len(diagnostic) - cap
@@ -332,6 +334,24 @@ GDN_SEQ_BLOCK = re.compile(r'gdn seq_block calls this captured forward: ([1-9][0
 GDN_SEQ_BLOCK_AUDIT_LINE = re.compile(r'\[GDN-SEQ-BLOCK-AUDIT\] layer=([0-9]+) user=([0-9]+) mismatches=([0-9]+)')
 GDN_SEQ_BLOCK_LEVEL_BITS = 4
 LEDGER_RESIDUAL = re.compile(r'\[MEMLEDGER\] phase=P7 [^\n]*check=residual status=([a-zA-Z]+)')
+# QWEN_FAST_PUBLISH_PREWARM=1 (M3NATIVE_PUBLISH_PREWARM; publish_prewarm.py, the k5dbg verdict's fix): every
+# request's admission logs one '[PINDIAG] publish prewarm pairs=P count=N ms=M program_cache=A->B' line (pairs=none
+# count=0 once every captured width was warmed earlier in the process), or '[PINDIAG] publish prewarm skipped' in the
+# prefill ramp. The flag needs such a line, and one that warmed something (count >= 1): an image without the module,
+# or a hook that never ran, logs neither. QWEN_FAST_SEQ_PUBLISH_LOG=1 (M3NATIVE_SEQ_PUBLISH_LOG; serving_sequential_
+# step, logging only): every sequential step that returned logs one '[SEQ-PUBLISH] request=R rows=' line, and under
+# QWEN_FAST_PHASE_LOG (every m3native arm) each one also ends with '[PHASE] step R end', so the two counts must be
+# equal - an image without the logging logs steps and no lines; without the phase log nothing is compared. Both are
+# reported under 'publish_prewarm' (every prewarm line parsed, both counts) only when one is set.
+PUBLISH_PREWARM_FLAG = 'QWEN_FAST_PUBLISH_PREWARM'
+PUBLISH_PREWARM_MARKER = '[PINDIAG] publish prewarm pairs='
+PUBLISH_PREWARM_SKIPPED = '[PINDIAG] publish prewarm skipped'
+PUBLISH_PREWARM_LINE = re.compile(r'\[PINDIAG\] publish prewarm pairs=(\S+) count=([0-9]+) ms=([0-9.]+) '
+                                  r'program_cache=(\S+)->(\S+)')
+SEQ_PUBLISH_LOG_FLAG = 'QWEN_FAST_SEQ_PUBLISH_LOG'
+SEQ_PUBLISH_MARKER = '[SEQ-PUBLISH] request='
+SEQ_PUBLISH_STEP = re.compile(r'\[SEQ-PUBLISH\] request=\S+ rows=')
+PHASE_STEP_END = re.compile(r'\[PHASE\] step \S+ end ')
 
 
 # Lever #2 (QWEN_FAST_GDN_PREFILL_CONV=1, lever_n_m3native_patch section H): the graft logs the
@@ -1065,6 +1085,8 @@ def required_flag_markers(environ, users, prompt_tokens=None):
     required.update(h1b_markers(environ))
     required.update(h2_markers(environ))
     required.update(pair_row_exact_markers(environ, users))
+    if on(PUBLISH_PREWARM_FLAG):
+        required[PUBLISH_PREWARM_FLAG] = [PUBLISH_PREWARM_MARKER]
     if on('QWEN_FAST_MEMORY_LEDGER'):
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
@@ -1172,6 +1194,11 @@ def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=
     # K5-A: under 'gdn_seq_block' only when one of its flags is set.
     if seq_block is not None:
         variable_user['gdn_seq_block'] = {key: value for key, value in seq_block.items() if key != 'problems'}
+    # Publish prewarm and the sequential publication log: under 'publish_prewarm' only when one is set.
+    prewarm = publish_prewarm_report(environ, log_text)
+    if prewarm is not None:
+        missing.extend(prewarm.pop('problems'))
+        variable_user['publish_prewarm'] = prewarm
     residual = LEDGER_RESIDUAL.search(log_text)
     return dict(found=found, missing=missing, ledger_residual=residual.group(1) if residual else None,
                 prefill_conv_chunk_calls=prefill_conv, prefill_conv=summary, verify_t1_sites=verify_t1_sites,
@@ -1237,6 +1264,31 @@ def gdn_seq_block_report(environ, users, log_text, gdn_layers=GDN_LAYERS):
             problems.append('%s: no audit line for layer/user %s' % (GDN_SEQ_BLOCK_AUDIT_FLAG, ','.join(absent)))
     return dict(level=level, captures=captures, complete=complete, audit_layers=layers, audit_lines=len(lines),
                 audit_mismatch_lines=len(bad), audit_mismatches=sum(line[2] for line in lines), problems=problems)
+
+
+def publish_prewarm_report(environ, log_text):
+    """Under QWEN_FAST_PUBLISH_PREWARM or QWEN_FAST_SEQ_PUBLISH_LOG: every prewarm line parsed (its pairs,
+    count, wall ms and program-cache entries before and after), the skipped lines, the sequential steps
+    logged and ended, and every problem (under 'problems'); None when neither flag is set. That a prewarm
+    line is there at all is required_flag_markers' check; here, that one of them warmed something - a
+    marker the line pattern cannot parse counts as none (a changed line format must not pass unread)."""
+    names = (PUBLISH_PREWARM_FLAG, SEQ_PUBLISH_LOG_FLAG)
+    flags = tuple(environ.get(name) for name in names)
+    if all(flag in (None, '', '0') for flag in flags):
+        return None
+    problems = ['%s: 0 or 1, not %r' % (name, flag) for name, flag in zip(names, flags)
+                if flag not in (None, '', '0', '1')]
+    lines = [dict(pairs=pairs, count=int(count), ms=float(ms), program_cache_before=before, program_cache_after=after)
+             for pairs, count, ms, before, after in PUBLISH_PREWARM_LINE.findall(log_text)]
+    skipped = log_text.count(PUBLISH_PREWARM_SKIPPED)
+    if flags[0] == '1' and PUBLISH_PREWARM_MARKER in log_text and not any(line['count'] for line in lines):
+        problems.append('%s: a prewarm that warmed something (%d parsed line(s), none with count>0; %d skipped)' % (
+            PUBLISH_PREWARM_FLAG, len(lines), skipped))
+    logged, ended = len(SEQ_PUBLISH_STEP.findall(log_text)), len(PHASE_STEP_END.findall(log_text))
+    if flags[1] == '1' and ended and logged != ended:
+        problems.append('%s: a [SEQ-PUBLISH] line for every sequential step (%d ended, %d logged)' % (
+            SEQ_PUBLISH_LOG_FLAG, ended, logged))
+    return dict(prewarm=lines, skipped=skipped, seq_publish_steps=logged, phase_step_ends=ended, problems=problems)
 
 
 def verify_t1_skipped(environ):

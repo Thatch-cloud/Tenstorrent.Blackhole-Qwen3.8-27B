@@ -1356,9 +1356,14 @@ class ShippingTests(unittest.TestCase):
 
     CHANGED = ('dflash_packed_proposal.py', 'dflash_packed_proposal_coordinator.py', 'dflash_proposal_trace.py',
                'dflash_batched_mask.py', 'dflash_device.py', 'draft_kv_history.py', 'dflash_traced_publish.py',
-               'serving_packed_step.py')
+               'serving_packed_step.py',
+               # QWEN_FAST_SEQ_PUBLISH_LOG: under the flag its sequential step sets the B1 split sink too.
+               'serving_sequential_step.py')
     # Carries B1 code but is not an image module: the arm bind-mounts the checkout's gate.
     GATE = ('lever_n_m3native_gate.py',)
+    # Names B1 in its documentation only (which prepare_publication branch it warms) and reads no
+    # flag of it; an image module all the same, in both copy lists (test_publish_prewarm).
+    NAMED = ('publish_prewarm.py',)
     # Ship from the frozen bundle, in neither copy list: an edit to one never reaches the rig.
     FROZEN = ('draft_selector.py', 'draft_kv_projection.py', 'draft_head_layout.py', 'feature_collective.py',
               'draft_kv_slide.py')
@@ -1394,7 +1399,10 @@ class ShippingTests(unittest.TestCase):
         checked against the pins and both copy lists."""
         carrying = {path.name for path in HERE.glob('*.py') if not path.name.startswith('test_')
                     and re.search('ROUND_B1|round_b1', path.read_text(encoding='utf-8', errors='replace'))}
-        self.assertEqual(carrying, set(self.CHANGED) | set(self.GATE))
+        self.assertEqual(carrying, set(self.CHANGED) | set(self.GATE) | set(self.NAMED))
+        for name in self.NAMED:
+            with self.subTest(named=name):
+                self.assertNotIn('QWEN_FAST_ROUND_B1\')', (HERE / name).read_text(encoding='utf-8'), 'reads no B1 flag')
 
     def test_the_slide_adapter_still_matches_the_qualified_prepare_text(self):
         import draft_kv_history

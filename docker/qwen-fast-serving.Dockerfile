@@ -92,6 +92,9 @@ COPY scripts/ci/early_draft.py /experiment-scripts/ci/
 # The pair drafter's row-1 fix (QWEN_FAST_PAIR_ROW_EXACT, default off): dflash_proposal_trace, draft_attention_branch
 # and dflash_packed_proposal import pair_row_exact when the flag is set, so it must reach the image beside them.
 COPY scripts/ci/pair_row_exact.py /experiment-scripts/ci/
+# Publish prewarm (QWEN_FAST_PUBLISH_PREWARM, default off): serving_request_factory imports publish_prewarm when the
+# flag is set, so it must reach the image beside it.
+COPY scripts/ci/publish_prewarm.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

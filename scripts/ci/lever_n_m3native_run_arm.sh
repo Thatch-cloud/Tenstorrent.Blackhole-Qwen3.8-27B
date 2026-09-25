@@ -639,6 +639,39 @@ if [ -n "$seq_block_value" ]; then
   fi
   echo "K5-A seq block 1 level $seq_block_level audit ${seq_block_audit:-none}"
 fi
+# Publish prewarm (publish_prewarm.py; default off). M3NATIVE_PUBLISH_PREWARM=1 becomes QWEN_FAST_PUBLISH_PREWARM=1:
+# each request's admission prepares and discards the drafter's publication once per process per captured
+# (rows, prefix), the call the sequential commit makes, so its eager programs exist before the first sequential
+# commit of each prefix (the k5dbg verdict, section 2). M3NATIVE_SEQ_PUBLISH_LOG=1 becomes QWEN_FAST_SEQ_PUBLISH_LOG=1:
+# serving_sequential_step logs '[SEQ-PUBLISH]' lines per sequential step (the stage timer, the B1 publication splits,
+# program-cache entries before and after); logging only. Both modules are baked (both image copy lists), so an
+# image without them fails the gate (no prewarm line; sequential steps without their '[SEQ-PUBLISH]' lines).
+# Refused here, before the docker run; unset, nothing is passed.
+for publish_flag in M3NATIVE_PUBLISH_PREWARM M3NATIVE_SEQ_PUBLISH_LOG; do
+  publish_value="${!publish_flag:-}"
+  if [ -n "$publish_value" ] && [ "$publish_value" != "1" ]; then
+    echo "$publish_flag must be 1 or unset, got '$publish_value'" >&2
+    exit 1
+  fi
+done
+if [ -n "${M3NATIVE_PUBLISH_PREWARM:-}${M3NATIVE_SEQ_PUBLISH_LOG:-}" ]; then
+  echo "publish prewarm ${M3NATIVE_PUBLISH_PREWARM:-0} sequential publish log ${M3NATIVE_SEQ_PUBLISH_LOG:-0}"
+fi
+# Host pressure (both default off; host-side reads of /proc only - neither opens a device). M3NATIVE_IO_GATE=1 runs
+# scripts/ci/runner_io_gate.py --attempts 4 right before the docker run, as qwen-fast-serving-canary.yml does, into
+# experiment-results/runner-io-admission.json, and only reports its verdict; M3NATIVE_IO_GATE=required also refuses
+# the arm when the host never went quiet (exit 75 after four 15 s windows). M3NATIVE_HOST_SAMPLER=1 samples
+# /proc/pressure/io, /proc/pressure/cpu and /proc/loadavg once a second, from before the io gate until the container
+# exits, into experiment-results/host-pressure.log ('<epoch> io|cpu|load <the /proc line>'); a missing file is
+# skipped, and the sampler stops with this script. Neither fails the arm on its own. Refused here, before the run.
+case "${M3NATIVE_IO_GATE:-}" in
+  ''|1|required) ;;
+  *) echo "M3NATIVE_IO_GATE must be 1, required or unset, got '$M3NATIVE_IO_GATE'" >&2; exit 1 ;;
+esac
+case "${M3NATIVE_HOST_SAMPLER:-}" in
+  ''|1) ;;
+  *) echo "M3NATIVE_HOST_SAMPLER must be 1 or unset, got '$M3NATIVE_HOST_SAMPLER'" >&2; exit 1 ;;
+esac
 # The pair drafter's row-1 fix (pair_row_exact.py; default off). M3NATIVE_PAIR_ROW_EXACT=1 becomes
 # QWEN_FAST_PAIR_ROW_EXACT=1: each packed pair's draft SDPA is folded, one KV head per user segment, so a user in
 # pair row 1 drafts exactly as it would alone (h1a-draft-race.md sections 2-3). It folds the packed pairs only
@@ -777,6 +810,45 @@ if [ -n "${M3NATIVE_TRACE_REGION_BYTES:-}" ]; then
   trace_region_bytes="$M3NATIVE_TRACE_REGION_BYTES"
   echo "trace region overridden: $trace_region_bytes bytes"
 fi
+# Host pressure, validated above: the sampler first, so its log also covers the io gate's windows; it polls this
+# script's pid and stops within a second of it, whatever ends the script.
+host_sampler_pid=""
+if [ -n "${M3NATIVE_HOST_SAMPLER:-}" ]; then
+  arm_pid=$$
+  (
+    while kill -0 "$arm_pid" 2>/dev/null; do
+      now=$(date +%s.%N 2>/dev/null) || now=unknown
+      for source in io cpu; do
+        if [ -r "/proc/pressure/$source" ]; then
+          while IFS= read -r line; do
+            printf '%s %s %s\n' "$now" "$source" "$line"
+          done < "/proc/pressure/$source" || true
+        fi
+      done
+      if [ -r /proc/loadavg ]; then
+        { IFS= read -r line < /proc/loadavg && printf '%s load %s\n' "$now" "$line"; } || true
+      fi
+      sleep 1 || true
+    done
+  ) > experiment-results/host-pressure.log 2>/dev/null &
+  host_sampler_pid=$!
+  echo "host sampler: pid $host_sampler_pid, /proc/pressure/{io,cpu} and /proc/loadavg at 1 Hz" \
+    "-> experiment-results/host-pressure.log"
+fi
+if [ -n "${M3NATIVE_IO_GATE:-}" ]; then
+  io_gate_report=experiment-results/runner-io-admission.json
+  if [ -e "$io_gate_report" ]; then
+    io_gate_report="experiment-results/runner-io-admission-$(date +%s).json"
+  fi
+  io_gate_status=0
+  timeout -k 10 300 python3 -B scripts/ci/runner_io_gate.py --attempts 4 --output "$io_gate_report" || io_gate_status=$?
+  echo "runner io gate: exit $io_gate_status (0 quiet, 75 still contended after four windows), report $io_gate_report"
+  if [ "$M3NATIVE_IO_GATE" = "required" ] && [ "$io_gate_status" -ne 0 ]; then
+    echo "M3NATIVE_IO_GATE=required: the host was not quiet before the run (runner_io_gate exit $io_gate_status);" \
+      "refusing the arm" >&2
+    exit 1
+  fi
+fi
 # The tt-metal watcher (TT_METAL_WATCHER=20, inherited from the fp2u lane's hang diagnosis)
 # compiles NoC sanitisation and waypoints into every kernel. The same folded SDPA decode
 # call costs 0.46 ms on card M without it and 2.05 ms in the gate's device profile with
@@ -833,6 +905,8 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_GDN_SEQ_BLOCK:+-e QWEN_FAST_GDN_SEQ_BLOCK=1} \
   ${M3NATIVE_GDN_SEQ_BLOCK_LEVEL:+-e QWEN_FAST_GDN_SEQ_BLOCK_LEVEL=$M3NATIVE_GDN_SEQ_BLOCK_LEVEL} \
   ${M3NATIVE_GDN_SEQ_BLOCK_AUDIT:+-e QWEN_FAST_GDN_SEQ_BLOCK_AUDIT=$M3NATIVE_GDN_SEQ_BLOCK_AUDIT} \
+  ${M3NATIVE_PUBLISH_PREWARM:+-e QWEN_FAST_PUBLISH_PREWARM=1} \
+  ${M3NATIVE_SEQ_PUBLISH_LOG:+-e QWEN_FAST_SEQ_PUBLISH_LOG=1} \
   ${M3NATIVE_REPLAY_GROUP_ROWS:+-e QWEN_FAST_REPLAY_GROUP_ROWS=$M3NATIVE_REPLAY_GROUP_ROWS} \
   ${M3NATIVE_SDPA_MODES:+-e QWEN_FAST_SDPA_MODES=$M3NATIVE_SDPA_MODES} \
   ${M3NATIVE_GDN_USER_BATCH_MIN_USERS:+-e QWEN_FAST_GDN_USER_BATCH_MIN_USERS=$M3NATIVE_GDN_USER_BATCH_MIN_USERS} \
@@ -910,6 +984,12 @@ timeout -k 30 2200 docker run --rm --name "$name" --network none \
   ${M3NATIVE_PROMPT_SOURCE:+--prompt-source $M3NATIVE_PROMPT_SOURCE} ${M3NATIVE_EOS:+--eos $M3NATIVE_EOS} \
   --references /bench/packed-gate-reference $allow_missing_references --results /experiment-results-gate \
   > experiment-results/m3native-gate-stdout.log 2>&1 || true
+if [ -n "$host_sampler_pid" ]; then
+  kill "$host_sampler_pid" 2>/dev/null || true
+  wait "$host_sampler_pid" 2>/dev/null || true
+  host_sampler_lines=$(wc -l < experiment-results/host-pressure.log 2>/dev/null || echo 0)
+  echo "host sampler: stopped after the container, $host_sampler_lines lines"
+fi
 
 if [ "${M3NATIVE_PROFILE:-}" = "1" ]; then
   # tracy wrote its .logs as root inside the bind mount; the runner user could not
