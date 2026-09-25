@@ -8,7 +8,7 @@ import urllib.request
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:8010'
 MODEL = sys.argv[2] if len(sys.argv) > 2 else 'Qwen/Qwen3.8-27B'
-ONLY = set(sys.argv[3].split(',')) if len(sys.argv) > 3 else None
+ONLY = set(filter(None, sys.argv[3].split(','))) if len(sys.argv) > 3 else None
 results = {}
 
 
