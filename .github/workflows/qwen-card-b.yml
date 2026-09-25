@@ -1,6 +1,6 @@
 name: Qwen card B job
-# One job per tag on the dedicated card-B runner (label thatch-qwen-p150a-card-b, org runner group
-# qwen-card-b, runner thatch-qwen-cardb-01 on the control-plane rig). Card B is the PCIe-only qualification
+# One job per tag on the dedicated card-B runner (its only label is thatch-qwen-p150a-card-b; org runner group
+# qwen-card-b, open to every private org repository; runner thatch-qwen-cardb-01 on the control-plane rig). Card B is the PCIe-only qualification
 # card (board blackhole-F36F768B9A5CAFA0, PCI 0000:f4:00.0); cards M and A, the serving pair, belong to the
 # p150a-pair runner and are never opened here.
 #
@@ -14,7 +14,9 @@ permissions:
   contents: read
 jobs:
   card-b:
-    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-card-b]
+    # The runner was registered with --no-default-labels: a job must name this label alone, and no generic
+    # [self-hosted, linux, x64] job from any org repository can land on card B's runner.
+    runs-on: [thatch-qwen-p150a-card-b]
     timeout-minutes: 150
     env:
       CARD_B_ID: blackhole-F36F768B9A5CAFA0
