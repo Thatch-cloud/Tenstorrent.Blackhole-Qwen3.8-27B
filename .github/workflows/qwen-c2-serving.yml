@@ -43,7 +43,7 @@ jobs:
                   key, _, value = line.partition('=')
                   values[key.strip()] = value.strip()
           actions = values.get('C2_ACTIONS', 'status').split()
-          assert set(actions) <= {'status', 'platform', 'reset', 'build', 'smoke', 'replay', 'push'}, actions
+          assert set(actions) <= {'status', 'platform', 'priority', 'reset', 'build', 'smoke', 'replay', 'push'}, actions
           assert re.fullmatch(r'[0-9a-z.-]{3,40}', values.get('C2_IMAGE_TAG', '')), 'C2_IMAGE_TAG'
           assert values.get('C2_PROFILE', 'general') in ('general', 'coding', 'exact')
           print('actions=' + ' '.join(actions))
@@ -94,6 +94,42 @@ jobs:
               | grep -v -E '^\[[0-9a-f]+:[0-9]+\] \[ *[0-9]+\]' | tail -80
           done
           echo "=== agent"; journalctl --user -u thatch-node-agent --since -30min --no-pager 2>&1 | grep -v -i heartbeat | tail -40
+      - name: CPU priority for the serving container
+        if: contains(steps.job.outputs.actions, 'priority')
+        working-directory: c2
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Measures the live serving container's decode before and after: system.slice's CPUWeight
+          # raised to kubepods.slice's (persistent systemd drop-in), and ci-docker-fence taught to
+          # give every thatch-inference-* container weight 10000 on cores 0-15,32-47 as it starts.
+          results="$RUNNER_TEMP/c2-results"
+          c=$(docker ps --format '{{.Names}}' | grep '^thatch-inference-' | head -1)
+          test -n "$c" || { echo "no serving container running" >&2; exit 1; }
+          port=$(docker port "$c" 8000/tcp | head -1 | sed 's/.*://')
+          id=$(docker inspect -f '{{.Id}}' "$c")
+          scope=/sys/fs/cgroup/system.slice/docker-$id.scope
+          show() {
+            echo "--- $1: loadavg $(cut -d' ' -f1-3 /proc/loadavg)"
+            for f in /sys/fs/cgroup/kubepods.slice/cpu.weight /sys/fs/cgroup/system.slice/cpu.weight "$scope/cpu.weight" \
+                     "$scope/cpuset.cpus" "$scope/cpu.max"; do printf '%s = %s\n' "$f" "$(cat "$f" 2>/dev/null)"; done
+            grep -E 'nr_throttled|throttled_usec' "$scope/cpu.stat" | tr '\n' ' '; echo
+            echo "busy ARC runner pods: $(sudo -n k3s kubectl -n arc-runners get pods --no-headers 2>/dev/null | grep -c Running)"
+          }
+          measure() {
+            python3 scripts/ci/c2_decode_probe.py "http://127.0.0.1:$port" "$1" 3 | tee -a "$results/priority.log"
+          }
+          show before | tee "$results/priority.log"
+          measure before
+          echo "=== fence script before"; sudo -n cat /usr/local/bin/ci-docker-fence.sh | head -40
+          sudo -n systemctl set-property system.slice CPUWeight=2500
+          sudo -n install -m 0755 scripts/ci/rig/ci-docker-fence.sh /usr/local/bin/ci-docker-fence.sh
+          sudo -n systemctl restart ci-docker-fence.service
+          sleep 5
+          sudo -n systemctl status ci-docker-fence.service --no-pager | tail -6
+          show after | tee -a "$results/priority.log"
+          measure after
       - name: Reset cards M and A
         if: contains(steps.job.outputs.actions, 'reset')
         working-directory: c2
