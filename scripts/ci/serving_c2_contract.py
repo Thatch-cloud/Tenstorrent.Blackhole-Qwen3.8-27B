@@ -146,7 +146,7 @@ def prompt_length(prompt):
     return None
 
 
-def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids):
+def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids, max_prompt_tokens=None):
     """Refuse what the fast path cannot serve; coerce the rest to its greedy contract."""
     if getattr(params, 'n', 1) != 1:
         raise ContractError('n must be 1 on this model')
@@ -164,10 +164,13 @@ def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids):
         raise ContractError('min_tokens is not supported on this model')
     if any(token not in eos_ids for token in (getattr(params, 'stop_token_ids', None) or ())):
         raise ContractError('stop_token_ids other than the model end-of-sequence tokens are not supported')
-    room = max_model_len - budget
+    # The profile may cap prompts below context less budget: the KV cache is sized for
+    # max-num-seqs x (max_prompt_tokens + budget), not x max_model_len, and the fast path
+    # has no preemption to fall back on when a request outgrows it.
+    room = max_model_len - budget if max_prompt_tokens is None else min(max_model_len - budget, max_prompt_tokens)
     if prompt_tokens is not None and prompt_tokens > room:
-        raise ContractError('prompt of %d tokens exceeds %d: the %d-token context less the %d-token output '
-                            'budget' % (prompt_tokens, room, max_model_len, budget))
+        raise ContractError('prompt of %d tokens exceeds the %d-token prompt limit of this model (%d-token '
+                            'output budget)' % (prompt_tokens, room, budget))
     # Greedy: the fast path's verifier commits argmax tokens whatever these say, and the
     # first token is sampled by vLLM from them, so they must agree with it.
     params.temperature = 0.0
@@ -184,7 +187,7 @@ def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids):
     return params
 
 
-def install_request_contract(module, *, budget, eos_ids):
+def install_request_contract(module, *, budget, eos_ids, max_prompt_tokens=None):
     processor = module.InputProcessor
     if getattr(processor, '_qwen_c2_contract', False):
         return
@@ -193,12 +196,14 @@ def install_request_contract(module, *, budget, eos_ids):
     def process_inputs(self, request_id, prompt, params, *args, **kwargs):
         if hasattr(params, 'temperature'):
             enforce_request(params, prompt_tokens=prompt_length(prompt),
-                            max_model_len=self.model_config.max_model_len, budget=budget, eos_ids=eos_ids)
+                            max_model_len=self.model_config.max_model_len, budget=budget, eos_ids=eos_ids,
+                            max_prompt_tokens=max_prompt_tokens)
         return original(self, request_id, prompt, params, *args, **kwargs)
 
     processor.process_inputs = process_inputs
     processor._qwen_c2_contract = True
-    log('request contract installed: greedy, max_tokens <= %d, eos %s', budget, sorted(eos_ids))
+    log('request contract installed: greedy, max_tokens <= %d, prompt <= %s, eos %s', budget,
+        max_prompt_tokens or 'context - budget', sorted(eos_ids))
 
 
 class PostImportHook(object):
@@ -244,5 +249,6 @@ def boot(environ=None, orig_argv=None):
         log('mesh %s, output budget %d, context %s', environ['TT_MESH_GRAPH_DESC_PATH'], budget,
             profile['engine'].get('max-model-len'))
         sys.meta_path.insert(0, PostImportHook(
-            INPUT_PROCESSOR, lambda module: install_request_contract(module, budget=budget, eos_ids=eos_ids)))
+            INPUT_PROCESSOR, lambda module: install_request_contract(
+                module, budget=budget, eos_ids=eos_ids, max_prompt_tokens=profile.get('max_prompt_tokens'))))
     return profile

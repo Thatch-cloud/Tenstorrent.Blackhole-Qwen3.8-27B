@@ -24,9 +24,10 @@ class Params(object):
             setattr(self, key, value)
 
 
-def enforce(params, prompt_tokens=1000, max_model_len=65792, budget=4096):
+def enforce(params, prompt_tokens=1000, max_model_len=131328, budget=4096, max_prompt_tokens=61440):
     return contract.enforce_request(params, prompt_tokens=prompt_tokens, max_model_len=max_model_len,
-                                    budget=budget, eos_ids=frozenset((248046, 248044)))
+                                    budget=budget, eos_ids=frozenset((248046, 248044)),
+                                    max_prompt_tokens=max_prompt_tokens)
 
 
 class ProfileTest(unittest.TestCase):
@@ -53,11 +54,17 @@ class ProfileTest(unittest.TestCase):
         for name in ('exact', 'coding'):
             profile = contract.load_profile(PROFILES, name)
             engine, env = profile['engine'], profile['env']
+            budget = int(env['QWEN_FAST_OUTPUT_BUDGET'])
             capacity = int(env['QWEN_DSPARK_REQUEST_CONTEXT']) + 256
             self.assertEqual(engine['max-model-len'], capacity, name)
             self.assertEqual(int(env['QWEN_FAST_MAX_POSITION']), capacity, name)
-            self.assertEqual(engine['num-gpu-blocks-override'], engine['max-num-seqs'] * capacity // 64, name)
-            self.assertEqual(int(env['QWEN_FAST_OUTPUT_BUDGET']) % 256, 0, name)
+            # ordered_cache admits page tables up to 1024 pages or exactly 2052 (131,328 positions).
+            self.assertIn(capacity // 64, (2052,) + tuple(range(1, 1025)), name)
+            self.assertEqual(budget % 256, 0, name)
+            # Every admitted request fits the KV cache at once: no preemption on the fast path.
+            longest = min(capacity - budget, profile.get('max_prompt_tokens') or capacity) + budget
+            self.assertGreaterEqual(engine['num-gpu-blocks-override'],
+                                    engine['max-num-seqs'] * -(-longest // 64), name)
 
     def test_default_profile_is_coding(self):
         environ = dict(os.environ)
@@ -85,7 +92,7 @@ class ArgvTest(unittest.TestCase):
         self.assertEqual(argv.count('--model'), 1)
         self.assertEqual(argv[argv.index('--model') + 1], '/snap')
         self.assertEqual(argv.count('--max-model-len'), 1)
-        self.assertEqual(argv[argv.index('--max-model-len') + 1], '65792')
+        self.assertEqual(argv[argv.index('--max-model-len') + 1], '131328')
         self.assertNotIn('--max_num_seqs=2', argv)
         self.assertEqual(argv.count('--additional-config'), 1)
         self.assertNotIn('FABRIC_1D', ' '.join(argv))
@@ -131,10 +138,13 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(enforce(Params(max_tokens=100000), prompt_tokens=61000).max_tokens, 4096)
         self.assertEqual(enforce(Params(max_tokens=None), prompt_tokens=None).max_tokens, 4096)
 
-    def test_prompt_must_leave_the_output_budget(self):
-        enforce(Params(), prompt_tokens=65792 - 4096)
+    def test_prompt_limits(self):
+        enforce(Params(), prompt_tokens=61440)
         with self.assertRaises(contract.ContractError):
-            enforce(Params(), prompt_tokens=65792 - 4095)
+            enforce(Params(), prompt_tokens=61441)
+        enforce(Params(), prompt_tokens=65792 - 4096, max_model_len=65792, max_prompt_tokens=None)
+        with self.assertRaises(contract.ContractError):
+            enforce(Params(), prompt_tokens=65792 - 4095, max_model_len=65792, max_prompt_tokens=None)
 
     def test_what_the_fast_path_cannot_serve_is_refused(self):
         for values in (dict(n=2), dict(logprobs=1), dict(prompt_logprobs=0), dict(structured_outputs=object()),
@@ -148,7 +158,7 @@ class RequestTest(unittest.TestCase):
         calls = []
 
         class InputProcessor(object):
-            model_config = types.SimpleNamespace(max_model_len=65792)
+            model_config = types.SimpleNamespace(max_model_len=131328)
 
             def process_inputs(self, request_id, prompt, params, *args, **kwargs):
                 calls.append((request_id, params.temperature, params.max_tokens, args, kwargs))
@@ -156,14 +166,16 @@ class RequestTest(unittest.TestCase):
 
         module = types.ModuleType('fake_input_processor')
         module.InputProcessor = InputProcessor
-        contract.install_request_contract(module, budget=4096, eos_ids=frozenset((248046,)))
-        contract.install_request_contract(module, budget=4096, eos_ids=frozenset((248046,)))
+        contract.install_request_contract(module, budget=4096, eos_ids=frozenset((248046,)), max_prompt_tokens=61440)
+        contract.install_request_contract(module, budget=4096, eos_ids=frozenset((248046,)), max_prompt_tokens=61440)
         result = InputProcessor().process_inputs('r1', {'type': 'token', 'prompt_token_ids': [1] * 1000},
                                                  Params(), ('generate',), arrival_time=1.0)
         self.assertEqual(result, 'request')
         self.assertEqual(calls, [('r1', 0.0, 4096, (('generate',),), {'arrival_time': 1.0})])
         with self.assertRaises(contract.ContractError):
             InputProcessor().process_inputs('r2', {'prompt_token_ids': [1] * 10}, Params(n=3), ())
+        with self.assertRaises(contract.ContractError):
+            InputProcessor().process_inputs('r3', {'prompt_token_ids': [1] * 61441}, Params(), ())
 
     def test_prompt_length_reads_token_prompts(self):
         self.assertEqual(contract.prompt_length({'type': 'token', 'prompt_token_ids': [1, 2]}), 2)
