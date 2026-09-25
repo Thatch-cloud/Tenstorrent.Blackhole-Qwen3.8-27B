@@ -94,7 +94,10 @@ def apply_environment(profile, environ=None):
     for key, value in profile['env'].items():
         environ[key] = str(value)
     environ['TT_MESH_GRAPH_DESC_PATH'] = profile['mesh_graph_descriptor']
-    environ.pop('QWEN36_BATCHED_DECODE_MODE', None)
+    # The fast path was measured without it; the stock decode path (general profile) is what
+    # it configures, and the platform bakes it =host, so that profile keeps it.
+    if profile.get('drop_batched_decode_mode', True):
+        environ.pop('QWEN36_BATCHED_DECODE_MODE', None)
     return environ
 
 

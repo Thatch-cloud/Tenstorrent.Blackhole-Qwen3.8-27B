@@ -150,7 +150,8 @@
           }
         }
       },
-      "request_contract": false
+      "request_contract": false,
+      "drop_batched_decode_mode": false
     }
   }
 }

@@ -85,6 +85,8 @@ class GeneralProfileTest(unittest.TestCase):
         additional = json.loads(argv[argv.index('--additional-config') + 1])
         self.assertNotIn('qwen_fast_t16', additional)
         self.assertIs(profile['request_contract'], False)
+        environ = contract.apply_environment(profile, {'QWEN36_BATCHED_DECODE_MODE': 'host'})
+        self.assertEqual(environ['QWEN36_BATCHED_DECODE_MODE'], 'host')
 
 
 class ArgvTest(unittest.TestCase):
