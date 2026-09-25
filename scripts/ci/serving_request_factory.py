@@ -1,12 +1,104 @@
 """Build a request from completed serving prefill, without reference generation."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 from serving_fast_request import FastRequest
-from serving_fast_policy import OUTPUT_BUDGET, validate_request_sampling
+from serving_fast_policy import OUTPUT_BUDGET, any_request_enabled, validate_request_sampling
 from serving_page_binding import validate_initial_capture_pages
+
+
+# The widest capture below which an engine's verify never replays attention: model_batch
+# replays only blocks of eight rows or more (ModelBatch.attention_replay = replay and rows >= 8)
+# and attention_request_plan captures every narrower width exactly once, at the request's own
+# position, replay or not. Beside the four-user block the engines capture 1, 2 and 4 rows
+# (packed_shapes.M3_SEQUENTIAL_CAPTURE_ROWS), so none of their device programs depends on the
+# replay switch.
+REPLAY_MIN_ROWS = 8
+
+
+class RequestRefused(ValueError):
+    """A host-side refusal of ONE request, raised before it has touched any device state: the
+    sampling contract, the fresh-prefill shape, the seed, the KV group and the page check at the
+    top of from_prefill. Under QWEN_FAST_ANY_REQUEST the lifecycle ends that request as
+    FINISHED_ABORTED and keeps the engine (serving_lifecycle); without it nothing raises this."""
+
+
+@contextmanager
+def host_refusals(enabled):
+    """Re-raise a ValueError from the enclosed host-side checks as RequestRefused when
+    `enabled`, with the same message; disabled, the original exception propagates untouched."""
+    try:
+        yield
+    except RequestRefused:
+        raise
+    except ValueError as refusal:
+        if not enabled:
+            raise
+        raise RequestRefused(str(refusal)) from refusal
+
+
+def request_budget(parameters, *, prompt_tokens, capacity, ceiling=None):
+    """One request's output budget under QWEN_FAST_ANY_REQUEST: its own max_tokens, within the
+    server ceiling (OUTPUT_BUDGET) and the room its page table leaves after the prompt.
+
+    The session counts the prefill seed as its first emitted token, exactly as vLLM counts it
+    against max_tokens, so a session built with this budget finishes on the round vLLM stops
+    scheduling the request; real_remaining_budget (serving_worker_hook) stays the backstop."""
+    ceiling = OUTPUT_BUDGET if ceiling is None else ceiling
+    max_tokens = getattr(parameters, 'max_tokens', None)
+    if any(type(value) is not int for value in (max_tokens, prompt_tokens, capacity, ceiling)):
+        raise ValueError('Integer max_tokens, prompt length, page capacity and ceiling required for a request budget')
+    if max_tokens < 1 or ceiling < 1 or not 1 <= prompt_tokens < capacity:
+        raise ValueError('A request budget needs max_tokens >= 1 and a prompt inside its page capacity; '
+                         'max_tokens=%d prompt=%d capacity=%d' % (max_tokens, prompt_tokens, capacity))
+    return min(max_tokens, ceiling, capacity - prompt_tokens)
+
+
+def sequential_captures(capture_rows):
+    """Whether an engine capped at `capture_rows` captures only widths that never replay."""
+    return capture_rows is not None and capture_rows < REPLAY_MIN_ROWS
+
+
+_ATTACH_QUALIFICATION = {}
+
+
+def attach_source_check(directory=None, *, qualify=None, log=None):
+    """The source qualification the per-request T16 gate used to carry, run once per process.
+
+    An engine built with target_attention_t16=True runs, at every admission,
+    target_t16_attention_gate.qualify(<verifier_engine's directory>) (verifier_engine.py:167-169).
+    Staged, that is frozen_combined_runtime.qualify_target -> qualify: every component source the
+    frozen evidence reports pin (draft-numerical.json and target-replay.json 'sources'), hashed
+    against the tree the process runs - the check that refused image v42. Under
+    QWEN_FAST_ANY_REQUEST the engines are built without that gate, so this calls the SAME
+    function on the SAME directory, once, at attach: a mismatch raises and the attach fails,
+    before any request. Cached per directory, so a second attach in one process does not rehash.
+
+    `qualify` and `log` are injectable for tests; by default the image's own (staged)
+    target_t16_attention_gate.qualify and this module's _log."""
+    if directory is None:
+        import verifier_engine
+
+        directory = Path(verifier_engine.__file__).parent
+    directory = Path(directory)
+    key = str(directory)
+    if key in _ATTACH_QUALIFICATION:
+        return _ATTACH_QUALIFICATION[key]
+    if qualify is None:
+        from target_t16_attention_gate import qualify
+    evidence = qualify(directory)
+    if not isinstance(evidence, dict) or not evidence:
+        raise ValueError('The attach-time source qualification must return its evidence, got %r' % (evidence,))
+    _ATTACH_QUALIFICATION[key] = evidence
+    sources = evidence.get('runtime_component_sources')
+    (_log if log is None else log)(
+        '[PINDIAG] attach source check: {} qualified once per process for engines without the per-request '
+        'T16 gate ({} pinned component sources, report {})', key,
+        len(sources) if isinstance(sources, dict) else 'unreported', evidence.get('report_sha256', 'unreported'))
+    return evidence
 
 
 def device_components():
@@ -64,38 +156,53 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                  collectives=None, buffer_pool=None, shared_weights=None, capture_rows=None):
     from dflash_request_runtime import TARGET_TAPS
 
-    prompt = tuple(state.prompt_token_ids)
-    validate_request_sampling(state.sampling_params, prompt_tokens=len(prompt), eos_ids=eos_ids)
-    # The frontier. Under whole-prompt prefill this is zero: the request arrives fresh
-    # and is prefilled inside the step, so anything else means it had been advanced
-    # already. Under CHUNKED prefill the seed is emitted on the final chunk, by which
-    # point the earlier chunks are counted - run 35696842354 reached here with 30720 of
-    # 32768 after sixteen chunks, and was refused for it.
-    #
-    # What the clause protects is that the request has not DECODED: the seed being
-    # adopted must be this prefill's own first token, not a continuation of a stream
-    # already in flight. That is frontier < len(prompt), true of both shapes, and still
-    # false for an advanced request. On the unchunked path nothing has run, so zero
-    # stays the only value it can take there.
-    frontier = state.num_computed_tokens
-    if (len(state.output_token_ids) != 1
-            or type(frontier) is not int or not 0 <= frontier < len(prompt)
-            or not isinstance(state.req_id, str) or not state.req_id
-            or len(helpers) != 48):
-        raise ValueError('Fresh native prefill with the frontier inside the prompt, one emitted seed '
-                         'and all GDN helpers required; frontier=%r prompt=%d emitted=%d helpers=%d'
-                         % (frontier, len(prompt), len(state.output_token_ids), len(helpers)))
-    seed = state.output_token_ids[0]
-    if type(seed) is not int or not 0 <= seed < model.args.vocab_size:
-        raise ValueError('Valid target-selected prefill seed required')
-    # Only when EOS is honoured. Under ignore_eos the request keeps decoding, so it
-    # needs a verifier exactly like any other - run 35442208627 stopped here after
-    # the lifecycle had already been corrected for the same assumption one layer up.
-    if seed in eos_ids and not getattr(state.sampling_params, 'ignore_eos', False):
-        raise ValueError('Terminal prefill must finish without allocating a verifier')
-    if len(state.block_ids) != 1:
-        raise ValueError('One scheduler-owned KV group required')
-    validate_initial_capture_pages(pages, state.block_ids[0], position=len(prompt), output_budget=OUTPUT_BUDGET)
+    # QWEN_FAST_ANY_REQUEST (C2-any, serving_fast_policy.any_request_enabled; default off).
+    # Off, every value below is what it always was: the server's OUTPUT_BUDGET for every
+    # request, the snapshot EOS for every session, replay attention and the T16 gate for every
+    # engine, and plain ValueErrors from the host checks.
+    any_request = any_request_enabled()
+    # Everything up to the slot adoption is host-side: nothing below has touched the device
+    # yet. Under C2-any a refusal here is this request's alone (RequestRefused), which the
+    # lifecycle ends as FINISHED_ABORTED instead of failing the engine.
+    with host_refusals(any_request):
+        prompt = tuple(state.prompt_token_ids)
+        validate_request_sampling(state.sampling_params, prompt_tokens=len(prompt), eos_ids=eos_ids)
+        # The frontier. Under whole-prompt prefill this is zero: the request arrives fresh
+        # and is prefilled inside the step, so anything else means it had been advanced
+        # already. Under CHUNKED prefill the seed is emitted on the final chunk, by which
+        # point the earlier chunks are counted - run 35696842354 reached here with 30720 of
+        # 32768 after sixteen chunks, and was refused for it.
+        #
+        # What the clause protects is that the request has not DECODED: the seed being
+        # adopted must be this prefill's own first token, not a continuation of a stream
+        # already in flight. That is frontier < len(prompt), true of both shapes, and still
+        # false for an advanced request. On the unchunked path nothing has run, so zero
+        # stays the only value it can take there.
+        frontier = state.num_computed_tokens
+        if (len(state.output_token_ids) != 1
+                or type(frontier) is not int or not 0 <= frontier < len(prompt)
+                or not isinstance(state.req_id, str) or not state.req_id
+                or len(helpers) != 48):
+            raise ValueError('Fresh native prefill with the frontier inside the prompt, one emitted seed '
+                             'and all GDN helpers required; frontier=%r prompt=%d emitted=%d helpers=%d'
+                             % (frontier, len(prompt), len(state.output_token_ids), len(helpers)))
+        seed = state.output_token_ids[0]
+        if type(seed) is not int or not 0 <= seed < model.args.vocab_size:
+            raise ValueError('Valid target-selected prefill seed required')
+        # Only when EOS is honoured. Under ignore_eos the request keeps decoding, so it
+        # needs a verifier exactly like any other - run 35442208627 stopped here after
+        # the lifecycle had already been corrected for the same assumption one layer up.
+        ignore_eos = getattr(state.sampling_params, 'ignore_eos', False)
+        if seed in eos_ids and not ignore_eos:
+            raise ValueError('Terminal prefill must finish without allocating a verifier')
+        if len(state.block_ids) != 1:
+            raise ValueError('One scheduler-owned KV group required')
+        # The request's own budget under C2-any (request_budget: its max_tokens within the
+        # ceiling and the page room after the prompt), so the session, the drafter and its
+        # proposal trace stop where vLLM stops the request; the server ceiling otherwise.
+        budget = (request_budget(state.sampling_params, prompt_tokens=len(prompt), capacity=int(pages.shape[1]) * 64)
+                  if any_request else OUTPUT_BUDGET)
+        validate_initial_capture_pages(pages, state.block_ids[0], position=len(prompt), output_budget=budget)
     # After the host-side refusals, so a rejected request touches no device state, and
     # before the drafter, the engine and every other reader of slot 0.
     adopt_prefill_slot(helpers, capture, state.req_id)
@@ -143,7 +250,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         device = components.device(operations, model,
             collectives if collectives is not None and shared_ccl else components.collectives(model.mesh_device),
             layers, projection, selector, _qwen_outputs, position=len(prompt),
-            block_rows=16, proposal_capture=True, max_new_tokens=OUTPUT_BUDGET,
+            block_rows=16, proposal_capture=True, max_new_tokens=budget,
             fused_convolution=True, feature_start=max(0, len(prompt) - 2048),
             cache_history=True, cache_projection_capture=False, live_query_qk=False,
             native_proposal_attention=True, defer_proposal_capture=True, buffer_pool=buffer_pool,
@@ -151,9 +258,12 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         owned.callback(device.close)
         release_capture()
         runtime = components.runtime(device, position=len(prompt))
+        # D4 (C2-any only): under ignore_eos vLLM keeps scheduling the request past an EOS, so
+        # the session must not finish there either - with the snapshot EOS it did, and the
+        # request then had nothing to decode on (B4 5b). eos_ids=() leaves only the budget.
         session = components.session(state.req_id, prompt, seed, vocab_size=model.args.vocab_size,
-            max_new_tokens=OUTPUT_BUDGET, eos_ids=eos_ids, neural={'dflash2': runtime},
-            verifier_rows=16, lookup_enabled=False)
+            max_new_tokens=budget, eos_ids=() if any_request and ignore_eos else eos_ids,
+            neural={'dflash2': runtime}, verifier_rows=16, lookup_enabled=False)
 
         def prepare_proposal(engine):
             if device.proposal_capture is not None:
@@ -166,7 +276,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                 # like. DFlashDevice.propose already runs eagerly when this is None,
                 # so leaving it unset isolates the trace as a variable.
                 return
-            device.proposal_capture = components.proposal(device, max_new_tokens=OUTPUT_BUDGET)
+            device.proposal_capture = components.proposal(device, max_new_tokens=budget)
 
         # The T16 gate compares these four for equality and run 35474038724 passed
         # position=32768 from len(prompt) yet still failed, so report what the gate
@@ -189,13 +299,28 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         # Only when the slot carries it, so a pool without verifier storage leaves the
         # engine allocating as before.
         verifier_storage = getattr(getattr(device, 'pool_slot', None), 'verifier', None)
+        # Phase 0 (C2-any only, plan S1 item 1). Beside the four-user block the runtime caps
+        # the captures below eight rows, which never replay (REPLAY_MIN_ROWS) and are captured
+        # once each at the request's own position either way, so replay attention changes none
+        # of this engine's device programs - it only keys the buckets by a mask-family plan and
+        # routes the engine through the T16 gate, which admits nothing but the frozen context
+        # with <= 256 left (frozen_combined_runtime.validate_target_option; smoke v3 died on
+        # a 54-token warmup there). Both off here; the gate's source check runs once at attach
+        # instead (attach_source_check). The pool lends buckets by width alone
+        # (serving_buffer_pool.VerifierSlot.take) and its replay tables exist only for rows
+        # >= 8, so the engine borrows exactly what it did. Anywhere else, unchanged.
+        sequential = any_request and sequential_captures(capture_rows)
+        if sequential:
+            _log('[PINDIAG] any-request engine for {}: captures <= {} rows, replay attention and the T16 gate '
+                 'off, budget {} of max_tokens {} at position {}{}', state.req_id, capture_rows, budget,
+                 state.sampling_params.max_tokens, len(prompt), ', ignore_eos' if ignore_eos else '')
         # capture_rows: the serving runtime's cap on this engine's captures beside a packed
         # block (packed_shapes.sequential_capture_rows); only when it caps, so a runtime
         # without one calls the engine exactly as before.
         engine = components.engine(model, session, pages, helpers, sampler=sampler,
-            norm_batch=True, attention_replay=True, replay_group_rows=4, max_verify_rows=16,
+            norm_batch=True, attention_replay=not sequential, replay_group_rows=4, max_verify_rows=16,
             native_sampling_rows=True, retain_feature_taps=TARGET_TAPS,
-            commit_only_gdn=True, target_attention_t16=True, before_capture=prepare_proposal,
+            commit_only_gdn=True, target_attention_t16=not sequential, before_capture=prepare_proposal,
             **(dict(storage=verifier_storage) if verifier_storage is not None else {}),
             **(dict(capture_rows=capture_rows) if capture_rows is not None else {}))
         owned.callback(engine.close)
