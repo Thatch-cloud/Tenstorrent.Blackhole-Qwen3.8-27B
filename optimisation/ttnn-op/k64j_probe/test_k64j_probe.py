@@ -432,7 +432,7 @@ class HelperTests(unittest.TestCase):
         report['decision'] = probe.decide(report)
         line = probe.verdict_line(report)
         self.assertTrue(line.startswith('K64J_P0 verdict=NO-GO split=1/2 extent=none trace=none skip=none '
-                                        'served=1/1 live=1/1 half_tile=none dynamic_chunk=none '
+                                        'served=1/1 served_pnht1=none live=1/1 half_tile=none dynamic_chunk=none '
                                         'skipped_rows=unwritten flag_0x20=unknown families=0 binary_stage=4 '
                                         'first_differing=["x"]'), line)
 
@@ -1038,7 +1038,8 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(kinds['half_tile_vs_legacy'], (12, 12))
         # E: G4B3 (0x1, 0x3) and G8B2 (0x1, 0x3, 0x7) at 3 extents.
         self.assertEqual(kinds['extent_vs_legacy'], (6, 6))
-        self.assertEqual(kinds['served_vs_legacy'], (2 * 24 + 3 * 5, 2 * 24 + 3 * 5))
+        self.assertEqual(kinds['served_vs_legacy'], (15, 15))                       # E: 2 x 3 + 3 x 3
+        self.assertEqual(kinds['served_unqualified_vs_legacy'], (48, 48))           # S: 2 rows x 12 entries x 2
         self.assertEqual(kinds['trace_vs_eager'], (6, 6))
         self.assertEqual(kinds['trace_vs_legacy'], (6, 6))
         self.assertEqual(kinds['trace_skip_live'], (5, 5))
@@ -1058,7 +1059,7 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(report['requested_programs'], sorted(report['requested_programs']))
         self.assertIn([0x7, 2, 4352 // 32, 4352 // 32], report['requested_programs'])
         self.assertTrue(report['verdict_line'].startswith('K64J_P0 verdict=GO split=12/12 extent=6/6 trace=12/12 '
-                                                          'skip=10/10 served=63/63 live=18/18 half_tile=12/12 '
+                                                          'skip=10/10 served=15/15 served_pnht1=48/48 live=18/18 half_tile=12/12 '
                                                           'dynamic_chunk=2/2 skipped_rows=unwritten flag_0x20=unknown'),
                         report['verdict_line'])
         self.assertEqual(fake.options['trace_region_size'], 16 << 20)
@@ -1112,6 +1113,13 @@ class DryRunTests(unittest.TestCase):
         status, report = self.run_probe(FakeTtnn(self.torch, broken={'served_wrong'}), ['--sections', 'E'])
         self.assertEqual((status, report['decision']['verdict']), (1, 'NO-DECISION'))
         self.assertTrue(all('served mode differs from legacy' in failure for failure in report['failures']))
+
+    def test_a_qwen_mode_on_an_unqualified_row_count_is_warned_not_failed(self):
+        fake = FakeTtnn(self.torch, broken={'served_wrong'})
+        status, report = self.run_probe(fake, ['--sections', 'S'])
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (0, [], 'GO'))
+        self.assertEqual(self.kinds(report)['served_unqualified_vs_legacy'], (0, 12))
+        self.assertEqual(sum('never-qualified row count' in warning for warning in report['warnings']), 12)
 
     def test_the_half_tile_is_recorded_and_the_verdict_stands(self):
         status, report = self.run_probe(FakeTtnn(self.torch, broken={'half_tile'}), ['--sections', 'S', '--rows', '2,1'])

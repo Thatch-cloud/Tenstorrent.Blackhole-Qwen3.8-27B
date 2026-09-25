@@ -108,8 +108,8 @@ Everything else that differs between the two programs is controlled:
 
 | Section | What | Verdict role |
 |---|---|---|
-| S | The plan's P0: 3 users per call at different positions p = E - 256 + s, where E is one of K1's six extents (2,304 ... 131,328) and s is +0, +7, +127, +240 or +255. Each user has its own table and variants normal / peaky, over seeds 0-2. The causal call is compared against the legacy call at each user's E. The served tail (0x1) and tail+share (0x3) must equal legacy. | rows 2: DECISIVE; rows 1 (half tile): recorded; served: a difference is a FAILURE |
-| E | The replay's bundles, G4B3 and G8B2, causal at E - 1 on the poisoned table, against legacy with a zero mask at E. The served 0x1 and 0x3 run too, and 0x7 on G8 with K64i. | DECISIVE |
+| S | The plan's P0: 3 users per call at different positions p = E - 256 + s, where E is one of K1's six extents (2,304 ... 131,328) and s is +0, +7, +127, +240 or +255. Each user has its own table and variants normal / peaky, over seeds 0-2. The causal call is compared against the legacy call at each user's E. The qwen tail (0x1) and tail+share (0x3) run on the same inputs; 12 and 24 rows were never qualified for them. | rows 2: DECISIVE; rows 1 (half tile): recorded; qwen modes: recorded and warned |
+| E | The replay's bundles, G4B3 and G8B2, causal at E - 1 on the poisoned table, against legacy with a zero mask at E. The served 0x1 and 0x3 run too, and 0x7 on G8 with K64i. | DECISIVE; a served mode that differs from legacy is a FAILURE (the graft is not the qualified one) |
 | liveness | `cur_pos = E` (one poisoned key into the next chunk) against `E - 1`, per entry. This is K3's "off by one chunk must change the output", and it proves the poison is live. | a dead control means NO-DECISION |
 | T | One trace of the causal call, replayed 64 times. The `cur_pos` tensor is rewritten between replays (`copy_host_to_device_tensor`, as `attention_replay.stage` does), spanning more than 50 families. Each replay must equal eager at its positions, and entry 0 must equal the compile-time call at its E. Then the skip patterns replay in the same trace. | DECISIVE |
 | K | R2, eager. `cur_pos = -1` on entries {0}, {1}, {2}, {0,2} and {0,1,2}, plus a B=1 call that skips its only user. The watchdog catches a hang. The live entries must equal the all-live call. The output is poisoned first, so the skipped rows' state is recorded. | live entries: DECISIVE; skipped rows: recorded |
@@ -117,7 +117,7 @@ Everything else that differs between the two programs is controlled:
 | N | 0x21 must be refused as unknown. A qwen sentinel on a causal call must be refused as non-causal: this is the refusal K64j relaxes. | recorded, warned |
 | timing | Runtime at E - 1 against compile-time at E. The runtime extent should pay for E keys, not C. Also the saving from 0 to 3 skipped users. | recorded |
 
-**The verdict line** is `K64J_P0 verdict=GO|NO-GO|NO-DECISION split=a/b extent=a/b trace=a/b skip=a/b served=a/b live=a/b half_tile=a/b dynamic_chunk=a/b skipped_rows=... flag_0x20=... families=N binary_stage=4`.
+**The verdict line** is `K64J_P0 verdict=GO|NO-GO|NO-DECISION split=a/b extent=a/b trace=a/b skip=a/b served=a/b served_pnht1=a/b live=a/b half_tile=a/b dynamic_chunk=a/b skipped_rows=... flag_0x20=... families=N binary_stage=4`.
 
 - **GO:** every decisive comparison is byte-equal and every liveness control moved. The runtime position reproduces
   the compile-time split on the served binary, and the skip holds.

@@ -31,9 +31,9 @@ Sections (--sections, default all):
      half tile, RECORDED), --variants normal and peaky (rows aimed at 8 visible keys each, so the running max
      moves across chunks, cores and tree rounds), --seeds. One causal call per group of B (E, s) pairs, against
      per entry: the non-causal LEGACY call at capacity E (B copies of that entry: its Q, its first E / 64 pages
-     and the mask -inf past p in the last 256 columns) - DECISIVE; and the served modes on the same inputs
-     (tail 0x1, tail+share 0x3 where the binary has them) == legacy, which a failure refuses (the graft is not the
-     qualified one). Liveness, per group and entry with E < C: the causal call at cur_pos = E (one key into the
+     and the mask -inf past p in the last 256 columns) - DECISIVE; and the qwen modes on the same inputs (tail
+     0x1, tail+share 0x3 where the binary has them) against legacy - RECORDED and warned (12 and 24 rows were
+     never qualified for them). Liveness, per group and entry with E < C: the causal call at cur_pos = E (one key into the
      next chunk, a poisoned page) must move the entry against cur_pos = E - 1 - the plan's K3 "cur_pos off by one
      chunk must change the output", and the proof that the poison is live.
   E  the replay shapes at cur_pos = E - 1: G4B3 (4-row groups, B = 3, 48 rows, PNHt 2) and G8B2 (8-row groups,
@@ -320,6 +320,7 @@ def verdict_line(report):
     words.append(part('trace', ('trace_vs_eager', 'trace_vs_legacy')))
     words.append(part('skip', ('skip_live', 'trace_skip_live')))
     words.append(part('served', ('served_vs_legacy',)))
+    words.append(part('served_pnht1', ('served_unqualified_vs_legacy',)))
     liveness = report.get('liveness', [])
     words.append('live=%d/%d' % (sum(1 for entry in liveness if entry['live']), len(liveness)))
     words.append(part('half_tile', ('half_tile_vs_legacy',)))
@@ -526,6 +527,9 @@ def record(report, entry, verbose=True):
     if entry['differing'] and entry['kind'] == 'served_vs_legacy':
         report['failures'].append('%s: served mode differs from legacy in %d elements (the mounted graft is not the '
                                   'qualified one)' % (entry['label'], entry['differing']))
+    elif entry['differing'] and entry['kind'] == 'served_unqualified_vs_legacy':
+        report['warnings'].append('%s: a qwen mode on a never-qualified row count differs from legacy in %d elements '
+                                  '(recorded; not what K64j serves)' % (entry['label'], entry['differing']))
     if verbose:
         print('%-18s %-60s %s' % (entry['kind'], entry['label'],
                                   'equal' if not entry['differing'] else 'DIFFERS(%d)' % entry['differing']),
@@ -591,9 +595,11 @@ def section_split(ttnn, torch, pool, seed, args, report):
                                                   decisive, rows=rows, batch=args.batch, extent=extent, start=start,
                                                   position=p, seed=seed, variant=variant))
                         for flags in served_flags(stage, rows, args.batch):
+                            # 12 / 24 folded rows (PNHt 1) were never qualified for the qwen modes (the replay
+                            # serves 48 and 96): recorded and warned, never a failure (section E's are).
                             served = pool.run(repeated, ref['pages'], causal=False, mask=ref['wide'],
                                               sentinel=MAGIC | flags, label=label + ' 0x%x' % flags)
-                            record(report, comparison('S', 'served_vs_legacy', '%s/0x%x' % (label, flags),
+                            record(report, comparison('S', 'served_unqualified_vs_legacy', '%s/0x%x' % (label, flags),
                                                       card.differing(torch, served, legacy), False, flags=flags))
                 # Liveness: cur_pos = E (one poisoned key more) against E - 1, on the first variant's query.
                 live_slots = [slot_index for slot_index, extent in enumerate(extents) if extent < pool.capacity]
