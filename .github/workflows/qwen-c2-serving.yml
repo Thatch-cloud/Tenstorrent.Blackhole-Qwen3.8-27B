@@ -7,7 +7,14 @@ name: Qwen C2 serving image
 #   build  - build tt-vllm:qwen38-c2-$C2_IMAGE_TAG unless present (waits for a build in flight)
 #   smoke  - run it on cards M+A shaped like the node agent's container, then the API smoke
 #            (scripts/ci/c2_serving_smoke.py); the container is always removed
+#   gate   - the m3native gate harness inside the image, in the agent's container shape, serving
+#            the contract's argv (scripts/ci/c2_serving_gate.py): C2_GATE_PLAN bringup (4 x 131072
+#            real text against v235's texts), matrix (a prompt length per user, solo vs concurrent
+#            under the exactness policy), memory (G5's DRAM lines); C2_PROFILE picks the profile
+#   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py)
 #   push   - push it to zot and print the digest
+# (status, platform, unserve, priority and reset are described at their steps.) The job file is
+# parsed by scripts/ci/c2_serving_job.py, which refuses anything these steps must not act on.
 # The smoke opens M+A, so it shares the two-card concurrency group and refuses if anything
 # holds either card or a platform serving container exists.
 on:
@@ -21,7 +28,7 @@ concurrency:
 jobs:
   c2-serving:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: 150
+    timeout-minutes: 420
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -34,26 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import re
-          values = {}
-          for line in open('.github/c2-serving-job.env', encoding='utf-8'):
-              line = line.strip()
-              if line and not line.startswith('#'):
-                  key, _, value = line.partition('=')
-                  values[key.strip()] = value.strip()
-          actions = values.get('C2_ACTIONS', 'status').split()
-          assert set(actions) <= {'status', 'platform', 'unserve', 'priority', 'reset', 'build', 'smoke', 'replay', 'push'}, actions
-          assert re.fullmatch(r'[0-9a-z.-]{3,40}', values.get('C2_IMAGE_TAG', '')), 'C2_IMAGE_TAG'
-          assert values.get('C2_PROFILE', 'general') in ('general', 'coding', 'exact')
-          print('actions=' + ' '.join(actions))
-          print('tag=' + values['C2_IMAGE_TAG'])
-          print('profile=' + values.get('C2_PROFILE', 'general'))
-          print('tests=' + values.get('C2_SMOKE_TESTS', ''))
-          platform_image = values.get('C2_PLATFORM_IMAGE', '')
-          assert not platform_image or re.fullmatch(r'[0-9a-z.:/@_-]{10,200}', platform_image), 'C2_PLATFORM_IMAGE'
-          print('platform_image=' + platform_image)
-          PY
+          python3 scripts/ci/c2_serving_job.py .github/c2-serving-job.env >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/c2-results"
       - name: Status
@@ -270,6 +258,55 @@ jobs:
             scripts/ci/build-c2-serving-image.sh 2>&1 | tee "$results/smoke.log"
           docker stats --no-stream "$name" | tee "$results/stats.txt" || true
           grep -F '[PINDIAG] dram after' <(docker logs "$name" 2>&1) | tail -8 || true
+      - name: Run the gate in the agent's container shape
+        if: contains(steps.job.outputs.actions, 'gate')
+        working-directory: c2
+        timeout-minutes: 380
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+          PROFILE: ${{ steps.job.outputs.profile }}
+          GATE_PLAN: ${{ steps.job.outputs.gate_plan }}
+          GATE_LENGTHS: ${{ steps.job.outputs.gate_lengths }}
+          GATE_MAX_TOKENS: ${{ steps.job.outputs.gate_max_tokens }}
+          GATE_MEMORY_PROMPT: ${{ steps.job.outputs.gate_memory_prompt }}
+        run: |
+          set -euo pipefail
+          # The fast path has never completed a request inside the serving image: every C2 rate was
+          # measured in the gate's own container. This runs the gate's harness inside the image, in the
+          # agent's container shape, with vLLM launched from the platform's argv so the contract's argv
+          # is what serves (c2-serve-for-real-plan 2.1 item 2, 2.2 items 5 and 7). One container per arm.
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          results="$RUNNER_TEMP/c2-results/gate"
+          docker image inspect "$image" > /dev/null
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to open M+A under it" >&2; exit 1
+          fi
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
+          echo "card M $m, card A $a"
+          # The telemetry exporter's tt-smi opens every card for a moment every 30 s: ignored, retried.
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            sudo -n fuser -v "$m" "$a" > "$RUNNER_TEMP/c2-results/gate-holders.txt" 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s "$RUNNER_TEMP/c2-results/gate-holders.txt" ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' "$RUNNER_TEMP/c2-results/gate-holders.txt" | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then echo 'M or A is held; refusing the gate' >&2; cat "$RUNNER_TEMP/c2-results/gate-holders.txt" >&2; exit 1; fi
+          status=0
+          python3 scripts/ci/c2_serving_gate.py --image "$image" --profile "$PROFILE" --plan "$GATE_PLAN" \
+            --lengths "$GATE_LENGTHS" --max-tokens "$GATE_MAX_TOKENS" \
+            ${GATE_MEMORY_PROMPT:+--memory-prompt "$GATE_MEMORY_PROMPT"} --results "$results" 2>&1 \
+            | tee "$RUNNER_TEMP/c2-results/gate.log" || status=$?
+          # Read the launched argv (memory read-the-launched-argv): the contract's own line, per arm.
+          for log in "$results"/*/server.log; do
+            [ -f "$log" ] || continue
+            echo "=== $log"; grep -F '[QWEN-C2]' "$log" | head -4 || true
+            grep -F '[PINDIAG] dram after' "$log" | tail -8 || true
+          done
+          exit "$status"
       - name: Replay the node agent's serving sequence
         if: contains(steps.job.outputs.actions, 'replay')
         working-directory: c2
@@ -277,14 +314,19 @@ jobs:
         shell: bash
         env:
           IMAGE: ${{ steps.job.outputs.platform_image }}
+          REPLAY_PROFILE: ${{ steps.job.outputs.replay_profile }}
         run: |
           set -euo pipefail
           test -n "$IMAGE"
           if docker ps --format '{{.Names}}' | grep -q '^thatch-inference-'; then
             echo "a platform serving container is running; refusing to open M+A under it" >&2; exit 1
           fi
-          python3 scripts/ci/c2_platform_replay.py --source thatch-inference-Qwen-Qwen3.8-27B --image "$IMAGE" \
-            --results "$RUNNER_TEMP/c2-results/replay"
+          # The agent's container is gone once the pair is taken for development (unserve): then the
+          # tracked record of it (replay v11's copy) is the source.
+          source=thatch-inference-Qwen-Qwen3.8-27B
+          docker inspect "$source" > /dev/null 2>&1 || source=scripts/ci/references/c2-serving/agent-container-36104200953.json
+          python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" \
+            ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} --results "$RUNNER_TEMP/c2-results/replay"
       - name: Push
         if: contains(steps.job.outputs.actions, 'push')
         shell: bash
