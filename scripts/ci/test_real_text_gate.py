@@ -139,6 +139,11 @@ class StreamOnceTests(unittest.TestCase):
         self.assertEqual((entry['tokens'], entry['text']), (2, 'Hello wor'), 'text chunks are counted as before')
         self.assertIsInstance(entry['started_s'], float)
 
+    def test_a_served_name_changes_only_the_model_field(self):
+        payload, _ = self.run_stream(model='Qwen/Qwen3.8-27B')
+        legacy, _ = self.run_stream()
+        self.assertEqual(json.loads(payload), dict(json.loads(legacy), model='Qwen/Qwen3.8-27B'))
+
     def test_a_failed_detail_stream_keeps_what_arrived(self):
         def urlopen(request, timeout):
             raise TimeoutError('timed out')
@@ -274,6 +279,203 @@ class RunTests(unittest.TestCase):
         self.assertIn('TypeError', report['acceptance']['error'])
         self.assertNotIn('error', report['decode_rate'])
         json.dumps(report)
+
+
+V235 = HERE / 'references' / 'c2-serving' / 'v235-real-text-4x131072.json'
+C2_ARGV_LINE = ('[QWEN-C2] profile exact: vLLM argv ["--served-model-name", "Qwen/Qwen3.8-27B", "--host", "0.0.0.0", '
+                '"--port", "8000", "--max-model-len", "131328"]')
+DRAM_LINES = (
+    '(EngineCore pid=88) 2026-09-25 02:41:42.032 | INFO     | dflash_device:pindiag:30 - [PINDIAG] dram after attach: '
+    'chip0 allocated=29.74GB free=4.17GB largest_free=4007.1MB of 33.91GB; chip1 allocated=29.74GB free=4.17GB '
+    'largest_free=4007.1MB of 33.91GB\n'
+    '(EngineCore pid=88) 2026-09-25 02:42:41.853 | INFO     | dflash_device:pindiag:30 - [PINDIAG] dram after engine '
+    'cmpl-ba5c3c305bfa5ec4-0-8161b507: chip0 allocated=30.42GB free=3.49GB largest_free=3309.9MB of 33.91GB; chip1 '
+    'allocated=30.42GB free=3.49GB largest_free=3309.9MB of 33.91GB\n'
+    '(EngineCore pid=88) 2026-09-25 02:45:29.184 | INFO     | dflash_device:pindiag:30 - [PINDIAG] dram after engine '
+    'cmpl-8ddc72492c897448-0-a8b5e0cc: chip0 allocated=32.59GB free=1.32GB largest_free=1123.8MB of 33.91GB; chip1 '
+    'allocated=32.60GB free=1.31GB largest_free=1120.0MB of 33.91GB\n')
+
+
+class PlatformArgvTests(unittest.TestCase):
+    """--server-argv platform: the C2 serving image's contract serves, the gate reads back what it launched."""
+
+    PLATFORM = ('--server-argv', 'platform')
+    REAL = ('--prompt-source', 'real-text', '--allow-missing-references')
+
+    def test_the_default_is_the_gate_argv_and_no_model_keyword(self):
+        options = parse()
+        self.assertEqual((options.server_argv, options.prompt_lengths, options.readiness_seconds), ('gate', None, 900))
+        self.assertEqual(gate.stream_kwargs(options), {})
+        self.assertEqual(options.snapshot, gate.MODEL)
+
+    def test_platform_streams_name_the_platforms_model(self):
+        self.assertEqual(gate.stream_kwargs(parse(*self.PLATFORM)), dict(model='Qwen/Qwen3.8-27B'))
+        options = parse(*self.PLATFORM + self.REAL + ('--context', '131328', '--prompt-tokens', '131072'))
+        self.assertEqual(gate.stream_kwargs(options), dict(ignore_eos=False, detail=True, model='Qwen/Qwen3.8-27B'))
+
+    def test_the_platform_argv_is_the_smokes(self):
+        argv = gate.platform_argv(8000)
+        self.assertEqual(argv[1:3], ['-m', 'vllm.entrypoints.openai.api_server'])
+        workflow = (HERE.parents[1] / '.github' / 'workflows' / 'qwen-c2-serving.yml').read_text(encoding='utf-8')
+        smoke = workflow[workflow.index('- name: Smoke on cards M+A'):workflow.index('- name: Replay')]
+        for flag in ('--reasoning-parser', '--tool-call-parser', '--enable-auto-tool-choice', '--max-model-len',
+                     '--max-num-seqs', '--block-size', '--no-enable-prefix-caching', '--additional-config'):
+            self.assertIn(flag, argv)
+            self.assertIn(flag, smoke)
+        self.assertIn("'%s'" % argv[argv.index('--additional-config') + 1], smoke)
+
+    def test_the_exact_profile_rewrites_the_platform_argv_to_v235s_engine(self):
+        """What the contract makes of the platform argv under 'exact' is v235's served engine: every
+        flag and value of run 36087022223's command but the served name, host and port (the
+        platform's) and the snapshot path (the agent mounts the hub at /models)."""
+        import serving_c2_contract as contract
+        profile = contract.load_profile(str(HERE / 'qwen_c2_profiles.json'), 'exact')
+        snapshot = profile['snapshots'][0]
+        platform = gate.platform_argv(8000)
+        served = contract.rewrite_argv(['/opt/venv/lib/python3.10/site-packages/vllm/entrypoints/openai/api_server.py']
+                                       + platform[3:], profile, snapshot)[1:]
+        v235 = json.loads(V235.read_text(encoding='utf-8'))['command'][3:]
+        platform_own = ('--served-model-name', '--host', '--port')
+
+        def engine(argv, drop):
+            pairs, index = {}, 0
+            while index < len(argv):
+                flag = argv[index]
+                value = argv[index + 1] if index + 1 < len(argv) and not argv[index + 1].startswith('--') else None
+                index += 2 if value is not None else 1
+                if flag not in drop:
+                    pairs[flag] = value
+            return pairs
+
+        mine = engine(served, platform_own + ('--reasoning-parser', '--tool-call-parser', '--enable-auto-tool-choice'))
+        theirs = engine(v235, platform_own)
+        self.assertEqual(mine.pop('--model'), snapshot)
+        self.assertEqual(theirs.pop('--model'), snapshot.replace('/models/', '/models/hub/'))
+        mine['--additional-config'] = json.loads(mine['--additional-config'].replace(snapshot, '@'))
+        theirs['--additional-config'] = json.loads(theirs['--additional-config'].replace(
+            snapshot.replace('/models/', '/models/hub/'), '@'))
+        self.assertEqual(mine, theirs)
+
+    def test_prompt_lengths_are_real_text_only_one_per_stream_and_fit_the_context(self):
+        options = parse(*self.PLATFORM + self.REAL + ('--context', '131328', '--users', '3',
+                                                      '--prompt-lengths', '60,2048,123136', '--max-tokens', '16384'))
+        self.assertEqual(options.prompt_lengths, [60, 2048, 123136])
+        self.assertIsNone(gate.real_text_target(options))
+        sequential = parse(*self.PLATFORM + self.REAL + ('--context', '131328', '--users', '1', '--sequential-users',
+                                                         '2', '--prompt-lengths', '255,4096'))
+        self.assertEqual(sequential.prompt_lengths, [255, 4096])
+        for argv in (('--prompt-lengths', '60,255'),                                        # synthetic
+                     self.REAL + ('--prompt-lengths', '60,255'),                            # 2 lengths, 4 users
+                     self.REAL + ('--users', '2', '--prompt-lengths', '60,x'),
+                     self.REAL + ('--users', '2', '--prompt-lengths', '60,33000'),          # past the gate context
+                     self.PLATFORM + self.REAL + ('--users', '1', '--prompt-lengths', '33024'),
+                     self.REAL + ('--users', '1', '--prompt-lengths', '32769'),             # gate: + max_tokens
+                     ('--expect-profile', 'exact'),                                         # needs platform
+                     ('--readiness-seconds', '0')):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                parse(*argv)
+        self.assertEqual(parse(*self.PLATFORM + self.REAL + ('--users', '1', '--prompt-lengths', '33023'))
+                         .prompt_lengths, [33023], 'the contract clamps max_tokens; one token of room is enough')
+
+    def test_the_launched_argv_is_read_back_from_the_contracts_line(self):
+        text = 'noise\n(APIServer pid=1) ' + C2_ARGV_LINE + '\n[QWEN-C2] request contract installed: greedy\n'
+        report = gate.platform_report(text, 'exact')
+        self.assertEqual(report['served_profile'], 'exact')
+        self.assertEqual(report['served_argv'][-2:], ['--max-model-len', '131328'])
+        self.assertEqual((report['problems'], report['contract_installed'], report['launches']), ([], True, 1))
+        self.assertEqual(len(report['qwen_c2_lines']), 2)
+        self.assertEqual(gate.platform_report(text, 'c2')['problems'], ["served profile 'exact', expected 'c2'"])
+        missing = gate.platform_report('vLLM API server version 0.25.1\n', 'exact')
+        self.assertEqual(len(missing['problems']), 1)
+        self.assertIn('did not rewrite', missing['problems'][0])
+        two = gate.platform_report(text + C2_ARGV_LINE.replace('exact', 'general') + '\n')
+        self.assertIn('2 different launched argv lines', two['problems'][0])
+
+    def test_dram_lines_are_parsed_per_chip_with_the_engine_floor(self):
+        report = gate.dram_report('x\n' + DRAM_LINES)
+        self.assertEqual([e['event'] for e in report['events']], ['attach', 'engine', 'engine'])
+        self.assertEqual(report['events'][1]['request'], 'cmpl-ba5c3c305bfa5ec4-0-8161b507')
+        self.assertEqual(report['events'][2]['chips'][1], dict(chip=1, allocated_gb=32.6, free_gb=1.31,
+                                                               largest_free_mb=1120.0, total_gb=33.91))
+        self.assertEqual((report['engines'], report['min_free_gb'], report['min_largest_free_mb']), (2, 1.31, 1120.0))
+        self.assertEqual(gate.dram_report(''), dict(events=[], engines=0, min_free_gb=None, min_largest_free_mb=None))
+
+    def run_platform(self, argv, log_text):
+        calls = []
+
+        def stream(port, prompt, max_tokens, results, index, timeout, **kwargs):
+            calls.append(dict(index=index, prompt=list(prompt), kwargs=kwargs, max_tokens=max_tokens))
+            results[index] = dict(text='answer %d' % index, finish_reason='stop', tokens=3, completion_tokens=5,
+                                  gaps_ms=[250.0], ttft_s=1.0, prompt_tokens=len(prompt))
+
+        with tempfile.TemporaryDirectory() as directory:
+            results = Path(directory, 'results')
+            results.mkdir()
+            (results / 'server.log').write_text(log_text, encoding='utf-8')
+            package = write_package(Path(directory, 'site'), code_corpus(files=200))
+            started = []
+
+            def start(*args, **kwargs):
+                started.append(kwargs)
+                return None, None, results / 'server.log', kwargs.get('command') or ['gate-argv']
+
+            with mock.patch.object(gate, 'start_server', side_effect=start), \
+                    mock.patch.object(gate, 'stop_server'), \
+                    mock.patch.object(gate, 'stream_once', side_effect=stream), \
+                    mock.patch.object(real_text_prompts, 'load_tokenizer', return_value=FakeTokenizer()), \
+                    mock.patch.object(real_text_prompts, 'package_root', return_value=package), \
+                    mock.patch.object(sys, 'argv', ['gate'] + argv + ['--results', str(results),
+                                                                     '--references', str(results)]), \
+                    redirect_stdout(io.StringIO()) as out:
+                code = gate.main()
+            text = out.getvalue()
+            report = json.loads(text[text.index(gate.BEGIN) + len(gate.BEGIN):text.index(gate.END)])
+        return code, calls, report, started
+
+    def test_a_platform_run_serves_the_platform_argv_and_records_what_the_contract_launched(self):
+        argv = list(self.PLATFORM + self.REAL) + ['--context', '131328', '--users', '3', '--prompt-lengths',
+                                                  '200,3000,2049', '--max-tokens', '4096', '--expect-profile', 'exact',
+                                                  '--readiness-seconds', '1800', '--snapshot', '/models/snap']
+        code, calls, report, started = self.run_platform(argv, C2_ARGV_LINE + '\n' + DRAM_LINES)
+        self.assertEqual(started[0]['command'], gate.platform_argv(8000))
+        self.assertEqual(started[0]['readiness_seconds'], 1800)
+        self.assertEqual(report['command'], gate.platform_argv(8000))
+        self.assertEqual(report['platform']['served_profile'], 'exact')
+        self.assertEqual(report['platform']['problems'], [])
+        self.assertEqual(report['dram']['engines'], 2)
+        self.assertEqual(sorted(len(c['prompt']) for c in calls), [200, 2049, 3000])
+        self.assertEqual(report['real_text']['prompt_lengths'], [200, 3000, 2049])
+        self.assertEqual(report['prompt_lengths_requested'], [200, 3000, 2049])
+        self.assertIsNone(report['real_text_target'])
+        self.assertTrue(all(c['kwargs']['model'] == 'Qwen/Qwen3.8-27B' for c in calls))
+        self.assertTrue(all(c['max_tokens'] == 4096 for c in calls))
+        self.assertEqual(report['real_text_stream_problems'], [])
+        self.assertEqual((report['server_argv'], report['snapshot']), ('platform', '/models/snap'))
+        self.assertEqual(code, 1, 'no packed-round evidence in a faked run')
+
+    def test_a_platform_run_without_the_contracts_line_fails_and_still_reports(self):
+        argv = list(self.PLATFORM + self.REAL) + ['--context', '131328', '--prompt-tokens', '3000', '--users', '1',
+                                                  '--sequential-users', '2']
+        code, calls, report, _ = self.run_platform(argv, 'no contract here\n')
+        self.assertEqual(code, 1)
+        self.assertIs(report['gate_passed'], False)
+        self.assertIn('did not rewrite', report['platform']['problems'][0])
+        self.assertEqual([c['index'] for c in calls], [0, 1])
+
+    def test_a_server_that_never_came_up_still_reports_its_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            results = Path(directory)
+            (results / 'server.log').write_text(C2_ARGV_LINE + '\nTraceback: boom\n', encoding='utf-8')
+            argv = ['gate', '--server-argv', 'platform', '--results', str(results), '--references', str(results)]
+            with mock.patch.object(gate, 'start_server', side_effect=RuntimeError('server exited before readiness: 1')), \
+                    mock.patch.object(gate, 'stop_server'), mock.patch.object(sys, 'argv', argv), \
+                    redirect_stdout(io.StringIO()) as out:
+                code = gate.main()
+            text = out.getvalue()
+        report = json.loads(text[text.index(gate.BEGIN) + len(gate.BEGIN):text.index(gate.END)])
+        self.assertEqual(code, 1)
+        self.assertIn('RuntimeError', report['fatal'])
+        self.assertEqual(report['platform']['served_profile'], 'exact')
 
 
 class MarkerFloorTests(unittest.TestCase):

@@ -37,7 +37,8 @@ BLOCK_SIZE = 64
 TARGET_TOKS_PER_USER = 200.0
 
 
-def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *, ignore_eos=True, detail=False):
+def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *, ignore_eos=True, detail=False,
+                model='qwen-longctx'):
     """One streaming completion; record the gap between successive tokens.
 
     The defaults send exactly the payload every existing caller always sent (ignore_eos=True,
@@ -47,11 +48,13 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *,
     and records, per chunk that carries tokens, its completion-token count (chunk_tokens) and its
     arrival offset from started_s (chunk_s, one time.perf_counter clock shared by the gate's
     threads), plus the stream's id (request_id: the engine id cmpl-<hex>-0-<sfx> extends it, which
-    is how a '[PACKED] request=' line is tied to its user) and its finish_reason."""
+    is how a '[PACKED] request=' line is tied to its user) and its finish_reason. `model` is the served
+    name the request names: 'qwen-longctx' (every gate's --served-model-name) unless the caller serves
+    another (the C2 serving gate's platform argv keeps the platform's, Qwen/Qwen3.8-27B)."""
     stream_options = dict(include_usage=True)
     if detail:
         stream_options['continuous_usage_stats'] = True
-    payload = json.dumps(dict(model='qwen-longctx', prompt=prompt,
+    payload = json.dumps(dict(model=model, prompt=prompt,
                               max_tokens=max_tokens, temperature=0.0,
                               stream=True,
                               stream_options=stream_options,

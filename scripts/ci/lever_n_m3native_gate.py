@@ -53,6 +53,17 @@ image. --eos stop (the real-text default, and required there) lets a stream end 
 the default mode (real text, or --eos stop) the report also carries the acceptance report
 (acceptance_report.py, from the full server.log after the server has stopped), the per-user
 decode rate and the QWEN_* configuration, all diagnostic: none can fail an otherwise passing arm.
+
+PLATFORM ARGV (--server-argv platform; default gate, which leaves the argv above untouched). For the
+C2 serving image (docker/qwen-c2-serving.Dockerfile, run by scripts/ci/c2_serving_gate.py in the
+node agent's container shape): the gate launches vLLM with the platform's argv (PLATFORM_ARGV, the
+smoke's), so the image's serving contract (serving_c2_contract, booted by QWEN_C2_SERVING=1)
+rewrites it to its profile's exactly as it does for the agent. What was actually served is read
+back from the contract's own '[QWEN-C2] profile <name>: vLLM argv [...]' line (read-the-launched-
+argv) into report['platform'], which a run without that line, or with another profile than
+--expect-profile, fails. Requests name --served-model-name (the platform's). The report also
+carries every '[PINDIAG] dram after ...' line parsed (report['dram'], G5). --prompt-lengths
+L1,L2,... (real text only) gives each user its own prompt length (real_text_prompts targets).
 """
 
 import argparse
@@ -125,6 +136,78 @@ def select_diagnostic(lines, cap=DIAGNOSTIC_CAP):
 
 
 GENERIC_REFERENCE_TOKENS = 32768
+
+
+# --server-argv platform: what the platform hands vLLM (the smoke step of qwen-c2-serving.yml, which
+# mirrors the Thatch runtime's launch), before the image's contract replaces every engine flag its
+# profile owns. The served name, host, port and parsers are the platform's and survive the rewrite.
+SERVER_ARGV_MODES = ('gate', 'platform')
+PLATFORM_SERVED_NAME = 'Qwen/Qwen3.8-27B'
+PLATFORM_ADDITIONAL_CONFIG = {'tt': {'l1_small_size': 24576, 'fabric_config': 'FABRIC_1D',
+                                     'trace_region_size': 1073741824}}
+QWEN_C2_ARGV = re.compile(r'\[QWEN-C2\] profile (\S+): vLLM argv (\[.*\])[ \t]*$', re.M)
+QWEN_C2_MARKER = '[QWEN-C2] '
+QWEN_C2_CONTRACT = '[QWEN-C2] request contract installed'
+QWEN_C2_LINES_CAP = 40
+# '[PINDIAG] dram after attach: ...' once, then 'dram after engine <request>: ...' per admitted request
+# (serving_runtime.py): each chip's allocated / free / largest free block (G5 reads the last engine's).
+DRAM_LINE = re.compile(r'\[PINDIAG\] dram after (attach|engine (\S+)): ([^\n]*)')
+DRAM_CHIP = re.compile(r'chip([0-9]+) allocated=([0-9.]+)GB free=([0-9.]+)GB largest_free=([0-9.]+)MB of ([0-9.]+)GB')
+
+
+def platform_argv(port, served_name=PLATFORM_SERVED_NAME):
+    """The vLLM argv a platform launch passes, as a list (nothing launched). The contract keeps
+    --served-model-name, --host, --port and the parsers, and replaces the rest with its profile's."""
+    return [sys.executable, '-m', 'vllm.entrypoints.openai.api_server',
+            '--model', 'Qwen/Qwen3.8-27B', '--served-model-name', served_name,
+            '--host', '0.0.0.0', '--port', str(port),
+            '--reasoning-parser', 'qwen3', '--tool-call-parser', 'qwen3_xml', '--enable-auto-tool-choice',
+            '--max-model-len', '65536', '--max-num-seqs', '2', '--block-size', '64', '--no-enable-prefix-caching',
+            '--additional-config', json.dumps(PLATFORM_ADDITIONAL_CONFIG)]
+
+
+def platform_report(log_text, expect_profile=None):
+    """What the contract served, from its own log lines: the profile, the launched argv (the
+    rewritten one), whether the request contract was installed, every [QWEN-C2] line (capped), and
+    the problems that fail a platform run (no argv line: the contract never ran in the API server;
+    another profile than expected; two different argv lines)."""
+    launches = [(match.group(1), match.group(2)) for match in QWEN_C2_ARGV.finditer(log_text)]
+    lines = [line.strip()[:400] for line in log_text.splitlines() if QWEN_C2_MARKER in line]
+    problems = []
+    served_argv = served_profile = None
+    if not launches:
+        problems.append('no "[QWEN-C2] profile <name>: vLLM argv" line: the serving contract did not rewrite the '
+                        'API server argv (QWEN_C2_SERVING unset, or its boot failed)')
+    else:
+        served_profile, text = launches[-1]
+        try:
+            served_argv = json.loads(text)
+        except ValueError:
+            served_argv = text
+            problems.append('the launched argv line is not a JSON list: %s' % text[:200])
+        if len(set(launches)) > 1:
+            problems.append('%d different launched argv lines (a restart with another profile?)' % len(set(launches)))
+        if expect_profile and served_profile != expect_profile:
+            problems.append('served profile %r, expected %r' % (served_profile, expect_profile))
+    return dict(served_profile=served_profile, served_argv=served_argv, launches=len(launches),
+                contract_installed=QWEN_C2_CONTRACT in log_text, qwen_c2_lines=lines[:QWEN_C2_LINES_CAP],
+                problems=problems)
+
+
+def dram_report(log_text):
+    """Every '[PINDIAG] dram after attach|engine <request>' line, parsed per chip, and the floor
+    over the engine lines (the G5 reading: DRAM left once every admitted request built its engine)."""
+    events = []
+    for match in DRAM_LINE.finditer(log_text):
+        chips = [dict(chip=int(chip), allocated_gb=float(allocated), free_gb=float(free),
+                      largest_free_mb=float(largest), total_gb=float(total))
+                 for chip, allocated, free, largest, total in DRAM_CHIP.findall(match.group(3))]
+        events.append(dict(event='attach' if match.group(1) == 'attach' else 'engine', request=match.group(2),
+                           chips=chips, line=match.group(0)[:400]))
+    engine_chips = [chip for event in events if event['event'] == 'engine' for chip in event['chips']]
+    return dict(events=events, engines=sum(1 for event in events if event['event'] == 'engine'),
+                min_free_gb=min((chip['free_gb'] for chip in engine_chips), default=None),
+                min_largest_free_mb=min((chip['largest_free_mb'] for chip in engine_chips), default=None))
 
 
 # Image A capacity flags: each one's marker, required whenever the flag reaches this process.
@@ -1722,7 +1805,7 @@ def engine_argv(port, users, context, trace_region_bytes=1073741824):
 
 
 def start_server(port, users, context, results, log_name, readiness_seconds=900,
-                 trace_region_bytes=1073741824):
+                 trace_region_bytes=1073741824, command=None):
     """The fast T16 + speculation recipe the four-user cycle bench serves
     (qwen-fp2u-image.yml), so the packed round under test is the one the 200
     tok/s/user work actually measures.
@@ -1731,8 +1814,9 @@ def start_server(port, users, context, results, log_name, readiness_seconds=900,
     (longctx_cycle_bench.py, reused here exactly) hard-codes model='qwen-longctx' in
     its request payload, so any other served name 404s every stream in milliseconds
     (gate 1, run 35556533480 - a false negative that looked like readiness with zero
-    decode rounds actually run)."""
-    command = engine_argv(port, users, context, trace_region_bytes)
+    decode rounds actually run). `command` (--server-argv platform: platform_argv) replaces
+    the recipe; its streams then name its served name (stream_kwargs)."""
+    command = command or engine_argv(port, users, context, trace_region_bytes)
     log_path = results / log_name
     handle = log_path.open('w')
     process = subprocess.Popen(command, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
@@ -1911,6 +1995,24 @@ def build_parser():
                         help='ignore: ignore_eos=True, every stream runs to --max-tokens (the synthetic '
                              'default). stop: ignore_eos=False, a stream may end at EOS (the real-text '
                              'default, and the only mode real text accepts)')
+    parser.add_argument('--server-argv', choices=SERVER_ARGV_MODES, default='gate',
+                        help='gate (default): the recipe argv above. platform: the platform\'s argv '
+                             '(platform_argv), which the C2 serving image\'s contract rewrites to its profile; '
+                             'the served argv is read back from its [QWEN-C2] line')
+    parser.add_argument('--served-model-name', default=PLATFORM_SERVED_NAME,
+                        help='--server-argv platform: the served name the platform argv passes and the '
+                             'streams request')
+    parser.add_argument('--expect-profile', default=None,
+                        help='--server-argv platform: the C2 profile the contract must report serving')
+    parser.add_argument('--snapshot', default=MODEL,
+                        help='the target snapshot the real-text tokenizer loads (the agent\'s container '
+                             'mounts the hub at /models, not /models/hub)')
+    parser.add_argument('--readiness-seconds', type=int, default=900,
+                        help='how long the server may take to answer /health')
+    parser.add_argument('--prompt-lengths', default=None,
+                        help='real text only: comma-separated prompt lengths, one per stream (--users, or '
+                             '--sequential-users), replacing --prompt-tokens for every user (a length per user, '
+                             'real_text_prompts targets). Needs an image that serves any prompt length')
     return parser
 
 
@@ -1938,6 +2040,31 @@ def parse_options(argv=None):
         parser.error('--prompt-source real-text needs --eos stop: the fast path\'s GreedySession finishes a '
                      'request at the snapshot EOS whatever ignore_eos says (serving_request_factory passes eos_ids, '
                      'greedy_verify.select_prefix stops there), and real text reaches EOS')
+    platform = options.server_argv == 'platform'
+    if options.expect_profile is not None and not platform:
+        parser.error('--expect-profile needs --server-argv platform: only the C2 contract reports a profile')
+    if options.readiness_seconds < 1:
+        parser.error('--readiness-seconds must be positive')
+    if options.prompt_lengths is not None:
+        if not real_text:
+            parser.error('--prompt-lengths needs --prompt-source real-text')
+        try:
+            import real_text_prompts
+            options.prompt_lengths = real_text_prompts.parse_targets(options.prompt_lengths)
+        except ValueError as error:
+            parser.error(str(error))
+        streams = options.sequential_users or options.users
+        if len(options.prompt_lengths) != streams:
+            parser.error('--prompt-lengths gives %d lengths for %d streams (--users, or --sequential-users)'
+                         % (len(options.prompt_lengths), streams))
+        # Under the platform argv the contract clamps max_tokens to what the context leaves; the
+        # recipe argv has no contract, so there every prompt must leave its whole budget.
+        room = options.context - (1 if platform else options.max_tokens)
+        too_long = [length for length in options.prompt_lengths if length > room]
+        if too_long:
+            parser.error('--prompt-lengths %s exceed %d (--context %d less %s)' % (
+                too_long, room, options.context, 'one token' if platform else '--max-tokens'))
+        return options
     if real_text and real_text_target(options) != options.prompt_tokens:
         parser.error('--prompt-source real-text needs --prompt-tokens + --max-tokens <= --context (got %d + %d > %d): '
                      'every prompt must be exactly --prompt-tokens long, because the image pins each request\'s '
@@ -1978,7 +2105,10 @@ def start_order_report(report, options):
 def real_text_target(options):
     """A real-text prompt's length: min(--prompt-tokens, --context - --max-tokens), which
     parse_options requires to BE --prompt-tokens (33024 - 256 = 32768, 131328 - 256 = 131072).
-    The arms keep their --context: KV sizing and the 4 x 131k fit are computed from it."""
+    The arms keep their --context: KV sizing and the 4 x 131k fit are computed from it.
+    None under --prompt-lengths, where every user has its own."""
+    if getattr(options, 'prompt_lengths', None):
+        return None
     return min(options.prompt_tokens, options.context - options.max_tokens)
 
 
@@ -1991,10 +2121,12 @@ def detail_mode(options):
 
 def stream_kwargs(options):
     """stream_once's keywords. None at all in the default mode (synthetic, --eos ignore), so every
-    existing call is unchanged - the payload stream_once sends and the fields it records."""
-    if not detail_mode(options):
-        return {}
-    return dict(ignore_eos=options.eos == 'ignore', detail=True)
+    existing call is unchanged - the payload stream_once sends and the fields it records. Under
+    --server-argv platform the streams also name the platform's served model."""
+    kwargs = {} if not detail_mode(options) else dict(ignore_eos=options.eos == 'ignore', detail=True)
+    if getattr(options, 'server_argv', 'gate') == 'platform':
+        kwargs['model'] = options.served_model_name
+    return kwargs
 
 
 def real_text_stream_problems(results, prompt_lengths=None):
@@ -2094,6 +2226,10 @@ def main():
         # Only outside the default mode: a default arm's report keeps exactly today's keys.
         report.update(prompt_source=options.prompt_source, eos=options.eos, max_tokens=options.max_tokens,
                       qwen_configuration=qwen_configuration(os.environ))
+    platform = options.server_argv == 'platform'
+    if platform:
+        report.update(server_argv='platform', served_model_name=options.served_model_name,
+                      expect_profile=options.expect_profile, snapshot=options.snapshot)
     process = handle = None
     streams = options.sequential_users or options.users
     prompts = None
@@ -2109,12 +2245,18 @@ def main():
             # concurrent arm and a sequential arm of the same N on one image build the same set.
             import real_text_prompts
             report['real_text_target'] = real_text_target(options)
-            built = real_text_prompts.build_prompts(streams, report['real_text_target'], model=MODEL,
-                                                    log=lambda line: print(line, flush=True))
+            if options.prompt_lengths:
+                report['prompt_lengths_requested'] = list(options.prompt_lengths)
+                built = real_text_prompts.build_prompts(streams, None, model=options.snapshot,
+                                                        log=lambda line: print(line, flush=True),
+                                                        targets=options.prompt_lengths)
+            else:
+                built = real_text_prompts.build_prompts(streams, report['real_text_target'], model=options.snapshot,
+                                                        log=lambda line: print(line, flush=True))
             real_text_prompts.write_prompts(options.results / REAL_TEXT_PROMPTS, built)
             report['real_text'] = real_text_prompts.summary(built)
             prompts = [entry['tokens'] for entry in built['users']]
-            print('[REALTEXT] %d prompts of %s tokens (target %d) in %.1f s, %d tokenizer calls; corpus %s files, '
+            print('[REALTEXT] %d prompts of %s tokens (target %s) in %.1f s, %d tokenizer calls; corpus %s files, '
                   '%s characters, sha256 %s' % (
                       streams, report['real_text']['prompt_lengths'], report['real_text_target'],
                       built['seconds']['total'], built['tokenizer_calls'], built['corpus'].get('files'),
@@ -2125,9 +2267,15 @@ def main():
                 return prompts[index]
             return prompt_for(options.prompt_base, options.prompt_user_offset, index, options.prompt_tokens)
 
-        process, handle, log_path, command = start_server(
-            options.port, options.users, options.context, options.results, 'server.log',
-            trace_region_bytes=options.trace_region_bytes)
+        if platform:
+            process, handle, log_path, command = start_server(
+                options.port, options.users, options.context, options.results, 'server.log',
+                readiness_seconds=options.readiness_seconds, trace_region_bytes=options.trace_region_bytes,
+                command=platform_argv(options.port, options.served_model_name))
+        else:
+            process, handle, log_path, command = start_server(
+                options.port, options.users, options.context, options.results, 'server.log',
+                readiness_seconds=options.readiness_seconds, trace_region_bytes=options.trace_region_bytes)
         report['command'] = command
         report['ready'] = True
 
@@ -2217,8 +2365,20 @@ def main():
         report['retired_binder_rounds_observed'] = len(binder_rounds)
         report['retired_binder_calls_nonzero'] = retired_binder_leaks(binder_rounds)
 
-        report['flag_markers'] = flag_marker_report(os.environ, streams, log_text,
-                                                    prompt_tokens=marker_prompt_tokens(options, report))
+        if platform:
+            report['platform'] = platform_report(log_text, options.expect_profile)
+            report['dram'] = dram_report(log_text)
+            try:
+                report['flag_markers'] = flag_marker_report(os.environ, streams, log_text,
+                                                            prompt_tokens=marker_prompt_tokens(options, report))
+            except Exception as error:
+                # Mixed lengths and more streams than seats reach shapes the marker floors were never
+                # written for: a failure there is recorded as a missing marker, never a lost report.
+                report['flag_markers'] = dict(found={}, missing=['flag_marker_report failed: %s: %s' % (
+                    type(error).__name__, str(error)[:300])])
+        else:
+            report['flag_markers'] = flag_marker_report(os.environ, streams, log_text,
+                                                        prompt_tokens=marker_prompt_tokens(options, report))
         checked = [c for c in comparisons if c.get('reference_present')]
         report['users_checked'] = len(checked)
         report['allow_missing_references'] = options.allow_missing_references
@@ -2235,11 +2395,21 @@ def main():
             report['real_text_stream_problems'] = real_text_stream_problems(
                 results, report['real_text']['prompt_lengths'])
             report['gate_passed'] = bool(report['gate_passed'] and not report['real_text_stream_problems'])
+        if platform:
+            report['gate_passed'] = bool(report['gate_passed'] and not report['platform']['problems'])
     except BaseException as error:
         report['fatal'] = '%s: %s' % (type(error).__name__, str(error)[:600])
     finally:
         stop_server(process, handle)
         log_path = options.results / 'server.log'
+        if platform and 'platform' not in report:
+            # A run that died before its streams still says what the contract launched, if anything.
+            try:
+                text = log_path.read_text(errors='replace') if log_path.is_file() else ''
+                report['platform'] = platform_report(text, options.expect_profile)
+                report['dram'] = dram_report(text)
+            except Exception as error:
+                report['platform'] = dict(problems=['platform report failed: %s' % error])
         if detail:
             add_run_diagnostics(report, log_path, sequential=bool(options.sequential_users))
         try:
