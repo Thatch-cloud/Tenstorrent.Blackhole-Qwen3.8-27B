@@ -4,7 +4,9 @@ name: Qwen C2 serving image
 # reachable; its runners reach GitHub outbound, so this is the way in from offsite.
 # Actions (C2_ACTIONS, space-separated, run in this order):
 #   status - what the rig holds: the last manual build log, C2 images, card holders, the agent
-#   build  - build tt-vllm:qwen38-c2-$C2_IMAGE_TAG unless present (waits for a build in flight)
+#   build  - build tt-vllm:qwen38-c2-$C2_IMAGE_TAG unless present (waits for a build in flight);
+#            the overlay is docker/qwen-c2-overlay.txt, and the tag lands only after G1 provenance
+#            (binaries, overlay sha256s, boot argv; provenance.json in the results) passes
 #   smoke  - run it on cards M+A shaped like the node agent's container, then the API smoke
 #            (scripts/ci/c2_serving_smoke.py); the container is always removed
 #   push   - push it to zot and print the digest
@@ -199,17 +201,14 @@ jobs:
             echo "$image present: $(docker image inspect "$image" --format '{{.Id}}')"
             exit 0
           fi
+          # The overlay is docker/qwen-c2-overlay.txt, the one list; the build tags the image only
+          # after G1 provenance (c2_image_provenance.py) passes. A tag present above skipped it:
+          # images built before the manifest (v6-teardown and older) were never checked.
           ctx="$RUNNER_TEMP/c2ctx"
-          rm -rf "$ctx"; mkdir -p "$ctx/ci"
-          cp docker/qwen-c2-serving.Dockerfile "$ctx/Dockerfile"
-          for file in serving_fast_policy.py packed_verifier.py serving_request_factory.py pooled_attention_replay.py \
-              serving_c2_contract.py test_serving_c2_contract.py test_serving_fast_policy.py qwen_c2_profiles.json \
-              qwen_c2_boot.py; do
-            cp "scripts/ci/$file" "$ctx/ci/"
-          done
-          cp -r docker/qwen-c2-graft/graft "$ctx/graft"
-          cp docker/qwen-c2-graft/graft.sha256 docker/qwen-c2-graft/source.sha256 "$ctx/"
+          rm -rf "$ctx"
+          python3 -B scripts/ci/c2_overlay.py stage --repo . --out "$ctx"
           tar -czf "$RUNNER_TEMP/c2ctx.tgz" -C "$ctx" .
+          export C2_CHECKOUT="$PWD" C2_PROVENANCE_REPORT="$RUNNER_TEMP/c2-results/provenance.json"
           bash scripts/ci/build-c2-serving-image.sh "$RUNNER_TEMP/c2ctx.tgz" "$TAG" 2>&1 | tee "$RUNNER_TEMP/c2-results/build.log"
       - name: Smoke on cards M+A
         if: contains(steps.job.outputs.actions, 'smoke')

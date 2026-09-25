@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Build the C2 serving base image on the rig (docker/qwen-c2-serving.Dockerfile).
 # Usage: build-c2-serving-image.sh <context.tgz> <tag>
-#   context.tgz holds Dockerfile, ci/, graft/, graft.sha256, source.sha256 (from the repo and
-#   the v235 graft artifact); this script adds what only the rig has: the K64i op graft, the
-#   DFlash2 fixtures and draft config, and a persistent copy of the gate's cache volume
-#   under the platform's /models mount (~/hf-cache/hub/.qwen-c2).
+#   context.tgz is what `python3 scripts/ci/c2_overlay.py stage --repo . --out <dir>` stages
+#   (tar -czf <tgz> -C <dir> .): the Dockerfile, the overlay manifest (docker/qwen-c2-overlay.txt)
+#   and overlay/ tree it names, the overlay and provenance tools, and the v235 model graft (graft/,
+#   graft.sha256, source.sha256). This script checks it against the manifest and adds what only
+#   the rig has: the K64i op graft, the DFlash2 fixtures and draft config, and a persistent copy
+#   of the gate's cache volume under the platform's /models mount (~/hf-cache/hub/.qwen-c2).
+#   The image is tagged only after G1 provenance (c2_image_provenance.py) passes.
+#   Optional env: C2_CHECKOUT (a checkout to compare the image's trees with, informational),
+#   C2_PROVENANCE_REPORT (where to write the provenance JSON).
 set -euo pipefail
 context_tgz=$1
 tag=$2
@@ -12,11 +17,14 @@ image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$tag
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 graft=/home/thatch/opgraft-K64i
 fixtures=/home/thatch/.cache/qwen-experiments
+models=/home/thatch/hf-cache/hub
 ctx=/home/thatch/c2-serving-ctx
 
 rm -rf "$ctx"
-mkdir -p "$ctx/fixture" "$ctx/draft-config"
+mkdir -p "$ctx"
 tar -xzf "$context_tgz" -C "$ctx"
+python3 -B "$ctx/c2_overlay.py" check --context "$ctx"
+mkdir -p "$ctx/fixture" "$ctx/draft-config"
 cp -al "$graft" "$ctx/opgraft-K64i"
 for component in attention convolution mlp projection selector; do
   cp -al "$fixtures/dflash2-$component-$revision" "$ctx/fixture/$component"
@@ -53,11 +61,20 @@ sudo -n du -sh "$persistent" || true
 sudo -n test -d "$persistent/${kernel_cache#/experiment-cache/}" && echo "warm kernel cache present" \
   || echo "kernel cache ${kernel_cache#/experiment-cache/} absent: the first start compiles it"
 
-DOCKER_BUILDKIT=1 docker build -f "$ctx/Dockerfile" --build-arg "KERNEL_CACHE=$kernel_cache" -t "$image" "$ctx"
-echo "built $image $(docker image inspect "$image" --format '{{.Id}}')"
+iid=$(mktemp)
+DOCKER_BUILDKIT=1 docker build -f "$ctx/Dockerfile" --build-arg "KERNEL_CACHE=$kernel_cache" --iidfile "$iid" "$ctx"
+id=$(cat "$iid")
+rm -f "$iid"
+echo "built $id: G1 provenance before it is tagged $image"
 
-# Boot check: the contract rewrites a platform-shaped argv and names the profile.
-docker run --rm --network none -v /home/thatch/hf-cache/hub:/models:ro --entrypoint python3 "$image" \
-  -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3.8-27B --served-model-name Qwen/Qwen3.8-27B \
-  --port 8001 --max-model-len 65536 --help 2>&1 >/dev/null | grep -F '[QWEN-C2]'
+# G1 provenance: (a) the installed binaries are the K64i graft's and no QWEN_ flag the image sets
+# lost its patch, (b) every overlaid file's sha256 in the image is its source's, (c) the boot
+# check's argv line, for the default profile and each named one, is the one the contract gives.
+# Any problem exits non-zero here, so the image never gets its tag.
+provenance=(--image "$id" --context "$ctx" --models "$models")
+if [ -n "${C2_CHECKOUT:-}" ]; then provenance+=(--checkout "$C2_CHECKOUT"); fi
+if [ -n "${C2_PROVENANCE_REPORT:-}" ]; then provenance+=(--report "$C2_PROVENANCE_REPORT"); fi
+python3 -B "$ctx/c2_image_provenance.py" "${provenance[@]}"
+docker tag "$id" "$image"
+echo "built $image $(docker image inspect "$image" --format '{{.Id}}')"
 rm -rf "$ctx"

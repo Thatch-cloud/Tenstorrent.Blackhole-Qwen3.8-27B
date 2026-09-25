@@ -1,0 +1,58 @@
+# Every repo file the C2 serving image (docker/qwen-c2-serving.Dockerfile) lays over its P8 base.
+#
+# This is the ONE list. Nothing else names these files:
+#   - scripts/ci/c2_overlay.py stage   copies each SOURCE into the build context (the CI build step
+#                                       in .github/workflows/qwen-c2-serving.yml, and a hand build);
+#   - scripts/ci/c2_overlay.py install copies each into the image (the Dockerfile), and runs every
+#                                       overlaid scripts/ci/test_*.py inside it;
+#   - scripts/ci/build-c2-serving-image.sh checks the staged context against it, and
+#     scripts/ci/c2_image_provenance.py checks every DESTINATION's sha256 in the built image;
+#   - scripts/ci/test_c2_image_overlay.py fails when a file the image holds differs from HEAD but is
+#     named neither here nor in the P8 copy lists (the P8 base commit's), unless it is KNOWN_STALE.
+#
+# The image's fast-path tree has three delivery routes, and a file NOT named here ships at the
+# version its route froze (memory serving-image-bundle-provenance):
+#   1. the bundle archive (commit 77d6995a): /experiment-scripts and /speculative-decoding;
+#   2. the P8 copy lists (docker/qwen-fast-serving.Dockerfile + qwen-fast-serving-image.yml) at the
+#      P8 base's commit (the Dockerfile's ARG BASE, qwen-fast-serving:ci-<commit>);
+#   3. this list, at the commit the C2 image is built from.
+#
+# Format: SOURCE [DESTINATION ...]
+#   SOURCE is repo-relative, under scripts/ci/ or speculative-decoding/harness/.
+#   With no DESTINATION a file replaces the base image's copy of it:
+#     scripts/ci/<file>                    -> /experiment-scripts/ci/<file>
+#     speculative-decoding/harness/<file>  -> /speculative-decoding/harness/<file>
+#   Listed DESTINATIONs replace that default (repeat it to keep it). @purelib/ is python's
+#   site-packages directory in the image.
+#
+# Never list frozen_combined_runtime.py: the native cache pins its bytes
+# (serving_native_install.py:57). Change its callers instead.
+
+# The serving contract, its profiles and boot hook.
+scripts/ci/serving_c2_contract.py
+scripts/ci/qwen_c2_profiles.json  /experiment-scripts/ci/qwen_c2_profiles.json  /opt/qwen-c2/profiles.json
+scripts/ci/qwen_c2_boot.py  @purelib/qwen_c2_boot.py
+
+# The fast path's serving policy; the TT plugin carries its own copy.
+scripts/ci/serving_fast_policy.py  /experiment-scripts/ci/serving_fast_policy.py  /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_fast_policy.py
+
+# Fast-path modules changed for serving.
+scripts/ci/packed_verifier.py
+scripts/ci/serving_request_factory.py
+scripts/ci/pooled_attention_replay.py
+
+# Stage 1 and 2 of the C2 serving plan change these. Overlaid now, while each is byte-identical
+# to the P8 base's copy, so the route is proven before a change depends on it.
+scripts/ci/serving_worker_hook.py
+scripts/ci/serving_lifecycle.py
+scripts/ci/serving_packed_step.py
+
+# The third route: GreedySession arrives with the bundle's /speculative-decoding tree. Unchanged
+# since 77d6995a today; decision D1 (plan stage 2) changes it.
+speculative-decoding/harness/greedy_session.py
+
+# Tests run inside the image at build time (every overlaid scripts/ci/test_*.py is).
+scripts/ci/test_serving_c2_contract.py
+scripts/ci/test_serving_fast_policy.py
+scripts/ci/test_serving_worker_hook.py
+scripts/ci/test_serving_lifecycle.py
