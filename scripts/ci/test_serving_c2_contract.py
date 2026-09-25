@@ -216,6 +216,18 @@ class PostImportHookTest(unittest.TestCase):
         self.assertNotIn(hook, sys.meta_path)
 
 
+class TeardownSkipTest(unittest.TestCase):
+    def test_only_an_engine_child_with_ttnn_exits_early(self):
+        exits = []
+        self.assertFalse(contract.exit_without_device_teardown(modules={}, parent=object(), exit=exits.append))
+        self.assertFalse(contract.exit_without_device_teardown(modules={'ttnn': 1}, parent=None, exit=exits.append,
+                                                               streams=()))
+        self.assertEqual(exits, [])
+        self.assertTrue(contract.exit_without_device_teardown(modules={'ttnn': 1}, parent=object(),
+                                                              exit=exits.append, streams=()))
+        self.assertEqual(exits, [0])
+
+
 class BootTest(unittest.TestCase):
     def test_off_unless_enabled(self):
         self.assertIsNone(contract.boot(environ={}, orig_argv=['python3', '-m', contract.API_SERVER]))

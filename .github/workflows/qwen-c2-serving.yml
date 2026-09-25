@@ -43,13 +43,16 @@ jobs:
                   key, _, value = line.partition('=')
                   values[key.strip()] = value.strip()
           actions = values.get('C2_ACTIONS', 'status').split()
-          assert set(actions) <= {'status', 'platform', 'build', 'smoke', 'push'}, actions
+          assert set(actions) <= {'status', 'platform', 'reset', 'build', 'smoke', 'replay', 'push'}, actions
           assert re.fullmatch(r'[0-9a-z.-]{3,40}', values.get('C2_IMAGE_TAG', '')), 'C2_IMAGE_TAG'
           assert values.get('C2_PROFILE', 'general') in ('general', 'coding', 'exact')
           print('actions=' + ' '.join(actions))
           print('tag=' + values['C2_IMAGE_TAG'])
           print('profile=' + values.get('C2_PROFILE', 'general'))
           print('tests=' + values.get('C2_SMOKE_TESTS', ''))
+          platform_image = values.get('C2_PLATFORM_IMAGE', '')
+          assert not platform_image or re.fullmatch(r'[0-9a-z.:/@_-]{10,200}', platform_image), 'C2_PLATFORM_IMAGE'
+          print('platform_image=' + platform_image)
           PY
           cat "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/c2-results"
@@ -91,6 +94,41 @@ jobs:
               | grep -v -E '^\[[0-9a-f]+:[0-9]+\] \[ *[0-9]+\]' | tail -80
           done
           echo "=== agent"; journalctl --user -u thatch-node-agent --since -30min --no-pager 2>&1 | grep -v -i heartbeat | tail -40
+      - name: Reset cards M and A
+        if: contains(steps.job.outputs.actions, 'reset')
+        working-directory: c2
+        timeout-minutes: 14
+        shell: bash
+        run: |
+          set -euo pipefail
+          # As the m3native gate does before every run, for its llrt.cpp:594 ethernet-core wedge:
+          # card M and card A together by board id (scripts/ci/serving_pair.sh), never card B, then
+          # the self-heal for a link that did not train or a missing by-id link. No firmware is
+          # written. Refuses while any process other than tt-smi holds either card.
+          results="$RUNNER_TEMP/c2-results"
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          . scripts/ci/serving_pair.sh
+          serving_pair_resolve 60
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            "${prefix[@]}" fuser -v "${SERVING_PAIR_NODES[@]}" > "$results/holders.txt" 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s "$results/holders.txt" ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' "$results/holders.txt" | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then echo 'M or A is held; refusing to reset' >&2; cat "$results/holders.txt" >&2; exit 1; fi
+          echo "resetting card M and card A: ${SERVING_PAIR_NODES[*]} (PCI ${SERVING_PAIR_PCI[*]})"
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${SERVING_PAIR_NODES[@]}" > "$results/reset.log" 2>&1 || status=$?
+          tail -15 "$results/reset.log"
+          heal=0
+          serving_pair_heal 60 720 2>&1 | tee -a "$results/reset.log" || heal=$?
+          echo "reset_exit=$status heal_exit=$heal"
+          serving_pair_resolve 120
+          test "$status" = 0 && test "$heal" = 0
       - name: Build
         if: contains(steps.job.outputs.actions, 'build')
         working-directory: c2
@@ -180,6 +218,21 @@ jobs:
             scripts/ci/build-c2-serving-image.sh 2>&1 | tee "$results/smoke.log"
           docker stats --no-stream "$name" | tee "$results/stats.txt" || true
           grep -F '[PINDIAG] dram after' <(docker logs "$name" 2>&1) | tail -8 || true
+      - name: Replay the node agent's serving sequence
+        if: contains(steps.job.outputs.actions, 'replay')
+        working-directory: c2
+        timeout-minutes: 80
+        shell: bash
+        env:
+          IMAGE: ${{ steps.job.outputs.platform_image }}
+        run: |
+          set -euo pipefail
+          test -n "$IMAGE"
+          if docker ps --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container is running; refusing to open M+A under it" >&2; exit 1
+          fi
+          python3 scripts/ci/c2_platform_replay.py --source thatch-inference-Qwen-Qwen3.8-27B --image "$IMAGE" \
+            --results "$RUNNER_TEMP/c2-results/replay"
       - name: Push
         if: contains(steps.job.outputs.actions, 'push')
         shell: bash

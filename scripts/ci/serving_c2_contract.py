@@ -209,6 +209,49 @@ def install_request_contract(module, *, budget, eos_ids, max_prompt_tokens=None)
         max_prompt_tokens or 'context - budget', sorted(eos_ids))
 
 
+def exit_without_device_teardown(modules=None, parent=None, exit=None, streams=None):
+    """At interpreter exit, end an engine process before tt-metal's C++ teardown runs.
+
+    tt-metal registers MetalContext::destroy_all_instances with on_exit when a process opens the
+    mesh. On this rig that teardown fails to bring device 0's active ethernet core back
+    (llrt.cpp:594, "Timed out while waiting for active ethernet core 31-25 to become active
+    again"), and every later open of the card then fails the same way until the pair is reset -
+    the m3native gate resets M+A before each run for exactly this reason. The Thatch runtime
+    restarts the engine inside one container (a release-first load, a health-monitor recovery,
+    a docker stop), so on 2026-09-25 the first graceful exit wedged card A and all five
+    restarts after it died (job 01M3BK9NQ1WQM3JTJSX2V03D1M). A process that is killed never runs
+    the teardown, and the next open succeeds (smokes v2-v5, each container removed with
+    docker rm -f). Python atexit handlers run before C on_exit handlers, so os._exit here
+    gives every exit of an engine process that end state.
+
+    Only a multiprocessing child that has imported ttnn - the vLLM EngineCore, the one process
+    that opens the mesh - is ended this way; the exit status is 0 (the parent watches the
+    child's sentinel, not its status)."""
+    modules = sys.modules if modules is None else modules
+    if 'ttnn' not in modules:
+        return False
+    if parent is None:
+        import multiprocessing
+
+        parent = getattr(multiprocessing, 'parent_process', lambda: None)()
+    if parent is None:
+        return False
+    log('engine process exiting without tt-metal device teardown')
+    for stream in (streams if streams is not None else (sys.stdout, sys.stderr)):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    (os._exit if exit is None else exit)(0)
+    return True
+
+
+def install_teardown_skip():
+    import atexit
+
+    atexit.register(exit_without_device_teardown)
+
+
 class PostImportHook(object):
     """Run a callback on a module right after it executes, without importing it early."""
 
@@ -242,6 +285,9 @@ def boot(environ=None, orig_argv=None):
     fix_sys_path()
     profile = load_profile(environ.get('QWEN_C2_PROFILES', PROFILES))
     apply_environment(profile, environ)
+    if profile.get('skip_device_teardown', True):
+        # Registered at interpreter start, so it runs after every other atexit handler.
+        install_teardown_skip()
     budget = int(profile['env']['QWEN_FAST_OUTPUT_BUDGET'])
     eos_ids = frozenset(int(token) for token in profile['eos_ids'])
     orig_argv = getattr(sys, 'orig_argv', None) if orig_argv is None else orig_argv
