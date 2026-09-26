@@ -1603,7 +1603,19 @@ def without_any_request(lines):
             or not code[2].startswith("raise ValueError('QWEN_FAST_ANY_REQUEST=1 needs")
             or not all(value.startswith("'") for value in code[3:-1]) or code[-1] != 'attach_source_check()'):
         raise AssertionError('The C2-any attach hunk holds more than its guard: %r' % (code,))
-    return without_no_block(lines[:starts[0]] + lines[ends[0] + 1:])
+    return without_s2_memory(without_no_block(lines[:starts[0]] + lines[ends[0] + 1:]))
+
+
+def without_s2_memory(lines):
+    """serving_runtime.py less S2 W6b's attach hunk (QWEN_FAST_EXTENT_REPLAY=1 only), which landed after this
+    parent: its one import line and the one guarded registration of the DRAM admission hold, each cut exactly
+    once and to its known last line, so nothing else is hidden."""
+    line = 'from serving_request_factory import extent_replay_enabled, register_dram_admission'
+    if lines.count(line) != 1:
+        raise AssertionError('The S2 W6b import %r is not in serving_runtime.py exactly once' % line)
+    lines = [value for value in lines if value != line]
+    return cut_once(lines, '# S2 W6b (QWEN_FAST_EXTENT_REPLAY=1 only; unset, nothing is registered and the scheduler '
+                           'admits exactly', 'scopes.callback(register_dram_admission(pool))')
 
 
 def cut_once(lines, first, last, replacement=()):

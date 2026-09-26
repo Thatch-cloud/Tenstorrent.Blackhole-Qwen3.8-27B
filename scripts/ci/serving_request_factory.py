@@ -26,6 +26,12 @@ class RequestRefused(ValueError):
     QWEN_FAST_ANY_REQUEST the lifecycle ends that request as FINISHED_ABORTED and keeps the engine
     (serving_lifecycle); without it nothing raises this.
 
+    S2 W6b adds one host-side refusal that is not of the request's own terms but is still raised before
+    it touches device state: under QWEN_FAST_EXTENT_REPLAY=1 the DRAM backstop (dram_backstop) refuses a
+    request whose engine build would not fit the DRAM its prefill left. The scheduler's hold
+    (serving_prefill_admission) normally keeps such a prompt waiting before its prefill; this is the
+    backstop when the hold was lifted or did not run.
+
     Deliberately NOT one: the frontier, the one-emitted-seed and GDN-helper count, a seed outside
     the vocabulary, an EOS seed that reached the factory without ignore_eos, and the KV group count.
     Those are engine and runner invariants - a bad sampled seed is evidence of a sampler or device
@@ -67,6 +73,110 @@ def request_budget(parameters, *, prompt_tokens, capacity, ceiling=None):
 def sequential_captures(capture_rows):
     """Whether an engine capped at `capture_rows` captures only widths that never replay."""
     return capture_rows is not None and capture_rows < REPLAY_MIN_ROWS
+
+
+# S2 (s2-design.md): the per-user extent replay beside the 64-row block, profiles c2-packed and c2-packed-gate
+# only. Its memory items (W6) key on this flag, never on "a block is built": exact and c2-gate build a block
+# too and keep every byte they had [A5].
+EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
+# W6a: the one proposal bucket every engine captures under the flag.
+SINGLE_PROPOSAL_CONTEXT = 2048
+DRAM_REGISTERED = '[PINDIAG] dram admission hold registered: '
+DRAM_BACKSTOP_REFUSED = '[PINDIAG] dram backstop refused request '
+# W6a's executed-path marker: the buckets the engine's proposal capture actually holds, read after the build.
+PROPOSAL_BUCKETS_BUILT = '[PINDIAG] proposal buckets built request='
+
+
+def extent_replay_enabled(environ=None):
+    """QWEN_FAST_EXTENT_REPLAY: '1' on, unset or '0' off, anything else refused (ValueError)."""
+    value = (os.environ if environ is None else environ).get(EXTENT_REPLAY_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (EXTENT_REPLAY_FLAG, value))
+    return value == '1'
+
+
+def single_bucket_contexts(position, max_new_tokens):
+    """S2 W6a: dflash_proposal_inputs.proposal_contexts' bounds and refusals, and always the one 2048 bucket.
+
+    The ladder builds one bucket per rung from min(position, 2048) to min(2048, position + budget), all at
+    once: four buckets, 1.35 GB per engine instead of 0.80 GB, for a prompt under 256 tokens with a long
+    answer (MEM goal-c2-serving: run 36218104858). Beside the block's 3.84 GB four such engines do not fit
+    (s2-design.md section 3.1). A 2048 bucket serves every history below it: proposal_inputs masks the
+    rows past history_rows with -inf and admits history_rows <= context_rows, and
+    PreparedDFlashProposal picks the first bucket at least history_rows wide (dflash_proposal_trace.py)."""
+    from dflash_proposal_inputs import proposal_contexts
+
+    proposal_contexts(position, max_new_tokens)
+    return (SINGLE_PROPOSAL_CONTEXT,)
+
+
+@contextmanager
+def single_proposal_bucket():
+    """S2 W6a: build a request's proposal capture with the single bucket, by a scoped patch of the name
+    dflash_proposal_trace resolves at call time - its bytes stay unchanged (pinned-adjacent, s2-design.md Q14),
+    the repo's pattern for such overrides (matched_target_geometry.geometry_scope)."""
+    from unittest.mock import patch
+    import dflash_proposal_trace
+
+    with patch.object(dflash_proposal_trace, 'proposal_contexts', single_bucket_contexts):
+        yield
+
+
+def built_proposal_buckets(device):
+    """The contexts of the proposal buckets `device`'s capture holds (PreparedDFlashProposal.buckets, one entry per
+    context, in build order): what W6a actually built, where _proposal_ladder is computed from the environment
+    before any capture exists (memory: graft-mounted-is-not-graft-executed). () when no capture was built
+    (QWEN_FAST_EAGER_PROPOSAL=1); 'unavailable (...)' rather than fail a request over a diagnostic."""
+    try:
+        capture = getattr(device, 'proposal_capture', None)
+        return () if capture is None else tuple(capture.buckets)
+    except Exception as failure:
+        return 'unavailable (%s)' % type(failure).__name__
+
+
+def register_dram_admission(pool, *, log=None):
+    """S2 W6b: park the scheduler-side DRAM admission hold's predicate (serving_prefill_admission) for this
+    attach: it reads the smallest largest-free block over the chips through `pool`, against the one set of
+    defaults there and the coordinator's DRAM reserve (QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB). Returns
+    the callable that removes it; serving_runtime registers it in the attach's scope, so it goes before
+    the pool closes."""
+    import serving_prefill_admission as admission
+    from dflash_packed_proposal_coordinator import dram_reserve_bytes
+
+    reserve = dram_reserve_bytes()
+    unregister = admission.register_dram_predicate(admission.dram_predicate(pool, reserve))
+    largest, reason = admission.largest_free(pool)
+    (_log if log is None else log)(
+        DRAM_REGISTERED + 'need = engine {} + build margin {} + prefill {} at >= {} prompt tokens + reserve {} bytes '
+        'per chip; largest_free now {}', admission.ENGINE_BUILD_BYTES, admission.ENGINE_BUILD_MARGIN_BYTES,
+        admission.PREFILL_TRANSIENT_BYTES, admission.PREFILL_TRANSIENT_FROM, reserve,
+        largest if largest is not None else 'unavailable (%s)' % reason)
+    return unregister
+
+
+def dram_backstop(pool, *, request_id, reserve=None, log=None):
+    """S2 W6b's post-prefill backstop: RequestRefused (quarantined under QWEN_FAST_ANY_REQUEST, so the
+    request ends FINISHED_ABORTED and the engine lives) when the smallest largest-free DRAM block over the
+    chips is below the engine build's peak plus the reserve. Returns that reading, or None when the pool
+    cannot be read: then it is a diagnostic, as the coordinator's headroom is (the attach refuses such a pool
+    under the flag, W7)."""
+    import serving_prefill_admission as admission
+
+    if reserve is None:
+        from dflash_packed_proposal_coordinator import dram_reserve_bytes
+
+        reserve = dram_reserve_bytes()
+    need = admission.backstop_need(reserve)
+    largest, reason = admission.largest_free(pool)
+    log = _log if log is None else log
+    if largest is None:
+        log('[PINDIAG] dram backstop unavailable for request {}: {} (not refused)', request_id, reason)
+        return None
+    if largest < need:
+        log(DRAM_BACKSTOP_REFUSED + '{}: largest_free={} need={} bytes per chip', request_id, largest, need)
+        raise RequestRefused('DRAM backstop: the largest free DRAM block (%d bytes on the smallest chip) is below '
+                             'the engine build peak plus the reserve (%d bytes)' % (largest, need))
+    return largest
 
 
 _ATTACH_QUALIFICATION = {}
@@ -141,8 +251,11 @@ def _log(message, *values):
 
 def _proposal_ladder(position, budget):
     """The proposal buckets a request's drafter builds at this position and budget, for the log
-    only: 'unavailable' rather than fail a request over a diagnostic."""
+    only: 'unavailable' rather than fail a request over a diagnostic. Under QWEN_FAST_EXTENT_REPLAY=1
+    the one 2048 bucket (S2 W6a, single_bucket_contexts)."""
     try:
+        if extent_replay_enabled():
+            return single_bucket_contexts(position, budget)
         from dflash_proposal_inputs import proposal_contexts
 
         return proposal_contexts(position, budget)
@@ -189,6 +302,9 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
     # request, the snapshot EOS for every session, replay attention and the T16 gate for every
     # engine, and plain ValueErrors from the host checks.
     any_request = any_request_enabled()
+    # S2 W6 (QWEN_FAST_EXTENT_REPLAY, default off): one 2048 proposal bucket (W6a), the DRAM backstop (W6b) and
+    # the engine build's ledger point (W6d). Off, none of the three runs.
+    extent_memory = extent_replay_enabled()
     # Phase 0 (below) builds the engine without the per-request T16 gate, whose source
     # qualification then runs only at attach (attach_source_check, from serving_runtime). An
     # image whose serving_runtime predates that call would serve without any source check at
@@ -246,6 +362,10 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         budget = (request_budget(state.sampling_params, prompt_tokens=len(prompt), capacity=int(pages.shape[1]) * 64)
                   if any_request else OUTPUT_BUDGET)
         validate_initial_capture_pages(pages, state.block_ids[0], position=len(prompt), output_budget=budget)
+    if extent_memory:
+        # S2 W6b: the post-prefill DRAM backstop, host-side and before any device state, like the refusals
+        # above (RequestRefused). The scheduler's hold keeps such a prompt waiting before its prefill.
+        dram_backstop(buffer_pool, request_id=state.req_id)
     # After the host-side refusals, so a rejected request touches no device state, and
     # before the drafter, the engine and every other reader of slot 0.
     adopt_prefill_slot(helpers, capture, state.req_id)
@@ -289,6 +409,14 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         # semaphore counter, so the next EAGER gather may reuse a handle the other
         # request's trace just used - the one hazard the collectives audit could
         # construct was a hang. This is the A/B for it.
+        if extent_memory:
+            # S2 W6d: the allocator just before the engine build (drafter, verifier captures, proposal bucket),
+            # against its estimated peak; a no-op unless QWEN_FAST_MEMORY_LEDGER=1.
+            import memory_ledger
+            import serving_prefill_admission
+
+            memory_ledger.before('engine', estimate=serving_prefill_admission.engine_build_peak(),
+                                 point='req=%s' % memory_ledger.short_id(state.req_id), request=str(state.req_id))
         shared_ccl = os.environ.get('QWEN_FAST_SHARED_CCL', '1') == '1'
         device = components.device(operations, model,
             collectives if collectives is not None and shared_ccl else components.collectives(model.mesh_device),
@@ -318,6 +446,12 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                 # committed blocks - which is what a clobbered trace would look
                 # like. DFlashDevice.propose already runs eagerly when this is None,
                 # so leaving it unset isolates the trace as a variable.
+                return
+            if extent_memory:
+                # S2 W6a: one 2048 bucket whatever the prompt, 0.80 GB per engine instead of up to 1.35 GB
+                # (single_bucket_contexts). Solo on the same profile builds the same bucket.
+                with single_proposal_bucket():
+                    device.proposal_capture = components.proposal(device, max_new_tokens=budget)
                 return
             device.proposal_capture = components.proposal(device, max_new_tokens=budget)
 
@@ -379,6 +513,10 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             **(dict(storage=verifier_storage) if verifier_storage is not None else {}),
             **(dict(capture_rows=capture_rows) if capture_rows is not None else {}))
         owned.callback(engine.close)
+        if extent_memory:
+            # S2 W6a, the executed path: before_capture (prepare_proposal) has built the capture inside the engine
+            # build, so its buckets are read from the capture itself - the line M8 checks for (2048,).
+            _log(PROPOSAL_BUCKETS_BUILT + '{} contexts={}', state.req_id, built_proposal_buckets(device))
         # QWEN_FAST_PUBLISH_PREWARM (M3NATIVE_PUBLISH_PREWARM; default off): the drafter's
         # publication prepared and discarded once per process per captured (rows, prefix),
         # so its eager programs exist before the first sequential commit needs them

@@ -151,6 +151,36 @@ def note_fixture_writer(reason):
     bump(reason)
 
 
+# S2's flag (dflash_packed_proposal_coordinator.EXTENT_REPLAY_FLAG; the test pins the two equal). Read here from the
+# environment, so a detach imports nothing.
+EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
+
+
+def release_dead_proposals(hook):
+    """S2 W6c (QWEN_FAST_EXTENT_REPLAY=1 only; unset, nothing is read or called): after a detached request's
+    device has closed, its packed proposal traces go at once (PackedProposalCoordinator.release_closed) instead
+    of at the next draft round, so a replacement's prefill and engine build see that DRAM free. A hook that
+    never packed a proposal has no coordinator and nothing to release. A failure - including a coordinator from
+    before release_closed existed - is logged and left to the next round's retirement (_retire_quad, _trace_for),
+    which closes whatever this could not: a detach must not fail the engine over a release. The flag is read from
+    the environment rather than through an import, so nothing here can raise before the try."""
+    if os.environ.get(EXTENT_REPLAY_FLAG) != '1':
+        return None
+    coordinator = getattr(hook, '_packed_coordinator', None)
+    if coordinator is None:
+        return None
+    try:
+        return coordinator.release_closed()
+    except Exception as failure:
+        try:
+            from loguru import logger
+            logger.warning('[PACKED-PROPOSE] release failed at detach ({}: {}); the next round retires it',
+                           type(failure).__name__, str(failure)[:200])
+        except BaseException:
+            pass
+        return None
+
+
 def prepare_pipelined_drafts(bridges):
     """QWEN_FAST_PIPELINED_PROPOSALS phase A: enqueue every eligible bridge's
     proposal device work (DFlashDevice.prepare_device -> dflash_proposal_trace.
@@ -244,6 +274,7 @@ class FastWorkerHook:
         if bridge is None:
             raise ValueError('That request does not decode on this worker')
         bridge.close()
+        release_dead_proposals(self)
         note_fixture_writer('detach')
         return self.bridges
 

@@ -13,6 +13,7 @@ from serving_fast_policy import any_request_enabled, validate_fast_config
 from serving_lifecycle import FastServingLifecycle
 from serving_page_binding import VerifierPageBinding
 from serving_request_factory import attach_source_check, from_prefill, sequential_captures
+from serving_request_factory import extent_replay_enabled, register_dram_admission
 from serving_runner_bridge import FastRunnerBridge
 
 
@@ -423,6 +424,11 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 request.close(state.req_id)
                 raise
 
+        # S2 W6b (QWEN_FAST_EXTENT_REPLAY=1 only; unset, nothing is registered and the scheduler admits exactly
+        # as before): the scheduler-side DRAM admission hold's predicate (serving_prefill_admission), read through
+        # this pool, is parked before the lifecycle serves a request; the scope removes it before the pool closes.
+        if extent_replay_enabled():
+            scopes.callback(register_dram_admission(pool))
         lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,
             capture_factory=capture_factory, bridge_factory=bridge_factory, eos_ids=eos_ids,
             cancelled=cancelled, packed_step=packed_step)

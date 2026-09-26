@@ -17,6 +17,14 @@ _schedule_prefill_only and decode fallback run unmodified. The tests check four 
   where the unpatched step reproduces the run's refusal (LifecycleTests);
 - the same on the INSTALLED vLLM and plugin (InstalledVllmAdmissionTests). That class is skipped where
   vLLM is not installed: it runs in qwen-fast-vllm-cpu.yml.
+S2 W6b adds the DRAM admission hold (DramNeedTests, DramHoldTests, and one installed-vLLM test): a prompt the
+registered predicate refuses waits while the decodes run and is admitted once it fits; with no decode left it is
+admitted anyway; the need is read on the smallest largest free block; and with no predicate, a passing one, an
+unavailable reading or a raising predicate, every step is the one the rule above gives. DramTimingTests pin the
+W6 review's fixes: nothing is asked with every seat decoding; a reading that still counts a finished request's
+engine defers one step without a hold line, and the finished id reaches the decode step the plugin falls back to
+(FinishingVllmScheduler models vLLM's hand-off of finished_req_ids); a blocked head is judged with the request
+behind it; a released request refused again is held and logged again; and the hold's state stays bounded.
 """
 
 import enum
@@ -456,6 +464,492 @@ class LifecycleTests(GateFreeCase):
                 self.assertFalse(case.lifecycle.failed)
 
 
+class DramRequest(FakeRequest):
+    """A request that reports its prompt length as vLLM's Request does (num_prompt_tokens)."""
+
+    @property
+    def num_prompt_tokens(self):
+        return self.prompt_tokens
+
+
+class dram(object):
+    """The worker's DRAM admission predicate registered for the block (None: absent, as before S2 W6b);
+    whatever was there before is put back afterwards."""
+
+    def __init__(self, admits):
+        self.admits = admits
+
+    def __enter__(self):
+        self.saved = sys.modules.pop(admission.DRAM_KEY, None)
+        if self.admits is not None:
+            admission.register_dram_predicate(self.admits)
+        return self
+
+    def __exit__(self, *failure):
+        sys.modules.pop(admission.DRAM_KEY, None)
+        if self.saved is not None:
+            sys.modules[admission.DRAM_KEY] = self.saved
+        return False
+
+
+class DramFreeCase(GateFreeCase):
+    """No prefill held and no DRAM predicate registered, whatever an earlier test left."""
+
+    def setUp(self):
+        super().setUp()
+        clear = dram(None)
+        clear.__enter__()
+        self.addCleanup(clear.__exit__, None, None, None)
+
+
+class Pool(object):
+    """A pool whose allocator statistics read (free, largest_free) bytes per chip."""
+
+    def __init__(self, *chips):
+        self.chips = chips
+
+    def dram_statistics(self):
+        return [dict(chip=index, free=free, largest_free=largest) for index, (free, largest) in enumerate(self.chips)]
+
+
+MB = 10 ** 6
+RESERVE = 256 * 2 ** 20
+
+
+class DramNeedTests(DramFreeCase):
+    def test_the_need_is_the_build_the_long_prompts_prefill_and_the_reserve(self):
+        build = 800 * MB + 200 * MB
+        self.assertEqual(admission.engine_build_peak(), build)
+        self.assertEqual(admission.dram_need(1, RESERVE), build + RESERVE)
+        self.assertEqual(admission.dram_need(2047, RESERVE), build + RESERVE)
+        for prompt in (2048, 123136, None, '4096'):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(admission.dram_need(prompt, RESERVE), build + 300 * MB + RESERVE,
+                                 'a long or unreadable prompt carries the prefill transient')
+        self.assertEqual(admission.backstop_need(RESERVE), build + RESERVE, 'after the prefill, no transient')
+        for reserve in (-1, 1.5, None, True):
+            with self.subTest(reserve=reserve), self.assertRaises(ValueError):
+                admission.dram_need(60, reserve)
+            with self.subTest(reserve=reserve), self.assertRaises(ValueError):
+                admission.backstop_need(reserve)
+
+    def test_the_reading_is_the_smallest_chips_largest_block_never_the_total_free(self):
+        self.assertEqual(admission.largest_free(Pool((5_000 * MB, 700 * MB), (6_000 * MB, 900 * MB))), (700 * MB, None))
+        self.assertEqual(admission.largest_free(object()), (None, 'pool without device statistics'))
+        unavailable = SimpleNamespace(dram_statistics=lambda: dict(unavailable='no memory view'))
+        self.assertEqual(admission.largest_free(unavailable), (None, 'no memory view'))
+        broken = SimpleNamespace(dram_statistics=Mock(side_effect=RuntimeError('allocator gone')))
+        self.assertEqual(admission.largest_free(broken), (None, 'RuntimeError: allocator gone'))
+        largest, reason = admission.largest_free(SimpleNamespace(dram_statistics=lambda: []))
+        self.assertIsNone(largest)
+        self.assertTrue(reason.startswith('ValueError'), reason)
+
+    def test_the_predicate_refuses_only_a_reading_below_the_need(self):
+        short, long = admission.dram_need(60, 0), admission.dram_need(4096, 0)
+        admits = admission.dram_predicate(Pool((9_000 * MB, short), (9_000 * MB, short + MB)), 0)
+        self.assertEqual(admits(60), (True, dict(largest_free=short, need=short)))
+        self.assertEqual(admits(4096), (False, dict(largest_free=short, need=long)))
+        # Plenty free in total, but no block large enough: held. The need is never read on `free`.
+        fragmented = admission.dram_predicate(Pool((20_000 * MB, 100 * MB), (20_000 * MB, 20_000 * MB)), 0)
+        self.assertFalse(fragmented(60)[0])
+        self.assertEqual(admission.dram_predicate(object(), 0)(4096),
+                         (True, dict(largest_free=None, need=long, unavailable='pool without device statistics')))
+        with self.assertRaises(ValueError):
+            admission.dram_predicate(Pool(), -1)
+
+    def test_registration_parks_the_predicate_and_its_removal_takes_only_its_own(self):
+        modules = {}
+        first, second = Mock(), Mock()
+        remove_first = admission.register_dram_predicate(first, modules)
+        self.assertIs(modules[admission.DRAM_KEY].admits, first)
+        self.assertIs(admission.dram_admits(modules), first)
+        remove_second = admission.register_dram_predicate(second, modules)
+        remove_first()
+        self.assertIs(admission.dram_admits(modules), second, 'a later registration is not removed by an earlier one')
+        remove_second()
+        self.assertNotIn(admission.DRAM_KEY, modules)
+        self.assertIsNone(admission.dram_admits(modules))
+        with self.assertRaises(ValueError):
+            admission.register_dram_predicate('not callable', modules)
+
+        class Broken(object):
+            @property
+            def admits(self):
+                raise RuntimeError('holder unreadable')
+
+        self.assertIsNone(admission.dram_admits({admission.DRAM_KEY: Broken()}))
+
+    def test_the_candidates_are_the_requests_the_waiting_loop_may_admit_this_step(self):
+        """skipped_waiting's, then waiting's, in queue order (vLLM's peek_request is the head of that order), up to
+        and including the first request that is not blocked: a blocked head is skipped unless promoted in the
+        pass, so the loop may admit it or any request up to that one (review W6 defect 4)."""
+        short, long = DramRequest('S', 60), DramRequest('W', 4096)
+        candidates = admission.admission_candidates
+        self.assertEqual(candidates(SimpleNamespace(skipped_waiting=Queue([short]), waiting=Queue([long]))), [short])
+        self.assertEqual(candidates(SimpleNamespace(skipped_waiting=Queue(), waiting=Queue([long, short]))), [long])
+        self.assertEqual(candidates(SimpleNamespace(waiting=Queue([long]))), [long])
+        self.assertEqual(candidates(SimpleNamespace(skipped_waiting=Queue(), waiting=Queue())), [])
+        grammar, remote = blocked(DramRequest('G', 60)), blocked(DramRequest('R', 90))
+        self.assertEqual(candidates(Blocking(skipped_waiting=Queue([grammar, remote]), waiting=Queue([short, long]))),
+                         [grammar, remote, short])
+        self.assertEqual(candidates(Blocking(skipped_waiting=Queue([grammar]), waiting=Queue())), [grammar])
+        self.assertEqual(candidates(SimpleNamespace(skipped_waiting=Queue([grammar]), waiting=Queue([long]))), [grammar],
+                         'a scheduler without _is_blocked_waiting_status blocks nothing')
+        self.assertIs(admission.binding_request([grammar, remote, short]), remote)
+        self.assertIs(admission.binding_request([short, long, DramRequest('W2', 4096)]), long, 'the first of equals')
+        unreadable = SimpleNamespace(request_id='U')
+        self.assertIs(admission.binding_request([long, unreadable]), unreadable, 'an unreadable length is the longest')
+        self.assertIsNone(admission.binding_request([]))
+        self.assertEqual(admission.prompt_tokens(short), 60)
+        self.assertEqual(admission.prompt_tokens(SimpleNamespace(prompt_token_ids=[1] * 7)), 7)
+        self.assertIsNone(admission.prompt_tokens(SimpleNamespace()))
+
+
+class DramHoldTests(DramFreeCase):
+    """The hold on the plugin's own class (fixtures/plugin_scheduler.py) over the reduced vLLM scheduler."""
+
+    def started(self, log):
+        """A scheduler with A decoding."""
+        scheduler = patched_plugin(log)()
+        scheduler.add_request(DramRequest('A'))
+        self.assertEqual(new_ids(scheduler.schedule()), ['A'])
+        return scheduler
+
+    @staticmethod
+    def lines(log, template):
+        return [entry.args[1:] for entry in log.call_args_list if entry.args[0] == template]
+
+    def test_a_prompt_that_does_not_fit_waits_while_the_decodes_run_and_is_admitted_once_it_fits(self):
+        log, asked, fits = Mock(), [], [False]
+
+        def admits(prompt):
+            asked.append(prompt)
+            return fits[0], dict(largest_free=900 * MB, need=1_300 * MB)
+
+        scheduler = self.started(log)
+        with dram(admits):
+            scheduler.add_request(DramRequest('B', 4096))
+            for _ in range(3):
+                step = scheduler.schedule()
+                self.assertEqual((new_ids(step), cached_ids(step)), ([], ['A']), 'A decodes, B waits')
+                self.assertEqual(names(scheduler.waiting), ['B'], 'the hidden queue came back')
+                self.assertEqual(scheduler.max_num_running_reqs, 4)
+            fits[0] = True
+            step = scheduler.schedule()
+            self.assertEqual((new_ids(step), cached_ids(step)), (['B'], []))
+            self.assertEqual(cached_ids(scheduler.schedule()), ['A', 'B'])
+        self.assertEqual(asked, [4096] * 4, 'asked about B at every prefill attempt, about nothing else')
+        self.assertEqual(self.lines(log, admission.DRAM_HOLD_LINE), [(4096, '900.0MB', '1300.0MB', 'B', 1)],
+                         'one hold line for the held state')
+        self.assertEqual(self.lines(log, admission.DRAM_RELEASED_LINE), [(4096, '900.0MB', '1300.0MB', 'B')])
+        self.assertEqual(self.lines(log, admission.DRAM_LIFTED_LINE), [])
+        self.assertIn(call('[PINDIAG] one fresh prefill per step: partials={} decodes={} gate_held={} allowed={} '
+                           'hidden={}', 0, 1, False, 0, True), log.call_args_list, 'the held step logs its decision')
+
+    def test_with_no_decode_left_the_prompt_is_admitted_and_the_backstop_decides(self):
+        """Nothing running can finish and free DRAM, so holding would stall the engine for good."""
+        log = Mock()
+        refuse = lambda prompt: (False, dict(largest_free=900 * MB, need=1_300 * MB))
+        scheduler = self.started(log)
+        with dram(refuse):
+            scheduler.add_request(DramRequest('B', 4096))
+            self.assertEqual(cached_ids(scheduler.schedule()), ['A'], 'held while A decodes')
+            scheduler.finish('A')
+            self.assertEqual(new_ids(scheduler.schedule()), ['B'], 'A finished: B is admitted, still short')
+            fresh = patched_plugin(log)()
+            fresh.add_request(DramRequest('C', 60))
+            self.assertEqual(new_ids(fresh.schedule()), ['C'], 'an idle engine admits at once')
+        self.assertEqual(self.lines(log, admission.DRAM_HOLD_LINE), [(4096, '900.0MB', '1300.0MB', 'B', 1)])
+        self.assertEqual(self.lines(log, admission.DRAM_LIFTED_LINE),
+                         [(4096, '900.0MB', '1300.0MB', 'B'), (60, '900.0MB', '1300.0MB', 'C')])
+        self.assertEqual(self.lines(log, admission.DRAM_RELEASED_LINE), [])
+
+    def test_a_held_gate_and_running_partials_are_decided_before_the_predicate_is_asked(self):
+        admits = Mock(return_value=(False, dict(largest_free=0, need=1)))
+        scheduler = self.started(Mock())
+        with dram(admits):
+            scheduler.add_request(DramRequest('B'))
+            with gate('cmpl-held'):
+                self.assertEqual(cached_ids(scheduler.schedule()), ['A'])
+            admits.assert_not_called()
+            # A running partial prefill continues alone; the predicate is not asked either.
+            recording = plugin_class(RecordingBase)
+            admission.install(configured(recording), log=Mock())
+            partial = recording.__new__(recording)
+            partial.qwen_seen, partial.qwen_requeue = {}, False
+            partial.running = [SimpleNamespace(name='partial', is_prefill_chunk=True),
+                               SimpleNamespace(name='decode', is_prefill_chunk=False)]
+            partial.waiting, partial.skipped_waiting = Queue([DramRequest('C')]), Queue()
+            partial.policy, partial.max_num_running_reqs = 'fcfs', 4
+            partial._schedule_prefill_only()
+            self.assertEqual(partial.qwen_seen['running'], ['partial'])
+            admits.assert_not_called()
+
+    def test_the_hold_reads_the_pool_through_the_registered_predicate(self):
+        """End to end with the worker's own predicate: 1.0 GB in the largest block, no reserve - a short
+        prompt fits (need 1.0 GB), a long one does not (need 1.3 GB)."""
+        log = Mock()
+        pool = Pool((20_000 * MB, 1_000 * MB), (20_000 * MB, 5_000 * MB))
+        scheduler = self.started(log)
+        with dram(admission.dram_predicate(pool, 0)):
+            scheduler.add_request(DramRequest('B', 60))
+            self.assertEqual(new_ids(scheduler.schedule()), ['B'])
+            scheduler.add_request(DramRequest('C', 4096))
+            step = scheduler.schedule()
+            self.assertEqual((new_ids(step), cached_ids(step)), ([], ['A', 'B']))
+        self.assertEqual(self.lines(log, admission.DRAM_HOLD_LINE), [(4096, '1000.0MB', '1300.0MB', 'C', 2)])
+
+    def scenario(self, admits, log):
+        """test_running_decodes_are_never_dropped_or_starved's arrivals, step by step."""
+        with dram(admits):
+            scheduler = patched_plugin(log)()
+            steps = []
+            scheduler.add_request(DramRequest('A'))
+            steps.extend(scheduler.schedule() for _ in range(2))
+            for request_id in 'BCD':
+                scheduler.add_request(DramRequest(request_id, 100))
+            steps.extend(scheduler.schedule() for _ in range(3))
+            scheduler.add_request(DramRequest('E'))
+            steps.extend(scheduler.schedule() for _ in range(2))
+            scheduler.finish('B')
+            steps.extend(scheduler.schedule() for _ in range(2))
+            return [(new_ids(step), cached_ids(step)) for step in steps]
+
+    def test_no_predicate_a_passing_one_an_unavailable_reading_or_a_raising_one_schedules_as_before(self):
+        reference = self.scenario(None, Mock())
+        self.assertEqual(reference[:2], [(['A'], []), ([], ['A'])])
+        for name, admits in (('passing', lambda prompt: (True, dict(largest_free=9_000 * MB, need=1_000 * MB))),
+                             ('unavailable', admission.dram_predicate(object(), 0)),
+                             ('raising', Mock(side_effect=RuntimeError('allocator gone')))):
+            with self.subTest(predicate=name):
+                log = Mock()
+                self.assertEqual(self.scenario(admits, log), reference)
+                self.assertEqual(self.lines(log, admission.DRAM_HOLD_LINE), [])
+                unavailable = self.lines(log, admission.DRAM_UNAVAILABLE_LINE)
+                if name == 'passing':
+                    self.assertEqual(unavailable, [])
+                else:
+                    self.assertEqual([request_id for request_id, _ in unavailable], ['A', 'B', 'C', 'D', 'E'],
+                                     'one line per request, never a hold')
+
+
+BLOCKED = 'WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR'
+
+
+class Blocking(SimpleNamespace):
+    """A scheduler with vLLM's _is_blocked_waiting_status (scheduler.py:1853-1858), over the fixture's statuses."""
+
+    @staticmethod
+    def _is_blocked_waiting_status(status):
+        return status == BLOCKED
+
+
+def blocked(request):
+    """`request` waiting on its structured-output grammar, as vLLM marks it."""
+    request.status = BLOCKED
+    return request
+
+
+def logged(log, template):
+    return [entry.args[1:] for entry in log.call_args_list if entry.args and entry.args[0] == template]
+
+
+class FinishingVllmScheduler(FakeVllmScheduler):
+    """FakeVllmScheduler with vLLM 0.25.1's finished_req_ids: finish() records the id (scheduler.py:2108), and
+    every schedule() - a pass the plugin then discards as much as one it returns - hands the set to its output and
+    starts a new one (:1105, :1210)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.finished_req_ids = set()
+
+    def finish(self, request_id):
+        super().finish(request_id)
+        self.finished_req_ids.add(request_id)
+
+    def schedule(self):
+        output = super().schedule()
+        output.finished_req_ids, self.finished_req_ids = self.finished_req_ids, set()
+        return output
+
+
+class Worker(object):
+    """The DRAM the hold reads, as the worker holds it: one engine per admitted request, freed only when a step's
+    output names that request finished, at the start of executing the step (serving_lifecycle._execute detaches
+    it and the hook closes its engine). By default the design's figures: 4.37 GB free per chip at attach beside
+    the block, 0.80 GB per engine (s2-design.md section 3.1)."""
+
+    def __init__(self, attach=4_370 * MB, engine=800 * MB):
+        self.attach, self.engine, self.engines = attach, engine, set()
+
+    def dram_statistics(self):
+        largest = self.attach - self.engine * len(self.engines)
+        return [dict(chip=0, free=largest, largest_free=largest)]
+
+    def execute(self, step):
+        self.engines -= set(step.finished_req_ids)
+        self.engines |= set(new_ids(step))
+        return step
+
+
+class DramTimingTests(DramFreeCase):
+    """The W6 review's defects in the hold: when it is asked, what a stale reading does, which request it judges,
+    what it logs, and what it keeps."""
+
+    @staticmethod
+    def finishing(log):
+        """The plugin's own class over FinishingVllmScheduler, with the wrapper installed."""
+        cls = plugin_class(FinishingVllmScheduler)
+        admission.install(configured(cls), log=log)
+        return cls()
+
+    def test_with_every_seat_decoding_nothing_is_asked_and_a_hold_after_a_seat_frees_is_logged(self):
+        """Defect 1(a): with four users decoding (max-num-seqs 4) a queued fifth is held by the seat limit, so the
+        predicate is not asked and no hold line is spent. When a seat frees, a real hold logs at its decode count."""
+        log, asked = Mock(), []
+
+        def refuse(prompt):
+            asked.append(prompt)
+            return False, dict(largest_free=1_170 * MB, need=1_568 * MB)
+
+        scheduler = patched_plugin(log)()
+        for request_id in 'ABCD':
+            scheduler.add_request(DramRequest(request_id, 100))
+            scheduler.schedule()
+        self.assertEqual(names(scheduler.running), ['A', 'B', 'C', 'D'])
+        with dram(refuse):
+            scheduler.add_request(DramRequest('E', 4096))
+            for _ in range(3):
+                step = scheduler.schedule()
+                self.assertEqual((new_ids(step), cached_ids(step)), ([], ['A', 'B', 'C', 'D']))
+            self.assertEqual(asked, [], 'every seat decoding: the waiting loop admits nobody, so nothing is asked')
+            self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [])
+            scheduler.finish('A')
+            step = scheduler.schedule()
+            self.assertEqual((new_ids(step), cached_ids(step)), ([], ['B', 'C', 'D']))
+        self.assertEqual(asked, [4096])
+        self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [(4096, '1170.0MB', '1568.0MB', 'E', 3)])
+
+    def test_a_replacement_behind_a_finish_is_deferred_one_step_and_the_decode_step_names_the_finish(self):
+        """Defect 1(b), on the design's figures: four 120k users hold four engines (1.17 GB left), A finishes and E
+        waits. That step's reading still counts A's engine, which the worker frees only when the step's output
+        names A. So E is deferred - no hold line - and the decode-only step the plugin falls back to must name A:
+        vLLM's first, discarded pass took it (FinishingVllmScheduler), and without it A's engine is never freed and
+        E waits for good. E is admitted on the fresh reading of the next step."""
+        log, worker = Mock(), Worker()
+        scheduler = self.finishing(log)
+        with dram(admission.dram_predicate(worker, RESERVE)):
+            for request_id in 'ABCD':
+                scheduler.add_request(DramRequest(request_id, 120_000))
+                self.assertEqual(new_ids(worker.execute(scheduler.schedule())), [request_id])
+            self.assertEqual(worker.dram_statistics()[0]['largest_free'], 1_170 * MB)
+            scheduler.finish('A')
+            scheduler.add_request(DramRequest('E', 110_000))
+            deferred = worker.execute(scheduler.schedule())
+            self.assertEqual((new_ids(deferred), cached_ids(deferred)), ([], ['B', 'C', 'D']))
+            self.assertEqual(deferred.finished_req_ids, {'A'}, 'the decode step names A, so the worker frees it')
+            self.assertEqual(worker.dram_statistics()[0]['largest_free'], 1_970 * MB)
+            admitted = worker.execute(scheduler.schedule())
+            self.assertEqual((new_ids(admitted), admitted.finished_req_ids), (['E'], set()))
+        need = '%.1fMB' % (admission.dram_need(110_000, RESERVE) / MB)
+        self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [], 'a stale reading is not a hold')
+        self.assertEqual(logged(log, admission.DRAM_DEFERRED_LINE), [(110_000, '1170.0MB', need, 'E', ['A'])])
+        self.assertEqual(logged(log, admission.DRAM_CARRIED_LINE), [(['A'],)])
+        self.assertEqual(logged(log, admission.DRAM_RELEASED_LINE), [])
+
+    def test_when_the_last_decode_finishes_the_deferred_pass_itself_names_the_finish_once(self):
+        """With no decode left the plugin returns the held pass itself, which already names the finish: nothing is
+        carried, so the next step does not name it twice."""
+        log, worker = Mock(), Worker(attach=1_900 * MB)
+        scheduler = self.finishing(log)
+        with dram(admission.dram_predicate(worker, RESERVE)):
+            scheduler.add_request(DramRequest('A', 120_000))
+            self.assertEqual(new_ids(worker.execute(scheduler.schedule())), ['A'])
+            scheduler.finish('A')
+            scheduler.add_request(DramRequest('E', 110_000))
+            deferred = worker.execute(scheduler.schedule())
+            self.assertEqual((new_ids(deferred), cached_ids(deferred), deferred.finished_req_ids), ([], [], {'A'}))
+            admitted = worker.execute(scheduler.schedule())
+            self.assertEqual((new_ids(admitted), admitted.finished_req_ids), (['E'], set()))
+        self.assertEqual(len(logged(log, admission.DRAM_DEFERRED_LINE)), 1)
+        for template in (admission.DRAM_CARRIED_LINE, admission.DRAM_HOLD_LINE, admission.DRAM_LIFTED_LINE):
+            self.assertEqual(logged(log, template), [], template)
+
+    def test_a_forced_prefill_only_step_returns_the_held_pass_as_it_is_so_nothing_is_carried(self):
+        """Lane coordination's forced PREFILL_ONLY mode returns the empty prefill pass itself (plugin
+        scheduler.py:116-121), which already names the finish; carrying it too would name it twice."""
+        log, worker = Mock(), Worker()
+        scheduler = self.finishing(log)
+        with dram(admission.dram_predicate(worker, RESERVE)):
+            for request_id in 'ABCD':
+                scheduler.add_request(DramRequest(request_id, 120_000))
+                worker.execute(scheduler.schedule())
+            scheduler.finish('A')
+            scheduler.add_request(DramRequest('E', 110_000))
+            scheduler.set_forced_mode(TTSchedulingMode.PREFILL_ONLY)
+            forced = worker.execute(scheduler.schedule())
+            self.assertEqual((new_ids(forced), cached_ids(forced), forced.finished_req_ids), ([], [], {'A'}))
+            scheduler.set_forced_mode(TTSchedulingMode.DEFAULT)
+            admitted = worker.execute(scheduler.schedule())
+            self.assertEqual((new_ids(admitted), admitted.finished_req_ids), (['E'], set()))
+        self.assertEqual(logged(log, admission.DRAM_CARRIED_LINE), [])
+
+    def test_a_blocked_head_is_judged_with_the_request_the_loop_may_admit_behind_it(self):
+        """Defect 4: a head vLLM skips for a blocked status (its grammar still compiling) hands the step to the
+        request behind it, whose need may carry the prefill transient the head's does not."""
+        log, asked = Mock(), []
+
+        def admits(prompt):
+            asked.append(prompt)
+            need = admission.dram_need(prompt, 0)
+            return 1_100 * MB >= need, dict(largest_free=1_100 * MB, need=need)
+
+        with dram(admits):
+            waiting = Blocking(skipped_waiting=Queue([blocked(DramRequest('G', 60))]),
+                               waiting=Queue([DramRequest('L', 4096)]))
+            self.assertTrue(admission.dram_hold(waiting, 2, {}, log))
+            self.assertEqual(asked, [4096])
+            unblocked = Blocking(skipped_waiting=Queue(), waiting=Queue([DramRequest('S', 60), DramRequest('L', 4096)]))
+            self.assertFalse(admission.dram_hold(unblocked, 2, {}, log))
+            self.assertEqual(asked, [4096, 60], 'an unblocked head is the only candidate')
+        self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [(4096, '1100.0MB', '1300.0MB', 'L', 2)])
+
+    def test_a_released_request_that_is_refused_again_is_held_and_logged_again(self):
+        """Defect 6, and the (request, decodes) key of defect 1: released means the reading fitted, not that the
+        request was admitted (a token budget can still keep it waiting), so a new refusal is a new hold; a new
+        decode count is a new state."""
+        log, fits = Mock(), [False]
+        scheduler, state = SimpleNamespace(waiting=Queue([DramRequest('E', 4096)])), {}
+        with dram(lambda prompt: (fits[0], dict(largest_free=900 * MB, need=1_300 * MB))):
+            self.assertTrue(admission.dram_hold(scheduler, 1, state, log))
+            self.assertTrue(admission.dram_hold(scheduler, 1, state, log))
+            fits[0] = True
+            self.assertFalse(admission.dram_hold(scheduler, 1, state, log))
+            fits[0] = False
+            self.assertTrue(admission.dram_hold(scheduler, 1, state, log))
+            self.assertTrue(admission.dram_hold(scheduler, 2, state, log))
+            self.assertTrue(admission.dram_hold(scheduler, 2, state, log))
+        self.assertEqual(logged(log, admission.DRAM_HOLD_LINE),
+                         [(4096, '900.0MB', '1300.0MB', 'E', 1)] * 2 + [(4096, '900.0MB', '1300.0MB', 'E', 2)])
+        self.assertEqual(logged(log, admission.DRAM_RELEASED_LINE), [(4096, '900.0MB', '1300.0MB', 'E')])
+
+    def test_the_state_stays_bounded_however_many_requests_pass(self):
+        """Defect 5: one line per distinct state, from state that does not grow with the traffic."""
+        log, state = Mock(), {}
+        with dram(admission.dram_predicate(object(), 0)):
+            for index in range(200):
+                for _ in range(2):
+                    admission.dram_hold(SimpleNamespace(waiting=Queue([DramRequest('U%d' % index, 60)])), 1, state, log)
+        with dram(lambda prompt: (False, dict(largest_free=0, need=1))):
+            for index in range(200):
+                for _ in range(2):
+                    admission.dram_hold(SimpleNamespace(waiting=Queue([DramRequest('L%d' % index, 60)])), 0, state, log)
+        self.assertEqual(len(logged(log, admission.DRAM_UNAVAILABLE_LINE)), 200)
+        self.assertEqual(len(logged(log, admission.DRAM_LIFTED_LINE)), 200)
+        self.assertEqual(sorted(state), ['dram_held', 'dram_noted'])
+        self.assertEqual((state['dram_held'], state['dram_noted']), (None, ('lifted', 'L199')))
+
+
 class InstalledVllmAdmissionTests(GateFreeCase):
     """Against the pinned vLLM (0.25.1 in qwen-fast-vllm-cpu.yml) and the class the engine builds,
     TTScheduler(AsyncScheduler): vLLM's own waiting loop, request queues, KV admission and
@@ -525,6 +1019,68 @@ class InstalledVllmAdmissionTests(GateFreeCase):
                 self.assertEqual(decode.scheduled_new_reqs, [])
                 self.assertEqual(scheduler.max_num_running_reqs, 4)
                 self.assertIn(call(admission.LIVE + '{}', 'TTScheduler'), log.call_args_list)
+
+    def test_a_dram_hold_keeps_the_prompt_waiting_while_the_decode_runs(self):
+        """S2 W6b on vLLM's own queues and Request (num_prompt_tokens, peek_request): B waits while the
+        predicate refuses it, A decodes meanwhile, and B is admitted alone once it fits."""
+        for source, scheduler_type in self.schedulers():
+            with self.subTest(source=source):
+                log, asked, fits = Mock(), [], [False]
+
+                def admits(prompt):
+                    asked.append(prompt)
+                    return fits[0], dict(largest_free=900 * MB, need=1_300 * MB)
+
+                admission.install(configured(scheduler_type), log=log)
+                case, scheduler = self.build(scheduler_type)
+                self.arrive(scheduler, 'A')
+                step = scheduler.schedule()
+                self.assertEqual(step.num_scheduled_tokens, {'A': 1024})
+                scheduler.update_from_output(step, case.output('A', [100]))
+                with dram(admits):
+                    self.arrive(scheduler, 'B')
+                    held = scheduler.schedule()
+                    self.assertEqual(set(held.num_scheduled_tokens), {'A'})
+                    self.assertEqual(held.scheduled_new_reqs, [])
+                    scheduler.update_from_output(held, case.output('A', [101]))
+                    fits[0] = True
+                    admitted = scheduler.schedule()
+                    self.assertEqual(admitted.num_scheduled_tokens, {'B': 1024})
+                self.assertEqual(asked, [1024, 1024])
+                self.assertEqual(scheduler.max_num_running_reqs, 4)
+                self.assertIn(call(admission.DRAM_HOLD_LINE, 1024, '900.0MB', '1300.0MB', 'B', 1), log.call_args_list)
+
+    def test_a_deferred_admission_behind_a_finish_leaves_the_finish_in_the_decode_step(self):
+        """S2 W6b on vLLM's own finished_req_ids: A and B decode, A finishes, and C waits on a reading that still
+        counts A's engine. The prefill pass is held (deferred, not a hold), the plugin falls back to a decode-only
+        pass, and that pass names A finished: without the carry vLLM's first, discarded pass took it and the worker
+        would never detach A. C is admitted on the next step, which names nothing twice."""
+        from vllm.v1.request import RequestStatus
+
+        for source, scheduler_type in self.schedulers():
+            with self.subTest(source=source):
+                log, fits = Mock(), [False]
+                admission.install(configured(scheduler_type), log=log)
+                case, scheduler = self.build(scheduler_type)
+                for request_id, token in (('A', 100), ('B', 200)):
+                    self.arrive(scheduler, request_id)
+                    step = scheduler.schedule()
+                    self.assertEqual(step.num_scheduled_tokens, {request_id: 1024})
+                    scheduler.update_from_output(step, case.output(request_id, [token]))
+                scheduler.finish_requests('A', RequestStatus.FINISHED_ABORTED)
+                with dram(lambda prompt: (fits[0], dict(largest_free=900 * MB, need=1_300 * MB))):
+                    self.arrive(scheduler, 'C')
+                    deferred = scheduler.schedule()
+                    self.assertEqual(set(deferred.num_scheduled_tokens), {'B'})
+                    self.assertEqual(deferred.scheduled_new_reqs, [])
+                    self.assertEqual(set(deferred.finished_req_ids), {'A'})
+                    scheduler.update_from_output(deferred, case.output('B', [201]))
+                    fits[0] = True
+                    admitted = scheduler.schedule()
+                    self.assertEqual(admitted.num_scheduled_tokens, {'C': 1024})
+                    self.assertEqual(set(admitted.finished_req_ids), set())
+                self.assertIn(call(admission.DRAM_CARRIED_LINE, ['A']), log.call_args_list)
+                self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [])
 
 
 if __name__ == '__main__':

@@ -46,6 +46,19 @@ per-phase report is one JSON line ({"stage": "memory_ledger", ...}) appended to 
 the log: $QWEN_FAST_MEMORY_LEDGER_REPORT when set, else memory-ledger.jsonl in the gate's
 mounted results directory (/experiment-results-gate) when that exists, else stdout. The
 first log line names where it went.
+
+S2 W6d, "BEFORE" POINTS (s2-design.md section 3.3): the phases above read the allocator only AFTER an
+allocation, so the peak inside an engine build, a pair or quad capture or a single-user rebuild is never
+observed. before(op, estimate=...) reads the allocator just ahead of such an operation and logs, per chip, the
+largest free block, the operation's estimated peak, the margin between them and the running floor of that
+margin over every before point so far (G5 judges floor >= the reserve); after(token) reads it again when the
+operation returns and logs what it cost. Both also read the trace region (BufferType.TRACE) when this ttnn
+exposes a view of it, else say it is unavailable (s2-design.md Q18). Neither enters the phase chain: the delta
+checks above, their readings and the known set are exactly what they are without them.
+    [MEMLEDGER] before op=<op>[ point=<p>] chip<n> largest_free= free= estimate= margin= floor= trace_used= ...
+    [MEMLEDGER] after op=<op>[ point=<p>] chip<n> cost= largest_free= trace_used= ...
+Their callers (serving_request_factory, dflash_packed_proposal_coordinator) call them only under
+QWEN_FAST_EXTENT_REPLAY=1.
 """
 
 import json
@@ -70,6 +83,8 @@ GATE_RESULTS = '/experiment-results-gate'
 MAX_WALK_NODES = 400000
 MAX_WALK_DEPTH = 12
 UNMATCHED_LISTED = 50
+BEFORE_MARKER = '[MEMLEDGER] before op='
+AFTER_MARKER = '[MEMLEDGER] after op='
 # Never descended into: classes, modules and code objects hold no device tensor of a phase.
 NOT_WALKED = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType, types.MethodType)
 
@@ -161,6 +176,51 @@ def first_packed_round(**walked):
     return ledger.phase('P12', point='first_packed_round', **walked)
 
 
+def before(op, *, estimate, point=None, request=None):
+    """S2 W6d: a reading ahead of a heavy operation (the module docstring), or None: a no-op unless a ledger
+    is active. Returns the token after() takes."""
+    ledger = _active
+    if ledger is None:
+        return None
+    return ledger.before(op, estimate=estimate, point=point, request=request)
+
+
+def after(token):
+    """S2 W6d: the reading when the operation `token` names has returned; a no-op without a ledger or token."""
+    ledger = _active
+    if ledger is None or token is None:
+        return None
+    return ledger.after(token)
+
+
+def trace_statistics(operations, tensor):
+    """Each chip's trace-region allocator figures, as serving_buffer_pool.dram_statistics reads DRAM's, or
+    dict(unavailable=why) when this ttnn has no TRACE buffer type or refuses its view (s2-design.md Q18)."""
+    try:
+        buffer_type = operations.BufferType.TRACE
+        report = []
+        for chip, shard in enumerate(operations.get_device_tensors(tensor)):
+            view = operations.get_memory_view(shard.device(), buffer_type)
+            banks = int(view.num_banks)
+            report.append(dict(chip=chip, banks=banks,
+                allocated=int(view.total_bytes_allocated_per_bank) * banks,
+                free=int(view.total_bytes_free_per_bank) * banks,
+                largest_free=int(view.largest_contiguous_bytes_free_per_bank) * banks,
+                total=int(view.total_bytes_per_bank) * banks))
+        return report
+    except BaseException as failure:
+        return dict(unavailable='%s: %s' % (type(failure).__name__, str(failure)[:80]))
+
+
+def _trace_text(trace, index):
+    if isinstance(trace, dict):
+        return 'trace=unavailable'
+    chip = next((item for item in trace if item['chip'] == index), None)
+    if chip is None:
+        return 'trace=unavailable'
+    return 'trace_used=%s trace_largest_free=%s' % (_mb(chip['allocated']), _mb(chip['largest_free']))
+
+
 def _gb(value):
     return '%.3fGB' % (value / 1e9)
 
@@ -184,6 +244,8 @@ class MemoryLedger:
         self.checks = []         # per phase: dict(phase, status, chips=[...])
         self.first_round_recorded = False
         self.engines = 0
+        self.before_points = []  # S2 W6d: (op, point, per-chip margin) of every before point
+        self.floor = {}          # chip -> the smallest margin over every before point so far
 
     def log(self, message):
         """One message within LINE_BUDGET; anything longer continues on further lines."""
@@ -321,6 +383,78 @@ class MemoryLedger:
         from serving_buffer_pool import dram_statistics
 
         return dram_statistics(self.operations, self.probe)
+
+    def trace_reading(self):
+        return trace_statistics(self.operations, self.probe)
+
+    # --- S2 W6d: before and after points (outside the phase chain) ------------------------------
+
+    def before(self, op, *, estimate, point=None, request=None):
+        try:
+            return self._before(op, estimate, point, request)
+        except BaseException as failure:
+            try:
+                self.log('[MEMLEDGER] before op=%s error=%s: %s' % (op, type(failure).__name__, str(failure)[:100]))
+            except BaseException:
+                pass
+            return None
+
+    def _before(self, op, estimate, point, request):
+        if type(estimate) is not int or estimate < 0:
+            raise ValueError('a non-negative integer estimate in bytes is required')
+        label = op if point is None else '%s point=%s' % (op, point)
+        chips, trace = self.reading(), self.trace_reading()
+        report = dict(stage='memory_ledger_before', op=op, point=point, request=request, estimate=estimate,
+                      chips=chips, trace=trace)
+        if isinstance(chips, dict):
+            self.log('[MEMLEDGER] before op=%s dram unavailable (%s)' % (label, str(chips.get('unavailable'))[:100]))
+            self.emit(json.dumps(report, default=str))
+            return None
+        margins = {}
+        for chip in chips:
+            index = chip['chip']
+            margin = chip['largest_free'] - estimate
+            margins[index] = margin
+            self.floor[index] = min(self.floor.get(index, margin), margin)
+            self.log('[MEMLEDGER] before op=%s chip%d largest_free=%s free=%s estimate=%s margin=%s floor=%s %s'
+                     % (label, index, _mb(chip['largest_free']), _gb(chip['free']), _mb(estimate), _mb(margin),
+                        _mb(self.floor[index]), _trace_text(trace, index)))
+        self.before_points.append((op, point, margins))
+        report.update(margins=margins, floor=dict(self.floor))
+        self.emit(json.dumps(report, default=str))
+        return dict(op=op, label=label, point=point, request=request, chips=chips)
+
+    def after(self, token):
+        try:
+            return self._after(token)
+        except BaseException as failure:
+            try:
+                self.log('[MEMLEDGER] after op=%s error=%s: %s' % (token.get('op'), type(failure).__name__,
+                                                                   str(failure)[:100]))
+            except BaseException:
+                pass
+            return None
+
+    def _after(self, token):
+        chips, trace = self.reading(), self.trace_reading()
+        report = dict(stage='memory_ledger_after', op=token['op'], point=token['point'], request=token['request'],
+                      chips=chips, trace=trace)
+        if isinstance(chips, dict):
+            self.log('[MEMLEDGER] after op=%s dram unavailable (%s)' % (token['label'],
+                                                                        str(chips.get('unavailable'))[:100]))
+            self.emit(json.dumps(report, default=str))
+            return report
+        costs = {}
+        for chip in chips:
+            index = chip['chip']
+            earlier = next((item for item in token['chips'] if item['chip'] == index), None)
+            costs[index] = None if earlier is None else chip['allocated'] - earlier['allocated']
+            self.log('[MEMLEDGER] after op=%s chip%d cost=%s largest_free=%s %s'
+                     % (token['label'], index, 'unknown' if costs[index] is None else _mb(costs[index]),
+                        _mb(chip['largest_free']), _trace_text(trace, index)))
+        report['costs'] = costs
+        self.emit(json.dumps(report, default=str))
+        return report
 
     def known_bytes(self, chip):
         return sum(size for (owner, _), (_, size, _) in self.known.items() if owner == chip)
