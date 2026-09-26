@@ -13,6 +13,10 @@ journalctl -k --since "2026-09-26 07:50:00 UTC" --no-pager 2>&1 | grep -iE "oom|
 echo; nvidia-smi 2>&1 | head -25
 echo; docker ps -a --format "{{.Names}} {{.Image}} {{.Status}}" 2>&1 | head -20
 INNER
+echo "--- ssh config"; grep -v -iE "identityfile|password" ~/.ssh/config 2>/dev/null | head -30
+name=$(ssh -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null newspark hostname 2>&1)
+echo "ssh newspark -> $name"
+case "$name" in *76cb*) echo "=== spark-76cb is newspark"; ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null newspark 'bash -s' < /tmp/inner76.sh; rm -f /tmp/inner76.sh; exit 0;; esac
 found=""
 cands="192.168.2.34 192.168.2.69 192.168.2.70 192.168.2.72 192.168.2.145 192.168.2.173 192.168.2.192 192.168.2.197"
 for i in $(seq 1 254); do cands="$cands 10.10.11.$i"; done
