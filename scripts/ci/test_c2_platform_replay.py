@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+from contextlib import redirect_stdout
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -155,7 +156,7 @@ class TrafficTests(unittest.TestCase):
             self.assertNotIn('notes', text)
             self.assertEqual(len(replay.source_corpus(15, root=directory)), 15)
 
-    def run_steps(self, stream_result=None, ask_results=None):
+    def run_steps(self, stream_result=None, ask_results=None, contract=True):
         streamed, asked, steps = [], [], []
 
         def stream(port, model, content, max_tokens):
@@ -174,14 +175,18 @@ class TrafficTests(unittest.TestCase):
             return value.get('ok', True)
 
         with mock.patch.object(replay, 'served_context', return_value=131328):
-            ok = replay.traffic_steps(8011, 'm', record, 3, stream=stream, ask=ask, sleep=lambda seconds: None)
+            ok = replay.traffic_steps(8011, 'm', record, 3, stream=stream, ask=ask, sleep=lambda seconds: None,
+                                      contract=contract)
         return ok, streamed, asked, steps
 
+    REFUSED = dict(ok=False, status=400, body='{"error": {"message": "n must be 1 on this model"}}')
+
     def test_the_g7_steps_run_in_order_and_pass(self):
-        ok, streamed, asked, steps = self.run_steps(ask_results=dict(n2=dict(ok=False, status=400)))
+        ok, streamed, asked, steps = self.run_steps(ask_results=dict(n2=self.REFUSED))
         self.assertTrue(ok)
-        self.assertEqual([name for name, _ in steps], ['long_prompt', 'streamed_long_answer', 'arrivals4', 'refused_n2',
-                                                       'alive_after_refusal', 'max_tokens_1', 'alive_after_max_tokens_1'])
+        self.assertEqual([name for name, _ in steps], ['long_prompt', 'streamed_long_answer', 'arrivals4',
+                                                       'edge_refusal_n2', 'alive_after_refusal', 'max_tokens_1',
+                                                       'alive_after_max_tokens_1'])
         self.assertEqual(streamed[1][1], replay.LONG_ANSWER_TOKENS)
         self.assertTrue(dict(steps)['streamed_long_answer']['thousands'])
         self.assertEqual(len(dict(steps)['arrivals4']['users']), 4)
@@ -193,10 +198,70 @@ class TrafficTests(unittest.TestCase):
         ok, _, _, steps = self.run_steps(ask_results=dict(alive=dict(ok=False, status=None, body='connection refused')))
         self.assertFalse(ok)
         self.assertFalse(dict(steps)['alive_after_refusal']['ok'])
-        ok, _, _, steps = self.run_steps(ask_results=dict(one=dict(ok=True, status=200, completion_tokens=2)))
+        ok, _, _, steps = self.run_steps(ask_results=dict(n2=self.REFUSED, one=dict(ok=True, status=200,
+                                                                                     completion_tokens=2)))
         self.assertFalse(ok, 'max_tokens=1 must return exactly one token')
         ok, _, _, steps = self.run_steps(ask_results=dict(n2=dict(ok=False, status=500)))
         self.assertFalse(ok, 'a refusal is a 400 (contract) or a 200 (general), never a server error')
+
+    def test_n2_is_refused_at_the_edge_with_the_contracts_words(self):
+        """Review finding 10: under a contract profile n=2 never reaches the engine; any other 400 (or a
+        200) there is not the contract's refusal."""
+        ok, _, _, steps = self.run_steps(ask_results=dict(n2=self.REFUSED))
+        self.assertTrue(dict(steps)['edge_refusal_n2']['ok'])
+        ok, _, _, steps = self.run_steps(ask_results=dict(n2=dict(ok=False, status=400, body='bad request')))
+        self.assertFalse(ok)
+        ok, _, _, steps = self.run_steps(ask_results=dict(n2=dict(ok=True, status=200)))
+        self.assertFalse(ok, 'a contract profile that served n=2 has no contract')
+        ok, _, _, steps = self.run_steps(ask_results=dict(n2=dict(ok=True, status=200)), contract=False)
+        self.assertTrue(ok, 'general has no contract: the stock path answers for itself')
+
+    def test_the_long_answer_must_be_thousands_or_say_the_ceiling_stopped_it(self):
+        """Review finding 10: a 50-token EOS answer passed 'a streamed answer of thousands of tokens'."""
+        ok, _, _, steps = self.run_steps(stream_result=dict(ok=True, finish='stop', completion_tokens=50),
+                                         ask_results=dict(n2=self.REFUSED))
+        self.assertFalse(ok)
+        self.assertIn('short of 1000', dict(steps)['streamed_long_answer']['note'])
+        ok, _, _, steps = self.run_steps(stream_result=dict(ok=True, finish='length', completion_tokens=256),
+                                         ask_results=dict(n2=self.REFUSED))
+        self.assertTrue(ok)
+        self.assertIs(dict(steps)['streamed_long_answer']['exercised'], False)
+        self.assertIn('not exercised', dict(steps)['streamed_long_answer']['note'])
+
+
+class SourceTests(unittest.TestCase):
+    """Review finding 8: the recorded Env copied whole onto another image served that image with the old
+    image's kernel cache key and defaults, and the replay still passed."""
+
+    def test_a_whole_env_is_never_copied_onto_another_image(self):
+        self.assertIsNone(replay.source_problem('zot/old@sha256:a', 'zot/new@sha256:b', ['PATH=/x']),
+                          'the source image\'s ENV is known: subtracted')
+        self.assertIsNone(replay.source_problem('zot/old@sha256:a', 'zot/old@sha256:a', None),
+                          'the same image: the copy is exact')
+        problem = replay.source_problem('zot/old@sha256:a', 'zot/new@sha256:b', None)
+        self.assertIn('Pull zot/old@sha256:a first', problem)
+        self.assertIn('source names no image', replay.source_problem(None, 'zot/new@sha256:b', None))
+
+    def test_the_replay_refuses_before_starting_anything(self):
+        commands = []
+
+        def run(command, timeout=None, check=True):
+            commands.append(command)
+            if command[:3] == ['docker', 'image', 'inspect']:
+                return mock.Mock(returncode=1, stdout='', stderr='No such image')
+            return mock.Mock(returncode=0, stdout='', stderr='')
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(replay, 'run', side_effect=run), \
+                mock.patch.object(sys, 'argv', ['replay', '--source', AGENT, '--image', 'zot/new@sha256:b',
+                                                '--results', directory]), \
+                redirect_stdout(io.StringIO()) as out:
+            code = replay.main()
+            with open(os.path.join(directory, 'platform-replay.json'), encoding='utf-8') as handle:
+                recorded = json.load(handle)
+        self.assertEqual(code, 1)
+        self.assertFalse(any(command[:2] == ['docker', 'run'] for command in commands))
+        self.assertFalse(recorded['steps']['source']['ok'])
+        self.assertIn('refused', out.getvalue())
 
 
 if __name__ == '__main__':

@@ -7,13 +7,18 @@ This replays what the agent does, step by step, in a copy of the agent's own con
 
   1. start: the agent's container config (docker inspect of --source, or a saved inspect JSON),
      the runtime entrypoint (serving.server), a new name and port, cards M then A re-resolved by
-     board id, and --profile (QWEN_C2_PROFILE) when given;
+     board id, and --profile (QWEN_C2_PROFILE) when given. The recorded Env merges the source
+     image's ENV with the agent's; replaying it onto another --image needs the source image here to
+     subtract its ENV, else the replay refuses (source_problem) rather than serve the old image's
+     kernel cache key and defaults;
   2. load:  `serving.manage --model <model> --release-first` (the placed job; release-first is
      forced on Tenstorrent), then the agent's warmup chat (max_tokens 1, no temperature);
   3. serve: a coding request, four concurrent requests, a tool call;
   4. traffic (G7, c2-serve-for-real-plan 2.2 item 5): a long prompt (~60% of the served context),
-     a streamed answer of thousands of tokens, four arrivals at seeded random times, a refused
-     request (n=2) and the engine still answering after it, max_tokens=1 and the engine still
+     a streamed answer of at least 1000 tokens (not exercised, and said so, when the profile's
+     ceiling is lower), four arrivals at seeded random times, n=2 refused AT THE EDGE under a
+     contract profile (a 400 with the contract's message; it never reaches the engine) and the
+     engine still answering after it, max_tokens=1 (exactly one token) and the engine still
      answering after it;
   5. reload: a second release-first load in the same container - the in-place restart;
   6. restart: docker stop (SIGTERM, graceful) and docker start, load again - a redeploy. The
@@ -118,6 +123,22 @@ def image_environment(reference):
         return list(json.loads(result.stdout)[0]['Config'].get('Env') or ())
     except (ValueError, KeyError, IndexError):
         return None
+
+
+def source_problem(source_image, image, inherited):
+    """Why the recorded container cannot be replayed onto `image`, or None. Its Env merges the source
+    image's own ENV with what the agent passed; without the source image's ENV to subtract, copying it
+    whole onto ANOTHER image would serve the old image's kernel cache key (TT_METAL_CACHE), weight
+    cache, PATH, venv and QWEN_* defaults over the new image's - a replay that passes on the wrong
+    configuration (read-the-launched-argv). Onto the source image itself the copy is exact."""
+    if inherited is not None or (source_image and image == source_image):
+        return None
+    if not source_image:
+        return ('the source names no image, so its own ENV cannot be told apart from what the agent passed; '
+                'replaying its whole Env onto %s could override that image\'s ENV' % image)
+    return ('the source image %s is not on this host, so its own ENV cannot be told apart from what the agent '
+            'passed; replaying its whole Env onto %s would override that image\'s ENV (kernel cache key, PATH, '
+            'QWEN_* defaults). Pull %s first, or replay that image itself' % (source_image, image, source_image))
 
 
 def serving_devices(root='/dev/tenstorrent/by-id'):
@@ -319,24 +340,57 @@ def arrivals(port, model, offsets, max_tokens=400, sleep=time.sleep, stream=stre
     return dict(ok=all(o and o['ok'] for o in outs), offsets=list(offsets), users=outs)
 
 
-def traffic_steps(port, model, record, seed, stream=stream_chat, ask=chat, sleep=time.sleep):
+LONG_ANSWER_MIN_TOKENS = 1000
+CONTRACT_INSTALLED = '[QWEN-C2] request contract installed'
+N_REFUSAL = 'n must be 1 on this model'   # serving_c2_contract.enforce_request's own words
+
+
+def long_answer_verdict(result, minimum=LONG_ANSWER_MIN_TOKENS):
+    """The streamed-long-answer step: at least `minimum` tokens streamed. An answer the profile's own
+    ceiling cut first ('length' short of it) did not exercise the step and says so; one that stopped at
+    EOS short of it fails - a 50-token answer is not thousands."""
+    tokens = result.get('completion_tokens') or 0
+    result['thousands'] = tokens >= minimum
+    if result.get('ok') and not result['thousands']:
+        if result.get('finish') == 'length':
+            result['exercised'] = False
+            result['note'] = 'the profile\'s output ceiling (%d tokens) is below %d: not exercised' % (tokens, minimum)
+        else:
+            result['ok'] = False
+            result['note'] = 'ended at %r after %d tokens, short of %d' % (result.get('finish'), tokens, minimum)
+    return result
+
+
+def edge_refusal_verdict(result, contract):
+    """n=2: under a contract profile the EDGE refuses it (serving_c2_contract.enforce_request raises
+    before the engine sees it: a 400 carrying the contract's message); without a contract (general,
+    the stock path) it is served, or refused by the stock stack's own 400 - never a server error.
+    Nothing here reaches an in-engine refusal."""
+    if contract:
+        result['ok'] = result.get('status') == 400 and N_REFUSAL in str(result.get('body') or '')
+        result['expected'] = '400 with %r (the contract refuses at the edge)' % N_REFUSAL
+    else:
+        result['ok'] = result.get('status') in (200, 400)
+        result['expected'] = '200 or 400 (no request contract: the stock path answers for itself)'
+    return result
+
+
+def traffic_steps(port, model, record, seed, stream=stream_chat, ask=chat, sleep=time.sleep, contract=True):
     """Step 4, the G7 additions; returns whether every one passed. `record` logs a step and returns
-    its ok. The survival checks are what matter: a refusal or a one-token request inside the engine
-    must end the request, never the engine (serving_lifecycle re-raises a host-side refusal)."""
+    its ok. `contract`: whether the served profile installed the request contract (its log line). The
+    survival checks are what matter: the engine must answer after an edge refusal and after a
+    one-token request (serving_lifecycle builds a bridge even for max_tokens=1)."""
     ok = True
     context = served_context(port) or 65536
     prompt = long_prompt(context)
     result = stream(port, model, prompt, 256)
     result.update(prompt_characters=len(prompt), served_context=context)
     ok = record('long_prompt', result) and ok
-    result = stream(port, model, LONG_ANSWER_PROMPT, LONG_ANSWER_TOKENS)
-    result['thousands'] = (result.get('completion_tokens') or 0) >= 1000
+    result = long_answer_verdict(stream(port, model, LONG_ANSWER_PROMPT, LONG_ANSWER_TOKENS))
     ok = record('streamed_long_answer', result) and ok
     ok = record('arrivals4', arrivals(port, model, arrival_offsets(seed), sleep=sleep, stream=stream)) and ok
-    refused = ask(port, model, 'hi', 8, n=2)
-    # A contract profile refuses n=2 at the edge (400); the general profile has no contract and may serve it.
-    refused['ok'] = refused.get('status') in (200, 400)
-    ok = record('refused_n2', refused) and ok
+    refused = edge_refusal_verdict(ask(port, model, 'hi', 8, n=2), contract)
+    ok = record('edge_refusal_n2', refused) and ok
     ok = record('alive_after_refusal', ask(port, model, 'Say OK.', 8)) and ok
     one = ask(port, model, 'Write a haiku about compilers.', 1)
     one['ok'] = one['ok'] and one.get('completion_tokens') == 1
@@ -399,10 +453,14 @@ def main():
     with open(os.path.join(options.results, 'source-inspect.json'), 'w') as handle:
         json.dump(info, handle, indent=1)
     inherited = image_environment(source_image) if source_image else None
-    # Without the source image's ENV the whole Env is copied, the old image's included: recorded, so a
-    # run that replayed another image's kernel cache key or QWEN_* defaults says so.
-    record('source', dict(ok=True, source=options.source, source_image=source_image,
-                          image_env_subtracted=inherited is not None))
+    problem = source_problem(source_image, options.image, inherited)
+    record('source', dict(ok=problem is None, source=options.source, source_image=source_image,
+                          image_env_subtracted=inherited is not None, problem=problem))
+    if problem is not None:
+        with open(os.path.join(options.results, 'platform-replay.json'), 'w') as handle:
+            json.dump(dict(passed=False, steps=steps), handle, indent=1)
+        print('PLATFORM_REPLAY passed=False refused: %s' % problem, flush=True)
+        return 1
     arguments = run_arguments(info, options.image, name, port, options.profile, image_env=inherited or ())
     with open(os.path.join(options.results, 'docker-run.json'), 'w') as handle:
         json.dump(arguments, handle, indent=1)
@@ -432,7 +490,9 @@ def main():
                                                    'required': ['path']}}}])
                 tool['ok'] = tool['ok'] and bool(tool.get('tool_calls'))
                 ok = record('tool_call', tool) and ok
-                ok = traffic_steps(port, model, record, seed) and ok
+                logs = run(['docker', 'logs', name], check=False)
+                contract = CONTRACT_INSTALLED in (logs.stdout or '') + (logs.stderr or '')
+                ok = traffic_steps(port, model, record, seed, contract=contract) and ok
                 ok = record('reload', load(name, model)) and ok
                 ok = record('after_reload', chat(port, model, 'Say OK.', 8)) and ok
                 capture('before-restart')
