@@ -23,34 +23,50 @@ x every core count, on CPU). What else differs between the two programs is known
     the runtime split reads nothing past its extent;
   - the cores per head depend on B (16 for B <= 3, 13 at B = 4), so each reference has the call's own B.
 
-Sections (--sections, default all):
+Sections (--sections, default all; run per seed in the order S, T, K, E, D, N, timing, T / D / N / timing on the
+first seed only):
   S  the plan's P0: single-position users at arbitrary, DIFFERENT positions in ONE call. B = --batch entries (3:
      16 cores per head, as every served replay shape), each a user with its own page table (C / 64 wide, poisoned
      past its E) at p = E - 256 + s for E in --extents (K1's six: 2,304 ... 131,328) and s in --starts (+0, +7,
      +127, +240, +255), --rows 2 (two query tokens at p, 24 folded rows: full tile, DECISIVE) and 1 (12 rows:
      half tile, RECORDED), --variants normal and peaky (rows aimed at 8 visible keys each, so the running max
      moves across chunks, cores and tree rounds), --seeds. One causal call per group of B (E, s) pairs, against
-     per entry: the non-causal LEGACY call at capacity E (B copies of that entry: its Q, its first E / 64 pages
-     and the mask -inf past p in the last 256 columns) - DECISIVE; and the qwen modes on the same inputs (tail
-     0x1, tail+share 0x3 where the binary has them) against legacy - RECORDED and warned (12 and 24 rows were
-     never qualified for them). Liveness, per group and entry with E < C: the causal call at cur_pos = E (one key into the
-     next chunk, a poisoned page) must move the entry against cur_pos = E - 1 - the plan's K3 "cur_pos off by one
-     chunk must change the output", and the proof that the poison is live.
+     per entry the non-causal LEGACY call at capacity E (B copies of that entry: its Q, its first E / 64 pages
+     and the mask -inf past p in the last 256 columns) - DECISIVE. Only with --served-pnht1 (off by default: 12
+     and 24 folded rows, PNHt 1, were never run on hardware in the qwen modes, K1 and card M ran G8B2, G4B3 and
+     G4B1 only) also the qwen tail (0x1) and tail+share (0x3) on the same inputs against legacy: each a WARNING
+     when it differs or raises, never a failure, and no factory line is required. Liveness, per group and entry
+     with E < C: the causal call at cur_pos = E (one key into the next chunk, a poisoned page) must move the
+     entry against cur_pos = E - 1 - the plan's K3 "cur_pos off by one chunk must change the output", and the
+     proof that the poison is live.
   E  the replay shapes at cur_pos = E - 1: G4B3 (4-row groups, B = 3, 48 rows, PNHt 2) and G8B2 (8-row groups,
      B = 2, 96 rows, PNHt 3), every entry the same user, causal on the poisoned C-wide table against the legacy
      non-causal call at capacity E with a zero mask (nothing is masked at E - 1) - DECISIVE - plus the served
-     flags on the same inputs (0x1, 0x3; 0x7 on G8 when the binary has the q-slice), and the cur_pos = E
-     liveness.
-  T  one TRACE of the causal call (rows 2, B entries, clean C-wide tables), replayed --trace-families times with
+     flags on the same inputs (0x1, 0x3; 0x7 on G8 when the binary has the q-slice) against legacy: a FAILURE
+     at the capacities K64i's modes were card-qualified at (--qualified-capacities, default 2,304 / 33,024 /
+     131,328: sdpa_decode_qwen/README.md 'Sweep' for 0x1 / 0x3, sdpa_decode_slice_card_b.py CAPACITIES for 0x7),
+     since a difference there means the mounted graft is not the qualified one; at any other capacity a
+     FINDING (kind served_unqualified_capacity, a warning): new evidence that K64i's tail differs from legacy at
+     that family, which is against K64j's "exact by construction" premise, not a wrong mount. And the
+     cur_pos = E liveness. E runs after T and K: its G8B2 legacy program's L1 fit at 131,328 keys is unmeasured.
+  T  one TRACE of the causal call (rows 2, B entries, CLEAN C-wide tables), replayed --trace-families times with
      the cur_pos tensor rewritten between replays (copy_host_to_device_tensor, as attention_replay.stage does the
      positions word) so the extent moves across that many 256-key families; every replay == the eager causal
      call at its positions (every entry), and == the compile-time legacy call at the entry's E (--trace-references:
-     entry 0 by default, all entries, or none) - all DECISIVE. Then UINT32_MAX skip patterns replayed in the same trace: the live entries == eager.
+     entry 0 by default, all entries, or none) - all DECISIVE. The tables are clean, so this proves the replay
+     re-reads the word and reproduces the compile-time split; a replay that read past E would show only through
+     rounding against legacy. Then UINT32_MAX skip patterns replayed in the same trace: the live entries ==
+     eager (the all-skipped pattern has no live entry: it is recorded as returned, not compared). Then the FENCE
+     trace: a second capture of the same program on a table poisoned past each entry's own E (one family per
+     entry, below C), replayed at FENCE_OFFSETS positions inside those families: every replay == the eager call
+     at the same positions on the clean table - DECISIVE (a replay that reads any key past E reads poison) -
+     and one replay at cur_pos = E per entry must differ from the clean eager call (liveness: the poison is live
+     inside the trace). Same program as the main trace: no new JIT build.
   K  R2, eager: rows 2, B entries at three families, cur_pos = UINT32_MAX (-1 as int32) on the entries of each
      pattern in SKIP_PATTERNS (and a B = 1 call that skips its only user). No hang (the watchdog), the live
-     entries == the all-live call - DECISIVE - and each skipped entry's rows: written or left unwritten (a NaN
-     tensor of the output's shape is freed just before, so unwritten rows show as NaN: RECORDED, it is what K64j's
-     consumers must expect).
+     entries == the all-live call - DECISIVE (the all-skipped pattern has no live entry: recorded as returned) -
+     and each skipped entry's rows: written or left unwritten (a NaN tensor of the output's shape is freed just
+     before, so unwritten rows show as NaN: RECORDED, it is what K64j's consumers must expect).
   D  the dynamic chunk, RECORDED: causal k_chunk_size 0 (the native decode's config, docker/qwen-c2-graft/graft/
      attention/tp.py:737-742) against k_chunk_size 256 at the same positions, rows 1 and 2. With the default
      compute config max_dynamic_chunk_size is 8 (fp32_dest_acc_en false), so the native chunk is 256 keys too.
@@ -64,18 +80,29 @@ Sections (--sections, default all):
 
 Verdict: one 'K64J_P0 verdict=...' line.
   GO           every DECISIVE comparison is byte-equal (torch.equal on int16 views), every liveness control
-               moved, no failure: the runtime position reproduces the compile-time split on this binary, and the
-               skip holds. K64j's gates (K1-K4) still have to prove the new non-causal branch.
+               moved, no failure, no decisive section cut by the deadline: the runtime position reproduces the
+               compile-time split on this binary, and the skip holds. K64j's gates (K1-K4) still have to prove the
+               new non-causal branch.
   NO-GO        a decisive comparison differs on an otherwise valid run: R1 or R2 is real on this binary (the plan's
                fallback is P1, decision D-b).
-  NO-DECISION  a failure (wrong binary or kernels, no compact scratch, a served mode that differs from legacy, a
-               requested qwen program without its factory line, an error, the watchdog), a dead liveness control,
-               or no decisive comparison ran.
+  NO-DECISION  a failure (wrong binary or kernels, no compact scratch, a served mode that differs from legacy at a
+               qualified capacity, a requested qwen program without its factory line, a section that raised, the
+               watchdog), a dead liveness control, a decisive section the deadline cut, SIGTERM, or no decisive
+               comparison ran.
 
 Failures: the loaded _ttnncpp.so is not --expect-binary-sha256; the stock kernels in the mounted op directory are
 not the ones this reading is of (49a05926 / 734c90c0 / d24769bd / e4623a22 / 1b52c60d, --kernel-root);
 QWEN_SDPA_TREE_SCRATCH_ROUNDS is not 1 (the G8 legacy calls need the compact scratch); a served mode that differs
-from legacy; a requested qwen program with no '[QWEN-SDPA] flags=' line; a non-finite reference; the watchdog.
+from legacy at a qualified capacity; a requested qwen program with no '[QWEN-SDPA] flags=' line; a non-finite
+reference; a section that raised ('<section>/seed<n>: <error>': the run goes on with the next section, so one
+program that fails to build or fit costs only its own section's evidence); the watchdog.
+
+Partial results: the JSON report is rewritten after every section (with 'in_progress'), so a run cut short still
+leaves the sections it finished. --deadline-s (the runner passes its container timeout less 600 s) stops the run
+cleanly between device calls once that much time has passed since start: the rest are listed under 'deadline', and
+a cut decisive section (S, T, K, E) makes the verdict NO-DECISION. SIGTERM (the container timeout, forwarded by
+docker run to this process, PID 1 in the container) writes the partial report at once, then unwinds (tensors,
+traces and the device closed) and exits 143.
 
 RUN with run_card_b.sh only (QUAL_CARD, default card B; the serving pair is refused without ALLOW_SERVING_CARD=1),
 in the C2 image with the served graft (K64i) mounted as the arm mounts it and a fresh kernel cache. The helpers
@@ -89,6 +116,7 @@ import mmap
 import os
 from pathlib import Path
 import random
+import signal
 import statistics
 import sys
 import time
@@ -113,8 +141,16 @@ ROWS = (2, 1)                                             # query tokens per ent
 DECISIVE_ROWS = 2
 BATCH = 3
 E_SHAPES = {'G4B3': (4, 3), 'G8B2': (8, 2)}               # the replay's bundles: rows per fold group, entries
+# The capacities K64i's served modes were card-qualified at, tail-vs-legacy on these shapes: 0x1 / 0x3 on card M
+# (sdpa_decode_qwen/README.md 'Sweep': 2,304, 33,024, 131,328), 0x7 on card B (sdpa_decode_slice_card_b.py
+# CAPACITIES: 2,304, 33,024, 66,048, 131,328). K1's other families (16,896, 65,792, 98,560) are new evidence.
+QUALIFIED_CAPACITIES = (2304, 33024, 131328)
 SECTIONS = ('S', 'E', 'T', 'K', 'D', 'N')
+RUN_ORDER = ('S', 'T', 'K', 'E', 'D', 'N', 'timing')     # E last of the decisive ones: its G8B2 L1 fit is unmeasured
+FIRST_SEED_ONLY = ('T', 'D', 'N', 'timing')
+DECISIVE_SECTIONS = ('S', 'T', 'K', 'E')
 TRACE_FAMILIES = 64
+FENCE_OFFSETS = (0, 1, 127, 128, 254, 255)               # the fence trace's replays: p = E - 256 + offset
 SKIP_PATTERNS = ((0,), (1,), (2,), (0, 2), (0, 1, 2))
 SKIP_EXTENTS = (2304, 65792, 131328)
 POISON_K, POISON_V = 0.0, 16384.0                         # exact in bf8; any read moves every row
@@ -141,10 +177,35 @@ RECORDED_KERNELS = ('dataflow/reader_decode_qwen.cpp', 'compute/sdpa_flash_decod
 OPEN_EXTRA_S = 600.0
 ENV_RECORDED = (card.SCRATCH_ENV, 'TT_METAL_WATCHER', 'TT_METAL_CACHE', 'TT_METAL_HOME')
 DECISIVE_KINDS = ('split_vs_legacy', 'extent_vs_legacy', 'trace_vs_eager', 'trace_vs_legacy', 'skip_live',
-                  'trace_skip_live')
+                  'trace_skip_live', 'trace_fence_vs_clean')
+DEADLINE_MARGIN_S = 600                                   # the runner's --deadline-s: its container timeout less this
 
 clock = time.perf_counter
 WATCHDOG = k1.Watchdog(0)
+
+
+class DeadlineReached(Exception):
+    """--deadline-s passed: stop cleanly between device calls (the sections' finally blocks free what they hold)."""
+
+
+class Terminated(BaseException):
+    """SIGTERM: a BaseException, so no section's `except Exception` swallows it; the run unwinds and main reports."""
+
+
+class Deadline:
+    """--deadline-s, from the probe's start (probe.clock, so the CPU tests can drive it): check() raises
+    DeadlineReached once it has passed. 0 is off."""
+
+    def __init__(self, seconds):
+        self.seconds = float(seconds or 0)
+        self.start = clock()
+
+    def check(self, label):
+        if self.seconds and clock() - self.start > self.seconds:
+            raise DeadlineReached(label)
+
+
+DEADLINE = Deadline(0)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -192,6 +253,44 @@ def trace_positions(capacity, families, batch, seed):
 
 def distinct_families(plan):
     return len({split_model.extent(position) for positions in plan for position in positions if position >= 0})
+
+
+def fence_extents(extents, capacity, batch):
+    """The fence trace's family per entry: the requested extents below the capacity (a table poisoned past E needs
+    a page past E), cycled over the entries; the first family (256 keys) when none is below it."""
+    below = [extent for extent in extents if extent < capacity] or [split_model.K_CHUNK]
+    return [below[slot % len(below)] for slot in range(batch)]
+
+
+def fence_plan(extents):
+    """The fence trace's replays: replay i puts entry b at E_b - 256 + FENCE_OFFSETS[(i + b) % n], so every entry
+    visits every offset (the family's first, second, middle and last keys) and the entries differ in each replay."""
+    count = len(FENCE_OFFSETS)
+    return [tuple(extent - split_model.K_CHUNK + FENCE_OFFSETS[(index + slot) % count]
+                  for slot, extent in enumerate(extents)) for index in range(count)]
+
+
+def section_runs(args):
+    """(seed, section) in run order: every seed's S, T, K, E, D, N, timing, the first-seed-only ones on the first."""
+    runs = []
+    for seed in args.seeds:
+        for name in RUN_ORDER:
+            if name == 'timing' and args.no_timing:
+                continue
+            if name != 'timing' and name not in args.sections:
+                continue
+            if name in FIRST_SEED_ONLY and seed != args.seeds[0]:
+                continue
+            runs.append((seed, name))
+    return runs
+
+
+def run_tag(seed, name):
+    return '%s/seed%d' % (name, seed)
+
+
+def one_line(error, limit=400):
+    return ' '.join(('%s: %s' % (type(error).__name__, error)).split())[:limit]
 
 
 def skip_positions(positions, pattern):
@@ -293,6 +392,11 @@ def decide(report):
     if dead:
         reasons.append('%d liveness controls did not move (%s): the poison or the off-by-one control is dead'
                        % (len(dead), ', '.join(entry['label'] for entry in dead[:4])))
+    deadline = report.get('deadline') or {}
+    cut = [tag for tag in deadline.get('skipped', []) if tag.split('/')[0] in DECISIVE_SECTIONS]
+    if cut:
+        reasons.append('the deadline (%ss) cut %d decisive section runs (%s)'
+                       % (deadline.get('seconds'), len(cut), ', '.join(cut[:6])))
     if not decisive:
         reasons.append('no decisive comparison ran')
     if reasons:
@@ -318,8 +422,10 @@ def verdict_line(report):
     words.append(part('split', ('split_vs_legacy',)))
     words.append(part('extent', ('extent_vs_legacy',)))
     words.append(part('trace', ('trace_vs_eager', 'trace_vs_legacy')))
+    words.append(part('fence', ('trace_fence_vs_clean',)))
     words.append(part('skip', ('skip_live', 'trace_skip_live')))
     words.append(part('served', ('served_vs_legacy',)))
+    words.append(part('served_unqualified_cap', ('served_unqualified_capacity',)))
     words.append(part('served_pnht1', ('served_unqualified_vs_legacy',)))
     liveness = report.get('liveness', [])
     words.append('live=%d/%d' % (sum(1 for entry in liveness if entry['live']), len(liveness)))
@@ -331,6 +437,12 @@ def verdict_line(report):
     words.append('flag_0x20=%s' % report.get('flag_0x20', 'n/a'))
     words.append('families=%d' % report.get('trace_families_distinct', 0))
     words.append('binary_stage=%s' % report.get('binary', {}).get('stage', '?'))
+    if report.get('findings'):
+        words.append('findings=%d' % len(report['findings']))
+    if report.get('sections_failed'):
+        words.append('sections_failed=%s' % ','.join(report['sections_failed']))
+    if (report.get('deadline') or {}).get('skipped'):
+        words.append('deadline_skipped=%d' % len(report['deadline']['skipped']))
     if decision['first_differing']:
         words.append('first_differing=%s' % json.dumps(decision['first_differing']))
     if decision['reasons']:
@@ -418,10 +530,10 @@ class Pool:
         clean = capacity // card.PAGE
         blocks = clean + POISON_BLOCKS
         generator = torch.Generator().manual_seed(4000 + seed)
-        keys = torch.randn(blocks, card.KV_HEADS, card.PAGE, card.HEAD_DIM, generator=generator) * 2
-        values = torch.randn(blocks, card.KV_HEADS, card.PAGE, card.HEAD_DIM, generator=generator)
-        keys[clean:] = POISON_K
-        values[clean:] = POISON_V
+        shape = (card.KV_HEADS, card.PAGE, card.HEAD_DIM)
+        poison = (POISON_BLOCKS,) + shape
+        keys = torch.cat([torch.randn((clean,) + shape, generator=generator) * 2, torch.full(poison, POISON_K)])
+        values = torch.cat([torch.randn((clean,) + shape, generator=generator), torch.full(poison, POISON_V)])
         self.keys = keys.to(torch.bfloat16)
         self.poison = list(range(clean, blocks))
         self.tables = [torch.randperm(clean, generator=generator).to(torch.int32) for _ in range(users)]
@@ -445,7 +557,8 @@ class Pool:
     def launch(self, query, pages, *, causal, cur_pos=None, mask=None, sentinel=LEGACY, k_chunk=split_model.K_CHUNK,
                label='sdpa', expect_program=True):
         """One device call; returns the output tensor (the caller reads and frees it). A qwen sentinel's program is
-        recorded as requested (its factory line must appear) unless the call is a refusal control."""
+        recorded as requested (its factory line must appear) unless expect_program is False: a refusal control, or
+        a --served-pnht1 call (recorded only)."""
         options = dict(is_causal=causal, scale=card.SCALE, program_config=self.config(sentinel, k_chunk),
                        memory_config=self.ttnn.DRAM_MEMORY_CONFIG)
         if mask is not None:
@@ -525,8 +638,14 @@ def slot(output, index):
 def record(report, entry, verbose=True):
     report['comparisons'].append(entry)
     if entry['differing'] and entry['kind'] == 'served_vs_legacy':
-        report['failures'].append('%s: served mode differs from legacy in %d elements (the mounted graft is not the '
-                                  'qualified one)' % (entry['label'], entry['differing']))
+        report['failures'].append('%s: served mode differs from legacy in %d elements at a qualified capacity (the '
+                                  'mounted graft is not the qualified one)' % (entry['label'], entry['differing']))
+    elif entry['differing'] and entry['kind'] == 'served_unqualified_capacity':
+        finding = ('%s: FINDING: K64i\'s served mode differs from legacy in %d elements at a capacity it was never '
+                   'card-qualified at - evidence against K64j\'s "exact by construction" premise at that family, not '
+                   'a wrong mount' % (entry['label'], entry['differing']))
+        report.setdefault('findings', []).append(finding)
+        report['warnings'].append(finding)
     elif entry['differing'] and entry['kind'] == 'served_unqualified_vs_legacy':
         report['warnings'].append('%s: a qwen mode on a never-qualified row count differs from legacy in %d elements '
                                   '(recorded; not what K64j serves)' % (entry['label'], entry['differing']))
@@ -554,6 +673,21 @@ def liveness(torch, report, section, label, before, after, slots):
                                                                                               moved[index], rows))
 
 
+def served_pnht1(torch, pool, report, query, ref, legacy, flags, label):
+    """--served-pnht1 only: a qwen mode on 12 / 24 folded rows (PNHt 1), which K1 and card M never ran (the replay
+    serves 48 and 96). A difference or a raise is a warning, never a failure, and no factory line is required."""
+    name = '%s/0x%x' % (label, flags)
+    try:
+        served = pool.run(query, ref['pages'], causal=False, mask=ref['wide'], sentinel=MAGIC | flags,
+                          label=label + ' 0x%x' % flags, expect_program=False)
+    except Exception as error:  # noqa: BLE001 - a TT_FATAL on a never-run shape is recorded, not fatal
+        report['warnings'].append('%s: a qwen mode on a never-qualified row count raised (recorded): %s'
+                                  % (name, one_line(error)))
+        return
+    record(report, comparison('S', 'served_unqualified_vs_legacy', name, card.differing(torch, served, legacy), False,
+                              flags=flags))
+
+
 def section_split(ttnn, torch, pool, seed, args, report):
     """S: single-position users at different positions in one call."""
     stage = report['binary']['stage']
@@ -566,6 +700,7 @@ def section_split(ttnn, torch, pool, seed, args, report):
             positions = [p for _extent, _start, p in group]
             users = list(range(args.batch))
             base = 'S/rows%d/seed%d/call%d' % (rows, seed, index)
+            DEADLINE.check(base)
             scope = Scope(ttnn)
             try:
                 pages = scope.keep(pool.pages_causal(users, extents))
@@ -594,13 +729,8 @@ def section_split(ttnn, torch, pool, seed, args, report):
                                                   card.differing(torch, slot(causal, slot_index), slot(legacy, 0)),
                                                   decisive, rows=rows, batch=args.batch, extent=extent, start=start,
                                                   position=p, seed=seed, variant=variant))
-                        for flags in served_flags(stage, rows, args.batch):
-                            # 12 / 24 folded rows (PNHt 1) were never qualified for the qwen modes (the replay
-                            # serves 48 and 96): recorded and warned, never a failure (section E's are).
-                            served = pool.run(repeated, ref['pages'], causal=False, mask=ref['wide'],
-                                              sentinel=MAGIC | flags, label=label + ' 0x%x' % flags)
-                            record(report, comparison('S', 'served_unqualified_vs_legacy', '%s/0x%x' % (label, flags),
-                                                      card.differing(torch, served, legacy), False, flags=flags))
+                        for flags in (served_flags(stage, rows, args.batch) if args.served_pnht1 else ()):
+                            served_pnht1(torch, pool, report, repeated, ref, legacy, flags, label)
                 # Liveness: cur_pos = E (one poisoned key more) against E - 1, on the first variant's query.
                 live_slots = [slot_index for slot_index, extent in enumerate(extents) if extent < pool.capacity]
                 if live_slots:
@@ -625,6 +755,7 @@ def section_extent(ttnn, torch, pool, seed, args, report):
         host_query = card.build_query(torch, batch, seed, 'normal', rows=rows)
         for extent in args.extents:
             label = 'E/%s/seed%d/E%d' % (name, seed, extent)
+            DEADLINE.check(label)
             scope = Scope(ttnn)
             try:
                 query = scope.keep(pool.upload(host_query))
@@ -638,11 +769,14 @@ def section_extent(ttnn, torch, pool, seed, args, report):
                 finite_or_fail(torch, report, label, legacy)
                 record(report, comparison('E', 'extent_vs_legacy', label, card.differing(torch, causal, legacy), True,
                                           shape=name, rows=rows, batch=batch, extent=extent, seed=seed))
+                # A served mode against legacy: a failure where K64i was card-qualified, a finding elsewhere.
+                kind = 'served_vs_legacy' if extent in args.qualified_capacities else 'served_unqualified_capacity'
                 for flags in served_flags(stage, rows, batch):
                     served = pool.run(query, reference_pages, causal=False, mask=wide, sentinel=MAGIC | flags,
                                       label=label + ' 0x%x' % flags)
-                    record(report, comparison('E', 'served_vs_legacy', '%s/0x%x' % (label, flags),
-                                              card.differing(torch, served, legacy), False, flags=flags))
+                    record(report, comparison('E', kind, '%s/0x%x' % (label, flags),
+                                              card.differing(torch, served, legacy), False, flags=flags,
+                                              extent=extent))
                 if extent < pool.capacity:
                     beyond = scope.keep(pool.positions([extent] * batch))
                     after = pool.run(query, pages, causal=True, cur_pos=beyond, label=label + ' E')
@@ -651,38 +785,82 @@ def section_extent(ttnn, torch, pool, seed, args, report):
                 scope.close()
 
 
+def capture_causal(ttnn, torch, device, pool, scope, traces, query, pages, positions, label):
+    """Capture one causal call that reads its positions from a cur_pos tensor (its program must already be built:
+    run it eagerly first). Returns replay(values, label): rewrite that tensor in place (copy_host_to_device_tensor,
+    as attention_replay.stage does the positions word), execute the trace, read the output back."""
+    cur_pos = scope.keep(pool.positions(positions))
+    with WATCHDOG.op(label + ' capture'):
+        trace, output = card.capture(ttnn, device, lambda: pool.launch(query, pages, causal=True, cur_pos=cur_pos,
+                                                                       label=label + ' capture'))
+    traces.append(trace)
+    scope.keep(output)
+
+    def replay(values, what):
+        source = ttnn.from_torch(torch.tensor(list(values), dtype=torch.int32), dtype=ttnn.int32,
+                                 layout=ttnn.ROW_MAJOR_LAYOUT)
+        with WATCHDOG.op('stage ' + what):
+            ttnn.copy_host_to_device_tensor(source, cur_pos)
+        with WATCHDOG.op('replay ' + what):
+            ttnn.execute_trace(device, trace, cq_id=0, blocking=True)
+            ttnn.synchronize_device(device)
+        with WATCHDOG.op('trace read back ' + what):
+            return ttnn.to_torch(output)
+
+    return replay
+
+
+def release_traces(ttnn, device, traces):
+    while traces:
+        trace = traces.pop()
+        with WATCHDOG.op('release trace'):
+            ttnn.release_trace(device, trace)
+
+
+def fence_trace(ttnn, torch, device, pool, seed, args, report, scope, traces, query, eager_at):
+    """T's fence: the same causal program captured on a table poisoned past each entry's own E (one family per
+    entry), replayed inside those families; each replay must equal the eager call on the CLEAN table at the same
+    positions (a key read past E is a poisoned one), and a replay at cur_pos = E must not (the poison is live)."""
+    batch = args.batch
+    extents = fence_extents(args.extents, pool.capacity, batch)
+    plan = fence_plan(extents)
+    report['fence_extents'] = extents
+    fenced = scope.keep(pool.pages_causal(list(range(batch)), extents))
+    warm = scope.keep(pool.positions(plan[0]))
+    ttnn.deallocate(pool.launch(query, fenced, causal=True, cur_pos=warm, label='T fence warm'))
+    replay = capture_causal(ttnn, torch, device, pool, scope, traces, query, fenced, plan[0], 'T fence')
+    for index, values in enumerate(plan):
+        label = 'T/seed%d/fence%d/%s' % (seed, index, ','.join(map(str, values)))
+        DEADLINE.check(label)
+        got = replay(values, label)
+        record(report, comparison('T', 'trace_fence_vs_clean', label,
+                                  card.differing(torch, got, eager_at(values, label)), True,
+                                  positions=list(values), extents=extents, seed=seed))
+    beyond = tuple(extents)
+    label = 'T/seed%d/fence/E' % seed
+    DEADLINE.check(label)
+    got = replay(beyond, label)
+    liveness(torch, report, 'T', label, eager_at(beyond, label), got,
+             [slot_index for slot_index, extent in enumerate(extents) if extent < pool.capacity])
+
+
 def section_trace(ttnn, torch, device, pool, seed, args, report):
-    """T: one trace, the extent rewritten between replays across --trace-families families; then skips."""
+    """T: one trace, the extent rewritten between replays across --trace-families families; then skips; then the
+    fence trace."""
     rows, batch = DECISIVE_ROWS, args.batch
     plan = trace_positions(pool.capacity, args.trace_families, batch, seed)
     report['trace_families_distinct'] = max(report.get('trace_families_distinct', 0), distinct_families(plan))
     users = list(range(batch))
     scope = Scope(ttnn)
-    trace = None
+    traces = []
     try:
         host_query = rows_query(torch, batch, rows, seed, 'normal', salt=500)
         query = scope.keep(pool.upload(host_query))
         pages = scope.keep(pool.pages_causal(users, [pool.capacity] * batch, poison=False))
-        cur_pos = scope.keep(pool.positions(plan[0]))
-        # Compile first: capture needs the program built (and the eager bytes are the first comparison anyway).
-        eager = {plan[0]: pool.run(query, pages, causal=True, cur_pos=cur_pos, label='T eager warm')}
-        with WATCHDOG.op('T capture'):
-            trace, output = card.capture(ttnn, device, lambda: pool.launch(query, pages, causal=True, cur_pos=cur_pos,
-                                                                           label='T capture'))
-        scope.keep(output)
-
-        def replay(values, label):
-            source = ttnn.from_torch(torch.tensor(list(values), dtype=torch.int32), dtype=ttnn.int32,
-                                     layout=ttnn.ROW_MAJOR_LAYOUT)
-            with WATCHDOG.op('stage ' + label):
-                ttnn.copy_host_to_device_tensor(source, cur_pos)
-            with WATCHDOG.op('replay ' + label):
-                ttnn.execute_trace(device, trace, cq_id=0, blocking=True)
-                ttnn.synchronize_device(device)
-            with WATCHDOG.op('trace read back ' + label):
-                return ttnn.to_torch(output)
+        eager = {}
 
         def eager_at(values, label):
+            """The eager causal call on the CLEAN table at `values` (cached)."""
             if values not in eager:
                 positions = pool.positions(values)
                 try:
@@ -691,8 +869,13 @@ def section_trace(ttnn, torch, device, pool, seed, args, report):
                     ttnn.deallocate(positions)
             return eager[values]
 
+        # Compile first: capture needs the program built (and the eager bytes are the first comparison anyway).
+        eager_at(plan[0], 'T warm')
+        replay = capture_causal(ttnn, torch, device, pool, scope, traces, query, pages, plan[0], 'T')
+
         for index, values in enumerate(plan):
             label = 'T/seed%d/replay%d/%s' % (seed, index, ','.join(map(str, values)))
+            DEADLINE.check(label)
             got = replay(values, label)
             reference = eager_at(values, label)
             record(report, comparison('T', 'trace_vs_eager', label, card.differing(torch, got, reference), True,
@@ -722,15 +905,19 @@ def section_trace(ttnn, torch, device, pool, seed, args, report):
                 continue
             values = skip_positions(last, pattern)
             label = 'T/seed%d/skip%s' % (seed, ''.join(map(str, pattern)))
+            DEADLINE.check(label)
             got = replay(values, label)
             live = [index for index in range(batch) if index not in pattern]
+            if not live:
+                report['trace_skip_all'] = 'returned'             # nothing to compare: it returned, no hang
+                continue
             differing = sum(card.differing(torch, slot(got, index), slot(full, index)) for index in live)
             record(report, comparison('T', 'trace_skip_live', label, differing, True, pattern=list(pattern),
                                       live=live, seed=seed))
+        release_traces(ttnn, device, traces)
+        fence_trace(ttnn, torch, device, pool, seed, args, report, scope, traces, query, eager_at)
     finally:
-        if trace is not None:
-            with WATCHDOG.op('release trace'):
-                ttnn.release_trace(device, trace)
+        release_traces(ttnn, device, traces)
         scope.close()
 
 
@@ -754,15 +941,19 @@ def section_skip(ttnn, torch, pool, seed, args, report):
             if max(pattern) >= batch:
                 continue
             label = 'K/seed%d/skip%s' % (seed, ''.join(map(str, pattern)))
+            DEADLINE.check(label)
             values = scope.keep(pool.positions(skip_positions(positions, pattern)))
             address = pool.poison_output(shape)
             out = pool.launch(query, pages, causal=True, cur_pos=values, label=label)
             reused = None if address is None else k1.buffer_address(out) == address
             got = pool.host(out, 'read back ' + label)
             live = [index for index in range(batch) if index not in pattern]
-            differing = sum(card.differing(torch, slot(got, index), slot(full, index)) for index in live)
-            record(report, comparison('K', 'skip_live', label, differing, True, pattern=list(pattern), live=live,
-                                      seed=seed, poison_address_reused=reused))
+            if live:
+                differing = sum(card.differing(torch, slot(got, index), slot(full, index)) for index in live)
+                record(report, comparison('K', 'skip_live', label, differing, True, pattern=list(pattern), live=live,
+                                          seed=seed, poison_address_reused=reused))
+            else:
+                report['skip_all_call'] = 'returned'              # nothing to compare: it returned, no hang
             for index in pattern:
                 rows_nan = int(torch.isnan(slot(got, index).float()).all(dim=-1).sum())
                 state = 'unwritten' if rows_nan == rows * 12 else ('written' if rows_nan == 0 else 'partial')
@@ -897,6 +1088,7 @@ def section_timing(ttnn, torch, device, pool, args, report):
         medians = {name: [] for name, _extent, _once in shapes}
         samples = {name: [] for name, _extent, _once in shapes}
         for index in range(args.rounds):
+            DEADLINE.check('timing round %d' % index)
             turn = index % len(shapes)
             for name, _extent, once in shapes[turn:] + shapes[:turn]:
                 got = eager_median(ttnn, device, once, args, 'timing %s round %d' % (name, index))
@@ -951,7 +1143,7 @@ def check_kernels(root, report):
     return ok
 
 
-def run(args, report):
+def run(args, report, checkpoint=None):
     import torch
     import ttnn
 
@@ -975,29 +1167,70 @@ def run(args, report):
             failures.append('%s=1 is required: the arm sets it, and the G8 legacy calls do not fit L1 without it'
                             % card.SCRATCH_ENV)
             return
-        users = max(args.batch, max(batch for _rows, batch in E_SHAPES.values()))
-        for seed in args.seeds:
-            pool = Pool(ttnn, torch, device, args.capacity, seed, users, report)
-            try:
-                if 'S' in args.sections:
-                    section_split(ttnn, torch, pool, seed, args, report)
-                if 'E' in args.sections:
-                    section_extent(ttnn, torch, pool, seed, args, report)
-                if 'T' in args.sections and seed == args.seeds[0]:
-                    section_trace(ttnn, torch, device, pool, seed, args, report)
-                if 'K' in args.sections:
-                    section_skip(ttnn, torch, pool, seed, args, report)
-                if 'D' in args.sections and seed == args.seeds[0]:
-                    section_dynamic(ttnn, torch, pool, seed, args, report)
-                if 'N' in args.sections and seed == args.seeds[0]:
-                    section_flags(ttnn, torch, pool, args, report)
-                if not args.no_timing and seed == args.seeds[0]:
-                    section_timing(ttnn, torch, device, pool, args, report)
-            finally:
-                pool.close()
+        run_sections(ttnn, torch, device, args, report, checkpoint)
     finally:
         with WATCHDOG.op('close device'):
             ttnn.close_device(device)
+
+
+def run_sections(ttnn, torch, device, args, report, checkpoint=None):
+    """Every (seed, section) of section_runs, each isolated: one that raises is a failure ('<section>/seed<n>:
+    <error>', so the verdict is NO-DECISION) and the run goes on with the next one; --deadline-s stops the run and
+    lists the rest under 'deadline'. The report is checkpointed after every section."""
+    users = max(args.batch, max(batch for _rows, batch in E_SHAPES.values()))
+    handlers = {
+        'S': lambda pool, seed: section_split(ttnn, torch, pool, seed, args, report),
+        'T': lambda pool, seed: section_trace(ttnn, torch, device, pool, seed, args, report),
+        'K': lambda pool, seed: section_skip(ttnn, torch, pool, seed, args, report),
+        'E': lambda pool, seed: section_extent(ttnn, torch, pool, seed, args, report),
+        'D': lambda pool, seed: section_dynamic(ttnn, torch, pool, seed, args, report),
+        'N': lambda pool, seed: section_flags(ttnn, torch, pool, args, report),
+        'timing': lambda pool, seed: section_timing(ttnn, torch, device, pool, args, report),
+    }
+    runs = section_runs(args)
+    report['plan_runs'] = [run_tag(seed, name) for seed, name in runs]
+    done, failed = report.setdefault('sections_done', []), report.setdefault('sections_failed', [])
+    pool, pool_seed, dead_seed = None, None, None
+    try:
+        for index, (seed, name) in enumerate(runs):
+            tag = run_tag(seed, name)
+            if seed == dead_seed:
+                continue                                        # its pool failed: already a failure
+            try:
+                DEADLINE.check(tag)
+                if pool_seed != seed:
+                    if pool is not None:
+                        pool.close()
+                    pool, pool_seed = None, seed
+                    try:
+                        pool = Pool(ttnn, torch, device, args.capacity, seed, users, report)
+                    except DeadlineReached:
+                        raise
+                    except Exception as error:  # noqa: BLE001 - that seed's sections cannot run
+                        dead_seed = seed
+                        report['failures'].append('pool/seed%d: %s (its sections did not run)' % (seed, one_line(error)))
+                        print('SECTION FAILED pool/seed%d: %s' % (seed, one_line(error)), flush=True)
+                        continue
+                handlers[name](pool, seed)
+            except DeadlineReached as reached:
+                skipped = [run_tag(later_seed, later) for later_seed, later in runs[index:]]
+                report['deadline'] = dict(seconds=DEADLINE.seconds, reached_at=str(reached), skipped=skipped)
+                report['warnings'].append('deadline %ss reached at %s: %d section runs not run (%s)'
+                                          % (DEADLINE.seconds, reached, len(skipped), ', '.join(skipped)))
+                print('DEADLINE reached at %s: skipped %s' % (reached, ', '.join(skipped)), flush=True)
+                break
+            except Exception as error:  # noqa: BLE001 - isolate the section; a TT_FATAL surfaces as RuntimeError
+                failed.append(tag)
+                report['failures'].append('%s: %s' % (tag, one_line(error)))
+                print('SECTION FAILED %s: %s' % (tag, one_line(error)), flush=True)
+            else:
+                done.append(tag)
+            finally:
+                if checkpoint is not None:
+                    checkpoint(tag)
+    finally:
+        if pool is not None:
+            pool.close()
 
 
 def parse_args(argv=None):
@@ -1011,7 +1244,12 @@ def parse_args(argv=None):
     parser.add_argument('--variants', default=','.join(VARIANTS))
     parser.add_argument('--rows', default=','.join(map(str, ROWS)), help='query tokens per entry in S and D (1, 2)')
     parser.add_argument('--batch', type=int, default=BATCH, help='entries per call in S, T and K (1-4)')
+    parser.add_argument('--served-pnht1', action='store_true',
+                        help='also run the qwen tail / tail+share on S\'s 12 / 24-row shapes (never run on hardware; '
+                             'warnings only, about 24 more JIT builds)')
     parser.add_argument('--shapes', default=','.join(E_SHAPES), help='section E shapes: %s' % ', '.join(E_SHAPES))
+    parser.add_argument('--qualified-capacities', default=','.join(map(str, QUALIFIED_CAPACITIES)),
+                        help='where a served mode that differs from legacy in E is a failure; elsewhere a finding')
     parser.add_argument('--sections', default=','.join(SECTIONS), help='any of %s' % ', '.join(SECTIONS))
     parser.add_argument('--trace-families', type=int, default=TRACE_FAMILIES)
     parser.add_argument('--trace-references', choices=('all', 'slot0', 'none'), default='slot0',
@@ -1023,6 +1261,9 @@ def parse_args(argv=None):
     parser.add_argument('--rounds', type=int, default=2)
     parser.add_argument('--no-timing', action='store_true')
     parser.add_argument('--watchdog', type=float, default=0, help='seconds per device call before os._exit(3); 0 off')
+    parser.add_argument('--deadline-s', type=float, default=0,
+                        help='stop cleanly between device calls this long after start (the runner: its container '
+                             'timeout less %d s); the rest is listed under "deadline"; 0 off' % DEADLINE_MARGIN_S)
     parser.add_argument('--expect-binary-sha256', default='', help='the mapped _ttnncpp.so must be this (K64i: %s)'
                         % K64I_TTNNCPP_SHA256[:16])
     parser.add_argument('--kernel-root', default=KERNEL_ROOT, help='the mounted sdpa_decode kernels ("" skips)')
@@ -1036,8 +1277,11 @@ def parse_args(argv=None):
         args.starts = ints(args.starts)
         args.seeds = ints(args.seeds)
         args.rows = ints(args.rows)
+        args.qualified_capacities = ints(args.qualified_capacities)
     except ValueError as error:
         parser.error(str(error))
+    if args.deadline_s < 0:
+        parser.error('--deadline-s must be >= 0')
     args.variants = [value for value in args.variants.split(',') if value]
     args.shapes = [value for value in args.shapes.split(',') if value]
     args.sections = [value for value in args.sections.split(',') if value]
@@ -1045,6 +1289,8 @@ def parse_args(argv=None):
         check_capacity(args.capacity)
         for extent in args.extents:
             check_capacity(extent, 'extent')
+        for extent in args.qualified_capacities:
+            check_capacity(extent, 'qualified capacity')
     except ValueError as error:
         parser.error(str(error))
     if not args.extents or max(args.extents) > args.capacity or len(set(args.extents)) != len(args.extents):
@@ -1067,12 +1313,47 @@ def parse_args(argv=None):
     return args
 
 
+def term_handler(report, write_report):
+    """The SIGTERM handler: the first signal records the error, writes the partial report at once (with its
+    NO-DECISION verdict: the unwinding may not finish before the SIGKILL) and raises Terminated in the main thread,
+    so the sections' finally blocks free their tensors and traces and run() closes the device; later ones are
+    ignored so they cannot break that unwinding."""
+
+    def on_term(signum, _frame):
+        if report.get('terminated'):
+            return
+        report['terminated'] = signum
+        report['error'] = ('terminated by signal %d during %r (the container timeout: --deadline-s did not stop the '
+                           'run first)' % (signum, WATCHDOG.label))
+        try:
+            decision = decide(report)
+            write_report(dict(decision=decision, verdict_line=verdict_line(dict(report, decision=decision)),
+                              in_progress='terminated'))
+        except Exception:  # noqa: BLE001 - best effort; main writes again after the unwinding
+            pass
+        raise Terminated(signum)
+
+    return on_term
+
+
+def install_signal(signum, handler):
+    """signal.signal where it can be set (the main thread): (installed, the handler to restore)."""
+    try:
+        previous = signal.signal(signum, handler)
+    except (ValueError, OSError, AttributeError):
+        return False, None
+    return True, (signal.SIG_DFL if previous is None else previous)
+
+
 def main(argv=None):
-    global WATCHDOG
+    global WATCHDOG, DEADLINE
     args = parse_args(argv)
+    DEADLINE = Deadline(args.deadline_s)
     report = dict(probe=PROBE, plan=PLAN, passed=False, argv=list(sys.argv[1:] if argv is None else argv),
                   capacity=args.capacity, extents=args.extents, starts=args.starts, seeds=args.seeds,
                   variants=args.variants, rows=args.rows, batch=args.batch, shapes=args.shapes, sections=args.sections,
+                  served_pnht1=args.served_pnht1, qualified_capacities=args.qualified_capacities,
+                  deadline_s=args.deadline_s, run_order=list(RUN_ORDER),
                   poison=dict(k=POISON_K, v=POISON_V, blocks=POISON_BLOCKS), k64j_flag='0x%x' % K64J_FLAG,
                   predictions=split_predictions(args.extents, args.capacity,
                                                 [args.batch] + [batch for _rows, batch in E_SHAPES.values()]),
@@ -1091,6 +1372,12 @@ def main(argv=None):
             payload.update(extra)
         args.out.write_text(json.dumps(payload, indent=2, default=str))
 
+    def checkpoint(tag):
+        try:
+            write_report(dict(in_progress='after %s' % tag))
+        except Exception as error:  # noqa: BLE001 - the final write still comes
+            report['warnings'].append('checkpoint write after %s failed: %s' % (tag, one_line(error)))
+
     def on_fire(label):
         try:
             write_report(dict(error='watchdog: %r exceeded its budget' % (label,), passed=False))
@@ -1100,21 +1387,26 @@ def main(argv=None):
     WATCHDOG = k1.Watchdog(args.watchdog, on_fire=on_fire).start()
     card.WATCHDOG = WATCHDOG
     k1.WATCHDOG = WATCHDOG
+    installed, previous = install_signal(signal.SIGTERM, term_handler(report, write_report))
     try:
         try:
             with native:
-                run(args, report)
+                run(args, report, checkpoint)
             if report.get('binary', {}).get('stage', 0) >= 1:
                 report['factory_lines'] = card.factory_lines(native.text())
                 for key in missing_programs(report['factory_lines'], report['_requested']):
                     report['failures'].append('factory log: no [QWEN-SDPA] line for flags=0x%x B=%d St=%d '
                                               'mask_width_t=%d (graft mounted, not executed)' % key)
+        except Terminated:
+            pass                                                # report['error'] was set by the handler
         except Exception as error:  # noqa: BLE001
             report['error'] = '%s: %s' % (type(error).__name__, error)
         report['decision'] = decide(report)
         report['verdict_line'] = verdict_line(report)
         report['passed'] = report['decision']['verdict'] == 'GO'
     finally:
+        if installed:
+            install_signal(signal.SIGTERM, previous)
         write_report()
     for failure in report['failures']:
         print('FAIL', failure)
@@ -1126,6 +1418,8 @@ def main(argv=None):
     print('SDPA_K64J_P0 passed=%s comparisons=%d liveness=%d failures=%d warnings=%d report=%s native_log=%s' % (
         report['passed'], len(report['comparisons']), len(report['liveness']), len(report['failures']),
         len(report['warnings']), args.out, native.path), flush=True)
+    if report.get('terminated'):
+        return 128 + int(report['terminated'])
     return 0 if report['passed'] else 1
 
 

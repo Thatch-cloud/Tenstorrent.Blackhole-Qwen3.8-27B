@@ -7,19 +7,31 @@
 # plus its served qwen modes as a cross-check. Queue it on the card-B runner (docs/card-b-runner.md:
 # CARD_B_HARNESS=optimisation/ttnn-op/k64j_probe/run_card_b.sh) or run it by hand on the rig.
 #
-#   bash run_card_b.sh                   # every section (S, E, T, K, D, N) and the timing, about 40-70 min
+#   bash run_card_b.sh                   # every section (S, T, K, E, D, N) and the timing, about 40-70 min (about 125
+#                                        # JIT builds, 64 of them T's per-family legacy references); --deadline-s
+#                                        # stops it cleanly 600 s before the 5,400 s container timeout, and the JSON
+#                                        # report is rewritten after every section. To halve the risk, run it as
+#                                        # two jobs: CARD_B_ARGS="--sections S,T --no-timing", then
+#                                        # "--sections K,E,D,N" (GO needs both)
 #   WATCHER=1 bash run_card_b.sh         # THE FIRST HARDWARE PASS (the trace with a rewritten cur_pos, the skips and
 #                                        # the C-wide poisoned tables were never run on this binary): TT_METAL_WATCHER=5,
 #                                        # extents 2,304 and 33,024, seed 0, variant normal, 8 trace families, no
 #                                        # timing, a per-call watchdog (WATCHDOG_S, default 120 s), a 2,700 s container
-#                                        # timeout; the watcher's own log lands in $RESULTS/watcher-<stamp>/
+#                                        # timeout (deadline 2,100 s); the watcher's own log lands in
+#                                        # $RESULTS/watcher-<stamp>/
 #   K64J_DRY_RUN=1 bash run_card_b.sh    # print the launch argv and exit: no node resolution, no holder check, no
 #                                        # docker, nothing launched (the graft is checked when it exists)
 #
 # Before anything is launched the graft must verify against its MANIFEST.sha256, its _ttnncpp.so must be
-# EXPECT_TTNNCPP_SHA256 (default K64i, cf54d716; empty skips) and its qwen decode kernels the served ones (stage 3:
-# 280a847f / 8776fcc7; the K64i slice pair 0f5a019c / ac6cf815 when present). Inside the container the probe checks
-# the mapped binary again and the five STOCK decode sources the causal and legacy programs are built from.
+# EXPECT_TTNNCPP_SHA256 (default K64i, cf54d716; empty skips), its qwen decode kernels the served ones (stage 3:
+# 280a847f / 8776fcc7; the K64i slice pair 0f5a019c / ac6cf815 when present) and its five STOCK decode sources the
+# ones the probe's reading is of (49a05926 / 734c90c0 / d24769bd / e4623a22 / 1b52c60d: the causal and legacy
+# programs are built from them), so a wrong graft fails before it costs card time. Inside the container the probe
+# checks the mapped binary and the stock sources again (with KOPGRAFT64=none, only there).
+#
+# The container timeout SIGTERMs `docker run`, which forwards it to the probe (PID 1 in the container, by exec):
+# the probe writes its partial report at once and unwinds. A 124 exit prints the hang hint below unless the log shows
+# the probe finished that unwinding ('ERROR terminated by signal', printed after the device closed).
 #
 # Env: KOPGRAFT64 (default ~/opgraft-K64i; 'none' runs the image's own binary and op tree, and then expects no binary
 # unless EXPECT_TTNNCPP_SHA256 is set), IMAGE (default image P8), RESULTS (~/kwork64/k64j/<card tag>), CARD_B_ARGS
@@ -41,6 +53,12 @@ READER_QWEN=280a847fae833891dffff1057d67b999288a183386cd058e3e1614755ce3499b
 COMPUTE_QWEN=8776fcc7420c6f27a9c7ae06c54c391225a00ce78322c5397970d74a5063ca8a
 READER_SLICE=0f5a019ccc06ca603bb4ed44c77cc66f9cb3e5bd35193810eb127f13c9f5631f
 WRITER_SLICE=ac6cf815c34df85a9d39593d95f28eb2da0cb5b37c232633e65bf3ed116925f4
+# The stock decode sources (tt-metal 9f9cd4fd; probe_k64j_card_b.STOCK_KERNELS, the vendored fixtures/).
+READER_ALL=49a05926b437e2ca90d7e01c60e85a6b11f333375a6159fa02c9ff6f78af764e
+WRITER_ALL=734c90c01c7a7174497133fae9df80110ead55275955faeb566d345bdccb60b8
+COMPUTE_ALL=d24769bdcbb8635f83f5f91a301fe0d89298d38263d4493a39c6d2decb57867f
+DATAFLOW_COMMON=e4623a2254559eaec4450ebfab0f9c5732e02acfe4d8126bd5eeb7efe0fdc608
+RT_ARGS_COMMON=1b52c60d78ada6f08effd326c2ed2407b3a74cf0db2353fadbe51b088610aec8
 if [ "$G" = none ]; then
   EXPECT=${EXPECT_TTNNCPP_SHA256-}
 else
@@ -332,7 +350,7 @@ KD=$OPS/transformer/sdpa_decode/device/kernels
 DRY=${K64J_DRY_RUN:-0}
 name=qwen-k64j-$QUAL_TAG
 stamp=$(date +%Y%m%dT%H%M%S)
-timeout_s=5400   # S (2 rows x 3 seeds x 10 calls), E, a 64-family trace with its references, K, D, N, timing
+timeout_s=5400   # S (2 rows x 3 seeds x 10 calls), T (a 64-family trace with its references), K, E, D, N, timing
 
 # The target's node, resolved by board id now; never shared: refuse while a container or a host
 # process can reach it (a container on another board - a CI gate on the serving pair - does not block).
@@ -372,15 +390,21 @@ else
     if [ -e "$G/sdpa_decode/device/kernels/dataflow/reader_decode_qwen_slice.cpp" ]; then
       pairs+=("dataflow/reader_decode_qwen_slice.cpp:$READER_SLICE" "dataflow/writer_decode_qwen_slice.cpp:$WRITER_SLICE")
     fi
-    for pair in "${pairs[@]}"; do
+    stock=("dataflow/reader_decode_all.cpp:$READER_ALL" "dataflow/writer_decode_all.cpp:$WRITER_ALL"
+           "compute/sdpa_flash_decode.cpp:$COMPUTE_ALL" "dataflow/dataflow_common.hpp:$DATAFLOW_COMMON"
+           "rt_args_common.hpp:$RT_ARGS_COMMON")
+    for pair in "${pairs[@]/#/served:}" "${stock[@]/#/stock:}"; do
+      kind=${pair%%:*}
+      pair=${pair#*:}
       file=$G/sdpa_decode/device/kernels/${pair%%:*}
       got=$(sha256sum "$file" 2>/dev/null | cut -c1-64 || true)
       if [ "$got" != "${pair#*:}" ]; then
-        echo "refusing: $file is ${got:-missing}, not the served ${pair#*:}" >&2
+        echo "refusing: $file is ${got:-missing}, not the $kind ${pair#*:}" >&2
         exit 1
       fi
     done
-    echo "### graft $G: _ttnncpp.so ${so_sha:0:16}, ${#pairs[@]} served qwen kernels, manifest verified"
+    echo "### graft $G: _ttnncpp.so ${so_sha:0:16}, ${#pairs[@]} served qwen kernels, ${#stock[@]} stock decode sources," \
+      "manifest verified"
   fi
   KM=(--mount "type=bind,src=$G/_ttnn.so,dst=/opt/tt-metal/ttnn/ttnn/_ttnn.so,readonly"
       --mount "type=bind,src=$G/_ttnncpp.so,dst=/opt/tt-metal/build_Release/ttnn/_ttnncpp.so,readonly"
@@ -418,6 +442,8 @@ if [ "${WATCHER:-}" = "1" ]; then
 else
   args+=(--watchdog "${WATCHDOG_S:-300}")
 fi
+# Stop cleanly 600 s (probe DEADLINE_MARGIN_S) before the container timeout: the rest is listed, not lost.
+args+=(--deadline-s "$((timeout_s - 600))")
 # shellcheck disable=SC2206
 extra=(${CARD_B_ARGS:-})
 
@@ -466,11 +492,20 @@ if [ "${WATCHER:-}" = "1" ]; then
 fi
 # Anchored: the summary line 'SDPA_K64J_P0 passed=...' comes after the verdict and also contains 'K64J_P0 '.
 echo "### $(grep -E '^K64J_P0 ' "$log" | tail -1 || echo 'no K64J_P0 line')"
+# >>> hang: status, log -> hung
 hung=0
 case "$status" in
   3|124|137) hung=1 ;;
   1) grep -qF 'Timeout (' "$log" && hung=1 ;;   # the faulthandler backstop (GIL held)
 esac
+# The container timeout (124) after the probe caught SIGTERM and unwound: its 'ERROR terminated by signal' line is
+# printed only after the device closed, so this is an overrun (see its partial report), not a hang.
+if [ "$status" = 124 ] && grep -q '^ERROR terminated by signal' "$log" && ! grep -qF 'Timeout (' "$log"; then
+  hung=0
+  echo "### TIMEOUT (exit 124): the probe caught SIGTERM, wrote its partial report and closed the device; not a" \
+    "hang. Raise the timeout or split the run (--sections)." >&2
+fi
+# <<< hang
 if [ "$hung" = 1 ]; then
   echo "HANG SUSPECTED (exit $status): the container is removed on exit." >&2
   qual_reset_hint >&2

@@ -2,12 +2,16 @@
 
   - the split (R1 on paper): split_model mirrors rt_args_common.hpp and get_tree_reduction_params (the vendored
     fixtures, sha-pinned; with a host g++ on PATH or QWEN_PF_GXX the fixtures are COMPILED and every workload and
-    tree answer compared), and over every 256-key family of the served 131,328-key geometry, every core count the
-    probe or the replay uses and every cur_pos in [E - 256, E - 1] the runtime split IS the compile-time call's at
-    capacity E; the fixed chunk ignores max_dynamic_chunk_size (served value 8); the stale-writer hazard is exactly
-    E / 256 < cores per head, and every skip;
+    tree answer compared, over positions 0-599 and both ends of every family), and over every 256-key family of
+    the served 131,328-key geometry and every core count the probe or the replay uses, the runtime split at five
+    cur_pos per family (E - 256, E - 255, E - 129, E - 2, E - 1) IS the compile-time call's at capacity E. Five
+    suffice: the split reads cur_pos only through valid_seq_len = nearest_n(cur_pos + 1, 256) (the fixture anchor
+    pins that line), which is monotonic in cur_pos, so equal at both ends of [E - 256, E - 1] means equal
+    throughout. The fixed chunk ignores max_dynamic_chunk_size (served value 8); the stale-writer hazard is
+    exactly E / 256 < cores per head, and every skip;
   - the served qwen readers, the slice writer and the qwen compute kernel carry the stock cur_pos block byte for
-    byte (read only under is_causal, both CB copies pushed before the UINT32_MAX return);
+    byte, compared with the vendored stock kernels themselves (fixtures/, tt-metal 9f9cd4fd, sha-pinned): read
+    only under is_causal, both CB copies pushed before the UINT32_MAX return;
   - the flag bit: 0x20 is none of the flags any factory generator, the served reader, the gate or a card test uses
     (0x10 is the card tests' unknown-flag control);
   - the probe's helpers: the position plans, the poisoned table, the masks against the causal writer's
@@ -17,12 +21,16 @@
     pass, KOPGRAFT64=none, the graft refusals, the verdict echo;
   - the whole flow on a fake ttnn with the op's semantics (the split and the tree of split_model, the causal and
     non-causal paths, the served flags, trace capture that reads the cur_pos tensor at replay, a DRAM allocator
-    that reuses freed addresses): GO end to end, and each broken variant is caught - an extent read one chunk too
-    far (NO-GO), a trace that ignores the rewritten cur_pos (NO-GO), a skip that disturbs a live entry (NO-GO), a
-    split taken from the compile-time capacity (NO-GO), a dead liveness control (NO-DECISION), a served mode that
-    differs (NO-DECISION), a graft that never logs, a wrong binary or kernel, no scratch setting.
+    that reuses freed addresses): GO end to end once with every section, and each broken variant on the one
+    section that must catch it, at one or two extents - an extent read one chunk too far (NO-GO, the fence trace
+    too), a trace that ignores the rewritten cur_pos (NO-GO), a skip that disturbs a live entry (NO-GO), a split
+    taken from the compile-time capacity (NO-GO), a dead liveness control (NO-DECISION), a served mode that
+    differs at a qualified capacity (NO-DECISION) or elsewhere (a finding), the opt-in PNHt-1 qwen modes (warnings
+    only), a section that raises (the others still run), the deadline, SIGTERM, a graft that never logs, a wrong
+    binary or kernel, no scratch setting.
 
-    py -3.11 -B -m unittest test_k64j_probe      (from this directory)
+    py -3.11 -B -m unittest test_k64j_probe      (from this directory; 20-25 s here, the bash runner tests
+                                                  need Git Bash on Windows)
 """
 
 import hashlib
@@ -32,6 +40,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -55,6 +64,14 @@ RUNNER = HERE / 'run_card_b.sh'
 FIXTURES = HERE / 'fixtures'
 RT_ARGS = FIXTURES / 'rt_args_common.1b52c60d.hpp'
 DEVICE_OP = FIXTURES / 'sdpa_decode_device_operation.ba2b3fc9.hpp'
+# The vendored stock decode sources (tt-metal 9f9cd4fd, Apache-2.0), by their path under the op's kernels/.
+STOCK_FIXTURES = {
+    'dataflow/reader_decode_all.cpp': FIXTURES / 'reader_decode_all.49a05926.cpp',
+    'dataflow/writer_decode_all.cpp': FIXTURES / 'writer_decode_all.734c90c0.cpp',
+    'compute/sdpa_flash_decode.cpp': FIXTURES / 'sdpa_flash_decode.d24769bd.cpp',
+    'dataflow/dataflow_common.hpp': FIXTURES / 'dataflow_common.e4623a22.hpp',
+    'rt_args_common.hpp': RT_ARGS,
+}
 ARM = CI / 'lever_n_m3native_run_arm.sh'
 GATE = ROOT / '.github' / 'workflows' / 'qwen-lever-n-m3native-gate.yml'
 CPU_WORKFLOW = ROOT / '.github' / 'workflows' / 'qwen-integration-cpu.yml'
@@ -80,8 +97,21 @@ def read(path):
 
 class SplitModelTests(unittest.TestCase):
     def test_the_fixtures_are_the_served_sources(self):
-        self.assertEqual(sha(RT_ARGS.read_bytes()), probe.STOCK_KERNELS['rt_args_common.hpp'])
+        self.assertEqual(sorted(STOCK_FIXTURES), sorted(probe.STOCK_KERNELS))
+        for name, path in STOCK_FIXTURES.items():
+            self.assertEqual(sha(path.read_bytes()), probe.STOCK_KERNELS[name], name)
+            self.assertTrue(path.name.split('.')[1] == probe.STOCK_KERNELS[name][:8], path.name)
         self.assertTrue(sha(DEVICE_OP.read_bytes()).startswith('ba2b3fc9'))
+        # generate_mask (the causal writer's final-chunk mask), which test_the_masks_are_the_causal_writers mirrors.
+        common = read(STOCK_FIXTURES['dataflow/dataflow_common.hpp'])
+        common = common[common.index('void generate_mask(uint32_t k_num_chunks, uint32_t Sk_chunk_t, uint32_t cur_pos) {'):
+                        common.index('void generate_sliding_window_mask(')]
+        for anchor in ('uint32_t cur_pos_in_chunk = cur_pos % (Sk_chunk_t * 32);',
+                       'uint32_t cur_pos_in_chunk_t = cur_pos_in_chunk / 32;',
+                       'constexpr uint32_t NEG_INF = 0xFF80FF80;',
+                       'fill_tile_partial<tile_bytes>(cb_mask_in, i, cur_pos_in_tile, NEG_INF);',
+                       'fill_tile<tile_bytes>(cb_mask_in, i, NEG_INF);'):
+            self.assertEqual(common.count(anchor), 1, anchor)
         text = read(RT_ARGS)
         for anchor in ('valid_seq_len = nearest_n(cur_pos + 1, k_chunk_size);',
                        'if constexpr (Sk_chunk_t == 0) {', 'return nearest_pow_of_2_up_to_8<max_size>(seq_len_in_tiles);',
@@ -162,12 +192,17 @@ class SplitModelTests(unittest.TestCase):
             model.compile_time_cur_pos(100)
 
 
-# The cur_pos block (from '    // Get cur_pos' to the split) of the STOCK kernels, hashed from tt-metal 9f9cd4fd:
-# reader_decode_all.cpp (49a05926), writer_decode_all.cpp (734c90c0), sdpa_flash_decode.cpp (d24769bd).
+# The cur_pos block (from '    // Get cur_pos' to the split) of each STOCK kernel: the vendored fixture it is cut
+# from, the text that ends it, and its hash (the README quotes the prefixes).
+SPLIT_START = '    auto Sk_chunk_t_dynamic'
+COMPUTE_SPLIT = '    // Get dynamic chunk size'
 STOCK_CUR_POS_BLOCKS = {
-    'reader': 'bce6424f2d0b83cab0bda3cf3171769941f0a508991b6b98020b677f59bfbd45',
-    'writer': 'e741ca9cd5acf90fcee12ebd61b89a9c617ac72637a143eb5690a706c5421d2f',
-    'compute': 'a7a3964ccc20cae2cf17d65bdb2a864018c88c049f5937a9c92effdb87fede9c',
+    'reader': ('dataflow/reader_decode_all.cpp', SPLIT_START,
+               'bce6424f2d0b83cab0bda3cf3171769941f0a508991b6b98020b677f59bfbd45'),
+    'writer': ('dataflow/writer_decode_all.cpp', SPLIT_START,
+               'e741ca9cd5acf90fcee12ebd61b89a9c617ac72637a143eb5690a706c5421d2f'),
+    'compute': ('compute/sdpa_flash_decode.cpp', COMPUTE_SPLIT,
+                'a7a3964ccc20cae2cf17d65bdb2a864018c88c049f5937a9c92effdb87fede9c'),
 }
 
 
@@ -177,25 +212,34 @@ def cur_pos_block(path, end):
     return text[start:text.index(end, start)]
 
 
+def stock_block(role):
+    name, end, _digest = STOCK_CUR_POS_BLOCKS[role]
+    return cur_pos_block(STOCK_FIXTURES[name], end)
+
+
 class ServedKernelTextTests(unittest.TestCase):
-    """The served qwen kernels in this repository carry the stock cur_pos block byte for byte, so the causal
-    path this probe runs on hardware is the code a K64j flag would lift out of `if constexpr (is_causal)`."""
+    """The served qwen kernels in this repository carry the stock cur_pos block byte for byte (compared with the
+    vendored stock kernels, not a constant), so the causal path this probe runs on hardware is the code a K64j flag
+    would lift out of `if constexpr (is_causal)`."""
+
+    def test_the_stock_blocks_are_cut_from_the_vendored_kernels(self):
+        for role, (_name, _end, digest) in STOCK_CUR_POS_BLOCKS.items():
+            block = stock_block(role)
+            self.assertEqual(sha(block.encode()), digest, role)
+            self.assertIn('if constexpr (is_causal) {', block, role)
 
     def test_every_served_reader_writer_and_compute_carries_the_stock_block(self):
-        split = '    auto Sk_chunk_t_dynamic'
         for path in (QWEN / 'reader_decode_qwen.cpp', QWEN / 'stage3' / 'reader_decode_qwen.cpp',
                      SLICE / 'reader_decode_qwen_slice.cpp'):
-            self.assertEqual(sha(cur_pos_block(path, split).encode()), STOCK_CUR_POS_BLOCKS['reader'], path.name)
-        self.assertEqual(sha(cur_pos_block(SLICE / 'writer_decode_qwen_slice.cpp', split).encode()),
-                         STOCK_CUR_POS_BLOCKS['writer'])
+            self.assertEqual(cur_pos_block(path, SPLIT_START), stock_block('reader'), path.name)
+        self.assertEqual(cur_pos_block(SLICE / 'writer_decode_qwen_slice.cpp', SPLIT_START), stock_block('writer'))
         for path in (QWEN / 'sdpa_flash_decode_qwen.cpp', QWEN / 'stage3' / 'sdpa_flash_decode_qwen.cpp'):
-            self.assertEqual(sha(cur_pos_block(path, '    // Get dynamic chunk size').encode()),
-                             STOCK_CUR_POS_BLOCKS['compute'], path.name)
+            self.assertEqual(cur_pos_block(path, COMPUTE_SPLIT), stock_block('compute'), path.name)
 
     def test_the_block_reads_cur_pos_only_when_causal_and_skips_on_uint32_max(self):
-        reader = cur_pos_block(SLICE / 'reader_decode_qwen_slice.cpp', '    auto Sk_chunk_t_dynamic')
-        writer = cur_pos_block(SLICE / 'writer_decode_qwen_slice.cpp', '    auto Sk_chunk_t_dynamic')
-        compute = cur_pos_block(QWEN / 'stage3' / 'sdpa_flash_decode_qwen.cpp', '    // Get dynamic chunk size')
+        reader = cur_pos_block(SLICE / 'reader_decode_qwen_slice.cpp', SPLIT_START)
+        writer = cur_pos_block(SLICE / 'writer_decode_qwen_slice.cpp', SPLIT_START)
+        compute = cur_pos_block(QWEN / 'stage3' / 'sdpa_flash_decode_qwen.cpp', COMPUTE_SPLIT)
         for name, block, read_line in (
                 ('reader', reader, 'cur_pos = index_ptr[cur_batch / q_heads_parallel_factor];'),
                 ('writer', writer, 'cur_pos = index_ptr[(uint32_t)(cur_batch / q_heads_parallel_factor)];'),
@@ -386,6 +430,28 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(plan, probe.trace_positions(SERVED_CAPACITY, 64, 3, 0))      # reproducible
         self.assertEqual(probe.skip_positions((5, 6, 7), (0, 2)), (-1, 6, -1))
 
+    def test_the_fence_plan_stays_inside_one_family_per_entry(self):
+        extents = probe.fence_extents(probe.EXTENTS, SERVED_CAPACITY, 3)
+        self.assertEqual(extents, [2304, 16896, 33024])                          # below C: poison past E exists
+        self.assertEqual(probe.fence_extents((2304, SERVED_CAPACITY), SERVED_CAPACITY, 3), [2304] * 3)
+        self.assertEqual(probe.fence_extents((SERVED_CAPACITY,), SERVED_CAPACITY, 2), [256, 256])
+        plan = probe.fence_plan(extents)
+        self.assertEqual(len(plan), len(probe.FENCE_OFFSETS))
+        for slot, extent in enumerate(extents):
+            column = [values[slot] for values in plan]
+            self.assertTrue(all(model.extent(p) == extent for p in column))          # never leaves its family
+            self.assertEqual(sorted(p - (extent - 256) for p in column), sorted(probe.FENCE_OFFSETS))
+        self.assertIn(extents[0] - 1, [values[0] for values in plan])              # the family's last key
+
+    def test_the_run_order_puts_e_after_the_trace_and_the_skips(self):
+        args = probe.parse_args(['--out', 'x.json', '--seeds', '0,1'])
+        runs = probe.section_runs(args)
+        self.assertEqual([probe.run_tag(seed, name) for seed, name in runs],
+                         ['S/seed0', 'T/seed0', 'K/seed0', 'E/seed0', 'D/seed0', 'N/seed0', 'timing/seed0',
+                          'S/seed1', 'K/seed1', 'E/seed1'])
+        args = probe.parse_args(['--out', 'x.json', '--sections', 'E,K', '--no-timing'])
+        self.assertEqual(probe.section_runs(args), [(seed, name) for seed in (0, 1, 2) for name in ('K', 'E')])
+
     def test_the_poisoned_row_keeps_the_extent_and_poisons_the_rest(self):
         torch = self.torch
         table = torch.randperm(2052).to(torch.int32)
@@ -481,18 +547,30 @@ class HelperTests(unittest.TestCase):
         empty = probe.decide(dict(comparisons=[self.entry('half_tile_vs_legacy', 0, False)], liveness=[], failures=[]))
         self.assertEqual(empty['verdict'], 'NO-DECISION')
         self.assertEqual(probe.decide(dict(go, error='boom'))['verdict'], 'NO-DECISION')
+        # The deadline: cutting a decisive section decides nothing; cutting only recorded ones leaves GO.
+        cut = probe.decide(dict(go, deadline=dict(seconds=10, skipped=['E/seed2', 'timing/seed0'])))
+        self.assertEqual(cut['verdict'], 'NO-DECISION')
+        self.assertIn('the deadline (10s) cut 1 decisive section runs (E/seed2)', cut['reasons'])
+        self.assertEqual(probe.decide(dict(go, deadline=dict(seconds=10, skipped=['D/seed0', 'N/seed0',
+                                                                                   'timing/seed0'])))['verdict'], 'GO')
+        # A finding at an unqualified capacity is not a failure.
+        found = dict(go, comparisons=go['comparisons'] + [self.entry('served_unqualified_capacity', 4, False)])
+        self.assertEqual(probe.decide(found)['verdict'], 'GO')
 
     def test_the_verdict_line(self):
         report = dict(comparisons=[self.entry('split_vs_legacy'), self.entry('split_vs_legacy', 2),
-                                   self.entry('served_vs_legacy', 0, False)],
+                                   self.entry('served_vs_legacy', 0, False),
+                                   self.entry('served_unqualified_capacity', 3, False)],
                       liveness=[dict(label='a', live=True)], failures=[], flag_0x20='unknown',
-                      trace_families_distinct=0, binary=dict(stage=4), skip_written='unwritten')
+                      trace_families_distinct=0, binary=dict(stage=4), skip_written='unwritten',
+                      findings=['x'], sections_failed=['E/seed1'], deadline=dict(seconds=5, skipped=['N/seed0']))
         report['decision'] = probe.decide(report)
         line = probe.verdict_line(report)
-        self.assertTrue(line.startswith('K64J_P0 verdict=NO-GO split=1/2 extent=none trace=none skip=none '
-                                        'served=1/1 served_pnht1=none live=1/1 half_tile=none dynamic_chunk=none '
-                                        'skipped_rows=unwritten flag_0x20=unknown families=0 binary_stage=4 '
-                                        'first_differing=["x"]'), line)
+        self.assertTrue(line.startswith('K64J_P0 verdict=NO-GO split=1/2 extent=none trace=none fence=none skip=none '
+                                        'served=1/1 served_unqualified_cap=0/1 served_pnht1=none live=1/1 '
+                                        'half_tile=none dynamic_chunk=none skipped_rows=unwritten flag_0x20=unknown '
+                                        'families=0 binary_stage=4 findings=1 sections_failed=E/seed1 '
+                                        'deadline_skipped=1 first_differing=["x"]'), line)
 
     def test_the_predictions(self):
         rows = probe.split_predictions((2304, SERVED_CAPACITY), SERVED_CAPACITY, (3, 2, 4))
@@ -507,9 +585,12 @@ class HelperTests(unittest.TestCase):
         self.assertEqual((args.capacity, args.extents, args.starts, args.seeds, args.rows, args.batch, args.sections),
                          (131328, list(probe.EXTENTS), list(probe.STARTS), [0, 1, 2], [2, 1], 3, list(probe.SECTIONS)))
         self.assertEqual(args.trace_references, 'slot0')
+        self.assertEqual((args.served_pnht1, args.qualified_capacities, args.deadline_s),
+                         (False, [2304, 33024, 131328], 0.0))
         for bad in (['--extents', '2300'], ['--extents', '262144'], ['--starts', '256'], ['--rows', '3'],
                     ['--batch', '5'], ['--sections', 'S,Q'], ['--shapes', 'G2B9'], ['--variants', 'odd'],
-                    ['--expect-binary-sha256', 'abc'], ['--capacity', '1000'], ['--extents', '2304,2304']):
+                    ['--expect-binary-sha256', 'abc'], ['--capacity', '1000'], ['--extents', '2304,2304'],
+                    ['--qualified-capacities', '1000'], ['--deadline-s', '-1']):
             with self.subTest(bad=bad), self.assertRaises(SystemExit), mock.patch('sys.stderr'):
                 probe.parse_args(['--out', 'x.json'] + bad)
 
@@ -548,10 +629,25 @@ class ContractTests(unittest.TestCase):
         for name, value in (('READER_ALL', 'dataflow/reader_decode_all.cpp'), ('COMPUTE_ALL', 'compute/sdpa_flash_decode.cpp'),
                             ('WRITER_ALL', 'dataflow/writer_decode_all.cpp'), ('DATAFLOW_COMMON', 'dataflow/dataflow_common.hpp')):
             self.assertIn('%s=%s' % (name, probe.STOCK_KERNELS[value]), build)
+        # The runner checks the graft's stock sources on the host, before any card time.
+        for name, value in (('READER_ALL', 'dataflow/reader_decode_all.cpp'), ('COMPUTE_ALL', 'compute/sdpa_flash_decode.cpp'),
+                            ('WRITER_ALL', 'dataflow/writer_decode_all.cpp'), ('DATAFLOW_COMMON', 'dataflow/dataflow_common.hpp'),
+                            ('RT_ARGS_COMMON', 'rt_args_common.hpp')):
+            self.assertEqual(re.findall(r'^%s=([0-9a-f]{64})$' % name, runner, flags=re.M), [probe.STOCK_KERNELS[value]])
+            self.assertIn('"%s:$%s"' % (value, name), runner)
         slice_runner = read(SLICE / 'run_card_b.sh')
         for name in ('READER_QWEN', 'COMPUTE_QWEN', 'READER_SLICE', 'WRITER_SLICE'):
             value = re.search(r'^%s=([0-9a-f]{64})$' % name, slice_runner, flags=re.M).group(1)
             self.assertIn('%s=%s' % (name, value), runner)
+
+    def test_the_qualified_capacities_are_the_card_tests(self):
+        """E's served-vs-legacy is a failure only where K64i's modes were card-qualified: the capacities both the
+        stage-3 card test (0x1 / 0x3) and the slice card test (0x7) sweep."""
+        slice_caps = re.search(r'^CAPACITIES = \(([0-9, ]+)\)$', read(SLICE / 'sdpa_decode_slice_card_b.py'), flags=re.M)
+        slice_caps = {int(value) for value in slice_caps.group(1).split(',') if value.strip()}
+        self.assertEqual(tuple(card.CAPACITIES), probe.QUALIFIED_CAPACITIES)
+        self.assertEqual(set(card.CAPACITIES) & slice_caps, set(probe.QUALIFIED_CAPACITIES))
+        self.assertEqual(sorted(set(probe.EXTENTS) - set(probe.QUALIFIED_CAPACITIES)), [16896, 65792, 98560])
 
     def test_the_cpu_suite_runs_this_directory(self):
         self.assertIn("python -B -m unittest discover -s optimisation/ttnn-op/k64j_probe -p 'test_*.py'",
@@ -596,7 +692,7 @@ def make_graft(root, binary=b'fake _ttnncpp.so'):
         (graft / name / 'placeholder.txt').write_bytes(name.encode())
     (graft / '_ttnn.so').write_bytes(b'fake _ttnn.so')
     (graft / '_ttnncpp.so').write_bytes(binary)
-    for name, source in QWEN_KERNELS.items():
+    for name, source in list(QWEN_KERNELS.items()) + list(STOCK_FIXTURES.items()):
         (kernels / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, kernels / name)
     write_manifest(graft)
@@ -653,7 +749,7 @@ class RunnerTests(unittest.TestCase):
         result = self.run_runner(KOPGRAFT64=graft.as_posix(), EXPECT_TTNNCPP_SHA256=sha(b'fake _ttnncpp.so'))
         argv = self.argv(result)
         self.assertEqual(result.stderr, '')
-        self.assertIn('### graft %s: _ttnncpp.so %s, 4 served qwen kernels, manifest verified'
+        self.assertIn('### graft %s: _ttnncpp.so %s, 4 served qwen kernels, 5 stock decode sources, manifest verified'
                       % (graft.as_posix(), sha(b'fake _ttnncpp.so')[:16]), result.stdout)
         self.assertEqual(argv[:3], ['docker', 'run', '--rm'])
         self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_B)
@@ -686,8 +782,10 @@ class RunnerTests(unittest.TestCase):
         tail = argv[entry + 5:]
         self.assertEqual(tail[0], 'probe')
         args = probe.parse_args(tail[1:])
-        self.assertEqual((args.expect_binary_sha256, args.watchdog, args.no_timing, args.extents),
-                         (sha(b'fake _ttnncpp.so'), 300.0, False, list(probe.EXTENTS)))
+        self.assertEqual((args.expect_binary_sha256, args.watchdog, args.no_timing, args.extents, args.served_pnht1),
+                         (sha(b'fake _ttnncpp.so'), 300.0, False, list(probe.EXTENTS), False))
+        self.assertEqual(args.deadline_s, 5400 - probe.DEADLINE_MARGIN_S)                  # timeout_s less the margin
+        self.assertIn('timeout_s=5400 ', read(RUNNER))
         self.assertRegex(args.out.as_posix(), r'^/results/probe-[0-9]{8}T[0-9]{6}\.json$')
 
     def test_the_default_expectation_is_k64i_and_the_watcher_pass(self):
@@ -699,8 +797,9 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(any(m['dst'] == '/opt/tt-metal/generated/watcher' for m in self.mounts(argv)))
         args = probe.parse_args(argv[argv.index('probe') + 1:])
         self.assertEqual((args.expect_binary_sha256, args.watchdog, args.no_timing, args.extents, args.seeds,
-                          args.variants, args.trace_families, args.sections),
-                         (probe.K64I_TTNNCPP_SHA256, 120.0, True, [2304, 33024], [0], ['normal'], 8, ['S', 'E']))
+                          args.variants, args.trace_families, args.sections, args.deadline_s),
+                         (probe.K64I_TTNNCPP_SHA256, 120.0, True, [2304, 33024], [0], ['normal'], 8, ['S', 'E'],
+                          2700.0 - probe.DEADLINE_MARGIN_S))
         self.assertIn('WATCHER=1: TT_METAL_WATCHER=5, per-call watchdog 120 s, container timeout 2700 s', result.stdout)
 
     def test_the_images_own_binary(self):
@@ -727,6 +826,17 @@ class RunnerTests(unittest.TestCase):
         reader.unlink()
         write_manifest(graft)
         self.assertIn('2 served qwen kernels', self.run_runner(**expect).stdout)       # a K64g graft: stage 3 only
+        # A stock decode source that is not the one the probe reads: refused on the host, before any card time.
+        writer = graft / 'sdpa_decode' / 'device' / 'kernels' / 'dataflow' / 'writer_decode_all.cpp'
+        writer.write_bytes(writer.read_bytes() + b'// edited\n')
+        write_manifest(graft)
+        self.refused(self.run_runner(**expect), 'refusing: %s is %s, not the stock %s'
+                     % (writer.as_posix(), sha(writer.read_bytes()), probe.STOCK_KERNELS['dataflow/writer_decode_all.cpp']))
+        writer.unlink()
+        write_manifest(graft)
+        self.refused(self.run_runner(**expect), 'refusing: %s is missing, not the stock 734c90c0' % writer.as_posix())
+        shutil.copyfile(STOCK_FIXTURES['dataflow/writer_decode_all.cpp'], writer)
+        write_manifest(graft)
         shutil.rmtree(graft / 'sdpa')
         self.refused(self.run_runner(**expect), 'refusing: %s/sdpa missing' % graft.as_posix())
 
@@ -745,6 +855,30 @@ class RunnerTests(unittest.TestCase):
         result = subprocess.run([BASH, '-c', 'set -o pipefail; log=%s; %s' % (shlex.quote(log.as_posix()), lines[0])],
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.stdout, '### no K64J_P0 line' + NL, result.stderr)
+
+    def test_a_timeout_after_a_clean_unwind_is_not_a_hang(self):
+        text = read(RUNNER)
+        block = text[text.index('# >>> hang'):text.index('# <<< hang')]
+        cases = (
+            (124, 'WARN x\nERROR terminated by signal 15 during None (the container timeout)\nK64J_P0 verdict=NO-DECISION\n', '0'),
+            (124, 'S/rows2/seed0/call0 ...\n', '1'),                                    # stuck: never unwound
+            (124, 'ERROR terminated by signal 15 during x\nTimeout (0:05:00)!\n', '1'),  # the backstop fired too
+            (137, 'ERROR terminated by signal 15 during x\n', '1'),
+            (3, 'WATCHDOG x\n', '1'),
+            (1, 'Timeout (0:05:00)!\n', '1'),
+            (1, 'K64J_P0 verdict=NO-GO\n', '0'),
+            (0, 'K64J_P0 verdict=GO\n', '0'),
+        )
+        calls = []
+        for index, (status, content, _hung) in enumerate(cases):
+            log = self.dir / ('probe%d.log' % index)
+            log.write_bytes(content.encode())
+            calls.append('check %d %s' % (status, shlex.quote(log.as_posix())))
+        script = 'check() {\nstatus=$1; log=$2\n%s\necho "hung=$hung"\n}\n%s\n' % (block, NL.join(calls))
+        result = subprocess.run([BASH, '-c', script], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.stdout.split(), ['hung=' + hung for _status, _content, hung in cases],
+                         result.stdout + result.stderr)
+        self.assertEqual(result.stderr.count('### TIMEOUT (exit 124): the probe caught SIGTERM'), 1)
 
     def test_a_real_run_resolves_the_board_before_anything_else(self):
         if Path('/dev/tenstorrent/by-id', CARD_B).exists():
@@ -796,18 +930,25 @@ class FakeTtnn:
     taken one lower: the liveness control goes dead), 'skip_bleeds' (a skipped entry zeroes the next one), 'noskip'
     (a skipped entry is computed at capacity - 1 and written), 'stale_trace' (a replay uses the cur_pos of the
     capture), 'split_capacity' (the causal split at capacity - 1, the visibility at cur_pos), 'served_wrong' (qwen
-    outputs + 1), 'half_tile' (a causal call with <= 16 rows moves by a bf16 step), 'accept_0x20'."""
+    outputs + 1), 'half_tile' (a causal call with <= 16 rows moves by a bf16 step), 'accept_0x20', 'fatal_g8'
+    (any call with 96 rows raises, as a program that does not fit L1 would), 'fatal_pnht1' (a qwen call with <= 32
+    rows raises), 'sigterm' (the process's SIGTERM handler runs during the first non-causal call: a container
+    timeout mid-run). seconds_per_call: the fake clock's step per call (the deadline tests)."""
 
     int32, bfloat16, bfloat8_b = 'int32', 'bf16', 'bf8'
     ROW_MAJOR_LAYOUT, TILE_LAYOUT, DRAM_MEMORY_CONFIG = 'rm', 'tile', 'dram'
 
-    def __init__(self, torch, broken=(), silent=False, reuse=True):
+    def __init__(self, torch, broken=(), silent=False, reuse=True, seconds_per_call=None):
         self.torch, self.broken, self.silent, self.reuse = torch, set(broken), silent, reuse
+        self.seconds_per_call = seconds_per_call
+        self.report_path = None
         self.transformer = self
         self.memory, self.free, self.next = {}, {}, 0x10000
+        self.floats = {}
         self.now = 0.0
         self.programs, self.traces, self.capturing = set(), {}, None
         self.calls = 0
+        self.closed = False
 
     def clock(self):
         return self.now
@@ -818,6 +959,7 @@ class FakeTtnn:
 
     def close_device(self, device):
         self.closed = True
+        self.live_traces_at_close = len(self.traces)
 
     def enable_program_cache(self):
         pass
@@ -859,6 +1001,14 @@ class FakeTtnn:
 
     def to_torch(self, tensor):
         return self.read(tensor).clone()
+
+    def read_float(self, tensor):
+        """read(tensor).float(), converted once per stored tensor (the K / V pool is read by every call)."""
+        data = self.read(tensor)
+        cached = self.floats.get(tensor.address)
+        if cached is None or cached[0] is not data:
+            cached = self.floats[tensor.address] = (data, data.float())
+        return cached[1]
 
     def deallocate(self, tensor):
         if not tensor.freed:
@@ -914,8 +1064,8 @@ class FakeTtnn:
         out = torch.empty(rows, card.HEAD_DIM)
         for kv in range(card.KV_HEADS):
             lo, hi = kv * per_kv, (kv + 1) * per_kv
-            k = keys[pages, kv].reshape(-1, card.HEAD_DIM)[:extent].float()
-            v = values[pages, kv].reshape(-1, card.HEAD_DIM)[:extent].float()
+            k = keys[pages, kv].reshape(-1, card.HEAD_DIM)[:extent]
+            v = values[pages, kv].reshape(-1, card.HEAD_DIM)[:extent]
             scores = bf((q[lo:hi].float() @ k.T) * scale)
             if causal:
                 scores[:, positions > visible_to] = float('-inf')
@@ -969,6 +1119,17 @@ class FakeTtnn:
         if not is_causal and not k_chunk:
             raise RuntimeError('TT_FATAL: Must provide k_chunk_size if paged and non-causal!')
         batches, rows = query.shape[1], query.shape[2]
+        if 'fatal_g8' in self.broken and rows == 96:
+            raise RuntimeError('TT_FATAL: Statically allocated circular buffers grow to 1827904 B, beyond max L1')
+        if 'fatal_pnht1' in self.broken and qwen and rows <= 32:
+            raise RuntimeError('TT_FATAL: [QWEN-SDPA] PNHt 1 is not supported')
+        if 'sigterm' in self.broken and not is_causal:
+            self.broken.discard('sigterm')
+            self.before_term = json.loads(Path(self.report_path).read_text())        # the last checkpoint
+            try:
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            finally:
+                self.after_term = json.loads(Path(self.report_path).read_text())     # what the handler wrote
         table = self.read(pages)
         capacity = table.shape[1] * card.PAGE
         if qwen and flags & 0x1 and attn_mask.shape[3] not in (capacity, 256):
@@ -982,7 +1143,7 @@ class FakeTtnn:
                                                                 'true' if flags & 0x2 and batches > 1 else 'false')).encode())
         self.calls += 1
         q = self.read(query).float()
-        keys, values = self.read(k), self.read(v)
+        keys, values = self.read_float(k), self.read_float(v)
         mask = None if attn_mask is None else self.read(attn_mask)
         share, tail = bool(flags & 0x2) and batches > 1, bool(flags & 0x1)
         cores = model.cores_per_head(batches)
@@ -1027,18 +1188,22 @@ class FakeTtnn:
             self.traces[self.capturing].append(write)
         else:
             write()
-        self.now += 20e-6 + 1e-9 * capacity
+        self.now += 20e-6 + 1e-9 * capacity if self.seconds_per_call is None else self.seconds_per_call
         return output
 
 
 class DryRunTests(unittest.TestCase):
     """The probe end to end on the fake: a 4,352-key table (17 chunks, more than the 16 cores per head: both
-    workload branches), extents 512 / 2,304 / 4,352."""
+    workload branches), extents 512 / 2,304 / 4,352, 2,304 and 4,352 standing for the qualified capacities. One
+    FULL run covers every section; each broken variant runs only the section that must catch it, at the fewest
+    extents that show it (the CPU job's 10-minute budget)."""
 
     ARGS = ['--capacity', '4352', '--extents', '512,2304,4352', '--starts', '7,255', '--seeds', '0',
-            '--variants', 'normal', '--rows', '2', '--trace-families', '4', '--no-timing']
+            '--variants', 'normal', '--rows', '2', '--trace-families', '4', '--no-timing',
+            '--qualified-capacities', '2304,4352']
     FULL = ['--capacity', '4352', '--extents', '512,2304,4352', '--starts', '7,255', '--seeds', '0',
-            '--variants', 'normal,peaky', '--rows', '2,1', '--trace-families', '6', '--no-timing']
+            '--variants', 'normal,peaky', '--rows', '2,1', '--trace-families', '6', '--no-timing',
+            '--qualified-capacities', '2304,4352']
     BINARY = b'fake K64i _ttnncpp.so ' + probe.SLICE_BINARY_MARKER
 
     def setUp(self):
@@ -1061,6 +1226,7 @@ class DryRunTests(unittest.TestCase):
 
     def run_probe(self, fake, extra=(), markers=None, scratch='1', name='probe', binary=None, base=None):
         out = self.dir / ('%s.json' % name)
+        fake.report_path = out
         if binary is not None:
             self.binary.write_bytes(binary)
         markers = dict(flags=True, share=True, stage1=False) if markers is None else markers
@@ -1074,6 +1240,7 @@ class DryRunTests(unittest.TestCase):
                 mock.patch.object(probe, 'clock', fake.clock), \
                 mock.patch.object(card, 'WATCHDOG', card.WATCHDOG), mock.patch.object(probe, 'WATCHDOG', probe.WATCHDOG), \
                 mock.patch.object(probe.k1, 'WATCHDOG', probe.k1.WATCHDOG), \
+                mock.patch.object(probe, 'DEADLINE', probe.DEADLINE), \
                 mock.patch.object(probe, 'print', create=True), mock.patch('sys.stdout'):
             if scratch is None:
                 os.environ.pop(card.SCRATCH_ENV, None)
@@ -1090,41 +1257,50 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual((status, report['passed'], report['decision']['verdict']), (0, True, 'GO'))
         self.assertEqual(report['binary']['stage'], 4)
         self.assertEqual(report['kernels']['stock'], self.stock)
+        self.assertEqual(report['sections_done'], ['S/seed0', 'T/seed0', 'K/seed0', 'E/seed0', 'D/seed0', 'N/seed0'])
+        self.assertEqual((report['sections_failed'], report.get('deadline'), report.get('findings')), ([], None, None))
+        self.assertNotIn('in_progress', report)
         kinds = self.kinds(report)
-        # S: 6 (E, s) pairs in 2 calls of 3, 2 variants: 12 entries per rows value; served 0x1 / 0x3 per entry.
+        # S: 6 (E, s) pairs in 2 calls of 3, 2 variants: 12 entries per rows value; no qwen mode on 12 / 24 rows.
         self.assertEqual(kinds['split_vs_legacy'], (12, 12))
         self.assertEqual(kinds['half_tile_vs_legacy'], (12, 12))
-        # E: G4B3 (0x1, 0x3) and G8B2 (0x1, 0x3, 0x7) at 3 extents.
+        self.assertNotIn('served_unqualified_vs_legacy', kinds)
+        # E: G4B3 (0x1, 0x3) and G8B2 (0x1, 0x3, 0x7): a failure kind at 2,304 and 4,352, a finding kind at 512.
         self.assertEqual(kinds['extent_vs_legacy'], (6, 6))
-        self.assertEqual(kinds['served_vs_legacy'], (15, 15))                       # E: 2 x 3 + 3 x 3
-        self.assertEqual(kinds['served_unqualified_vs_legacy'], (48, 48))           # S: 2 rows x 12 entries x 2
+        self.assertEqual(kinds['served_vs_legacy'], (10, 10))                       # 2 x 2 + 3 x 2
+        self.assertEqual(kinds['served_unqualified_capacity'], (5, 5))              # 2 + 3, at 512
+        # T: the replays, entry 0's references, the skips with a live entry, the fence replays.
         self.assertEqual(kinds['trace_vs_eager'], (6, 6))
         self.assertEqual(kinds['trace_vs_legacy'], (6, 6))
-        self.assertEqual(kinds['trace_skip_live'], (5, 5))
-        self.assertEqual(kinds['skip_live'], (5, 5))
+        self.assertEqual(kinds['trace_skip_live'], (4, 4))
+        self.assertEqual(kinds['trace_fence_vs_clean'], (6, 6))
+        self.assertEqual(report['fence_extents'], [512, 2304, 512])
+        self.assertEqual(kinds['skip_live'], (4, 4))
+        self.assertEqual((report['trace_skip_all'], report['skip_all_call'], report['skip_idle_call']),
+                         ('returned', 'returned', 'returned'))
         self.assertEqual(kinds['dynamic_vs_fixed'], (2, 2))
         self.assertTrue(all(entry['decisive'] for entry in report['comparisons']
                             if entry['kind'] in probe.DECISIVE_KINDS))
-        # Liveness: S (2 rows x 2 calls, entries below the capacity) and E (2 shapes x 2 extents x entries).
+        # Liveness: S (2 rows x 2 calls, entries below the capacity), E (2 shapes x 2 extents x entries), the fence.
         self.assertTrue(report['liveness'] and all(entry['live'] for entry in report['liveness']))
-        self.assertEqual(len(report['liveness']), 2 * 4 + 2 * 3 + 2 * 2)
+        self.assertEqual(len(report['liveness']), 2 * 4 + 2 * 3 + 2 * 2 + 3)
         self.assertEqual(report['flag_0x20'], 'unknown')
         self.assertTrue(report['refusals']['qwen sentinel on a causal call']['matched'])
         self.assertEqual(report['skip_written'], 'unwritten')
-        self.assertEqual(report['skip_idle_call'], 'returned')
         self.assertTrue(all(entry['poison_address_reused'] for entry in report['comparisons'] if entry['kind'] == 'skip_live'))
         self.assertGreaterEqual(report['trace_families_distinct'], 3)
         self.assertEqual(report['requested_programs'], sorted(report['requested_programs']))
         self.assertIn([0x7, 2, 4352 // 32, 4352 // 32], report['requested_programs'])
-        self.assertTrue(report['verdict_line'].startswith('K64J_P0 verdict=GO split=12/12 extent=6/6 trace=12/12 '
-                                                          'skip=10/10 served=15/15 served_pnht1=48/48 live=18/18 half_tile=12/12 '
-                                                          'dynamic_chunk=2/2 skipped_rows=unwritten flag_0x20=unknown'),
-                        report['verdict_line'])
+        self.assertTrue(report['verdict_line'].startswith(
+            'K64J_P0 verdict=GO split=12/12 extent=6/6 trace=12/12 fence=6/6 skip=8/8 served=10/10 '
+            'served_unqualified_cap=5/5 served_pnht1=none live=21/21 half_tile=12/12 dynamic_chunk=2/2 '
+            'skipped_rows=unwritten flag_0x20=unknown'), report['verdict_line'])
         self.assertEqual(fake.options['trace_region_size'], 16 << 20)
+        self.assertEqual((fake.closed, fake.live_traces_at_close), (True, 0))
         self.assertNotIn('timing', report)
 
     def test_an_extent_read_past_its_chunk_is_no_go(self):
-        status, report = self.run_probe(FakeTtnn(self.torch, broken={'overread'}))
+        status, report = self.run_probe(FakeTtnn(self.torch, broken={'overread'}), ['--sections', 'S,T'])
         self.assertEqual((status, report['failures']), (1, []))
         self.assertEqual(report['decision']['verdict'], 'NO-GO')
         # Only the entries at p = C - 1 cannot read further (the table ends there).
@@ -1132,24 +1308,27 @@ class DryRunTests(unittest.TestCase):
         equal = [entry for entry in report['comparisons'] if entry['kind'] == 'split_vs_legacy' and not entry['differing']]
         self.assertTrue(differing)
         self.assertTrue(all(entry['position'] == 4351 for entry in equal), equal)
-        self.assertEqual(self.kinds(report)['extent_vs_legacy'], (2, 6))       # E = C again
+        # The trace equals eager (both over-read), but every fence replay reads a poisoned page.
+        self.assertEqual(self.kinds(report)['trace_vs_eager'], (4, 4))
+        self.assertEqual(self.kinds(report)['trace_fence_vs_clean'], (0, 6))
 
     def test_a_trace_that_ignores_the_rewritten_position_is_no_go(self):
         status, report = self.run_probe(FakeTtnn(self.torch, broken={'stale_trace'}), ['--sections', 'T'])
         self.assertEqual(report['decision']['verdict'], 'NO-GO')
-        equal, runs = self.kinds(report)['trace_vs_eager']
-        self.assertEqual((equal, runs), (1, 4))                 # only the capture's own positions replay right
+        self.assertEqual(self.kinds(report)['trace_vs_eager'], (1, 4))     # only the capture's own positions replay right
+        self.assertEqual(self.kinds(report)['trace_fence_vs_clean'], (1, 6))
 
     def test_every_entry_can_be_referenced_in_the_trace(self):
-        status, report = self.run_probe(FakeTtnn(self.torch), ['--sections', 'T', '--trace-references', 'all'])
+        status, report = self.run_probe(FakeTtnn(self.torch), ['--sections', 'T', '--trace-references', 'all',
+                                                               '--trace-families', '2'])
         self.assertEqual((status, report['decision']['verdict']), (0, 'GO'))
-        self.assertEqual(self.kinds(report)['trace_vs_legacy'], (12, 12))
-        self.assertEqual(self.kinds(report)['trace_vs_eager'], (4, 4))
+        self.assertEqual(self.kinds(report)['trace_vs_legacy'], (6, 6))
+        self.assertEqual(self.kinds(report)['trace_vs_eager'], (2, 2))
 
     def test_a_skip_that_disturbs_a_live_entry_is_no_go(self):
-        status, report = self.run_probe(FakeTtnn(self.torch, broken={'skip_bleeds'}), ['--sections', 'K,T'])
+        status, report = self.run_probe(FakeTtnn(self.torch, broken={'skip_bleeds'}), ['--sections', 'K'])
         self.assertEqual(report['decision']['verdict'], 'NO-GO')
-        self.assertLess(self.kinds(report)['skip_live'][0], 5)
+        self.assertLess(self.kinds(report)['skip_live'][0], 4)
 
     def test_a_skip_that_writes_is_recorded_not_failed(self):
         status, report = self.run_probe(FakeTtnn(self.torch, broken={'noskip'}), ['--sections', 'K'])
@@ -1157,44 +1336,115 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(report['skip_written'], 'written')
 
     def test_a_split_from_the_compile_time_capacity_is_no_go(self):
-        status, report = self.run_probe(FakeTtnn(self.torch, broken={'split_capacity'}), ['--sections', 'S,E'])
+        status, report = self.run_probe(FakeTtnn(self.torch, broken={'split_capacity'}), ['--sections', 'S'])
         self.assertEqual(report['decision']['verdict'], 'NO-GO')
-        self.assertLess(self.kinds(report)['split_vs_legacy'][0], 12)
+        self.assertLess(self.kinds(report)['split_vs_legacy'][0], 6)
 
     def test_a_dead_liveness_control_decides_nothing(self):
-        status, report = self.run_probe(FakeTtnn(self.torch, broken={'clamp'}), ['--sections', 'S,E'])
+        status, report = self.run_probe(FakeTtnn(self.torch, broken={'clamp'}), ['--sections', 'S'])
         self.assertEqual((status, report['decision']['verdict']), (1, 'NO-DECISION'))
         self.assertIn('liveness controls did not move', report['decision']['reasons'][0])
         self.assertEqual(self.kinds(report)['split_vs_legacy'], (6, 6))             # starts 7, 255: no boundary
 
-    def test_a_served_mode_that_differs_fails_the_run(self):
-        status, report = self.run_probe(FakeTtnn(self.torch, broken={'served_wrong'}), ['--sections', 'E'])
+    def test_a_served_mode_that_differs_fails_at_a_qualified_capacity_and_is_a_finding_elsewhere(self):
+        status, report = self.run_probe(FakeTtnn(self.torch, broken={'served_wrong'}),
+                                        ['--sections', 'E', '--shapes', 'G4B3', '--extents', '512,2304'])
         self.assertEqual((status, report['decision']['verdict']), (1, 'NO-DECISION'))
-        self.assertTrue(all('served mode differs from legacy' in failure for failure in report['failures']))
+        self.assertEqual(len(report['failures']), 2)                                 # 0x1 and 0x3 at 2,304
+        self.assertTrue(all('E2304/0x' in failure and 'at a qualified capacity' in failure
+                            for failure in report['failures']), report['failures'])
+        self.assertEqual(len(report['findings']), 2)                                 # 0x1 and 0x3 at 512
+        self.assertTrue(all('E512/0x' in finding and 'exact by construction' in finding
+                            for finding in report['findings']), report['findings'])
+        self.assertIn(' served=0/2 served_unqualified_cap=0/2 ', report['verdict_line'])
+        self.assertIn(' findings=2', report['verdict_line'])
 
-    def test_a_qwen_mode_on_an_unqualified_row_count_is_warned_not_failed(self):
-        fake = FakeTtnn(self.torch, broken={'served_wrong'})
-        status, report = self.run_probe(fake, ['--sections', 'S'])
+    def test_the_pnht1_qwen_modes_are_opt_in_and_only_ever_warn(self):
+        base = ['--sections', 'S', '--extents', '2304,4352', '--starts', '7']
+        status, report = self.run_probe(FakeTtnn(self.torch, broken={'served_wrong'}), base, name='off')
+        self.assertEqual((status, report['decision']['verdict'], report['warnings']), (0, 'GO', []))
+        self.assertIn(' served_pnht1=none ', report['verdict_line'])
+        self.assertEqual(report['requested_programs'], [])
+        status, report = self.run_probe(FakeTtnn(self.torch, broken={'served_wrong'}), base + ['--served-pnht1'],
+                                        name='wrong')
         self.assertEqual((status, report['failures'], report['decision']['verdict']), (0, [], 'GO'))
-        self.assertEqual(self.kinds(report)['served_unqualified_vs_legacy'], (0, 12))
-        self.assertEqual(sum('never-qualified row count' in warning for warning in report['warnings']), 12)
+        self.assertEqual(self.kinds(report)['served_unqualified_vs_legacy'], (0, 6))   # 3 entries x 0x1, 0x3
+        self.assertEqual(sum('never-qualified row count differs' in warning for warning in report['warnings']), 6)
+        self.assertEqual(report['requested_programs'], [])                           # no factory line required
+        status, report = self.run_probe(FakeTtnn(self.torch, broken={'fatal_pnht1'}), base + ['--served-pnht1'],
+                                        name='fatal')
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (0, [], 'GO'))
+        self.assertNotIn('served_unqualified_vs_legacy', self.kinds(report))
+        self.assertEqual(sum('never-qualified row count raised' in warning for warning in report['warnings']), 6)
+
+    def test_a_section_that_raises_costs_only_its_own_evidence(self):
+        fake = FakeTtnn(self.torch, broken={'fatal_g8'})
+        status, report = self.run_probe(fake, ['--sections', 'E,N', '--extents', '2304', '--seeds', '0,1'])
+        self.assertEqual((status, report['decision']['verdict']), (1, 'NO-DECISION'))
+        self.assertEqual(report['sections_failed'], ['E/seed0', 'E/seed1'])
+        self.assertEqual(report['sections_done'], ['N/seed0'])
+        self.assertEqual(len(report['failures']), 2)
+        self.assertTrue(report['failures'][0].startswith('E/seed0: RuntimeError: TT_FATAL: Statically allocated'),
+                        report['failures'])
+        self.assertEqual(self.kinds(report)['extent_vs_legacy'], (2, 2))            # G4B3 ran before G8B2 raised
+        self.assertEqual(report['flag_0x20'], 'unknown')                             # N ran after E failed
+        self.assertIn(' sections_failed=E/seed0,E/seed1', report['verdict_line'])
+        self.assertIsNone(report.get('error'))
+        self.assertTrue(fake.closed)
+
+    def test_the_deadline_stops_cleanly_and_lists_the_rest(self):
+        fake = FakeTtnn(self.torch, seconds_per_call=1.0)
+        status, report = self.run_probe(fake, ['--sections', 'S,K,N', '--extents', '2304', '--starts', '7',
+                                               '--deadline-s', '3'])
+        self.assertEqual((status, report['decision']['verdict']), (1, 'NO-DECISION'))
+        self.assertEqual(report['sections_done'], ['S/seed0'])                      # 6 one-second calls
+        self.assertEqual(report['deadline']['skipped'], ['K/seed0', 'N/seed0'])
+        self.assertEqual(report['deadline']['reached_at'], 'K/seed0')
+        self.assertIn('the deadline (3.0s) cut 1 decisive section runs (K/seed0)', report['decision']['reasons'])
+        self.assertIn(' deadline_skipped=2', report['verdict_line'])
+        self.assertEqual(self.kinds(report)['split_vs_legacy'], (3, 3))
+        self.assertTrue(fake.closed)
+        # Inside a section: the check between device calls stops T mid-plan, and its trace is released.
+        fake = FakeTtnn(self.torch, seconds_per_call=1.0)
+        status, report = self.run_probe(fake, ['--sections', 'T', '--deadline-s', '2'], name='mid')
+        self.assertEqual(report['deadline']['skipped'], ['T/seed0'])
+        self.assertTrue(report['deadline']['reached_at'].startswith('T/seed0/replay'), report['deadline'])
+        self.assertEqual((fake.closed, fake.live_traces_at_close), (True, 0))
+
+    def test_sigterm_writes_the_partial_report_then_unwinds(self):
+        fake = FakeTtnn(self.torch, broken={'sigterm'})
+        status, report = self.run_probe(fake, ['--sections', 'K,E', '--shapes', 'G4B3', '--extents', '2304'])
+        self.assertEqual(status, 128 + int(signal.SIGTERM))
+        self.assertEqual(fake.before_term['in_progress'], 'after K/seed0')          # the checkpoint after K
+        self.assertEqual(fake.before_term['tally']['skip_live']['runs'], 4)
+        self.assertEqual(fake.after_term['in_progress'], 'terminated')              # written by the handler at once
+        self.assertEqual(fake.after_term['decision']['verdict'], 'NO-DECISION')
+        self.assertTrue(fake.after_term['verdict_line'].startswith('K64J_P0 verdict=NO-DECISION'))
+        self.assertTrue(report['error'].startswith('terminated by signal %d' % int(signal.SIGTERM)), report['error'])
+        self.assertEqual(report['decision']['verdict'], 'NO-DECISION')
+        self.assertEqual((report['sections_done'], report['sections_failed']), (['K/seed0'], []))
+        self.assertEqual((fake.closed, fake.live_traces_at_close), (True, 0))       # unwound: the device closed
+        self.assertIsNot(signal.getsignal(signal.SIGTERM), None)
+        self.assertNotEqual(getattr(signal.getsignal(signal.SIGTERM), '__name__', ''), 'on_term')  # restored
 
     def test_the_half_tile_is_recorded_and_the_verdict_stands(self):
-        status, report = self.run_probe(FakeTtnn(self.torch, broken={'half_tile'}), ['--sections', 'S', '--rows', '2,1'])
+        status, report = self.run_probe(FakeTtnn(self.torch, broken={'half_tile'}),
+                                        ['--sections', 'S', '--rows', '2,1', '--extents', '2304,4352', '--starts', '7'])
         self.assertEqual((status, report['decision']['verdict']), (0, 'GO'))
-        self.assertEqual(self.kinds(report)['half_tile_vs_legacy'], (0, 6))
-        self.assertEqual(self.kinds(report)['split_vs_legacy'], (6, 6))
-        self.assertIn(' half_tile=0/6 ', report['verdict_line'])
+        self.assertEqual(self.kinds(report)['half_tile_vs_legacy'], (0, 3))
+        self.assertEqual(self.kinds(report)['split_vs_legacy'], (3, 3))
+        self.assertIn(' half_tile=0/3 ', report['verdict_line'])
 
     def test_a_binary_that_accepts_0x20_is_warned(self):
-        status, report = self.run_probe(FakeTtnn(self.torch, broken={'accept_0x20'}), ['--sections', 'N,E'])
+        status, report = self.run_probe(FakeTtnn(self.torch, broken={'accept_0x20'}), ['--sections', 'N'])
         self.assertEqual(report['flag_0x20'], 'accepted')
         self.assertTrue(any('ACCEPTS flag 0x20' in warning for warning in report['warnings']))
 
     def test_a_graft_that_never_logs_was_not_executed(self):
-        status, report = self.run_probe(FakeTtnn(self.torch, silent=True), ['--sections', 'E'])
+        status, report = self.run_probe(FakeTtnn(self.torch, silent=True),
+                                        ['--sections', 'E', '--shapes', 'G4B3', '--extents', '2304'])
         self.assertEqual((status, report['decision']['verdict']), (1, 'NO-DECISION'))
-        self.assertEqual(len(report['failures']), 15)
+        self.assertEqual(len(report['failures']), 2)
         self.assertTrue(all('graft mounted, not executed' in failure for failure in report['failures']))
 
     def test_the_binary_the_kernels_and_the_scratch_are_checked_first(self):
@@ -1213,7 +1463,8 @@ class DryRunTests(unittest.TestCase):
         self.assertIn('QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 is required', report['failures'][0])
 
     def test_a_stock_binary_runs_legacy_only(self):
-        status, report = self.run_probe(FakeTtnn(self.torch), ['--sections', 'S,E,N'], binary=b'stock',
+        status, report = self.run_probe(FakeTtnn(self.torch), ['--sections', 'E,N', '--shapes', 'G4B3',
+                                                               '--extents', '2304'], binary=b'stock',
                                         markers=dict(flags=False, share=False, stage1=False))
         self.assertEqual((status, report['binary']['stage'], report['decision']['verdict']), (0, 0, 'GO'))
         self.assertNotIn('served_vs_legacy', report['tally'])
@@ -1221,15 +1472,17 @@ class DryRunTests(unittest.TestCase):
 
     def test_the_timing_is_recorded(self):
         base = [arg for arg in self.ARGS if arg != '--no-timing']
-        status, report = self.run_probe(FakeTtnn(self.torch), ['--sections', 'K', '--warmup', '0', '--iters', '2',
-                                                               '--rounds', '2'], name='timing', base=base)
+        status, report = self.run_probe(FakeTtnn(self.torch), ['--sections', 'K', '--extents', '2304',
+                                                               '--warmup', '0', '--iters', '2', '--rounds', '2'],
+                                        name='timing', base=base)
         self.assertEqual(status, 0)
+        self.assertEqual(report['sections_done'], ['K/seed0', 'timing/seed0'])
         names = [row['name'] for row in report['timing']['rows']]
-        self.assertEqual(names, ['runtime E512', 'compile E512', 'runtime E2304', 'compile E2304', 'runtime E4352',
-                                 'compile E4352', 'skip0', 'skip1', 'skip2', 'skip3'])
-        self.assertEqual(sorted(report['timing']['runtime_over_compile']), ['E2304', 'E4352', 'E512'])
+        self.assertEqual(names, ['runtime E2304', 'compile E2304', 'skip0', 'skip1', 'skip2', 'skip3'])
+        self.assertEqual(sorted(report['timing']['runtime_over_compile']), ['E2304'])
         self.assertTrue(all(row['eager']['n'] == 4 for row in report['timing']['rows']))
         self.assertEqual(sorted(report['timing']['skip_us']), ['skip0', 'skip1', 'skip2', 'skip3'])
+
 
 if __name__ == '__main__':
     unittest.main()
