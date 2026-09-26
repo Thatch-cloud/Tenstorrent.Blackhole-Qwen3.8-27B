@@ -88,13 +88,23 @@ Verdict: one 'K64J_CARD verdict=...' line.
   NO-DECISION  a failure (wrong binary or kernels, no compact scratch, a missing factory or F22 line, a section that
                raised, the watchdog), a dead liveness control, a decisive section cut by the deadline, SIGTERM, or
                no decisive comparison ran.
-The line also carries k2_verdict=, K2's own verdict, which decides design 6.1's branch: PASS (every K2 row equal: the
-strict policy stands), FAIL (a K2 row differs on a valid K2 run: S2 stops for the user's decision D-c), NO-DECISION
-(a K2 failure, a global failure, a dead K2 control, K2 cut by the deadline, an error, or no K2 row compared; another
-section's failure alone does not void it), not_run.
+The line also carries k2_verdict=, K2's own verdict, which decides design 6.1's branch, and k2_coverage=, how many of
+the design's K2 tickets it compared (k2_coverage: every sweep start 128..300 and every (E, r) of CB2_EXTENTS x
+CB2_STARTS, for each of seeds 0-4 and variants normal and peaky):
+  PASS          every K2 row equal over the design's WHOLE set: the strict policy stands.
+  REDUCED-PASS  every K2 row equal, on less than that set (the WATCHER pass, any narrowed run): it does not set the
+                policy; only the full pass's PASS does.
+  FAIL          a K2 row differs on a valid K2 run, at any coverage: S2 stops for the user's decision D-c.
+  NO-DECISION   a K2 failure, a global failure, a program K2 requested that never logged its F4 line, a dead K2
+                control, K2 cut by the deadline, an error, or no K2 row compared. Another section's failure alone
+                does not void it, nor a program that only other sections requested (check_log names the sections
+                that requested each unlogged program: 'factory log [X7]: ...').
+  not_run       K2 not in --sections.
 
 RUN with run_card_b.sh only (QUAL_CARD, default card B), in the C2 image with graft K64j mounted as the arm mounts
-it, WATCHER=1 first. The helpers above the device section import no ttnn and are tested on CPU by
+it, WATCHER=1 first. With card B taken by other work, run it on card M by hand on the rig: QUAL_CARD=
+blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 (run_card_b.sh's header; the card-B CI job only ever runs card B).
+The helpers above the device section import no ttnn and are tested on CPU by
 test_k64j_card_b.py and test_k64j_cb2a.py, which also run the whole flow on a fake ttnn whose broken variants the
 sections must catch.
 """
@@ -174,6 +184,10 @@ Z_FAMILIES = tuple(range(K_CHUNK, 4096, K_CHUNK))       # the 15 families with E
 IDLE_STARTS = (0, 32)                                   # an idle segment's start: page 0, tile row 0 or 1
 Z_STARTS = IDLE_STARTS + (7, 127, 240, 255)
 OUTPUT_MEMORY = ('l1', 'dram')
+K2_DESIGN_SEEDS = (0, 1, 2, 3, 4)                       # K2's full coverage (s2-design.md W10a K2 positions): seeds 0-4
+K2_DESIGN_VARIANTS = ('normal', 'peaky')                # and both variants, over K2_SWEEP and CB2_EXTENTS x CB2_STARTS
+K2_REDUCED_PASS = 'REDUCED-PASS'                        # every K2 row equal on less than that: not the policy's PASS
+FACTORY_FAILURE = re.compile(r'factory log \[([A-Za-z0-9,]+)\]: ')     # check_log: an unlogged program, by requester
 
 # K2's reference: the model's native decode call (docker/qwen-c2-graft/graft/attention/tp.py, the graft the serving
 # image installs over the model tree, docker/qwen-c2-serving.Dockerfile:30-45). test_k64j_cb2a parses that source and
@@ -192,8 +206,10 @@ NATIVE_DECODE = dict(
               'sliced to DRAM (:102-103), the row\'s own (1,) cur_pos and (1, W) table, **kwargs forwarded (:105)')
 UNVERIFIED = (
     'is_causal: the native call does not pass it (tp.py:743-754) and neither does this harness, so both take the op '
-    'binding\'s default; that it is True is inferred (a non-causal paged call with k_chunk_size 0 is refused), not '
-    'read in this repo',
+    'binding\'s default, True as this repo models it from the binding dump (optimisation/ttnn-op/sdpa_decode_qwen/'
+    'test_sdpa_decode_qwen_sources.py:653-686: sdpa_decode_nanobind.cpp:82-106, options.get(\'is_causal\', True)) '
+    'and as docs/t16-vs-b1-65536.md:25 records it (the native B1 call passes no is_causal: "API default"); the '
+    'binding source itself is tt-metal\'s, not in this repo, so the image binary\'s default is not read here',
     'compute_kernel_config: passed by neither the native call nor the served replay (attention_parallel.py:17-19), so '
     'both take the op default; its value (HiFi2, fp32_dest_acc_en false per the k64j_probe README reading of '
     'sdpa_decode.cpp:77) is a tt-metal source outside this repo',
@@ -380,9 +396,21 @@ def native_cur_pos(position):
     return position
 
 
+def k2_family_floor(extents, starts):
+    """K2's family tickets below the admission floor: the (E, r) whose start E - 256 + r is below MIN_LIVE_START. Their
+    rows' native chunk is 128 keys or less (design 1.4 #9), so the native call splits unlike the extent call and the
+    rows would differ by design: never a decisive ticket (parse_args refuses them when K2 runs; k2_tickets raises)."""
+    return [(extent, offset) for extent in extents for offset in starts if extent - K_CHUNK + offset < MIN_LIVE_START]
+
+
 def k2_tickets(sweep, floor, extents, starts):
     """K2's tickets in run order, decisive first: every start of `sweep` (lo, hi inclusive), then E - 256 + r for E in
-    `extents` and r in `starts`, then the recorded `floor` starts (None: none)."""
+    `extents` and r in `starts`, then the recorded `floor` starts (None: none). ValueError on a decisive ticket below
+    the admission floor (a sweep from below MIN_LIVE_START, or k2_family_floor)."""
+    below = k2_family_floor(extents, starts)
+    if sweep[0] < MIN_LIVE_START or below:
+        raise ValueError('K2\'s decisive tickets must start at >= %d (the admission floor): the sweep starts at %d, '
+                         'the family tickets E - 256 + r below it are (E, r) = %s' % (MIN_LIVE_START, sweep[0], below))
     tickets = [dict(kind='sweep', start=start, extent=split_model.extent(start))
                for start in range(sweep[0], sweep[1] + 1)]
     tickets += [dict(kind='family', start=extent - K_CHUNK + offset, extent=extent)
@@ -537,6 +565,63 @@ def tally(comparisons):
     return probe.tally(comparisons)
 
 
+class RequestLog(set):
+    """report['_requested']: the qwen programs the run requested (a set of probe.program_key tuples, as
+    probe.Pool.launch and ExtentPool.served_launch add them) and, per program, the sections whose calls requested it
+    (`by`; run_sections sets `section` before each section runs), so check_log can say whose evidence a program that
+    never logged its factory line voids."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.section, self.by = None, {}
+
+    def add(self, key):
+        super().add(key)
+        self.by.setdefault(key, set()).add(self.section)
+
+
+def failure_sections(failure):
+    """The sections a failure belongs to, or None for a global one: a section's own ('X7/seed0: ...' -> {'X7'}, any
+    of RUN_ORDER, timing included); a requested program that never logged, which check_log attributes to the sections
+    that requested it ('factory log [X7,Z]: ...' -> {'X7', 'Z'}); anything else (the binary, the kernels, the scratch,
+    a pool, an extent-log pairing problem, an unattributed factory-log line) is global."""
+    head = failure.split('/')[0]
+    if head in RUN_ORDER:
+        return {head}
+    match = FACTORY_FAILURE.match(failure)
+    return set(match.group(1).split(',')) if match else None
+
+
+def k2_coverage(report):
+    """K2's coverage of the design's set (s2-design.md W10a: every ticket start of K2_SWEEP and every (E, r) of
+    CB2_EXTENTS x CB2_STARTS, for each seed of K2_DESIGN_SEEDS and variant of K2_DESIGN_VARIANTS): how many of those
+    (seed, variant, ticket) a k2_native_vs_extent comparison covered, `full` only when every one was, and `short`, the
+    dimensions that fell short ('seeds', 'variants', 'sweep', 'family'; 'combinations' when each is present somewhere
+    but not in every combination)."""
+    tickets = [('sweep', start) for start in range(K2_SWEEP[0], K2_SWEEP[1] + 1)]
+    tickets += [('family', extent, offset) for extent in CB2_EXTENTS for offset in CB2_STARTS]
+    design = {(seed, variant) + ticket for seed in K2_DESIGN_SEEDS for variant in K2_DESIGN_VARIANTS
+              for ticket in tickets}
+    got = set()
+    for entry in report.get('comparisons', []):
+        if entry['kind'] != 'k2_native_vs_extent':
+            continue
+        key = (entry.get('seed'), entry.get('variant'))
+        if entry.get('ticket') == 'sweep':
+            got.add(key + ('sweep', entry['start']))
+        elif entry.get('ticket') == 'family':
+            got.add(key + ('family', entry['extent'], entry['start'] - (entry['extent'] - K_CHUNK)))
+    covered = design & got
+    short = [name for name, index, wanted in (('seeds', 0, K2_DESIGN_SEEDS), ('variants', 1, K2_DESIGN_VARIANTS))
+             if set(wanted) - {key[index] for key in covered}]
+    short += [kind for kind in ('sweep', 'family')
+              if {ticket for ticket in tickets if ticket[0] == kind} - {key[2:] for key in covered}]
+    full = covered == design
+    if not full and not short:
+        short = ['combinations']
+    return dict(full=full, covered=len(covered), design=len(design), short=short)
+
+
 def decide(report):
     """PASS / FAIL / NO-DECISION from the comparisons, liveness, failures, error and deadline."""
     comparisons = report.get('comparisons', [])
@@ -564,19 +649,29 @@ def decide(report):
         verdict = 'FAIL'
     else:
         verdict = 'PASS'
+    ran_k2 = 'K2' in (report.get('sections') or ())
     return dict(verdict=verdict, reasons=reasons, decisive=len(decisive), decisive_differing=len(differing),
-                first_differing=[entry['label'] for entry in differing[:6]], k2=k2_verdict(report))
+                first_differing=[entry['label'] for entry in differing[:6]], k2=k2_verdict(report),
+                k2_coverage=k2_coverage(report) if ran_k2 else None)
+
+
+def voids_k2(failure):
+    """A failure voids K2 when it is K2's own or global (failure_sections): another section's, or a program only
+    other sections requested, does not."""
+    sections = failure_sections(failure)
+    return sections is None or 'K2' in sections
 
 
 def k2_verdict(report):
     """K2's own verdict, the one design 6.1 branches on: not_run (K2 not requested); NO-DECISION on an error, a
-    failure that is K2's or no section's (the binary, the kernels, the scratch, a pool, the factory log), a dead K2
-    liveness control, a K2 run cut by the deadline, or no K2 row compared; otherwise FAIL if any K2 row differs, else
-    PASS. Another section's failure ('X7/...', 'Z/...') does not void K2."""
+    failure that voids K2 (voids_k2: K2's own, a program K2 requested that never logged, or a global one - the binary,
+    the kernels, the scratch, a pool, the extent log), a dead K2 liveness control, a K2 run cut by the deadline, or no
+    K2 row compared; otherwise FAIL if any K2 row differs, at any coverage; else PASS when the rows covered the
+    design's whole set (k2_coverage), REDUCED-PASS when they did not - a reduced run never sets the policy. Another
+    section's failure ('X7/...', 'Z/...', 'factory log [X7]: ...') does not void K2."""
     if 'K2' not in (report.get('sections') or ()):
         return 'not_run'
-    others = set(SECTIONS) - {'K2'}
-    if report.get('error') or any(failure.split('/')[0] not in others for failure in report.get('failures', [])):
+    if report.get('error') or any(voids_k2(failure) for failure in report.get('failures', [])):
         return 'NO-DECISION'
     if any(entry['section'] == 'K2' and not entry['live'] for entry in report.get('liveness', [])):
         return 'NO-DECISION'
@@ -585,7 +680,9 @@ def k2_verdict(report):
     rows = [entry for entry in report.get('comparisons', []) if entry['kind'] == 'k2_native_vs_extent']
     if not rows:
         return 'NO-DECISION'
-    return 'FAIL' if any(entry['differing'] for entry in rows) else 'PASS'
+    if any(entry['differing'] for entry in rows):
+        return 'FAIL'
+    return 'PASS' if k2_coverage(report)['full'] else K2_REDUCED_PASS
 
 
 def verdict_line(report):
@@ -617,6 +714,9 @@ def verdict_line(report):
     if rows.get('floor'):
         words.append('k2_floor_differing=%d/%d' % (rows['floor_differing'], rows['floor']))
     words.append('k2_verdict=%s' % decision.get('k2', 'not_run'))
+    coverage = decision.get('k2_coverage')
+    if coverage:
+        words.append('k2_coverage=%d/%d' % (coverage['covered'], coverage['design']))
     words.append(part('x7', ('x7_narrow_vs_wide', 'x7_extent_vs_wide')))
     words.append(part('z', ('z_trace_vs_eager', 'z_trace_vs_reference')))
     if report.get('z_families'):
@@ -1522,6 +1622,9 @@ def run_sections(ttnn, torch, device, args, report, checkpoint=None):
                                                   % (seed, probe.one_line(error)))
                         print('SECTION FAILED pool/seed%d: %s' % (seed, probe.one_line(error)), flush=True)
                         continue
+                requested = report.get('_requested')
+                if isinstance(requested, RequestLog):
+                    requested.section = name                    # the programs this section requests are its own
                 handlers[name](pool, seed)
             except probe.DeadlineReached as reached:
                 skipped = [run_tag(later_seed, later) for later_seed, later in runs[index:]]
@@ -1537,6 +1640,8 @@ def run_sections(ttnn, torch, device, args, report, checkpoint=None):
             else:
                 done.append(tag)
             finally:
+                if isinstance(report.get('_requested'), RequestLog):
+                    report['_requested'].section = None
                 if checkpoint is not None:
                     checkpoint(tag)
     finally:
@@ -1631,6 +1736,11 @@ def parse_args(argv=None):
     for name, starts in (('--cb2-starts', args.cb2_starts), ('--z-starts', args.z_starts)):
         if not starts or any(not 0 <= start < K_CHUNK for start in starts):
             parser.error('%s must be non-empty and 0..255' % name)
+    below = k2_family_floor(args.cb2_extents, args.cb2_starts)
+    if 'K2' in args.sections and below:
+        parser.error('--cb2-extents x --cb2-starts: K2\'s family tickets E - 256 + r must start at >= %d (the '
+                     'admission floor: below it the native chunk is 128 keys or less and the rows differ by design); '
+                     'these do not: (E, r) = %s' % (MIN_LIVE_START, below))
     if not args.extents or max(args.extents) > args.capacity or len(set(args.extents)) != len(args.extents):
         parser.error('--extents must be distinct and at most --capacity')
     if not args.starts or any(not 0 <= start < K_CHUNK for start in args.starts):
@@ -1672,9 +1782,13 @@ def check_log(report, text):
     """The factory's lines for every requested program: F4 (probe.missing_programs) and the F22 pairing."""
     lines = card.factory_lines(text)
     report['factory_lines'] = lines
-    for key in probe.missing_programs(lines, report['_requested']):
-        report['failures'].append('factory log: no [QWEN-SDPA] line for flags=0x%x B=%d St=%d mask_width_t=%d '
-                                  '(graft mounted, not executed)' % key)
+    requested = report['_requested']
+    by = getattr(requested, 'by', {})
+    for key in probe.missing_programs(lines, requested):
+        sections = by.get(key, {None})                  # an unknown requester: global (it voids K2 too)
+        where = '' if None in sections else ' [%s]' % ','.join(sorted(sections, key=RUN_ORDER.index))
+        report['failures'].append('factory log%s: no [QWEN-SDPA] line for flags=0x%x B=%d St=%d mask_width_t=%d '
+                                  '(graft mounted, not executed)' % ((where,) + tuple(key)))
     events = extent_lines(text)
     report['extent_lines'] = [fields for kind, fields in events if kind == 'F22']
     for problem in extent_line_problems(events):
@@ -1700,7 +1814,8 @@ def main(argv=None):
                   not_run=dict(NOT_RUN), env={name: os.environ.get(name) for name in ENV_RECORDED},
                   watchdog=args.watchdog, failures=[], warnings=[], comparisons=[], liveness=[])
     if set(CB2A_SECTIONS) & set(args.sections):
-        tickets = k2_tickets(args.k2_sweep, args.k2_floor, args.cb2_extents, args.cb2_starts)
+        tickets = (k2_tickets(args.k2_sweep, args.k2_floor, args.cb2_extents, args.cb2_starts)
+                   if 'K2' in args.sections else [])
         report['cb2a'] = dict(
             k2_sweep=list(args.k2_sweep), k2_floor=list(args.k2_floor) if args.k2_floor else None,
             cb2_extents=args.cb2_extents, cb2_starts=args.cb2_starts, z_families=args.z_families,
@@ -1708,13 +1823,13 @@ def main(argv=None):
             served=dict(flags='0x%x' % SERVED_FLAGS, compile_flags='0x%x' % COMPILE_FLAGS, rows=SERVED_ROWS,
                         batch=SERVED_BATCH, offsets=list(SERVED_OFFSETS), k_chunk_size=K_CHUNK),
             k2_tickets={kind: sum(1 for ticket in tickets if ticket['kind'] == kind)
-                        for kind in ('sweep', 'family', 'floor')})
+                        for kind in ('sweep', 'family', 'floor')} if 'K2' in args.sections else None)
     if 'K2' in args.sections:
         report['native_decode'] = dict(NATIVE_DECODE)
         report['unverified'] = list(UNVERIFIED)
         for line in native_decode_lines():
             print(line, flush=True)
-    report['_requested'] = set()
+    report['_requested'] = RequestLog()
     native = card.NativeLog(args.out.with_name(args.out.name + '.native.log'))
     args.out.parent.mkdir(parents=True, exist_ok=True)
 

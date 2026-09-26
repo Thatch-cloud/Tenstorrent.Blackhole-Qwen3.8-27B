@@ -9,13 +9,18 @@
     token queries;
   - the contract: K2's reference kwargs are the model's native decode call (docker/qwen-c2-graft/graft/attention/
     tp.py, parsed), SerialAttentionReader forwards them in one B = 1 call per row, the subject's are
-    attention_parallel's plus cur_pos_tensor (checked on the calls the harness makes); the constants; the runner's
-    CB2a watcher pass carries the reduced set and the full pass the design's;
+    attention_parallel's plus cur_pos_tensor (checked on the calls the harness makes); the constants; UNVERIFIED's
+    is_causal citations; K2's own verdict: PASS only over the design's whole set (k2_coverage), REDUCED-PASS on
+    less, FAIL at any coverage, and voided only by K2's own or a global failure (an unlogged program is attributed
+    to the sections that requested it); K2's family tickets below the admission floor refused; the runner's CB2a
+    watcher pass carries the reduced set and the full pass the design's;
   - the flow on the fake ttnn (test_k64j_card_b.FakeExtentTtnn): PASS end to end with K2's own verdict, and each
     broken variant on the section that must catch it - a K2 reference at the wrong cur_pos (p + 1, p - 1, E - 1),
     a half-tile Q that moves (K2), a mask read at [C - 256, C) (X7), a narrow-mask batch offset that K1's X cannot
-    see and X7 and K2 can, a stale writer (Z: the watchdog fires; at 4,352 keys it does not hang); a section that
-    raises, the deadline and SIGTERM on the new sections.
+    see and X7 and K2 can, a stale writer (Z: the watchdog fires; at 4,352 keys it does not hang), a trace that keeps
+    its captured words (Z's trace against eager) and a program that ignores the word (Z's trace against the
+    compile-time call, which eager cannot see); a section that raises, a program that never logged (only its
+    requesters' evidence is void), the deadline and SIGTERM on the new sections.
 
     py -3.11 -B -m unittest test_k64j_cb2a      (from this directory; the runner test needs Git Bash on Windows)
 """
@@ -63,6 +68,19 @@ def sha(data):
 
 def int16(torch, tensor):
     return card.int16_view(torch, tensor)
+
+
+def k2_rows(seeds=card_b.K2_DESIGN_SEEDS, variants=card_b.K2_DESIGN_VARIANTS, sweep=card_b.K2_SWEEP,
+            extents=card_b.CB2_EXTENTS, starts=card_b.CB2_STARTS, differing=0):
+    """k2_native_vs_extent comparisons as section_k2 records them, one per (seed, variant, decisive ticket)."""
+    return [probe.comparison('K2', 'k2_native_vs_extent', 'K2/seed%d/%s/E%d/s%d' % (seed, variant, ticket['extent'],
+                                                                                  ticket['start']),
+                             differing, True, ticket=ticket['kind'], extent=ticket['extent'], start=ticket['start'],
+                             seed=seed, variant=variant)
+            for seed in seeds for variant in variants for ticket in card_b.k2_tickets(sweep, None, extents, starts)]
+
+
+UNLOGGED = 'no [QWEN-SDPA] line for flags=0x%x B=2 St=%d mask_width_t=%d (graft mounted, not executed)'
 
 
 # ---------------------------------------------------------------------------------------------
@@ -170,6 +188,15 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(floor, set(range(100, 128)))
         self.assertIsNone(card_b.parse_range('', 'x'))
         self.assertEqual(len(card_b.k2_tickets((128, 130), None, (2304,), (7,))), 4)
+        # No decisive ticket below the admission floor: at E = 256 the family tickets r < 128 start below it.
+        self.assertEqual(card_b.k2_family_floor((256, 512, 2304), (0, 7, 127, 128, 255)),
+                         [(256, 0), (256, 7), (256, 127)])
+        self.assertEqual(card_b.k2_family_floor(card_b.CB2_EXTENTS, card_b.CB2_STARTS), [])
+        self.assertEqual(len(card_b.k2_tickets((128, 128), None, (256,), (128, 255))), 3)
+        for sweep, extents, starts in (((128, 300), (256,), (0,)), ((128, 300), (256, 2304), (7, 127)),
+                                       ((127, 300), (2304,), (7,))):
+            with self.subTest(sweep=sweep, extents=extents, starts=starts), self.assertRaises(ValueError):
+                card_b.k2_tickets(sweep, None, extents, starts)
 
     def test_the_floor_is_the_native_chunk(self):
         """design 1.4 #9: the native chunk is 128 keys at 127 and 256 from 128 on, and from 128 on the native B = 1
@@ -303,10 +330,31 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(set(card_b.NATIVE_DECODE['program_config']) - {'compute_with_storage_grid_size'},
                          set(card_b.NATIVE_PROGRAM_CONFIG))
         self.assertTrue(card_b.UNVERIFIED and all(isinstance(item, str) for item in card_b.UNVERIFIED))
+        self.assertTrue(card_b.UNVERIFIED[0].startswith('is_causal: '))
         printed = card_b.native_decode_lines()
         self.assertEqual(len(printed), 1 + len(card_b.UNVERIFIED))
         self.assertTrue(all(line.startswith('UNVERIFIED K2: ') for line in printed[1:]))
         self.assertIn('k_chunk_size', printed[0])
+
+    def test_the_is_causal_default_is_cited_from_this_repo(self):
+        """UNVERIFIED 1 cites what the repo holds about the binding's is_causal default, at the lines it names: the
+        binding dump's model (sdpa_decode_nanobind.cpp:82-106, options.get('is_causal', True)) and the T16-vs-B1
+        record ('API default'); it no longer says the default is not read in this repo."""
+        text = card_b.UNVERIFIED[0]
+        sources = ROOT / 'optimisation' / 'ttnn-op' / 'sdpa_decode_qwen' / 'test_sdpa_decode_qwen_sources.py'
+        record = ROOT / 'docs' / 't16-vs-b1-65536.md'
+        for citation in ('optimisation/ttnn-op/sdpa_decode_qwen/test_sdpa_decode_qwen_sources.py:653-686',
+                         'sdpa_decode_nanobind.cpp:82-106', "options.get('is_causal', True)",
+                         'docs/t16-vs-b1-65536.md:25', '"API default"'):
+            self.assertIn(citation, text)
+        self.assertNotIn('not read in this repo', text)
+        lines = sources.read_text(encoding='utf-8').splitlines()
+        self.assertIn('sdpa_decode_nanobind.cpp:82-106', lines[653 - 1])
+        self.assertIn("options.get('is_causal', True)", NL.join(lines[653 - 1:686]))
+        self.assertIn("if options.get('is_causal', True):", lines[685 - 1])
+        cited = record.read_text(encoding='utf-8').splitlines()[25 - 1]
+        self.assertIn('is_causal', cited)
+        self.assertIn('API default', cited)
 
     def test_the_solo_reader_issues_one_b1_call_per_row_and_forwards_the_kwargs(self):
         class Tensor:
@@ -378,13 +426,75 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(sorted(card_b.NOT_RUN), ['K4'])
         self.assertEqual(card_b.RUN_ORDER[-4:], ('K2', 'X7', 'Z', 'timing'))
 
+    def test_k2s_coverage_is_the_designs_set(self):
+        """s2-design.md W10a K2: every p in 128..300, s mod 256 in {0, 7, 127, 240, 255} at the five families, seeds
+        0-4, variants normal and peaky - 5 x 2 x (173 + 25) tickets. PASS needs every one; every row equal on less is
+        REDUCED-PASS (the watcher pass among them), which never sets the policy; a FAIL decides at any coverage."""
+        self.assertEqual((card_b.K2_DESIGN_SEEDS, card_b.K2_DESIGN_VARIANTS), ((0, 1, 2, 3, 4), ('normal', 'peaky')))
+        self.assertEqual(card_b.K2_REDUCED_PASS, 'REDUCED-PASS')
+
+        def verdict(rows):
+            report = dict(sections=['K2'], comparisons=rows, liveness=[], failures=[])
+            return card_b.k2_verdict(report), card_b.k2_coverage(report)
+
+        full = k2_rows()
+        self.assertEqual(len(full), 1980)
+        self.assertEqual(verdict(full), ('PASS', dict(full=True, covered=1980, design=1980, short=[])))
+        wider = k2_rows(sweep=(128, 400)) + [dict(full[0], kind='k2_floor', ticket='floor', start=100)]
+        self.assertEqual(verdict(wider), ('PASS', dict(full=True, covered=1980, design=1980, short=[])))
+        # The WATCHER pass (run_card_b.sh WATCHER=1): seed 0, normal, sweep 232..263, 2,304 and 131,328 at 0/240/255.
+        watcher = k2_rows(seeds=(0,), variants=('normal',), sweep=(232, 263), extents=(2304, 131328),
+                          starts=(0, 240, 255))
+        self.assertEqual(verdict(watcher), ('REDUCED-PASS', dict(full=False, covered=38, design=1980,
+                                                                 short=['seeds', 'variants', 'sweep', 'family'])))
+        self.assertEqual(verdict(watcher[:-1] + [dict(watcher[-1], differing=3)])[0], 'FAIL')
+        self.assertEqual(verdict(full[:-1] + [dict(full[-1], differing=1)])[0], 'FAIL')
+        for name, rows, short in (
+                ('seeds 0-3', k2_rows(seeds=(0, 1, 2, 3)), ['seeds']),
+                ('normal only', k2_rows(variants=('normal',)), ['variants']),
+                ('sweep 128..299', k2_rows(sweep=(128, 299)), ['sweep']),
+                ('four families', k2_rows(extents=(2304, 4352, 16640, 65792)), ['family']),
+                ('four family starts', k2_rows(starts=(0, 7, 127, 240)), ['family']),
+                ('seed 3 peaky without families', [row for row in full if not (
+                    row['seed'] == 3 and row['variant'] == 'peaky' and row['ticket'] == 'family')], ['combinations'])):
+            with self.subTest(name):
+                got, coverage = verdict(rows)
+                self.assertEqual((got, coverage['full'], coverage['short']), ('REDUCED-PASS', False, short))
+                self.assertLess(coverage['covered'], 1980)
+                self.assertEqual(verdict(rows[:-1] + [dict(rows[-1], differing=2)])[0], 'FAIL')
+
+    def test_an_unlogged_program_voids_only_its_requesters(self):
+        """check_log names the sections that requested each program that never logged; K2 is void only when K2
+        requested it (or the requester is unknown), as for any failure that is K2's own or global."""
+        log = card_b.RequestLog()
+        log.section = 'K2'
+        log.add((0x27, 2, 136, 8))
+        log.section = 'X7'
+        log.add((0x27, 2, 136, 8))
+        log.add((0x7, 2, 72, 8))
+        log.section = None
+        log.add((0x7, 2, 72, 72))
+        self.assertEqual(set(log), {(0x27, 2, 136, 8), (0x7, 2, 72, 8), (0x7, 2, 72, 72)})
+        self.assertEqual(log.by, {(0x27, 2, 136, 8): {'K2', 'X7'}, (0x7, 2, 72, 8): {'X7'}, (0x7, 2, 72, 72): {None}})
+        report = dict(_requested=log, failures=[], warnings=[], capacity=4352)
+        card_b.check_log(report, '')
+        self.assertEqual(report['failures'], ['factory log [X7]: ' + UNLOGGED % (0x7, 72, 8),
+                                              'factory log: ' + UNLOGGED % (0x7, 72, 72),
+                                              'factory log [K2,X7]: ' + UNLOGGED % (0x27, 136, 8)])
+        self.assertEqual([card_b.failure_sections(failure) for failure in report['failures']],
+                         [{'X7'}, None, {'K2', 'X7'}])
+        self.assertEqual([card_b.failure_sections(failure) for failure in (
+            'X7/seed0: RuntimeError: boom', 'timing/seed0: boom', 'pool/seed1: boom', 'extent log: x')],
+            [{'X7'}, {'timing'}, None, None])
+
     def test_k2s_own_verdict(self):
         def entry(kind, differing=0, decisive=True):
             return probe.comparison(kind.split('_')[0].upper(), kind, 'x', differing, decisive)
 
-        good = dict(sections=['K2', 'X7'], comparisons=[entry('k2_native_vs_extent'), entry('x7_narrow_vs_wide')],
+        good = dict(sections=['K2', 'X7'], comparisons=k2_rows() + [entry('x7_narrow_vs_wide')],
                     liveness=[dict(section='K2', label='l', live=True)], failures=[])
         self.assertEqual(card_b.k2_verdict(good), 'PASS')
+        self.assertEqual(card_b.k2_verdict(dict(good, comparisons=[entry('k2_native_vs_extent')])), 'REDUCED-PASS')
         self.assertEqual(card_b.k2_verdict(dict(good, sections=['X7'])), 'not_run')
         self.assertEqual(card_b.k2_verdict(dict(good, comparisons=good['comparisons'] + [
             entry('k2_native_vs_extent', 3)])), 'FAIL')
@@ -394,8 +504,15 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(card_b.k2_verdict(other), 'PASS')                               # another section's failure
         self.assertEqual(card_b.decide(other)['verdict'], 'NO-DECISION')
         for failures in (['K2/seed0: RuntimeError: boom'], ['pool/seed1: boom'], ['the loaded _ttnncpp.so is x'],
-                         ['factory log: no [QWEN-SDPA] line for flags=0x27 B=2 St=4104 mask_width_t=8']):
+                         ['factory log: no [QWEN-SDPA] line for flags=0x27 B=2 St=4104 mask_width_t=8'],
+                         ['factory log [K2]: ' + UNLOGGED % (0x27, 4104, 8)],
+                         ['factory log [K2,X7,Z]: ' + UNLOGGED % (0x27, 4104, 8)],
+                         ['extent log: flags=0x27 B=2 St=4104: 0 F22 lines, expected one']):
             self.assertEqual(card_b.k2_verdict(dict(good, failures=failures)), 'NO-DECISION', failures)
+        for failures in (['factory log [X7]: ' + UNLOGGED % (0x7, 4104, 8)],
+                         ['factory log [X7,Z]: ' + UNLOGGED % (0x27, 4104, 8), 'Z/seed0: RuntimeError: boom'],
+                         ['timing/seed0: RuntimeError: boom']):
+            self.assertEqual(card_b.k2_verdict(dict(good, failures=failures)), 'PASS', failures)
         self.assertEqual(card_b.k2_verdict(dict(good, error='terminated')), 'NO-DECISION')
         self.assertEqual(card_b.k2_verdict(dict(good, liveness=[dict(section='K2', label='l', live=False)])),
                          'NO-DECISION')
@@ -405,9 +522,14 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(card_b.k2_verdict(dict(good, deadline=dict(skipped=['Z/seed4']))), 'PASS')
         self.assertEqual(card_b.k2_verdict(dict(good, comparisons=[entry('x7_narrow_vs_wide')])), 'NO-DECISION')
         good['decision'] = card_b.decide(good)
+        self.assertEqual(good['decision']['k2_coverage'], dict(full=True, covered=1980, design=1980, short=[]))
         good['k2_rows'] = dict(compared=32, equal=32, floor=8, floor_differing=5, capped=0)
-        self.assertIn(' k2=1/1 k2_rows=32/32 k2_floor_differing=5/8 k2_verdict=PASS x7=1/1 z=none k4=not_run',
-                      card_b.verdict_line(good))
+        self.assertIn(' k2=1980/1980 k2_rows=32/32 k2_floor_differing=5/8 k2_verdict=PASS k2_coverage=1980/1980 '
+                      'x7=1/1 z=none k4=not_run', card_b.verdict_line(good))
+        reduced = dict(good, comparisons=k2_rows(seeds=(0,)))
+        reduced['decision'] = card_b.decide(reduced)
+        self.assertIn(' k2_verdict=REDUCED-PASS k2_coverage=396/1980 ', card_b.verdict_line(reduced))
+        self.assertIsNone(card_b.decide(dict(good, sections=['X7']))['k2_coverage'])
 
     def test_the_cb2a_arguments(self):
         args = card_b.parse_args(['--out', 'x.json', '--sections', 'K2,X7,Z'])
@@ -421,6 +543,16 @@ class ContractTests(unittest.TestCase):
         self.assertIsNone(card_b.parse_args(['--out', 'x.json', '--k2-floor', '']).k2_floor)
         # A K1 run on a small table never reads CB2a's served-geometry defaults.
         card_b.parse_args(['--out', 'x.json', '--capacity', '4352', '--extents', '2304'])
+        # K2's family tickets start at the admission floor or above; X7 and Z have no floor.
+        for good in (['--sections', 'X7', '--cb2-extents', '256,2304'],
+                     ['--sections', 'K2', '--cb2-extents', '256,2304', '--cb2-starts', '128,240,255']):
+            self.assertEqual(card_b.parse_args(['--out', 'x.json'] + good).cb2_extents, [256, 2304])
+        for bad in (['--sections', 'K2', '--cb2-extents', '256,2304'],
+                    ['--sections', 'K2,X7', '--cb2-extents', '256', '--cb2-starts', '127,255'],
+                    ['--sections', 'K2', '--cb2-extents', '2304,256', '--cb2-starts', '0']):
+            with self.subTest(floor=bad), self.assertRaises(SystemExit), mock.patch('sys.stderr') as stderr:
+                card_b.parse_args(['--out', 'x.json'] + bad)
+            self.assertIn('admission floor', ''.join(str(call) for call in stderr.mock_calls))
         for bad in (['--k2-sweep', '127:300'], ['--k2-sweep', '300'], ['--k2-sweep', '300:200'],
                     ['--k2-floor', '100:128'], ['--cb2-extents', '2300'], ['--cb2-extents', '2304,2304'],
                     ['--cb2-starts', '256'], ['--z-starts', ''], ['--z-families', '4000'],
@@ -489,6 +621,8 @@ class RunnerTests(unittest.TestCase):
 
 SMALL = ['--k2-sweep', '232:263', '--k2-floor', '120:127', '--cb2-extents', '2304', '--cb2-starts', '7,255',
          '--z-families', '256,512,3840', '--z-starts', '0,32,255']
+# Z captured at 2,304 and replayed there and at 4,352 (= the fake's table), at the starts 0, 7 and 240.
+Z_PAIR = ['--z-families', '2304,4352', '--z-starts', '0,7,240']
 
 
 class DryRunTests(unittest.TestCase):
@@ -543,7 +677,10 @@ class DryRunTests(unittest.TestCase):
         status, report = self.run_card(fake, ['--variants', 'peaky', '--z-starts', '0,32,240'])
         self.assertEqual((report.get('error'), report['failures'], report['warnings']), (None, [], []))
         self.assertEqual((status, report['passed'], report['decision']['verdict'], report['decision']['k2']),
-                         (0, True, 'PASS', 'PASS'))
+                         (0, True, 'PASS', 'REDUCED-PASS'))
+        # Every K2 row equal, on one seed and one variant, 2,304 and 4,352 of the five families: 183 of 1,980.
+        self.assertEqual(report['decision']['k2_coverage'], dict(full=False, covered=183, design=1980,
+                                                                 short=['seeds', 'variants', 'family']))
         self.assertEqual(report['sections_done'], ['K2/seed0', 'X7/seed0', 'Z/seed0'])
         self.assertEqual(report['cb2a']['k2_tickets'], dict(sweep=173, family=10, floor=28))
         kinds = self.kinds(report)
@@ -566,7 +703,8 @@ class DryRunTests(unittest.TestCase):
             'K64J_CARD verdict=PASS extent=none mixed=none share_slot0=none trace=none fence=none skip=none '
             'refusals=none live=186/186 families=0 k2=183/183 k2_rows=2778/2778 k2_floor_differing='),
             report['verdict_line'])
-        self.assertIn(' k2_verdict=PASS x7=20/20 z=90/90 z_families=15 k4=not_run', report['verdict_line'])
+        self.assertIn(' k2_verdict=REDUCED-PASS k2_coverage=183/1980 x7=20/20 z=90/90 z_families=15 k4=not_run',
+                      report['verdict_line'])
         self.assertEqual((fake.closed, fake.live_traces_at_close), (True, 0))
         # The calls: the native one exactly as tp.py passes it, the subject as the replay passes it plus cur_pos.
         native = [call for call in fake.recorded if call['program_config']['q_chunk_size'] == card.LEGACY]
@@ -676,19 +814,55 @@ class DryRunTests(unittest.TestCase):
                                         '--watchdog', '30'], name='above', watchdog=Firing)
         self.assertEqual((status, report['decision']['verdict']), (0, 'PASS'))
 
+    def test_a_trace_that_keeps_the_captured_words_fails_z(self):
+        """Z's trace against eager decides: captured at 2,304, a trace that keeps the captured words replays the
+        4,352 family at 2,303 - the eager call (and the compile-time call) at 4,351 differ."""
+        status, report = self.run_card(FakeExtentTtnn(self.torch, broken={'stale_trace'}), ['--sections', 'Z'] + Z_PAIR,
+                                       name='stale')
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (1, [], 'FAIL'))
+        kinds = self.kinds(report)
+        self.assertEqual((kinds['z_trace_vs_eager'], kinds['z_trace_vs_reference']), ((3, 6), (3, 6)))
+        self.assertEqual(self.differing(report, 'z_trace_vs_eager'),
+                         ['Z/seed0/replay3/E4352+0', 'Z/seed0/replay4/E4352+7', 'Z/seed0/replay5/E4352+240'])
+
+    def test_a_program_that_ignores_the_word_fails_z_against_the_reference(self):
+        """Z's trace against the compile-time call decides on its own: a program that ignores the word runs at the
+        capacity captured and eager alike (6 of 6 equal), and only the 0x7 call at E sees it (E < C differs)."""
+        status, report = self.run_card(FakeExtentTtnn(self.torch, broken={'ignore_word'}), ['--sections', 'Z'] + Z_PAIR,
+                                       name='ignore')
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (1, [], 'FAIL'))
+        kinds = self.kinds(report)
+        self.assertEqual((kinds['z_trace_vs_eager'], kinds['z_trace_vs_reference']), ((6, 6), (3, 6)))
+        self.assertEqual(self.differing(report, 'z_trace_vs_reference'),
+                         ['Z/seed0/replay0/E2304+0', 'Z/seed0/replay1/E2304+7', 'Z/seed0/replay2/E2304+240'])
+
+    def differing(self, report, kind):
+        return [entry['label'] for entry in report['comparisons'] if entry['kind'] == kind and entry['differing']]
+
     def test_a_section_that_raises_costs_only_its_own_evidence(self):
         with mock.patch.object(card_b, 'section_x7', side_effect=RuntimeError('boom')):
             status, report = self.run_card(FakeExtentTtnn(self.torch), ['--sections', 'K2,X7,Z'] + SMALL)
         self.assertEqual((report['sections_done'], report['sections_failed']), (['K2/seed0', 'Z/seed0'], ['X7/seed0']))
         self.assertEqual(report['failures'], ['X7/seed0: RuntimeError: boom'])
-        self.assertEqual((report['decision']['verdict'], report['decision']['k2']), ('NO-DECISION', 'PASS'))
-        # A program that never built (the fake's fatal_g8: every 96-row call FakeTtnn runs raises before its factory
-        # line) leaves a requested program unlogged: a global failure, so K2 cannot stand either.
+        self.assertEqual((report['decision']['verdict'], report['decision']['k2']), ('NO-DECISION', 'REDUCED-PASS'))
+        # A program that never built (the fake's fatal_g8: every 96-row call FakeTtnn runs - X7's first 0x7 call -
+        # raises before its factory line) leaves a requested program unlogged. X7 alone requested it: K2 stands.
         status, report = self.run_card(FakeExtentTtnn(self.torch, broken={'fatal_g8'}), ['--sections', 'K2,X7']
                                        + SMALL, name='fatal')
         self.assertEqual((report['sections_done'], report['sections_failed']), (['K2/seed0'], ['X7/seed0']))
+        self.assertEqual((report['decision']['verdict'], report['decision']['k2']), ('NO-DECISION', 'REDUCED-PASS'))
+        self.assertEqual(len(report['failures']), 2, report['failures'])
+        self.assertTrue(report['failures'][0].startswith('X7/seed0: RuntimeError: TT_FATAL: Statically allocated'))
+        self.assertEqual(report['failures'][1], 'factory log [X7]: ' + UNLOGGED % (0x7, 2304 // 32, 256 // 32))
+        # A binary that logs nothing: the 0x27 program K2 (and X7) requested never logged, so K2 is void; X7's own
+        # 0x7 programs are X7's.
+        status, report = self.run_card(FakeExtentTtnn(self.torch, silent=True), ['--sections', 'K2,X7'] + SMALL,
+                                       name='silent')
+        self.assertEqual((report['sections_done'], report['sections_failed']), (['K2/seed0', 'X7/seed0'], []))
         self.assertEqual((report['decision']['verdict'], report['decision']['k2']), ('NO-DECISION', 'NO-DECISION'))
-        self.assertTrue(any('graft mounted, not executed' in failure for failure in report['failures']))
+        self.assertEqual(report['failures'], ['factory log [X7]: ' + UNLOGGED % (0x7, 72, 8),
+                                              'factory log [X7]: ' + UNLOGGED % (0x7, 72, 72),
+                                              'factory log [K2,X7]: ' + UNLOGGED % (0x27, 4352 // 32, 8)])
 
     def test_the_deadline_stops_cleanly_and_lists_the_rest(self):
         fake = FakeExtentTtnn(self.torch, seconds_per_call=1.0)

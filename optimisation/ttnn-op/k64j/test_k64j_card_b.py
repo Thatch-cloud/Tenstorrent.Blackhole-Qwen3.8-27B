@@ -10,7 +10,11 @@
   - the runner (needs bash): LF, bash -n, the canonical qual_card block followed by qual_card_select, the launch right
     after the recheck; the dry run on card B with the arm's graft mounts and the harness files; the watcher pass;
     EXPECT_TTNNCPP_SHA256 required; the graft refusals (manifest, binary sha, the F22 literal, a kernel); the serving
-    pair refused;
+    pair refused without ALLOW_SERVING_CARD=1; card M (card B is reserved) with QUAL_CARD=<card M's board id>
+    ALLOW_SERVING_CARD=1: the dry run, and the real launch path on a fake rig (scripts/ci/test_qual_card.FakeRig's
+    stubs spliced in after the block) - it launches on card M's node with the per-call watchdog, and refuses as on
+    card B: a host holder, a --privileged container, any container that can reach any Tenstorrent device (a serving
+    target), no override; a hang (the watchdog's exit 3) prints the pair's reset hint;
   - the whole flow on a fake ttnn (test_k64j_probe.FakeTtnn with the K64j factory's semantics: 0x20 reads the words
     at run time, slot 0 under share, -1 skips, the trace re-reads them, the F20 refusals, the F4 and F22 lines):
     PASS end to end once, and each broken variant on the section that must catch it - a program that ignores the
@@ -49,6 +53,7 @@ import make_k64j_kernels as kernels  # noqa: E402
 import probe_k64j_card_b as probe  # noqa: E402
 import split_model as model  # noqa: E402
 import test_k64j_probe as probe_tests  # noqa: E402 - the fake ttnn, the fixtures, the mask mirror, bash
+import test_qual_card as qual_tests  # noqa: E402 - scripts/ci: the fake rig (board tree, readlink, docker, fuser)
 
 card = probe.card
 RUNNER = HERE / 'run_card_b.sh'
@@ -472,6 +477,23 @@ class RunnerTests(unittest.TestCase):
     def test_the_serving_pair_is_refused(self):
         self.refused(self.run_runner(QUAL_CARD=CARD_M), 'refusing: QUAL_CARD=%s is card M' % CARD_M)
 
+    def test_card_m_is_selected_by_its_board_id_and_the_override(self):
+        """Card B is reserved: QUAL_CARD=<card M's board id> ALLOW_SERVING_CARD=1 selects card M (a dry run: the
+        launch argv; CardMRunTests runs the real path on a fake rig)."""
+        graft = make_graft(self.dir)
+        result = self.run_runner(KOPGRAFT64=graft.as_posix(), EXPECT_TTNNCPP_SHA256=sha(BINARY), QUAL_CARD=CARD_M,
+                                 ALLOW_SERVING_CARD='1', WATCHER='1', CARD_B_ARGS='--sections K2,X7,Z')
+        argv = self.argv(result)
+        self.assertIn('WARNING: ALLOW_SERVING_CARD=1: this run is on %s, card M, half of the serving pair' % CARD_M,
+                      result.stderr)
+        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_M)
+        self.assertEqual((argv.count('--device'), argv[argv.index('--name') + 1]), (1, 'qwen-k64j-card-card-m'))
+        self.assertIn('### k64j-card ', result.stdout)
+        self.assertIn(' card=%s (card-m) ' % CARD_M, result.stdout)
+        args = card_b.parse_args(argv[argv.index('card') + 1:])
+        self.assertEqual((args.sections, args.watchdog, args.expect_binary_sha256),
+                         (['K2', 'X7', 'Z'], 120.0, sha(BINARY)))
+
     def test_the_runner_echoes_the_verdict_line_not_the_summary_line(self):
         lines = [line for line in read(RUNNER).splitlines() if line.startswith('echo ') and 'K64J_CARD' in line]
         self.assertEqual(len(lines), 1, lines)
@@ -480,6 +502,130 @@ class RunnerTests(unittest.TestCase):
         result = subprocess.run([BASH, '-c', 'set -o pipefail; log=%s; %s' % (shlex.quote(log.as_posix()), lines[0])],
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.stdout, '### K64J_CARD verdict=PASS extent=10/10' + NL, result.stderr)
+
+
+@unittest.skipUnless(BASH, 'bash not found')
+class CardMRunTests(unittest.TestCase):
+    """Card B is reserved for other work, so the harness runs on card M through this runner: QUAL_CARD=<card M's
+    board id> ALLOW_SERVING_CARD=1. These run the runner's REAL path (not the dry run) on a fake rig: the runner and
+    the harness files it mounts laid out as in the checkout, with test_qual_card.FakeRig's stubs (the board tree,
+    readlink, device numbers, sysfs) plus docker, fuser, sudo, id and timeout stubs spliced in right after the
+    embedded qual_card block, so every refusal and the launch run as on the rig."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.rig = qual_tests.FakeRig(self.dir / 'rig')
+        self.graft = make_graft(self.dir)
+        tree = self.dir / 'ops'
+        for source in (HERE / 'k64j_card_b.py', PROBE_DIR / 'probe_k64j_card_b.py', PROBE_DIR / 'split_model.py',
+                       OPS / 'sdpa_decode_qwen' / 'test_sdpa_decode_qwen_card_m.py',
+                       OPS / 'sdpa_decode_qwen' / 'probe_k1_card_b.py'):
+            (tree / source.parent.name).mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, tree / source.parent.name / source.name)
+        self.runner = tree / 'k64j' / 'run_card_b.sh'
+        self.launched = self.rig.dir / 'docker-run.argv'
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_on(self, **env):
+        text = read(RUNNER)
+        end = text.index(NL, text.index('# <<< qual_card.sh')) + 1
+        stubs = self.rig.stubs() + [
+            'docker() { case $1 in ps) echo %s ;; inspect) cat "$FAKE_DIR/container-$2" ;; image) return 0 ;; '
+            'run) printf "%%q " "$@" > "$FAKE_DIR/docker-run.argv"; echo "K64J_CARD verdict=PASS"; '
+            'return "${FAKE_RUN_STATUS:-0}" ;; rm) return 0 ;; esac; }' % ' '.join(self.rig.containers),
+            'fuser() { echo "$*" >> "$FAKE_DIR/fuser.log"; local n=${@: -1}; case " ${FAKE_HELD:-} " in *" $n "*) '
+            'echo "$n: thatch 4242 F.... python3" >&2; return 0 ;; esac; return 1; }',
+            'sudo() { return 1; }',
+            'id() { echo 1000; }',
+            'timeout() { while [ $# -gt 0 ]; do case $1 in -k) shift 2 ;; [0-9]*) shift; break ;; *) break ;; esac; '
+            'done; "$@"; }',
+        ]
+        self.runner.write_bytes((text[:end] + NL.join(stubs) + NL + text[end:]).encode('utf-8'))
+        environ = {key: value for key, value in os.environ.items() if key not in SCRUB}
+        environ.update(HOME=self.dir.as_posix(), RESULTS=(self.dir / 'results').as_posix(), K64J_CARD_DRY_RUN='0',
+                       KOPGRAFT64=self.graft.as_posix(), EXPECT_TTNNCPP_SHA256=sha(BINARY), QUAL_CARD=CARD_M,
+                       ALLOW_SERVING_CARD='1')
+        environ.update(env)
+        return subprocess.run([BASH, self.runner.as_posix()], env=environ, capture_output=True, text=True,
+                              encoding='utf-8', errors='replace', timeout=120)
+
+    def launch_argv(self):
+        return shlex.split(self.launched.read_text(encoding='utf-8'))
+
+    def refused(self, result, needle):
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(needle, result.stderr)
+        self.assertFalse(self.launched.exists(), 'launched despite: ' + needle)
+
+    def test_card_m_launches_on_its_node_with_the_watchdog(self):
+        node = self.rig.node(CARD_M)
+        result = self.run_on()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('WARNING: ALLOW_SERVING_CARD=1: this run is on %s, card M, half of the serving pair' % CARD_M,
+                      result.stderr)
+        for line in ('### target card: %s (card M, half of the serving pair) -> %s' % (CARD_M, node),
+                     '### containers: none can reach %s (%s)' % (node, CARD_M),
+                     '### device holders on %s: none' % node, '### %s is still %s' % (CARD_M, node),
+                     '### K64J_CARD verdict=PASS'):
+            self.assertIn(line, result.stdout)
+        self.assertIn('-v ' + node, self.rig.fuser_calls())
+        argv = self.launch_argv()
+        self.assertEqual(argv[:2], ['run', '--rm'])
+        self.assertEqual((argv.count('--device'), argv[argv.index('--device') + 1]), (1, node))
+        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-k64j-card-card-m')
+        args = card_b.parse_args(argv[argv.index('card') + 1:])
+        self.assertEqual((args.watchdog, args.deadline_s, args.expect_binary_sha256), (300.0, 4800.0, sha(BINARY)))
+        self.assertTrue(list((self.dir / 'results').glob('card-*.log')))
+        # The watcher pass with CB2a's sections: the 120 s per-call watchdog and TT_METAL_WATCHER=5.
+        self.launched.unlink()
+        result = self.run_on(WATCHER='1', CARD_B_ARGS='--sections K2,X7,Z')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        argv = self.launch_argv()
+        self.assertEqual(argv[argv.index('--device') + 1], node)
+        self.assertIn('TT_METAL_WATCHER=5', [argv[i + 1] for i, word in enumerate(argv) if word == '-e'])
+        args = card_b.parse_args(argv[argv.index('card') + 1:])
+        self.assertEqual((args.sections, args.watchdog, args.deadline_s), (['K2', 'X7', 'Z'], 120.0, 2100.0))
+
+    def test_card_m_needs_the_override(self):
+        self.refused(self.run_on(ALLOW_SERVING_CARD='0'), 'refusing: QUAL_CARD=%s is card M' % CARD_M)
+
+    def test_a_host_holder_of_card_m_refuses(self):
+        node = self.rig.node(CARD_M)
+        self.refused(self.run_on(FAKE_HELD=node), 'refusing: host processes hold %s' % node)
+        self.assertEqual(self.rig.fuser_calls(), ['-v ' + node] * 5)
+
+    def test_a_privileged_container_refuses(self):
+        self.rig.container('privileged', privileged=True)
+        self.refused(self.run_on(), 'refusing: container /privileged is --privileged')
+
+    def test_any_container_on_any_card_refuses_a_card_m_run(self):
+        """Card M is a serving card: a container that can reach ANY Tenstorrent device blocks the launch - card M's
+        own, card A's, and the card-B agent's (card B only). One on no device does not."""
+        for name, card in (('on-card-m', CARD_M), ('on-card-a', CARD_A), ('card-b-agent', CARD_B)):
+            with self.subTest(card=card):
+                rig = self.rig
+                self.rig = qual_tests.FakeRig(self.dir / ('rig-' + name))
+                self.launched = self.rig.dir / 'docker-run.argv'
+                self.rig.container(name, devices=(self.rig.node(card),))
+                self.refused(self.run_on(), 'refusing: container /%s has %s among its devs'
+                             % (name, self.rig.node(card)))
+                self.rig = rig
+                self.launched = self.rig.dir / 'docker-run.argv'
+        self.rig.container('no-device', mounts=('/home/thatch/hf-cache',))
+        result = self.run_on()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.launched.exists())
+
+    def test_a_hang_on_card_m_resets_the_pair_together(self):
+        result = self.run_on(FAKE_RUN_STATUS='3')                   # the harness watchdog's exit
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('HANG SUSPECTED (exit 3)', result.stderr)
+        self.assertIn('HANG RECOVERY for %s (card M, half of the serving pair)' % CARD_M, result.stderr)
+        self.assertIn('then reset card M and' + NL + '  card A TOGETHER, in one call:', result.stderr)
+        self.assertIn('~/.local/bin/tt-smi -r "$m" "$a"', result.stderr)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -849,7 +995,8 @@ class DryRunTests(unittest.TestCase):
                                        name='silent')
         self.assertEqual(report['decision']['verdict'], 'NO-DECISION')
         self.assertEqual(len(report['failures']), 2)                              # the 0x21 and the 0x1 program
-        self.assertTrue(all('graft mounted, not executed' in failure for failure in report['failures']))
+        self.assertTrue(all(failure.startswith('factory log [X]: ') and 'graft mounted, not executed' in failure
+                            for failure in report['failures']), report['failures'])
 
     def test_a_binary_that_accepts_the_unknown_flag_control_fails(self):
         status, report = self.run_card(FakeExtentTtnn(self.torch, broken={'accept_0x11'}), ['--sections', 'N'])
