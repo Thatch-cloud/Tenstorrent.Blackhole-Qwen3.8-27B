@@ -389,6 +389,36 @@ class CollectorInstallTests(unittest.TestCase):
         self.assertTrue(other.get_prometheus_registry._qwen_prefix)
         self.assertTrue(chat.OpenAIServingChat.create_chat_completion._qwen_prefix)
 
+    def test_a_wrap_that_raises_inside_vllm_s_import_is_logged_not_raised(self):
+        """The hooks run inside vLLM's own import of the module (serving_c2_contract.PostImportHook):
+        an exception there would fail the API server's import."""
+        hooks, logged = [], []
+        broken = types.ModuleType(metrics.CHAT_MODULE)
+
+        class Exploding(object):
+            def __get__(self, instance, owner):
+                raise RuntimeError('vLLM moved the class')
+
+        broken.__class__ = type('ExplodingModule', (types.ModuleType,), {
+            'OpenAIServingChat': Exploding(), 'get_prometheus_registry': Exploding()})
+        with mock.patch.object(metrics, 'log', lambda *a: logged.append(a[0] % a[1:])):
+            metrics.install_collector(lambda name, callback: hooks.append((name, callback)), modules={})
+            for name, callback in hooks:
+                self.assertFalse(callback(broken))
+        self.assertEqual(len(logged), 2, logged)
+        self.assertTrue(all(line.startswith('metrics wrap of ') for line in logged), logged)
+        # a module already imported is wrapped through the same guard
+        with mock.patch.object(metrics, 'log', lambda *a: logged.append(a[0] % a[1:])):
+            self.assertTrue(metrics.install_collector(hooks.append, modules={metrics.CHAT_MODULE: broken,
+                                                                             metrics.PROMETHEUS_MODULE: broken}))
+        self.assertEqual(len(logged), 4, logged)
+
+    def test_salt_verdicts_are_counted_and_bounded(self):
+        with mock.patch.dict(metrics._SALTS, {}, clear=True):
+            for verdict in ('verified', 'verified', 'dropped-no-key', 'something-new'):
+                metrics.count_salt(verdict)
+            self.assertEqual(metrics.salt_counts(), {'verified': 2, 'dropped-no-key': 1, 'other': 1})
+
     def test_collect_builds_prometheus_families(self):
         made = []
 
@@ -407,14 +437,17 @@ class CollectorInstallTests(unittest.TestCase):
         package.core = core
         collector = metrics.PrefixCollector('/nonexistent', lookup=lambda: registry_with_traffic())
         with mock.patch.dict(metrics._REQUESTS, {('high',) + ('unset',) * 3 + ('set',): 2}, clear=True), \
+                mock.patch.dict(metrics._SALTS, {'dropped-unverified': 5}, clear=True), \
                 mock.patch.dict(sys.modules, {'prometheus_client': package, 'prometheus_client.core': core}):
             families = list(collector.collect())
         self.assertEqual(len(families), len(made))
         self.assertIn(('counter', 'qwen_prefix_grants', 3), made)
         self.assertIn(('gauge', 'qwen_prefix_registry_bytes', 4000), made)
         self.assertIn(('counter', 'qwen_prefix_restore_seconds', 1.5), made)
-        self.assertEqual(made[-1], ('counter', 'qwen_prefix_chat_requests', metrics.REQUEST_LABELS))
-        self.assertEqual(families[-1].samples, [(('high', 'unset', 'unset', 'unset', 'set'), 2)])
+        self.assertEqual(made[-2], ('counter', 'qwen_prefix_chat_requests', metrics.REQUEST_LABELS))
+        self.assertEqual(families[-2].samples, [(('high', 'unset', 'unset', 'unset', 'set'), 2)])
+        self.assertEqual(made[-1], ('counter', 'qwen_prefix_salts', ('verdict',)))
+        self.assertEqual(families[-1].samples, [(('dropped-unverified',), 5)])
         self.assertEqual(collector.describe(), [])
 
     @unittest.skipUnless(HAVE_PROMETHEUS, 'prometheus_client is a vLLM dependency: this runs in the image')
@@ -427,7 +460,8 @@ class CollectorInstallTests(unittest.TestCase):
             exporter = metrics.Exporter(tmp, 1.0, lookup=registry_with_traffic, logger=lambda *a: None)
             exporter.publish()
             metrics.register_collector(registry, tmp)
-            with mock.patch.dict(metrics._REQUESTS, {('medium', 'unset', 'unset', 'true', 'set'): 4}, clear=True):
+            with mock.patch.dict(metrics._REQUESTS, {('medium', 'unset', 'unset', 'true', 'set'): 4}, clear=True), \
+                    mock.patch.dict(metrics._SALTS, {'verified': 3}, clear=True):
                 text = generate_latest(registry).decode('utf-8')
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -444,6 +478,7 @@ class CollectorInstallTests(unittest.TestCase):
         self.assertIn('qwen_prefix_registry_bytes 4000.0', text)
         self.assertIn('qwen_prefix_export_writers 1.0', text)
         self.assertIn('# TYPE qwen_prefix_orphans_total counter', text)
+        self.assertIn('qwen_prefix_salts_total{verdict="verified"} 3.0', text)
 
 
 class ContractBootTests(unittest.TestCase):

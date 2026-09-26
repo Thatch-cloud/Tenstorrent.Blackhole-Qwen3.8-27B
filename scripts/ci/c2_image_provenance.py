@@ -31,18 +31,22 @@ gets its tag; a problem exits 1, so a failed image is never tagged, smoked or pu
     /experiment-scripts/ci/frozen-evidence) holds its pinned bytes. Exact runs qualify on every
     request and a mismatch kills the engine in execute_model (image v42, run 35495227738).
 (f) prefix reuse (the TT prefix-reuse design, G1): the stage record /opt/qwen-c2/prefix-stage.json
-    (qwen_prefix_stage.py) says every target held its pinned original, the image still holds what the
-    stage wrote, each stage module that ran is the context's overlaid source, and the stage table is
-    this checkout's; and every profile's launched argv and booted environment say prefix reuse is on
-    exactly where the profile turns it on: --enable-prefix-caching, --enable-chunked-prefill,
-    --no-async-scheduling and QWEN_PREFIX_REUSE=1 under general-prefix, --no-enable-prefix-caching and
-    no QWEN_PREFIX_REUSE under every other profile (memory read-the-launched-argv).
+    (qwen_prefix_stage.py) says the image still holds what the stage wrote, each stage module that ran is
+    the context's overlaid source, every module the stages imported is an overlay destination at the
+    context's bytes (not the bundle's or P8's version), and the stage table is this checkout's; once the
+    table patches anything, every target must also have held its pinned original and the trees must
+    have resolved (with it empty those are reported, not failed). And every profile's launched argv
+    and booted environment say prefix reuse is on exactly where the profile turns it on:
+    --enable-prefix-caching, --enable-chunked-prefill, --no-async-scheduling, --prefix-caching-hash-algo
+    sha256 and QWEN_PREFIX_REUSE=1, with no flag serving_c2_contract.prefix_launch_problems objects to,
+    under the general-prefix profiles; --no-enable-prefix-caching and no QWEN_PREFIX_REUSE under every
+    other profile (memory read-the-launched-argv). A gate-only profile is booted with QWEN_C2_GATE=1.
 (i) with --checkout, every image tree file the checkout also has is compared with it and the
     differences are listed. Informational only: (d) is the gate.
 
 --base-drift runs (a)'s strings, (d), (e) and (f)'s anchors (the prefix stage's pinned originals)
 against the P8 base image alone, read-only and before any build, to show what the first build would
-fail on.
+fail on (the anchors fail it only once the stage table patches anything; before, they are reported).
 
 Stdlib only, python >= 3.6. Every container runs with --network none.
 """
@@ -106,7 +110,9 @@ CHECKOUT_ROOTS = {'/experiment-scripts/ci': 'scripts/ci', '/speculative-decoding
 # The profile that must boot into the v235 gate's environment, and the contract's own switches
 # (read by nothing but serving_c2_contract), which the gate never had.
 PROFILE_OF_RECORD = 'exact'
-CONTRACT_SWITCHES = ('QWEN_C2_SERVING', 'QWEN_C2_PROFILE', 'QWEN_C2_PROFILES')
+CONTRACT_SWITCHES = ('QWEN_C2_SERVING', 'QWEN_C2_PROFILE', 'QWEN_C2_PROFILES', 'QWEN_C2_GATE')
+# serving_c2_contract.GATE_SWITCH: a profile with gate_only: true boots only with it set to 1.
+GATE_SWITCH = 'QWEN_C2_GATE'
 
 # A platform-shaped argv, as the node agent passes it; the contract replaces what it owns.
 BOOT_ARGS = ('--model', 'Qwen/Qwen3.8-27B', '--served-model-name', 'Qwen/Qwen3.8-27B',
@@ -481,6 +487,7 @@ def check_environment(reference, environments):
 
 PREFIX_ON_FLAGS = ('--enable-prefix-caching', '--enable-chunked-prefill', '--no-async-scheduling')
 PREFIX_OFF_FLAGS = ('--no-enable-prefix-caching',)
+PREFIX_HASH_FLAG = '--prefix-caching-hash-algo'
 
 
 def check_prefix_launch(contract, profiles_path, name, logged, env):
@@ -500,12 +507,20 @@ def check_prefix_launch(contract, profiles_path, name, logged, env):
     wanted, refused = (PREFIX_ON_FLAGS, PREFIX_OFF_FLAGS) if on else (PREFIX_OFF_FLAGS, ('--enable-prefix-caching',))
     missing = [flag for flag in wanted if flag not in logged]
     present = [flag for flag in refused if flag in logged]
+    shown = list(wanted)
+    if on:
+        algos = contract.launched_values(logged, PREFIX_HASH_FLAG[2:])
+        if algos != [contract.PREFIX_HASH_ALGO]:
+            missing.append('%s %s (launched %s)' % (PREFIX_HASH_FLAG, contract.PREFIX_HASH_ALGO, algos or 'none'))
+        shown.append('%s %s' % (PREFIX_HASH_FLAG, contract.PREFIX_HASH_ALGO))
+        refusals, warnings = contract.prefix_launch_problems(logged)
+        present += refusals + warnings
     if missing or present:
         problems.append('(f) %s: prefix reuse is %s in the profile, but the launched argv lacks %s and has %s' % (
             name, 'on' if on else 'off', missing or 'nothing', present or 'nothing'))
     else:
         lines.append('(f) %s: prefix reuse %s in the launched argv (%s) and %s' % (
-            name, 'ON' if on else 'off', ' '.join(wanted),
+            name, 'ON' if on else 'off', ' '.join(shown),
             '%s=1' % contract.PREFIX_SWITCH if on else 'no %s' % contract.PREFIX_SWITCH))
     return problems, lines
 
@@ -515,18 +530,25 @@ def prefix_stage_files():
     return [[path, False] for _, path, _, _ in qwen_prefix_stage.TARGETS]
 
 
-def check_prefix_anchors(files):
-    """(f) before a build: the stage refuses a base whose targets are not its pinned originals."""
+def check_prefix_anchors(files, stages=None):
+    """(f) before a build: the stage refuses a base whose targets are not its pinned originals - once
+    its table patches anything; with the table empty the build only records them, so they are reported."""
+    stages = qwen_prefix_stage.STAGES if stages is None else stages
     problems, lines = [], []
     for name, path, pin, source in qwen_prefix_stage.TARGETS:
         found = files.get(path) or {}
         if not found.get('exists'):
-            problems.append('(f) %s: the base has no %s; the prefix stage refuses the build' % (name, path))
+            text = '(f) %s: the base has no %s; the prefix stage refuses the build' % (name, path)
         elif found.get('sha256') != pin:
-            problems.append('(f) %s: the base holds %s at %s, not the pinned %s (%s); the prefix stage refuses '
-                            'the build' % (name, path, found.get('sha256'), pin, source))
+            text = '(f) %s: the base holds %s at %s, not the pinned %s (%s); the prefix stage refuses the build' % (
+                name, path, found.get('sha256'), pin, source)
         else:
             lines.append('(f) %s: the base holds the pinned %s' % (name, pin[:16]))
+            continue
+        if stages:
+            problems.append(text)
+        else:
+            lines.append(text + ' once its stage table patches anything (empty now: reported, not failed)')
     return problems, lines
 
 
@@ -536,7 +558,8 @@ def check_prefix_stage(record, files, entries, source_shas):
     module_shas = {entry.source[len('scripts/ci/'):-len('.py')]: source_shas[entry.source] for entry in entries
                    if entry.source.startswith('scripts/ci/') and entry.source.endswith('.py')
                    and '/' not in entry.source[len('scripts/ci/'):]}
-    return qwen_prefix_stage.record_problems(record, image_shas, module_shas)
+    return qwen_prefix_stage.record_problems(record, image_shas, module_shas,
+                                             overlay_destinations(entries, source_shas))
 
 
 def check_layers(layers, trees, bundle=None, replaced=(), accepted=None):
@@ -684,19 +707,23 @@ class Docker(object):
         return dict(env=dict(item.partition('=')[::2] for item in config.get('Env') or []),
                     labels=dict(config.get('Labels') or {}))
 
-    def environment(self, image, profile):
+    def environment(self, image, profile, gate=False):
         arguments = ['run', '--rm', '--network', 'none']
         if profile:
             arguments += ['-e', 'QWEN_C2_PROFILE=' + profile]
+        if gate:
+            arguments += ['-e', GATE_SWITCH + '=1']
         code, out, err = self.run(arguments + ['--entrypoint', 'python3', image, '-c', ENV_PROBE])
         if code != 0:
             raise RuntimeError('environment probe of %s (%s) exited %d: %s' % (image, profile, code, err[-2000:]))
         return parse_marked(out, 'C2ENV')
 
-    def boot(self, image, models, profile):
+    def boot(self, image, models, profile, gate=False):
         arguments = ['run', '--rm', '--network', 'none', '-v', '%s:/models:ro' % models]
         if profile:
             arguments += ['-e', 'QWEN_C2_PROFILE=' + profile]
+        if gate:
+            arguments += ['-e', GATE_SWITCH + '=1']
         code, out, err = self.run(arguments + ['--entrypoint', 'python3', image, '-m', API_SERVER] + list(BOOT_ARGS))
         return err + '\n' + out
 
@@ -764,12 +791,13 @@ def verify(image, context, models, checkout=None, docker=None, log=print):
     report += lines
     contract = load_contract(context / 'overlay' / 'scripts/ci/serving_c2_contract.py')
     boots = {}
+    gates = {name: profile.get('gate_only') is True for name, profile in profiles['profiles'].items()}
     for profile in [None] + sorted(profiles['profiles']):
-        boots[profile] = docker.boot(image, models, profile)
+        boots[profile] = docker.boot(image, models, profile, gate=gates.get(profile or profiles['default'], False))
         found, lines = check_argv(contract, profiles_path, profile, profile or profiles['default'], boots[profile])
         problems += found
         report += lines
-    environments = {name: docker.environment(image, name) for name in sorted(profiles['profiles'])}
+    environments = {name: docker.environment(image, name, gate=gates[name]) for name in sorted(profiles['profiles'])}
     found, lines = check_environment(read_json(context / 'v235-environment.json'), environments)
     problems += found
     report += lines

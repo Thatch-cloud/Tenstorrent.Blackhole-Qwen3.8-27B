@@ -36,7 +36,13 @@ unreadable files, and whether the kill-switch file exists.
 The API server also counts chat requests by the fields that decide whether the next turn's prompt
 extends this one - top-level reasoning_effort and chat_template_kwargs' reasoning_effort,
 preserve_thinking and enable_thinking (P0b, correction C6) - and by whether a cache_salt came with it
-(none: no hit, fail closed): qwen_prefix_chat_requests_total{...}, labels bounded.
+(none: no hit, fail closed): qwen_prefix_chat_requests_total{...}, labels bounded. And it counts what the
+contract's salt policy did with each request's cache_salt (serving_c2_contract.salt_verdict: verified,
+dropped-unverified, dropped-no-key, unset): qwen_prefix_salts_total{verdict}.
+
+Nothing here raises into serving: the exporter and collector swallow their own failures, and the two
+wraps the API server installs when vLLM imports its modules (install_collector) are guarded, because
+they run inside vLLM's own import of those modules.
 
 The hit rate to report is the model's (L - Q), from grant_tokens against vllm:prompt_tokens; never
 vllm:prefix_cache_hits, which vLLM counts inside get_computed_blocks before the trim (design 2.2 need 5).
@@ -423,6 +429,12 @@ class PrefixCollector(object):
         for labels, value in sorted(request_counts().items()):
             requests.add_metric(list(labels), value)
         yield requests
+        salts = CounterMetricFamily(
+            PREFIX + 'salts', 'requests by what the salt policy did with their cache_salt (dropped: served '
+            'unsalted, so no hit)', labels=('verdict',))
+        for verdict, value in sorted(salt_counts().items()):
+            salts.add_metric([verdict], value)
+        yield salts
 
     def describe(self):
         # Names vary with the registry's counters; an empty describe keeps registration from calling
@@ -477,6 +489,22 @@ def count_request(request):
 def request_counts():
     with _REQUESTS_LOCK:
         return dict(_REQUESTS)
+
+
+SALT_VERDICTS = ('verified', 'dropped-unverified', 'dropped-no-key', 'unset')
+_SALTS = {}
+
+
+def count_salt(verdict):
+    """One request's salt verdict (serving_c2_contract.install_salt_policy); anything else is 'other'."""
+    verdict = verdict if verdict in SALT_VERDICTS else 'other'
+    with _REQUESTS_LOCK:
+        _SALTS[verdict] = _SALTS.get(verdict, 0) + 1
+
+
+def salt_counts():
+    with _REQUESTS_LOCK:
+        return dict(_SALTS)
 
 
 def wrap_chat_serving(module):
@@ -537,16 +565,30 @@ def wrap_prometheus_module(module, directory=None):
     return True
 
 
+def guarded(name, wrap):
+    """wrap(module), logging instead of raising: a wrap runs inside vLLM's own import of `name`, and an
+    exception there would fail the API server's import of it."""
+    def callback(module):
+        try:
+            return wrap(module)
+        except Exception as error:
+            log('metrics wrap of %s not installed: %s: %s', name, type(error).__name__, error)
+            return False
+
+    return callback
+
+
 def install_collector(on_import, directory=None, modules=None):
     """In the API server: wrap vLLM's registry getter, and count chat requests by shape, now for a
     module already imported, else when it is. on_import(name, callback) runs callback(module) right
-    after `name` executes (serving_c2_contract.PostImportHook)."""
+    after `name` executes (serving_c2_contract.PostImportHook). Each wrap is guarded."""
     modules = sys.modules if modules is None else modules
     for name, wrap in ((PROMETHEUS_MODULE, lambda loaded: wrap_prometheus_module(loaded, directory)),
                        (CHAT_MODULE, wrap_chat_serving)):
+        callback = guarded(name, wrap)
         module = modules.get(name)
         if module is not None:
-            wrap(module)
+            callback(module)
         else:
-            on_import(name, wrap)
+            on_import(name, callback)
     return True

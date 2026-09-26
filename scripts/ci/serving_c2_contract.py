@@ -27,13 +27,22 @@ process match it:
    flags reuse is exact under (prefix_reuse_problems), or the boot refuses; a profile that does not
    set it gets it removed, so an inherited value cannot turn half of reuse on under exact, c2 or
    general. Under a prefix profile the API server serves the registry's metrics, which the engine
-   process exports (qwen_prefix_metrics).
+   process exports (qwen_prefix_metrics); it keeps a request's cache_salt only when the salt verifies
+   against the platform's salt key (salt_verdict), so a client cannot choose the cache partition it
+   shares; it refuses a launched KV connector and warns on a server default that strips past
+   reasoning (prefix_launch_problems); and every process logs where the model entry was imported
+   from (the bring-up check, qwen_prefix_stage bringup).
+6. gate-only profiles (gate_only: true) boot only with QWEN_C2_GATE=1: they exist for a gate and
+   must never take traffic.
 
 Nothing here changes a gate: every step is off unless QWEN_C2_SERVING=1.
 """
 
+import hashlib
+import hmac
 import json
 import os
+import re
 import sys
 
 PROFILES = '/opt/qwen-c2/profiles.json'
@@ -43,6 +52,32 @@ INPUT_PROCESSOR = 'vllm.v1.engine.input_processor'
 # The prefix-reuse switch (design section 2.0.1): the model graft's supports_prefix_caching, the
 # scheduler graft's install and the runner patch all read it. Only a profile sets it.
 PREFIX_SWITCH = 'QWEN_PREFIX_REUSE'
+# vLLM's default (config/cache.py:95), pinned in the prefix profiles: the block-hash chain is what makes
+# a cached block's content its prompt's, and the exactness argument leans on it (design L2).
+PREFIX_HASH_ALGO = 'sha256'
+# The model entry every process logs the source of under a prefix profile (the bring-up check).
+MODEL_ENTRY = 'models.demos.blackhole.qwen36.tt.qwen36_vllm'
+# A profile with gate_only: true boots only with this set to 1.
+GATE_SWITCH = 'QWEN_C2_GATE'
+
+# Client cache_salt under a prefix profile (design 2.2 need 4, decision D-P2). A salt partitions vLLM's
+# prefix cache and the checkpoint registry: requests with one salt share KV blocks and checkpoints, and
+# each can time the other's hits. The platform must choose it per tenant, never the client (an SDK's
+# constant salt would join tenants). So the API server keeps a request's cache_salt only when it
+# verifies against the platform's salt key, and drops it otherwise: an unsalted request gets no hit and
+# publishes nothing (the scheduler graft's fail-closed rule). A verifiable salt is
+# 'qps1.<tag>.<mac>' - tag 8-128 of [A-Za-z0-9_-], the gateway's opaque per-tenant value (for example
+# HMAC(tenant secret, tenant_id); never the displayed tenant id), mac the hex HMAC-SHA256 of 'qps1.<tag>'
+# under the key (mint_salt). The key is the file SALT_KEY_ENV names (default SALT_KEY_FILE, on the
+# persistent mount beside the kill switch), at least SALT_KEY_MIN_BYTES bytes, read once at boot. Without
+# it every salt is dropped and reuse is inert: general-prefix then serves as general does, with no hit.
+# The format is this image's PROPOSAL for D-P2; the ADM gateway must mint it before reuse does anything.
+SALT_KEY_FILE = '/models/.qwen-c2/prefix-salt.key'
+SALT_KEY_ENV = 'QWEN_PREFIX_SALT_KEY_FILE'
+SALT_VERSION = 'qps1'
+SALT_TAG = re.compile(r'\A[A-Za-z0-9_-]{8,128}\Z')
+SALT_MAC = re.compile(r'\A[0-9a-f]{64}\Z')
+SALT_KEY_MIN_BYTES = 32
 
 # Engine flags a profile owns, and whether each takes a value. A platform value for any of
 # these is dropped: the fast path is only qualified under the profile's.
@@ -55,6 +90,7 @@ OWNED_FLAGS = {
     'async-scheduling': False, 'no-async-scheduling': False,
     'enable-chunked-prefill': False, 'no-enable-chunked-prefill': False,
     'enforce-eager': False, 'no-enforce-eager': False,
+    'prefix-caching-hash-algo': True,
 }
 
 
@@ -162,7 +198,135 @@ def prefix_reuse_problems(profile):
         problems.append('the fast path (qwen_fast_t16) cannot admit a prefix hit yet (C1)')
     if engine.get('speculative-config'):
         problems.append('speculative decoding: the scheduler graft refuses lookahead')
+    if engine.get('prefix-caching-hash-algo') != PREFIX_HASH_ALGO:
+        problems.append('prefix-caching-hash-algo must be %s (the block-hash chain a hit\'s exactness leans on), '
+                        'not %r' % (PREFIX_HASH_ALGO, engine.get('prefix-caching-hash-algo')))
     return problems
+
+
+def gate_problems(profile, environ):
+    """A gate-only profile outside a gate."""
+    if profile.get('gate_only') is True and environ.get(GATE_SWITCH) != '1':
+        return ['profile %s is gate only: it boots only with %s=1, never for traffic' % (profile['name'], GATE_SWITCH)]
+    return []
+
+
+def launched_values(argv, flag):
+    """Every value argv gives the engine flag `flag` (--flag v or --flag=v; underscores read as dashes)."""
+    tokens, values = list(argv), []
+    for index, token in enumerate(tokens):
+        if not token.startswith('--'):
+            continue
+        name, separator, value = token[2:].partition('=')
+        if name.replace('_', '-') != flag:
+            continue
+        values.append(value if separator else (tokens[index + 1] if index + 1 < len(tokens) else ''))
+    return values
+
+
+def prefix_launch_problems(argv):
+    """(refusals, warnings) of a prefix profile's launched argv, for engine flags the contract does not own."""
+    refusals, warnings = [], []
+    if launched_values(argv, 'kv-transfer-config'):
+        refusals.append('--kv-transfer-config: the scheduler graft refuses a KV connector (external tokens would '
+                        'move start_pos past Q)')
+    for value in launched_values(argv, 'default-chat-template-kwargs'):
+        try:
+            kwargs = json.loads(value)
+        except ValueError:
+            warnings.append('--default-chat-template-kwargs %r is not JSON' % value)
+            continue
+        if isinstance(kwargs, dict) and 'preserve_thinking' in kwargs and kwargs['preserve_thinking'] is not True:
+            warnings.append('--default-chat-template-kwargs sets preserve_thinking=%s: the Qwen3.8 template then '
+                            'drops past reasoning at every new user message, so a turn stops extending the last '
+                            'one and reuse collapses to older checkpoints (P0b 8.3)'
+                            % json.dumps(kwargs['preserve_thinking']))
+    return refusals, warnings
+
+
+def read_salt_key(environ=None):
+    """(key bytes or None, the file read or why there is no key)."""
+    environ = os.environ if environ is None else environ
+    path = environ.get(SALT_KEY_ENV) or SALT_KEY_FILE
+    try:
+        with open(path, 'rb') as handle:
+            key = handle.read().strip()
+    except (OSError, IOError) as error:
+        return None, '%s: %s' % (path, getattr(error, 'strerror', None) or type(error).__name__)
+    if len(key) < SALT_KEY_MIN_BYTES:
+        return None, '%s holds %d bytes, fewer than %d' % (path, len(key), SALT_KEY_MIN_BYTES)
+    return key, path
+
+
+def salt_mac(key, tag):
+    return hmac.new(key, ('%s.%s' % (SALT_VERSION, tag)).encode('ascii'), hashlib.sha256).hexdigest()
+
+
+def mint_salt(key, tag):
+    """The cache_salt the platform sends for the tenant whose opaque tag this is."""
+    if not isinstance(tag, str) or not SALT_TAG.match(tag):
+        raise ValueError('a salt tag is 8-128 of [A-Za-z0-9_-], got %r' % (tag,))
+    return '%s.%s.%s' % (SALT_VERSION, tag, salt_mac(key, tag))
+
+
+def salt_verdict(salt, key):
+    """'unset', 'verified', 'dropped-no-key' or 'dropped-unverified' for one request's cache_salt."""
+    if salt is None or salt == '':
+        return 'unset'
+    if key is None:
+        return 'dropped-no-key'
+    parts = salt.split('.') if isinstance(salt, str) else ()
+    if (len(parts) != 3 or parts[0] != SALT_VERSION or not SALT_TAG.match(parts[1])
+            or not SALT_MAC.match(parts[2])):
+        return 'dropped-unverified'
+    return 'verified' if hmac.compare_digest(salt_mac(key, parts[1]), parts[2]) else 'dropped-unverified'
+
+
+def install_salt_policy(module, key, counter=None):
+    """Wrap InputProcessor.process_inputs - every request of every OpenAI route passes it on the way to the
+    engine (v1/engine/async_llm.py:349) - so the EngineCoreRequest it builds keeps cache_salt only when
+    salt_verdict says 'verified'. Not guarded: if this cannot install, the API server must not serve
+    (fail closed); counter(verdict) is observability and never raises into a request."""
+    processor = module.InputProcessor
+    if getattr(processor, '_qwen_prefix_salt', False):
+        return False
+    original = processor.process_inputs
+
+    def process_inputs(self, *args, **kwargs):
+        request = original(self, *args, **kwargs)
+        verdict = salt_verdict(getattr(request, 'cache_salt', None), key)
+        if verdict.startswith('dropped'):
+            request.cache_salt = None
+        if counter is not None:
+            try:
+                counter(verdict)
+            except Exception:
+                pass
+        return request
+
+    processor.process_inputs = process_inputs
+    processor._qwen_prefix_salt = True
+    log('prefix: cache_salt kept only when it verifies against the salt key (%s)',
+        'present' if key is not None else 'ABSENT: every salt is dropped, no request can hit')
+    return True
+
+
+def salt_counter():
+    """qwen_prefix_metrics.count_salt, or None when the metrics module is not importable."""
+    try:
+        import qwen_prefix_metrics
+
+        return qwen_prefix_metrics.count_salt
+    except Exception:
+        return None
+
+
+def log_model_tree(module):
+    """The bring-up check's evidence: which file this process imported the model entry from."""
+    try:
+        log('prefix: model tree %s', os.path.realpath(getattr(module, '__file__', None) or '?'))
+    except Exception:
+        pass
 
 
 def install_prefix_metrics(api_server, on_import=None):
@@ -437,6 +601,9 @@ def boot(environ=None, orig_argv=None):
         return None
     fix_sys_path()
     profile = load_profile(environ.get('QWEN_C2_PROFILES', PROFILES))
+    problems = gate_problems(profile, environ)
+    if problems:
+        raise ValueError('; '.join(problems))
     problems = prefix_reuse_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve prefix reuse exactly: %s' % (profile['name'], '; '.join(problems)))
@@ -451,6 +618,7 @@ def boot(environ=None, orig_argv=None):
     api_server = is_api_server(orig_argv)
     if prefix_reuse(profile):
         install_prefix_metrics(api_server)
+        sys.meta_path.insert(0, PostImportHook(MODEL_ENTRY, log_model_tree))
     if api_server:
         snapshot = resolve_snapshot(profile)
         sys.argv[:] = rewrite_argv(sys.argv, profile, snapshot)
@@ -458,8 +626,18 @@ def boot(environ=None, orig_argv=None):
         log('mesh %s, output budget %d, context %s', environ['TT_MESH_GRAPH_DESC_PATH'], budget,
             profile['engine'].get('max-model-len'))
         if prefix_reuse(profile):
-            log('profile %s: prefix reuse on (%s=1, vLLM prefix caching; the platform turns chunking off again)',
-                profile['name'], PREFIX_SWITCH)
+            refusals, warnings = prefix_launch_problems(sys.argv[1:])
+            if refusals:
+                raise ValueError('profile %s cannot serve prefix reuse with this launch: %s' % (
+                    profile['name'], '; '.join(refusals)))
+            for warning in warnings:
+                log('prefix: WARNING %s', warning)
+            key, where = read_salt_key(environ)
+            log('profile %s: prefix reuse on (%s=1, vLLM prefix caching; the platform turns chunking off again); '
+                'salt key %s', profile['name'], PREFIX_SWITCH, where)
+            counter = salt_counter()
+            sys.meta_path.insert(0, PostImportHook(
+                INPUT_PROCESSOR, lambda module: install_salt_policy(module, key, counter)))
         if profile.get('request_contract', True) is False:
             log('profile %s: no request contract (the fast path is off)', profile['name'])
             return profile

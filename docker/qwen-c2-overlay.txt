@@ -78,10 +78,15 @@ speculative-decoding/harness/greedy_session.py
 # Conversation prefix reuse (the TT prefix-reuse design, G1; the general-prefix profiles). Every G1
 # runtime module goes here - the registry and scheduler graft the patched TTScheduler.__init__
 # installs from, the metrics exporter and collector the contract boots - and so does every stage module
-# scripts/ci/qwen_prefix_stage.py (a build tool, staged beside c2_overlay.py, never overlaid) runs:
-# test_qwen_prefix_image fails while a scripts/ci/qwen_prefix_*.py is missing here.
+# scripts/ci/qwen_prefix_stage.py (a build tool, staged beside c2_overlay.py, never overlaid) runs, AND
+# every scripts/ci module those import, directly or not: test_qwen_prefix_image fails while one is
+# missing here, and c2_image_provenance (f) fails an image whose stages ran a module this list does not
+# lay at the context's bytes. lever_n_model_patch is the model stage's (its patch_tp_replay makes both
+# chunk loops resumable; the bundle's 77d6995a copy patches the traced loop only). Nothing else in the
+# container imports it, so laying it changes no profile.
 scripts/ci/prefix_scheduler_graft.py
 scripts/ci/qwen_prefix_metrics.py
+scripts/ci/lever_n_model_patch.py
 
 # Tests run inside the image at build time (every overlaid scripts/ci/test_*.py is).
 scripts/ci/test_serving_c2_contract.py

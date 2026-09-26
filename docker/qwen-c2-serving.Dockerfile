@@ -61,14 +61,21 @@ RUN set -eu; \
 
 # Conversation prefix reuse (the TT prefix-reuse design, G1): the AST stages that graft it into the TT
 # plugin (scheduler.py, model_runner.py, worker.py) and the model tree (model.py, qwen36_vllm.py), none
-# of them an overlay destination. The tool refuses unless vllm_tt_plugin and models import from the
-# trees it patches and every target holds its pinned original bytes (the source.sha256 pattern above,
-# checked before anything is written); it runs each stage from the overlaid tree, compiles the result
-# and records every target's sha256 before and after, which c2_image_provenance (f) holds the image to.
-# Every grafted branch stays off unless QWEN_PREFIX_REUSE=1, which only the general-prefix profiles set.
+# of them an overlay destination. apply runs each stage from the overlaid tree, compiles the result and
+# records every target's sha256 before and after, and the sha256 of every overlaid module the stages
+# imported, which c2_image_provenance (f) holds the image to. Once the stage table patches anything it
+# refuses unless vllm_tt_plugin and models import from the trees it patches and every target holds its
+# pinned original bytes (the source.sha256 pattern above, checked before anything is written); with the
+# table empty it only records what it found. check then imports every patched module with
+# QWEN_PREFIX_REUSE unset and =1 (each must load the patched file) and re-runs P8's installed-plugin
+# tests and the overlay's in-image tests against the patched files with the switch unset - the files
+# every profile serves. Every grafted branch stays off unless QWEN_PREFIX_REUSE=1, which only the
+# general-prefix profiles set.
 COPY qwen_prefix_stage.py /opt/qwen-c2/
 RUN set -eu; cd /experiment-scripts/ci && VLLM_PLUGINS='' python3 -B /opt/qwen-c2/qwen_prefix_stage.py apply \
-      --modules /experiment-scripts/ci --record /opt/qwen-c2/prefix-stage.json
+      --modules /experiment-scripts/ci --record /opt/qwen-c2/prefix-stage.json; \
+    tests=$(python3 -B /opt/qwen-c2/c2_overlay.py tests --manifest /opt/qwen-c2/qwen-c2-overlay.txt); \
+    python3 -B /opt/qwen-c2/qwen_prefix_stage.py check --record /opt/qwen-c2/prefix-stage.json --tests $tests
 
 # The DFlash2 draft: its config (the speculative model path) and the fixture weights.
 COPY draft-config/ /draft-config/
