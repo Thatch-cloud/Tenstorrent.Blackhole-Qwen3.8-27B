@@ -33,6 +33,11 @@ capture failures, LRU and coupled evictions, unsalted and kill-switch denials, r
 grants; plus the export's own health: live writers, the oldest live write's age, dead writers' files,
 unreadable files, and whether the kill-switch file exists.
 
+The API server also counts chat requests by the fields that decide whether the next turn's prompt
+extends this one - top-level reasoning_effort and chat_template_kwargs' reasoning_effort,
+preserve_thinking and enable_thinking (P0b, correction C6) - and by whether a cache_salt came with it
+(none: no hit, fail closed): qwen_prefix_chat_requests_total{...}, labels bounded.
+
 The hit rate to report is the model's (L - Q), from grant_tokens against vllm:prompt_tokens; never
 vllm:prefix_cache_hits, which vLLM counts inside get_computed_blocks before the trim (design 2.2 need 5).
 
@@ -411,11 +416,90 @@ class PrefixCollector(object):
         for kind, name, help_text, value in self.rows():
             family = CounterMetricFamily if kind == 'counter' else GaugeMetricFamily
             yield family(name, help_text, value=value)
+        requests = CounterMetricFamily(
+            PREFIX + 'chat_requests', 'chat completions by the fields that decide whether the next turn\'s prompt '
+            'extends this one (reasoning_effort, chat_template_kwargs) and by cache_salt (unset: no hit)',
+            labels=REQUEST_LABELS)
+        for labels, value in sorted(request_counts().items()):
+            requests.add_metric(list(labels), value)
+        yield requests
 
     def describe(self):
         # Names vary with the registry's counters; an empty describe keeps registration from calling
         # collect() before an engine exists.
         return []
+
+
+# -- request shapes that decide whether prompt N+1 extends prompt N (P0b, correction C6) -------------
+CHAT_MODULE = 'vllm.entrypoints.openai.chat_completion.serving'
+CHAT_CLASS = 'OpenAIServingChat'
+REQUEST_LABELS = ('reasoning_effort', 'template_reasoning_effort', 'preserve_thinking', 'enable_thinking',
+                  'cache_salt')
+# vLLM 0.25.1 accepts these (chat_completion/protocol.py:228-229); the Qwen3.8 template renders only
+# none/low/medium/xhigh and raises on the rest (P0b C7). Anything else is 'other': labels stay bounded.
+EFFORTS = ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
+_REQUESTS = {}
+_REQUESTS_LOCK = threading.Lock()
+
+
+def label(value, allowed=()):
+    if value is None:
+        return 'unset'
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, str) and value in allowed:
+        return value
+    return 'other'
+
+
+def request_labels(request):
+    """The label values of one chat request: what the Qwen3.8 template keys its reasoning history on
+    (preserve_thinking not true strips it; enable_thinking or reasoning_effort changing between turns
+    breaks the prefix at token 3-9) and whether it carries a cache_salt (none: no hit, fail closed)."""
+    kwargs = getattr(request, 'chat_template_kwargs', None)
+    kwargs = kwargs if isinstance(kwargs, dict) else {}
+    return (label(getattr(request, 'reasoning_effort', None), EFFORTS),
+            label(kwargs.get('reasoning_effort'), EFFORTS),
+            label(kwargs.get('preserve_thinking')),
+            label(kwargs.get('enable_thinking')),
+            'set' if getattr(request, 'cache_salt', None) else 'unset')
+
+
+def count_request(request):
+    try:
+        labels = request_labels(request)
+    except Exception:
+        labels = ('other',) * len(REQUEST_LABELS)
+    with _REQUESTS_LOCK:
+        _REQUESTS[labels] = _REQUESTS.get(labels, 0) + 1
+
+
+def request_counts():
+    with _REQUESTS_LOCK:
+        return dict(_REQUESTS)
+
+
+def wrap_chat_serving(module):
+    """Count every chat completion by request_labels before vLLM serves it; the count never raises
+    into the request."""
+    cls = getattr(module, CHAT_CLASS, None)
+    original = getattr(cls, 'create_chat_completion', None)
+    if original is None or getattr(original, '_qwen_prefix', False):
+        return False
+    import functools
+
+    @functools.wraps(original)
+    async def create_chat_completion(self, request, *args, **kwargs):
+        try:
+            count_request(request)
+        except Exception:
+            pass
+        return await original(self, request, *args, **kwargs)
+
+    create_chat_completion._qwen_prefix = True
+    cls.create_chat_completion = create_chat_completion
+    log('request shapes counted on %s.%s.create_chat_completion', module.__name__, CHAT_CLASS)
+    return True
 
 
 _COLLECTED = {}
@@ -454,12 +538,15 @@ def wrap_prometheus_module(module, directory=None):
 
 
 def install_collector(on_import, directory=None, modules=None):
-    """In the API server: wrap vLLM's registry getter now if it is imported, else when it is.
-    on_import(name, callback) runs callback(module) right after `name` executes
-    (serving_c2_contract.PostImportHook)."""
+    """In the API server: wrap vLLM's registry getter, and count chat requests by shape, now for a
+    module already imported, else when it is. on_import(name, callback) runs callback(module) right
+    after `name` executes (serving_c2_contract.PostImportHook)."""
     modules = sys.modules if modules is None else modules
-    module = modules.get(PROMETHEUS_MODULE)
-    if module is not None:
-        return wrap_prometheus_module(module, directory)
-    on_import(PROMETHEUS_MODULE, lambda loaded: wrap_prometheus_module(loaded, directory))
+    for name, wrap in ((PROMETHEUS_MODULE, lambda loaded: wrap_prometheus_module(loaded, directory)),
+                       (CHAT_MODULE, wrap_chat_serving)):
+        module = modules.get(name)
+        if module is not None:
+            wrap(module)
+        else:
+            on_import(name, wrap)
     return True

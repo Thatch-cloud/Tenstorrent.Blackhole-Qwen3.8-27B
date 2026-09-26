@@ -142,34 +142,47 @@ def table_problems(targets=None, stages=None):
     return problems
 
 
-def package_directory(name, find_spec=None):
-    """The directory the package `name` imports from, without executing it, or None."""
+def package_locations(name, find_spec=None):
+    """The directories the package `name` imports from, in import order (several for a namespace
+    package), without executing it; [] when it does not resolve."""
     find_spec = find_spec or importlib.util.find_spec
     try:
         spec = find_spec(name)
     except (ImportError, ValueError):
-        return None
+        return []
     if spec is None:
-        return None
+        return []
     locations = list(getattr(spec, 'submodule_search_locations', None) or ())
-    if locations:
-        return os.path.realpath(locations[0])
-    origin = getattr(spec, 'origin', None)
-    return os.path.realpath(os.path.dirname(origin)) if origin else None
+    if not locations and getattr(spec, 'origin', None):
+        locations = [os.path.dirname(spec.origin)]
+    return [os.path.realpath(location) for location in locations]
 
 
-def resolution_problems(find_spec=None):
+def package_directory(name, find_spec=None):
+    """The first directory the package `name` imports from, or None."""
+    locations = package_locations(name, find_spec)
+    return locations[0] if locations else None
+
+
+QWEN_ENTRY = 'demos/blackhole/qwen36/tt/qwen36_vllm.py'
+
+
+def resolution_problems(find_spec=None, isfile=os.path.isfile):
     """(problems, found): the plugin and model trees this image's python imports must be the ones the
-    targets name."""
-    found = dict(plugin=package_directory(PLUGIN_PACKAGE, find_spec),
-                 models=package_directory(MODEL_PACKAGE, find_spec))
+    targets name. For `models` the first location that holds the Qwen tree counts (a namespace
+    package may span several)."""
+    plugin = package_locations(PLUGIN_PACKAGE, find_spec)
+    models = package_locations(MODEL_PACKAGE, find_spec)
+    qwen = [location for location in models if isfile(os.path.join(location, QWEN_ENTRY))]
+    found = dict(plugin=plugin[0] if plugin else None, models=qwen[0] if qwen else None, model_locations=models)
     problems = []
     if found['plugin'] != os.path.realpath(PLUGIN_ROOT):
         problems.append('%s imports from %s, not %s: the stages would patch a plugin nothing runs (design R5)'
                         % (PLUGIN_PACKAGE, found['plugin'], PLUGIN_ROOT))
     if found['models'] != os.path.realpath(MODEL_TREE + '/models'):
-        problems.append('%s imports from %s, not %s/models: the stages would patch a model tree nothing runs'
-                        % (MODEL_PACKAGE, found['models'], MODEL_TREE))
+        problems.append('%s.%s imports from %s (models locations %s), not %s/models: the stages would patch a '
+                        'model tree nothing runs' % (MODEL_PACKAGE, QWEN_ENTRY[:-3].replace('/', '.'),
+                                                     found['models'], models, MODEL_TREE))
     return problems, found
 
 

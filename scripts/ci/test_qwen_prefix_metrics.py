@@ -285,6 +285,56 @@ class FakeRegistry(object):
         self.collectors.append(collector)
 
 
+def chat_module():
+    """A stand-in for vllm.entrypoints.openai.chat_completion.serving (0.25.1: an async method)."""
+    module = types.ModuleType(metrics.CHAT_MODULE)
+
+    class OpenAIServingChat(object):
+        async def create_chat_completion(self, request, raw_request=None):
+            """Chat Completion API."""
+            return ('served', request, raw_request)
+
+    module.OpenAIServingChat = OpenAIServingChat
+    return module
+
+
+class RequestShapeTests(unittest.TestCase):
+    def setUp(self):
+        metrics._REQUESTS.clear()
+
+    def tearDown(self):
+        metrics._REQUESTS.clear()
+
+    def test_the_labels(self):
+        request = types.SimpleNamespace(reasoning_effort='high', cache_salt='abc', chat_template_kwargs={
+            'preserve_thinking': False, 'enable_thinking': True, 'reasoning_effort': 'xhigh'})
+        self.assertEqual(metrics.request_labels(request), ('high', 'xhigh', 'false', 'true', 'set'))
+        self.assertEqual(metrics.request_labels(types.SimpleNamespace()), ('unset',) * 4 + ('unset',))
+        odd = types.SimpleNamespace(reasoning_effort='extreme', chat_template_kwargs={'preserve_thinking': 'true',
+                                                                                      'enable_thinking': 1})
+        # C1: the template strips reasoning for "true" and 1 too: they must not read as the boolean
+        self.assertEqual(metrics.request_labels(odd), ('other', 'unset', 'other', 'other', 'unset'))
+        self.assertEqual(metrics.request_labels(types.SimpleNamespace(chat_template_kwargs=['x']))[2], 'unset')
+
+    def test_a_chat_completion_is_counted_and_still_served(self):
+        import asyncio
+
+        module = chat_module()
+        self.assertTrue(metrics.wrap_chat_serving(module))
+        self.assertFalse(metrics.wrap_chat_serving(module))
+        method = module.OpenAIServingChat.create_chat_completion
+        self.assertEqual((method.__name__, method.__doc__), ('create_chat_completion', 'Chat Completion API.'))
+        request = types.SimpleNamespace(reasoning_effort=None, chat_template_kwargs=None, cache_salt=None)
+        served = asyncio.run(module.OpenAIServingChat().create_chat_completion(request, 'raw'))
+        self.assertEqual(served, ('served', request, 'raw'))
+        asyncio.run(module.OpenAIServingChat().create_chat_completion(request))
+        self.assertEqual(metrics.request_counts(), {('unset',) * 5: 2})
+        with mock.patch.object(metrics, 'request_labels', side_effect=ValueError('x')):
+            asyncio.run(module.OpenAIServingChat().create_chat_completion(request))
+        self.assertEqual(metrics.request_counts()[('other',) * 5], 1)
+        self.assertFalse(metrics.wrap_chat_serving(types.ModuleType('no_chat_class')))
+
+
 class CollectorInstallTests(unittest.TestCase):
     def setUp(self):
         metrics._COLLECTED.clear()
@@ -327,21 +377,28 @@ class CollectorInstallTests(unittest.TestCase):
         module = types.ModuleType(metrics.PROMETHEUS_MODULE)
         module.get_prometheus_registry = lambda: FakeRegistry()
         self.assertTrue(metrics.install_collector(lambda name, callback: hooks.append((name, callback)), modules={}))
-        self.assertEqual([name for name, _ in hooks], [metrics.PROMETHEUS_MODULE])
+        self.assertEqual([name for name, _ in hooks], [metrics.PROMETHEUS_MODULE, metrics.CHAT_MODULE])
         hooks[0][1](module)
         self.assertTrue(module.get_prometheus_registry._qwen_prefix)
         other = types.ModuleType(metrics.PROMETHEUS_MODULE)
         other.get_prometheus_registry = lambda: FakeRegistry()
-        self.assertTrue(metrics.install_collector(hooks.append, modules={metrics.PROMETHEUS_MODULE: other}))
-        self.assertEqual(len(hooks), 1)
+        chat = chat_module()
+        self.assertTrue(metrics.install_collector(hooks.append, modules={metrics.PROMETHEUS_MODULE: other,
+                                                                          metrics.CHAT_MODULE: chat}))
+        self.assertEqual(len(hooks), 2)
         self.assertTrue(other.get_prometheus_registry._qwen_prefix)
+        self.assertTrue(chat.OpenAIServingChat.create_chat_completion._qwen_prefix)
 
     def test_collect_builds_prometheus_families(self):
         made = []
 
         class Family(object):
-            def __init__(self, kind, name, documentation, value=None):
-                made.append((kind, name, value))
+            def __init__(self, kind, name, documentation, value=None, labels=None):
+                self.samples = []
+                made.append((kind, name, value if labels is None else tuple(labels)))
+
+            def add_metric(self, labels, value):
+                self.samples.append((tuple(labels), value))
 
         core = types.ModuleType('prometheus_client.core')
         core.CounterMetricFamily = lambda *a, **k: Family('counter', *a, **k)
@@ -349,12 +406,15 @@ class CollectorInstallTests(unittest.TestCase):
         package = types.ModuleType('prometheus_client')
         package.core = core
         collector = metrics.PrefixCollector('/nonexistent', lookup=lambda: registry_with_traffic())
-        with mock.patch.dict(sys.modules, {'prometheus_client': package, 'prometheus_client.core': core}):
+        with mock.patch.dict(metrics._REQUESTS, {('high',) + ('unset',) * 3 + ('set',): 2}, clear=True), \
+                mock.patch.dict(sys.modules, {'prometheus_client': package, 'prometheus_client.core': core}):
             families = list(collector.collect())
         self.assertEqual(len(families), len(made))
         self.assertIn(('counter', 'qwen_prefix_grants', 3), made)
         self.assertIn(('gauge', 'qwen_prefix_registry_bytes', 4000), made)
         self.assertIn(('counter', 'qwen_prefix_restore_seconds', 1.5), made)
+        self.assertEqual(made[-1], ('counter', 'qwen_prefix_chat_requests', metrics.REQUEST_LABELS))
+        self.assertEqual(families[-1].samples, [(('high', 'unset', 'unset', 'unset', 'set'), 2)])
         self.assertEqual(collector.describe(), [])
 
     @unittest.skipUnless(HAVE_PROMETHEUS, 'prometheus_client is a vLLM dependency: this runs in the image')
@@ -367,9 +427,16 @@ class CollectorInstallTests(unittest.TestCase):
             exporter = metrics.Exporter(tmp, 1.0, lookup=registry_with_traffic, logger=lambda *a: None)
             exporter.publish()
             metrics.register_collector(registry, tmp)
-            text = generate_latest(registry).decode('utf-8')
+            with mock.patch.dict(metrics._REQUESTS, {('medium', 'unset', 'unset', 'true', 'set'): 4}, clear=True):
+                text = generate_latest(registry).decode('utf-8')
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+        sample = [line for line in text.splitlines() if line.startswith('qwen_prefix_chat_requests_total{')]
+        self.assertEqual(len(sample), 1, text)
+        for pair in ('reasoning_effort="medium"', 'template_reasoning_effort="unset"', 'preserve_thinking="unset"',
+                     'enable_thinking="true"', 'cache_salt="set"'):
+            self.assertIn(pair, sample[0])
+        self.assertTrue(sample[0].endswith('} 4.0'), sample[0])
         self.assertIn('qwen_prefix_grants_total 3.0', text)
         self.assertIn('qwen_prefix_grant_tokens_total 6144.0', text)
         self.assertIn('qwen_prefix_trim_loss_tokens_total 128.0', text)

@@ -338,24 +338,36 @@ class StageTests(unittest.TestCase):
                 self.assertEqual(path, root + '/' + name.split('/', 1)[1])
 
     def test_resolution(self):
-        def spec(location):
-            return types.SimpleNamespace(submodule_search_locations=[location], origin=location + '/__init__.py')
+        def spec(*locations):
+            return types.SimpleNamespace(submodule_search_locations=list(locations), origin=None)
 
-        good = {stage.PLUGIN_PACKAGE: spec(stage.PLUGIN_ROOT), stage.MODEL_PACKAGE: spec(stage.MODEL_TREE + '/models')}
-        with mock.patch.object(stage.os.path, 'realpath', lambda path: path):
-            problems, found = stage.resolution_problems(good.get)
+        models = stage.MODEL_TREE + '/models'
+        holds = {models + '/' + stage.QWEN_ENTRY}
+        isfile = lambda path: path.replace(os.sep, '/') in holds  # noqa: E731
+        good = {stage.PLUGIN_PACKAGE: spec(stage.PLUGIN_ROOT), stage.MODEL_PACKAGE: spec(models)}
+        with mock.patch.object(stage.os.path, 'realpath', lambda path: path), \
+                mock.patch.object(stage.os.path, 'join', lambda *parts: '/'.join(parts)):
+            problems, found = stage.resolution_problems(good.get, isfile)
             self.assertEqual(problems, [])
-            self.assertEqual(found['plugin'], stage.PLUGIN_ROOT)
+            self.assertEqual((found['plugin'], found['models']), (stage.PLUGIN_ROOT, models))
+            # a namespace `models` spanning another tree first still imports qwen36 from /opt/tt-metal
+            spanning = dict(good, **{stage.MODEL_PACKAGE: spec('/experiment-scripts/ci/models', models)})
+            self.assertEqual(stage.resolution_problems(spanning.get, isfile)[0], [])
             other = dict(good, **{stage.PLUGIN_PACKAGE: spec('/opt/vllm-tt-plugin/src/vllm_tt_plugin')})
-            problems, _ = stage.resolution_problems(other.get)
+            problems, _ = stage.resolution_problems(other.get, isfile)
             self.assertTrue(problems and 'nothing runs' in problems[0], problems)
-            problems, _ = stage.resolution_problems({}.get)
+            elsewhere = dict(good, **{stage.MODEL_PACKAGE: spec('/usr/lib/python3/dist-packages/models')})
+            problems, _ = stage.resolution_problems(elsewhere.get, isfile)
+            self.assertTrue(problems and 'model tree nothing runs' in problems[0], problems)
+            problems, _ = stage.resolution_problems({}.get, isfile)
             self.assertEqual(len(problems), 2)
 
             def raising(name):
                 raise ImportError(name)
 
             self.assertIsNone(stage.package_directory('x', raising))
+            module = types.SimpleNamespace(submodule_search_locations=None, origin='/a/b/mod.py')
+            self.assertEqual(stage.package_locations('mod', {'mod': module}.get), ['/a/b'])
 
     def test_the_record_check(self):
         """record_problems is what c2_image_provenance (f) runs on the built image."""
