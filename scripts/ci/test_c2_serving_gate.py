@@ -38,13 +38,18 @@ with open(driver.REFERENCE, encoding='utf-8') as _handle:
 
 
 def profiles_with_c2():
-    """The checkout's profiles plus a c2 shaped like the plan's (2.2: 131,328 geometry, 16,384 ceiling,
-    a ~123k prompt cap) - the real one lands in qwen_c2_profiles.json on another track."""
-    profiles = json.loads(json.dumps(CHECKOUT_PROFILES))
-    c2 = json.loads(json.dumps(profiles['profiles']['exact']))
-    c2['env']['QWEN_FAST_OUTPUT_BUDGET'] = '16384'
-    c2['max_prompt_tokens'] = 123136
-    profiles['profiles']['c2'] = c2
+    """The checkout's profiles, c2 and c2-gate included (s1/core: 131,328 geometry, 16,384 ceiling; c2
+    keeps 8,192 of answer room, so a 123,136-token prompt cap; c2-gate keeps 256, so v235's 131,072)."""
+    return json.loads(json.dumps(CHECKOUT_PROFILES))
+
+
+def narrow_profiles(cap=114944):
+    """The checkout's profiles plus c2-narrow: c2 with its prompt cap lowered to `cap`, for the ladder
+    fitting a profile below the G4 ladder's top rung."""
+    profiles = profiles_with_c2()
+    narrow = json.loads(json.dumps(profiles['profiles']['c2']))
+    narrow['max_prompt_tokens'] = cap
+    profiles['profiles']['c2-narrow'] = narrow
     return profiles
 
 
@@ -210,10 +215,13 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(driver.SNAPSHOT, CHECKOUT_PROFILES['profiles']['exact']['snapshots'][0])
 
     def test_the_default_ladder_is_fitted_to_the_profile_with_a_note(self):
-        """Today's c2 admits 131,328 - 16,384 = 114,944 at most: the ladder's 120,000 would be a 400, a
-        hardware FAIL that reads as the fast path's (review finding 3). Lowered, and said so."""
+        """A profile admitting less than the ladder's 120,000 would answer it with a 400, a hardware FAIL
+        that reads as the fast path's (review finding 3). Lowered, and said so. c2 itself (123,136)
+        takes the whole ladder."""
         notes = []
-        arms = driver.plan_arms('matrix', 'c2', profiles_with_c2(), notes=notes)
+        (_, c_args, _), _ = driver.plan_arms('matrix', 'c2', profiles_with_c2(), notes=notes)
+        self.assertEqual((parse_harness(c_args).prompt_lengths, notes), (list(c2_serving_job.LADDER), []))
+        arms = driver.plan_arms('matrix', 'c2-narrow', narrow_profiles(), notes=notes)
         (c_arm, c_args, _), (s_arm, s_args, _) = arms
         concurrent, solo = parse_harness(c_args), parse_harness(s_args)
         fitted = list(c2_serving_job.LADDER[:-1]) + [114944]
@@ -229,11 +237,14 @@ class PlanTests(unittest.TestCase):
     def test_what_a_profile_cannot_serve_is_refused_before_any_container(self):
         c2 = profiles_with_c2()
         for plan, profile, profiles, kwargs, words in (
-                ('matrix', 'c2', c2, dict(lengths=[60, 120000]), 'exceed 114944'),         # past the edge
+                ('matrix', 'c2', c2, dict(lengths=[60, 124000]), 'exceed 123136'),         # past the edge
+                ('matrix', 'c2-gate', c2, dict(lengths=[131073]), 'exceed 131072'),
+                ('matrix', 'c2', c2, dict(lengths=[60, 120000], max_tokens=16384),         # the answer room
+                 'leaves 11328 tokens'),
                 ('matrix', 'c2', c2, dict(lengths=[44, 2048]), 'below 45 tokens'),         # the compact template
                 ('matrix', 'exact', c2, dict(lengths=[60, 2048]), 'output ceiling 256'),   # 4096 > 256: cut silently
                 ('matrix', 'general', c2, dict(lengths=[60], max_tokens=256), None),       # fits
-                ('memory', 'c2', c2, dict(memory_prompt=123136), 'exceed 114944'),
+                ('memory', 'c2', c2, dict(memory_prompt=123137), 'exceed 123136'),
                 ('lifecycle', 'exact', c2, {}, 'output ceiling 256'),
                 ('lifecycle', 'general', c2, {}, 'output ceiling 256')):
             with self.subTest(plan=plan, profile=profile, kwargs=kwargs):
@@ -253,10 +264,12 @@ class PlanTests(unittest.TestCase):
             logit_bias = allowed_token_ids = bad_words = stop_token_ids = max_tokens = None
 
         profiles = profiles_with_c2()
+        self.assertTrue({'exact', 'c2', 'c2-gate'} <= set(profiles['profiles']))
         for name, profile in sorted(profiles['profiles'].items()):
             context, ceiling, room = driver.profile_limits(profiles, name)
-            kwargs = dict(max_model_len=context, budget=int(profile['env']['QWEN_FAST_OUTPUT_BUDGET']),
-                          eos_ids=frozenset(profile['eos_ids']), max_prompt_tokens=profile.get('max_prompt_tokens'))
+            # Every limit the contract's boot reads from the profile (request_limits), as it installs them.
+            kwargs = dict(max_model_len=context, eos_ids=frozenset(profile['eos_ids']),
+                          **contract.request_limits(profile))
             with self.subTest(profile=name):
                 params = Params()
                 params.max_tokens = ceiling + 1000
@@ -266,21 +279,33 @@ class PlanTests(unittest.TestCase):
                 with self.assertRaises(contract.ContractError):
                     contract.enforce_request(Params(), prompt_tokens=room + 1, **kwargs)
 
-    def test_the_memory_arm_is_four_largest_prompts_at_the_ceiling(self):
-        (arm, args, _), = driver.plan_arms('memory', 'c2', profiles_with_c2())
-        options = parse_harness(args)
-        self.assertEqual(driver.profile_limits(profiles_with_c2(), 'c2'), (131328, 16384, 114944))
-        self.assertEqual(options.prompt_lengths, [114944] * 4, 'the contract today: context less the ceiling')
-        self.assertEqual(options.max_tokens, 16384)
-        (_, args, _), = driver.plan_arms('memory', 'c2', profiles_with_c2(), memory_prompt=100000)
-        self.assertEqual(parse_harness(args).prompt_lengths, [100000] * 4)
+    def test_the_c2_profiles_limits(self):
+        """c2 keeps 8,192 tokens of answer room (a 123,136 cap), c2-gate 256 (v235's 131,072 admitted)."""
+        self.assertEqual(driver.profile_limits(profiles_with_c2(), 'c2'), (131328, 16384, 123136))
+        self.assertEqual(driver.profile_limits(profiles_with_c2(), 'c2-gate'), (131328, 16384, 131072))
+        self.assertEqual(driver.profile_limits(profiles_with_c2(), 'exact'), (131328, 256, 131072))
+        self.assertEqual([name for name in sorted(CHECKOUT_PROFILES['profiles'])
+                          if driver.any_request_profile(CHECKOUT_PROFILES, name)], ['c2', 'c2-gate'])
+
+    def test_the_memory_arms_are_the_largest_prompts_and_on_c2_any_the_shortest(self):
+        """G5: four of the largest admitted prompts at what the contract leaves them (c2: 123,136 + 8,192;
+        a larger max_tokens would be clamped and read as a budget cut) and, where C2-any is on, four
+        60-token prompts at the whole 16,384 ceiling - every proposal bucket per drafter (R3)."""
+        (arm, args, _), (short_arm, short_args, _) = driver.plan_arms('memory', 'c2', profiles_with_c2())
+        options, short = parse_harness(args), parse_harness(short_args)
+        self.assertEqual((arm, short_arm), ('memory-concurrent', 'memory-short'))
+        self.assertEqual((options.prompt_lengths, options.max_tokens), ([123136] * 4, 8192))
+        self.assertEqual((short.prompt_lengths, short.max_tokens, short.users), ([60] * 4, 16384, 4))
+        (_, args, _), _ = driver.plan_arms('memory', 'c2', profiles_with_c2(), memory_prompt=100000)
+        self.assertEqual((parse_harness(args).prompt_lengths, parse_harness(args).max_tokens), ([100000] * 4, 16384))
         (_, args, _), = driver.plan_arms('memory', 'exact', CHECKOUT_PROFILES)
         self.assertEqual((parse_harness(args).prompt_lengths, parse_harness(args).max_tokens), ([131072] * 4, 256))
 
     def test_a_profile_whose_edge_refuses_v235s_prompts_is_warned_about(self):
         self.assertIsNone(driver.bringup_warning(CHECKOUT_PROFILES, 'exact'))
+        self.assertIsNone(driver.bringup_warning(CHECKOUT_PROFILES, 'c2-gate'))
         warning = driver.bringup_warning(profiles_with_c2(), 'c2')
-        self.assertIn('admits prompts up to 114944 tokens', warning)
+        self.assertIn('admits prompts up to 123136 tokens', warning)
         self.assertIn('131072-token prompts', warning)
         self.assertIsNotNone(driver.bringup_warning(CHECKOUT_PROFILES, 'general'))
 
@@ -392,6 +417,8 @@ class VerdictTests(unittest.TestCase):
         other = driver.bringup_verdict(served_report(argv=wrong, profile='c2'), V235, 'c2')
         self.assertEqual(other['verdict'], 'PASS', 'on another profile the argv difference is reported only')
         self.assertIn('launched argv differs from v235\'s engine in: --max-num-seqs', other['lines'])
+        gate_profile = driver.bringup_verdict(served_report(argv=wrong, profile='c2-gate'), V235, 'c2-gate')
+        self.assertEqual(gate_profile['verdict'], 'FAIL', 'c2-gate serves exact' + "'" + 's engine with c2' + "'" + 's environment')
 
     def test_memory_records_and_needs_every_engines_line(self):
         want = driver.asked(driver.plan_arms('memory', 'exact', CHECKOUT_PROFILES)[0][1])
@@ -479,8 +506,9 @@ class FakeDocker(object):
     """Writes each arm's gate stdout the way the container would, from a per-arm report factory, and
     optionally a server.log (a wedge, for one)."""
 
-    def __init__(self, reports, server_logs=None):
+    def __init__(self, reports, server_logs=None, default_log=None):
         self.reports, self.calls, self.server_logs = reports, [], server_logs or {}
+        self.default_log = default_log
 
     def __call__(self, arguments, stdout_path, timeout, name):
         arm = name[len(driver.CONTAINER_PREFIX):]
@@ -491,20 +519,39 @@ class FakeDocker(object):
                 handle.write('[REALTEXT] building\n%s\n%s\n%s\n' % (gate.BEGIN, json.dumps(report), gate.END))
             else:
                 handle.write('docker: Error response from daemon\n')
-        if arm in self.server_logs:
+        log_text = self.server_logs.get(arm, self.default_log)
+        if log_text is not None:
             with open(os.path.join(os.path.dirname(stdout_path), 'server.log'), 'w') as handle:
-                handle.write(self.server_logs[arm])
+                handle.write(log_text)
         return 0 if report is not None else 125
 
 
+def any_request_log(requests=4, prompt=60, ladder='[256, 512, 1024, 2048]'):
+    """What an engine under QWEN_FAST_ANY_REQUEST=1 logs: the D2 consumer's live line on its first step,
+    and one build line per request (serving_request_factory)."""
+    lines = ['INFO [PINDIAG] request quarantine installed on vllm_tt_plugin.scheduler.TTScheduler',
+             'INFO ' + driver.QUARANTINE_LIVE]
+    lines += ['INFO %scmpl-%d: captures <= 4 rows, replay attention and the T16 gate off, budget 16384 of '
+              'max_tokens 16384 at position %d, proposal ladder %s' % (driver.ANY_REQUEST_ENGINE, i, prompt, ladder)
+              for i in range(requests)]
+    return chr(10).join(lines) + chr(10)
+
+
 class DriverTests(unittest.TestCase):
-    def run_driver(self, argv, reports, profiles=None, server_logs=None, containers=None, corpus=None):
+    def run_driver(self, argv, reports, profiles=None, server_logs=None, containers=None, corpus=None,
+                   default_log='any-request'):
+        profiles = profiles or profiles_with_c2()
+        if default_log == 'any-request':
+            # An engine under a C2-any profile logs the consumer's live line; any other logs none of it.
+            name = argv[argv.index('--profile') + 1] if '--profile' in argv else None
+            default_log = any_request_log() if name in profiles['profiles'] and driver.any_request_profile(
+                profiles, name) else None
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, 'profiles.json')
             with open(path, 'w', encoding='utf-8') as handle:
-                json.dump(profiles or profiles_with_c2(), handle)
+                json.dump(profiles, handle)
             results = os.path.join(directory, 'results')
-            docker, lines = FakeDocker(reports, server_logs), []
+            docker, lines = FakeDocker(reports, server_logs, default_log), []
             code = driver.main(argv + ['--image', 'zot/img:c2', '--results', results, '--profiles', path],
                                execute=docker, devices=['/dev/tenstorrent/3', '/dev/tenstorrent/1'], log=lines.append,
                                containers=containers or (lambda: []),
@@ -587,12 +634,17 @@ class DriverTests(unittest.TestCase):
         same = {'matrix-concurrent': lambda n: matrix_report(texts), 'matrix-solo': lambda n: matrix_report(texts)}
         code, summary, calls, lines, _ = self.run_driver(['--profile', 'c2', '--plan', 'matrix'], same)
         self.assertEqual(code, 0, lines)
+        self.assertFalse(any('[C2-GATE] note:' in line for line in lines), 'c2 takes the whole ladder')
+        self.assertTrue(calls[0]['arguments'][calls[0]['arguments'].index('--prompt-lengths') + 1].endswith(',120000'))
+        code, summary, calls, lines, _ = self.run_driver(['--profile', 'c2-narrow', '--plan', 'matrix'], same,
+                                                         profiles=narrow_profiles())
+        self.assertEqual(code, 0, lines)
         self.assertTrue(any('[C2-GATE] note: matrix: the default ladder\'s [120000] lowered to 114944' in line
                             for line in lines))
         self.assertTrue(calls[0]['arguments'][calls[0]['arguments'].index('--prompt-lengths') + 1].endswith(',114944'))
 
     def test_plans_the_profile_or_the_budget_cannot_take_are_refused_before_any_container(self):
-        for argv, words in ((['--plan', 'matrix', '--lengths', '60,120000'], 'exceed 114944'),
+        for argv, words in ((['--plan', 'matrix', '--lengths', '60,124000'], 'exceed 123136'),
                             (['--plan', 'bringup,matrix', '--lengths', '60,2048', '--max-tokens', '20000'],
                              'exceeds profile c2\'s output ceiling 16384'),
                             (['--plan', 'matrix,lifecycle', '--budget-seconds', '22200'], 'past the 22200 s'),
@@ -605,11 +657,17 @@ class DriverTests(unittest.TestCase):
     def test_an_arm_with_no_report_fails_its_plan_and_the_others_still_run(self):
         reports = {'bringup-concurrent': lambda n: None,
                    'memory-concurrent': lambda n: served_report(profile='c2', finish='stop', completion=500,
-                                                                max_tokens=16384)}
+                                                                max_tokens=8192),
+                   'memory-short': lambda n: served_report(profile='c2', finish='stop', completion=500,
+                                                           max_tokens=16384)}
         code, summary, calls, lines, _ = self.run_driver(['--profile', 'c2', '--plan', 'bringup,memory'], reports)
         self.assertEqual(code, 1)
         self.assertEqual(summary['results']['bringup']['verdict'], 'FAIL')
         self.assertEqual(summary['results']['memory']['verdict'], 'PASS', summary['results']['memory'])
+        self.assertEqual(sorted(summary['results']['memory']['arms']), ['memory-concurrent', 'memory-short'])
+        ladders = summary['results']['memory']['arms']['memory-short']['any_request_engines']
+        self.assertEqual(len(ladders), 4)
+        self.assertTrue(all(line.endswith('proposal ladder [256, 512, 1024, 2048]') for line in ladders), ladders)
         self.assertTrue(any('NO [QWEN-C2] argv line' in line for line in lines))
         self.assertTrue(any('[PINDIAG] dram after engine cmpl-3' in line for line in lines))
 
@@ -638,6 +696,34 @@ class DriverTests(unittest.TestCase):
                          ('INFRA', 'INFRA'))
         self.assertIn('reset M+A', summary['infra'])
         self.assertTrue(lines[-1].startswith('C2_GATE profile=c2 plans=bringup,memory passed=False infra='))
+
+    def test_c2_any_arms_need_the_quarantine_consumers_live_line(self):
+        """Memory graft-mounted-is-not-graft-executed: a consumer wrapped onto a scheduler class the
+        engine never builds is silent until a refusal strands a request. Under QWEN_FAST_ANY_REQUEST=1
+        every arm that served must show it; its absence fails the arm even on identical texts."""
+        texts = ['answer %d ' % i * 50 for i in range(4)]
+        same = {'matrix-concurrent': lambda n: matrix_report(texts), 'matrix-solo': lambda n: matrix_report(texts)}
+        argv = ['--profile', 'c2', '--plan', 'matrix', '--lengths', '60,2048,4096,90']
+        code, summary, _, lines, files = self.run_driver(argv, same)
+        self.assertEqual((code, summary['results']['matrix']['verdict']), (0, 'PASS'), lines)
+        self.assertIn('server.log', files['matrix-concurrent'])
+        silent = 'INFO [PINDIAG] request quarantine installed on vllm_tt_plugin.scheduler.TTScheduler' + chr(10)
+        code, summary, _, lines, _ = self.run_driver(argv, same, server_logs={'matrix-solo': silent})
+        self.assertEqual((code, summary['results']['matrix']['verdict']), (1, 'FAIL'))
+        self.assertTrue(any('solo: QWEN_FAST_ANY_REQUEST=1 but the server log has no' in p
+                            for p in summary['results']['matrix']['platform_problems']), summary['results']['matrix'])
+        code, summary, _, _, _ = self.run_driver(argv, same, default_log=None)
+        self.assertEqual((code, summary['results']['matrix']['verdict']), (1, 'FAIL'), 'no server.log: unproven')
+
+    def test_no_c2_any_marker_may_appear_off_the_switch(self):
+        """exact must run v235's path: an any-request marker in its log means the switch leaked."""
+        code, summary, _, _, _ = self.run_driver(
+            ['--profile', 'exact', '--plan', 'bringup'], {'bringup-concurrent': lambda n: served_report()},
+            profiles=CHECKOUT_PROFILES, server_logs={'bringup-concurrent': any_request_log()})
+        self.assertEqual((code, summary['results']['bringup']['verdict']), (1, 'FAIL'))
+        self.assertTrue(any('carries C2-any markers' in p for p in summary['results']['bringup']['platform_problems']))
+        self.assertEqual(driver.any_request_check('INFO nothing of it' + chr(10), False), ([], []))
+        self.assertEqual(driver.any_request_check(None, False), ([], []))
 
     def test_dry_run_and_bad_arguments(self):
         with tempfile.TemporaryDirectory() as directory:

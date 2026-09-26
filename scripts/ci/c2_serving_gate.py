@@ -17,16 +17,17 @@ copied out). Each arm is one container; the image's engine skips tt-metal's tear
 next arm reopens the pair (the platform replay's docker stop/start proved it).
 
 PLANS (C2_GATE_PLAN, run in order). Every plan is checked against the IMAGE's profile before any
-container starts (plan_arms): a prompt past what the contract admits (profile_limits: context less the
-output ceiling, or max_prompt_tokens), an answer budget past the ceiling (the contract would cut it
-silently), or a length below the compact framing's template (real_text_prompts.COMPACT_MIN_TARGET) is
-refused - except the default ladder's top rung, which is lowered to the profile's largest admitted
-prompt with a logged note.
+container starts (plan_arms): a prompt past what the contract admits (profile_limits, the contract's
+own prompt_room: context less the output ceiling or less min_answer_tokens, lowered by
+max_prompt_tokens), an answer budget past the ceiling or past what a prompt leaves of the context (the
+contract would cut it silently), or a length below the compact framing's template
+(real_text_prompts.COMPACT_MIN_TARGET) is refused - except the default ladder's top rung, which is
+lowered to the profile's largest admitted prompt with a logged note.
   bringup  4 users x 131072-token real-text prompts, 256 out, EOS on, 0.25 s apart (v235's shape),
            against the tracked v235 texts: IDENTICAL/DIVERGED per user (real_text_compare.
            reference_verdicts). Passes when all four are IDENTICAL, the harness's own verdict (every
            lever's marker, the packed rounds) holds, every stream spent exactly what it asked, and -
-           on the profile v235's engine is (REFERENCE_PROFILE) - the launched argv is v235's engine
+           on the profiles v235's engine is (REFERENCE_PROFILES) - the launched argv is v235's engine
            (real_text_compare.served_engine_diff). First, in a throwaway container without devices,
            the image's real-text corpus (its vLLM source) is checked against v235's: another corpus
            builds other prompts, so the plan is NOT_COMPARABLE without spending M+A on it. Gate table
@@ -39,8 +40,11 @@ prompt with a logged note.
            than asked, a 'length' finish short of its budget, or a user whose full-draft acceptance
            collapsed (both arms share one engine, so a corruption common to both would otherwise
            match) FAILS it. Gate table row G4 part 1.
-  memory   4 users x the profile's largest admitted prompt x its output ceiling, concurrent: every
-           '[PINDIAG] dram after engine' line recorded, and the floor printed. Gate table row G5.
+  memory   4 users x the profile's largest admitted prompt x what the contract leaves it (the output
+           ceiling, or context less the prompt), concurrent; on a C2-any profile also memory-short, 4
+           users x MEMORY_SHORT_PROMPT x the whole ceiling (every proposal bucket per drafter, R3):
+           every '[PINDIAG] dram after engine' line and every per-request engine's proposal ladder
+           recorded, and the floor printed. Gate table row G5.
   lifecycle  six users on four seats, two event arms (LIFECYCLE_EVENTS) and a solo reference:
            lifecycle-drops  user 0 (the first arrival) leaves while its engine builds, users 1-3 at 4, 3
                             and 2 live streams, user 4 takes user 0's freed seat, user 5 (ignore_eos)
@@ -55,7 +59,10 @@ prompt with a logged note.
            answer (slots were released), and the ledger's idle allocation after every stream, less the
            one before the first, must match the solo arm's to LEDGER_FLAT_GB per chip (the ledger stays
            flat). Gate table row Lifecycle.
-Every arm prints the contract's launched-argv line (read-the-launched-argv) and its DRAM lines.
+Every arm prints the contract's launched-argv line (read-the-launched-argv) and its DRAM lines. Under
+a profile that turns C2-any on (QWEN_FAST_ANY_REQUEST=1) every arm that served must show the D2
+quarantine consumer's live line (QUARANTINE_LIVE) in its server log, and under any other profile none
+of the C2-any markers may appear (ANY_REQUEST_MARKERS): either is a problem that fails the arm.
 
 SAFETY. Before each arm: no thatch-inference-* container may exist (a placement reloading onto M+A
 mid-gate), and a leftover gate container of the same name is removed; after each arm, however it
@@ -83,6 +90,7 @@ sys.path.insert(0, HERE)
 import c2_serving_job  # noqa: E402
 import real_text_compare  # noqa: E402
 import real_text_prompts  # noqa: E402
+import serving_c2_contract  # noqa: E402  (stdlib only at import: json, os, sys)
 
 CARD_M = 'blackhole-CEF5729692C19E6D'
 CARD_A = 'blackhole-3707293C249A5E67'
@@ -98,11 +106,28 @@ PLATFORM_PREFIX = 'thatch-inference-'
 BENCH_SCRIPTS = ('lever_n_m3native_gate.py', 'longctx_cycle_bench.py', 'm3native_ttft_profile.py',
                  'acceptance_report.py', 'real_text_prompts.py')
 REFERENCE = os.path.join(HERE, 'references', 'c2-serving', 'v235-real-text-4x131072.json')
-# v235's served engine is what this profile rewrites the platform argv to (test_real_text_gate): on it,
-# a launched argv that is not v235's engine fails the bring-up; on any other it is reported.
-REFERENCE_PROFILE = 'exact'
+# v235's served engine is what these profiles rewrite the platform argv to (test_real_text_gate; c2-gate
+# is exact's engine with c2's environment, test_serving_c2_contract): on them a launched argv that is
+# not v235's engine fails the bring-up; on any other it is reported.
+REFERENCE_PROFILES = ('exact', 'c2-gate')
 BRINGUP_USERS, BRINGUP_PROMPT, BRINGUP_MAX_TOKENS = 4, 131072, 256
 MEMORY_USERS = 4
+# G5's short-prompt arm, on a profile that takes any request (ANY_REQUEST_FLAG): four users with prompts
+# this short and the profile's whole output ceiling. Each drafter then captures every proposal bucket
+# (256..2048: one per rung from min(position, 2048) to min(2048, position + budget), serving_request_factory),
+# the per-request worst case the large-prompt arm never reaches (R3).
+MEMORY_SHORT_PROMPT = 60
+# C2-any (QWEN_FAST_ANY_REQUEST=1, the c2 profiles). The D2 quarantine's consumer logs QUARANTINE_LIVE
+# from inside the scheduler class it wrapped, on the engine's first step: a consumer on a class the
+# engine never builds is silent until a refusal strands a request (serving_request_quarantine, memory
+# graft-mounted-is-not-graft-executed), so every arm under the switch must show it. Every per-request
+# engine logs its build with its proposal ladder (ANY_REQUEST_ENGINE; R3, G5), recorded per arm. None of
+# ANY_REQUEST_MARKERS may appear under a profile that leaves the switch off: exact runs v235's path.
+ANY_REQUEST_FLAG = 'QWEN_FAST_ANY_REQUEST'
+QUARANTINE_LIVE = '[PINDIAG] request quarantine consumer live in TTScheduler'
+ANY_REQUEST_ENGINE = '[PINDIAG] any-request engine for '
+ANY_REQUEST_MARKERS = ('[PINDIAG] request quarantine', ANY_REQUEST_ENGINE, '[PINDIAG] attach source check')
+ANY_REQUEST_LINES_KEPT = 32
 STAGGER = 0.25            # v235's M3NATIVE_STAGGER: admission in user order
 READINESS_SECONDS = 1800
 ARM_SECONDS = dict(bringup=3600, matrix=5400, memory=5400, lifecycle=3300)
@@ -177,21 +202,33 @@ def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HU
 
 
 def profile_limits(profiles, name):
-    """(max-model-len, output ceiling, largest admitted prompt) of a profile, as the contract computes
-    the prompt limit today (serving_c2_contract.enforce_request: context less budget, or the profile's
-    max_prompt_tokens when that is lower). test_c2_serving_gate holds this against enforce_request
-    itself, so a contract change that moves the limit fails there until this follows it."""
+    """(max-model-len, output ceiling, largest admitted prompt) of a profile, the prompt limit computed
+    by the contract's own functions (serving_c2_contract.request_limits and prompt_room, which
+    enforce_request uses): context less the output ceiling - or less min_answer_tokens where the profile
+    names it (c2: 123,136; c2-gate: 131,072) - lowered by max_prompt_tokens. test_c2_serving_gate holds
+    this against enforce_request itself on every profile of the checkout."""
     profile = profiles['profiles'][name]
     context = int(profile['engine']['max-model-len'])
-    ceiling = int(profile['env']['QWEN_FAST_OUTPUT_BUDGET'])
-    room = context - ceiling
-    if profile.get('max_prompt_tokens'):
-        room = min(room, int(profile['max_prompt_tokens']))
-    return context, ceiling, room
+    limits = serving_c2_contract.request_limits(profile)
+    room = serving_c2_contract.prompt_room(context, limits['budget'], limits['max_prompt_tokens'],
+                                           limits['min_answer_tokens'])
+    return context, limits['budget'], room
 
 
 def profile_seats(profiles, name):
     return int(profiles['profiles'][name]['engine'].get('max-num-seqs') or 1)
+
+
+def any_request_profile(profiles, name):
+    """Whether the profile turns C2-any on (serving_fast_policy.any_request_enabled's switch)."""
+    return str((profiles['profiles'][name].get('env') or {}).get(ANY_REQUEST_FLAG, '0')) == '1'
+
+
+def answer_room(context, lengths, max_tokens):
+    """The largest max_tokens every prompt in `lengths` can be served in full: the contract clamps a
+    request to context less its prompt, and a 'length' finish short of what the harness asked reads as
+    a budget cut (request_problems)."""
+    return min([max_tokens] + [context - length for length in lengths])
 
 
 def common_args(profile, context, stream_seconds, readiness=READINESS_SECONDS):
@@ -240,6 +277,11 @@ def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.D
         lengths = list(lengths)
         check_lengths(profile, lengths, room, 'matrix prompt lengths')
         check_budget(profile, max_tokens, ceiling, 'matrix --max-tokens')
+        fits = answer_room(context, lengths, max_tokens)
+        if fits < max_tokens:
+            raise PlanError('matrix --max-tokens %d: a %d-token prompt leaves %d tokens of profile %s\'s context %d, '
+                            'so the contract would cut that answer to %d and its \'length\' finish would read as a '
+                            'budget cut' % (max_tokens, context - fits, fits, profile, context, fits))
         text = ','.join(str(length) for length in lengths)
         base = common_args(profile, context, STREAM_SECONDS[plan]) + ['--prompt-lengths', text,
                                                                        '--max-tokens', str(max_tokens)]
@@ -247,12 +289,22 @@ def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.D
                  ARM_SECONDS[plan]),
                 ('matrix-solo', base + ['--users', '1', '--sequential-users', str(len(lengths))], ARM_SECONDS[plan])]
     if plan == 'memory':
+        # The largest prompt gets what the contract leaves it: the ceiling, or context less the prompt
+        # when that is smaller (c2: 123,136 + 8,192), so every stream can run to its budget.
         prompt = memory_prompt or room
         check_lengths(profile, [prompt], room, 'memory prompt')
         args = common_args(profile, context, STREAM_SECONDS[plan]) + [
             '--users', str(MEMORY_USERS), '--prompt-lengths', ','.join([str(prompt)] * MEMORY_USERS),
-            '--max-tokens', str(ceiling), '--stagger', str(STAGGER)]
-        return [('memory-concurrent', args, ARM_SECONDS[plan])]
+            '--max-tokens', str(answer_room(context, [prompt], ceiling)), '--stagger', str(STAGGER)]
+        arms = [('memory-concurrent', args, ARM_SECONDS[plan])]
+        if any_request_profile(profiles, profile):
+            short = [MEMORY_SHORT_PROMPT] * MEMORY_USERS
+            check_lengths(profile, short, room, 'memory short prompts')
+            arms.append(('memory-short', common_args(profile, context, STREAM_SECONDS[plan]) + [
+                '--users', str(MEMORY_USERS), '--prompt-lengths', ','.join(str(length) for length in short),
+                '--max-tokens', str(answer_room(context, short, ceiling)), '--stagger', str(STAGGER)],
+                ARM_SECONDS[plan]))
+        return arms
     if plan == 'lifecycle':
         check_lengths(profile, LIFECYCLE_LENGTHS, room, 'lifecycle prompt lengths')
         check_budget(profile, LIFECYCLE_MAX_TOKENS, ceiling, 'lifecycle --max-tokens')
@@ -359,6 +411,7 @@ def arm_problems(label, report, want=None, acceptance=False):
     """Everything besides the texts that fails an arm: the contract's problems, stream problems, a fatal
     error, what it served against what it asked, and (the matrix) a collapsed acceptance."""
     problems = ['%s: %s' % (label, p) for p in ((report.get('platform') or {}).get('problems') or [])]
+    problems += ['%s: %s' % (label, p) for p in report.get('c2_gate_problems') or []]
     problems += ['%s: %s' % (label, p) for p in stream_problems(report)]
     if report.get('fatal'):
         problems.append('%s: fatal: %s' % (label, report['fatal']))
@@ -371,7 +424,7 @@ def arm_problems(label, report, want=None, acceptance=False):
 
 def bringup_verdict(report, reference, profile=None, want=None):
     """IDENTICAL/DIVERGED per user against the reference, and PASS only when all four are IDENTICAL,
-    the contract served the expected profile - with v235's engine argv, on REFERENCE_PROFILE - every
+    the contract served the expected profile - with v235's engine argv, on REFERENCE_PROFILES - every
     stream spent what it asked, and the harness's own verdict held."""
     if report is None:
         return dict(verdict='FAIL', reason='no gate report', users=[])
@@ -379,13 +432,13 @@ def bringup_verdict(report, reference, profile=None, want=None):
     problems = arm_problems('bring-up', report, want)
     served_argv = (report.get('platform') or {}).get('served_argv')
     argv_diff = real_text_compare.served_engine_diff(served_argv, reference.get('command'))
-    if argv_diff and profile == REFERENCE_PROFILE:
+    if argv_diff and profile in REFERENCE_PROFILES:
         problems.append('bring-up: the launched argv is not v235\'s engine (served | v235): %s' % ', '.join(
             '%s=%s|%s' % (flag, json.dumps(values[0]), json.dumps(values[1])) for flag, values in sorted(argv_diff.items())))
     missing = ((report.get('flag_markers') or {}).get('missing')) or []
     passed = result['verdict'] == 'IDENTICAL' and not problems and bool(report.get('gate_passed'))
     lines = real_text_compare.render_reference(result).split('\n') + ['problem: %s' % p for p in problems]
-    if argv_diff and profile != REFERENCE_PROFILE:
+    if argv_diff and profile not in REFERENCE_PROFILES:
         lines.append('launched argv differs from v235\'s engine in: %s' % ', '.join(sorted(argv_diff)))
     return dict(verdict='PASS' if passed else 'FAIL', texts=result['verdict'], users=result['users'],
                 arithmetic_diff=result['arithmetic_diff'], configuration_diff=result['configuration_diff'],
@@ -546,6 +599,35 @@ def platform_containers():
     return [name for name in output.stdout.decode('utf-8', 'replace').split() if name.startswith(PLATFORM_PREFIX)]
 
 
+def server_log(arm_dir):
+    """The arm's server log (the harness writes it beside its report), or None."""
+    try:
+        with open(os.path.join(arm_dir, 'server.log'), errors='replace') as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def any_request_check(log_text, any_request):
+    """(problems, per-request engine lines) of one served arm's server log. Under a C2-any profile the
+    D2 consumer must have logged QUARANTINE_LIVE; under any other no C2-any marker may appear."""
+    if log_text is None:
+        return (['no server.log: the D2 quarantine consumer\'s live line (%s) cannot be checked' % QUARANTINE_LIVE]
+                if any_request else []), []
+    engines = [line.strip() for line in log_text.splitlines() if ANY_REQUEST_ENGINE in line]
+    if any_request:
+        if QUARANTINE_LIVE not in log_text:
+            return (['%s=1 but the server log has no "%s": the quarantine consumer never ran in the scheduler '
+                     'this engine built, so a refusal would strand its request (serving_request_quarantine)' % (
+                         ANY_REQUEST_FLAG, QUARANTINE_LIVE)], engines)
+        return [], engines
+    leaked = sorted(marker for marker in ANY_REQUEST_MARKERS if marker in log_text)
+    if leaked:
+        return (['the profile leaves %s off, but the server log carries C2-any markers (%s): this is not the '
+                 'profile\'s path' % (ANY_REQUEST_FLAG, '; '.join(leaked))], engines)
+    return [], engines
+
+
 def wedged(arm_dir):
     """Whether the arm's server log (or the gate's stdout, which quotes its tail) shows the wedge."""
     for name in ('server.log', 'gate-stdout.log'):
@@ -565,12 +647,13 @@ class Runner(object):
     ethernet-core wedge) every later arm is skipped."""
 
     def __init__(self, image, profile, results, checkout, devices, hub=HUB, execute=None, log=print,
-                 containers=None, corpus=None):
+                 containers=None, corpus=None, any_request=False):
         self.image, self.profile, self.results, self.checkout = image, profile, results, checkout
         self.devices, self.hub, self.log = devices, hub, log
         self.execute = execute or self._execute
         self.containers = containers or platform_containers
         self.corpus = corpus or (lambda: image_corpus(image, checkout))
+        self.any_request = any_request   # the profile turns C2-any on (any_request_profile)
         self.arms = {}
         self.infra = None
 
@@ -612,7 +695,12 @@ class Runner(object):
         seconds = round(time.time() - started, 1)
         with open(os.path.join(arm_dir, 'gate-stdout.log'), errors='replace') as handle:
             report = extract(handle.read())
+        engines = []
         if report is not None:
+            # What the server log says about C2-any, judged with the arm's own problems (arm_problems).
+            problems, engines = any_request_check(server_log(arm_dir), self.any_request)
+            if problems:
+                report['c2_gate_problems'] = list(report.get('c2_gate_problems') or []) + problems
             with open(os.path.join(arm_dir, 'm3native-gate.json'), 'w') as handle:
                 json.dump(report, handle, indent=2)
         line = launched_argv_line(report)
@@ -625,26 +713,31 @@ class Runner(object):
             self.log('[C2-GATE] arm %s: stream problem: %s' % (arm, problem))
         if report and report.get('fatal'):
             self.log('[C2-GATE] arm %s: fatal: %s' % (arm, report['fatal']))
+        for problem in (report or {}).get('c2_gate_problems') or []:
+            self.log('[C2-GATE] arm %s: problem: %s' % (arm, problem))
+        for text in engines[:8]:
+            self.log('[C2-GATE] arm %s: %s' % (arm, text))
         infra = None
         if wedged(arm_dir):
             infra = self.infra = ('arm %s hit tt-metal\'s ethernet-core wedge ("%s", llrt.cpp:594): reset M+A '
                                   'before the next run; nothing after it ran' % (arm, WEDGE))
             self.log('[C2-GATE] arm %s: INFRA - %s' % (arm, infra))
         self.arms[arm] = dict(exit=status, seconds=seconds, launched=line, gate_passed=(report or {}).get('gate_passed'),
-                              fatal=(report or {}).get('fatal'), infra=infra)
+                              fatal=(report or {}).get('fatal'), infra=infra,
+                              any_request_engines=engines[:ANY_REQUEST_LINES_KEPT])
         return report
 
 
 def bringup_warning(profiles, profile):
-    """Why v235's shape may be refused at this profile's edge, or None. Today's contract caps a prompt
-    at context less the output ceiling (or max_prompt_tokens): a c2 profile with a 16,384 ceiling admits
-    at most 114,944 (123,136 with the plan's cap), so 131,072-token prompts come back as 400s unless the
-    contract track's per-request budget lands first."""
+    """Why v235's shape may be refused at this profile's edge, or None. The contract caps a prompt at
+    context less the output ceiling, or less min_answer_tokens (profile_limits): c2 admits at most
+    123,136, so v235's 131,072-token prompts come back as 400s; c2-gate (min_answer_tokens 256) admits
+    them, which is why the c2 bring-up runs on c2-gate."""
     context, ceiling, room = profile_limits(profiles, profile)
     if room >= BRINGUP_PROMPT and context >= BRINGUP_PROMPT + BRINGUP_MAX_TOKENS:
         return None
-    return ('profile %s admits prompts up to %d tokens (context %d, output ceiling %d) under today\'s contract '
-            'formula; the bring-up sends %d-token prompts, which its edge may refuse' % (
+    return ('profile %s admits prompts up to %d tokens (context %d, output ceiling %d; profile_limits); the '
+            'bring-up sends %d-token prompts, which its edge will refuse' % (
                 profile, room, context, ceiling, BRINGUP_PROMPT))
 
 
@@ -671,8 +764,20 @@ def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2
         if warning:
             result['warning'] = warning
     elif plan == 'memory':
-        (arm, args, timeout), = arms
-        result = memory_verdict(runner.run(arm, args, timeout), want=asked(args))
+        results = []
+        for arm, args, timeout in arms:
+            one = memory_verdict(runner.run(arm, args, timeout), want=asked(args))
+            one['any_request_engines'] = (runner.arms.get(arm) or {}).get('any_request_engines') or []
+            results.append((arm, one))
+        if len(results) == 1:
+            result = results[0][1]
+        else:
+            # memory-short on a C2-any profile: each arm judged alone, the plan the worst of them; every
+            # per-request engine's proposal ladder recorded with its arm (R3).
+            result = dict(verdict=worst([one['verdict'] for _, one in results]), arms=dict(results),
+                          lines=['%s: %s' % (arm, line) for arm, one in results
+                                 for line in (one.get('lines') or []) + one['any_request_engines']] +
+                          ['%s %s' % (arm, one['verdict']) for arm, one in results])
     elif plan == 'lifecycle':
         reports = [(arm, args, timeout, runner.run(arm, args, timeout)) for arm, args, timeout in arms]
         (s_arm, s_args, s_timeout, solo) = reports[-1]
@@ -825,7 +930,8 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     options.checkout, os.path.join(options.results, arm), args, options.hub))))
         return 0
     runner = Runner(options.image, options.profile, options.results, options.checkout,
-                    devices if devices is not None else serving_pair(), options.hub, execute, log, containers, corpus)
+                    devices if devices is not None else serving_pair(), options.hub, execute, log, containers, corpus,
+                    any_request=any_request_profile(profiles, options.profile))
     context, ceiling, room = profile_limits(profiles, options.profile)
     summary = dict(image=options.image, profile=options.profile, plans=plans, context=context,
                    output_ceiling=ceiling, largest_prompt=room, worst_case_seconds=worst_case,
