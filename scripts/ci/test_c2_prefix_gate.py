@@ -182,6 +182,25 @@ class ArmTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             gate.plan_arms('soak', 'general-prefix', 'general', document)
 
+    def test_every_exactness_and_lifecycle_arm_is_a_plan_of_its_own(self):
+        """G1 v47 (run 36246961161): the eager arm alone, without the traced and audit arms' hour."""
+        document = profiles()
+        self.assertEqual(gate.PLANS, job.PREFIX_PLANS + tuple(arm for arm, _ in job.PREFIX_ARM_PLANS))
+        self.assertEqual(sorted(arm for arm, _ in job.PREFIX_ARM_PLANS),
+                         sorted(entry[0] for plan in ('exactness', 'lifecycle') for entry in gate.PLAN_ARMS[plan]))
+        for arm, plan in job.PREFIX_ARM_PLANS:
+            with self.subTest(arm=arm):
+                alone = gate.plan_arms(arm, 'general-prefix', 'general', document)
+                self.assertEqual(alone, [a for a in gate.plan_arms(plan, 'general-prefix', 'general', document)
+                                         if a['arm'] == arm])
+        eager, = gate.plan_arms('exactness-eager', 'general-prefix', 'none', document)
+        self.assertEqual((eager['served'], eager['kind'], eager['scenario'], eager['timeout']),
+                         ('general-prefix+eager', 'eager', 'exactness_eager', 5400))
+        self.assertEqual(gate.worst_case_seconds({'exactness-eager': [eager]}), 5400 + gate.ARM_OVERHEAD_SECONDS)
+        for plan in ('bringup-prefix', 'timing-prefix'):
+            with self.subTest(plan=plan), self.assertRaises(ValueError):
+                gate.plan_arms(plan, 'general-prefix', 'general', document)
+
     def test_the_worst_case_fits_one_plan_per_step(self):
         document = profiles()
         for plan in gate.PLANS:
@@ -606,6 +625,44 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(traced['verdict'], 'NOT_EXERCISED')
         self.assertTrue(any('no [PREFIX] row carries slot_sha and logits_sha' in m for m in traced['not_exercised']))
 
+    def test_the_eager_arm_alone_passes_and_names_the_eager_warm(self):
+        result, harness, _ = self.plan('exactness-eager')
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        self.assertEqual(list(result['arms']), ['exactness-eager'])
+        self.assertEqual([e.path for e in harness.engines], ['eager'])
+        self.assertTrue(any(note.startswith('eager warm: ') and '"page_table_blocks": 4128' in note
+                            for note in result['arms']['exactness-eager']['notes']))
+
+    def test_an_eager_arm_without_the_eager_warm_fails(self):
+        """G1 v47 (run 36246961161): an image that compiles the eager prefill after the decode trace is parked."""
+        result, _, _ = self.plan('exactness-eager', 'nowarm', eager=dict(no_eager_warm=True))
+        eager = result['arms']['exactness-eager']
+        self.assertEqual(eager['verdict'], 'FAIL')
+        self.assertTrue(any('no "%s" line' % pm.EAGER_WARM in p for p in eager['problems']), eager['problems'])
+
+    def test_a_row_that_compiles_fails_an_exactness_arm(self):
+        """F3 on every row, not only across a hit: v47's eager arm compiled 133 programs in its first (cold)
+        row, and its next prefill hung the device."""
+        class Grows(fakes.FakeEngine):
+            def say(self, line):
+                if line.startswith('[PREFIX] req=') and '-0002-cold' in line:
+                    line = line.replace('programs=%d' % self.programs, 'programs=%d' % (self.programs + 133))
+                super(Grows, self).say(line)
+
+        result, _, _ = self.plan('exactness-eager', 'grows', engine_class=Grows)
+        eager = result['arms']['exactness-eager']
+        self.assertEqual(eager['verdict'], 'FAIL')
+        self.assertTrue(any('pfx-exactness-eager-0002-cold (path eager, Q=0' in p and 'compiled 133 programs' in p
+                            for p in eager['problems']), eager['problems'])
+
+    def test_the_mmio_timeout_line_is_a_named_failure(self):
+        line = ('(EngineCore pid=67) ERROR 09-26 15:04:40 [core.py:1233] RuntimeError: MMIO per-op timeout: 4B load '
+                'took 49571 us (budget=2 ms), 4 of 4 bytes remaining.')
+        scanned = pm.scan([line])
+        problems, _, _ = gate.generic_problems(arm_of('exactness', 'exactness-eager'), scanned, [], None,
+                                               'general-prefix+eager')
+        self.assertTrue(any('MMIO per-op timeout' in p for p in problems), problems)
+
     def test_an_eager_arm_that_ran_the_traced_loop_fails(self):
         result, _, _ = self.plan('exactness', eager=dict(path='traced'))
         eager = result['arms']['exactness-eager']
@@ -770,6 +827,19 @@ class MainTests(unittest.TestCase):
                                                     'exactness-audit', 'exactness-eager'])
         self.assertIn('QWEN_C2_PROFILES=%s' % gate.DERIVED_MOUNT, arms[3]['docker'])
 
+    def test_the_eager_arm_alone(self):
+        code, lines = self.main('--plan', 'exactness-eager', '--dry-run')
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(lines[0])['worst_case_seconds'], 5400 + gate.ARM_OVERHEAD_SECONDS)
+        arm, = [json.loads(line) for line in lines[1:]]
+        self.assertEqual((arm['plan'], arm['arm'], arm['served']), ('exactness-eager', 'exactness-eager',
+                                                                   'general-prefix+eager'))
+        for plans in ('exactness,exactness-eager', 'exactness-eager,exactness-eager', 'lifecycle-tiny,lifecycle'):
+            with self.subTest(plans=plans):
+                code, lines = self.main('--plan', plans, '--dry-run')
+                self.assertEqual(code, 2)
+                self.assertIn('would run twice', lines[-1])
+
     def test_refusals(self):
         self.assertEqual(self.main('--plan', 'soak')[0], 2)
         self.assertEqual(self.main('--agents', '1,x')[0], 2)
@@ -829,7 +899,17 @@ class JobTests(unittest.TestCase):
                 self.read(**values)
         with self.assertRaises(job.JobError):
             job.read_job(dict(C2_IMAGE_TAG='v7-prefix', C2_ACTIONS='prefix'), ['general'])
-        self.assertEqual(job.PREFIX_PLANS, gate.PLANS)
+        self.assertEqual(job.PREFIX_PLANS + tuple(arm for arm, _ in job.PREFIX_ARM_PLANS), gate.PLANS)
+
+    def test_one_arm_as_its_own_plan(self):
+        outputs = self.read(C2_ACTIONS='status reset build prefix', C2_PREFIX_PLAN='exactness-eager')
+        self.assertEqual((outputs['actions'], outputs['prefix_plan']), ('status reset build prefix', 'exactness-eager'))
+        outputs = self.read(C2_PREFIX_PLAN='exactness-eager, lifecycle-tiny', C2_PREFIX_BASELINE='none')
+        self.assertEqual(outputs['prefix_plan'], 'exactness-eager,lifecycle-tiny')
+        for plan in ('exactness exactness-eager', 'exactness-eager exactness-eager', 'lifecycle-store lifecycle',
+                     'exactness exactness', 'bringup-prefix', 'timing-baseline'):
+            with self.subTest(plan=plan), self.assertRaises(job.JobError):
+                self.read(C2_PREFIX_PLAN=plan)
 
     def test_a_job_that_does_not_run_prefix_ignores_its_keys(self):
         """An exact or c2 run is never refused over a prefix key it does not use."""

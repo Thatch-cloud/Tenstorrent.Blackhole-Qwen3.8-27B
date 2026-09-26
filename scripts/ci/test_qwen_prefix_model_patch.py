@@ -7,9 +7,10 @@ the IMG bytes: md5 e4ba08d9 and b5230935, the sha256 SOURCE_SHA256 pins):
 
   pins     the fixtures are the pinned originals; the stage's output is the pinned graft; stage()
            refuses any other input and writes nothing it did not pin, and a second run refuses;
-  scope    only the three chunk-prefill methods of model.py and three methods of qwen36_vllm.py
+  scope    only the three chunk-prefill methods of model.py and four methods of qwen36_vllm.py
            change - prefill_paged_slots and the RoPE line stay byte for byte - and everything else
-           is added (the adapter after the imports, the new methods, the constants);
+           is added (the adapter after the imports, the new methods, the constants); the decode
+           warmup's one edit calls the eager warm only on its traced call and under the switch;
   reuse    the loops' resumable edit is lever_n_model_patch.patch_tp_replay's, called once;
   refuse   a Lever N tree (F5), an already staged tree, a drifted anchor and the bundle's copy of
            lever_n_model_patch, which lacks the eager-loop edit;
@@ -162,7 +163,7 @@ class Scope(unittest.TestCase):
         self.assertEqual(added, {'_qwen_prefix_prefill_slots', '_qwen_prefix_gdn_layers',
                                  '_qwen_prefix_program_cache_entries', '_qwen_prefix_read_scratch',
                                  '_qwen_prefix_capture', '_qwen_prefix_restore', '_qwen_prefix_warm_restore',
-                                 '_qwen_prefix_audit'})
+                                 '_qwen_prefix_audit', '_qwen_prefix_fit_page_table'})
         self.assertEqual(before['prefill_paged_slots'], after['prefill_paged_slots'])
 
     def test_the_batched_prefill_entries_are_the_stock_ones(self):
@@ -180,12 +181,13 @@ class Scope(unittest.TestCase):
         """python -O strips assert statements; every guard the stage adds must survive it."""
         blocks = {'MODEL_ADAPTER': patcher.MODEL_ADAPTER,
                   'MODEL_METHODS': 'class _Methods:\n' + patcher.MODEL_METHODS,
-                  'VLLM_WARM_METHOD': 'class _Methods:\n' + patcher.VLLM_WARM_METHOD}
+                  'VLLM_WARM_METHOD': 'class _Methods:\n' + patcher.VLLM_WARM_METHOD,
+                  'VLLM_WARM_EAGER_METHOD': 'class _Methods:\n' + patcher.VLLM_WARM_EAGER_METHOD}
         for name, block in blocks.items():
             asserts = [node.lineno for node in ast.walk(ast.parse(block)) if isinstance(node, ast.Assert)]
             self.assertEqual(asserts, [], name)
         for name in ('ENTRY_RESUME', 'EAGER_TAIL_NEW', 'TRACED_CAPTURE_NEW', 'VLLM_ENTRY_NEW',
-                     'VLLM_BATCHED_CALL_NEW', 'VLLM_SLOTS_NEW', 'VLLM_WARM_NEW'):
+                     'VLLM_BATCHED_CALL_NEW', 'VLLM_SLOTS_NEW', 'VLLM_WARM_NEW', 'VLLM_DECODE_WARM_NEW'):
             self.assertNotIn('assert ', getattr(patcher, name), name)
 
     def test_model_module_level_additions_sit_after_the_imports(self):
@@ -215,18 +217,41 @@ class Scope(unittest.TestCase):
         self.assertIn(patcher.EAGER_TAIL_NEW, after['_prefill_chunked_eager_tp'])
         self.assertIn(patcher.TRACED_CAPTURE_NEW, after['_prefill_traced_chunked_tp'])
 
-    def test_vllm_changes_only_the_entry_the_batched_prefill_and_the_warmup(self):
+    def test_vllm_changes_only_the_entry_the_batched_prefill_and_the_warmups(self):
         stock, graft = methods(vllm_text()), methods(staged()[1])
         self.assertEqual({k: v for k, v in stock.items() if not k.startswith('Qwen36ForCausalLM.')},
                          {k: v for k, v in graft.items() if not k.startswith('Qwen36ForCausalLM.')})
         before, after = vllm_methods(vllm_text()), vllm_methods(staged()[1])
         changed = {name for name in before if before[name] != after[name]}
-        self.assertEqual(changed, {'prefill_forward', '_prefill_forward_tp_batched', 'warmup_model_prefill'})
-        self.assertEqual(set(after) - set(before), {'_qwen_prefix_warm'})
+        self.assertEqual(changed, {'prefill_forward', '_prefill_forward_tp_batched', 'warmup_model_prefill',
+                                   'warmup_model_decode'})
+        self.assertEqual(set(after) - set(before), {'_qwen_prefix_warm', '_qwen_prefix_warm_eager'})
         graft = staged()[1]
         self.assertEqual(graft.count(patcher.VLLM_CONSTANTS), 1)
         self.assertEqual(graft.count('"supports_prefix_caching": _QWEN_PREFIX_REUSE,'), 1)
         self.assertNotIn('"supports_prefix_caching": False', graft)
+
+    def test_the_decode_warmup_warms_the_eager_prefill_only_on_its_traced_call_under_the_switch(self):
+        """G1 v47 (run 36246961161): trace_mode decode_only parks the decode traces with no prefill
+        compiled. The one edit sits before the stock return, so the eager warm precedes the capture."""
+        before, after = vllm_methods(vllm_text())['warmup_model_decode'], vllm_methods(staged()[1])['warmup_model_decode']
+        self.assertEqual(after, before.replace(patcher.VLLM_DECODE_WARM_OLD, patcher.VLLM_DECODE_WARM_NEW))
+        self.assertIn('        if _QWEN_PREFIX_REUSE and kwargs.get("enable_trace"):\n', patcher.VLLM_DECODE_WARM_NEW)
+        self.assertTrue(patcher.VLLM_DECODE_WARM_NEW.endswith(patcher.VLLM_DECODE_WARM_OLD))
+        warm = vllm_methods(staged()[1])['_qwen_prefix_warm_eager']
+        self.assertIn('capture_chunk_trace=False', warm)
+        self.assertIn('_chunked_trace_id', warm)
+        order = [warm.index(text) for text in ('prev = model._bind_gdn_prefill_scratch()',
+                                               'model.capture_prefill_trace_chunked(',
+                                               'model._unbind_gdn_prefill_scratch(prev)')]
+        self.assertEqual(order, sorted(order), 'bind, warm, unbind')
+
+    def test_only_the_eager_route_fits_the_page_table(self):
+        route = model_methods(staged()[0])['_qwen_prefix_prefill_slots']
+        self.assertEqual(route.count('self._qwen_prefix_fit_page_table(pt)'), 1)
+        self.assertIn('        if path == "eager":\n', route)
+        for name in ('_prefill_chunked_eager_tp', '_prefill_traced_chunked_tp', 'prefill_traced_chunked'):
+            self.assertNotIn('_qwen_prefix_fit_page_table', model_methods(staged()[0])[name], name)
 
     def test_the_stock_calls_survive_on_the_off_path(self):
         after = vllm_methods(staged()[1])
@@ -335,6 +360,11 @@ class Names(unittest.TestCase):
         for point in (patcher.DRAM_REGISTRY, patcher.DRAM_FIRST_CAPTURE):
             self.assertEqual(model.count('_qwen_prefix_dram("%s", ' % point), 1, point)
         self.assertNotIn('_qwen_prefix_dram', vllm)
+        # The eager warm's line, which the gate's eager arm requires (prefix_markers.EAGER_WARM).
+        import prefix_markers
+        self.assertTrue(patcher.MARKER_EAGER_WARM.startswith(prefix_markers.EAGER_WARM))
+        self.assertEqual(vllm.count('f"' + patcher.MARKER_EAGER_WARM + ': page_table_blocks='), 1)
+        self.assertNotIn(patcher.MARKER_EAGER_WARM, model)
 
     def test_the_stage_is_python_3_7_syntax_and_the_graft_python_3_10(self):
         source = (HERE / 'qwen_prefix_model_patch.py').read_text(encoding='utf-8')

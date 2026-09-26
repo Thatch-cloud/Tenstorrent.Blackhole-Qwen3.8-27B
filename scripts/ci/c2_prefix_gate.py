@@ -16,7 +16,9 @@ DERIVED profile - the image's own profile with that one change, written to the a
 mounted read-only at DERIVED_MOUNT with QWEN_C2_PROFILES pointing at it (serving_c2_contract.boot
 reads that variable) - and the knob's effect is checked in the log, never assumed.
 
-PLANS (--plan, comma-separated, run in order):
+PLANS (--plan, comma-separated, run in order; each exactness and lifecycle arm is also a plan of its own,
+named as the arm - c2_serving_job.PREFIX_ARM_PLANS - that runs only it, judged exactly as inside its plan:
+--plan exactness-eager; an arm never runs twice in one invocation):
   bringup    bringup-reference on the BASELINE profile (general): a three-turn real-text conversation;
              bringup-prefix on the prefix profile: each turn UNSALTED (fail-closed tenancy leaves reuse
              off inside a reuse engine: byte-identical to the reference, no grant, and vLLM's
@@ -45,7 +47,11 @@ PLANS (--plan, comma-separated, run in order):
              exactness-audit: the short chain and the boundaries with QWEN_PREFIX_AUDIT=1 (derived):
              each hit's KV [0,L) and GDN slot digests equal its cold twin's. exactness-eager: the same
              with trace_mode decode_only (derived): the eager loop C1 reuses, rows path=eager, no
-             '[TP chunk-replay]'.
+             '[TP chunk-replay]', and the model graft's '[PINDIAG] prefix: eager prefill warmed' line
+             (the eager prefill compiled before the decode trace is parked: G1 v47, run 36246961161,
+             ran without it, compiled 133 programs in its first row and hung the device on the next
+             prefill). On every exactness arm a [PREFIX] row whose program cache grew is a FAIL (F3:
+             a compile after the traces are parked, the second-request hang #48536).
   lifecycle  lifecycle-evict (VLLM_SERVER_DEV_MODE=1, derived): four arrivals at once (two hits, two
              same-tenant first turns: the same-step rule), an abort while waiting for a seat, an abort
              during a hit's prefill, a KV flood that evicts conversations built to ~56k (eviction
@@ -109,7 +115,7 @@ import prefix_replay as replay  # noqa: E402
 import prefix_report as report  # noqa: E402
 import qwen_prefix_model_patch as model_patch  # noqa: E402
 
-PLANS = c2_serving_job.PREFIX_PLANS
+PLANS = c2_serving_job.PREFIX_PLANS + tuple(arm for arm, _ in c2_serving_job.PREFIX_ARM_PLANS)
 PORT = 8021
 CONTAINER_PREFIX = 'qwen-c2-prefix-'
 DERIVED_MOUNT = '/prefix-gate/profiles.json'
@@ -168,6 +174,9 @@ PLAN_ARMS = dict(
     timing=(('timing-prefix', 'timing', 'prefix', None, 9000, False),
             ('timing-baseline', 'timing', 'baseline', None, 9000, False)),
 )
+# The single-arm plans (c2_serving_job.PREFIX_ARM_PLANS): the arm exactly as its plan runs it.
+PLAN_ARMS.update([(arm, tuple(entry for entry in PLAN_ARMS[plan] if entry[0] == arm))
+                  for arm, plan in c2_serving_job.PREFIX_ARM_PLANS])
 
 
 class PlanError(ValueError):
@@ -455,6 +464,14 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
                 notes.append('%s: vLLM found %d cached tokens (published for it: %d)' % (
                     record['tag'], raw, record['expected_raw_h']))
     path = 'eager' if arm.get('kind') == 'eager' else 'traced'
+    if path == 'eager' and installs:
+        warm = scanned.get('eager_warm') or []
+        if not warm:
+            problems.append('no "%s" line: the model graft did not compile the eager prefill before the decode trace '
+                            'was parked, so the first request compiles it after the park and a later prefill can hang '
+                            'the device (G1 v47, run 36246961161): an image built before the eager warm' % markers.EAGER_WARM)
+        else:
+            notes.append('eager warm: %s' % json.dumps(dict((k, v) for k, v in warm[-1].items() if k not in ('index', 'time'))))
     other = 'traced' if path == 'eager' else 'eager'
     paths = sorted(set(str(row.get('path')) for r in records for row in (r.get('markers') or {}).get('rows') or ()
                        if row.get('path')))
@@ -468,6 +485,24 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
         problems.append('%d "[TP chunk-replay]" lines on the eager arm: trace_mode decode_only did not reach the '
                         'model' % scanned['chunk_replay'])
     return problems, notes, missing
+
+
+def row_growth_problems(rows):
+    """F3 on every [PREFIX] row of an exactness arm: a row whose program cache grew compiled after the traces
+    were parked, the second-request hang (#48536). G1 v47's eager arm (run 36246961161) logged one such row
+    (115 -> 248) and its next prefill hung the device; its traced and audit arms' rows compiled nothing.
+    -> problems."""
+    grown = []
+    for row in rows:
+        before, after = row.get('programs_before'), row.get('programs')
+        if isinstance(before, int) and isinstance(after, int) and after > before:
+            grown.append('%s (path %s, Q=%s L=%s) compiled %d programs inside its prefill row: a compile after the '
+                         'traces were parked (F3, the second-request hang #48536)' % (
+                             row.get('tag') or row.get('req'), row.get('path'), row.get('q'), row.get('l'),
+                             after - before))
+    if len(grown) > MAX_LISTED:
+        grown = grown[:MAX_LISTED] + ['%d more rows compiled programs (server.log)' % (len(grown) - MAX_LISTED)]
+    return grown
 
 
 def pair_problems(pairs):
@@ -831,6 +866,7 @@ def judge_arm(arm, driver, scanned, stats, error):
             problems.append('the registry denied %s unsalted requests a hit: an unsalted request published blocks'
                             % stats['unsalted_denied'])
     if arm['scenario'].startswith('exactness'):
+        problems += row_growth_problems(scanned.get('rows') or [])
         more_missing, more_problems, more_lines = exercised_exactness(arm, records, driver.events)
         missing += more_missing
         problems += more_problems
@@ -1138,7 +1174,7 @@ class Runner(object):
             json.dump(dict(events=driver.events, phases=driver.phases), handle, indent=1, default=str)
         summary = dict((key, scanned[key]) for key in ('installs', 'refused', 'capture_skipped', 'kill_switch', 'stats',
                                                         'launches', 'apc', 'chunking_off', 'chunk_replay', 'kv_tokens',
-                                                        'failures'))
+                                                        'failures', 'eager_warm'))
         summary.update(grants=len(scanned['grants']), rows=len(scanned['rows']), audits=len(scanned['audits']),
                        dram=scanned['dram'][:32], dram_readings=(scanned.get('dram_readings') or [])[:32])
         with open(os.path.join(arm_dir, 'arm.json'), 'w', encoding='utf-8') as handle:
@@ -1218,13 +1254,19 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
             profiles = json.load(handle)
     else:
         profiles = gate.image_profiles(options.image)
-    arms_of = {}
+    arms_of, ran = {}, {}
     for plan in plans:
         try:
             arms_of[plan] = plan_arms(plan, options.profile, options.baseline, profiles)
         except PlanError as error:
             log('refused: %s' % error)
             return 2
+        for arm in arms_of[plan]:
+            if arm['arm'] in ran:
+                log('refused: arm %s would run twice (plans %s and %s) into one results directory'
+                    % (arm['arm'], ran[arm['arm']], plan))
+                return 2
+            ran[arm['arm']] = plan
     worst_case = worst_case_seconds(arms_of)
     if options.budget_seconds is not None and worst_case > options.budget_seconds:
         log('refused: plans %s may take %d s (every arm to its limit), past the %d s this step and job leave: run '

@@ -24,7 +24,10 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_REPLAY_SERVED_MODEL  the model id the replay's /v1/models must advertise and its requests after
                       the warmup name, org/name[:tag] (default, rendered empty: c2_platform_replay.py's,
                       Qwen/Qwen3.8-27B:tt); Qwen/Qwen3.8-27B replays an image without the alias
-  C2_PREFIX_PLAN      PREFIX_PLANS for the prefix action (c2_prefix_gate.py), in order (default: bringup)
+  C2_PREFIX_PLAN      PREFIX_PLANS for the prefix action (c2_prefix_gate.py), in order (default: bringup);
+                      each exactness and lifecycle arm is a plan too (PREFIX_ARM_PLANS): exactness-eager
+                      re-runs that arm alone. Never beside its own plan, and no plan twice (one arm, one
+                      results directory)
   C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
                       the baseline arm)
@@ -43,6 +46,12 @@ ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'drift', 'build
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
 PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing')
+# (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
+# only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
+# G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.
+PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exactness'),
+                    ('exactness-eager', 'exactness'), ('lifecycle-evict', 'lifecycle'),
+                    ('lifecycle-store', 'lifecycle'), ('lifecycle-tiny', 'lifecycle'))
 PREFIX_PROFILE = 'general-prefix'
 PREFIX_BASELINE = 'general'
 PREFIX_AGENTS = (1, 4, 5, 6)
@@ -143,9 +152,15 @@ def read_prefix(values, profiles, running):
         return dict(prefix_plan='bringup', prefix_profile=PREFIX_PROFILE, prefix_baseline=PREFIX_BASELINE,
                     prefix_agents=','.join(str(count) for count in PREFIX_AGENTS))
     plans = split_list(values.get('C2_PREFIX_PLAN', 'bringup')) or ['bringup']
-    unknown = sorted(set(plans) - set(PREFIX_PLANS))
+    known = PREFIX_PLANS + tuple(arm for arm, _ in PREFIX_ARM_PLANS)
+    unknown = sorted(set(plans) - set(known))
     if unknown:
-        raise JobError('C2_PREFIX_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(PREFIX_PLANS)))
+        raise JobError('C2_PREFIX_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(known)))
+    parent = dict(PREFIX_ARM_PLANS)
+    twice = sorted(set(plan for plan in plans if plans.count(plan) > 1 or parent.get(plan) in plans))
+    if twice:
+        raise JobError('C2_PREFIX_PLAN: %s would run an arm twice into one results directory (a plan named twice, '
+                       'or an arm beside its own plan)' % ', '.join(twice))
     profile = values.get('C2_PREFIX_PROFILE') or PREFIX_PROFILE
     if profile not in profiles:
         raise JobError('C2_PREFIX_PROFILE %r is not a profile of qwen_c2_profiles.json (%s)' % (profile, ', '.join(profiles)))

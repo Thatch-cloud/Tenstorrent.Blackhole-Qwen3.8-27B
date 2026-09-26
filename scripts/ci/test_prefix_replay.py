@@ -290,7 +290,7 @@ class FakeEngine(object):
     FAULTS = ('diverge_hits', 'diverge_once', 'diverge_after_resume', 'unsalted_differs', 'capture_differs',
               'grow_programs', 'grow_on_capture', 'drop_rows', 'drop_resumed_rows', 'no_digests', 'bad_slot_on_hit',
               'publish_unsalted', 'publish_when_killed', 'no_stats', 'no_dropped_hits', 'no_counters', 'kill_line_off',
-              'no_dram', 'no_capture_dram', 'dram_unavailable')
+              'no_dram', 'no_capture_dram', 'dram_unavailable', 'no_eager_warm')
     # The model graft's G2 reading (qwen_prefix_model_patch._qwen_prefix_dram), in serving_buffer_pool's text.
     DRAM_TEXT = ('chip0 allocated=25.90GB free=8.01GB largest_free=7877.5MB of 33.91GB; '
                  'chip1 allocated=25.90GB free=8.01GB largest_free=7877.5MB of 33.91GB')
@@ -373,6 +373,11 @@ class FakeEngine(object):
             self.say('INFO platform.py:83] Chunked prefill is not supported for `model_type=qwen3_5`; disabling it.')
         self.say('INFO platform.py:1153] Automatic prefix caching is %s' % ('enabled' if self.prefix else 'disabled'))
         self.say('INFO kv_cache_utils.py:2146] GPU KV cache size: {:,} tokens'.format(self.num_blocks * BLOCK))
+        if self.prefix and self.path == 'eager' and 'no_eager_warm' not in self.faults:
+            # The model graft's eager warm (qwen_prefix_model_patch._qwen_prefix_warm_eager), before the decode trace.
+            self.say('(EngineCore pid=9) INFO | models.demos.blackhole.qwen36.tt.qwen36_vllm:_qwen_prefix_warm_eager:505 - '
+                     '[PINDIAG] prefix: eager prefill warmed before the decode trace: page_table_blocks=4128 '
+                     'programs=115->554')
         if self.prefix:
             line = marker_fixture.install_line().replace('store_gib=8.0', 'store_gib=%.1f' % self.store_gib)
             self.say('(EngineCore pid=9) ' + line)

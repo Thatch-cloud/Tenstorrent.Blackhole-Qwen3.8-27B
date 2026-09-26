@@ -403,6 +403,7 @@ class Toy(object):
         self.fake = fake
         self.segments = []
         self.ropes = []
+        self.widths = []
         model = object.__new__(module.Qwen36Model)
         self.model = model
         mesh = FakeMesh(fake)
@@ -428,7 +429,7 @@ class Toy(object):
         model._rope_tp_cos_sin_torch = lambda start, length: (torch.zeros(1, 1, length, 2), torch.zeros(1, 1, length, 2))
         model._set_vision_merge = lambda ids, vision_tokens, offset=0: None
         model._vis_row_offset_for = lambda token_ids, chunk_start: 0
-        model.capture_prefill_trace_chunked = lambda *args, **kwargs: self.segments.append(('capture-trace',))
+        model.capture_prefill_trace_chunked = self.capture
         self.vocab = vocab
         if traced:
             self.enable_trace(buf_blocks=num_blocks)
@@ -449,6 +450,23 @@ class Toy(object):
         model._chunk_sin_buf = fake.device_tensor(torch.zeros(1, 1, CHUNK, 2), fake.bfloat16)
         model._chunked_trace_output = fake.device_tensor(torch.zeros(1, 2), fake.float32)
         model.mesh_device.traces['chunk-trace'] = self.trace_body
+
+    def capture(self, device, page_table, chunk_size=CHUNK, warmup_masked_buckets=True, capture_chunk_trace=True):
+        """capture_prefill_trace_chunked. A capture records ('capture-trace',) (a traced engine's trace
+        is set up by enable_trace); the warm without one (capture_chunk_trace=False) does what the real
+        one leaves behind for the loops - the chunk size and the chunk-input page-table buffer at
+        page_table's width, no trace - and records ('warm-eager', that width, whether the B=1 scratch
+        was bound)."""
+        if capture_chunk_trace:
+            self.segments.append(('capture-trace',))
+            return
+        model, fake = self.model, self.fake
+        model._chunked_chunk_size = chunk_size
+        model._chunked_trace_id = None
+        model._chunk_full_page_table_buf = fake.device_tensor(page_table.to(torch.int64), fake.int32)
+        model._chunk_full_page_table_buf.layout = fake.ROW_MAJOR_LAYOUT
+        bound = all(layer.attention.B == 1 for layer in model.layers if not layer.is_full_attention)
+        self.segments.append(('warm-eager', int(page_table.shape[1]), bound))
 
     # -- the chunk program -----------------------------------------------------------------------
     def segment(self, tokens, start, page_row, path):
@@ -506,12 +524,14 @@ class Toy(object):
         return FakeTensor(row.reshape(1, 1, -1).expand(2, 1, -1).clone(), self.fake.float32, 'TILE', False)
 
     def chunk_masked(self, token_buf, valid_len, chunk_start, page_table, bucket, flex_sdpa=True, vision_tokens=None):
+        self.widths.append(('eager', int(page_table.shape[1])))
         tokens = token_buf[0, :valid_len]
         h = self.segment(tokens, chunk_start, page_table[0], 'eager')
         return self.hidden(h, tokens[-1])
 
     def masked_bucket(self, token_ids, page_table, actual_len, chunk_start=0, bucket=None, flex_sdpa=True,
                       vision_tokens=None, vis_row_offset=0):
+        self.widths.append(('tail', int(page_table.shape[1])))
         if chunk_start == 0:
             self.model._reset_gdn_state_for_new_sequence()
             self.model._build_request_rope(token_ids[:, :actual_len], vision_tokens)

@@ -46,7 +46,12 @@ model.py (models/demos/blackhole/qwen36/tt/model.py in the image)
   * the restore path is chosen and compiled at warmup, before any trace is parked (F3): each path
     starts from a zeroed scratch, writes a pattern only it writes, and is read back chip by chip;
     copy_host_to_device_tensor (no allocation, no program) when it round-trips exactly, else
-    from_torch + ttnn.copy, whose programs the warmup has already compiled.
+    from_torch + ttnn.copy, whose programs the warmup has already compiled;
+  * on the eager loop (trace_mode decode_only) the route fits every row's page table to the width
+    the prefill programs were warmed at (the chunk-input buffer's, as the traced loop and the
+    short-prompt path already do), so a request replays what qwen36_vllm's eager warm compiled
+    instead of compiling the paged SDPA again at the runner's width after the decode trace is
+    parked (F3; G1 v47, run 36246961161).
 
 qwen36_vllm.py (models/demos/blackhole/qwen36/tt/qwen36_vllm.py)
   * supports_prefix_caching = QWEN_PREFIX_REUSE == "1", read once at import. The flag and the graft
@@ -56,7 +61,16 @@ qwen36_vllm.py (models/demos/blackhole/qwen36/tt/qwen36_vllm.py)
     row request ids (REQ_IDS_KWARG, supplied by the runner patch); a resumed row reaching the
     unbatched path is an assertion;
   * warmup_model_prefill warms the restore path on its first call (the plugin's compile-only phase),
-    once per model.
+    once per model;
+  * warmup_model_decode's traced call - the first trace trace_mode decode_only parks - is preceded,
+    when no chunk trace was captured, by the eager prefill's warm: the model's own warm without a
+    capture (capture_prefill_trace_chunked, capture_chunk_trace=False: the chunk program, every masked
+    bucket masked and full, every paged-fill width) against the bound B=1 scratch, once per model.
+    Without it the plugin compiles no prefill in decode_only (warmup_model_prefill returns at once
+    without a trace and gets no traced call), so the first request compiled the whole eager chunk loop
+    after the decode traces were parked and the next prefill hung the device: G1 v47's eager arm, run
+    36246961161, 133 programs, then an MMIO per-op timeout inside forward_prefill_paged (#48536).
+    trace_mode all warms the prefill in its chunk-trace capture and is left alone.
 
 With QWEN_PREFIX_REUSE unset every served path is the stock one: the new keyword arguments default
 to the stock behaviour, prefill_paged_slots is untouched, the model's prefill_paged_slots* entries
@@ -96,8 +110,8 @@ SOURCE_SHA256 = {
 # edit below, or to lever_n_model_patch.patch_tp_replay, changes these on purpose
 # (test_qwen_prefix_model_patch prints the new values).
 PATCHED_SHA256 = {
-    MODEL_FILE: '5be184fa029f80e3431bcbdf4cfbfed94706862ddb69876d3a5cda9e666e3531',
-    VLLM_FILE: '4eafb09617ba62f322e259f5610447c251b9e6a093b2ca70f233d5079f403edc',
+    MODEL_FILE: 'f81ccf7c9e47b5e420f06af50dbfcea375d2448e8b646af0d3bc52907f9e3ed1',
+    VLLM_FILE: 'bd742abe2ebb67bbcc14cb58301c1ec27ac5810983d9521d52bf6e344e3ef189',
 }
 
 # Shared with the registry (qwen_prefix_registry.REGISTRY_KEY and REQUEST_IDS_KWARG) and the runner
@@ -107,6 +121,8 @@ REQ_IDS_KWARG = 'request_ids'
 CHUNK = 2048
 MARKER_ROW = '[PREFIX] row='
 MARKER_WARM = '[PINDIAG] prefix: model warm restore_mode='
+# qwen36_vllm's eager warm (trace_mode decode_only), before the decode trace is parked; prefix_markers.EAGER_WARM.
+MARKER_EAGER_WARM = '[PINDIAG] prefix: eager prefill warmed before the decode trace'
 MARKER_AUDIT = '[PREFIX-AUDIT]'
 # G2's DRAM reading, '<MARKER_DRAM><point>: <per-chip figures>' (prefix_markers.DRAM_READING parses it; the
 # bring-up gate requires the DRAM_REGISTRY point, and DRAM_FIRST_CAPTURE once the arm stored a checkpoint).
@@ -454,6 +470,14 @@ MODEL_METHODS = r'''
         held = "absent" if registry is None else "present"
         chunk_size = self._chunked_chunk_size or _QWEN_PREFIX_CHUNK
         path = "traced" if self._chunked_trace_id is not None else "eager"
+        if path == "eager":
+            # F3 on the eager loop (trace_mode decode_only; G1 v47, run 36246961161): the loop hands its
+            # forwards the page table as the runner built it, and the paged SDPA program is keyed on its
+            # width, so the programs Qwen36ForCausalLM._qwen_prefix_warm_eager compiled at the chunk-input
+            # buffer's width would compile again after the decode trace is parked. Fit it to that width,
+            # as the traced loop and the short-prompt path already do; entries past a prompt's blocks are
+            # never read.
+            pt = self._qwen_prefix_fit_page_table(pt)
         spec = getattr(self, "_qwen_prefix_state_spec", None)
         rows = []
         for u in range(N):
@@ -549,6 +573,18 @@ MODEL_METHODS = r'''
             return int(self.mesh_device.num_program_cache_entries())
         except Exception:
             return None
+
+    def _qwen_prefix_fit_page_table(self, pt):
+        """pt (host [rows, blocks]) zero-padded or clipped to the chunk-input page-table buffer's width -
+        the width the prefill programs were warmed at - exactly as _prefill_traced_chunked_tp fits it;
+        unchanged when no warm allocated that buffer."""
+        buf = getattr(self, "_chunk_full_page_table_buf", None)
+        if buf is None:
+            return pt
+        width = int(buf.shape[-1])
+        if pt.shape[1] < width:
+            return torch.cat([pt, torch.zeros(pt.shape[0], width - pt.shape[1], dtype=pt.dtype)], dim=1)
+        return pt[:, :width]
 
     def _qwen_prefix_read_scratch(self):
         """Host copies of the bound scratch's GDN state, per GDN layer: rec_state
@@ -890,6 +926,12 @@ VLLM_WARM_NEW = (
     '        if _QWEN_PREFIX_REUSE:\n'
     '            self._qwen_prefix_warm()\n'
     + VLLM_WARM_OLD)
+VLLM_DECODE_WARM_OLD = '        return warmup_decode_buckets(self, super().warmup_model_decode, *args, **kwargs)\n'
+VLLM_DECODE_WARM_NEW = (
+    '        if _QWEN_PREFIX_REUSE and kwargs.get("enable_trace"):\n'
+    '            # The first trace trace_mode decode_only parks: warm the eager prefill before it.\n'
+    '            self._qwen_prefix_warm_eager(kwargs.get("kv_cache"))\n'
+    + VLLM_DECODE_WARM_OLD)
 VLLM_WARM_METHOD = r'''
     def _qwen_prefix_warm(self):
         """QWEN_PREFIX_REUSE: choose and compile the GDN restore path before any trace is parked (F3).
@@ -913,6 +955,48 @@ VLLM_WARM_METHOD = r'''
             model._qwen_prefix_warm_restore()
         finally:
             model._unbind_gdn_prefill_scratch(prev)
+'''
+VLLM_WARM_EAGER_METHOD = r'''
+    def _qwen_prefix_warm_eager(self, kv_cache):
+        """QWEN_PREFIX_REUSE under trace_mode decode_only: compile the eager prefill before the first
+        trace is parked (F3).
+
+        The plugin compiles prefill only through warmup_model_prefill, which returns at once without a
+        trace, and decode_only never makes its traced call: the route's first request then compiled
+        the whole eager chunk loop after the decode traces were parked (133 programs, G1 v47, run
+        36246961161) and the next prefill hung the device - an MMIO per-op timeout inside
+        forward_prefill_paged, the second-request hang (#48536). warmup_model_decode's traced call is
+        the first capture this mode makes, so this runs just before it: once per model, and only when
+        no chunk trace was captured (trace_mode all warmed the prefill in that capture). It is the
+        model's own warm without a capture, capture_prefill_trace_chunked(capture_chunk_trace=False):
+        the chunk program, every masked bucket masked and full (the eager loop's full chunk is bucket
+        2048 full, its tail a masked bucket) and every paged-fill width, against the bound B=1 scratch
+        at warmup_model_prefill's chunk-trace page-table width - the buffer it allocates at that width
+        is what _qwen_prefix_prefill_slots fits the eager loop's page table to."""
+        model = self.model[0]
+        if getattr(model, "_chunked_trace_id", None) is not None or getattr(model, "_qwen_prefix_eager_warmed", False):
+            return
+        if not (model.num_devices > 1 and model.args.max_batch_size > 1):
+            return
+        # warmup_model_prefill's chunk-trace page table: the whole KV cache, rounded up to 32 blocks.
+        if kv_cache:
+            num_blocks = math.ceil(int(kv_cache[0][0].shape[0]) / 32) * 32
+        else:
+            num_blocks = math.ceil(_PREFILL_WARMUP_BUCKET / _BLOCK_SIZE)
+        page_table = torch.arange(num_blocks, dtype=torch.int32).reshape(1, num_blocks)
+        before = model._qwen_prefix_program_cache_entries()
+        prev = model._bind_gdn_prefill_scratch()
+        try:
+            model.capture_prefill_trace_chunked(
+                self.mesh_device, page_table, chunk_size=_PREFILL_WARMUP_CHUNK, capture_chunk_trace=False
+            )
+        finally:
+            model._unbind_gdn_prefill_scratch(prev)
+        model._qwen_prefix_eager_warmed = True
+        logger.info(
+            f"[PINDIAG] prefix: eager prefill warmed before the decode trace: page_table_blocks={num_blocks} "
+            f"programs={before}->{model._qwen_prefix_program_cache_entries()}"
+        )
 '''
 
 
@@ -983,7 +1067,7 @@ def patch_model_source(source):
 
 
 def patch_vllm_source(source):
-    """Every qwen36_vllm.py edit: the capability flag, the routing and the warmup, in one stage."""
+    """Every qwen36_vllm.py edit: the capability flag, the routing and the warmups, in one stage."""
     refuse_vllm(source)
     for old, what in ((VLLM_CONSTANTS_ANCHOR, 'constants anchor'), (VLLM_CAPABILITY_OLD, 'capability')):
         if source.count(old) != 1:
@@ -999,6 +1083,9 @@ def patch_vllm_source(source):
                            'batched prefix call')
     source = _span_replace(source, 'warmup_model_prefill', VLLM_WARM_OLD, VLLM_WARM_NEW, 'warmup hook')
     source = _insert_after_method(source, 'warmup_model_prefill', VLLM_WARM_METHOD)
+    source = _span_replace(source, 'warmup_model_decode', VLLM_DECODE_WARM_OLD, VLLM_DECODE_WARM_NEW,
+                           'decode warmup hook')
+    source = _insert_after_method(source, 'warmup_model_decode', VLLM_WARM_EAGER_METHOD)
     ast.parse(source)
     return source
 

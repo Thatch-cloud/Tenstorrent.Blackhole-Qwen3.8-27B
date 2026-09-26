@@ -133,6 +133,21 @@ class ScanTests(unittest.TestCase):
                          (pm.DRAM_REGISTRY, None, [0, 1]))
         self.assertEqual([f['signature'] for f in out['failures']], [pm.WEDGE])
 
+    def test_the_eager_warm_line_and_the_mmio_timeout(self):
+        """G1 v47 (run 36246961161): the fixed model graft's eager warm, and the host's read of the hung device."""
+        out = pm.scan([
+            '2026-09-26T15:03:46.300000000Z (EngineCore pid=67) 2026-09-26 15:03:46.300 | INFO | '
+            'models.demos.blackhole.qwen36.tt.qwen36_vllm:_qwen_prefix_warm_eager:505 - [PINDIAG] prefix: eager prefill '
+            'warmed before the decode trace: page_table_blocks=4128 programs=115->554',
+            '(EngineCore pid=67) ERROR 09-26 15:04:40 [core.py:1233] RuntimeError: MMIO per-op timeout: 4B load took '
+            '49571 us (budget=2 ms), 4 of 4 bytes remaining.'])
+        warm, = out['eager_warm']
+        self.assertEqual((warm['page_table_blocks'], warm['programs'], warm['index'], warm['time']),
+                         (4128, '115->554', 0, '2026-09-26T15:03:46.300000000Z'))
+        failure, = out['failures']
+        self.assertEqual((failure['signature'], failure['index']), (pm.MMIO_TIMEOUT, 1))
+        self.assertEqual(pm.scan(self.log())['eager_warm'], [])
+
     def test_by_tag_groups_and_drops_untagged(self):
         out = pm.scan(self.log())
         grouped = pm.by_tag(out['rows'])

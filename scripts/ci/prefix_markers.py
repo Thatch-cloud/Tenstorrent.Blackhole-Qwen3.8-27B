@@ -53,6 +53,11 @@ never guessed around):
     read into dram_readings: point, chips (chip, allocated_gb, free_gb, largest_free_mb, total_gb),
     unavailable (the reason, or None) and text. The fast path's 'dram after attach' and 'dram after
     engine <id>' lines carry the same text (serving_buffer_pool.format_dram) and parse the same way.
+  model graft, the eager warm (trace_mode decode_only; qwen36_vllm's _qwen_prefix_warm_eager):
+    [PINDIAG] prefix: eager prefill warmed before the decode trace: page_table_blocks=<n> programs=<a>-><b>
+        once per engine, before the decode trace is parked; read into eager_warm (its fields). The
+        eager exactness arm requires it: an image without it compiles the eager prefill after the
+        traces are parked, and G1 v47's (run 36246961161) next prefill hung the device.
   audit mode (QWEN_PREFIX_AUDIT=1, program-free):
     [PREFIX-AUDIT] req=<id> Q=<n> L=<n> kv_range=<a>:<b> kv_sha=<hex> slot_sha=<hex> [logits_sha=<hex>]
     digests of the unpacked K/V values over kv_range and of the row's GDN slot bytes (the model also
@@ -64,7 +69,8 @@ Other lines read: the serving contract's '[QWEN-C2] profile <name>: vLLM argv [.
 argv, memory read-the-launched-argv), the TT platform's 'Automatic prefix caching is enabled' and
 'Chunked prefill is not supported ... disabling it', the model's '[TP chunk-replay]' (the traced
 chunk loop ran), every '[PINDIAG] dram ...' line (raw, beside dram_readings), vLLM's 'GPU KV cache size: N tokens',
-and failure signatures (a traceback, an engine death, tt-metal's ethernet-core wedge).
+and failure signatures (a traceback, an engine death, tt-metal's ethernet-core wedge, UMD's MMIO
+per-op timeout - the host's read of a hung device, G1 v47's eager arm).
 
 Log lines may carry docker's --timestamps prefix; it is split off and kept.
 
@@ -102,9 +108,14 @@ DRAM_REGISTRY = 'registry'              # qwen_prefix_model_patch.DRAM_REGISTRY
 DRAM_FIRST_CAPTURE = 'first capture'    # qwen_prefix_model_patch.DRAM_FIRST_CAPTURE
 KV_TOKENS = re.compile(r'GPU KV cache size: ([0-9,]+) tokens')
 WEDGE = 'Timed out while waiting for active ethernet core'
+# UMD's per-op MMIO budget (2 ms) overran and its hang check did not clear it (umd device_memcpy.cpp): G1 v47's
+# eager arm (run 36246961161) logged it from fetch_queue_reserve_back, after the device stopped taking commands.
+MMIO_TIMEOUT = 'MMIO per-op timeout'
 TRACEBACK = 'Traceback (most recent call last)'
 FAILURES = (TRACEBACK, 'EngineDeadError', 'EngineCore encountered a fatal error', 'PrefixInstallError',
-            'AssertionError', WEDGE)
+            'AssertionError', WEDGE, MMIO_TIMEOUT)
+# qwen_prefix_model_patch.MARKER_EAGER_WARM begins with it.
+EAGER_WARM = '[PINDIAG] prefix: eager prefill warmed'
 FIELD = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=(\[[^\]]*\]|\S+)')
 ENGINE_SUFFIX = re.compile(r'^(.*)-([0-9A-Za-z]{8})$')
 
@@ -223,7 +234,7 @@ def scan(lines):
     entry keeps its line index and timestamp so the driver can window it against a request."""
     out = dict(installs=[], grants=[], rows=[], audits=[], refused=[], capture_skipped=[], kill_switch=[],
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
-               kv_tokens=None, failures=[])
+               kv_tokens=None, failures=[], eager_warm=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
         where = dict(index=index, time=stamp)
@@ -255,6 +266,10 @@ def scan(lines):
                                                pos=match.group(2), reason=match.group(3)[:200]))
         if KILL_SWITCH in line:
             out['kill_switch'].append(dict(where, line=line.strip()[:300]))
+        if EAGER_WARM in line:
+            entry = fields(line.split(EAGER_WARM, 1)[1])
+            entry.update(where)
+            out['eager_warm'].append(entry)
         match = STATS.search(line)
         if match:
             try:

@@ -20,6 +20,11 @@ driven as the scheduler graft (qwen_prefix_scheduler_patch) drives it. What is h
              hit (copy_host_to_device_tensor when it round-trips, else ttnn.copy warmed), once per
              model; each path is judged from a zeroed scratch with its own pattern, chip by chip,
              so an h2d that writes nothing, one chip, or chip 0 to both is not chosen;
+  eager warm under the plugin's two-phase warmup in trace_mode decode_only, the eager prefill is
+             warmed (the model's warm without a capture, the B=1 scratch bound) right before the
+             decode trace is parked, once per model, never under trace_mode all or with the switch
+             off; the route then runs the eager loop at the warmed page-table width, exactly
+             (G1 v47, run 36246961161: without it the second eager prefill hung the device);
   capture    a MemoryError while capturing skips the checkpoint, counts it, and the request is exact
              (S7); a registry refusal is reported; unreachable plan positions are dropped;
   fast path  the C2 fast path's prefill capture binds the staged model on every profile (its
@@ -108,6 +113,27 @@ class Engine(object):
         # the warmup creates is gone afterwards.
         with registry_scope(self.registry), prefix_env(self.environ):
             self.wrapper.warmup_model_prefill(self.model._paged_kv_caches, enable_trace)
+
+    def plugin_warmup(self, trace_mode):
+        """The TT plugin's two-phase warmup (TTModelRunner.warmup_model, fixtures/vllm_tt_plugin_bf77cd63
+        model_runner.py:2298-2345), keyword arguments as it passes them. The decode warmup's base
+        (warmup_decode_buckets, which captures the decode traces when enable_trace) records
+        ('decode-warmup', enable_trace) in the toy's segments."""
+        segments = self.toy.segments
+        self.vllm.warmup_decode_buckets = lambda wrapper, base, *args, **kwargs: segments.append(
+            ('decode-warmup', kwargs.get('enable_trace')))
+        kv = self.model._paged_kv_caches
+        prefill = dict(kv_cache=kv, can_sample_on_device=False)
+        decode = dict(kv_cache=kv, max_batch_size=4, num_blocks=1024, can_sample_on_device=False)
+        with registry_scope(self.registry), prefix_env(self.environ):
+            self.wrapper.warmup_model_prefill(enable_trace=False, **prefill)
+            self.wrapper.warmup_model_decode(enable_trace=False, **decode)
+            if hasattr(self.wrapper, 'already_warmed_up_prefill'):
+                self.wrapper.already_warmed_up_prefill = False
+            if trace_mode == 'all':
+                self.wrapper.warmup_model_prefill(enable_trace=True, **prefill)
+            if trace_mode in ('all', 'decode_only'):
+                self.wrapper.warmup_model_decode(enable_trace=True, **decode)
 
     def prefill(self, rows, req_ids=True, environ=None):
         """rows: (req_id, tokens, page_row, start_pos, slot). The runner's kwargs, as submit_prefill
@@ -998,6 +1024,97 @@ class TracedRegistryContract(RegistryContract):
     traced = True
 
 
+class EagerWarm(ExactTestBase):
+    """trace_mode decode_only parks the decode traces with no prefill compiled: the route's first
+    request compiled the eager chunk loop after them and the next prefill hung the device (G1 v47,
+    run 36246961161, 133 programs, an MMIO per-op timeout in forward_prefill_paged). The eager
+    prefill is warmed right before the first trace this mode parks, and the loop then runs at the
+    width it was warmed at."""
+
+    def warm_lines(self, engine):
+        return engine.log.lines(patcher.MARKER_EAGER_WARM)
+
+    def test_decode_only_warms_the_eager_prefill_right_before_the_decode_trace(self):
+        engine = Engine()
+        engine.plugin_warmup('decode_only')
+        self.assertEqual(engine.toy.segments, [('decode-warmup', False), ('warm-eager', 4096, True),
+                                               ('decode-warmup', True)])
+        self.assertIsNone(engine.model._chunked_trace_id, 'the prefill stays eager')
+        self.assertEqual(len(engine.log.lines(patcher.MARKER_WARM)), 1, 'the restore path is warmed too')
+        lines = self.warm_lines(engine)
+        self.assertEqual(len(lines), 1)
+        self.assertIn('page_table_blocks=4096 programs=', lines[0])
+        for layer in engine.model.layers:
+            if not layer.is_full_attention:
+                self.assertEqual(layer.attention.B, 4, 'the batched decode buffers are bound again')
+
+    def test_trace_mode_all_warms_the_prefill_in_its_capture_and_not_again(self):
+        engine = Engine(traced=True)
+        engine.plugin_warmup('all')
+        self.assertEqual(engine.toy.segments, [('decode-warmup', False), ('capture-trace',), ('decode-warmup', True)])
+        self.assertEqual(self.warm_lines(engine), [])
+
+    def test_trace_mode_none_parks_no_trace_and_warms_nothing_more(self):
+        engine = Engine()
+        engine.plugin_warmup('none')
+        self.assertEqual(engine.toy.segments, [('decode-warmup', False)])
+        self.assertEqual(self.warm_lines(engine), [])
+
+    def test_once_per_model(self):
+        engine = Engine()
+        engine.plugin_warmup('decode_only')
+        engine.plugin_warmup('decode_only')
+        self.assertEqual([s for s in engine.toy.segments if s[0] == 'warm-eager'], [('warm-eager', 4096, True)])
+        self.assertEqual(len(self.warm_lines(engine)), 1)
+
+    def test_a_model_off_the_batched_path_is_not_warmed(self):
+        engine = Engine()
+        engine.model.args.max_batch_size = 1
+        engine.plugin_warmup('decode_only')
+        self.assertNotIn('warm-eager', [s[0] for s in engine.toy.segments])
+
+    def test_the_eager_loop_runs_at_the_warmed_width_and_stays_exact(self):
+        """The runner's page table (vLLM's max_num_blocks_per_req wide) is narrower than the warmed
+        width: the route fits every eager chunk and tail to the warmed width, a hit still equals a
+        cold run, and the buffer's content is never read."""
+        engine = Engine()
+        engine.pool = F.Pool(width=1024)
+        engine.plugin_warmup('decode_only')
+        base = F.prompt(9000, seed=91)
+        conv = {'id': 'eager-width'}
+        self.run_turn_and_cold(engine, conv, base[:4500], 0)
+        self.run_turn_and_cold(engine, conv, base[:9000], 4096)
+        self.assertTrue(engine.toy.widths)
+        self.assertEqual(set(width for _, width in engine.toy.widths), {4096})
+        self.assertEqual({path for path, _ in engine.toy.widths}, {'eager', 'tail'})
+        self.assertEqual({row.split('path=')[1].split()[0] for row in engine.rows_prefix()}, {'eager'})
+
+    def test_a_short_prompt_on_the_warmed_eager_engine_stays_exact(self):
+        engine = Engine()
+        engine.pool = F.Pool(width=1024)
+        engine.plugin_warmup('decode_only')
+        tokens = F.prompt(1500, seed=92)
+        self.run_turn_and_cold(engine, {'id': 'eager-short'}, tokens, 0)
+
+    def test_without_the_warm_the_eager_loop_keeps_the_runners_width(self):
+        engine = self.engine()
+        engine.pool = F.Pool(width=1024)
+        base = F.prompt(4500, seed=93)
+        self.run_turn_and_cold(engine, {'id': 'eager-unwarmed'}, base, 0)
+        self.assertEqual(set(width for _, width in engine.toy.widths), {1024})
+
+    def test_the_traced_loop_is_not_refitted_by_the_route(self):
+        engine = Engine(traced=True)
+        engine.pool = F.Pool(width=1024)
+        engine.plugin_warmup('all')
+        base = F.prompt(4500, seed=94)
+        self.run_turn_and_cold(engine, {'id': 'traced-width'}, base, 0)
+        # The traced loop fits its own copy (stock): the tail it hands the masked bucket is the
+        # captured width, as before the route existed.
+        self.assertEqual(set(width for path, width in engine.toy.widths if path == 'tail'), {4096})
+        self.assertNotIn('eager', {path for path, _ in engine.toy.widths})
+
+
 class OffIsStock(unittest.TestCase):
     """QWEN_PREFIX_REUSE unset: the staged files make the stock files' ttnn calls and results."""
 
@@ -1049,6 +1166,16 @@ class OffIsStock(unittest.TestCase):
             self.assertEqual(stock.fake.log, staged.fake.log)
             self.assertEqual(stock.toy.segments, staged.toy.segments)
             self.assertEqual(staged.log.lines('prefix'), [])
+
+    def test_the_plugin_warmup_is_stock_in_every_trace_mode(self):
+        for trace_mode in ('decode_only', 'all', 'none'):
+            with self.subTest(trace_mode=trace_mode):
+                stock, staged = self.pair(traced=trace_mode == 'all')
+                for engine in (stock, staged):
+                    engine.plugin_warmup(trace_mode)
+                self.assertEqual(stock.fake.log, staged.fake.log)
+                self.assertEqual(stock.toy.segments, staged.toy.segments)
+                self.assertEqual(staged.log.lines('prefix'), [])
 
     def test_the_staged_classes_add_only_private_prefix_names(self):
         """The call logs above cannot see a class attribute, and the fast path's capture reads the
