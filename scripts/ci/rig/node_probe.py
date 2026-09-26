@@ -75,6 +75,18 @@ for title, query in QUERIES:
 
 section('monitoring config naming the site', ['bash', '-c', "sudo -n k3s kubectl get configmap,secret -A -o yaml 2>/dev/null | grep -n -i -B2 -A2 '%s' | grep -v -i 'password\|token\|key:' | head -40" % SHORT])
 section('LAN hosts answering ssh on 192.168.2.0/24 (connect only)', ['bash', '-c', 'for i in $(seq 2 254); do (timeout 1 bash -c "</dev/tcp/192.168.2.$i/22" 2>/dev/null && echo 192.168.2.$i) & done; wait'], 60)
+CANDIDATES = ['192.168.2.34', '192.168.2.69', '192.168.2.70', '192.168.2.72', '192.168.2.145', '192.168.2.173', '192.168.2.192', '192.168.2.197']
+for ip in CANDIDATES:
+    section('agent exporter on %s:9108' % ip, ['bash', '-c', 'curl -sS -m 4 http://%s:9108/metrics 2>&1 | grep -E "^thatch_node_(health|agent|info|up)|site=|node=" | head -5' % ip], 15)
+    text = section('ssh hostname on %s (key auth only)' % ip, ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=4', '-o', 'StrictHostKeyChecking=no',
+                   '-o', 'UserKnownHostsFile=/dev/null', 'thatch@' + ip, 'hostname'], 15)
+    if SHORT in text:
+        remote = ('uptime; echo; free -g | head -2; echo; systemctl --user is-active thatch-node-agent; systemctl --user status thatch-node-agent --no-pager 2>&1 | head -25; '
+                  'echo; journalctl --user -u thatch-node-agent --since "2026-09-26 07:50" --no-pager 2>&1 | grep -vi heartbeat | tail -80; '
+                  'echo; journalctl -k --since "2026-09-26 07:50" --no-pager 2>&1 | grep -iE "oom|killed process|out of memory|nvrm|xid" | tail -20; '
+                  'echo; nvidia-smi 2>&1 | head -25; echo; docker ps -a --format "{{.Names}} {{.Image}} {{.Status}}" 2>&1 | head -20')
+        section('on %s (read-only)' % ip, ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', '-o', 'StrictHostKeyChecking=no',
+                '-o', 'UserKnownHostsFile=/dev/null', 'thatch@' + ip, remote], 120)
 nodes = section('k3s nodes', ['sudo', '-n', 'k3s', 'kubectl', 'get', 'nodes', '-o', 'wide'])
 section('pods on or about the site', ['bash', '-c', "sudo -n k3s kubectl get pods -A -o wide 2>&1 | grep -i '%s' | head -40" % SHORT])
 hosts = section('name lookup', ['bash', '-c', 'getent hosts %s %s.local %s.lan 2>&1; grep -i %s /etc/hosts 2>&1' % (SITE, SITE, SITE, SHORT)])
