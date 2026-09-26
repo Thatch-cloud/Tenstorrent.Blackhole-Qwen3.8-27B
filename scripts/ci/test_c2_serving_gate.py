@@ -530,7 +530,9 @@ def any_request_log(requests=4, prompt=60, ladder='[256, 512, 1024, 2048]'):
     """What an engine under QWEN_FAST_ANY_REQUEST=1 logs: the D2 consumer's live line on its first step,
     and one build line per request (serving_request_factory)."""
     lines = ['INFO [PINDIAG] request quarantine installed on vllm_tt_plugin.scheduler.TTScheduler',
-             'INFO ' + driver.QUARANTINE_LIVE]
+             'INFO ' + driver.QUARANTINE_LIVE,
+             'INFO [PINDIAG] one fresh prefill per step installed on vllm_tt_plugin.scheduler.TTScheduler',
+             'INFO ' + driver.ADMISSION_LIVE_PREFIX + 'TTScheduler']
     lines += ['INFO %scmpl-%d: captures <= 4 rows, replay attention and the T16 gate off, budget 16384 of '
               'max_tokens 16384 at position %d, proposal ladder %s' % (driver.ANY_REQUEST_ENGINE, i, prompt, ladder)
               for i in range(requests)]
@@ -725,16 +727,30 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(driver.any_request_check('INFO nothing of it' + chr(10), False), ([], [], []))
         self.assertEqual(driver.any_request_check(None, False), ([], [], []))
 
+    def test_the_one_fresh_prefill_cap_must_have_run_under_the_switch(self):
+        """Run 36211578069: without the cap the TTScheduler batches arrivals and the engine dies."""
+        quarantine_only = 'INFO ' + driver.QUARANTINE_LIVE + chr(10)
+        problems, _, _ = driver.any_request_check(quarantine_only, True)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('one-fresh-prefill cap never ran', problems[0])
+        installed_only = quarantine_only + ('INFO [PINDIAG] one fresh prefill per step installed on '
+                                            'vllm_tt_plugin.scheduler.TTScheduler' + chr(10))
+        self.assertEqual(len(driver.any_request_check(installed_only, True)[0]), 1, 'installed is not live')
+        self.assertEqual(driver.any_request_check(any_request_log(), True)[0], [])
+        leaked = driver.any_request_check('INFO ' + driver.ADMISSION_LIVE_PREFIX + 'TTScheduler' + chr(10), False)
+        self.assertTrue(any('carries C2-any markers' in p for p in leaked[0]), 'exact must never cap')
+
     def test_the_consumer_counts_in_any_class_and_its_class_is_recorded(self):
         """A subclass of the wrapped TTScheduler still runs the inherited wrapper: live, and noted."""
-        problems, _, consumers = driver.any_request_check(
-            'INFO ' + driver.QUARANTINE_LIVE_PREFIX + 'OneInFlightScheduler' + chr(10), True)
+        live = ('INFO ' + driver.QUARANTINE_LIVE_PREFIX + 'OneInFlightScheduler' + chr(10) +
+                'INFO ' + driver.ADMISSION_LIVE_PREFIX + 'OneInFlightScheduler' + chr(10))
+        problems, _, consumers = driver.any_request_check(live, True)
         self.assertEqual((problems, consumers), ([], ['OneInFlightScheduler']))
         texts = ['answer %d ' % i * 50 for i in range(4)]
         same = {'matrix-concurrent': lambda n: matrix_report(texts), 'matrix-solo': lambda n: matrix_report(texts)}
         code, summary, _, lines, _ = self.run_driver(
             ['--profile', 'c2', '--plan', 'matrix', '--lengths', '60,2048,4096,90'], same,
-            default_log='INFO ' + driver.QUARANTINE_LIVE_PREFIX + 'OneInFlightScheduler' + chr(10))
+            default_log=live)
         self.assertEqual(code, 0, lines)
         self.assertEqual(summary['arms']['matrix-solo']['quarantine_consumers'], ['OneInFlightScheduler'])
         self.assertTrue(any('the D2 consumer ran in OneInFlightScheduler, not TTScheduler' in line for line in lines))

@@ -126,11 +126,16 @@ MEMORY_SHORT_PROMPT = 60
 # Every per-request
 # engine logs its build with its proposal ladder (ANY_REQUEST_ENGINE; R3, G5), recorded per arm. None of
 # ANY_REQUEST_MARKERS may appear under a profile that leaves the switch off: exact runs v235's path.
+# The one-fresh-prefill cap (serving_prefill_admission) logs ADMISSION_LIVE_PREFIX + the class from its
+# first prefill step (the platform warmup). Without it the TTScheduler batches simultaneous arrivals into
+# one step and the lifecycle kills the engine (run 36211578069), so every arm under the switch must show it.
 ANY_REQUEST_FLAG = 'QWEN_FAST_ANY_REQUEST'
 QUARANTINE_LIVE_PREFIX = '[PINDIAG] request quarantine consumer live in '
 QUARANTINE_LIVE = QUARANTINE_LIVE_PREFIX + 'TTScheduler'
 ANY_REQUEST_ENGINE = '[PINDIAG] any-request engine for '
-ANY_REQUEST_MARKERS = ('[PINDIAG] request quarantine', ANY_REQUEST_ENGINE, '[PINDIAG] attach source check')
+ADMISSION_LIVE_PREFIX = '[PINDIAG] one fresh prefill per step live in '
+ANY_REQUEST_MARKERS = ('[PINDIAG] request quarantine', ANY_REQUEST_ENGINE, '[PINDIAG] attach source check',
+                       '[PINDIAG] one fresh prefill per step')
 ANY_REQUEST_LINES_KEPT = 32
 STAGGER = 0.25            # v235's M3NATIVE_STAGGER: admission in user order
 READINESS_SECONDS = 1800
@@ -614,8 +619,9 @@ def server_log(arm_dir):
 
 def any_request_check(log_text, any_request):
     """(problems, per-request engine lines, consumer classes) of one served arm's server log. Under a
-    C2-any profile the D2 consumer must have logged its live line (QUARANTINE_LIVE_PREFIX, any class);
-    under any other no C2-any marker may appear."""
+    C2-any profile the D2 consumer and the one-fresh-prefill cap must both have logged their live lines
+    (QUARANTINE_LIVE_PREFIX and ADMISSION_LIVE_PREFIX, any class); under any other no C2-any marker may
+    appear."""
     if log_text is None:
         return (['no server.log: the D2 quarantine consumer\'s live line (%s) cannot be checked' % QUARANTINE_LIVE]
                 if any_request else []), [], []
@@ -628,6 +634,11 @@ def any_request_check(log_text, any_request):
             return (['%s=1 but the server log has no "%s": the quarantine consumer never ran in the scheduler '
                      'this engine built, so a refusal would strand its request (serving_request_quarantine)' % (
                          ANY_REQUEST_FLAG, QUARANTINE_LIVE)], engines, consumers)
+        if not any(ADMISSION_LIVE_PREFIX in line for line in lines):
+            return (['%s=1 but the server log has no "%s<class>": the one-fresh-prefill cap never ran, so '
+                     'prompts arriving together share a prefill step and fail the engine '
+                     '(serving_prefill_admission, run 36211578069)' % (ANY_REQUEST_FLAG, ADMISSION_LIVE_PREFIX)],
+                    engines, consumers)
         return [], engines, consumers
     leaked = sorted(marker for marker in ANY_REQUEST_MARKERS if marker in log_text)
     if leaked:
