@@ -4,6 +4,10 @@ name: Qwen C2 serving image
 # reachable; its runners reach GitHub outbound, so this is the way in from offsite.
 # Actions (C2_ACTIONS, space-separated, run in this order):
 #   status - what the rig holds: the last manual build log, C2 images, card holders, the agent
+#   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
+#            on card M alone, card B being reserved for other work: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
+#            the same refusals as the gate (anything holding M or A, a platform serving container); never card
+#            A or card B, and never a reset (put reset before it after a hang); results in cardm/
 #   build  - build tt-vllm:qwen38-c2-$C2_IMAGE_TAG unless present (waits for a build in flight);
 #            the overlay is docker/qwen-c2-overlay.txt, and the tag lands only after G1 provenance
 #            (binaries and op directories, overlay sha256s and revision, boot argv and exact's v235
@@ -184,6 +188,90 @@ jobs:
           echo "reset_exit=$status heal_exit=$heal"
           serving_pair_resolve 120
           test "$status" = 0 && test "$heal" = 0
+      - name: Run a qualification harness on card M
+        if: contains(steps.job.outputs.actions, 'cardm')
+        working-directory: c2
+        timeout-minutes: 100
+        shell: bash
+        env:
+          HARNESS: ${{ steps.job.outputs.cardm_harness }}
+          HARNESS_ARGS: ${{ steps.job.outputs.cardm_args }}
+          HARNESS_ENV: ${{ steps.job.outputs.cardm_env }}
+        run: |
+          set -euo pipefail
+          # Card B is reserved for other work, so a single-card harness (qwen-card-b.yml's kind, e.g. the K64j
+          # CB2a sections of optimisation/ttnn-op/k64j/run_card_b.sh) runs here on card M, in the pair's
+          # concurrency group. Card M only: QUAL_CARD is card M's board id and ALLOW_SERVING_CARD=1 lifts the
+          # harness's serving-pair refusal, both set here after the job's environment (c2_serving_job.py refuses
+          # either, RESULTS, CARD_B_ARGS and any QUAL_* in C2_CARDM_ENV, and accepts only a harness that selects
+          # its board by the canonical qual_card.sh block). The harness maps card M's node alone, refuses while
+          # anything can reach card M or any container any Tenstorrent device (a card-B job's included), and
+          # never resets: after a hang it prints the pair's reset, which is the reset action's, never this step's.
+          test -n "$HARNESS"
+          results="/tmp/c2-cardm-results/$GITHUB_RUN_ID"
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to open card M under it" >&2; exit 1
+          fi
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
+          echo "card M $m, card A $a"
+          # The gate step's holder check (test_c2_serving_job pins it to the gate's text): nothing but the
+          # telemetry exporter's tt-smi may hold M or A.
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            sudo -n fuser -v "$m" "$a" > "$RUNNER_TEMP/c2-results/cardm-holders.txt" 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s "$RUNNER_TEMP/c2-results/cardm-holders.txt" ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' "$RUNNER_TEMP/c2-results/cardm-holders.txt" | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then echo 'M or A is held; refusing the card-M run' >&2; cat "$RUNNER_TEMP/c2-results/cardm-holders.txt" >&2; exit 1; fi
+          # What runs before the harness, so the next step removes only a container this one started.
+          docker ps -q | sort > "$RUNNER_TEMP/cardm-containers-before.txt"
+          mkdir -p "$results"
+          chmod 0777 "$results"
+          read -r -a extra <<< "$HARNESS_ENV"
+          echo "card M run: $HARNESS | args: $HARNESS_ARGS | env: ${HARNESS_ENV:-none} | results: $results"
+          env ${extra[@]+"${extra[@]}"} QUAL_CARD=blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 RESULTS="$results" \
+            CARD_B_ARGS="$HARNESS_ARGS" bash "$HARNESS" 2>&1 | tee "$results/harness-console.log"
+      - name: Collect the card-M results
+        if: always() && contains(steps.job.outputs.actions, 'cardm')
+        shell: bash
+        run: |
+          set +e -uo pipefail   # best effort throughout: the runner's bash -e must not stop the collection
+          # A container the card-M step started that still maps card M's node (the harness's EXIT trap removes its
+          # own; a step killed at its timeout may not get there) is removed. Nothing else: a platform serving
+          # container, a container that was there before, and one on card A or card B are never touched.
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          if [ -f "$RUNNER_TEMP/cardm-containers-before.txt" ]; then
+            for id in $(docker ps -q | sort | comm -13 "$RUNNER_TEMP/cardm-containers-before.txt" -); do
+              name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null)
+              case $name in /thatch-inference-*) continue ;; esac
+              for path in $(docker inspect -f '{{range .HostConfig.Devices}}{{println .PathOnHost}}{{end}}' "$id" 2>/dev/null); do
+                if [ -n "$m" ] && [ "$(readlink -f "$path")" = "$m" ]; then
+                  echo "removing $id $name: it maps card M ($m)"
+                  docker rm -f "$id" > /dev/null 2>&1 || true
+                  break
+                fi
+              done
+            done
+          fi
+          # The harness's files (root-owned: its container wrote them) into the uploaded results, all but the
+          # kernel caches (kcache-*); then the run's directory goes.
+          results="/tmp/c2-cardm-results/$GITHUB_RUN_ID"
+          out="$RUNNER_TEMP/c2-results/cardm"
+          if [ -d "$results" ]; then
+            mkdir -p "$out"
+            for f in "$results"/*; do
+              [ -e "$f" ] || continue
+              case ${f##*/} in kcache-*) continue ;; esac
+              sudo -n cp -a "$f" "$out/" 2>/dev/null || cp -a "$f" "$out/" || true
+            done
+            sudo -n chown -R "$(id -u):$(id -g)" "$out" 2>/dev/null || true
+            sudo -n rm -rf "$results" 2>/dev/null || rm -rf "$results" || true
+          fi
+          ls -la "$out" 2>/dev/null | head -40
+          grep -h -E '^K64J_CARD ' "$out"/*.log 2>/dev/null | tail -2 || true
       - name: G1 base drift
         if: contains(steps.job.outputs.actions, 'drift')
         working-directory: c2
