@@ -3,9 +3,11 @@
 The hardware gates fail a sequential arm when a request's Q differs from the oracle's, so the oracle
 must be the scheduler graft's rules and nothing else. This drives both with the same requests:
 
-  - the graft: vLLM 0.25.1's real TTScheduler and KVCacheManager with prefix_scheduler_graft
-    installed, built from the general-prefix engine config the way the P0a probe builds it
-    (prefix_p0a_probe.SchedEnv / Drive: ttnn and the TT model stubbed, no device);
+  - the graft: vLLM 0.25.1's real TTScheduler and KVCacheManager with G1's scheduler graft
+    (qwen_prefix_scheduler_patch over qwen_prefix_registry) installed, built from the general-prefix
+    engine config the way the P0a probe builds it (prefix_p0a_probe.SchedEnv / Drive: ttnn and the TT
+    model stubbed, no device). Each registry has mid-loop captures enabled, as the served model graft
+    declares at warmup (qwen_prefix_model_patch), so the gap boundary is planned;
   - the oracle: prefix_judge.Oracle fed the same prompts and salts in the same order.
 
 SCENARIOS covers the design's worked cases: a chain whose turns extend the previous prompt, a changed
@@ -17,14 +19,16 @@ conversations of one tenant sharing a 4,300-token block (the gap capture), and a
     python3 scripts/ci/prefix_oracle_check.py          # inside the serving image, as the probe runs
 
 prints one line per request and 'ORACLE_VS_GRAFT <n> requests, <m> mismatches'; exits 1 on any
-mismatch, and on a GOLDEN change: GOLDEN is what the real graft committed on 2026-09-26 (vLLM 0.25.1
-source, plugin bf77cd63, scripts/ci at prefix/g1-harness), which test_prefix_oracle_check holds the
+mismatch, and on a GOLDEN change: GOLDEN is what the real graft committed (first recorded on
+2026-09-26 with the P0a prototype at prefix/g1-harness; re-run on the integrated G1 graft, branch
+prefix/g1, vLLM 0.25.1 source, plugin bf77cd63: unchanged), which test_prefix_oracle_check holds the
 oracle to on CPU - a graft that now commits something else has to be re-recorded, not waved through.
 
 WHICH graft: the step runs this from the mounted checkout (/c2/scripts/ci), so by default it drives
-the checkout's prefix_scheduler_graft.py. Once the image carries its own copy (IMAGE_GRAFT, where
-docker/qwen-c2-overlay.txt's default destination puts it), that copy is the one driven, and it must
-be byte-identical to the checkout's: otherwise the oracle is held to a graft the engine does not run.
+the checkout's GRAFT_FILES. Once the image carries its own copies (IMAGE_GRAFT: the plugin package the
+patched TTScheduler imports them from, where docker/qwen-c2-overlay.txt lays them), those are the ones
+driven, and each must be byte-identical to the checkout's: otherwise the oracle is held to a graft the
+engine does not run.
 """
 
 import hashlib
@@ -37,7 +41,10 @@ import prefix_judge as judge
 
 CHUNK = judge.CHUNK
 HERE = os.path.dirname(os.path.abspath(__file__))
-IMAGE_GRAFT = '/experiment-scripts/ci/prefix_scheduler_graft.py'
+# The package the patched TTScheduler.__init__ imports the graft from (a relative import), and the two
+# files it needs, the registry first: the graft imports it by its plain name when loaded outside a package.
+IMAGE_GRAFT = '/opt/qwen-fast-plugin/src/vllm_tt_plugin'
+GRAFT_FILES = ('qwen_prefix_registry.py', 'qwen_prefix_scheduler_patch.py')
 
 
 def tokens(count, seed):
@@ -110,25 +117,39 @@ def file_sha(path):
         return hashlib.sha256(handle.read()).hexdigest()
 
 
+def graft_file(directory, name):
+    return directory.rstrip('/\\') + '/' + name
+
+
 def choose_graft(checkout=None, image=IMAGE_GRAFT, exists=os.path.exists, sha=file_sha):
-    """-> (path of the graft to drive, problem or None). The image's copy when it has one (it must
-    equal the checkout's byte for byte), else the checkout's, said so."""
-    checkout = checkout or os.path.join(HERE, 'prefix_scheduler_graft.py')
-    if not exists(image):
+    """-> (directory whose GRAFT_FILES to drive, problem or None). The image's copies when it has them
+    (each must equal the checkout's byte for byte), else the checkout's, said so."""
+    checkout = checkout or HERE
+    present = [name for name in GRAFT_FILES if exists(graft_file(image, name))]
+    if not present:
         return checkout, None
-    mine, theirs = sha(checkout), sha(image)
-    if mine != theirs:
-        return image, ('the image serves %s (sha256 %s) but the checkout has prefix_scheduler_graft.py %s: the oracle '
-                       'would be held to a graft the engine does not run' % (image, theirs, mine))
+    if len(present) != len(GRAFT_FILES):
+        return image, ('the image carries %s but not %s: the patched scheduler could not install the graft' % (
+            ', '.join(graft_file(image, name) for name in present),
+            ', '.join(name for name in GRAFT_FILES if name not in present)))
+    for name in GRAFT_FILES:
+        mine, theirs = sha(graft_file(checkout, name)), sha(graft_file(image, name))
+        if mine != theirs:
+            return image, ('the image serves %s (sha256 %s) but the checkout has %s %s: the oracle would be held '
+                           'to a graft the engine does not run' % (graft_file(image, name), theirs, name, mine))
     return image, None
 
 
-def load_graft(path):
-    """The graft module from `path`, installed as sys.modules['prefix_scheduler_graft']."""
-    spec = importlib.util.spec_from_file_location('prefix_scheduler_graft', path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules['prefix_scheduler_graft'] = module
-    spec.loader.exec_module(module)
+def load_graft(directory):
+    """The registry and the scheduler graft from `directory`, installed as sys.modules[<their names>];
+    returns the graft (qwen_prefix_scheduler_patch)."""
+    module = None
+    for name in GRAFT_FILES:
+        stem = name[:-len('.py')]
+        spec = importlib.util.spec_from_file_location(stem, graft_file(directory, name))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[stem] = module
+        spec.loader.exec_module(module)
     return module
 
 
@@ -143,7 +164,10 @@ def run_graft(say=print, graft_path=None):  # pragma: no cover - needs vLLM 0.25
     env = probe.SchedEnv(vllm_config, [])
     out = []
     for name, capacity, steps in scenarios():
-        registry = graft.PrefixRegistry(budget_bytes=None if capacity is None else capacity * graft.CHECKPOINT_NBYTES)
+        registry = graft.PrefixRegistry(budget_bytes=None if capacity is None
+                                        else capacity * graft.prefix_registry.CHECKPOINT_NBYTES)
+        # The served model graft declares mid-loop captures at warmup, before the scheduler exists.
+        registry.enable_mid_loop_capture()
         scheduler, state = env.make(registry=registry)
         drive = probe.Drive(env, scheduler, state, name)
         for rid, prompt, salt in steps:
@@ -174,12 +198,14 @@ def verdict(graft_rows, say=print):
 
 def main(say=print):  # pragma: no cover - see run_graft
     path, problem = choose_graft()
-    say('graft driven: %s (sha256 %s)' % (path, file_sha(path)))
+    for name in GRAFT_FILES:
+        if os.path.exists(graft_file(path, name)):
+            say('graft driven: %s (sha256 %s)' % (graft_file(path, name), file_sha(graft_file(path, name))))
     if problem:
         say('FAIL: ' + problem)
         return 1
     if path != IMAGE_GRAFT:
-        say('NOTE: the image carries no %s: the checkout copy of the graft was driven' % IMAGE_GRAFT)
+        say('NOTE: the image carries no graft in %s: the checkout copy of the graft was driven' % IMAGE_GRAFT)
     return verdict(run_graft(say, path), say)
 
 

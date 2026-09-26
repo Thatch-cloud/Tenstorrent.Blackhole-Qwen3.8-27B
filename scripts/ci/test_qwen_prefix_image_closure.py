@@ -1,25 +1,28 @@
 """A profile that turns prefix reuse on must ship in an image that carries every prefix-reuse stage.
 
 The G1 modules reach the C2 serving image only through docker/qwen-c2-overlay.txt (the one list,
-c2_overlay.py) and RUN steps in docker/qwen-c2-serving.Dockerfile. Neither names them yet, and
-test_c2_image_overlay only flags files an older layer already holds - a new module in no layer is
-invisible to it. So a profile that sets QWEN_PREFIX_REUSE=1 on today's image would boot with the
-plugin's stock scheduler (no hook, no grants) beside a model whose hit path asserts on start_pos > 0
-without a grant: fail-closed, but as a crash loop (memory serving-image-bundle-provenance).
+c2_overlay.py) and the prefix stage RUN in docker/qwen-c2-serving.Dockerfile (qwen_prefix_stage.py
+apply, which runs the stage table qwen_prefix_stage.STAGES from the overlaid tree). test_c2_image_overlay
+only flags files an older layer already holds - a new module in no layer is invisible to it. So a
+profile that sets QWEN_PREFIX_REUSE=1 on an image without them would boot with the plugin's stock
+scheduler (no hook, no grants) beside a model whose hit path asserts on start_pos > 0 without a
+grant: fail-closed, but as a crash loop (memory serving-image-bundle-provenance).
 
 Wherever reuse is on - a profile's env in qwen_c2_profiles.json, or the C2 Dockerfile's ENV - this
 holds the image to:
 1. the manifest lists qwen_prefix_registry.py and qwen_prefix_scheduler_patch.py at their
    /experiment-scripts/ci path AND at the TT plugin's own copy (/opt/qwen-fast-plugin/src/
-   vllm_tt_plugin/<name>, which the scheduler stage copies beside the patched scheduler.py), so G1's
-   provenance check (c2_image_provenance (b)) hashes the plugin copies against the same source as
-   the tree copies; and qwen_prefix_runner_patch.py and qwen_prefix_model_patch.py at their
-   /experiment-scripts/ci path;
-2. the Dockerfile RUNs each stage with python3 from /experiment-scripts/ci after the RUN that does
-   `c2_overlay.py install` (before it, the stages would run from the P8 tree's copies or none), the
-   scheduler and runner stages on the plugin package, none of them with --check. The model stage
-   ships with the flag (design section 2.0.1 item 4: with the flag on and no model graft, today's
-   model ignores start_pos and silently rewrites shared blocks).
+   vllm_tt_plugin/<name>: the patched TTScheduler.__init__ imports both from its own package, and
+   the table-driven stage writes nothing but its targets), so G1's provenance check
+   (c2_image_provenance (b)) hashes the plugin copies against the same source as the tree copies;
+   and qwen_prefix_runner_patch.py and qwen_prefix_model_patch.py at their /experiment-scripts/ci path;
+2. the Dockerfile RUNs `python3 ... qwen_prefix_stage.py apply --modules /experiment-scripts/ci` after
+   the RUN that does `c2_overlay.py install` (before it, the stages would run from the P8 tree's
+   copies or none), and not as `--check`/`anchors` only;
+3. the stage table patches every target (qwen_prefix_stage.table_problems is empty) with the
+   scheduler, runner and model stage modules. The model stage ships with the flag (design section
+   2.0.1 item 4: with the flag on and no model graft, today's model ignores start_pos and silently
+   rewrites shared blocks), which is why the table is all or nothing.
 With the flag set nowhere it checks nothing about the image; its controls run either way.
 """
 
@@ -35,6 +38,7 @@ sys.path.insert(0, str(HERE))
 
 import c2_overlay  # noqa: E402
 import qwen_prefix_scheduler_patch  # noqa: E402
+import qwen_prefix_stage  # noqa: E402
 
 MANIFEST = ROOT / 'docker' / 'qwen-c2-overlay.txt'
 DOCKERFILE = ROOT / 'docker' / 'qwen-c2-serving.Dockerfile'
@@ -51,12 +55,13 @@ REQUIRED = {
     'scripts/ci/qwen_prefix_runner_patch.py': (TREE + 'qwen_prefix_runner_patch.py',),
     'scripts/ci/qwen_prefix_model_patch.py': (TREE + 'qwen_prefix_model_patch.py',),
 }
-# stage script -> the package it must be run on (None: the stage's own default target).
-STAGES = (
-    ('qwen_prefix_scheduler_patch.py', PLUGIN_PACKAGE),
-    ('qwen_prefix_runner_patch.py', PLUGIN_PACKAGE),
-    ('qwen_prefix_model_patch.py', None),
-)
+# The stage modules the table must run (each on the targets it owns).
+STAGE_MODULES = {
+    'qwen_prefix_scheduler_patch': ('plugin/scheduler.py',),
+    'qwen_prefix_runner_patch': ('plugin/model_input.py', 'plugin/model_runner.py', 'plugin/worker.py'),
+    'qwen_prefix_model_patch': ('model/model.py', 'model/qwen36_vllm.py'),
+}
+STAGE_TOOL = '/opt/qwen-c2/qwen_prefix_stage.py'
 BACKSLASH = chr(92)
 
 
@@ -100,8 +105,22 @@ def commands(step):
     return [part.strip() for part in re.split(r';|&&|[|][|]', step[len('RUN '):]) if part.strip()]
 
 
-def plumbing_problems(manifest_text, dockerfile_text):
-    """What an image built from these two files lacks for prefix reuse ([] when nothing)."""
+def table_problems(stages, targets=None):
+    """What the stage table lacks for prefix reuse ([] when nothing)."""
+    problems = ['the stage table: %s' % problem for problem in qwen_prefix_stage.table_problems(targets, stages)]
+    if not stages:
+        problems.append('qwen_prefix_stage.STAGES is empty: the build patches nothing')
+        return problems
+    for module, owned in sorted(STAGE_MODULES.items()):
+        patched = sorted(target for target, name, _ in stages if name == module)
+        if patched != sorted(owned):
+            problems.append('the stage table runs %s on %s, not %s' % (module, patched, sorted(owned)))
+    return problems
+
+
+def plumbing_problems(manifest_text, dockerfile_text, stages=None):
+    """What an image built from these two files and this stage table lacks for prefix reuse."""
+    stages = qwen_prefix_stage.STAGES if stages is None else stages
     try:
         entries = c2_overlay.parse_manifest(manifest_text)
     except c2_overlay.ManifestError as error:
@@ -121,44 +140,25 @@ def plumbing_problems(manifest_text, dockerfile_text):
     if len(installs) != 1:
         problems.append('expected one RUN of c2_overlay.py install in the Dockerfile, found %d' % len(installs))
         return problems
-    for script, package in STAGES:
-        path = TREE + script
-        runs = [(index, command) for index, step in enumerate(steps) if step.startswith('RUN ')
-                for command in commands(step) if path in command]
-        if not runs:
-            problems.append('no RUN runs %s' % path)
-            continue
-        good = [index for index, command in runs
-                if index > installs[0] and command.split()[0].startswith('python3') and '--check' not in command.split()
-                and (package is None or package in command.split())]
-        if good:
-            continue
-        index, command = runs[0]
-        if index < installs[0]:
-            problems.append('%s runs before the overlay install (step %d < %d)' % (path, index, installs[0]))
-        elif '--check' in command.split():
-            problems.append('%s runs with --check only: %s' % (path, command))
-        elif package is not None and package not in command.split():
-            problems.append('%s is not run on %s: %s' % (path, package, command))
-        else:
-            problems.append('%s is not run with python3: %s' % (path, command))
+    runs = [(index, command) for index, step in enumerate(steps) if step.startswith('RUN ')
+            for command in commands(step) if STAGE_TOOL in command]
+    applies = [(index, command) for index, command in runs if ' apply' in ' ' + command]
+    if not applies:
+        problems.append('no RUN runs %s apply' % STAGE_TOOL)
+    else:
+        good = [index for index, command in applies
+                if index > installs[0] and 'python3' in command.split()[:4]
+                and '--modules' in command.split()
+                and command.split()[command.split().index('--modules') + 1] == TREE.rstrip('/')]
+        if not good:
+            index, command = applies[0]
+            if index < installs[0]:
+                problems.append('%s apply runs before the overlay install (step %d < %d)' % (STAGE_TOOL, index,
+                                                                                           installs[0]))
+            else:
+                problems.append('%s apply does not run the overlaid tree with python3: %s' % (STAGE_TOOL, command))
+    problems += table_problems(stages)
     return problems
-
-
-COMPLETE_MANIFEST_LINES = (
-    'scripts/ci/qwen_prefix_registry.py  /experiment-scripts/ci/qwen_prefix_registry.py  '
-    + PLUGIN + 'qwen_prefix_registry.py',
-    'scripts/ci/qwen_prefix_scheduler_patch.py  /experiment-scripts/ci/qwen_prefix_scheduler_patch.py  '
-    + PLUGIN + 'qwen_prefix_scheduler_patch.py',
-    'scripts/ci/qwen_prefix_runner_patch.py',
-    'scripts/ci/qwen_prefix_model_patch.py',
-)
-STAGE_RUN = ('RUN set -eu; ' + BACKSLASH + '\n'
-             '    python3 -B /experiment-scripts/ci/qwen_prefix_scheduler_patch.py ' + PLUGIN_PACKAGE + '; '
-             + BACKSLASH + '\n'
-             '    python3 -B /experiment-scripts/ci/qwen_prefix_runner_patch.py ' + PLUGIN_PACKAGE + '; '
-             + BACKSLASH + '\n'
-             '    python3 -B /experiment-scripts/ci/qwen_prefix_model_patch.py\n')
 
 
 class PrefixImageClosureTests(unittest.TestCase):
@@ -174,53 +174,75 @@ class PrefixImageClosureTests(unittest.TestCase):
         profiles = json.loads(read(PROFILES))
         name = sorted(profiles['profiles'])[0]
         profiles['profiles'][name].setdefault('env', {})[FLAG] = '1'
-        self.assertEqual(reuse_enablers(json.dumps(profiles), ''), ['profile %s' % name])
+        self.assertIn('profile %s' % name, reuse_enablers(json.dumps(profiles), ''))
         for env in ('ENV A=1 QWEN_PREFIX_REUSE=1', 'ENV QWEN_PREFIX_REUSE="1" ' + BACKSLASH + '\n    B=2'):
             self.assertEqual(reuse_enablers(json.dumps({'profiles': {}}), env + '\n'), ['Dockerfile ENV'], env)
         for env in ('ENV QWEN_PREFIX_REUSE=0', 'ENV QWEN_PREFIX_REUSE_X=1', '# ENV QWEN_PREFIX_REUSE=1'):
             self.assertEqual(reuse_enablers(json.dumps({'profiles': {}}), env + '\n'), [], env)
 
-    def test_the_real_files_with_the_plumbing_added_pass(self):
-        manifest = read(MANIFEST) + '\n' + '\n'.join(COMPLETE_MANIFEST_LINES) + '\n'
-        dockerfile = read(DOCKERFILE) + '\n' + STAGE_RUN
-        self.assertEqual(plumbing_problems(manifest, dockerfile), [])
-
     def test_the_check_names_what_is_missing(self):
-        """Controls on the real files: each missing piece is named."""
-        manifest = read(MANIFEST)
-        dockerfile = read(DOCKERFILE)
-        complete = manifest + '\n' + '\n'.join(COMPLETE_MANIFEST_LINES) + '\n'
-        staged = dockerfile + '\n' + STAGE_RUN
-        today = plumbing_problems(manifest, dockerfile)
-        if any('qwen_prefix' in line for line in manifest.split('\n') if not line.lstrip().startswith('#')):
-            self.skipTest('the manifest already names prefix modules; the today-control no longer applies')
-        self.assertIn('scripts/ci/qwen_prefix_registry.py is not in docker/qwen-c2-overlay.txt', today)
-        self.assertIn('no RUN runs /experiment-scripts/ci/qwen_prefix_scheduler_patch.py', today)
-        without_plugin_copy = complete.replace('  ' + PLUGIN + 'qwen_prefix_registry.py', '')
-        self.assertEqual(plumbing_problems(without_plugin_copy, staged),
+        """Controls on the real files: each piece taken out is named."""
+        manifest, dockerfile = read(MANIFEST), read(DOCKERFILE)
+        self.assertEqual(plumbing_problems(manifest, dockerfile), [])
+        registry_line = [line for line in manifest.split('\n') if line.startswith('scripts/ci/qwen_prefix_registry.py')]
+        self.assertEqual(len(registry_line), 1)
+        without_plugin_copy = manifest.replace(registry_line[0], registry_line[0].replace(
+            '  ' + PLUGIN + 'qwen_prefix_registry.py', ''))
+        self.assertEqual(plumbing_problems(without_plugin_copy, dockerfile),
                          ['scripts/ci/qwen_prefix_registry.py does not land at %sqwen_prefix_registry.py' % PLUGIN])
-        without_model = complete.replace('scripts/ci/qwen_prefix_model_patch.py\n', '')
-        self.assertEqual(plumbing_problems(without_model, staged),
+        without_model = manifest.replace('\nscripts/ci/qwen_prefix_model_patch.py\n', '\n')
+        self.assertEqual(plumbing_problems(without_model, dockerfile),
                          ['scripts/ci/qwen_prefix_model_patch.py is not in docker/qwen-c2-overlay.txt'])
+        steps = [step for step in instructions(dockerfile) if STAGE_TOOL + ' apply' in step]
+        self.assertEqual(len(steps), 1)
+        no_apply = dockerfile.replace(STAGE_TOOL + ' apply', STAGE_TOOL + ' anchors')
+        self.assertEqual(plumbing_problems(manifest, no_apply), ['no RUN runs %s apply' % STAGE_TOOL])
         marker = 'COPY qwen-c2-overlay.txt c2_overlay.py /opt/qwen-c2/\n'
         self.assertEqual(dockerfile.count(marker), 1)
-        early = dockerfile.replace(marker, STAGE_RUN + marker)
-        self.assertEqual([problem.split(' (')[0] for problem in plumbing_problems(complete, early)],
-                         ['%s%s runs before the overlay install' % (TREE, script) for script, _ in STAGES])
-        checked = dockerfile + '\n' + STAGE_RUN.replace('qwen_prefix_runner_patch.py ', 'qwen_prefix_runner_patch.py --check ')
-        self.assertEqual(len(plumbing_problems(complete, checked)), 1)
-        self.assertIn('--check only', plumbing_problems(complete, checked)[0])
-        elsewhere = dockerfile + '\n' + STAGE_RUN.replace('qwen_prefix_scheduler_patch.py ' + PLUGIN_PACKAGE,
-                                                           'qwen_prefix_scheduler_patch.py /tmp/plugin')
-        self.assertIn('is not run on %s' % PLUGIN_PACKAGE, plumbing_problems(complete, elsewhere)[0])
+        early = dockerfile.replace(marker, 'RUN python3 -B %s apply --modules /experiment-scripts/ci\n' % STAGE_TOOL
+                                   + marker).replace(STAGE_TOOL + ' apply ' + BACKSLASH, STAGE_TOOL + ' anchors '
+                                                     + BACKSLASH)
+        self.assertEqual([problem.split(' (')[0] for problem in plumbing_problems(manifest, early)],
+                         ['%s apply runs before the overlay install' % STAGE_TOOL])
+        elsewhere = dockerfile.replace('--modules /experiment-scripts/ci', '--modules /tmp/ci')
+        self.assertEqual(len(plumbing_problems(manifest, elsewhere)), 1)
+        self.assertIn('does not run the overlaid tree', plumbing_problems(manifest, elsewhere)[0])
+
+    def test_the_table_must_patch_every_target_with_the_three_stage_modules(self):
+        self.assertEqual(table_problems(qwen_prefix_stage.STAGES), [])
+        self.assertEqual(table_problems(()), ['qwen_prefix_stage.STAGES is empty: the build patches nothing'])
+        no_worker = tuple(row for row in qwen_prefix_stage.STAGES if row[0] != 'plugin/worker.py')
+        problems = table_problems(no_worker)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn('prefix reuse is all or nothing', problems[0])
+        self.assertIn('runs qwen_prefix_runner_patch on', problems[1])
+        other = tuple((target, 'some_other_patch' if module == 'qwen_prefix_model_patch' else module, function)
+                      for target, module, function in qwen_prefix_stage.STAGES)
+        self.assertEqual(table_problems(other), ["the stage table runs qwen_prefix_model_patch on [], not "
+                                                 "['model/model.py', 'model/qwen36_vllm.py']"])
+
+    def test_every_stage_function_exists_and_is_the_module_s_own_edit(self):
+        """The table's functions are the text-to-text edits each module's own stage() runs."""
+        import qwen_prefix_model_patch
+        import qwen_prefix_runner_patch
+        modules = dict(qwen_prefix_scheduler_patch=qwen_prefix_scheduler_patch,
+                       qwen_prefix_runner_patch=qwen_prefix_runner_patch,
+                       qwen_prefix_model_patch=qwen_prefix_model_patch)
+        for target, module, function in qwen_prefix_stage.STAGES:
+            with self.subTest(target=target):
+                self.assertTrue(callable(getattr(modules[module], function, None)), (module, function))
+        runner_files = dict(qwen_prefix_runner_patch.FILES)
+        for target, module, function in qwen_prefix_stage.STAGES:
+            if module == 'qwen_prefix_runner_patch':
+                self.assertIs(getattr(qwen_prefix_runner_patch, function), runner_files[target.split('/', 1)[1]])
 
     def test_the_plugin_copies_are_the_scheduler_stage_s_runtime_files(self):
-        """What the stage copies beside scheduler.py is exactly what the manifest must also put
+        """What the CLI stage copies beside scheduler.py is exactly what the manifest must also put
         there, so the provenance hash covers every plugin copy the hook imports."""
         plugin_copies = {Path(path).name for needed in REQUIRED.values() for path in needed if path.startswith(PLUGIN)}
         self.assertEqual(plugin_copies, set(qwen_prefix_scheduler_patch.RUNTIME_FILES))
-        for script, _ in STAGES[:2]:
-            self.assertTrue((HERE / script).is_file(), script)
+        for module in STAGE_MODULES:
+            self.assertTrue((HERE / (module + '.py')).is_file(), module)
 
     def test_instructions_join_continuations(self):
         text = 'FROM x\n# c\nRUN a; ' + BACKSLASH + '\n    # inner comment\n    b\nENV A=1\n'

@@ -23,6 +23,18 @@ def seq(start, length):
     return list(range(start, start + length))
 
 
+class AuditAbsenceTests(unittest.TestCase):
+    def test_two_audit_rows_without_digests_are_not_an_agreement(self):
+        bare = dict(tag='x', markers=dict(audit=dict(kv_range=None, kv_sha=None, slot_sha=None)))
+        other = dict(tag='y', markers=dict(audit=dict(kv_range=None, kv_sha=None, slot_sha=None)))
+        (severity, text), = pj.audit_problems(bare, other)
+        self.assertEqual(severity, 'NOT_EXERCISED')
+        self.assertIn('kv_range, kv_sha, slot_sha', text)
+        full = dict(kv_range='0:10', kv_sha='aa', slot_sha='bb')
+        self.assertEqual(pj.audit_problems(dict(tag='x', markers=dict(audit=full)),
+                                              dict(tag='y', markers=dict(audit=dict(full)))), [])
+
+
 class OracleTests(unittest.TestCase):
     def test_prefix_digests_name_prefixes(self):
         a = pj.prefix_digests(seq(0, 200))

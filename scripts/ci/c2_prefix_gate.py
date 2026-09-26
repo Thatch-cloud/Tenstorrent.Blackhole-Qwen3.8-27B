@@ -85,6 +85,7 @@ passed, 2 when refused up front.
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
 import argparse
+import binascii
 import copy
 import json
 import os
@@ -223,13 +224,52 @@ def worst_case_seconds(arms_of):
     return sum(arm['timeout'] + ARM_OVERHEAD_SECONDS for arms in arms_of.values() for arm in arms)
 
 
-def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_path=None):
+# The model graft's per-row slot and logits digests (qwen_prefix_model_patch): a gate instrument, not a
+# profile knob, so the image's own profile serves; on every prefix arm but timing, which measures TTFT.
+DIGESTS_ENV = 'QWEN_PREFIX_DIGESTS=1'
+
+
+# The registry's counters (qwen_prefix_registry.StatsExport) go out at most every QWEN_PREFIX_STATS_S (30 s by
+# default) and only from a schedule() call, so an engine that falls idle right after an event would leave it
+# unexported: every prefix arm exports on every step instead (a tmpfs file write, a log line only on change).
+STATS_NOW_ENV = 'QWEN_PREFIX_STATS_S=0'
+
+
+def wants_digests(arm):
+    return bool(arm.get('prefix')) and arm.get('scenario') != 'timing'
+
+
+# The salt key a prefix arm mounts (serving_c2_contract.SALT_KEY_ENV names it in the container): the image
+# keeps a cache_salt only when it verifies against its key, so the gate mints every salt under a key of
+# its own (prefix_replay.mint_salt) - never the operator's /models/.qwen-c2/prefix-salt.key.
+SALT_KEY_MOUNT = '/prefix-gate/salt.key'
+SALT_KEY_ENV = 'QWEN_PREFIX_SALT_KEY_FILE'
+
+
+def write_salt_key(path, urandom=os.urandom):
+    """A fresh 64-character key at `path` (the contract reads it stripped, at least 32 bytes). -> the key bytes."""
+    key = binascii.hexlify(urandom(32))
+    with open(path, 'wb') as handle:
+        handle.write(key + b'\n')
+    return key
+
+
+def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_path=None, digests=False,
+               salt_key_path=None, stats_now=False):
     """`docker run -d` of one serving container: the S1 gate's agent shape (its --rm dropped: the
     reload drill stops and starts the same container), the API on 127.0.0.1:port, a derived
-    profiles file when the arm has one, and the platform's vLLM argv."""
+    profiles file when the arm has one, the row digests when asked, the arm's salt key when it has
+    one, and the platform's vLLM argv."""
     arguments = [token for token in gate.agent_shape(image, name, served, devices, hub) if token != '--rm']
     arguments[2:2] = ['-d']
     arguments += ['-p', '127.0.0.1:%d:8000' % port]
+    if digests:
+        arguments += ['-e', DIGESTS_ENV]
+    if stats_now:
+        arguments += ['-e', STATS_NOW_ENV]
+    if salt_key_path:
+        arguments += ['--mount', 'type=bind,src=%s,dst=%s,readonly' % (salt_key_path, SALT_KEY_MOUNT),
+                      '-e', '%s=%s' % (SALT_KEY_ENV, SALT_KEY_MOUNT)]
     if derived_path:
         arguments += ['--mount', 'type=bind,src=%s,dst=%s,readonly' % (derived_path, DERIVED_MOUNT),
                       '-e', 'QWEN_C2_PROFILES=%s' % DERIVED_MOUNT]
@@ -928,7 +968,13 @@ class Runner(object):
             derived_path = os.path.join(arm_dir, 'profiles.json')
             with open(derived_path, 'w', encoding='utf-8') as handle:
                 json.dump(arm['derived'], handle, indent=1, sort_keys=True)
-        arguments = server_run(self.image, name, arm['served'], self.devices, self.port, self.hub, derived_path)
+        salt_key = salt_key_path = None
+        if arm.get('prefix'):
+            salt_key_path = os.path.join(arm_dir, 'salt.key')
+            salt_key = write_salt_key(salt_key_path)
+        arguments = server_run(self.image, name, arm['served'], self.devices, self.port, self.hub, derived_path,
+                               digests=wants_digests(arm), salt_key_path=salt_key_path,
+                               stats_now=bool(arm.get('prefix')))
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         started = self.clock()
@@ -943,7 +989,7 @@ class Runner(object):
         # the evictions it does not model are what the arm looks for (a LOST hit).
         driver = replay.Driver(client, arm['arm'], self.get_corpus(), follower, container, seed=self.seed,
                                deadline=deadline, clock=self.clock, sleep=self.sleep, say=self.log,
-                               strict=arm['strict'])
+                               strict=arm['strict'], salt_key=salt_key)
         error, stats, metrics, output = None, None, {}, ''
         try:
             code, output = self.docker(arguments, 300)
@@ -1143,7 +1189,10 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                     docker=server_run(options.image, CONTAINER_PREFIX + arm['arm'], arm['served'],
                                                       devices or ['<M>', '<A>'], options.port, options.hub,
                                                       '<results>/%s/profiles.json' % arm['arm'] if arm['derived']
-                                                      else None))))
+                                                      else None, digests=wants_digests(arm),
+                                                      salt_key_path='<results>/%s/salt.key' % arm['arm']
+                                                      if arm.get('prefix') else None,
+                                                      stats_now=bool(arm.get('prefix'))))))
         return 0
     runner = (runner_factory or Runner)(options.image, options.results, options.checkout,
                                         devices if devices is not None else gate.serving_pair(), options.hub,

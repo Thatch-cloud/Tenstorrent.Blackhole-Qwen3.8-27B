@@ -83,8 +83,14 @@ speculative-decoding/harness/greedy_session.py
 # missing here, and c2_image_provenance (f) fails an image whose stages ran a module this list does not
 # lay at the context's bytes. lever_n_model_patch is the model stage's (its patch_tp_replay makes both
 # chunk loops resumable; the bundle's 77d6995a copy patches the traced loop only). Nothing else in the
-# container imports it, so laying it changes no profile.
-scripts/ci/prefix_scheduler_graft.py
+# container imports it, so laying it changes no profile. The patched TTScheduler.__init__ imports the
+# scheduler graft and the registry from the plugin package itself (a relative import, only under
+# QWEN_PREFIX_REUSE=1), so both also land at the plugin path, and provenance (b) hashes those copies
+# against the same source (test_qwen_prefix_image_closure).
+scripts/ci/qwen_prefix_registry.py  /experiment-scripts/ci/qwen_prefix_registry.py  /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_prefix_registry.py
+scripts/ci/qwen_prefix_scheduler_patch.py  /experiment-scripts/ci/qwen_prefix_scheduler_patch.py  /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_prefix_scheduler_patch.py
+scripts/ci/qwen_prefix_runner_patch.py
+scripts/ci/qwen_prefix_model_patch.py
 scripts/ci/qwen_prefix_metrics.py
 scripts/ci/lever_n_model_patch.py
 

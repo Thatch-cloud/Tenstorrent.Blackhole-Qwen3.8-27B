@@ -35,8 +35,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import lever_n_model_patch  # noqa: E402
-import prefix_scheduler_graft  # noqa: E402
 import qwen_prefix_model_patch as patcher  # noqa: E402
+import qwen_prefix_registry  # noqa: E402
+import qwen_prefix_runner_patch  # noqa: E402
 
 MODEL = HERE / 'fixtures' / 'qwen36_model.py'
 VLLM = HERE / 'fixtures' / 'qwen36_vllm.py'
@@ -282,12 +283,46 @@ class Refusals(unittest.TestCase):
             patcher.patch_vllm_source(drifted)
 
 
+class SwitchOff(unittest.TestCase):
+    def test_switch_off_the_staged_files_run_as_the_stock_ones(self):
+        """qwen_prefix_stage's switch-off rule, held here: with QWEN_PREFIX_REUSE unset the staged
+        model.py and qwen36_vllm.py make the stock files' ttnn calls and results (prefill traced and
+        eager, warmup) and the capability is off. The executed comparison is
+        test_qwen_prefix_model_runtime.OffIsStock, run from this module too."""
+        import test_qwen_prefix_model_runtime as runtime
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(runtime.OffIsStock)
+        result = unittest.TestResult()
+        suite.run(result)
+        self.assertEqual(result.failures + result.errors, [])
+        self.assertGreaterEqual(result.testsRun, 6)
+
+    def test_the_image_stage_entries_are_the_pinned_edits(self):
+        """qwen_prefix_stage.STAGES runs patch_model / patch_vllm_entry: the same bytes stage() writes,
+        refused on an input or output off the pins."""
+        model, vllm = model_text(), vllm_text()
+        self.assertEqual(patcher.patch_model(model), patcher.patch_model_source(model))
+        self.assertEqual(patcher.patch_vllm_entry(vllm), patcher.patch_vllm_source(vllm))
+        with self.assertRaisesRegex(ValueError, 'not the pinned original'):
+            patcher.patch_model(model + '\n')
+        with mock.patch.object(patcher, 'PATCHED_SHA256', dict(patcher.PATCHED_SHA256, **{patcher.VLLM_FILE: '0' * 64})):
+            with self.assertRaisesRegex(ValueError, 'not the pinned graft'):
+                patcher.patch_vllm_entry(vllm)
+
+
 class Names(unittest.TestCase):
     def test_the_registry_key_is_the_scheduler_grafts(self):
-        self.assertEqual(patcher.REGISTRY_KEY, prefix_scheduler_graft.REGISTRY_KEY)
+        self.assertEqual(patcher.REGISTRY_KEY, qwen_prefix_registry.REGISTRY_KEY)
         self.assertIn('_QWEN_PREFIX_REGISTRY_KEY = "%s"' % patcher.REGISTRY_KEY, staged()[0])
-        self.assertEqual(patcher.CHUNK, prefix_scheduler_graft.CHUNK)
+        self.assertEqual(patcher.CHUNK, qwen_prefix_registry.CHUNK)
         self.assertIn('_QWEN_PREFIX_CHUNK = %d' % patcher.CHUNK, staged()[0])
+
+    def test_the_request_id_kwarg_is_the_one_the_runner_passes(self):
+        # submit_prefill hands the row ids over as this kwarg (qwen_prefix_runner_patch.SUBMIT_NEW);
+        # a different name here leaves every row without a request id: a hit would assert.
+        self.assertEqual(patcher.REQ_IDS_KWARG, qwen_prefix_runner_patch.REQUEST_IDS_KWARG)
+        self.assertEqual(patcher.REQ_IDS_KWARG, qwen_prefix_registry.REQUEST_IDS_KWARG)
+        self.assertIn('kwargs["%s"] = ' % patcher.REQ_IDS_KWARG, qwen_prefix_runner_patch.SUBMIT_NEW)
 
     def test_the_request_id_kwarg_and_the_markers_are_in_the_staged_files(self):
         model, vllm = staged()

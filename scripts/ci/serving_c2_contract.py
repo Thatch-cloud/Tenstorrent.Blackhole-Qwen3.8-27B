@@ -161,7 +161,7 @@ def prefix_reuse(profile):
 def prefix_reuse_problems(profile):
     """Every way the profile's engine flags break prefix reuse's exactness assumptions, [] when none.
 
-    Reuse is exact only under the engine prefix_scheduler_graft.install_problems accepts (async
+    Reuse is exact only under the engine qwen_prefix_scheduler_patch.install_problems accepts (async
     scheduling off, a whole-prompt token budget, 64-token blocks, no speculative lookahead) and
     with vLLM's own prefix cache on; vLLM's align-mode assertion also needs chunked prefill on in
     the argv, which the TT platform turns off again for qwen3_5 (design 2.0.1 item 5; P0a checks

@@ -206,6 +206,54 @@ class ShapeTests(unittest.TestCase):
         self.assertIn('type=bind,src=/r/x/profiles.json,dst=%s,readonly' % gate.DERIVED_MOUNT, derived)
         self.assertIn('QWEN_C2_PROFILES=%s' % gate.DERIVED_MOUNT, derived)
         self.assertIn('QWEN_C2_PROFILE=general-prefix+eager', derived)
+        self.assertNotIn(gate.DIGESTS_ENV, arguments)
+        self.assertNotIn(gate.STATS_NOW_ENV, arguments)
+        now = gate.server_run('img', 'n', 'general-prefix', ['/a', '/b'], stats_now=True)
+        self.assertEqual(now[now.index(gate.STATS_NOW_ENV) - 1], '-e')
+        import qwen_prefix_registry
+        self.assertEqual(gate.STATS_NOW_ENV.split('=')[0], qwen_prefix_registry.ENV_STATS_S)
+        digests = gate.server_run('img', 'n', 'general-prefix', ['/a', '/b'], digests=True)
+        self.assertEqual(digests[digests.index(gate.DIGESTS_ENV) - 1], '-e')
+        self.assertLess(digests.index(gate.DIGESTS_ENV), digests.index('--entrypoint'))
+
+    def test_a_prefix_arm_mounts_its_own_salt_key_and_mints_salts_the_contract_keeps(self):
+        """The image keeps a cache_salt only when it verifies against its salt key (serving_c2_contract's
+        salt policy); a gate that sent raw salts would get no hit at all. Each prefix arm writes a key,
+        mounts it where QWEN_PREFIX_SALT_KEY_FILE points, and its driver mints every salt under it."""
+        import serving_c2_contract as contract
+
+        arguments = gate.server_run('img', 'n', 'general-prefix', ['/a', '/b'], salt_key_path='/r/arm/salt.key')
+        self.assertIn('type=bind,src=/r/arm/salt.key,dst=%s,readonly' % gate.SALT_KEY_MOUNT, arguments)
+        self.assertIn('%s=%s' % (contract.SALT_KEY_ENV, gate.SALT_KEY_MOUNT), arguments)
+        self.assertEqual(gate.SALT_KEY_ENV, contract.SALT_KEY_ENV)
+        self.assertLess(arguments.index('%s=%s' % (contract.SALT_KEY_ENV, gate.SALT_KEY_MOUNT)),
+                        arguments.index('--entrypoint'))
+        directory = tempfile.mkdtemp()
+        try:
+            path = os.path.join(directory, 'salt.key')
+            key = gate.write_salt_key(path)
+            read, where = contract.read_salt_key({contract.SALT_KEY_ENV: path})
+            self.assertEqual((read, where), (key, path))
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+        driver = replay.Driver(None, 'exactness-traced', None, salt_key=key)
+        for salt in (driver.salt('chain'), driver.fresh_salt(), driver.fresh_salt('rerun')):
+            self.assertEqual(contract.salt_verdict(salt, read), 'verified', salt)
+            self.assertEqual(contract.salt_verdict(salt, b'k' * 32), 'dropped-unverified')
+        self.assertEqual(driver.salt('chain'), driver.salt('chain'))
+        self.assertNotEqual(driver.salt('chain'), driver.salt('shared'))
+
+    def test_the_row_digests_go_to_every_prefix_arm_but_timing(self):
+        """The model prints slot_sha / logits_sha only with QWEN_PREFIX_DIGESTS=1: the exactness, bring-up
+        and lifecycle arms compare them; the timing arm measures TTFT without the hashing, and the
+        baseline (general) has no prefix route."""
+        document = profiles()
+        wanted = {}
+        for plan in gate.PLANS:
+            for arm in gate.plan_arms(plan, 'general-prefix', 'general', document):
+                wanted[arm['arm']] = gate.wants_digests(arm)
+        self.assertEqual(sorted(name for name, on in wanted.items() if not on),
+                         ['bringup-reference', 'timing-baseline', 'timing-prefix'])
 
     def test_the_contract_reads_the_derived_file(self):
         """serving_c2_contract.boot loads QWEN_C2_PROFILES: the derived file is what serves, and its

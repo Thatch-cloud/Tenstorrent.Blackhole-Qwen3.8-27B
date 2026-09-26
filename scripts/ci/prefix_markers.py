@@ -7,23 +7,33 @@ boundary, once per admission attempt (kv_cache_manager.py:238-244).
 THE MARKER CONTRACT (what the harness expects each G1 track to print; a missing marker is reported,
 never guessed around):
 
-  scheduler graft (prefix_scheduler_graft.py, printed today):
+  scheduler graft (qwen_prefix_scheduler_patch.py over qwen_prefix_registry.py):
     [PINDIAG] prefix: install scheduler=<module.Class> plugin=<path> coordinator=<Class> block_size=<n>
-        blocks=<n> kv_spec_dtype=<dtype> QWEN_SDPA_BF8=<v> store_gib=<f> kill_switch=<path>
-    [PINDIAG] prefix: grant req=<engine request id> h=<n> Q=<n> plan=[<pos>,...]
+        blocks=<n> kv_spec_dtype=<dtype> QWEN_SDPA_BF8=<v> hash=<algo> executor=<backend> store_gib=<f>
+        kill_switch=<path> stats=<path> vllm=<version>
+    [PINDIAG] prefix: grant req=<engine request id> h=<n> Q=<n> drain=<n> plan=[<pos>,...]
+        (drain: where the row's chunk loop drains, floor2048 of the tokens it prefills; the P0a
+        prototype printed no drain= and is still read)
     [PINDIAG] prefix: commit refused req=<id> start_pos=<n> Q=<n>
     [PINDIAG] prefix: capture skipped req=<id> pos=<n>: <reason>
     [PINDIAG] prefix: kill switch <path> present: ...
   registry counters (the design's cross-process export; either form is read, the last one wins):
     [PINDIAG] prefix: stats {<json of PrefixRegistry.snapshot()>}      in the server log, or
     the JSON file STATS_FILE inside the container (read with docker exec)
-    The lifecycle gates read REQUIRED_STATS from it; `dropped_hits` (a staged grant with Q > 0
-    that commit dropped: an allocation failure after a grant, F2) is not in the P0a prototype's
-    counters yet - the scheduler track adds it, and until then the tiny-pool arm says so.
-  model graft (one line per prefill row, from inside the branch that ran):
-    [PREFIX] req=<engine request id> Q=<n> L=<n> path=<traced|eager> restored_ms=<f> captured=[<pos>,...]
-        capture_ms=<f> programs_before=<program-cache entries before the row> programs=<entries after it>
-        slot_sha=<hex> logits_sha=<hex>
+    The lifecycle gates read REQUIRED_STATS from it, `dropped_hits` (a staged grant with Q > 0
+    that commit dropped: an allocation failure after a grant, F2) included.
+  model graft (qwen_prefix_model_patch; one line per prefill row, from inside the branch that ran):
+    [PREFIX] row=<index> req=<engine request id> path=<traced|eager> registry=<present|absent>
+        grant=<committed|none> Q=<n> L=<n> plan=[<pos>,...] restored_ms=<f or -> captured=[<pos>:stored:<n>ms |
+        <pos>:refused:<n>ms | <pos>:skipped, ...] dropped=[<pos>,...] ms=<row ms> programs=<before>-><after>
+        programs_across_restore=<...> [slot_sha=<hex> logits_sha=<hex>]
+    read as: captured = the stored positions (refused and skipped ones go to capture_failed), capture_ms
+    = the sum of the stored captures' ms, programs_before / programs = the two sides of the arrow ('None'
+    when the program cache size is unavailable). slot_sha and logits_sha are printed only with
+    QWEN_PREFIX_DIGESTS=1 (or QWEN_PREFIX_AUDIT=1), a gate instrument the gate passes to every prefix arm
+    but timing. The harness's own spelling (req=... captured=[<pos>,...] capture_ms=<f>
+    programs_before=<n> programs=<n>) is read too. Other '[PREFIX] ' lines (program growth, capture
+    skipped, no registry) are not rows.
     programs_before lets the gate judge what the row itself compiled (a decode step between two rows
     may compile on its own); without it only a row right after its cold twin is measured.
     slot_sha digests the row's end-of-prefill GDN state (the bytes the row already copies to the
@@ -35,8 +45,9 @@ never guessed around):
     The design's own spelling (row=... ms=...) is accepted too: `row` is read as the request id
     when it is not a plain integer, `ms` as capture_ms.
   audit mode (QWEN_PREFIX_AUDIT=1, program-free):
-    [PREFIX-AUDIT] req=<id> Q=<n> L=<n> kv_range=<a>:<b> kv_sha=<hex> slot_sha=<hex>
-    digests of the unpacked K/V values over kv_range and of the row's GDN slot bytes; the gate
+    [PREFIX-AUDIT] req=<id> Q=<n> L=<n> kv_range=<a>:<b> kv_sha=<hex> slot_sha=<hex> [logits_sha=<hex>]
+    digests of the unpacked K/V values over kv_range and of the row's GDN slot bytes (the model also
+    prints one line per 2048-token window, window=<w> ... kv=<hex>, which is not an audit row); the gate
     compares a hit's digests with its cold twin's over the same range, so kv_range should be 0:L
     on every row (a hit's [0,Q) is the shared blocks, L2; its [Q,L) the resumed chunks and tail).
 
@@ -59,12 +70,15 @@ REQUIRED_STATS = ('pins', 'commit_mismatch', 'dropped_attempts', 'dropped_hits',
                   'evicted_coupled', 'evicted_lru', 'unsalted_denied')
 DOCKER_TIME = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) ')
 INSTALL = '[PINDIAG] prefix: install '
-GRANT = re.compile(r'\[PINDIAG\] prefix: grant req=(\S+) h=(\d+) Q=(\d+) plan=\[([0-9, ]*)\]')
+GRANT = re.compile(r'\[PINDIAG\] prefix: grant req=(\S+) h=(\d+) Q=(\d+)(?: drain=(\d+))? plan=\[([0-9, ]*)\]')
 COMMIT_REFUSED = re.compile(r'\[PINDIAG\] prefix: commit refused req=(\S+) start_pos=(\d+) Q=(\d+)')
 CAPTURE_SKIPPED = re.compile(r'\[PINDIAG\] prefix: capture skipped req=(\S+) pos=(\S+): (.*)$')
 KILL_SWITCH = '[PINDIAG] prefix: kill switch '
 STATS = re.compile(r'\[PINDIAG\] prefix: stats (\{.*\})\s*$')
 MODEL_ROW = '[PREFIX] '
+# A row, not the model's other [PREFIX] lines (program growth, capture skipped, no registry).
+MODEL_ROW_LINE = re.compile(r'\[PREFIX\] (?:row|req)=')
+PROGRAMS_ARROW = re.compile(r'^(\d+|None)->(\d+|None)$')
 AUDIT_ROW = '[PREFIX-AUDIT] '
 QWEN_C2_ARGV = re.compile(r'\[QWEN-C2\] profile (\S+): vLLM argv (\[.*\])[ \t]*$')
 APC = re.compile(r'Automatic prefix caching is (enabled|disabled)')
@@ -117,7 +131,8 @@ def request_tag(request_id):
 
 def model_row(text):
     """A [PREFIX] row's fields, normalised: req (from req, or from row when that is not a number),
-    Q, L, path, restored_ms, captured, capture_ms, programs(_before), slot_sha, logits_sha."""
+    Q, L, path, restored_ms, captured, capture_failed, capture_ms, programs(_before), slot_sha, logits_sha
+    (the model graft's spelling and the harness's own, see the module docstring)."""
     body = text.split(MODEL_ROW, 1)[1]
     values, raw = fields(body), dict(FIELD.findall(body))
     req = values.get('req')
@@ -126,11 +141,35 @@ def model_row(text):
     captured = values.get('captured')
     if captured is not None and not isinstance(captured, list):
         captured = [captured]
+    stored, failed, stored_ms = [], [], []
+    for item in captured or ():
+        if isinstance(item, int):
+            stored.append(item)
+            continue
+        parts = str(item).split(':')
+        if parts[0].isdigit() and len(parts) >= 2 and parts[1] == 'stored':
+            stored.append(int(parts[0]))
+            if len(parts) >= 3 and parts[2].endswith('ms'):
+                try:
+                    stored_ms.append(float(parts[2][:-2]))
+                except ValueError:
+                    pass
+        else:
+            failed.append(str(item))
     programs = values.get('programs', values.get('program_cache'))
     programs_before = values.get('programs_before')
+    arrow = PROGRAMS_ARROW.match(programs) if isinstance(programs, str) else None
+    if arrow:
+        programs_before = None if arrow.group(1) == 'None' else int(arrow.group(1))
+        programs = None if arrow.group(2) == 'None' else int(arrow.group(2))
+    capture_ms = values.get('capture_ms')
+    if capture_ms is None:
+        capture_ms = sum(stored_ms) if stored_ms else (values.get('ms') if 'plan' not in values else None)
+    restored_ms = values.get('restored_ms')
     return dict(req=req, tag=request_tag(req) if req else None, q=values.get('Q'), l=values.get('L'),
-                path=values.get('path'), restored_ms=values.get('restored_ms'), captured=captured or [],
-                capture_ms=values.get('capture_ms', values.get('ms')), programs=programs,
+                path=values.get('path'), restored_ms=restored_ms if isinstance(restored_ms, (int, float)) else None,
+                captured=stored, capture_failed=failed, capture_ms=capture_ms,
+                programs=programs if isinstance(programs, int) else None,
                 row=values.get('row'), slot_sha=raw.get('slot_sha'), logits_sha=raw.get('logits_sha'),
                 programs_before=programs_before if isinstance(programs_before, int) else None)
 
@@ -142,7 +181,8 @@ def audit_row(text):
     values, raw = fields(body), dict(FIELD.findall(body))
     req = values.get('req') or (values.get('row') if isinstance(values.get('row'), str) else None)
     return dict(req=req, tag=request_tag(req) if req else None, q=values.get('Q'), l=values.get('L'),
-                kv_range=raw.get('kv_range'), kv_sha=raw.get('kv_sha'), slot_sha=raw.get('slot_sha'))
+                kv_range=raw.get('kv_range'), kv_sha=raw.get('kv_sha'), slot_sha=raw.get('slot_sha'),
+                logits_sha=raw.get('logits_sha'))
 
 
 def scan(lines):
@@ -160,14 +200,15 @@ def scan(lines):
             out['installs'].append(entry)
         match = GRANT.search(line)
         if match:
-            plan = [int(part) for part in match.group(4).replace(' ', '').split(',') if part]
+            plan = [int(part) for part in match.group(5).replace(' ', '').split(',') if part]
             out['grants'].append(dict(where, req=match.group(1), tag=request_tag(match.group(1)),
-                                      h=int(match.group(2)), q=int(match.group(3)), plan=plan))
-        if MODEL_ROW in line:
+                                      h=int(match.group(2)), q=int(match.group(3)), plan=plan,
+                                      drain=int(match.group(4)) if match.group(4) else None))
+        if MODEL_ROW_LINE.search(line):
             entry = model_row(line)
             entry.update(where)
             out['rows'].append(entry)
-        if AUDIT_ROW in line:
+        if AUDIT_ROW in line and 'kv_range=' in line:
             entry = audit_row(line)
             entry.update(where)
             out['audits'].append(entry)

@@ -295,11 +295,15 @@ class HookTests(unittest.TestCase):
         self.assertEqual(scheduler.constructed_with, (('config',), {'kv_cache_config': 'kv'}))
         self.assertEqual(scheduler._forced_mode.name, 'DEFAULT')
 
-    def test_the_hook_does_nothing_otherwise(self):
+    def test_switch_off_the_hook_does_nothing(self):
+        """QWEN_PREFIX_REUSE unset (or anything but 1): the patched TTScheduler.__init__ installs
+        nothing and ends as the plugin's does (qwen_prefix_stage's switch-off rule)."""
         for environ in ({}, {'QWEN_PREFIX_REUSE': '0'}, {'QWEN_PREFIX_REUSE': 'true'}):
             scheduler, calls = self.construct(environ)
             self.assertEqual(calls, [])
             self.assertEqual(scheduler._forced_mode.name, 'DEFAULT')
+            self.assertEqual(scheduler.constructed_with, (('config',), {'kv_cache_config': 'kv'}))
+            self.assertNotIn('_qwen_prefix', scheduler.__dict__)
 
 
 # ------------------------------------------------------------------------------------------------

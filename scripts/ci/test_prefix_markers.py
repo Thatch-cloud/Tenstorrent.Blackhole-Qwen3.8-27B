@@ -12,7 +12,7 @@ from contextlib import redirect_stderr
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import prefix_markers as pm  # noqa: E402
-import prefix_scheduler_graft as graft  # noqa: E402
+import qwen_prefix_registry as graft  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -143,9 +143,10 @@ class ScanTests(unittest.TestCase):
         self.assertEqual((audit['kv_range'], audit['kv_sha'], audit['slot_sha']), ('0:10', '0042', '0007'))
 
     def test_the_stats_the_lifecycle_gates_require(self):
-        """Every required counter but dropped_hits is one the P0a prototype registry already keeps."""
+        """Every required counter is one the registry keeps (pins is a snapshot gauge)."""
         missing = set(pm.REQUIRED_STATS) - set(graft.STAT_NAMES) - {'pins'}
-        self.assertEqual(missing, {'dropped_hits'})
+        self.assertEqual(missing, set())
+        self.assertIn('pins', graft.PrefixRegistry(budget_bytes=1).snapshot())
 
     def test_a_design_spelling_row_with_a_request_id(self):
         row = pm.model_row('[PREFIX] row=chatcmpl-pfx-x-0001-cold-12345678 Q=0 L=10 captured=[8192,10240] ms=5')

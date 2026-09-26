@@ -4,8 +4,9 @@ The streaming client is held against a real local HTTP server (server-sent event
 tokens, closed sockets); the scenarios against FakeEngine, a served general-prefix engine in
 miniature whose GRANTS COME FROM THE REAL SCHEDULER GRAFT, not from the harness's oracle:
 
-  - prefix_scheduler_graft.SchedulerGraft (the trim, the cap, the per-step commit, eviction
-    coupling, the kill switch) and PrefixRegistry (the checkpoint LRU, pins, grants) are driven over
+  - qwen_prefix_scheduler_patch.SchedulerGraft (the trim, the cap, the per-step commit, eviction
+    coupling, the kill switch) and qwen_prefix_registry.PrefixRegistry (the checkpoint LRU, pins,
+    grants; mid-loop captures declared, as the served model graft does at warmup) are driven over
     a model of vLLM's KV side - FakePool (a free queue in LRU order, a hash map where the first block
     cached for a hash wins, blocks freed tail first, a cached block evicted when reallocated),
     FakeManager.get_computed_blocks (the longest cached run of the request's block hashes, salt in
@@ -50,7 +51,8 @@ import prefix_agent_corpus as pc  # noqa: E402
 import prefix_judge as judge  # noqa: E402
 import prefix_markers as pm  # noqa: E402
 import prefix_replay as replay  # noqa: E402
-import prefix_scheduler_graft as graft  # noqa: E402
+import qwen_prefix_registry as prefix_registry  # noqa: E402
+import qwen_prefix_scheduler_patch as graft  # noqa: E402
 import test_prefix_agent_corpus as corpus_fixture  # noqa: E402
 import test_prefix_markers as marker_fixture  # noqa: E402
 
@@ -90,6 +92,27 @@ def pool_blocks(profile):
 
 
 # -- vLLM's KV side, in miniature ----------------------------------------------------------------
+
+class SaltMintTests(unittest.TestCase):
+    """prefix_replay.mint_salt is serving_c2_contract.mint_salt (the rig host has no contract import)."""
+
+    def test_the_minted_salt_is_the_contract_s(self):
+        import serving_c2_contract as contract
+
+        key = b'0123456789abcdef' * 4
+        for name in ('pfx-salt-exactness-traced-0-chain', 'pfx-cold-bringup-prefix-0-0001', 'a.b c', 'x' * 300):
+            with self.subTest(name=name):
+                minted = replay.mint_salt(key, name)
+                tag = minted.split('.')[1]
+                self.assertEqual(minted, contract.mint_salt(key, tag))
+                self.assertEqual(contract.salt_verdict(minted, key), 'verified')
+                self.assertRegex(tag, '^[A-Za-z0-9_-]{8,128}$')
+
+    def test_without_a_key_the_driver_sends_the_raw_names(self):
+        driver = replay.Driver(None, 'arm', None)
+        self.assertEqual(driver.salt('s'), 'pfx-salt-arm-0-s')
+        self.assertTrue(driver.fresh_salt().startswith('pfx-cold-arm-0-'))
+
 
 class FakeRequest(object):
     """The Request fields the scheduler graft reads, and the fake scheduler's own bookkeeping."""
@@ -281,7 +304,7 @@ class FakeEngine(object):
         self.path = path or ('eager' if tt.get('trace_mode') == 'decode_only' else 'traced')
         self.audit = str(env.get('QWEN_PREFIX_AUDIT')) == '1'
         self.dev_mode = str(env.get('VLLM_SERVER_DEV_MODE')) == '1'
-        self.store_gib = float(env.get('QWEN_PREFIX_STORE_GIB', graft.DEFAULT_STORE_GIB))
+        self.store_gib = float(env.get('QWEN_PREFIX_STORE_GIB', prefix_registry.DEFAULT_STORE_GIB))
         self.max_num_seqs = int(engine.get('max-num-seqs', 4))
         self.max_model_len = int(engine.get('max-model-len', 65536))
         self.num_blocks = pool_blocks(self.profile)
@@ -312,8 +335,10 @@ class FakeEngine(object):
         self.coordinator = FakeCoordinator(self.pool, self.single)
         self.manager = FakeManager(self.pool, self.coordinator)
         self.registry = graft.PrefixRegistry(environ=dict(QWEN_PREFIX_STORE_GIB=str(self.store_gib)))
+        # The served model graft declares its mid-loop captures at warmup (qwen_prefix_model_patch).
+        self.registry.enable_mid_loop_capture()
         self.graft = graft.SchedulerGraft(SimpleNamespace(kv_cache_manager=self.manager), self.registry,
-                                          self.kill_path, 0.0, time.monotonic, self.graft_say)
+                                          graft.KillSwitch(self.kill_path, 0.0, time.monotonic), self.graft_say)
         self.graft.original.update(get_computed_blocks=self.manager.get_computed_blocks,
                                    cache_blocks=self.coordinator.cache_blocks,
                                    _maybe_evict_cached_block=self.pool._maybe_evict_cached_block)
@@ -435,8 +460,8 @@ class FakeEngine(object):
             return None
         with self.cv:
             values = self.registry.snapshot()
-            if 'no_dropped_hits' not in self.faults:
-                values['dropped_hits'] = self.dropped_hits
+            if 'no_dropped_hits' in self.faults:
+                values.pop('dropped_hits', None)     # a registry without the counter (the P0a prototype)
             return values
 
     def kill_switch(self, on):
@@ -478,7 +503,7 @@ class FakeEngine(object):
         admitted = []
         if self.waiting and not holding:
             # The registry logs through the module's log (commit refused, capture skipped).
-            with mock.patch.object(graft, 'log', self.graft_say):
+            with mock.patch.object(prefix_registry, 'log', self.graft_say):
                 self.registry.begin_step()
                 admitted = self.admit()
                 for request, q in admitted:
@@ -548,7 +573,8 @@ class FakeEngine(object):
                 self.say('ERROR AssertionError: the committed grant Q=%s is not the row start %s (%s)' % (
                     granted, q, request.request_id))
             for position, _ in (grant.plan if grant is not None else ()):
-                if self.registry.capture(request.request_id, position) is not None:
+                # The model graft captures inside its chunk loop, after exactly `position` tokens.
+                if self.registry.capture(request.request_id, position, loop_pos=position) is not None:
                     captured.append(position)
         if first:
             request.first_q, request.captured = q, captured
@@ -1413,6 +1439,8 @@ class ScenarioTests(unittest.TestCase):
         grant, tiny = driver.events['tiny-grant'], driver.events['tiny']
         self.assertTrue(grant['ok'] and grant['filler_running'] and grant['waiting_gauge'])
         self.assertGreater(engine.dropped_hits, 0, 'a staged grant with Q > 0 was dropped')
+        self.assertEqual(engine.registry.stats['dropped_hits'], engine.dropped_hits,
+                         'the registry counts the dropped hits the fake saw')
         self.assertGreater(tiny['preemptions'], 0)
         records = resolved(driver, engine)
         waited = dict((r['tag'], r) for r in records)[grant['tag']]

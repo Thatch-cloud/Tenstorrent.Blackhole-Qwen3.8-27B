@@ -2,9 +2,10 @@
 
 The model side of the TT prefix-reuse design (revision 2, 2026-09-26): section 2.0.1 item 4 and
 the "Model graft" row of section 2.2. vLLM keeps the attention KV pages and the scheduler graft
-(prefix_scheduler_graft / qwen_prefix_registry) trims every hit to Q, a 2048-token boundary with a
+(qwen_prefix_scheduler_patch / qwen_prefix_registry) trims every hit to Q, a 2048-token boundary with a
 saved GatedDeltaNet (GDN) checkpoint, and commits a grant per admitted request. This stage makes
-the model honour a grant exactly:
+the model honour a grant exactly (its contract with the registry is qwen_prefix_registry's module
+docstring; this module's adapter functions are the only code that touches the registry):
 
 model.py (models/demos/blackhole/qwen36/tt/model.py in the image)
   * both chunk loops, _prefill_traced_chunked_tp and _prefill_chunked_eager_tp, become resumable
@@ -22,9 +23,15 @@ model.py (models/demos/blackhole/qwen36/tt/model.py in the image)
     row's, the checkpoint's token ids equal the prompt's, its GDN states match the scratch's layer
     count, shapes and dtypes; F2), a hit restores fp32 rec_state and conv_carry into the bound B=1
     scratch in place and resumes at Q/2048, planned boundaries are captured to host (a failure
-    skips the checkpoint and is counted, never fails the request; S7), every row logs the program
-    cache size before and after it (F3), and QWEN_PREFIX_AUDIT=1 logs program-free KV / GDN-slot /
-    logits digests (F3). Its name is deliberately outside prefill_paged_slots*: the C2 fast path's
+    skips the checkpoint and is counted, never fails the request; S7). A capture is taken inside the
+    chunk loop right after the chunk that ends on the boundary, so it is the state after exactly
+    that many tokens: the registry is told so (loop_pos) and the model declares mid-loop captures
+    (the gap boundary and a resumed request's prompt boundary, both below the loop's drain), on the
+    registry holder at warmup - before vLLM builds the scheduler - and on the registry itself on
+    every prefill. Every row logs the program cache size before and after it (F3);
+    QWEN_PREFIX_DIGESTS=1 (a gate instrument) adds the row's end-of-prefill GDN slot and last-position
+    logits digests (slot_sha, logits_sha) to its marker, and QWEN_PREFIX_AUDIT=1 logs program-free
+    KV / GDN-slot / logits digests (F3). Its name is deliberately outside prefill_paged_slots*: the C2 fast path's
     prefill capture (dflash_prefill_window.PrefillWindowCapture.bindings) refuses, on every
     profile of the image, a model exposing a prefill_paged_slots* entry it does not know. For the
     same reason the route refuses to run under a fast-path capture;
@@ -81,13 +88,14 @@ SOURCE_SHA256 = {
 # edit below, or to lever_n_model_patch.patch_tp_replay, changes these on purpose
 # (test_qwen_prefix_model_patch prints the new values).
 PATCHED_SHA256 = {
-    MODEL_FILE: '79a08c8a7d864b78440e9758b2998eed2dc7cc9b547f09c8fb7e2992bd2beab9',
-    VLLM_FILE: '904952a6947b56f066248b6d7c70ce057617fb4ccccb2a00299d2c566cc6927c',
+    MODEL_FILE: 'feb1a912fd6e70ef03bf537f1953663380340d2908d1e3b16fb5ed77a25619dc',
+    VLLM_FILE: '4eafb09617ba62f322e259f5610447c251b9e6a093b2ca70f233d5079f403edc',
 }
 
-# Shared with the scheduler graft (prefix_scheduler_graft.REGISTRY_KEY) and the runner patch.
+# Shared with the registry (qwen_prefix_registry.REGISTRY_KEY and REQUEST_IDS_KWARG) and the runner
+# patch (qwen_prefix_runner_patch.REQUEST_IDS_KWARG: submit_prefill's kwarg).
 REGISTRY_KEY = '_qwen_prefix_registry'
-REQ_IDS_KWARG = 'qwen_prefix_req_ids'
+REQ_IDS_KWARG = 'request_ids'
 CHUNK = 2048
 MARKER_ROW = '[PREFIX] row='
 MARKER_WARM = '[PINDIAG] prefix: model warm restore_mode='
@@ -143,13 +151,16 @@ def _qwen_prefix_warn_once(key, message):
 
 
 def _qwen_prefix_registry():
-    """The scheduler graft's registry, parked under a fixed sys.modules key (None when absent).
+    """The scheduler graft's registry (qwen_prefix_registry.PrefixRegistry), parked under a fixed
+    sys.modules key (None when absent).
 
-    The adapter. The model reads only: registry.grant_for(req_id) -> None or a grant with req_id,
+    The adapter. The model uses only: registry.grant_for(req_id) -> None or a grant with req_id,
     q (0 on a miss), checkpoint (pos, token_ids, rec, carry; required when q > 0) and plan (the
     boundaries to capture, as (pos, key) pairs or bare positions); registry.capture(req_id, pos,
-    rec=, carry=, nbytes=), which must not raise; and the optional registry.stats dict. If the
-    registry's API moves, change these module functions, not the model methods."""
+    rec=, carry=, nbytes=, ms=, loop_pos=), which must not raise and refuses a state not taken
+    after exactly pos tokens; registry.note_restore(ms); registry.enable_mid_loop_capture(); and
+    the optional registry.stats dict. If the registry's API moves, change these module functions,
+    not the model methods."""
     import sys as _qwen_sys
 
     return getattr(_qwen_sys.modules.get(_QWEN_PREFIX_REGISTRY_KEY), "registry", None)
@@ -161,13 +172,59 @@ def _qwen_prefix_note(registry, name, value):
         stats[name] += value
 
 
-def _qwen_prefix_put(registry, req_id, pos, rec, carry, nbytes):
+def _qwen_prefix_put(registry, req_id, pos, rec, carry, nbytes, ms=None):
+    """File the state a chunk loop handed over at `pos` - the tokens the loop had run when it
+    called on_capture, which is what the registry holds the capture to (loop_pos)."""
     try:
-        return registry.capture(req_id, pos, rec=rec, carry=carry, nbytes=nbytes)
+        return registry.capture(req_id, pos, rec=rec, carry=carry, nbytes=nbytes, ms=ms, loop_pos=pos)
     except Exception as error:  # the registry guards itself; a capture never fails a request (S7)
         _qwen_prefix_note(registry, "capture_failures", 1)
         logger.warning(f"[PREFIX] capture not stored req={req_id} pos={pos}: {error!r}")
         return None
+
+
+def _qwen_prefix_restored(registry, ms):
+    note = getattr(registry, "note_restore", None)
+    if callable(note):
+        note(ms)
+    else:
+        _qwen_prefix_note(registry, "restore_ms", ms)
+
+
+def _qwen_prefix_declare_mid_loop(create=False):
+    """Tell the scheduler graft this model captures inside its chunk loop (at a planned boundary
+    below the loop's drain, after exactly that many tokens), so it plans the gap boundary and a
+    resumed request's prompt boundary too. The warmup runs before vLLM builds the scheduler, so
+    with create it declares on the registry holder (created as a bare module when absent), which
+    qwen_prefix_registry.shared_registry honours when it creates the registry."""
+    import sys as _qwen_sys
+    import types as _qwen_types
+
+    holder = _qwen_sys.modules.get(_QWEN_PREFIX_REGISTRY_KEY)
+    if holder is None:
+        if not create:
+            return
+        holder = _qwen_types.ModuleType(_QWEN_PREFIX_REGISTRY_KEY)
+        _qwen_sys.modules[_QWEN_PREFIX_REGISTRY_KEY] = holder
+    holder.mid_loop_capture = True
+    enable = getattr(getattr(holder, "registry", None), "enable_mid_loop_capture", None)
+    if callable(enable):
+        enable()
+
+
+def _qwen_prefix_digests(rec_snap, conv_snap, logits):
+    """(slot_sha, logits_sha): sha256 (32 hex) of a row's end-of-prefill GDN slot state - every GDN
+    layer's rec_state, then its conv_states - and of its last-position logits, as the host copies
+    every prefill already makes hold them. A hit and its salted cold twin must agree on both."""
+    import hashlib as _qwen_hashlib
+
+    gdn = _qwen_hashlib.sha256()
+    for rec in rec_snap:
+        gdn.update(_qwen_prefix_bytes(rec))
+    for convs in conv_snap:
+        for c in convs:
+            gdn.update(_qwen_prefix_bytes(c))
+    return gdn.hexdigest()[:32], _qwen_hashlib.sha256(_qwen_prefix_bytes(logits)).hexdigest()[:32]
 
 
 def _qwen_prefix_plan(grant):
@@ -318,6 +375,8 @@ MODEL_METHODS = r'''
                 f"(sys.modules[{_QWEN_PREFIX_REGISTRY_KEY!r}]): every row runs cold and reuse never engages - "
                 "the scheduler graft is missing or runs in another process",
             )
+        else:
+            _qwen_prefix_declare_mid_loop()
         held = "absent" if registry is None else "present"
         chunk_size = self._chunked_chunk_size or _QWEN_PREFIX_CHUNK
         path = "traced" if self._chunked_trace_id is not None else "eager"
@@ -332,6 +391,7 @@ MODEL_METHODS = r'''
                 raise AssertionError(f"prefix reuse: request {u}: empty prompt (actual_len={actual})")
             rows.append(_qwen_prefix_row(u, req_ids[u], starts[u], actual, toks, registry, chunk_size, spec))
         audit = os.environ.get("QWEN_PREFIX_AUDIT") == "1"
+        digests = audit or os.environ.get("QWEN_PREFIX_DIGESTS") == "1"
 
         prev = self._bind_gdn_prefill_scratch()
         host_logits = []
@@ -351,7 +411,7 @@ MODEL_METHODS = r'''
                     self._qwen_prefix_restore(row.rec, row.carry)
                     restored_ms = (_qwen_time.perf_counter() - began) * 1000.0
                     programs = (programs_before, self._qwen_prefix_program_cache_entries())
-                    _qwen_prefix_note(registry, "restore_ms", restored_ms)
+                    _qwen_prefix_restored(registry, restored_ms)
                 captured = []
                 resume = {}
                 if row.start or row.plan:
@@ -372,6 +432,10 @@ MODEL_METHODS = r'''
                 )
                 if audit:
                     self._qwen_prefix_audit(row, pt[u : u + 1], per_user_rec[-1], per_user_conv[-1], host_logits[-1])
+                shas = ""
+                if digests:
+                    slot_sha, logits_sha = _qwen_prefix_digests(per_user_rec[-1], per_user_conv[-1], host_logits[-1])
+                    shas = f" slot_sha={slot_sha} logits_sha={logits_sha}"
                 programs_after = self._qwen_prefix_program_cache_entries()
                 elapsed = (_qwen_time.perf_counter() - began) * 1000.0
                 restored = "-" if restored_ms is None else f"{restored_ms:.1f}"
@@ -380,7 +444,7 @@ MODEL_METHODS = r'''
                     f"grant={'committed' if row.granted else 'none'} Q={row.start} L={actual} plan={row.plan} "
                     f"restored_ms={restored} captured=[{','.join(captured)}] dropped={row.dropped} "
                     f"ms={elapsed:.1f} programs={programs_before}->{programs_after} "
-                    f"programs_across_restore={programs}"
+                    f"programs_across_restore={programs}{shas}"
                 )
                 if programs_before is not None and programs_after is not None and programs_after > programs_before:
                     _qwen_prefix_note(registry, "program_growth", 1)
@@ -434,9 +498,8 @@ MODEL_METHODS = r'''
             logger.warning(f"[PREFIX] capture skipped req={req_id} pos={pos}: {error!r}")
             captured.append(f"{pos}:skipped")
             return
-        stored = _qwen_prefix_put(registry, req_id, pos, rec, carry, nbytes)
         ms = (_qwen_time.perf_counter() - began) * 1000.0
-        _qwen_prefix_note(registry, "capture_ms", ms)
+        stored = _qwen_prefix_put(registry, req_id, pos, rec, carry, nbytes, ms)
         captured.append(f"{pos}:{'stored' if stored is not None else 'refused'}:{ms:.0f}ms")
 
     def _qwen_prefix_restore(self, rec_list, carry_list, mode=None):
@@ -543,6 +606,8 @@ MODEL_METHODS = r'''
             )
         self._qwen_prefix_state_spec = _qwen_prefix_state_spec(rec_now, carry_now)
         self._qwen_prefix_restore_mode = chosen
+        # Before vLLM builds the scheduler: the capture hook takes a boundary below the loop's drain.
+        _qwen_prefix_declare_mid_loop(create=True)
         programs = self._qwen_prefix_program_cache_entries()
         if programs is None:
             logger.warning(
@@ -585,21 +650,21 @@ MODEL_METHODS = r'''
                 for w, digest in enumerate(windows):
                     digest.update(_qwen_prefix_bytes(seq[:, w * chunk : min((w + 1) * chunk, actual)]))
                 del sel, seq
+        whole = _qwen_hashlib.sha256()
         for w, digest in enumerate(windows):
+            window_sha = digest.hexdigest()[:32]
+            whole.update(window_sha.encode("ascii"))
             logger.info(
                 f"[PREFIX-AUDIT] req={row.req_id} Q={row.start} L={actual} window={w} "
                 f"tokens=[{w * chunk},{min((w + 1) * chunk, actual)}) new={int(w * chunk >= row.start)} "
-                f"kv={digest.hexdigest()[:32]}"
+                f"kv={window_sha}"
             )
-        gdn = _qwen_hashlib.sha256()
-        for rec in rec_snap:
-            gdn.update(_qwen_prefix_bytes(rec))
-        for convs in conv_snap:
-            for c in convs:
-                gdn.update(_qwen_prefix_bytes(c))
+        # The summary the gate compares (prefix_markers.audit_row): KV over [0, L) as the chain of the
+        # window digests above, the GDN slot and the last-position logits.
+        slot_sha, logits_sha = _qwen_prefix_digests(rec_snap, conv_snap, logits)
         logger.info(
-            f"[PREFIX-AUDIT] req={row.req_id} Q={row.start} L={actual} gdn_slot={gdn.hexdigest()[:32]} "
-            f"logits={_qwen_hashlib.sha256(_qwen_prefix_bytes(logits)).hexdigest()[:32]}"
+            f"[PREFIX-AUDIT] req={row.req_id} Q={row.start} L={actual} kv_range=0:{actual} "
+            f"kv_sha={whole.hexdigest()[:32]} slot_sha={slot_sha} logits_sha={logits_sha}"
         )
 '''
 
@@ -858,6 +923,31 @@ def patch_vllm_source(source):
     source = _insert_after_method(source, 'warmup_model_prefill', VLLM_WARM_METHOD)
     ast.parse(source)
     return source
+
+
+def _pinned_patch(name, source, transform):
+    """transform(source) held to this stage's pins: the input must be the pinned original and the
+    output the pinned graft, so a drifted lever_n_model_patch cannot stage a different graft through
+    the image's stage table either."""
+    digest = sha256_bytes(source.encode('utf-8'))
+    if digest != SOURCE_SHA256[name]:
+        raise ValueError('%s sha256 %s is not the pinned original %s' % (name, digest, SOURCE_SHA256[name]))
+    result = transform(source)
+    digest = sha256_bytes(result.encode('utf-8'))
+    if digest != PATCHED_SHA256[name]:
+        raise ValueError('staged %s sha256 %s is not the pinned graft %s: the stage or lever_n_model_patch '
+                         'drifted' % (name, digest, PATCHED_SHA256[name]))
+    return result
+
+
+def patch_model(source):
+    """The C2 image's stage for model.py (qwen_prefix_stage.STAGES): patch_model_source, pinned."""
+    return _pinned_patch(MODEL_FILE, source, patch_model_source)
+
+
+def patch_vllm_entry(source):
+    """The C2 image's stage for qwen36_vllm.py (qwen_prefix_stage.STAGES): patch_vllm_source, pinned."""
+    return _pinned_patch(VLLM_FILE, source, patch_vllm_source)
 
 
 def patch_tree_bytes(model_bytes, vllm_bytes):

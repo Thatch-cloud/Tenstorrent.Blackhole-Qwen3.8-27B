@@ -29,7 +29,8 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import c2_overlay  # noqa: E402
-import prefix_scheduler_graft as graft  # noqa: E402
+import qwen_prefix_registry as registry  # noqa: E402
+import qwen_prefix_scheduler_patch as graft  # noqa: E402
 import qwen_prefix_stage as stage  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 
@@ -102,11 +103,13 @@ def script_closure(modules, directory=HERE):
 
 
 def g1_modules(stages=None, directory=HERE):
-    """The G1 modules the image must carry at this commit: every stage module, every qwen_prefix_* runtime
-    module (not the stage tool, which is a build tool), and the scheduler graft."""
+    """The G1 modules the image must carry at this commit: every stage module, and every qwen_prefix_*
+    runtime module - the registry and the scheduler graft the patched TTScheduler imports, the metrics
+    the contract boots - but not the stage tool (a build tool) or a CPU-test fixture."""
     stages = stage.STAGES if stages is None else stages
-    names = {module for _, module, _ in stages} | {'prefix_scheduler_graft'}
-    names |= {path.stem for path in Path(directory).glob('qwen_prefix_*.py') if path.stem != 'qwen_prefix_stage'}
+    names = {module for _, module, _ in stages} | {'qwen_prefix_registry', 'qwen_prefix_scheduler_patch'}
+    names |= {path.stem for path in Path(directory).glob('qwen_prefix_*.py')
+              if path.stem != 'qwen_prefix_stage' and not path.stem.endswith('_fixture')}
     return sorted(names)
 
 
@@ -133,8 +136,12 @@ def stage_test_problems(stages, directory, workflow_text):
 def platform_scheduler(profile):
     """A stand-in for the TTScheduler vLLM builds under `profile`, with the engine flags as the TT platform
     leaves them for qwen3_5 (PLG/platform.py:67-105: chunked prefill off again, max-num-batched-tokens
-    raised to max-model-len; what P0a checks 1-2 measured in the image) and the single 64-token spec the
-    TT worker builds. Returns (scheduler, the fake coordinator module install_problems imports)."""
+    raised to max-model-len, long_prefill_token_threshold 0; what P0a checks 1-2 measured in the image),
+    the profile's block-hash algorithm, the uniproc executor vLLM picks at DP=1 (the P0a probe's served
+    config: hash=sha256, executor=uni, threshold 0) and the single 64-token spec the TT worker builds. The
+    vLLM internals the wrappers bind are not modelled (test_qwen_prefix_scheduler_vllm holds them on real
+    vLLM objects): see profile_problems. Returns (scheduler, the fake coordinator module install_problems
+    imports)."""
     engine = profile['engine']
     coordinator = types.ModuleType('vllm.v1.core.kv_cache_coordinator')
     coordinator.UnitaryKVCacheCoordinator = type('UnitaryKVCacheCoordinator', (), {})
@@ -143,8 +150,12 @@ def platform_scheduler(profile):
     scheduler = types.SimpleNamespace(
         scheduler_config=types.SimpleNamespace(
             async_scheduling=bool(engine.get('async-scheduling')) and not engine.get('no-async-scheduling'),
-            enable_chunked_prefill=False, max_num_batched_tokens=max(engine['max-num-batched-tokens'], context)),
-        cache_config=types.SimpleNamespace(enable_prefix_caching=engine.get('enable-prefix-caching') is True),
+            enable_chunked_prefill=False, max_num_batched_tokens=max(engine['max-num-batched-tokens'], context),
+            long_prefill_token_threshold=0),
+        cache_config=types.SimpleNamespace(enable_prefix_caching=engine.get('enable-prefix-caching') is True,
+                                           prefix_caching_hash_algo=engine.get('prefix-caching-hash-algo', 'sha256')),
+        vllm_config=types.SimpleNamespace(parallel_config=types.SimpleNamespace(
+            distributed_executor_backend='uni', pipeline_parallel_size=1)),
         max_model_len=context,
         kv_cache_manager=types.SimpleNamespace(coordinator=coordinator.UnitaryKVCacheCoordinator()),
         kv_cache_config=types.SimpleNamespace(kv_cache_groups=[types.SimpleNamespace(
@@ -152,6 +163,14 @@ def platform_scheduler(profile):
         block_size=engine['block-size'], has_mamba_layers=False, connector=None,
         num_lookahead_tokens=int(speculative.get('num_speculative_tokens', 0)))
     return scheduler, coordinator
+
+
+INTERNALS = 'vLLM internals the wrappers bind are missing'
+
+
+def profile_problems(scheduler):
+    """install_problems on the stand-in, less the internals it does not model (platform_scheduler)."""
+    return [problem for problem in graft.install_problems(scheduler) if not problem.startswith(INTERNALS)]
 
 
 def boot_api_server(name, environ_extra=None, platform_argv=()):
@@ -210,7 +229,7 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIn('gate_only', prefix)
         # general's default trace mode ("all", PLG/worker.py:198): prefill takes the traced chunk loop
         self.assertNotIn('trace_mode', prefix['engine']['additional-config']['tt'])
-        self.assertEqual(float(prefix['env']['QWEN_PREFIX_STORE_GIB']), graft.DEFAULT_STORE_GIB)
+        self.assertEqual(float(prefix['env']['QWEN_PREFIX_STORE_GIB']), registry.DEFAULT_STORE_GIB)
 
     def test_the_eager_gate_profile_is_general_prefix_in_decode_only_trace_mode(self):
         prefix, eager = load('general-prefix'), load('general-prefix-eager')
@@ -250,7 +269,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(profiles()['default'], 'general', 'general-prefix becomes the default only at release')
 
     def test_the_prefix_profiles_pass_the_guard_and_the_scheduler_graft_s_install_rules(self):
-        """prefix_scheduler_graft.install_problems itself, on the scheduler vLLM builds under each prefix
+        """qwen_prefix_scheduler_patch.install_problems itself, on the scheduler vLLM builds under each prefix
         profile as the TT platform rewrites it - and it refuses the same scheduler with a flag broken."""
         for name in PREFIX_PROFILES:
             with self.subTest(profile=name):
@@ -258,16 +277,17 @@ class ProfileTests(unittest.TestCase):
                 self.assertEqual(contract.prefix_reuse_problems(profile), [])
                 scheduler, coordinator = platform_scheduler(profile)
                 with mock.patch.dict(sys.modules, {coordinator.__name__: coordinator}):
-                    self.assertEqual(graft.install_problems(scheduler), [])
+                    self.assertEqual(profile_problems(scheduler), [])
                 self.assertEqual(profile['engine']['max-model-len'] % graft.CHUNK, 0)
         broken = json.loads(json.dumps(load('general-prefix')))
         broken['engine'].update({'no-async-scheduling': False, 'async-scheduling': True, 'block-size': 128,
-                                 'enable-prefix-caching': False,
+                                 'enable-prefix-caching': False, 'prefix-caching-hash-algo': 'xxhash',
                                  'speculative-config': {'method': 'dflash', 'num_speculative_tokens': 4}})
         scheduler, coordinator = platform_scheduler(broken)
         with mock.patch.dict(sys.modules, {coordinator.__name__: coordinator}):
-            problems = graft.install_problems(scheduler)
-        for words in ('async scheduling is on', 'prefix caching is off', 'KV block size 128', 'lookahead'):
+            problems = profile_problems(scheduler)
+        for words in ('async scheduling is on', 'prefix caching is off', 'KV block size 128', 'lookahead',
+                      "prefix_caching_hash_algo is 'xxhash'"):
             self.assertTrue(any(words in problem for problem in problems), (words, problems))
 
 
@@ -668,8 +688,10 @@ class StageTests(unittest.TestCase):
 
     def test_the_checkout_s_table(self):
         self.assertEqual(stage.table_problems(), [])
-        self.assertEqual(stage.target_names(), ['plugin/scheduler.py', 'plugin/model_runner.py', 'plugin/worker.py',
-                                                'model/model.py', 'model/qwen36_vllm.py'])
+        self.assertEqual(stage.target_names(), ['plugin/scheduler.py', 'plugin/model_input.py', 'plugin/model_runner.py',
+                                                'plugin/worker.py', 'model/model.py', 'model/qwen36_vllm.py'])
+        self.assertEqual(sorted(target for target, _, _ in stage.STAGES), sorted(stage.target_names()),
+                         'the integrated table patches every target')
         for name, path, pin, _ in stage.TARGETS:
             with self.subTest(target=name):
                 self.assertRegex(pin, '^[0-9a-f]{64}$')
@@ -715,19 +737,19 @@ class StageTests(unittest.TestCase):
         record = dict(schema=stage.SCHEMA, targets=rows, stages=[], imported=[], warnings=[], complete=False,
                       resolved=dict(plugin=stage.PLUGIN_ROOT, models=stage.MODEL_TREE + '/models'))
         shas = {path: pin for _, path, pin, _ in stage.TARGETS}
-        problems, lines = stage.record_problems(record, shas, {})
+        problems, lines = stage.record_problems(record, shas, {}, stages=())
         self.assertEqual(problems, [])
         self.assertTrue(lines[0].startswith('(f) prefix-reuse stage: 0 stage(s), no target grafted'))
         self.assertEqual(stage.record_problems(None, shas, {})[0],
                          ['(f) the image has no /opt/qwen-c2/prefix-stage.json: the prefix-reuse stage never ran'])
         model = stage.MODEL_ROOT + '/model.py'
-        problems, _ = stage.record_problems(record, dict(shas, **{model: '0' * 64}), {})
+        problems, _ = stage.record_problems(record, dict(shas, **{model: '0' * 64}), {}, stages=())
         self.assertEqual(len(problems), 1)
         self.assertIn('not the %s the stage wrote' % rows['model/model.py']['after'], problems[0])
         foreign = json.loads(json.dumps(record))
         foreign['targets']['plugin/worker.py'].update(path='/elsewhere/worker.py')
         foreign['stages'] = [dict(module='qwen_prefix_scheduler_patch', sha256='2' * 64)]
-        problems, _ = stage.record_problems(foreign, shas, {'qwen_prefix_scheduler_patch': '3' * 64})
+        problems, _ = stage.record_problems(foreign, shas, {'qwen_prefix_scheduler_patch': '3' * 64}, stages=())
         self.assertEqual(len(problems), 2, problems)
         self.assertIn('plugin/worker.py: the record has path', problems[0])
         self.assertIn('ran at %s; the context overlays %s' % ('2' * 64, '3' * 64), problems[1])
@@ -740,16 +762,16 @@ class StageTests(unittest.TestCase):
                       imported=[dict(module='lever_n_model_patch', path='/experiment-scripts/ci/lever_n_model_patch.py',
                                      sha256='4' * 64)])
         shas = {path: pin for _, path, pin, _ in stage.TARGETS}
-        problems, _ = stage.record_problems(record, shas, {}, {})
+        problems, _ = stage.record_problems(record, shas, {}, {}, stages=())
         self.assertEqual(len(problems), 1, problems)
         self.assertIn('which the overlay does not lay', problems[0])
         self.assertIn('name scripts/ci/lever_n_model_patch.py in docker/qwen-c2-overlay.txt', problems[0])
         overlaid = {'/experiment-scripts/ci/lever_n_model_patch.py': '5' * 64}
-        problems, _ = stage.record_problems(record, shas, {}, overlaid)
+        problems, _ = stage.record_problems(record, shas, {}, overlaid, stages=())
         self.assertEqual(len(problems), 1, problems)
         self.assertIn('at %s; the context overlays %s' % ('4' * 64, '5' * 64), problems[0])
         overlaid['/experiment-scripts/ci/lever_n_model_patch.py'] = '4' * 64
-        problems, lines = stage.record_problems(record, shas, {}, overlaid)
+        problems, lines = stage.record_problems(record, shas, {}, overlaid, stages=())
         self.assertEqual(problems, [])
         self.assertIn('(f) the stages ran /experiment-scripts/ci/lever_n_model_patch.py at %s' % ('4' * 16), lines)
 
@@ -760,7 +782,7 @@ class StageTests(unittest.TestCase):
         record = dict(schema=stage.SCHEMA, targets=rows, stages=[], imported=[], complete=False, resolved={},
                       warnings=['model/model.py moved'])
         shas = {path: row['after'] for path, row in ((row['path'], row) for row in rows.values())}
-        problems, lines = stage.record_problems(record, shas, {}, {})
+        problems, lines = stage.record_problems(record, shas, {}, {}, stages=())
         self.assertEqual(problems, [])
         self.assertTrue(any('the build found %s' % ('6' * 64) in line and 'not fatal' in line for line in lines), lines)
         self.assertIn('(f) the prefix stage warned: model/model.py moved', lines)
@@ -770,7 +792,8 @@ class StageTests(unittest.TestCase):
         self.assertTrue(any('does not say which plugin and model trees' in problem for problem in problems), problems)
         self.assertTrue(any('complete=False' in problem for problem in problems), problems)
         rows['plugin/worker.py'].update(after='7' * 64)
-        problems, _ = stage.record_problems(record, dict(shas, **{rows['plugin/worker.py']['path']: '7' * 64}), {}, {})
+        problems, _ = stage.record_problems(record, dict(shas, **{rows['plugin/worker.py']['path']: '7' * 64}), {}, {},
+                                            stages=())
         self.assertEqual(len(problems), 1, problems)
         self.assertIn('no stage patched it, yet the stage left %s' % ('7' * 64), problems[0])
 
@@ -866,8 +889,9 @@ class StageTests(unittest.TestCase):
         self.assertEqual(len(problems), 4, problems)
         self.assertEqual(stage.bringup_problems(text, None)[0], ['bring-up: no prefix-stage record to hold the log to'])
         # the lines are the ones the scheduler graft and the contract write
-        source = (HERE / 'prefix_scheduler_graft.py').read_text(encoding='utf-8')
-        self.assertIn("'[PINDIAG] prefix: '", source)
+        source = (HERE / 'qwen_prefix_scheduler_patch.py').read_text(encoding='utf-8')
+        self.assertIn("'[PINDIAG] prefix: '", (HERE / 'qwen_prefix_registry.py').read_text(encoding='utf-8'))
+        self.assertIn('log = prefix_registry.log', source)
         self.assertIn("'install scheduler=%s.%s plugin=%s ", source)
         module = types.ModuleType('vllm.v1.engine.input_processor')
         module.InputProcessor = type('InputProcessor', (object,), {'process_inputs': lambda self, *a: None})
@@ -907,7 +931,7 @@ class PluginPinTests(unittest.TestCase):
 
     def test_the_plugin_pins(self):
         pins = {name: pin for name, _, pin, _ in stage.TARGETS}
-        for name in ('scheduler.py', 'model_runner.py'):
+        for name in ('scheduler.py', 'model_input.py', 'model_runner.py'):
             with self.subTest(name=name):
                 self.assertEqual(hashlib.sha256(self.blob(name).encode('utf-8')).hexdigest(), pins['plugin/' + name])
         dockerfile = code_lines(DOCKERFILE)
@@ -1028,7 +1052,10 @@ class PlumbingTests(unittest.TestCase):
         closure = script_closure(g1_modules())
         wanted = ['scripts/ci/%s.py' % name for name in closure]
         self.assertIn('scripts/ci/qwen_prefix_metrics.py', wanted)
-        self.assertIn('scripts/ci/prefix_scheduler_graft.py', wanted)
+        self.assertIn('scripts/ci/qwen_prefix_registry.py', wanted)
+        self.assertIn('scripts/ci/qwen_prefix_scheduler_patch.py', wanted)
+        self.assertIn('scripts/ci/lever_n_model_patch.py', wanted)
+        self.assertNotIn('scripts/ci/qwen_prefix_model_fixture.py', wanted, 'a CPU-test fixture')
         self.assertEqual(sorted(set(wanted) - sources), [])
         self.assertNotIn(c2_overlay.PREFIX_STAGE, wanted)
         self.assertIn('scripts/ci/test_qwen_prefix_metrics.py', sources, 'runs inside the image at build')
@@ -1048,7 +1075,7 @@ class PlumbingTests(unittest.TestCase):
             (tmp / 'qwen_prefix_stage.py').write_text('import stage_only\n', encoding='utf-8')
             table = (('model/model.py', 'qwen_prefix_model_patch', 'patch_model'),)
             modules = g1_modules(table, tmp)
-            self.assertEqual(modules, ['prefix_scheduler_graft', 'qwen_prefix_model_patch'])
+            self.assertEqual(modules, ['qwen_prefix_model_patch', 'qwen_prefix_registry', 'qwen_prefix_scheduler_patch'])
             self.assertEqual(script_closure(modules, tmp),
                              ['helper_one', 'helper_two', 'lever_n_model_patch', 'qwen_prefix_model_patch'])
         finally:

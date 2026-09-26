@@ -1,8 +1,8 @@
 """prefix_oracle_check: the gates' oracle held to what the REAL scheduler graft committed, on CPU.
 
-GOLDEN was recorded by driving vLLM 0.25.1's real TTScheduler and KVCacheManager with
-prefix_scheduler_graft installed (prefix_oracle_check.run_graft; the probe step runs it in the
-serving image). The oracle must agree with it request for request: a sequential gate arm FAILS on a
+GOLDEN was recorded by driving vLLM 0.25.1's real TTScheduler and KVCacheManager with the scheduler
+graft (qwen_prefix_scheduler_patch over qwen_prefix_registry) installed (prefix_oracle_check.run_graft;
+the probe step runs it in the serving image). The oracle must agree with it request for request: a sequential gate arm FAILS on a
 Q the oracle did not predict, so an oracle that drifted from the graft would fail good engines."""
 
 import os
@@ -53,17 +53,31 @@ class GoldenTests(unittest.TestCase):
         self.assertEqual(check.verdict(rows, lambda line: None), 1)
 
     def test_the_graft_driven_is_the_images_when_it_has_one(self):
-        shas = {'/c2/g.py': 'aa', '/img/g.py': 'aa'}
-        self.assertEqual(check.choose_graft('/c2/g.py', '/img/g.py', exists=lambda path: False, sha=shas.get),
-                         ('/c2/g.py', None))
-        self.assertEqual(check.choose_graft('/c2/g.py', '/img/g.py', exists=lambda path: True, sha=shas.get),
-                         ('/img/g.py', None))
-        shas['/img/g.py'] = 'bb'
-        path, problem = check.choose_graft('/c2/g.py', '/img/g.py', exists=lambda path: True, sha=shas.get)
-        self.assertEqual(path, '/img/g.py')
+        shas = dict(('/%s/%s' % (where, name), 'aa') for where in ('c2', 'img') for name in check.GRAFT_FILES)
+        self.assertEqual(check.choose_graft('/c2', '/img', exists=lambda path: False, sha=shas.get), ('/c2', None))
+        self.assertEqual(check.choose_graft('/c2', '/img', exists=lambda path: True, sha=shas.get), ('/img', None))
+        shas['/img/qwen_prefix_registry.py'] = 'bb'
+        path, problem = check.choose_graft('/c2', '/img', exists=lambda path: True, sha=shas.get)
+        self.assertEqual(path, '/img')
         self.assertIn('does not run', problem)
-        self.assertEqual(check.IMAGE_GRAFT, '/experiment-scripts/ci/prefix_scheduler_graft.py',
-                         'the overlay manifest\'s default destination for scripts/ci files')
+        self.assertIn('qwen_prefix_registry.py', problem)
+        path, problem = check.choose_graft('/c2', '/img', exists=lambda path: path.endswith('registry.py'),
+                                           sha=shas.get)
+        self.assertIn('could not install the graft', problem)
+        self.assertEqual(check.GRAFT_FILES, ('qwen_prefix_registry.py', 'qwen_prefix_scheduler_patch.py'))
+
+    def test_the_image_graft_is_where_the_overlay_lays_the_plugin_copies(self):
+        """The patched TTScheduler imports the graft from its own package: the overlay manifest lays both
+        files there (test_qwen_prefix_image_closure), and that is the copy the engine runs."""
+        import c2_overlay
+
+        manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'docker', 'qwen-c2-overlay.txt')
+        laid = set()
+        for entry in c2_overlay.read_manifest(manifest):
+            laid.update(entry.destinations)
+        for name in check.GRAFT_FILES:
+            self.assertIn(check.graft_file(check.IMAGE_GRAFT, name), laid)
+        self.assertEqual(check.IMAGE_GRAFT + '/', c2_overlay.PLUGIN)
 
     def test_scenarios_are_deterministic_and_chunk_sized(self):
         a, b = check.scenarios(), check.scenarios()

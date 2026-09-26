@@ -2,8 +2,8 @@
 
 The REAL model.py and qwen36_vllm.py (the IMG bytes qwen_prefix_model_patch pins), stock and
 staged, run on a recording fake ttnn with a toy hybrid model whose chunk program has section
-2.0.4's dependency structure (qwen_prefix_model_fixture). The registry is the P0a prototype of
-qwen_prefix_registry, driven as the scheduler graft drives it. What is held:
+2.0.4's dependency structure (qwen_prefix_model_fixture). The registry is qwen_prefix_registry,
+driven as the scheduler graft (qwen_prefix_scheduler_patch) drives it. What is held:
 
   exact      a hit - chained over 7 turns, tail-only, at previous-prompt lengths 2047/2048/2049,
              after an early divergence (an older checkpoint), from a gap capture another
@@ -28,6 +28,10 @@ qwen_prefix_registry, driven as the scheduler graft drives it. What is held:
   markers    every row names the registry's presence, the grant and its plan, and the program cache
              before and after it; growth, a missing registry and an unknown count are warned;
   audit      QWEN_PREFIX_AUDIT=1 digests match between hit and cold, and the audit only reads;
+  contract   the registry's model contract: the warmup declares mid-loop captures (on the holder,
+             before the scheduler exists), every capture is filed with the loop's own token count
+             (loop_pos), restores and captures are counted through the registry; and the harness
+             (prefix_markers, prefix_judge) reads the rows, digests and audit rows the model prints;
   off        with QWEN_PREFIX_REUSE unset the staged files make exactly the stock files' ttnn calls
              and results (prefill and warmup, traced and eager), add only private _qwen_prefix*
              names to the classes, and the capability is False.
@@ -48,9 +52,9 @@ import torch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import prefix_scheduler_graft as graft  # noqa: E402
 import qwen_prefix_model_fixture as F  # noqa: E402
 import qwen_prefix_model_patch as patcher  # noqa: E402
+import qwen_prefix_registry as prefix_registry  # noqa: E402
 
 ON = {'QWEN_PREFIX_REUSE': '1'}
 
@@ -89,12 +93,15 @@ class Engine(object):
         self.toy = F.Toy(self.module, self.fake, traced=traced)
         self.model = self.toy.model
         self.wrapper = F.build_wrapper(self.vllm, self.toy)
-        self.registry = graft.PrefixRegistry(budget_bytes=1 << 30) if registry else None
+        self.registry = prefix_registry.PrefixRegistry(budget_bytes=1 << 30) if registry else None
         self.pool = F.Pool()
         self.environ = dict(environ)
 
     def warm(self, enable_trace=False):
-        with prefix_env(self.environ):
+        # Inside the engine's registry scope: the warmup's mid-loop declaration reaches this registry
+        # (in serving it lands on the holder first; shared_registry carries it over), and any holder
+        # the warmup creates is gone afterwards.
+        with registry_scope(self.registry), prefix_env(self.environ):
             self.wrapper.warmup_model_prefill(self.model._paged_kv_caches, enable_trace)
 
     def prefill(self, rows, req_ids=True, environ=None):
@@ -712,7 +719,8 @@ class Audit(ExactTestBase):
         for line in engine.log.lines(patcher.MARKER_AUDIT):
             fields = dict(part.split('=', 1) for part in line.split() if '=' in part)
             key = ('window', fields['window']) if 'window' in fields else ('state',)
-            out.setdefault(fields['req'], {})[key] = fields.get('kv') or (fields['gdn_slot'], fields['logits'])
+            out.setdefault(fields['req'], {})[key] = fields.get('kv') or (
+                fields['kv_range'], fields['kv_sha'], fields['slot_sha'], fields['logits_sha'])
         return out
 
     def test_hit_and_cold_digests_match_and_the_audit_only_reads(self):
@@ -740,6 +748,136 @@ class Audit(ExactTestBase):
             self.assertEqual(len(span), 2 * len(engine.model._paged_kv_caches))
         self.assertTrue(any('new=1' in line and 'window=2' in line and 'Q=4096' in line
                             for line in engine.log.lines(patcher.MARKER_AUDIT)))
+
+
+class RegistryContract(ExactTestBase):
+    """G1 integration: the model graft against qwen_prefix_registry's model contract, and its markers
+    against the harness that judges them on hardware (prefix_markers, prefix_judge)."""
+
+    REQ = 'chatcmpl-pfx-m-0001-%s-1a2b3c4d'
+
+    def test_the_warmup_declares_mid_loop_captures_before_the_scheduler_exists(self):
+        engine = Engine(traced=self.traced)
+        with mock.patch.dict(sys.modules), prefix_env(engine.environ):
+            sys.modules.pop(patcher.REGISTRY_KEY, None)
+            engine.wrapper.warmup_model_prefill(engine.model._paged_kv_caches, False)
+            holder = sys.modules[patcher.REGISTRY_KEY]
+            self.assertIs(holder.mid_loop_capture, True)
+            self.assertIsNone(getattr(holder, 'registry', None), 'no scheduler, no registry yet')
+            registry = prefix_registry.shared_registry(environ={})
+            self.assertTrue(registry.mid_loop_capture, 'the scheduler\'s registry inherits the declaration')
+            self.assertIs(prefix_registry.shared_registry(), registry)
+            self.assertIs(prefix_registry.current_registry(), registry)
+
+    def test_a_registry_that_missed_the_warmup_learns_it_at_the_first_prefill(self):
+        engine = Engine(traced=self.traced)
+        with mock.patch.dict(sys.modules), prefix_env(engine.environ):
+            sys.modules.pop(patcher.REGISTRY_KEY, None)
+            engine.wrapper.warmup_model_prefill(engine.model._paged_kv_caches, False)
+        self.assertFalse(engine.registry.mid_loop_capture)
+        engine.turn({'id': 'late'}, F.prompt(3000, seed=31), 0, [2048])
+        self.assertTrue(engine.registry.mid_loop_capture)
+
+    def test_the_stock_warmup_declares_nothing(self):
+        engine = Engine(traced=self.traced, environ={})
+        with mock.patch.dict(sys.modules), prefix_env({}):
+            sys.modules.pop(patcher.REGISTRY_KEY, None)
+            engine.wrapper.warmup_model_prefill(engine.model._paged_kv_caches, False)
+            self.assertNotIn(patcher.REGISTRY_KEY, sys.modules)
+
+    def test_captures_mid_loop_and_at_the_drain_are_filed_at_their_own_positions(self):
+        """The gap boundary (below the loop's drain) and the drain boundary are both stored; the
+        registry refuses none as taken at the wrong point, and each is the cold state there."""
+        engine = self.engine()
+        system = F.prompt(5000, seed=32)
+        a = torch.cat([system, F.prompt(3000, seed=33)])
+        b = torch.cat([system, F.prompt(3500, seed=34)])
+        self.run_turn_and_cold(engine, {'id': 'A'}, a, 0, [6144])
+        self.run_turn_and_cold(engine, {'id': 'B'}, b, 0, [4096, 8192], h=4992)
+        stats = engine.registry.stats
+        self.assertEqual((stats['captures'], stats['capture_wrong_position'], stats['capture_failures']), (3, 0, 0))
+        self.assertGreater(stats['capture_ms'], 0)
+        for tokens, pos in ((a, 6144), (b, 4096), (b, 8192)):
+            self.assertEqual(engine.registry.get(F.key_at(tokens.tolist(), pos)).pos, pos)
+
+    def test_a_restore_is_counted_through_the_registry(self):
+        engine = self.engine()
+        base = F.prompt(7000, seed=35)
+        conv = {'id': 'r'}
+        engine.turn(conv, base[:4500], 0)
+        engine.turn(conv, base[:7000], 4096)
+        self.assertEqual(engine.registry.stats['restores'], 1)
+        self.assertGreaterEqual(engine.registry.stats['restore_ms'], 0.0)
+
+    def rows(self, engine):
+        import prefix_markers as pm
+
+        return pm.scan(engine.log.lines('[PREFIX'))
+
+    def test_the_harness_reads_the_models_rows_and_digests(self):
+        import prefix_judge as judge
+
+        engine = self.engine(environ=dict(ON, QWEN_PREFIX_DIGESTS='1'))
+        base = F.prompt(7000, seed=36)
+        conv = {'id': self.REQ % 'turn'}
+        engine.turn(conv, base[:4500], 0)
+        engine.turn({'id': self.REQ % 'hit', 'row': conv['row']}, base[:7000], 4096)
+        engine.cold(base[:7000], req=self.REQ % 'cold')
+        scanned = self.rows(engine)
+        first, hit, cold = scanned['rows']
+        self.assertEqual((first['tag'], first['q'], first['l'], first['captured'], first['capture_failed']),
+                         ('pfx-m-0001-turn', 0, 4500, [4096], []))
+        self.assertEqual((hit['tag'], hit['q'], hit['l'], hit['captured'], cold['q'], cold['captured']),
+                         ('pfx-m-0001-hit', 4096, 7000, [6144], 0, []))
+        self.assertEqual(hit['path'], 'traced' if self.traced else 'eager')
+        self.assertIsInstance(hit['restored_ms'], float)
+        self.assertIsNone(first['restored_ms'])
+        self.assertIsInstance(first['capture_ms'], float)
+        for row in (first, hit, cold):
+            self.assertIsInstance(row['programs_before'], int)
+            self.assertIsInstance(row['programs'], int)
+            self.assertRegex(row['slot_sha'], '^[0-9a-f]{32}$')
+            self.assertRegex(row['logits_sha'], '^[0-9a-f]{32}$')
+        self.assertEqual(judge.row_growth(hit, None), (0, 'the row itself'))
+        self.assertEqual((hit['slot_sha'], hit['logits_sha']), (cold['slot_sha'], cold['logits_sha']))
+        self.assertNotEqual(first['slot_sha'], hit['slot_sha'])
+        self.assertEqual(judge.digest_problems(dict(tag='cold', markers=dict(row=cold)),
+                                               dict(tag='hit', markers=dict(row=hit))), [])
+
+    def test_without_the_digest_switch_the_rows_carry_none(self):
+        engine = self.engine()
+        engine.turn({'id': self.REQ % 'plain'}, F.prompt(3000, seed=37), 0)
+        row, = self.rows(engine)['rows']
+        self.assertIsNone(row['slot_sha'])
+        self.assertIsNone(row['logits_sha'])
+
+    def test_the_harness_reads_the_audit_summary_and_the_judge_compares_it(self):
+        import prefix_judge as judge
+
+        engine = self.engine(environ=dict(ON, QWEN_PREFIX_AUDIT='1'))
+        base = F.prompt(7000, seed=38)
+        conv = {'id': self.REQ % 'turn'}
+        engine.turn(conv, base[:4500], 0)
+        engine.turn({'id': self.REQ % 'hit', 'row': conv['row']}, base[:7000], 4096)
+        engine.cold(base[:7000], req=self.REQ % 'cold')
+        scanned = self.rows(engine)
+        self.assertEqual(len(scanned['audits']), 3, 'the judge takes the first audit row per request')
+        audits = dict((entry['tag'], entry) for entry in scanned['audits'])
+        self.assertEqual(sorted(audits), ['pfx-m-0001-cold', 'pfx-m-0001-hit', 'pfx-m-0001-turn'],
+                         'one summary row per request; the per-window lines are not audit rows')
+        hit, cold = audits['pfx-m-0001-hit'], audits['pfx-m-0001-cold']
+        self.assertEqual((hit['kv_range'], cold['kv_range']), ('0:7000', '0:7000'))
+        self.assertEqual(judge.audit_problems(dict(tag='cold', markers=dict(audit=cold)),
+                                              dict(tag='hit', markers=dict(audit=hit))), [])
+        wrong = dict(hit, kv_sha='0' * 32)
+        self.assertEqual([severity for severity, _ in judge.audit_problems(
+            dict(tag='cold', markers=dict(audit=cold)), dict(tag='hit', markers=dict(audit=wrong)))], ['FAIL'])
+        rows = dict((row['tag'], row) for row in scanned['rows'])
+        self.assertEqual(rows['pfx-m-0001-hit']['slot_sha'], hit['slot_sha'], 'audit implies the row digests')
+
+
+class TracedRegistryContract(RegistryContract):
+    traced = True
 
 
 class OffIsStock(unittest.TestCase):

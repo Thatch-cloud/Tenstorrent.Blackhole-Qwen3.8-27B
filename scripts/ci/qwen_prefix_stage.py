@@ -3,7 +3,8 @@ then exercise what they patched.
 
 Conversation prefix reuse (the general-prefix profiles) needs code in two trees the C2 serving image
 takes from its P8 base: the TT plugin (the scheduler graft's install point in TTScheduler.__init__, the
-runner's request ids, the worker's block-size assertion) and the model tree (model.py and qwen36_vllm.py:
+runner's request ids and the TTModelInput field that carries them, the worker's block-size assertion) and
+the model tree (model.py and qwen36_vllm.py:
 the capability flag, restore, resumable loops, captures). Neither tree is an overlay destination, so the
 changes are AST stages - text-to-text functions in scripts/ci modules that docker/qwen-c2-overlay.txt lays
 into /experiment-scripts/ci - and this tool runs them inside the image build
@@ -30,10 +31,11 @@ into /experiment-scripts/ci - and this tool runs them inside the image build
      after, and which stage module (with its sha256) patched it; c2_image_provenance (f) holds the built
      image to that record, the pins and the overlay's sources.
 
-Steps 2 and 3 are fatal only while STAGES patches something. With the table empty (branch prefix/g1-image)
-nothing is written, so a base that moved off a pin, or a tree that resolves elsewhere, cannot change the
-exact, c2 or general image: the build logs it, the record keeps it (`warnings`), and provenance (f)
-reports it without failing. The first build reads the model pins no build has confirmed yet.
+Steps 2 and 3 are fatal only while STAGES patches something. The integrated G1 table (branch prefix/g1)
+patches all six targets, so a base that moved off a pin, or a tree that resolves elsewhere, now fails the
+build of EVERY C2 image, whatever its profile - the price of one image serving general-prefix. With the table
+emptied nothing is written, and the build only logs, records (`warnings`) and reports (provenance (f)) such a
+base. The first build reads the model pins no build has confirmed yet.
 
 `check` (the same RUN, right after apply) exercises what apply patched: each patched target's module is
 imported in a fresh interpreter with QWEN_PREFIX_REUSE unset and set to 1, and must load from the patched
@@ -85,6 +87,9 @@ TARGETS = (
     ('plugin/scheduler.py', PLUGIN_ROOT + '/scheduler.py',
      'a1bd6257d3a14c904b41b4795b8e8b4b1b132c70fc3a4db9d4340a128a100de4',
      'vllm-tt-plugin bf77cd63 src/vllm_tt_plugin/scheduler.py (git blob); P8 does not patch it'),
+    ('plugin/model_input.py', PLUGIN_ROOT + '/model_input.py',
+     '8adf4bac4daba576deb27111757bedad69c1d669eb5c15d0ad2d128af2040b54',
+     'vllm-tt-plugin bf77cd63 src/vllm_tt_plugin/model_input.py (git blob); P8 does not patch it'),
     ('plugin/model_runner.py', PLUGIN_ROOT + '/model_runner.py',
      'eed4d0fbe0a41fcb18515ad72c0587a05ffa32e615032dd79771331226919530',
      'vllm-tt-plugin bf77cd63 src/vllm_tt_plugin/model_runner.py (git blob); P8 does not patch it'),
@@ -107,6 +112,7 @@ TARGETS = (
 # The module each target is when a served process imports it (check imports these).
 TARGET_MODULES = {
     'plugin/scheduler.py': PLUGIN_PACKAGE + '.scheduler',
+    'plugin/model_input.py': PLUGIN_PACKAGE + '.model_input',
     'plugin/model_runner.py': PLUGIN_PACKAGE + '.model_runner',
     'plugin/worker.py': PLUGIN_PACKAGE + '.worker',
     'model/model.py': MODEL_PACKAGE + '.demos.blackhole.qwen36.tt.model',
@@ -124,7 +130,7 @@ IMPORT_PROBE = ('import importlib, os, sys\n'
                 'module = importlib.import_module(sys.argv[1])\n'
                 'print(%r + os.path.realpath(module.__file__))\n' % IMPORT_MARK)
 
-# What a served engine logs about the trees it runs (prefix_scheduler_graft's install line, and the
+# What a served engine logs about the trees it runs (qwen_prefix_scheduler_patch's install line, and the
 # contract's post-import hook on the model entry under a prefix profile).
 INSTALL_LINE = re.compile(r'\[PINDIAG\] prefix: install .*?\bplugin=(\S+)')
 MODEL_LINE = re.compile(r'\[QWEN-C2\] prefix: model tree (\S+)')
@@ -135,19 +141,24 @@ SALT_LINE = re.compile(r'\[QWEN-C2\] prefix: cache_salt kept only when it verifi
 # text and returns the patched text, and raises when its own anchor text is missing. A target may be
 # patched by several stages, in table order.
 #
-# EMPTY on branch prefix/g1-image: the G1 scheduler and model tracks deliver the stage modules, and the
-# integration fills this table - all five TARGETS or none (table_problems). The design's names (section
-# 2.2, "Code touched"):
-#   ('plugin/scheduler.py',    'qwen_prefix_scheduler_patch', 'patch_scheduler'),
-#   ('plugin/model_runner.py', 'qwen_prefix_runner_patch',    'patch_model_runner'),
-#   ('plugin/worker.py',       'qwen_prefix_runner_patch',    'patch_worker'),
-#   ('model/model.py',         'qwen_prefix_model_patch',     'patch_model'),
-#   ('model/qwen36_vllm.py',   'qwen_prefix_model_patch',     'patch_vllm_entry'),
+# The integrated G1 table (branch prefix/g1): all six TARGETS or none (table_problems). Each function is the
+# stage module's own text-to-text edit - the same one its CLI stage() runs - and refuses a text whose
+# anchors it does not find; the model's two are held to its PATCHED_SHA256 as well (qwen_prefix_model_patch
+# ._pinned_patch). The scheduler hook imports qwen_prefix_scheduler_patch and qwen_prefix_registry from the
+# plugin package at runtime, and the stage writes no files beside its targets: the overlay manifest lays
+# both at the plugin path as well as under /experiment-scripts/ci (test_qwen_prefix_image_closure).
 # test_qwen_prefix_image refuses, for every module named here: one not in docker/qwen-c2-overlay.txt; one
 # that imports (transitively) a scripts/ci module the manifest does not name; and one without an
 # allowlisted scripts/ci/test_<module>.py holding a *switch_off* test. Every runtime module a patched
 # target imports (the registry, the scheduler graft) goes in the manifest too.
-STAGES = ()
+STAGES = (
+    ('plugin/scheduler.py', 'qwen_prefix_scheduler_patch', 'patch_scheduler'),
+    ('plugin/model_input.py', 'qwen_prefix_runner_patch', 'patch_model_input'),
+    ('plugin/model_runner.py', 'qwen_prefix_runner_patch', 'patch_model_runner'),
+    ('plugin/worker.py', 'qwen_prefix_runner_patch', 'patch_worker'),
+    ('model/model.py', 'qwen_prefix_model_patch', 'patch_model'),
+    ('model/qwen36_vllm.py', 'qwen_prefix_model_patch', 'patch_vllm_entry'),
+)
 
 
 class StageError(RuntimeError):

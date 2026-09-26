@@ -43,7 +43,12 @@ and DRAINS at floor2048(L), then the tail runs.
   - The scheduler plans only drain captures (pos == grant.drain) until the model declares it takes
     mid-loop captures: registry.enable_mid_loop_capture(), once, before serving. Only then does
     the plan carry the gap boundary floor2048(h) below the drain (the shared-prefix / sibling
-    sub-agent case) and a resumed (preempted) request's prompt boundary below its drain.
+    sub-agent case) and a resumed (preempted) request's prompt boundary below its drain. The model
+    warms up before vLLM builds the scheduler (and so before any registry exists), so it may declare
+    on the holder instead: sys.modules[REGISTRY_KEY].mid_loop_capture = True (creating the holder
+    as a bare module when absent); shared_registry() honours that when it creates the registry.
+  - The model also counts program_growth (a row whose program cache grew after warmup, F3) in
+    registry.stats, and reports restore time through note_restore(ms).
 Pure python; imports nothing outside the standard library.
 """
 
@@ -87,7 +92,7 @@ STAT_NAMES = (
     'killed_denied', 'publish_capped', 'captures', 'capture_replaced', 'capture_kept_pinned',
     'capture_failures', 'capture_wrong_position', 'capture_skipped_budget', 'capture_disabled',
     'mid_loop_unplanned', 'evicted_lru', 'evicted_coupled', 'dropped', 'clears', 'reset_kept',
-    'freed_requests', 'restores', 'restore_ms', 'capture_ms',
+    'freed_requests', 'restores', 'restore_ms', 'capture_ms', 'dropped_hits', 'program_growth',
 )
 
 
@@ -397,6 +402,10 @@ class PrefixRegistry(object):
         for req_id, grant in self.staged.items():
             if req_id not in admitted:
                 self.stats['dropped_attempts'] += 1
+                if grant.q:
+                    # A hit vLLM took and then discarded (an allocation failure after the grant, a
+                    # budget break, the TT decode fallback; F2): the next attempt re-stages it.
+                    self.stats['dropped_hits'] += 1
                 continue
             if admitted[req_id] != grant.q:
                 self.stats['commit_mismatch'] += 1
@@ -541,9 +550,16 @@ def shared_registry(environ=None):
     holder = sys.modules.get(REGISTRY_KEY)
     if holder is None:
         holder = types.ModuleType(REGISTRY_KEY)
-        holder.registry = PrefixRegistry(environ=environ)
         sys.modules[REGISTRY_KEY] = holder
-    return holder.registry
+    registry = getattr(holder, 'registry', None)
+    if registry is None:
+        registry = PrefixRegistry(environ=environ)
+        # The model graft warms up before vLLM builds the scheduler, so it declares mid-loop
+        # captures on the holder (see the module's contract) before this registry exists.
+        if getattr(holder, 'mid_loop_capture', False) is True:
+            registry.enable_mid_loop_capture()
+        holder.registry = registry
+    return registry
 
 
 def current_registry():

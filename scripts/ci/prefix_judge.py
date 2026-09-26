@@ -532,6 +532,10 @@ def audit_problems(cold, hit):
     if a is None or b is None:
         return [('NOT_EXERCISED', 'no [PREFIX-AUDIT] row for %s' % (cold.get('tag') if a is None else hit.get('tag')))]
     problems = []
+    absent = [name for name in ('kv_range', 'kv_sha', 'slot_sha') if not a.get(name) or not b.get(name)]
+    if absent:
+        return [('NOT_EXERCISED', 'the audit rows of %s / %s carry no %s: nothing is compared' % (
+            cold.get('tag'), hit.get('tag'), ', '.join(absent)))]
     if a.get('kv_range') != b.get('kv_range'):
         problems.append(('NOT_EXERCISED', 'the audits cover different KV ranges (%s, %s)' % (
             a.get('kv_range'), b.get('kv_range'))))

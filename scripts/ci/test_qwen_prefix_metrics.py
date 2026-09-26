@@ -15,7 +15,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import prefix_scheduler_graft as graft  # noqa: E402
+import qwen_prefix_registry as graft  # noqa: E402
 import qwen_prefix_metrics as metrics  # noqa: E402
 
 try:

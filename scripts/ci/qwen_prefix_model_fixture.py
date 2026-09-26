@@ -15,9 +15,10 @@ fixtures/qwen36_vllm.py, the IMG bytes qwen_prefix_model_patch pins), stock or s
     AND conv carry it starts from, in deterministic fp32. A resume from the wrong state, without
     the carry, or over the wrong blocks changes the bytes; an exact resume reproduces them.
 
-The registry is prefix_scheduler_graft.PrefixRegistry (the P0a prototype of qwen_prefix_registry),
-driven the way the scheduler graft drives it: begin_step, stage, commit, with the capture plan
-computed by the graft's own SchedulerGraft.plan and Q checked by the trim's token check.
+The registry is qwen_prefix_registry.PrefixRegistry, driven the way the scheduler graft
+(qwen_prefix_scheduler_patch) drives it: begin_step, stage, commit, with the capture plan computed
+by the graft's own SchedulerGraft.plan (which plans a boundary below the loop's drain only once the
+model has declared mid-loop captures, as its warmup does) and Q checked by the trim's token check.
 
 What the fixture does NOT model (review finding 10): mesh mappers are recorded but a device tensor
 is its logical host view (dim 0 = the chips), so how copy_host_to_device_tensor distributes a
@@ -38,8 +39,9 @@ from unittest import mock
 
 import torch
 
-import prefix_scheduler_graft as graft
 import qwen_prefix_model_patch as patcher
+import qwen_prefix_registry as prefix_registry
+import qwen_prefix_scheduler_patch as scheduler_patch
 
 HERE = Path(__file__).resolve().parent
 MODEL_FIXTURE = HERE / 'fixtures' / 'qwen36_model.py'
@@ -571,7 +573,8 @@ def admit(registry, req_id, tokens, q, plan=None, h=None, step=True, force_plan=
     """Stage and commit one grant as SchedulerGraft.trim + commit do; returns start_pos.
 
     The plan is the scheduler graft's own (SchedulerGraft.plan: the prompt's last boundary above Q
-    plus the gap boundary floor2048(h)); a test's explicit plan must equal it unless force_plan,
+    plus the gap boundary floor2048(h), the latter only once the model declared mid-loop captures on
+    this registry); a test's explicit plan must equal it unless force_plan,
     which hands the model a plan the scheduler would not make. Q's checkpoint must pass the trim's
     token check (Checkpoint.matches), or the scheduler would have lowered Q."""
     if step:
@@ -586,7 +589,7 @@ def admit(registry, req_id, tokens, q, plan=None, h=None, step=True, force_plan=
         raise AssertionError('the test asked for a hit at %d with no checkpoint' % q)
     if q and (checkpoint.pos != q or not checkpoint.matches(tokens[0:q])):
         raise AssertionError('the trim would refuse the checkpoint at %d (token mismatch)' % q)
-    planned = graft.SchedulerGraft.plan(None, request, h, q)
+    planned, unplanned, drain = scheduler_patch.SchedulerGraft.plan(SimpleNamespace(registry=registry), request, h, q)
     if plan is None:
         pairs = planned
     elif force_plan:
@@ -596,7 +599,7 @@ def admit(registry, req_id, tokens, q, plan=None, h=None, step=True, force_plan=
             raise AssertionError('the test plan %r is not the scheduler graft\'s %r (L=%d h=%d Q=%d)' % (
                 list(plan), [pos for pos, _ in planned], len(tokens), h, q))
         pairs = planned
-    registry.stage(graft.Grant(req_id, q, h, key, checkpoint, pairs, request))
+    registry.stage(prefix_registry.Grant(req_id, q, h, key, checkpoint, pairs, request, drain, unplanned))
     registry.commit({req_id: q})
     return q
 

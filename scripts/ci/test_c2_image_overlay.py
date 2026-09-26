@@ -1097,22 +1097,28 @@ class ProvenanceTests(unittest.TestCase):
                                     'qwen_prefix_stage wrote it'])
 
     def test_an_empty_stage_table_reports_a_moved_base_and_does_not_fail(self):
-        """With STAGES empty nothing is written: a target off its pin, or unresolved trees, are reported."""
-        built, _ = fake_image(self.context, self.entries)
-        record = json.loads(json.dumps(built['prefix']))
+        """With STAGES empty nothing is written: a target off its pin, or unresolved trees, are reported.
+        (The integrated table is not empty: the same record fails it - the last assertions.)"""
         model = qwen_prefix_stage.MODEL_ROOT + '/model.py'
-        record['targets']['model/model.py'].update(before='7' * 64, after='7' * 64)
-        record['resolved'] = {}
-        record['warnings'] = ['model/model.py: %s is %s, not the pinned ...' % (model, '7' * 64)]
-        problems, _ = self.verify(prefix=record, prefix_shas={model: '7' * 64})
-        self.assertEqual(problems, [])
-        self.assertTrue(any('(f) model/model.py: the build found %s at %s, not the pinned' % ('7' * 64, model) in line
-                            and 'not fatal while the stage table is empty' in line for line in self.log), self.log)
-        self.assertTrue(any(line.startswith('[G1] (f) the prefix stage warned: model/model.py') for line in self.log))
+        with mock.patch.object(qwen_prefix_stage, 'STAGES', ()):
+            built, _ = fake_image(self.context, self.entries)
+            record = json.loads(json.dumps(built['prefix']))
+            record['targets']['model/model.py'].update(before='7' * 64, after='7' * 64)
+            record['resolved'] = {}
+            record['warnings'] = ['model/model.py: %s is %s, not the pinned ...' % (model, '7' * 64)]
+            problems, _ = self.verify(prefix=record, prefix_shas={model: '7' * 64})
+            self.assertEqual(problems, [])
+            self.assertTrue(any('(f) model/model.py: the build found %s at %s, not the pinned' % ('7' * 64, model)
+                                in line and 'not fatal while the stage table is empty' in line for line in self.log),
+                            self.log)
+            self.assertTrue(any(line.startswith('[G1] (f) the prefix stage warned: model/model.py') for line in self.log))
         with mock.patch.object(qwen_prefix_stage, 'STAGES', (('model/model.py', 'm', 'f'),)):
             problems, _ = qwen_prefix_stage.record_problems(record, {model: '7' * 64}, {}, {})
         self.assertTrue(any('the build found' in problem for problem in problems), problems)
         self.assertTrue(any('does not say which plugin and model trees' in problem for problem in problems), problems)
+        self.assertTrue(qwen_prefix_stage.STAGES, 'the integrated G1 table patches every target')
+        problems, _ = qwen_prefix_stage.record_problems(record, {model: '7' * 64}, {}, {})
+        self.assertTrue(any('the build found %s' % ('7' * 64) in problem for problem in problems), problems)
 
     def test_a_switch_leaking_into_another_profile_fails(self):
         contract = provenance.load_contract(self.context / 'overlay/scripts/ci/serving_c2_contract.py')
@@ -1137,12 +1143,18 @@ class ProvenanceTests(unittest.TestCase):
         worker = qwen_prefix_stage.PLUGIN_ROOT + '/worker.py'
         base['files'][worker] = dict(base['files'][worker], sha256='1' * 64)
         log = []
-        problems, _ = provenance.base_drift(self.context, None, FakeDocker(self.context, built, base, {}), log.append)
-        # the stage table is empty: the build would record the moved worker, not refuse it
+        with mock.patch.object(qwen_prefix_stage, 'STAGES', ()):
+            problems, _ = provenance.base_drift(self.context, None, FakeDocker(self.context, built, base, {}),
+                                                log.append)
+        # an empty stage table: the build would record the moved worker, not refuse it
         self.assertEqual(problems, [])
         self.assertTrue(any('(f) plugin/worker.py: the base holds %s at %s, not the pinned' % (worker, '1' * 64) in line
                             and 'empty now: reported, not failed' in line for line in log), log)
         self.assertTrue(any('(f) model/qwen36_vllm.py: the base holds the pinned' in line for line in log))
+        # the integrated table patches every target: the same base fails the drift check (the build would refuse it)
+        problems, _ = provenance.base_drift(self.context, None, FakeDocker(self.context, built, base, {}), [].append)
+        self.assertTrue(any('(f) plugin/worker.py: the base holds %s at %s, not the pinned' % (worker, '1' * 64)
+                            in problem for problem in problems), problems)
         problems, _ = provenance.check_prefix_anchors(base['files'], stages=(('plugin/worker.py', 'm', 'f'),))
         self.assertEqual(len(problems), 1, problems)
         self.assertIn('(f) plugin/worker.py: the base holds %s at %s, not the pinned' % (worker, '1' * 64), problems[0])

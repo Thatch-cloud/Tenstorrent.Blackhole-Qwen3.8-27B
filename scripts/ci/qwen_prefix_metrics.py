@@ -1,7 +1,7 @@
 """G1 of the TT prefix-reuse design (section 2.2, S5): the prefix registry's metrics, from the EngineCore
 to the API server's /metrics.
 
-The checkpoint registry (prefix_scheduler_graft.PrefixRegistry, one per process under the fixed
+The checkpoint registry (qwen_prefix_registry.PrefixRegistry, one per process under the fixed
 sys.modules key REGISTRY_KEY) lives in the vLLM EngineCore, a child process of the API server
 (SKILL:211-212). vLLM's Prometheus endpoint lives in the API server. So the engine publishes and the API
 server collects, through a tmpfs file per engine process:
@@ -74,6 +74,9 @@ GAUGES = {
     'pins': 'checkpoint pins held by this step\'s committed grants',
     'staged_now': 'grants staged in the current schedule() call',
     'committed_now': 'grants committed for the current step',
+    'orphans_now': 'resident checkpoints whose KV chain is broken below them',
+    'mid_loop_capture': '1 once the model graft declared captures inside its chunk loop (gap boundaries planned)',
+    'disabled': '1 once the kill switch latched the registry off for the life of the engine',
 }
 COUNTERS = {
     'attempts': 'admission attempts the trim saw (vLLM calls get_computed_blocks once per attempt)',
@@ -103,6 +106,15 @@ COUNTERS = {
     'freed_requests': 'requests whose grants were dropped when vLLM freed them',
     'restore_ms': 'time restoring checkpoints into the prefill scratch',
     'capture_ms': 'time capturing checkpoints to host',
+    'dropped_hits': 'staged hits (Q > 0) dropped because the step did not admit the request (F2)',
+    'program_growth': 'prefill rows whose program cache grew after warmup (F3: a compile after parking)',
+    'capture_wrong_position': 'captures refused because the state was not taken after exactly pos tokens',
+    'restores': 'checkpoints restored into the prefill scratch',
+    'token_checks': 'token-id checks the trim ran (remembered per request and checkpoint)',
+    'session_denied': 'hits denied to streaming-input sessions (their prompt holds decode-written tokens)',
+    'capture_disabled': 'captures refused because the registry is latched off',
+    'mid_loop_unplanned': 'boundaries below the loop drain left unplanned (the model had not declared mid-loop captures)',
+    'reset_kept': 'reset_prefix_cache calls vLLM refused, so the registry was kept',
 }
 
 
@@ -157,6 +169,9 @@ def read_registry(registry, attempts=3):
     budget = getattr(registry, 'budget_bytes', None)
     if budget is not None and 'budget_bytes' not in values:
         values['budget_bytes'] = budget
+    if 'disabled' in values:
+        # the registry holds the reason (a string) once latched, else None
+        values['disabled'] = int(values['disabled'] is not None)
     return numbers(values)
 
 

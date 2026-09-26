@@ -38,6 +38,7 @@ Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
 
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -493,13 +494,33 @@ def ci_pods(run=subprocess.run):
 
 # -- the driver ----------------------------------------------------------------------------------
 
+# The general-prefix image keeps a request's cache_salt only when it verifies against the image's salt key
+# (serving_c2_contract's salt policy: qps1.<tag>.<hmac-sha256(key, 'qps1.<tag>')>); anything else is served
+# unsalted - no hit, nothing published. So a gate arm mints every salt with the key it mounts into the
+# container (c2_prefix_gate: QWEN_PREFIX_SALT_KEY_FILE). serving_c2_contract.mint_salt, restated here for
+# the rig host's Python 3.7 stdlib; test_prefix_replay holds the two equal.
+SALT_VERSION = 'qps1'
+SALT_TAG_BAD = re.compile(r'[^A-Za-z0-9_-]')
+
+
+def mint_salt(key, name):
+    """The verified cache_salt for the raw salt `name` under `key` (bytes). The tag is `name` with every
+    character outside [A-Za-z0-9_-] replaced and cut to 8..128 characters."""
+    tag = SALT_TAG_BAD.sub('-', str(name))[:128]
+    if len(tag) < 8:
+        tag = (tag + '--------')[:8]
+    mac = hmac.new(key, ('%s.%s' % (SALT_VERSION, tag)).encode('ascii'), hashlib.sha256).hexdigest()
+    return '%s.%s.%s' % (SALT_VERSION, tag, mac)
+
+
 class Driver(object):
     """Sends tagged requests, keeps every record, feeds the oracle, compares pairs."""
 
     def __init__(self, client, arm, corpus, log=None, container=None, seed=0, max_tokens=DEFAULT_MAX_TOKENS,
                  deadline=None, clock=time.time, sleep=time.sleep, say=print, pods=ci_pods, strict=True,
-                 store_capacity=None):
+                 store_capacity=None, salt_key=None):
         self.client, self.arm, self.corpus, self.log, self.container = client, arm, corpus, log, container
+        self.salt_key = salt_key
         self.seed, self.max_tokens, self.deadline = seed, max_tokens, deadline
         self.clock, self.sleep, self.say, self.pods = clock, sleep, say, pods
         self.strict = strict
@@ -516,13 +537,18 @@ class Driver(object):
             self.counter += 1
             return 'pfx-%s-%04d-%s' % (self.arm, self.counter, label)
 
+    def minted(self, raw):
+        """The salt as sent: minted under the arm's salt key when it has one (a prefix arm on
+        hardware), else the raw name (the CPU fakes, the baseline)."""
+        return mint_salt(self.salt_key, raw) if self.salt_key else raw
+
     def salt(self, name):
-        return 'pfx-salt-%s-%s-%s' % (self.arm, self.seed, name)
+        return self.minted('pfx-salt-%s-%s-%s' % (self.arm, self.seed, name))
 
     def fresh_salt(self, kind='cold'):
         with self.lock:
             self.counter += 1
-            return 'pfx-%s-%s-%s-%04d' % (kind, self.arm, self.seed, self.counter)
+            return self.minted('pfx-%s-%s-%s-%04d' % (kind, self.arm, self.seed, self.counter))
 
     def remaining(self):
         """Seconds before the arm's deadline, or None without one."""

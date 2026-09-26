@@ -197,6 +197,26 @@ class SubmitPrefillTests(unittest.TestCase):
         self.assertEqual(with_ids, baseline)
 
 
+class SwitchOffTests(unittest.TestCase):
+    """QWEN_PREFIX_REUSE unset: every method the stage patches behaves as the plugin's own
+    (qwen_prefix_stage's switch-off rule): no row ids, the plugin's prefill kwargs, no block-size
+    assertion and no marker."""
+
+    def test_switch_off_every_patched_method_is_the_plugin_s(self):
+        for environ in ({}, {'QWEN_PREFIX_REUSE': '0'}):
+            with self.subTest(environ=environ):
+                self.assertIsNone(PrepareIdsTests.ids(None, True, environ))
+                self.assertIsNone(PrepareIdsTests.ids(None, False, environ))
+        prefill = SubmitPrefillTests()
+        original, patched = prefill.functions()
+        self.assertEqual(prefill.run_one(patched, None), prefill.run_one(original, None))
+        workers = WorkerTests()
+        for worker in (fixture('worker.py'), p8_worker()):
+            function = workers.function(runner.patch_worker(worker.decode('utf-8')))
+            self.assertEqual(len(workers.call(function, 128, [128], {}, kv_caches=[[SimpleNamespace(dtype='x')]])), 1)
+            self.assertEqual(workers.lines, [])
+
+
 class PrepareIdsTests(unittest.TestCase):
     def ids(self, is_prompt, environ):
         code = ('def prepare(input_batch, req_indices, is_prompt):\n' + runner.IDS_NEW +
