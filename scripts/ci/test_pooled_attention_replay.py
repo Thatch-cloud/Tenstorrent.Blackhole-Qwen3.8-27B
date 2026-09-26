@@ -783,6 +783,74 @@ class SdpaModesTests(unittest.TestCase):
         self.assertIn("modes=readahead,share,slice,tail rows=16 capacity=4352 bundles=[2] flags=['0xf'] mask=wide",
                       lines[-1])
 
+    def test_extent_parses_needs_tail_and_sets_0x20_on_every_bundle(self):
+        """K64j (optimisation/ttnn-op/k64j): 'extent' is flag 0x20 and needs 'tail' (the factory refuses 0x20 without
+        0x1). It rides on every bundle, whatever its entries or rows, beside the flags the other modes set."""
+        from pooled_attention_replay import QWEN_RUNTIME_EXTENT, SDPA_MODE_NAMES, SDPA_MODES_ENV, mode_flags, sdpa_modes
+        self.assertEqual(QWEN_RUNTIME_EXTENT, 0x20)
+        self.assertEqual(SDPA_MODE_NAMES, ('tail', 'share', 'slice', 'readahead', 'extent'))
+        self.assertEqual(sdpa_modes({SDPA_MODES_ENV: 'tail,extent'}), frozenset({'tail', 'extent'}))
+        self.assertEqual(sdpa_modes({SDPA_MODES_ENV: 'extent,share,slice,readahead,tail'}),
+                         frozenset({'tail', 'share', 'slice', 'readahead', 'extent'}))
+        for value in ('extent', 'share,extent', 'slice,share,readahead,extent'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'extent needs tail'):
+                sdpa_modes({SDPA_MODES_ENV: value})
+        modes = frozenset({'tail', 'extent'})
+        self.assertEqual([mode_flags(modes, batches) for batches in (3, 1)], [0x21, 0x21])
+        every = frozenset({'tail', 'share', 'slice', 'readahead', 'extent'})
+        self.assertEqual(mode_flags(every, 2, 8), 0x2F)
+        self.assertEqual(mode_flags(every, 1, 8), 0x25, '0x2 and 0x8 are inert at one entry; 0x20 is not')
+        self.assertEqual(mode_flags(every, 3, 4), 0x2B)
+        self.assertEqual(mode_flags(every - {'extent'}, 2, 8), 0xF, 'unchanged without extent')
+
+    def test_extent_needs_the_k64j_binary_literal(self):
+        from pooled_attention_replay import QWEN_SDPA_EXTENT_MARKER, required_binary_markers
+        self.assertEqual(QWEN_SDPA_EXTENT_MARKER, b'[QWEN-SDPA] runtime-extent entries=')
+        self.assertEqual(required_binary_markers(frozenset({'tail', 'extent'})),
+                         (b'[QWEN-SDPA] flags=', QWEN_SDPA_EXTENT_MARKER))
+        self.assertEqual(required_binary_markers(frozenset({'tail', 'share', 'slice', 'extent'})),
+                         (b'[QWEN-SDPA] flags=', b'[QWEN-SDPA] KV-share twin bands', b'[QWEN-SDPA] q-slice rows_per_kv=',
+                          QWEN_SDPA_EXTENT_MARKER))
+        self.assertNotIn(QWEN_SDPA_EXTENT_MARKER, required_binary_markers(frozenset({'tail', 'share', 'slice', 'readahead'})))
+        # The factory's own F22 format literal (optimisation/ttnn-op/k64j/apply_factory_k64j.py).
+        factory = Path(__file__).resolve().parents[2] / 'optimisation' / 'ttnn-op' / 'k64j' / 'apply_factory_k64j.py'
+        self.assertIn("EXTENT_LOG_MARKER = '%s'" % QWEN_SDPA_EXTENT_MARKER.decode(), factory.read_text(encoding='utf-8'))
+
+    def test_extent_is_refused_on_a_reader_without_runtime_extent_before_anything_is_checked(self):
+        """The pooled and packed readers stage wide masks and no cur_pos words: the factory would refuse 0x20 at the
+        first capture, so the mode is refused here, before the binary check and before any config changes."""
+        from pooled_attention_replay import _binary_checked, apply_sdpa_modes
+        reader = self.reader(batches=(3, 1))
+        before = list(reader.metadata)
+        with self.assertRaisesRegex(ValueError, 'extent .flag 0x20, K64j. needs a replay reader that stages one cur_pos word'):
+            apply_sdpa_modes(reader, frozenset({'tail', 'extent'}), log=self.fail, binary_check=self.fail)
+        self.assertEqual(reader.metadata, before)
+        self.assertFalse(hasattr(reader, 'sdpa_modes_applied'))
+        self.assertEqual(_binary_checked, [])
+        reader.operations.SDPAProgramConfig.assert_not_called()
+
+    def test_extent_on_a_k64i_binary_is_refused_and_on_k64j_sets_0x21(self):
+        from pooled_attention_replay import QWEN_SDPA_EXTENT_MARKER, _binary_checked, apply_sdpa_modes
+        reader = self.reader(batches=(3, 1))
+        reader.runtime_extent = True
+        before = list(reader.metadata)
+
+        def k64i(markers):
+            return '/k64i/_ttnncpp.so', QWEN_SDPA_EXTENT_MARKER not in markers
+
+        with self.assertRaisesRegex(RuntimeError, 'needs the K64j .QWEN-SDPA. runtime-extent factory; /k64i/_ttnncpp.so lacks it'):
+            apply_sdpa_modes(reader, frozenset({'tail', 'extent'}), log=self.fail, binary_check=k64i)
+        self.assertEqual(reader.metadata, before)
+        self.assertEqual(_binary_checked, [])
+        lines = []
+        self.assertEqual(apply_sdpa_modes(reader, frozenset({'tail', 'extent'}), log=lines.append,
+                                          binary_check=lambda markers: ('/k64j/_ttnncpp.so', True)), (0x21, 0x21))
+        for old, new in zip(before, reader.metadata, strict=True):
+            self.assertEqual(vars(new[3]), dict(vars(old[3]), q_chunk_size=0x51DEC021))
+        self.assertEqual(lines, [
+            '[PINDIAG] sdpa qwen-modes binary /k64j/_ttnncpp.so carries the [QWEN-SDPA] branch and the K64j runtime extent',
+            "[PINDIAG] sdpa qwen-modes modes=extent,tail rows=16 capacity=4352 bundles=[3, 1] flags=['0x21', '0x21'] mask=narrow"])
+
     def test_the_packed_block_at_eight_row_groups_shares_every_user(self):
         """M3NATIVE_REPLAY_GROUP_ROWS=8 + tail,share: each T16 user is one batch-2 bundle -> 0x3."""
         from pooled_attention_replay import SDPA_MODES_ENV

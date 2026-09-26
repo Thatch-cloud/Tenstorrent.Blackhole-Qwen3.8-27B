@@ -365,20 +365,27 @@ class FlagBitTests(unittest.TestCase):
                 values[name] = int(value, 16)
         return values
 
-    def test_0x20_is_free_everywhere_and_0x10_is_the_unknown_flag_control(self):
+    def test_0x20_is_k64js_alone_and_0x10_is_the_unknown_flag_control(self):
+        """At P0, 0x20 was free in every factory generator, pooled_attention_replay and the gate. K64j
+        (../k64j) has since taken it: its own factory generator, the replay's 'extent' mode and the gate's flag,
+        and nothing else; the stage 1-4 factories still serve 0x1-0x8 only, and 0x10 stays unknown."""
         flags = {}
         flags.update(self.factory_flags(QWEN / 'apply_factory_qwen.py'))
         flags.update(self.factory_flags(SLICE / 'apply_factory_slice.py'))
         self.assertEqual(sorted(flags.values()), [0x1, 0x2, 0x4, 0x8])
+        self.assertEqual(self.factory_flags(HERE.parent / 'k64j' / 'apply_factory_k64j.py'), {'kQwenRuntimeExtent': 0x20})
         import pooled_attention_replay as pooled
-        served = {pooled.QWEN_MASK_TAIL, pooled.QWEN_KV_SHARE, pooled.QWEN_Q_SLICE, pooled.QWEN_KV_READAHEAD}
-        self.assertEqual(served, {0x1, 0x2, 0x4, 0x8})
+        served = {pooled.QWEN_MASK_TAIL, pooled.QWEN_KV_SHARE, pooled.QWEN_Q_SLICE, pooled.QWEN_KV_READAHEAD,
+                  pooled.QWEN_RUNTIME_EXTENT}
+        self.assertEqual(served, {0x1, 0x2, 0x4, 0x8, 0x20})
         gate = re.search(r"^SDPA_MODE_FLAGS = (\{[^}]*\})", read(CI / 'lever_n_m3native_gate.py'), flags=re.M).group(1)
-        self.assertEqual(sorted(eval(gate).values()), [0x1, 0x2, 0x4, 0x8])  # noqa: S307 - a literal dict
+        self.assertEqual(sorted(eval(gate).values()), [0x1, 0x2, 0x4, 0x8, 0x20])  # noqa: S307 - a literal dict
         self.assertEqual(card.UNKNOWN_FLAG & 0xFF, 0x10)
         self.assertIn("('unknown flag 0x10', 8, 2, 0x11,", read(SLICE / 'sdpa_decode_slice_card_b.py'))
         self.assertEqual(probe.K64J_FLAG, 0x20)
-        self.assertNotIn(probe.K64J_FLAG, set(flags.values()) | served | {0x10})
+        self.assertEqual(pooled.QWEN_RUNTIME_EXTENT, probe.K64J_FLAG)
+        self.assertNotIn(probe.K64J_FLAG, set(flags.values()) | {0x10})
+        self.assertNotIn(0x10, served)
         # Every factory refuses what it does not know: the probe's N control expects exactly that text.
         for path in (QWEN / 'apply_factory_qwen.py', SLICE / 'apply_factory_slice.py'):
             self.assertIn('"[QWEN-SDPA] unknown flags {:#x}"', read(path))

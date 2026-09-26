@@ -410,7 +410,8 @@ class ContractTests(unittest.TestCase):
         import lever_n_m3native_gate as gate
         self.assertEqual(gate.SDPA_SLICE_MARKER, factory.SLICE_LOG_MARKER)
         self.assertEqual(gate.SDPA_MODE_FLAGS, dict(tail=factory.FLAG_TAIL, share=factory.FLAG_SHARE,
-                                                     slice=factory.FLAG_SLICE, readahead=factory.FLAG_READAHEAD))
+                                                     slice=factory.FLAG_SLICE, readahead=factory.FLAG_READAHEAD,
+                                                     extent=0x20))   # K64j's (../k64j checks it against its factory)
         markers = gate.sdpa_mode_markers({'tail', 'share', 'slice'})
         self.assertEqual(markers[2:], ['[QWEN-SDPA] flags=0x7 ', factory.SLICE_LOG_MARKER])
         # The factory's own lines as fmt prints them ({:#x} and {} format as Python's do) carry both markers:

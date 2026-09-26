@@ -281,8 +281,9 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(card.SHARE, magic | replay.QWEN_KV_SHARE)
         self.assertEqual(card.TAIL_SHARE, magic | replay.QWEN_MASK_TAIL | replay.QWEN_KV_SHARE)
         self.assertEqual((card.SHARE_STAGE3, card.NO_FLAGS, card.QWEN_PLAIN), (card.SHARE, magic, magic))
-        # 'slice' (0x4) and 'readahead' (0x8) are stage 4 (K64i): ../sdpa_decode_slice checks them against its factory.
-        self.assertEqual(replay.SDPA_MODE_NAMES, ('tail', 'share', 'slice', 'readahead'))
+        # 'slice' (0x4) and 'readahead' (0x8) are stage 4 (K64i): ../sdpa_decode_slice checks them against its factory;
+        # 'extent' (0x20) is K64j's: ../k64j checks it against its own.
+        self.assertEqual(replay.SDPA_MODE_NAMES, ('tail', 'share', 'slice', 'readahead', 'extent'))
         self.assertEqual((replay.QWEN_Q_SLICE, replay.QWEN_KV_READAHEAD), (0x4, 0x8))
         self.assertEqual(set(replay.SDPA_MODES_LATER), {'narrow'})
 
@@ -340,8 +341,9 @@ class ContractTests(unittest.TestCase):
         self.assertIn('[QWEN-SDPA] flags=', factory.MARKERS)
         # The gate's modes line is apply_sdpa_modes' own format.
         import inspect
-        self.assertIn("'%s modes=%s rows=%d capacity=%d bundles=%s flags=%s mask=wide'",
+        self.assertIn("'%s modes=%s rows=%d capacity=%d bundles=%s flags=%s mask=%s'",
                       inspect.getsource(replay.apply_sdpa_modes))
+        self.assertIn("'narrow' if 'extent' in modes else 'wide'", inspect.getsource(replay.apply_sdpa_modes))
         self.assertTrue(markers[1].startswith(replay.SDPA_MODES_MARKER + ' modes=share,tail '))
 
     def test_the_refusals_the_card_m_test_expects_are_the_factorys_texts(self):
