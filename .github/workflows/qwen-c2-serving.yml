@@ -22,7 +22,8 @@ name: Qwen C2 serving image
 #            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile.
 #            The driver refuses plans that do not fit the step's and the job's time left; every gate
 #            container is removed however the step ends
-#   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py)
+#   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py);
+#            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt)
 #   push   - push it to zot and print the digest
 # (status, platform, unserve, priority and reset are described at their steps.) The job file is
 # parsed by scripts/ci/c2_serving_job.py, which refuses anything these steps must not act on.
@@ -370,6 +371,7 @@ jobs:
         env:
           IMAGE: ${{ steps.job.outputs.platform_image }}
           REPLAY_PROFILE: ${{ steps.job.outputs.replay_profile }}
+          REPLAY_SERVED_MODEL: ${{ steps.job.outputs.replay_served_model }}
         run: |
           set -euo pipefail
           test -n "$IMAGE"
@@ -381,7 +383,8 @@ jobs:
           source=thatch-inference-Qwen-Qwen3.8-27B
           docker inspect "$source" > /dev/null 2>&1 || source=scripts/ci/references/c2-serving/agent-container-36104200953.json
           python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" \
-            ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} --results "$RUNNER_TEMP/c2-results/replay"
+            ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
+            --results "$RUNNER_TEMP/c2-results/replay"
       - name: Push
         if: contains(steps.job.outputs.actions, 'push')
         shell: bash

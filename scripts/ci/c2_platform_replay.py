@@ -34,7 +34,7 @@ A chat after 5 and 6 must succeed. Everything the runtime and vLLM wrote under /
 out before the container is removed. Exit 0 only if every step passed.
 
 Usage: c2_platform_replay.py --source thatch-inference-Qwen-Qwen3.8-27B|<inspect.json> --image <ref> --results <dir>
-       [--profile NAME] [--seed N] [--model CHECKPOINT] [--served-model NAME]
+       [--profile NAME] [--seed N] [--model CHECKPOINT] [--served-model NAME] [--env NAME=value ...]
 To replay an image without the alias (a rollback candidate), pass --served-model Qwen/Qwen3.8-27B.
 """
 import argparse

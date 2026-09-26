@@ -309,17 +309,25 @@ class ReplayNameTests(unittest.TestCase):
     """main(): serving.manage loads the checkpoint, the agent's warmup names the checkpoint (answered,
     not advertised), and every later request names the served model."""
 
+    GOOD = dict(model=TT, aliases=[TT])
+    BAD = dict(model=PLAIN)   # what an image without the alias advertises: it would take plain traffic
+
     def drive(self, models, *arguments):
+        """`models` is the /v1/models body, or a sequence of them: the one before the restart (the
+        first load's) and the one after `docker start` (the redeploy's)."""
         commands, chats, traffic = [], [], []
+        answers = list(models) if isinstance(models, (list, tuple)) else [models, models]
 
         def run(command, timeout=None, check=True):
             commands.append(command)
+            if command[:2] == ['docker', 'start']:
+                answers.pop(0)
             if command[:3] == ['docker', 'image', 'inspect']:
                 return mock.Mock(returncode=0, stdout=json.dumps([dict(Config=dict(Env=[]))]), stderr='')
             return mock.Mock(returncode=0, stdout='true', stderr='')
 
         def http(port, path, body=None, timeout=60):
-            return 200, dict(models)
+            return 200, dict(answers[0])
 
         def chat(port, model, content, max_tokens, timeout=900, **extra):
             chats.append((model, content))
@@ -364,6 +372,25 @@ class ReplayNameTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertFalse(steps['served_name']['ok'])
             self.assertFalse(steps['served_name_after_restart']['ok'])
+
+    def failed(self, steps):
+        return [name for name, step in steps.items() if not step.get('ok', True)]
+
+    def test_the_plain_id_advertised_only_after_the_restart_fails_the_replay(self):
+        """Reviewer defect 1: the check after the restart counts on its own - a redeploy that comes
+        back advertising the checkpoint fails the replay though everything before it passed."""
+        code, steps, _, _, _ = self.drive((self.GOOD, self.BAD))
+        self.assertEqual(self.failed(steps), ['served_name_after_restart'])
+        self.assertEqual((steps['served_name']['served'], steps['served_name_after_restart']['served']), (TT, PLAIN))
+        self.assertEqual(code, 1)
+
+    def test_the_plain_id_advertised_only_before_the_restart_fails_the_replay(self):
+        """Reviewer defect 1: the check after the first load counts on its own - a restart that comes
+        back advertising the tag does not clear it."""
+        code, steps, _, _, _ = self.drive((self.BAD, self.GOOD))
+        self.assertEqual(self.failed(steps), ['served_name'])
+        self.assertEqual((steps['served_name']['served'], steps['served_name_after_restart']['served']), (PLAIN, TT))
+        self.assertEqual(code, 1)
 
     def test_an_image_without_the_alias_replays_under_its_plain_name(self):
         code, steps, loads, chats, traffic = self.drive(dict(model=PLAIN), '--served-model', PLAIN)
