@@ -97,7 +97,7 @@ jobs:
           python -B -m unittest test_c2_parser_rechunk
           python -B -m unittest test_serving_plugin_patch
           python -B -m unittest test_serving_worker_hook
-          python -B -m unittest test_serving_request_factory
+          python -B -m unittest test_serving_request_factory test_serving_extent_memory
           python -B -m unittest test_serving_lifecycle
           python -B -m unittest test_serving_any_request test_serving_request_quarantine test_serving_prefill_admission
           python -B -m unittest test_c2_overlay_closure

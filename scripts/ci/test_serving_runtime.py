@@ -614,13 +614,13 @@ class DramAdmissionAttachTests(unittest.TestCase):
         return seen
 
     def test_the_flag_parks_the_hold_for_the_attach_and_removes_it_before_the_pool_closes(self):
-        from serving_prefill_admission import dram_need
+        import serving_prefill_admission
         from dflash_packed_proposal_coordinator import dram_reserve_bytes
 
         seen = self.run_attach({'QWEN_FAST_EXTENT_REPLAY': '1'})
         self.assertEqual(len(seen['registered']), 1)
         # The fake pool has no allocator statistics: the predicate admits and says why.
-        self.assertEqual(seen['admits'], (True, dict(largest_free=None, need=dram_need(4096, dram_reserve_bytes()),
+        self.assertEqual(seen['admits'], (True, dict(largest_free=None, need=serving_prefill_admission.dram_need(4096, dram_reserve_bytes()),
                                                      unavailable='pool without device statistics')))
         self.assertEqual(seen['lifecycles_at_registration'], 0, 'parked before the lifecycle is built')
         self.assertIs(seen['pool_closed_at_removal'], False, 'removed before the pool closes')

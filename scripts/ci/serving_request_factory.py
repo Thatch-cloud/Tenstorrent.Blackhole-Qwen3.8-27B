@@ -399,9 +399,9 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             # S2 W6d: the allocator just before the engine build (drafter, verifier captures, proposal bucket),
             # against its estimated peak; a no-op unless QWEN_FAST_MEMORY_LEDGER=1.
             import memory_ledger
-            from serving_prefill_admission import engine_build_peak
+            import serving_prefill_admission
 
-            memory_ledger.before('engine', estimate=engine_build_peak(),
+            memory_ledger.before('engine', estimate=serving_prefill_admission.engine_build_peak(),
                                  point='req=%s' % memory_ledger.short_id(state.req_id), request=str(state.req_id))
         shared_ccl = os.environ.get('QWEN_FAST_SHARED_CCL', '1') == '1'
         device = components.device(operations, model,
