@@ -22,6 +22,12 @@ process match it:
    profiles (QWEN_FAST_ANY_REQUEST=1), where a host-side refusal of one request's own terms
    (its sampling contract, budget or page table) ends only that request, as FINISHED_ABORTED
    (serving_request_quarantine); every other in-engine refusal still fails the engine.
+5. prefix reuse (the TT prefix-reuse design, G1): the profile alone owns QWEN_PREFIX_REUSE, the switch
+   every prefix-reuse graft in the image reads. A profile that sets it must also carry the engine
+   flags reuse is exact under (prefix_reuse_problems), or the boot refuses; a profile that does not
+   set it gets it removed, so an inherited value cannot turn half of reuse on under exact, c2 or
+   general. Under a prefix profile the API server serves the registry's metrics, which the engine
+   process exports (qwen_prefix_metrics).
 
 Nothing here changes a gate: every step is off unless QWEN_C2_SERVING=1.
 """
@@ -34,6 +40,9 @@ PROFILES = '/opt/qwen-c2/profiles.json'
 FAST_PATHS = ('/experiment-scripts/ci', '/speculative-decoding/harness', '/opt/tt-metal/ttnn', '/opt/tt-metal')
 API_SERVER = 'vllm.entrypoints.openai.api_server'
 INPUT_PROCESSOR = 'vllm.v1.engine.input_processor'
+# The prefix-reuse switch (design section 2.0.1): the model graft's supports_prefix_caching, the
+# scheduler graft's install and the runner patch all read it. Only a profile sets it.
+PREFIX_SWITCH = 'QWEN_PREFIX_REUSE'
 
 # Engine flags a profile owns, and whether each takes a value. A platform value for any of
 # these is dropped: the fast path is only qualified under the profile's.
@@ -101,7 +110,80 @@ def apply_environment(profile, environ=None):
     # it configures, and the platform bakes it =host, so that profile keeps it.
     if profile.get('drop_batched_decode_mode', True):
         environ.pop('QWEN36_BATCHED_DECODE_MODE', None)
+    # Prefix reuse is the profile's to switch on: an inherited value under any other profile would
+    # give the model the capability while the profile's argv leaves prefix caching off.
+    if PREFIX_SWITCH not in profile['env']:
+        environ.pop(PREFIX_SWITCH, None)
     return environ
+
+
+def prefix_reuse(profile):
+    """Whether the profile turns conversation prefix reuse on (general-prefix and its gate variant)."""
+    return str(profile.get('env', {}).get(PREFIX_SWITCH, '')) == '1'
+
+
+def prefix_reuse_problems(profile):
+    """Every way the profile's engine flags break prefix reuse's exactness assumptions, [] when none.
+
+    Reuse is exact only under the engine prefix_scheduler_graft.install_problems accepts (async
+    scheduling off, a whole-prompt token budget, 64-token blocks, no speculative lookahead) and
+    with vLLM's own prefix cache on; vLLM's align-mode assertion also needs chunked prefill on in
+    the argv, which the TT platform turns off again for qwen3_5 (design 2.0.1 item 5; P0a checks
+    1-2). Prefix caching without the switch would serve hits no checkpoint makes exact, and the
+    fast path cannot admit a hit yet (C1: serving_lifecycle refuses num_computed_tokens != 0)."""
+    engine = profile.get('engine', {})
+    value = profile.get('env', {}).get(PREFIX_SWITCH)
+    caching = engine.get('enable-prefix-caching') is True
+    problems = []
+    if value is not None and str(value) not in ('0', '1'):
+        problems.append('%s=%r is neither 1 nor 0' % (PREFIX_SWITCH, value))
+    if caching and engine.get('no-enable-prefix-caching'):
+        problems.append('both enable-prefix-caching and no-enable-prefix-caching')
+    if not prefix_reuse(profile):
+        if caching:
+            problems.append('enable-prefix-caching without %s=1: vLLM would serve cached blocks without the '
+                            'checkpoint trim that makes a hit exact' % PREFIX_SWITCH)
+        return problems
+    if not caching or engine.get('no-enable-prefix-caching'):
+        problems.append('%s=1 needs enable-prefix-caching' % PREFIX_SWITCH)
+    if engine.get('enable-chunked-prefill') is not True or engine.get('no-enable-chunked-prefill'):
+        problems.append('enable-chunked-prefill is required: vLLM asserts it for a hybrid model with prefix '
+                        'caching, and the TT platform turns chunking off again')
+    if engine.get('no-async-scheduling') is not True or engine.get('async-scheduling'):
+        problems.append('no-async-scheduling is required: blocks hashed at allocation would be read unwritten')
+    if engine.get('block-size') != 64:
+        problems.append('block-size must be 64 (the page tables and the 2048-token chunk arithmetic), not %r'
+                        % engine.get('block-size'))
+    budget, context = engine.get('max-num-batched-tokens'), engine.get('max-model-len')
+    if type(budget) is not int or type(context) is not int or budget < context:
+        problems.append('max-num-batched-tokens %r must cover max-model-len %r: a prefill must never split'
+                        % (budget, context))
+    if (engine.get('additional-config') or {}).get('qwen_fast_t16'):
+        problems.append('the fast path (qwen_fast_t16) cannot admit a prefix hit yet (C1)')
+    if engine.get('speculative-config'):
+        problems.append('speculative decoding: the scheduler graft refuses lookahead')
+    return problems
+
+
+def install_prefix_metrics(api_server, on_import=None):
+    """The registry's metrics under a prefix profile: the API server collects what the engine process
+    exports (qwen_prefix_metrics). Every process also starts an exporter in the children it forks
+    (vLLM forks the EngineCore by default). Observability only: a failure is logged, never raised."""
+    try:
+        import qwen_prefix_metrics
+
+        if api_server:
+            if on_import is None:
+                def on_import(name, callback):
+                    sys.meta_path.insert(0, PostImportHook(name, callback))
+            qwen_prefix_metrics.install_collector(on_import)
+        else:
+            qwen_prefix_metrics.start_exporter()
+        qwen_prefix_metrics.export_in_forked_children()
+        return True
+    except Exception as error:
+        log('prefix metrics not installed: %s: %s', type(error).__name__, error)
+        return False
 
 
 def engine_arguments(profile, snapshot):
@@ -355,6 +437,9 @@ def boot(environ=None, orig_argv=None):
         return None
     fix_sys_path()
     profile = load_profile(environ.get('QWEN_C2_PROFILES', PROFILES))
+    problems = prefix_reuse_problems(profile)
+    if problems:
+        raise ValueError('profile %s cannot serve prefix reuse exactly: %s' % (profile['name'], '; '.join(problems)))
     apply_environment(profile, environ)
     if profile.get('skip_device_teardown', True):
         # Registered at interpreter start, so it runs after every other atexit handler.
@@ -363,12 +448,18 @@ def boot(environ=None, orig_argv=None):
     budget = limits['budget']
     eos_ids = frozenset(int(token) for token in profile['eos_ids'])
     orig_argv = getattr(sys, 'orig_argv', None) if orig_argv is None else orig_argv
-    if is_api_server(orig_argv):
+    api_server = is_api_server(orig_argv)
+    if prefix_reuse(profile):
+        install_prefix_metrics(api_server)
+    if api_server:
         snapshot = resolve_snapshot(profile)
         sys.argv[:] = rewrite_argv(sys.argv, profile, snapshot)
         log('profile %s: vLLM argv %s', profile['name'], json.dumps(sys.argv[1:]))
         log('mesh %s, output budget %d, context %s', environ['TT_MESH_GRAPH_DESC_PATH'], budget,
             profile['engine'].get('max-model-len'))
+        if prefix_reuse(profile):
+            log('profile %s: prefix reuse on (%s=1, vLLM prefix caching; the platform turns chunking off again)',
+                profile['name'], PREFIX_SWITCH)
         if profile.get('request_contract', True) is False:
             log('profile %s: no request contract (the fast path is off)', profile['name'])
             return profile

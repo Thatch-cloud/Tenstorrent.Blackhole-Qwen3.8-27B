@@ -75,8 +75,17 @@ scripts/ci/serving_packed_step.py
 # install refuses a changed copy and G1 (e) fails the build.
 speculative-decoding/harness/greedy_session.py
 
+# Conversation prefix reuse (the TT prefix-reuse design, G1; the general-prefix profiles). Every G1
+# runtime module goes here - the registry and scheduler graft the patched TTScheduler.__init__
+# installs from, the metrics exporter and collector the contract boots - and so does every stage module
+# scripts/ci/qwen_prefix_stage.py (a build tool, staged beside c2_overlay.py, never overlaid) runs:
+# test_qwen_prefix_image fails while a scripts/ci/qwen_prefix_*.py is missing here.
+scripts/ci/prefix_scheduler_graft.py
+scripts/ci/qwen_prefix_metrics.py
+
 # Tests run inside the image at build time (every overlaid scripts/ci/test_*.py is).
 scripts/ci/test_serving_c2_contract.py
 scripts/ci/test_serving_fast_policy.py
 scripts/ci/test_serving_worker_hook.py
 scripts/ci/test_serving_lifecycle.py
+scripts/ci/test_qwen_prefix_metrics.py

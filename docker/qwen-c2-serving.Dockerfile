@@ -59,6 +59,17 @@ RUN set -eu; \
     tests=$(python3 -B /opt/qwen-c2/c2_overlay.py tests --manifest /opt/qwen-c2/qwen-c2-overlay.txt); \
     cd /experiment-scripts/ci && VLLM_PLUGINS='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python3 -B -m unittest $tests
 
+# Conversation prefix reuse (the TT prefix-reuse design, G1): the AST stages that graft it into the TT
+# plugin (scheduler.py, model_runner.py, worker.py) and the model tree (model.py, qwen36_vllm.py), none
+# of them an overlay destination. The tool refuses unless vllm_tt_plugin and models import from the
+# trees it patches and every target holds its pinned original bytes (the source.sha256 pattern above,
+# checked before anything is written); it runs each stage from the overlaid tree, compiles the result
+# and records every target's sha256 before and after, which c2_image_provenance (f) holds the image to.
+# Every grafted branch stays off unless QWEN_PREFIX_REUSE=1, which only the general-prefix profiles set.
+COPY qwen_prefix_stage.py /opt/qwen-c2/
+RUN set -eu; cd /experiment-scripts/ci && VLLM_PLUGINS='' python3 -B /opt/qwen-c2/qwen_prefix_stage.py apply \
+      --modules /experiment-scripts/ci --record /opt/qwen-c2/prefix-stage.json
+
 # The DFlash2 draft: its config (the speculative model path) and the fixture weights.
 COPY draft-config/ /draft-config/
 COPY fixture/ /experiment-dflash-fixture/

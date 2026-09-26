@@ -91,6 +91,7 @@ jobs:
           python -B -m unittest test_serving_image_copy_closure
           python -B -m unittest test_c2_image_overlay
           python -B -m unittest test_serving_c2_contract
+          python -B -m unittest test_qwen_prefix_metrics test_qwen_prefix_image
           python -B -m unittest test_serving_plugin_patch
           python -B -m unittest test_serving_worker_hook
           python -B -m unittest test_serving_request_factory

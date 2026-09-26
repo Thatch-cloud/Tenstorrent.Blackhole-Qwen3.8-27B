@@ -38,6 +38,7 @@ import c2_image_layers as layers_model  # noqa: E402
 import c2_image_provenance as provenance  # noqa: E402
 import c2_overlay  # noqa: E402
 import c2_serving_job  # noqa: E402
+import qwen_prefix_stage  # noqa: E402
 import test_serving_image_copy_closure as p8  # noqa: E402
 
 C2_DOCKERFILE = ROOT / c2_overlay.DOCKERFILE
@@ -843,8 +844,26 @@ def context_dirs(context):
     return {op: c2_overlay.tree_digest(str(Path(context) / 'opgraft-K64i' / op)) for op, _ in provenance.GRAFT_OP_DIRS}
 
 
+def faithful_prefix_record(context):
+    """The prefix stage's record and the targets' shas for an image built faithfully from context: each
+    target held its pin, and the stage table's modules (the context's overlaid sources) patched it."""
+    context = Path(context)
+    stages = [dict(target=target, module=module, function=function, path='/experiment-scripts/ci/%s.py' % module,
+                   sha256=c2_overlay.sha256(context / 'overlay' / 'scripts/ci' / (module + '.py')))
+              for target, module, function in qwen_prefix_stage.STAGES]
+    rows, shas = {}, {}
+    for name, path, pin, source in qwen_prefix_stage.TARGETS:
+        patched_by = ['%s.%s' % (stage['module'], stage['function']) for stage in stages if stage['target'] == name]
+        after = hashlib.sha256((pin + ''.join(patched_by)).encode()).hexdigest() if patched_by else pin
+        rows[name] = dict(path=path, pin=pin, pin_source=source, before=pin, after=after, patched_by=patched_by)
+        shas[path] = after
+    return dict(schema=qwen_prefix_stage.SCHEMA, targets=rows, stages=stages, complete=bool(stages),
+                resolved=dict(plugin=qwen_prefix_stage.PLUGIN_ROOT, models=qwen_prefix_stage.MODEL_TREE + '/models'),
+                python='3.10.12'), shas
+
+
 def fake_image(context, entries, tampered=None, dropped=None, record=True, ttnn_strings=None, op_dir=None,
-               trees=None, pins=None, base_pins=None):
+               trees=None, pins=None, base_pins=None, prefix=True, prefix_shas=None):
     """Probe results for an image built faithfully from context (with optional faults)."""
     context = Path(context)
     graft = {binary: c2_overlay.sha256(context / 'opgraft-K64i' / binary) for binary in ('_ttnn.so', '_ttnncpp.so')}
@@ -883,8 +902,15 @@ def fake_image(context, entries, tampered=None, dropped=None, record=True, ttnn_
     base_strings = {binary: strings[binary] + list(dropped or ()) for binary in strings}
     base = {path: dict(exists=True, path=path, realpath=path, sha256='0' * 64, qwen=sorted(base_strings[binary]))
             for binary, path in provenance.GRAFT_BINARIES}
+    prefix_record, target_shas = faithful_prefix_record(context)
+    target_shas.update(prefix_shas or {})
+    for path, sha in target_shas.items():
+        files[path] = dict(exists=sha is not None, path=path, realpath=path, sha256=sha)
+    for name, path, pin, _ in qwen_prefix_stage.TARGETS:
+        base[path] = dict(exists=True, path=path, realpath=path, sha256=pin)
     built = dict(files=files, record=dict(files=rows) if record else None, trees=image_trees, dirs=dirs,
                  pins=faithful_pins if pins is None else pins, bundle={})
+    built['prefix'] = prefix_record if prefix is True else (prefix or None)
     return built, dict(files=base, pins=faithful_pins if base_pins is None else base_pins, trees=image_trees, bundle={})
 
 
@@ -979,6 +1005,57 @@ class ProvenanceTests(unittest.TestCase):
         self.assertTrue(any('(c) exact: QWEN_ environment sha256' in line and 'equal up to the unset defaults' in line
                             for line in self.log))
         self.assertTrue(any(re.search(r'\(d\) layers .*: \d+ files as modelled, \d+ at the bundle record.s bytes, \d+ never in the bundle, 0 at HEAD', line) for line in self.log))
+
+    def test_prefix_reuse_is_on_exactly_where_the_profile_says(self):
+        """(f): the launched argv and booted environment of every profile agree with its prefix switch."""
+        problems, _ = self.verify()
+        self.assertEqual(problems, [])
+        self.assertIn('[G1] (f) general-prefix: prefix reuse ON in the launched argv (--enable-prefix-caching '
+                      '--enable-chunked-prefill --no-async-scheduling) and QWEN_PREFIX_REUSE=1', self.log)
+        self.assertIn('[G1] (f) general: prefix reuse off in the launched argv (--no-enable-prefix-caching) and '
+                      'no QWEN_PREFIX_REUSE', self.log)
+        self.assertTrue(any(line.startswith('[G1] (f) prefix-reuse stage: %d stage(s)' % len(qwen_prefix_stage.STAGES))
+                            for line in self.log))
+
+    def test_a_prefix_profile_launched_without_prefix_caching_fails(self):
+        contract = provenance.load_contract(self.context / 'overlay/scripts/ci/serving_c2_contract.py')
+        profiles = self.context / 'overlay/scripts/ci/qwen_c2_profiles.json'
+        snapshot = contract.load_profile(str(profiles), 'general-prefix')['snapshots'][0]
+        argv = provenance.expected_argv(contract, profiles, 'general-prefix', snapshot)
+        argv[argv.index('--enable-prefix-caching')] = '--no-enable-prefix-caching'
+        problems, _ = self.verify(argv_override={'general-prefix': argv})
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn('(c) general-prefix: the image launched', problems[0])
+        self.assertIn("(f) general-prefix: prefix reuse is on in the profile, but the launched argv lacks "
+                      "['--enable-prefix-caching'] and has ['--no-enable-prefix-caching']", problems[1])
+
+    def test_a_switch_leaking_into_another_profile_fails(self):
+        contract = provenance.load_contract(self.context / 'overlay/scripts/ci/serving_c2_contract.py')
+        loaded = contract.load_profile(str(self.context / 'overlay/scripts/ci/qwen_c2_profiles.json'), 'general')
+        env = contract.apply_environment(loaded, provenance.dockerfile_env((self.context / 'Dockerfile').read_text()))
+        env['QWEN_PREFIX_REUSE'] = '1'
+        problems, _ = self.verify(environments={'general': env})
+        self.assertEqual(problems, ['(f) general: the booted environment has QWEN_PREFIX_REUSE=1 under a profile '
+                                    'without prefix reuse'])
+
+    def test_a_missing_or_foreign_prefix_stage_record_fails(self):
+        problems, _ = self.verify(prefix=None)
+        self.assertEqual(problems, ['(f) the image has no /opt/qwen-c2/prefix-stage.json: the prefix-reuse stage '
+                                    'never ran'])
+        model = qwen_prefix_stage.MODEL_ROOT + '/model.py'
+        problems, _ = self.verify(prefix_shas={model: 'e' * 64})
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('(f) model/model.py: %s is %s in the image' % (model, 'e' * 64), problems[0])
+
+    def test_base_drift_reads_the_prefix_anchors(self):
+        built, base = fake_image(self.context, self.entries)
+        worker = qwen_prefix_stage.PLUGIN_ROOT + '/worker.py'
+        base['files'][worker] = dict(base['files'][worker], sha256='1' * 64)
+        log = []
+        problems, _ = provenance.base_drift(self.context, None, FakeDocker(self.context, built, base, {}), log.append)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('(f) plugin/worker.py: the base holds %s at %s, not the pinned' % (worker, '1' * 64), problems[0])
+        self.assertTrue(any('(f) model/qwen36_vllm.py: the base holds the pinned' in line for line in log))
 
     def test_a_tampered_overlay_file_fails(self):
         problems, _ = self.verify(tampered='/opt/qwen-c2/profiles.json')

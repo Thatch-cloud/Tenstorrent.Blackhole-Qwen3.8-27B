@@ -271,6 +271,93 @@
       },
       "request_contract": false,
       "drop_batched_decode_mode": false
+    },
+    "general-prefix": {
+      "description": "general with conversation prefix reuse (the TT prefix-reuse design, G1): vLLM's attention prefix cache plus GDN checkpoints the model saves at 2048-token boundaries, so a turn that extends an earlier prompt re-prefills only from the last checkpoint below its vLLM hit, byte-identical to a cold prefill. Exactly general's engine argv with enable-prefix-caching and enable-chunked-prefill in place of the no- flags (the argv the P0a probe built and passed): vLLM's align-mode assertion needs chunking on, and the TT platform turns chunking off again for qwen3_5 and raises max-num-batched-tokens to max-model-len, so prefill stays whole-prompt. QWEN_PREFIX_REUSE=1 switches every prefix-reuse graft in the image on (the model's supports_prefix_caching, the scheduler graft, the runner patch); QWEN_PREFIX_STORE_GIB is the host checkpoint budget (about 154 MB per checkpoint; design D-P4). Hits need a cache_salt (fail closed). The runtime kill switch is the file /models/.qwen-c2/prefix-reuse.off. Needs an image whose prefix stage grafted every target (/opt/qwen-c2/prefix-stage.json complete=true); without it the platform drops prefix caching and vLLM refuses to start. Not the default: UNVERIFIED on hardware until the G1 gates pass.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_graph_descriptor": "/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "65536",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "65536",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 65536,
+        "max-num-seqs": 4,
+        "block-size": 64,
+        "max-num-batched-tokens": 65536,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576
+          }
+        },
+        "enable-prefix-caching": true,
+        "enable-chunked-prefill": true
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
+    "general-prefix-eager": {
+      "description": "GATE ONLY (G1's eager exactness gate, design F1): general-prefix with trace_mode decode_only, so prefill takes the eager chunk loop - the loop C1 reuses on the fast path - instead of the traced one. Everything else is general-prefix's. Not for traffic: the eager prefill is slower.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_graph_descriptor": "/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "65536",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "65536",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 65536,
+        "max-num-seqs": 4,
+        "block-size": 64,
+        "max-num-batched-tokens": 65536,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576
+          }
+        },
+        "enable-prefix-caching": true,
+        "enable-chunked-prefill": true
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
     }
   }
 }
