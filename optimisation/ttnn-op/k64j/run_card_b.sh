@@ -17,6 +17,15 @@
 #   K64J_CARD_DRY_RUN=1 bash run_card_b.sh   # print the launch argv and exit: no node resolution, no holder check,
 #                                         # no docker, nothing launched (the graft is checked when it exists)
 #
+# CB2a (s2-design.md W10a, 6.2: K2, X7 and Z, opt-in by --sections), watcher pass first:
+#   WATCHER=1 CARD_B_ARGS="--sections K2,X7,Z" bash run_card_b.sh
+#                                         # the watcher defaults above plus CB2a's reduced set: K2 tickets 232..263
+#                                         # (families 256 and 512 and the cap), floor 120..127, families 2,304 and
+#                                         # 131,328 at +0 / +240 / +255, Z at 256 / 512 / 2,304 / 3,840
+#   CARD_B_ARGS="--sections K2,X7,Z --seeds 0,1,2,3,4 --variants normal,peaky --no-timing" bash run_card_b.sh
+#                                         # the full pass: K2 every ticket 128..300 and the five families, X7, and Z
+#                                         # at all 15 stale-writer families; K2 decides the exactness policy
+#
 # Before anything is launched the graft must verify against its MANIFEST.sha256, its _ttnncpp.so must be
 # EXPECT_TTNNCPP_SHA256 (REQUIRED for a real run: K64j's sha is the K64J_TTNNCPP_SHA256 line build_k64j.sh prints)
 # and carry the F22 literal '[QWEN-SDPA] runtime-extent entries=', its four qwen decode kernels must be K64j's
@@ -424,7 +433,8 @@ if [ "${WATCHER:-}" = "1" ]; then
   timeout_s=2700
   args+=(--extents 2304,33024 --seeds 0 --variants normal --combos G4B3:0x21,G4B3:0x23,G8B2:0x27
          --trace-combos G4B3:0x21,G8B2:0x27 --trace-families 8 --trace-references 2 --no-timing
-         --watchdog "${WATCHDOG_S:-120}")
+         --k2-sweep 232:263 --k2-floor 120:127 --cb2-extents 2304,131328 --cb2-starts 0,240,255
+         --z-families 256,512,2304,3840 --watchdog "${WATCHDOG_S:-120}")
   WM=(-e TT_METAL_WATCHER=5 --mount "type=bind,src=$R/watcher-$stamp,dst=/opt/tt-metal/generated/watcher")
   if [ "$DRY" != 1 ]; then
     mkdir -p "$R/watcher-$stamp"

@@ -16,7 +16,8 @@
     PASS end to end once, and each broken variant on the section that must catch it - a program that ignores the
     word (X), share entries on their own slot (M, K), a skip that disturbs a live entry (K), a trace that keeps the
     captured word (T), a word clamped below a family boundary (L: a dead control), a binary that never logs F22 or
-    accepts 0x11 (N), a deadline and the SIGTERM handler.
+    accepts 0x11 (N), a deadline and the SIGTERM handler. CB2a's sections (K2, X7, Z) and the fake's CB2a variants are
+    test_k64j_cb2a's.
 
     py -3.11 -B -m unittest test_k64j_card_b      (from this directory; the bash runner tests need Git Bash on Windows)
 """
@@ -194,13 +195,14 @@ class HelperTests(unittest.TestCase):
         report['decision'] = card_b.decide(report)
         self.assertTrue(card_b.verdict_line(report).startswith(
             'K64J_CARD verdict=FAIL extent=1/2 mixed=none share_slot0=1/1 trace=none fence=none skip=none refusals=1/1 '
-            'live=1/1 skipped_rows=unwritten families=51 k2=not_run k4=not_run sections_failed=T/seed0 '
-            'deadline_skipped=1 first_differing=["x"]'), card_b.verdict_line(report))
+            'live=1/1 skipped_rows=unwritten families=51 k2=none k2_verdict=not_run x7=none z=none k4=not_run '
+            'sections_failed=T/seed0 deadline_skipped=1 first_differing=["x"]'), card_b.verdict_line(report))
 
     def test_the_arguments_and_the_run_order(self):
         args = card_b.parse_args(['--out', 'x.json'])
         self.assertEqual((args.capacity, args.extents, args.starts, args.seeds, args.variants, args.sections),
-                         (131328, list(probe.EXTENTS), list(probe.STARTS), [0, 1, 2], ['normal'], list(card_b.SECTIONS)))
+                         (131328, list(probe.EXTENTS), list(probe.STARTS), [0, 1, 2], ['normal'],
+                          list(card_b.DEFAULT_SECTIONS)))
         self.assertEqual((args.combos, args.trace_combos, args.trace_families, args.trace_references),
                          (card_b.default_combos(), [('G4B3', 0x21), ('G8B2', 0x27)], 64, 8))
         self.assertEqual(args.expect_binary_sha256, '')
@@ -300,10 +302,10 @@ class ContractTests(unittest.TestCase):
         result = subprocess.run([BASH, '-n', RUNNER.as_posix()], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_k2_and_k4_are_listed_as_not_run(self):
-        self.assertEqual(sorted(card_b.NOT_RUN), ['K2', 'K4'])
-        self.assertIn('k2=not_run k4=not_run', card_b.verdict_line(dict(comparisons=[], liveness=[], decision=dict(
-            verdict='NO-DECISION', reasons=[], first_differing=[]))))
+    def test_k4_is_listed_as_not_run(self):
+        self.assertEqual(sorted(card_b.NOT_RUN), ['K4'])
+        self.assertIn('k2=none k2_verdict=not_run x7=none z=none k4=not_run', card_b.verdict_line(dict(
+            comparisons=[], liveness=[], decision=dict(verdict='NO-DECISION', reasons=[], first_differing=[]))))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -492,10 +494,136 @@ class FakeExtentTtnn(probe_tests.FakeTtnn):
 
     broken: 'ignore_word' (a 0x20 program runs at capacity - 1), 'own_slot' (share entries read their own word),
     'skip_bleeds' (a skipped entry zeroes the next one), 'stale_trace' (a replay keeps the captured words), 'clamp'
-    (a word on a family boundary is taken one lower: the liveness control goes dead), 'no_f22', 'accept_0x11'."""
+    (a word on a family boundary is taken one lower: the liveness control goes dead), 'no_f22', 'accept_0x11';
+    for CB2a (test_k64j_cb2a): 'tail_at_capacity' (a tail call reads its mask at the call's capacity, [C - 256, C),
+    not at the mask's own last chunk: a wide mask read there, and a narrow one past its width, reading 0.0),
+    'narrow_batch_offset' (a sliced call with a narrow mask reads entry 0's mask rows for every entry: the mask
+    batch stride lost, the K64i reader_decode_qwen_slice.cpp:338-341 class, shared by 0x27 and 0x7-narrow), and
+    'stale_writer' (a 0x20 writer on the compile-time cur_pos: the call hangs wherever split_model.stale_writer_hangs
+    says so - the fake lets the harness watchdog's budget pass and fires it).
 
-    def paged_scaled_dot_product_attention_decode(self, query, k, v, pages, *, is_causal, scale, program_config,
-                                                  memory_config, attn_mask=None, cur_pos_tensor=None):
+    The call takes the table as the 4th positional argument or page_table_tensor= (the served calls' spelling) and
+    is_causal defaults to True (the native decode call does not pass it); with record_calls, each call's keyword
+    names are kept in self.recorded."""
+
+    L1_MEMORY_CONFIG = 'l1'
+
+    def __init__(self, torch, *args, record_calls=False, **kwargs):
+        super().__init__(torch, *args, **kwargs)
+        self.recorded = [] if record_calls else None
+
+    def attend(self, q, keys, values, table_row, cur_pos, chunk_tiles, scale, cores, causal, mask_row, tail,
+               capacity):
+        """FakeTtnn.attend with its two products and its sums in float64: a row's bytes then do not depend on how
+        many rows share the call (CPU BLAS blocks a 12-row and a 96-row product differently), so K2's B = 1 native
+        rows and the G8B2 subject's folded rows agree exactly where the device's per-row arithmetic would. The
+        split, the tree, the masks and every bf16 rounding are FakeTtnn's."""
+        torch = self.torch
+
+        def bf(value):
+            return value.to(torch.bfloat16).float()
+
+        def merge(own, other):
+            m = torch.maximum(own[0], other[0])
+            a = torch.where(torch.isfinite(own[0]), torch.exp(own[0] - m), torch.zeros_like(m))
+            b = torch.where(torch.isfinite(other[0]), torch.exp(other[0] - m), torch.zeros_like(m))
+            return m, bf(own[1] * a + other[1] * b), bf(own[2] * a[:, None] + other[2] * b[:, None])
+
+        visible_to = split_pos = cur_pos
+        if causal and 'overread' in self.broken:
+            visible_to = split_pos = min(capacity - 1, cur_pos + 256)
+        if causal and 'split_capacity' in self.broken:
+            split_pos = capacity - 1
+        plan = model.split(split_pos, cores, chunk_tiles, 8)
+        chunk, chunks = plan['chunk'], plan['num_chunks']
+        extent = chunks * chunk
+        pages = table_row[:-(-extent // card.PAGE)].long()
+        positions = torch.arange(extent)
+        rows = q.shape[0]
+        per_kv = rows // card.KV_HEADS
+        out = torch.empty(rows, card.HEAD_DIM)
+        for kv in range(card.KV_HEADS):
+            lo, hi = kv * per_kv, (kv + 1) * per_kv
+            k = keys[pages, kv].reshape(-1, card.HEAD_DIM)[:extent].double()
+            v = values[pages, kv].reshape(-1, card.HEAD_DIM)[:extent].double()
+            scores = bf((q[lo:hi].double() @ k.T) * scale)
+            if causal:
+                scores[:, positions > visible_to] = float('-inf')
+            elif mask_row is not None:
+                bias = mask_row[lo:hi].float()
+                if tail:
+                    scores[:, extent - 256:] = scores[:, extent - 256:] + bias[:, -256:]
+                else:
+                    scores = scores + bias[:, :extent]
+            blocks = scores.view(hi - lo, chunks, chunk)
+            m = blocks.max(dim=2).values
+            finite = torch.isfinite(m)
+            p = torch.where(finite[..., None], torch.exp(blocks - torch.where(finite, m, torch.zeros_like(m))[..., None]),
+                            torch.zeros_like(blocks))
+            l = bf(p.double().sum(dim=2))
+            o = bf(torch.einsum('rnc,ncd->rnd', p.double(), v.view(chunks, chunk, card.HEAD_DIM)))
+            partial = {}
+            for core, (first, last) in enumerate(plan['ranges']):
+                if first == last:
+                    continue
+                own = (m[:, first], l[:, first], o[:, first])
+                for index in range(first + 1, last):
+                    own = merge(own, (m[:, index], l[:, index], o[:, index]))
+                partial[core] = own
+
+            def reduce(core):
+                own = partial[core]
+                for child in model.tree_params(core, cores)['children']:
+                    if child is not None and child < chunks and child in partial:
+                        own = merge(own, reduce(child))
+                return own
+
+            result = reduce(0)
+            out[lo:hi] = result[2] / result[1][:, None]
+        return out
+
+    def mask_seen(self, mask, flags, batches, capacity):
+        """The mask as a broken device reads it (the fake's attend adds the LAST 256 columns of what this returns)."""
+        torch = self.torch
+        width = mask.shape[3]
+        if 'narrow_batch_offset' in self.broken and flags & card_b.SLICE and width == 256 and batches > 1:
+            mask = mask[0:1].expand(batches, -1, -1, -1).clone()
+        if 'tail_at_capacity' in self.broken and flags & card_b.TAIL:
+            read = torch.zeros(mask.shape[:3] + (256,), dtype=mask.dtype)
+            first = capacity - 256
+            if first + 256 <= width:
+                read = mask[..., first:first + 256].clone()
+            mask = mask.clone()
+            mask[..., -256:] = read
+        return mask
+
+    def hang(self):
+        """A call that never returns: the harness watchdog's budget passes and it fires (check() prints WATCHDOG,
+        runs on_fire and calls its exit, which the tests make raise)."""
+        watchdog = probe.WATCHDOG
+        with watchdog.lock:
+            label = watchdog.label
+            watchdog.deadline = 0.0
+        if label is None:
+            raise RuntimeError('FakeExtentTtnn: a stale writer hung outside a watchdog op (--watchdog 0)')
+        watchdog.check()
+        raise AssertionError('the watchdog did not fire')
+
+    def paged_scaled_dot_product_attention_decode(self, query, k, v, *positional, **options):
+        if self.recorded is not None:
+            self.recorded.append(dict(positional=len(positional), options=sorted(options),
+                                      program_config=dict(options.get('program_config') or {}),
+                                      memory_config=options.get('memory_config'), is_causal=options.get('is_causal'),
+                                      rows=query.shape[2], batches=query.shape[1]))
+        if len(positional) > 1 or (positional and 'page_table_tensor' in options):
+            raise TypeError('one page table, positional or page_table_tensor=')
+        pages = positional[0] if positional else options.pop('page_table_tensor')
+        is_causal = options.pop('is_causal', True)
+        scale, program_config, memory_config = options.pop('scale'), options.pop('program_config'), options.pop(
+            'memory_config')
+        attn_mask, cur_pos_tensor = options.pop('attn_mask', None), options.pop('cur_pos_tensor', None)
+        if options:
+            raise TypeError('unexpected keyword arguments %r' % sorted(options))
         sentinel = program_config['q_chunk_size']
         qwen = (sentinel & 0xFFFFFF00) == card.MAGIC
         flags = sentinel & 0xFF if qwen else 0
@@ -519,9 +647,19 @@ class FakeExtentTtnn(probe_tests.FakeTtnn):
                                         cur_pos_tensor)
             if flags & card_b.UNKNOWN_CONTROL:
                 program_config = dict(program_config, q_chunk_size=sentinel & ~card_b.UNKNOWN_CONTROL)
-        return super().paged_scaled_dot_product_attention_decode(
-            query, k, v, pages, is_causal=is_causal, scale=scale, program_config=program_config,
-            memory_config=memory_config, attn_mask=attn_mask, cur_pos_tensor=cur_pos_tensor)
+        substitute = None
+        if qwen and attn_mask is not None and {'tail_at_capacity', 'narrow_batch_offset'} & self.broken:
+            # The broken read of an eager (or captured: FakeTtnn reads it at call time) non-extent qwen call.
+            capacity = self.read(pages).shape[1] * card.PAGE
+            seen = self.mask_seen(self.read(attn_mask), flags, query.shape[1], capacity)
+            attn_mask = substitute = self.from_torch(seen, dtype=self.bfloat16, layout=self.TILE_LAYOUT, device=self)
+        try:
+            return super().paged_scaled_dot_product_attention_decode(
+                query, k, v, pages, is_causal=is_causal, scale=scale, program_config=program_config,
+                memory_config=memory_config, attn_mask=attn_mask, cur_pos_tensor=cur_pos_tensor)
+        finally:
+            if substitute is not None:
+                self.deallocate(substitute)
 
     def extent_call(self, query, k, v, pages, scale, k_chunk, flags, attn_mask, cur_pos_tensor):
         torch = self.torch
@@ -553,13 +691,15 @@ class FakeExtentTtnn(probe_tests.FakeTtnn):
             data = self.memory[output.address].clone()
             current = snapshot if (replay and 'stale_trace' in self.broken) else self.read(cur_pos_tensor)
             words = [int(value) for value in current.tolist()]
-            mask = self.read(attn_mask)            # re-read at every replay, as the device does
+            mask = self.mask_seen(self.read(attn_mask), flags, batches, capacity)   # re-read at every replay
             skipped = []
             for entry in range(batches):
                 word = words[entry if (not share or 'own_slot' in self.broken) else 0]
                 if word == -1:
                     skipped.append(entry)
                     continue
+                if 'stale_writer' in self.broken and model.stale_writer_hangs(word, capacity, cores):
+                    self.hang()
                 if 'ignore_word' in self.broken:
                     word = capacity - 1
                 if 'clamp' in self.broken and word % 256 == 0:
