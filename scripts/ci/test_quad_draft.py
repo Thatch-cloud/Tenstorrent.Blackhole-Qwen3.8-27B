@@ -2471,6 +2471,31 @@ class GateTests(unittest.TestCase):
 # Shipping and the pins.
 # ---------------------------------------------------------------------------------------------
 
+def model_batch_without_s2(text):
+    """model_batch.py less S2 W3's extent fixture branch (design s2-design.md W3, `packed_extent`), which
+    landed after PARENT: the keyword, its refusal, its capacity branch and its reader branch. Each is cut
+    exactly once and to its known last line, so nothing else is hidden."""
+    lines = text.split(chr(10))
+
+    def cut(first, last, replacement=()):
+        starts = [index for index, value in enumerate(lines) if value.strip() == first]
+        if len(starts) != 1:
+            raise AssertionError('%r is not in model_batch.py exactly once' % first)
+        ends = [index for index in range(starts[0], len(lines)) if lines[index].strip() == last]
+        if not ends:
+            raise AssertionError('%r has no %r after it' % (first, last))
+        return lines[:starts[0]] + list(replacement) + lines[ends[0] + 1:]
+
+    lines = cut('kv_single_chain=False, packed_extent=None):', 'kv_single_chain=False, packed_extent=None):',
+                ['                 kv_single_chain=False):'])
+    lines = cut("# S2 (design W3): the extent block's lent storage - per segment, per bundle, a full-width",
+                "raise ValueError('Packed extent storage needs a long-context packed replay fixture and no per-family tables')")
+    lines = cut('elif self.attention_replay and packed_extent is not None:', 'self.replay_capacity = pages.shape[1] * 64')
+    lines = cut('if self.pack is not None and packed_extent is not None:', 'elif self.pack is not None:',
+                ['            if self.pack is not None:'])
+    return chr(10).join(lines)
+
+
 class ShippingTests(unittest.TestCase):
     def test_the_module_and_its_kernel_reach_the_image_through_both_copy_lists(self):
         from test_serving_image_copy_closure import context_modules, dockerfile_modules, dockerfile_text
@@ -2510,10 +2535,19 @@ class ShippingTests(unittest.TestCase):
                                            'dflash_proposal_trace.py', 'fused_commit.py', 'serving_bundle.py']), '')
 
     def test_the_serving_bundle_inventorys_eight_files_are_untouched(self):
-        """Plan section 4.1: serving_bundle.package's critical staged-source inventory."""
-        self.assertEqual(self.git_changed(['model_batch.py', 'verifier_engine.py', 'dflash_combined_request.py',
+        """Plan section 4.1: serving_bundle.package's critical staged-source inventory. model_batch.py
+        is compared less S2 W3's extent fixture branch, which landed after PARENT (model_batch_without_s2)."""
+        self.assertEqual(self.git_changed(['verifier_engine.py', 'dflash_combined_request.py',
                                            'draft_kv_slide.cpp', 'draft_kv_slide_gate.py', 'frozen_combined_runtime.py',
                                            'target_t16_attention_gate.py', 'dflash_t16_native_scope.py']), '')
+        if self.git_changed(['model_batch.py']):
+            result = subprocess.run(['git', 'show', '%s:scripts/ci/model_batch.py' % PARENT], capture_output=True,
+                                    cwd=str(HERE), timeout=60)
+            if result.returncode != 0:
+                self.skipTest('no git history for %s' % PARENT)
+            parent = result.stdout.decode('utf-8').replace(chr(13) + chr(10), chr(10))
+            today = (HERE / 'model_batch.py').read_text(encoding='utf-8').replace(chr(13) + chr(10), chr(10))
+            self.assertEqual(model_batch_without_s2(today), parent)
 
     def test_every_touched_file_is_lf(self):
         for name in ('quad_draft.py', 'quad_conv_io.cpp', 'test_quad_draft.py', 'dflash_device.py',
