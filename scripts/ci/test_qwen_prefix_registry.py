@@ -7,8 +7,11 @@ test_qwen_prefix_scheduler_vllm (real vLLM objects).
 """
 
 import importlib.util
+import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from array import array
 from types import SimpleNamespace
@@ -17,8 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import qwen_prefix_registry as registry_module  # noqa: E402
 from qwen_prefix_registry import (  # noqa: E402
-    BLOCK, CHUNK, CHECKPOINT_NBYTES, Grant, KillSwitch, PrefixRegistry, REGISTRY_KEY, current_registry,
-    floor_chunk, shared_registry, store_budget_bytes)
+    BLOCK, CHUNK, CHECKPOINT_NBYTES, Grant, KillSwitch, PrefixRegistry, REGISTRY_KEY, StatsExport,
+    current_registry, floor_chunk, shared_registry, store_budget_bytes)
 
 IDS = list(range(CHUNK))
 
@@ -27,8 +30,8 @@ def request(tokens):
     return SimpleNamespace(all_token_ids=list(tokens))
 
 
-def grant(req_id, q=0, h=0, key=None, checkpoint=None, plan=(), tokens=None, orphans=0):
-    return Grant(req_id, q, h, key, checkpoint, list(plan), request(tokens or range(3 * CHUNK)), orphans)
+def grant(req_id, q=0, h=0, key=None, checkpoint=None, plan=(), tokens=None, drain=None, unplanned=()):
+    return Grant(req_id, q, h, key, checkpoint, list(plan), request(tokens or range(3 * CHUNK)), drain, unplanned)
 
 
 class Silence(object):
@@ -185,17 +188,79 @@ class GrantTests(unittest.TestCase):
                              request(tokens)))
         registry.commit({'a': 0})
         with Silence():
-            stored = registry.capture('a', 2 * CHUNK, rec='r', carry='c', nbytes=7, ms=3.5)
-            self.assertIsNone(registry.capture('a', 3 * CHUNK))
-            self.assertIsNone(registry.capture('nobody', CHUNK))
+            stored = registry.capture('a', 2 * CHUNK, rec='r', carry='c', nbytes=7, ms=3.5, loop_pos=2 * CHUNK)
+            self.assertIsNone(registry.capture('a', 3 * CHUNK, loop_pos=3 * CHUNK))
+            self.assertIsNone(registry.capture('nobody', CHUNK, loop_pos=CHUNK))
         self.assertEqual((stored.pos, stored.rec, stored.carry, stored.nbytes), (2 * CHUNK, 'r', 'c', 7))
         self.assertTrue(stored.matches(tokens[0:2 * CHUNK]))
         self.assertEqual(registry.stats['capture_failures'], 2)
         self.assertEqual(registry.stats['capture_ms'], 3.5)
         registry.budget_bytes = 1 << 30
-        self.assertEqual(registry.capture('a', CHUNK).nbytes, CHECKPOINT_NBYTES)
+        self.assertEqual(registry.capture('a', CHUNK, loop_pos=CHUNK).nbytes, CHECKPOINT_NBYTES)
         registry.note_restore(12.0)
         self.assertEqual((registry.stats['restores'], registry.stats['restore_ms']), (1, 12.0))
+
+    def test_a_capture_is_refused_unless_taken_after_exactly_pos_tokens(self):
+        """The review's poison: the state at the drain (18432) filed under the gap boundary 4096
+        with token_ids[0:4096]; the next sibling would pass the token check and restore it."""
+        registry = self.registry
+        registry.begin_step()
+        tokens = list(range(5000, 5000 + 9 * CHUNK + 16))
+        registry.stage(Grant('a', 0, 5952, None, None, [(2 * CHUNK, b'gap'), (9 * CHUNK, b'prompt')],
+                             request(tokens), drain=9 * CHUNK))
+        registry.commit({'a': 0})
+        with Silence():
+            self.assertIsNone(registry.capture('a', 2 * CHUNK, rec='state@drain', loop_pos=9 * CHUNK))
+            self.assertIsNone(registry.capture('a', 2 * CHUNK, rec='state@?'))
+        self.assertIsNone(registry.get(b'gap'))
+        self.assertEqual((registry.stats['capture_wrong_position'], registry.stats['capture_failures']), (2, 2))
+        self.assertIsNotNone(registry.capture('a', 2 * CHUNK, rec='state@4096', nbytes=1, loop_pos=2 * CHUNK))
+        self.assertIsNotNone(registry.capture('a', 9 * CHUNK, rec='state@18432', nbytes=1, loop_pos=9 * CHUNK))
+        self.assertEqual((registry.get(b'gap').rec, registry.get(b'prompt').rec), ('state@4096', 'state@18432'))
+
+    def test_the_grant_knows_where_the_loop_drains(self):
+        planned = grant('a', q=CHUNK, h=3 * CHUNK, plan=[(4 * CHUNK, b'p'), (3 * CHUNK, b'g')], drain=4 * CHUNK)
+        self.assertEqual((planned.capture_positions(), planned.mid_loop_positions()), ([3 * CHUNK, 4 * CHUNK], [3 * CHUNK]))
+        self.assertEqual(grant('b', q=CHUNK, plan=[(2 * CHUNK, b'p')]).drain, 2 * CHUNK, 'default: the last capture')
+        self.assertIn('drain=%d' % (4 * CHUNK), planned.describe())
+
+    def test_mid_loop_captures_are_off_until_the_model_declares_them(self):
+        registry = PrefixRegistry(budget_bytes=1)
+        self.assertFalse(registry.mid_loop_capture)
+        with Silence():
+            registry.enable_mid_loop_capture()
+            registry.enable_mid_loop_capture()
+        self.assertTrue(registry.snapshot()['mid_loop_capture'])
+
+    def test_a_token_check_is_remembered_per_request_candidate_and_checkpoint(self):
+        registry = self.registry
+        reads = []
+
+        def tokens():
+            reads.append(1)
+            return IDS + [7, 8, 9]
+
+        for _ in range(3):
+            self.assertTrue(registry.tokens_match('r', CHUNK, self.entry, tokens))
+        self.assertEqual((len(reads), registry.stats['token_checks'], registry.stats['token_mismatches']), (1, 1, 0))
+        replaced = registry.put(b'k2048', CHUNK, [0] * CHUNK, nbytes=10)
+        for _ in range(2):
+            self.assertFalse(registry.tokens_match('r', CHUNK, replaced, tokens))
+        self.assertEqual((len(reads), registry.stats['token_checks'], registry.stats['token_mismatches']), (2, 2, 1))
+        self.assertTrue(registry.tokens_match('other', CHUNK, self.entry, tokens), 'per request')
+        registry.forget_request('r')
+        self.assertNotIn('r', registry.token_checks)
+        registry.clear()
+        self.assertFalse(registry.token_checks)
+
+    def test_an_orphan_is_counted_once_and_leaves_with_its_checkpoint(self):
+        registry = self.registry
+        for _ in range(3):
+            registry.note_orphan(b'k2048')
+        registry.note_orphan(b'not-resident')
+        self.assertEqual((registry.stats['orphans'], registry.snapshot()['orphans_now']), (1, 1))
+        registry.drop(b'k2048', 'coupled')
+        self.assertEqual((registry.stats['orphans'], registry.snapshot()['orphans_now']), (1, 0))
 
     def test_clear_keeps_admitted_grants_restorable(self):
         registry = self.registry
@@ -215,7 +280,7 @@ class GrantTests(unittest.TestCase):
         registry.disable('kill switch')
         registry.disable('again')
         self.assertEqual(registry.disabled, 'kill switch')
-        self.assertIsNone(registry.capture('a', CHUNK))
+        self.assertIsNone(registry.capture('a', CHUNK, loop_pos=CHUNK))
         self.assertIsNone(registry.put(b'z', CHUNK, IDS, nbytes=1))
         self.assertEqual(registry.stats['capture_disabled'], 2)
         self.assertFalse(registry.entries)
@@ -225,6 +290,65 @@ class GrantTests(unittest.TestCase):
         snap = self.registry.snapshot()
         self.assertEqual((snap['entries'], snap['bytes'], snap['pins'], snap['budget_bytes']), (1, 10, 0, 1 << 20))
         self.assertTrue(set(registry_module.STAT_NAMES) <= set(snap))
+        json.dumps(snap)
+
+
+class StatsExportTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.mkdtemp(prefix='qwen-prefix-stats-')
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.path = os.path.join(self.directory, 'stats.json')
+        self.now = [100.0]
+        self.lines = []
+
+    def logger(self, message, *values):
+        self.lines.append(message % values if values else message)
+
+    def export(self, path=None, interval_s=30.0):
+        return StatsExport(path=self.path if path is None else path, interval_s=interval_s,
+                           clock=lambda: self.now[0], logger=self.logger)
+
+    def test_rate_limited_on_change_and_atomic(self):
+        registry = PrefixRegistry(budget_bytes=1 << 20)
+        export = self.export()
+        self.assertTrue(export.maybe_export(registry))
+        with open(self.path, encoding='utf-8') as handle:
+            first = json.load(handle)
+        self.assertEqual((first['captures'], first['pid']), (0, os.getpid()))
+        registry.put(b'k', CHUNK, IDS, nbytes=5)
+        self.now[0] += 10
+        self.assertFalse(export.maybe_export(registry), 'within the interval')
+        self.now[0] += 25
+        self.assertTrue(export.maybe_export(registry))
+        with open(self.path, encoding='utf-8') as handle:
+            self.assertEqual(json.load(handle)['bytes'], 5)
+        self.now[0] += 60
+        self.assertFalse(export.maybe_export(registry), 'unchanged')
+        self.assertTrue(export.maybe_export(registry, force=True))
+        self.assertEqual(len(self.lines), 3)
+        self.assertTrue(all(line.startswith('stats {') for line in self.lines))
+        self.assertEqual(sorted(os.listdir(self.directory)), ['stats.json'], 'no temporary file left')
+
+    def test_a_write_failure_is_logged_once_and_the_line_continues(self):
+        registry = PrefixRegistry(budget_bytes=1 << 20)
+        export = self.export(path=os.path.join(self.directory, 'missing', 'stats.json'), interval_s=0)
+        self.assertTrue(export.maybe_export(registry))
+        registry.put(b'k', CHUNK, IDS, nbytes=5)
+        self.assertTrue(export.maybe_export(registry))
+        failures = [line for line in self.lines if 'not written' in line]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(len([line for line in self.lines if line.startswith('stats {')]), 2)
+
+    def test_an_empty_path_logs_only_and_the_environment_sets_both(self):
+        registry = PrefixRegistry(budget_bytes=1 << 20)
+        export = self.export(path='')
+        self.assertTrue(export.maybe_export(registry))
+        self.assertEqual(os.listdir(self.directory), [])
+        configured = StatsExport(environ={'QWEN_PREFIX_STATS_PATH': self.path, 'QWEN_PREFIX_STATS_S': '5'})
+        self.assertEqual((configured.path, configured.interval_s), (self.path, 5.0))
+        default = StatsExport(environ={})
+        self.assertEqual((default.path, default.interval_s), ('/tmp/qwen-prefix-stats.json', 30.0))
+        self.assertEqual(StatsExport(environ={'QWEN_PREFIX_STATS_S': 'soon'}).interval_s, 30.0)
 
 
 class OwnerTests(unittest.TestCase):

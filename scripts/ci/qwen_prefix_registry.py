@@ -14,27 +14,42 @@ process holds what vLLM cannot know about a hit: the GatedDeltaNet (GDN) state t
 - Kill switch: KillSwitch polls a flag file at most once a second; once engaged the registry is
   disabled for the life of the process (no grants, no captures, no publishing). Turning reuse back
   on needs an engine restart, so nothing published under a suspect build is ever served (S7).
-- Counters for the metrics export (S5): grants, trim loss h-Q, KV hits without a checkpoint,
-  checkpoints without KV (orphans), token mismatches, capture failures, restore and capture ms,
-  bytes, pins.
+- Counters (S5): grants, trim loss h-Q, KV hits without a checkpoint, distinct checkpoints found
+  without their KV (orphans), token mismatches, capture failures and refusals, restore and capture
+  ms, bytes, pins. StatsExport writes them from the scheduler process, rate-limited, as a
+  "[PINDIAG] prefix: stats {...}" line and a JSON file on tmpfs (QWEN_PREFIX_STATS_PATH).
 
 Shared through a fixed sys.modules key (REGISTRY_KEY; precedent serving_lifecycle.PREFILL_GATE_KEY)
 so the scheduler graft (the plugin package's copy of this module) and the model graft (whichever
 copy the model tree imports) reach the same object without importing each other by path. Copies of
 this file may be loaded under two module names; nothing here depends on class identity.
 
-The model side's contract (G1 model graft, qwen_prefix_model_patch):
+The model side's contract (G1 model graft, qwen_prefix_model_patch). A prefill row covers tokens
+[start_pos, L), L = the row's num_tokens; its chunk loop runs chunks start_pos/2048 .. L//2048 - 1
+and DRAINS at floor2048(L), then the tail runs.
   registry = shared_registry()                  # or sys.modules[REGISTRY_KEY].registry
   grant = registry.grant_for(request_id)        # request ids arrive as prefill kwarg REQUEST_IDS_KWARG
   - start_pos > 0 and grant is None, or grant.q != start_pos: an assertion (never a silent rewrite).
   - grant.checkpoint.matches(row_tokens[0:grant.q]) as the last guard; restore grant.checkpoint.rec
     and .carry; run the chunk loop from grant.q // CHUNK; registry.note_restore(ms).
-  - for pos in grant.capture_positions(): registry.capture(request_id, pos, rec, carry, nbytes, ms)
-    right after the chunk loop drains and before the tail. A capture never raises (S7).
+  - CAPTURES. A capture at pos is the GDN state after EXACTLY pos tokens: taken once chunk
+    pos/2048 - 1 completes and before chunk pos/2048 starts - mid-loop whenever pos < floor2048(L)
+    (grant.drain), and before the tail only when pos == grant.drain. For every pos in
+    grant.capture_positions():
+        registry.capture(request_id, pos, rec, carry, nbytes, ms, loop_pos=<tokens the loop has run>)
+    and capture() refuses (counted as capture_wrong_position, never stored) unless loop_pos == pos,
+    so a state taken at the wrong point can never be filed under another boundary's key (a later
+    hit would restore it: silently inexact). A capture never raises (S7).
+  - The scheduler plans only drain captures (pos == grant.drain) until the model declares it takes
+    mid-loop captures: registry.enable_mid_loop_capture(), once, before serving. Only then does
+    the plan carry the gap boundary floor2048(h) below the drain (the shared-prefix / sibling
+    sub-agent case) and a resumed (preempted) request's prompt boundary below its drain.
 Pure python; imports nothing outside the standard library.
 """
 
 import gc
+import itertools
+import json
 import os
 import sys
 import time
@@ -48,11 +63,19 @@ BLOCK = 64
 REGISTRY_KEY = '_qwen_prefix_registry'
 ENV_REUSE = 'QWEN_PREFIX_REUSE'
 ENV_STORE_GIB = 'QWEN_PREFIX_STORE_GIB'
+ENV_STATS_PATH = 'QWEN_PREFIX_STATS_PATH'
+ENV_STATS_S = 'QWEN_PREFIX_STATS_S'
 # The prefill kwarg the runner patch (qwen_prefix_runner_patch) adds: the request id of each row.
 REQUEST_IDS_KWARG = 'request_ids'
 KILL_SWITCH_PATH = '/models/.qwen-c2/prefix-reuse.off'
 KILL_SWITCH_POLL_S = 1.0
 DEFAULT_STORE_GIB = 8.0
+# The stats export: /tmp is a container-private tmpfs in the node agent's container shape
+# (--read-only --tmpfs /tmp, as the C2 smoke reproduces it) and must be writable there anyway
+# (VLLM_CACHE_ROOT=/tmp/vllm-cache). /dev/shm is not used: under --ipc=host it is the host's, and
+# two engines would share one file. Empty QWEN_PREFIX_STATS_PATH: the log line only.
+DEFAULT_STATS_PATH = '/tmp/qwen-prefix-stats.json'
+DEFAULT_STATS_S = 30.0
 # Host checkpoint, both chips: 48 layers x (fp32 rec_state [1,24,128,128] + bf16 conv_carry
 # [1,3,5120]) = 73.4 MiB per chip, about 154 MB (design section 2.0.3). The model passes the real size.
 CHECKPOINT_NBYTES = 2 * 48 * (24 * 128 * 128 * 4 + 3 * 5120 * 2)
@@ -60,10 +83,11 @@ CHECKPOINT_NBYTES = 2 * 48 * (24 * 128 * 128 * 4 + 3 * 5120 * 2)
 STAT_NAMES = (
     'attempts', 'staged', 'dropped_attempts', 'commit_mismatch', 'admissions', 'grants',
     'grant_tokens', 'trim_loss_tokens', 'kv_hit_without_checkpoint', 'orphans',
-    'same_step_rejects', 'token_mismatches', 'unsalted_denied', 'killed_denied', 'publish_capped',
-    'captures', 'capture_replaced', 'capture_kept_pinned', 'capture_failures',
-    'capture_skipped_budget', 'capture_disabled', 'evicted_lru', 'evicted_coupled', 'dropped',
-    'clears', 'freed_requests', 'restores', 'restore_ms', 'capture_ms',
+    'same_step_rejects', 'token_checks', 'token_mismatches', 'unsalted_denied', 'session_denied',
+    'killed_denied', 'publish_capped', 'captures', 'capture_replaced', 'capture_kept_pinned',
+    'capture_failures', 'capture_wrong_position', 'capture_skipped_budget', 'capture_disabled',
+    'mid_loop_unplanned', 'evicted_lru', 'evicted_coupled', 'dropped', 'clears', 'reset_kept',
+    'freed_requests', 'restores', 'restore_ms', 'capture_ms',
 )
 
 
@@ -105,11 +129,12 @@ def store_budget_bytes(environ=None):
 
 
 class Checkpoint(object):
-    """GDN state at a 2048-token boundary, keyed by vLLM's block hash at that boundary."""
+    """GDN state at a 2048-token boundary, keyed by vLLM's block hash at that boundary. serial is
+    unique per process, so a remembered token check can never vouch for a later entry."""
 
-    __slots__ = ('key', 'pos', 'token_ids', 'rec', 'carry', 'nbytes', 'pins')
+    __slots__ = ('key', 'pos', 'token_ids', 'rec', 'carry', 'nbytes', 'pins', 'serial')
 
-    def __init__(self, key, pos, token_ids, rec=None, carry=None, nbytes=0):
+    def __init__(self, key, pos, token_ids, rec=None, carry=None, nbytes=0, serial=0):
         self.key = key
         self.pos = pos
         self.token_ids = token_ids
@@ -117,6 +142,7 @@ class Checkpoint(object):
         self.carry = carry
         self.nbytes = int(nbytes)
         self.pins = 0
+        self.serial = serial
 
     def matches(self, tokens):
         """Whether tokens (a sequence of ints) are exactly the ids this checkpoint was captured from."""
@@ -124,13 +150,14 @@ class Checkpoint(object):
 
 
 class Grant(object):
-    """One admission's reuse record: the trimmed hit Q (0 on a miss), vLLM's raw hit h and the
-    boundaries the model should capture. Staged on every admission attempt; committed only when
-    the step's output admits the request at start_pos == Q. The model reads the committed one."""
+    """One admission's reuse record: the trimmed hit Q (0 on a miss), vLLM's raw hit h, where the
+    row's chunk loop drains (floor2048 of the tokens it prefills) and the boundaries the model
+    should capture. Staged on every admission attempt; committed only when the step's output admits
+    the request at start_pos == Q. The model reads the committed one."""
 
-    __slots__ = ('req_id', 'q', 'h', 'key', 'checkpoint', 'plan', 'request', 'tokens', 'orphans')
+    __slots__ = ('req_id', 'q', 'h', 'key', 'checkpoint', 'plan', 'request', 'tokens', 'drain', 'unplanned')
 
-    def __init__(self, req_id, q, h, key, checkpoint, plan, request, orphans=0):
+    def __init__(self, req_id, q, h, key, checkpoint, plan, request, drain=None, unplanned=()):
         self.req_id = req_id
         self.q = q
         self.h = h
@@ -139,14 +166,19 @@ class Grant(object):
         self.plan = plan
         self.request = request
         self.tokens = None
-        self.orphans = orphans
+        self.drain = max([q] + [pos for pos, _ in plan]) if drain is None else drain
+        self.unplanned = tuple(unplanned)
 
     def capture_positions(self):
-        return [pos for pos, _ in self.plan]
+        return sorted(pos for pos, _ in self.plan)
+
+    def mid_loop_positions(self):
+        """Planned captures the chunk loop must take before it drains."""
+        return [pos for pos in self.capture_positions() if pos < self.drain]
 
     def describe(self):
-        return 'req=%s h=%d Q=%d plan=[%s]' % (self.req_id, self.h, self.q,
-                                                ','.join(str(pos) for pos, _ in self.plan))
+        return 'req=%s h=%d Q=%d drain=%d plan=[%s]' % (self.req_id, self.h, self.q, self.drain,
+                                                        ','.join(str(pos) for pos in self.capture_positions()))
 
 
 class KillSwitch(object):
@@ -194,8 +226,16 @@ class PrefixRegistry(object):
         self.committed = {}
         self.same_step_blocks = set()
         self.disabled = None
+        # Off until the model graft declares it takes captures inside its chunk loop.
+        self.mid_loop_capture = False
+        # Distinct checkpoint keys seen resident while their KV chain was broken below them.
+        self.orphan_keys = set()
+        # req_id -> {candidate Q: (checkpoint serial, tokens match)}: a waiting request is
+        # re-attempted every step it stays blocked, and its token prefix never changes.
+        self.token_checks = {}
         self.stats = dict.fromkeys(STAT_NAMES, 0)
         self._owner = None
+        self._serials = itertools.count(1)
 
     # -- the scheduler that owns this registry --------------------------------------------------
     def _live_owner(self):
@@ -223,6 +263,13 @@ class PrefixRegistry(object):
             self.same_step_blocks.clear()
         self._owner = weakref.ref(owner)
 
+    def enable_mid_loop_capture(self):
+        """The model graft's declaration that it captures at pos after exactly pos tokens even when
+        pos is below its loop's drain point. Until it is made, only drain captures are planned."""
+        if not self.mid_loop_capture:
+            self.mid_loop_capture = True
+            log('model declares mid-loop captures: gap and resumed-prompt boundaries are planned')
+
     # -- checkpoints ---------------------------------------------------------------------------
     def get(self, key):
         return self.entries.get(key)
@@ -249,7 +296,7 @@ class PrefixRegistry(object):
             self._remove(key)
             self.stats['capture_replaced'] += 1
         ids = token_ids if isinstance(token_ids, array) else token_array(token_ids)
-        checkpoint = Checkpoint(key, pos, ids, rec, carry, nbytes)
+        checkpoint = Checkpoint(key, pos, ids, rec, carry, nbytes, next(self._serials))
         self.entries[key] = checkpoint
         self.bytes += checkpoint.nbytes
         self.stats['captures'] += 1
@@ -264,6 +311,7 @@ class PrefixRegistry(object):
         checkpoint = self.entries.pop(key, None)
         if checkpoint is not None:
             self.bytes -= checkpoint.nbytes
+            self.orphan_keys.discard(key)
         return checkpoint
 
     def drop(self, key, reason='dropped'):
@@ -290,6 +338,8 @@ class PrefixRegistry(object):
         steps (reset_prefix_cache) never breaks an admission vLLM has already been handed."""
         self.entries.clear()
         self.bytes = 0
+        self.orphan_keys.clear()
+        self.token_checks.clear()
         self.stats['clears'] += 1
 
     def disable(self, reason):
@@ -297,6 +347,31 @@ class PrefixRegistry(object):
         if self.disabled is None:
             self.disabled = str(reason)
         self.clear()
+
+    # -- the trim's helpers ---------------------------------------------------------------------
+    def tokens_match(self, req_id, candidate, entry, tokens):
+        """entry.matches(tokens()[0:candidate]), remembered per (request, candidate, checkpoint
+        serial): the ~5 ms array build of a 62k-token check runs once per request and checkpoint,
+        not on every step a blocked request is re-attempted. tokens is a callable returning the
+        request's all_token_ids; a request's prefix never changes (streaming sessions, whose prompt
+        is rewritten, never reach the trim)."""
+        memo = self.token_checks.setdefault(req_id, {})
+        seen = memo.get(candidate)
+        if seen is not None and seen[0] == entry.serial:
+            return seen[1]
+        self.stats['token_checks'] += 1
+        verdict = entry.pos == candidate and entry.matches(tokens()[0:candidate])
+        if not verdict:
+            self.stats['token_mismatches'] += 1
+        memo[candidate] = (entry.serial, verdict)
+        return verdict
+
+    def note_orphan(self, key):
+        """A resident checkpoint whose KV chain is broken below it (it cannot be granted until the
+        missing block is re-cached; the LRU ages it out). Counted once per key."""
+        if key in self.entries and key not in self.orphan_keys:
+            self.orphan_keys.add(key)
+            self.stats['orphans'] += 1
 
     # -- grants --------------------------------------------------------------------------------
     def begin_step(self):
@@ -332,13 +407,14 @@ class PrefixRegistry(object):
             if grant.checkpoint is not None:
                 grant.checkpoint.pins += 1
                 self.touch(grant.key)
+                self.orphan_keys.discard(grant.key)
                 self.stats['grants'] += 1
                 self.stats['grant_tokens'] += grant.q
             self.stats['admissions'] += 1
             self.stats['trim_loss_tokens'] += grant.h - grant.q
+            self.stats['mid_loop_unplanned'] += len(grant.unplanned)
             if floor_chunk(grant.h) > grant.q:
                 self.stats['kv_hit_without_checkpoint'] += 1
-            self.stats['orphans'] += grant.orphans
             grant.request = None
             self.committed[req_id] = grant
             done.append(grant)
@@ -348,9 +424,11 @@ class PrefixRegistry(object):
     def grant_for(self, req_id):
         return self.committed.get(req_id)
 
-    def capture(self, req_id, pos, rec=None, carry=None, nbytes=None, ms=None):
-        """Model side: store the state captured at boundary pos of this step's prefill of req_id.
-        A failure skips the checkpoint and is counted; it never fails the request (S7)."""
+    def capture(self, req_id, pos, rec=None, carry=None, nbytes=None, ms=None, loop_pos=None):
+        """Model side: store the GDN state after exactly pos tokens of this step's prefill of req_id.
+        loop_pos is how many tokens the model's chunk loop had run when it took rec and carry; the
+        capture is refused unless it is pos (see the module's contract). A failure or refusal
+        skips the checkpoint and is counted; it never fails the request (S7)."""
         try:
             grant = self.committed.get(req_id)
             if grant is None:
@@ -358,6 +436,10 @@ class PrefixRegistry(object):
             keys = dict(grant.plan)
             if pos not in keys:
                 raise KeyError('boundary %d is not planned for %s' % (pos, req_id))
+            if loop_pos != pos:
+                self.stats['capture_wrong_position'] += 1
+                raise ValueError('the state was taken after %r tokens, not %d: refused (it would be '
+                                 'restored as the state at %d)' % (loop_pos, pos, pos))
             if ms is not None:
                 self.stats['capture_ms'] += float(ms)
             return self.put(keys[pos], pos, grant.tokens[0:pos], rec, carry,
@@ -372,6 +454,7 @@ class PrefixRegistry(object):
         self.stats['restore_ms'] += float(ms)
 
     def forget_request(self, req_id):
+        self.token_checks.pop(req_id, None)
         found = self.staged.pop(req_id, None) is not None
         grant = self.committed.pop(req_id, None)
         if grant is not None:
@@ -389,8 +472,66 @@ class PrefixRegistry(object):
         values = dict(self.stats)
         values.update(entries=len(self.entries), bytes=self.bytes, budget_bytes=self.budget_bytes,
                       pins=self.pins(), staged_now=len(self.staged), committed_now=len(self.committed),
+                      orphans_now=len(self.orphan_keys), mid_loop_capture=self.mid_loop_capture,
                       disabled=self.disabled)
         return values
+
+
+class StatsExport(object):
+    """The registry's counters out of the EngineCore process (S5): at most once per interval_s, a
+    "[PINDIAG] prefix: stats {json}" line when they changed, and the same JSON written atomically
+    to path (tmpfs) for whatever reads it next to the engine. Never raises; a write failure is
+    logged once and the log line continues."""
+
+    def __init__(self, path=None, interval_s=None, clock=time.monotonic, logger=log, environ=None):
+        environ = os.environ if environ is None else environ
+        self.path = environ.get(ENV_STATS_PATH, DEFAULT_STATS_PATH) if path is None else path
+        if interval_s is None:
+            try:
+                interval_s = float(environ.get(ENV_STATS_S) or DEFAULT_STATS_S)
+            except ValueError:
+                interval_s = DEFAULT_STATS_S
+        self.interval_s = max(0.0, float(interval_s))
+        self.clock = clock
+        self.log = logger
+        self.last_time = None
+        self.last_values = None
+        self.write_failed = False
+        self.exports = 0
+
+    def maybe_export(self, registry, force=False):
+        try:
+            now = self.clock()
+            if not force and self.last_time is not None and now - self.last_time < self.interval_s:
+                return False
+            self.last_time = now
+            values = registry.snapshot()
+            if values == self.last_values and not force:
+                return False
+            self.last_values = values
+            text = json.dumps(values, sort_keys=True, separators=(',', ':'))
+            self.log('stats %s', text)
+            self.exports += 1
+            if self.path:
+                self._write(dict(values, pid=os.getpid(), time=time.time()))
+            return True
+        except Exception as error:
+            if not self.write_failed:
+                self.write_failed = True
+                self.log('stats export failed: %s: %s', type(error).__name__, error)
+            return False
+
+    def _write(self, values):
+        try:
+            temporary = '%s.%d.tmp' % (self.path, os.getpid())
+            with open(temporary, 'w', encoding='utf-8') as handle:
+                json.dump(values, handle, sort_keys=True)
+            os.replace(temporary, self.path)
+        except Exception as error:
+            if not self.write_failed:
+                self.write_failed = True
+                self.log('stats file %s not written (the log line continues): %s: %s',
+                         self.path, type(error).__name__, error)
 
 
 def shared_registry(environ=None):

@@ -14,51 +14,73 @@ a. kv_cache_manager.get_computed_blocks (the trim). vLLM calls it on every attem
    block hash at Q, no block below Q was cached in this scheduler step (the TT analogue of vLLM's
    Mamba rule, single_type_kv_cache_manager.py:1196-1203: a same-step block may not be written
    yet), and the checkpoint's stored token ids equal the request's (a mismatch lowers Q here
-   instead of killing the engine in the model, S7). It stages the grant and the captures the model
-   should take (the prompt boundary floor2048(P) above Q, and the gap boundary floor2048(h) when it
-   is a whole chunk above Q); staging is idempotent and takes no pin. A request without cache_salt
-   gets no hit (fail closed, S4); so does every request once the kill switch is engaged.
+   instead of killing the engine in the model, S7; the verdict is remembered per request and
+   checkpoint, so a request blocked at the queue head does not rebuild a 62k-token array every
+   step). It stages the grant and the captures the model should take; staging is idempotent and
+   takes no pin. A capture at pos is the state after exactly pos tokens (qwen_prefix_registry's
+   model contract), so the plan is: the prompt boundary floor2048(P) above Q and the gap boundary
+   floor2048(h) when it is a whole chunk above Q - each only if it is where the row's chunk loop
+   drains (floor2048(num_tokens)), unless the model graft has declared mid-loop captures
+   (registry.enable_mid_loop_capture); never anything above floor2048(P), which is all the cap
+   publishes. A request without cache_salt gets no hit (fail closed, S4); so does a streaming-input
+   session (request.resumable: vLLM folds its decode-written tokens into its prompt,
+   scheduler.py:1213-1252) and every request once the kill switch is engaged.
 b. kv_cache_manager.coordinator.cache_blocks (the cap). Both publish paths reach it: allocation
    (kv_cache_manager.py:452-462) and every output (async_scheduler.py:67-73 through
    kv_cache_manager.py:620-629). Only prompt blocks below floor2048(prompt) are hashed into the
    cache - blocks a full prefill chunk wrote; decode and prompt-tail blocks never are, because
-   vLLM serves the first block cached for a hash (block_pool.py:47-72). An unsalted request
-   publishes nothing. The block ids it newly caches feed the same-step rule.
+   vLLM serves the first block cached for a hash (block_pool.py:47-72). An unsalted request or a
+   streaming-input session publishes nothing. The block ids it newly caches feed the same-step
+   rule.
 c. schedule (the per-step commit, F2/S6). vLLM may discard an admission attempt after the hit was
    taken - a budget break (:833-840), an allocation failure (:917-924), TTScheduler's decode
    fallback (plugin scheduler.py:140). Grants staged during one schedule() call are committed only
    for requests the returned SchedulerOutput admits (new or resumed) at start_pos == Q, and pinned
-   for that one step; the rest drop.
+   for that one step; the rest drop. The same wrapper exports the registry's counters
+   (qwen_prefix_registry.StatsExport: a rate-limited "[PINDIAG] prefix: stats" line and a tmpfs
+   JSON file).
 d. kv_cache_manager.block_pool._maybe_evict_cached_block (eviction coupling, F8/S9). When vLLM
    evicts a block and its hash no longer maps to any cached block, the checkpoint keyed by that
    hash goes too, so the registry stays a subset of the cached KV.
-e. reset_prefix_cache clears the registry; _free_request drops the request's staged and committed
-   grant and its pin (this covers a waiting request that is aborted).
+e. reset_prefix_cache clears the registry when vLLM's reset succeeded (it returns False and keeps
+   every cached block while running requests hold blocks, scheduler.py:2196-2240; the registry is
+   then still a subset of the cached KV); _free_request drops the request's staged and committed
+   grant, its pin and its remembered token checks (this covers a waiting request that is aborted).
 
 The kill switch (qwen_prefix_registry.KillSwitch, the flag file /models/.qwen-c2/prefix-reuse.off,
 polled at most once a second from the trim) disables the registry for the life of the process.
 
 install() refuses to start - the engine dies in TTScheduler.__init__ - unless async scheduling is
 off (blocks hashed at allocation in step t are unwritten when step t+1 reads them), chunked prefill
-is off with a whole-prompt token budget (Lever N's chunking gives start_pos > 0 a second meaning,
-F5), the coordinator is the unitary one (HybridKVCacheCoordinator calls manager.cache_blocks
-directly and would bypass the cap, kv_cache_coordinator.py:602-628), prefix caching is on, the KV
-spec, scheduler and hash block sizes are 64, there is no KV connector, no speculative lookahead and
-no pipeline parallelism, the vLLM internals the wrappers bind exist, and no other live scheduler in
-the process already owns the shared registry (lane mode builds one TTScheduler per lane).
+is off with a whole-prompt token budget and long_prefill_token_threshold 0 (vLLM splits a prefill
+at that threshold before it looks at chunking, scheduler.py:828; Lever N's chunking gives
+start_pos > 0 a second meaning, F5), the coordinator is the unitary one (HybridKVCacheCoordinator
+calls manager.cache_blocks directly and would bypass the cap, kv_cache_coordinator.py:602-628),
+prefix caching is on with a sha256 block hash (the exactness argument, design 2.0.4 L2, needs a
+collision-resistant chain; vLLM itself warns about xxhash, config/cache.py:95-110), the executor is
+the uniproc one (the registry is shared with the model through sys.modules, so the model must run
+in this process), the KV spec, scheduler and hash block sizes are 64, there is no KV connector, no
+speculative lookahead and no pipeline parallelism, the vLLM internals the wrappers bind exist, and
+no other live scheduler in the process already owns the shared registry (lane mode builds one
+TTScheduler per lane).
 
 Delivery (the design's "an AST patch of the plugin's scheduler.py"; not a scheduler_cls subclass,
 because platform.py:1078-1081 assigns scheduler_cls unconditionally): stage(<plugin package>)
 refuses a scheduler.py whose sha256 is not bf77cd63's (the image's copy, dumped by CPU probe
 35665853903, is that blob: a1bd6257...), appends a guarded hook to TTScheduler.__init__ and copies
-this module and qwen_prefix_registry.py into the package beside it. The hook imports nothing
-unless QWEN_PREFIX_REUSE=1, so every other profile runs the plugin's own scheduler byte for byte.
+this module and qwen_prefix_registry.py into the package beside it. A copy already there is
+accepted only if it is this stage's own bytes: the C2 image lists both plugin copies as overlay
+destinations (docker/qwen-c2-overlay.txt), so its provenance check hashes them against the
+/experiment-scripts/ci copies this stage runs from (test_qwen_prefix_image_closure holds a profile
+that turns QWEN_PREFIX_REUSE on to that plumbing). The hook imports nothing unless
+QWEN_PREFIX_REUSE=1, so every other profile runs the plugin's own scheduler byte for byte.
 
     python3 -B qwen_prefix_scheduler_patch.py [--check] /opt/qwen-fast-plugin/src/vllm_tt_plugin
 
 Markers: "[PINDIAG] prefix: install ..." when the wrappers go on (scheduler class, plugin path,
-coordinator, block size, KV spec dtype, QWEN_SDPA_BF8); "[PINDIAG] prefix: grant req=... h=... Q=...
-plan=[...]" from inside the per-step commit for every admission that carries a grant.
+coordinator, block size, KV spec dtype, QWEN_SDPA_BF8, hash algorithm, executor); "[PINDIAG]
+prefix: grant req=... h=... Q=... drain=... plan=[...]" from inside the per-step commit for every
+admission that carries a grant; "[PINDIAG] prefix: stats {...}" at most every QWEN_PREFIX_STATS_S.
 """
 
 import argparse
@@ -83,6 +105,7 @@ Checkpoint = prefix_registry.Checkpoint
 Grant = prefix_registry.Grant
 KillSwitch = prefix_registry.KillSwitch
 PrefixRegistry = prefix_registry.PrefixRegistry
+StatsExport = prefix_registry.StatsExport
 floor_chunk = prefix_registry.floor_chunk
 shared_registry = prefix_registry.shared_registry
 log = prefix_registry.log
@@ -93,6 +116,10 @@ PLUGIN_REVISION = 'bf77cd63756fc891b8fb7f7cb3f5c1420f0e044c'
 SCHEDULER_SHA256 = 'a1bd6257d3a14c904b41b4795b8e8b4b1b132c70fc3a4db9d4340a128a100de4'
 RUNTIME_FILES = ('qwen_prefix_registry.py', 'qwen_prefix_scheduler_patch.py')
 HOOK_TAG = 'qwen_prefix_scheduler_patch'
+# Block-hash algorithms whose chain is collision resistant (vLLM config/cache.py:95-110).
+HASH_ALGORITHMS = ('sha256', 'sha256_cbor')
+# The registry reaches the model through sys.modules: the model must run in the scheduler's process.
+EXECUTOR_BACKEND = 'uni'
 # Lever N's scheduler edits (lever_n_scheduler_patch, lever_n_model_patch.patch_scheduler) turn
 # vLLM chunking on; prefix reuse is not exact beside them (design F5).
 LEVER_N_TAGS = ('Lever N M2', '[PINDIAG] m2 one-in-flight:', '_qwen_saved_waiting')
@@ -166,7 +193,8 @@ def stage(package, source_dir=None, check_only=False):
     """Patch <package>/scheduler.py in place and copy the runtime modules beside it.
 
     Refuses, before writing anything: a scheduler.py that is not the pinned bf77cd63 blob, a package
-    that already holds either runtime module, and a missing runtime source."""
+    runtime module whose bytes are not the source's (a copy the image's overlay already installed
+    from the same source is accepted and left alone), and a missing runtime source."""
     package = Path(package)
     source_dir = Path(source_dir) if source_dir else Path(__file__).resolve().parent
     target = package / 'scheduler.py'
@@ -175,19 +203,26 @@ def stage(package, source_dir=None, check_only=False):
     if observed != SCHEDULER_SHA256:
         raise ValueError('%s: sha256 %s is not the pinned plugin %s scheduler.py (%s)'
                          % (target, observed, PLUGIN_REVISION[:8], SCHEDULER_SHA256))
+    sources = {}
+    present = {}
     for name in RUNTIME_FILES:
-        if (package / name).exists():
-            raise ValueError('refusing to overwrite %s' % (package / name))
         if not (source_dir / name).is_file():
             raise ValueError('runtime source %s is missing' % (source_dir / name))
+        sources[name] = (source_dir / name).read_bytes()
+        if (package / name).exists():
+            present[name] = sha256_hex((package / name).read_bytes())
+            if present[name] != sha256_hex(sources[name]):
+                raise ValueError('refusing to overwrite %s (sha256 %s, not the source %s\'s %s)'
+                                 % (package / name, present[name], source_dir / name, sha256_hex(sources[name])))
     patched = patch_scheduler(data.decode('utf-8')).encode('utf-8')
     report = {'scheduler.py': (observed, sha256_hex(patched))}
     for name in RUNTIME_FILES:
-        report[name] = (None, sha256_hex((source_dir / name).read_bytes()))
+        report[name] = (present.get(name), sha256_hex(sources[name]))
     if check_only:
         return report
     for name in RUNTIME_FILES:
-        shutil.copyfile(str(source_dir / name), str(package / name))
+        if name not in present:
+            (package / name).write_bytes(sources[name])
     target.write_bytes(patched)
     return report
 
@@ -254,8 +289,23 @@ def install_problems(scheduler):
     if batched is not None and max_model_len is not None and batched < max_model_len:
         problems.append('max_num_batched_tokens %d < max_model_len %d: a prefill could be split'
                         % (batched, max_model_len))
-    if not getattr(getattr(scheduler, 'cache_config', None), 'enable_prefix_caching', False):
+    threshold = getattr(config, 'long_prefill_token_threshold', None)
+    if threshold != 0:
+        problems.append('long_prefill_token_threshold is %r, not 0: vLLM splits a prefill there before it '
+                        'looks at chunking (scheduler.py:828), and the next piece reaches the model at '
+                        'start_pos > 0 with no grant' % (threshold,))
+    cache_config = getattr(scheduler, 'cache_config', None)
+    if not getattr(cache_config, 'enable_prefix_caching', False):
         problems.append('prefix caching is off')
+    algorithm = getattr(cache_config, 'prefix_caching_hash_algo', None)
+    if algorithm not in HASH_ALGORITHMS:
+        problems.append('prefix_caching_hash_algo is %r, not one of %s: a hit is exact only on a collision-'
+                        'resistant hash chain (vLLM config/cache.py:95-110)' % (algorithm, ', '.join(HASH_ALGORITHMS)))
+    parallel = getattr(getattr(scheduler, 'vllm_config', None), 'parallel_config', None)
+    backend = getattr(parallel, 'distributed_executor_backend', None)
+    if backend != EXECUTOR_BACKEND:
+        problems.append('the executor backend is %r, not %r: the model would not share this process\'s '
+                        'registry, so no checkpoint is ever captured or restored' % (backend, EXECUTOR_BACKEND))
     manager = getattr(scheduler, 'kv_cache_manager', None)
     if not getattr(manager, 'enable_caching', True):
         problems.append('the KV cache manager does not cache blocks')
@@ -284,7 +334,6 @@ def install_problems(scheduler):
         problems.append('a KV connector is configured: external tokens would move start_pos past Q')
     if getattr(scheduler, 'num_lookahead_tokens', 0):
         problems.append('speculative lookahead is on')
-    parallel = getattr(getattr(scheduler, 'vllm_config', None), 'parallel_config', None)
     if parallel is not None and getattr(parallel, 'pipeline_parallel_size', 1) != 1:
         problems.append('pipeline parallel size %s: a step\'s grants must be read before the next '
                         'schedule()' % parallel.pipeline_parallel_size)
@@ -301,7 +350,9 @@ def maybe_install(scheduler, environ=None):
 
 
 def install(scheduler, registry=None, kill_switch_path=KILL_SWITCH_PATH, poll_s=KILL_SWITCH_POLL_S,
-            clock=time.monotonic, logger=log):
+            clock=time.monotonic, logger=log, stats=None):
+    """Wrap scheduler (see the module docstring). stats: the StatsExport (default: from the
+    environment, QWEN_PREFIX_STATS_PATH and QWEN_PREFIX_STATS_S)."""
     existing = scheduler.__dict__.get('_qwen_prefix')
     if existing is not None:
         return existing
@@ -313,14 +364,16 @@ def install(scheduler, registry=None, kill_switch_path=KILL_SWITCH_PATH, poll_s=
         registry.bind(scheduler)
     except RuntimeError as error:
         raise PrefixInstallError('prefix reuse refused: %s' % error)
-    graft = SchedulerGraft(scheduler, registry, KillSwitch(kill_switch_path, poll_s, clock), logger)
+    if stats is None:
+        stats = StatsExport(clock=clock, logger=logger)
+    graft = SchedulerGraft(scheduler, registry, KillSwitch(kill_switch_path, poll_s, clock), logger, stats)
     graft.wrap()
     scheduler._qwen_prefix = graft
     return graft
 
 
 class SchedulerGraft(object):
-    def __init__(self, scheduler, registry, kill_switch, logger):
+    def __init__(self, scheduler, registry, kill_switch, logger, stats=None):
         self.scheduler = scheduler
         self.registry = registry
         self.manager = scheduler.kv_cache_manager
@@ -330,6 +383,7 @@ class SchedulerGraft(object):
         self.kill_switch = kill_switch
         self.kill_switch_path = kill_switch.path
         self.log = logger
+        self.stats_export = stats
         self.original = {}
         self.get_block_hash = None
 
@@ -345,29 +399,66 @@ class SchedulerGraft(object):
             self.registry.disable('kill switch %s' % self.kill_switch.path)
             self.log('kill switch %s present: no grants, captures or publishing until the engine '
                      'restarts; registry cleared', self.kill_switch.path)
+            self.export(force=True)
         return self.killed
+
+    def export(self, force=False):
+        if self.stats_export is not None:
+            self.stats_export.maybe_export(self.registry, force=force)
+
+    @staticmethod
+    def excluded(request):
+        """The counter to bump when a request may not hit, publish or capture, else None: an
+        unsalted request (fail-closed tenancy, S4), or a streaming-input session, whose
+        decode-written tokens vLLM folds into its prompt before it re-enters WAITING with
+        num_computed_tokens > 0 (scheduler.py:1213-1252; only the realtime speech endpoint
+        creates one, async_llm.py:472)."""
+        if not request.cache_salt:
+            return 'unsalted_denied'
+        if getattr(request, 'resumable', False):
+            return 'session_denied'
+        return None
 
     # -- a. the trim -----------------------------------------------------------------------------
     def plan(self, request, h, q):
+        """([(pos, block hash at pos)] to capture, the mid-loop positions left out, the drain).
+
+        Candidates: the prompt boundary floor2048(P) above Q, and the gap boundary floor2048(h)
+        when it is a whole chunk above Q (where a shared system prompt or tool block becomes
+        reusable by the next sibling after one miss). The row's chunk loop drains at
+        floor2048(num_tokens) - above P for a resumed (preempted) request, whose prefill covers its
+        output tokens too. A candidate below the drain needs a mid-loop capture: planned only once
+        the model has declared it takes them (registry.enable_mid_loop_capture). Nothing above
+        floor2048(P) is ever planned: the cap publishes nothing there, so no request could hit it."""
         prompt_boundary = floor_chunk(request.num_prompt_tokens)
-        gap_boundary = floor_chunk(h)
-        positions = set()
+        drain = floor_chunk(request.num_tokens)
+        candidates = set()
         if prompt_boundary > q:
-            positions.add(prompt_boundary)
+            candidates.add(prompt_boundary)
+        gap_boundary = floor_chunk(h)
         if gap_boundary - q >= CHUNK:
-            positions.add(gap_boundary)
+            candidates.add(gap_boundary)
         hashes = request.block_hashes
-        return [(pos, hashes[pos // BLOCK - 1]) for pos in sorted(positions) if pos // BLOCK <= len(hashes)]
+        planned, unplanned = [], []
+        for pos in sorted(candidates):
+            if pos > prompt_boundary or pos > drain or pos // BLOCK > len(hashes):
+                continue
+            if pos < drain and not self.registry.mid_loop_capture:
+                unplanned.append(pos)
+                continue
+            planned.append((pos, hashes[pos // BLOCK - 1]))
+        return planned, unplanned, drain
 
     def trim(self, request, blocks, h):
         registry = self.registry
         stats = registry.stats
         stats['attempts'] += 1
         empty = self.manager.empty_kv_cache_blocks
-        if not request.cache_salt:
+        excluded = self.excluded(request)
+        if excluded:
             registry.unstage(request.request_id)
             if h:
-                stats['unsalted_denied'] += 1
+                stats[excluded] += 1
             return empty, 0
         if self.kill_switch_engaged():
             registry.unstage(request.request_id)
@@ -384,6 +475,7 @@ class SchedulerGraft(object):
                     first_same = index
                     break
         hashes = request.block_hashes
+        request_id = request.request_id
         q, key, checkpoint = 0, None, None
         rejected_same_step = False
         k = h // CHUNK
@@ -397,29 +489,28 @@ class SchedulerGraft(object):
             entry = registry.get(hashes[count - 1])
             if entry is None:
                 continue
-            if entry.pos != candidate or not entry.matches(request.all_token_ids[0:candidate]):
-                stats['token_mismatches'] += 1
+            if not registry.tokens_match(request_id, candidate, entry, lambda: request.all_token_ids):
                 continue
             q, key, checkpoint = candidate, hashes[count - 1], entry
             break
         if rejected_same_step:
             stats['same_step_rejects'] += 1
-        orphans = 0
-        for boundary in range(floor_chunk(h) + CHUNK, floor_chunk(request.num_tokens - 1) + 1, CHUNK):
-            if boundary // BLOCK <= len(hashes) and registry.get(hashes[boundary // BLOCK - 1]) is not None:
-                orphans += 1
-        plan = self.plan(request, h, q)
-        if q or plan:
-            registry.stage(Grant(request.request_id, q, h, key, checkpoint, plan, request, orphans))
+        if registry.entries:
+            for boundary in range(floor_chunk(h) + CHUNK, floor_chunk(request.num_tokens - 1) + 1, CHUNK):
+                if boundary // BLOCK <= len(hashes):
+                    registry.note_orphan(hashes[boundary // BLOCK - 1])
+        plan, unplanned, drain = self.plan(request, h, q)
+        if q or plan or unplanned:
+            registry.stage(Grant(request_id, q, h, key, checkpoint, plan, request, drain, unplanned))
         else:
-            registry.unstage(request.request_id)
+            registry.unstage(request_id)
         if q == 0:
             return empty, 0
         return self.manager.create_kv_cache_blocks((list(group[0:q // BLOCK]),)), q
 
     # -- b. the cap ------------------------------------------------------------------------------
     def cap(self, request, num_computed_tokens):
-        if not request.cache_salt or self.killed:
+        if self.excluded(request) or self.killed:
             limit = 0
         else:
             limit = floor_chunk(request.num_prompt_tokens)
@@ -447,6 +538,7 @@ class SchedulerGraft(object):
                     admitted[req_id] = cached.num_computed_tokens[index]
         for grant in self.registry.commit(admitted):
             self.log('grant %s', grant.describe())
+        self.export()
 
     # -- d. eviction coupling --------------------------------------------------------------------
     def evict(self, block):
@@ -497,7 +589,12 @@ class SchedulerGraft(object):
 
         def reset_prefix_cache(*args, **kwargs):
             result = original['reset_prefix_cache'](*args, **kwargs)
-            registry.clear()
+            if result:
+                registry.clear()
+            else:
+                # vLLM kept every cached block (running requests hold blocks,
+                # scheduler.py:2196-2240), so every checkpoint still has its KV: keep them.
+                registry.stats['reset_kept'] += 1
             return result
 
         def _free_request(request, *args, **kwargs):
@@ -519,11 +616,15 @@ class SchedulerGraft(object):
         except Exception:
             vllm_version = '?'
         self.log('install scheduler=%s.%s plugin=%s coordinator=%s block_size=%d blocks=%d kv_spec_dtype=%s '
-                 'QWEN_SDPA_BF8=%s store_gib=%.1f kill_switch=%s vllm=%s',
+                 'QWEN_SDPA_BF8=%s hash=%s executor=%s store_gib=%.1f kill_switch=%s stats=%s vllm=%s',
                  type(scheduler).__module__, type(scheduler).__name__, getattr(module, '__file__', '?'),
                  type(self.coordinator).__name__, spec.block_size, scheduler.kv_cache_config.num_blocks,
                  getattr(spec, 'dtype', '?'), os.environ.get('QWEN_SDPA_BF8', 'unset'),
-                 registry.budget_bytes / float(1 << 30), self.kill_switch_path, vllm_version)
+                 scheduler.cache_config.prefix_caching_hash_algo,
+                 scheduler.vllm_config.parallel_config.distributed_executor_backend,
+                 registry.budget_bytes / float(1 << 30), self.kill_switch_path,
+                 getattr(self.stats_export, 'path', None), vllm_version)
+        self.export(force=True)
 
     def original_get_computed_blocks(self, request):
         """vLLM's own answer, untrimmed (for probes and audits)."""

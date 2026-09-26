@@ -15,9 +15,12 @@ platform and the served model config - the probe's checks 1-4 (the align asserti
 turning chunking back off, validate_block_size, validate_mamba_block_size) and check 5's TT worker
 KV spec - stays with the probe, which runs inside the serving image.
 
-A fake TT model stands in for the device: it asserts what the G1 model graft asserts (a prefill row
-with start_pos > 0 has a committed grant whose Q equals start_pos and whose checkpoint's token ids
-match the row) and takes the planned captures.
+A fake TT model stands in for the device (test_qwen_prefix_scheduler_patch.FakeGdnModel): it
+asserts what the G1 model graft asserts (a prefill row with start_pos > 0 has a committed grant
+whose Q equals start_pos and whose checkpoint's token ids match the row), carries a GDN state that
+is a hash chain over the 2048-token chunks it actually ran, checks every restored state against the
+cold chain of the row's own tokens, and takes each planned capture when its loop has run exactly
+that many tokens.
 
 Skipped where vLLM is not importable (the 3.11 CPU suite). Runs in qwen-fast-vllm-cpu.yml and
 locally on the P0a python 3.10 environment with the vLLM 0.25.1 source on PYTHONPATH.
@@ -32,6 +35,7 @@ import random
 import shutil
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -40,6 +44,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import qwen_prefix_scheduler_patch as source_patch  # noqa: E402
+from test_qwen_prefix_scheduler_patch import FakeGdnModel, ModelAssertion  # noqa: E402,F401
 
 try:
     import torch
@@ -68,14 +73,13 @@ Row = collections.namedtuple('Row', 'step rid start q h')
 STATE = {}
 
 
-class ModelAssertion(AssertionError):
-    """What the G1 model graft raises: the engine would die rather than rewrite shared blocks."""
-
-
 def setUpModule():
     if VLLM_ERROR is not None:
         return
     os.environ.setdefault('VLLM_USE_V2_MODEL_RUNNER', '0')
+    # A graft installed without an explicit StatsExport reads its file path here: none in tests.
+    STATE['stats_path'] = os.environ.get('QWEN_PREFIX_STATS_PATH')
+    os.environ['QWEN_PREFIX_STATS_PATH'] = ''
     saved = {name: sys.modules.get(name) for name in ('vllm_tt_plugin', 'vllm_tt_plugin.logger')}
     try:
         import vllm_tt_plugin.logger  # noqa: F401  (installed in the vLLM lane: stdlib only)
@@ -112,6 +116,10 @@ def setUpModule():
 def tearDownModule():
     if VLLM_ERROR is not None or 'root' not in STATE:
         return
+    if STATE.get('stats_path') is None:
+        os.environ.pop('QWEN_PREFIX_STATS_PATH', None)
+    else:
+        os.environ['QWEN_PREFIX_STATS_PATH'] = STATE['stats_path']
     for key in [key for key in sys.modules if key.startswith(STATE['package'])]:
         del sys.modules[key]
     for name, module in STATE['saved_modules'].items():
@@ -161,7 +169,7 @@ class Env(object):
                        cache_salt=salt, block_hasher=self.hasher)
 
     def make(self, num_blocks=None, install=True, registry=None, kill_switch_path=None, clock=None, ledger=None,
-             vllm_config=None):
+             vllm_config=None, mid_loop=False):
         kv_cache_config = self.kv_cache_config
         if num_blocks is not None:
             kv_cache_config = dataclasses.replace(kv_cache_config, num_blocks=num_blocks)
@@ -174,8 +182,12 @@ class Env(object):
         state = None
         if install:
             extra = {} if clock is None else {'clock': clock}
-            state = self.graft.install(scheduler, registry=registry or self.graft.PrefixRegistry(budget_bytes=1 << 40),
-                                       kill_switch_path=kill_switch_path, logger=self.log, **extra)
+            registry = registry or self.graft.PrefixRegistry(budget_bytes=1 << 40)
+            if mid_loop:
+                registry.mid_loop_capture = True
+            state = self.graft.install(scheduler, registry=registry, kill_switch_path=kill_switch_path,
+                                       logger=self.log, stats=self.graft.StatsExport(path='', logger=self.log),
+                                       **extra)
         return scheduler, state
 
     def log(self, message, *values):
@@ -206,7 +218,9 @@ class Drive(object):
     def __init__(self, env, scheduler, state, name):
         self.env, self.scheduler, self.state = env, scheduler, state
         self.registry = state.registry if state is not None else None
+        self.model = FakeGdnModel(self.registry) if self.registry is not None else None
         self.requests = {}
+        self.grants = collections.defaultdict(list)
         self.rows = []
         self.steps = 0
         self.history = []
@@ -228,16 +242,10 @@ class Drive(object):
         self.rows.append(Row(self.steps, rid, start, grant.q if grant else None, grant.h if grant else None))
         if self.registry is None:
             return
-        if start > 0:
-            if grant is None:
-                raise ModelAssertion('row %s: start_pos=%d without a committed grant' % (rid, start))
-            if grant.req_id != rid or grant.q != start:
-                raise ModelAssertion('row %s: grant %s does not match start_pos=%d' % (rid, grant.describe(), start))
-            if not grant.checkpoint.matches(request.all_token_ids[0:start]):
-                raise ModelAssertion('row %s: checkpoint tokens differ from the prompt below %d' % (rid, start))
         if grant is not None:
-            for pos in grant.capture_positions():
-                self.registry.capture(rid, pos, rec='rec@%d' % pos, carry='carry@%d' % pos, nbytes=1)
+            self.grants[rid].append(grant)
+        # The row prefills every token the request holds: a resumed (preempted) request's outputs too.
+        self.model.prefill(rid, request.all_token_ids[0:request.num_tokens], start)
 
     def execute(self, output):
         req_ids = list(output.num_scheduled_tokens)
@@ -292,8 +300,10 @@ class GraftOnRealVllmTests(unittest.TestCase):
         key = graft.prefix_registry.REGISTRY_KEY
         saved = sys.modules.pop(key, None)
         previous = os.environ.get('QWEN_PREFIX_REUSE')
+        previous_stats = os.environ.get('QWEN_PREFIX_STATS_PATH')
         try:
             os.environ['QWEN_PREFIX_REUSE'] = '1'
+            os.environ['QWEN_PREFIX_STATS_PATH'] = ''
             scheduler, _ = self.env.make(install=False)
             state = scheduler.__dict__.get('_qwen_prefix')
             self.assertIsNotNone(state, 'TTScheduler.__init__ did not install the graft')
@@ -315,6 +325,10 @@ class GraftOnRealVllmTests(unittest.TestCase):
                 os.environ.pop('QWEN_PREFIX_REUSE', None)
             else:
                 os.environ['QWEN_PREFIX_REUSE'] = previous
+            if previous_stats is None:
+                os.environ.pop('QWEN_PREFIX_STATS_PATH', None)
+            else:
+                os.environ['QWEN_PREFIX_STATS_PATH'] = previous_stats
             sys.modules.pop(key, None)
             if saved is not None:
                 sys.modules[key] = saved
@@ -349,7 +363,7 @@ class GraftOnRealVllmTests(unittest.TestCase):
         drive.run()
         row = drive.row('b')
         self.assertEqual((row.start, row.q), (4096, 4096))
-        self.assertIn('grant req=b h=4096 Q=4096 plan=[]', self.env.logs)
+        self.assertIn('grant req=b h=4096 Q=4096 drain=4096 plan=[]', self.env.logs)
         self.assertTrue(any(line.startswith('install scheduler=%s.scheduler.TTScheduler' % STATE['package'])
                             for line in self.env.logs))
 
@@ -588,7 +602,8 @@ class GraftOnRealVllmTests(unittest.TestCase):
     def test_check_13_fail_closed_salt(self):
         env = self.env
         graft = STATE['graft']
-        scheduler, _ = env.make(install=False)
+        ledger = {}
+        scheduler, _ = env.make(install=False, ledger=ledger)
         pool = scheduler.kv_cache_manager.block_pool
         raw = Drive(env, scheduler, None, 'c13-raw')
         text = tokens(4200, 'c13-u')
@@ -608,10 +623,18 @@ class GraftOnRealVllmTests(unittest.TestCase):
         self.assertEqual((u1.start, u1.q), (0, None))
         self.assertEqual(registry.stats['unsalted_denied'], denied + 1)
         self.assertEqual(len(pool.cached_block_hash_to_block), size)
+        # u1's first 4096 tokens hash like u0's raw publishes, so the map size alone cannot see a
+        # capped unsalted publish; the ledger records every block anyone publishes.
+        self.assertEqual([entry for entry in ledger.values() if entry[0] == 'u1'], [])
+        drive.add('u2', tokens(4500, 'c13-u2'), 1, salt=None)
+        drive.run()
+        self.assertEqual([entry for entry in ledger.values() if entry[0] == 'u2'], [])
+        self.assertEqual(len(pool.cached_block_hash_to_block), size)
         self.assertFalse(registry.entries)
         drive.add('s1', text + tokens(300, 'c13-s1'), 1, salt='tenant-a')
         drive.run()
         self.assertEqual(len(pool.cached_block_hash_to_block) - size, 4096 // BLOCK)
+        self.assertEqual(len([entry for entry in ledger.values() if entry[0] == 's1']), 4096 // BLOCK)
         drive.add('s2', text + tokens(400, 'c13-s2'), 1, salt='tenant-a')
         drive.add('s3', text + tokens(400, 'c13-s3'), 1, salt='tenant-b')
         drive.run()
@@ -638,6 +661,15 @@ class GraftOnRealVllmTests(unittest.TestCase):
         def block_size(scheduler):
             scheduler.block_size = 128
 
+        def executor(backend):
+            def mutate(scheduler):
+                config = copy.copy(scheduler.vllm_config)
+                parallel = copy.copy(config.parallel_config)
+                object.__setattr__(parallel, 'distributed_executor_backend', backend)
+                object.__setattr__(config, 'parallel_config', parallel)
+                scheduler.vllm_config = config
+            return mutate
+
         cases = [
             ('async scheduling', with_config('async_scheduling', True), 'async scheduling is on'),
             ('chunked prefill (Lever N)', with_config('enable_chunked_prefill', True), 'chunked prefill is on'),
@@ -649,6 +681,11 @@ class GraftOnRealVllmTests(unittest.TestCase):
             ('prefix caching off', with_config('enable_prefix_caching', False, 'cache_config'), 'prefix caching is off'),
             ('block size 128', block_size, 'scheduler block size 128'),
             ('lookahead', lambda s: setattr(s, 'num_lookahead_tokens', 16), 'speculative lookahead'),
+            ('long prefill threshold', with_config('long_prefill_token_threshold', 2048),
+             'long_prefill_token_threshold is 2048'),
+            ('xxhash', with_config('prefix_caching_hash_algo', 'xxhash', 'cache_config'),
+             "prefix_caching_hash_algo is 'xxhash'"),
+            ('mp executor', executor('mp'), "executor backend is 'mp'"),
         ]
         for name, mutate, expected in cases:
             scheduler, _ = self.env.make(install=False)
@@ -660,6 +697,10 @@ class GraftOnRealVllmTests(unittest.TestCase):
             self.assertNotIn('schedule', vars(scheduler), name)
         scheduler, state = self.env.make()
         self.assertIn('schedule', vars(scheduler))
+        self.assertEqual((scheduler.cache_config.prefix_caching_hash_algo,
+                          scheduler.vllm_config.parallel_config.distributed_executor_backend,
+                          scheduler.scheduler_config.long_prefill_token_threshold), ('sha256', 'uni', 0),
+                         'the general profile shape passes on vLLM\'s own defaults')
 
     # -- P0a check 16 ---------------------------------------------------------------------------
     def test_check_16_the_kill_switch(self):
@@ -706,6 +747,13 @@ class GraftOnRealVllmTests(unittest.TestCase):
         drive.add('x', text)
         drive.run()
         self.assertEqual(len(registry.entries), 1)
+        running = drive.add('running', tokens(300, 'c17-r'), 50)
+        drive.step()
+        self.assertEqual(running.status, RequestStatus.RUNNING)
+        self.assertFalse(scheduler.reset_prefix_cache(), 'vLLM keeps its cache while a request holds blocks')
+        self.assertEqual((len(registry.entries), registry.stats['reset_kept']), (1, 1))
+        self.assertIsNotNone(cached_key(pool, drive.requests['x'].block_hashes[4096 // BLOCK - 1]))
+        drive.run()
         self.assertTrue(scheduler.reset_prefix_cache())
         self.assertFalse(registry.entries)
         self.assertEqual(len(pool.cached_block_hash_to_block), 0)
@@ -769,6 +817,75 @@ class GraftOnRealVllmTests(unittest.TestCase):
         resumed = [row for row in drive.rows if row.rid in {request.request_id for request in preempted}]
         self.assertGreaterEqual(len(resumed), 2)
         self.assertEqual(state.registry.pins(), 0)
+
+    # -- the capture contract: the gap boundary and resumed requests ----------------------------
+    def siblings(self, mid_loop):
+        """Three sibling sub-agents sharing a 6000-token system prompt and tools (P0b: 6,002 tokens
+        shared, 4,096 reusable), admitted one after another."""
+        scheduler, state = self.env.make(mid_loop=mid_loop)
+        drive = Drive(self.env, scheduler, state, 'siblings')
+        shared = tokens(6000, 'sib-shared')
+        for name, extra in (('a', 3000), ('b', 3500), ('c', 2800)):
+            drive.add(name, shared + tokens(extra, 'sib-' + name))
+            drive.run()
+        return state.registry, drive
+
+    def test_a_sibling_restores_the_gap_boundary_the_previous_one_captured_mid_loop(self):
+        registry, drive = self.siblings(mid_loop=True)
+        b = drive.grants['b'][-1]
+        self.assertEqual((b.h, b.q, b.drain, b.capture_positions(), b.mid_loop_positions()),
+                         (5952, 0, 8192, [4096, 8192], [4096]))
+        self.assertEqual((drive.row('c').q, drive.row('c').start), (4096, 4096))
+        self.assertEqual(drive.model.restored['c'], 4096, 'restored the cold state at 4096')
+        self.assertEqual(registry.stats['capture_wrong_position'], 0)
+
+    def test_without_mid_loop_captures_the_sibling_misses(self):
+        registry, drive = self.siblings(mid_loop=False)
+        self.assertEqual((drive.grants['b'][-1].capture_positions(), drive.grants['b'][-1].unplanned), ([8192], (4096,)))
+        self.assertEqual(drive.row('c').start, 0)
+
+    def test_a_resumed_request_captures_its_prompt_boundary_mid_loop(self):
+        """Preempted at 6300 tokens (P=5000) after its checkpoint at 4096 went (as the LRU or
+        coupling can take it), the request re-prefills all 6300 tokens: its loop drains at 6144, so
+        4096 is a mid-loop capture, taken when the loop reaches it; the next turn restores it."""
+        scheduler, state = self.env.make(mid_loop=True)
+        registry = state.registry
+        drive = Drive(self.env, scheduler, state, 'resumed')
+        prompt = tokens(5000, 'resumed-p')
+        request = drive.add('r', prompt, 3000)
+        while request.num_tokens < 6300:
+            drive.step()
+            self.assertLess(drive.steps, 2000)
+        key = request.block_hashes[4096 // BLOCK - 1]
+        self.assertIsNotNone(registry.get(key))
+        registry.drop(key)
+        # vLLM's own preemption (what reset_prefix_cache(reset_running_requests=True) does).
+        scheduler.running.remove(request)
+        scheduler._preempt_request(request, time.monotonic())
+        drive.step()
+        grant = drive.grants['r'][-1]
+        self.assertEqual((drive.row('r').start, grant.q, grant.drain, grant.capture_positions(),
+                          grant.mid_loop_positions()), (0, 0, 6144, [4096], [4096]))
+        self.assertEqual(registry.get(key).pos, 4096)
+        self.assertEqual(registry.stats['capture_wrong_position'], 0)
+        drive.run()
+        drive.add('n', prompt[0:4096] + tokens(500, 'resumed-n'))
+        drive.run()
+        self.assertEqual((drive.row('n').q, drive.model.restored['n']), (4096, 4096))
+
+    def test_a_drain_capture_under_a_mid_loop_key_would_be_caught(self):
+        """Positive control: a model that takes every capture at the drain and claims loop_pos=pos
+        files the state at 8192 under the 4096 key; the next sibling's restore check fails."""
+        scheduler, state = self.env.make(mid_loop=True)
+        drive = Drive(self.env, scheduler, state, 'poison')
+        drive.model.mode = 'drain-lying'
+        shared = tokens(6000, 'poison-shared')
+        for name, extra in (('a', 3000), ('b', 3500)):
+            drive.add(name, shared + tokens(extra, 'poison-' + name))
+            drive.run()
+        drive.add('c', shared + tokens(2800, 'poison-c'))
+        with self.assertRaisesRegex(ModelAssertion, 'not the cold state'):
+            drive.run()
 
 
 if __name__ == '__main__':

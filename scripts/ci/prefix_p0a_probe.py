@@ -67,6 +67,8 @@ def load_local(name):
     return module
 
 
+# The probe checks the wrappers, not the stats export: its log line only, no file.
+os.environ.setdefault('QWEN_PREFIX_STATS_PATH', '')
 # The registry first: the scheduler graft, loaded outside a package, imports it by its plain name.
 load_local('qwen_prefix_registry')
 graft = load_local('qwen_prefix_scheduler_patch')
@@ -523,8 +525,11 @@ class Drive(object):
             if not grant.checkpoint.matches(request.all_token_ids[0:start]):
                 raise ModelAssertion('row %s: checkpoint tokens differ from the prompt below %d' % (rid, start))
         if grant is not None:
+            # The stand-in takes each capture where the contract says, after exactly pos tokens
+            # (qwen_prefix_registry's model contract); test_qwen_prefix_scheduler_vllm's FakeGdnModel
+            # also checks the state it restores.
             for pos, _ in grant.plan:
-                self.registry.capture(rid, pos)
+                self.registry.capture(rid, pos, loop_pos=pos)
 
     def execute(self, output):
         from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput

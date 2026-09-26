@@ -11,16 +11,24 @@ Runs in the 3.11 CPU suite, which has no vLLM. Three layers:
 3. The wrappers (trim, cap, commit, eviction coupling, free, reset, kill switch, install refusals)
    on a small model of vLLM's prefix cache (FakeScheduler and friends below). The same scenarios on
    real vLLM 0.25.1 objects are test_qwen_prefix_scheduler_vllm (the installed-vLLM lane).
+
+FakeGdnModel stands in for the G1 model graft in both: its GDN state is a sha256 chain over the
+2048-token chunks its loop actually ran, restored from and captured into the registry, and every
+restore is compared with the cold chain of the row's own tokens. A checkpoint filed under the wrong
+boundary (a capture taken at the drain for a mid-loop position) is therefore caught at the next
+hit, as the real model's output would silently be wrong.
 """
 
 import hashlib
 import importlib
+import json
 import os
 import shutil
 import sys
 import tempfile
 import types
 import unittest
+from array import array
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -30,7 +38,7 @@ sys.path.insert(0, str(HERE))
 
 import qwen_prefix_registry  # noqa: E402
 import qwen_prefix_scheduler_patch as patch_module  # noqa: E402
-from qwen_prefix_registry import BLOCK, PrefixRegistry  # noqa: E402
+from qwen_prefix_registry import BLOCK, CHUNK, PrefixRegistry  # noqa: E402
 
 FIXTURE = HERE / 'fixtures' / 'vllm_tt_plugin_bf77cd63' / 'scheduler.py'
 SALT = 'tenant-a'
@@ -49,6 +57,78 @@ class Quiet(object):
     def __exit__(self, *exc):
         sys.stderr.close()
         sys.stderr = self.saved
+
+
+class ModelAssertion(AssertionError):
+    """What the G1 model graft raises: the engine would die rather than rewrite shared blocks."""
+
+
+INITIAL_STATE = b'gdn-initial-state'
+
+
+def chunk_state(state, chunk):
+    return hashlib.sha256(state + array('q', chunk).tobytes()).digest()
+
+
+def cold_state(tokens, upto):
+    """The GDN state a cold prefill of tokens holds after its first upto tokens."""
+    state = INITIAL_STATE
+    for index in range(upto // CHUNK):
+        state = chunk_state(state, tokens[index * CHUNK:(index + 1) * CHUNK])
+    return state
+
+
+class FakeGdnModel(object):
+    """The model graft's side of one prefill row (qwen_prefix_registry's model contract).
+
+    mode 'contract': each planned capture when the chunk loop has run exactly pos tokens.
+    mode 'drain-honest': every capture after the loop drains, loop_pos the tokens actually run (a
+      model built to the old "after the loop drains" wording; capture() refuses the mid-loop ones).
+    mode 'drain-lying': the same, but claiming loop_pos=pos - the poison capture() cannot see; the
+      restore check below catches it at the next hit."""
+
+    def __init__(self, registry, mode='contract'):
+        self.registry = registry
+        self.mode = mode
+        self.chunks = {}
+        self.restored = {}
+
+    def prefill(self, req_id, tokens, start_pos):
+        registry = self.registry
+        tokens = list(tokens)
+        grant = registry.grant_for(req_id)
+        if start_pos > 0:
+            if grant is None:
+                raise ModelAssertion('row %s: start_pos=%d without a committed grant' % (req_id, start_pos))
+            if grant.req_id != req_id or grant.q != start_pos:
+                raise ModelAssertion('row %s: grant %s does not match start_pos=%d' % (req_id, grant.describe(), start_pos))
+            if not grant.checkpoint.matches(tokens[0:start_pos]):
+                raise ModelAssertion('row %s: checkpoint tokens differ from the prompt below %d' % (req_id, start_pos))
+            state = grant.checkpoint.rec
+            if state != cold_state(tokens, start_pos):
+                raise ModelAssertion('row %s: the state restored at %d is not the cold state there' % (req_id, start_pos))
+            registry.note_restore(1.0)
+            self.restored[req_id] = start_pos
+        else:
+            state = INITIAL_STATE
+        drain = len(tokens) // CHUNK * CHUNK
+        plan = grant.capture_positions() if grant is not None else []
+        if grant is not None and grant.drain != drain:
+            raise ModelAssertion('row %s: the scheduler planned for a loop draining at %d, not %d'
+                                 % (req_id, grant.drain, drain))
+        run = 0
+        for index in range(start_pos // CHUNK, drain // CHUNK):
+            state = chunk_state(state, tokens[index * CHUNK:(index + 1) * CHUNK])
+            run += 1
+            done = (index + 1) * CHUNK
+            if self.mode == 'contract' and done in plan:
+                registry.capture(req_id, done, rec=state, carry=b'carry', nbytes=1, ms=0.5, loop_pos=done)
+        if self.mode != 'contract':
+            for pos in plan:
+                registry.capture(req_id, pos, rec=state, carry=b'carry', nbytes=1,
+                                 loop_pos=pos if self.mode == 'drain-lying' else drain)
+        self.chunks[req_id] = run
+        return state
 
 
 # ------------------------------------------------------------------------------------------------
@@ -120,10 +200,29 @@ class StageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'refusing to overwrite'):
             patch_module.stage(package)
         self.assertEqual((package / 'scheduler.py').read_bytes(), fixture_bytes())
+        self.assertEqual((package / 'qwen_prefix_registry.py').read_text(), '# someone else\n')
         crlf = self.package()
         (crlf / 'scheduler.py').write_bytes(fixture_bytes().replace(b'\n', b'\r\n'))
         with self.assertRaisesRegex(ValueError, 'is not the pinned'):
             patch_module.stage(crlf)
+
+    def test_a_copy_the_overlay_installed_from_the_same_source_is_accepted(self):
+        """The C2 image lists both plugin copies as overlay destinations (so its provenance check
+        hashes them); the stage then runs over them and must neither refuse nor rewrite them."""
+        package = self.package()
+        for name in patch_module.RUNTIME_FILES:
+            (package / name).write_bytes((HERE / name).read_bytes())
+        report = patch_module.stage(package)
+        for name in patch_module.RUNTIME_FILES:
+            self.assertEqual(report[name][0], report[name][1], 'reported as already present')
+            self.assertEqual((package / name).read_bytes(), (HERE / name).read_bytes())
+        self.assertIn(b'qwen_prefix_scheduler_patch', (package / 'scheduler.py').read_bytes())
+        stale = self.package()
+        (stale / 'qwen_prefix_scheduler_patch.py').write_bytes((HERE / 'qwen_prefix_scheduler_patch.py').read_bytes()
+                                                               + b'# an older copy\n')
+        with self.assertRaisesRegex(ValueError, 'refusing to overwrite .*qwen_prefix_scheduler_patch.py'):
+            patch_module.stage(stale)
+        self.assertEqual(sorted(p.name for p in stale.iterdir()), ['qwen_prefix_scheduler_patch.py', 'scheduler.py'])
 
     def test_cli(self):
         package = self.package()
@@ -341,11 +440,12 @@ class Manager(object):
 
 
 class Request(object):
-    def __init__(self, request_id, tokens, salt=SALT, prompt=None):
+    def __init__(self, request_id, tokens, salt=SALT, prompt=None, resumable=False):
         self.request_id = request_id
         self.all_token_ids = list(tokens)
         self.num_prompt_tokens = len(tokens) if prompt is None else prompt
         self.cache_salt = salt
+        self.resumable = resumable
         self.block_hashes = []
         parent = (salt or '').encode()
         for start in range(0, len(tokens) - len(tokens) % BLOCK, BLOCK):
@@ -370,8 +470,8 @@ class FakeScheduler(object):
     def __init__(self, num_blocks=400, max_model_len=65536):
         self.kv_cache_manager = Manager(num_blocks)
         self.scheduler_config = SimpleNamespace(async_scheduling=False, enable_chunked_prefill=False,
-                                                max_num_batched_tokens=max_model_len)
-        self.cache_config = SimpleNamespace(enable_prefix_caching=True)
+                                                max_num_batched_tokens=max_model_len, long_prefill_token_threshold=0)
+        self.cache_config = SimpleNamespace(enable_prefix_caching=True, prefix_caching_hash_algo='sha256')
         self.max_model_len = max_model_len
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=BLOCK, dtype='bf16'))],
@@ -380,13 +480,17 @@ class FakeScheduler(object):
         self.has_mamba_layers = False
         self.connector = None
         self.num_lookahead_tokens = 0
-        self.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1))
+        self.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1,
+                                                                           distributed_executor_backend='uni'))
         self.waiting = []
+        self.requests = {}
         self.freed = []
         self.resets = 0
+        self.reset_succeeds = True
         self.budget = None
 
     def add(self, request):
+        self.requests[request.request_id] = request
         self.waiting.append(request)
 
     def schedule(self):
@@ -424,7 +528,10 @@ class FakeScheduler(object):
         self.freed.append(request.request_id)
 
     def reset_prefix_cache(self, reset_running_requests=False, reset_connector=False):
+        """vLLM's: False, with every cached block kept, while running requests hold blocks."""
         self.resets += 1
+        if not self.reset_succeeds:
+            return False
         self.kv_cache_manager.block_pool.cached_block_hash_to_block.map.clear()
         return True
 
@@ -438,31 +545,45 @@ class GraftTests(unittest.TestCase):
         patcher = mock.patch.dict(sys.modules, fake_vllm_modules())
         patcher.start()
         self.addCleanup(patcher.stop)
+        # A graft installed without an explicit StatsExport reads its path from here: no file.
+        environment = mock.patch.dict(os.environ, {'QWEN_PREFIX_STATS_PATH': ''})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.logs = []
+        self.model = None
 
     def logger(self, message, *values):
         self.logs.append(message % values if values else message)
 
-    def make(self, registry=None, **kwargs):
+    def make(self, registry=None, mid_loop=False, mode='contract', **kwargs):
         scheduler = FakeScheduler(**kwargs)
-        graft = patch_module.install(scheduler, registry=registry or PrefixRegistry(budget_bytes=1 << 40),
-                                     kill_switch_path=None, logger=self.logger)
+        registry = registry or PrefixRegistry(budget_bytes=1 << 40)
+        if mid_loop:
+            with Quiet():
+                registry.enable_mid_loop_capture()
+        graft = patch_module.install(scheduler, registry=registry, kill_switch_path=None, logger=self.logger,
+                                     stats=patch_module.StatsExport(path='', logger=self.logger))
+        self.model = FakeGdnModel(registry, mode)
         return scheduler, graft
 
     def step(self, scheduler, model=True):
-        """schedule, then the model's side: assert the grant for start_pos > 0, take the captures."""
+        """schedule, then the model's side (FakeGdnModel): the grant assertions, the restore check
+        against the cold chain, the captures. Returns {req_id: (start_pos, grant)}."""
         out = scheduler.schedule()
         registry = scheduler._qwen_prefix.registry
+        if getattr(self, 'model', None) is None or self.model.registry is not registry:
+            self.model = FakeGdnModel(registry)
         rows = {}
         for data in out.scheduled_new_reqs:
             grant = registry.grant_for(data.req_id)
             rows[data.req_id] = (data.num_computed_tokens, grant)
-            if data.num_computed_tokens:
+            if model:
+                with Quiet():
+                    self.model.prefill(data.req_id, scheduler.requests[data.req_id].all_token_ids,
+                                       data.num_computed_tokens)
+            elif data.num_computed_tokens:
                 self.assertIsNotNone(grant, 'start_pos > 0 without a committed grant')
                 self.assertEqual(grant.q, data.num_computed_tokens)
-            if model and grant is not None:
-                for pos in grant.capture_positions():
-                    registry.capture(data.req_id, pos, rec='state@%d' % pos, nbytes=1)
         return rows
 
     def serve(self, scheduler, request):
@@ -483,7 +604,9 @@ class GraftTests(unittest.TestCase):
         start, grant = self.serve(scheduler, Request('b', text + tokens(3000, 2)))
         self.assertEqual((start, grant.q, grant.h, grant.capture_positions()), (4096, 4096, 4096, [6144]))
         self.assertEqual([line for line in self.logs if line.startswith('grant req=b')],
-                         ['grant req=b h=4096 Q=4096 plan=[6144]'])
+                         ['grant req=b h=4096 Q=4096 drain=6144 plan=[6144]'])
+        self.assertEqual((self.model.restored['b'], self.model.chunks['b']), (4096, 1),
+                         'b restored at 4096 and ran one chunk')
 
     def test_a_kv_hit_without_a_checkpoint_gets_the_older_boundary(self):
         scheduler, graft = self.make()
@@ -545,6 +668,147 @@ class GraftTests(unittest.TestCase):
         start, grant = self.serve(scheduler, Request('s2', text + tokens(10, 12)))
         self.assertEqual((start, grant.q), (4096, 4096))
 
+    def test_streaming_sessions_get_nothing_and_publish_nothing(self):
+        """A resumable request (vLLM's streaming input) is treated like an unsalted one: its prompt
+        later absorbs decode-written tokens, which the cap would otherwise publish."""
+        scheduler, graft = self.make()
+        registry = graft.registry
+        pool = scheduler.kv_cache_manager.block_pool
+        text = tokens(4200, 30)
+        start, grant = self.serve(scheduler, Request('session', text, resumable=True))
+        self.assertEqual((start, grant, len(pool.cached_block_hash_to_block)), (0, None, 0))
+        self.serve(scheduler, Request('s1', text))
+        start, grant = self.serve(scheduler, Request('session2', text + tokens(10, 31), resumable=True))
+        self.assertEqual((start, grant), (0, None))
+        self.assertEqual(registry.stats['session_denied'], 1)
+        self.assertEqual(len(pool.cached_block_hash_to_block), 4096 // BLOCK, 's1 alone published')
+
+    def test_the_plan_takes_mid_loop_boundaries_only_from_a_model_that_declared_them(self):
+        """The review's case: P=20000, h=5952, Q=0. The gap boundary 4096 is below the loop's drain
+        at 18432, so it is a mid-loop capture; a resumed request (P=5000, 9000 tokens) drains at 8192
+        with its prompt boundary at 4096."""
+        scheduler, graft = self.make()
+        request = Request('p', tokens(20000, 40))
+        plan, unplanned, drain = graft.plan(request, 5952, 0)
+        self.assertEqual(([pos for pos, _ in plan], unplanned, drain), ([18432], [4096], 18432))
+        resumed = Request('r', tokens(9000, 41), prompt=5000)
+        self.assertEqual(graft.plan(resumed, 4096, 4096), ([], [], 8192))
+        plan, unplanned, drain = graft.plan(resumed, 0, 0)
+        self.assertEqual((plan, unplanned, drain), ([], [4096], 8192), 'nothing above the prompt boundary, '
+                                                                        'nothing at the resumed drain')
+        with Quiet():
+            graft.registry.enable_mid_loop_capture()
+        plan, unplanned, _ = graft.plan(request, 5952, 0)
+        self.assertEqual(([pos for pos, _ in plan], unplanned), ([4096, 18432], []))
+        self.assertEqual(plan[0][1], request.block_hashes[4096 // BLOCK - 1])
+        self.assertEqual([pos for pos, _ in graft.plan(resumed, 0, 0)[0]], [4096])
+
+    def siblings(self, mid_loop, mode='contract'):
+        """Three sibling sub-agents sharing a 6000-token system prompt and tools, one after another."""
+        scheduler, graft = self.make(mid_loop=mid_loop, mode=mode)
+        shared = tokens(6000, 50)
+        rows = {}
+        for name, seed, extra in (('a', 51, 3000), ('b', 52, 3500), ('c', 53, 2800)):
+            rows[name] = self.serve(scheduler, Request(name, shared + tokens(extra, seed)))
+        return graft.registry, rows
+
+    def test_a_sibling_restores_the_gap_boundary_a_previous_sibling_captured_mid_loop(self):
+        registry, rows = self.siblings(mid_loop=True)
+        self.assertEqual(rows['a'][1].capture_positions(), [8192])
+        start, grant = rows['b']
+        self.assertEqual((start, grant.h, grant.q, grant.capture_positions(), grant.mid_loop_positions()),
+                         (0, 5952, 0, [4096, 8192], [4096]))
+        start, grant = rows['c']
+        self.assertEqual((start, grant.q), (4096, 4096))
+        self.assertEqual(self.model.restored['c'], 4096, 'the restored state was the cold state at 4096')
+        self.assertEqual((registry.stats['capture_wrong_position'], registry.stats['capture_failures']), (0, 0))
+
+    def test_without_the_declaration_the_gap_boundary_is_not_planned(self):
+        registry, rows = self.siblings(mid_loop=False)
+        self.assertEqual((rows['b'][1].capture_positions(), rows['b'][1].unplanned), ([8192], (4096,)))
+        self.assertEqual((rows['c'][0], rows['c'][1].q), (0, 0))
+        self.assertEqual(registry.stats['mid_loop_unplanned'], 2)
+
+    def test_a_drain_capture_filed_under_a_mid_loop_boundary_is_refused(self):
+        """A model built to the old wording ("after the loop drains") reports where its loop really
+        was, and capture() refuses: no checkpoint, no hit, nothing inexact."""
+        registry, rows = self.siblings(mid_loop=True, mode='drain-honest')
+        self.assertEqual(registry.stats['capture_wrong_position'], 2, 'b\'s 4096 and c\'s 4096')
+        self.assertEqual((rows['c'][0], rows['c'][1].q), (0, 0))
+
+    def test_the_fake_model_catches_a_poisoned_checkpoint(self):
+        """Positive control for the restore check: a model that lies about loop_pos files the state
+        at 8192 under the 4096 key; the next sibling restores it and the check fires."""
+        with self.assertRaisesRegex(ModelAssertion, 'not the cold state'):
+            self.siblings(mid_loop=True, mode='drain-lying')
+
+    def test_a_resumed_request_captures_its_prompt_boundary_mid_loop_only(self):
+        """A preempted request re-prefills its output tokens too: P=5000 with 9000 tokens drains at
+        8192. Without mid-loop captures nothing is planned; with them, 4096 is captured when the
+        loop reaches it and a later turn on the same prompt restores the right state."""
+        for mid_loop in (False, True):
+            with self.subTest(mid_loop=mid_loop):
+                scheduler, graft = self.make(mid_loop=mid_loop)
+                registry = graft.registry
+                prompt = tokens(5000, 60)
+                resumed = Request('r', prompt + tokens(4000, 61), prompt=5000)
+                start, grant = self.serve(scheduler, resumed)
+                self.assertEqual((start, grant.drain), (0, 8192))
+                self.assertEqual(grant.capture_positions(), [4096] if mid_loop else [])
+                self.assertEqual(scheduler.kv_cache_manager.coordinator.calls[-1], ('r', 4096),
+                                 'the cap stops at the prompt boundary')
+                start, grant = self.serve(scheduler, Request('next', prompt + tokens(700, 62)))
+                self.assertEqual((start, grant.q), (4096, 4096) if mid_loop else (0, 0))
+                if mid_loop:
+                    self.assertEqual(self.model.restored['next'], 4096)
+                self.assertEqual(registry.stats['capture_wrong_position'], 0)
+
+    def test_the_token_check_runs_once_per_request_and_checkpoint(self):
+        """A request blocked at the queue head is re-attempted every step; its token prefix never
+        changes, so the 62k-token array is built once per checkpoint, not once per step."""
+        scheduler, graft = self.make()
+        registry = graft.registry
+        text = tokens(4200, 70)
+        self.serve(scheduler, Request('x', text))
+        pool = scheduler.kv_cache_manager.block_pool
+        hoard = [block for block in pool.free if block.block_hash is None][5:]
+        for block in hoard:
+            pool.free.remove(block)
+        checks = registry.stats['token_checks']
+        scheduler.add(Request('b', text[0:4096] + tokens(900, 71)))
+        for _ in range(4):
+            self.step(scheduler)
+        self.assertEqual(registry.stats['token_checks'] - checks, 1)
+        key = Request('p', text).block_hashes[4096 // BLOCK - 1]
+        entry = registry.get(key)
+        with Quiet():
+            registry.put(key, 4096, list(entry.token_ids), rec=entry.rec, nbytes=1)
+        self.step(scheduler)
+        self.assertEqual(registry.stats['token_checks'] - checks, 2, 'a replaced checkpoint is checked again')
+        pool.give_back(hoard)
+        rows = self.step(scheduler)
+        self.assertEqual(rows['b'][1].q, 4096)
+        scheduler.finish(scheduler.requests['b'])
+        self.assertNotIn('b', registry.token_checks, 'forgotten with the request')
+
+    def test_an_orphan_is_counted_once(self):
+        """x's checkpoint at 4096 loses block 40 of its chain. Three admissions see it (resumed
+        requests whose prompt ends at 2100 re-publish only up to 2048, so the chain stays broken):
+        one orphan, not three. A request that re-caches the chain and re-captures 4096 retires it."""
+        scheduler, graft = self.make()
+        registry = graft.registry
+        text = tokens(4200, 80)
+        self.serve(scheduler, Request('x', text))
+        pool = scheduler.kv_cache_manager.block_pool
+        pool._maybe_evict_cached_block(
+            pool.cached_block_hash_to_block.get_one_block((Request('p', text).block_hashes[40], 0)))
+        for index in range(3):
+            start, grant = self.serve(scheduler, Request('o%d' % index, text, prompt=2100))
+            self.assertEqual((start, grant.h), (0, 2560))
+        self.assertEqual((registry.stats['orphans'], registry.snapshot()['orphans_now']), (1, 1))
+        self.serve(scheduler, Request('heal', text[0:4096] + tokens(300, 84)))
+        self.assertEqual((registry.stats['orphans'], registry.snapshot()['orphans_now']), (1, 0))
+
     def test_an_attempt_that_is_not_admitted_leaves_no_grant(self):
         """P0a check 10 on the fakes: the budget break."""
         scheduler, graft = self.make()
@@ -601,8 +865,15 @@ class GraftTests(unittest.TestCase):
         self.assertIsNone(registry.grant_for('c'))
         self.assertEqual(registry.pins(), 0)
         self.assertEqual(scheduler.freed[-1], 'c', 'the original _free_request still runs')
+        self.serve(scheduler, Request('y', tokens(4200, 90)))
+        kept = len(registry.entries)
+        scheduler.reset_succeeds = False
+        self.assertFalse(scheduler.reset_prefix_cache())
+        self.assertEqual((len(registry.entries), registry.stats['reset_kept']), (kept, 1),
+                         'vLLM kept the cached blocks, so the checkpoints stay')
+        scheduler.reset_succeeds = True
         self.assertTrue(scheduler.reset_prefix_cache())
-        self.assertEqual((scheduler.resets, len(registry.entries)), (1, 0))
+        self.assertEqual((scheduler.resets, len(registry.entries)), (2, 0))
 
     def test_the_kill_switch_disables_everything_and_latches(self):
         """P0a check 16 on the fakes."""
@@ -639,6 +910,12 @@ class GraftTests(unittest.TestCase):
             ('async scheduling is on', lambda s: setattr(s.scheduler_config, 'async_scheduling', True)),
             ('chunked prefill is on', lambda s: setattr(s.scheduler_config, 'enable_chunked_prefill', True)),
             ('max_num_batched_tokens', lambda s: setattr(s.scheduler_config, 'max_num_batched_tokens', 2048)),
+            ('long_prefill_token_threshold is 2048', lambda s: setattr(s.scheduler_config,
+                                                                       'long_prefill_token_threshold', 2048)),
+            ("prefix_caching_hash_algo is 'xxhash'", lambda s: setattr(s.cache_config, 'prefix_caching_hash_algo',
+                                                                       'xxhash')),
+            ("executor backend is 'mp'", lambda s: setattr(s.vllm_config.parallel_config,
+                                                           'distributed_executor_backend', 'mp')),
             ('prefix caching is off', lambda s: setattr(s.cache_config, 'enable_prefix_caching', False)),
             ('does not cache blocks', lambda s: setattr(s.kv_cache_manager, 'enable_caching', False)),
             ('not UnitaryKVCacheCoordinator', self.make_hybrid),
@@ -673,13 +950,48 @@ class GraftTests(unittest.TestCase):
         scheduler, graft = self.make()
         self.assertIs(patch_module.install(scheduler), graft, 'a second install is the first')
         self.assertTrue(self.logs[0].startswith('install scheduler='))
-        self.assertIn('block_size=64', self.logs[0])
+        for field in ('block_size=64', 'hash=sha256', 'executor=uni'):
+            self.assertIn(field, self.logs[0])
+        for algorithm in ('sha256', 'sha256_cbor'):
+            scheduler = FakeScheduler()
+            scheduler.cache_config.prefix_caching_hash_algo = algorithm
+            self.assertEqual(patch_module.install_problems(scheduler), [])
 
     @staticmethod
     def make_hybrid(scheduler):
         scheduler.kv_cache_manager.coordinator = HybridKVCacheCoordinator()
         scheduler.kv_cache_manager.coordinator.cache_blocks = None
         scheduler.kv_cache_manager.coordinator.single_type_managers = []
+
+    def test_the_commit_exports_the_counters(self):
+        directory = tempfile.mkdtemp(prefix='qwen-prefix-stats-')
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, 'stats.json')
+        now = [0.0]
+        scheduler = FakeScheduler()
+        registry = PrefixRegistry(budget_bytes=1 << 40)
+        graft = patch_module.install(scheduler, registry=registry, kill_switch_path=None, clock=lambda: now[0],
+                                     logger=self.logger,
+                                     stats=patch_module.StatsExport(path=path, interval_s=30, clock=lambda: now[0],
+                                                                    logger=self.logger))
+        self.model = FakeGdnModel(registry)
+        with open(path, encoding='utf-8') as handle:
+            self.assertEqual(json.load(handle)['captures'], 0, 'written at install')
+        text = tokens(4200, 95)
+        self.serve(scheduler, Request('x', text))
+        now[0] += 31.0
+        self.serve(scheduler, Request('b', text[0:4096] + tokens(300, 96)))
+        with open(path, encoding='utf-8') as handle:
+            exported = json.load(handle)
+        self.assertEqual((exported['grants'], exported['entries'], exported['pins']), (1, 1, 1))
+        for name in ('trim_loss_tokens', 'orphans', 'capture_failures', 'restore_ms', 'capture_ms', 'bytes',
+                     'orphans_now', 'mid_loop_capture', 'pid', 'time'):
+            self.assertIn(name, exported)
+        lines = [line for line in self.logs if line.startswith('stats ')]
+        self.assertEqual(len(lines), 2, 'install, then once in 30 s')
+        self.assertEqual(json.loads(lines[-1][len('stats '):])['grants'], 1)
+        graft.export()
+        self.assertEqual(len([line for line in self.logs if line.startswith('stats ')]), 2, 'rate-limited')
 
     def test_one_live_scheduler_per_shared_registry(self):
         registry = PrefixRegistry(budget_bytes=1 << 30)
