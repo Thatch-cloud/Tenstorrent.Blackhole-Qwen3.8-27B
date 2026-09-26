@@ -13,8 +13,8 @@ the same narrow mask. The P0 probe showed K64i's tail on these shapes equal to l
 and 36218529407), so an equal 0x20 call is the served arithmetic at E, and an equal output also proves the runtime
 split read nothing past E.
 
-Sections (--sections, default all; per seed in the order N, X, M, K, L, T, timing; N, L, T and timing on the first
-seed only):
+Sections (--sections, default K1/K3's N, X, M, K, L, T; per seed in the order N, X, M, K, L, T, K2, X7, Z, timing;
+N, L, T and timing on the first seed only; CB2a's K2, X7 and Z are below):
   N  K3's refusals, decisive: the loaded binary must refuse the unknown-flag control 0x11 ('[QWEN-SDPA] unknown
      flags'), 0x20 without the tail flag, 0x21 with a wide mask, 0x21 without a cur_pos tensor, 0x21 with B + 1
      words, 0x21 on a causal call and 0x01 with a cur_pos tensor, each with its factory literal (F19, F20). An
@@ -43,8 +43,38 @@ seed only):
      differ (the poison is live inside the trace).
   timing (unless --no-timing; recorded): the 0x21 call at E - 1 on the C-wide table against the 0x1 call at capacity
      E, per extent; and 0 against B skipped entries.
-K2 (native B1 rows before the boundary) and K4 (the mask kernel against the host prediction) are not in this graft:
-the report lists them as not_run.
+
+CB2a (s2-design.md W10a and 6.2; opt-in: --sections K2,X7,Z, per seed in that order). These run the SERVED calls'
+kwargs: page_table_tensor by keyword, the model's scale (HD ** -0.5) and output memory (L1, --output-memory):
+  K2 DECISIVE, and it alone sets the exactness policy (design 6.1; its own verdict is k2_verdict=). The solo path's
+     own call against the packed extent path, row by row. The reference is the native decode call as
+     SerialAttentionReader issues it for one live user (scripts/ci/attention_batch.py:96-105): one query row of 12
+     heads (a half-tile Q), B = 1, the row's own cur_pos p, the user's (1, C / 64) table, and the model's kwargs
+     verbatim (NATIVE_DECODE: docker/qwen-c2-graft/graft/attention/tp.py:737-754 - the device grid, exp_approx_mode
+     False, q_chunk_size 0, k_chunk_size 0, the scale, the output in L1; is_causal and compute_kernel_config not
+     passed). What source cannot pin is listed in UNVERIFIED, recorded and printed at run time. The subject is the
+     same rows inside one G8B2 0x27 call as the extent reader issues it: the 16-row ticket at start s folded into
+     one B = 2 bundle (offsets 0 and 8, LAYOUT(16, 8)), cur_pos E - 1 in both slots, the narrow mask the pinned
+     kernel writes at capacity 256 with the word s & 255 (served_mask), the C-wide table poisoned past E. Every row
+     p < E of the ticket (the boundary cap: rows past E are wrong by design, design 2.4) must equal its native row
+     bit for bit. Tickets: every start of --k2-sweep (128..300: families 256 and 512, every row slot and mask word
+     there), then s = E - 256 + r for E in --cb2-extents and r in --cb2-starts; per variant (normal, peaky: the
+     peaky rows aim at their own key and at the first key past it). RECORDED, not decisive: the tickets of
+     --k2-floor (100..127), their rows below 128 (the admission floor's other side, expected to differ). Liveness
+     (peaky only, on the reference path): the native call at cur_pos p + 1 must move the ticket's first row against
+     the native call at p.
+  X7 DECISIVE (design 2.3 item 5): 0x7 with the narrow mask == 0x7 with the wide mask carrying the real -inf tail
+     (served_mask at capacity E with the word s), both at capacity E on the table truncated to E / 64; and the served
+     0x27 at E - 1 on the poisoned C-wide table == that 0x7 wide call; E in --cb2-extents, s = E - 256 + r for r in
+     --cb2-starts, per variant. Liveness, on the reference path: per family, the 0x7 wide call with a zero mask must
+     move every entry whose tail masks a key.
+  Z  DECISIVE (design B5): the stale-writer zone. G8B2 0x27 captured once on the clean C-wide table and replayed at
+     every family of --z-families (256 ... 3,840: the 15 with E / 256 < 16 cores per head) and s = E - 256 + r, r in
+     --z-starts (0 and 32, the idle segments' starts, then 7, 127, 240, 255), the words and the narrow mask
+     rewritten between replays: each replay == the eager call == the compile-time 0x7 call at E (the table truncated
+     to E / 64, the same narrow mask). A hang is the watchdog's (exit 3), never a verdict.
+K4 (the mask kernel at capacity 256 against its host mirror) is W10b's R1 (extent_reader_card_b.py): the report lists
+it as not_run.
 
 The log: every 0x20 program built must log one F4 '[QWEN-SDPA] flags=' line with 0x20 set, followed by exactly one
 F22 '[QWEN-SDPA] runtime-extent entries=' line carrying its B, kv_share and q_slice; a requested program without its
@@ -58,10 +88,25 @@ Verdict: one 'K64J_CARD verdict=...' line.
   NO-DECISION  a failure (wrong binary or kernels, no compact scratch, a missing factory or F22 line, a section that
                raised, the watchdog), a dead liveness control, a decisive section cut by the deadline, SIGTERM, or
                no decisive comparison ran.
+The line also carries k2_verdict=, K2's own verdict, which decides design 6.1's branch, and k2_coverage=, how many of
+the design's K2 tickets it compared (k2_coverage: every sweep start 128..300 and every (E, r) of CB2_EXTENTS x
+CB2_STARTS, for each of seeds 0-4 and variants normal and peaky):
+  PASS          every K2 row equal over the design's WHOLE set: the strict policy stands.
+  REDUCED-PASS  every K2 row equal, on less than that set (the WATCHER pass, any narrowed run): it does not set the
+                policy; only the full pass's PASS does.
+  FAIL          a K2 row differs on a valid K2 run, at any coverage: S2 stops for the user's decision D-c.
+  NO-DECISION   a K2 failure, a global failure, a program K2 requested that never logged its F4 line, a dead K2
+                control, K2 cut by the deadline, an error, or no K2 row compared. Another section's failure alone
+                does not void it, nor a program that only other sections requested (check_log names the sections
+                that requested each unlogged program: 'factory log [X7]: ...').
+  not_run       K2 not in --sections.
 
 RUN with run_card_b.sh only (QUAL_CARD, default card B), in the C2 image with graft K64j mounted as the arm mounts
-it, WATCHER=1 first. The helpers above the device section import no ttnn and are tested on CPU by
-test_k64j_card_b.py, which also runs the whole flow on a fake ttnn whose broken variants the sections must catch.
+it, WATCHER=1 first. With card B taken by other work, run it on card M by hand on the rig: QUAL_CARD=
+blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 (run_card_b.sh's header; the card-B CI job only ever runs card B).
+The helpers above the device section import no ttnn and are tested on CPU by
+test_k64j_card_b.py and test_k64j_cb2a.py, which also run the whole flow on a fake ttnn whose broken variants the
+sections must catch.
 """
 
 import argparse
@@ -85,7 +130,8 @@ import split_model  # noqa: E402 - the families
 k1, card = probe.k1, probe.card
 
 CARD = 'K64J_CARD'
-PLAN = 'c2-serve-for-real-plan.md section 2.3 (K1, K3; K2 and K4 are not in this graft)'
+PLAN = ('c2-serve-for-real-plan.md section 2.3 (K1, K3); s2-design.md W10a / CB2a (K2, X7, Z); K4 is W10b R1, not '
+        'in this harness')
 CAPACITY = probe.CAPACITY
 EXTENTS = probe.EXTENTS
 STARTS = probe.STARTS
@@ -106,19 +152,75 @@ TRACE_REFERENCES = 8
 SKIP_EXTENTS = probe.SKIP_EXTENTS
 SKIP_PATTERNS = probe.SKIP_PATTERNS
 FENCE_OFFSETS = probe.FENCE_OFFSETS
-SECTIONS = ('N', 'X', 'M', 'K', 'L', 'T')
-RUN_ORDER = ('N', 'X', 'M', 'K', 'L', 'T', 'timing')
+DEFAULT_SECTIONS = ('N', 'X', 'M', 'K', 'L', 'T')      # K1 / K3 (CB1)
+CB2A_SECTIONS = ('K2', 'X7', 'Z')                       # s2-design.md W10a (CB2a): opt-in
+SECTIONS = DEFAULT_SECTIONS + CB2A_SECTIONS
+RUN_ORDER = ('N', 'X', 'M', 'K', 'L', 'T', 'K2', 'X7', 'Z', 'timing')
 FIRST_SEED_ONLY = ('N', 'L', 'T', 'timing')
-DECISIVE_SECTIONS = ('N', 'X', 'M', 'K', 'T')
+DECISIVE_SECTIONS = ('N', 'X', 'M', 'K', 'T', 'K2', 'X7', 'Z')
 DECISIVE_KINDS = ('refusal', 'extent_vs_reference', 'mixed_vs_reference', 'share_slot0', 'skip_live',
                   'share_skip_slot0_wins', 'trace_vs_eager', 'trace_vs_reference', 'trace_skip_live',
-                  'trace_fence_vs_clean')
+                  'trace_fence_vs_clean', 'k2_native_vs_extent', 'x7_narrow_vs_wide', 'x7_extent_vs_wide',
+                  'z_trace_vs_eager', 'z_trace_vs_reference')
 DEADLINE_MARGIN_S = probe.DEADLINE_MARGIN_S
 OPEN_EXTRA_S = probe.OPEN_EXTRA_S
 ENV_RECORDED = probe.ENV_RECORDED
 KERNEL_ROOT = probe.KERNEL_ROOT
-NOT_RUN = {'K2': 'native B1 rows before the boundary: a model-level comparison, not a kernel call (plan 2.3)',
-           'K4': 'the mask-refresh v2 kernel is not in graft K64j'}
+NOT_RUN = {'K4': 'the mask kernel at capacity 256 against its host mirror is W10b R1 (extent_reader_card_b.py), '
+                 'not a section of this harness'}
+
+# CB2a (s2-design.md W10a, 2.3, 2.4, 6.1, 6.2).
+TICKET_ROWS = 16                                        # one served ticket (a packed round's rows per user)
+SERVED_ROWS, SERVED_BATCH = 8, 2                        # LAYOUT(16, 8) = parallel_groups(256, 16, max_group_rows=8)
+SERVED_OFFSETS = (0, 8)                                 # its one bundle's group offsets: one G8B2 call per ticket
+SERVED_FLAGS = TAIL | SHARE | SLICE | EXTENT            # 0x27: the extent reader's call at G8B2
+COMPILE_FLAGS = SERVED_FLAGS & ~EXTENT                  # 0x7: v235's served call, at capacity E
+MIN_LIVE_START = 128                                    # the admission floor (design 1.4 #9, W1 MIN_LIVE_START)
+K2_SWEEP = (128, 300)                                   # every ticket start in it (families 256 and 512)
+K2_FLOOR = (100, 127)                                   # recorded: the floor's other side
+CB2_EXTENTS = (2304, 4352, 16640, 65792, 131328)        # K2's and X7's families
+CB2_STARTS = (0, 7, 127, 240, 255)                      # s mod 256 of their tickets
+Z_FAMILIES = tuple(range(K_CHUNK, 4096, K_CHUNK))       # the 15 families with E / 256 < 16 cores per head
+IDLE_STARTS = (0, 32)                                   # an idle segment's start: page 0, tile row 0 or 1
+Z_STARTS = IDLE_STARTS + (7, 127, 240, 255)
+OUTPUT_MEMORY = ('l1', 'dram')
+K2_DESIGN_SEEDS = (0, 1, 2, 3, 4)                       # K2's full coverage (s2-design.md W10a K2 positions): seeds 0-4
+K2_DESIGN_VARIANTS = ('normal', 'peaky')                # and both variants, over K2_SWEEP and CB2_EXTENTS x CB2_STARTS
+K2_REDUCED_PASS = 'REDUCED-PASS'                        # every K2 row equal on less than that: not the policy's PASS
+FACTORY_FAILURE = re.compile(r'factory log \[([A-Za-z0-9,]+)\]: ')     # check_log: an unlogged program, by requester
+
+# K2's reference: the model's native decode call (docker/qwen-c2-graft/graft/attention/tp.py, the graft the serving
+# image installs over the model tree, docker/qwen-c2-serving.Dockerfile:30-45). test_k64j_cb2a parses that source and
+# keeps these equal to it; SerialAttentionReader forwards the kwargs unchanged, one B = 1 call per row.
+NATIVE_PROGRAM_CONFIG = dict(exp_approx_mode=False, q_chunk_size=0, k_chunk_size=0)   # + the device grid
+NATIVE_CALL_KWARGS = ('page_table_tensor', 'cur_pos_tensor', 'scale', 'program_config', 'memory_config')
+NATIVE_SCALE = 256 ** -0.5                              # tp.py:134 self.scale = self.HD ** -0.5, HD 256
+NATIVE_DECODE = dict(
+    source='docker/qwen-c2-graft/graft/attention/tp.py',
+    sha256='749a9814453f71f419708f738f7ce2211cf5cc56f220f3052d43e4840a53d153',   # docker/qwen-c2-graft/graft.sha256
+    lines=dict(program_config='737-742', call='743-754', scale='134', forward_decode_same='622-627, 645-656'),
+    program_config=dict(NATIVE_PROGRAM_CONFIG, compute_with_storage_grid_size='the device grid (tp.py:736)'),
+    call=list(NATIVE_CALL_KWARGS), scale=NATIVE_SCALE, memory_config='L1 (tp.py:753)',
+    not_passed=['is_causal', 'attn_mask', 'compute_kernel_config'],
+    solo_path='scripts/ci/attention_batch.py:82-113 SerialAttentionReader: per row one B = 1 call, the query row '
+              'sliced to DRAM (:102-103), the row\'s own (1,) cur_pos and (1, W) table, **kwargs forwarded (:105)')
+UNVERIFIED = (
+    'is_causal: the native call does not pass it (tp.py:743-754) and neither does this harness, so both take the op '
+    'binding\'s default, True as this repo models it from the binding dump (optimisation/ttnn-op/sdpa_decode_qwen/'
+    'test_sdpa_decode_qwen_sources.py:653-686: sdpa_decode_nanobind.cpp:82-106, options.get(\'is_causal\', True)) '
+    'and as docs/t16-vs-b1-65536.md:25 records it (the native B1 call passes no is_causal: "API default"); the '
+    'binding source itself is tt-metal\'s, not in this repo, so the image binary\'s default is not read here',
+    'compute_kernel_config: passed by neither the native call nor the served replay (attention_parallel.py:17-19), so '
+    'both take the op default; its value (HiFi2, fp32_dest_acc_en false per the k64j_probe README reading of '
+    'sdpa_decode.cpp:77) is a tt-metal source outside this repo',
+    'the query dtype bf16: tp.py:6 and no typecast in _decode_from_prep; attn_decode_prep\'s output dtype is the op\'s',
+    'the query shape (1, 1, 12, 256), HD 256 and 12 local heads: from the attn_decode_prep log line '
+    '(docs/gdn-conv-path-2026-09-19.md:165), not from source (model_config.py reads them from the checkpoint)',
+    'the one-row engine: SerialAttentionReader passes attn_decode_prep\'s q unsliced (attention_batch.py:96-99), in '
+    'the layout the op returns; this harness runs the multi-row engines\' shape, a DRAM-interleaved row slice',
+    'the paged K / V: bf8 (QWEN_SDPA_BF8=1, docker/qwen-c2-serving.Dockerfile:89; tp.py:846-847) in 64-key blocks, '
+    'as this harness\'s pool (probe.Pool) holds them',
+)
 
 # The K64j factory's literals (apply_factory_k64j.py; test_k64j_card_b keeps these equal to it).
 EXTENT_LOG_MARKER = '[QWEN-SDPA] runtime-extent entries='
@@ -238,6 +340,149 @@ def reference_sample(count, wanted):
     return {round(index * (count - 1) / (wanted - 1)) for index in range(wanted)}
 
 
+def mask_row_positions(word, rows=SERVED_ROWS, batches=SERVED_BATCH, offset=0):
+    """attention_mask_replay.cpp:24 (and attention_mask_replay.mask_position): folded row h of entry b sits at
+    word + offset + b * rows + (h % (rows * 6)) / 6 - [[position per row] per entry]."""
+    return [[word + offset + batch * rows + (head % (rows * 6)) // 6 for head in range(rows * 12)]
+            for batch in range(batches)]
+
+
+def served_mask(torch, word, capacity, width=None, rows=SERVED_ROWS, batches=SERVED_BATCH, offset=0):
+    """The pinned mask kernel on the host (attention_mask_replay.cpp:18-33) run with the start word `word` at
+    `capacity`, into a zero-initialised tensor (attention_replay.py:51): (batches, 1, rows * 12, width) bf16, -inf
+    (0xff80) in the last 256 columns - the cache positions [capacity - 256, capacity) - wherever the column's position
+    is past the row's (mask_row_positions), +0.0 elsewhere. At rows 8 there is no padding head (h < 96 = rows * 12,
+    cpp :28). width (default capacity) keeps the tensor's LAST width columns: the wide mask is width = capacity."""
+    width = capacity if width is None else width
+    if (any(type(value) is not int for value in (word, capacity, width)) or word < 0 or capacity < K_CHUNK
+            or capacity % K_CHUNK or not K_CHUNK <= width <= capacity):
+        raise ValueError('served_mask needs a word >= 0, a 256-aligned capacity and a width of 256 .. capacity')
+    positions = torch.tensor(mask_row_positions(word, rows, batches, offset), dtype=torch.int64)    # (B, rows*12)
+    cache = torch.arange(capacity - K_CHUNK, capacity, dtype=torch.int64)                           # cpp :27
+    tail = torch.where(cache[None, None, :] > positions[:, :, None], float('-inf'), 0.0)            # cpp :28
+    mask = torch.zeros(batches, 1, rows * 12, width, dtype=torch.float32)
+    mask[:, 0, :, width - K_CHUNK:] = tail
+    return mask.to(torch.bfloat16)
+
+
+def narrow_mask(torch, start):
+    """The extent reader's (2, 1, 96, 256) mask for a ticket at `start`: the pinned kernel at capacity 256 with the
+    relative word start & 255 (design 1.4 #2, 2.3 item 2)."""
+    return served_mask(torch, start & (K_CHUNK - 1), K_CHUNK)
+
+
+def wide_mask(torch, start, extent):
+    """v235's (2, 1, 96, E) mask for the same ticket at capacity E: the pinned kernel with the absolute word."""
+    return served_mask(torch, start, extent)
+
+
+def accept_limit(start, rows=TICKET_ROWS):
+    """design 2.4: a ticket at `start` commits at most min(rows, E - start) rows, those at positions below E."""
+    return min(rows, split_model.extent(start) - start)
+
+
+def ticket_positions(start, rows=TICKET_ROWS):
+    return list(range(start, start + rows))
+
+
+def valid_positions(start, rows=TICKET_ROWS):
+    """The ticket's rows the boundary cap commits (positions < E): the rows K2 compares."""
+    return list(range(start, start + accept_limit(start, rows)))
+
+
+def native_cur_pos(position):
+    """The solo path's cur_pos word for the row at `position`: the row's own position (SerialAttentionReader gives
+    each row its singleton position tensor, attention_batch.py:101-105; the model's cur_pos_tt)."""
+    return position
+
+
+def k2_family_floor(extents, starts):
+    """K2's family tickets below the admission floor: the (E, r) whose start E - 256 + r is below MIN_LIVE_START. Their
+    rows' native chunk is 128 keys or less (design 1.4 #9), so the native call splits unlike the extent call and the
+    rows would differ by design: never a decisive ticket (parse_args refuses them when K2 runs; k2_tickets raises)."""
+    return [(extent, offset) for extent in extents for offset in starts if extent - K_CHUNK + offset < MIN_LIVE_START]
+
+
+def k2_tickets(sweep, floor, extents, starts):
+    """K2's tickets in run order, decisive first: every start of `sweep` (lo, hi inclusive), then E - 256 + r for E in
+    `extents` and r in `starts`, then the recorded `floor` starts (None: none). ValueError on a decisive ticket below
+    the admission floor (a sweep from below MIN_LIVE_START, or k2_family_floor)."""
+    below = k2_family_floor(extents, starts)
+    if sweep[0] < MIN_LIVE_START or below:
+        raise ValueError('K2\'s decisive tickets must start at >= %d (the admission floor): the sweep starts at %d, '
+                         'the family tickets E - 256 + r below it are (E, r) = %s' % (MIN_LIVE_START, sweep[0], below))
+    tickets = [dict(kind='sweep', start=start, extent=split_model.extent(start))
+               for start in range(sweep[0], sweep[1] + 1)]
+    tickets += [dict(kind='family', start=extent - K_CHUNK + offset, extent=extent)
+                for extent in extents for offset in starts]
+    if floor:
+        tickets += [dict(kind='floor', start=start, extent=split_model.extent(start))
+                    for start in range(floor[0], floor[1] + 1)]
+    return tickets
+
+
+def k2_compared(ticket):
+    """The rows of a K2 ticket that are compared: every committed row (decisive), or, for a floor ticket, its
+    committed rows below the admission floor (recorded)."""
+    rows = valid_positions(ticket['start'])
+    return rows if ticket['kind'] != 'floor' else [position for position in rows if position < MIN_LIVE_START]
+
+
+def z_plan(families, starts):
+    """Z's replays in order: (E, s) for every family and start, s = E - 256 + r."""
+    return [(extent, extent - K_CHUNK + offset) for extent in families for offset in starts]
+
+
+def token_query(torch, seed, variant, position, keys=None, table=None):
+    """One token's (12, 256) bf16 query at `position`: the same bytes for the solo row and inside the packed ticket.
+    normal: N(0, 1). peaky: 0.1 x N(0, 1) plus, per head, 6 x the unit vector of its KV head's key at the token's own
+    position, at the first position PAST it (masked on both paths: a boundary read one key too far moves the row),
+    at two earlier positions in its final chunk (anywhere earlier when it opens the chunk) and three anywhere earlier
+    (the host keys through `table`), so the own key and the one past it weigh alike."""
+    generator = torch.Generator().manual_seed((seed * 1000003 + position) * 2 + (1 if variant == 'peaky' else 0))
+    tokens = torch.randn(12, card.HEAD_DIM, generator=generator)
+    if variant == 'peaky':
+        if keys is None or table is None:
+            raise ValueError('Peaky queries need the host keys and the page table')
+        tokens *= 0.1
+        last = len(table) * card.PAGE - 1
+        chunk = split_model.extent(position) - K_CHUNK
+        earlier = chunk if chunk < position else 0
+        for head in range(12):
+            kv = head // 6
+            aims = [position, position + 1]
+            if position > 0:
+                aims += torch.randint(earlier, position, (2,), generator=generator).tolist()
+                aims += torch.randint(0, position, (3,), generator=generator).tolist()
+            for aim in aims:
+                aim = min(aim, last)
+                vector = keys[int(table[aim // card.PAGE]), kv, aim % card.PAGE].float()
+                tokens[head] += 6 * vector / vector.norm().clamp_min(1e-3)
+    elif variant != 'normal':
+        raise ValueError('Unknown query variant %r' % (variant,))
+    return tokens.to(torch.bfloat16)
+
+
+def ticket_query(torch, tokens, start):
+    """The ticket's (1, 2, 96, 256) G8B2 query: its 16 token queries (tokens: position -> (12, 256)) folded as the
+    extent reader's device fold lays them (attention_head_fold.fold_query per group, groups at SERVED_OFFSETS)."""
+    host = torch.stack([tokens(position) for position in ticket_positions(start)])[None]
+    return card.fold_entries(torch, host, SERVED_OFFSETS, SERVED_ROWS)
+
+
+def parse_range(text, name):
+    """'lo:hi' (inclusive) -> (lo, hi); '' -> None."""
+    if not text:
+        return None
+    lo, sep, hi = text.partition(':')
+    if not sep:
+        raise ValueError('%s must be lo:hi, got %r' % (name, text))
+    lo, hi = int(lo), int(hi)
+    if not 0 <= lo <= hi:
+        raise ValueError('%s must have 0 <= lo <= hi, got %r' % (name, text))
+    return lo, hi
+
+
 def section_runs(args):
     runs = []
     for seed in args.seeds:
@@ -320,6 +565,63 @@ def tally(comparisons):
     return probe.tally(comparisons)
 
 
+class RequestLog(set):
+    """report['_requested']: the qwen programs the run requested (a set of probe.program_key tuples, as
+    probe.Pool.launch and ExtentPool.served_launch add them) and, per program, the sections whose calls requested it
+    (`by`; run_sections sets `section` before each section runs), so check_log can say whose evidence a program that
+    never logged its factory line voids."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.section, self.by = None, {}
+
+    def add(self, key):
+        super().add(key)
+        self.by.setdefault(key, set()).add(self.section)
+
+
+def failure_sections(failure):
+    """The sections a failure belongs to, or None for a global one: a section's own ('X7/seed0: ...' -> {'X7'}, any
+    of RUN_ORDER, timing included); a requested program that never logged, which check_log attributes to the sections
+    that requested it ('factory log [X7,Z]: ...' -> {'X7', 'Z'}); anything else (the binary, the kernels, the scratch,
+    a pool, an extent-log pairing problem, an unattributed factory-log line) is global."""
+    head = failure.split('/')[0]
+    if head in RUN_ORDER:
+        return {head}
+    match = FACTORY_FAILURE.match(failure)
+    return set(match.group(1).split(',')) if match else None
+
+
+def k2_coverage(report):
+    """K2's coverage of the design's set (s2-design.md W10a: every ticket start of K2_SWEEP and every (E, r) of
+    CB2_EXTENTS x CB2_STARTS, for each seed of K2_DESIGN_SEEDS and variant of K2_DESIGN_VARIANTS): how many of those
+    (seed, variant, ticket) a k2_native_vs_extent comparison covered, `full` only when every one was, and `short`, the
+    dimensions that fell short ('seeds', 'variants', 'sweep', 'family'; 'combinations' when each is present somewhere
+    but not in every combination)."""
+    tickets = [('sweep', start) for start in range(K2_SWEEP[0], K2_SWEEP[1] + 1)]
+    tickets += [('family', extent, offset) for extent in CB2_EXTENTS for offset in CB2_STARTS]
+    design = {(seed, variant) + ticket for seed in K2_DESIGN_SEEDS for variant in K2_DESIGN_VARIANTS
+              for ticket in tickets}
+    got = set()
+    for entry in report.get('comparisons', []):
+        if entry['kind'] != 'k2_native_vs_extent':
+            continue
+        key = (entry.get('seed'), entry.get('variant'))
+        if entry.get('ticket') == 'sweep':
+            got.add(key + ('sweep', entry['start']))
+        elif entry.get('ticket') == 'family':
+            got.add(key + ('family', entry['extent'], entry['start'] - (entry['extent'] - K_CHUNK)))
+    covered = design & got
+    short = [name for name, index, wanted in (('seeds', 0, K2_DESIGN_SEEDS), ('variants', 1, K2_DESIGN_VARIANTS))
+             if set(wanted) - {key[index] for key in covered}]
+    short += [kind for kind in ('sweep', 'family')
+              if {ticket for ticket in tickets if ticket[0] == kind} - {key[2:] for key in covered}]
+    full = covered == design
+    if not full and not short:
+        short = ['combinations']
+    return dict(full=full, covered=len(covered), design=len(design), short=short)
+
+
 def decide(report):
     """PASS / FAIL / NO-DECISION from the comparisons, liveness, failures, error and deadline."""
     comparisons = report.get('comparisons', [])
@@ -347,8 +649,40 @@ def decide(report):
         verdict = 'FAIL'
     else:
         verdict = 'PASS'
+    ran_k2 = 'K2' in (report.get('sections') or ())
     return dict(verdict=verdict, reasons=reasons, decisive=len(decisive), decisive_differing=len(differing),
-                first_differing=[entry['label'] for entry in differing[:6]])
+                first_differing=[entry['label'] for entry in differing[:6]], k2=k2_verdict(report),
+                k2_coverage=k2_coverage(report) if ran_k2 else None)
+
+
+def voids_k2(failure):
+    """A failure voids K2 when it is K2's own or global (failure_sections): another section's, or a program only
+    other sections requested, does not."""
+    sections = failure_sections(failure)
+    return sections is None or 'K2' in sections
+
+
+def k2_verdict(report):
+    """K2's own verdict, the one design 6.1 branches on: not_run (K2 not requested); NO-DECISION on an error, a
+    failure that voids K2 (voids_k2: K2's own, a program K2 requested that never logged, or a global one - the binary,
+    the kernels, the scratch, a pool, the extent log), a dead K2 liveness control, a K2 run cut by the deadline, or no
+    K2 row compared; otherwise FAIL if any K2 row differs, at any coverage; else PASS when the rows covered the
+    design's whole set (k2_coverage), REDUCED-PASS when they did not - a reduced run never sets the policy. Another
+    section's failure ('X7/...', 'Z/...', 'factory log [X7]: ...') does not void K2."""
+    if 'K2' not in (report.get('sections') or ()):
+        return 'not_run'
+    if report.get('error') or any(voids_k2(failure) for failure in report.get('failures', [])):
+        return 'NO-DECISION'
+    if any(entry['section'] == 'K2' and not entry['live'] for entry in report.get('liveness', [])):
+        return 'NO-DECISION'
+    if any(tag.split('/')[0] == 'K2' for tag in (report.get('deadline') or {}).get('skipped', [])):
+        return 'NO-DECISION'
+    rows = [entry for entry in report.get('comparisons', []) if entry['kind'] == 'k2_native_vs_extent']
+    if not rows:
+        return 'NO-DECISION'
+    if any(entry['differing'] for entry in rows):
+        return 'FAIL'
+    return 'PASS' if k2_coverage(report)['full'] else K2_REDUCED_PASS
 
 
 def verdict_line(report):
@@ -373,7 +707,21 @@ def verdict_line(report):
     if report.get('skip_written'):
         words.append('skipped_rows=%s' % report['skip_written'])
     words.append('families=%d' % report.get('trace_families_distinct', 0))
-    words.append('k2=not_run k4=not_run')
+    words.append(part('k2', ('k2_native_vs_extent',)))
+    rows = report.get('k2_rows') or {}
+    if rows.get('compared'):
+        words.append('k2_rows=%d/%d' % (rows['equal'], rows['compared']))
+    if rows.get('floor'):
+        words.append('k2_floor_differing=%d/%d' % (rows['floor_differing'], rows['floor']))
+    words.append('k2_verdict=%s' % decision.get('k2', 'not_run'))
+    coverage = decision.get('k2_coverage')
+    if coverage:
+        words.append('k2_coverage=%d/%d' % (coverage['covered'], coverage['design']))
+    words.append(part('x7', ('x7_narrow_vs_wide', 'x7_extent_vs_wide')))
+    words.append(part('z', ('z_trace_vs_eager', 'z_trace_vs_reference')))
+    if report.get('z_families'):
+        words.append('z_families=%d' % len(report['z_families']))
+    words.append('k4=not_run')
     if report.get('sections_failed'):
         words.append('sections_failed=%s' % ','.join(report['sections_failed']))
     if (report.get('deadline') or {}).get('skipped'):
@@ -410,6 +758,51 @@ class ExtentPool(probe.Pool):
 
     def reference_run(self, query, pages, mask, flags, label):
         return self.run(query, pages, causal=False, mask=mask, sentinel=MAGIC | reference_flags(flags), label=label)
+
+    # CB2a: the served calls' own kwargs.
+    output = 'l1'                                       # --output-memory: the model's memory_config (tp.py:753)
+
+    def output_memory(self):
+        return self.ttnn.L1_MEMORY_CONFIG if self.output == 'l1' else self.ttnn.DRAM_MEMORY_CONFIG
+
+    def grid(self):
+        grid = self.device.compute_with_storage_grid_size()
+        return (grid.x, grid.y)
+
+    def served_launch(self, query, pages, mask, flags, *, words=None, label):
+        """The replay's call as attention_parallel.execute issues it (attention_parallel.py:17-19) with the extent
+        reader's cur_pos_tensor (design W1 execute_extent) when `words` is given: page_table_tensor by keyword,
+        is_causal False, the mask, the model's scale and memory_config, and the pooled config (the device grid,
+        exp_approx_mode False, q_chunk_size the qwen sentinel, k_chunk_size 256). Recorded as a requested program."""
+        ttnn = self.ttnn
+        config = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=self.grid(), exp_approx_mode=False,
+                                        q_chunk_size=MAGIC | flags, k_chunk_size=K_CHUNK)
+        options = dict(page_table_tensor=pages, is_causal=False, attn_mask=mask, scale=NATIVE_SCALE,
+                       program_config=config, memory_config=self.output_memory())
+        if words is not None:
+            options['cur_pos_tensor'] = words
+        self.report['_requested'].add(probe.program_key(int(pages.shape[1]) * card.PAGE, int(query.shape[1]),
+                                                        int(mask.shape[3]), flags))
+        with probe.WATCHDOG.op(label):
+            return ttnn.transformer.paged_scaled_dot_product_attention_decode(query, self.k, self.v, **options)
+
+    def served_run(self, query, pages, mask, flags, *, words=None, label):
+        return self.host(self.served_launch(query, pages, mask, flags, words=words, label=label), 'read back ' + label)
+
+    def native_launch(self, query, pages, cur_pos, label):
+        """K2's reference: the native decode call with exactly the kwargs tp.py:743-754 passes (NATIVE_DECODE) -
+        page_table_tensor, cur_pos_tensor, scale, program_config (the device grid, exp_approx_mode False,
+        q_chunk_size 0, k_chunk_size 0) and memory_config; is_causal, attn_mask and compute_kernel_config are not
+        passed, as there."""
+        ttnn = self.ttnn
+        config = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=self.grid(), **NATIVE_PROGRAM_CONFIG)
+        with probe.WATCHDOG.op(label):
+            return ttnn.transformer.paged_scaled_dot_product_attention_decode(
+                query, self.k, self.v, page_table_tensor=pages, cur_pos_tensor=cur_pos, scale=NATIVE_SCALE,
+                program_config=config, memory_config=self.output_memory())
+
+    def native_run(self, query, pages, cur_pos, label):
+        return self.host(self.native_launch(query, pages, cur_pos, label), 'read back ' + label)
 
 
 def query_for(torch, pool, batch, rows, seed, variant, extent, salt=0):
@@ -886,6 +1279,237 @@ def section_timing(ttnn, torch, device, pool, args, report):
                             skip_us={name: by[name] for name in by if name.startswith('skip')})
 
 
+# ---------------------------------------------------------------------------------------------
+# CB2a: K2, X7, Z (s2-design.md W10a).
+# ---------------------------------------------------------------------------------------------
+
+class ServedRig(TraceRig):
+    """TraceRig on the served call (ExtentPool.served_launch): Z's trace. replay() is TraceRig's: the words and the
+    narrow mask rewritten in place (copy_host_to_device_tensor), the trace executed, the output read back."""
+
+    def eager(self, words, host_mask, label):
+        pool = self.pool
+        word_tensor, mask_tensor = pool.words(words), pool.upload(host_mask)
+        try:
+            return pool.served_run(self.query, self.pages, mask_tensor, self.flags, words=word_tensor,
+                                   label=label + ' eager')
+        finally:
+            self.ttnn.deallocate(word_tensor)
+            self.ttnn.deallocate(mask_tensor)
+
+    def capture(self, words, host_mask, traces, label):
+        ttnn, pool = self.ttnn, self.pool
+        self.words = self.scope.keep(pool.words(words))
+        self.mask = self.scope.keep(pool.upload(host_mask))
+        with probe.WATCHDOG.op(label + ' capture'):
+            self.trace, self.output = card.capture(ttnn, self.device, lambda: pool.served_launch(
+                self.query, self.pages, self.mask, self.flags, words=self.words, label=label + ' capture'))
+        traces.append(self.trace)
+        self.scope.keep(self.output)
+
+
+def row_slice(rows, index):
+    """(1, 1, 12, 256): one token row of an unfolded (1, T, 12, 256) output."""
+    return rows[:, index:index + 1]
+
+
+def section_k2(ttnn, torch, pool, seed, args, report):
+    """K2: per ticket, the G8B2 0x27 extent call against the native B1 call of every committed row."""
+    tickets = k2_tickets(args.k2_sweep, args.k2_floor, args.cb2_extents, args.cb2_starts)
+    counts = report.setdefault('k2_rows', dict(compared=0, equal=0, floor=0, floor_differing=0, capped=0))
+    table = pool.tables[0]
+    scope = probe.Scope(ttnn)
+    families = {}
+
+    def family(extent):
+        """The user's tables for family E (both poisoned past E): the native (1, C / 64) row, the subject's (2, C /
+        64) bundle table, and the subject's words E - 1."""
+        if extent not in families:
+            families[extent] = dict(
+                native=scope.keep(pool.pages_causal([0], [extent])),
+                subject=scope.keep(pool.pages_causal([0] * SERVED_BATCH, [extent] * SERVED_BATCH)),
+                words=scope.keep(pool.words([extent - 1] * SERVED_BATCH)))
+        return families[extent]
+
+    try:
+        for variant in args.variants:
+            tokens, natives = {}, {}
+
+            def token(position, variant=variant, tokens=tokens):
+                if position not in tokens:
+                    tokens[position] = token_query(torch, seed, variant, position, pool.keys, table)
+                return tokens[position]
+
+            def native(position, cur_pos, label, token=token, natives=natives):
+                """The solo row's output (cached): its token's query, B = 1, cur_pos, family(E(position))'s row."""
+                key = (position, cur_pos)
+                if key not in natives:
+                    probe.DEADLINE.check(label)
+                    query = pool.upload(token(position)[None, None].contiguous())
+                    word = pool.positions([cur_pos])
+                    try:
+                        natives[key] = pool.native_run(query, family(split_model.extent(position))['native'], word,
+                                                       label)
+                    finally:
+                        ttnn.deallocate(query)
+                        ttnn.deallocate(word)
+                    probe.finite_or_fail(torch, report, label, natives[key])
+                return natives[key]
+
+            for ticket in tickets:
+                start, extent, kind = ticket['start'], ticket['extent'], ticket['kind']
+                label = 'K2/seed%d/%s/E%d/s%d' % (seed, variant, extent, start)
+                probe.DEADLINE.check(label)
+                tables = family(extent)
+                query = pool.upload(ticket_query(torch, token, start))
+                mask = pool.upload(narrow_mask(torch, start))
+                try:
+                    got = pool.served_run(query, tables['subject'], mask, SERVED_FLAGS, words=tables['words'],
+                                          label=label + ' extent')
+                finally:
+                    ttnn.deallocate(query)
+                    ttnn.deallocate(mask)
+                rows = card.unfold_entries(torch, got, SERVED_ROWS)             # (1, 16, 12, 256), ticket order
+                compared = k2_compared(ticket)
+                decisive = kind != 'floor'
+                differing, moved = 0, []
+                for position in compared:
+                    reference = native(position, native_cur_pos(position), '%s/p%d native' % (label, position))
+                    count = card.differing(torch, row_slice(rows, position - start), reference)
+                    differing += count
+                    if count:
+                        moved.append(position)
+                if decisive:
+                    counts['compared'] += len(compared)
+                    counts['equal'] += len(compared) - len(moved)
+                    counts['capped'] += TICKET_ROWS - len(compared)
+                else:
+                    counts['floor'] += len(compared)
+                    counts['floor_differing'] += len(moved)
+                record(report, probe.comparison('K2', 'k2_native_vs_extent' if decisive else 'k2_floor', label,
+                                                differing, decisive, ticket=kind, extent=extent, start=start,
+                                                rows=len(compared), differing_rows=moved, seed=seed, variant=variant))
+                # Liveness (peaky: every row aims at the key past it), on the reference path alone: the native call
+                # one key further must move the ticket's first row - the comparison sees a boundary one key off.
+                if decisive and variant == 'peaky' and compared and compared[0] + 1 < pool.capacity:
+                    position = compared[0]
+                    own = native(position, position, '%s/p%d native at p' % (label, position))
+                    beyond = native(position, position + 1, '%s/p%d native at p + 1' % (label, position))
+                    moved_rows = probe.moved_rows(torch, own, beyond)[0]
+                    report['liveness'].append(dict(section='K2', label='%s/p%d+1' % (label, position),
+                                                   moved_rows=moved_rows, rows=12, live=moved_rows > 0))
+    finally:
+        scope.close()
+
+
+def section_x7(ttnn, torch, pool, seed, args, report):
+    """X7: 0x7 narrow == 0x7 wide (the real -inf tail) at capacity E; 0x27 at E - 1 on the C-wide table == 0x7 wide."""
+    table = pool.tables[0]
+    for extent in args.cb2_extents:
+        base = 'X7/seed%d/E%d' % (seed, extent)
+        probe.DEADLINE.check(base)
+        scope = probe.Scope(ttnn)
+        live_done = False
+        try:
+            reference_pages = scope.keep(pool.pages_reference(0, extent, SERVED_BATCH))
+            extent_pages = scope.keep(pool.pages_causal([0] * SERVED_BATCH, [extent] * SERVED_BATCH))
+            words = scope.keep(pool.words([extent - 1] * SERVED_BATCH))
+            for offset in args.cb2_starts:
+                start = extent - K_CHUNK + offset
+                inner = probe.Scope(ttnn)                                # the wide mask is E columns: free it soon
+                try:
+                    narrow_host = narrow_mask(torch, start)
+                    narrow = inner.keep(pool.upload(narrow_host))
+                    wide = inner.keep(pool.upload(wide_mask(torch, start, extent)))
+                    for variant in args.variants:
+                        label = '%s+%d/%s' % (base, offset, variant)
+                        probe.DEADLINE.check(label)
+                        query = inner.keep(pool.upload(ticket_query(
+                            torch, lambda position, variant=variant: token_query(torch, seed, variant, position,
+                                                                                 pool.keys, table), start)))
+                        got_narrow = pool.served_run(query, reference_pages, narrow, COMPILE_FLAGS,
+                                                     label=label + ' 0x7 narrow')
+                        got_wide = pool.served_run(query, reference_pages, wide, COMPILE_FLAGS, label=label + ' 0x7 wide')
+                        got_extent = pool.served_run(query, extent_pages, narrow, SERVED_FLAGS, words=words,
+                                                     label=label + ' 0x27')
+                        probe.finite_or_fail(torch, report, label, got_wide)
+                        record(report, probe.comparison('X7', 'x7_narrow_vs_wide', label + '/narrow',
+                                                        card.differing(torch, got_narrow, got_wide), True,
+                                                        extent=extent, start=start, seed=seed, variant=variant))
+                        record(report, probe.comparison('X7', 'x7_extent_vs_wide', label + '/0x27',
+                                                        card.differing(torch, got_extent, got_wide), True,
+                                                        extent=extent, start=start, seed=seed, variant=variant))
+                        # Liveness, on the reference (wide) path alone: a zero wide mask must move every entry
+                        # whose tail masks a key - the comparison sees the mask's content.
+                        masked = [index for index in range(SERVED_BATCH)
+                                  if bool(torch.isinf(narrow_host[index].float()).any())]
+                        if not live_done and masked:
+                            zero = inner.keep(pool.upload(torch.zeros(SERVED_BATCH, 1, SERVED_ROWS * 12, extent,
+                                                                      dtype=torch.bfloat16)))
+                            opened = pool.served_run(query, reference_pages, zero, COMPILE_FLAGS,
+                                                     label=label + ' 0x7 zero wide mask')
+                            moved = probe.moved_rows(torch, got_wide, opened)
+                            for index in masked:
+                                report['liveness'].append(dict(section='X7', label='%s/zero_mask/entry%d' % (label, index),
+                                                               moved_rows=moved[index], rows=SERVED_ROWS * 12,
+                                                               live=moved[index] > 0))
+                            live_done = True
+                finally:
+                    inner.close()
+        finally:
+            scope.close()
+
+
+def section_z(ttnn, torch, device, pool, seed, args, report):
+    """Z: one G8B2 0x27 trace replayed over the stale-writer families at their idle and boundary starts."""
+    plan = z_plan(args.z_families, args.z_starts)
+    report['z_families'] = sorted(set(args.z_families))
+    scope, traces, references = probe.Scope(ttnn), [], {}
+    try:
+        query = scope.keep(pool.upload(card.build_query(torch, SERVED_BATCH, seed, 'normal', rows=SERVED_ROWS)))
+        pages = scope.keep(pool.pages_causal([0] * SERVED_BATCH, [pool.capacity] * SERVED_BATCH, poison=False))
+        rig = ServedRig(ttnn, torch, device, pool, scope, query, pages, SERVED_FLAGS, SERVED_ROWS, SERVED_BATCH)
+
+        def words(extent):
+            return [extent - 1] * SERVED_BATCH
+
+        first_extent, first_start = plan[0]
+        rig.eager(words(first_extent), narrow_mask(torch, first_start), 'Z/seed%d warm' % seed)   # builds it
+        rig.capture(words(first_extent), narrow_mask(torch, first_start), traces, 'Z/seed%d' % seed)
+        for index, (extent, start) in enumerate(plan):
+            label = 'Z/seed%d/replay%d/E%d+%d' % (seed, index, extent, start - (extent - K_CHUNK))
+            probe.DEADLINE.check(label)
+            host_mask = narrow_mask(torch, start)
+            got = rig.replay(words(extent), host_mask, label)
+            eager = rig.eager(words(extent), host_mask, label)
+            if extent not in references:
+                references[extent] = scope.keep(pool.pages_reference(0, extent, SERVED_BATCH))
+            mask = pool.upload(host_mask)
+            try:
+                reference = pool.served_run(query, references[extent], mask, COMPILE_FLAGS,
+                                            label=label + ' 0x7 reference')
+            finally:
+                ttnn.deallocate(mask)
+            probe.finite_or_fail(torch, report, label, reference)
+            record(report, probe.comparison('Z', 'z_trace_vs_eager', label, card.differing(torch, got, eager), True,
+                                            extent=extent, start=start, seed=seed))
+            record(report, probe.comparison('Z', 'z_trace_vs_reference', label, card.differing(torch, got, reference),
+                                            True, extent=extent, start=start, seed=seed), verbose=False)
+    finally:
+        probe.release_traces(ttnn, device, traces)
+        scope.close()
+
+
+def native_decode_lines():
+    """What the harness prints before K2 runs: the native kwargs it uses and what source cannot pin."""
+    lines = ['K2 native decode (%s:%s, sha256 %s): program_config %s, call kwargs %s, scale %r, memory_config %s; '
+             'not passed: %s' % (NATIVE_DECODE['source'], NATIVE_DECODE['lines']['call'], NATIVE_DECODE['sha256'][:16],
+                                 NATIVE_DECODE['program_config'], ','.join(NATIVE_DECODE['call']), NATIVE_SCALE,
+                                 NATIVE_DECODE['memory_config'], ','.join(NATIVE_DECODE['not_passed']))]
+    lines += ['UNVERIFIED K2: %s' % item for item in UNVERIFIED]
+    return lines
+
+
 def check_binary(args, report):
     """The mapped _ttnncpp.so: the expected K64j binary (required), stage 4 plus the F22 literal, compact scratch."""
     path, markers = card.loaded_binary()
@@ -931,7 +1555,7 @@ def run(args, report, checkpoint=None):
     import ttnn
 
     options = dict(device_id=args.device_id, l1_small_size=24576)
-    if 'T' in args.sections:
+    if {'T', 'Z'} & set(args.sections):
         options['trace_region_size'] = args.trace_region_bytes
     with probe.WATCHDOG.op('open device', extra=OPEN_EXTRA_S):
         device = ttnn.open_device(**options)
@@ -941,6 +1565,8 @@ def run(args, report, checkpoint=None):
             report['program_cache_enabled_call'] = True
         except Exception as error:  # noqa: BLE001 - default-on in newer runtimes
             report['program_cache_enabled_call'] = repr(error)[:200]
+        grid = device.compute_with_storage_grid_size()
+        report['grid'] = [grid.x, grid.y]
         if not check_binary(args, report):
             return
         if args.kernel_root and not check_kernels(args.kernel_root, report):
@@ -965,6 +1591,9 @@ def run_sections(ttnn, torch, device, args, report, checkpoint=None):
         'K': lambda pool, seed: section_skip(ttnn, torch, pool, seed, args, report),
         'L': lambda pool, seed: section_liveness(ttnn, torch, pool, seed, args, report),
         'T': lambda pool, seed: section_trace(ttnn, torch, device, pool, seed, args, report),
+        'K2': lambda pool, seed: section_k2(ttnn, torch, pool, seed, args, report),
+        'X7': lambda pool, seed: section_x7(ttnn, torch, pool, seed, args, report),
+        'Z': lambda pool, seed: section_z(ttnn, torch, device, pool, seed, args, report),
         'timing': lambda pool, seed: section_timing(ttnn, torch, device, pool, args, report),
     }
     runs = section_runs(args)
@@ -984,6 +1613,7 @@ def run_sections(ttnn, torch, device, args, report, checkpoint=None):
                     pool, pool_seed = None, seed
                     try:
                         pool = ExtentPool(ttnn, torch, device, args.capacity, seed, 3, report)
+                        pool.output = args.output_memory
                     except probe.DeadlineReached:
                         raise
                     except Exception as error:  # noqa: BLE001 - that seed's sections cannot run
@@ -992,6 +1622,9 @@ def run_sections(ttnn, torch, device, args, report, checkpoint=None):
                                                   % (seed, probe.one_line(error)))
                         print('SECTION FAILED pool/seed%d: %s' % (seed, probe.one_line(error)), flush=True)
                         continue
+                requested = report.get('_requested')
+                if isinstance(requested, RequestLog):
+                    requested.section = name                    # the programs this section requests are its own
                 handlers[name](pool, seed)
             except probe.DeadlineReached as reached:
                 skipped = [run_tag(later_seed, later) for later_seed, later in runs[index:]]
@@ -1007,6 +1640,8 @@ def run_sections(ttnn, torch, device, args, report, checkpoint=None):
             else:
                 done.append(tag)
             finally:
+                if isinstance(report.get('_requested'), RequestLog):
+                    report['_requested'].section = None
                 if checkpoint is not None:
                     checkpoint(tag)
     finally:
@@ -1026,7 +1661,19 @@ def parse_args(argv=None):
     parser.add_argument('--combos', default=','.join(combo_name(*combo) for combo in default_combos()),
                         help='X, M and L: shape:flags pairs (G4B3 0x21/0x23, G8B2 0x21/0x23/0x27/0x2F)')
     parser.add_argument('--trace-combos', default=','.join(combo_name(*combo) for combo in TRACE_COMBOS))
-    parser.add_argument('--sections', default=','.join(SECTIONS), help='any of %s' % ', '.join(SECTIONS))
+    parser.add_argument('--sections', default=','.join(DEFAULT_SECTIONS),
+                        help='any of %s (default K1/K3\'s %s; CB2a is K2,X7,Z)' % (', '.join(SECTIONS),
+                                                                                ','.join(DEFAULT_SECTIONS)))
+    parser.add_argument('--k2-sweep', default='%d:%d' % K2_SWEEP,
+                        help='K2: every ticket start lo..hi (inclusive, lo >= %d)' % MIN_LIVE_START)
+    parser.add_argument('--k2-floor', default='%d:%d' % K2_FLOOR,
+                        help='K2, recorded: ticket starts lo..hi below %d, their rows below it ("" none)' % MIN_LIVE_START)
+    parser.add_argument('--cb2-extents', default=','.join(map(str, CB2_EXTENTS)), help='K2\'s and X7\'s families')
+    parser.add_argument('--cb2-starts', default=','.join(map(str, CB2_STARTS)), help='their tickets\' s mod 256')
+    parser.add_argument('--z-families', default=','.join(map(str, Z_FAMILIES)), help='Z\'s families')
+    parser.add_argument('--z-starts', default=','.join(map(str, Z_STARTS)), help='Z\'s s mod 256 per family')
+    parser.add_argument('--output-memory', choices=OUTPUT_MEMORY, default=OUTPUT_MEMORY[0],
+                        help='K2, X7 and Z: the calls\' output memory (the model\'s is L1, tp.py:753)')
     parser.add_argument('--trace-families', type=int, default=TRACE_FAMILIES)
     parser.add_argument('--trace-references', type=int, default=TRACE_REFERENCES,
                         help='replays whose entry 0 is compared with the compile-time call at its family (one JIT '
@@ -1054,6 +1701,12 @@ def parse_args(argv=None):
         args.seeds = ints(args.seeds)
         args.combos = parse_combos(args.combos)
         args.trace_combos = parse_combos(args.trace_combos)
+        args.k2_sweep = parse_range(args.k2_sweep, '--k2-sweep')
+        args.k2_floor = parse_range(args.k2_floor, '--k2-floor')
+        args.cb2_extents = ints(args.cb2_extents)
+        args.cb2_starts = ints(args.cb2_starts)
+        args.z_families = ints(args.z_families)
+        args.z_starts = ints(args.z_starts)
     except ValueError as error:
         parser.error(str(error))
     if args.deadline_s < 0:
@@ -1064,8 +1717,30 @@ def parse_args(argv=None):
         probe.check_capacity(args.capacity)
         for extent in args.extents:
             probe.check_capacity(extent, 'extent')
+        for extent in args.cb2_extents + args.z_families:
+            probe.check_capacity(extent, 'CB2a family')
     except ValueError as error:
         parser.error(str(error))
+    # CB2a's own arguments are checked against --capacity only when their sections run (the defaults are the served
+    # geometry's; a K1 run on a smaller table never reads them).
+    if (args.k2_sweep is None or args.k2_sweep[0] < MIN_LIVE_START
+            or ('K2' in args.sections and split_model.extent(args.k2_sweep[1]) > args.capacity)):
+        parser.error('--k2-sweep must be lo:hi with lo >= %d and its last family within --capacity' % MIN_LIVE_START)
+    if args.k2_floor is not None and args.k2_floor[1] >= MIN_LIVE_START:
+        parser.error('--k2-floor must lie below %d (or be "")' % MIN_LIVE_START)
+    for name, extents, sections in (('--cb2-extents', args.cb2_extents, ('K2', 'X7')),
+                                    ('--z-families', args.z_families, ('Z',))):
+        if not extents or len(set(extents)) != len(extents) or (
+                set(sections) & set(args.sections) and max(extents) > args.capacity):
+            parser.error('%s must be non-empty, distinct and at most --capacity' % name)
+    for name, starts in (('--cb2-starts', args.cb2_starts), ('--z-starts', args.z_starts)):
+        if not starts or any(not 0 <= start < K_CHUNK for start in starts):
+            parser.error('%s must be non-empty and 0..255' % name)
+    below = k2_family_floor(args.cb2_extents, args.cb2_starts)
+    if 'K2' in args.sections and below:
+        parser.error('--cb2-extents x --cb2-starts: K2\'s family tickets E - 256 + r must start at >= %d (the '
+                     'admission floor: below it the native chunk is 128 keys or less and the rows differ by design); '
+                     'these do not: (E, r) = %s' % (MIN_LIVE_START, below))
     if not args.extents or max(args.extents) > args.capacity or len(set(args.extents)) != len(args.extents):
         parser.error('--extents must be distinct and at most --capacity')
     if not args.starts or any(not 0 <= start < K_CHUNK for start in args.starts):
@@ -1107,9 +1782,13 @@ def check_log(report, text):
     """The factory's lines for every requested program: F4 (probe.missing_programs) and the F22 pairing."""
     lines = card.factory_lines(text)
     report['factory_lines'] = lines
-    for key in probe.missing_programs(lines, report['_requested']):
-        report['failures'].append('factory log: no [QWEN-SDPA] line for flags=0x%x B=%d St=%d mask_width_t=%d '
-                                  '(graft mounted, not executed)' % key)
+    requested = report['_requested']
+    by = getattr(requested, 'by', {})
+    for key in probe.missing_programs(lines, requested):
+        sections = by.get(key, {None})                  # an unknown requester: global (it voids K2 too)
+        where = '' if None in sections else ' [%s]' % ','.join(sorted(sections, key=RUN_ORDER.index))
+        report['failures'].append('factory log%s: no [QWEN-SDPA] line for flags=0x%x B=%d St=%d mask_width_t=%d '
+                                  '(graft mounted, not executed)' % ((where,) + tuple(key)))
     events = extent_lines(text)
     report['extent_lines'] = [fields for kind, fields in events if kind == 'F22']
     for problem in extent_line_problems(events):
@@ -1134,7 +1813,23 @@ def main(argv=None):
                   predictions=probe.split_predictions(args.extents, args.capacity, [3, 2, 1]),
                   not_run=dict(NOT_RUN), env={name: os.environ.get(name) for name in ENV_RECORDED},
                   watchdog=args.watchdog, failures=[], warnings=[], comparisons=[], liveness=[])
-    report['_requested'] = set()
+    if set(CB2A_SECTIONS) & set(args.sections):
+        tickets = (k2_tickets(args.k2_sweep, args.k2_floor, args.cb2_extents, args.cb2_starts)
+                   if 'K2' in args.sections else [])
+        report['cb2a'] = dict(
+            k2_sweep=list(args.k2_sweep), k2_floor=list(args.k2_floor) if args.k2_floor else None,
+            cb2_extents=args.cb2_extents, cb2_starts=args.cb2_starts, z_families=args.z_families,
+            z_starts=args.z_starts, output_memory=args.output_memory, min_live_start=MIN_LIVE_START,
+            served=dict(flags='0x%x' % SERVED_FLAGS, compile_flags='0x%x' % COMPILE_FLAGS, rows=SERVED_ROWS,
+                        batch=SERVED_BATCH, offsets=list(SERVED_OFFSETS), k_chunk_size=K_CHUNK),
+            k2_tickets={kind: sum(1 for ticket in tickets if ticket['kind'] == kind)
+                        for kind in ('sweep', 'family', 'floor')} if 'K2' in args.sections else None)
+    if 'K2' in args.sections:
+        report['native_decode'] = dict(NATIVE_DECODE)
+        report['unverified'] = list(UNVERIFIED)
+        for line in native_decode_lines():
+            print(line, flush=True)
+    report['_requested'] = RequestLog()
     native = card.NativeLog(args.out.with_name(args.out.name + '.native.log'))
     args.out.parent.mkdir(parents=True, exist_ok=True)
 

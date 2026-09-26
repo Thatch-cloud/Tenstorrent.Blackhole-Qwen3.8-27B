@@ -17,6 +17,32 @@
 #   K64J_CARD_DRY_RUN=1 bash run_card_b.sh   # print the launch argv and exit: no node resolution, no holder check,
 #                                         # no docker, nothing launched (the graft is checked when it exists)
 #
+# CB2a (s2-design.md W10a, 6.2: K2, X7 and Z, opt-in by --sections), watcher pass first:
+#   WATCHER=1 CARD_B_ARGS="--sections K2,X7,Z" bash run_card_b.sh
+#                                         # the watcher defaults above plus CB2a's reduced set: K2 tickets 232..263
+#                                         # (families 256 and 512 and the cap), floor 120..127, families 2,304 and
+#                                         # 131,328 at +0 / +240 / +255, Z at 256 / 512 / 2,304 / 3,840; all K2 rows
+#                                         # equal reads k2_verdict=REDUCED-PASS k2_coverage=38/1980 (never the
+#                                         # policy's PASS); a K2 FAIL decides at any coverage
+#   CARD_B_ARGS="--sections K2,X7,Z --seeds 0,1,2,3,4 --variants normal,peaky --no-timing" bash run_card_b.sh
+#                                         # the full pass: K2 every ticket 128..300 and the five families, X7, and Z
+#                                         # at all 15 stale-writer families; K2 decides the exactness policy
+#                                         # (k2_verdict=PASS only with k2_coverage=1980/1980)
+#
+# ON CARD M (card B is taken by other work): the same runner, by hand on the rig. The card-B CI job
+# (qwen-card-b.yml) cannot do it: it always sets QUAL_CARD to card B and refuses QUAL_CARD and ALLOW_SERVING_CARD
+# in its job file. Two variables select card M, both required:
+#   QUAL_CARD=blackhole-CEF5729692C19E6D   card M's board id (the target is resolved by board id, never a node number)
+#   ALLOW_SERVING_CARD=1                   lifts the serving-pair refusal, with a loud warning
+# e.g. QUAL_CARD=blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 WATCHER=1 CARD_B_ARGS="--sections K2,X7,Z"
+#      KOPGRAFT64=... EXPECT_TTNNCPP_SHA256=... bash run_card_b.sh
+# Nothing else changes: the node resolved by board id and rechecked right before the launch, one --device (card M's
+# node), the holder check (fuser on card M's node; and, card M being a serving card, ANY container that can reach
+# ANY Tenstorrent device refuses the launch - a --privileged one, a CI gate arm, or the card-B agent's container),
+# the per-call watchdog, the container timeout and the deadline. Results go to ~/kwork64/k64j/card-m, the container
+# is qwen-k64j-card-card-m, and a hang's hint resets card M and card A TOGETHER (the Ethernet-linked pair). Check gh
+# run list for the qwen-two-p150a-exclusive group before and after.
+#
 # Before anything is launched the graft must verify against its MANIFEST.sha256, its _ttnncpp.so must be
 # EXPECT_TTNNCPP_SHA256 (REQUIRED for a real run: K64j's sha is the K64J_TTNNCPP_SHA256 line build_k64j.sh prints)
 # and carry the F22 literal '[QWEN-SDPA] runtime-extent entries=', its four qwen decode kernels must be K64j's
@@ -424,7 +450,8 @@ if [ "${WATCHER:-}" = "1" ]; then
   timeout_s=2700
   args+=(--extents 2304,33024 --seeds 0 --variants normal --combos G4B3:0x21,G4B3:0x23,G8B2:0x27
          --trace-combos G4B3:0x21,G8B2:0x27 --trace-families 8 --trace-references 2 --no-timing
-         --watchdog "${WATCHDOG_S:-120}")
+         --k2-sweep 232:263 --k2-floor 120:127 --cb2-extents 2304,131328 --cb2-starts 0,240,255
+         --z-families 256,512,2304,3840 --watchdog "${WATCHDOG_S:-120}")
   WM=(-e TT_METAL_WATCHER=5 --mount "type=bind,src=$R/watcher-$stamp,dst=/opt/tt-metal/generated/watcher")
   if [ "$DRY" != 1 ]; then
     mkdir -p "$R/watcher-$stamp"
