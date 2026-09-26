@@ -494,9 +494,14 @@ class GuardTests(unittest.TestCase):
                 profile, environ, logged, hooks, launched = boot_api_server(
                     name, platform_argv=['--kv-transfer-config', '{}'])
                 self.assertEqual(profile['name'], name)
-                # only the request contract's hook, where the profile has one - as before G1
-                self.assertEqual([hook.name for hook in hooks],
-                                 [contract.INPUT_PROCESSOR] if profile.get('request_contract', True) else [])
+                # only the request contract's hook, where the profile has one - as before G1 - and S1's
+                # parser M hook where the profile asks for it (c2, c2-gate): neither is a prefix hook
+                expected = [contract.INPUT_PROCESSOR] if profile.get('request_contract', True) else []
+                if contract.parser_rechunk(profile):
+                    import c2_parser_rechunk
+
+                    expected.append(c2_parser_rechunk.MODULE)
+                self.assertEqual(sorted(hook.name for hook in hooks), sorted(expected))
                 self.assertFalse(any(line.startswith(('prefix:', 'metrics')) or 'prefix reuse' in line or 'salt' in line
                                      for line in logged), logged)
                 self.assertNotIn(contract.PREFIX_SWITCH, environ)

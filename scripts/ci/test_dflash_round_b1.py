@@ -1026,8 +1026,10 @@ class HistoryWriteTests(unittest.TestCase):
                 self.assertEqual(on_device.kv_history.prepare.call_args.kwargs, dict(position=100))
 
     def test_every_state_that_might_read_the_history_keeps_the_write(self):
+        # The ramp (history_rows < 2048) is not among them any more: under C7 it skips the write
+        # too, flag on or off (test_dflash_ramp_history); unfused here is the steady state.
         states = dict(audit=dict(progress=lambda *a, **k: None), no_cache=dict(kv_history=None),
-                      eager=dict(capture=False), ramp=dict(history_rows=50), unfused=dict(fused=False))
+                      eager=dict(capture=False), unfused=dict(fused=False))
         for label, options in states.items():
             with self.subTest(state=label):
                 off = recorded_publication(False, **dict(options))

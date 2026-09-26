@@ -1603,7 +1603,43 @@ def without_any_request(lines):
             or not code[2].startswith("raise ValueError('QWEN_FAST_ANY_REQUEST=1 needs")
             or not all(value.startswith("'") for value in code[3:-1]) or code[-1] != 'attach_source_check()'):
         raise AssertionError('The C2-any attach hunk holds more than its guard: %r' % (code,))
-    return lines[:starts[0]] + lines[ends[0] + 1:]
+    return without_no_block(lines[:starts[0]] + lines[ends[0] + 1:])
+
+
+def cut_once(lines, first, last, replacement=()):
+    """lines less the one run from the line equal (stripped) to `first` through the next equal to
+    `last`, with `replacement` in its place; exactly one such run, or AssertionError."""
+    starts = [index for index, value in enumerate(lines) if value.strip() == first]
+    if len(starts) != 1:
+        raise AssertionError('%r is not in serving_runtime.py exactly once' % first)
+    ends = [index for index in range(starts[0], len(lines)) if lines[index].strip() == last]
+    if not ends:
+        raise AssertionError('%r has no %r after it' % (first, last))
+    return lines[:starts[0]] + list(replacement) + lines[ends[0] + 1:]
+
+
+def without_no_block(lines):
+    """serving_runtime.py less C2-any's no-block changes, which landed after the attach hunk (runs
+    36218104858 and 36219636175): C2_ANY_SHAPE and c2_any_without_block, its paragraph and branch in
+    register_reader_reason, the sequential-width cap with no block, and its own trim line. Each is
+    cut exactly once and to its known last line, so nothing else is hidden."""
+    lines = cut_once(lines, "C2_ANY_SHAPE = 'C2-any with no packed block'", "C2_ANY_SHAPE = 'C2-any with no packed block'")
+    lines = cut_once(lines, 'def c2_any_without_block(environ=None):',
+                     "return environ.get('QWEN_FAST_ANY_REQUEST') == '1' and environ.get('QWEN_FAST_PACKED_STEP', 'unset') != '1'")
+    lines = cut_once(lines, 'The same holds for C2-any with no packed block (c2_any_without_block, the c2 profile): its',
+                     '')   # the paragraph and the blank line it added before 'The policy is evaluated'
+    lines = cut_once(lines, 'if not met and c2_any_without_block(environ):',
+                     "return (C2_ANY_SHAPE, 'register-epilogue reader on native w_gate_up')")
+    lines = cut_once(lines, '# C2-any with no packed block at all (the c2 profile sets QWEN_FAST_PACKED_STEP=0): its',
+                     'capture_rows = M3_SEQUENTIAL_CAPTURE_ROWS')
+    lines = cut_once(lines, 'if trimmed and no_block_any_request:', 'elif trimmed:', ['        if trimmed:'])
+    # The cuts leave the blank lines around the removed constant and function doubled.
+    collapsed = []
+    for value in lines:
+        if value.strip() == '' and len(collapsed) >= 2 and collapsed[-1].strip() == '' and collapsed[-2].strip() == '':
+            continue
+        collapsed.append(value)
+    return collapsed
 
 
 class ShippingTests(unittest.TestCase):

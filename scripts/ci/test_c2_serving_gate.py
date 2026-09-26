@@ -530,7 +530,9 @@ def any_request_log(requests=4, prompt=60, ladder='[256, 512, 1024, 2048]'):
     """What an engine under QWEN_FAST_ANY_REQUEST=1 logs: the D2 consumer's live line on its first step,
     and one build line per request (serving_request_factory)."""
     lines = ['INFO [PINDIAG] request quarantine installed on vllm_tt_plugin.scheduler.TTScheduler',
-             'INFO ' + driver.QUARANTINE_LIVE]
+             'INFO ' + driver.QUARANTINE_LIVE,
+             'INFO [PINDIAG] one fresh prefill per step installed on vllm_tt_plugin.scheduler.TTScheduler',
+             'INFO ' + driver.ADMISSION_LIVE_PREFIX + 'TTScheduler']
     lines += ['INFO %scmpl-%d: captures <= 4 rows, replay attention and the T16 gate off, budget 16384 of '
               'max_tokens 16384 at position %d, proposal ladder %s' % (driver.ANY_REQUEST_ENGINE, i, prompt, ladder)
               for i in range(requests)]
@@ -725,16 +727,30 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(driver.any_request_check('INFO nothing of it' + chr(10), False), ([], [], []))
         self.assertEqual(driver.any_request_check(None, False), ([], [], []))
 
+    def test_the_one_fresh_prefill_cap_must_have_run_under_the_switch(self):
+        """Run 36211578069: without the cap the TTScheduler batches arrivals and the engine dies."""
+        quarantine_only = 'INFO ' + driver.QUARANTINE_LIVE + chr(10)
+        problems, _, _ = driver.any_request_check(quarantine_only, True)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('one-fresh-prefill cap never ran', problems[0])
+        installed_only = quarantine_only + ('INFO [PINDIAG] one fresh prefill per step installed on '
+                                            'vllm_tt_plugin.scheduler.TTScheduler' + chr(10))
+        self.assertEqual(len(driver.any_request_check(installed_only, True)[0]), 1, 'installed is not live')
+        self.assertEqual(driver.any_request_check(any_request_log(), True)[0], [])
+        leaked = driver.any_request_check('INFO ' + driver.ADMISSION_LIVE_PREFIX + 'TTScheduler' + chr(10), False)
+        self.assertTrue(any('carries C2-any markers' in p for p in leaked[0]), 'exact must never cap')
+
     def test_the_consumer_counts_in_any_class_and_its_class_is_recorded(self):
         """A subclass of the wrapped TTScheduler still runs the inherited wrapper: live, and noted."""
-        problems, _, consumers = driver.any_request_check(
-            'INFO ' + driver.QUARANTINE_LIVE_PREFIX + 'OneInFlightScheduler' + chr(10), True)
+        live = ('INFO ' + driver.QUARANTINE_LIVE_PREFIX + 'OneInFlightScheduler' + chr(10) +
+                'INFO ' + driver.ADMISSION_LIVE_PREFIX + 'OneInFlightScheduler' + chr(10))
+        problems, _, consumers = driver.any_request_check(live, True)
         self.assertEqual((problems, consumers), ([], ['OneInFlightScheduler']))
         texts = ['answer %d ' % i * 50 for i in range(4)]
         same = {'matrix-concurrent': lambda n: matrix_report(texts), 'matrix-solo': lambda n: matrix_report(texts)}
         code, summary, _, lines, _ = self.run_driver(
             ['--profile', 'c2', '--plan', 'matrix', '--lengths', '60,2048,4096,90'], same,
-            default_log='INFO ' + driver.QUARANTINE_LIVE_PREFIX + 'OneInFlightScheduler' + chr(10))
+            default_log=live)
         self.assertEqual(code, 0, lines)
         self.assertEqual(summary['arms']['matrix-solo']['quarantine_consumers'], ['OneInFlightScheduler'])
         self.assertTrue(any('the D2 consumer ran in OneInFlightScheduler, not TTScheduler' in line for line in lines))
@@ -834,12 +850,15 @@ def lifecycle_report(events, alive=True, texts=None, profile='c2', drift=0.0, ph
                                        reason='5 s into its prefill', live=0, phase=phases.get(index, 'prefill'))
         elif kind == 'one':
             stream = dict(text=text[:8], finish_reason='length', completion_tokens=1)
+        elif kind == 'cut256':
+            stream = dict(text=text[:20], finish_reason='length', completion_tokens=256)
         elif kind == 'ignore':
             stream = dict(text=text + ' and on past EOS', finish_reason='length', completion_tokens=2048)
         else:
             stream = dict(text=text, finish_reason='stop', completion_tokens=300, prompt_tokens=100)
         streams.append(stream)
-        comparisons.append(dict(user=index, prompt_sha256=shas[index], max_tokens=1 if kind == 'one' else 2048,
+        comparisons.append(dict(user=index, prompt_sha256=shas[index],
+                                max_tokens=dict(one=1, cut256=256).get(kind, 2048),
                                 ignore_eos=kind == 'ignore'))
     seats = 4 if events else 1
     return dict(streams=streams, comparisons=comparisons, max_tokens=2048, qwen_configuration=dict(QWEN_C2_PROFILE=profile),
@@ -863,6 +882,8 @@ class LifecycleTests(unittest.TestCase):
         drops, edges, solo = options
         self.assertEqual(drops.events['drops'], {0: ('build', 0), 1: ('live', 4), 2: ('live', 3), 3: ('live', 2)})
         self.assertEqual(drops.events['ignore_eos'], [5])
+        # User 4 leaves early so user 3's live=2 drop can fire (run 36222651529 left it NOT_EXERCISED).
+        self.assertEqual(drops.events['max_tokens'], {4: 256})
         barrier = ('barrier', (60, (1, 2, 3)))
         self.assertEqual(edges.events, dict(drops={0: ('prefill', 5.0), 1: barrier, 2: barrier, 3: barrier},
                                             max_tokens={4: 1}, ignore_eos=[]))
@@ -954,10 +975,10 @@ class LifecycleTests(unittest.TestCase):
         texts = ['lifecycle answer %d ' % i * 40 for i in range(6)]
         bad = list(texts)
         bad[5] = 'something else entirely ' * 30
-        reports = {'lifecycle-drops': lambda n: lifecycle_report({1: 'drop'}, texts=bad),
+        reports = {'lifecycle-drops': lambda n: lifecycle_report({1: 'drop', 4: 'cut256'}, texts=bad),
                    'lifecycle-edges': lambda n: lifecycle_report({4: 'one'}),
                    'lifecycle-solo': lambda n: lifecycle_report({}),
-                   'lifecycle-drops-rerun': lambda n: lifecycle_report({1: 'drop'}),
+                   'lifecycle-drops-rerun': lambda n: lifecycle_report({1: 'drop', 4: 'cut256'}),
                    'lifecycle-solo-rerun': lambda n: lifecycle_report({})}
         code, summary, calls, lines, _ = DriverTests().run_driver(['--profile', 'c2', '--plan', 'lifecycle'], reports)
         self.assertEqual([c['arm'] for c in calls], ['lifecycle-drops', 'lifecycle-edges', 'lifecycle-solo',

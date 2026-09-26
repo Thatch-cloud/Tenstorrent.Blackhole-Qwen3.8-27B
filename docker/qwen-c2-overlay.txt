@@ -46,6 +46,9 @@
 scripts/ci/serving_c2_contract.py
 scripts/ci/qwen_c2_profiles.json  /experiment-scripts/ci/qwen_c2_profiles.json  /opt/qwen-c2/profiles.json
 scripts/ci/qwen_c2_boot.py  @purelib/qwen_c2_boot.py
+# R21 fix M: the contract's boot imports it in the API server under the c2 profiles (parser_rechunk)
+# and wraps vLLM's DelegatingParser.parse_delta with it; an image without it fails that boot.
+scripts/ci/c2_parser_rechunk.py
 
 # The fast path's serving policy; the TT plugin carries its own copy.
 scripts/ci/serving_fast_policy.py  /experiment-scripts/ci/serving_fast_policy.py  /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_fast_policy.py
@@ -55,11 +58,21 @@ scripts/ci/packed_verifier.py
 scripts/ci/serving_request_factory.py
 scripts/ci/pooled_attention_replay.py
 
+# The drafter skips its feature-history write through the prefill ramp (history_rows < 2048) under
+# C7 (dflash_device.history_unread), which every any-request engine is in: a short prompt's rounds
+# compiled new slice/concat/pad shapes every round (~1 s each on a cold kernel cache, run 36211578069).
+# P8 lays this file at its base commit; without this line the C2 image ships that version.
+scripts/ci/dflash_device.py
+
 # C2-any (stage 1, the c2 profiles) changes serving_request_factory, serving_runtime and
 # serving_lifecycle together and adds serving_request_quarantine (D2): all of them here, or c2
 # ships half a change (test_c2_overlay_closure).
 scripts/ci/serving_runtime.py
 scripts/ci/serving_request_quarantine.py
+# One fresh prompt per prefill step on the scheduler the engine runs (the TT platform overwrites the
+# fast path's own scheduler_cls): serving_lifecycle installs it beside the quarantine under
+# QWEN_FAST_ANY_REQUEST (run 36211578069).
+scripts/ci/serving_prefill_admission.py
 
 # Stage 1 and 2 of the C2 serving plan change these. Overlaid since before stage 1 landed, so the
 # route was proven before a change depended on it; serving_lifecycle now carries D2 and D4.
@@ -100,3 +113,6 @@ scripts/ci/test_serving_fast_policy.py
 scripts/ci/test_serving_worker_hook.py
 scripts/ci/test_serving_lifecycle.py
 scripts/ci/test_qwen_prefix_metrics.py
+# Fix M against the image's own vLLM parsers and tokenizers (CorpusTests), on its token-id corpus.
+scripts/ci/test_c2_parser_rechunk.py
+scripts/ci/c2_parser_corpus.json

@@ -484,6 +484,22 @@ class PreparedDraftWeights:
             raise ValueError('Shared draft weights closed while lent to %r' % borrowers)
 
 
+def history_unread(device):
+    """C7's condition: a committed K/V cache (kv_history), no audit reporter (progress is None) and
+    a captured proposal (proposal_capture). Under it nothing reads the feature history's content:
+    the single-user trace copies it only without a K/V cache or with a reporter
+    (PreparedDFlashProposal.update), the eager proposal runs only without a captured proposal
+    (DFlashDevice.propose), commit_publication audits the K/V against it only with a reporter,
+    and the packed pair and quad traces take no history at all. So a publication may leave it
+    unwritten and mark it stale (history_stale), which each of those readers refuses. All three
+    are fixed for a request's life once its proposal is captured (serving_request_factory
+    captures it in the engine's before_capture, before the first publication). getattr, as the
+    fused steady branch of _prepare_publication_round_b1 reads them: fixtures stand a bare
+    namespace in for the device."""
+    return (device.kv_history is not None and getattr(device, 'progress', None) is None
+            and getattr(device, 'proposal_capture', None) is not None)
+
+
 class DFlashDevice:
     def __init__(self, operations, model, collectives, layers, projection, selector, features, *, position, progress=None,
                  block_rows=8, proposal_capture=False, max_new_tokens=513, fused_convolution=False, feature_start=0,
@@ -713,6 +729,11 @@ class DFlashDevice:
                     (1, 1, self.history_rows, 5120)))
                 combined = retain(operations.concat([dropped, projected], dim=2))
                 operations.copy(combined, self.spare_history)
+            elif self.history_rows < 2048 and history_unread(self):
+                # C7 in the ramp (_prepare_publication_round_b1's docstring): the committed history
+                # is short of 2048 rows, so the write below would slice, concat, slice and pad at
+                # shapes history_rows sets, new every round. Nothing reads what it writes.
+                self.history_stale = True
             else:
                 valid_history = retain(operations.slice(self.history, (0, 0, 0, 0), (1, 1, self.history_rows, 5120)))
                 combined = retain(operations.concat([valid_history, projected], dim=2))
@@ -773,6 +794,23 @@ class DFlashDevice:
         (DFlashDevice.propose), PreparedDFlashProposal.update's history copy and
         commit_publication's K/V audit.
 
+        C7 in the ramp. Under the same condition (history_unread) the general branch's write is
+        skipped too while the committed history is short of 2048 rows (history_rows < 2048):
+        the prefill ramp of a prompt under 2048 tokens, and the one round that crosses into
+        2048. There the write slices, concats, slices and pads at shapes history_rows sets,
+        which moves every round, so no round reuses the last one's programs: run 36211578069
+        measured 'hist' at ~0.9-1.1 s of a ~1 s round (a 4096-token answer to a 60-token
+        prompt took ten minutes) against ~0.3 ms once history_rows is 2048. That second is
+        program compiles: run 36218104858, on the kernel cache the first run had warmed,
+        served the same prompt at 32.7 tok/s - but a cold cache, a new image or another
+        prompt's (history_rows, prefix) path compiles about four programs a round again.
+        Skipped, the round keeps rows, the pending record (the spare it names, so
+        commit_publication still swaps the pair) and kv_history.prepare exactly as before, and
+        the history is marked stale for good, as in the steady state. prepare_publication
+        skips it alike. The sequential step publishes with fused_steady_state False, so this
+        is the only skip it reaches: at history_rows == 2048 its general branch writes as
+        before, from a history nothing reads.
+
         M0a. When the packed commit installed a split sink (dflash_traced_publish.
         PUBLICATION_SPLITS, serving_packed_step.commit_entry under QWEN_FAST_PACKED_AUDIT),
         the host time of project_features ('proj'), the history write ('hist'),
@@ -808,6 +846,10 @@ class DFlashDevice:
                         (1, 1, self.history_rows, 5120)))
                     combined = retain(operations.concat([dropped, projected], dim=2))
                     operations.copy(combined, self.spare_history)
+            elif self.history_rows < 2048 and history_unread(self):
+                # C7 in the ramp (docstring): no write, the history marked stale; rows, the pending
+                # record and kv_history.prepare below are unchanged.
+                self.history_stale = True
             else:
                 valid_history = retain(operations.slice(self.history, (0, 0, 0, 0), (1, 1, self.history_rows, 5120)))
                 combined = retain(operations.concat([valid_history, projected], dim=2))
@@ -852,8 +894,10 @@ class DFlashDevice:
         self.pending = None
         if self.kv_history is not None and self.progress is not None:
             if getattr(self, 'history_stale', False):
-                # Set only under QWEN_FAST_ROUND_B1 (C7): _prepare_publication_round_b1.
-                raise ValueError('The feature history is stale (QWEN_FAST_ROUND_B1 C7) and cannot be audited')
+                # Set by C7 (history_unread): a publication that skipped the history write -
+                # prepare_publication and its B1 twin in the ramp, the B1 fused steady branch,
+                # fused_commit. Unreachable while C7 holds (progress is None).
+                raise ValueError('The feature history is stale (C7) and cannot be audited')
             self.kv_history.audit(self.history)
 
     def discard_publication(self, publication):
@@ -1067,9 +1111,9 @@ class DFlashDevice:
             self.proposal_calls += 1
             return tokens
         if getattr(self, 'history_stale', False):
-            # Set only under QWEN_FAST_ROUND_B1 (C7): _prepare_publication_round_b1 stopped
-            # writing the history this eager proposal reads.
-            raise ValueError('The feature history is stale (QWEN_FAST_ROUND_B1 C7) and cannot be read')
+            # Set by C7 (history_unread): a publication stopped writing the history this eager
+            # proposal reads. Unreachable while C7 holds (a captured proposal).
+            raise ValueError('The feature history is stale (C7) and cannot be read')
         operations = self.operations
         audit = ProposalAudit(self) if proposal_audit_enabled() else None
         owned, retain = self.temporaries([self.history, self.spare_history, *self.owned])

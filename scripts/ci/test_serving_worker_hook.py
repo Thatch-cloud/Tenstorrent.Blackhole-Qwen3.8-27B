@@ -54,13 +54,18 @@ class WorkerHookTests(unittest.TestCase):
             'sample_tokens': namespace['sample_tokens']})
         worker = actual_worker_type()
         worker.model_runner = bridge.runner
+        original_sampler = bridge.runner.sample_tokens
         hook = FastWorkerHook(worker, bridge, cancelled=lambda: False)
         from vllm.v1.outputs import ModelRunnerOutput
         result = worker.execute_model(scheduled)
         self.assertIsInstance(result, ModelRunnerOutput)
         self.assertEqual(result.sampled_token_ids, [list(range(11, 27))])
-        with self.assertRaises(RuntimeError):
-            worker.sample_tokens(None)
+        original_sampler.assert_not_called()
+        # The pinned worker's sample_tokens reaches the runner's sampler through the hook: a sampler
+        # call belongs to another request's prefill, so it is delegated, not refused (1755097f, which
+        # changed the local twin of this assertion but not this installed-vLLM one).
+        worker.sample_tokens(None)
+        original_sampler.assert_called_once_with(None)
         hook.close()
 
     def test_committed_block_bypasses_baseline_forward_and_sampler(self):

@@ -34,6 +34,14 @@ process match it:
    from (the bring-up check, qwen_prefix_stage bringup).
 6. gate-only profiles (gate_only: true) boot only with QWEN_C2_GATE=1: they exist for a gate and
    must never take traffic.
+7. streaming parsers: C2 commits 3-16 tokens per engine step, so the API server's reasoning and
+   tool-call parsers see multi-token deltas, which they parse differently from one token per step
+   (R21: a real </think> or <tool_call> bound to a later lookalike, whitespace after a tool call).
+   A profile with "parser_rechunk": true (c2, c2-gate) arms c2_parser_rechunk (fix M) in the API
+   server: when vLLM imports vllm.parser.abstract_parser, DelegatingParser.parse_delta is wrapped
+   to feed the parsers one token per sub-delta where that matters and merge the results into one
+   message per step. general, the general-prefix profiles and exact never arm it (general and
+   general-prefix decode one token per step).
 
 Nothing here changes a gate: every step is off unless QWEN_C2_SERVING=1.
 """
@@ -595,6 +603,26 @@ class PostImportHook(object):
         return spec
 
 
+def parser_rechunk(profile):
+    """Whether the profile arms fix M (c2_parser_rechunk); off unless it says true."""
+    value = profile.get('parser_rechunk', False)
+    if value not in (True, False):
+        raise ValueError('parser_rechunk must be true or false, got %r' % (value,))
+    return value
+
+
+def arm_parser_rechunk(profile_name):
+    """Wrap DelegatingParser.parse_delta with fix M when vLLM imports its module. The module is
+    imported here, at boot, so an image without it fails the API server's boot (status 78)
+    instead of serving the c2 profile without M; install refuses a parser that is not vLLM
+    0.25.1's, which fails the server's own import of the parsers."""
+    import c2_parser_rechunk
+
+    sys.meta_path.insert(0, PostImportHook(c2_parser_rechunk.MODULE, c2_parser_rechunk.install))
+    log('profile %s: parser M armed: %s.%s.parse_delta re-chunks multi-token deltas at marker tokens (R21)',
+        profile_name, c2_parser_rechunk.MODULE, c2_parser_rechunk.CLASS)
+
+
 def boot(environ=None, orig_argv=None):
     environ = os.environ if environ is None else environ
     if environ.get('QWEN_C2_SERVING') != '1':
@@ -638,6 +666,8 @@ def boot(environ=None, orig_argv=None):
             counter = salt_counter()
             sys.meta_path.insert(0, PostImportHook(
                 INPUT_PROCESSOR, lambda module: install_salt_policy(module, key, counter)))
+        if parser_rechunk(profile):
+            arm_parser_rechunk(profile['name'])
         if profile.get('request_contract', True) is False:
             log('profile %s: no request contract (the fast path is off)', profile['name'])
             return profile

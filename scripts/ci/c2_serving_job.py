@@ -5,8 +5,9 @@
 prints one key=value line per workflow output (qwen-c2-serving.yml's 'Read the job file' step used
 to parse the file inline; this is that parse, with the gate's keys added, where a CPU test can hold
 it). Refuses (exit 1, the reason on stderr) anything the workflow must not act on: an unknown
-action, a malformed image tag or platform image, a profile the checkout's qwen_c2_profiles.json does
-not define, an unknown gate plan, a prompt length that is not a positive integer.
+action, a malformed image tag, platform image or replay model id, a profile the checkout's
+qwen_c2_profiles.json does not define, an unknown gate plan, a prompt length that is not a positive
+integer.
 
 Keys (every one optional but C2_IMAGE_TAG):
   C2_ACTIONS          ACTIONS, run in the workflow's order (default: status)
@@ -20,6 +21,9 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_GATE_MAX_TOKENS  the matrix's answer budget per user (default 4096)
   C2_GATE_MEMORY_PROMPT  G5's prompt length (default: the profile's largest admitted prompt)
   C2_REPLAY_PROFILE   the profile the replay's container serves (default: the source container's)
+  C2_REPLAY_SERVED_MODEL  the model id the replay's /v1/models must advertise and its requests after
+                      the warmup name, org/name[:tag] (default, rendered empty: c2_platform_replay.py's,
+                      Qwen/Qwen3.8-27B:tt); Qwen/Qwen3.8-27B replays an image without the alias
   C2_PREFIX_PLAN      PREFIX_PLANS for the prefix action (c2_prefix_gate.py), in order (default: bringup)
   C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
@@ -51,6 +55,8 @@ PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qwen_c2_pro
 TAG = re.compile(r'[0-9a-z.-]{3,40}')
 PLATFORM_IMAGE = re.compile(r'[0-9a-z.:/@_-]{10,200}')
 PROFILE_NAME = re.compile(r'[a-z0-9_-]{1,40}')
+# A Hugging Face style id, org/name, and an optional deployment tag: Qwen/Qwen3.8-27B, Qwen/Qwen3.8-27B:tt.
+MODEL_ID = re.compile(r'[0-9A-Za-z._-]{1,96}/[0-9A-Za-z._-]{1,96}(?::[0-9A-Za-z._-]{1,40})?')
 
 
 class JobError(ValueError):
@@ -115,11 +121,15 @@ def read_job(values, profiles):
     replay_profile = values.get('C2_REPLAY_PROFILE', '')
     if replay_profile and replay_profile not in profiles:
         raise JobError('C2_REPLAY_PROFILE %r is not a profile of qwen_c2_profiles.json' % replay_profile)
+    replay_served_model = values.get('C2_REPLAY_SERVED_MODEL', '')
+    if replay_served_model and not MODEL_ID.fullmatch(replay_served_model):
+        raise JobError('C2_REPLAY_SERVED_MODEL must match %s, got %r' % (MODEL_ID.pattern, replay_served_model))
     prefix = read_prefix(values, profiles, 'prefix' in actions)
     outputs = dict(actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
-                   gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile)
+                   gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,
+                   replay_served_model=replay_served_model)
     outputs.update(prefix)
     return outputs
 
