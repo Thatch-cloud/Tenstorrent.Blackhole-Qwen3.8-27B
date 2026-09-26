@@ -15,7 +15,8 @@ name: Qwen C2 serving image
 #            never fails the job - the build's G1 enforces
 #   probe  - the prefix-reuse P0a probe (scripts/ci/prefix_p0a_probe.py) inside
 #            tt-vllm:qwen38-c2-$C2_IMAGE_TAG, on the CPU: no --device, no network, the model
-#            snapshot read-only; opens no card
+#            snapshot read-only; opens no card. Then the prefix gates' oracle against the same
+#            real scheduler graft (scripts/ci/prefix_oracle_check.py)
 #   smoke  - run it on cards M+A shaped like the node agent's container, then the API smoke
 #            (scripts/ci/c2_serving_smoke.py); the container is always removed
 #   gate   - the m3native gate harness inside the image, in the agent's container shape, serving
@@ -25,6 +26,15 @@ name: Qwen C2 serving image
 #            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile.
 #            The driver refuses plans that do not fit the step's and the job's time left; every gate
 #            container is removed however the step ends
+#   prefix - the prefix-reuse (general-prefix, G1) gates in the agent's container shape
+#            (scripts/ci/c2_prefix_gate.py): C2_PREFIX_PLAN bringup (grants disabled == the baseline
+#            byte for byte, the first hit compiles nothing, the install and platform lines, the anchor
+#            probe), exactness (a real-text agent chain 2.6k -> 60k, every turn cold vs hit in full, the
+#            2047/2048/2049 boundaries and tail-only hits, a changed suffix, an early divergence, a shared
+#            system block; audit and eager arms), lifecycle (arrivals, aborts, a KV flood, a small store,
+#            a tiny pool, reset_prefix_cache, the kill switch, an in-place restart), timing (busy agents in
+#            the metering shape, hit rate from the model's L-Q). Every prefix container is removed however
+#            the step ends, and the kill-switch file only if the gate wrote it
 #   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py)
 #   push   - push it to zot and print the digest
 # (status, platform, unserve, priority and reset are described at their steps.) The job file is
@@ -241,7 +251,7 @@ jobs:
       - name: Prefix-reuse P0a probe in the image (CPU only, no device)
         if: contains(steps.job.outputs.actions, 'probe')
         working-directory: c2
-        timeout-minutes: 25
+        timeout-minutes: 40
         shell: bash
         env:
           TAG: ${{ steps.job.outputs.tag }}
@@ -251,14 +261,25 @@ jobs:
           # 0.25.1 and TT plugin, then G1's prefix scheduler graft (scripts/ci/qwen_prefix_scheduler_patch.py
           # over qwen_prefix_registry.py) driven on the real TTScheduler. The checkout is mounted read-only at /c2; no --device, so
           # it opens no card. Prints PASS/FAIL per check and exits 1 on any FAIL.
+          # Then the prefix gates' oracle (prefix_judge.Oracle) against the same real graft, request by
+          # request (scripts/ci/prefix_oracle_check.py): the hardware gates fail on any Q it did not
+          # predict, so it must be the graft's rules. It drives the image's own overlaid graft when the
+          # image has one (and fails if that differs from the checkout's), and fails on a GOLDEN change.
+          # Both always run; the step fails if either does.
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
           docker image inspect "$image" --format "probe image $image {{.Id}}"
           name="qwen-prefix-p0a-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          trap 'docker rm -f "$name" "$name-oracle" >/dev/null 2>&1 || true' EXIT
+          status=0
           timeout -k 20 1320 docker run --rm --name "$name" --network none --cpus 8 --memory 16g \
             -v /home/thatch/hf-cache/hub:/models:ro -v "$PWD:/c2:ro" \
             --entrypoint python3 "$image" /c2/scripts/ci/prefix_p0a_probe.py 2>&1 \
-            | tee "$RUNNER_TEMP/c2-results/prefix-p0a.log"
+            | tee "$RUNNER_TEMP/c2-results/prefix-p0a.log" || status=$?
+          timeout -k 20 900 docker run --rm --name "$name-oracle" --network none --cpus 8 --memory 16g \
+            -v /home/thatch/hf-cache/hub:/models:ro -v "$PWD:/c2:ro" \
+            --entrypoint python3 "$image" /c2/scripts/ci/prefix_oracle_check.py 2>&1 \
+            | tee "$RUNNER_TEMP/c2-results/prefix-oracle.log" || status=$?
+          exit "$status"
       - name: Smoke on cards M+A
         if: contains(steps.job.outputs.actions, 'smoke')
         working-directory: c2
@@ -384,6 +405,71 @@ jobs:
             [ -f "$log" ] || continue
             echo "=== $log"; grep -F '[QWEN-C2]' "$log" | head -4 || true
             grep -F '[PINDIAG] dram after' "$log" | tail -8 || true
+          done
+          exit "$status"
+      - name: Prefix-reuse gates in the agent's container shape
+        if: contains(steps.job.outputs.actions, 'prefix')
+        working-directory: c2
+        timeout-minutes: 380
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+          PREFIX_PROFILE: ${{ steps.job.outputs.prefix_profile }}
+          PREFIX_PLAN: ${{ steps.job.outputs.prefix_plan }}
+          PREFIX_BASELINE: ${{ steps.job.outputs.prefix_baseline }}
+          PREFIX_AGENTS: ${{ steps.job.outputs.prefix_agents }}
+        run: |
+          set -euo pipefail
+          # TT prefix-reuse design 2.2 (G1): a serving container per arm in the agent's shape, launched
+          # from the platform's argv, driven over its OpenAI API from this host with real-text agent
+          # conversations; the engine's own markers judge every hit against a cold twin.
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          results="$RUNNER_TEMP/c2-results/prefix"
+          docker image inspect "$image" > /dev/null
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to open M+A under it" >&2; exit 1
+          fi
+          # The kill-switch drill writes this file through the container; the gate removes it, and so
+          # does this trap - only when its content says the gate wrote it (an operator's flag stays).
+          flag=/home/thatch/hf-cache/hub/.qwen-c2/prefix-reuse.off
+          cleanup_prefix() {
+            docker ps -a --format '{{.Names}}' | grep '^qwen-c2-prefix-' | xargs -r docker rm -f || true
+            if [ "$(sudo -n cat "$flag" 2>/dev/null)" = qwen-c2-prefix-gate ]; then sudo -n rm -f "$flag" || true; fi
+          }
+          stale=$(docker ps -a --format '{{.Names}}' | grep '^qwen-c2-prefix-' || true)
+          if [ -n "$stale" ]; then
+            echo "removing prefix containers a previous job left: $stale (reset M+A if the next arm wedges)"
+            cleanup_prefix
+          fi
+          trap cleanup_prefix EXIT
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
+          echo "card M $m, card A $a"
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            sudo -n fuser -v "$m" "$a" > "$RUNNER_TEMP/c2-results/prefix-holders.txt" 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s "$RUNNER_TEMP/c2-results/prefix-holders.txt" ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' "$RUNNER_TEMP/c2-results/prefix-holders.txt" | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then echo 'M or A is held; refusing the prefix gate' >&2; cat "$RUNNER_TEMP/c2-results/prefix-holders.txt" >&2; exit 1; fi
+          # What this step (380 min) and the job (600 min, from C2_JOB_STARTED) leave, less margins.
+          step_left=$(( 380 * 60 - 600 ))
+          job_left=$(( 600 * 60 - ($(date +%s) - ${C2_JOB_STARTED:?}) - 900 ))
+          budget=$(( step_left < job_left ? step_left : job_left ))
+          echo "prefix gate budget: $budget s (step $step_left s, job $job_left s)"
+          echo "busy ARC runner pods: $(sudo -n k3s kubectl -n arc-runners get pods --no-headers 2>/dev/null | grep -c Running || true)"
+          status=0
+          python3 scripts/ci/c2_prefix_gate.py --image "$image" --profile "$PREFIX_PROFILE" --plan "$PREFIX_PLAN" \
+            --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" \
+            --results "$results" 2>&1 | tee "$RUNNER_TEMP/c2-results/prefix.log" || status=$?
+          # Read the launched argv (memory read-the-launched-argv) and the graft's install line, per arm.
+          for log in "$results"/*/server.log; do
+            [ -f "$log" ] || continue
+            echo "=== $log"; grep -F '[QWEN-C2]' "$log" | head -4 || true
+            grep -F '[PINDIAG] prefix: install' "$log" | head -2 || true
+            grep -F 'Automatic prefix caching is' "$log" | head -2 || true
           done
           exit "$status"
       - name: Replay the node agent's serving sequence
