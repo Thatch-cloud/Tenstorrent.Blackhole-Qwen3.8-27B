@@ -43,6 +43,32 @@
 # is qwen-k64j-card-card-m, and a hang's hint resets card M and card A TOGETHER (the Ethernet-linked pair). Check gh
 # run list for the qwen-two-p150a-exclusive group before and after.
 #
+# CB2b (s2-design.md W10b, 6.2: R1, S, R2 and R4 through the REAL S2 extent readers): K64J_HARNESS=extent_reader runs
+# extent_reader_card_b.py instead of k64j_card_b.py (K64J_HARNESS=card, the default), with this checkout's scripts/ci
+# mounted read-only at /bench/ci - the code under test; its four pinned sources (attention_mask_replay.py/.cpp,
+# attention_fold_dma.py/.cpp) are checked against their frozen sha256s here, before anything is launched - and
+# QWEN_FAST_SDPA_MODES=tail,share,slice (the image's; the reader adds extent). Report reader-<stamp>.json, container
+# qwen-k64j-reader-<card tag>, verdict line K64J_READER. Everything else (the graft checks, the board, the holder
+# check, the watchdog, the timeouts) is as above. CARD B IS RESERVED for another agent and is this runner's default
+# QUAL_CARD, so CB2b runs on card M only: through the cardm action (.github/c2-serving-job.env), which sets card M
+# itself -
+#   C2_CARDM_HARNESS=optimisation/ttnn-op/k64j/run_card_b.sh
+#   C2_CARDM_ENV=K64J_HARNESS=extent_reader [WATCHER=1] KOPGRAFT64=/home/thatch/opgraft-K64j
+#     EXPECT_TTNNCPP_SHA256=<K64J_TTNNCPP_SHA256>
+#   C2_CARDM_ARGS as CARD_B_ARGS below
+# - or by hand with card M named, as every example here names it (never QUAL_CARD unset). Watcher pass first:
+#   QUAL_CARD=blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 K64J_HARNESS=extent_reader WATCHER=1 bash run_card_b.sh
+#                                         # seed 0, peaky; R1 at words 0 / 32 / 255 on G8B2, G4B3 and G4B1; S; R2 at
+#                                         # the five named families (two assignments, one replay each, with the
+#                                         # tables); R4 with segments 2 and 3 idle (starts 0 and 32) at the first
+#                                         # assignment and at the one holding C; reads scope=reduced (never CB2b's
+#                                         # evidence)
+#   QUAL_CARD=blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 K64J_HARNESS=extent_reader bash run_card_b.sh
+#                                         # the full pass, the harness's defaults (CARD_B_ARGS="--sections R1,S,R2,R4
+#                                         # --seeds 0,1,2 --variants normal,peaky"): 56 families (more than 50)
+#                                         # restaged twice each, four idle patterns; K64J_READER verdict=PASS
+#                                         # scope=full is CB2b's evidence
+#
 # Before anything is launched the graft must verify against its MANIFEST.sha256, its _ttnncpp.so must be
 # EXPECT_TTNNCPP_SHA256 (REQUIRED for a real run: K64j's sha is the K64J_TTNNCPP_SHA256 line build_k64j.sh prints)
 # and carry the F22 literal '[QWEN-SDPA] runtime-extent entries=', its four qwen decode kernels must be K64j's
@@ -55,10 +81,10 @@
 #
 # Env: KOPGRAFT64 (default ~/opgraft-K64j), EXPECT_TTNNCPP_SHA256, IMAGE (default image P8), RESULTS
 # (~/kwork64/k64j/<card tag>), CARD_B_ARGS (extra harness args, appended last, e.g. "--sections X,M --seeds 0"),
-# WATCHER=1, WATCHDOG_S, K64J_CARD_DRY_RUN=1, QUAL_CARD (the target board id under /dev/tenstorrent/by-id; default
-# card B, blackhole-F36F768B9A5CAFA0; card M or card A, the serving pair, is refused unless ALLOW_SERVING_CARD=1,
-# which prints a loud warning). QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 is set as the arm sets it. Every run gets a fresh
-# kernel cache.
+# WATCHER=1, WATCHDOG_S, K64J_CARD_DRY_RUN=1, K64J_HARNESS (card, the default, or extent_reader), QUAL_CARD (the
+# target board id under /dev/tenstorrent/by-id; default card B, blackhole-F36F768B9A5CAFA0; card M or card A, the
+# serving pair, is refused unless ALLOW_SERVING_CARD=1, which prints a loud warning). QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
+# is set as the arm sets it. Every run gets a fresh kernel cache.
 #
 # ON A HANG (the WATCHDOG line and exit 3; exit 1 with 'Timeout (' in the log; or the timeout's 124 / 137): the EXIT
 # trap removes the container. Then reset THE TARGET CARD ONLY with the hint printed below. This script never resets.
@@ -81,6 +107,14 @@ WRITER_ALL=734c90c01c7a7174497133fae9df80110ead55275955faeb566d345bdccb60b8
 COMPUTE_ALL=d24769bdcbb8635f83f5f91a301fe0d89298d38263d4493a39c6d2decb57867f
 DATAFLOW_COMMON=e4623a2254559eaec4450ebfab0f9c5732e02acfe4d8126bd5eeb7efe0fdc608
 RT_ARGS_COMMON=1b52c60d78ada6f08effd326c2ed2407b3a74cf0db2353fadbe51b088610aec8
+# K64J_HARNESS=extent_reader: the scripts/ci sources it loads, and the frozen bytes of the four pinned ones
+# (target_t16_attention_gate.SOURCES at 8c102b20; extent_reader_card_b.PINNED).
+CI_SOURCES='extent_attention_replay.py pooled_attention_replay.py serving_buffer_pool.py attention_head_fold.py
+gdn_multitoken_conv.py attention_mask_replay.py attention_mask_replay.cpp attention_fold_dma.py attention_fold_dma.cpp'
+MASK_PY=3e431742e35a2b94b4a02a60fa334a93a44a471eaefcacd25e52fbafdf03361f
+MASK_CPP=e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8
+FOLD_PY=5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5
+FOLD_CPP=066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9
 
 # >>> qual_card.sh: which board a qualification harness runs on (canonical copy scripts/ci/qual_card.sh)
 # Every single-card harness under optimisation/ttnn-op embeds this block byte for byte (the scripts in
@@ -365,7 +399,15 @@ R=${RESULTS:-$HOME/kwork64/k64j/$QUAL_TAG}
 OPS=/opt/tt-metal/ttnn/cpp/ttnn/operations
 KD=$OPS/transformer/sdpa_decode/device/kernels
 DRY=${K64J_CARD_DRY_RUN:-0}
-name=qwen-k64j-card-$QUAL_TAG
+MAIN=${K64J_HARNESS:-card}
+case $MAIN in
+  card) stem=card; verdict_tag=K64J_CARD ;;
+  extent_reader) stem=reader; verdict_tag=K64J_READER ;;
+  *) echo "refusing: K64J_HARNESS=$MAIN is neither card (k64j_card_b.py) nor extent_reader" \
+       "(extent_reader_card_b.py)" >&2
+     exit 1 ;;
+esac
+name=qwen-k64j-$stem-$QUAL_TAG
 stamp=$(date +%Y%m%dT%H%M%S)
 timeout_s=5400   # N, X (6 combos x 6 extents x 5 starts x 3 seeds), M, K, L, T (two 64-family traces), timing
 
@@ -386,9 +428,31 @@ fi
 
 HARNESS=("$here/k64j_card_b.py" "$probe_dir/probe_k64j_card_b.py" "$probe_dir/split_model.py"
          "$qwen/test_sdpa_decode_qwen_card_m.py" "$qwen/probe_k1_card_b.py")
+if [ "$MAIN" = extent_reader ]; then
+  HARNESS+=("$here/extent_reader_card_b.py")
+fi
 for file in "${HARNESS[@]}"; do
   test -s "$file" || { echo "refusing: $file missing (ship k64j, k64j_probe and sdpa_decode_qwen side by side)" >&2; exit 1; }
 done
+XE=()
+if [ "$MAIN" = extent_reader ]; then
+  # The code under test is this checkout's scripts/ci, mounted read-only; the pinned sources keep their bytes.
+  ci=$(cd "$here/../../../scripts/ci" 2>/dev/null && pwd || echo "$here/../../../scripts/ci")
+  for file in $CI_SOURCES; do
+    test -s "$ci/$file" \
+      || { echo "refusing: $ci/$file missing (the extent reader runs this checkout's scripts/ci)" >&2; exit 1; }
+  done
+  for pair in "attention_mask_replay.py:$MASK_PY" "attention_mask_replay.cpp:$MASK_CPP" \
+              "attention_fold_dma.py:$FOLD_PY" "attention_fold_dma.cpp:$FOLD_CPP"; do
+    got=$(sha256sum "$ci/${pair%%:*}" | cut -c1-64)
+    if [ "$got" != "${pair#*:}" ]; then
+      echo "refusing: $ci/${pair%%:*} is $got, not its frozen ${pair#*:} (a pinned source changed)" >&2
+      exit 1
+    fi
+  done
+  echo "### code under test: $ci (4 pinned sources at their frozen bytes)"
+  XE=(-e QWEN_FAST_SDPA_MODES=tail,share,slice)
+fi
 
 # Graft K64j, checked before anything is launched (in a dry run, only when it exists here).
 if [ "$DRY" = 1 ] && [ ! -e "$G" ]; then
@@ -438,20 +502,28 @@ if [ "$DRY" != 1 ]; then
   chmod 0777 "$R" "$R/kcache-$stamp"
 fi
 
-args=(--out "/results/card-$stamp.json" --expect-binary-sha256 "$EXPECT")
+args=(--out "/results/$stem-$stamp.json" --expect-binary-sha256 "$EXPECT")
 BM=()
 for file in "${HARNESS[@]}"; do
   BM+=(--mount "type=bind,src=$file,dst=/bench/$(basename "$file"),readonly")
 done
+if [ "$MAIN" = extent_reader ]; then
+  BM+=(--mount "type=bind,src=$ci,dst=/bench/ci,readonly")
+fi
 WM=()
 if [ "${WATCHER:-}" = "1" ]; then
   # One pass under the NoC sanitiser over every new program kind (0x21, share, slice) and the trace; timing is
   # meaningless here. CARD_B_ARGS, appended last, can widen it.
   timeout_s=2700
-  args+=(--extents 2304,33024 --seeds 0 --variants normal --combos G4B3:0x21,G4B3:0x23,G8B2:0x27
-         --trace-combos G4B3:0x21,G8B2:0x27 --trace-families 8 --trace-references 2 --no-timing
-         --k2-sweep 232:263 --k2-floor 120:127 --cb2-extents 2304,131328 --cb2-starts 0,240,255
-         --z-families 256,512,2304,3840 --watchdog "${WATCHDOG_S:-120}")
+  if [ "$MAIN" = extent_reader ]; then
+    args+=(--seeds 0 --variants peaky --r1-words 0,32,255 --r2-families 5 --r2-restages 1 --idle-patterns 2+3
+           --watchdog "${WATCHDOG_S:-120}")
+  else
+    args+=(--extents 2304,33024 --seeds 0 --variants normal --combos G4B3:0x21,G4B3:0x23,G8B2:0x27
+           --trace-combos G4B3:0x21,G8B2:0x27 --trace-families 8 --trace-references 2 --no-timing
+           --k2-sweep 232:263 --k2-floor 120:127 --cb2-extents 2304,131328 --cb2-starts 0,240,255
+           --z-families 256,512,2304,3840 --watchdog "${WATCHDOG_S:-120}")
+  fi
   WM=(-e TT_METAL_WATCHER=5 --mount "type=bind,src=$R/watcher-$stamp,dst=/opt/tt-metal/generated/watcher")
   if [ "$DRY" != 1 ]; then
     mkdir -p "$R/watcher-$stamp"
@@ -472,7 +544,11 @@ inner='sha256sum /opt/tt-metal/build_Release/lib/_ttnncpp.so /opt/tt-metal/build
 inner+="$KD/dataflow/reader_decode_qwen.cpp $KD/dataflow/reader_decode_qwen_slice.cpp $KD/compute/sdpa_flash_decode_qwen.cpp "
 inner+="$KD/dataflow/writer_decode_qwen_slice.cpp $KD/dataflow/reader_decode_all.cpp $KD/dataflow/writer_decode_all.cpp "
 inner+="$KD/compute/sdpa_flash_decode.cpp $KD/dataflow/dataflow_common.hpp $KD/rt_args_common.hpp 2>&1; "
-inner+='exec python3 -B /bench/k64j_card_b.py "$@"'
+if [ "$MAIN" = extent_reader ]; then
+  inner+='exec python3 -B /bench/extent_reader_card_b.py "$@"'
+else
+  inner+='exec python3 -B /bench/k64j_card_b.py "$@"'
+fi
 
 argv=(docker run --rm --name "$name" --network none
   --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges
@@ -486,9 +562,11 @@ argv=(docker run --rm --name "$name" --network none
   ${WM[@]+"${WM[@]}"}
   -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/kcache -e OMP_NUM_THREADS=8
   -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
+  ${XE[@]+"${XE[@]}"}
   --entrypoint sh "$IMAGE" -c "$inner"
   card "${args[@]}" ${extra[@]+"${extra[@]}"})
-echo "### k64j-card $stamp card=$QUAL_CARD ($QUAL_TAG) node=$node image=${IMAGE:7:12} graft=$G watcher=${WATCHER:-0}"
+echo "### k64j-card $stamp card=$QUAL_CARD ($QUAL_TAG) node=$node image=${IMAGE:7:12} graft=$G watcher=${WATCHER:-0}" \
+  "harness=$MAIN"
 echo "### argv: $(printf '%q ' "${argv[@]}")"
 if [ "$DRY" = 1 ]; then
   echo "### dry run: nothing launched"
@@ -497,10 +575,10 @@ fi
 qual_card_recheck   # the board is still on the node the holder check cleared
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 set +e   # keep the exit status of the run itself, below
-timeout -k 30 "$timeout_s" "${argv[@]}" 2>&1 | tee "$R/card-$stamp.log"
+timeout -k 30 "$timeout_s" "${argv[@]}" 2>&1 | tee "$R/$stem-$stamp.log"
 status=${PIPESTATUS[0]}
-log=$R/card-$stamp.log
-echo "### exit $status; report $R/card-$stamp.json; native log $R/card-$stamp.json.native.log"
+log=$R/$stem-$stamp.log
+echo "### exit $status; report $R/$stem-$stamp.json; native log $R/$stem-$stamp.json.native.log"
 if [ "${WATCHER:-}" = "1" ]; then
   wlog=$R/watcher-$stamp/watcher.log
   if [ -s "$wlog" ]; then
@@ -510,8 +588,9 @@ if [ "${WATCHER:-}" = "1" ]; then
     echo "### no watcher log at $wlog"
   fi
 fi
-# Anchored: the summary line 'SDPA_K64J_CARD passed=...' comes after the verdict and also contains 'K64J_CARD '.
-echo "### $(grep -E '^K64J_CARD ' "$log" | tail -1 || echo 'no K64J_CARD line')"
+# Anchored: the summary line 'SDPA_K64J_CARD passed=...' comes after the verdict and also contains 'K64J_CARD '
+# (the extent reader's verdict line is K64J_READER's).
+echo "### $(grep -E "^${verdict_tag:-K64J_CARD} " "$log" | tail -1 || echo "no ${verdict_tag:-K64J_CARD} line")"
 # >>> hang: status, log -> hung
 hung=0
 case "$status" in

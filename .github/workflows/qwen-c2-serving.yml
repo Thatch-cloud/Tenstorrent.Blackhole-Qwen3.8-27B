@@ -271,7 +271,8 @@ jobs:
             sudo -n rm -rf "$results" 2>/dev/null || rm -rf "$results" || true
           fi
           ls -la "$out" 2>/dev/null | head -40
-          grep -h -E '^K64J_CARD ' "$out"/*.log 2>/dev/null | tail -2 || true
+          # The verdict line of either K64j harness: k64j_card_b.py's K64J_CARD, extent_reader_card_b.py's K64J_READER.
+          grep -h -E '^K64J_(CARD|READER) ' "$out"/*.log 2>/dev/null | tail -2 || true
       - name: G1 base drift
         if: contains(steps.job.outputs.actions, 'drift')
         working-directory: c2
