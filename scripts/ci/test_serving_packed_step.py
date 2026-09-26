@@ -27,6 +27,9 @@ import verifier_engine
 
 ROWS = 16
 TAPS = ('tap0', 'tap1', 'tap2', 'tap3', 'tap4')
+# The log capture truncates around 250 characters and loguru's prefix takes some (as
+# test_dflash_device_audit.LINE_BUDGET).
+LINE_BUDGET = 180
 
 
 class FakeBlock:
@@ -519,9 +522,12 @@ class PackedStepTests(unittest.TestCase):
         self.assertEqual(request.engine.adopted, [])
 
     def test_a_session_that_refuses_the_narrowing_leaves_the_round_to_refuse_round(self):
-        """A session that cannot narrow (a session type without narrow, or one that refuses the
-        cut) is the residual path too; the entries narrowed before it are failed at their live,
-        narrowed tickets, so no session is left pending."""
+        """A session that cannot narrow (a session type without narrow - an image without S2's
+        greedy_session - or one that refuses the cut) is the residual path too; the entries
+        narrowed before it are failed at their live, narrowed tickets, so no session is left
+        pending. None of them gets a NARROWED_MARKER line: that line counts the narrowed
+        survivors the engine served (M6's "survivor narrowed" check), and A was failed with the
+        round, not served."""
         block = FakeBlock(users=4)
         first = FakeRequest('A', 100, self.stepped)
         second = FakeRequest('B', 3000, self.stepped)
@@ -534,7 +540,8 @@ class PackedStepTests(unittest.TestCase):
             outputs = packed_device_step([entry(first), entry(second)], cancelled=lambda: False, block=block)
         self.assertEqual([(item.request_id, item.token_ids, item.finished) for item in outputs],
                          [('A', (), True), ('B', (), True)])
-        self.assertIn('[PINDIAG] packed survivor narrowed request=A rows=16->4', output.getvalue())
+        self.assertNotIn(serving_packed_step.NARROWED_MARKER, output.getvalue(),
+                         'A was cut, then failed with the round: no narrowed line for it')
         self.assertIn('[PINDIAG] packed survivor narrowing refused request=B rows=16->4 TypeError', output.getvalue())
         self.assertIn('A round the block cannot serve', output.getvalue())
         self.assertEqual((first.session.phase, second.session.phase), ('failed', 'failed'))
@@ -1239,17 +1246,27 @@ class RefusedRoundAbortTests(unittest.TestCase):
         self.block = FakeBlock(users=4)
         self.stepped = []
 
-    def refused_round(self, names='AB'):
+    def owners(self, names, widths, rows=None):
+        """One drafted request per name, bound to the next segment, its engine capturing `widths`
+        (one tuple per name), its ticket `rows` wide (one per name, the block's by default)."""
         owners = []
-        for segment, name in enumerate(names):
+        for segment, (name, captured) in enumerate(zip(names, widths, strict=True)):
             owner = FakeRequest(name, 100 + 1000 * segment, self.stepped)
-            owner.engine.widths = (32,)
+            owner.engine.widths = captured
             self.block.bind(owner.engine, segment)
-            owner.propose(self.block.predictions_for(segment), accept=3)
+            owner.propose(self.block.predictions_for(segment), accept=3, rows=ROWS if rows is None else rows[segment])
             owners.append(owner)
+        return owners
+
+    def run_round(self, owners):
         with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
             outputs = packed_device_step([entry(owner) for owner in owners], cancelled=lambda: False, block=self.block)
-        return owners, outputs, output.getvalue()
+        return outputs, output.getvalue()
+
+    def refused_round(self, names='AB'):
+        owners = self.owners(names, [(32,)] * len(names))
+        outputs, lines = self.run_round(owners)
+        return owners, outputs, lines
 
     def install(self):
         self.quarantine.holder().installed = 'vllm_tt_plugin.scheduler.TTScheduler'
@@ -1264,9 +1281,66 @@ class RefusedRoundAbortTests(unittest.TestCase):
                             pending.values()))
         for owner in owners:
             self.assertEqual((owner.session.phase, owner.session.finished), ('failed', True))
-        self.assertIn('[PINDIAG] packed refused round aborted requests=A,B end FINISHED_ABORTED through the request '
-                      'quarantine, engine kept', lines)
+        self.assertIn('[PINDIAG] packed refused round aborted 1/2 FINISHED_ABORTED via the request quarantine, '
+                      'engine kept: request=A', lines)
+        self.assertIn('[PINDIAG] packed refused round aborted 2/2 FINISHED_ABORTED via the request quarantine, '
+                      'engine kept: request=B', lines)
         self.assertEqual((self.block.calls, self.stepped), ([], []))
+
+    def assert_every_request_aborted(self, owners, outputs):
+        """Every request of the round refused, registered with the quarantine and its session
+        finished - a failed, unfinished one is drafted again and kills the engine (VR4 finding 2)."""
+        names = [owner.session.request_id for owner in owners]
+        self.assertEqual([(output.request_id, output.token_ids, output.finished, output.cancelled)
+                          for output in outputs], [(name, (), True, True) for name in names])
+        self.assertEqual(sorted(self.quarantine.holder().pending), sorted(names))
+        for owner in owners:
+            self.assertEqual((owner.session.request_id, owner.session.phase, owner.session.finished),
+                             (owner.session.request_id, 'failed', True))
+
+    def test_a_mixed_round_registers_and_finishes_its_servable_request_too(self):
+        """A refused round is refused whole: B's own engine serves its ticket, but A's has no
+        width up to it, so fail_round fails B's session with A's - and B must end through the
+        quarantine like A, not only the unservable one."""
+        self.install()
+        owners = self.owners('AB', [(32,), (1, 2, 4, 8, 16)])
+        self.assertTrue(owners[1].engine.serves(owners[1].session.pending), "B's own engine serves its ticket")
+        outputs, lines = self.run_round(owners)
+        self.assert_every_request_aborted(owners, outputs)
+        self.assertEqual(lines.count(serving_packed_step.ABORTED_MARKER), 2)
+        self.assertEqual((self.block.calls, self.stepped), ([], []))
+
+    def test_a_partially_narrowed_round_registers_and_finishes_the_request_already_cut(self):
+        """A is cut to 4 rows, then B's session refuses its cut: refuse_round fails the round at
+        A's narrowed ticket and B's drafted one, and both must end through the quarantine - not
+        only the request whose ticket is still the drafted width."""
+        self.install()
+        owners = self.owners('AB', [(1, 2, 4)] * 2)
+        owners[1].session.narrow = None
+        outputs, lines = self.run_round(owners)
+        self.assertEqual([len(owner.session.pending.tokens) for owner in owners], [4, ROWS], 'A was cut, B was not')
+        self.assert_every_request_aborted(owners, outputs)
+        self.assertNotIn(serving_packed_step.NARROWED_MARKER, lines)
+        self.assertEqual(lines.count(serving_packed_step.ABORTED_MARKER), 2)
+
+    def test_each_aborted_request_gets_its_own_line_within_the_log_budget(self):
+        """Four vLLM-length request ids on one line ran past the log capture's ~250 characters
+        before loguru's prefix, cutting the later ids and the tail. One line per request, its id
+        (cut to 48, as every line here cuts it) last, each within LINE_BUDGET. A 3->4-live
+        transition round: D's stale ticket is narrower than the block's, no engine captures any
+        width up to either, so the whole round of four is refused."""
+        self.install()
+        names = ['chatcmpl-%032x-%08x' % (index, index) for index in range(4)]
+        self.assertEqual({len(name) for name in names}, {50})
+        owners = self.owners(names, [(32,)] * 4, rows=(ROWS, ROWS, ROWS, 8))
+        outputs, lines = self.run_round(owners)
+        self.assert_every_request_aborted(owners, outputs)
+        aborted = [line for line in lines.splitlines() if line.startswith(serving_packed_step.ABORTED_MARKER)]
+        self.assertEqual(len(aborted), 4, lines)
+        for index, (line, name) in enumerate(zip(aborted, names, strict=True), 1):
+            self.assertLessEqual(len(line), LINE_BUDGET, line)
+            self.assertIn(' %d/4 FINISHED_ABORTED ' % index, line)
+            self.assertTrue(line.endswith(' request=' + name[:48]), line)
 
     def test_the_drafts_before_the_scheduler_aborts_them_skip_the_aborted_requests(self):
         """Between this step and update_from_output's abort, the next round is drafted (inside

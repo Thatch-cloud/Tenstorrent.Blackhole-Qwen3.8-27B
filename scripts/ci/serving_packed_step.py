@@ -458,11 +458,14 @@ def kv_shared_at_proposal(requests, block):
 def kv_shared(entries, block):
     """`kv_guard` over the round's tickets, at the step: the backstop behind proposal_rows.
     Beside the 64-row block (the only one that chains) the per-request engines capture only
-    the sequential widths (1, 2, 4), so the round's 16-row tickets have no capture anywhere:
-    packed_device_step then refuses the round (`unservable`, `refuse_round` - every request
-    fails, nothing is written). A conflict here means the tables changed between the
-    drafting and the step in a way vLLM's disjoint, append-only allocation does not produce;
-    KV_SHARED fails the gated arm either way."""
+    the sequential widths (1, 2, 4), so the round's 16-row tickets have no capture of their
+    own: packed_device_step then cuts each to the widest width its engine serves and hands
+    the round to the sequential step, the block never touched (`unservable`, `narrow_round`,
+    S2 D1). Only a ticket nothing narrower serves still refuses the round (`refuse_round` -
+    every request fails, nothing is written; under the D2 request quarantine each then ends
+    FINISHED_ABORTED, S2 W5b). A conflict here means the tables changed between the drafting
+    and the step in a way vLLM's disjoint, append-only allocation does not produce; KV_SHARED
+    fails the gated arm either way."""
     import verify_trace_t2
 
     reason = kv_guard([(entry['request'].engine, entry['ticket'].position) for entry in entries], block)
@@ -944,17 +947,26 @@ def fences_fields(metrics, block, segments):
                 write_ms='%.2f' % float(prestage.get('write_ms', 0.0)))
 
 
-# S2 D1 (design section 4, W5a/W5b): survivor narrowing and the abort of a refused round. Defined
-# here, at the end, like PUBLISH_SPLIT_LINE, so the lines above keep their numbers.
+# S2 D1 (design section 4, W5a/W5b): survivor narrowing and the abort of a refused round, defined
+# here at the end beside PUBLISH_SPLIT_LINE. Unlike that one, S2 did NOT keep the lines above at
+# their numbers: the module docstring's S2 paragraph (from :33), the SimpleNamespace import and the
+# narrowing branches in packed_device_step, packed_device_rounds and refuse_round shift every line
+# after them, so match a [PACKED*] line's loguru prefix, or a traceback, against the source the
+# image actually carries, never a pre-S2 copy.
 #
-# One NARROWED_MARKER line per request whose ticket was cut, from inside the step (so a count of
-# them is the count of narrowed survivors the engine actually served); NARROWING_REFUSED_MARKER when
-# a ticket could not be cut and the round went to refuse_round; ABORTED_MARKER when refuse_round
-# ended its requests through the D2 request quarantine. Short: the log capture truncates around
-# 250 characters.
+# One NARROWED_MARKER line per request whose ticket was cut, written only once every cut the round
+# needed has succeeded and the round goes to the sequential step - so a count of them is the count
+# of narrowed survivors the engine actually served, never one that refuse_round then failed (M6's
+# "survivor narrowed" check); NARROWING_REFUSED_MARKER when a ticket could not be cut and the round
+# went to refuse_round; one ABORTED_LINE per request refuse_round ended through the D2 request
+# quarantine. The log capture truncates around 250 characters and loguru's prefix takes some:
+# ABORTED_LINE stays within 180 for any request id (cut to 48 as everywhere here), its id last;
+# the other two carry their free text (the reason, the failure) last, so a cut loses only that.
 NARROWED_MARKER = '[PINDIAG] packed survivor narrowed'
 NARROWING_REFUSED_MARKER = '[PINDIAG] packed survivor narrowing refused'
 ABORTED_MARKER = '[PINDIAG] packed refused round aborted'
+ABORTED_LINE = (ABORTED_MARKER + ' {index}/{count} FINISHED_ABORTED via the request quarantine, engine kept: '
+                'request={request}')
 NARROW_WIDTHS = (32, 16, 8, 4, 2, 1)
 
 
@@ -994,7 +1006,8 @@ def narrow_round(entries, reason):
     (entries, why) when one cannot be cut: every width is planned before any session changes, so
     then nothing was narrowed, unless a session refused midway, whose entries narrowed before it are
     returned with their live tickets for refuse_round to fail. An entry already servable (or whose
-    engine has no serves contract) keeps its ticket."""
+    engine has no serves contract) keeps its ticket. The NARROWED_MARKER lines are written only on
+    (entries, None): an entry cut before a later one refused is failed with the round, not served."""
     widths = []
     for entry in entries:
         engine, ticket = entry['request'].engine, entry['ticket']
@@ -1009,7 +1022,7 @@ def narrow_round(entries, reason):
             step_log('%s %s' % (NARROWING_REFUSED_MARKER, why))
             return entries, why
         widths.append(width)
-    narrowed = list(entries)
+    narrowed, lines = list(entries), []
     for index, (entry, width) in enumerate(zip(entries, widths)):
         if width is None:
             continue
@@ -1020,10 +1033,14 @@ def narrow_round(entries, reason):
             why = 'request=%s rows=%d->%d %s: %s' % (str(entry['request_id'])[:48], rows, width,
                                                      type(failure).__name__, str(failure)[:80])
             step_log('%s %s' % (NARROWING_REFUSED_MARKER, why))
+            # the entries already cut go to refuse_round with the rest: none is served, so the
+            # NARROWED_MARKER lines buffered for them are dropped
             return narrowed, why
         narrowed[index] = dict(entry, ticket=ticket)
-        step_log('%s request=%s rows=%d->%d reason=%s' % (NARROWED_MARKER, str(entry['request_id'])[:48], rows,
-                                                          width, str(reason).replace(' ', '_')[:120]))
+        lines.append('%s request=%s rows=%d->%d reason=%s' % (NARROWED_MARKER, str(entry['request_id'])[:48], rows,
+                                                              width, str(reason).replace(' ', '_')[:120]))
+    for line in lines:
+        step_log(line)
     return narrowed, None
 
 
@@ -1041,7 +1058,9 @@ def abort_refused(entries, reason):
     Only when the quarantine's consumer is installed in this process (QWEN_FAST_ANY_REQUEST's
     serving_lifecycle installs it on the scheduler class the engine runs). Without it - the exact
     profile, any image without the module, a non-string request id - nothing is registered or
-    marked and refuse_round is exactly what it was. Returns the request ids registered."""
+    marked and refuse_round is exactly what it was. Otherwise EVERY request of the round is
+    registered and marked - the servable, the narrowed and the unservable alike, since fail_round
+    failed each one's session - with one ABORTED_LINE each. Returns the request ids registered."""
     try:
         import serving_request_quarantine as quarantine
     except ImportError:
@@ -1052,9 +1071,8 @@ def abort_refused(entries, reason):
     ids = [entry['request_id'] for entry in entries]
     if not ids or any(not isinstance(request_id, str) or not request_id for request_id in ids):
         return ()
-    for entry in entries:
+    for index, entry in enumerate(entries, 1):
         quarantine.register(entry['request_id'], 'packed round refused: %s' % str(reason)[:200])
         entry['request'].session.finished = True
-    step_log('%s requests=%s end FINISHED_ABORTED through the request quarantine, engine kept' % (
-        ABORTED_MARKER, ','.join(request_id[:48] for request_id in ids)))
+        step_log(ABORTED_LINE.format(index=index, count=len(entries), request=entry['request_id'][:48]))
     return tuple(ids)
