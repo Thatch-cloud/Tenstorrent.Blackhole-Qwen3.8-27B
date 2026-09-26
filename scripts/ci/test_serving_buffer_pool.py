@@ -14,8 +14,8 @@ import torch
 import dflash_device
 from dflash_device import DFlashDevice, PreparedDraftWeights, pindiag
 from pooled_attention_replay import bundle_batches, family_capacities
-from serving_buffer_pool import (DRAFT_LAYERS, GDN_LAYERS, HISTORY_SHAPE, KV_SHAPE, QUERY_SHAPE, ServingBufferPool,
-                                 bank_tensors, snapshot_tensors, tensor_bytes)
+from serving_buffer_pool import (DRAFT_LAYERS, GDN_LAYERS, HISTORY_SHAPE, KV_SHAPE, QUERY_SHAPE, PackedExtentStorage,
+                                 ServingBufferPool, bank_tensors, extent_bundle_batches, snapshot_tensors, tensor_bytes)
 
 # A slot: the history pair plus, per draft layer, active and spare k and v.
 SLOT_TENSORS = 2 + 4 * DRAFT_LAYERS
@@ -80,9 +80,9 @@ class FakeShard:
 
 
 class FakeTensor:
-    def __init__(self, shape, shards, dtype=None, layout=None, mapper=None):
+    def __init__(self, shape, shards, dtype=None, layout=None, mapper=None, memory=None):
         self.shape, self.shards = tuple(shape), shards
-        self.dtype, self.layout, self.mapper = dtype, layout, mapper
+        self.dtype, self.layout, self.mapper, self.memory = dtype, layout, mapper, memory
 
 
 class FakeOperations:
@@ -108,7 +108,7 @@ class FakeOperations:
 
     def from_torch(self, value, **options):
         return self.allocate(value.shape, dtype=options.get('dtype'), layout=options.get('layout'),
-                             mapper=options.get('mesh_mapper'))
+                             mapper=options.get('mesh_mapper'), memory=options.get('memory_config'))
 
     def zeros_like(self, tensor):
         self.zeros_like_calls += 1
@@ -761,6 +761,148 @@ class PackedReplayTableTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'without the GDN helpers'):
             ServingBufferPool(operations, 'mesh', users=2, packed_replay_group_rows=8)
         self.assertEqual(operations.live, [])
+
+
+def extent_pool(operations, users=1, **overrides):
+    """The S2 pool: the M3 shape at eight-row groups, a sequential capture width only. One slot and one
+    narrow bucket: the pool's overlap check is quadratic in its tensors."""
+    options = dict(bucket_rows=(1,), packed_shapes=((4, 16),), packed_replay_group_rows=8, extent_replay=True)
+    options.update(overrides)
+    return verifier_pool(operations, users=users, **options)
+
+
+class PackedExtentStorageTests(unittest.TestCase):
+    """S2 W2 (QWEN_FAST_EXTENT_REPLAY): the extent readers' lent storage - per packed user, per bundle of
+    the extent layout, one full-width table and one cur_pos - allocated before any trace, lent once,
+    and nothing per family."""
+
+    def test_each_user_borrows_one_full_width_table_and_one_cur_pos_per_bundle_in_f20_s_geometry(self):
+        operations = FakeOperations()
+        pool = extent_pool(operations)
+        self.assertEqual((pool.extent_replay, pool.replay_capacities, pool.packed), (True, (68 * 64,), {}))
+        storage = pool.packed_extent(4, 16)
+        self.assertIsInstance(storage, PackedExtentStorage)
+        self.assertEqual((storage.users, storage.rows, storage.taken), (4, 16, False))
+        for user in range(4):
+            # G8B2: one bundle of two eight-row groups per sixteen-row user.
+            ((table,), (positions,)) = storage.tables[user], storage.cur_pos[user]
+            self.assertEqual((table.shape, positions.shape), ((2, 68), (2,)))
+            for value in (table, positions):
+                self.assertEqual((value.dtype, value.layout, value.mapper, value.memory),
+                                 ('int32', 'row_major', ('replicate', 'mesh'), 'dram'))
+            # K64j F20: int32 row-major, interleaved, padded_shape[-1] == B.
+            self.assertEqual(positions.shape[-1], table.shape[0])
+            self.assertEqual(storage.segment_storage()[user], ((table, positions),))
+        self.assertEqual(storage.tensors, tuple(tensor for user in range(4) for pair in storage.segment_storage()[user]
+                                                for tensor in pair))
+        # Pool-owned, allocated with the pool, on independent chip storage.
+        self.assertTrue(all(any(value is owned for owned in pool.owned) for value in storage.tensors))
+        for chip in range(2):
+            chip_addresses = [value.shards[chip].address for value in pool.owned]
+            self.assertEqual(len(set(chip_addresses)), len(chip_addresses))
+        # Not in any slot, and a slot loan zeroes none of it (the reader stages it at construction).
+        self.assertFalse(any(any(value is entry for entry in slot.tensors) for slot in pool.slots for value in storage.tensors))
+        pool.acquire()
+        self.assertFalse(any(value is filled for filled, zero in operations.fills for value in storage.tensors))
+
+    def test_the_layout_follows_the_packed_group_width(self):
+        self.assertEqual([extent_bundle_batches(rows, 8) for rows in (8, 16, 32)], [(1,), (2,), (3, 1)])
+        self.assertEqual([extent_bundle_batches(rows, 4) for rows in (8, 16, 32)], [(2,), (3, 1), (3, 3, 2)])
+        pool = extent_pool(FakeOperations(), packed_replay_group_rows=4)
+        storage = pool.packed_extent(4, 16)
+        for user in range(4):
+            self.assertEqual([value.shape for value in storage.tables[user]], [(3, 68), (1, 68)])
+            self.assertEqual([value.shape for value in storage.cur_pos[user]], [(3,), (1,)])
+
+    def test_the_storage_is_lent_once_and_replicas_are_independent(self):
+        pool = extent_pool(FakeOperations(), packed_replicas={(4, 16): 2})
+        first = pool.packed_extent(4, 16)
+        self.assertIs(first.take(), first)
+        with self.assertRaisesRegex(ValueError, 'already lent'):
+            first.take()
+        second = pool.packed_extent(4, 16)
+        self.assertIsNot(second, first)
+        second.take()
+        self.assertFalse({id(value) for value in first.tensors} & {id(value) for value in second.tensors})
+        with self.assertRaisesRegex(ValueError, 'already lent'):
+            pool.packed_extent(4, 16).take()
+        first.release()
+        self.assertIs(pool.packed_extent(4, 16), first)
+        with self.assertRaisesRegex(ValueError, r'shapes \[\(4, 16\)\]; \(2, 16\) was asked for'):
+            pool.packed_extent(2, 16)
+
+    def test_no_family_but_c_and_no_replay_width_under_extent(self):
+        operations = FakeOperations()
+        pool = extent_pool(operations)
+        self.assertEqual(pool.replay_capacities, (4352,))
+        for bucket in pool.slots[0].verifier.buckets:
+            self.assertEqual((bucket.batch.replay_pages, bucket.replay_tables()), ({}, ()))
+        with self.assertRaisesRegex(ValueError, 'extent storage .extent_replay. and no per-family'):
+            pool.packed_replay(4, 16)
+        self.assertEqual(extent_pool(FakeOperations(), replay_capacities=(4352,)).replay_capacities, (4352,))
+        # page width 2052 (C = 131328) needs no validate_ticket family: the readers never ask it.
+        self.assertEqual(extent_pool(FakeOperations(), users=1, packed_shapes=((2, 16),), page_width=2052).replay_capacities,
+                         (131328,))
+        refusals = {'another family': (dict(replay_capacities=(4096,)), 'at C = 4352 only'),
+                    'every family': (dict(replay_capacities=(4096, 4352)), 'at C = 4352 only'),
+                    'a replay-width capture': (dict(bucket_rows=(1, 2, 4, 8)), 'replay width'),
+                    'a partial family': (dict(page_width=66), 'whole 256-key families'),
+                    'a truthy int': (dict(extent_replay=1), 'explicit bool')}
+        for name, (overrides, message) in refusals.items():
+            operations = FakeOperations()
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
+                extent_pool(operations, **overrides)
+            self.assertEqual(operations.live, [], 'refused before anything was allocated')
+        operations = FakeOperations()
+        with self.assertRaisesRegex(ValueError, 'without the GDN helpers'):
+            ServingBufferPool(operations, 'mesh', users=2, extent_replay=True)
+        self.assertEqual(operations.live, [])
+
+    def test_the_bytes_are_accounted_and_described(self):
+        operations = FakeOperations()
+        pool = extent_pool(operations)
+        storage = pool.packed_extent(4, 16)
+        self.assertEqual(pool.packed_bytes, 4 * (4 * 2 * 68 + 4 * 2))
+        report = pool.describe()
+        self.assertEqual((report['extent_replay'], report['packed_replay'], report['packed_replay_bytes'],
+                          report['replay_capacities']), (True, [], pool.packed_bytes, [4352]))
+        (described,) = report['packed_extent']
+        self.assertEqual((described['users'], described['rows'], described['taken'], described['bytes']),
+                         (4, 16, False, pool.packed_bytes))
+        self.assertEqual(described['tables'], [[[shard.address for shard in table.shards] for table in per_user]
+                                               for per_user in storage.tables])
+        self.assertEqual(described['cur_pos'], [[[shard.address for shard in value.shards] for value in per_user]
+                                                for per_user in storage.cur_pos])
+        storage.take()
+        self.assertTrue(pool.describe()['packed_extent'][0]['taken'])
+
+    def test_close_frees_the_extent_storage_with_the_pool(self):
+        operations = FakeOperations()
+        pool = extent_pool(operations)
+        storage = pool.packed_extent(4, 16)
+        pool.close()
+        self.assertEqual(len(operations.deallocated), len(operations.live))
+        self.assertTrue(all(any(value is freed for freed in operations.deallocated) for value in storage.tensors))
+        self.assertEqual(pool.extent, {})
+        with self.assertRaisesRegex(ValueError, 'Closed'):
+            pool.packed_extent(4, 16)
+
+    def test_flag_off_the_pool_is_unchanged_and_lends_no_extent_storage(self):
+        operations = FakeOperations()
+        pool = verifier_pool(operations, users=1, bucket_rows=(8,), packed_shapes=((4, 16),), packed_replay_group_rows=8)
+        self.assertEqual((pool.extent_replay, pool.extent), (False, {}))
+        self.assertEqual(list(pool.packed_replay(4, 16).replay_pages), list(REPLAY_CAPACITIES))
+        report = pool.describe()
+        self.assertNotIn('extent_replay', report)
+        self.assertNotIn('packed_extent', report)
+        with self.assertRaisesRegex(ValueError, 'without extent_replay'):
+            pool.packed_extent(4, 16)
+
+    def test_storage_needs_one_table_and_one_cur_pos_per_bundle_per_user(self):
+        with self.assertRaisesRegex(ValueError, 'one table and one cur_pos per bundle'):
+            PackedExtentStorage(2, 16, [[1], [2]], [[3]])
+        with self.assertRaisesRegex(ValueError, 'one table and one cur_pos per bundle'):
+            PackedExtentStorage(1, 16, [[1, 2]], [[3]])
 
 
 class DramStatisticsTests(unittest.TestCase):

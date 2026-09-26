@@ -96,10 +96,23 @@ one block's two users, not both blocks' four. `packed_shapes=` still names the s
 `packed_replay(2, 16)` then lends the first untaken one each time it is asked, so the two
 blocks' own `PackedVerifierEngine.__init__` calls - made in turn, each immediately
 `take()`-ing what it got back - end up with two different sets without either naming which.
+
+AND THE EXTENT READERS' (S2, `extent_replay=True`, under QWEN_FAST_EXTENT_REPLAY=1). The S2 block
+serves each user at its own 256-key family through one captured program (K64j flag 0x20,
+extent_attention_replay.py): no family is fixed at capture, so no per-family table set is needed.
+Instead each packed user, per bundle of the extent readers' layout, borrows one FULL-WIDTH table
+(batches, page_width) - the same shape as today's table at the widest family C = page_width * 64 -
+and one (batches,) int32 cur_pos word per entry, which K64j reads in-trace (F20: row-major int32,
+interleaved, padded_shape[-1] == batches). Both are state kept across steps, the class this pool
+exists for, so both are allocated here, zeroed, before any trace, and lent once as a
+PackedExtentStorage (`packed_extent(users, rows)`). The per-family tables are not built at all:
+the family set collapses to C, and the per-request bucket slots must hold no replay width (they
+capture at 1, 2 and 4 rows beside the block), since their pinned readers would need the families.
 """
 
 from types import SimpleNamespace
 
+from attention_head_fold import parallel_groups
 from dflash_device import pindiag
 from pooled_attention_replay import bundle_batches, family_capacities
 from gdn_multitoken_conv import addresses, release_owned
@@ -122,6 +135,15 @@ BATCH_INPUTS = ('tokens', 'positions', 'pages', 'singleton_pages', 'cos', 'sin')
 # (packed_shapes.serving_shape). M2's (4, 8) is still accepted when given explicitly.
 PACKED_REPLAY_SHAPES = ((2, 16), (4, 16))
 PACKED_BLOCK_ROWS = max(PACKED_BLOCK_WIDTHS)
+# The extent readers bundle every segment as the native chunk grouping at position 256
+# (extent_attention_replay.LAYOUT); test_extent_attention_replay pins this copy equal to it.
+EXTENT_LAYOUT_START = 256
+
+
+def extent_bundle_batches(rows, group_rows):
+    """How many groups each bundle of a `rows`-row extent segment packs, in bundle order: the first
+    dimension of its lent table and the length of its cur_pos."""
+    return tuple(len(bundle) for bundle in parallel_groups(EXTENT_LAYOUT_START, rows, max_group_rows=group_rows))
 
 
 def default_packed_shapes(users):
@@ -225,6 +247,44 @@ class PackedReplayTables:
             bytes=sum(tensor_bytes(tuple(table.shape), 4) for table in self.tensors),
             replay_pages={capacity: [[list(addresses(operations, table)) for table in tables] for tables in per_user]
                           for capacity, per_user in sorted(self.replay_pages.items())})
+
+
+class PackedExtentStorage:
+    """The S2 block's per-user extent storage for one shape: per user, per bundle of the extent
+    layout, a full-width (batches, page_width) page table and a (batches,) int32 cur_pos
+    (extent_attention_replay.ExtentSegmentReader's `storage`). Lent once, to the block; restaged by
+    the block before every verify and at reader construction, so never zeroed on loan."""
+
+    def __init__(self, users, rows, tables, cur_pos):
+        tables = tuple(tuple(per_user) for per_user in tables)
+        cur_pos = tuple(tuple(per_user) for per_user in cur_pos)
+        if (len(tables) != users or len(cur_pos) != users
+                or any(len(user_tables) != len(user_positions) for user_tables, user_positions in zip(tables, cur_pos))):
+            raise ValueError('Extent storage needs one table and one cur_pos per bundle for each of %d users' % users)
+        self.users, self.rows = users, rows
+        self.tables, self.cur_pos = tables, cur_pos
+        self.taken = False
+        self.tensors = tuple(tensor for user in range(users) for pair in zip(tables[user], cur_pos[user])
+                             for tensor in pair)
+
+    def segment_storage(self):
+        """Per user, its (table, cur_pos) per bundle: one PackedExtentReplayReader segment's `storage`."""
+        return tuple(tuple(zip(self.tables[user], self.cur_pos[user])) for user in range(self.users))
+
+    def take(self):
+        if self.taken:
+            raise ValueError('The pooled extent storage for %d x T%d packed users is already lent' % (self.users, self.rows))
+        self.taken = True
+        return self
+
+    def release(self):
+        self.taken = False
+
+    def describe(self, operations):
+        return dict(users=self.users, rows=self.rows, taken=self.taken,
+            bytes=sum(tensor_bytes(tuple(tensor.shape), 4) for tensor in self.tensors),
+            tables=[[list(addresses(operations, table)) for table in per_user] for per_user in self.tables],
+            cur_pos=[[list(addresses(operations, positions)) for positions in per_user] for per_user in self.cur_pos])
 
 
 class VerifierSlot:
@@ -360,9 +420,11 @@ class ServingBufferPool:
 
     def __init__(self, operations, mesh, *, users, helpers=None, page_width=None, bucket_rows=(),
                  feature_taps=0, rope=None, mtp_hidden=False, replay_group_rows=4, replay_capacities=None,
-                 packed_shapes=None, packed_replicas=None, packed_replay_group_rows=None):
+                 packed_shapes=None, packed_replicas=None, packed_replay_group_rows=None, extent_replay=False):
         import torch
 
+        if type(extent_replay) is not bool:
+            raise ValueError('Extent replay storage must be selected by an explicit bool')
         if type(users) is not int or not 1 <= users <= NATIVE_GDN_SLOTS:
             raise ValueError('Explicit scheduler request count within the %d native GDN slots required'
                              % NATIVE_GDN_SLOTS)
@@ -407,17 +469,33 @@ class ServingBufferPool:
                 packed_replay_group_rows = replay_group_rows
             elif type(packed_replay_group_rows) is not int or packed_replay_group_rows not in (4, 8):
                 raise ValueError('Packed replay group width must be integer four or eight')
-            admitted = family_capacities(page_width=page_width)
-            if replay_capacities is None:
-                replay_capacities = admitted
-            replay_capacities = tuple(replay_capacities)
-            if (len(set(replay_capacities)) != len(replay_capacities)
-                    or any(type(capacity) is not int or capacity not in admitted for capacity in replay_capacities)):
-                raise ValueError('Replay families must be distinct native chunk capacities the page table holds: %r'
-                                 % (admitted,))
+            if extent_replay:
+                # S2: one full-width table set at C = page_width * 64 and nothing per family. The
+                # extent readers never ask validate_ticket, so C need not be an admitted family; the
+                # bucket slots must hold no replay width, whose pinned readers would need the families.
+                extent_capacity = page_width * 64
+                if page_width % 4:
+                    raise ValueError('Extent replay needs a page table of whole 256-key families, got width %d'
+                                     % page_width)
+                if replay_capacities is not None and tuple(replay_capacities) != (extent_capacity,):
+                    raise ValueError('Extent replay pools its tables at C = %d only, not %r'
+                                     % (extent_capacity, tuple(replay_capacities)))
+                if any(rows >= 8 for rows in bucket_rows):
+                    raise ValueError('Extent replay pools no per-family replay tables: capture widths %r include a '
+                                     'replay width (8 or more rows)' % (bucket_rows,))
+                replay_capacities = (extent_capacity,)
+            else:
+                admitted = family_capacities(page_width=page_width)
+                if replay_capacities is None:
+                    replay_capacities = admitted
+                replay_capacities = tuple(replay_capacities)
+                if (len(set(replay_capacities)) != len(replay_capacities)
+                        or any(type(capacity) is not int or capacity not in admitted for capacity in replay_capacities)):
+                    raise ValueError('Replay families must be distinct native chunk capacities the page table holds: %r'
+                                     % (admitted,))
         elif (page_width is not None or bucket_rows or feature_taps or rope is not None or mtp_hidden
                 or replay_group_rows != 4 or replay_capacities is not None or packed_shapes or packed_replicas
-                or packed_replay_group_rows is not None):
+                or packed_replay_group_rows is not None or extent_replay):
             raise ValueError('Verifier storage geometry without the GDN helpers that shape it')
         else:
             packed_shapes, packed_replicas = (), {}
@@ -427,8 +505,10 @@ class ServingBufferPool:
         self.replay_group_rows, self.replay_capacities = replay_group_rows, replay_capacities
         self.packed_replay_group_rows = packed_replay_group_rows
         self.packed_shapes, self.packed_replicas = packed_shapes, packed_replicas
+        self.extent_replay = extent_replay
         self.owned, self.slots = [], []
         self.packed, self.packed_bytes = {}, 0
+        self.extent = {}
         self.closed = False
         try:
             protected = []
@@ -502,6 +582,24 @@ class ServingBufferPool:
             # or, with `packed_replicas` naming more than one, one independent set per block
             # of that shape (QWEN_FAST_FOUR_AS_TWO's two 32-row blocks each lend their own).
             for count, rows in packed_shapes:
+                if extent_replay:
+                    # Per user, per bundle of the extent layout: the full-width table, then its
+                    # cur_pos, zeroed, independent on both chips (adopt), before any trace.
+                    self.extent[(count, rows)] = []
+                    batches = extent_bundle_batches(rows, packed_replay_group_rows)
+                    for replica in range(packed_replicas.get((count, rows), 1)):
+                        counted[0] = 0
+                        integers = dict(dtype=operations.int32, layout=operations.ROW_MAJOR_LAYOUT, itemsize=4)
+                        tables, cur_pos = [], []
+                        for user in range(count):
+                            tables.append([])
+                            cur_pos.append([])
+                            for entries in batches:
+                                tables[-1].append(allocate((entries, page_width), **integers))
+                                cur_pos[-1].append(allocate((entries,), **integers))
+                        self.extent[(count, rows)].append(PackedExtentStorage(count, rows, tables, cur_pos))
+                        self.packed_bytes += counted[0]
+                    continue
                 self.packed[(count, rows)] = []
                 for replica in range(packed_replicas.get((count, rows), 1)):
                     counted[0] = 0
@@ -527,11 +625,28 @@ class ServingBufferPool:
         own `take()` raises 'already lent', exactly as the single-set case always did."""
         if self.closed:
             raise ValueError('Closed serving buffer pool cannot lend packed replay page tables')
+        if self.extent_replay:
+            raise ValueError('The pool holds S2 extent storage (extent_replay) and no per-family packed replay '
+                             'tables: ask packed_extent')
         candidates = self.packed.get((users, rows))
         if not candidates:
             raise ValueError('The pool holds packed replay page tables for shapes %r; %r was asked for'
                              % (sorted(self.packed), (users, rows)))
         return next((tables for tables in candidates if not tables.taken), candidates[-1])
+
+    def packed_extent(self, users, rows):
+        """The S2 block's extent storage for (users, rows_per_user), to be taken once: the first
+        untaken set, as packed_replay lends its tables."""
+        if self.closed:
+            raise ValueError('Closed serving buffer pool cannot lend packed extent storage')
+        if not self.extent_replay:
+            raise ValueError('The pool was built without extent_replay: it holds per-family packed replay tables, '
+                             'no extent storage')
+        candidates = self.extent.get((users, rows))
+        if not candidates:
+            raise ValueError('The pool holds packed extent storage for shapes %r; %r was asked for'
+                             % (sorted(self.extent), (users, rows)))
+        return next((storage for storage in candidates if not storage.taken), candidates[-1])
 
     def acquire(self, *, owner='unnamed'):
         if self.closed:
@@ -584,7 +699,10 @@ class ServingBufferPool:
                 replay_capacities=list(self.replay_capacities), replay_page_bytes_per_slot=replay_bytes,
                 packed_replay_group_rows=self.packed_replay_group_rows,
                 packed_shapes=[list(shape) for shape in self.packed_shapes], packed_replay_bytes=self.packed_bytes,
-                packed_replay=[tables.describe(self.operations) for group in self.packed.values() for tables in group])
+                packed_replay=[tables.describe(self.operations) for group in self.packed.values() for tables in group],
+                # Only under extent_replay: flag off, the attach line reads exactly as before.
+                **({} if not self.extent_replay else dict(extent_replay=True, packed_extent=[
+                    storage.describe(self.operations) for group in self.extent.values() for storage in group])))
         return report
 
     def close(self):
@@ -597,5 +715,6 @@ class ServingBufferPool:
         self.owned.clear()
         self.slots.clear()
         self.packed.clear()
+        self.extent.clear()
         if lent:
             raise ValueError('Serving buffer pool closed with slots %r still lent' % lent)
