@@ -1146,9 +1146,9 @@ class Runner(object):
                              env=env)
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
-        self.log('[C2-GATE] arm %s: %s%s' % (arm, ' '.join(gate_args), ''.join(
-            ' [profile %s]' % profile if profile != self.profile else '') + ''.join(
-            ' [-e %s=%s]' % pair for pair in env)))
+        self.log('[C2-GATE] arm %s: %s%s%s' % (arm, ' '.join(gate_args),
+                                                ' [profile %s]' % profile if profile != self.profile else '',
+                                                ''.join(' [-e %s=%s]' % pair for pair in env)))
         cache_before = self.count_cache()
         started = time.time()
         status = self.execute(arguments, os.path.join(arm_dir, 'gate-stdout.log'), timeout, name)

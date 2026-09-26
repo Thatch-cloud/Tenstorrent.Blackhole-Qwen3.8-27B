@@ -182,6 +182,36 @@ class ArmTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(driver.PlanError):
                 driver.agent_shape('img', 'n', 'c2', [], env=((name, '1'),))
 
+    def test_the_kernel_cache_is_found_on_the_hub_and_counted(self):
+        self.assertEqual(driver.host_cache_dir('/experiment-cache/kernels-qwen-abc-pf-def', hub='/h'),
+                         os.path.join('/h', '.qwen-c2', 'kernels-qwen-abc-pf-def'))
+        self.assertEqual(driver.host_cache_dir('/models/cache', hub='/h'), os.path.join('/h', 'cache'))
+        self.assertIsNone(driver.host_cache_dir('/root/.cache/tt-metal-cache', hub='/h'), 'a tmpfs dies with the arm')
+        self.assertIsNone(driver.host_cache_dir(None))
+        with tempfile.TemporaryDirectory() as directory:
+            os.makedirs(os.path.join(directory, 'kernels', 'sdpa', '1234'))
+            for name in ('a.o', 'b.elf'):
+                with open(os.path.join(directory, 'kernels', 'sdpa', '1234', name), 'w') as handle:
+                    handle.write('x')
+            self.assertEqual(driver.count_entries(directory), 2)
+        self.assertIsNone(driver.count_entries(None))
+
+    def test_whose_kernel_cache_growth_is_judged(self):
+        runner = driver.Runner('img', 'c2', '/r', '/c', [], profiles=PROFILES)
+        self.assertFalse(runner.judges('matrix', 'c2'), 'S1 on an S1 profile: recorded only (auto)')
+        self.assertTrue(runner.judges('matrix', 'c2-packed'))
+        self.assertTrue(runner.judges('control', 'c2-gate'), 'every arm of an S2 plan, flag-off ones too')
+        self.assertFalse(runner.judges('warm', 'c2-packed-gate'))
+        self.assertFalse(runner.judges('control', 'c2-gate', judged=False))
+        runner.jit = 'judge'
+        self.assertTrue(runner.judges('bringup', 'exact'), 'M2: the exact bring-up adds nothing to the cache')
+        self.assertFalse(runner.judges('warm-off', 'c2-gate'))
+        runner.jit = 'record'
+        self.assertFalse(runner.judges('control', 'c2-packed-gate'))
+        self.assertIsNone(runner.relaxation('c2-packed'), 'strict unless asked')
+        runner.policy, runner.decision = 'dc-i', 'user-decision'
+        self.assertEqual((runner.relaxation('c2-packed'), runner.relaxation('c2')), ('dc-i', None))
+
     def test_the_s1_plans_on_an_s2_profile_audit_every_arm(self):
         for plan in job.GATE_PLANS:
             with self.subTest(plan=plan):
