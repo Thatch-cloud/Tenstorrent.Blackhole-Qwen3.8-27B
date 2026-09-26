@@ -227,6 +227,15 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             capture_rows = M3_SEQUENTIAL_CAPTURE_ROWS
         else:
             capture_rows = sequential_capture_rows(packed_shapes[0] if packed_shapes else None)
+        # C2-any with no packed block at all (the c2 profile sets QWEN_FAST_PACKED_STEP=0): its
+        # engines drop replay attention and the T16 gate, so they must capture the sequential
+        # widths whatever the block would have asked. The block could never engage under c2 - it
+        # needs every live user inside [131072, 131328), and c2 caps prompts at 123136 - yet it held
+        # 3.84 GB per chip, and run 36218104858 died building the fourth engine with 0.79 GB free
+        # (engines cost 0.80 GB at one proposal bucket, 1.35 GB at four).
+        no_block_any_request = any_request_enabled() and not packed_shapes
+        if no_block_any_request:
+            capture_rows = M3_SEQUENTIAL_CAPTURE_ROWS
         # QWEN_FAST_ANY_REQUEST (C2-any, plan S1; default off). Its engines drop replay
         # attention and the per-request T16 gate, which is only sound where every capture is
         # narrower than a replayed block (serving_request_factory.sequential_captures): beside
@@ -243,7 +252,10 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             attach_source_check()
         bucket_rows = capture_bucket_rows(policy['verifier_rows'], policy['output_budget'], capture_rows)
         trimmed = capture_rows != policy['verifier_rows']
-        if trimmed:
+        if trimmed and no_block_any_request:
+            pindiag('[PINDIAG] per-request captures trimmed to widths {} for C2-any with no packed block',
+                    tuple(sorted(set(bucket_rows))))
+        elif trimmed:
             pindiag('[PINDIAG] per-request captures trimmed to widths {} for the four-user block',
                     tuple(sorted(set(bucket_rows))))
         # packed_shapes covers each distinct shape once (validate_packed_shapes still

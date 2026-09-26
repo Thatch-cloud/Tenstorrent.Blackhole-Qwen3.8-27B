@@ -51,7 +51,9 @@ class RuntimeAttachmentTests(unittest.TestCase):
         built = bool(shapes)
         # Beside the four-user block - one 64-row block or two 32-row ones, the same total
         # rows either way - the per-request captures are trimmed to (1, 2, 4).
-        trimmed = packed and users == 4
+        # C2-any with no block built captures the same sequential widths (serving_runtime.py).
+        no_block_any_request = not built and (extra_env or {}).get('QWEN_FAST_ANY_REQUEST') == '1'
+        trimmed = (packed and users == 4) or no_block_any_request
         model = SimpleNamespace(args=object(), mesh_device=object(),
             layers=[SimpleNamespace(is_full_attention=False, attention=object()) for _ in range(48)])
         config = FastPolicyTests().fixture()
@@ -221,7 +223,9 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         expected.append(('[PINDIAG] QWEN_FAST_PACKED_STEP=1 builds no packed block for {} scheduler requests '
                                          '(two take the 32-row M1 block, four the 64-row M3 block); the sequential step '
                                          'serves the rounds', users))
-                    if trimmed:
+                    if trimmed and no_block_any_request:
+                        expected.append(('[PINDIAG] per-request captures trimmed to widths {} for C2-any with no packed block', (1, 2, 4)))
+                    elif trimmed:
                         expected.append(('[PINDIAG] per-request captures trimmed to widths {} for the four-user block', (1, 2, 4)))
                     expected.append(('[PINDIAG] dram after attach: {}', 'unavailable (pool without device statistics)'))
                     self.assertEqual([call.args for call in diagnostic.call_args_list], expected)

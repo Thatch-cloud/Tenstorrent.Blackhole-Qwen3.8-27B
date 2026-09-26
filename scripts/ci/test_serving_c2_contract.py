@@ -83,6 +83,9 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual((env['QWEN_FAST_MAX_POSITION'], env['QWEN_DSPARK_REQUEST_CONTEXT']), ('131328', '131072'))
         self.assertEqual(env['QWEN_FAST_ANY_REQUEST'], '1')
         self.assertEqual(env['QWEN_FAST_FAULTHANDLER'], '0')
+        # No packed block: it cannot engage under the 123136-token cap and its 3.84 GB per chip is what
+        # the fourth per-request engine needs (run 36218104858).
+        self.assertEqual(env['QWEN_FAST_PACKED_STEP'], '0')
         limits = contract.request_limits(c2)
         self.assertEqual(limits, dict(budget=16384, max_prompt_tokens=123136, min_answer_tokens=8192,
                                       default_max_tokens=8192))
@@ -99,7 +102,11 @@ class ProfileTest(unittest.TestCase):
         for snapshot in ('/snap', exact['snapshots'][1]):
             self.assertEqual(contract.engine_arguments(gate, snapshot), contract.engine_arguments(exact, snapshot))
         self.assertEqual(gate['engine'], exact['engine'])
-        self.assertEqual(gate['env'], c2['env'], 'the c2 code paths, the c2 ceiling')
+        # c2's code paths and ceiling, but WITH the packed block: the bring-up's 4 x 131072 users are the
+        # one shape it serves, and the image's own QWEN_FAST_PACKED_STEP=1 builds it.
+        self.assertEqual(gate['env'], {key: value for key, value in c2['env'].items() if key != 'QWEN_FAST_PACKED_STEP'},
+                         'the c2 code paths, the c2 ceiling')
+        self.assertNotIn('QWEN_FAST_PACKED_STEP', gate['env'])
         for key in ('eos_ids', 'snapshots', 'mesh_graph_descriptor', 'default_max_tokens'):
             self.assertEqual(gate.get(key), c2.get(key), key)
         limits = contract.request_limits(gate)

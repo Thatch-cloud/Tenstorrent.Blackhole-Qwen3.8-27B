@@ -445,10 +445,18 @@ class AttachWiringTests(unittest.TestCase):
                 test_serving_runtime.RuntimeAttachmentTests().exercise(packed=True, users=4, four_as_two=False, extra_env=environ)
                 check.assert_not_called()
 
+    def test_on_with_no_packed_block_the_engines_capture_the_sequential_widths(self):
+        """The c2 profile (QWEN_FAST_PACKED_STEP=0): no block is built, the engines are capped at the
+        sequential widths (1, 2, 4) instead of refused, and the source check still runs once."""
+        for users in (1, 4):
+            with self.subTest(users=users), patch.object(serving_runtime, 'attach_source_check') as check:
+                test_serving_runtime.RuntimeAttachmentTests().exercise(packed=False, users=users, extra_env=ON)
+                check.assert_called_once_with()
+
     def test_on_an_attach_whose_engines_capture_replayed_widths_is_refused_before_the_pool(self):
-        """One user, or two (the 32-row block keeps the full T16 captures): the gate would
+        """Beside the two-user 32-row block, which keeps the full T16 captures: the gate would
         still refuse every request that is not the frozen shape, so the attach is refused."""
-        for packed, users in ((False, 1), (True, 2)):
+        for packed, users in ((True, 2),):
             with self.subTest(users=users), patch.object(serving_runtime, 'attach_source_check') as check, \
                     patch.object(serving_runtime, 'ServingBufferPool') as pool, \
                     self.assertRaisesRegex(ValueError, 'QWEN_FAST_ANY_REQUEST=1 needs per-request captures'):
