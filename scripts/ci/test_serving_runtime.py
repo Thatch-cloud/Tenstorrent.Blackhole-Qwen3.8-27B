@@ -567,3 +567,69 @@ class MemoryLedgerHookTests(unittest.TestCase):
         # memory_ledger.record is the real one here: with no active ledger it returns at
         # its first line, so MemoryLedger.phase (patched to fail the test) never runs.
         self.run_attach(False)
+
+
+class DramAdmissionAttachTests(unittest.TestCase):
+    """S2 W6b at attach: under QWEN_FAST_EXTENT_REPLAY=1 the DRAM admission hold's predicate is parked over the
+    attach's pool before the lifecycle is built and removed before that pool closes; without the flag nothing
+    is parked and the attach is today's."""
+
+    def setUp(self):
+        import serving_prefill_admission
+
+        saved = sys.modules.pop(serving_prefill_admission.DRAM_KEY, None)
+
+        def restore():
+            sys.modules.pop(serving_prefill_admission.DRAM_KEY, None)
+            if saved is not None:
+                sys.modules[serving_prefill_admission.DRAM_KEY] = saved
+
+        self.addCleanup(restore)
+
+    def run_attach(self, extra_env):
+        import serving_prefill_admission
+
+        seen, registered = {}, []
+        original = serving_runtime.register_dram_admission
+
+        def register(pool):
+            unregister = original(pool, log=Mock())
+
+            def remove():
+                seen['pool_closed_at_removal'] = pool.close.called
+                unregister()
+
+            registered.append(pool)
+            seen['lifecycles_at_registration'] = serving_runtime.FastServingLifecycle.call_count
+            return remove
+
+        def probe(install, diagnostic):
+            holder = sys.modules.get(serving_prefill_admission.DRAM_KEY)
+            seen['admits'] = None if holder is None else holder.admits(4096)
+
+        with patch.object(serving_runtime, 'register_dram_admission', side_effect=register):
+            RuntimeAttachmentTests().exercise(packed=True, users=4, four_as_two=False, extra_env=extra_env, probe=probe)
+        seen['after'] = sys.modules.get(serving_prefill_admission.DRAM_KEY)
+        seen['registered'] = registered
+        return seen
+
+    def test_the_flag_parks_the_hold_for_the_attach_and_removes_it_before_the_pool_closes(self):
+        from serving_prefill_admission import dram_need
+        from dflash_packed_proposal_coordinator import dram_reserve_bytes
+
+        seen = self.run_attach({'QWEN_FAST_EXTENT_REPLAY': '1'})
+        self.assertEqual(len(seen['registered']), 1)
+        # The fake pool has no allocator statistics: the predicate admits and says why.
+        self.assertEqual(seen['admits'], (True, dict(largest_free=None, need=dram_need(4096, dram_reserve_bytes()),
+                                                     unavailable='pool without device statistics')))
+        self.assertEqual(seen['lifecycles_at_registration'], 0, 'parked before the lifecycle is built')
+        self.assertIs(seen['pool_closed_at_removal'], False, 'removed before the pool closes')
+        self.assertIsNone(seen['after'])
+
+    def test_without_the_flag_nothing_is_parked(self):
+        for extra_env in (None, {'QWEN_FAST_EXTENT_REPLAY': '0'}):
+            with self.subTest(extra_env=extra_env):
+                seen = self.run_attach(extra_env)
+                self.assertEqual(seen['registered'], [])
+                self.assertIsNone(seen['admits'])
+                self.assertIsNone(seen['after'])

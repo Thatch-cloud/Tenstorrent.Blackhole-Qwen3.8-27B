@@ -620,6 +620,60 @@ class WorkerHookTests(unittest.TestCase):
         self.assertIs(worker.model_runner._qwen_fast_hook, hook)
 
 
+class DeadProposalReleaseTests(unittest.TestCase):
+    """S2 W6c: a detach closes the departed request's device first, then (QWEN_FAST_EXTENT_REPLAY=1 only) the
+    coordinator's dead proposal traces, before the replacement's prefill can run."""
+
+    def hook(self, events, coordinator=None):
+        hook = FastWorkerHook.__new__(FastWorkerHook)
+        hook.bridges = {name: SimpleNamespace(close=Mock(side_effect=lambda name=name: events.append(('close', name))))
+                        for name in ('a', 'b')}
+        if coordinator is not None:
+            hook._packed_coordinator = coordinator
+        return hook
+
+    @staticmethod
+    def environment(on):
+        environment = {name: value for name, value in os.environ.items() if name != 'QWEN_FAST_EXTENT_REPLAY'}
+        if on:
+            environment['QWEN_FAST_EXTENT_REPLAY'] = '1'
+        return patch.dict(os.environ, environment, clear=True)
+
+    def test_under_the_flag_a_detach_releases_the_dead_traces_after_the_device_closed(self):
+        events = []
+        coordinator = SimpleNamespace(release_closed=Mock(side_effect=lambda: events.append('release') or 'released'))
+        hook = self.hook(events, coordinator)
+        with self.environment(True):
+            self.assertEqual(sorted(hook.detach('a')), ['b'])
+        self.assertEqual(events, [('close', 'a'), 'release'])
+
+    def test_with_the_flag_off_a_detach_is_todays(self):
+        events = []
+        coordinator = SimpleNamespace(release_closed=Mock(side_effect=AssertionError('released')))
+        hook = self.hook(events, coordinator)
+        with self.environment(False):
+            self.assertEqual(sorted(hook.detach('a')), ['b'])
+        self.assertEqual(events, [('close', 'a')])
+        coordinator.release_closed.assert_not_called()
+
+    def test_a_hook_that_never_packed_a_proposal_has_nothing_to_release(self):
+        events = []
+        with self.environment(True):
+            self.assertEqual(sorted(self.hook(events).detach('b')), ['a'])
+        self.assertEqual(events, [('close', 'b')])
+
+    def test_a_failed_release_is_logged_and_the_detach_completes(self):
+        from serving_worker_hook import release_dead_proposals
+
+        events = []
+        coordinator = SimpleNamespace(release_closed=Mock(side_effect=RuntimeError('device fault')))
+        hook = self.hook(events, coordinator)
+        with self.environment(True):
+            self.assertEqual(sorted(hook.detach('a')), ['b'])
+            self.assertIsNone(release_dead_proposals(hook))
+        self.assertEqual(coordinator.release_closed.call_count, 2)
+
+
 class PhaseLogTests(unittest.TestCase):
     def test_phase_runs_the_call_and_returns_its_result_when_logging_is_off(self):
         import serving_worker_hook

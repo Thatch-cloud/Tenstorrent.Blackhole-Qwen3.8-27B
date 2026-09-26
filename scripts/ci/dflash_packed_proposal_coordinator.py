@@ -108,6 +108,51 @@ def estimated_pair_capture_bytes():
     return PAIR_CAPTURE_PLACEHOLDER_BYTES + 2 * PREPARE_PUBLICATION_TRANSIENT_BYTES
 
 
+# S2 W6d: one single-user PreparedDFlashProposal bucket at the 2048 context, the one _ensure_single_user
+# rebuilds (dflash_proposal_trace.PreparedDFlashProposal.__init__'s uploads, T16): identifiers (1,16) uint32
+# (64 B), history (1,1,2080,5120) bf16 (21,299,200 B), mask (1,1,32,2080) bf16 (133,120 B), rope.q
+# 2x(1,1,32,128) bf16 (16,384 B), rope.k 2x(1,1,2080,128) bf16 (1,064,960 B) and cached_history 5 layers x
+# k/v x (1,4,2048,128) bf16 (20,971,520 B). A LOWER BOUND, like the pair's: the trace's retained
+# intermediates are not sized here (the after point measures the real figure).
+SINGLE_CAPTURE_PLACEHOLDER_BYTES = 64 + 21_299_200 + 133_120 + 16_384 + 1_064_960 + 20_971_520
+
+
+def estimated_single_capture_bytes():
+    return SINGLE_CAPTURE_PLACEHOLDER_BYTES + PREPARE_PUBLICATION_TRANSIENT_BYTES
+
+
+# S2 W6c: the line PackedProposalCoordinator.release_closed logs at every detach it runs for.
+RELEASED_LINE = '[PACKED-PROPOSE] released quad={quad} pairs={pairs}'
+# S2 (s2-design.md): W6c and W6d run only under this flag, read at each use. The attach refuses a value other
+# than '0' or '1' (serving_request_factory.extent_replay_enabled, W7); here only '1' turns them on, so a round
+# never raises over it.
+EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
+
+
+def extent_memory_points(environ=None):
+    """QWEN_FAST_EXTENT_REPLAY=1."""
+    return (os.environ if environ is None else environ).get(EXTENT_REPLAY_FLAG) == '1'
+
+
+def ledger_before(op, estimate, point):
+    """S2 W6d: memory_ledger.before ahead of a capture, only under QWEN_FAST_EXTENT_REPLAY=1 (and a no-op there
+    unless QWEN_FAST_MEMORY_LEDGER=1). Unset, nothing is imported or read."""
+    if not extent_memory_points():
+        return None
+    import memory_ledger
+
+    return memory_ledger.before(op, estimate=estimate, point=point)
+
+
+def ledger_after(token):
+    """S2 W6d: memory_ledger.after for a token ledger_before returned; None does nothing."""
+    if token is None:
+        return None
+    import memory_ledger
+
+    return memory_ledger.after(token)
+
+
 def dram_reserve_bytes(environ=None):
     """QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB: an integer number of megabytes,
     default 256. Read at each round rather than at import, so the value a test
@@ -304,6 +349,29 @@ class PackedProposalCoordinator:
             self.quad[1].close()
             self.quad = None
 
+    def release_closed(self):
+        """S2 W6c: close, now, every proposal trace a closed device was captured for - the quad if any of its
+        four devices has closed (_retire_quad's test) and every pair trace bound to one. Called from
+        FastWorkerHook.detach (serving_worker_hook.release_dead_proposals, QWEN_FAST_EXTENT_REPLAY=1 only) right
+        after the departing request's device closed. Otherwise the quad (0.3-0.45 GB per chip, est.) is retired
+        only in the next draft round's _prepare_quad and a stale pair only when its slots re-form, and a
+        replacement's prefill and engine build, which run first, see about 0.5 GB less (s2-design.md section 3.1).
+        Live traces are kept, and so is each surviving device's released single-user capture: _ensure_single_user
+        rebuilds it the first round it is needed. Logs RELEASED_LINE every time it runs."""
+        quad = 0
+        if self.quad is not None and any(getattr(device, 'closed', False) for device in self.quad[0]):
+            self.quad[1].close()
+            self.quad = None
+            quad = 1
+        pairs = []
+        for group, (device_a, device_b, trace, _) in list(self.pairs.items()):
+            if getattr(device_a, 'closed', False) or getattr(device_b, 'closed', False):
+                trace.close()
+                del self.pairs[group]
+                pairs.append(list(group))
+        audit_log(RELEASED_LINE, quad=quad, pairs=pairs)
+        return dict(quad=quad, pairs=pairs)
+
     def _cached_trace(self, pair, device_a, device_b):
         """The pair's already-captured trace if the SAME two devices still occupy
         it and neither has closed, else None - a fresh capture (and the DRAM
@@ -375,7 +443,13 @@ class PackedProposalCoordinator:
         view = capture if isinstance(capture, _PackedCaptureView) else None
         from dflash_proposal_trace import PreparedDFlashProposal
 
-        rebuilt = PreparedDFlashProposal(device, max_new_tokens=1)
+        # S2 W6d: this rebuild checks no headroom, so the ledger reads the allocator either side of it.
+        ledger_token = ledger_before('single', estimated_single_capture_bytes(),
+                                     'slot=%s' % getattr(getattr(device, 'pool_slot', None), 'index', None))
+        try:
+            rebuilt = PreparedDFlashProposal(device, max_new_tokens=1)
+        finally:
+            ledger_after(ledger_token)
         if view is not None:
             view._original = rebuilt
         else:
@@ -494,6 +568,9 @@ class PackedProposalCoordinator:
                                 trace.round_number = round_number
                             ids = '%s,%s' % (entry_a['bridge'].request.session.request_id,
                                              entry_b['bridge'].request.session.request_id)
+                            # S2 W6d: a fresh pair capture allocates; the ledger reads either side of it.
+                            ledger_token = (ledger_before('pair', estimated_pair_capture_bytes(),
+                                                          'slots=%s,%s' % (slot_a, slot_b)) if fresh_build else None)
                             try:
                                 ready = phase('propose_pair', ids,
                                               lambda: trace.prepare_device(entry_a['seed'], entry_b['seed']))
@@ -519,6 +596,7 @@ class PackedProposalCoordinator:
                                     audit_log(PAIR_FALLBACK_LINE, pair=[slot_a, slot_b],
                                               fallback='%s: %s' % (type(failure).__name__, str(failure)[:160]))
                                 ready = False
+                            ledger_after(ledger_token)
                         else:
                             ready = False
                         if ready:
@@ -663,7 +741,8 @@ class PackedProposalCoordinator:
         trace = None
         if self.quad is not None and all(old is new for old, new in zip(self.quad[0], devices)):
             trace = self.quad[1]
-        if trace is None or not trace.buckets:
+        fresh = trace is None or not trace.buckets
+        if fresh:
             # A fresh capture - a new quad, or the same four devices' quad whose last build failed (its _bucket
             # released what that attempt built) - needs the headroom; replaying a built quad allocates nothing.
             headroom = dram_headroom(devices[0])
@@ -681,10 +760,13 @@ class PackedProposalCoordinator:
             trace.round_number = round_number
         seeds = [entry['seed'] for entry in entries]
         ids = ','.join(str(entry['bridge'].request.session.request_id) for entry in entries)
+        # S2 W6d: a fresh quad capture allocates; the ledger reads either side of it.
+        ledger_token = ledger_before('quad', quad_draft.QUAD_CAPTURE_BYTES_EST, 'slots=0,1,2,3') if fresh else None
         started = time.perf_counter()
         try:
             ready = phase('propose_quad', ids, lambda: trace.prepare_device(seeds))
         except Exception as failure:
+            ledger_after(ledger_token)
             # As a pair's failure (above): this round falls back to today's pairs - never the engine. The trace
             # stays valid (its _bucket released what the attempt built); two in a row give up for good.
             trace.discard_pending()
@@ -694,6 +776,7 @@ class PackedProposalCoordinator:
             if self.quad_failures >= quad_draft.GIVE_UP_FAILURES:
                 self._disable_quad(round_number, 'consecutive_failures=%d' % self.quad_failures)
             return None
+        ledger_after(ledger_token)
         if not ready:
             return None
         built_ms = quad_draft.elapsed_ms(started)

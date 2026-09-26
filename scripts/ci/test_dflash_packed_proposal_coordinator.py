@@ -727,6 +727,206 @@ class DramReserveTests(unittest.TestCase):
         self.assertEqual(len(FakeTrace.instances[0].prepared), 2, 'round two still replayed the existing trace')
 
 
+EXTENT = {'QWEN_FAST_EXTENT_REPLAY': '1'}
+
+
+def extent_environment(on):
+    """os.environ with QWEN_FAST_EXTENT_REPLAY set to 1, or absent (the flag-off path)."""
+    environment = {name: value for name, value in os.environ.items() if name != 'QWEN_FAST_EXTENT_REPLAY'}
+    if on:
+        environment.update(EXTENT)
+    return unittest.mock.patch.dict(os.environ, environment, clear=True)
+
+
+class ReleaseClosedTests(unittest.TestCase):
+    """S2 W6c: release_closed closes, at detach, the quad if any of its devices has closed and every pair trace
+    bound to a closed device; live traces stay, and the line is logged every time."""
+
+    def devices(self, count=4):
+        operations, mesh = SimpleNamespace(synchronize_device=Mock()), object()
+        return [make_device(operations, mesh, slot=slot) for slot in range(count)]
+
+    def coordinator(self, devices):
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+        coordinator = PackedProposalCoordinator()
+        pairs = {(0, 1): FakeTrace(devices[0], devices[1]), (2, 3): FakeTrace(devices[2], devices[3])}
+        for group, trace in pairs.items():
+            coordinator.pairs[group] = (devices[group[0]], devices[group[1]], trace, True)
+        quad = SimpleNamespace(closed=False)
+        quad.close = lambda: setattr(quad, 'closed', True)
+        coordinator.quad = (tuple(devices), quad, True)
+        return coordinator, pairs, quad
+
+    def test_a_closed_device_releases_the_quad_and_its_own_pair_and_keeps_the_live_pair(self):
+        from dflash_packed_proposal_coordinator import RELEASED_LINE
+
+        devices = self.devices()
+        coordinator, pairs, quad = self.coordinator(devices)
+        devices[3].closed = True
+        with unittest.mock.patch('dflash_packed_proposal_coordinator.audit_log') as log:
+            self.assertEqual(coordinator.release_closed(), dict(quad=1, pairs=[[2, 3]]))
+        self.assertTrue(quad.closed)
+        self.assertIsNone(coordinator.quad)
+        self.assertTrue(pairs[(2, 3)].closed)
+        self.assertFalse(pairs[(0, 1)].closed)
+        self.assertEqual(list(coordinator.pairs), [(0, 1)])
+        log.assert_called_once_with(RELEASED_LINE, quad=1, pairs=[[2, 3]])
+
+    def test_with_every_device_live_nothing_is_released_and_the_line_says_so(self):
+        devices = self.devices()
+        coordinator, pairs, quad = self.coordinator(devices)
+        with unittest.mock.patch('dflash_packed_proposal_coordinator.audit_log') as log:
+            self.assertEqual(coordinator.release_closed(), dict(quad=0, pairs=[]))
+        self.assertFalse(quad.closed or any(trace.closed for trace in pairs.values()))
+        self.assertEqual(sorted(coordinator.pairs), [(0, 1), (2, 3)])
+        log.assert_called_once()
+        empty = __import__('dflash_packed_proposal_coordinator').PackedProposalCoordinator()
+        with unittest.mock.patch('dflash_packed_proposal_coordinator.audit_log'):
+            self.assertEqual(empty.release_closed(), dict(quad=0, pairs=[]))
+
+    def test_two_closed_devices_release_both_pairs(self):
+        devices = self.devices()
+        coordinator, pairs, quad = self.coordinator(devices)
+        devices[0].closed = devices[2].closed = True
+        with unittest.mock.patch('dflash_packed_proposal_coordinator.audit_log'):
+            self.assertEqual(coordinator.release_closed(), dict(quad=1, pairs=[[0, 1], [2, 3]]))
+        self.assertEqual(coordinator.pairs, {})
+        self.assertTrue(all(trace.closed for trace in pairs.values()))
+
+    def test_the_survivors_draft_on_after_a_release(self):
+        """A released pair's survivor rebuilds its single-user capture once, the next round it drafts alone."""
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+        FakeTrace.instances, FakeSingleUserCapture.instances = [], []
+        with unittest.mock.patch('dflash_proposal_trace.PreparedPackedDFlashProposal', FakeTrace), \
+                unittest.mock.patch('dflash_proposal_trace.PreparedDFlashProposal', FakeSingleUserCapture), \
+                unittest.mock.patch('dflash_packed_proposal_coordinator.audit_log'):
+            operations, mesh = SimpleNamespace(synchronize_device=Mock()), object()
+            bridges = [make_bridge(name, make_device(operations, mesh, slot=slot), seed=100 + slot)
+                       for slot, name in enumerate('ab')]
+            coordinator = PackedProposalCoordinator()
+            coordinator.prepare(bridges)
+            self.assertEqual(len(FakeTrace.instances), 1)
+            survivor, departed = (bridge.request.runtime.drafter for bridge in bridges)
+            departed.closed = True
+            self.assertEqual(coordinator.release_closed(), dict(quad=0, pairs=[[0, 1]]))
+            self.assertTrue(FakeTrace.instances[0].closed)
+            coordinator.prepare(bridges[:1])
+            self.assertEqual(len(FakeSingleUserCapture.instances), 1, 'the survivor rebuilt its own capture once')
+            self.assertEqual(len(FakeTrace.instances), 1, 'no pair re-formed')
+
+
+class LedgerPointTests(unittest.TestCase):
+    """S2 W6d: a fresh pair or quad capture and a single-user rebuild are ledger before/after points under
+    QWEN_FAST_EXTENT_REPLAY=1; a replay is not; with the flag off memory_ledger is never asked."""
+
+    def setUp(self):
+        FakeTrace.instances, FakeSingleUserCapture.instances = [], []
+        for target, value in (('dflash_proposal_trace.PreparedPackedDFlashProposal', FakeTrace),
+                              ('dflash_proposal_trace.PreparedDFlashProposal', FakeSingleUserCapture)):
+            patcher = unittest.mock.patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.operations, self.mesh = SimpleNamespace(synchronize_device=Mock()), object()
+        self.points = []
+
+    def ledger(self):
+        import memory_ledger
+
+        def before(op, **options):
+            self.points.append(('before', op, options))
+            return dict(op=op)
+
+        return unittest.mock.patch.multiple(memory_ledger, before=Mock(side_effect=before),
+                                            after=Mock(side_effect=lambda token: self.points.append(('after', token['op']))))
+
+    def pair_bridges(self):
+        return [make_bridge(name, make_device(self.operations, self.mesh, slot=slot), seed=100 + slot)
+                for slot, name in enumerate('ab')]
+
+    def test_a_fresh_pair_capture_is_read_either_side_and_its_replay_is_not(self):
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator, estimated_pair_capture_bytes
+
+        bridges, coordinator = self.pair_bridges(), PackedProposalCoordinator()
+        with extent_environment(True), self.ledger():
+            coordinator.prepare(bridges)
+            coordinator.prepare(bridges)
+        self.assertEqual(self.points, [('before', 'pair', dict(estimate=estimated_pair_capture_bytes(), point='slots=0,1')),
+                                       ('after', 'pair')])
+
+    def test_a_failed_pair_capture_still_closes_its_point(self):
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+        bridges, coordinator = self.pair_bridges(), PackedProposalCoordinator()
+        original = FakeTrace.__init__
+
+        def failing(trace, device_a, device_b):
+            original(trace, device_a, device_b)
+            trace.fail = RuntimeError('capture refused')
+
+        with extent_environment(True), self.ledger(), unittest.mock.patch.object(FakeTrace, '__init__', failing):
+            coordinator.prepare(bridges)
+        self.assertEqual([(kind, op) for kind, op, *_ in self.points], [('before', 'pair'), ('after', 'pair')])
+
+    def test_a_single_user_rebuild_is_read_either_side_even_when_it_fails(self):
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator, estimated_single_capture_bytes
+
+        device = make_device(self.operations, self.mesh, slot=2)
+        device._packed_capture_released, device.proposal_capture = True, None
+        with extent_environment(True), self.ledger():
+            self.assertTrue(PackedProposalCoordinator()._ensure_single_user(device))
+            device._packed_capture_released, device.proposal_capture = True, None
+            with unittest.mock.patch('dflash_proposal_trace.PreparedDFlashProposal', side_effect=RuntimeError('oom')), \
+                    self.assertRaisesRegex(RuntimeError, 'oom'):
+                PackedProposalCoordinator()._ensure_single_user(device)
+        self.assertEqual(self.points, [('before', 'single', dict(estimate=estimated_single_capture_bytes(), point='slot=2')),
+                                       ('after', 'single')] * 2)
+
+    def test_the_quad_capture_is_read_either_side(self):
+        import quad_draft
+        from test_quad_draft import FLAG, REQUIRED, FakeQuadTrace, clean_environment, pair_trace_class, quad_bridges
+        from test_quad_draft import selected_tokens
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+        FakeQuadTrace.instances, FakeQuadTrace.failures = [], []
+        with clean_environment(**{FLAG: '1'}, **REQUIRED, **EXTENT), self.ledger(), \
+                unittest.mock.patch('quad_draft.PreparedQuadDFlashProposal', FakeQuadTrace), \
+                unittest.mock.patch('dflash_proposal_trace.PreparedPackedDFlashProposal', pair_trace_class()), \
+                unittest.mock.patch('dflash_packed_proposal.select_packed_batched', Mock(side_effect=selected_tokens)), \
+                unittest.mock.patch('dflash_packed_proposal_coordinator.audit_log'):
+            coordinator, bridges = PackedProposalCoordinator(), quad_bridges(self.operations, self.mesh)
+            coordinator.prepare(bridges)
+            coordinator.prepare(bridges)
+        self.assertEqual(len(FakeQuadTrace.instances), 1)
+        self.assertEqual(self.points, [('before', 'quad', dict(estimate=quad_draft.QUAD_CAPTURE_BYTES_EST,
+                                                               point='slots=0,1,2,3')), ('after', 'quad')])
+
+    def test_with_the_flag_off_the_ledger_is_never_asked(self):
+        import memory_ledger
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+        with extent_environment(False), \
+                unittest.mock.patch.object(memory_ledger, 'before', side_effect=AssertionError('asked')), \
+                unittest.mock.patch.object(memory_ledger, 'after', side_effect=AssertionError('asked')):
+            coordinator = PackedProposalCoordinator()
+            coordinator.prepare(self.pair_bridges())
+            device = make_device(self.operations, self.mesh, slot=2)
+            device._packed_capture_released, device.proposal_capture = True, None
+            self.assertTrue(coordinator._ensure_single_user(device))
+        self.assertEqual(len(FakeTrace.instances), 1)
+
+    def test_the_single_estimate_is_its_placeholders_and_one_publication_transient(self):
+        from dflash_packed_proposal_coordinator import (PREPARE_PUBLICATION_TRANSIENT_BYTES,
+                                                        SINGLE_CAPTURE_PLACEHOLDER_BYTES, estimated_single_capture_bytes)
+
+        history = 2080 * 5120 * 2
+        mask, rope_q, rope_k = 32 * 2080 * 2, 2 * 32 * 128 * 2, 2 * 2080 * 128 * 2
+        cache = 5 * 2 * 4 * 2048 * 128 * 2
+        self.assertEqual(SINGLE_CAPTURE_PLACEHOLDER_BYTES, 64 + history + mask + rope_q + rope_k + cache)
+        self.assertEqual(estimated_single_capture_bytes(), SINGLE_CAPTURE_PLACEHOLDER_BYTES + PREPARE_PUBLICATION_TRANSIENT_BYTES)
+
+
 class CommittedKvHistoryTests(unittest.TestCase):
     """_committed_kv_history: the exact precondition dflash_device.DFlashDevice.
     execute_proposal itself checks (dflash_device.py:661-662) before it accepts a

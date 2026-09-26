@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import weakref
 
 import memory_ledger
@@ -146,6 +146,105 @@ class SizingTests(unittest.TestCase):
         reported = shard('bf4')
         reported.buffer = lambda: SimpleNamespace(page_size=lambda: 13824)
         self.assertEqual(ledger.page_bytes(reported), 13824)
+
+
+class TraceOperations(FakeOperations):
+    """FakeOperations with a trace region: a TRACE view answers from `trace_allocated` per chip."""
+    BufferType = SimpleNamespace(DRAM='dram', L1='l1', TRACE='trace')
+    TRACE_TOTAL = 256 * 2 ** 20
+
+    def __init__(self):
+        super().__init__()
+        self.trace_allocated = {id(device): 0 for device in self.devices}
+
+    def get_memory_view(self, device, kind):
+        if kind != 'trace':
+            return super().get_memory_view(device, kind)
+        allocated = self.trace_allocated[id(device)]
+        return SimpleNamespace(num_banks=BANKS, total_bytes_per_bank=self.TRACE_TOTAL // BANKS,
+                               total_bytes_allocated_per_bank=allocated // BANKS,
+                               total_bytes_free_per_bank=(self.TRACE_TOTAL - allocated) // BANKS,
+                               largest_contiguous_bytes_free_per_bank=(self.TRACE_TOTAL - allocated) // BANKS)
+
+
+class BeforePointTests(unittest.TestCase):
+    """S2 W6d: before and after points read the allocator either side of a heavy operation, report the margin
+    over its estimate, the running floor and the trace region, and never enter the phase chain."""
+
+    def test_a_before_point_logs_the_margin_and_floor_per_chip_and_leaves_the_phase_chain_alone(self):
+        operations = FakeOperations()
+        ledger, lines, reports = ledger_for(operations)
+        ledger.phase('P0')
+        operations.charge(4_000_000_000)
+        chain = (list(ledger.readings), list(ledger.checks), dict(ledger.known))
+        largest = (TOTAL - 4_000_000_000) // BANKS // 2 * BANKS
+        token = ledger.before('pair', estimate=86_000_000, point='slots=0,1')
+        self.assertEqual((list(ledger.readings), list(ledger.checks), dict(ledger.known)), chain,
+                         'no reading, check or known buffer is added')
+        self.assertEqual(token['op'], 'pair')
+        self.assertEqual(ledger.floor, {0: largest - 86_000_000, 1: largest - 86_000_000})
+        before = [line for line in lines if line.startswith(memory_ledger.BEFORE_MARKER)]
+        self.assertEqual(len(before), 2, 'one line per chip')
+        self.assertEqual(before[0], '[MEMLEDGER] before op=pair point=slots=0,1 chip0 largest_free=%.1fMB free=%.3fGB '
+                         'estimate=86.0MB margin=%.1fMB floor=%.1fMB trace=unavailable'
+                         % (largest / 1e6, (TOTAL - 4_000_000_000) // BANKS * BANKS / 1e9,
+                            (largest - 86_000_000) / 1e6, (largest - 86_000_000) / 1e6))
+        self.assertTrue(all(len(line) <= memory_ledger.LINE_BUDGET for line in lines))
+        self.assertEqual(reports[-1]['stage'], 'memory_ledger_before')
+        self.assertEqual(reports[-1]['margins'], {'0': largest - 86_000_000, '1': largest - 86_000_000})
+        # A tighter operation lowers the floor; a looser one leaves it.
+        ledger.before('quad', estimate=500_000_000)
+        ledger.before('single', estimate=1)
+        self.assertEqual(ledger.floor[0], largest - 500_000_000)
+        self.assertEqual([op for op, _, _ in ledger.before_points], ['pair', 'quad', 'single'])
+        # The next phase's delta spans from P0, as it would with no before point at all.
+        report = ledger.phase('P1')
+        self.assertEqual(report['check']['chips'][0]['delta'], 4_000_000_000 // BANKS * BANKS)
+
+    def test_the_after_point_logs_what_the_operation_cost(self):
+        operations = FakeOperations()
+        ledger, lines, reports = ledger_for(operations)
+        token = ledger.before('single', estimate=64_000_000, point='slot=2')
+        operations.charge(48_000_000)
+        report = ledger.after(token)
+        self.assertEqual(report['costs'], {0: 48_000_000, 1: 48_000_000})
+        after = [line for line in lines if line.startswith(memory_ledger.AFTER_MARKER)]
+        self.assertEqual([line.split(' largest_free=')[0] for line in after],
+                         ['[MEMLEDGER] after op=single point=slot=2 chip0 cost=48.0MB',
+                          '[MEMLEDGER] after op=single point=slot=2 chip1 cost=48.0MB'])
+        self.assertEqual(reports[-1]['stage'], 'memory_ledger_after')
+
+    def test_the_trace_region_is_read_where_the_view_exists(self):
+        operations = TraceOperations()
+        operations.trace_allocated[id(operations.devices[0])] = 120 * 2 ** 20
+        ledger, lines, reports = ledger_for(operations)
+        ledger.before('quad', estimate=450 * 2 ** 20)
+        before = [line for line in lines if line.startswith(memory_ledger.BEFORE_MARKER)]
+        self.assertTrue(before[0].endswith('trace_used=%.1fMB trace_largest_free=%.1fMB'
+                                           % (120 * 2 ** 20 / 1e6, (256 - 120) * 2 ** 20 / 1e6)), before[0])
+        self.assertTrue(before[1].endswith('trace_used=0.0MB trace_largest_free=%.1fMB' % (256 * 2 ** 20 / 1e6)))
+        self.assertEqual(reports[-1]['trace'][0]['allocated'], 120 * 2 ** 20)
+        self.assertEqual(memory_ledger.trace_statistics(FakeOperations(), FakeTensor(FakeOperations(), (32, 32))),
+                         dict(unavailable="AttributeError: 'types.SimpleNamespace' object has no attribute 'TRACE'"))
+
+    def test_without_a_ledger_before_and_after_do_nothing(self):
+        self.assertIsNone(memory_ledger.active())
+        with patch.object(MemoryLedger, 'before', side_effect=AssertionError('ran')), \
+                patch.object(MemoryLedger, 'after', side_effect=AssertionError('ran')):
+            self.assertIsNone(memory_ledger.before('engine', estimate=1))
+            self.assertIsNone(memory_ledger.after(dict(op='engine')))
+
+    def test_a_bad_estimate_or_an_unreadable_allocator_is_logged_never_raised(self):
+        operations = FakeOperations()
+        ledger, lines, reports = ledger_for(operations)
+        self.assertIsNone(ledger.before('engine', estimate=-1))
+        self.assertTrue(lines[-1].startswith('[MEMLEDGER] before op=engine error=ValueError'))
+        broken = MemoryLedger(SimpleNamespace(get_device_tensors=Mock(side_effect=RuntimeError('no view'))), 'probe',
+                              log=lines.append, emit=lambda text: None)
+        self.assertIsNone(broken.before('engine', estimate=1))
+        self.assertTrue(lines[-1].startswith('[MEMLEDGER] before op=engine dram unavailable'))
+        self.assertEqual(broken.after(dict(op='engine', label='engine', point=None, request=None, chips=[]))['chips'],
+                         dict(unavailable='RuntimeError: no view'))
 
 
 class PhaseTests(unittest.TestCase):
