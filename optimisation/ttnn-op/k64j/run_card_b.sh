@@ -36,6 +36,12 @@
 #   ALLOW_SERVING_CARD=1                   lifts the serving-pair refusal, with a loud warning
 # e.g. QUAL_CARD=blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 WATCHER=1 CARD_B_ARGS="--sections K2,X7,Z"
 #      KOPGRAFT64=... EXPECT_TTNNCPP_SHA256=... bash run_card_b.sh
+# Nothing else changes: the node resolved by board id and rechecked right before the launch, one --device (card M's
+# node), the holder check (fuser on card M's node; and, card M being a serving card, ANY container that can reach
+# ANY Tenstorrent device refuses the launch - a --privileged one, a CI gate arm, or the card-B agent's container),
+# the per-call watchdog, the container timeout and the deadline. Results go to ~/kwork64/k64j/card-m, the container
+# is qwen-k64j-card-card-m, and a hang's hint resets card M and card A TOGETHER (the Ethernet-linked pair). Check gh
+# run list for the qwen-two-p150a-exclusive group before and after.
 #
 # CB2b (s2-design.md W10b, 6.2: R1, S, R2 and R4 through the REAL S2 extent readers): K64J_HARNESS=extent_reader runs
 # extent_reader_card_b.py instead of k64j_card_b.py (K64J_HARNESS=card, the default), with this checkout's scripts/ci
@@ -43,23 +49,25 @@
 # attention_fold_dma.py/.cpp) are checked against their frozen sha256s here, before anything is launched - and
 # QWEN_FAST_SDPA_MODES=tail,share,slice (the image's; the reader adds extent). Report reader-<stamp>.json, container
 # qwen-k64j-reader-<card tag>, verdict line K64J_READER. Everything else (the graft checks, the board, the holder
-# check, the watchdog, the timeouts) is as above. Watcher pass first:
-#   K64J_HARNESS=extent_reader WATCHER=1 bash run_card_b.sh
+# check, the watchdog, the timeouts) is as above. CARD B IS RESERVED for another agent and is this runner's default
+# QUAL_CARD, so CB2b runs on card M only: through the cardm action (.github/c2-serving-job.env), which sets card M
+# itself -
+#   C2_CARDM_HARNESS=optimisation/ttnn-op/k64j/run_card_b.sh
+#   C2_CARDM_ENV=K64J_HARNESS=extent_reader [WATCHER=1] KOPGRAFT64=/home/thatch/opgraft-K64j
+#     EXPECT_TTNNCPP_SHA256=<K64J_TTNNCPP_SHA256>
+#   C2_CARDM_ARGS as CARD_B_ARGS below
+# - or by hand with card M named, as every example here names it (never QUAL_CARD unset). Watcher pass first:
+#   QUAL_CARD=blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 K64J_HARNESS=extent_reader WATCHER=1 bash run_card_b.sh
 #                                         # seed 0, peaky; R1 at words 0 / 32 / 255 on G8B2, G4B3 and G4B1; S; R2 at
-#                                         # the five named families (two replays, tables only); R4 with segments 2
-#                                         # and 3 idle (starts 0 and 32); reads scope=reduced (never CB2b's evidence)
-#   K64J_HARNESS=extent_reader CARD_B_ARGS="--sections R1,S,R2,R4 --seeds 0,1,2 --variants normal,peaky" bash run_card_b.sh
-#                                         # the full pass: 56 families (more than 50) restaged twice each, four idle
-#                                         # patterns; K64J_READER verdict=PASS scope=full is CB2b's evidence
-# On card M through the cardm action (.github/c2-serving-job.env): C2_CARDM_HARNESS=optimisation/ttnn-op/k64j/
-#   run_card_b.sh, C2_CARDM_ENV=K64J_HARNESS=extent_reader [WATCHER=1] KOPGRAFT64=/home/thatch/opgraft-K64j
-#   EXPECT_TTNNCPP_SHA256=<K64J_TTNNCPP_SHA256>, C2_CARDM_ARGS as CARD_B_ARGS above.
-# Nothing else changes: the node resolved by board id and rechecked right before the launch, one --device (card M's
-# node), the holder check (fuser on card M's node; and, card M being a serving card, ANY container that can reach
-# ANY Tenstorrent device refuses the launch - a --privileged one, a CI gate arm, or the card-B agent's container),
-# the per-call watchdog, the container timeout and the deadline. Results go to ~/kwork64/k64j/card-m, the container
-# is qwen-k64j-card-card-m, and a hang's hint resets card M and card A TOGETHER (the Ethernet-linked pair). Check gh
-# run list for the qwen-two-p150a-exclusive group before and after.
+#                                         # the five named families (two assignments, one replay each, with the
+#                                         # tables); R4 with segments 2 and 3 idle (starts 0 and 32) at the first
+#                                         # assignment and at the one holding C; reads scope=reduced (never CB2b's
+#                                         # evidence)
+#   QUAL_CARD=blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 K64J_HARNESS=extent_reader bash run_card_b.sh
+#                                         # the full pass, the harness's defaults (CARD_B_ARGS="--sections R1,S,R2,R4
+#                                         # --seeds 0,1,2 --variants normal,peaky"): 56 families (more than 50)
+#                                         # restaged twice each, four idle patterns; K64J_READER verdict=PASS
+#                                         # scope=full is CB2b's evidence
 #
 # Before anything is launched the graft must verify against its MANIFEST.sha256, its _ttnncpp.so must be
 # EXPECT_TTNNCPP_SHA256 (REQUIRED for a real run: K64j's sha is the K64J_TTNNCPP_SHA256 line build_k64j.sh prints)

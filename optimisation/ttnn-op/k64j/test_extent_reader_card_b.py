@@ -17,7 +17,11 @@
     cur_pos, an absolute word, a wide mask read, a missing slot copy (alone, and with a device that lacks R10's slot
     copy), an unstaged construction, a mask kernel that skips a tile, a trace that keeps its captured cur_pos, a
     non-finite idle row, a missing PINDIAG or F22 line, a module from elsewhere, the wrong QWEN_FAST_SDPA_MODES and
-    the deadline.
+    the deadline; and the ones that only one part of the harness can see - a replayed mask launch on its captured word
+    (only a real replay in R1), one that skips a tile whose bits the eager run left right (only the NaN poison), an
+    idle segment that moves its live neighbour (only r4_live_unchanged), or a live one at C (only R4 at the
+    assignment holding C), a device that finds E without reading cur_pos (only cur_pos_live: NO-DECISION, never
+    PASS) or that ignores every mask (only mask_live).
 
     py -3.11 -B -m unittest test_extent_reader_card_b      (from this directory; scripts/ci on the path)
 """
@@ -121,7 +125,13 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
 
     broken (besides FakeExtentTtnn's 'own_slot', 'stale_trace', 'tail_at_capacity', 'no_f22'): 'mask_stale_tile' (the
     mask kernel never writes column tile 7), 'idle_nonfinite' (an entry at word 255 on an all-zero table comes back
-    NaN)."""
+    NaN), 'mask_trace_word' (a mask launch replayed from a trace reads the word its positions tensor held at capture,
+    not at replay), 'mask_trace_skips_tile' (a replayed mask launch never writes column tile 0; an eager one does),
+    'idle_bleeds' (an idle entry - word 255 on an all-zero table - moves the output of the live segments next to its
+    own, in the same forward), 'idle_bleeds_at_capacity' (it moves every live segment at E = C in the same forward),
+    'extent_from_table' (a 0x20 program ignores its cur_pos_tensor and takes E from the table instead: the first
+    poison page, else C - right on every poisoned table, so only the cur_pos liveness control can tell), 'ignore_mask'
+    (every call, 0x20 or not, ignores its attention mask)."""
 
     class DataMovementProcessor:
         RISCV_0 = 'riscv0'
@@ -132,6 +142,7 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
     def __init__(self, torch, *args, **kwargs):
         super().__init__(torch, *args, **kwargs)
         self.launched = []
+        self.forward = []                   # (idle, live at C) per 0x20 call run since the block's last concat
 
     # tensors --------------------------------------------------------------------------------
     def allocate(self, shape, dtype, layout=None, memory=None):
@@ -185,12 +196,35 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
         shape[dim] = sum(part.shape[dim] for part in parts)
         output = self.allocate(tuple(shape), parts[0].dtype, self.TILE_LAYOUT, memory_config)
         sources = [part.address for part in parts]
+        block = dim == 1 and len(parts) == len(reader_b.SEGMENTS) and shape[1] == reader_b.SEGMENTS[-1][1]
 
         def write(replay=False):
-            self.memory[output.address] = self.torch.cat([self.memory[address] for address in sources], dim=dim)
+            data = self.torch.cat([self.memory[address] for address in sources], dim=dim)
+            self.memory[output.address] = self.bleed(data) if block else data
 
         self.run_or_record(write)
         return output
+
+    def bleed(self, data):
+        """The block's own concat ends a forward: its four 0x20 calls ran since the last one, in segment order.
+        'idle_bleeds' moves (+1) the live segments next to an idle one; 'idle_bleeds_at_capacity' every live segment
+        at E = C while any segment is idle."""
+        calls, self.forward = self.forward, []
+        if len(calls) != len(reader_b.SEGMENTS) or not any(idle for idle, _ in calls):
+            return data
+        moved = set()
+        for index, (idle, at_capacity) in enumerate(calls):
+            if idle:
+                continue
+            if 'idle_bleeds' in self.broken and any(calls[other][0] for other in (index - 1, index + 1)
+                                                    if 0 <= other < len(calls)):
+                moved.add(index)
+            if 'idle_bleeds_at_capacity' in self.broken and at_capacity:
+                moved.add(index)
+        for index in sorted(moved):
+            first, last = reader_b.SEGMENTS[index]
+            data[:, first:last] = (data[:, first:last].float() + 1).to(data.dtype)
+        return data
 
     # program descriptors ----------------------------------------------------------------------
     def CoreCoord(self, x, y):  # noqa: N802
@@ -253,16 +287,19 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
                    'attention_fold_dma.cpp': self.fold_launch}.get(path.name)
             if run is None:
                 raise RuntimeError('TT_FATAL: no emulation of %s' % path.name)
-            launches.append((run, tasks))
+            # What each positions word holds as the launch is issued (at capture, for a launch recorded in a trace).
+            seen = ({task[0]: self.memory[task[0]].clone() for task in tasks}
+                    if path.name == 'attention_mask_replay.cpp' else {})
+            launches.append((run, tasks, seen))
             self.launched.append((path.name, len(tasks)))
 
         def write(replay=False):
-            for run, tasks in launches:
-                run(tasks, shapes)
+            for run, tasks, seen in launches:
+                run(tasks, shapes, replay, seen)
 
         self.run_or_record(write)
 
-    def mask_launch(self, tasks, shapes):
+    def mask_launch(self, tasks, shapes, replay=False, seen=None):
         """attention_mask_replay.cpp, per task: its (batch, head tile, column tile), the word read from the positions
         tensor, the tile of 0 / -inf, written at page (b * HT + ht) * (capacity / 32) + capacity / 32 - 8 + ct."""
         torch = self.torch
@@ -275,10 +312,13 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
         for positions, destination, rows, capacity, offset, task in tasks:
             if destination != target:
                 raise RuntimeError('one mask per launch')
-            word = int(self.memory[positions].reshape(-1)[0]) & 0xffffffff
+            source = seen if (replay and 'mask_trace_word' in self.broken) else self.memory
+            word = int(source[positions].reshape(-1)[0]) & 0xffffffff
             head_tiles = (rows * 12 + 31) // 32
             batch, head_tile, column_tile = task // (head_tiles * 8), (task // 8) % head_tiles, task % 8
             if 'mask_stale_tile' in self.broken and column_tile == 7:
+                continue
+            if replay and 'mask_trace_skips_tile' in self.broken and column_tile == 0:
                 continue
             head = head_tile * 32 + torch.arange(32)
             position = word + offset + batch * rows + (head % (rows * 6)) // 6
@@ -294,7 +334,7 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
             mask[entry, 0, first:last, column * 32:(column + 1) * 32] = tile[:last - first]
         self.memory[target] = mask
 
-    def fold_launch(self, tasks, shapes):
+    def fold_launch(self, tasks, shapes, replay=False, seen=None):
         """attention_fold_dma.cpp: task t writes output tile t (its row tile t / 8, column tile t % 8). Forward,
         folded row h of the output is token offset + (h % (rows * 6)) / 6, head (h / (rows * 6)) * 6 + h % 6 of the
         source; inverse, token t's head r is folded row (r / 6) * rows * 6 + t * 6 + r % 6. Every task writes its
@@ -359,21 +399,38 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
             current = captured if (replay and 'stale_trace' in self.broken) else self.memory[cur_pos_tensor.address]
             words = [int(value) for value in current.reshape(-1).tolist()]
             mask = self.mask_seen(self.memory[attn_mask.address], flags, batches, capacity)
+            if 'ignore_mask' in self.broken:
+                mask = torch.zeros_like(mask)
             data = torch.zeros(output.shape, dtype=torch.bfloat16)
+            idle, live_at_capacity = [], False
             for entry in range(batches):
                 word = words[entry if (not share or 'own_slot' in self.broken) else 0]
                 row = table[0 if share else entry]
-                if 'idle_nonfinite' in self.broken and word == 255 and not bool(row.any()):
+                if 'extent_from_table' in self.broken:
+                    poisoned = (row >= keys.shape[0] - probe.POISON_BLOCKS).nonzero()
+                    word = (int(poisoned[0]) * card.PAGE if len(poisoned) else capacity) - 1
+                idle.append(word == 255 and not bool(row.any()))
+                live_at_capacity = live_at_capacity or (not idle[-1] and word == capacity - 1)
+                if 'idle_nonfinite' in self.broken and idle[-1]:
                     data[0, entry] = float('nan')
                     continue
                 result = self.attend(q[0, entry], keys, values, row, word, k_chunk // 32, scale, cores, False,
                                      mask[entry, 0], True, capacity)
                 data[0, entry] = result.to(torch.bfloat16)
             self.memory[output.address] = data
+            self.forward.append((all(idle), live_at_capacity))
 
         self.run_or_record(write)
         self.now += 20e-6 + 1e-9 * capacity if self.seconds_per_call is None else self.seconds_per_call
         return output
+
+    def paged_scaled_dot_product_attention_decode(self, query, k, v, *positional, **options):
+        """'ignore_mask' on the non-extent calls (the 0x7 references): their mask read as zeros."""
+        mask = options.get('attn_mask')
+        if 'ignore_mask' in self.broken and mask is not None and options.get('cur_pos_tensor') is None:
+            options['attn_mask'] = self.from_torch(self.torch.zeros_like(self.read(mask)), dtype=self.bfloat16,
+                                                   layout=self.TILE_LAYOUT, device=self)
+        return super().paged_scaled_dot_product_attention_decode(query, k, v, *positional, **options)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -430,6 +487,17 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(residues, set(reader_b.DESIGN_RESIDUES) | {240})      # 255 is 240 in the last family
         self.assertEqual(len(reader_b.replay_plan(reader_b.R2_NAMED, (0,), 1, reader_b.CAPACITY)), 2)
 
+    def test_r4_runs_at_the_first_assignment_and_at_the_one_holding_c(self):
+        """Idle segments must share a trace with a live segment at C (the served layout near 131k) too."""
+        families = reader_b.family_plan(reader_b.CAPACITY, reader_b.R2_NAMED, reader_b.R2_FAMILIES)
+        plan = reader_b.replay_plan(families, reader_b.DESIGN_RESIDUES, 2, reader_b.CAPACITY)
+        self.assertNotIn(reader_b.CAPACITY, plan[0]['families'])
+        self.assertEqual(reader_b.idle_entries(plan, reader_b.CAPACITY), [0, 2])
+        self.assertEqual((plan[2]['families'][0], plan[2]['tables']), (reader_b.CAPACITY, True))
+        watcher = reader_b.replay_plan(reader_b.R2_NAMED, (0, 32, 255), 1, reader_b.CAPACITY)
+        self.assertEqual(reader_b.idle_entries(watcher, reader_b.CAPACITY), [0, 1])
+        self.assertEqual(reader_b.idle_entries(reader_b.replay_plan([256, 512, 1280], (7,), 1, 1280), 1280), [0])
+
     def test_idle_patterns(self):
         self.assertEqual(reader_b.parse_patterns('3,2+3,0,0+1'), [(3,), (2, 3), (0,), (0, 1)])
         self.assertEqual(reader_b.parse_patterns('3+1'), [(1, 3)])
@@ -457,7 +525,7 @@ class HelperTests(unittest.TestCase):
                     comparisons=self.comparisons(reader_b.DECISIVE_KINDS), liveness=[dict(label='l', live=True)],
                     r1_run={name: list(reader_b.R1_WORDS) for name in reader_b.R1_GEOMETRIES},
                     r2_families_replayed=reader_b.family_plan(reader_b.CAPACITY, reader_b.R2_NAMED, 56),
-                    variants_run=['normal', 'peaky'], idle_starts_run=[0, 32], failures=[])
+                    variants_run=['normal', 'peaky'], idle_starts_run=[0, 32], seeds_run=[0, 1, 2], failures=[])
 
     def test_the_decision_and_the_scope(self):
         report = self.full_report()
@@ -485,13 +553,31 @@ class HelperTests(unittest.TestCase):
         report['failures'] = ['R1/seed0: boom']
         self.assertEqual(reader_b.decide(report)['verdict'], 'NO-DECISION')
 
+    def test_a_full_scope_needs_the_block_run_of_seeds_0_1_and_2(self):
+        """One seed over every section, family and variant is a reduced scope, never CB2b's evidence."""
+        report = self.full_report()
+        report['seeds_run'] = [0]
+        decision = reader_b.decide(report)
+        self.assertEqual((decision['verdict'], decision['scope'], decision['scope_short']),
+                         ('PASS', 'reduced', ['seeds']))
+        del report['seeds_run']
+        self.assertEqual(reader_b.decide(report)['scope_short'], ['seeds'])
+        report['seeds_run'] = [0, 1, 2, 3, 4]
+        self.assertEqual(reader_b.decide(report)['scope'], 'full')
+
     def test_the_verdict_line(self):
         report = self.full_report()
         report['two_chip_view'] = dict(phantom_programs=12)
+        report['modules'] = dict(sha256={'extent_attention_replay.py': 'ab' * 32})
         report['decision'] = reader_b.decide(report)
         line = reader_b.verdict_line(report)
         self.assertTrue(line.startswith('K64J_READER verdict=PASS scope=full r1=2/2 r1_reader=1/1 staging=6/6 r2=2/2 '
-                                        'r2_trace=1/1 r4=3/3 live=1/1 families=56 chips=1of2 phantom=12'), line)
+                                        'r2_trace=1/1 r4=3/3 live=1/1 families=56 chips=1of2 phantom=12 '
+                                        'extent_sha256=' + 'ab' * 32), line)
+        report['seeds_run'] = [0]
+        report['decision'] = reader_b.decide(report)
+        self.assertIn(' scope=reduced ', reader_b.verdict_line(report))
+        self.assertIn(' scope_short=seeds', reader_b.verdict_line(report))
 
     def test_the_pindiag_lines_one_construction_must_log(self):
         engaged = '[PINDIAG] extent replay engaged segments=4 flags=0x27,0x27,0x27,0x27 mask=narrow capacity=4352'
@@ -676,6 +762,19 @@ class ContractTests(unittest.TestCase):
         ttnn.get_device_tensors = lambda value: [shard, shard]
         with self.assertRaisesRegex(RuntimeError, 'mesh composer'):
             reader_b.read(ttnn, 'mesh tensor', 'x')
+
+    def test_the_runners_cb2b_examples_name_card_m(self):
+        """Card B is reserved for another agent and is the runner's default QUAL_CARD: every CB2b example command in
+        the runner's header names card M by its board id, with ALLOW_SERVING_CARD=1, and none names card B."""
+        text = read(RUNNER)
+        start = text.index('# CB2b (')
+        paragraph = text[start:text.index(NL + '#' + NL, start)]
+        commands = [line for line in paragraph.splitlines() if 'bash run_card_b.sh' in line]
+        self.assertEqual(len(commands), 2, paragraph)
+        for line in commands:
+            self.assertIn('#   QUAL_CARD=%s ALLOW_SERVING_CARD=1 K64J_HARNESS=extent_reader ' % CARD_M, line)
+        self.assertNotIn(CARD_B, paragraph)
+        self.assertIn('C2_CARDM_ENV=K64J_HARNESS=extent_reader [WATCHER=1]', paragraph)
 
     def test_without_the_view_the_real_reader_refuses_one_chip(self):
         fake = FakeReaderTtnn(torch)
@@ -927,6 +1026,12 @@ class DryRunTests(unittest.TestCase):
              '--seeds', '0', '--variants', 'normal', '--r1-words', '7,255', '--r1-geometries', 'G8B2',
              '--r2-restages', '1', '--idle-patterns', '2+3']
 
+    # C = 1,280 again, but the named families put C in the second assignment: [256, 512, 768, 1024], then
+    # [1280, 256, 512, 768] - segment 0 live at C while segments 2 and 3 go idle.
+    AT_C = ['--capacity', '1280', '--r2-named', '256,512,768,1024,1280', '--r2-families', '5', '--r2-residues',
+            '7,250', '--seeds', '0', '--variants', 'normal', '--r1-words', '7,255', '--r1-geometries', 'G8B2',
+            '--r2-restages', '1', '--idle-patterns', '2+3']
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
@@ -999,8 +1104,11 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(len(report['liveness']), 4)
         self.assertTrue(all(entry['live'] for entry in report['liveness']), report['liveness'])
         self.assertEqual(report['r2_families_replayed'], [256, 512, 768, 1280, 2048, 2304])
-        self.assertEqual((report['variants_run'], report['idle_starts_run'], report['captures']),
-                         (['normal', 'peaky'], [0, 32], 1))
+        self.assertEqual((report['variants_run'], report['idle_starts_run'], report['captures'], report['seeds_run']),
+                         (['normal', 'peaky'], [0, 32], 1, [0]))
+        self.assertIn('seeds', report['decision']['scope_short'])
+        self.assertIn(' extent_sha256=%s' % sha((CI / 'extent_attention_replay.py').read_bytes()),
+                      report['verdict_line'])
         self.assertEqual(report['extent_reader'], dict(flags=['0x27'] * 4, segments=4, capacity=2304, borrowed=8))
         self.assertIn([0x27, 2, 2304 // 32, 8], report['requested_programs'])
         for family in (256, 512, 768, 1280, 2048, 2304):
@@ -1128,6 +1236,70 @@ class DryRunTests(unittest.TestCase):
         self.assertLessEqual({'r4_idle_finite'}, self.failing(report))
         self.assertNotIn('r4_live_unchanged', self.failing(report))
 
+    def test_r1_trace_is_a_replay_not_a_launch(self):
+        """A replayed mask launch on the word it was captured with (design Q1's in-trace half): only a real replay
+        shows it - r1_trace fails at word 7 (the capture held 255, the last eager word), r1_eager passes."""
+        status, report = self.run_reader(FakeReaderTtnn(torch, broken={'mask_trace_word'}), base=self.SMALL,
+                                         extra=['--sections', 'R1'])
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (1, [], 'FAIL'))
+        self.assertEqual(self.failing(report), {'r1_trace'})
+        self.assertEqual((self.kinds(report)['r1_trace'], self.kinds(report)['r1_eager']), ((1, 2), (2, 2)))
+        self.assertEqual(report['decision']['first_differing'], ['R1/G8B2/word7/trace'])
+
+    def test_r1_poisons_the_mask_before_every_run(self):
+        """A replayed mask launch that skips a tile whose bits are the same at both words (column tile 0: no key of
+        it is past row 240): what the eager runs left there is right, so only the NaN poison shows the tile was not
+        rewritten."""
+        for word in (240, 255):
+            self.assertTrue(bool((extent_module.narrow_mask_host(word, 8, 2, 0)[..., :32] == 0).all()))
+        status, report = self.run_reader(FakeReaderTtnn(torch, broken={'mask_trace_skips_tile'}), base=self.SMALL,
+                                         extra=['--sections', 'R1', '--r1-words', '240,255'])
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (1, [], 'FAIL'))
+        self.assertEqual(self.failing(report), {'r1_trace'})
+        self.assertEqual((self.kinds(report)['r1_trace'], self.kinds(report)['r1_eager']), ((0, 2), (2, 2)))
+
+    def test_an_idle_segment_that_moves_its_live_neighbour_fails_r4_live_unchanged(self):
+        """Segments 2 and 3 idle move segment 1's rows: the idle rows stay right, so only the live segments' check
+        against the all-live replay can see it."""
+        status, report = self.run_reader(FakeReaderTtnn(torch, broken={'idle_bleeds'}), base=self.SMALL,
+                                         extra=['--sections', 'R4'])
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (1, [], 'FAIL'))
+        self.assertEqual(self.failing(report), {'r4_live_unchanged'})
+        self.assertEqual(report['decision']['first_differing'], ['R2/seed0/normal/a0.0/idle2+3/segment1'])
+
+    def test_r4_runs_again_at_the_assignment_holding_c(self):
+        """R4 at the first assignment (no segment at C here) and again at the one holding C: an idle segment that
+        disturbs a live segment at C is caught there, and only there."""
+        status, report = self.run_reader(FakeReaderTtnn(torch), base=self.AT_C, extra=['--sections', 'R4'])
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (0, [], 'PASS'))
+        labels = [entry['label'] for entry in report['comparisons'] if entry['kind'] == 'r4_live_unchanged']
+        self.assertEqual(labels, ['R2/seed0/normal/a%d.0/idle2+3/segment%d' % (assignment, segment)
+                                  for assignment in (0, 1) for segment in (0, 1)])
+        status, report = self.run_reader(FakeReaderTtnn(torch, broken={'idle_bleeds_at_capacity'}), base=self.AT_C,
+                                         extra=['--sections', 'R4'], name='bleeds')
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (1, [], 'FAIL'))
+        self.assertEqual(self.failing(report), {'r4_live_unchanged'})
+        self.assertEqual(report['decision']['first_differing'], ['R2/seed0/normal/a1.0/idle2+3/segment0'])
+
+    def test_a_device_that_finds_e_without_cur_pos_decides_nothing(self):
+        """A 0x20 program that ignores cur_pos_tensor but takes the right E from the poisoned table: every R2 and S
+        comparison is equal, so the cur_pos liveness control alone keeps this from a PASS."""
+        status, report = self.run_reader(FakeReaderTtnn(torch, broken={'extent_from_table'}), base=self.SMALL,
+                                         extra=['--sections', 'S,R2'])
+        self.assertEqual((report['failures'], self.failing(report)), ([], set()))
+        self.assertEqual((status, report['decision']['verdict']), (1, 'NO-DECISION'))
+        self.assertEqual([entry['kind'] for entry in report['liveness'] if not entry['live']], ['cur_pos_live'])
+        self.assertIn('1 liveness controls did not move', report['decision']['reasons'][0])
+
+    def test_a_device_that_ignores_every_mask_decides_nothing(self):
+        """Every call ignores its mask, the reader's and the 0x7 references' alike: R2 is equal everywhere, so the
+        mask liveness control alone keeps this from a PASS."""
+        status, report = self.run_reader(FakeReaderTtnn(torch, broken={'ignore_mask'}), base=self.SMALL,
+                                         extra=['--sections', 'S,R2'])
+        self.assertEqual((report['failures'], self.failing(report)), ([], set()))
+        self.assertEqual((status, report['decision']['verdict']), (1, 'NO-DECISION'))
+        self.assertEqual([entry['kind'] for entry in report['liveness'] if not entry['live']], ['mask_live'])
+
     def test_a_reader_that_never_logs_it_was_engaged_decides_nothing(self):
         status, report = self.run_reader(FakeReaderTtnn(torch), base=self.SMALL, extra=['--sections', 'S'],
                                          patches=[mock.patch.object(extent_module, 'ENGAGED_MARKER', '[PINDIAG] x')])
@@ -1167,6 +1339,7 @@ class DryRunTests(unittest.TestCase):
         status, report = self.run_reader(fake, base=self.SMALL, extra=['--seeds', '0,1', '--deadline-s', '100'])
         self.assertEqual(report['decision']['verdict'], 'NO-DECISION')
         self.assertTrue(report['deadline']['skipped'], report.get('deadline'))
+        self.assertNotIn(1, report.get('seeds_run') or [])
         self.assertEqual((fake.closed, fake.live_traces_at_close), (True, 0))
 
 

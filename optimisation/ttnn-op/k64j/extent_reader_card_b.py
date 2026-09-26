@@ -31,11 +31,12 @@ on their own; this proves the reader code that issues them, through the classes 
       compile-time call at capacity E with the table truncated to E / 64 and the WIDE mask carrying the real -inf tail
       (k64j_card_b.wide_mask), folded and unfolded on the host (r2_trace_vs_wide), and == the same reader called
       eagerly on the same staged state (r2_trace_vs_eager).
-  R4  DECISIVE. At each variant's first assignment, idle segments (--idle-patterns: which segments go idle, the k-th
-      of them at start 32 * (k % 2), page 0 tile row 0 or 1) on the zero table at E = 256, in the same trace: the
-      live segments == the all-live replay bit for bit (r4_live_unchanged), every idle row finite (r4_idle_finite),
-      and each idle segment == the 0x7 call at capacity 256 on the zero table with the wide mask at its start
-      (r4_idle_vs_wide).
+  R4  DECISIVE. At each variant's first assignment (the small families) and again at the first assignment that holds
+      a segment at C (idle segments in one trace with a live segment at C, the served layout near 131k), idle
+      segments (--idle-patterns: which segments go idle, the k-th of them at start 32 * (k % 2), page 0 tile row 0 or
+      1) on the zero table at E = 256, in the same trace: the live segments == the all-live replay bit for bit
+      (r4_live_unchanged), every idle row finite (r4_idle_finite), and each idle segment == the 0x7 call at capacity
+      256 on the zero table with the wide mask at its start (r4_idle_vs_wide).
   liveness (per seed and variant, at the first assignment; a dead control is NO-DECISION): a segment below C with its
       lent cur_pos rewritten to [E, E] (one poisoned chunk more) must move its rows (cur_pos_live: the kernel reads
       the lent cur_pos), and its 0x7 reference with a ZERO wide mask must differ from the real one (mask_live: the
@@ -49,11 +50,26 @@ built from the same shard addresses, is dropped and counted as phantom). It is s
 calls into the reader classes, so the pinned modules' function-local `import ttnn` resolves to it; everything else
 it forwards to ttnn unchanged. Nothing of the reader is replaced or patched but its log function (_pindiag), which is
 teed into the report. Chip 1 of the serving pair is left to the model-level gates on M+A (G3, G3b, the extent audit).
+WHAT THIS CANNOT SEE: chip 1's programs (prepare_narrow's mask program, device_layout_dma's folds) are built from chip
+0's shard addresses and never launched, so a chip-indexing error in either - chip 1 given chip 0's metadata buffer,
+word or mask, or chip 1's own ones never written - passes here. Chip 1 is covered only by W3's extent audit (the
+two-chip readback of every segment's word and cur_pos and, in rotation, its narrow masks and tables) and by G3 / G3b
+on M+A; the audit's chip-1 mask comparison is therefore decisive there (its MISMATCH line fails the arm, design 2.2
+step 7), never advisory. The verdict line says chips=1of2.
 
 THE CODE UNDER TEST comes from this checkout's scripts/ci, which run_card_b.sh mounts at /bench/ci (--ci-root): every
 module must be loaded from there, the four pinned sources must keep their frozen bytes, and the sha256 of
 extent_attention_replay.py (what W7's evidence pins), pooled_attention_replay.py and serving_buffer_pool.py are
-recorded.
+recorded; the first is also on the verdict line (extent_sha256=).
+
+FOR W7 (design W7: "the extent readers refuse construction unless admitted() holds"). This harness constructs the
+readers with no admission - its PASS is part of the admission's evidence - and that evidence pins
+extent_attention_replay.py's sha256 as this run recorded it. So the admitted() refusal belongs in the readers' caller
+(model_batch, which builds the PackedExtentReplayReader, or packed_verifier), never in extent_attention_replay.py: a
+refusal there changes the pinned bytes, and a rerun of this harness would then be refused by the refusal itself
+(otherwise it needs a bypass for this harness, and CB2b rerun on the new bytes). W7's evidence takes the line
+'K64J_READER verdict=PASS scope=full ... chips=1of2 ... extent_sha256=<the pinned sha>' - a reduced scope, another
+sha or a missing chips=1of2 is not CB2b's evidence.
 
 The log: the reader's 0x27 program (B = 2, C / 32, 8 mask tiles) and every 0x7 reference must log their F4 lines, the
 0x27 one followed by exactly one F22 line (entries=2 kv_share=true q_slice=true); each construction must log one
@@ -64,8 +80,9 @@ Verdict: one 'K64J_READER verdict=...' line.
   PASS         every decisive comparison byte-equal, every liveness control moved, no failure, nothing decisive cut by
                the deadline. scope=full when the run covered the design's set (every section; R1 at the three
                geometries and the residues 0, 7, 127, 240, 255; R2 over more than 50 families including the five
-               named, at C = 131,328, for both variants; R4 at both idle starts); scope=reduced otherwise (the WATCHER
-               pass, a narrowed run). Only a full-scope PASS is CB2b's evidence.
+               named, at C = 131,328, for both variants; R4 at both idle starts; the block run of each of seeds 0, 1
+               and 2 complete); scope=reduced otherwise (the WATCHER pass, a narrowed run, one seed). Only a full-scope
+               PASS is CB2b's evidence.
   FAIL         a decisive comparison differs on an otherwise valid run.
   NO-DECISION  a failure (the wrong binary or kernels, no compact scratch, QWEN_FAST_SDPA_MODES other than
                tail,share,slice, a module not from --ci-root, a pinned source changed, the host mirrors disagreeing, a
@@ -227,6 +244,16 @@ def replay_plan(families, residues, restages, capacity, users=USERS):
     return plan
 
 
+def idle_entries(plan, capacity):
+    """The indices of the plan entries R4 runs at: the first (the first assignment, the small families) and the first
+    that holds a segment at C (idle segments in one trace with a live segment at C: the served layout near 131k)."""
+    chosen = [0]
+    at_capacity = next((index for index, entry in enumerate(plan) if capacity in entry['families']), None)
+    if at_capacity is not None and at_capacity not in chosen:
+        chosen.append(at_capacity)
+    return chosen
+
+
 def parse_patterns(text, users=USERS):
     """'3,2+3,0' -> [(3,), (2, 3), (0,)]: per replay the segments that go idle (one or two, never all), in segment
     order, the order packed_verifier.idle_inputs numbers them in."""
@@ -289,6 +316,8 @@ def scope(report):
         short.append('variants')
     if set(IDLE_STARTS) - set(report.get('idle_starts_run') or ()):
         short.append('idle_starts')
+    if set(SEEDS) - set(report.get('seeds_run') or ()):
+        short.append('seeds')
     return ('full' if not short else 'reduced'), short
 
 
@@ -350,6 +379,9 @@ def verdict_line(report):
     view = report.get('two_chip_view') or {}
     if view:
         words.append('chips=1of2 phantom=%d' % view.get('phantom_programs', 0))
+    source = ((report.get('modules') or {}).get('sha256') or {}).get('extent_attention_replay.py')
+    if source:
+        words.append('extent_sha256=%s' % source)
     if decision.get('scope_short'):
         words.append('scope_short=%s' % ','.join(decision['scope_short']))
     if report.get('sections_failed'):
@@ -861,8 +893,10 @@ def section_block(ttnn, torch, device, mods, view, seed, args, report):
     across the plan, the idle patterns and the liveness controls."""
     wants = set(args.sections) & set(BLOCK_SECTIONS)
     plan = replay_plan(args.families, args.r2_residues, args.r2_restages, args.capacity)
+    idle_at = idle_entries(plan, args.capacity)
     if 'R2' not in wants:
-        plan = plan[:1]
+        plan = [plan[index] for index in idle_at]         # what R4 replays at (S uses the first alone)
+        idle_at = list(range(len(plan)))
     block = Block(ttnn, torch, device, mods, view, seed, args, report)
     replayed = set(report.get('r2_families_replayed') or ())
     try:
@@ -926,8 +960,9 @@ def section_block(ttnn, torch, device, mods, view, seed, args, report):
                     report['variants_run'] = sorted(set(report.get('variants_run') or ()) | {variant})
                 if index == 0:
                     liveness(block, entry, got, variant, label)
-                    if 'R4' in wants:
-                        section_idle(block, entry, got, variant, label)
+                if index in idle_at and 'R4' in wants:
+                    section_idle(block, entry, got, variant, label)
+        report['seeds_run'] = sorted(set(report.get('seeds_run') or ()) | {seed})
     finally:
         block.close()
 

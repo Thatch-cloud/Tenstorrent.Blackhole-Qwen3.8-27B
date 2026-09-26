@@ -558,6 +558,17 @@ class CardMStepRunTests(unittest.TestCase):
         self.assertIn('LEFT=no', result.stdout)
         self.assertIn('K64J_CARD k2_verdict=REDUCED-PASS', result.stdout)
 
+    def test_the_collection_prints_the_extent_readers_verdict_line_too(self):
+        """run_card_b.sh K64J_HARNESS=extent_reader (CB2b) logs K64J_READER, not K64J_CARD: the step shows either."""
+        self.write('harness.sh', HARNESS.replace(
+            'echo cache', 'echo "K64J_READER verdict=PASS scope=full chips=1of2" > "$RESULTS/reader-1.log"' + NL
+            + 'echo cache'))
+        self.assertEqual(self.run_step(RUN_STEP).returncode, 0)
+        result = self.run_step(COLLECT_STEP)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(NL + 'K64J_READER verdict=PASS scope=full chips=1of2' + NL, result.stdout)
+        self.assertIn(NL + 'K64J_CARD k2_verdict=REDUCED-PASS' + NL, result.stdout)
+
     def test_the_collection_without_a_run_touches_nothing(self):
         result = self.run_step(COLLECT_STEP)
         self.assertEqual(result.returncode, 0, result.stderr)
