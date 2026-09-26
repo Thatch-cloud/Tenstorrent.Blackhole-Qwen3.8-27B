@@ -11,9 +11,10 @@ gets its tag; a problem exits 1, so a failed image is never tagged, smoked or pu
     K64c lost QWEN_SDPA_TREE_SCRATCH_ROUNDS). The graft's _ttnncpp.so carries GRAFT_LITERALS (K64j's
     [QWEN-SDPA] factory literals, which the QWEN_ token regex cannot see) and, with
     --previous-graft, every QWEN_ / [QWEN- string of the graft it replaces (K64i), as build_k64j.sh
-    step 6 checked when it was built. Each op directory the JIT compiles from (attn_prep,
-    nlp_concat_heads_decode, sdpa_decode, sdpa) must be the context's graft copy, tree for tree: a
-    wrong kernel directory is silent at run time.
+    step 6 checked when it was built - that graft first shown to be K64i (its MANIFEST.sha256 holds
+    and its _ttnncpp.so is the v235 gate's cf54d716), or the superset is vacuous. Each op directory
+    the JIT compiles from (attn_prep, nlp_concat_heads_decode, sdpa_decode, sdpa) must be the
+    context's graft copy, tree for tree: a wrong kernel directory is silent at run time.
 (b) overlay: every destination docker/qwen-c2-overlay.txt names holds the sha256 of its source
     in the build context; the install record says which base files the overlay changed. The
     image's revision label and /opt/qwen-c2/source-revision name the commit the context was
@@ -90,6 +91,16 @@ ENVIRONMENT_SUCCESSIONS = {
         'F19-F22) and four kernels, K64i\'s 30 QWEN strings kept; exact never builds a 0x20 program, and M2 '
         'holds exact on the K64j image IDENTICAL to v235'),
 }
+# The graft GRAFT_NAME replaces, whose strings (a)'s superset check holds the new binaries to: K64i, the v235
+# gate's binary - the older value of the reviewed succession. The superset is only as good as the graft it
+# compares with, so that graft must verify against its own MANIFEST.sha256 and its _ttnncpp.so must be this
+# binary; a replaced or rebuilt ~/opgraft-K64i would otherwise make "keeps all of K64i's strings" vacuous.
+PREVIOUS_GRAFT_LABEL = 'K64i'
+PREVIOUS_GRAFT_TTNNCPP_SHA256 = ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][0]
+GRAFT_MANIFEST = 'MANIFEST.sha256'
+# sha256sum's lines, as the graft builds write them ((cd $G && find . -type f ! -name MANIFEST.sha256 | sort |
+# xargs sha256sum) > MANIFEST.sha256): the digest, a space, ' ' or '*' for the mode, the ./-relative path.
+MANIFEST_LINE = re.compile(r'^([0-9a-f]{64}) [ *](.+)$')
 # QWEN_ flags the base binaries read, the image sets, and the graft is KNOWN not to read, each
 # with the reason that is acceptable (e.g. the gate that qualified the graft ran without it
 # too). Empty until a build reports one; never add a flag without reading which patch it is.
@@ -230,6 +241,40 @@ def binary_literals(path):
             return qwen_literals(view)
 
 
+def previous_graft_problems(previous):
+    """(a)'s check of the graft the superset compares with (--previous-graft, the rig's ~/opgraft-K64i): its
+    MANIFEST.sha256 lists each binary read here at the binary's own sha256 (the build script runs the full
+    `sha256sum -c` before the build; this holds the two files read here to it again), and its _ttnncpp.so is
+    PREVIOUS_GRAFT_TTNNCPP_SHA256. A binary that is missing is named by the superset check itself."""
+    previous = Path(previous)
+    manifest = previous / GRAFT_MANIFEST
+    if not manifest.is_file():
+        return ['(a) the previous graft %s has no %s: it cannot be shown to be %s' % (previous, GRAFT_MANIFEST,
+                                                                                    PREVIOUS_GRAFT_LABEL)]
+    listed = {}
+    for line in manifest.read_text(encoding='utf-8').splitlines():
+        match = MANIFEST_LINE.match(line)
+        if match:
+            name = match.group(2)
+            listed[name[2:] if name.startswith('./') else name] = match.group(1)
+    problems = []
+    for binary in sorted({binary for binary, _ in GRAFT_BINARIES}):
+        path = previous / binary
+        if not path.is_file():
+            continue
+        digest = c2_overlay.sha256(path)
+        if binary not in listed:
+            problems.append('(a) the previous graft\'s %s does not list %s' % (GRAFT_MANIFEST, binary))
+        elif listed[binary] != digest:
+            problems.append('(a) the previous graft\'s %s is %s, not the %s its %s lists: changed after it was built'
+                            % (binary, digest[:16], listed[binary][:16], GRAFT_MANIFEST))
+        if binary == '_ttnncpp.so' and digest != PREVIOUS_GRAFT_TTNNCPP_SHA256:
+            problems.append('(a) the previous graft\'s _ttnncpp.so is %s, not %s\'s %s (the v235 gate\'s runtime pin): '
+                            'the superset would compare with another binary' % (
+                                digest[:16], PREVIOUS_GRAFT_LABEL, PREVIOUS_GRAFT_TTNNCPP_SHA256[:16]))
+    return problems
+
+
 def check_graft_literals(graft, previous=None):
     """Problems and report lines for (a)'s literals, read on the host from the context's graft (its binaries'
     sha256 are the installed ones', checked in check_binaries): GRAFT_LITERALS in its _ttnncpp.so, and with
@@ -254,6 +299,11 @@ def check_graft_literals(graft, previous=None):
     if previous is None:
         lines.append('(a) QWEN_ / [QWEN- superset against the previous graft: not checked (no --previous-graft)')
         return problems, lines
+    found = previous_graft_problems(previous)
+    problems += found
+    if not found:
+        lines.append('(a) the previous graft %s verifies against its %s and its _ttnncpp.so is %s\'s %s' % (
+            Path(previous).name, GRAFT_MANIFEST, PREVIOUS_GRAFT_LABEL, PREVIOUS_GRAFT_TTNNCPP_SHA256[:16]))
     for binary in sorted({binary for binary, _ in GRAFT_BINARIES}):
         old, new = Path(previous) / binary, graft / binary
         if not old.is_file():

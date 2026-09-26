@@ -18,8 +18,9 @@
 #   Optional env: C2_CHECKOUT (a checkout to compare the image's trees with, informational),
 #   C2_PROVENANCE_REPORT (where to write the provenance JSON).
 #   The graft is K64j (S2, design W9): its _ttnncpp.so must be $graft_sha, and G1 holds every
-#   QWEN_ / [QWEN- string of the previous graft (K64i, $previous_graft) to be in it too (a graft .so
-#   replaces the whole binary: memory graft-so-drops-image-patches). The kernel-cache key below hashes
+#   QWEN_ / [QWEN- string of the previous graft (K64i, $previous_graft, itself checked against its
+#   MANIFEST.sha256 and $previous_graft_sha first) to be in it too (a graft .so replaces the whole
+#   binary: memory graft-so-drops-image-patches). The kernel-cache key below hashes
 #   the graft's own *qwen*.cpp, so K64j's first start compiles every kernel (TT_METAL_CACHE is that
 #   whole directory); never seed it from K64i's.
 set -euo pipefail
@@ -31,6 +32,7 @@ graft=/home/thatch/opgraft-K64j
 graft_name=opgraft-K64j
 graft_sha=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7
 previous_graft=/home/thatch/opgraft-K64i
+previous_graft_sha=cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4
 fixtures=/home/thatch/.cache/qwen-experiments
 models=/home/thatch/hf-cache/hub
 ctx=/home/thatch/c2-serving-ctx
@@ -58,7 +60,15 @@ if [ "$(sha256sum < "$graft/_ttnncpp.so" | cut -c1-64)" != "$graft_sha" ]; then
   echo "$graft/_ttnncpp.so is not the K64j binary $graft_sha" >&2
   exit 2
 fi
+# G1 holds the graft's strings to the previous graft's, so that graft must be K64i as built: its MANIFEST.sha256
+# verifies and its _ttnncpp.so is the v235 gate's binary (a replaced or rebuilt ~/opgraft-K64i would make the
+# superset vacuous).
 test -f "$previous_graft/_ttnncpp.so" || { echo "$previous_graft/_ttnncpp.so is missing: G1 compares the graft's strings with it" >&2; exit 2; }
+(cd "$previous_graft" && sha256sum -c --quiet MANIFEST.sha256) || { echo "$previous_graft does not verify against its MANIFEST.sha256" >&2; exit 2; }
+if [ "$(sha256sum < "$previous_graft/_ttnncpp.so" | cut -c1-64)" != "$previous_graft_sha" ]; then
+  echo "$previous_graft/_ttnncpp.so is not the K64i binary $previous_graft_sha" >&2
+  exit 2
+fi
 cp -al "$graft" "$ctx/$graft_name"
 for component in attention convolution mlp projection selector; do
   cp -al "$fixtures/dflash2-$component-$revision" "$ctx/fixture/$component"
