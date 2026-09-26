@@ -46,6 +46,9 @@
 scripts/ci/serving_c2_contract.py
 scripts/ci/qwen_c2_profiles.json  /experiment-scripts/ci/qwen_c2_profiles.json  /opt/qwen-c2/profiles.json
 scripts/ci/qwen_c2_boot.py  @purelib/qwen_c2_boot.py
+# R21 fix M: the contract's boot imports it in the API server under the c2 profiles (parser_rechunk)
+# and wraps vLLM's DelegatingParser.parse_delta with it; an image without it fails that boot.
+scripts/ci/c2_parser_rechunk.py
 
 # The fast path's serving policy; the TT plugin carries its own copy.
 scripts/ci/serving_fast_policy.py  /experiment-scripts/ci/serving_fast_policy.py  /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_fast_policy.py
@@ -84,3 +87,6 @@ scripts/ci/test_serving_c2_contract.py
 scripts/ci/test_serving_fast_policy.py
 scripts/ci/test_serving_worker_hook.py
 scripts/ci/test_serving_lifecycle.py
+# Fix M against the image's own vLLM parsers and tokenizers (CorpusTests), on its token-id corpus.
+scripts/ci/test_c2_parser_rechunk.py
+scripts/ci/c2_parser_corpus.json

@@ -114,7 +114,8 @@
       },
       "max_prompt_tokens": 123136,
       "min_answer_tokens": 8192,
-      "default_max_tokens": 8192
+      "default_max_tokens": 8192,
+      "parser_rechunk": true
     },
     "c2-gate": {
       "description": "GATE ONLY (the c2 bring-up at v235's shape): c2's environment - QWEN_FAST_ANY_REQUEST=1, output ceiling 16384 - with exact's prompt limit, 131072 (min_answer_tokens 256, no max_prompt_tokens), so the 4 x 131072 real-text bring-up runs c2's code where v235 ran and compares byte for byte: at 131072 every request's budget is min(max_tokens, 256), and the four-user packed block engages beside the Phase 0 engines. The engine argv is exact's. Not for traffic: a 131072-token prompt leaves 256 tokens of answer.",
@@ -173,7 +174,8 @@
         }
       },
       "min_answer_tokens": 256,
-      "default_max_tokens": 8192
+      "default_max_tokens": 8192,
+      "parser_rechunk": true
     },
     "coding": {
       "description": "NOT SERVABLE: the fast path refuses any request whose prompt is not exactly the frozen context or whose remaining budget exceeds 256 (frozen_combined_runtime.validate_target_option; smoke v3, run 36099730091). Kept for the record.",
