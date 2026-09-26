@@ -89,8 +89,8 @@ class FlagTests(unittest.TestCase):
         self.assertTrue(guards, 'no `if extent_replay:` at the top level of ServingBufferPool.__init__')
         first = guards[0]
         self.assertEqual([ast.unparse(node) for node in first.body],
-                         ['from packed_any_admission import require_admitted',
-                          "require_admitted('ServingBufferPool extent storage')"])
+                         ['import packed_any_admission',
+                          "packed_any_admission.require_admitted('ServingBufferPool extent storage')"])
         allocations = [node for node in init.body if isinstance(node, ast.Try)]
         self.assertLess(init.body.index(first), init.body.index(allocations[0]), 'the guard runs before the allocations')
 
