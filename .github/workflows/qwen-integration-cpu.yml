@@ -88,6 +88,8 @@ jobs:
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_chain -p 'test_*.py'
           python -B -m unittest test_m3native_engine_argv
           python -B -m unittest test_serving_image_copy_closure
+          python -B -m unittest test_c2_image_overlay
+          python -B -m unittest test_serving_c2_contract
           python -B -m unittest test_serving_plugin_patch
           python -B -m unittest test_serving_worker_hook
           python -B -m unittest test_serving_request_factory
@@ -214,4 +216,5 @@ jobs:
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
           bash -n scripts/ci/mlp-clock-hardware-suite.sh
+          bash -n scripts/ci/build-c2-serving-image.sh
           git diff --check

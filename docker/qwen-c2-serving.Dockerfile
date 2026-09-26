@@ -2,7 +2,8 @@
 # m3native gate arm bind-mounted for tags v235/v238 baked in, plus the serving contract
 # (scripts/ci/serving_c2_contract.py) that makes a platform-launched vLLM match the gate's.
 # Thatch.Server's tt-serving-image.yml layers its runtime on top (docker/tenstorrent-serving.Dockerfile).
-# Built on the rig by scripts/ci/build-c2-serving-image.sh, which stages this context.
+# Built on the rig by the context's own build-c2-serving-image.sh, from a context that
+# `python3 scripts/ci/c2_overlay.py stage --repo . --out <dir>` stages and the script completes.
 ARG BASE=qwen-fast-serving:ci-be9e184e672756c8eee040f03e48dbff58e68fda
 FROM ${BASE}
 ARG KERNEL_CACHE
@@ -43,21 +44,20 @@ RUN set -eu; root=/opt/tt-metal/models/demos/blackhole/qwen36/tt; cd /opt/qwen-c
     done; \
     sed "s#  graft/#  $root/#" /opt/qwen-c2/graft.sha256 | sha256sum -c --quiet
 
-# The fast path's evidence tree changes for serving, and the plugin's copy of the policy. C2-any (the
-# c2 profiles) changes serving_request_factory, serving_runtime and serving_lifecycle together and adds
-# serving_request_quarantine: all four here, or c2 ships half a change (test_c2_overlay_closure).
-COPY ci/ /opt/qwen-c2/ci/
-RUN set -eu; cd /opt/qwen-c2/ci; \
-    cp serving_fast_policy.py packed_verifier.py serving_request_factory.py pooled_attention_replay.py \
-       serving_runtime.py serving_lifecycle.py serving_request_quarantine.py \
-       serving_c2_contract.py test_serving_c2_contract.py test_serving_fast_policy.py qwen_c2_profiles.json \
-       /experiment-scripts/ci/; \
-    cp serving_fast_policy.py /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_fast_policy.py; \
-    cp qwen_c2_profiles.json /opt/qwen-c2/profiles.json; \
+# Every file docker/qwen-c2-overlay.txt names, laid over P8's fast-path trees (/experiment-scripts/ci,
+# /speculative-decoding/harness) and the plugin's copy of the policy. That manifest is the one list:
+# c2_overlay.py stages the context from it, installs from it here (recording each destination's sha256
+# before and after), and build-c2-serving-image.sh checks the context and the built image against it.
+# Then the contract's boot hook, and every overlaid scripts/ci test module, run inside the image.
+COPY qwen-c2-overlay.txt c2_overlay.py /opt/qwen-c2/
+COPY overlay/ /opt/qwen-c2/overlay/
+RUN set -eu; \
+    python3 -B /opt/qwen-c2/c2_overlay.py install --manifest /opt/qwen-c2/qwen-c2-overlay.txt \
+      --root /opt/qwen-c2/overlay --record /opt/qwen-c2/overlay-install.json; \
     site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'); \
-    cp qwen_c2_boot.py "$site/qwen_c2_boot.py"; \
     echo 'import qwen_c2_boot' > "$site/qwen_c2_serving.pth"; \
-    cd /experiment-scripts/ci && VLLM_PLUGINS='' python3 -B -m unittest test_serving_c2_contract test_serving_fast_policy
+    tests=$(python3 -B /opt/qwen-c2/c2_overlay.py tests --manifest /opt/qwen-c2/qwen-c2-overlay.txt); \
+    cd /experiment-scripts/ci && VLLM_PLUGINS='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python3 -B -m unittest $tests
 
 # The DFlash2 draft: its config (the speculative model path) and the fixture weights.
 COPY draft-config/ /draft-config/
@@ -91,3 +91,13 @@ ENV QWEN_ATTN_PREP=1 QWEN_CARDS_ALLOCATED=1 QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 QWE
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 VLLM_USE_V2_MODEL_RUNNER=0 TT_METAL_HOME=/opt/tt-metal \
     MESH_DEVICE=P300 OMP_NUM_THREADS=8 TT_CACHE_PATH=/experiment-cache/weights TT_METAL_CACHE=${KERNEL_CACHE} \
     VLLM_CACHE_ROOT=/tmp/vllm-cache QWEN_C2_SERVING=1
+
+# Provenance, last so a new commit or stamp never invalidates the cached layers above (an ARG
+# busts the cache of every RUN after it). P8's revision label names P8's commit; this one names
+# the commit the context was staged from (c2_overlay.py stage writes source-revision). The build
+# script writes build-stamp (its own sha256), so an older copy of the script, which writes none,
+# fails here instead of tagging an image G1 never checked; G1 holds the stamp to the context's script.
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=${SOURCE_REVISION}
+COPY source-revision build-stamp /opt/qwen-c2/
+RUN test -n "${SOURCE_REVISION}" && test "$(cat /opt/qwen-c2/source-revision)" = "${SOURCE_REVISION}"

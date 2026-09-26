@@ -51,8 +51,14 @@ def dockerfile_text():
     return DOCKERFILE.read_text(encoding='utf-8').replace(chr(13) + chr(10), chr(10))
 
 
-def dockerfile_modules(text):
-    """Every scripts/ci module a Dockerfile COPY line names."""
+def working_tree_test_serving():
+    return {p.name for p in HERE.glob('test_serving_*.py')}
+
+
+def dockerfile_modules(text, test_serving=None):
+    """Every scripts/ci module a Dockerfile COPY line names. test_serving expands the
+    test_serving_*.py glob (default: the working tree's matches); pass another tree's
+    names to read the lists as some other commit had them."""
     names = set()
     for line in text.splitlines():
         if not line.startswith('COPY '):
@@ -62,15 +68,18 @@ def dockerfile_modules(text):
             if match:
                 names.add(match.group(1))
             elif token == 'scripts/ci/test_serving_*.py':
-                names.update(p.name for p in HERE.glob('test_serving_*.py'))
+                names.update(working_tree_test_serving() if test_serving is None else test_serving)
     if not names:
         raise AssertionError('no scripts/ci COPY lines parsed - the regex has drifted')
     return names
 
 
-def context_modules():
-    """Every scripts/ci module the image workflow copies into the build context."""
-    text = WORKFLOW.read_text(encoding='utf-8').replace(chr(13) + chr(10), chr(10))
+def context_modules(text=None, test_serving=None):
+    """Every scripts/ci module the image workflow copies into the build context (default:
+    the working tree's workflow; see dockerfile_modules for test_serving)."""
+    if text is None:
+        text = WORKFLOW.read_text(encoding='utf-8')
+    text = text.replace(chr(13) + chr(10), chr(10))
     names = set()
     for match in re.finditer(r'for name in ([^;]+); do', text):
         for token in match.group(1).split():
@@ -79,7 +88,7 @@ def context_modules():
     for match in re.finditer(r'cp serving-build-orchestrator/scripts/ci/(\S+)', text):
         token = match.group(1)
         if token == 'test_serving_*.py':
-            names.update(p.name for p in HERE.glob('test_serving_*.py'))
+            names.update(working_tree_test_serving() if test_serving is None else test_serving)
         elif re.match(r'^[A-Za-z0-9_]+[.](?:py|cpp)$', token):
             names.add(token)
     if not names:
