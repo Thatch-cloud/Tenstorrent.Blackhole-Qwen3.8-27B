@@ -85,13 +85,13 @@ jobs:
             SSHPASS="$SPARK_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no -o ConnectTimeout=8 thatch@192.168.2.68 'bash -s' < scripts/ci/rig/spark_remote.sh 2>&1 | tee "$RUNNER_TEMP/c2-results/spark-remote.log"
           else
             python3 - <<'PY2' 2>&1 | tee "$RUNNER_TEMP/c2-results/spark-remote.log"
-import os, paramiko
-c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-c.connect('192.168.2.68', username='thatch', password=os.environ['SPARK_PASSWORD'], look_for_keys=False, allow_agent=False, timeout=10)
-stdin, stdout, stderr = c.exec_command('bash -s', timeout=180)
-stdin.write(open('scripts/ci/rig/spark_remote.sh').read()); stdin.channel.shutdown_write()
-print(stdout.read().decode(errors='replace')[-12000:]); print(stderr.read().decode(errors='replace')[-3000:])
-PY2
+          import os, paramiko
+          c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+          c.connect('192.168.2.68', username='thatch', password=os.environ['SPARK_PASSWORD'], look_for_keys=False, allow_agent=False, timeout=10)
+          stdin, stdout, stderr = c.exec_command('bash -s', timeout=180)
+          stdin.write(open('scripts/ci/rig/spark_remote.sh').read()); stdin.channel.shutdown_write()
+          print(stdout.read().decode(errors='replace')[-12000:]); print(stderr.read().decode(errors='replace')[-3000:])
+          PY2
           fi
       - name: Platform serving container (read-only)
         if: contains(steps.job.outputs.actions, 'platform')
