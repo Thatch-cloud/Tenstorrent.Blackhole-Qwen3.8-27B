@@ -47,7 +47,8 @@ lowered to the profile's largest admitted prompt with a logged note.
            recorded, and the floor printed. Gate table row G5.
   lifecycle  six users on four seats, two event arms (LIFECYCLE_EVENTS) and a solo reference:
            lifecycle-drops  user 0 (the first arrival) leaves while its engine builds, users 1-3 at 4, 3
-                            and 2 live streams, user 4 takes user 0's freed seat, user 5 (ignore_eos)
+                            and 2 live streams, user 4 takes user 0's freed seat (max_tokens 256, so it
+                            leaves while user 3 still streams), user 5 (ignore_eos)
                             user 1's;
            lifecycle-edges  user 0 (60,000 tokens, the first arrival) is cancelled 5 s into its
                             prefill, users 1-3 leave together once each has 60 chunks (a triple drop
@@ -150,7 +151,10 @@ RERUN_PLANS = ('matrix', 'lifecycle')   # a first divergence runs every arm of t
 LIFECYCLE_LENGTHS = (60000, 4096, 8192, 2049, 16384, 255)
 LIFECYCLE_MAX_TOKENS = 2048
 LIFECYCLE_EVENTS = (
-    ('lifecycle-drops', ['--drops', '0:build,1:live=4,2:live=3,3:live=2', '--user-ignore-eos', '5']),
+    # User 4 answers at most 256 tokens: run 36222651529 left user 3's live=2 drop NOT_EXERCISED because
+    # user 4's natural answer kept three streams live until user 3 reached EOS on its own.
+    ('lifecycle-drops', ['--drops', '0:build,1:live=4,2:live=3,3:live=2', '--user-ignore-eos', '5',
+                         '--user-max-tokens', '4:256']),
     ('lifecycle-edges', ['--drops', '0:prefill+5,1+2+3:60', '--user-max-tokens', '4:1']),
 )
 # The phase each drop kind must hit for its event to count (the harness's report['lifecycle']).
