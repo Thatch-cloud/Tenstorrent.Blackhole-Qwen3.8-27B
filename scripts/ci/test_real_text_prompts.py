@@ -344,6 +344,83 @@ class FitPrefixTests(unittest.TestCase):
         self.assertEqual(rtp.pad_to([1, 2], [1], 2, 0), ([1, 2], 0, None))
 
 
+class PerUserTargetTests(unittest.TestCase):
+    """targets=[...]: the C2 serving gate's real-text matrix, one prompt length per user."""
+
+    def corpus(self, files=120):
+        return '\n\n'.join('File: %s\n%s' % item for item in sorted(code_corpus(files=files).items()))
+
+    def compact_overhead(self, task_index=0):
+        return len(rtp.encode_compact(FakeTokenizer(), '', rtp.COMPACT_TASKS[task_index]))
+
+    def repository_overhead(self, task_index=0):
+        return len(rtp.encode_prompt(FakeTokenizer(), '', rtp.TASKS[task_index]))
+
+    def test_each_user_gets_exactly_its_own_length(self):
+        short = self.compact_overhead() + 5
+        targets = [short, 2047, 2048, 2049, 4096]
+        built = rtp.build_prompts(5, None, tokenizer=FakeTokenizer(), corpus=self.corpus(), targets=targets)
+        self.assertEqual([len(e['tokens']) for e in built['users']], targets)
+        self.assertEqual(rtp.summary(built)['prompt_lengths'], targets)
+        self.assertEqual(built['targets'], targets)
+        self.assertIsNone(built['target'])
+        self.assertEqual([e['target'] for e in built['users']], targets)
+        self.assertEqual(built['users'][0]['framing'], 'compact')
+        self.assertEqual({e['framing'] for e in built['users'][1:]}, {'repository'})
+        self.assertEqual(built['users'][0]['task'], rtp.COMPACT_TASK_NAMES[0])
+        self.assertEqual(built['users'][1]['task'], rtp.TASK_NAMES[1])
+
+    def test_the_uniform_build_is_unchanged(self):
+        """No targets: no framing key, the top-level target, and the same tokens as a per-user
+        build whose lengths are all that target (every one fits the repository framing)."""
+        uniform = rtp.build_prompts(4, 3000, tokenizer=FakeTokenizer(), corpus=self.corpus())
+        self.assertNotIn('framing', uniform['users'][0])
+        self.assertNotIn('targets', uniform)
+        self.assertEqual(uniform['target'], 3000)
+        per_user = rtp.build_prompts(4, None, tokenizer=FakeTokenizer(), corpus=self.corpus(), targets=[3000] * 4)
+        self.assertEqual([e['tokens'] for e in uniform['users']], [e['tokens'] for e in per_user['users']])
+
+    def test_a_target_below_the_repository_framing_takes_the_compact_one(self):
+        tokenizer = FakeTokenizer()
+        boundary = self.repository_overhead(0) + rtp.MIN_EXCERPT_TOKENS
+        self.assertEqual(rtp.choose_framing(tokenizer, boundary, 0), 'repository')
+        self.assertEqual(rtp.choose_framing(tokenizer, boundary - 1, 0), 'compact')
+        built = rtp.build_prompts(1, None, tokenizer=tokenizer, corpus=self.corpus(), targets=[boundary - 1])
+        entry = built['users'][0]
+        self.assertEqual((entry['framing'], len(entry['tokens'])), ('compact', boundary - 1))
+        call = tokenizer.calls[-1]
+        self.assertEqual(len(call['messages']), 1, 'one user turn, no system turn')
+        content = call['messages'][0]['content']
+        self.assertTrue(content.startswith(rtp.COMPACT_TASKS[0] + rtp.COMPACT_HEADER))
+        self.assertEqual({k: call[k] for k in ('tokenize', 'add_generation_prompt', 'return_dict', 'enable_thinking')},
+                         dict(tokenize=True, add_generation_prompt=True, return_dict=False, enable_thinking=False))
+
+    def test_the_solo_arm_builds_the_concurrent_arms_prompts(self):
+        targets = [self.compact_overhead() + 9, 2048, 5000]
+        first = rtp.build_prompts(3, None, tokenizer=FakeTokenizer(), corpus=self.corpus(), targets=targets)
+        second = rtp.build_prompts(3, None, tokenizer=FakeTokenizer(), corpus=self.corpus(), targets=targets)
+        self.assertEqual([e['prompt_sha256'] for e in first['users']], [e['prompt_sha256'] for e in second['users']])
+
+    def test_windows_stay_disjoint_with_mixed_lengths(self):
+        built = rtp.build_prompts(3, None, tokenizer=FakeTokenizer(), corpus=self.corpus(),
+                                  targets=[self.compact_overhead() + 3, 6000, 2500])
+        ranges = sorted((e['excerpt_start'], e['excerpt_end']) for e in built['users'])
+        for (_, end), (start, _) in zip(ranges, ranges[1:]):
+            self.assertLessEqual(end, start)
+
+    def test_bad_target_lists_are_refused(self):
+        with self.assertRaisesRegex(ValueError, '2 prompt lengths for 3 users'):
+            rtp.build_prompts(3, None, tokenizer=FakeTokenizer(), corpus=self.corpus(), targets=[3000, 3000])
+        for text in ('', '60,,255', '60,-1', '60,x', '0'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                rtp.parse_targets(text)
+        self.assertEqual(rtp.parse_targets('60, 255,2047'), [60, 255, 2047])
+        self.assertEqual(rtp.parse_targets([60, 255]), [60, 255])
+        with self.assertRaisesRegex(ValueError, 'no room'):
+            rtp.build_prompts(1, None, tokenizer=FakeTokenizer(), corpus=self.corpus(),
+                              targets=[self.compact_overhead() - 1])
+
+
 class TokenizerLoadTests(unittest.TestCase):
     def test_the_snapshot_is_loaded_local_only_without_remote_code(self):
         calls = []
@@ -353,6 +430,70 @@ class TokenizerLoadTests(unittest.TestCase):
             self.assertEqual(rtp.load_tokenizer('/models/snapshot'), 'tokenizer')
         self.assertEqual(calls, [(('/models/snapshot',), dict(local_files_only=True, trust_remote_code=False))])
 
+
+
+SNAPSHOT_SUFFIX = os.path.join('models--Qwen--Qwen3.8-27B', 'snapshots', '1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0')
+SNAPSHOT_ROOTS = (os.environ.get('QWEN_SNAPSHOT_ROOT', ''), '/models', '/models/hub', '/home/thatch/hf-cache/hub',
+                  os.path.join(os.path.expanduser('~'), '.cache', 'huggingface', 'hub'))
+
+
+def served_snapshot():
+    for root in SNAPSHOT_ROOTS:
+        path = os.path.join(root, SNAPSHOT_SUFFIX) if root else ''
+        if path and os.path.isfile(os.path.join(path, 'tokenizer.json')):
+            return path
+    return None
+
+
+class QwenTemplate(object):
+    """The served snapshot's tokenizer.json under the Qwen3 chat template (a system turn if given, the
+    user turn, the generation prompt, and the empty think block that enable_thinking=False writes) -
+    for a snapshot carrying no tokenizer_config.json with the template (a dev PC's copy). The repository
+    framing's 115-133 tokens (real_text_prompts' docstring, measured on the rig) validate it."""
+
+    def __init__(self, path):
+        from tokenizers import Tokenizer
+        self.tokenizer = Tokenizer.from_file(os.path.join(path, 'tokenizer.json'))
+
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, return_dict=False,
+                            enable_thinking=True):
+        text = ''.join('<|im_start|>%s\n%s<|im_end|>\n' % (m['role'], m['content']) for m in messages)
+        text += '<|im_start|>assistant\n' + ('<think>\n\n</think>\n\n' if not enable_thinking else '')
+        return self.tokenizer.encode(text, add_special_tokens=False).ids
+
+
+class TemplateTokenTests(unittest.TestCase):
+    """Review finding 12: the compact framing was never measured on the real tokenizer; a compact
+    template past a target raises "no room" inside the container and kills the arm before a request."""
+
+    def test_the_pinned_lengths_leave_room_for_the_ladder(self):
+        self.assertEqual(len(rtp.COMPACT_TEMPLATE_TOKENS), len(rtp.COMPACT_TASKS))
+        self.assertEqual(len(rtp.REPOSITORY_TEMPLATE_TOKENS), len(rtp.TASKS))
+        self.assertEqual(rtp.COMPACT_MIN_TARGET, max(rtp.COMPACT_TEMPLATE_TOKENS) + 1)
+        self.assertLess(rtp.COMPACT_MIN_TARGET, 60, 'the G4 ladder\'s shortest rung carries code')
+        self.assertEqual((min(rtp.REPOSITORY_TEMPLATE_TOKENS), max(rtp.REPOSITORY_TEMPLATE_TOKENS)), (115, 133))
+
+    def test_the_pinned_lengths_are_the_served_tokenizers(self):
+        path = served_snapshot()
+        if path is None:
+            self.skipTest('the served snapshot\'s tokenizer is not on this machine')
+        tokenizer = None
+        try:
+            from transformers import AutoTokenizer
+            candidate = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+            if getattr(candidate, 'chat_template', None):
+                tokenizer = candidate
+        except Exception:
+            tokenizer = None
+        if tokenizer is None:
+            try:
+                tokenizer = QwenTemplate(path)
+            except ImportError:
+                self.skipTest('neither transformers with the chat template nor tokenizers is installed')
+        self.assertEqual(tuple(len(rtp.encode_prompt(tokenizer, '', task)) for task in rtp.TASKS),
+                         rtp.REPOSITORY_TEMPLATE_TOKENS)
+        self.assertEqual(tuple(len(rtp.encode_compact(tokenizer, '', task)) for task in rtp.COMPACT_TASKS),
+                         rtp.COMPACT_TEMPLATE_TOKENS)
 
 if __name__ == '__main__':
     unittest.main()

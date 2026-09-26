@@ -24,6 +24,25 @@ share and the GDN prefill conv only in the concurrent arms), so a side-by-side d
 packing with those flags and is labelled so.
 
 Stdlib only; exits 0 when every user is exact, 1 when any is not, 2 when a report is unreadable.
+
+THE EXACTNESS POLICY (--policy; c2-serve-for-real-plan 2.2 item 5, fixed before G4). Near-tie tokens
+flip within 0-758 characters when the arithmetic changes (docs/real-text-2026-09-24.md:222-227), so:
+  - the reference is a solo (sequential) run on the SAME image with the same arithmetic flags;
+  - full answers are compared, never prefixes (a 'prefix' verdict means the arms ran different
+    budgets, which is NOT_COMPARABLE);
+  - a first divergence triggers ONE re-run of both arms (--rerun CONCURRENT2 SEQUENTIAL2). A
+    divergence that reproduces (the same first differing character, or the same text) FAILS - unless
+    the arms differ in an arithmetic flag (any configuration flag outside ARITHMETIC_NEUTRAL, an unset
+    flag read as its EFFECTIVE_DEFAULTS value), which makes it NOT_COMPARABLE: it needs a reference
+    under the same arithmetic. A divergence that does not reproduce, or reappears somewhere else, is
+    UNSTABLE (nondeterminism, itself a finding).
+Verdicts: PASS (exit 0), FAIL (1), NOT_COMPARABLE (3), UNSTABLE (4), RERUN (5: a first divergence and
+no --rerun given - the caller's cue to run both arms again). exactness_policy is the pure decision.
+
+BRING-UP (--against-reference FILE): one served arm against a tracked reference's texts (the C2
+serving image at 4 x 131072 against v235, scripts/ci/references/c2-serving/): IDENTICAL or DIVERGED per
+user, NOT_COMPARABLE where the prompts differ (another corpus or tokenizer) or a divergence meets an
+arithmetic difference, ERROR where the served stream failed (reference_verdicts).
 """
 
 import argparse
@@ -129,14 +148,36 @@ def stream_budgets(report):
     return [value if value is not None else report.get('max_tokens') for value in per_user]
 
 
+# What a report's qwen_configuration covers (lever_n_m3native_gate.qwen_configuration). A report
+# with no configuration_scope recorded QWEN_* only (v157-v160, v235); 'qwen-tt' reports also carry
+# QWEN<n>_* (QWEN35_GDN_*, QWEN36_*), TT_*, MESH_DEVICE and OMP_NUM_THREADS. Two reports are compared
+# only on the names both scopes cover, so an older report never reads as missing a flag.
+LEGACY_SCOPE = 'qwen'
+EXTENDED_SCOPE = 'qwen-tt'
+EXTENDED_PREFIX = re.compile(r'(?:QWEN[0-9]*_|TT_)')
+EXTENDED_NAMES = frozenset(('MESH_DEVICE', 'OMP_NUM_THREADS'))
+
+
+def configuration_scope(report):
+    return report.get('configuration_scope') or LEGACY_SCOPE
+
+
+def in_scope(name, scope):
+    if scope == LEGACY_SCOPE:
+        return name.startswith('QWEN_')
+    return bool(EXTENDED_PREFIX.match(name)) or name in EXTENDED_NAMES
+
+
 def configuration_diff(concurrent, single):
-    """{flag: [concurrent value, single value]} for every QWEN_* flag the arms differ by, or None
-    when either report carries no configuration (a gate report from before it recorded one)."""
+    """{flag: [concurrent value, single value]} for every configuration flag the arms differ by,
+    over the names both reports' scopes cover, or None when either report carries no configuration
+    (a gate report from before it recorded one)."""
     first, second = concurrent.get('qwen_configuration'), single.get('qwen_configuration')
     if first is None or second is None:
         return None
+    scopes = (configuration_scope(concurrent), configuration_scope(single))
     return {name: [first.get(name), second.get(name)] for name in sorted(set(first) | set(second))
-            if first.get(name) != second.get(name)}
+            if all(in_scope(name, scope) for scope in scopes) and first.get(name) != second.get(name)}
 
 
 def user_acceptance(report, user):
@@ -198,6 +239,328 @@ def compare(concurrent, single):
                             accept=(single.get('acceptance') or {}).get('summary_line')))
 
 
+# QWEN_* flags that only log, audit, check or route: arms differing in them still run the same
+# arithmetic. Everything else counts as arithmetic (conservative: an unknown flag makes a divergence
+# NOT_COMPARABLE rather than a FAIL). An *_AUDIT flag re-computes a cut beside the served one and
+# raises on a mismatch; the committed tokens come from the served path either way.
+ARITHMETIC_NEUTRAL = frozenset((
+    'QWEN_C2_SERVING', 'QWEN_C2_PROFILE', 'QWEN_C2_PROFILES', 'QWEN_CARDS_ALLOCATED', 'QWEN_HARDWARE_TESTS',
+    'QWEN_FABRIC_LINK_PROBE', 'QWEN_FAST_FAULTHANDLER', 'QWEN_FAST_CARRY_LOG', 'QWEN_FAST_PHASE_LOG',
+    'QWEN_FAST_PHASE_TIMING', 'QWEN_FAST_SEQ_PUBLISH_LOG', 'QWEN_FAST_MEMORY_LEDGER', 'QWEN_FAST_SHARD_CHECK',
+    # Paths (the 'qwen-tt' scope): where the runtime, the weight cache and the kernel cache live.
+    'TT_METAL_HOME', 'TT_CACHE_PATH', 'TT_METAL_CACHE',
+))
+ARITHMETIC_NEUTRAL_SUFFIXES = ('_AUDIT',)
+# The value a flag takes when the environment does not set it, where the code defines one: an
+# absent flag and its default are the same arithmetic. QWEN_FAST_OUTPUT_BUDGET: serving_fast_policy.
+# OUTPUT_BUDGET (256 unset); the C2 contract exports its profile's value into every process of the
+# image (serving_c2_contract.apply_environment), so a served arm carries 256 where v235 carried none.
+EFFECTIVE_DEFAULTS = {'QWEN_FAST_OUTPUT_BUDGET': '256'}
+POLICY_EXIT = dict(PASS=0, FAIL=1, NOT_COMPARABLE=3, UNSTABLE=4, RERUN=5)
+
+
+def arithmetic_neutral(name):
+    return name in ARITHMETIC_NEUTRAL or name.endswith(ARITHMETIC_NEUTRAL_SUFFIXES)
+
+
+def arithmetic_diff(first, second):
+    """{flag: [first, second]} for every arithmetic flag the two reports differ by, a flag either
+    side leaves unset read as its EFFECTIVE_DEFAULTS value; None when either carries no configuration."""
+    differ = configuration_diff(first, second)
+    if differ is None:
+        return None
+    def effective(name, value):
+        return EFFECTIVE_DEFAULTS.get(name) if value is None else value
+
+    return {name: values for name, values in differ.items() if not arithmetic_neutral(name)
+            and effective(name, values[0]) != effective(name, values[1])}
+
+
+def policy_user(verdict):
+    """compare_user's verdict under the policy: IDENTICAL, DIVERGED, NOT_COMPARABLE or ERROR."""
+    if verdict == 'exact':
+        return 'IDENTICAL'
+    if verdict == 'error':
+        return 'ERROR'
+    if verdict in ('prompt-mismatch', 'prefix'):
+        return 'NOT_COMPARABLE'
+    return 'DIVERGED'   # diverged, finish-, token- or eos-mismatch: the full answers differ
+
+
+def policy_pass(concurrent, single):
+    """One pass of the policy: compare() per user, mapped to IDENTICAL / DIVERGED / NOT_COMPARABLE /
+    ERROR, with a divergence under an arithmetic difference made NOT_COMPARABLE."""
+    result = compare(concurrent, single)
+    arithmetic = arithmetic_diff(concurrent, single)
+    users = []
+    for user in result['users']:
+        verdict = policy_user(user.get('verdict'))
+        entry = dict(user=user['user'], verdict=verdict, detail=user.get('verdict'),
+                     first_divergence=user.get('first_divergence'), prompt_sha256=user.get('prompt_sha256'),
+                     concurrent_len=user.get('concurrent_len'), single_len=user.get('single_len'))
+        if verdict == 'DIVERGED' and arithmetic:
+            entry.update(verdict='NOT_COMPARABLE', reason='arithmetic flags differ: %s' % ', '.join(sorted(arithmetic)))
+        elif user.get('verdict') == 'prompt-mismatch':
+            entry['reason'] = 'the arms served different prompts'
+        elif user.get('verdict') == 'prefix':
+            entry['reason'] = 'the arms ran different budgets'
+        users.append(entry)
+    return dict(users=users, arithmetic_diff=arithmetic, configuration_recorded=arithmetic is not None)
+
+
+def texts(report):
+    return [(stream or {}).get('text') for stream in report.get('streams') or []]
+
+
+def lifecycle_user(concurrent, single, budgets=(None, None), ignore_eos=False):
+    """One user of a lifecycle arm (the gate's --drops / --user-max-tokens / --user-ignore-eos)
+    against its solo run on the same prompt at the arm's full budget, EOS on. What each event leaves
+    must agree with the solo text as far as it goes: a dropped stream must be a PREFIX of it. A stream
+    cut by its own smaller budget must be a prefix that spent exactly that budget ('length',
+    completion_tokens = its max_tokens), or, where the solo run reached EOS inside that budget, the
+    solo answer itself. An ignore_eos stream, when the solo run stopped at EOS, must run PAST it:
+    strictly longer, the solo text its prefix, and the whole budget spent ('length', completion_tokens
+    = its max_tokens) - an engine that ignores ignore_eos stops where the solo run did, and that is a
+    divergence here, not a match. A user with no event is compared in full (compare_user).
+    -> (policy verdict, detail)."""
+    concurrent, single = concurrent or {}, single or {}
+    if not single or single.get('error') or concurrent.get('error'):
+        return 'ERROR', 'error'
+    actual, reference = concurrent.get('text') or '', single.get('text') or ''
+    finish, count = concurrent.get('finish_reason'), concurrent.get('completion_tokens')
+    if concurrent.get('dropped'):
+        return ('IDENTICAL' if reference.startswith(actual) else 'DIVERGED'), 'dropped %s' % concurrent['dropped']
+    if ignore_eos and single.get('finish_reason') == 'stop':
+        if finish == 'stop' and actual == reference:
+            return 'DIVERGED', 'ignore_eos ignored: stopped at the solo EOS'
+        past = (len(actual) > len(reference) and actual.startswith(reference) and finish == 'length'
+                and budgets[0] is not None and count == budgets[0])
+        return ('IDENTICAL' if past else 'DIVERGED'), 'ignore_eos past the solo EOS'
+    if None not in budgets and budgets[0] < budgets[1]:
+        if finish == 'length':
+            consistent = reference.startswith(actual) and count == budgets[0]
+        elif finish == 'stop':
+            consistent = actual == reference and single.get('finish_reason') == 'stop'
+        else:
+            consistent = False
+        return ('IDENTICAL' if consistent else 'DIVERGED'), 'its own budget %d' % budgets[0]
+    detail = compare_user(concurrent, single, budgets)['verdict']
+    return policy_user(detail), detail
+
+
+def lifecycle_pass(concurrent, single):
+    """policy_pass for a lifecycle arm: each user through lifecycle_user, the same shape out."""
+    streams_c, streams_s = concurrent.get('streams') or [], single.get('streams') or []
+    shas_c, shas_s = prompt_shas(concurrent), prompt_shas(single)
+    budgets_c, budgets_s = stream_budgets(concurrent), stream_budgets(single)
+    comparisons = concurrent.get('comparisons') or []
+    arithmetic = arithmetic_diff(concurrent, single)
+    users = []
+    for user in range(max(len(streams_c), len(streams_s))):
+        sha_c = shas_c[user] if user < len(shas_c) else None
+        sha_s = shas_s[user] if user < len(shas_s) else None
+        mine = streams_c[user] if user < len(streams_c) else None
+        theirs = streams_s[user] if user < len(streams_s) else None
+        entry = dict(user=user, prompt_sha256=sha_c, first_divergence=first_divergence(
+            (mine or {}).get('text') or '', (theirs or {}).get('text') or ''))
+        if not sha_c or sha_c != sha_s:
+            entry.update(verdict='NOT_COMPARABLE', detail='prompt-mismatch', reason='the arms served different prompts')
+        else:
+            ignore = bool((comparisons[user] if user < len(comparisons) else {}).get('ignore_eos'))
+            verdict, detail = lifecycle_user(mine, theirs, (budgets_c[user] if user < len(budgets_c) else None,
+                                                            budgets_s[user] if user < len(budgets_s) else None), ignore)
+            entry.update(verdict=verdict, detail=detail)
+            if verdict == 'DIVERGED' and arithmetic:
+                entry.update(verdict='NOT_COMPARABLE', reason='arithmetic flags differ: %s' % ', '.join(sorted(arithmetic)))
+        users.append(entry)
+    return dict(users=users, arithmetic_diff=arithmetic, configuration_recorded=arithmetic is not None)
+
+
+def exactness_policy(concurrent, single, rerun=None, pass_function=None):
+    """The policy's verdict for a concurrent arm against its solo reference, given the first pass
+    and, after a first divergence, the re-run of both arms (rerun = (concurrent2, single2)).
+
+    Per user: IDENTICAL; DIVERGED (in both passes, the same divergence: at the same character, or
+    the re-run's text byte for byte the first run's - reproduced); UNSTABLE (in one pass only, or at
+    different places in the two); NOT_COMPARABLE; ERROR; RERUN (diverged in the first pass, no re-run
+    yet). Overall: FAIL on any DIVERGED or ERROR, else RERUN, else NOT_COMPARABLE, else UNSTABLE,
+    else PASS. 'reproducible' says, per arm, whether the re-run repeated the first run's texts byte
+    for byte. `pass_function` (default policy_pass; lifecycle_pass for the gate's lifecycle arms)
+    makes one pass's verdicts."""
+    pass_function = pass_function or policy_pass
+    first = pass_function(concurrent, single)
+    second = pass_function(*rerun) if rerun is not None else None
+    first_texts = texts(concurrent)
+    again_texts = texts(rerun[0]) if rerun is not None else []
+    users = []
+    for index, entry in enumerate(first['users']):
+        again = second['users'][index] if second and index < len(second['users']) else None
+        verdict = entry['verdict']
+        reason = entry.get('reason') or (again or {}).get('reason')
+        if verdict in ('ERROR', 'NOT_COMPARABLE'):
+            final = verdict
+        elif again is None:
+            final = 'RERUN' if verdict == 'DIVERGED' else 'IDENTICAL'
+        elif again['verdict'] in ('ERROR', 'NOT_COMPARABLE'):
+            final = again['verdict']
+        elif verdict == 'DIVERGED' and again['verdict'] == 'DIVERGED':
+            same_text = (index < len(first_texts) and index < len(again_texts)
+                         and first_texts[index] == again_texts[index])
+            if entry.get('first_divergence') == again.get('first_divergence') or same_text:
+                final = 'DIVERGED'
+            else:
+                final = 'UNSTABLE'
+                reason = reason or 'diverged in both runs, at different characters (%s, %s)' % (
+                    entry.get('first_divergence'), again.get('first_divergence'))
+        elif verdict == again['verdict'] == 'IDENTICAL':
+            final = 'IDENTICAL'
+        else:
+            final = 'UNSTABLE'
+        users.append(dict(user=entry['user'], verdict=final, first=verdict,
+                          rerun=again['verdict'] if again else None,
+                          first_divergence=entry.get('first_divergence'),
+                          rerun_divergence=again.get('first_divergence') if again else None,
+                          reason=reason))
+    finals = [u['verdict'] for u in users]
+    if not users:
+        overall = 'FAIL'
+    elif 'DIVERGED' in finals or 'ERROR' in finals:
+        overall = 'FAIL'
+    elif 'RERUN' in finals:
+        overall = 'RERUN'
+    elif 'NOT_COMPARABLE' in finals:
+        overall = 'NOT_COMPARABLE'
+    elif 'UNSTABLE' in finals:
+        overall = 'UNSTABLE'
+    else:
+        overall = 'PASS'
+    reproducible = None
+    if rerun is not None:
+        reproducible = dict(concurrent=texts(concurrent) == texts(rerun[0]), single=texts(single) == texts(rerun[1]))
+    return dict(verdict=overall, users=users, first=first, rerun=second, reproducible=reproducible)
+
+
+def reference_verdicts(served, reference):
+    """Bring-up: each served stream against the tracked reference's (the same prompts, the same
+    budget): IDENTICAL, DIVERGED (with the first differing character), NOT_COMPARABLE (the prompts
+    differ, or a divergence meets an arithmetic difference) or ERROR (the served stream failed)."""
+    references = reference.get('streams') or []
+    streams = served.get('streams') or []
+    shas = prompt_shas(served)
+    budgets = stream_budgets(served)
+    arithmetic = arithmetic_diff(served, reference)
+    users = []
+    for index in range(max(len(references), len(streams))):
+        mine = streams[index] if index < len(streams) else None
+        theirs = references[index] if index < len(references) else None
+        sha = shas[index] if index < len(shas) else None
+        entry = dict(user=index, prompt_sha256=sha, reference_prompt_sha256=(theirs or {}).get('prompt_sha256'))
+        if theirs is None or not sha or sha != theirs.get('prompt_sha256'):
+            entry.update(verdict='NOT_COMPARABLE', reason='the served prompt is not the reference\'s')
+        else:
+            detail = compare_user(mine, theirs, (budgets[index] if index < len(budgets) else None,
+                                                 theirs.get('max_tokens')))
+            verdict = policy_user(detail['verdict'])
+            entry.update(verdict=verdict, detail=detail['verdict'], first_divergence=detail.get('first_divergence'),
+                         served_len=detail['concurrent_len'], reference_len=detail['single_len'],
+                         finish=[detail['finish_concurrent'], detail['finish_single']],
+                         completion=[detail['completion_concurrent'], detail['completion_single']])
+            if verdict == 'DIVERGED' and arithmetic:
+                entry.update(verdict='NOT_COMPARABLE',
+                             reason='DIVERGED under different arithmetic flags: %s' % ', '.join(sorted(arithmetic)))
+        users.append(entry)
+    finals = [u['verdict'] for u in users]
+    overall = ('IDENTICAL' if users and all(v == 'IDENTICAL' for v in finals) else
+               'FAIL' if 'DIVERGED' in finals or 'ERROR' in finals or not users else 'NOT_COMPARABLE')
+    return dict(verdict=overall, users=users, arithmetic_diff=arithmetic,
+                configuration_diff=configuration_diff(served, reference))
+
+
+# The launched argv against a reference's (read-the-launched-argv): flags the platform owns (its
+# served name, host and port) and the chat endpoint's parsers are not the engine's; the reference
+# mounted the hub at /models/hub where the agent mounts it at /models.
+PLATFORM_OWN_FLAGS = ('--served-model-name', '--host', '--port')
+PARSER_FLAGS = ('--reasoning-parser', '--tool-call-parser', '--enable-auto-tool-choice')
+REFERENCE_HUB, AGENT_HUB = '/models/hub/', '/models/'
+
+
+def engine_flags(argv, drop=()):
+    """{flag: value, or True for a flag without one} of an argv's '--flag [value]' pairs, the `drop`
+    flags left out (an absent flag then reads None, never equal to a present one)."""
+    pairs, index = {}, 0
+    argv = list(argv or ())
+    while index < len(argv):
+        flag = str(argv[index])
+        value = argv[index + 1] if index + 1 < len(argv) and not str(argv[index + 1]).startswith('--') else None
+        index += 2 if value is not None else 1
+        if flag not in drop:
+            pairs[flag] = True if value is None else value
+    return pairs
+
+
+def _engine_value(value):
+    if not isinstance(value, str):
+        return value
+    value = value.replace(REFERENCE_HUB, AGENT_HUB)
+    if value[:1] in '{[':
+        try:
+            return json.loads(value)
+        except ValueError:
+            pass
+    return value
+
+
+def served_engine_diff(served_argv, reference_command):
+    """{flag: [served, reference]} for every engine flag the contract's launched argv (the
+    '[QWEN-C2] profile <name>: vLLM argv' list, sys.argv[1:]) and a reference's recorded command
+    ([python, -m, module, ...]) differ in; JSON values compared as JSON. {} when they serve the same
+    engine; None when either is not an argv list."""
+    if not isinstance(served_argv, list) or not isinstance(reference_command, list) or len(reference_command) < 3:
+        return None
+    drop = PLATFORM_OWN_FLAGS + PARSER_FLAGS
+    mine = {flag: _engine_value(value) for flag, value in engine_flags(served_argv, drop).items()}
+    theirs = {flag: _engine_value(value) for flag, value in engine_flags(reference_command[3:], drop).items()}
+    return {flag: [mine.get(flag), theirs.get(flag)] for flag in sorted(set(mine) | set(theirs))
+            if mine.get(flag) != theirs.get(flag)}
+
+
+def render_reference(result):
+    lines = []
+    for user in result['users']:
+        if user['verdict'] == 'DIVERGED':
+            lines.append('user %d: DIVERGED at character %s (%s; served %s / reference %s characters)' % (
+                user['user'], user.get('first_divergence'), user.get('detail'), user.get('served_len'),
+                user.get('reference_len')))
+        else:
+            lines.append('user %d: %s%s' % (user['user'], user['verdict'],
+                                             ' (%s)' % user['reason'] if user.get('reason') else ''))
+    differ = result.get('configuration_diff')
+    if differ:
+        lines.append('configuration differs from the reference (served | reference): %s' % ', '.join(
+            '%s=%s|%s' % (name, values[0], values[1]) for name, values in sorted(differ.items())))
+    lines.append('BRING-UP %s' % result['verdict'])
+    return '\n'.join(lines)
+
+
+def render_policy(result):
+    lines = ['user verdict          first      rerun      diverge  rerun-diverge  reason']
+    for user in result['users']:
+        lines.append('%-4s %-15s %-10s %-10s %7s  %13s  %s' % (
+            user['user'], user['verdict'], user['first'], user['rerun'] or '-', _f(user.get('first_divergence'), '%d'),
+            _f(user.get('rerun_divergence'), '%d'), user.get('reason') or ''))
+    arithmetic = result['first'].get('arithmetic_diff')
+    if arithmetic:
+        lines.append('arithmetic flags differ (c | s): %s' % ', '.join(
+            '%s=%s|%s' % (name, values[0], values[1]) for name, values in sorted(arithmetic.items())))
+    elif not result['first'].get('configuration_recorded'):
+        lines.append('configurations not recorded in both reports: arithmetic equality is unverified')
+    if result.get('reproducible') is not None:
+        lines.append('re-run reproduced its first run byte for byte: concurrent=%s single=%s' % (
+            result['reproducible']['concurrent'], result['reproducible']['single']))
+    lines.append('POLICY %s' % result['verdict'])
+    return '\n'.join(lines)
+
+
 def _f(value, pattern='%.2f'):
     return '-' if value is None else pattern % value
 
@@ -239,19 +602,46 @@ def render(result):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('concurrent', type=Path, help='the concurrent arm (e.g. v157 or v159)')
-    parser.add_argument('sequential', type=Path, help='the sequential arm on the same prompts (e.g. v158 or v160)')
+    parser.add_argument('sequential', type=Path, nargs='?',
+                        help='the sequential arm on the same prompts (e.g. v158 or v160)')
     parser.add_argument('--json', type=Path, help='also write the comparison here')
+    parser.add_argument('--policy', action='store_true',
+                        help='apply the exactness policy (verdict PASS/FAIL/NOT_COMPARABLE/UNSTABLE/RERUN)')
+    parser.add_argument('--rerun', type=Path, nargs=2, metavar=('CONCURRENT2', 'SEQUENTIAL2'),
+                        help='with --policy: the re-run of both arms after a first divergence')
+    parser.add_argument('--against-reference', type=Path, metavar='FILE',
+                        help='bring-up: compare CONCURRENT (a served arm) with a tracked reference file instead')
     options = parser.parse_args(argv)
+    if options.against_reference is None and options.sequential is None:
+        parser.error('the sequential arm is required (or --against-reference)')
+    if options.rerun and not options.policy:
+        parser.error('--rerun needs --policy')
     try:
-        concurrent, single = load_report(options.concurrent), load_report(options.sequential)
+        concurrent = load_report(options.concurrent)
+        if options.against_reference is not None:
+            reference = json.loads(options.against_reference.read_text(encoding='utf-8'))
+        else:
+            single = load_report(options.sequential)
+        rerun = tuple(load_report(path) for path in options.rerun) if options.rerun else None
     except (OSError, ValueError) as error:
         print('unreadable report: %s' % error, file=sys.stderr)
         return 2
-    result = compare(concurrent, single)
-    print(render(result))
+    if options.against_reference is not None:
+        result = reference_verdicts(concurrent, reference)
+        print(render_reference(result))
+        code = 0 if result['verdict'] == 'IDENTICAL' else 1
+    elif options.policy:
+        result = exactness_policy(concurrent, single, rerun)
+        print(render(compare(concurrent, single)))
+        print(render_policy(result))
+        code = POLICY_EXIT[result['verdict']]
+    else:
+        result = compare(concurrent, single)
+        print(render(result))
+        code = 0 if result['exact'] else 1
     if options.json:
         options.json.write_text(json.dumps(result, indent=2), encoding='utf-8')
-    return 0 if result['exact'] else 1
+    return code
 
 
 if __name__ == '__main__':
