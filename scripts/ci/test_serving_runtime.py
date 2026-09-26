@@ -640,11 +640,12 @@ class PackedAnyAdmissionAttachTests(unittest.TestCase):
             test.exercise(admission=dict(statistics=packed_any_admission.AdmissionRefused('statistics unavailable')),
                           statistics_refused=True, **self.M3)
 
-    def test_the_flag_off_runs_neither(self):
+    def test_the_flag_off_runs_neither_nor_imports_the_admission(self):
+        """Off, the attach never imports packed_any_admission: the module ships in the C2 overlay only, and an
+        image built by the P8 route (qwen-fast-serving.Dockerfile copies serving_runtime.py, not it) attaches
+        as it always did."""
         for extra_env in ({}, {'QWEN_FAST_EXTENT_REPLAY': '0'}):
-            with self.subTest(extra_env=extra_env), \
-                    patch('packed_any_admission.admit', side_effect=AssertionError('admit ran')), \
-                    patch('packed_any_admission.admit_statistics', side_effect=AssertionError('statistics ran')):
+            with self.subTest(extra_env=extra_env), patch.dict(sys.modules, {'packed_any_admission': None}):
                 RuntimeAttachmentTests().exercise(extra_env=extra_env, **self.M3)
                 RuntimeAttachmentTests().exercise(packed=False, users=1, extra_env=extra_env)
 

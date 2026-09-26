@@ -149,14 +149,15 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # position through the K64j extent readers. Admitted here or nowhere, host only and before anything
     # is built, so a refusal builds nothing: the M3 shape, C2-any, eight-row groups, the tree-scratch
     # precondition, the modes, the K64j binary and kernels, and the pinned hardware evidence
-    # (packed_any_admission, design W7). Off, nothing here runs and the attach is today's.
-    from packed_any_admission import extent_replay_enabled
-
-    extent_replay = extent_replay_enabled()
+    # (packed_any_admission, design W7). Off (unset or '0'), nothing here runs, not even the import - the
+    # module ships in the C2 overlay only, as serving_lifecycle's lazy quarantine import does - and the
+    # attach is today's.
+    extent_replay = os.environ.get('QWEN_FAST_EXTENT_REPLAY', '0') != '0'
     if extent_replay:
-        from packed_any_admission import admit as admit_packed_any
+        import packed_any_admission
 
-        admit_packed_any(runtime_root, m3=m3_shape(policy), binary_record=binary_record, log=pindiag)
+        packed_any_admission.extent_replay_enabled()   # strictly '1' from here: any other value is refused
+        packed_any_admission.admit(runtime_root, m3=m3_shape(policy), binary_record=binary_record, log=pindiag)
     if (native_attention_evidence is None or kv_publication_evidence is None
             or (block_stream is None and reader is None)
             or (block_stream is not None and 'pipeline_evidence' in block_stream)):
@@ -310,9 +311,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # Design B4: the scheduler-side DRAM hold reads the pool's statistics for every request, so a
             # c2-packed attach that cannot read them fails closed here, before any trace (the pool closes
             # with the scopes).
-            from packed_any_admission import admit_statistics
-
-            admit_statistics(pool, log=pindiag)
+            packed_any_admission.admit_statistics(pool, log=pindiag)
         memory_ledger.record('P2', buffer_pool=pool)
         owner = ServingCacheOwner(operations, runner, model)
         # Built once and shared by every request: two TT_CCL objects cycling semaphore

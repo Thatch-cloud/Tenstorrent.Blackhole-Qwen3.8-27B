@@ -372,7 +372,7 @@ class ImageContentTests(unittest.TestCase):
             class EditedRepo(object):
                 def paths(self, *arguments):
                     found = REPO.paths(*arguments)
-                    return found + [path] if arguments[0] == 'diff' and arguments[2] == p8_commit() else found
+                    return found | {path} if arguments[0] == 'diff' and arguments[2] == p8_commit() else found
 
             real = layers_model.stale_files(dropped, EditedRepo())
         self.assertIn(path, real)
