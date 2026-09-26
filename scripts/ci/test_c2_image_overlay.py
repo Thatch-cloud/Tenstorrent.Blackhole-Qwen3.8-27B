@@ -37,6 +37,7 @@ if str(HERE) not in sys.path:
 import c2_image_layers as layers_model  # noqa: E402
 import c2_image_provenance as provenance  # noqa: E402
 import c2_overlay  # noqa: E402
+import c2_serving_job  # noqa: E402
 import test_serving_image_copy_closure as p8  # noqa: E402
 
 C2_DOCKERFILE = ROOT / c2_overlay.DOCKERFILE
@@ -93,9 +94,11 @@ C2_KNOWN_STALE = {
         'host-side only: imported by lever_n_m3native_patch in the graft job on the runner, never inside the '
         'container'),
     'scripts/ci/longctx_cycle_bench.py': (
-        'a32c5b30fc477ad12f38defb9777cfdcfdb39a62',
-        'mounted per arm at /bench/longctx_cycle_bench.py (lever_n_m3native_run_arm.sh), not imported from the '
-        'baked tree'),
+        '714d89db78fa52b4793b3e5a84105cea97402db6',
+        'mounted per arm at /bench/longctx_cycle_bench.py (lever_n_m3native_run_arm.sh, and c2_serving_gate.'
+        'BENCH_SCRIPTS since s1/gates), not imported from the baked tree: its only importer is the harness, '
+        'lever_n_m3native_gate, mounted beside it. Re-pinned at the S1 integration for the stream_once of s1/gates '
+        '(a cancel through the StreamWatch)'),
     'scripts/ci/mlp_clock_samples.py': (
         'e3e5d6602c4296e7927ac5689a7139f357d96fc6',
         'clock evidence tooling; HEAD re-pins the drain regeneration (d08c1140). ' + _UNREVIEWED),
@@ -529,7 +532,11 @@ class OneListTests(unittest.TestCase):
     def test_the_drift_action_is_read_only(self):
         workflow = C2_WORKFLOW.read_text(encoding='utf-8')
         step = workflow_step(workflow, 'G1 base drift')
-        self.assertIn("'drift'", workflow[:workflow.index('- name: Status')])
+        # The job file's parse (c2_serving_job, since s1/gates) knows the action, in the workflow's order.
+        self.assertIn('python3 scripts/ci/c2_serving_job.py .github/c2-serving-job.env',
+                      workflow[:workflow.index('- name: Status')])
+        self.assertLess(c2_serving_job.ACTIONS.index('reset'), c2_serving_job.ACTIONS.index('drift'))
+        self.assertLess(c2_serving_job.ACTIONS.index('drift'), c2_serving_job.ACTIONS.index('build'))
         self.assertIn('--base-drift --context "$ctx"', step)
         self.assertIn('|| status=$?', step)
         for word in ('docker build', 'docker tag', 'docker push', 'docker rmi', 'build-c2-serving-image.sh',
