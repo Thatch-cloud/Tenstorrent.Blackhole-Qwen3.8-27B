@@ -75,6 +75,7 @@ jobs:
           python -B -m unittest discover -s optimisation/ttnn-op/k64j -p 'test_*.py'
           python -B -m unittest test_dflash_proposal_trace test_padded_probe
           python -B -m unittest test_padded_block
+          python -B -m unittest test_serving_survivor_narrowing
           python -B -m unittest test_verify_prestage test_round_fences
           python -B -m unittest test_fused_commit
           python -B -m unittest test_early_draft

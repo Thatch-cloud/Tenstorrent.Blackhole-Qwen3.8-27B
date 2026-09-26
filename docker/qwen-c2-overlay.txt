@@ -80,8 +80,10 @@ scripts/ci/serving_worker_hook.py
 scripts/ci/serving_lifecycle.py
 scripts/ci/serving_packed_step.py
 
-# The third route: GreedySession arrives with the bundle's /speculative-decoding tree. Unchanged
-# since 77d6995a today; decision D1 (plan stage 2) changes it. Its sha256 is recorded in
+# The third route: GreedySession arrives with the bundle's /speculative-decoding tree. S2 D1 (W5a)
+# changes it (GreedySession.narrow, called by serving_packed_step.narrow_round), so this line is what
+# ships that change: without it the image keeps the bundle's 77d6995a copy, which has no narrow, and
+# every narrowing is refused into refuse_round. Its sha256 is recorded in
 # scripts/ci/dspark-request-hardware.json, but only dspark_request_experiment.request_preflight
 # reads such records, and only dspark-target-hardware.py calls that - not the serving path. If the
 # frozen evidence (target-replay.json, which qualify does not filter for '../') ever names it, the

@@ -53,7 +53,14 @@ If a registered request is still pending when the next step executes, the wrappe
 in this engine, and serving_lifecycle fails the engine loudly (unconsumed) rather than let an
 unbridged request decode.
 
-Default off: nothing here is imported unless QWEN_FAST_ANY_REQUEST=1.
+S2 W5b adds a second worker-side source: serving_packed_step.refuse_round, the residual path of
+a packed round no engine captures even narrowed, registers every request of that round here. Those
+are RUNNING decodes, not prefills, and the step returns ZERO new tokens for them, so vLLM builds no
+EngineCoreOutput of its own: abort_quarantined adds the finishing one (new_token_ids=[],
+finish_reason ABORT), and finish_requests frees the request's blocks whatever its inflated frontier.
+
+Default off: nothing here is imported unless QWEN_FAST_ANY_REQUEST=1 (serving_packed_step imports it
+only to ask consumer_installed, which reads the holder without creating it).
 """
 
 import importlib
@@ -87,6 +94,14 @@ def holder():
         value.live = False
         sys.modules[HOLDER_KEY] = value
     return value
+
+
+def consumer_installed():
+    """Whether install() wrapped a scheduler class in this process, read without creating the
+    holder. serving_packed_step.abort_refused (S2 W5b) asks before it ends a refused packed
+    round's requests here; register() below refuses without one anyway."""
+    value = sys.modules.get(HOLDER_KEY)
+    return value is not None and getattr(value, 'installed', None) is not None
 
 
 def register(request_id, reason):

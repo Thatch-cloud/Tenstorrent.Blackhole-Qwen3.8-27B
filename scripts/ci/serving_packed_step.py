@@ -30,6 +30,15 @@ native GDN slot 0 is trusted by nobody afterwards (`verifier_engine.note_packed_
 the sequential step restores each user's carry first, and the packed trace restores every
 segment's carry inside itself.
 
+S2 D1 (survivor narrowing): a round drafted at the block's width that the block then does not
+serve - a partner aborted after the drafts (vLLM tells the worker one step late), or a padded
+check failed at the step - holds tickets its engines never captured (beside the 64-row block
+they capture 1, 2 and 4 rows). Each such ticket is cut to the widest width its own engine
+serves (`narrow_round`, GreedySession.narrow; one NARROWED_MARKER line per request) and the
+round goes to the sequential step like any other. Only a ticket nothing narrower serves still
+refuses the round (`refuse_round`), and under the D2 request quarantine its requests then end
+as FINISHED_ABORTED in the same engine step instead of failing the engine one step later.
+
 Every user's commit runs in entries order; the last one is the round's fence. The block
 knows it is last - `PackedVerifierEngine.commit_user` fences exactly the commit that
 empties its pending segments - so this step adds nothing for that beyond committing every
@@ -51,6 +60,7 @@ differs from before it existed.
 
 import os
 import time
+from types import SimpleNamespace
 
 from attention_mask_replay import validate_ticket
 from serving_fast_request import CommittedOutput
@@ -552,17 +562,19 @@ def packed_device_step(entries, *, cancelled, block):
     reason = ineligible(entries, block)
     if reason is not None:
         # A round drafted for the block (proposal_rows) whose entries changed before the
-        # step: its tickets have no capture anywhere, and the session cannot re-propose
-        # (fail_verification is final), so the round is failed here, before any device
-        # work, with the reason - rather than by the engine's own refusal one step later.
-        # serving_worker_hook.discard_stale_ticket keeps every live request's pending
-        # ticket at one width per step, so this is unreachable in normal steady-state
-        # and transition operation; kept only as a last-resort guard, it degrades this
-        # round (refuse_round) instead of raising past the step - a scheduler race must
-        # never crash the engine for every OTHER live user (run 35535533720).
+        # step: a partner aborted after the drafts (vLLM names it one step late: the 2->1,
+        # 3->1 and 4->1 aborts), a padded check failed here, or a scheduler race (run
+        # 35535533720). Its block-width tickets have no capture of their own engines, and a
+        # session cannot re-propose while one is pending, so S2 D1 narrows each to the widest
+        # width its engine serves (narrow_round) and the round goes to the sequential step
+        # below. Only a ticket nothing narrower serves still refuses the round (refuse_round),
+        # before any device work and without raising past the step: a race must never crash
+        # the engine for every OTHER live user.
         refused = unservable(entries)
         if refused:
-            return refuse_round(entries, block, reason, refused)
+            entries, failure = narrow_round(entries, reason)
+            if failure is not None:
+                return refuse_round(entries, block, reason, refused)
     elif cancelled():
         # Each request's own step answers a cancellation without touching the device.
         reason = 'cancelled before the verify'
@@ -670,14 +682,17 @@ def packed_device_rounds(entries, *, cancelled, blocks):
         matched, group_entries = group
         reason = ineligible(group_entries, block)
         if reason is not None:
-            # Same degrade-not-crash rule as the single-block step, applied to this block's
-            # own group: a mixed group with no fallback capture anywhere is refused (failed)
-            # here rather than raised past the step for every OTHER live user or block.
+            # Same rule as the single-block step, applied to this block's own group: its
+            # tickets are narrowed to widths their engines serve (S2 D1) and join the
+            # sequential batch; a group with a ticket nothing narrower serves is refused
+            # (failed) here rather than raised past the step for every OTHER live user or block.
             refused = unservable(group_entries)
             if refused:
-                for output in refuse_round(group_entries, block, reason, refused):
-                    outputs_by_id[output.request_id] = output
-                continue
+                group_entries, failure = narrow_round(group_entries, reason)
+                if failure is not None:
+                    for output in refuse_round(group_entries, block, reason, refused):
+                        outputs_by_id[output.request_id] = output
+                    continue
         elif cancelled():
             reason = 'cancelled before the verify'
         if reason is not None:
@@ -844,15 +859,20 @@ def fail_round(entries, block):
 
 def refuse_round(entries, block, reason, refused):
     """A round drafted for the block that the block cannot serve, whose tickets no
-    request engine captures either - so the sequential step cannot take it either.
+    request engine captures either, even narrowed (`narrow_round`) - so the sequential
+    step cannot take it either.
 
     `serving_worker_hook.discard_stale_ticket` keeps every live request's pending
-    ticket at one width per step, so this is unreachable in normal steady-state and
-    transition operation: reaching it means a scheduler race put a mixed round here
-    anyway, not that the hardware or a request failed. Fails every request of the
-    round exactly as `fail_round` always has, but returns their outputs instead of
-    raising past the step, so the race costs this round for these requests rather
-    than the engine for every other live user (run 35535533720)."""
+    ticket at one width per step, and `narrow_round` serves the survivors of an abort
+    the drafts could not see, so reaching this means a ticket no narrower width of its
+    own engine serves, not that the hardware or a request failed. Fails every request of
+    the round exactly as `fail_round` always has, but returns their outputs instead of
+    raising past the step, so this costs the round's requests rather than the engine
+    for every other live user (run 35535533720). A failed session cannot draft again,
+    so without more the engine still dies one step later, at the next draft (VR4
+    finding 2); `abort_refused` (S2 W5b) ends these requests as FINISHED_ABORTED
+    through the D2 request quarantine in this same engine step when its scheduler-side
+    consumer is installed (QWEN_FAST_ANY_REQUEST), and without it changes nothing."""
     message = ('A round the block cannot serve (%s) holds tickets no request engine captured (%s): '
               'it was drafted for the block but its entries changed before the step'
               % (reason, '; '.join(refused)))
@@ -862,6 +882,7 @@ def refuse_round(entries, block, reason, refused):
     except ImportError:
         print('[PACKED] %s' % message, flush=True)
     fail_round(entries, block)
+    abort_refused(entries, message)
     return [CommittedOutput(entry['request_id'], (), entry['request'].session.position, True, True)
             for entry in entries]
 
@@ -921,3 +942,119 @@ def fences_fields(metrics, block, segments):
                 prestage_ms='%.2f' % float(prestage.get('prestage_ms', 0.0)),
                 diff_ms='%.2f' % float(prestage.get('diff_ms', 0.0)),
                 write_ms='%.2f' % float(prestage.get('write_ms', 0.0)))
+
+
+# S2 D1 (design section 4, W5a/W5b): survivor narrowing and the abort of a refused round. Defined
+# here, at the end, like PUBLISH_SPLIT_LINE, so the lines above keep their numbers.
+#
+# One NARROWED_MARKER line per request whose ticket was cut, from inside the step (so a count of
+# them is the count of narrowed survivors the engine actually served); NARROWING_REFUSED_MARKER when
+# a ticket could not be cut and the round went to refuse_round; ABORTED_MARKER when refuse_round
+# ended its requests through the D2 request quarantine. Short: the log capture truncates around
+# 250 characters.
+NARROWED_MARKER = '[PINDIAG] packed survivor narrowed'
+NARROWING_REFUSED_MARKER = '[PINDIAG] packed survivor narrowing refused'
+ABORTED_MARKER = '[PINDIAG] packed refused round aborted'
+NARROW_WIDTHS = (32, 16, 8, 4, 2, 1)
+
+
+def step_log(text):
+    """One narrowing or abort line into the server log (loguru, else stdout)."""
+    try:
+        from loguru import logger
+    except ImportError:
+        print(text, flush=True)
+        return
+    logger.warning('{}', text)
+
+
+def servable_width(engine, ticket):
+    """The widest verifier bucket no wider than `ticket` whose cut of it `engine` serves (its own
+    captures hold it: VerifierEngine.serves, which reads only the rows and the position), or None -
+    also for an engine without the serves contract."""
+    serves = getattr(engine, 'serves', None)
+    if not callable(serves):
+        return None
+    for rows in NARROW_WIDTHS:
+        if rows > len(ticket.tokens):
+            continue
+        cut = SimpleNamespace(request_id=ticket.request_id, epoch=getattr(ticket, 'epoch', None),
+                              position=ticket.position, tokens=tuple(ticket.tokens[:rows]),
+                              source=getattr(ticket, 'source', None), match_length=getattr(ticket, 'match_length', 0))
+        if serves(cut):
+            return rows
+    return None
+
+
+def narrow_round(entries, reason):
+    """S2 D1 (W5a): every entry whose ticket its own engine does not serve, cut to the widest width
+    that engine does (GreedySession.narrow: same position and seed, its leading proposals, a new
+    epoch), so the round can go to the sequential step instead of refuse_round. Returns
+    (entries, None) - new entry dicts carrying the narrowed tickets, the others as they were - or
+    (entries, why) when one cannot be cut: every width is planned before any session changes, so
+    then nothing was narrowed, unless a session refused midway, whose entries narrowed before it are
+    returned with their live tickets for refuse_round to fail. An entry already servable (or whose
+    engine has no serves contract) keeps its ticket."""
+    widths = []
+    for entry in entries:
+        engine, ticket = entry['request'].engine, entry['ticket']
+        serves = getattr(engine, 'serves', None)
+        if not callable(serves) or serves(ticket):
+            widths.append(None)
+            continue
+        width = servable_width(engine, ticket)
+        if width is None:
+            why = 'request=%s rows=%d no narrower width its engine captures' % (
+                str(entry['request_id'])[:48], len(ticket.tokens))
+            step_log('%s %s' % (NARROWING_REFUSED_MARKER, why))
+            return entries, why
+        widths.append(width)
+    narrowed = list(entries)
+    for index, (entry, width) in enumerate(zip(entries, widths)):
+        if width is None:
+            continue
+        rows = len(entry['ticket'].tokens)
+        try:
+            ticket = entry['request'].session.narrow(entry['request_id'], entry['ticket'], width)
+        except Exception as failure:
+            why = 'request=%s rows=%d->%d %s: %s' % (str(entry['request_id'])[:48], rows, width,
+                                                     type(failure).__name__, str(failure)[:80])
+            step_log('%s %s' % (NARROWING_REFUSED_MARKER, why))
+            return narrowed, why
+        narrowed[index] = dict(entry, ticket=ticket)
+        step_log('%s request=%s rows=%d->%d reason=%s' % (NARROWED_MARKER, str(entry['request_id'])[:48], rows,
+                                                          width, str(reason).replace(' ', '_')[:120]))
+    return narrowed, None
+
+
+def abort_refused(entries, reason):
+    """S2 W5b: end a refused round's requests as FINISHED_ABORTED in this engine step, keeping the
+    engine. Each is registered with the D2 request quarantine (serving_request_quarantine.register),
+    whose scheduler-side wrapper finishes it right after this step's output, zero new tokens and
+    all (it adds the finishing EngineCoreOutput itself), and frees its KV blocks; the next step
+    names it in finished_req_ids and the lifecycle detaches its bridge like any finished request.
+    Its session is marked finished, so the drafts between the two (inside this step under
+    QWEN_FAST_EARLY_DRAFT, else post_step's take_draft_token_ids) skip it - FastRunnerBridge.drafts
+    returns None for a finished session, proposal_rows counts only unfinished ones - instead of
+    raising on its failed session (VR4 finding 2).
+
+    Only when the quarantine's consumer is installed in this process (QWEN_FAST_ANY_REQUEST's
+    serving_lifecycle installs it on the scheduler class the engine runs). Without it - the exact
+    profile, any image without the module, a non-string request id - nothing is registered or
+    marked and refuse_round is exactly what it was. Returns the request ids registered."""
+    try:
+        import serving_request_quarantine as quarantine
+    except ImportError:
+        return ()
+    installed = getattr(quarantine, 'consumer_installed', None)
+    if not callable(installed) or not installed():
+        return ()
+    ids = [entry['request_id'] for entry in entries]
+    if not ids or any(not isinstance(request_id, str) or not request_id for request_id in ids):
+        return ()
+    for entry in entries:
+        quarantine.register(entry['request_id'], 'packed round refused: %s' % str(reason)[:200])
+        entry['request'].session.finished = True
+    step_log('%s requests=%s end FINISHED_ABORTED through the request quarantine, engine kept' % (
+        ABORTED_MARKER, ','.join(request_id[:48] for request_id in ids)))
+    return tuple(ids)
