@@ -4,6 +4,7 @@ from contextlib import ExitStack, contextmanager
 from functools import partial
 import json
 import os
+import re
 
 from dflash_device import PreparedDraftWeights, pindiag
 import memory_ledger
@@ -23,6 +24,9 @@ SINGLE_GATEUP_SHAPE = 'the single gate/up copy'
 M3_SHAPE = 'the 64-row block'
 C2_ANY_SHAPE = 'C2-any with no packed block'
 PADDED_BLOCK_FLAG = 'QWEN_FAST_PADDED_BLOCK'
+CAPTURE_POSITION_FLAG = 'QWEN_FAST_PACKED_CAPTURE_POSITION'
+CAPTURE_POSITION_MARKER = '[PINDIAG] packed capture position override='
+EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 
 
 def m3_shape(policy, environ=None):
@@ -111,6 +115,39 @@ def padded_block_admission(policy, environ=None):
     return minimum
 
 
+def packed_capture_position(environ=None):
+    """QWEN_FAST_PACKED_CAPTURE_POSITION (S2 design W3, B1; GATE ONLY, unset by default): the
+    position every packed block of this attach captures at, or None for the block's own default
+    (packed_verifier: C - 256, the last native chunk family). G3b sets it per arm to run the same
+    served path below C - the flag-off block captured in family F (4352, 16640: families the pinned
+    validate_ticket admits and the pool already holds tables for) against the extent block at the
+    same position - and nothing else may: W8 pins that no traffic profile and no image ENV sets it.
+    A strict decimal integer; anything else (an empty value included) is a configuration error,
+    refused before anything is built. The range is the block's own to refuse."""
+    environ = os.environ if environ is None else environ
+    text = environ.get(CAPTURE_POSITION_FLAG)
+    if text is None:
+        return None
+    if type(text) is not str or re.fullmatch('0|[1-9][0-9]*', text) is None:
+        raise ValueError('%s must be a decimal integer position, got %r' % (CAPTURE_POSITION_FLAG, text))
+    return int(text)
+
+
+def extent_replay_requested(environ=None):
+    """QWEN_FAST_EXTENT_REPLAY (S2 C2-packed-any, design W2/W3; default off), strictly: unset or '0'
+    is off, '1' is on, and anything else is a configuration error, refused before anything is built.
+    On, the attach builds the pool WITH its extent storage (ServingBufferPool extent_replay=True) and
+    then requires every packed block over it to be the extent block; the block keys on that storage
+    alone (PackedVerifierEngine.extent), so without this the flag would build today's family block,
+    which packs only [131072, 131312], and nothing at attach would say so. Whether the extent path
+    is admitted at all is packed_any_admission's (design W7); this makes the flag reach the storage
+    and proves the block took it."""
+    value = (os.environ if environ is None else environ).get(EXTENT_REPLAY_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (EXTENT_REPLAY_FLAG, value))
+    return value == '1'
+
+
 @contextmanager
 def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixtures,
                             native_attention_evidence, block_stream, kv_publication_evidence,
@@ -146,6 +183,11 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # QWEN_FAST_PADDED_BLOCK (default off): the 64-row block's fewest live users per round, or
     # None. Refused here at any other shape, before anything is built, like the single copy.
     padded_min_users = padded_block_admission(policy)
+    # QWEN_FAST_PACKED_CAPTURE_POSITION (S2 G3b, gate only, default unset): parsed here, before
+    # anything is built; each block refuses a position its capacity cannot capture at.
+    capture_position = packed_capture_position()
+    # QWEN_FAST_EXTENT_REPLAY (S2, default off; strictly '0' or '1'): read here, before anything is built.
+    extent_replay = extent_replay_requested()
     if (native_attention_evidence is None or kv_publication_evidence is None
             or (block_stream is None and reader is None)
             or (block_stream is not None and 'pipeline_evidence' in block_stream)):
@@ -223,6 +265,15 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                             'serves the rounds', policy['scheduler_requests'])
                 else:
                     packed_shapes = (shape,)
+        # S2 (QWEN_FAST_EXTENT_REPLAY=1) serves its rounds through the packed block alone - the pool lends
+        # the block its extent storage and the block keys on it - so with no block to build the flag would
+        # build nothing and every round would run sequentially. Refused before the pool, the first
+        # allocation.
+        if extent_replay and not packed_shapes:
+            raise ValueError('%s=1 serves its rounds through the packed block, and this attach builds none '
+                             '(QWEN_FAST_PACKED_STEP=%s, %d scheduler requests)'
+                             % (EXTENT_REPLAY_FLAG, os.environ.get('QWEN_FAST_PACKED_STEP', 'unset'),
+                                policy['scheduler_requests']))
         # The per-request engines' capture widths, and the pool's buckets that hold them:
         # the full T16 set by default and beside the 32-row block, the sequential widths
         # (1, 2, 4) beside the 64-row block, whose four engines' 8- and 16-row captures do
@@ -293,7 +344,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             feature_taps=len(TARGET_TAPS), rope=rope,
             **({} if not packed_shapes else dict(packed_shapes=distinct_shapes,
                 packed_replay_group_rows=replay_group_rows(),
-                **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}))))
+                **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}),
+                # S2: the extent storage in place of the per-family tables; flag off, no keyword at all.
+                **({'extent_replay': True} if extent_replay else {}))))
         scopes.callback(pool.close)
         memory_ledger.record('P2', buffer_pool=pool)
         owner = ServingCacheOwner(operations, runner, model)
@@ -351,12 +404,17 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # two-user or m3 four-user default) gets no `pool_slots=` at all, so its block
             # is built exactly as it always was: slots 0..users-1, in order.
             packed_blocks, slot = [], 0
+            if capture_position is not None:
+                pindiag('{}{} (gate only)', CAPTURE_POSITION_MARKER, capture_position)
             for shape in packed_shapes:
                 packed_block = PackedVerifierEngine(operations, model, helpers, sampler, pool=pool, shared_weights=weights,
                                                     shape=shape, feature_taps=TARGET_TAPS,
                                                     **({'pool_slots': tuple(range(slot, slot + shape.users))} if four_as_two else {}),
                                                     **({'padded_min_users': padded_min_users}
                                                        if padded_min_users is not None else {}),
+                                                    # S2 G3b's gate-only knob; unset, no keyword at all.
+                                                    **({'capture_position': capture_position}
+                                                       if capture_position is not None else {}),
                                                     # Round-fence plan H1b (QWEN_FAST_FUSED_COMMIT, default
                                                     # off): the block's T_proj traces use the one shared
                                                     # TT_CCL every request's device uses.
@@ -366,6 +424,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 packed_blocks.append(packed_block)
                 memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)
                 slot += shape.users
+            # S2: every block must be the extent block under the flag, and none may be without it. The
+            # block keys on the pool's storage alone (PackedVerifierEngine.extent), so this is the one
+            # attach-time proof that the flag reached the storage and the storage the block (design W2,
+            # W3); refused before the lifecycle admits a request, and the scopes close what was built.
+            extents = [getattr(packed_block, 'extent', False) for packed_block in packed_blocks]
+            if any(value is not extent_replay for value in extents):
+                raise ValueError('%s=%d, but the packed blocks built are extent=%r'
+                                 % (EXTENT_REPLAY_FLAG, int(extent_replay), extents))
             # The step bound to its block (or blocks), carrying the per-round ticket-width
             # policy the worker hook asks before drafting.
             packed_step = PackedStep(packed_blocks if four_as_two else packed_blocks[0])

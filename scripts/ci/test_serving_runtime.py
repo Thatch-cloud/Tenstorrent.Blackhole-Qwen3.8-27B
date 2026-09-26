@@ -30,8 +30,14 @@ class RuntimeAttachmentTests(unittest.TestCase):
     STREAM = {'streams': 'serial', 'evidence': 'stream'}
 
     def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None, four_as_two=None,
-                 replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None):
+                 replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None,
+                 capture_position=None, block_extent=None, refused_in_attach=None, refused_after_blocks=None):
         events = []
+        # S2 (QWEN_FAST_EXTENT_REPLAY): the flag in the final environment is what the pool must be told and
+        # what every fake block reports as its `extent`, as PackedVerifierEngine does over that pool;
+        # `block_extent` makes the blocks report something else ('missing': no attribute at all).
+        # `refused_in_attach` is the ValueError text of a refusal inside the attach before the pool,
+        # `refused_after_blocks` that of one after the blocks were built (both logged, then the scopes close).
 
         def diag(template, *values):
             # the attach-failed line lands among the events, so its place before the scope
@@ -107,6 +113,9 @@ class RuntimeAttachmentTests(unittest.TestCase):
         if replay_group_rows is not None:
             env['QWEN_FAST_REPLAY_GROUP_ROWS'] = str(replay_group_rows)
         env.update(extra_env or {})
+        extent = env.get('QWEN_FAST_EXTENT_REPLAY') == '1'
+        if block_extent != 'missing':
+            block.extent = extent if block_extent is None else block_extent
         with patch.dict('os.environ', env), \
                 patch.dict(sys.modules, {
                 'models.common.sampling.generator': SimpleNamespace(SamplingGenerator=generator),
@@ -179,6 +188,10 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         self.assertEqual(options['packed_replay_group_rows'],
                                          replay_group_rows if replay_group_rows is not None else 4)
                         expected.add('packed_replay_group_rows')
+                        if extent:
+                            # S2: the pool is built with its extent storage, and told so explicitly.
+                            self.assertIs(options['extent_replay'], True)
+                            expected.add('extent_replay')
                     self.assertEqual(set(options), expected)
                     # The device geometry from_prefill asks for, prepared once inside the
                     # admitted runtime and before any request.
@@ -203,6 +216,9 @@ class RuntimeAttachmentTests(unittest.TestCase):
                             if padded is not None:
                                 # QWEN_FAST_PADDED_BLOCK: the one keyword it adds, only where admitted.
                                 expected_options['padded_min_users'] = padded
+                            if capture_position is not None:
+                                # S2 G3b's gate-only QWEN_FAST_PACKED_CAPTURE_POSITION: its one keyword.
+                                expected_options['capture_position'] = capture_position
                             self.assertEqual(call.kwargs, expected_options)
                         self.assertIsInstance(packed_step, serving_packed_step.PackedStep)
                         if two_blocks:
@@ -227,6 +243,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         expected.append(('[PINDIAG] per-request captures trimmed to widths {} for C2-any with no packed block', (1, 2, 4)))
                     elif trimmed:
                         expected.append(('[PINDIAG] per-request captures trimmed to widths {} for the four-user block', (1, 2, 4)))
+                    if capture_position is not None and built:
+                        expected.append(('{}{} (gate only)', serving_runtime.CAPTURE_POSITION_MARKER, capture_position))
                     expected.append(('[PINDIAG] dram after attach: {}', 'unavailable (pool without device statistics)'))
                     self.assertEqual([call.args for call in diagnostic.call_args_list], expected)
                     if probe is not None:
@@ -243,9 +261,21 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 # attach may have left hung: run 35507675630).
                 block_built = ['block_build'] * len(shapes)
                 block_closed = ['block_close'] * len(shapes)
+                def failed(message):
+                    return ('diag', self.ATTACH_FAILED.replace('RuntimeError: attach failed', 'ValueError: ' + message))
+
                 if refused:
                     # Refused before the pool, the runtime or anything else was built.
                     self.assertEqual(events, [])
+                elif refused_in_attach is not None:
+                    # Refused inside the attach before the pool: logged, with nothing built to close.
+                    self.assertEqual(events, [failed(refused_in_attach)])
+                elif refused_after_blocks is not None:
+                    # Refused once the blocks exist, before the lifecycle: logged, then everything closes.
+                    self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
+                                              *block_built, failed(refused_after_blocks),
+                                              *block_closed, 'weights_close', 'runtime_exit',
+                                              'pool_close'])
                 elif attach_fail:
                     self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
                                               *block_built, ('diag', self.ATTACH_FAILED),
@@ -433,6 +463,99 @@ class RuntimeAttachmentTests(unittest.TestCase):
     def test_the_padded_block_minimum_alone_changes_nothing(self):
         # Unread while the flag is off: the attach is exactly today's.
         self.exercise(packed=True, users=4, four_as_two=False, extra_env={'QWEN_FAST_PADDED_BLOCK_MIN_USERS': '3'})
+
+
+    # --- S2 G3b: the gate-only capture position (QWEN_FAST_PACKED_CAPTURE_POSITION) ------------
+
+    def test_the_capture_position_knob_reaches_every_block_and_is_logged_as_gate_only(self):
+        # G3b's flag-off arm: the family block captured at 16384 (family 16640); and at C - 256 on the
+        # M3 block. Every other keyword of the block, the pool and the recipe is unchanged.
+        for users, four_as_two in ((4, False), (2, None)):
+            for position in (16384, 4096):
+                with self.subTest(users=users, position=position):
+                    self.exercise(packed=True, users=users, four_as_two=four_as_two, capture_position=position,
+                                  extra_env={'QWEN_FAST_PACKED_CAPTURE_POSITION': str(position)})
+        # both blocks of the four-as-two pair
+        self.exercise(packed=True, users=4, capture_position=16384,
+                      extra_env={'QWEN_FAST_PACKED_CAPTURE_POSITION': '16384'})
+
+    def test_a_malformed_capture_position_is_refused_before_anything_is_built(self):
+        for value in ('', '16384.0', ' 16384', '016384', '-1', 'C-256', '1e4'):
+            with self.subTest(value=value), \
+                    self.assertRaisesRegex(ValueError, 'QWEN_FAST_PACKED_CAPTURE_POSITION must be a decimal integer'):
+                self.exercise(packed=True, users=4, four_as_two=False, refused=True,
+                              extra_env={'QWEN_FAST_PACKED_CAPTURE_POSITION': value})
+
+    def test_the_capture_position_is_read_strictly(self):
+        read = serving_runtime.packed_capture_position
+        self.assertIsNone(read({}))
+        self.assertEqual([read({'QWEN_FAST_PACKED_CAPTURE_POSITION': value}) for value in ('0', '4096', '131072')],
+                         [0, 4096, 131072])
+
+    def test_the_capture_position_with_no_block_changes_nothing(self):
+        # parsed (so a malformed value is still refused) but no block takes it and nothing is logged
+        self.exercise(packed=False, users=4, extra_env={'QWEN_FAST_PACKED_CAPTURE_POSITION': '16384'})
+
+    # --- S2 W2/W3: QWEN_FAST_EXTENT_REPLAY reaches the pool, and the block proves it took it ------
+
+    EXTENT = {'QWEN_FAST_EXTENT_REPLAY': '1'}
+    M3 = dict(packed=True, users=4, four_as_two=False)
+
+    def test_the_extent_flag_builds_the_pool_with_its_extent_storage_and_requires_the_extent_block(self):
+        # exercise() asserts the pool's keywords are exactly today's plus extent_replay=True, and the fake
+        # block reports extent=True, as PackedVerifierEngine does over such a pool; the attach completes.
+        self.exercise(extra_env=self.EXTENT, **self.M3)
+        self.exercise(extra_env=dict(self.EXTENT, QWEN_FAST_REPLAY_GROUP_ROWS='8'), replay_group_rows=8, **self.M3)
+
+    def test_the_flag_unset_or_zero_passes_the_pool_no_extent_keyword(self):
+        for extra_env in ({}, {'QWEN_FAST_EXTENT_REPLAY': '0'}):
+            with self.subTest(extra_env=extra_env):
+                self.exercise(extra_env=extra_env, **self.M3)
+                self.exercise(packed=True, users=2, extra_env=extra_env)
+                self.exercise(packed=False, users=4, extra_env=extra_env)
+                # a block that does not say (an older packed_verifier) is not the extent one
+                self.exercise(extra_env=extra_env, block_extent='missing', **self.M3)
+
+    def test_the_flag_with_the_family_block_built_fails_the_attach_before_any_request(self):
+        # The review's F1 scenario: the flag is on, but the block over the pool is today's family block,
+        # which packs only [131072, 131312]; the attach must not come up serving it.
+        for block_extent, reported in ((False, 'extent=[False]'), ('missing', 'extent=[False]')):
+            with self.subTest(block_extent=block_extent), \
+                    self.assertRaisesRegex(ValueError, 'QWEN_FAST_EXTENT_REPLAY=1, but the packed blocks built are'):
+                self.exercise(extra_env=self.EXTENT, block_extent=block_extent, **self.M3,
+                              refused_after_blocks='QWEN_FAST_EXTENT_REPLAY=1, but the packed blocks built are '
+                                                   + reported)
+
+    def test_an_extent_block_without_the_flag_fails_the_attach_before_any_request(self):
+        for extra_env in ({}, {'QWEN_FAST_EXTENT_REPLAY': '0'}):
+            with self.subTest(extra_env=extra_env), \
+                    self.assertRaisesRegex(ValueError, 'QWEN_FAST_EXTENT_REPLAY=0, but the packed blocks built are'):
+                self.exercise(extra_env=extra_env, block_extent=True, **self.M3,
+                              refused_after_blocks='QWEN_FAST_EXTENT_REPLAY=0, but the packed blocks built are '
+                                                   'extent=[True]')
+        # every block is checked: both of the four-as-two pair
+        with self.assertRaisesRegex(ValueError, 'extent=\\[True, True\\]'):
+            self.exercise(packed=True, users=4, block_extent=True,
+                          refused_after_blocks='QWEN_FAST_EXTENT_REPLAY=0, but the packed blocks built are '
+                                               'extent=[True, True]')
+
+    def test_the_flag_with_no_packed_block_is_refused_before_the_pool(self):
+        # the c2 profile's QWEN_FAST_PACKED_STEP=0, a request count no block serves, one user
+        for packed, users, step in ((False, 4, '0'), (True, 3, '1'), (False, 1, '0')):
+            message = ('QWEN_FAST_EXTENT_REPLAY=1 serves its rounds through the packed block, and this attach builds '
+                       'none (QWEN_FAST_PACKED_STEP=%s, %d scheduler requests)' % (step, users))
+            with self.subTest(packed=packed, users=users), self.assertRaisesRegex(ValueError, 'builds none'):
+                self.exercise(packed=packed, users=users, extra_env=self.EXTENT, refused_in_attach=message)
+
+    def test_a_malformed_extent_flag_is_refused_before_anything_is_built(self):
+        for value in ('yes', 'true', '2', '', ' 1', '01'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'QWEN_FAST_EXTENT_REPLAY must be 0 or 1'):
+                self.exercise(extra_env={'QWEN_FAST_EXTENT_REPLAY': value}, refused=True, **self.M3)
+
+    def test_the_extent_flag_is_read_strictly(self):
+        read = serving_runtime.extent_replay_requested
+        self.assertEqual([read({}), read({'QWEN_FAST_EXTENT_REPLAY': '0'}), read({'QWEN_FAST_EXTENT_REPLAY': '1'})],
+                         [False, False, True])
 
 
 class RegisterReaderReasonTests(unittest.TestCase):

@@ -411,7 +411,7 @@ class ModelBatch:
                  attention_parallel=False, attention_replay=False, attention_tree=False, attention_mask_once=False,
                  replay_group_rows=4, prefix_zero_reuse=False, defer_conv_publication=False, short_context=False,
                  attention_audit=False, commit_only_gdn=False, pack=None, storage=None, packed_replay_pages=None,
-                 kv_single_chain=False):
+                 kv_single_chain=False, packed_extent=None):
         import torch
         import ttnn
 
@@ -444,6 +444,12 @@ class ModelBatch:
         # describe a packed replay fixture and nothing else.
         if packed_replay_pages is not None and (self.pack is None or not self.attention_replay):
             raise ValueError('Packed replay page tables need a packed fixture with replay attention')
+        # S2 (design W3): the extent block's lent storage - per segment, per bundle, a full-width
+        # table and a cur_pos word (serving_buffer_pool.PackedExtentStorage.segment_storage) - in
+        # place of the per-family tables, for a packed replay fixture only. None: today's path.
+        if packed_extent is not None and (self.pack is None or not self.attention_replay
+                                          or packed_replay_pages is not None or short_context):
+            raise ValueError('Packed extent storage needs a long-context packed replay fixture and no per-family tables')
         if type(replay_group_rows) is not int or replay_group_rows not in (4, 8) or (replay_group_rows == 8 and not attention_replay):
             raise ValueError('Eight-row replay grouping requires explicit replay attention')
         self.replay_group_rows = replay_group_rows
@@ -455,6 +461,11 @@ class ModelBatch:
             from attention_mask_replay import validate_ticket
             self.replay_capacity = (start // 256 + 1) * 256
             validate_ticket(start, self.rows, self.replay_capacity, short_context=short_context)
+        elif self.attention_replay and packed_extent is not None:
+            # S2: no family is fixed at capture. Every extent reader takes the whole table,
+            # C = page_width * 64, and each segment its own family from its cur_pos word; the
+            # readers validate each segment's start themselves (extent_attention_replay).
+            self.replay_capacity = pages.shape[1] * 64
         elif self.attention_replay:
             # Packed: one family for the block, keyed on the capture position as unpacked,
             # and each user's segment validated at that user's own start (its own reader).
@@ -576,7 +587,22 @@ class ModelBatch:
             # user, over the block's lent table sets (packed_replay_pages,
             # serving_buffer_pool.PackedReplayTables) or its own uploads when unpooled.
             tables = None if self.pack is not None else replay_storage(storage, self.replay_capacity)
-            if self.pack is not None:
+            if self.pack is not None and packed_extent is not None:
+                # S2 (design W3): one extent reader per segment over the block's lent full-width tables
+                # and cur_pos words, each at its segment's capture start. Construction stages each
+                # segment's word, cur_pos and table for that start (design A6), so the initial stage
+                # below finds the starts already equal and skips, soundly. Reached only where a pool
+                # lends extent storage (QWEN_FAST_EXTENT_REPLAY=1), i.e. only in the C2 image, which
+                # overlays extent_attention_replay (docker/qwen-c2-overlay.txt, test_c2_overlay_closure);
+                # the P8 image, whose bundle lacks the module, never takes this branch.
+                import extent_attention_replay
+
+                self.replay_reader = extent_attention_replay.PackedExtentReplayReader(ttnn, model.mesh_device,
+                    self.pack['segments'], pages.shape[1], self.pack['tables'], storage=packed_extent,
+                    max_group_rows=self.replay_group_rows,
+                    starts=tuple(int(positions[first]) for first, last in self.pack['segments']))
+                self.borrowed.extend(self.replay_reader.borrowed)
+            elif self.pack is not None:
                 from pooled_attention_replay import PackedReplayAttentionReader
 
                 self.replay_reader = PackedReplayAttentionReader(ttnn, model.mesh_device, self.pack['segments'],
