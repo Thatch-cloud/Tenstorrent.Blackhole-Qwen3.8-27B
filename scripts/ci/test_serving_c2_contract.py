@@ -51,7 +51,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(exact['env']['QWEN_FAST_OUTPUT_BUDGET'], '256')
 
     def test_profile_geometry_is_consistent(self):
-        for name in ('exact', 'coding', 'c2'):
+        for name in ('exact', 'coding', 'c2', 'c2-gate'):
             profile = contract.load_profile(PROFILES, name)
             engine, env = profile['engine'], profile['env']
             self.assertIs(engine['additional-config']['qwen_fast_t16'], True, name)
@@ -90,6 +90,39 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(room, 123136)
         self.assertGreaterEqual(131328 - room, 8192, 'every admitted prompt keeps at least 8k of answer room')
 
+    def test_the_c2_gate_profile_is_c2_at_exacts_prompt_limit(self):
+        """The plan's bring-up runs c2 at v235's shape, 4 x 131072, and compares byte for byte. Under
+        c2 itself the edge refuses every 131072-token prompt (its cap is 123136), so the packed
+        block never engages and the one direct A/B against v235 could not run: c2-gate is c2's
+        environment with exact's prompt limit, and exact's engine."""
+        exact, c2, gate = (contract.load_profile(PROFILES, name) for name in ('exact', 'c2', 'c2-gate'))
+        for snapshot in ('/snap', exact['snapshots'][1]):
+            self.assertEqual(contract.engine_arguments(gate, snapshot), contract.engine_arguments(exact, snapshot))
+        self.assertEqual(gate['engine'], exact['engine'])
+        self.assertEqual(gate['env'], c2['env'], 'the c2 code paths, the c2 ceiling')
+        for key in ('eos_ids', 'snapshots', 'mesh_graph_descriptor', 'default_max_tokens'):
+            self.assertEqual(gate.get(key), c2.get(key), key)
+        limits = contract.request_limits(gate)
+        self.assertEqual(limits, dict(budget=16384, max_prompt_tokens=None, min_answer_tokens=256,
+                                      default_max_tokens=8192))
+        room = contract.prompt_room(131328, 16384, None, 256)
+        self.assertEqual(room, 131072)
+        self.assertEqual(room, contract.prompt_room(131328, int(exact['env']['QWEN_FAST_OUTPUT_BUDGET'])),
+                         "exact's prompt limit")
+        gate_limits = dict(max_model_len=131328, max_prompt_tokens=None, min_answer_tokens=256,
+                           budget=16384, default_max_tokens=8192)
+        # v235's requests: 131072 tokens, max_tokens 256 - admitted, and the budget is exact's
+        self.assertEqual(enforce(Params(max_tokens=256), prompt_tokens=131072, **gate_limits).max_tokens, 256)
+        self.assertEqual(enforce(Params(max_tokens=16384), prompt_tokens=131072, **gate_limits).max_tokens, 256)
+        self.assertEqual(enforce(Params(max_tokens=131328 - 131072), prompt_tokens=131072,
+                                 **gate_limits).max_tokens, 256)
+        with self.assertRaises(contract.ContractError):
+            enforce(Params(max_tokens=256), prompt_tokens=131073, **gate_limits)
+        # ...which c2 refuses outright
+        with self.assertRaisesRegex(contract.ContractError, 'exceeds the 123136-token prompt limit'):
+            enforce(Params(max_tokens=256), prompt_tokens=131072, max_model_len=131328,
+                    **dict(contract.request_limits(c2)))
+
     def test_no_other_profile_turns_the_any_request_path_on(self):
         for name in ('exact', 'coding', 'general'):
             profile = contract.load_profile(PROFILES, name)
@@ -107,7 +140,7 @@ class ProfileTest(unittest.TestCase):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'docker',
                             'qwen-c2-serving.Dockerfile')
         with open(path, encoding='utf-8') as handle:
-            self.assertNotIn('QWEN_FAST_ANY_REQUEST', handle.read(), 'only the c2 profile may set it')
+            self.assertNotIn('QWEN_FAST_ANY_REQUEST', handle.read(), 'only the c2 profiles may set it')
 
     def test_default_profile_is_general(self):
         environ = dict(os.environ)
