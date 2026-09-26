@@ -64,6 +64,15 @@ def clean_environment():
                                    if not name.startswith('QWEN_FAST_')}, clear=True)
 
 
+def narrowing_off():
+    """Today's step without S2 D1 (serving_packed_step.narrow_round): every ticket left as drafted,
+    so a round no engine captures goes to refuse_round as it did before S2. The parent comparisons
+    run today's step under this: S2 changes only the rounds the parents refused
+    (ParentTests.test_with_s2_narrowing_only_the_round_the_parent_refused_differs)."""
+    return patch.object(serving_packed_step, 'narrow_round',
+                        lambda entries, reason: (entries, 'S2 D1 narrowing off for the parent comparison'))
+
+
 class PaddedFixture(tpv.FourUserFixture):
     """The M3 block with every padded-path line captured: the block's (packed_verifier.diagnostic)
     and the step's (serving_packed_step.padded_log, through verify_trace_t2's log_line)."""
@@ -565,7 +574,12 @@ class StepTests(StepFixture):
         self.assertEqual((block.phase, block.rounds, block.padded_rounds), ('idle', 1, 1))
         self.assertIsNone(verifier_engine._resident)
 
-    def test_the_step_backstop_refuses_a_page_zero_round_drafted_before_it_was_seen(self):
+    def test_the_step_backstop_narrows_a_page_zero_round_drafted_before_it_was_seen(self):
+        """A page-0 hit found only at the step (an abort after the drafts, VR4 finding 3's 4->3 and
+        3->2 caveat): the round's block-width tickets have no capture of their own trimmed engines.
+        Before S2 that was refuse_round, and the engine died one step later; S2 D1 cuts each ticket
+        to 4 rows and the sequential step serves the round, the block untouched. The page-0 lines
+        stay (the gate fails a padded arm on any), and the round logs its padded skip."""
         block = self.padded()
         a, b, c, d = self.owners()
         entries = self.draft([c, a, b])
@@ -576,6 +590,26 @@ class StepTests(StepFixture):
         self.assertEqual(reason, 'page0 in a live table: segment 0 position 4100 page_index 64')
         self.assertEqual(self.marked(packed_verifier.PADDED_PAGE0_MARKER),
                          ['[PINDIAG] packed padded page0 site=ineligible ' + reason] * 2)
+        self.assertNotIn('A round the block cannot serve', out.getvalue())
+        for name in 'CAB':
+            self.assertIn('[PINDIAG] packed survivor narrowed request=%s rows=16->4 reason=page0_in_a_live_table' % name,
+                          out.getvalue())
+        self.assertEqual(self.stepped, [('C', False), ('A', False), ('B', False)])
+        self.assertEqual([owner.rows_stepped for owner in (c, a, b)], [[4], [4], [4]])
+        self.assertEqual([(output.request_id, output.finished) for output in outputs],
+                         [('C', False), ('A', False), ('B', False)])
+        self.assertEqual([len(self.marked(marker)) for marker in (packed_verifier.PADDED_SKIPPED_MARKER,)], [1])
+        self.assertEqual(block.fixture.retained.commits, [], 'nothing was staged or committed')
+
+    def test_the_step_backstop_still_refuses_a_round_no_engine_captures_even_narrowed(self):
+        block = self.padded()
+        a, b, c, d = self.owners()
+        for owner in (a, b, c):
+            owner.engine.widths = (32,)
+        entries = self.draft([c, a, b])
+        a.engine.pages[0, 64] = 0
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as out:
+            outputs = packed_device_step(entries, cancelled=lambda: False, block=block)
         self.assertIn('A round the block cannot serve (page0 in a live table', out.getvalue())
         self.assertTrue(all(output.finished and output.cancelled for output in outputs))
         self.assertEqual(block.fixture.retained.commits, [], 'nothing was staged or committed')
@@ -841,7 +875,30 @@ class ParentTests(unittest.TestCase):
     def test_the_steps_answers_and_rounds_are_the_parents(self):
         parent = self.parent('serving_packed_step.py')
         with clean_environment():
-            self.assertEqual(self.step_scenarios(serving_packed_step), self.step_scenarios(parent))
+            with narrowing_off():
+                today = self.step_scenarios(serving_packed_step)
+            self.assertEqual(today, self.step_scenarios(parent))
+
+    def test_with_s2_narrowing_only_the_round_the_parent_refused_differs(self):
+        """S2 D1 changes the step only where the parent refused the round: the 16-row round of three
+        survivors whose engines capture (1, 2, 4). The parent failed all three (refuse_round); today
+        cuts each ticket to 4 rows and the sequential step serves them. Every other answer and round
+        is the parent's."""
+        parent = self.parent('serving_packed_step.py')
+        with clean_environment():
+            today, before = self.step_scenarios(serving_packed_step), self.step_scenarios(parent)
+        self.assertEqual([index for index, (mine, theirs) in enumerate(zip(today, before)) if mine != theirs], [3])
+        outputs, stepped, lines, phases = before[3]
+        self.assertTrue(all(output.finished and output.cancelled and not output.token_ids for output in outputs))
+        self.assertEqual((stepped, phases), ([], ['failed'] * 3))
+        self.assertIn('A round the block cannot serve', lines)
+        outputs, stepped, lines, phases = today[3]
+        self.assertEqual(stepped, [('A', False), ('B', False), ('C', False)])
+        self.assertEqual([(output.request_id, output.token_ids, output.finished) for output in outputs],
+                         [('A', (7,), False), ('B', (7,), False), ('C', (7,), False)])
+        self.assertEqual(phases, ['pending'] * 3, 'narrowed, not failed (the fake sequential step commits nothing)')
+        self.assertEqual(lines.count(serving_packed_step.NARROWED_MARKER), 3)
+        self.assertNotIn('A round the block cannot serve', lines)
 
     def test_the_real_blocks_round_is_the_parents(self):
         """The verifier and the step together over the real block, flag off: the same traces, the same
@@ -891,7 +948,9 @@ class ParentTests(unittest.TestCase):
                 fixture.doCleanups()
 
         with clean_environment():
-            self.assertEqual(scenario(packed_verifier, serving_packed_step), scenario(parent_verifier, parent_step))
+            with narrowing_off():
+                today = scenario(packed_verifier, serving_packed_step)
+            self.assertEqual(today, scenario(parent_verifier, parent_step))
 
     def test_the_verifier_rounds_are_the_parents_call_for_call(self):
         parent = self.parent('packed_verifier.py')

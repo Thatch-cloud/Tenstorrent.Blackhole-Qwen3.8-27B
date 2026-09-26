@@ -88,6 +88,28 @@ class GreedySession:
         if self.phase != 'pending' or ticket is not self.pending:
             raise ValueError('The current live block ticket is required')
 
+    def narrow(self, request_id, ticket, rows):
+        """The live ticket cut to its first `rows` tokens, in place of it: the same position, seed
+        and leading proposals, a new epoch. A round drafted at the packed block's width that the
+        block will not serve (a partner finished or aborted after the drafts; its padded checks
+        failed) has tickets no capture of the request's own engine holds, and the session cannot
+        re-propose while one is pending; the survivor is served sequentially at a width its engine
+        captures instead (S2 D1, serving_packed_step.narrow_round). Nothing was verified or
+        published for the old ticket, so cutting it is host-only: the dropped proposals are simply
+        never offered, as a rejected draft is never emitted. The drafter's cached proposal is not
+        touched; a publication at a prefix within the shorter ticket resets it
+        (DFlashRequestRuntime.publish). Refused, with nothing changed, unless `rows` is a verifier
+        bucket no wider than the ticket."""
+        self.check_ticket(request_id, ticket)
+        if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32) or rows > len(ticket.tokens):
+            raise ValueError('A verifier bucket no wider than the live ticket is required')
+        self.epoch += 1
+        narrowed = BlockTicket(request_id, self.epoch, ticket.position, tuple(ticket.tokens[:rows]),
+                               ticket.source if rows > 1 else 'target',
+                               min(ticket.match_length, rows - 1) if rows > 1 else 0)
+        self.pending, self.phase = narrowed, 'pending'
+        return narrowed
+
     def commit(self, request_id, ticket, predictions, publish):
         self.check_ticket(request_id, ticket)
         if not callable(publish):

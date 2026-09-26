@@ -5,14 +5,15 @@ Before this, every refusal inside the fast path's lifecycle set `failed` and re-
 died and every live user with it - smoke v3 died on the platform's 54-token warmup that way.
 Under QWEN_FAST_ANY_REQUEST (serving_fast_policy.any_request_enabled) a host-side refusal of
 ONE request's own terms - raised before that request touched any device state - is quarantined
-instead. That is exactly two sources: the sampling contract at admission
-(serving_fast_policy.validate_request_sampling in the lifecycle), and
+instead. That is exactly two sources (S2 W5b adds a third, below): the sampling contract at
+admission (serving_fast_policy.validate_request_sampling in the lifecycle), and
 serving_request_factory.RequestRefused from the bridge, which covers only the request's sampling
 contract, budget and page table. Everything else still fails the engine, deliberately:
 - the step-shape refusals in serving_lifecycle ('one complete fresh prefill', 'Text-only uncached
   prompt') - the scheduler handed the worker a step it cannot run;
 - a grammar_output reaching _sample;
-- every hook and packed-step round refusal;
+- every hook refusal, and every packed-step failure but the residual round refusal
+  (serving_packed_step.refuse_round), whose requests S2 W5b ends here instead (below);
 - the factory's engine and runner invariants (frontier, helpers, a seed outside the vocabulary,
   an EOS seed without ignore_eos, the KV group count): evidence of a sampler, device or lifecycle
   fault, on which the other live users must not keep decoding.
@@ -53,7 +54,15 @@ If a registered request is still pending when the next step executes, the wrappe
 in this engine, and serving_lifecycle fails the engine loudly (unconsumed) rather than let an
 unbridged request decode.
 
-Default off: nothing here is imported unless QWEN_FAST_ANY_REQUEST=1.
+S2 W5b adds a third source, also worker-side: serving_packed_step.refuse_round, the residual
+path of a packed round no engine captures even narrowed, registers every request of that round
+here. Those are RUNNING decodes, not prefills, and the step returns ZERO new tokens for them, so
+vLLM builds no EngineCoreOutput of its own: abort_quarantined adds the finishing one
+(new_token_ids=[], finish_reason ABORT), and finish_requests frees the request's blocks whatever
+its inflated frontier.
+
+Default off: nothing here is imported unless QWEN_FAST_ANY_REQUEST=1 (serving_packed_step imports it
+only to ask consumer_installed, which reads the holder without creating it).
 """
 
 import importlib
@@ -87,6 +96,14 @@ def holder():
         value.live = False
         sys.modules[HOLDER_KEY] = value
     return value
+
+
+def consumer_installed():
+    """Whether install() wrapped a scheduler class in this process, read without creating the
+    holder. serving_packed_step.abort_refused (S2 W5b) asks before it ends a refused packed
+    round's requests here; register() below refuses without one anyway."""
+    value = sys.modules.get(HOLDER_KEY)
+    return value is not None and getattr(value, 'installed', None) is not None
 
 
 def register(request_id, reason):

@@ -27,6 +27,9 @@ import verifier_engine
 
 ROWS = 16
 TAPS = ('tap0', 'tap1', 'tap2', 'tap3', 'tap4')
+# The log capture truncates around 250 characters and loguru's prefix takes some (as
+# test_dflash_device_audit.LINE_BUDGET).
+LINE_BUDGET = 180
 
 
 class FakeBlock:
@@ -104,6 +107,17 @@ class FakeSession:
     def check_ticket(self, request_id, ticket):
         if request_id != self.request_id or self.phase != 'pending' or ticket is not self.pending:
             raise ValueError('The current live block ticket is required')
+
+    def narrow(self, request_id, ticket, rows):
+        """GreedySession.narrow: the live ticket cut to its first `rows` tokens, a new epoch."""
+        self.check_ticket(request_id, ticket)
+        if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32) or rows > len(ticket.tokens):
+            raise ValueError('A verifier bucket no wider than the live ticket is required')
+        self.epoch += 1
+        self.pending = SimpleNamespace(request_id=self.request_id, epoch=self.epoch, position=ticket.position,
+                                       tokens=tuple(ticket.tokens[:rows]))
+        self.phase = 'pending'
+        return self.pending
 
     def commit(self, request_id, ticket, predictions, publish):
         self.check_ticket(request_id, ticket)
@@ -224,6 +238,8 @@ class FakeRequest:
         self.closed = self.cancelled = self.busy = False
         self.collect_timings = False
         self.stepped = stepped
+        # the rows of the ticket each sequential step found pending (S2 D1 narrows it first)
+        self.rows_stepped = []
 
     def propose(self, predictions, accept, rows=ROWS):
         """A ticket whose first `accept` proposals the target will agree with."""
@@ -233,7 +249,24 @@ class FakeRequest:
         """What the sequential fallback drives: this request's own step."""
         flag = cancelled()
         self.stepped.append((request_id, flag))
+        self.rows_stepped.append(None if self.session.pending is None else len(self.session.pending.tokens))
         return CommittedOutput(request_id, () if flag else (7,), self.session.position, flag, flag)
+
+
+class CommittingRequest(FakeRequest):
+    """FastRequest.step's own commit, for the sequential fallback: the pending ticket verified by the
+    request's own engine (the target agrees with every proposal it carries) and committed through
+    the session, which goes idle."""
+
+    def step(self, request_id, *, cancelled):
+        flag = cancelled()
+        self.stepped.append((request_id, flag))
+        ticket = self.session.pending
+        self.rows_stepped.append(len(ticket.tokens))
+        if not self.engine.serves(ticket):
+            raise ValueError('The sequential step reached a ticket its own engine never captured')
+        decision = self.session.commit(request_id, ticket, [*ticket.tokens[1:], 77], lambda prefix: None)
+        return CommittedOutput(request_id, tuple(decision.emitted), self.session.position, False)
 
 
 def entry(request):
@@ -422,28 +455,31 @@ class PackedStepTests(unittest.TestCase):
                 self.assertEqual([output.request_id for output in outputs], [item['request_id'] for item in entries])
                 self.assertEqual(self.block.calls, [], 'the block was not touched')
 
-    def test_a_round_drafted_for_the_block_that_the_block_cannot_serve_degrades_without_raising_past_the_step(self):
+    def test_a_round_drafted_for_the_block_that_the_block_cannot_serve_is_narrowed_and_served_sequentially(self):
         """Beside the 64-row block the engines capture only (1, 2, 4): a 16-row ticket the
-        block does not serve (its entries changed after drafting) has no capture anywhere and
-        cannot be re-proposed. serving_worker_hook.discard_stale_ticket keeps this mix from
-        ever forming in normal steady-state or transition operation; reached anyway (a
-        scheduler race, not a hardware fault), the round degrades - failed exactly as a
-        refused verify would fail it, naming the reason and the tickets, but returned rather
-        than raised, so a race costs this round for this request, not the engine for every
-        other live user."""
+        block does not serve (its entries changed after drafting: a partner aborted, which
+        vLLM names one step late) has no capture of its own engine. S2 D1 cuts it to the
+        widest width that engine serves - the same position and seed, its leading proposals,
+        a new epoch - logs the narrowing, and hands the round to the sequential step: the
+        survivor keeps decoding, where refuse_round used to fail it (and the engine with it,
+        one step later)."""
         request = FakeRequest('A', 100, self.stepped)
         request.engine.widths = (1, 2, 4)
         self.block.bind(request.engine, 0)
-        request.propose(self.block.predictions_for(0), accept=15)
+        drafted = request.propose(self.block.predictions_for(0), accept=15)
         with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
             outputs = self.step([entry(request)])
-        self.assertEqual(outputs, [CommittedOutput('A', (), 100, True, True)])
-        self.assertIn('cannot serve (entries=1 block_users=2) holds tickets no request '
-                      'engine captured (request=A rows=16)', output.getvalue())
-        self.assertEqual((self.stepped, self.block.calls), ([], []))
-        self.assertEqual(request.session.phase, 'failed', 'the round is failed, as a refused verify would fail it')
+        self.assertEqual(outputs, [CommittedOutput('A', (7,), 100, False, False)])
+        self.assertEqual((self.stepped, request.rows_stepped, self.block.calls), ([('A', False)], [4], []))
+        narrowed = request.session.pending
+        self.assertEqual((narrowed.tokens, narrowed.position, narrowed.epoch), (drafted.tokens[:4], 100, drafted.epoch + 1))
+        self.assertEqual(request.session.phase, 'pending', 'narrowed, not failed')
         self.assertEqual(request.engine.adopted, [])
+        self.assertIn('[PINDIAG] packed survivor narrowed request=A rows=16->4 reason=entries=1_block_users=2',
+                      output.getvalue())
+        self.assertNotIn('cannot serve', output.getvalue())
         # a narrow ticket the trimmed engine captured goes to the sequential step as before
+        self.stepped.clear()
         survivor = FakeRequest('B', 3000, self.stepped)
         survivor.engine.widths = (1, 2, 4)
         self.block.bind(survivor.engine, 1)
@@ -459,6 +495,58 @@ class PackedStepTests(unittest.TestCase):
         self.stepped.clear()
         self.step([entry(plain)])
         self.assertEqual(self.stepped, [('C', False)])
+        self.assertEqual(plain.rows_stepped, [16], 'no serves contract: nothing to narrow against')
+
+    def test_a_ticket_no_narrower_width_serves_still_refuses_the_round_without_raising(self):
+        """The residual path: an engine that captures no width up to the ticket's (here only 32
+        rows, beside a 16-row ticket) cannot take any cut of it, so the round is refused as it
+        always was - failed as a refused verify would fail it, naming the reason and the
+        tickets, returned rather than raised - and nothing was narrowed. Without the D2
+        request quarantine's consumer (every profile but QWEN_FAST_ANY_REQUEST's), the session
+        stays failed and unfinished exactly as before S2 (W5b below)."""
+        request = FakeRequest('A', 100, self.stepped)
+        request.engine.widths = (32,)
+        self.block.bind(request.engine, 0)
+        drafted = request.propose(self.block.predictions_for(0), accept=15)
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
+            outputs = self.step([entry(request)])
+        self.assertEqual(outputs, [CommittedOutput('A', (), 100, True, True)])
+        self.assertIn('cannot serve (entries=1 block_users=2) holds tickets no request '
+                      'engine captured (request=A rows=16)', output.getvalue())
+        self.assertIn('[PINDIAG] packed survivor narrowing refused request=A rows=16 no narrower width', output.getvalue())
+        self.assertNotIn('[PINDIAG] packed survivor narrowed', output.getvalue())
+        self.assertNotIn(serving_packed_step.ABORTED_MARKER, output.getvalue())
+        self.assertEqual((self.stepped, self.block.calls), ([], []))
+        self.assertEqual((request.session.phase, request.session.finished), ('failed', False))
+        self.assertIs(request.session.pending, drafted, 'nothing narrowed')
+        self.assertEqual(request.engine.adopted, [])
+
+    def test_a_session_that_refuses_the_narrowing_leaves_the_round_to_refuse_round(self):
+        """A session that cannot narrow (a session type without narrow - an image without S2's
+        greedy_session - or one that refuses the cut) is the residual path too; the entries
+        narrowed before it are failed at their live, narrowed tickets, so no session is left
+        pending. None of them gets a NARROWED_MARKER line: that line counts the narrowed
+        survivors the engine served (M6's "survivor narrowed" check), and A was failed with the
+        round, not served."""
+        block = FakeBlock(users=4)
+        first = FakeRequest('A', 100, self.stepped)
+        second = FakeRequest('B', 3000, self.stepped)
+        for segment, request in enumerate((first, second)):
+            request.engine.widths = (1, 2, 4)
+            block.bind(request.engine, segment)
+            request.propose(block.predictions_for(segment), accept=3)
+        second.session.narrow = None
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
+            outputs = packed_device_step([entry(first), entry(second)], cancelled=lambda: False, block=block)
+        self.assertEqual([(item.request_id, item.token_ids, item.finished) for item in outputs],
+                         [('A', (), True), ('B', (), True)])
+        self.assertNotIn(serving_packed_step.NARROWED_MARKER, output.getvalue(),
+                         'A was cut, then failed with the round: no narrowed line for it')
+        self.assertIn('[PINDIAG] packed survivor narrowing refused request=B rows=16->4 TypeError', output.getvalue())
+        self.assertIn('A round the block cannot serve', output.getvalue())
+        self.assertEqual((first.session.phase, second.session.phase), ('failed', 'failed'))
+        self.assertEqual(len(first.session.pending.tokens), 4, 'failed at its live narrowed ticket')
+        self.assertEqual(self.stepped, [])
 
     def test_the_packed_step_object_binds_the_block_and_carries_the_proposal_policy(self):
         step = PackedStep(self.block)
@@ -981,34 +1069,43 @@ class FourUserStepTests(unittest.TestCase):
         self.assertEqual([item[0] for item in self.stepped], ['C', 'A', 'D', 'B', 'E'])
         self.assertEqual(self.block.calls, [])
 
-    def test_a_mixed_round_from_the_three_to_four_live_transition_degrades_without_raising(self):
+    def test_a_mixed_round_from_the_three_to_four_live_transition_is_narrowed_and_served_sequentially(self):
         """The exact shape of run 35535533720: at the 3->4-live transition, D keeps a stale
         narrower ticket - drafted while fewer than four were live - while A, B and C draft
         fresh at the block's width once proposal_rows sees all four bound and live. Beside
         the real 64-row block every engine is trimmed to its sequential captures (1, 2, 4)
         (packed_shapes.sequential_capture_rows), so D's own ticket is servable standalone but
         A, B and C's 16-row tickets - captured only on the block - are not.
-        serving_worker_hook.discard_stale_ticket keeps this mix from ever forming in normal
-        steady-state or transition operation; reached anyway, the round degrades every
-        request rather than raising past the step and crashing the engine for every live
-        user."""
-        owners = [self.request('A', 0, 100, accept=15), self.request('B', 1, 3000, accept=9),
-                  self.request('C', 2, 700, accept=0), self.request('D', 3, 5000, accept=12)]
-        for owner in owners:
+        serving_worker_hook.discard_stale_ticket keeps this mix from forming in normal
+        operation; reached anyway, S2 D1 cuts A, B and C to their engines' widest width (4),
+        leaves D's servable ticket alone, and the sequential step serves all four in the
+        scheduler's order - nobody fails, the block is never touched."""
+        owners = [CommittingRequest(name, position, self.stepped)
+                  for name, position in (('A', 100), ('B', 3000), ('C', 700), ('D', 5000))]
+        for segment, (owner, accept) in enumerate(zip(owners, (15, 9, 0, 12))):
+            self.block.bind(owner.engine, segment)
             owner.engine.widths = (1, 2, 4)
+            owner.propose(self.block.predictions_for(segment), accept=accept)
         # D's ticket is stale: drafted narrow, before it shared the others' width
         owners[3].session.pending, owners[3].session.phase = None, 'idle'
-        owners[3].propose(self.block.predictions_for(3), accept=3, rows=4)
+        stale = owners[3].propose(self.block.predictions_for(3), accept=3, rows=4)
         entries = [entry(owners[index]) for index in (2, 0, 3, 1)]
         with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
             outputs = self.step(entries)
-        self.assertEqual(outputs, [CommittedOutput('C', (), 700, True, True), CommittedOutput('A', (), 100, True, True),
-                                   CommittedOutput('D', (), 5000, True, True), CommittedOutput('B', (), 3000, True, True)])
-        self.assertIn('request=D rows=4 rows_per_user=16', output.getvalue())
-        self.assertIn('request=C rows=16', output.getvalue())
+        self.assertEqual(self.stepped, [('C', False), ('A', False), ('D', False), ('B', False)])
+        self.assertEqual([owner.rows_stepped for owner in owners], [[4], [4], [4], [4]])
+        self.assertEqual([(item.request_id, len(item.token_ids), item.finished) for item in outputs],
+                         [('C', 4, False), ('A', 4, False), ('D', 4, False), ('B', 4, False)])
+        self.assertEqual([owner.session.position for owner in owners], [104, 3004, 704, 5004])
+        lines = output.getvalue()
+        for name in 'CAB':
+            self.assertIn('[PINDIAG] packed survivor narrowed request=%s rows=16->4 reason=request=D_rows=4_rows_per_user=16'
+                          % name, lines)
+        self.assertNotIn('request=D rows=16', lines)
+        self.assertEqual(owners[3].session.epoch, stale.epoch, "D's servable ticket was not re-issued")
         self.assertEqual(self.block.calls, [], 'the block was never touched')
         for owner in owners:
-            self.assertEqual(owner.session.phase, 'failed')
+            self.assertEqual(owner.session.phase, 'idle')
             self.assertEqual(owner.engine.adopted, [])
 
     def test_discarding_the_stale_ticket_lets_the_transition_round_reach_the_block(self):
@@ -1035,42 +1132,54 @@ class FourUserStepTests(unittest.TestCase):
         for owner in owners:
             self.assertEqual(owner.session.phase, 'idle')
 
-    def test_survivors_holding_stale_block_width_tickets_after_a_partner_finishes_are_refused_not_served(self):
-        """The exact shape of run 35564623068, the opposite direction from the previous two
-        tests: entries drop BELOW the block's own user count when one of four finishes, but
-        a survivor's PENDING ticket is still the block's own 16-row width - drafted while
-        all four were live, never discarded because a round the policy answers None for
-        (too few live requests for a full group) was not treated as one that could hold a
-        stale ticket. Beside the real 64-row block every engine is trimmed to its
-        sequential captures (1, 2, 4) (packed_shapes.sequential_capture_rows), so a 16-row
-        ticket has no capture to fall back to: `ineligible` refuses the round on entry count
-        alone and `unservable` finds every ticket unservable, so `packed_device_step` calls
-        `refuse_round` - failing every survivor's session, not just the finished partner's.
-        The next `serving_vllm_contract.prepared_ticket` call for any of them then raises,
-        because their session.phase is 'failed', not 'pending' - the engine crash the bug
-        report traced. This is the state `serving_worker_hook._drafts` must never produce."""
-        owners = [self.request('A', 0, 100, accept=15), self.request('B', 1, 3000, accept=9),
-                  self.request('C', 2, 700, accept=0), self.request('D', 3, 5000, accept=12)]
-        for owner in owners:
+    def test_survivors_holding_stale_block_width_tickets_after_a_partner_finishes_are_narrowed_and_served(self):
+        """The exact shape of run 35564623068, and of an abort vLLM names only after the
+        drafts (VR4 finding 3: 2->1, 3->1, 4->1): entries drop BELOW the block's own user
+        count while a survivor's PENDING ticket is still the block's own 16-row width,
+        drafted while all four were live. Beside the real 64-row block every engine is
+        trimmed to its sequential captures (1, 2, 4) (packed_shapes.sequential_capture_rows),
+        so a 16-row ticket has no capture to fall back to: `ineligible` refuses the round on
+        entry count alone and `unservable` finds every ticket unservable. Before S2 that was
+        `refuse_round`, failing every survivor's session - and the next
+        `serving_vllm_contract.prepared_ticket` for any of them raised on the failed session,
+        killing the engine. S2 D1 narrows each survivor's ticket to 4 rows instead, and the
+        sequential step serves them: the survivors commit, their sessions go idle, the block
+        is never touched."""
+        owners = [CommittingRequest(name, position, self.stepped)
+                  for name, position in (('A', 100), ('B', 3000), ('C', 700), ('D', 5000))]
+        for segment, owner in enumerate(owners):
+            self.block.bind(owner.engine, segment)
             owner.engine.widths = (1, 2, 4)
         for live in (owners[:3], owners[:2], owners[:1]):
             with self.subTest(live=[owner.session.request_id for owner in live]):
+                self.stepped.clear()
+                drafted = {}
                 for owner in live:
                     # A stale ticket the coming round has no shared width for: minted
                     # fresh here at the block's width, standing in for one drafted
-                    # before the partner finished and never discarded.
+                    # before the partner finished or aborted.
                     owner.session.pending, owner.session.phase = None, 'idle'
-                    owner.propose(self.block.predictions_for(owners.index(owner)), accept=0, rows=16)
+                    owner.rows_stepped.clear()
+                    drafted[owner.session.request_id] = (
+                        owner.propose(self.block.predictions_for(owners.index(owner)), accept=0, rows=16),
+                        owner.session.position)
                 entries = [entry(owner) for owner in live]
                 with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as captured:
                     outputs = self.step(entries)
-                self.assertEqual(outputs, [CommittedOutput(owner.session.request_id, (), owner.session.position,
-                                                            True, True) for owner in live])
-                self.assertIn('block_users=4', captured.getvalue())
+                self.assertEqual(self.stepped, [(owner.session.request_id, False) for owner in live])
                 self.assertEqual(self.block.calls, [], 'the block was never touched')
-                for owner in live:
-                    self.assertEqual(owner.session.phase, 'failed')
+                for owner, output in zip(live, outputs):
+                    ticket, position = drafted[owner.session.request_id]
+                    self.assertEqual(owner.rows_stepped, [4])
+                    # the target agreed with the three proposals the cut kept: all of them and its own token
+                    self.assertEqual(output, CommittedOutput(owner.session.request_id, (*ticket.tokens[1:4], 77),
+                                                             position + 4, False))
+                    self.assertEqual((owner.session.phase, owner.session.pending, owner.session.position),
+                                     ('idle', None, position + 4))
                     self.assertEqual(owner.engine.adopted, [])
+                    self.assertIn('[PINDIAG] packed survivor narrowed request=%s rows=16->4 reason=entries=%d_block_users=4'
+                                  % (owner.session.request_id, len(live)), captured.getvalue())
+                self.assertNotIn('cannot serve', captured.getvalue())
 
     def test_survivors_of_a_trimmed_block_reach_the_sequential_step_once_discard_gives_them_native_tickets(self):
         """The fix for the previous test: `serving_worker_hook.discard_stale_ticket`, called
@@ -1118,6 +1227,175 @@ class FourUserStepTests(unittest.TestCase):
         self.assertEqual([(output.request_id, output.cancelled) for output in outputs],
                          [('C', False), ('A', False), ('D', True), ('B', True)])
         self.assertEqual((self.block.phase, self.block.pending_segments), ('idle', set()))
+
+
+class RefusedRoundAbortTests(unittest.TestCase):
+    """S2 W5b: a round refuse_round still fails (no narrower width serves a ticket) ends each of its
+    requests as FINISHED_ABORTED through the D2 request quarantine when its scheduler-side consumer
+    is installed (QWEN_FAST_ANY_REQUEST's lifecycle), and marks each session finished, so the drafts
+    between this step and the scheduler's abort skip them instead of raising on a failed session.
+    Without the consumer nothing changes: the session stays failed and unfinished, as before S2."""
+
+    def setUp(self):
+        import serving_request_quarantine as quarantine
+
+        self.quarantine = quarantine
+        verifier_engine.note_prefill()
+        sys.modules.pop(quarantine.HOLDER_KEY, None)
+        self.addCleanup(sys.modules.pop, quarantine.HOLDER_KEY, None)
+        self.block = FakeBlock(users=4)
+        self.stepped = []
+
+    def owners(self, names, widths, rows=None):
+        """One drafted request per name, bound to the next segment, its engine capturing `widths`
+        (one tuple per name), its ticket `rows` wide (one per name, the block's by default)."""
+        owners = []
+        for segment, (name, captured) in enumerate(zip(names, widths, strict=True)):
+            owner = FakeRequest(name, 100 + 1000 * segment, self.stepped)
+            owner.engine.widths = captured
+            self.block.bind(owner.engine, segment)
+            owner.propose(self.block.predictions_for(segment), accept=3, rows=ROWS if rows is None else rows[segment])
+            owners.append(owner)
+        return owners
+
+    def run_round(self, owners):
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
+            outputs = packed_device_step([entry(owner) for owner in owners], cancelled=lambda: False, block=self.block)
+        return outputs, output.getvalue()
+
+    def refused_round(self, names='AB'):
+        owners = self.owners(names, [(32,)] * len(names))
+        outputs, lines = self.run_round(owners)
+        return owners, outputs, lines
+
+    def install(self):
+        self.quarantine.holder().installed = 'vllm_tt_plugin.scheduler.TTScheduler'
+
+    def test_with_the_consumer_installed_every_request_of_the_refused_round_is_registered_and_finished(self):
+        self.install()
+        owners, outputs, lines = self.refused_round()
+        self.assertEqual(outputs, [CommittedOutput('A', (), 100, True, True), CommittedOutput('B', (), 1100, True, True)])
+        pending = self.quarantine.holder().pending
+        self.assertEqual(sorted(pending), ['A', 'B'])
+        self.assertTrue(all(reason.startswith('packed round refused: A round the block cannot serve') for reason in
+                            pending.values()))
+        for owner in owners:
+            self.assertEqual((owner.session.phase, owner.session.finished), ('failed', True))
+        self.assertIn('[PINDIAG] packed refused round aborted 1/2 FINISHED_ABORTED via the request quarantine, '
+                      'engine kept: request=A', lines)
+        self.assertIn('[PINDIAG] packed refused round aborted 2/2 FINISHED_ABORTED via the request quarantine, '
+                      'engine kept: request=B', lines)
+        self.assertEqual((self.block.calls, self.stepped), ([], []))
+
+    def assert_every_request_aborted(self, owners, outputs):
+        """Every request of the round refused, registered with the quarantine and its session
+        finished - a failed, unfinished one is drafted again and kills the engine (VR4 finding 2)."""
+        names = [owner.session.request_id for owner in owners]
+        self.assertEqual([(output.request_id, output.token_ids, output.finished, output.cancelled)
+                          for output in outputs], [(name, (), True, True) for name in names])
+        self.assertEqual(sorted(self.quarantine.holder().pending), sorted(names))
+        for owner in owners:
+            self.assertEqual((owner.session.request_id, owner.session.phase, owner.session.finished),
+                             (owner.session.request_id, 'failed', True))
+
+    def test_a_mixed_round_registers_and_finishes_its_servable_request_too(self):
+        """A refused round is refused whole: B's own engine serves its ticket, but A's has no
+        width up to it, so fail_round fails B's session with A's - and B must end through the
+        quarantine like A, not only the unservable one."""
+        self.install()
+        owners = self.owners('AB', [(32,), (1, 2, 4, 8, 16)])
+        self.assertTrue(owners[1].engine.serves(owners[1].session.pending), "B's own engine serves its ticket")
+        outputs, lines = self.run_round(owners)
+        self.assert_every_request_aborted(owners, outputs)
+        self.assertEqual(lines.count(serving_packed_step.ABORTED_MARKER), 2)
+        self.assertEqual((self.block.calls, self.stepped), ([], []))
+
+    def test_a_partially_narrowed_round_registers_and_finishes_the_request_already_cut(self):
+        """A is cut to 4 rows, then B's session refuses its cut: refuse_round fails the round at
+        A's narrowed ticket and B's drafted one, and both must end through the quarantine - not
+        only the request whose ticket is still the drafted width."""
+        self.install()
+        owners = self.owners('AB', [(1, 2, 4)] * 2)
+        owners[1].session.narrow = None
+        outputs, lines = self.run_round(owners)
+        self.assertEqual([len(owner.session.pending.tokens) for owner in owners], [4, ROWS], 'A was cut, B was not')
+        self.assert_every_request_aborted(owners, outputs)
+        self.assertNotIn(serving_packed_step.NARROWED_MARKER, lines)
+        self.assertEqual(lines.count(serving_packed_step.ABORTED_MARKER), 2)
+
+    def test_each_aborted_request_gets_its_own_line_within_the_log_budget(self):
+        """Four vLLM-length request ids on one line ran past the log capture's ~250 characters
+        before loguru's prefix, cutting the later ids and the tail. One line per request, its id
+        (cut to 48, as every line here cuts it) last, each within LINE_BUDGET. A 3->4-live
+        transition round: D's stale ticket is narrower than the block's, no engine captures any
+        width up to either, so the whole round of four is refused."""
+        self.install()
+        names = ['chatcmpl-%032x-%08x' % (index, index) for index in range(4)]
+        self.assertEqual({len(name) for name in names}, {50})
+        owners = self.owners(names, [(32,)] * 4, rows=(ROWS, ROWS, ROWS, 8))
+        outputs, lines = self.run_round(owners)
+        self.assert_every_request_aborted(owners, outputs)
+        aborted = [line for line in lines.splitlines() if line.startswith(serving_packed_step.ABORTED_MARKER)]
+        self.assertEqual(len(aborted), 4, lines)
+        for index, (line, name) in enumerate(zip(aborted, names, strict=True), 1):
+            self.assertLessEqual(len(line), LINE_BUDGET, line)
+            self.assertIn(' %d/4 FINISHED_ABORTED ' % index, line)
+            self.assertTrue(line.endswith(' request=' + name[:48]), line)
+
+    def test_the_drafts_before_the_scheduler_aborts_them_skip_the_aborted_requests(self):
+        """Between this step and update_from_output's abort, the next round is drafted (inside
+        this step under QWEN_FAST_EARLY_DRAFT, else by take_draft_token_ids after it): the policy
+        does not count an aborted request as live, and its bridge drafts nothing instead of
+        raising on the failed session (serving_vllm_contract.prepared_ticket)."""
+        from serving_runner_bridge import FastRunnerBridge
+
+        self.install()
+        owners, outputs, lines = self.refused_round('ABC')
+        survivor = FakeRequest('D', 9000, self.stepped)
+        self.block.bind(survivor.engine, 3)
+        self.assertIsNone(proposal_rows(self.block, [*owners, survivor]),
+                          'one live request of four: the aborted three are not live')
+        for owner in owners:
+            bridge = FastRunnerBridge.__new__(FastRunnerBridge)
+            bridge.request, bridge.failed = owner, False
+            self.assertIsNone(bridge.drafts())
+            self.assertIsNone(bridge.drafts(packed_rows=16))
+
+    def test_without_the_consumer_the_refusal_is_exactly_todays(self):
+        owners, outputs, lines = self.refused_round()
+        self.assertEqual(outputs, [CommittedOutput('A', (), 100, True, True), CommittedOutput('B', (), 1100, True, True)])
+        self.assertIsNone(sys.modules.get(self.quarantine.HOLDER_KEY), 'the holder is not even created')
+        for owner in owners:
+            self.assertEqual((owner.session.phase, owner.session.finished), ('failed', False))
+        self.assertNotIn(serving_packed_step.ABORTED_MARKER, lines)
+        # the holder present but no scheduler class wrapped (install failed): still today's
+        self.quarantine.holder()
+        owners, outputs, lines = self.refused_round()
+        self.assertEqual(self.quarantine.holder().pending, {})
+        self.assertTrue(all(not owner.session.finished for owner in owners))
+
+    def test_a_request_id_the_quarantine_cannot_hold_leaves_the_whole_round_as_today(self):
+        self.install()
+        owner = FakeRequest('A', 100, self.stepped)
+        owner.engine.widths = (32,)
+        self.block.bind(owner.engine, 0)
+        owner.propose(self.block.predictions_for(0), accept=3)
+        item = entry(owner)
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO):
+            self.assertEqual(serving_packed_step.abort_refused([dict(item, request_id=7)], 'x'), ())
+        self.assertEqual(self.quarantine.holder().pending, {})
+        self.assertFalse(owner.session.finished)
+
+    def test_a_narrowed_round_registers_nothing(self):
+        self.install()
+        owner = FakeRequest('A', 100, self.stepped)
+        owner.engine.widths = (1, 2, 4)
+        self.block.bind(owner.engine, 0)
+        owner.propose(self.block.predictions_for(0), accept=3)
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO):
+            packed_device_step([entry(owner)], cancelled=lambda: False, block=self.block)
+        self.assertEqual((self.quarantine.holder().pending, owner.session.finished), ({}, False))
+        self.assertEqual(self.stepped, [('A', False)])
 
 
 class TwoBlockProposalRowsTests(unittest.TestCase):
@@ -1279,11 +1557,11 @@ class TwoBlockStepTests(unittest.TestCase):
         self.assertTrue(all(output.cancelled for output in outputs))
         self.assertEqual((self.block_a.calls, self.block_b.calls), ([], []))
 
-    def test_a_round_a_blocks_own_group_cannot_serve_degrades_without_raising_past_the_step(self):
+    def test_a_round_a_blocks_own_group_cannot_serve_is_narrowed_into_the_sequential_batch(self):
         """A stale 16-row ticket for block A, whose partner is missing from this round, has
-        no capture anywhere once its engine is trimmed to (1, 2, 4): the degrade-not-crash
-        refusal (serving_packed_step.refuse_round) applies to block A's own group, while
-        block B's intact pair still runs packed in the same round."""
+        no capture of its own engine once that is trimmed to (1, 2, 4): S2 D1 narrows it to
+        4 rows and it joins the round's sequential batch, while block B's intact pair still
+        runs packed in the same round."""
         a = self.request(self.block_a, 'A', 0, 100, accept=15)
         a.engine.widths = (1, 2, 4)
         c = self.request(self.block_b, 'C', 0, 700, accept=0)
@@ -1292,13 +1570,29 @@ class TwoBlockStepTests(unittest.TestCase):
             outputs = self.step([entry(c), entry(a), entry(d)])
         self.assertEqual(self.block_a.calls, [], 'block A never ran: its own group could not serve the ticket')
         self.assertEqual(self.block_b.calls, [('verify', ['C', 'D']), ('commit', 0, 1), ('commit', 1, 13)])
+        self.assertIn('[PINDIAG] packed survivor narrowed request=A rows=16->4 reason=entries=1_block_users=2',
+                      output.getvalue())
+        self.assertNotIn('cannot serve', output.getvalue())
+        self.assertEqual([output.request_id for output in outputs], ['C', 'A', 'D'])
+        self.assertEqual(outputs[1], CommittedOutput('A', (7,), 100, False, False))
+        self.assertEqual((self.stepped, a.rows_stepped), ([('A', False)], [4]))
+        self.assertEqual(a.session.phase, 'pending', 'narrowed, not failed')
+        self.assertEqual(a.engine.adopted, [])
+
+    def test_a_blocks_group_no_narrower_width_serves_is_still_refused_while_the_other_block_runs(self):
+        a = self.request(self.block_a, 'A', 0, 100, accept=15)
+        a.engine.widths = (32,)
+        c = self.request(self.block_b, 'C', 0, 700, accept=0)
+        d = self.request(self.block_b, 'D', 1, 5000, accept=12)
+        with patch.dict(sys.modules, loguru=None), patch('sys.stdout', new_callable=io.StringIO) as output:
+            outputs = self.step([entry(c), entry(a), entry(d)])
+        self.assertEqual(self.block_a.calls, [])
+        self.assertEqual(self.block_b.calls, [('verify', ['C', 'D']), ('commit', 0, 1), ('commit', 1, 13)])
         self.assertIn('cannot serve (entries=1 block_users=2) holds tickets no request '
                       'engine captured (request=A rows=16)', output.getvalue())
-        self.assertEqual([output.request_id for output in outputs], ['C', 'A', 'D'])
         self.assertEqual(outputs[1], CommittedOutput('A', (), 100, True, True))
         self.assertEqual(a.session.phase, 'failed')
-        self.assertEqual(a.engine.adopted, [])
-        self.assertEqual(self.stepped, [], 'the degraded group is refused, not sent to the sequential step')
+        self.assertEqual(self.stepped, [], 'the refused group is not sent to the sequential step')
 
     def test_single_block_packed_step_still_runs_the_unchanged_packed_device_step(self):
         """A PackedStep built over ONE block runs `packed_device_step` directly, never the
