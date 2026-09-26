@@ -60,11 +60,21 @@ QUERIES = [
     ('seconds since each target last scraped up', 'time() - timestamp(up)'),
     ('uptime of every node exporter (s)', 'time() - node_boot_time_seconds'),
     ('up over the last hour, min', 'min_over_time(up[1h]) == 0'),
+    ('last push from the site (unix s, and age s)', 'push_time_seconds{instance=~".*%s.*"}' % SHORT),
+    ('age of the last push (s)', 'time() - push_time_seconds{instance=~".*%s.*"}' % SHORT),
+    ('root fs used on the site', 'thatch_root_fs_used_percent{instance=~".*%s.*"}' % SHORT),
+    ('node health over 3h (min, max)', 'min_over_time(thatch_node_health{site="%s"}[3h])' % SITE),
+    ('vram free/used/total now', 'thatch_node_vram_free_mb{site="%s"} or thatch_node_vram_used_mb{site="%s"} or thatch_node_vram_total_mb{site="%s"}' % (SITE, SITE, SITE)),
+    ('watts over the last 2h (max)', 'max_over_time(thatch_node_current_watts{site="%s"}[2h])' % SITE),
+    ('placements drift/failed/orphaned', 'thatch_node_placement_drift{site="%s"} or thatch_node_placement_failed{site="%s"} or thatch_node_placement_orphaned{site="%s"}' % (SITE, SITE, SITE)),
+    ('spark-8c4d LAN agent target, for the address pattern', 'up{job="thatch-node-agent-lan"}'),
 ]
 for title, query in QUERIES:
     print('=== prometheus: %s: %s' % (title, query), flush=True)
     print(prom(query), flush=True)
 
+section('monitoring config naming the site', ['bash', '-c', "sudo -n k3s kubectl get configmap,secret -A -o yaml 2>/dev/null | grep -n -i -B2 -A2 '%s' | grep -v -i 'password\|token\|key:' | head -40" % SHORT])
+section('LAN hosts answering ssh on 192.168.2.0/24 (connect only)', ['bash', '-c', 'for i in $(seq 2 254); do (timeout 1 bash -c "</dev/tcp/192.168.2.$i/22" 2>/dev/null && echo 192.168.2.$i) & done; wait'], 60)
 nodes = section('k3s nodes', ['sudo', '-n', 'k3s', 'kubectl', 'get', 'nodes', '-o', 'wide'])
 section('pods on or about the site', ['bash', '-c', "sudo -n k3s kubectl get pods -A -o wide 2>&1 | grep -i '%s' | head -40" % SHORT])
 hosts = section('name lookup', ['bash', '-c', 'getent hosts %s %s.local %s.lan 2>&1; grep -i %s /etc/hosts 2>&1' % (SITE, SITE, SITE, SHORT)])
