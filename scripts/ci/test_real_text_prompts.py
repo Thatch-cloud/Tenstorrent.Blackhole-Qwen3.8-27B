@@ -431,5 +431,69 @@ class TokenizerLoadTests(unittest.TestCase):
         self.assertEqual(calls, [(('/models/snapshot',), dict(local_files_only=True, trust_remote_code=False))])
 
 
+
+SNAPSHOT_SUFFIX = os.path.join('models--Qwen--Qwen3.8-27B', 'snapshots', '1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0')
+SNAPSHOT_ROOTS = (os.environ.get('QWEN_SNAPSHOT_ROOT', ''), '/models', '/models/hub', '/home/thatch/hf-cache/hub',
+                  os.path.join(os.path.expanduser('~'), '.cache', 'huggingface', 'hub'))
+
+
+def served_snapshot():
+    for root in SNAPSHOT_ROOTS:
+        path = os.path.join(root, SNAPSHOT_SUFFIX) if root else ''
+        if path and os.path.isfile(os.path.join(path, 'tokenizer.json')):
+            return path
+    return None
+
+
+class QwenTemplate(object):
+    """The served snapshot's tokenizer.json under the Qwen3 chat template (a system turn if given, the
+    user turn, the generation prompt, and the empty think block that enable_thinking=False writes) -
+    for a snapshot carrying no tokenizer_config.json with the template (a dev PC's copy). The repository
+    framing's 115-133 tokens (real_text_prompts' docstring, measured on the rig) validate it."""
+
+    def __init__(self, path):
+        from tokenizers import Tokenizer
+        self.tokenizer = Tokenizer.from_file(os.path.join(path, 'tokenizer.json'))
+
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, return_dict=False,
+                            enable_thinking=True):
+        text = ''.join('<|im_start|>%s\n%s<|im_end|>\n' % (m['role'], m['content']) for m in messages)
+        text += '<|im_start|>assistant\n' + ('<think>\n\n</think>\n\n' if not enable_thinking else '')
+        return self.tokenizer.encode(text, add_special_tokens=False).ids
+
+
+class TemplateTokenTests(unittest.TestCase):
+    """Review finding 12: the compact framing was never measured on the real tokenizer; a compact
+    template past a target raises "no room" inside the container and kills the arm before a request."""
+
+    def test_the_pinned_lengths_leave_room_for_the_ladder(self):
+        self.assertEqual(len(rtp.COMPACT_TEMPLATE_TOKENS), len(rtp.COMPACT_TASKS))
+        self.assertEqual(len(rtp.REPOSITORY_TEMPLATE_TOKENS), len(rtp.TASKS))
+        self.assertEqual(rtp.COMPACT_MIN_TARGET, max(rtp.COMPACT_TEMPLATE_TOKENS) + 1)
+        self.assertLess(rtp.COMPACT_MIN_TARGET, 60, 'the G4 ladder\'s shortest rung carries code')
+        self.assertEqual((min(rtp.REPOSITORY_TEMPLATE_TOKENS), max(rtp.REPOSITORY_TEMPLATE_TOKENS)), (115, 133))
+
+    def test_the_pinned_lengths_are_the_served_tokenizers(self):
+        path = served_snapshot()
+        if path is None:
+            self.skipTest('the served snapshot\'s tokenizer is not on this machine')
+        tokenizer = None
+        try:
+            from transformers import AutoTokenizer
+            candidate = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+            if getattr(candidate, 'chat_template', None):
+                tokenizer = candidate
+        except Exception:
+            tokenizer = None
+        if tokenizer is None:
+            try:
+                tokenizer = QwenTemplate(path)
+            except ImportError:
+                self.skipTest('neither transformers with the chat template nor tokenizers is installed')
+        self.assertEqual(tuple(len(rtp.encode_prompt(tokenizer, '', task)) for task in rtp.TASKS),
+                         rtp.REPOSITORY_TEMPLATE_TOKENS)
+        self.assertEqual(tuple(len(rtp.encode_compact(tokenizer, '', task)) for task in rtp.COMPACT_TASKS),
+                         rtp.COMPACT_TEMPLATE_TOKENS)
+
 if __name__ == '__main__':
     unittest.main()

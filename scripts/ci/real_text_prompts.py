@@ -115,6 +115,15 @@ COMPACT_TASKS = (
 )
 COMPACT_TASK_NAMES = ('lru_cache', 'json_parser', 'asyncio_explainer', 'rate_limiter')
 MIN_EXCERPT_TOKENS = 64   # of real code below which a per-user target takes the compact framing
+# The templates' own length on the served tokenizer (snapshot 1d4bf0f2, its Qwen3 chat template, thinking
+# off), per task: encode_compact(tokenizer, '', COMPACT_TASKS[i]) and encode_prompt(tokenizer, '', TASKS[i]).
+# Measured 2026-09-26; test_real_text_prompts re-measures them wherever the snapshot's tokenizer is
+# present. A per-user target must exceed the compact template to carry any code: C2 serving gate plans
+# refuse a length below COMPACT_MIN_TARGET before any container starts (fit_prefix would raise "no room"
+# inside it, killing the arm before a single request).
+COMPACT_TEMPLATE_TOKENS = (44, 42, 41, 43)
+REPOSITORY_TEMPLATE_TOKENS = (128, 133, 115, 120)
+COMPACT_MIN_TARGET = max(COMPACT_TEMPLATE_TOKENS) + 1
 FRAMINGS = ('repository', 'compact')
 
 SAMPLE_CHARACTERS = 65536

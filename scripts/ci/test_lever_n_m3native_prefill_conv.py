@@ -901,9 +901,12 @@ class GateTests(unittest.TestCase):
     def test_the_arm_gate_passes_the_prompt_length(self):
         import lever_n_m3native_gate as gate
         source = Path(gate.__file__).read_text(encoding='utf-8')
-        self.assertIn('flag_marker_report(os.environ, streams, log_text,' + chr(10)
-                      + '                                                    prompt_tokens=marker_prompt_tokens(options, report))',
-                      source)
+        # Both arms of the call - the gate's argv and, guarded, the C2 serving image's platform argv -
+        # pass the prompt length (the call's indentation is the branch's, not the point).
+        calls = re.findall(r'flag_marker_report\(os\.environ, streams, log_text,\s+'
+                           r'prompt_tokens=marker_prompt_tokens\(options, report\)\)', source)
+        self.assertEqual(len(calls), 2)
+        self.assertNotRegex(source, r'flag_marker_report\(os\.environ, streams, log_text\)')
         # A synthetic arm still passes --prompt-tokens; a real-text arm its shortest prompt.
         options = gate.parse_options(['--prompt-tokens', '131072'])
         self.assertEqual(gate.marker_prompt_tokens(options, {}), 131072)

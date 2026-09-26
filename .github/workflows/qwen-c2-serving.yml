@@ -11,7 +11,9 @@ name: Qwen C2 serving image
 #            the contract's argv (scripts/ci/c2_serving_gate.py): C2_GATE_PLAN bringup (4 x 131072
 #            real text against v235's texts), matrix (a prompt length per user, solo vs concurrent
 #            under the exactness policy), memory (G5's DRAM lines), lifecycle (drops, cancels,
-#            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile
+#            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile.
+#            The driver refuses plans that do not fit the step's and the job's time left; every gate
+#            container is removed however the step ends
 #   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py)
 #   push   - push it to zot and print the digest
 # (status, platform, unserve, priority and reset are described at their steps.) The job file is
@@ -29,7 +31,7 @@ concurrency:
 jobs:
   c2-serving:
     runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
-    timeout-minutes: 420
+    timeout-minutes: 600
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -44,6 +46,8 @@ jobs:
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           python3 scripts/ci/c2_serving_job.py .github/c2-serving-job.env >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
+          # When the job began: the gate step budgets its plans against what the job's timeout leaves.
+          echo "C2_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/c2-results"
       - name: Status
         if: contains(steps.job.outputs.actions, 'status')
@@ -283,6 +287,18 @@ jobs:
           if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
             echo "a platform serving container exists; refusing to open M+A under it" >&2; exit 1
           fi
+          # Every gate container goes with this step, however it ends (the driver removes its own too, and
+          # turns SIGTERM into an exit): one left running would hold M+A after the concurrency group let go.
+          # A leftover of a killed job is removed first - it holds the cards and makes docker run exit 125.
+          remove_gate_containers() {
+            docker ps -a --format '{{.Names}}' | grep '^qwen-c2-gate-' | xargs -r docker rm -f || true
+          }
+          stale=$(docker ps -a --format '{{.Names}}' | grep '^qwen-c2-gate-' || true)
+          if [ -n "$stale" ]; then
+            echo "removing gate containers a previous job left: $stale (reset M+A if the next arm wedges)"
+            remove_gate_containers
+          fi
+          trap remove_gate_containers EXIT
           m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
           a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
           echo "card M $m, card A $a"
@@ -296,9 +312,16 @@ jobs:
             sleep 2
           done
           if [ "$clear" != 1 ]; then echo 'M or A is held; refusing the gate' >&2; cat "$RUNNER_TEMP/c2-results/gate-holders.txt" >&2; exit 1; fi
+          # What this step (380 min) and the job (600 min, from C2_JOB_STARTED) leave, less margins for
+          # this step's tail: the driver refuses a plan list whose worst case (every arm to its limit,
+          # every re-run) does not fit, before any container starts.
+          step_left=$(( 380 * 60 - 600 ))
+          job_left=$(( 600 * 60 - ($(date +%s) - ${C2_JOB_STARTED:?}) - 900 ))
+          budget=$(( step_left < job_left ? step_left : job_left ))
+          echo "gate budget: $budget s (step $step_left s, job $job_left s)"
           status=0
           python3 scripts/ci/c2_serving_gate.py --image "$image" --profile "$PROFILE" --plan "$GATE_PLAN" \
-            --lengths "$GATE_LENGTHS" --max-tokens "$GATE_MAX_TOKENS" \
+            ${GATE_LENGTHS:+--lengths "$GATE_LENGTHS"} --max-tokens "$GATE_MAX_TOKENS" --budget-seconds "$budget" \
             ${GATE_MEMORY_PROMPT:+--memory-prompt "$GATE_MEMORY_PROMPT"} --results "$results" 2>&1 \
             | tee "$RUNNER_TEMP/c2-results/gate.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv): the contract's own line, per arm.

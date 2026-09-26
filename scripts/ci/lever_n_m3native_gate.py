@@ -62,8 +62,16 @@ rewrites it to its profile's exactly as it does for the agent. What was actually
 back from the contract's own '[QWEN-C2] profile <name>: vLLM argv [...]' line (read-the-launched-
 argv) into report['platform'], which a run without that line, or with another profile than
 --expect-profile, fails. Requests name --served-model-name (the platform's). The report also
-carries every '[PINDIAG] dram after ...' line parsed (report['dram'], G5). --prompt-lengths
-L1,L2,... (real text only) gives each user its own prompt length (real_text_prompts targets).
+carries every '[PINDIAG] dram after ...' line parsed (report['dram'], G5) and the memory ledger
+read on its own (report['ledger']: the P7 residual status and the idle allocation before the first
+prefill and after every stream). report['command'] is then the argv that served (the contract's),
+report['command_requested'] the platform's. --prompt-lengths L1,L2,... (real text only) gives each
+user its own prompt length (real_text_prompts targets).
+
+LIFECYCLE (the C2 serving gate's lifecycle arms, detail mode): --drops (DROP_GRAMMAR), --user-max-tokens
+and --user-ignore-eos act per user; a StreamWatch puts every stream and the server log's admission
+markers on one clock, fires the drops, and records the phase each one hit (report['lifecycle']).
+--alive-check N then sends N requests at once (the engine's seats) that must all answer.
 """
 
 import argparse
@@ -2014,42 +2022,103 @@ def build_parser():
                              '--sequential-users), replacing --prompt-tokens for every user (a length per user, '
                              'real_text_prompts targets). Needs an image that serves any prompt length')
     parser.add_argument('--drops', default=None,
-                        help='lifecycle, detail mode only: U:N closes user U\'s stream after N text chunks '
-                             '(N=1: during the engine build after the prefill\'s token), U:@S if no byte arrived '
-                             'within S seconds (a cancel during prefill); comma-separated')
+                        help='lifecycle, detail mode only, comma-separated: %s' % DROP_GRAMMAR)
     parser.add_argument('--user-max-tokens', default=None,
                         help='lifecycle, detail mode only: U:M gives user U its own max_tokens; comma-separated')
     parser.add_argument('--user-ignore-eos', default=None,
                         help='lifecycle, detail mode only: comma-separated users sent with ignore_eos=True')
-    parser.add_argument('--alive-check', action='store_true',
-                        help='after every stream, one more request (user 0\'s prompt, 8 tokens): the engine '
-                             'survived what the streams did (report[\'alive_after\'])')
+    parser.add_argument('--alive-check', type=int, nargs='?', const=1, default=0, metavar='N',
+                        help='after every stream, N more requests at once (the shortest prompt, 8 tokens each; '
+                             'N=1 without a value): the engine survived what the streams did and gave every '
+                             'seat back (report[\'alive_after\'])')
+    parser.add_argument('--alive-seconds', type=int, default=ALIVE_SECONDS,
+                        help='--alive-check: how long all N may take to answer')
     return parser
 
 
+# --drops (the C2 serving gate's lifecycle arms). The pre-first-byte kinds (seconds, prefill, build)
+# are fired by StreamWatch's thread, which shuts the stream's socket down; the others by the stream
+# itself at a chunk. prefill and build read the server log, so they need the target user's prompt
+# length to be unique (--prompt-lengths): that is how a ledger line names its request's user.
+DROP_GRAMMAR = ('U:N closes user U\'s stream after N text chunks; U:@S if no byte arrived within S seconds; '
+                'U:prefill+S S seconds after the server log shows its prefill began; U:build when the server log '
+                'shows its prefill done and its engine build begun (the first byte only comes after the build); '
+                'U:live=K at its first chunk while exactly K streams are live; U+V+W:N closes all of them together '
+                'once each has N chunks (one wall time: a multiple drop in one round)')
+LOG_DROP_KINDS = ('prefill', 'build')
+ALIVE_SECONDS = 600
+
+
+def parse_drop(value, part):
+    """One --drops WHEN: ('chunks', N), ('seconds', S), ('prefill', S), ('build', 0) or ('live', K)."""
+    try:
+        if value.startswith('@'):
+            drop = ('seconds', float(value[1:]))
+        elif value.startswith('prefill+'):
+            drop = ('prefill', float(value[len('prefill+'):]))
+        elif value == 'build':
+            drop = ('build', 0)
+        elif value.startswith('live='):
+            drop = ('live', int(value[len('live='):]))
+        else:
+            drop = ('chunks', int(value))
+    except ValueError:
+        raise ValueError('--drops: %r is not N, @S, prefill+S, build or live=K' % part)
+    if drop[1] < 0 or (drop[1] == 0 and drop[0] not in ('prefill', 'build')):
+        raise ValueError('--drops: %r must be positive' % part)
+    return drop
+
+
+def describe_drop(drop):
+    kind, value = drop
+    if kind == 'barrier':
+        return 'barrier %s at %d chunks' % ('+'.join(str(user) for user in value[1]), value[0])
+    if kind == 'prefill':
+        return 'prefill+%s' % value
+    if kind == 'build':
+        return 'build'
+    if kind == 'live':
+        return 'live=%d' % value
+    return '%s %s' % (kind, value)
+
+
 def user_events(options, streams):
-    """--drops, --user-max-tokens and --user-ignore-eos as {user: value}, or ValueError."""
+    """--drops, --user-max-tokens and --user-ignore-eos as {user: value}, or ValueError. A barrier
+    (U+V+W:N) gives each member ('barrier', (N, (U, V, W)))."""
+    def user_number(text, name, part):
+        try:
+            user = int(text)
+        except ValueError:
+            raise ValueError('%s: %r is not USER:VALUE' % (name, part))
+        if not 0 <= user < streams:
+            raise ValueError('%s: %r names no stream of 0..%d' % (name, part, streams - 1))
+        return user
+
     def pairs(text, name):
         out = {}
         for part in [p.strip() for p in (text or '').split(',') if p.strip()]:
             user, _, value = part.partition(':')
-            try:
-                user = int(user)
-            except ValueError:
-                raise ValueError('%s: %r is not USER:VALUE' % (name, part))
-            if not 0 <= user < streams or user in out or not value:
+            user = user_number(user, name, part)
+            if user in out or not value:
                 raise ValueError('%s: %r names no stream of 0..%d once' % (name, part, streams - 1))
             out[user] = value
         return out
 
     drops = {}
-    for user, value in pairs(options.drops, '--drops').items():
-        try:
-            drops[user] = ('seconds', float(value[1:])) if value.startswith('@') else ('chunks', int(value))
-        except ValueError:
-            raise ValueError('--drops: %r is not N or @S' % value)
-        if drops[user][1] <= 0:
-            raise ValueError('--drops: %r must be positive' % value)
+    for part in [p.strip() for p in (options.drops or '').split(',') if p.strip()]:
+        who, _, value = part.partition(':')
+        if not value:
+            raise ValueError('--drops: %r is not USER:WHEN' % part)
+        members = [user_number(text, '--drops', part) for text in who.split('+')]
+        if len(set(members)) != len(members) or any(member in drops for member in members):
+            raise ValueError('--drops: %r names a stream twice' % part)
+        drop = parse_drop(value, part)
+        if len(members) > 1:
+            if drop[0] != 'chunks':
+                raise ValueError('--drops: %r - a barrier takes a chunk count' % part)
+            drop = ('barrier', (drop[1], tuple(sorted(members))))
+        for member in members:
+            drops[member] = drop
     budgets = {}
     for user, value in pairs(options.user_max_tokens, '--user-max-tokens').items():
         try:
@@ -2070,16 +2139,362 @@ def user_events(options, streams):
     return dict(drops=drops, max_tokens=budgets, ignore_eos=sorted(ignore_eos))
 
 
-def user_stream(options, index, kwargs):
-    """(max_tokens, stream_once keywords) for one user: the arm's, with that user's events applied."""
+def user_stream(options, index, kwargs, watch=None):
+    """(max_tokens, stream_once keywords) for one user: the arm's, with that user's events applied.
+    Every stream of a watched arm reports to the watch (the live count needs all of them)."""
     events = getattr(options, 'events', None) or {}
     kwargs = dict(kwargs)
-    drop = (events.get('drops') or {}).get(index)
-    if drop is not None:
-        kwargs['drop_after' if drop[0] == 'chunks' else 'drop_after_s'] = drop[1]
+    if watch is not None:
+        kwargs['watch'] = watch
     if index in (events.get('ignore_eos') or ()):
         kwargs['ignore_eos'] = True
     return (events.get('max_tokens') or {}).get(index, options.max_tokens), kwargs
+
+
+# The admission markers one request leaves in the server log, in order (serving_lifecycle,
+# memory_ledger, serving_runtime):
+#   prefill   "[PINDIAG] prefill gate: held='<id>'"                    its prefill begins
+#             "[MEMLEDGER] phase=prefill point=before prompt=<L> ..."  the same request's prompt length
+#   build     "[MEMLEDGER] phase=prefill point=after req=<id[-12:]>"   prefill done, the engine build begins
+#   engine    "[PINDIAG] dram after engine <id[:48]>: ..."             the engine is built
+#   admitted  "[PINDIAG] prefill gate: held=None was='<id>'"           it joined the decoding set
+# The two ledger lines need QWEN_FAST_MEMORY_LEDGER=1, which the C2 serving image sets. The first token
+# reaches the client only after the build (serving_lifecycle samples the prefill's token, then
+# bridge_factory builds the engine, in the same step), so a drop during the build is timed on the log,
+# never on a chunk count.
+PREFILL_HELD = re.compile(r"\[PINDIAG\] prefill gate: held='([^']+)'")
+PREFILL_RELEASED = re.compile(r"\[PINDIAG\] prefill gate: held=None was='([^']+)'")
+LEDGER_PREFILL_BEFORE = re.compile(r'\[MEMLEDGER\] phase=prefill point=before prompt=([0-9]+) ')
+LEDGER_PREFILL_AFTER = re.compile(r'\[MEMLEDGER\] phase=prefill point=after req=(\S+) ')
+ENGINE_BUILT = re.compile(r'\[PINDIAG\] dram after engine (\S+): ')
+WATCH_POLL_SECONDS = 0.05
+BARRIER_WAIT_SECONDS = 600.0
+
+
+class StreamWatch(object):
+    """The lifecycle arms' one clock (time.perf_counter, the streams' own): when each stream started,
+    got its first chunk and ended, what the server log said about each request's admission (tailed
+    every WATCH_POLL_SECONDS by a thread, each marker stamped when it was read), and the --drops that
+    act on them. stream_once calls begin/opened/chunk/end; the thread fires the pre-first-byte drops
+    (seconds, prefill, build) by shutting the stream's socket down, and the stream records the drop
+    (cancelled). report() puts every event against the markers: the phase each one hit (queued,
+    prefill, build, decode) and how many streams were live then."""
+
+    def __init__(self, drops, lengths, log_path, clock=time.perf_counter, poll=WATCH_POLL_SECONDS):
+        self.drops = dict(drops)
+        self.lengths = list(lengths or ())
+        self.log_path = Path(log_path)
+        self.clock, self.poll = clock, poll
+        self.epoch = clock()
+        self.state = threading.Condition()
+        self.started, self.first, self.ended, self.chunks = {}, {}, {}, {}
+        self.sockets, self.fired, self.cancels, self.missed = {}, {}, {}, {}
+        self.requests, self.order = {}, []
+        self.current = None
+        self.ledger_seen = False
+        self.offset, self.partial = 0, b''
+        self.barriers = {}
+        for kind, value in self.drops.values():
+            if kind == 'barrier':
+                self.barriers.setdefault(value[1], dict(chunks=value[0], members=list(value[1]), arrived={},
+                                                        released=None, complete=None))
+        self.thread = None
+        self.stopping = False
+
+    # --- the server log ------------------------------------------------------------------
+
+    def read_log(self):
+        try:
+            with open(str(self.log_path), 'rb') as handle:
+                handle.seek(self.offset)
+                data = handle.read()
+        except OSError:
+            return
+        if not data:
+            return
+        self.offset += len(data)
+        lines = (self.partial + data).split(b'\n')
+        self.partial = lines.pop()
+        now = self.clock()
+        with self.state:
+            for line in lines:
+                self.note(line.decode('utf-8', 'replace'), now)
+            self.state.notify_all()
+
+    def request(self, request_id):
+        if request_id not in self.requests:
+            self.requests[request_id] = {}
+            self.order.append(request_id)
+        return self.requests[request_id]
+
+    def note(self, line, now):
+        match = PREFILL_RELEASED.search(line)
+        if match:
+            self.request(match.group(1)).setdefault('admitted', now)
+            return
+        match = PREFILL_HELD.search(line)
+        if match:
+            self.current = match.group(1)
+            self.request(self.current).setdefault('prefill', now)
+            return
+        match = LEDGER_PREFILL_BEFORE.search(line)
+        if match:
+            self.ledger_seen = True
+            if self.current is not None:
+                self.request(self.current).setdefault('prompt', int(match.group(1)))
+            return
+        match = LEDGER_PREFILL_AFTER.search(line)
+        if match:
+            self.ledger_seen = True
+            for request_id in self.order:
+                if request_id.endswith(match.group(1)):
+                    self.requests[request_id].setdefault('build', now)
+            return
+        match = ENGINE_BUILT.search(line)
+        if match:
+            for request_id in self.order:
+                if request_id[:48] == match.group(1):
+                    self.requests[request_id].setdefault('engine', now)
+
+    def user_by_length(self, length):
+        return self.lengths.index(length) if length is not None and self.lengths.count(length) == 1 else None
+
+    def request_of(self, user):
+        """The request the server log ties to `user` before its first byte: the one whose ledger line
+        carried the user's (unique) prompt length."""
+        for request_id in self.order:
+            if self.user_by_length(self.requests[request_id].get('prompt')) == user:
+                return self.requests[request_id]
+        return None
+
+    # --- the streams (stream_once) ----------------------------------------------------------
+
+    def begin(self, user, when):
+        with self.state:
+            self.started[user] = when
+
+    def opened(self, user, sock):
+        with self.state:
+            self.sockets[user] = sock
+            if user in self.cancels:
+                self._shutdown(user)
+
+    def live(self, when):
+        return sum(1 for user, first in self.first.items()
+                   if first <= when and (user not in self.ended or self.ended[user] > when))
+
+    def _fire(self, user, when, reason):
+        self.fired[user] = dict(t=when, reason=reason, live=self.live(when))
+        return reason
+
+    def chunk(self, user, tokens, when):
+        """After each text chunk: the reason to go away now, or None."""
+        with self.state:
+            if user not in self.first:
+                self.first[user] = when
+                self.state.notify_all()
+            self.chunks[user] = tokens
+            kind, value = self.drops.get(user, (None, None))
+            if user in self.fired:
+                return None
+            if kind in ('seconds',) + LOG_DROP_KINDS:
+                self.missed.setdefault(user, 'the first byte came before the drop was due')
+                return None
+            if kind == 'chunks' and tokens >= value:
+                return self._fire(user, when, 'after %d chunks' % tokens)
+            if kind == 'live' and self.live(when) == value:
+                return self._fire(user, when, 'at %d live streams' % value)
+            if kind == 'barrier' and tokens >= value[0]:
+                barrier = self.barriers[value[1]]
+                barrier['arrived'].setdefault(user, when)
+                self.state.notify_all()
+                deadline = when + BARRIER_WAIT_SECONDS
+                while barrier['released'] is None and not self._barrier_ready(barrier) and self.clock() < deadline:
+                    self.state.wait(self.poll)
+                if barrier['released'] is None:
+                    barrier['released'] = self.clock()
+                    barrier['complete'] = all(member in barrier['arrived'] for member in barrier['members'])
+                    self.state.notify_all()
+                return self._fire(user, self.clock(), 'barrier %s at %d chunks' % (
+                    '+'.join(str(member) for member in barrier['members']), value[0]))
+            return None
+
+    def _barrier_ready(self, barrier):
+        return all(member in barrier['arrived'] or member in self.ended for member in barrier['members'])
+
+    def end(self, user, when):
+        with self.state:
+            self.ended.setdefault(user, when)
+            self.state.notify_all()
+
+    def cancelled(self, user):
+        with self.state:
+            return self.cancels.get(user)
+
+    # --- the pre-first-byte drops --------------------------------------------------------------
+
+    def _shutdown(self, user):
+        sock = self.sockets.get(user)
+        if sock is None:
+            return
+        try:
+            import socket
+            sock.shutdown(socket.SHUT_RDWR)
+        except (OSError, ValueError):
+            pass
+
+    def due(self, user, kind, value, now):
+        if kind == 'seconds':
+            return now - self.started[user] >= value and 'no byte within %s s' % value
+        marks = self.request_of(user)
+        if not marks:
+            return None
+        if kind == 'prefill' and marks.get('prefill') is not None and now - marks['prefill'] >= value:
+            return '%s s into its prefill' % value
+        if kind == 'build' and marks.get('build') is not None:
+            return 'its engine build began'
+        return None
+
+    def check(self, now):
+        with self.state:
+            for user, (kind, value) in sorted(self.drops.items()):
+                if (kind not in ('seconds',) + LOG_DROP_KINDS or user in self.fired or user in self.first
+                        or user in self.ended or user not in self.started):
+                    continue
+                reason = self.due(user, kind, value, now)
+                if reason:
+                    self._fire(user, now, reason)
+                    self.cancels[user] = reason
+                    self._shutdown(user)
+
+    def run(self):
+        while not self.stopping:
+            self.read_log()
+            self.check(self.clock())
+            time.sleep(self.poll)
+
+    def start(self):
+        self.thread = threading.Thread(target=self.run, name='stream-watch', daemon=True)
+        self.thread.start()
+        return self
+
+    def stop(self):
+        self.stopping = True
+        if self.thread is not None:
+            self.thread.join(5.0)
+        self.read_log()
+
+    # --- the record -----------------------------------------------------------------------------
+
+    def seconds(self, when):
+        return None if when is None else round(when - self.epoch, 3)
+
+    def phase_at(self, user, when, marks):
+        first = self.first.get(user)
+        if first is not None and when >= first:
+            return 'decode'
+        if marks.get('build') is not None and when >= marks['build']:
+            return 'build'
+        if marks.get('prefill') is not None and when >= marks['prefill']:
+            return 'prefill' if self.ledger_seen else 'prefill-or-build'
+        return 'queued'
+
+    def report(self, results=()):
+        """Every drop against the markers (fired or not, when, the phase, the live count), every
+        user's timeline, the barriers. A request is tied to its user by the stream's id (the engine id
+        extends it) or, before a first byte, by its ledger prompt length."""
+        with self.state:
+            stream_ids = {user: (entry or {}).get('request_id') for user, entry in enumerate(results or ())}
+            owners = {}
+            for request_id in self.order:
+                owner = next((user for user, stream_id in stream_ids.items()
+                              if stream_id and request_id.startswith(stream_id)), None)
+                owners[request_id] = owner if owner is not None else self.user_by_length(
+                    self.requests[request_id].get('prompt'))
+            users = sorted(set(self.started) | set(range(len(results or ()))))
+            timeline, marks_of = {}, {}
+            for user in users:
+                ids = [request_id for request_id in self.order if owners[request_id] == user]
+                marks = self.requests[ids[0]] if len(ids) == 1 else {}
+                marks_of[user] = marks
+                timeline[str(user)] = dict(
+                    request_ids=ids, started_s=self.seconds(self.started.get(user)),
+                    prefill_s=self.seconds(marks.get('prefill')), build_s=self.seconds(marks.get('build')),
+                    engine_s=self.seconds(marks.get('engine')), admitted_s=self.seconds(marks.get('admitted')),
+                    first_chunk_s=self.seconds(self.first.get(user)), ended_s=self.seconds(self.ended.get(user)),
+                    chunks=self.chunks.get(user, 0))
+            events = {}
+            for user, drop in sorted(self.drops.items()):
+                entry = dict(kind=drop[0], spec=describe_drop(drop), fired=user in self.fired)
+                fired = self.fired.get(user)
+                if fired:
+                    entry.update(fired_s=self.seconds(fired['t']), reason=fired['reason'], live=fired['live'],
+                                 phase=self.phase_at(user, fired['t'], marks_of.get(user) or {}))
+                else:
+                    entry['missed'] = self.missed.get(user) or 'never due before the stream ended'
+                events[str(user)] = entry
+            barriers = [dict(members=b['members'], chunks=b['chunks'], complete=b['complete'],
+                             released_s=self.seconds(b['released']),
+                             arrived_s={str(user): self.seconds(when) for user, when in sorted(b['arrived'].items())})
+                        for _, b in sorted(self.barriers.items())]
+            return dict(ledger_markers=self.ledger_seen, requests_seen=len(self.order), events=events,
+                        users=timeline, barriers=barriers)
+
+
+def alive_check(port, prompt, count, stream_timeout, deadline_seconds, kwargs, clock=time.perf_counter):
+    """`count` requests at once (the engine's seats), `prompt` for 8 tokens each, after every stream
+    has ended: each must answer within `deadline_seconds` of the first's start - a seat a drop or a
+    cancel never gave back leaves one queued past it. -> (entries, every one answered)."""
+    results = [None] * count
+    threads = [threading.Thread(target=stream_once, args=(port, prompt, 8, results, index, stream_timeout),
+                                kwargs=dict(kwargs), daemon=True) for index in range(count)]
+    started = clock()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(max(0.0, deadline_seconds - (clock() - started)))
+    entries = []
+    for index in range(count):
+        entry = results[index]
+        if threads[index].is_alive() or entry is None:
+            entry = dict(error='no answer within %d s (a seat not given back?)' % deadline_seconds)
+        entries.append(entry)
+    return entries, all(entry and not entry.get('error') and entry.get('text') for entry in entries)
+
+
+# The ledger's allocator reading before each prefill (memory_ledger, 'phase=prefill point=before'),
+# one line per chip: with nothing else resident it is the idle allocation, which a lifecycle arm
+# compares before its first request and after every stream has ended (the ledger stays flat).
+LEDGER_IDLE_CHIP = re.compile(r'\[MEMLEDGER\] phase=prefill point=before prompt=([0-9]+) chip([0-9]+) '
+                              r'allocated=([0-9.]+)GB')
+
+
+def ledger_readings(log_text):
+    """[{prompt, chips: {'0': allocated GB, ...}}], one per prefill, in log order."""
+    readings = []
+    for match in LEDGER_IDLE_CHIP.finditer(log_text):
+        prompt, chip, allocated = int(match.group(1)), match.group(2), float(match.group(3))
+        if not readings or chip in readings[-1]['chips'] or readings[-1]['prompt'] != prompt:
+            readings.append(dict(prompt=prompt, chips={}))
+        readings[-1]['chips'][chip] = allocated
+    return readings
+
+
+def ledger_report(log_text, alive_index=None):
+    """The memory ledger read independently of flag_marker_report (which a mixed-length arm may not
+    survive): the P7 residual check's status (attach time), the idle reading before the first prefill,
+    the one before the first prefill after `alive_index` readings (the alive check's first request,
+    after every stream ended), and their difference per chip in GB (idle_drift_gb)."""
+    residual = LEDGER_RESIDUAL.search(log_text)
+    readings = ledger_readings(log_text)
+    first = readings[0] if readings else None
+    after = readings[alive_index] if alive_index is not None and alive_index < len(readings) else None
+    drift = None
+    if first is not None and after is not None:
+        drift = {chip: round(after['chips'][chip] - first['chips'][chip], 3)
+                 for chip in sorted(first['chips']) if chip in after['chips']}
+    return dict(residual_status=residual.group(1) if residual else None, readings=len(readings),
+                first_idle=first, idle_after_streams=after, idle_drift_gb=drift)
 
 
 def parse_options(argv=None):
@@ -2117,6 +2532,24 @@ def parse_options(argv=None):
         parser.error(str(error))
     if any(options.events.values()) and not detail_mode(options):
         parser.error('--drops, --user-max-tokens and --user-ignore-eos need detail streams (real text or --eos stop)')
+    if options.alive_check < 0 or options.alive_seconds < 1:
+        parser.error('--alive-check needs a count of at least 1 and --alive-seconds a positive limit')
+    log_drops = sorted(user for user, (kind, _) in options.events['drops'].items() if kind in LOG_DROP_KINDS)
+    if log_drops:
+        # The server log names a request's user before its first byte only by the prompt length its
+        # ledger line carries, so each such user needs a length no other user has.
+        try:
+            import real_text_prompts
+            lengths = real_text_prompts.parse_targets(options.prompt_lengths) if options.prompt_lengths else None
+        except ValueError:
+            lengths = None   # refused below with its own message
+        if lengths is not None and not all(user < len(lengths) and lengths.count(lengths[user]) == 1
+                                           for user in log_drops):
+            parser.error('--drops prefill+S and build need a --prompt-lengths length no other user has (users %s)'
+                         % log_drops)
+        if options.prompt_lengths is None:
+            parser.error('--drops prefill+S and build need --prompt-lengths: the server log names a request\'s user '
+                         'by its prompt length')
     if options.prompt_lengths is not None:
         if not real_text:
             parser.error('--prompt-lengths needs --prompt-source real-text')
@@ -2236,10 +2669,21 @@ def marker_prompt_tokens(options, report):
     return options.prompt_tokens
 
 
+# What qwen_configuration records (report['configuration_scope']): every QWEN<n>_* flag (QWEN_*, and
+# QWEN35_GDN_*, QWEN36_* that the stock model code reads), every TT_*, MESH_DEVICE and OMP_NUM_THREADS.
+# Reports from before the scope was recorded carry QWEN_* only; real_text_compare compares two reports
+# on the names both scopes cover.
+CONFIGURATION_SCOPE = 'qwen-tt'
+CONFIGURATION_PREFIX = re.compile(r'(?:QWEN[0-9]*_|TT_)')
+CONFIGURATION_NAMES = ('MESH_DEVICE', 'OMP_NUM_THREADS')
+
+
 def qwen_configuration(environ):
-    """The QWEN_* flags the server process inherits: what real_text_compare.py diffs between a
-    concurrent and a sequential arm, whose flag sets differ (v157/v159 vs v158/v160)."""
-    return {name: environ[name] for name in sorted(environ) if name.startswith('QWEN_')}
+    """The configuration flags the server process inherits (CONFIGURATION_SCOPE): what
+    real_text_compare.py diffs between a concurrent and a sequential arm, whose flag sets differ
+    (v157/v159 vs v158/v160), and between a served arm and a tracked reference."""
+    return {name: environ[name] for name in sorted(environ)
+            if CONFIGURATION_PREFIX.match(name) or name in CONFIGURATION_NAMES}
 
 
 def _round_trip(value):
@@ -2299,7 +2743,7 @@ def main():
     if detail:
         # Only outside the default mode: a default arm's report keeps exactly today's keys.
         report.update(prompt_source=options.prompt_source, eos=options.eos, max_tokens=options.max_tokens,
-                      qwen_configuration=qwen_configuration(os.environ))
+                      qwen_configuration=qwen_configuration(os.environ), configuration_scope=CONFIGURATION_SCOPE)
     platform = options.server_argv == 'platform'
     if platform:
         report.update(server_argv='platform', served_model_name=options.served_model_name,
@@ -2356,39 +2800,50 @@ def main():
         results = [None] * streams
         kwargs = stream_kwargs(options)
         events = options.events if any(options.events.values()) else None
+        watch = None
         if events:
-            report['user_events'] = dict(drops={str(u): '%s %s' % (kind, value) for u, (kind, value)
-                                                in sorted(events['drops'].items())},
+            report['user_events'] = dict(drops={str(u): describe_drop(drop) for u, drop in sorted(events['drops'].items())},
                                          max_tokens={str(u): m for u, m in sorted(events['max_tokens'].items())},
                                          ignore_eos=events['ignore_eos'])
-        if options.sequential_users:
-            # One request at a time: each is the only stream on the server, which is
-            # what a single-stream reference means.
-            for index in range(streams):
-                budget, user_kwargs = user_stream(options, index, kwargs)
-                stream_once(options.port, prompt(index), budget, results, index, options.stream_timeout,
-                            **user_kwargs)
-        threads = [] if options.sequential_users else [threading.Thread(
-            target=stream_once,
-            args=(options.port, prompt(index), user_stream(options, index, kwargs)[0], results, index,
-                  options.stream_timeout),
-            kwargs=user_stream(options, index, kwargs)[1])
-            for index in range(options.users)]
-        for position, index in enumerate(request_order(options) if threads else []):
-            if position and options.stagger:
-                time.sleep(options.stagger)
-            threads[index].start()
-        for thread in threads:
-            thread.join()
+            if events['drops']:
+                watch = StreamWatch(events['drops'], (report.get('real_text') or {}).get('prompt_lengths'),
+                                    log_path).start()
+        try:
+            if options.sequential_users:
+                # One request at a time: each is the only stream on the server, which is
+                # what a single-stream reference means.
+                for index in range(streams):
+                    budget, user_kwargs = user_stream(options, index, kwargs, watch)
+                    stream_once(options.port, prompt(index), budget, results, index, options.stream_timeout,
+                                **user_kwargs)
+            threads = [] if options.sequential_users else [threading.Thread(
+                target=stream_once,
+                args=(options.port, prompt(index), user_stream(options, index, kwargs, watch)[0], results, index,
+                      options.stream_timeout),
+                kwargs=user_stream(options, index, kwargs, watch)[1])
+                for index in range(options.users)]
+            for position, index in enumerate(request_order(options) if threads else []):
+                if position and options.stagger:
+                    time.sleep(options.stagger)
+                threads[index].start()
+            for thread in threads:
+                thread.join()
+        finally:
+            if watch is not None:
+                watch.stop()
+                report['lifecycle'] = watch.report(results)
         report['streams'] = results
+        alive_index = None
         if options.alive_check:
-            # The engine outlived what the streams did (drops, a cancel, a one-token request): one
-            # more request, user 0's prompt, 8 tokens, after every stream has ended.
-            alive = [None]
-            stream_once(options.port, prompt(0), 8, alive, 0, options.stream_timeout, **kwargs)
-            report['alive_after'] = alive[0]
-            report['alive'] = bool(alive[0] and not alive[0].get('error') and alive[0].get('text'))
-            print('[ALIVE] after the streams: %s' % report['alive'], flush=True)
+            # The engine outlived what the streams did (drops, a cancel, a one-token request) and gave
+            # every seat back: --alive-check N more requests at once, the shortest prompt, 8 tokens
+            # each, after every stream has ended, all answered within --alive-seconds.
+            alive_index = len(ledger_readings(log_path.read_text(errors='replace') if log_path.is_file() else ''))
+            shortest = min(range(streams), key=lambda index: len(prompt(index)))
+            report['alive_after'], report['alive'] = alive_check(
+                options.port, prompt(shortest), options.alive_check, options.stream_timeout, options.alive_seconds,
+                kwargs)
+            print('[ALIVE] after the streams: %s (%d at once)' % (report['alive'], options.alive_check), flush=True)
         # Derived, not measured: the gate already records ttft_s and gaps_ms per
         # stream, and run 35658854824 showed those carry a precise serial-prefill
         # story no gate asserted. Reporting is unconditional; the thresholds are
@@ -2461,6 +2916,7 @@ def main():
         if platform:
             report['platform'] = platform_report(log_text, options.expect_profile)
             report['dram'] = dram_report(log_text)
+            report['ledger'] = ledger_report(log_text, alive_index)
             try:
                 report['flag_markers'] = flag_marker_report(os.environ, streams, log_text,
                                                             prompt_tokens=marker_prompt_tokens(options, report))
@@ -2505,6 +2961,13 @@ def main():
                 report['dram'] = dram_report(text)
             except Exception as error:
                 report['platform'] = dict(problems=['platform report failed: %s' % error])
+        if platform and report.get('command') is not None:
+            # What served is the contract's rewrite of what was launched (read-the-launched-argv):
+            # 'command' is the served argv (None when the contract logged none), the platform's own
+            # is 'command_requested'.
+            served = (report.get('platform') or {}).get('served_argv')
+            report['command_requested'] = report['command']
+            report['command'] = list(report['command'][:3]) + served if isinstance(served, list) else None
         if detail:
             add_run_diagnostics(report, log_path, sequential=bool(options.sequential_users))
         try:

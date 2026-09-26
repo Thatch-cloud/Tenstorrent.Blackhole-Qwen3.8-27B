@@ -15,7 +15,8 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_SMOKE_TESTS      comma-separated c2_serving_smoke.py tests, empty for all
   C2_PLATFORM_IMAGE   the thatch-serving-tt image the replay runs
   C2_GATE_PLAN        GATE_PLANS, comma- or space-separated, run in order (default: bringup)
-  C2_GATE_LENGTHS     the matrix's prompt lengths, one per user (default: the S1 G4 ladder)
+  C2_GATE_LENGTHS     the matrix's prompt lengths, one per user (default, rendered empty: the S1 G4
+                      ladder, whose top rung the gate lowers to what the image's profile admits)
   C2_GATE_MAX_TOKENS  the matrix's answer budget per user (default 4096)
   C2_GATE_MEMORY_PROMPT  G5's prompt length (default: the profile's largest admitted prompt)
   C2_REPLAY_PROFILE   the profile the replay's container serves (default: the source container's)
@@ -94,7 +95,7 @@ def read_job(values, profiles):
     if unknown:
         raise JobError('C2_GATE_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(GATE_PLANS)))
     lengths_text = values.get('C2_GATE_LENGTHS', '')
-    lengths = [positive_int('C2_GATE_LENGTHS', part) for part in split_list(lengths_text)] or list(LADDER)
+    lengths = [positive_int('C2_GATE_LENGTHS', part) for part in split_list(lengths_text)]
     max_tokens = positive_int('C2_GATE_MAX_TOKENS', values['C2_GATE_MAX_TOKENS']) \
         if values.get('C2_GATE_MAX_TOKENS') else DEFAULT_MAX_TOKENS
     memory_prompt = positive_int('C2_GATE_MEMORY_PROMPT', values['C2_GATE_MEMORY_PROMPT']) \

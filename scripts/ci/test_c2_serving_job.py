@@ -33,7 +33,8 @@ class ParseTests(unittest.TestCase):
     def test_defaults(self):
         outputs = read()
         self.assertEqual((outputs['actions'], outputs['profile'], outputs['gate_plan']), ('status', 'general', 'bringup'))
-        self.assertEqual(outputs['gate_lengths'], '60,255,2047,2048,2049,4096,32768,60000,120000')
+        self.assertEqual(outputs['gate_lengths'], '', 'empty: the gate runs its ladder, top rung fitted to the '
+                                                      'image\'s profile (an explicit list is never changed)')
         self.assertEqual((outputs['gate_max_tokens'], outputs['gate_memory_prompt']), ('4096', ''))
         self.assertEqual((outputs['platform_image'], outputs['replay_profile'], outputs['tests']), ('', '', ''))
 

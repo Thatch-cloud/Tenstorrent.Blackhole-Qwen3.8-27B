@@ -291,7 +291,7 @@ class LifecycleTests(unittest.TestCase):
         streams = [dict(text=TEXTS[0][:17], dropped='after 3 chunks'),                    # dropped mid-answer
                    dict(text='', dropped='no byte within 2 s'),                            # cancelled in prefill
                    dict(text=TEXTS[2][:3], finish_reason='length', completion_tokens=1),   # max_tokens=1
-                   dict(text=TEXTS[3] + ' and on past EOS', finish_reason='length', completion_tokens=300)]
+                   dict(text=TEXTS[3] + ' and on past EOS', finish_reason='length', completion_tokens=1024)]
         result = rtc.lifecycle_pass(self.event(streams, budgets=(1024, 1024, 1, 1024),
                                                ignore_eos=(False, False, False, True)),
                                     self.solo(finish=('stop', 'length', 'length', 'stop')))
@@ -319,6 +319,75 @@ class LifecycleTests(unittest.TestCase):
         result = rtc.lifecycle_pass(self.event(streams, ignore_eos=(False, False, False, True)), self.solo())
         self.assertEqual(result['users'][3]['verdict'], 'DIVERGED')
 
+
+    def test_an_ignore_eos_the_engine_ignored_is_a_divergence(self):
+        """Review finding 5: the engine stopping at EOS anyway left a stream equal to the solo text, which
+        read IDENTICAL; it must run past EOS and spend its whole budget."""
+        solo = self.solo(finish=('stop', 'length', 'length', 'stop'))
+        ignored = [self.full(0, 'stop'), self.full(1), self.full(2), dict(text=TEXTS[3], finish_reason='stop',
+                                                                          completion_tokens=256)]
+        result = rtc.lifecycle_pass(self.event(ignored, ignore_eos=(False, False, False, True)), solo)
+        self.assertEqual((result['users'][3]['verdict'], result['users'][3]['detail']),
+                         ('DIVERGED', 'ignore_eos ignored: stopped at the solo EOS'))
+        for stream in (dict(text=TEXTS[3] + ' more', finish_reason='stop', completion_tokens=300),    # a later EOS
+                       dict(text=TEXTS[3] + ' more', finish_reason='length', completion_tokens=300),  # short of 1024
+                       dict(text='X' + TEXTS[3], finish_reason='length', completion_tokens=1024)):    # not an extension
+            with self.subTest(stream=stream):
+                streams = ignored[:3] + [stream]
+                result = rtc.lifecycle_pass(self.event(streams, ignore_eos=(False, False, False, True)), solo)
+                self.assertEqual(result['users'][3]['verdict'], 'DIVERGED')
+
+    def test_a_budget_cut_user_must_spend_its_own_budget(self):
+        """Review finding 5: max_tokens=1 checked the prefix and finish only, not the one token."""
+        solo = self.solo()
+        for stream, verdict in ((dict(text=TEXTS[3][:3], finish_reason='length', completion_tokens=1), 'IDENTICAL'),
+                                (dict(text=TEXTS[3][:3], finish_reason='length', completion_tokens=2), 'DIVERGED'),
+                                (dict(text=TEXTS[3][:3], finish_reason='abort', completion_tokens=1), 'DIVERGED')):
+            with self.subTest(stream=stream):
+                streams = [self.full(0, 'stop'), self.full(1), self.full(2), stream]
+                result = rtc.lifecycle_pass(self.event(streams, budgets=(1024, 1024, 1024, 1)), solo)
+                self.assertEqual(result['users'][3]['verdict'], verdict)
+        # Where the solo run reached EOS inside the cut, the cut user's answer is the solo answer itself.
+        stopped = self.solo(finish=('stop', 'length', 'length', 'stop'))
+        streams = [self.full(0, 'stop'), self.full(1), self.full(2), dict(text=TEXTS[3], finish_reason='stop',
+                                                                          completion_tokens=256)]
+        result = rtc.lifecycle_pass(self.event(streams, budgets=(1024, 1024, 1024, 300)), stopped)
+        self.assertEqual(result['users'][3]['verdict'], 'IDENTICAL')
+
+
+class ConfigurationTests(unittest.TestCase):
+    """Review findings 4 and 13: an unset flag and its default are one arithmetic; the extended scope."""
+
+    def test_an_unset_flag_reads_as_its_default(self):
+        served = report(configuration=dict(CONFIGURATION, QWEN_FAST_OUTPUT_BUDGET='256'))
+        self.assertEqual(rtc.arithmetic_diff(served, report()), {})
+        self.assertEqual(rtc.configuration_diff(served, report()), {'QWEN_FAST_OUTPUT_BUDGET': ['256', None]},
+                         'still shown, not judged')
+        raised = report(configuration=dict(CONFIGURATION, QWEN_FAST_OUTPUT_BUDGET='16384'))
+        self.assertEqual(rtc.arithmetic_diff(raised, report()), {'QWEN_FAST_OUTPUT_BUDGET': ['16384', None]})
+        self.assertEqual(rtc.EFFECTIVE_DEFAULTS['QWEN_FAST_OUTPUT_BUDGET'],
+                         str(__import__('serving_fast_policy')._output_budget(None)))
+
+    def test_two_reports_are_compared_on_the_names_both_recorded(self):
+        extended = dict(CONFIGURATION, QWEN35_GDN_STATE_BF16='1', TT_METAL_CACHE='/k1', OMP_NUM_THREADS='8')
+        new = report(configuration=extended)
+        new['configuration_scope'] = 'qwen-tt'
+        self.assertEqual(rtc.configuration_diff(new, report()), {}, 'a QWEN_-only report never recorded the rest')
+        other = report(configuration=dict(extended, QWEN35_GDN_STATE_BF16='0', TT_METAL_CACHE='/k2',
+                                          OMP_NUM_THREADS='16'))
+        other['configuration_scope'] = 'qwen-tt'
+        self.assertEqual(rtc.arithmetic_diff(new, other), {'OMP_NUM_THREADS': ['8', '16'],
+                                                          'QWEN35_GDN_STATE_BF16': ['1', '0']},
+                         'a cache path is not arithmetic; the GDN state dtype and the thread count are')
+
+    def test_a_divergence_reproduces_only_where_it_first_appeared(self):
+        """Review finding 13: two divergences at different characters are nondeterminism, not a repeat."""
+        solo = report(users=1, sequential=4)
+        moved = rtc.exactness_policy(report(texts=diverged(1, at=5)), solo, rerun=(report(texts=diverged(1, at=9)), solo))
+        self.assertEqual((moved['verdict'], moved['users'][1]['verdict']), ('UNSTABLE', 'UNSTABLE'))
+        self.assertIn('different characters (5, 9)', moved['users'][1]['reason'])
+        same = rtc.exactness_policy(report(texts=diverged(1, at=5)), solo, rerun=(report(texts=diverged(1, at=5)), solo))
+        self.assertEqual(same['verdict'], 'FAIL')
 
 V235 = Path(__file__).resolve().parent / 'references' / 'c2-serving' / 'v235-real-text-4x131072.json'
 

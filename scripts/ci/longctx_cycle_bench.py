@@ -37,8 +37,14 @@ BLOCK_SIZE = 64
 TARGET_TOKS_PER_USER = 200.0
 
 
+def response_socket(response):
+    """The socket under an http.client response (its fp is a BufferedReader over a SocketIO), or None."""
+    raw = getattr(getattr(response, 'fp', None), 'raw', None)
+    return getattr(raw, '_sock', None)
+
+
 def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *, ignore_eos=True, detail=False,
-                model='qwen-longctx', drop_after=None, drop_after_s=None):
+                model='qwen-longctx', watch=None):
     """One streaming completion; record the gap between successive tokens.
 
     The defaults send exactly the payload every existing caller always sent (ignore_eos=True,
@@ -52,12 +58,14 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *,
     name the request names: 'qwen-longctx' (every gate's --served-model-name) unless the caller serves
     another (the C2 serving gate's platform argv keeps the platform's, Qwen/Qwen3.8-27B).
 
-    A client that goes away (the C2 serving gate's lifecycle arms; both off by default): drop_after=N
-    closes the stream once N text chunks have arrived (N=1: during the engine build that follows the
-    prefill's token); drop_after_s=S closes it if no byte has arrived S seconds after the request (a
-    cancel during prefill - S is then also the inactivity limit, so a stream whose first byte beat S
-    keeps going and records that it was not dropped). A drop records `dropped` (why) and what had
-    arrived, and is not an error."""
+    A client that goes away (the C2 serving gate's lifecycle arms): `watch` (None by default, which
+    leaves everything above exactly as it was) is the gate's StreamWatch, on the same clock. The
+    stream tells it when it began (watch.begin), its socket once the response opened (watch.opened:
+    the watch cancels a stream before its first byte by shutting that socket down) and every text
+    chunk (watch.chunk, which returns a reason when the client should go away now), and when it
+    ended (watch.end). A drop - at a chunk, or a cancel the watch made (watch.cancelled) - records
+    `dropped` (why) and what had arrived, and is not an error. The socket's inactivity limit stays
+    stream_timeout throughout: a cancel is the watch's doing, never a timeout's."""
     stream_options = dict(include_usage=True)
     if detail:
         stream_options['continuous_usage_stats'] = True
@@ -77,6 +85,8 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *,
     entry = {}
     details = dict(request_id=None, finish_reason=None, started_s=started, chunk_s=[], chunk_tokens=[]) if detail else None
     completed = 0
+    if watch is not None:
+        watch.begin(index, started)
     try:
         # The socket timeout is the inactivity limit between chunks. At 900 s a hung
         # decode sat for fifteen minutes (run 35481903377) and produced no log; 180 s
@@ -85,7 +95,9 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *,
         # flight): the fourth user's first byte lands only after three ~78 s prefills,
         # ~312 s, so measuring a four-user packed round needs the limit raised above
         # that ramp until prefill/decode alternation removes it.
-        with urlopen(request, timeout=drop_after_s if drop_after_s is not None else stream_timeout) as response:
+        with urlopen(request, timeout=stream_timeout) as response:
+            if watch is not None:
+                watch.opened(index, response_socket(response))
             previous = None
             for raw in response:
                 line = raw.decode('utf-8', 'replace').strip()
@@ -133,33 +145,35 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *,
                 elif previous is not None:
                     gaps.append(now - previous)   # first token deliberately dropped
                 previous = now
-                if drop_after is not None and tokens >= drop_after:
-                    entry['dropped'] = 'after %d chunks' % tokens
-                    break
+                if watch is not None:
+                    reason = watch.chunk(index, tokens, now)
+                    if reason:
+                        entry['dropped'] = reason
+                        break
         entry.update(tokens=tokens, gaps_ms=[1000.0 * g for g in gaps], text=''.join(pieces),
                      ttft_s=(first_token_at - started) if first_token_at else None,
                      wall_s=time.perf_counter() - started)
         if details is not None:
             entry.update(details)
-        if drop_after_s is not None and 'dropped' not in entry:
-            entry['dropped'] = None   # the first byte beat drop_after_s: the stream ran to its end
+        if watch is not None and 'dropped' not in entry and watch.cancelled(index):
+            entry['dropped'] = watch.cancelled(index)   # the watch shut the socket: the stream saw its end
         results[index] = entry
     except BaseException as error:
-        timed_out = isinstance(error, (TimeoutError, OSError, URLError)) and 'timed out' in str(error)
-        if drop_after_s is not None and not pieces and timed_out:
-            results[index] = dict(dropped='no byte within %s s' % drop_after_s, tokens=0, gaps_ms=[], text='',
-                                  ttft_s=None, wall_s=time.perf_counter() - started)
-            if details is not None:
-                results[index].update(details)
-            return
+        cancelled = watch.cancelled(index) if watch is not None else None
         # Keep what arrived before the failure: a hang after N tokens and a refusal
         # at admission are different findings.
         results[index] = dict(error='%s: %s' % (type(error).__name__, str(error)[:300]),
                               tokens=tokens, gaps_ms=[1000.0 * g for g in gaps], text=''.join(pieces),
                               ttft_s=(first_token_at - started) if first_token_at else None,
                               wall_s=time.perf_counter() - started)
+        if cancelled:
+            results[index]['dropped'] = cancelled
+            del results[index]['error']
         if details is not None:
             results[index].update(details)
+    finally:
+        if watch is not None:
+            watch.end(index, time.perf_counter())
 
 
 def main():
