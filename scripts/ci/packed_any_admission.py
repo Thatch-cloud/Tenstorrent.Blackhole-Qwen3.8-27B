@@ -46,7 +46,8 @@ extent path it did not admit. The guard is in the pool - the one source of the s
 reader is built over - and never in extent_attention_replay.py, whose bytes the evidence pins: CB2b
 qualifies the reader as every S2 branch holds it.
 
-WHEN CB2b LANDS. Transcribe its full-scope run into sections.CB2b, from the 'K64J_READER verdict=PASS
+RECORDING CB2b (done for run 36260236826, v52; a re-qualified reader is recorded the same way). Transcribe
+its full-scope run into sections.CB2b, from the 'K64J_READER verdict=PASS
 scope=full ...' line and the report JSON of optimisation/ttnn-op/k64j/extent_reader_card_b.py: status PASS,
 run, failures 0, scope, chips, capacity, seeds and variants run, r1_geometries (the report's r1_run:
 geometry -> words), r2_families (r2_families_replayed), idle_starts (idle_starts_run), counts R1 (the line's
@@ -69,7 +70,7 @@ HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / 'packed_any_evidence.json'
 # The sha256 of packed_any_evidence.json as reviewed. A new record (CB2b's result, a re-qualified reader)
 # changes the file, and then this pin, in the same commit: the pin is what makes the file evidence.
-EVIDENCE_SHA256 = '3a2d4b79ca8558f7d58dbffe3935fc9f8d0d6a4cded674545735fc1d5fc7fce7'
+EVIDENCE_SHA256 = 'a9407e9a54bfbaa7a0264456644ef6136e376f600ce8f0490417f2b5406515ee'
 EVIDENCE_SCHEMA = 'qwen-c2-packed-any-evidence/1'
 
 RUNTIME_BINARY_ENV = 'QWEN_FAST_RUNTIME_BINARY_SHA256'

@@ -345,8 +345,8 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(caught.exception.problems, ['evidence: CB2b: status %s, not PASS' % status])
 
     def test_the_checked_in_evidence_lacks_at_most_cb2b(self):
-        """Today: CB1 and CB2a PASS, CB2b not run, so every c2-packed attach is refused. When CB2b's record lands
-        (and EVIDENCE_SHA256 is re-pinned) the same assertion admits it - see the next test."""
+        """CB1, CB2a and CB2b (run 36260236826, RecordedEvidenceTests) are PASS, so the checked-in evidence admits.
+        While CB2b was pending the same assertion refused every c2-packed attach naming it - see the next test."""
         self.assert_real_evidence_decides()
 
     def test_recording_cb2b_needs_only_the_record_and_the_pin(self):
@@ -575,6 +575,121 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn('re-run CB2b on these bytes', problems[0])
 
 
+# CB2b as recorded: run 36260236826 (experiment/c2-serving-v52, card M), the full-scope pass of
+# extent_reader_card_b.py on graft K64j, transcribed from its report (cardm/reader-20260926T174702.json).
+RECORDED_CB2B_RUN = 36260236826
+RECORDED_CB2B_LINE = ('K64J_READER verdict=PASS scope=full r1=42/42 r1_reader=672/672 staging=1932/1932 r2=684/684 '
+                      'r2_trace=168/168 r4=264/264 live=12/12 families=56 chips=1of2 phantom=2895 '
+                      'extent_sha256=5633fc3a21a400360542913fb47559db999117e2e3b6e8d540c770d45720cd31')
+
+
+def line_pair(words, *names):
+    """[passed, total] summed over the verdict line's name=passed/total words."""
+    pairs = [[int(part) for part in words[name].split('/')] for name in names]
+    return [sum(pair[0] for pair in pairs), sum(pair[1] for pair in pairs)]
+
+
+class RecordedEvidenceTests(unittest.TestCase):
+    """The checked-in CB2b is run 36260236826's full-scope pass: the checked-in evidence admits at its pin, the
+    record's counts are its verdict line's, and a mutated copy of the record - another reader sha, a reduced scope,
+    the watcher pass's coverage, a partial section - is refused both at its own pin (for what it says) and at the
+    checked-in one (for its bytes)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='packed-any-recorded-'))
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        self.evidence = checked_in()
+        self.cb2b = self.evidence['sections']['CB2b']
+
+    def write(self, evidence):
+        path = self.tmp / 'packed_any_evidence.json'
+        path.write_bytes((json.dumps(evidence, indent=1) + '\n').encode('utf-8'))
+        return path, sha(path.read_bytes())
+
+    def test_the_recorded_cb2b_is_v52_s_full_pass_and_admits(self):
+        cb2b = self.cb2b
+        self.assertEqual((cb2b['status'], cb2b['run'], cb2b['failures'], cb2b['scope'], cb2b['chips'], cb2b['capacity']),
+                         ('PASS', RECORDED_CB2B_RUN, 0, 'full', '1of2', 131328))
+        self.assertEqual(cb2b['verdict_line'], RECORDED_CB2B_LINE)
+        self.assertEqual((cb2b['seeds'], cb2b['variants'], cb2b['idle_starts']), ([0, 1, 2], ['normal', 'peaky'], [0, 32]))
+        self.assertEqual(sorted(cb2b['r1_geometries']), sorted(admission.CB2B_R1_GEOMETRIES))
+        self.assertEqual(cb2b['sources'], self.evidence['sources'])
+        self.assertEqual(admission.evidence_problems(self.evidence), [])
+        record = admission.check_evidence(admission.EVIDENCE)
+        self.assertEqual((record['sections']['CB2b']['run'], record['sections']['CB2a']['run'],
+                          record['sections']['CB1']['run']), (RECORDED_CB2B_RUN, 36239779235, 36223820488))
+
+    def test_the_recorded_counts_are_the_verdict_line_s(self):
+        """R1 = r1 + r1_reader, S = staging, R2 = r2 + r2_trace, R4 = r4, liveness = live (the admission's
+        docstring); the line's extent_sha256 is the sources' and its families the R2 list's length."""
+        words = dict(word.split('=', 1) for word in self.cb2b['verdict_line'].split()[1:] if '=' in word)
+        self.assertEqual(self.cb2b['counts'], dict(R1=line_pair(words, 'r1', 'r1_reader'), S=line_pair(words, 'staging'),
+                                                   R2=line_pair(words, 'r2', 'r2_trace'), R4=line_pair(words, 'r4'),
+                                                   liveness=line_pair(words, 'live')))
+        self.assertEqual(self.cb2b['counts'], dict(R1=[714, 714], S=[1932, 1932], R2=[852, 852], R4=[264, 264],
+                                                   liveness=[12, 12]))
+        self.assertEqual(sum(total for name, (_, total) in self.cb2b['counts'].items() if name != 'liveness'),
+                         self.cb2b['comparisons'])
+        self.assertEqual((words['verdict'], words['scope'], words['chips']),
+                         (self.cb2b['status'], self.cb2b['scope'], self.cb2b['chips']))
+        self.assertEqual(words['extent_sha256'], self.cb2b['sources']['extent_attention_replay.py'])
+        self.assertEqual(int(words['families']), len(self.cb2b['r2_families']))
+        self.assertEqual(self.cb2b['watcher_pass']['scope'], 'reduced', 'the watcher pass is never the record')
+
+    # (name, path under sections, value, every problem the admission names)
+    RECORDED_MUTATIONS = (
+        ('a wrong extent_sha256', ('CB2b', 'sources', 'extent_attention_replay.py'), 'f' * 64,
+         ['CB2b: ran extent_attention_replay.py at ffffffffffffffff, not the qualified 5633fc3a21a40036']),
+        ('scope reduced', ('CB2b', 'scope'), 'reduced',
+         ["CB2b: scope reduced, not full (a reduced run - the watcher pass, one seed - is never CB2b's evidence)"]),
+        ('failed', ('CB2b', 'status'), 'FAIL', ['CB2b: status FAIL, not PASS']),
+        ('the watcher pass\'s seed', ('CB2b', 'seeds'), [0], ['CB2b: seeds lack [1, 2]']),
+        ('one variant', ('CB2b', 'variants'), ['peaky'], ["CB2b: variants lack ['normal']"]),
+        ('R1 without G4B1', ('CB2b', 'r1_geometries', 'G4B1'), DELETE,
+         ['CB2b: R1 ran no G4B1 (the design asks G8B2, G4B3 and G4B1)']),
+        ('the watcher pass\'s five families', ('CB2b', 'r2_families'), [256, 512, 2304, 3328, 5888],
+         ['CB2b: R2 replayed 5 families, not more than 50', 'CB2b: R2 families lack the named [16640, 65792, 131328]']),
+        ('a partial R2', ('CB2b', 'counts', 'R2'), [851, 852], ['CB2b: R2 [851, 852] is not a full pass']),
+        ('another capacity', ('CB2b', 'capacity'), 65792, ['CB2b: capacity 65792, not the served C = 131328']),
+    )
+
+    def test_a_mutated_record_is_refused_at_its_own_pin_and_at_the_checked_in_one(self):
+        for name, path, value, problems in self.RECORDED_MUTATIONS:
+            evidence = checked_in()
+            set_path(evidence, SECTIONS + path, value)
+            with self.subTest(mutation=name):
+                self.assertEqual(admission.evidence_problems(evidence), problems)
+                path_, digest = self.write(evidence)
+                with self.assertRaises(admission.AdmissionRefused) as caught:
+                    admission.check_evidence(path_, expected_sha256=digest)
+                self.assertEqual(caught.exception.problems, ['evidence: %s' % problem for problem in problems])
+                with self.assertRaisesRegex(admission.AdmissionRefused, 'not the reviewed %s' % admission.EVIDENCE_SHA256[:16]):
+                    admission.check_evidence(path_)
+
+    def test_a_reader_sha_changed_everywhere_is_refused_by_the_live_bytes(self):
+        """Both copies of the reader sha moved together (a record for other bytes) are refused by the checkout's own
+        extent_attention_replay.py, once."""
+        evidence = checked_in()
+        evidence['sources']['extent_attention_replay.py'] = 'e' * 64
+        evidence['sections']['CB2b']['sources']['extent_attention_replay.py'] = 'e' * 64
+        problems = admission.evidence_problems(evidence)
+        self.assertEqual(problems, ['sources: extent_attention_replay.py is 5633fc3a21a40036, but the evidence qualified '
+                                    'eeeeeeeeeeeeeeee (re-run CB2b on these bytes)'])
+
+    def test_an_edited_verdict_line_is_refused_by_the_pin(self):
+        """The admission reads the record's fields, not its verdict line; the pin is what refuses an edit there."""
+        evidence = checked_in()
+        evidence['sections']['CB2b']['verdict_line'] = self.cb2b['verdict_line'].replace(
+            'extent_sha256=5633fc3a', 'extent_sha256=0633fc3a')
+        path, _ = self.write(evidence)
+        with self.assertRaisesRegex(admission.AdmissionRefused, 'not the reviewed'):
+            admission.check_evidence(path)
+        self.write(self.evidence)
+        self.assertEqual(sha((self.tmp / 'packed_any_evidence.json').read_bytes()), admission.EVIDENCE_SHA256,
+                         'the checked-in file is json.dumps(indent=1) of itself, so the copies above differ only by '
+                         'their edit')
+
+
 class AdmitTests(unittest.TestCase):
     def setUp(self):
         self.state = mock.patch.dict(admission._STATE, clear=True)
@@ -715,6 +830,27 @@ class AdmitTests(unittest.TestCase):
         with mock.patch.object(admission, 'EVIDENCE_SHA256', sha(path.read_bytes())):
             self.assert_the_real_evidence_decides_the_attach(path)
         self.assertTrue(admission.admitted())
+
+    def test_a_mutated_copy_of_the_recorded_evidence_refuses_the_attach(self):
+        """The recorded CB2b with its scope reduced: at its own pin the attach is refused naming exactly that, and at
+        the checked-in pin for its bytes; nothing is admitted either way."""
+        tmp = Path(tempfile.mkdtemp(prefix='packed-any-mutated-'))
+        self.addCleanup(shutil.rmtree, str(tmp), True)
+        evidence = checked_in()
+        evidence['sections']['CB2b']['scope'] = 'reduced'
+        path = tmp / 'packed_any_evidence.json'
+        path.write_bytes((json.dumps(evidence, indent=1) + '\n').encode('utf-8'))
+        with mock.patch.object(admission, 'check_runtime', return_value=self.runtime):
+            with mock.patch.object(admission, 'EVIDENCE_SHA256', sha(path.read_bytes())), \
+                    self.assertRaises(admission.AdmissionRefused) as caught:
+                admission.admit('/opt/tt-metal', m3=M3, environ=dict(GOOD_ENV), log=self.lines, evidence=path)
+            self.assertEqual(caught.exception.problems, ["evidence: CB2b: scope reduced, not full (a reduced run - the "
+                                                         "watcher pass, one seed - is never CB2b's evidence)"])
+            with self.assertRaises(admission.AdmissionRefused) as caught:
+                admission.admit('/opt/tt-metal', m3=M3, environ=dict(GOOD_ENV), log=self.lines, evidence=path)
+            self.assertEqual(len(caught.exception.problems), 1, caught.exception.problems)
+            self.assertIn('not the reviewed %s' % admission.EVIDENCE_SHA256[:16], caught.exception.problems[0])
+        self.assertFalse(admission.admitted())
 
 
 class StatisticsTests(unittest.TestCase):

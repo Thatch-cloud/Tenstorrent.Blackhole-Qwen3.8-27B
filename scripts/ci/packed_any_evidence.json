@@ -1,13 +1,14 @@
 {
  "schema": "qwen-c2-packed-any-evidence/1",
  "what": "The hardware evidence that qualifies S2 C2-packed-any (QWEN_FAST_EXTENT_REPLAY=1): packed rounds at any position through one K64j 0x27 program per bundle (s2-design.md rev 2, W7 and 6.2). packed_any_admission.check_evidence reads it at every c2-packed attach; its sha256 is pinned there (EVIDENCE_SHA256), so a new record changes both in one commit.",
- "provenance": "CB1 and CB2a are transcribed from the goal-c2-serving memory note and the S2 build brief (2026-09-26); their run artifacts were not re-read when this file was written. CB2b has not run: until its record is PASS, every c2-packed attach is refused. sources names extent_attention_replay.py as every S2 branch holds it (5633fc3a, W1 b35bb070, merged at 937bd2f7), so a CB2b dispatched from any of them qualifies these bytes; the admission guard is in serving_buffer_pool, never in the reader.",
+ "provenance": "CB2b is written from run 36260236826 (experiment/c2-serving-v52, commit af1e3ebb): its cardm report cardm/reader-20260926T174702.json (sha256 246a09a7b0e1e5f7), by a script that takes every value from that report and its console, and checks the report against the admission's K64j binary, kernels and reader sha. The watcher pass before it is run 36255706983 (experiment/c2-serving-v51). CB2a was re-read from run 36239779235's report (cardm/card-20260926T114459.json, sha256 d5c1d05b803e501f) and the K64j binary from card-b-v7 run 36222920898's build summary and MANIFEST.sha256 when CB2b was recorded; both match what was here. CB1 is transcribed from the goal-c2-serving memory note and the S2 build brief (2026-09-26); its run artifact was not re-read. sources names extent_attention_replay.py as every S2 branch holds it (5633fc3a, W1 b35bb070, merged at 937bd2f7): CB2b ran the checkout's copy of it (/bench/ci) at these bytes; the admission guard is in serving_buffer_pool, never in the reader.",
  "binary": {
   "graft": "/home/thatch/opgraft-K64j",
   "ttnncpp_sha256": "152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7",
   "build": "optimisation/ttnn-op/k64j/build_k64j.sh through the card-B job, card-b-v7 run 36222920898",
   "qwen_strings": 34,
-  "base": "K64i cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4 (its 30 QWEN strings kept)"
+  "base": "K64i cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4 (its 30 QWEN strings kept)",
+  "manifest": "k64j-MANIFEST.sha256 and k64j-build-summary.txt of run 36222920898 name _ttnncpp.so 152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7"
  },
  "kernels": {
   "compute/sdpa_flash_decode_qwen.cpp": "409a1aafc3ffaaca2c6afba0e999525b7d141491f0a52e5583efa70447ee5c0e",
@@ -162,32 +163,174 @@
     "tag": "experiment/c2-serving-v43",
     "status": "PASS",
     "k2_verdict": "REDUCED-PASS 38/1980"
-   }
+   },
+   "report": "cardm/card-20260926T114459.json",
+   "report_sha256": "d5c1d05b803e501f655fd830d80f7f265a3c308333bc9e3bbffc99150601c04a"
   },
   "CB2b": {
-   "status": "PENDING",
+   "status": "PASS",
    "what": "W10b: the real extent readers over pool-like lent storage - R1 (the pinned mask kernel at capacity 256 == narrow_mask_host, at G8B2, G4B3 and G4B1), S (construction and restage staging: word, cur_pos and tables read back), R2 (each segment == the 0x7 compile-time call with the wide -inf mask at capacity E, over more than 50 families), R4 (idle segments at 0/32 on the zero table)",
-   "harness": "optimisation/ttnn-op/k64j/extent_reader_card_b.py (W10b) through run_card_b.sh, K64J_HARNESS=extent_reader, WATCHER=1 first; the full-scope pass is the evidence",
-   "required": {
+   "run": 36260236826,
+   "tag": "experiment/c2-serving-v52",
+   "commit": "af1e3ebb254a6977197cd5c6abc0b7242d646baf",
+   "card": "M",
+   "image": "57cb69948943",
+   "graft": "/home/thatch/opgraft-K64j",
+   "harness": "optimisation/ttnn-op/k64j/extent_reader_card_b.py through run_card_b.sh (K64J_HARNESS=extent_reader, KOPGRAFT64=/home/thatch/opgraft-K64j), --sections R1,S,R2,R4 --seeds 0,1,2 --variants normal,peaky (the cardm action; card B is reserved)",
+   "report": "cardm/reader-20260926T174702.json",
+   "report_sha256": "246a09a7b0e1e5f7562b72372477014baaae60aa86674bc9c194826ba5024ad4",
+   "verdict_line": "K64J_READER verdict=PASS scope=full r1=42/42 r1_reader=672/672 staging=1932/1932 r2=684/684 r2_trace=168/168 r4=264/264 live=12/12 families=56 chips=1of2 phantom=2895 extent_sha256=5633fc3a21a400360542913fb47559db999117e2e3b6e8d540c770d45720cd31",
+   "scope": "full",
+   "chips": "1of2",
+   "capacity": 131328,
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "variants": [
+    "normal",
+    "peaky"
+   ],
+   "r1_geometries": {
+    "G8B2": [
+     0,
+     7,
+     32,
+     127,
+     128,
+     240,
+     255
+    ],
+    "G4B3": [
+     0,
+     7,
+     32,
+     127,
+     128,
+     240,
+     255
+    ],
+    "G4B1": [
+     0,
+     7,
+     32,
+     127,
+     128,
+     240,
+     255
+    ]
+   },
+   "r2_families": [
+    256,
+    512,
+    2304,
+    3328,
+    5888,
+    8448,
+    11264,
+    13824,
+    16384,
+    16640,
+    19200,
+    21760,
+    24320,
+    26880,
+    29696,
+    32256,
+    34816,
+    37376,
+    39936,
+    42496,
+    45056,
+    47872,
+    50432,
+    52992,
+    55552,
+    58112,
+    60672,
+    63232,
+    65792,
+    66304,
+    68864,
+    71424,
+    73984,
+    76544,
+    79104,
+    81664,
+    84224,
+    87040,
+    89600,
+    92160,
+    94720,
+    97280,
+    99840,
+    102400,
+    105216,
+    107776,
+    110336,
+    112896,
+    115456,
+    118016,
+    120576,
+    123392,
+    125952,
+    128512,
+    131072,
+    131328
+   ],
+   "idle_starts": [
+    0,
+    32
+   ],
+   "counts": {
+    "R1": [
+     714,
+     714
+    ],
+    "S": [
+     1932,
+     1932
+    ],
+    "R2": [
+     852,
+     852
+    ],
+    "R4": [
+     264,
+     264
+    ],
+    "liveness": [
+     12,
+     12
+    ]
+   },
+   "comparisons": 3762,
+   "failures": 0,
+   "warnings": 0,
+   "phantom_programs": 2895,
+   "served": {
+    "flags": "0x27",
+    "rows": 8,
+    "batch": 2,
+    "segments": 4
+   },
+   "pinned_modules": {
+    "attention_fold_dma.cpp": "066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9",
+    "attention_fold_dma.py": "5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5",
+    "attention_mask_replay.cpp": "e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8",
+    "attention_mask_replay.py": "6a31981cb9203439b8e6e78e8bd712e078f00335a7f211c732d4ac47cabca3a8"
+   },
+   "sources": {
+    "extent_attention_replay.py": "5633fc3a21a400360542913fb47559db999117e2e3b6e8d540c770d45720cd31"
+   },
+   "watcher_pass": {
+    "run": 36255706983,
+    "tag": "experiment/c2-serving-v51",
     "status": "PASS",
-    "run": "the run id (an integer)",
-    "failures": 0,
-    "scope": "full (the verdict line's scope=; a reduced run is never the evidence)",
-    "chips": "1of2 (the verdict line's chips=)",
-    "capacity": 131328,
-    "seeds": "the report's seeds_run, covering [0, 1, 2]",
-    "variants": "the report's variants_run, covering [normal, peaky]",
-    "r1_geometries": "the report's r1_run: {geometry: [words]}, G8B2, G4B3 and G4B1 each covering 0, 7, 127, 240, 255",
-    "r2_families": "the report's r2_families_replayed: more than 50 distinct families including 256, 2304, 16640, 65792 and 131328",
-    "idle_starts": "the report's idle_starts_run, covering [0, 32]",
-    "counts": {
-     "R1": "[passed, total]: the verdict line's r1 plus r1_reader, all passed",
-     "S": "[passed, total]: staging, all passed",
-     "R2": "[passed, total]: r2 plus r2_trace, all passed",
-     "R4": "[passed, total]: r4, all passed",
-     "liveness": "[passed, total]: live, all moved"
-    },
-    "sources": "the verdict line's extent_sha256 as {\"extent_attention_replay.py\": sha256}: the top-level sources' own"
+    "scope": "reduced",
+    "watcher_errors": 0,
+    "report_sha256": "826e229ad79c902e654e42c49ec578f4cb89f9a130fb16b942ea23d0c3160758"
    }
   }
  }
