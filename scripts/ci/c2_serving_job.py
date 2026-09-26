@@ -28,7 +28,8 @@ import os
 import re
 import sys
 
-ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'drift', 'build', 'smoke', 'gate', 'replay', 'push')
+ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'drift', 'build', 'probe', 'smoke', 'gate',
+           'replay', 'push')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S1's G4 ladder (c2-serve-for-real-plan 2.2, gate table row G4 part 1): both sides of every page and
 # chunk boundary the fast path has (2048 = the draft window and the prefill chunk), a short prompt

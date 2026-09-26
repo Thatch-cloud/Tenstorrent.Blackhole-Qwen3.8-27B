@@ -13,6 +13,9 @@ name: Qwen C2 serving image
 #   drift  - read-only, no cards: G1's strings, layer and frozen-pin checks on the P8 base
 #            (c2_image_provenance.py --base-drift), base-drift.log/.json in the results; reports,
 #            never fails the job - the build's G1 enforces
+#   probe  - the prefix-reuse P0a probe (scripts/ci/prefix_p0a_probe.py) inside
+#            tt-vllm:qwen38-c2-$C2_IMAGE_TAG, on the CPU: no --device, no network, the model
+#            snapshot read-only; opens no card
 #   smoke  - run it on cards M+A shaped like the node agent's container, then the API smoke
 #            (scripts/ci/c2_serving_smoke.py); the container is always removed
 #   gate   - the m3native gate harness inside the image, in the agent's container shape, serving
@@ -235,6 +238,27 @@ jobs:
           tar -czf "$RUNNER_TEMP/c2ctx.tgz" -C "$ctx" .
           export C2_CHECKOUT="$PWD" C2_PROVENANCE_REPORT="$RUNNER_TEMP/c2-results/provenance.json"
           bash scripts/ci/build-c2-serving-image.sh "$RUNNER_TEMP/c2ctx.tgz" "$TAG" 2>&1 | tee "$RUNNER_TEMP/c2-results/build.log"
+      - name: Prefix-reuse P0a probe in the image (CPU only, no device)
+        if: contains(steps.job.outputs.actions, 'probe')
+        working-directory: c2
+        timeout-minutes: 25
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Design section 2.1, P0a: the general-prefix engine config through the image's own vLLM
+          # 0.25.1 and TT plugin, then the prefix scheduler graft (scripts/ci/prefix_scheduler_graft.py)
+          # driven on the real TTScheduler. The checkout is mounted read-only at /c2; no --device, so
+          # it opens no card. Prints PASS/FAIL per check and exits 1 on any FAIL.
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          docker image inspect "$image" --format "probe image $image {{.Id}}"
+          name="qwen-prefix-p0a-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 20 1320 docker run --rm --name "$name" --network none --cpus 8 --memory 16g \
+            -v /home/thatch/hf-cache/hub:/models:ro -v "$PWD:/c2:ro" \
+            --entrypoint python3 "$image" /c2/scripts/ci/prefix_p0a_probe.py 2>&1 \
+            | tee "$RUNNER_TEMP/c2-results/prefix-p0a.log"
       - name: Smoke on cards M+A
         if: contains(steps.job.outputs.actions, 'smoke')
         working-directory: c2
