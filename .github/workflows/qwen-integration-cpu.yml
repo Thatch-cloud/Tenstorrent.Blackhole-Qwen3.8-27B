@@ -88,6 +88,7 @@ jobs:
           python -B -m unittest test_qwen_prefix_registry test_qwen_prefix_scheduler_patch test_qwen_prefix_runner_patch test_qwen_prefix_scheduler_vllm test_qwen_prefix_image_closure
           python -B -m unittest test_prefix_agent_corpus test_prefix_markers test_prefix_judge test_prefix_report test_prefix_oracle_check
           python -B -m unittest test_prefix_replay test_c2_prefix_gate
+          python -B -m unittest test_prefix_p0a_probe
           python -B -m unittest test_lever_n_prefill_profile_report
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_bench -p 'test_*.py'
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_chain -p 'test_*.py'

@@ -168,6 +168,9 @@ def run_graft(say=print, graft_path=None):  # pragma: no cover - needs vLLM 0.25
                                         else capacity * graft.prefix_registry.CHECKPOINT_NBYTES)
         # The served model graft declares mid-loop captures at warmup, before the scheduler exists.
         registry.enable_mid_loop_capture()
+        # env.make constructs with QWEN_PREFIX_REUSE absent: a G1 image's TTScheduler.__init__ hook would
+        # otherwise install its own graft on the one shared registry and refuse the next scenario's
+        # scheduler (run 36236920928). The graft installed is this scenario's, on this registry.
         scheduler, state = env.make(registry=registry)
         drive = probe.Drive(env, scheduler, state, name)
         for rid, prompt, salt in steps:

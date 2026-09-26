@@ -11,11 +11,14 @@ device attached - it opens none - and the Qwen3.8-27B snapshot mounted read-only
 Checks 1-4 build the engine config of a general-prefix profile - the image's `general` profile with
 prefix caching and chunked prefill on, exactly as the design's section 2.0.1 item 5 has it - through
 vLLM's own argument parser and create_engine_config, which runs the TT platform's
-check_and_update_config. The model graft that makes Qwen36ForCausalLM report
-supports_prefix_caching when QWEN_PREFIX_REUSE=1 does not exist yet, so the probe sets that one
-capability on the class, and says so. Two controls run the same build in child processes: chunked
-prefill off (the align assertion must fire) and the capability left as the image has it (the
-platform must drop prefix caching and the mamba-block-size validator must refuse).
+check_and_update_config, with QWEN_PREFIX_REUSE=1 set before this process first imports the
+model, as the general-prefix profile has it. A G1 image's model (qwen_prefix_model_patch) then
+reports supports_prefix_caching itself, and check 4 requires that; a model tree without the G1 model
+graft (a pre-G1 image, the local stubs) gets that one capability set on the class, and the probe says
+so. Two controls run the same build in child processes: chunked prefill off (the align assertion must
+fire) and the capability as the image ships it without the switch - QWEN_PREFIX_REUSE absent from the
+child's environment and never set in it, as every other profile runs (the platform must drop prefix
+caching and the mamba-block-size validator must refuse).
 
 Checks 5-14 mirror EngineCore._initialize_kv_caches on that config with the installed TT worker's
 own functions (the single "foo" FullAttentionSpec, the TT block count), build the real TTScheduler
@@ -29,11 +32,24 @@ prefix_scheduler_graft.py, productionised); test_qwen_prefix_scheduler_vllm carr
 16-18 as unit tests. Checks 15-18 are extra unit tests of the same modules (registry LRU, kill
 switch, reset, the token-mismatch guard).
 
+In a G1 image the plugin's TTScheduler.__init__ carries the scheduler graft's hook
+(qwen_prefix_scheduler_patch.INIT_HOOK): with QWEN_PREFIX_REUSE=1 in the environment it installs the
+plugin's own copy of the graft on the process's one shared registry, which refuses a second live
+scheduler. The checks build many schedulers - controls without the graft, and grafts with their own
+registry, kill switch and clock - so SchedEnv.make constructs every one with the switch absent and
+installs exactly what the check asks for. Check 14's last row builds the served config the way the
+engine does, through the hook, and requires the copy it installs to be the bytes the checks drove.
+(Run 36236920928, image g1-7e1296a, the first with G1's stages: the probe set the switch for every
+variant and every scheduler, so the no-capability control had the capability, the no-graft controls
+ran with the graft, and every scheduler built while another was alive was refused - 10 FAIL, while
+the plain plugin and stub model passed 18/18 locally. test_prefix_p0a_probe holds that condition.)
+
 Prints PASS or FAIL per check with its evidence and exits 1 if any check fails.
 """
 
 import argparse
 import collections
+import contextlib
 import copy
 import dataclasses
 import hashlib
@@ -80,6 +96,15 @@ TT_MODEL_FALLBACK = ('models.demos.blackhole.qwen36.tt.qwen36_vllm', 'Qwen36ForC
 VARIANT_TAG = 'P0A-VARIANT '
 SALT = 'tenant-a'
 CHUNK, BLOCK = graft.CHUNK, graft.BLOCK
+# The general-prefix profile's switch (qwen_c2_profiles.json). A G1 image reads it in two staged
+# places: the model, once at import (qwen_prefix_model_patch: supports_prefix_caching), and the
+# plugin's TTScheduler.__init__, at every construction (qwen_prefix_scheduler_patch.INIT_HOOK).
+REUSE_ENV = graft.prefix_registry.ENV_REUSE
+# The engine-config variants whose profile sets it; the others run as every other profile does.
+REUSE_VARIANTS = ('general-prefix', 'no-chunking')
+# What the G1 model stage defines in qwen36_vllm (qwen_prefix_model_patch.STAGED_SIGN_VLLM): the
+# switch as the module read it at import.
+MODEL_STAGED_SIGN = '_QWEN_PREFIX_REUSE'
 
 RESULTS = []
 Row = collections.namedtuple('Row', 'step rid start q h')
@@ -130,6 +155,30 @@ def digest(path, algorithm='sha256', length=16):
 # --------------------------------------------------------------------------------------------
 # Engine config (checks 1-4)
 # --------------------------------------------------------------------------------------------
+def set_reuse(on, environ=None):
+    """REUSE_ENV '1' (on) or absent (off) in environ, default os.environ; returns environ."""
+    environ = os.environ if environ is None else environ
+    if on:
+        environ[REUSE_ENV] = '1'
+    else:
+        environ.pop(REUSE_ENV, None)
+    return environ
+
+
+@contextlib.contextmanager
+def reuse_switch(on):
+    """REUSE_ENV on or absent in os.environ for the duration, then as it was."""
+    saved = os.environ.get(REUSE_ENV)
+    set_reuse(on)
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop(REUSE_ENV, None)
+        else:
+            os.environ[REUSE_ENV] = saved
+
+
 def load_contract():
     # The image's .pth hook imported its own copy at interpreter start (QWEN_C2_SERVING=1); the
     # checkout's copy is only the fallback outside the image.
@@ -174,13 +223,19 @@ def tt_model_class():
 
 
 def simulate_capability(enable):
+    """The model class's capabilities for a variant. A G1 model tree (MODEL_STAGED_SIGN in its
+    module) reports supports_prefix_caching itself when REUSE_ENV was 1 at its import, so nothing is
+    set; a tree without the G1 model graft gets that one flag set on the class when enable, and the
+    evidence says which."""
     module, cls = tt_model_class()
     before = dict(getattr(cls, 'model_capabilities', None) or {})
-    if enable:
+    simulated = bool(enable) and not before.get('supports_prefix_caching')
+    if simulated:
         cls.model_capabilities = dict(before, supports_prefix_caching=True)
     return dict(module=module.__name__, cls=cls.__name__, file=getattr(module, '__file__', '?'),
                 image_capabilities=before, used_capabilities=dict(getattr(cls, 'model_capabilities', {}) or {}),
-                simulated=bool(enable))
+                simulated=simulated, staged=hasattr(module, MODEL_STAGED_SIGN),
+                reuse_at_import=getattr(module, MODEL_STAGED_SIGN, None))
 
 
 def config_view(vllm_config):
@@ -243,7 +298,9 @@ def install_config_hooks(evidence):
 
 
 def build_config(variant):
-    os.environ['QWEN_PREFIX_REUSE'] = '1'
+    # The variant's own switch, before this process first imports the model (a G1 model reads it
+    # then): set for general-prefix and no-chunking, absent for no-capability and fallback-general.
+    set_reuse(variant in REUSE_VARIANTS)
     evidence = dict(variant=variant)
     path, contract_file, snapshot, argv = variant_argv(variant)
     evidence.update(profiles=path, contract=contract_file, snapshot=snapshot, argv=argv)
@@ -286,8 +343,11 @@ def run_variant(variant):
     command = [sys.executable, os.path.abspath(__file__), '--variant', variant]
     try:
         # errors='replace': a non-UTF-8 byte in the child's log must not cost the control's verdict.
+        # The child gets its variant's switch, not this process's: general-prefix runs here with it
+        # set, and the no-capability control must never see it (build_config also sets it per variant).
         process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=1200,
-                                 universal_newlines=True, encoding='utf-8', errors='replace')
+                                 universal_newlines=True, encoding='utf-8', errors='replace',
+                                 env=set_reuse(variant in REUSE_VARIANTS, dict(os.environ)))
     except subprocess.TimeoutExpired as error:
         return None, 'timed out after %ss' % error.timeout
     for line in process.stdout.splitlines():
@@ -375,17 +435,33 @@ def check_4(evidence, vllm_config, control, control_note):
     control_error = str((control or {}).get('error', ''))
     control_ok = (control is not None and '--mamba-block-size can only be set with --enable-prefix-caching' in control_error
                   and (control.get('platform_after') or {}).get('prefix') is False)
+    # A G1 model tree must report the capability itself under the general-prefix switch: a simulated
+    # flag there would pass the probe while general-prefix served without it.
+    capability = evidence.get('capability') or {}
+    own = not (capability.get('staged') and capability.get('simulated'))
+    if not capability:
+        source = 'not recorded (the config did not reach the model)'
+    elif not capability.get('simulated'):
+        source = "the model's own (%s=%r at its import)" % (MODEL_STAGED_SIGN, capability.get('reuse_at_import'))
+    elif capability.get('staged'):
+        source = ('SIMULATED, yet this model tree carries the G1 model graft and read %s=%r at its import: '
+                  'general-prefix would serve without the capability'
+                  % (MODEL_STAGED_SIGN, capability.get('reuse_at_import')))
+    else:
+        source = 'SIMULATED on the class: this model tree carries no G1 model graft (no %s)' % MODEL_STAGED_SIGN
+    shipped = (control or {}).get('capability') or {}
     lines = ['construction passed the after-validator validate_mamba_block_size (vllm.py:2213-2225): %s; '
              'mamba_block_size=%s block_size=%s prefix caching=%s; explicit call: %s'
              % (vllm_config is not None, final.get('mamba_block_size'), final.get('block_size'),
                 final.get('enable_prefix_caching'), explicit),
-             'control, capability as the image ships it (%s): %s' % (
-                 show(((control or {}).get('capability') or {}).get('image_capabilities')),
+             'general-prefix capability: %s' % source,
+             'control, capability as the image ships it without %s (%s=%r at its import; %s): %s' % (
+                 REUSE_ENV, MODEL_STAGED_SIGN, shipped.get('reuse_at_import'), show(shipped.get('image_capabilities')),
                  '%s: %s' % (control.get('error_type'), control_error[:300]) if control else control_note),
              'control platform_after=%s' % show((control or {}).get('platform_after')),
              'control verdict: %s (flag absent => platform drops prefix caching => validator refuses; '
              'the capability flag and the profile must ship together)' % ('as expected' if control_ok else 'NOT as expected')]
-    return ok and control_ok, '\n'.join(lines)
+    return ok and control_ok and own, '\n'.join(lines)
 
 
 # --------------------------------------------------------------------------------------------
@@ -452,13 +528,19 @@ class SchedEnv(object):
                        cache_salt=salt, block_hasher=self.hasher)
 
     def make(self, num_blocks=None, install=True, registry=None, kill_switch_path=None, clock=time.monotonic,
-             ledger=None):
+             ledger=None, hook=False):
+        """A TTScheduler on the TT KV config; with install, the graft on its own registry, kill switch
+        and clock. Constructed with the general-prefix switch absent, so a G1 plugin's constructor
+        hook installs nothing of its own on the shared registry (one live scheduler per process);
+        hook=True constructs it with the switch set, as the engine does."""
         kv_cache_config = self.kv_cache_config
         if num_blocks is not None:
             kv_cache_config = dataclasses.replace(kv_cache_config, num_blocks=num_blocks)
-        scheduler = self.scheduler_cls(vllm_config=self.vllm_config, kv_cache_config=kv_cache_config,
-                                       structured_output_manager=self.structured, block_size=self.scheduler_block,
-                                       hash_block_size=self.hash_block, include_finished_set=False, log_stats=True)
+        with reuse_switch(hook):
+            scheduler = self.scheduler_cls(vllm_config=self.vllm_config, kv_cache_config=kv_cache_config,
+                                           structured_output_manager=self.structured,
+                                           block_size=self.scheduler_block, hash_block_size=self.hash_block,
+                                           include_finished_set=False, log_stats=True)
         if ledger is not None:
             attach_ledger(scheduler, ledger)
         state = None
@@ -988,10 +1070,40 @@ def check_14(env):
             outcome = 'refused: %s' % str(error)[len('prefix reuse refused: '):][:160]
         ok = ok and good
         lines.append('%-26s %s' % (name, outcome))
-    scheduler, state = env.make()
-    installed = state is not None and 'schedule' in scheduler.__dict__
-    lines.append('%-26s %s' % ('the served config', 'installed' if installed else 'NOT installed'))
+    scheduler, _ = env.make(install=False, hook=True)
+    installed, detail = served_install(scheduler, env)
+    lines.append('%-26s %s' % ('the served config', detail))
     return ok and installed, '\n'.join(lines)
+
+
+def served_install(scheduler, env):
+    """-> (ok, detail) for a scheduler constructed as the engine constructs it (the switch set). A G1
+    plugin's TTScheduler.__init__ hook must have installed its own copy of the graft, and that copy
+    must be the bytes the checks drove; a plugin without the hook (pre-G1, the local tree) gets the
+    checked graft installed explicitly, and says so."""
+    plugin_file = getattr(sys.modules.get(type(scheduler).__module__), '__file__', None)
+    try:
+        with open(plugin_file, encoding='utf-8') as handle:
+            has_hook = graft.HOOK_TAG in handle.read()
+    except (OSError, TypeError):
+        has_hook = False
+    hooked = scheduler.__dict__.get('_qwen_prefix')
+    if hooked is None and has_hook:
+        return False, ('NOT installed: %s carries the G1 constructor hook, yet constructing it with %s=1 '
+                       'installed nothing' % (plugin_file, REUSE_ENV))
+    if hooked is None:
+        graft.install(scheduler, registry=graft.PrefixRegistry(), kill_switch_path=None, logger=env.log)
+        return 'schedule' in scheduler.__dict__, 'installed explicitly: %s has no G1 constructor hook' % plugin_file
+    module = sys.modules.get(type(hooked).__module__)
+    pairs = ((getattr(module, '__file__', None), graft.__file__),
+             (getattr(getattr(module, 'prefix_registry', None), '__file__', None), graft.prefix_registry.__file__))
+    differs = [(served, checked) for served, checked in pairs
+               if not served or digest(served, length=64) != digest(checked, length=64)]
+    detail = 'installed by the plugin\'s TTScheduler.__init__ hook (%s=1): %s' % (
+        REUSE_ENV, ', '.join('%s sha256 %s' % (served, digest(served) if served else '-') for served, _ in pairs))
+    if differs:
+        detail += '; NOT the graft the checks drove: %s' % ', '.join('%s != %s' % pair for pair in differs)
+    return 'schedule' in scheduler.__dict__ and not differs, detail
 
 
 def check_15():
@@ -1132,7 +1244,9 @@ def model_tree_report():
         module, cls = tt_model_class()
         root = os.path.dirname(module.__file__)
         say('INFO TT model %s.%s at %s' % (module.__name__, cls.__name__, root))
-        say('INFO   model_capabilities as shipped: %s' % show(getattr(cls, 'model_capabilities', None)))
+        say('INFO   model_capabilities (%s=%s here): %s; G1 model graft: %s (%s=%r at its import)'
+            % (REUSE_ENV, os.environ.get(REUSE_ENV, '<unset>'), show(getattr(cls, 'model_capabilities', None)),
+               hasattr(module, MODEL_STAGED_SIGN), MODEL_STAGED_SIGN, getattr(module, MODEL_STAGED_SIGN, None)))
         for name in ('qwen36_vllm.py', 'model.py'):
             path = os.path.join(root, name)
             say('INFO   %-15s md5 %s sha256 %s' % (name, digest(path, 'md5', 8), digest(path)))
@@ -1143,7 +1257,14 @@ def model_tree_report():
 
 def main():
     say('=== P0a probe: prefix reuse on the TT general path, config and scheduler (design section 2.1)')
+    inherited = os.environ.get(REUSE_ENV)
+    # The general-prefix profile's switch, before anything in this process imports the model: a G1
+    # model reads it at import, as the serving contract applies the profile's env at interpreter
+    # start. Scheduler construction keeps a G1 plugin's constructor hook off (SchedEnv.make).
+    set_reuse(True)
     environment_report()
+    say('INFO env %s=%s inherited; 1 from here on, the general-prefix profile\'s switch'
+        % (REUSE_ENV, '<unset>' if inherited is None else inherited))
     model_tree_report()
     started = time.time()
     try:
