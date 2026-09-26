@@ -9,10 +9,12 @@ FROM ${BASE}
 ARG KERNEL_CACHE
 LABEL thatch.qwen.c2-serving="1" thatch.qwen.serving-qualified="false"
 
-# K64i: the arm mounts each binary over its path and each op directory over the image's
-# (a directory mount REPLACES the directory, so the image's copy is removed first).
-COPY opgraft-K64i/ /opt/qwen-c2/opgraft-K64i/
-RUN set -eu; g=/opt/qwen-c2/opgraft-K64i; \
+# K64j (S2, design W9; optimisation/ttnn-op/k64j/build_k64j.sh, card-b-v7 run 36222920898): K64i's contents,
+# the decode factory with the runtime extent (flag 0x20, F19-F22) and its four kernels, _ttnncpp.so 152951c1
+# (K64i's 30 QWEN strings kept, 34 in all). The arm mounts each binary over its path and each op directory
+# over the image's (a directory mount REPLACES the directory, so the image's copy is removed first).
+COPY opgraft-K64j/ /opt/qwen-c2/opgraft-K64j/
+RUN set -eu; g=/opt/qwen-c2/opgraft-K64j; \
     for pair in _ttnn.so:/opt/tt-metal/ttnn/ttnn/_ttnn.so \
                 _ttnncpp.so:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so \
                 _ttnncpp.so:/opt/tt-metal/build_Release/lib/_ttnncpp.so; do \
@@ -24,7 +26,7 @@ RUN set -eu; g=/opt/qwen-c2/opgraft-K64i; \
                 sdpa:/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa; do \
       target=$(readlink -f "${pair#*:}"); rm -rf "$target"; cp -a "$g/${pair%%:*}" "$target"; \
     done; \
-    test "$(sha256sum < /opt/tt-metal/build_Release/lib/_ttnncpp.so | cut -c1-64)" = cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4; \
+    test "$(sha256sum < /opt/tt-metal/build_Release/lib/_ttnncpp.so | cut -c1-64)" = 152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7; \
     test "$(sha256sum < "$(readlink -f /opt/tt-metal/ttnn/ttnn/_ttnn.so)" | cut -c1-64)" = "$(sha256sum < $g/_ttnn.so | cut -c1-64)"
 
 # The v235 model-tree graft (artifact m3native-graft-sha-36087022223): the five wired model
@@ -79,7 +81,7 @@ ENV QWEN_ATTN_PREP=1 QWEN_CARDS_ALLOCATED=1 QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 QWE
     QWEN_FAST_PHASE_TIMING=1 QWEN_FAST_PIPELINED_COMMITS=1 QWEN_FAST_PIPELINED_PROPOSALS=1 \
     QWEN_FAST_PIPELINED_PUBLISH=1 QWEN_FAST_PRESTAGE=1 QWEN_FAST_PUBLISH_PREWARM=1 QWEN_FAST_QUAD_DRAFT=1 \
     QWEN_FAST_REPLAY_GROUP_ROWS=8 QWEN_FAST_ROUND_B1=1 QWEN_FAST_ROUND_FENCES=1 \
-    QWEN_FAST_RUNTIME_BINARY_SHA256=cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4 \
+    QWEN_FAST_RUNTIME_BINARY_SHA256=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7 \
     QWEN_FAST_SDPA_MODES=tail,share,slice QWEN_FAST_SDPA_PF=1 QWEN_FAST_SDPA_PF_FLAGS=0x3 \
     QWEN_FAST_SEQ_PUBLISH_LOG=1 QWEN_FAST_SHARD_CHECK=0 QWEN_FAST_SHARED_CCL=1 QWEN_FAST_SINGLE_GATEUP=1 \
     QWEN_FAST_SKIP_BLOCK_STREAM=1 QWEN_FAST_TRACED_PUBLISH=1 QWEN_FAST_VERIFY_T1=1 QWEN_FAST_VERIFY_T2=1 \

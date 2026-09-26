@@ -869,15 +869,18 @@ class ProfileGatingTests(unittest.TestCase):
             return json.load(handle)['profiles']
 
     def test_only_c2_and_c2_gate_ask_for_m(self):
+        # ...and their S2 twins, c2-packed and c2-packed-gate (design W8: c2's and c2-gate's limits and parser).
         asked = {name: profile.get('parser_rechunk') for name, profile in self.profiles().items()}
-        self.assertEqual(asked, {'exact': None, 'c2': True, 'c2-gate': True, 'coding': None, 'general': None})
+        self.assertEqual(asked, {'exact': None, 'c2': True, 'c2-gate': True, 'c2-packed': True, 'c2-packed-gate': True,
+                                 'coding': None, 'general': None})
         for name, profile in self.profiles().items():
-            self.assertEqual(contract.parser_rechunk(profile), name in ('c2', 'c2-gate'), name)
+            self.assertEqual(contract.parser_rechunk(profile), name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate'),
+                             name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 
     def test_boot_arms_m_in_the_api_server_under_the_c2_profiles(self):
-        for name in ('c2', 'c2-gate'):
+        for name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate'):
             with self.subTest(profile=name):
                 hooks, err = self.boot(name)
                 self.assertEqual(sorted(hooks), sorted([rechunk.MODULE, contract.INPUT_PROCESSOR]))

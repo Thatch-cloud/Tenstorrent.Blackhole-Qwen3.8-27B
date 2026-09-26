@@ -179,6 +179,129 @@
       "default_max_tokens": 8192,
       "parser_rechunk": true
     },
+    "c2-packed": {
+      "description": "C2-packed-any (plan stage S2): c2 WITH the 64-row packed block, serving it at any position. c2's environment less its two block overrides (QWEN_FAST_PACKED_STEP=0, QWEN_FAST_PADDED_BLOCK=0), so the image's QWEN_FAST_PACKED_STEP=1 and QWEN_FAST_PADDED_BLOCK=1 build the block, plus QWEN_FAST_EXTENT_REPLAY=1: each packed user reads its own 256-key family E = (start // 256 + 1) * 256 through one K64j 0x27 program per bundle (graft K64j, flag 0x20, a per-bundle cur_pos tensor), so 2-4 live users at any positions >= 128 share one verify round instead of 4-row sequential rounds. c2's limits: prompts up to 123136 (at least 8192 tokens of answer room), output ceiling 16384, max_tokens 8192 when omitted, parser M. The attach is refused unless packed_any_admission admits it (the M3 shape, eight-row groups, the tree-scratch patch, K64j at both binary paths with its kernels, and packed_any_evidence.json recording CB1, CB2a and CB2b PASS); a refused attach fails closed and c2 keeps serving. NOT QUALIFIED for traffic until the S2 gates (design 6.3, M0-M12) pass.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_graph_descriptor": "/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "max_prompt_tokens": 123136,
+      "min_answer_tokens": 8192,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true
+    },
+    "c2-packed-gate": {
+      "description": "GATE ONLY (S2's flag-on arms, G3/G3b/M1): c2-gate plus QWEN_FAST_EXTENT_REPLAY=1 - c2-gate's environment, engine and limits (no prompt cap, min_answer_tokens 256, so 4 x 131072 runs where v235 ran), with the packed block serving through the K64j extent readers. Its flag-off twin is c2-gate. Not for traffic: a 131072-token prompt leaves 256 tokens of answer.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_graph_descriptor": "/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true
+    },
     "coding": {
       "description": "NOT SERVABLE: the fast path refuses any request whose prompt is not exactly the frozen context or whose remaining budget exceeds 256 (frozen_combined_runtime.validate_target_option; smoke v3, run 36099730091). Kept for the record.",
       "eos_ids": [
@@ -236,7 +359,7 @@
       "max_prompt_tokens": 61440
     },
     "general": {
-      "description": "The C2 image with the fast path OFF: the stock TT plugin decode with the image's kernels (K64i) and model graft, no speculative decoding, any request shape (sampling, long outputs, any prompt length). The fast path serves only prompts of exactly its frozen context (frozen_combined_runtime.validate_target_option).",
+      "description": "The C2 image with the fast path OFF: the stock TT plugin decode with the image's kernels (K64j) and model graft, no speculative decoding, any request shape (sampling, long outputs, any prompt length). The fast path serves only prompts of exactly its frozen context (frozen_combined_runtime.validate_target_option).",
       "eos_ids": [
         248046,
         248044

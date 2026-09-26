@@ -285,7 +285,7 @@ jobs:
           rm -rf "$ctx"
           python3 -B scripts/ci/c2_overlay.py stage --repo . --out "$ctx"
           status=0
-          python3 -B "$ctx/c2_image_provenance.py" --base-drift --context "$ctx" --graft /home/thatch/opgraft-K64i \
+          python3 -B "$ctx/c2_image_provenance.py" --base-drift --context "$ctx" --graft /home/thatch/opgraft-K64j \
             --report "$RUNNER_TEMP/c2-results/base-drift.json" > "$RUNNER_TEMP/c2-results/base-drift.log" 2>&1 || status=$?
           tail -60 "$RUNNER_TEMP/c2-results/base-drift.log"
           rm -rf "$ctx"

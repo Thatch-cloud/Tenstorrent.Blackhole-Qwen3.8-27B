@@ -835,5 +835,123 @@ class PackedCaptureViewTests(unittest.TestCase):
         self.assertIs(device.proposal_capture._trace, trace_two)
 
 
+class SinglesLineTests(unittest.TestCase):
+    """S2 W12: under QWEN_FAST_EXTENT_REPLAY=1 with QWEN_FAST_PACKED_AUDIT=1, one '[PACKED-PROPOSE] singles' line per
+    round names every user that drafted on its own capture and why; without the extent flag the log is today's.
+    And a pair trace holding a bucket at any context but (2048, 2048) fails the round loudly."""
+
+    S2 = {'QWEN_FAST_EXTENT_REPLAY': '1', 'QWEN_FAST_PACKED_AUDIT': '1'}
+
+    def setUp(self):
+        FakeTrace.instances = []
+        self.patcher = unittest.mock.patch('dflash_proposal_trace.PreparedPackedDFlashProposal', FakeTrace)
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+        self.operations = SimpleNamespace(synchronize_device=Mock())
+        self.mesh = object()
+
+    def bridges(self, slots, **options):
+        return PackedProposalCoordinatorTests.bridges(self, slots, **options)
+
+    def singles(self, bridges, environ=None, coordinator=None, **prepare):
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator, SINGLES_LINE
+
+        coordinator = coordinator or PackedProposalCoordinator()
+        with unittest.mock.patch.dict(os.environ, self.S2 if environ is None else environ), \
+                unittest.mock.patch('dflash_packed_proposal_coordinator.audit_log') as audit_log:
+            coordinator.prepare(bridges, **prepare)
+        return [(call.kwargs['round'], call.kwargs['slots'], call.kwargs['reasons'])
+                for call in audit_log.call_args_list if call.args[0] == SINGLES_LINE]
+
+    def test_the_ramp_an_absent_partner_and_an_unslotted_device_are_named(self):
+        ramp = self.bridges([('a', 0), ('b', 1)], history_rows=1024)
+        rest = self.bridges([('c', 2), ('d', None)])
+        lines = self.singles([ramp['a'], ramp['b'], rest['c'], rest['d']])
+        self.assertEqual(lines, [(1, [0, 1, 2, None], ['ramp', 'ramp', 'absent', 'unslotted'])])
+
+    def test_a_pair_at_2048_that_packable_refuses_is_unpackable(self):
+        bridges = self.bridges([('a', 0), ('b', 1)], native=False)
+        self.assertEqual(self.singles(list(bridges.values())), [(1, [0, 1], ['unpackable', 'unpackable'])])
+
+    def test_four_packed_users_draft_no_singles(self):
+        bridges = self.bridges([('a', 0), ('b', 1), ('c', 2), ('d', 3)])
+        self.assertEqual(self.singles(list(bridges.values())), [])
+        self.assertEqual(len(FakeTrace.instances), 2)
+
+    def test_a_dram_refusal_a_raising_pair_and_a_declining_pair_are_named(self):
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+        bridges = self.bridges([('a', 0), ('b', 1)])
+        with unittest.mock.patch('dflash_packed_proposal_coordinator.dram_headroom', return_value=0):
+            self.assertEqual(self.singles(list(bridges.values())), [(1, [0, 1], ['dram_reserve', 'dram_reserve'])])
+        for fault, reason in (('fail', 'failure'), ('ready', 'declined')):
+            coordinator = PackedProposalCoordinator()
+            real_trace_for = coordinator._trace_for
+
+            def faulty(pair, device_a, device_b, fault=fault):
+                trace = real_trace_for(pair, device_a, device_b)
+                if fault == 'fail':
+                    trace.fail = RuntimeError('boom')
+                else:
+                    trace.ready = False
+                return trace
+
+            coordinator._trace_for = faulty
+            with self.subTest(fault=fault):
+                bridges = self.bridges([('a', 0), ('b', 1)])
+                self.assertEqual(self.singles(list(bridges.values()), coordinator=coordinator),
+                                 [(1, [0, 1], [reason, reason])])
+
+    def test_a_pairs_packed_only_split_is_named(self):
+        bridges = self.bridges([('a', 0), ('b', 1), ('c', 2)])
+        environ = dict(self.S2, QWEN_FAST_PAIRS_PACKED_ONLY='1')
+        with unittest.mock.patch('dflash_packed_proposal_coordinator._PAIRS_PACKED_ONLY_NOTED', [1]):
+            lines = self.singles(list(bridges.values()), environ=environ, packed_round=False)
+        self.assertEqual(lines, [(1, [0, 1, 2], ['split', 'split', 'absent'])])
+
+    def test_without_the_extent_flag_the_log_is_today_s(self):
+        bridges = self.bridges([('a', 0), ('b', 1)], history_rows=1024)
+        for environ in ({'QWEN_FAST_PACKED_AUDIT': '1'}, {'QWEN_FAST_EXTENT_REPLAY': '1'},
+                        {'QWEN_FAST_EXTENT_REPLAY': '0', 'QWEN_FAST_PACKED_AUDIT': '1'}):
+            with self.subTest(environ=environ), unittest.mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop('QWEN_FAST_EXTENT_REPLAY', None)
+                os.environ.pop('QWEN_FAST_PACKED_AUDIT', None)
+                self.assertEqual(self.singles(list(bridges.values()), environ=environ), [])
+
+    def test_every_reason_the_line_can_carry_is_documented(self):
+        import ast
+        import dflash_packed_proposal_coordinator as coordinator
+
+        from pathlib import Path
+
+        tree = ast.parse(Path(coordinator.__file__).read_text(encoding='utf-8'))
+        prepare = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'prepare')
+        used = {node.value for node in ast.walk(prepare) if isinstance(node, ast.Constant)
+                and node.value in coordinator.SINGLE_REASONS}
+        used.update(('ramp', 'unpackable'))       # unpacked_reason's
+        self.assertEqual(used, set(coordinator.SINGLE_REASONS))
+
+    def test_a_pair_bucket_off_the_steady_state_context_fails_the_round(self):
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator, check_pair_buckets
+
+        check_pair_buckets(SimpleNamespace(buckets={(2048, 2048): object()}), (0, 1))
+        check_pair_buckets(SimpleNamespace(), (0, 1))
+        coordinator = PackedProposalCoordinator()
+        real_trace_for = coordinator._trace_for
+
+        def ramped(pair, device_a, device_b):
+            trace = real_trace_for(pair, device_a, device_b)
+            trace.buckets = {(2048, 2048): object(), (1024, 2048): object()}
+            return trace
+
+        coordinator._trace_for = ramped
+        bridges = self.bridges([('a', 0), ('b', 1)])
+        with self.assertRaisesRegex(AssertionError, r'pair \[0, 1\] holds buckets at contexts \[\(1024, 2048\)\]'):
+            coordinator.prepare(list(bridges.values()))
+        # The round fails as any failure after enqueueing does: fenced, the shared pair's pending dropped once.
+        self.operations.synchronize_device.assert_called_once_with(self.mesh)
+        self.assertEqual(FakeTrace.instances[0].discard_calls, 1)
+
+
 if __name__ == '__main__':
     unittest.main()

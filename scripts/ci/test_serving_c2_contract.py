@@ -51,7 +51,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(exact['env']['QWEN_FAST_OUTPUT_BUDGET'], '256')
 
     def test_profile_geometry_is_consistent(self):
-        for name in ('exact', 'coding', 'c2', 'c2-gate'):
+        for name in ('exact', 'coding', 'c2', 'c2-gate', 'c2-packed', 'c2-packed-gate'):
             profile = contract.load_profile(PROFILES, name)
             engine, env = profile['engine'], profile['env']
             self.assertIs(engine['additional-config']['qwen_fast_t16'], True, name)
@@ -161,6 +161,103 @@ class ProfileTest(unittest.TestCase):
         finally:
             os.environ.clear()
             os.environ.update(environ)
+
+
+DOCKERFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'docker', 'qwen-c2-serving.Dockerfile')
+EXTENT_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
+# S2's gate-only knobs (design 1.2, W3/W4/W11): the gate sets them per arm; no profile and no image may.
+GATE_ONLY = ('QWEN_FAST_EXTENT_AUDIT', 'QWEN_FAST_PACKED_CAPTURE_POSITION', 'QWEN_FAST_GATE_FORCE_CAP')
+
+
+class PackedAnyProfileTest(unittest.TestCase):
+    """S2 (design W8, 1.2): c2-packed is c2 with the packed block and the extent flag; c2-packed-gate is
+    c2-gate with the flag. exact, c2 and c2-gate keep their bytes, and are the rollback and the flag-off arms."""
+
+    def load(self, name):
+        return contract.load_profile(PROFILES, name)
+
+    def test_c2_packed_is_c2_less_its_block_overrides_plus_the_flag(self):
+        c2, packed = self.load('c2'), self.load('c2-packed')
+        block_only = ('QWEN_FAST_PACKED_STEP', 'QWEN_FAST_PADDED_BLOCK')
+        self.assertEqual(packed['env'], dict({key: value for key, value in c2['env'].items() if key not in block_only},
+                                             **{EXTENT_FLAG: '1'}))
+        for key in block_only:
+            self.assertIn(key, c2['env'])
+            self.assertNotIn(key, packed['env'], 'the image\'s own value (1) builds the block')
+        for key in set(c2) | set(packed):
+            if key not in ('env', 'description', 'name'):
+                self.assertEqual(packed.get(key), c2.get(key), key)
+        self.assertEqual(contract.request_limits(packed), dict(budget=16384, max_prompt_tokens=123136,
+                                                               min_answer_tokens=8192, default_max_tokens=8192))
+        self.assertIs(contract.parser_rechunk(packed), True)
+
+    def test_c2_packed_gate_is_c2_gate_plus_the_flag(self):
+        gate, packed_gate = self.load('c2-gate'), self.load('c2-packed-gate')
+        self.assertEqual(packed_gate['env'], dict(gate['env'], **{EXTENT_FLAG: '1'}))
+        for key in set(gate) | set(packed_gate):
+            if key not in ('env', 'description', 'name'):
+                self.assertEqual(packed_gate.get(key), gate.get(key), key)
+        self.assertEqual(contract.request_limits(packed_gate), contract.request_limits(gate))
+
+    def test_the_s2_engines_are_exacts(self):
+        exact = self.load('exact')
+        for name in ('c2-packed', 'c2-packed-gate'):
+            for snapshot in ('/snap', exact['snapshots'][1]):
+                with self.subTest(profile=name, snapshot=snapshot):
+                    self.assertEqual(contract.engine_arguments(self.load(name), snapshot),
+                                     contract.engine_arguments(exact, snapshot))
+
+    def test_only_the_s2_profiles_set_the_flag_and_none_sets_a_gate_only_knob(self):
+        with open(PROFILES, encoding='utf-8') as handle:
+            names = sorted(json.load(handle)['profiles'])
+        self.assertEqual([name for name in names if EXTENT_FLAG in self.load(name)['env']], ['c2-packed', 'c2-packed-gate'])
+        for name in names:
+            env = self.load(name)['env']
+            with self.subTest(profile=name):
+                self.assertIn(env.get(EXTENT_FLAG, '0'), ('0', '1'))
+                for knob in GATE_ONLY:
+                    self.assertNotIn(knob, env)
+        # The rollback and the flag-off arms are untouched by S2 (design 1.2: W6 no longer edits them).
+        self.assertEqual(self.load('exact')['env'], {'QWEN_FAST_OUTPUT_BUDGET': '256', 'QWEN_FAST_MAX_POSITION': '131328',
+                                                     'QWEN_DSPARK_REQUEST_CONTEXT': '131072'})
+        self.assertEqual(self.load('c2')['env']['QWEN_FAST_PACKED_STEP'], '0')
+
+    @unittest.skipUnless(os.path.isfile(DOCKERFILE), 'repository checkout only')
+    def test_the_image_bakes_neither_the_flag_nor_a_gate_only_knob(self):
+        with open(DOCKERFILE, encoding='utf-8') as handle:
+            text = handle.read()
+        for name in (EXTENT_FLAG,) + GATE_ONLY:
+            self.assertNotIn(name, text, 'only the S2 profiles (the flag) or the gate (the knobs) may set %s' % name)
+
+    @unittest.skipUnless(os.path.isfile(DOCKERFILE), 'repository checkout only')
+    def test_the_s2_profiles_boot_into_an_environment_the_admission_takes(self):
+        """The image's ENV, then the profile (the contract's own apply_environment): exactly what the attach's
+        packed_any_admission.check_environment reads - the M3 shape at max-num-seqs, ANY_REQUEST, eight-row
+        groups, the tree-scratch patch, tail without extent - and the runtime pin names K64j. Under c2 the
+        same boot fails the shape: it builds no block."""
+        import packed_any_admission
+        import serving_runtime
+
+        with open(DOCKERFILE, encoding='utf-8') as handle:
+            joined = handle.read().replace(chr(92) + chr(10), ' ')
+        # c2_image_provenance.dockerfile_env's parse (that module is not in the image this test also runs in).
+        image = dict(token.partition('=')[::2] for line in joined.split(chr(10)) if line.startswith('ENV ')
+                     for token in line[4:].split() if '=' in token)
+        for name, admitted in (('c2-packed', True), ('c2-packed-gate', True), ('c2', False)):
+            profile = self.load(name)
+            env = contract.apply_environment(profile, dict(image))
+            m3 = serving_runtime.m3_shape(dict(scheduler_requests=profile['engine']['max-num-seqs']), env)
+            problems = packed_any_admission.check_environment(env, m3)
+            with self.subTest(profile=name):
+                if admitted:
+                    self.assertEqual(problems, [])
+                    self.assertTrue(packed_any_admission.extent_replay_enabled(env))
+                    self.assertEqual(env[packed_any_admission.RUNTIME_BINARY_ENV],
+                                     packed_any_admission.K64J_TTNNCPP_SHA256)
+                else:
+                    self.assertEqual(len(problems), 1, problems)
+                    self.assertIn('PACKED_STEP=0', problems[0])
+                    self.assertFalse(packed_any_admission.extent_replay_enabled(env))
 
 
 class GeneralProfileTest(unittest.TestCase):

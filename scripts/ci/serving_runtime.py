@@ -129,7 +129,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # touches the hash-pinned sources nor lowers the pin itself. Must run before
     # combined_runtime() is entered below, since dflash_t16_native_scope.admit runs inside it.
     from runtime_binary_override import install as override_runtime_binary
-    override_runtime_binary(runtime_root, log=pindiag)
+    binary_record = override_runtime_binary(runtime_root, log=pindiag)
     # Measurement-only, env-gated admission of the device profiler into the mandatory
     # block-stream recipe (attribution only, never a throughput claim): inert unless
     # QWEN_FAST_PROFILED_BLOCK_STREAM=1, and edits no recipe file. Must run before
@@ -145,6 +145,18 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # QWEN_FAST_PADDED_BLOCK (default off): the 64-row block's fewest live users per round, or
     # None. Refused here at any other shape, before anything is built, like the single copy.
     padded_min_users = padded_block_admission(policy)
+    # S2 C2-packed-any (QWEN_FAST_EXTENT_REPLAY, default off; strictly '0' or '1'): packed rounds at any
+    # position through the K64j extent readers. Admitted here or nowhere, host only and before anything
+    # is built, so a refusal builds nothing: the M3 shape, C2-any, eight-row groups, the tree-scratch
+    # precondition, the modes, the K64j binary and kernels, and the pinned hardware evidence
+    # (packed_any_admission, design W7). Off, nothing here runs and the attach is today's.
+    from packed_any_admission import extent_replay_enabled
+
+    extent_replay = extent_replay_enabled()
+    if extent_replay:
+        from packed_any_admission import admit as admit_packed_any
+
+        admit_packed_any(runtime_root, m3=m3_shape(policy), binary_record=binary_record, log=pindiag)
     if (native_attention_evidence is None or kv_publication_evidence is None
             or (block_stream is None and reader is None)
             or (block_stream is not None and 'pipeline_evidence' in block_stream)):
@@ -294,6 +306,13 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 packed_replay_group_rows=replay_group_rows(),
                 **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}))))
         scopes.callback(pool.close)
+        if extent_replay:
+            # Design B4: the scheduler-side DRAM hold reads the pool's statistics for every request, so a
+            # c2-packed attach that cannot read them fails closed here, before any trace (the pool closes
+            # with the scopes).
+            from packed_any_admission import admit_statistics
+
+            admit_statistics(pool, log=pindiag)
         memory_ledger.record('P2', buffer_pool=pool)
         owner = ServingCacheOwner(operations, runner, model)
         # Built once and shared by every request: two TT_CCL objects cycling semaphore

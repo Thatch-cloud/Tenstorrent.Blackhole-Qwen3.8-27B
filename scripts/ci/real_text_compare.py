@@ -256,6 +256,16 @@ ARITHMETIC_NEUTRAL_SUFFIXES = ('_AUDIT',)
 # OUTPUT_BUDGET (256 unset); the C2 contract exports its profile's value into every process of the
 # image (serving_c2_contract.apply_environment), so a served arm carries 256 where v235 carried none.
 EFFECTIVE_DEFAULTS = {'QWEN_FAST_OUTPUT_BUDGET': '256'}
+# Reviewed successions (S2 design W9 and M2): {flag: (older value, newer value)}. Two arms that differ by
+# exactly that pair of that flag are held to the same arithmetic, so a divergence between them FAILS
+# instead of reading NOT_COMPARABLE: the K64j image serves exact through K64i's programs (it adds only the
+# 0x20 branch and its kernels), and M2 - exact on the K64j image against v235's K64i reference - is the
+# run that must fail if that is not so. c2_image_provenance.ENVIRONMENT_SUCCESSIONS is the same review
+# for G1 (test_c2_image_overlay holds the two equal). Any other value of the flag is still arithmetic.
+REVIEWED_SUCCESSIONS = {
+    'QWEN_FAST_RUNTIME_BINARY_SHA256': ('cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4',
+                                        '152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7'),
+}
 POLICY_EXIT = dict(PASS=0, FAIL=1, NOT_COMPARABLE=3, UNSTABLE=4, RERUN=5)
 
 
@@ -263,9 +273,16 @@ def arithmetic_neutral(name):
     return name in ARITHMETIC_NEUTRAL or name.endswith(ARITHMETIC_NEUTRAL_SUFFIXES)
 
 
+def reviewed_succession(name, values):
+    """Whether two values of a flag are one of REVIEWED_SUCCESSIONS' pairs, in either order."""
+    pair = REVIEWED_SUCCESSIONS.get(name)
+    return pair is not None and sorted(values, key=str) == sorted(pair)
+
+
 def arithmetic_diff(first, second):
     """{flag: [first, second]} for every arithmetic flag the two reports differ by, a flag either
-    side leaves unset read as its EFFECTIVE_DEFAULTS value; None when either carries no configuration."""
+    side leaves unset read as its EFFECTIVE_DEFAULTS value and a REVIEWED_SUCCESSIONS pair read as
+    equal; None when either carries no configuration."""
     differ = configuration_diff(first, second)
     if differ is None:
         return None
@@ -273,7 +290,8 @@ def arithmetic_diff(first, second):
         return EFFECTIVE_DEFAULTS.get(name) if value is None else value
 
     return {name: values for name, values in differ.items() if not arithmetic_neutral(name)
-            and effective(name, values[0]) != effective(name, values[1])}
+            and effective(name, values[0]) != effective(name, values[1])
+            and not reviewed_succession(name, values)}
 
 
 def policy_user(verdict):

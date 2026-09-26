@@ -30,8 +30,22 @@ class RuntimeAttachmentTests(unittest.TestCase):
     STREAM = {'streams': 'serial', 'evidence': 'stream'}
 
     def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None, four_as_two=None,
-                 replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None):
+                 replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None,
+                 admission=None, statistics_refused=False):
         events = []
+        # S2 W7 (QWEN_FAST_EXTENT_REPLAY=1): `admission` sets the flag and records packed_any_admission.admit
+        # and admit_statistics as events ('admit', 'statistics'); its 'admit' / 'statistics' entries are the
+        # exceptions they raise. None leaves the flag and both functions alone.
+        self.admission_calls = dict(admit=[], statistics=[])
+
+        def admission_call(name):
+            def call(*args, **kwargs):
+                events.append(name)
+                self.admission_calls[name].append((args, kwargs))
+                if admission.get(name) is not None:
+                    raise admission[name]
+                return {}
+            return call
 
         def diag(template, *values):
             # the attach-failed line lands among the events, so its place before the scope
@@ -106,8 +120,14 @@ class RuntimeAttachmentTests(unittest.TestCase):
             env['QWEN_FAST_FOUR_AS_TWO'] = '1' if four_as_two else '0'
         if replay_group_rows is not None:
             env['QWEN_FAST_REPLAY_GROUP_ROWS'] = str(replay_group_rows)
+        if admission is not None:
+            env['QWEN_FAST_EXTENT_REPLAY'] = '1'
         env.update(extra_env or {})
         with patch.dict('os.environ', env), \
+                (patch('packed_any_admission.admit', side_effect=admission_call('admit'))
+                 if admission is not None else nullcontext()), \
+                (patch('packed_any_admission.admit_statistics', side_effect=admission_call('statistics'))
+                 if admission is not None else nullcontext()), \
                 patch.dict(sys.modules, {
                 'models.common.sampling.generator': SimpleNamespace(SamplingGenerator=generator),
                 'models.tt_transformers.tt.ccl': SimpleNamespace(TT_CCL=Mock()),
@@ -243,16 +263,24 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 # attach may have left hung: run 35507675630).
                 block_built = ['block_build'] * len(shapes)
                 block_closed = ['block_close'] * len(shapes)
+                # Under the extent flag the admission runs first, and the statistics check right after the pool.
+                admitted = ['admit'] if admission is not None else []
+                statistics = ['statistics'] if admission is not None else []
                 if refused:
                     # Refused before the pool, the runtime or anything else was built.
-                    self.assertEqual(events, [])
+                    self.assertEqual(events, admitted)
+                elif statistics_refused:
+                    # Only the pool was built, and it closes with the scopes after the failure is logged.
+                    failure = admission['statistics']
+                    self.assertEqual(events, [*admitted, 'pool_build', *statistics, ('diag', self.ATTACH_FAILED.replace(
+                        'RuntimeError: attach failed', '%s: %s' % (type(failure).__name__, failure))), 'pool_close'])
                 elif attach_fail:
-                    self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
+                    self.assertEqual(events, [*admitted, 'pool_build', *statistics, 'runtime_enter', 'weights_build',
                                               *block_built, ('diag', self.ATTACH_FAILED),
                                               *block_closed, 'weights_close', 'runtime_exit',
                                               'pool_close'])
                 else:
-                    self.assertEqual(events, ['pool_build', 'runtime_enter', 'weights_build',
+                    self.assertEqual(events, [*admitted, 'pool_build', *statistics, 'runtime_enter', 'weights_build',
                                               *block_built, 'request', 'lifecycle_close',
                                               *block_closed, 'weights_close', 'runtime_exit',
                                               'pool_close'])
@@ -567,3 +595,73 @@ class MemoryLedgerHookTests(unittest.TestCase):
         # memory_ledger.record is the real one here: with no active ledger it returns at
         # its first line, so MemoryLedger.phase (patched to fail the test) never runs.
         self.run_attach(False)
+
+
+class PackedAnyAdmissionAttachTests(unittest.TestCase):
+    """S2 W7: under QWEN_FAST_EXTENT_REPLAY=1 the attach admits the extent path (packed_any_admission.admit) on
+    the host before anything is built, and requires the pool's DRAM statistics right after the pool; with
+    the flag unset or '0' neither runs and the attach is exactly today's."""
+
+    M3 = dict(packed=True, users=4, four_as_two=False)
+
+    def test_the_flag_admits_before_anything_and_reads_the_statistics_after_the_pool(self):
+        test = RuntimeAttachmentTests()
+        test.exercise(admission={}, **self.M3)
+        (args, kwargs), = test.admission_calls['admit']
+        self.assertEqual(args, ('.',), 'the runtime root the binaries and kernels are read under')
+        self.assertEqual(kwargs['m3'], (True, 'users=4 FOUR_AS_TWO=0 PACKED_STEP=1'))
+        self.assertIsNone(kwargs['binary_record'], 'no override is requested in this environment')
+        self.assertTrue(callable(kwargs['log']))
+        (args, kwargs), = test.admission_calls['statistics']
+        self.assertEqual(args[0].describe(), dict(users=4), 'the pool just built')
+
+    def test_the_override_record_reaches_the_admission_so_the_binaries_are_hashed_once(self):
+        record = dict(override='a' * 64, binaries={'build_Release/lib/_ttnncpp.so': 'a' * 64})
+        test = RuntimeAttachmentTests()
+        with patch('runtime_binary_override.install', return_value=record):
+            test.exercise(admission={}, **self.M3)
+        (_, kwargs), = test.admission_calls['admit']
+        self.assertIs(kwargs['binary_record'], record)
+
+    def test_a_refused_admission_builds_nothing(self):
+        import packed_any_admission
+
+        test = RuntimeAttachmentTests()
+        with self.assertRaisesRegex(packed_any_admission.AdmissionRefused, 'CB2b'):
+            test.exercise(admission=dict(admit=packed_any_admission.AdmissionRefused('CB2b: status PENDING')),
+                          refused=True, **self.M3)
+        self.assertEqual(test.admission_calls['statistics'], [])
+
+    def test_unreadable_statistics_fail_the_attach_with_only_the_pool_built(self):
+        import packed_any_admission
+
+        test = RuntimeAttachmentTests()
+        with self.assertRaisesRegex(packed_any_admission.AdmissionRefused, 'unavailable'):
+            test.exercise(admission=dict(statistics=packed_any_admission.AdmissionRefused('statistics unavailable')),
+                          statistics_refused=True, **self.M3)
+
+    def test_the_flag_off_runs_neither(self):
+        for extra_env in ({}, {'QWEN_FAST_EXTENT_REPLAY': '0'}):
+            with self.subTest(extra_env=extra_env), \
+                    patch('packed_any_admission.admit', side_effect=AssertionError('admit ran')), \
+                    patch('packed_any_admission.admit_statistics', side_effect=AssertionError('statistics ran')):
+                RuntimeAttachmentTests().exercise(extra_env=extra_env, **self.M3)
+                RuntimeAttachmentTests().exercise(packed=False, users=1, extra_env=extra_env)
+
+    def test_a_malformed_flag_is_refused_before_anything(self):
+        for value in ('yes', 'true', '2', ''):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'QWEN_FAST_EXTENT_REPLAY must be 0 or 1'):
+                RuntimeAttachmentTests().exercise(extra_env={'QWEN_FAST_EXTENT_REPLAY': value}, refused=True, **self.M3)
+
+    def test_the_real_admission_refuses_this_checkout_s_runtime_and_names_why(self):
+        """No fake admission: the attach under the flag reaches packed_any_admission.admit, which refuses a
+        runtime root that is not K64j and the evidence whose CB2b has not passed - and nothing is built."""
+        import packed_any_admission
+
+        with patch.dict(packed_any_admission._STATE, clear=True), \
+                self.assertRaises(packed_any_admission.AdmissionRefused) as caught:
+            RuntimeAttachmentTests().exercise(extra_env={'QWEN_FAST_EXTENT_REPLAY': '1'}, refused=True, **self.M3)
+        for words in ('QWEN_FAST_ANY_REQUEST=(unset), not 1', 'QWEN_FAST_RUNTIME_BINARY_SHA256=(unset)',
+                      'the runtime is not K64j', 'CB2b: status PENDING, not PASS'):
+            self.assertIn(words, str(caught.exception))
+        self.assertFalse(packed_any_admission.admitted())

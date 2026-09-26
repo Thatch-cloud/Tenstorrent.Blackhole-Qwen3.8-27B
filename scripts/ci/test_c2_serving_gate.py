@@ -285,7 +285,28 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(driver.profile_limits(profiles_with_c2(), 'c2-gate'), (131328, 16384, 131072))
         self.assertEqual(driver.profile_limits(profiles_with_c2(), 'exact'), (131328, 256, 131072))
         self.assertEqual([name for name in sorted(CHECKOUT_PROFILES['profiles'])
-                          if driver.any_request_profile(CHECKOUT_PROFILES, name)], ['c2', 'c2-gate'])
+                          if driver.any_request_profile(CHECKOUT_PROFILES, name)],
+                         ['c2', 'c2-gate', 'c2-packed', 'c2-packed-gate'])
+
+    def test_the_s2_profiles_limits_are_their_flag_off_twins(self):
+        """S2 (design W8): c2-packed serves c2's edge (123,136-token prompts, 8,192 of answer room), and
+        c2-packed-gate c2-gate's (v235's 131,072 admitted), so a flag-on arm and its flag-off twin plan the
+        same arms and a G3/G3b/M1 pair differs only in QWEN_FAST_EXTENT_REPLAY."""
+        profiles = profiles_with_c2()
+        for flag_on, flag_off in (('c2-packed', 'c2'), ('c2-packed-gate', 'c2-gate')):
+            with self.subTest(profile=flag_on):
+                self.assertEqual(driver.profile_limits(profiles, flag_on), driver.profile_limits(profiles, flag_off))
+                self.assertEqual(driver.profile_seats(profiles, flag_on), 4)
+                self.assertTrue(driver.any_request_profile(profiles, flag_on))
+                self.assertEqual(driver.bringup_warning(profiles, flag_on) is None,
+                                 driver.bringup_warning(profiles, flag_off) is None)
+                on, off = (dict(profiles['profiles'][name]['env']) for name in (flag_on, flag_off))
+                self.assertEqual(on.pop('QWEN_FAST_EXTENT_REPLAY'), '1')
+                for key in ('QWEN_FAST_PACKED_STEP', 'QWEN_FAST_PADDED_BLOCK'):
+                    off.pop(key, None)
+                self.assertEqual(on, off)
+        self.assertEqual(driver.profile_limits(profiles, 'c2-packed'), (131328, 16384, 123136))
+        self.assertEqual(driver.profile_limits(profiles, 'c2-packed-gate'), (131328, 16384, 131072))
 
     def test_the_memory_arms_are_the_largest_prompts_and_on_c2_any_the_shortest(self):
         """G5: four of the largest admitted prompts at what the contract leaves them (c2: 123,136 + 8,192;

@@ -1036,6 +1036,8 @@ class StructureTests(unittest.TestCase):
             'contextlib': {'ExitStack', 'contextmanager'}, 'os': set(), 'pathlib': {'Path'},
             'attention_mask_replay': set(), 'attention_fold_dma': {'device_layout_dma'},
             'attention_head_fold': {'parallel_groups'}, 'gdn_multitoken_conv': {'addresses', 'release_owned'},
+            # Design W7: under QWEN_FAST_EXTENT_REPLAY=1 a reader refuses construction unless the attach admitted it.
+            'packed_any_admission': {'require_admitted'},
             'pooled_attention_replay': {'QWEN_SDPA_EXTENT_MARKER', 'apply_sdpa_modes', 'sdpa_modes', 'validate_segments'}})
         lazy = {alias.name for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
                 and node not in tree.body for alias in node.names}

@@ -86,6 +86,18 @@ scripts/ci/serving_packed_step.py
 scripts/ci/extent_attention_replay.py
 scripts/ci/serving_buffer_pool.py
 
+# S2 W7: the c2-packed attach-time admission, and the hardware evidence it pins (CB1, CB2a, CB2b and the reader
+# bytes they qualified), flat beside it: packed_any_admission reads packed_any_evidence.json from its own directory.
+scripts/ci/packed_any_admission.py
+scripts/ci/packed_any_evidence.json
+# The modules S2 edits that the image otherwise holds at P8's commit (the P8 copy lists), byte-identical to HEAD
+# until S2's own edits land: model_batch (W3: the extent readers in the block), dflash_packed_proposal_coordinator
+# (W6c: dead-trace release on detach; W12: the singles line) and memory_ledger (W6d: before-points). Overlaid
+# now, so each S2 edit ships the moment it lands (test_c2_image_overlay's positive control drops model_batch).
+scripts/ci/model_batch.py
+scripts/ci/dflash_packed_proposal_coordinator.py
+scripts/ci/memory_ledger.py
+
 # The third route: GreedySession arrives with the bundle's /speculative-decoding tree. S2 D1 (W5a)
 # changes it (GreedySession.narrow, called by serving_packed_step.narrow_round), so this line is what
 # ships that change: without it the image keeps the bundle's 77d6995a copy, which has no narrow, and
@@ -103,6 +115,9 @@ scripts/ci/test_serving_worker_hook.py
 scripts/ci/test_serving_lifecycle.py
 # S2 W1: the extent readers against the image's own pinned mask kernel sources and pooled reader.
 scripts/ci/test_extent_attention_replay.py
+# S2 W7: the admission against fake runtimes and evidence, and (InImageRuntimeTests) check_runtime on the image's
+# own /opt/tt-metal: K64j at both binary paths with its literals, its four kernels, the patched tree scratch.
+scripts/ci/test_packed_any_admission.py
 # Fix M against the image's own vLLM parsers and tokenizers (CorpusTests), on its token-id corpus.
 scripts/ci/test_c2_parser_rechunk.py
 scripts/ci/c2_parser_corpus.json
