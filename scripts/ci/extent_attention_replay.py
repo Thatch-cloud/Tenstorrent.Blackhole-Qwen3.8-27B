@@ -23,7 +23,11 @@ The word and cur_pos come from one helper, extent_values(start), so they cannot 
 different families. Construction stages word, cur_pos and tables for the reader's start, fenced
 and address-checked (design A6): without it the pool's zeroed cur_pos would describe E = 256
 while `start` says otherwise, and model_batch skips the initial stage exactly when the start
-already matches the capture start.
+already matches the capture start. After construction `stage(start)` writes only what the start
+determines, the word and cur_pos, as the pinned stage writes only its word: the lent tables are
+written when a table is passed (construction does) and otherwise by the block's packed_values ->
+write_packed every round. The reader keeps no host copy of a table, so it can never restage one
+that a served round has since replaced.
 
 WHAT IT NEVER DOES. attention_replay.py, attention_mask_replay.py/.cpp, attention_parallel.py and
 attention_fold_dma.* are frozen-recipe evidence (target_t16_attention_gate.SOURCES) and keep their
@@ -101,6 +105,14 @@ def accept_limit(start, rows):
     design and are capped like rejected drafts (design 2.4)."""
     _integer('rows', rows, 1)
     return min(rows, extent(start) - start)
+
+
+def check_start(start, rows, capacity):
+    """Host only: an integer start whose `rows` rows fit a `capacity`-key table. No floor: idle
+    segments sit at start 0 or 32 (admits holds live tickets to >= 128)."""
+    if type(start) is not int or start < 0 or start + rows > capacity:
+        raise ValueError('Extent ticket must be an integer start with 0 <= start and start + %d <= %d, got %r'
+                         % (rows, capacity, start))
 
 
 def admits(start, rows, capacity):
@@ -253,11 +265,6 @@ def _padded_last(tensor):
     return tuple(tensor.shape)[-1] if shape is None else tuple(shape)[-1]
 
 
-def _memory_config(operations, tensor):
-    config = getattr(tensor, 'memory_config', None)
-    return config() if callable(config) else operations.DRAM_MEMORY_CONFIG
-
-
 def independent(operations, tensors, what):
     """Refuse two tensors sharing a chip-local buffer: a lent table, cur_pos, word or mask is written
     by the host and read in-trace, so an alias would stage one user's state into another's."""
@@ -281,12 +288,12 @@ def validate_extent_storage(operations, storage, bundles, page_width):
         batches = len(bundle)
         if (tuple(table.shape) != (batches, page_width) or table.dtype != operations.int32
                 or table.layout != operations.ROW_MAJOR_LAYOUT
-                or _memory_config(operations, table) != operations.DRAM_MEMORY_CONFIG):
+                or table.memory_config() != operations.DRAM_MEMORY_CONFIG):
             raise ValueError('Extent page table must be a row-major int32 (%d, %d) in interleaved DRAM'
                              % (batches, page_width))
         if (tuple(positions.shape) != (batches,) or _padded_last(positions) != batches
                 or positions.dtype != operations.int32 or positions.layout != operations.ROW_MAJOR_LAYOUT
-                or _memory_config(operations, positions) != operations.DRAM_MEMORY_CONFIG):
+                or positions.memory_config() != operations.DRAM_MEMORY_CONFIG):
             raise ValueError('Extent cur_pos must be a row-major int32 (%d,) in interleaved DRAM (K64j F20: '
                              'padded_shape[-1] == B)' % batches)
     independent(operations, [tensor for pair in storage for tensor in pair], 'Extent storage')
@@ -342,7 +349,6 @@ class ExtentSegmentReader:
         lent = validate_extent_storage(operations, storage, bundles, page_width)
         self.borrowed = [tensor for pair in lent for tensor in pair]
         self.cur_pos = [positions for table, positions in lent]
-        self.pages_host = pages_host[:, :page_width].clone()
         self.owned, self.metadata, self.programs = [], [], []
         self.calls, self.refresh_calls = 0, 0
         self.mask_scope = None
@@ -362,7 +368,7 @@ class ExtentSegmentReader:
                                                     offset=bundle[0]['offset']))
             independent(operations, [*self.borrowed, *self.owned], 'Extent reader buffers')
             # Design A6: the word, cur_pos and tables for `start`, before any forward reads them.
-            self.stage(start)
+            self.stage(start, table=pages_host)
             apply_sdpa_modes(self, modes | {'extent'})
             flags = tuple(getattr(self, 'sdpa_modes_applied', None) or ())
             if len(flags) != len(self.metadata) or any(value != EXTENT_FLAGS for value in flags):
@@ -390,17 +396,18 @@ class ExtentSegmentReader:
             raise RuntimeError('Extent replay reader is closed')
         if self.failed:
             raise RuntimeError('Extent replay reader is poisoned after a failed operation')
-        if type(start) is not int or start < 0 or start + self.rows > self.capacity:
-            raise ValueError('Extent ticket must be an integer start with 0 <= start and start + %d <= %d, got %r'
-                             % (self.rows, self.capacity, start))
+        check_start(start, self.rows, self.capacity)
 
     def stage_values(self, start, table):
         """(destination, host value, dtype, layout) for `start`, in order: the word [start & 255, 0 x 7],
-        then per bundle its cur_pos [E - 1] * B and its table (1, >= page_width) repeated B times."""
+        then per bundle its cur_pos [E - 1] * B and, when `table` is a host table, that table
+        (1, >= page_width) repeated B times. `table=None` gives only what the start determines, the
+        word and cur_pos; the argument is required, so a caller that means to write tables says so."""
         import torch
 
         self.validate(start)
-        if getattr(table, 'ndim', None) != 2 or table.shape[0] != 1 or table.shape[1] < self.page_width:
+        if table is not None and (getattr(table, 'ndim', None) != 2 or table.shape[0] != 1
+                                  or table.shape[1] < self.page_width):
             raise ValueError('One complete (1, >= %d) host page table required' % self.page_width)
         operations = self.operations
         relative, position = extent_values(start)
@@ -410,14 +417,17 @@ class ExtentSegmentReader:
         for (bundle, pages, mask, config), cur_pos in zip(self.metadata, self.cur_pos, strict=True):
             values.append((cur_pos, torch.full((len(bundle),), position, dtype=torch.int32),
                            operations.int32, operations.ROW_MAJOR_LAYOUT))
-            values.append((pages, table[:, :self.page_width].repeat(len(bundle), 1).contiguous(),
-                           operations.int32, operations.ROW_MAJOR_LAYOUT))
+            if table is not None:
+                values.append((pages, table[:, :self.page_width].repeat(len(bundle), 1).contiguous(),
+                               operations.int32, operations.ROW_MAJOR_LAYOUT))
         return values
 
     def stage(self, start, table=None):
-        """Write exactly stage_values(start, the current table), fenced, addresses checked unchanged; a
-        failed copy poisons the reader. `table` replaces the current host table once written."""
-        values = self.stage_values(start, self.pages_host if table is None else table)
+        """Write exactly stage_values(start, table), fenced, addresses checked unchanged; a failed copy
+        poisons the reader. Without a table that is the word and cur_pos only: the lent tables are the
+        block's to keep current (packed_values -> write_packed, every round), and a restage from a
+        table held since capture would silently point every attention layer at old pages."""
+        values = self.stage_values(start, table)
         if self.mask_scope is not None:
             raise RuntimeError('Cannot stage positions during a shared-mask forward')
         operations = self.operations
@@ -435,8 +445,6 @@ class ExtentSegmentReader:
             self.failed = True
             raise
         self.start = start
-        if table is not None:
-            self.pages_host = table[:, :self.page_width].clone()
 
     def refresh(self):
         self.validate(self.start)
@@ -513,6 +521,10 @@ class PackedExtentReplayReader:
             raise ValueError('One host page table, one start and one lent (table, cur_pos) set per packed segment required')
         if type(max_group_rows) is not int or type(page_width) is not int:
             raise ValueError('Integer group width and page-table width required')
+        # Every start on the host before any reader is built: a bad start for a later segment
+        # refuses the block with nothing staged into any segment's lent storage.
+        for (first, last), start in zip(self.segments, starts, strict=True):
+            check_start(start, last - first, page_width * 64)
         # Every segment's lent storage against the bundles its reader will take, and no buffer shared
         # between segments, before any reader is built: a wrong set refuses the block with nothing staged.
         for (first, last), pairs in zip(self.segments, lent, strict=True):
@@ -586,7 +598,8 @@ class PackedExtentReplayReader:
             reader.validate(start)
 
     def stage(self, starts):
-        """Each segment's word, cur_pos and tables, one fenced write per segment."""
+        """Each segment's word and cur_pos, one fenced write per segment. The tables are not written:
+        construction staged them and the block's packed_values keeps them current."""
         starts = tuple(starts)
         self.validate(starts)
         for reader, start in zip(self.readers, starts, strict=True):

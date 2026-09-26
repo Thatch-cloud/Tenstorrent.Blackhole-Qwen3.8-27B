@@ -48,9 +48,12 @@ class FakeShard:
 
 
 class FakeTensor:
-    def __init__(self, shape, dtype, layout, memory, shards, value=None, name=''):
+    def __init__(self, shape, dtype, layout, memory, shards, value=None, name='', origin=None):
         self.shape, self.dtype, self.layout, self.memory = tuple(shape), dtype, layout, memory
         self.shards, self.value, self.name = shards, value, name
+        # What made it: ('slice', source, start, stop), ('concat', parts), ('fold', source, inverse,
+        # offset) or ('sdpa', query, options), so a test can walk an output back to its rows.
+        self.origin = origin
 
     @property
     def padded_shape(self):
@@ -62,24 +65,26 @@ class FakeTensor:
 
 class FakeDevice:
     """Two chips with independent bump allocators; device tensors hold a host copy of their value, so
-    a test reads back what the host staged into them."""
+    a test reads back what the host staged into them. Slices, concats and SDPA results record their
+    inputs (FakeTensor.origin), and `events` orders the SDPA calls against the mask refreshes a test
+    records there."""
 
     int32, uint32, bfloat16 = 'int32', 'uint32', 'bf16'
     ROW_MAJOR_LAYOUT, TILE_LAYOUT, DRAM_MEMORY_CONFIG = 'row_major', 'tile', 'dram'
 
     def __init__(self):
         self.next = [0x1000, 0x800000]
-        self.live, self.deallocated, self.copies, self.sdpa = [], [], [], []
+        self.live, self.deallocated, self.copies, self.sdpa, self.events = [], [], [], [], []
         self.fences = 0
         self.copy_hook = None
         self.transformer = SimpleNamespace(paged_scaled_dot_product_attention_decode=self.attention)
 
-    def device_tensor(self, shape, dtype=None, layout=None, memory='dram', value=None, name=''):
+    def device_tensor(self, shape, dtype=None, layout=None, memory='dram', value=None, name='', origin=None):
         shards = []
         for chip in range(2):
             shards.append(FakeShard(self.next[chip]))
             self.next[chip] += 0x100
-        tensor = FakeTensor(shape, dtype, layout, memory, shards, value, name)
+        tensor = FakeTensor(shape, dtype, layout, memory, shards, value, name, origin)
         self.live.append(tensor)
         return tensor
 
@@ -126,16 +131,18 @@ class FakeDevice:
 
     def slice(self, tensor, start, stop, memory_config):
         return self.device_tensor(tuple(b - a for a, b in zip(start, stop)), 'bf16', 'tile', memory_config,
-                                  name='slice%d' % start[1])
+                                  name='slice%d' % start[1], origin=('slice', tensor, tuple(start), tuple(stop)))
 
     def concat(self, parts, dim, memory_config):
         shape = list(parts[0].shape)
         shape[dim] = sum(part.shape[dim] for part in parts)
-        return self.device_tensor(shape, 'bf16', 'tile', memory_config, name='concat')
+        return self.device_tensor(shape, 'bf16', 'tile', memory_config, name='concat', origin=('concat', tuple(parts)))
 
     def attention(self, query, keys, values, **options):
         self.sdpa.append(options)
-        return self.device_tensor(query.shape, 'bf16', 'tile', options['memory_config'], name='sdpa')
+        self.events.append(('sdpa', options['attn_mask']))
+        return self.device_tensor(query.shape, 'bf16', 'tile', options['memory_config'], name='sdpa',
+                                  origin=('sdpa', query, options))
 
 
 MESH = SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))
@@ -161,10 +168,47 @@ def host_table(seed, width=WIDTH):
 def fake_device_layout_dma(device):
     def permute(mesh, source, rows, owned, *, inverse=False, offset=0):
         output = device.device_tensor((1, rows, 12, 256) if inverse else (1, 1, rows * 12, 256), 'bf16', 'tile',
-                                      'dram', name='fold')
+                                      'dram', name='fold', origin=('fold', source, inverse, offset))
         owned.append(output)
         return output
     return permute
+
+
+def recording_refresh(device, refreshed):
+    """attention_mask_replay.execute's stand-in: records each mask refresh, and orders it against the
+    SDPA calls in device.events."""
+    def execute(positions, mask, program):
+        refreshed.append((positions, mask, program))
+        device.events.append(('refresh', mask))
+    return execute
+
+
+def expect(condition, what):
+    if not condition:
+        raise AssertionError(what)
+
+
+def route(output):
+    """Walk a segment reader's output back through the fake device, one entry per chunk in the order
+    its concat joined them: (the tensor whose rows were folded in, the group offsets stacked, the
+    bundle entry sliced back out, and that SDPA call's page table, cur_pos and mask)."""
+    expect(output.origin is not None and output.origin[0] == 'concat', 'not a concat: %r' % (output.origin,))
+    routes = []
+    for chunk in output.origin[1]:
+        kind, selected, inverse, offset = chunk.origin
+        expect(kind == 'fold' and inverse, 'chunk is not an inverse fold: %r' % (chunk.origin,))
+        kind, result, first, last = selected.origin
+        expect(kind == 'slice' and last[1] == first[1] + 1, 'chunk is not one bundle entry: %r' % (selected.origin,))
+        kind, stacked, options = result.origin
+        expect(kind == 'sdpa', 'entry is not an SDPA result: %r' % (result.origin,))
+        kind, folds = stacked.origin
+        expect(kind == 'concat' and all(fold.origin[0] == 'fold' and not fold.origin[2] for fold in folds),
+               'SDPA query is not a stack of folds: %r' % (stacked.origin,))
+        sources = [fold.origin[1] for fold in folds]
+        expect(all(source is sources[0] for source in sources), 'one bundle folds two sources')
+        routes.append((sources[0], tuple(fold.origin[3] for fold in folds), first[1],
+                       options['page_table_tensor'], options['cur_pos_tensor'], options['attn_mask']))
+    return routes
 
 
 class Harness(object):
@@ -315,6 +359,8 @@ class HelperTests(unittest.TestCase):
         so it keeps its own copy of the layout; this is the pin that keeps the two equal."""
         import serving_buffer_pool
         self.assertEqual(serving_buffer_pool.EXTENT_LAYOUT_START, K)
+        self.assertEqual((serving_buffer_pool.EXTENT_GROUP_ROWS, serving_buffer_pool.EXTENT_BUNDLE_ENTRIES),
+                         (extent_attention_replay.EXTENT_GROUP_ROWS, extent_attention_replay.EXTENT_BUNDLE_ENTRIES))
         for group_rows in (4, 8):
             for rows in (8, 16, 32):
                 self.assertEqual(serving_buffer_pool.extent_bundle_batches(rows, group_rows),
@@ -464,7 +510,7 @@ class SegmentReaderTests(unittest.TestCase):
         self.assertTrue(torch.equal(table.value, new.repeat(2, 1)))
         self.assertEqual([list(value.shards) for value in (reader.positions, table, cur_pos)], before)
         reader.stage(4200)
-        self.assertTrue(torch.equal(table.value, new.repeat(2, 1)), 'the current table is the last one staged')
+        self.assertTrue(torch.equal(table.value, new.repeat(2, 1)), 'a stage without a table leaves the lent table')
 
         def move(source, destination):
             if destination is cur_pos:
@@ -499,6 +545,32 @@ class SegmentReaderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             reader.stage_values(4200, host_table(3, WIDTH - 1))
 
+    def test_a_restage_after_a_served_round_writes_the_word_and_cur_pos_and_leaves_the_table_alone(self):
+        """Review defect 1. The block writes each round's tables through stage_values -> write_packed,
+        never through reader.stage, so a later stage(start) must not restage a table the reader held
+        since capture: that would silently point every attention layer at the capture's pages."""
+        reader, ((table, cur_pos),) = segment(self.device, start=4200)
+        served = host_table(9)
+        for destination, value, dtype, layout in reader.stage_values(70000, served):
+            self.device.copy_host_to_device_tensor(self.device.from_torch(value, dtype=dtype, layout=layout),
+                                                   destination)
+        reader.start = 70000  # stage_packed sets each reader's start after write_packed
+        copies, fences = len(self.device.copies), self.device.fences
+        for start in (70000, 90000):
+            reader.stage(start)
+            with self.subTest(start=start):
+                self.assertTrue(torch.equal(table.value, served.repeat(2, 1)), 'the capture-time table came back')
+                self.assertEqual(cur_pos.value.tolist(), [extent(start) - 1] * 2)
+                self.assertEqual(reader.positions.value.tolist(), [start & 255] + [0] * 7)
+        self.assertEqual(self.device.copies[copies:], [reader.positions, cur_pos] * 2, 'the word and cur_pos only')
+        self.assertEqual(self.device.fences, fences + 2)
+        # A table is written only when one is passed, as construction passes its own.
+        reader.stage(4200, table=host_table(11))
+        self.assertTrue(torch.equal(table.value, host_table(11).repeat(2, 1)))
+        self.assertEqual(self.device.copies[-3:], [reader.positions, cur_pos, table])
+        self.assertEqual([value[0] for value in reader.stage_values(4300, None)], [reader.positions, cur_pos])
+        self.assertFalse(hasattr(reader, 'pages_host'), 'the reader keeps no host table to restage')
+
     def test_9_a_shared_mask_forward_refreshes_each_mask_once(self):
         reader, pairs = segment(self.device)
         refreshed = []
@@ -520,12 +592,24 @@ class SegmentReaderTests(unittest.TestCase):
         reader, ((table, cur_pos),) = segment(self.device, start=60000)
         query = self.device.device_tensor((1, 16, 12, 256), 'bf16', 'tile')
         keys, values = self.device.device_tensor((1,), 'bf16', 'tile'), self.device.device_tensor((1,), 'bf16', 'tile')
-        with patch('attention_mask_replay.execute'), \
+        refreshed = []
+        with patch('attention_mask_replay.execute', side_effect=recording_refresh(self.device, refreshed)), \
                 patch('extent_attention_replay.device_layout_dma', side_effect=fake_device_layout_dma(self.device)):
             result = reader(query, keys, values, page_table_tensor='ignored', cur_pos_tensor='ignored',
                             scale=0.0625, memory_config='dram')
-        (call,) = self.device.sdpa
-        mask = reader.metadata[0][2]
+            (call,) = self.device.sdpa
+            mask = reader.metadata[0][2]
+            # Review defect 3: outside shared_masks every call first refreshes each bundle's narrow mask,
+            # once; a call that skipped it would read a stale or zero mask and see future keys.
+            self.assertEqual(refreshed, [(reader.positions, mask, reader.programs[0])])
+            self.assertEqual(reader.refresh_calls, len(reader.metadata))
+            self.assertEqual(self.device.events, [('refresh', mask), ('sdpa', mask)])
+            reader(query, keys, values, scale=0.0625, memory_config='dram')
+            self.assertEqual(reader.refresh_calls, 2 * len(reader.metadata))
+            self.assertEqual(self.device.events[2:], [('refresh', mask), ('sdpa', mask)])
+        # Review defect 2, in the segment: both groups of the query stacked at offsets 0 and 8, and the
+        # two bundle entries sliced back out in order, all through this user's table, cur_pos and mask.
+        self.assertEqual(route(result), [(query, (0, 8), 0, table, cur_pos, mask), (query, (0, 8), 1, table, cur_pos, mask)])
         self.assertIs(call['cur_pos_tensor'], cur_pos)
         self.assertIs(call['page_table_tensor'], table)
         self.assertIs(call['attn_mask'], mask)
@@ -533,7 +617,7 @@ class SegmentReaderTests(unittest.TestCase):
         self.assertEqual(call['program_config'].q_chunk_size, QWEN_DECODE_MAGIC | EXTENT_FLAGS)
         self.assertEqual((call['program_config'].k_chunk_size, call['is_causal'], call['scale']), (256, False, 0.0625))
         self.assertEqual(result.shape, (1, 16, 12, 256))
-        self.assertEqual(reader.calls, 1)
+        self.assertEqual(reader.calls, 2)
         self.assertEqual(reader.sdpa_modes_applied, (EXTENT_FLAGS,))
         # The mask program was prepared on the reader's own word and narrow mask, at the bundle's geometry.
         (program,) = self.harness.programs
@@ -605,6 +689,30 @@ class SegmentReaderTests(unittest.TestCase):
             pairs[0][1].shards = [FakeShard(pairs[0][0].shards[0].address), pairs[0][1].shards[1]]
             return pairs
 
+        class Unconfigured(FakeTensor):
+            """A lent tensor that cannot state its memory config (review defect 4)."""
+
+            def __getattribute__(self, name):
+                if name == 'memory_config':
+                    raise AttributeError(name)
+                return super().__getattribute__(name)
+
+        def unconfigured(which):
+            def change(device, pairs):
+                old = pairs[0][which]
+                bare = Unconfigured(old.shape, old.dtype, old.layout, old.memory, old.shards, old.value)
+                return [tuple(bare if index == which else tensor for index, tensor in enumerate(pairs[0]))]
+            return change
+
+        # Never taken for interleaved DRAM: the F20 check reads every tensor's own memory config.
+        for name, change in (('table', unconfigured(0)), ('cur_pos', unconfigured(1))):
+            with self.subTest(name='%s without memory_config' % name):
+                device, pairs = mutate(change)
+                allocated = len(device.live)
+                with self.assertRaises(AttributeError):
+                    ExtentSegmentReader(device, MESH, 16, WIDTH, host_table(1), storage=pairs, max_group_rows=8, start=4200)
+                self.assertEqual(len(device.live), allocated)
+                self.assertEqual(device.copies, [])
         cases = {'table narrow': table(shape=(2, WIDTH - 4)), 'table one entry': table(shape=(1, WIDTH)),
                  'table uint32': table(dtype='uint32'), 'table tiled': table(layout='tile'), 'table in L1': table(memory='l1'),
                  'cur_pos one entry': positions(shape=(1,)), 'cur_pos 2-D': positions(shape=(2, 1)),
@@ -728,6 +836,68 @@ class PackedReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'query geometry'):
             reader(self.device.device_tensor((1, 32, 12, 256), 'bf16', 'tile'), keys, values,
                    scale=0.0625, memory_config='dram')
+
+    def test_each_segment_s_rows_go_through_its_own_cur_pos_and_table_and_return_in_row_order(self):
+        """Review defect 2 (the pooled reader's pin, test_pooled_attention_replay.py:400-440): user k's
+        rows [16k, 16k + 16) are sliced from the block's query, run through user k's own table, cur_pos
+        and mask, and come back as the k-th part of the output, after that segment's own refresh."""
+        reader, storage = self.build()
+        query = self.device.device_tensor((1, 64, 12, 256), 'bf16', 'tile', name='query')
+        keys, values = self.device.device_tensor((1,), 'bf16', 'tile'), self.device.device_tensor((1,), 'bf16', 'tile')
+        refreshed = []
+        with patch('attention_mask_replay.execute', side_effect=recording_refresh(self.device, refreshed)), \
+                patch('extent_attention_replay.device_layout_dma', side_effect=fake_device_layout_dma(self.device)):
+            result = reader(query, keys, values, scale=0.0625, memory_config='dram')
+        sliced = [tensor for tensor in self.device.live
+                  if tensor.origin is not None and tensor.origin[0] == 'slice' and tensor.origin[1] is query]
+        self.assertEqual([tensor.origin[2:] for tensor in sliced],
+                         [((0, first, 0, 0), (1, last, 12, 256)) for first, last in self.SEGMENTS])
+        kind, parts = result.origin
+        self.assertEqual((kind, len(parts), result.shape), ('concat', 4, (1, 64, 12, 256)))
+        masks = [own.metadata[0][2] for own in reader.readers]
+        for user, (part, rows) in enumerate(zip(parts, sliced)):
+            ((table, cur_pos),) = storage[user]
+            with self.subTest(user=user):
+                self.assertEqual(route(part), [(rows, (0, 8), 0, table, cur_pos, masks[user]),
+                                               (rows, (0, 8), 1, table, cur_pos, masks[user])])
+        # Review defect 3, packed: unscoped, each segment refreshes its own mask once, before its SDPA.
+        self.assertEqual(self.device.events, [event for mask in masks for event in (('refresh', mask), ('sdpa', mask))])
+        self.assertEqual(reader.refresh_calls, len(reader.metadata))
+
+    def test_a_packed_restage_after_a_served_round_leaves_every_user_s_table_alone(self):
+        """Review defect 1, packed: stage(starts) writes each segment's word and cur_pos, and never a table."""
+        reader, storage = self.build()
+        starts = (300, 70000, 90000, 131100)
+        served = [host_table(10 + user) for user in range(4)]
+        for own, start, table in zip(reader.readers, starts, served):
+            for destination, value, dtype, layout in own.stage_values(start, table):
+                self.device.copy_host_to_device_tensor(self.device.from_torch(value, dtype=dtype, layout=layout),
+                                                       destination)
+            own.start = start
+        copies = len(self.device.copies)
+        reader.stage(starts)
+        for user in range(4):
+            ((table, cur_pos),) = storage[user]
+            with self.subTest(user=user):
+                self.assertTrue(torch.equal(table.value, served[user].repeat(2, 1)), 'the capture-time table came back')
+                self.assertEqual(cur_pos.value.tolist(), [extent(starts[user]) - 1] * 2)
+        self.assertEqual(self.device.copies[copies:],
+                         [tensor for own, pairs in zip(reader.readers, storage) for tensor in (own.positions, pairs[0][1])])
+
+    def test_every_start_is_checked_on_the_host_before_any_segment_is_built(self):
+        """Review defect 6: a bad start for a later segment used to surface only after the segments
+        before it were built and staged into their lent storage."""
+        for starts in ((1500, 20000, C - 15, 60000), (1500, 20000, 60000, 4200.0), (1500, -1, 60000, 4200),
+                       (1500, 20000, 60000, True)):
+            with self.subTest(starts=starts):
+                device = FakeDevice()
+                storage = [lend(device) for segment in self.SEGMENTS]
+                allocated = len(device.live)
+                with self.assertRaisesRegex(ValueError, 'integer start'):
+                    PackedExtentReplayReader(device, MESH, self.SEGMENTS, WIDTH, [host_table(user) for user in range(4)],
+                                             storage=storage, max_group_rows=8, starts=starts)
+                self.assertEqual(len(device.live), allocated, 'no segment reader was built')
+                self.assertEqual(device.copies, [], 'nothing was staged into any lent storage')
 
     def test_validate_and_stage_reach_every_segment_and_idle_starts_validate(self):
         reader, storage = self.build()

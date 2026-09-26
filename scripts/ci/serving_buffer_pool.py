@@ -138,6 +138,10 @@ PACKED_BLOCK_ROWS = max(PACKED_BLOCK_WIDTHS)
 # The extent readers bundle every segment as the native chunk grouping at position 256
 # (extent_attention_replay.LAYOUT); test_extent_attention_replay pins this copy equal to it.
 EXTENT_LAYOUT_START = 256
+# The one geometry the extent readers take, K64j CB1's G8B2: eight-row groups, two to a bundle
+# (extent_attention_replay.EXTENT_GROUP_ROWS and EXTENT_BUNDLE_ENTRIES, pinned equal the same way).
+EXTENT_GROUP_ROWS = 8
+EXTENT_BUNDLE_ENTRIES = 2
 
 
 def extent_bundle_batches(rows, group_rows):
@@ -483,6 +487,14 @@ class ServingBufferPool:
                 if any(rows >= 8 for rows in bucket_rows):
                     raise ValueError('Extent replay pools no per-family replay tables: capture widths %r include a '
                                      'replay width (8 or more rows)' % (bucket_rows,))
+                # The readers refuse any other grouping at block build, after the attach has
+                # allocated everything; refuse it here, before the first allocation.
+                if packed_replay_group_rows != EXTENT_GROUP_ROWS or any(
+                        set(extent_bundle_batches(rows, EXTENT_GROUP_ROWS)) != {EXTENT_BUNDLE_ENTRIES}
+                        for count, rows in packed_shapes):
+                    raise ValueError('Extent replay storage is qualified at G8B2 only (eight-row groups, two per '
+                                     'bundle, K64j CB1): packed group width %r over shapes %r'
+                                     % (packed_replay_group_rows, packed_shapes))
                 replay_capacities = (extent_capacity,)
             else:
                 admitted = family_capacities(page_width=page_width)

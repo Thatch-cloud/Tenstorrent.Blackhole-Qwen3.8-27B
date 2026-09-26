@@ -805,14 +805,29 @@ class PackedExtentStorageTests(unittest.TestCase):
         pool.acquire()
         self.assertFalse(any(value is filled for filled, zero in operations.fills for value in storage.tensors))
 
-    def test_the_layout_follows_the_packed_group_width(self):
+    def test_the_storage_is_g8b2_and_any_other_grouping_is_refused_before_anything_is_allocated(self):
+        """Review defect 5: the readers take G8B2 only and refused any other storage at block build,
+        after the attach had allocated everything; the pool now refuses it first."""
         self.assertEqual([extent_bundle_batches(rows, 8) for rows in (8, 16, 32)], [(1,), (2,), (3, 1)])
         self.assertEqual([extent_bundle_batches(rows, 4) for rows in (8, 16, 32)], [(2,), (3, 1), (3, 3, 2)])
-        pool = extent_pool(FakeOperations(), packed_replay_group_rows=4)
+        # Eight through the per-request width when the packed width is unset: the same G8B2 storage.
+        pool = extent_pool(FakeOperations(), packed_replay_group_rows=None, replay_group_rows=8)
         storage = pool.packed_extent(4, 16)
+        self.assertEqual(pool.packed_replay_group_rows, 8)
         for user in range(4):
-            self.assertEqual([value.shape for value in storage.tables[user]], [(3, 68), (1, 68)])
-            self.assertEqual([value.shape for value in storage.cur_pos[user]], [(3,), (1,)])
+            self.assertEqual([value.shape for value in storage.tables[user]], [(2, 68)])
+            self.assertEqual([value.shape for value in storage.cur_pos[user]], [(2,)])
+        refusals = {'G4 named': dict(packed_replay_group_rows=4),
+                    'G4 by default (unset, per-request width 4)': dict(packed_replay_group_rows=None),
+                    'T8 users (B1)': dict(packed_shapes=((4, 8),)),
+                    'T32 users (B3 + B1)': dict(packed_shapes=((2, 32),)),
+                    'one T32 shape among T16': dict(users=4, packed_shapes=((4, 16), (2, 32)))}
+        for name, overrides in refusals.items():
+            operations = FakeOperations()
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, 'qualified at G8B2 only'):
+                    extent_pool(operations, **overrides)
+                self.assertEqual(operations.live, [], 'refused before anything was allocated')
 
     def test_the_storage_is_lent_once_and_replicas_are_independent(self):
         pool = extent_pool(FakeOperations(), packed_replicas={(4, 16): 2})
