@@ -3,10 +3,24 @@
 Before this, every refusal inside the fast path's lifecycle set `failed` and re-raised
 (serving_lifecycle.py, the `except` at the end of _execute and of _sample), so the engine
 died and every live user with it - smoke v3 died on the platform's 54-token warmup that way.
-Under QWEN_FAST_ANY_REQUEST (serving_fast_policy.any_request_enabled) a HOST-SIDE refusal of
-one request - one raised before that request touched any device state
-(serving_request_factory.RequestRefused, or the sampling contract at admission) - is
-quarantined instead:
+Under QWEN_FAST_ANY_REQUEST (serving_fast_policy.any_request_enabled) a host-side refusal of
+ONE request's own terms - raised before that request touched any device state - is quarantined
+instead. That is exactly two sources: the sampling contract at admission
+(serving_fast_policy.validate_request_sampling in the lifecycle), and
+serving_request_factory.RequestRefused from the bridge, which covers only the request's sampling
+contract, budget and page table. Everything else still fails the engine, deliberately:
+- the step-shape refusals in serving_lifecycle ('one complete fresh prefill', 'Text-only uncached
+  prompt') - the scheduler handed the worker a step it cannot run;
+- a grammar_output reaching _sample;
+- every hook and packed-step round refusal;
+- the factory's engine and runner invariants (frontier, helpers, a seed outside the vocabulary,
+  an EOS seed without ignore_eos, the KV group count): evidence of a sampler, device or lifecycle
+  fault, on which the other live users must not keep decoding.
+In practice the edge contract (serving_c2_contract.enforce_request) already refuses or coerces
+every sampling-contract violation before the engine sees it, so this path is rarely reached; it
+exists so that one that slips through ends one request, not every live user's.
+
+A quarantined request:
 
 1. the worker (serving_lifecycle) has already run the request's prefill and sampled its first
    token; it builds no bridge, closes the capture, frees the prefill gate, returns the step's
@@ -29,6 +43,12 @@ although the API server had installed serving_one_in_flight.OneInFlightScheduler
 consumer placed in that subclass would never run. The wrapper goes on the class the worker's
 own config names (scheduler_class), and two markers say whether it ran: one line from inside
 the wrapper the first time it is called (the positive control) and one per aborted request.
+On the TT platform the first reads exactly
+    [PINDIAG] request quarantine consumer live in TTScheduler
+on the engine's first step (the platform's warmup): a c2 gate or smoke must require it, because
+a quarantine installed on a class the engine never builds is silent until a refusal strands a
+request. test_serving_request_quarantine.InstalledVllmQuarantineTests drives the consumer through
+TTScheduler(AsyncScheduler) on the installed vLLM, which only qwen-fast-vllm-cpu.yml has.
 If a registered request is still pending when the next step executes, the wrapper did not run
 in this engine, and serving_lifecycle fails the engine loudly (unconsumed) rather than let an
 unbridged request decode.

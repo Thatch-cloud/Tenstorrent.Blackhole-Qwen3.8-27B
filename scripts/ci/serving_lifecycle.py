@@ -105,9 +105,11 @@ class FastServingLifecycle:
         # QWEN_FAST_ANY_REQUEST (C2-any; default off), read once for the lifecycle's life.
         # Off, `quarantine` stays None and every path below is exactly what it was: a
         # refusal fails the engine, and only an EOS first token skips the bridge. On:
-        # - D2: a host-side refusal of one request (the sampling contract at admission, or
-        #   serving_request_factory.RequestRefused from the bridge) ends that request as
-        #   FINISHED_ABORTED through serving_request_quarantine, and the engine lives on;
+        # - D2: a host-side refusal of one request's own terms (the sampling contract at
+        #   admission, or serving_request_factory.RequestRefused from the bridge: its sampling
+        #   contract, budget or page table) ends that request as FINISHED_ABORTED through
+        #   serving_request_quarantine, and the engine lives on. Step-shape refusals, a
+        #   grammar_output, hook and round refusals and the factory's invariants stay fatal;
         # - D4: a first token that already exhausts max_tokens (or the context) is terminal
         #   like EOS - no bridge; the platform's warmup is max_tokens 1.
         self.any_request = any_request_enabled()

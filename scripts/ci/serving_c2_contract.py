@@ -19,8 +19,9 @@ process match it:
    the API edge coerces sampling to greedy, clamps max_tokens, and refuses what it cannot
    serve before the engine sees it. A refusal inside the engine (serving_fast_policy.
    validate_request_sampling) fails the engine, not the request - except under the c2
-   profile (QWEN_FAST_ANY_REQUEST=1), where a host-side refusal ends only that request, as
-   FINISHED_ABORTED (serving_request_quarantine).
+   profiles (QWEN_FAST_ANY_REQUEST=1), where a host-side refusal of one request's own terms
+   (its sampling contract, budget or page table) ends only that request, as FINISHED_ABORTED
+   (serving_request_quarantine); every other in-engine refusal still fails the engine.
 
 Nothing here changes a gate: every step is off unless QWEN_C2_SERVING=1.
 """

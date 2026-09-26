@@ -56,8 +56,10 @@ OUTPUT_BUDGET = _output_budget(os.environ.get('QWEN_FAST_OUTPUT_BUDGET'))
 # - the source qualification that gate carried runs once, at attach, instead
 #   (serving_request_factory.attach_source_check, called by serving_runtime);
 # - each request's budget is its own max_tokens, not the server ceiling OUTPUT_BUDGET;
-# - a host-side refusal ends that one request (FINISHED_ABORTED) instead of the engine, and
-#   ignore_eos and a first token that exhausts max_tokens are served (serving_lifecycle).
+# - a host-side refusal of one request's own terms (its sampling contract, budget or page
+#   table) ends that one request (FINISHED_ABORTED) instead of the engine - every other refusal
+#   stays fatal - and ignore_eos and a first token that exhausts max_tokens are served
+#   (serving_lifecycle, serving_request_quarantine).
 # Unset or '0', every one of those paths is exactly what it was.
 ANY_REQUEST_FLAG = 'QWEN_FAST_ANY_REQUEST'
 

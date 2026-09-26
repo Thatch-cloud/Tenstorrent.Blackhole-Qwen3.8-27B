@@ -1,5 +1,6 @@
 """D2 request quarantine and D4's first-token terminal, under QWEN_FAST_ANY_REQUEST (plan S1
-item 4): a host-side refusal ends ONE request as FINISHED_ABORTED and the engine lives on; a
+item 4): a host-side refusal of ONE request's own terms ends it as FINISHED_ABORTED and the
+engine lives on (every other refusal stays fatal); a
 first token that exhausts max_tokens builds no bridge. Every behaviour is also driven with the
 flag OFF, where it must be exactly today's: the refusal fails the engine.
 
@@ -9,10 +10,12 @@ EngineCoreOutputs per client, and fake vLLM output types. The real-vLLM check at
 runs only where vLLM is installed (qwen-fast-vllm-cpu.yml)."""
 
 from contextlib import nullcontext
+from pathlib import Path
 import sys
+import types
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import serving_request_quarantine as quarantine
 from serving_lifecycle import FastServingLifecycle, prefill_gate
@@ -154,7 +157,10 @@ class BridgeRefusalTests(QuarantineCase):
         self.assertEqual(case.lifecycle.request_id, 'second')
 
     def test_on_a_device_side_bridge_failure_still_fails_the_engine(self):
-        for failure in (RuntimeError('trace capture failed'), ValueError('Native GDN buffers changed')):
+        for failure in (RuntimeError('trace capture failed'), ValueError('Native GDN buffers changed'),
+                        # engine and runner invariants from the factory: plain ValueErrors
+                        ValueError('Valid target-selected prefill seed required'),
+                        ValueError('Terminal prefill must finish without allocating a verifier')):
             with self.subTest(failure=failure):
                 case = self.fixture(ON, fake_scheduler_class())
                 case.build.side_effect = failure
@@ -174,7 +180,9 @@ class BridgeRefusalTests(QuarantineCase):
         hook = case.lifecycle.hook
         self.assertEqual(case.lifecycle.decoding_ids, ['request'])
         second = self.next_request(case, finished=())
-        case.build.side_effect = RequestRefused('Valid target-selected prefill seed required')
+        # A refusal of the request's own terms (serving_request_factory.RequestRefused covers
+        # only its sampling contract, budget and page table; a bad seed is engine-fatal).
+        case.build.side_effect = RequestRefused('Scheduler must own capture warmup pages before verifier allocation')
         sampler.return_value = SimpleNamespace(req_ids=['second'], sampled_token_ids=[[11]])
         case.worker.model_runner.requests['second'] = SimpleNamespace(output_token_ids=[11],
                                                                       prompt_token_ids=[1] * 4096)
@@ -368,9 +376,43 @@ class ConsumerTests(QuarantineCase):
         self.assertEqual(list(quarantine.holder().pending), ['b'])
 
 
+PLUGIN_SCHEDULER_FIXTURE = Path(__file__).resolve().parent / 'fixtures' / 'plugin_scheduler.py'
+
+
+def plugin_scheduler_class():
+    """TTScheduler as the engine runs it: the TT platform names vllm_tt_plugin.scheduler.TTScheduler,
+    a TTScheduler(AsyncScheduler) with placeholder bookkeeping, not vLLM's stock Scheduler. Built
+    from fixtures/plugin_scheduler.py - the pinned plugin's class body as probe 35665853903 dumped
+    it, the source the lever-N scheduler tests load - executed over the INSTALLED vLLM's own
+    AsyncScheduler, request queues and output types. TTSchedulingMode is the one name the reduced
+    dump uses without defining; the plugin's scheduler.py defines exactly these three members.
+    A fresh class per call, so wrapping it never leaks into another test."""
+    import enum
+    from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.request_queue import RequestQueue, create_request_queue
+    from vllm.v1.request import Request
+
+    class TTSchedulingMode(enum.Enum):
+        DEFAULT = 'default'
+        PREFILL_ONLY = 'prefill_only'
+        DECODE_ONLY = 'decode_only'
+
+    module = types.ModuleType('qwen_quarantine_plugin_scheduler')
+    module.__dict__.update(AsyncScheduler=AsyncScheduler, SchedulerOutput=SchedulerOutput, Request=Request,
+                           RequestQueue=RequestQueue, create_request_queue=create_request_queue,
+                           TTSchedulingMode=TTSchedulingMode)
+    exec(compile(PLUGIN_SCHEDULER_FIXTURE.read_text(encoding='utf-8'), str(PLUGIN_SCHEDULER_FIXTURE), 'exec'),
+         module.__dict__)
+    return module.TTScheduler
+
+
 class InstalledVllmQuarantineTests(unittest.TestCase):
-    """The consumer against the pinned vLLM's own Scheduler (0.25.1 in qwen-fast-vllm-cpu.yml):
-    skipped wherever vLLM is not installed."""
+    """The consumer against the pinned vLLM (0.25.1 in qwen-fast-vllm-cpu.yml) and the scheduler class
+    the engine actually builds, TTScheduler(AsyncScheduler): EngineCoreOutput's mutability, the
+    per-client output dict and finish_requests on a request carrying async placeholders are all
+    vLLM's own here. Skipped wherever vLLM is not installed - which is the PR's CPU suite: this runs
+    only on an experiment/fast-vllm-cpu-v* tag, so run one before a c2 hardware run."""
 
     def setUp(self):
         try:
@@ -380,32 +422,62 @@ class InstalledVllmQuarantineTests(unittest.TestCase):
         sys.modules.pop(quarantine.HOLDER_KEY, None)
         self.addCleanup(sys.modules.pop, quarantine.HOLDER_KEY, None)
 
-    def test_the_real_scheduler_aborts_a_quarantined_request_after_its_first_token(self):
+    def schedulers(self):
+        """The fixture's TTScheduler, and the installed plugin's own when this environment has it
+        (qwen-fast-vllm-cpu.yml installs upstream-plugin with pip -e)."""
+        classes = [('fixture', plugin_scheduler_class())]
+        try:
+            from vllm_tt_plugin.scheduler import TTScheduler
+        except ImportError:
+            pass
+        else:
+            classes.append(('installed plugin', type('TTScheduler', (TTScheduler,), {})))
+        return classes
+
+    def test_the_tt_scheduler_aborts_a_quarantined_request_after_its_first_token(self):
         from vllm.sampling_params import SamplingParams
-        from vllm.v1.core.sched.scheduler import Scheduler
+        from vllm.v1.core.sched.async_scheduler import AsyncScheduler
         from vllm.v1.engine import FinishReason
         from vllm.v1.request import Request, RequestStatus
         import test_serving_scheduler
 
-        class Probe(Scheduler):
-            pass
-
-        case = test_serving_scheduler.RealSchedulerTests()
-        case.scheduler_type = Probe
-        scheduler = case.scheduler()
-        quarantine.install(SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls=Probe)))
-        request = Request('request', [42] * 4096, SamplingParams(temperature=0, max_tokens=256), None)
-        scheduler.add_request(request)
-        scheduled = scheduler.schedule()
-        quarantine.register('request', 'test')
-        outputs = scheduler.update_from_output(scheduled, case.output('request', [100]))
-        finishing = [output for batch in outputs.values() for output in batch.outputs if output.request_id == 'request']
-        self.assertEqual(len(finishing), 1)
-        self.assertEqual(finishing[0].new_token_ids, [100])
-        self.assertEqual(finishing[0].finish_reason, FinishReason.ABORT)
-        self.assertEqual(request.status, RequestStatus.FINISHED_ABORTED)
-        self.assertNotIn('request', scheduler.requests)
-        self.assertEqual(scheduler.schedule().finished_req_ids, {'request'})
+        for source, scheduler_type in self.schedulers():
+            with self.subTest(source=source):
+                sys.modules.pop(quarantine.HOLDER_KEY, None)
+                self.assertTrue(issubclass(scheduler_type, AsyncScheduler), 'the class the engine builds')
+                self.assertEqual(scheduler_type.__name__, 'TTScheduler')
+                case = test_serving_scheduler.RealSchedulerTests()
+                case.scheduler_type = scheduler_type
+                scheduler = case.scheduler()
+                log = Mock()
+                quarantine.install(SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls=scheduler_type)),
+                                   log=log)
+                request = Request('request', [42] * 4096, SamplingParams(temperature=0, max_tokens=256), None)
+                scheduler.add_request(request)
+                scheduled = scheduler.schedule()
+                self.assertEqual(scheduled.num_scheduled_tokens, {'request': 4096})
+                self.assertGreaterEqual(request.num_output_placeholders, 1, "AsyncScheduler's placeholder for the seed")
+                quarantine.register('request', 'test')
+                outputs = scheduler.update_from_output(scheduled, case.output('request', [100]))
+                self.assertIsInstance(outputs, dict, 'EngineCoreOutputs per client index')
+                finishing = [output for batch in outputs.values() for output in batch.outputs
+                             if output.request_id == 'request']
+                self.assertEqual(len(finishing), 1)
+                self.assertEqual(finishing[0].new_token_ids, [100])
+                self.assertEqual(finishing[0].finish_reason, FinishReason.ABORT, 'EngineCoreOutput took the mutation')
+                self.assertEqual(request.status, RequestStatus.FINISHED_ABORTED)
+                self.assertNotIn('request', scheduler.requests)
+                self.assertEqual(quarantine.holder().pending, {})
+                # the positive control the c2 gate greps for: from inside the wrapper, naming the class
+                self.assertIn(call('[PINDIAG] request quarantine consumer live in {}', 'TTScheduler'),
+                              log.call_args_list)
+                following = scheduler.schedule()
+                self.assertEqual(following.finished_req_ids, {'request'})
+                self.assertEqual(following.total_num_scheduled_tokens, 0)
+                # and the seat is free: the next request prefills normally
+                replacement = Request('replacement', [43] * 4096, SamplingParams(temperature=0, max_tokens=256), None)
+                scheduler.add_request(replacement)
+                self.assertEqual(scheduler.schedule().num_scheduled_tokens, {'replacement': 4096})
 
 
 if __name__ == '__main__':

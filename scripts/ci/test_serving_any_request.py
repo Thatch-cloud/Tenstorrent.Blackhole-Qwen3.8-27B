@@ -74,12 +74,17 @@ class FactoryTests(unittest.TestCase):
 
     def test_on_phase_zero_is_refused_for_the_engine_until_the_attach_check_has_run(self):
         """An image whose serving_runtime predates attach_source_check would otherwise serve
-        with no source check at all. Configuration, so a plain ValueError (fatal), and before
-        the drafter or any other device work."""
+        with no source check at all. Configuration, so a plain ValueError (fatal), before the
+        drafter or any other device work - and before the request's own checks, so on such an
+        image a request those checks would refuse (the platform's max_tokens=1 warmup reaching
+        the page check with a budget of 1, on a lifecycle without D4) still meets THIS error."""
         serving_request_factory._ATTACH_QUALIFICATION.clear()
-        with self.assertRaisesRegex(ValueError, 'attach-time check never ran') as caught:
-            self.build(ON, capture_rows=4)
-        self.assertNotIsInstance(caught.exception, RequestRefused)
+        for refusal in (dict(), dict(max_tokens=1), dict(blocks=64), dict(max_tokens=0)):
+            with self.subTest(refusal=refusal):
+                with self.assertRaisesRegex(ValueError, 'attach-time check never ran') as caught:
+                    self.build(ON, capture_rows=4, **refusal)
+                self.assertNotIsInstance(caught.exception, RequestRefused)
+                self.assert_no_device_work()
         # the gate still guards engines that keep it, and off nothing changes
         request, _, _, _ = self.build(ON, capture_rows=None)
         request.close('request')
@@ -87,22 +92,39 @@ class FactoryTests(unittest.TestCase):
         request.close('request')
 
     def build(self, environ, *, capture_rows=4, max_tokens=256, ignore_eos=False, blocks=65, prompt=4096,
-              pages=None):
+              pages=None, seed=None, helpers=48, block_groups=None, frontier=None):
         case = test_serving_request_factory.RequestFactoryTests()
         components, device, engines, arguments = case.fixture()
-        arguments['state'].sampling_params.max_tokens = max_tokens
-        arguments['state'].sampling_params.ignore_eos = ignore_eos
-        arguments['state'].prompt_token_ids = [1] * prompt
-        arguments['state'].block_ids = (list(range(blocks)),)
+        state = arguments['state']
+        state.sampling_params.max_tokens = max_tokens
+        state.sampling_params.ignore_eos = ignore_eos
+        state.prompt_token_ids = [1] * prompt
+        state.block_ids = (list(range(blocks)),) if block_groups is None else block_groups
+        if seed is not None:
+            state.output_token_ids = [seed]
+        if frontier is not None:
+            state.num_computed_tokens = frontier
         device.position = prompt   # the fake drafter sits at the prefilled frontier
         if pages is None:
             pages = torch.tensor([list(range(blocks)) + [0] * (68 - blocks)], dtype=torch.int32)
         extra = {} if capture_rows is None else dict(capture_rows=capture_rows)
+        # Recorded before the call, so a test whose build raises can still ask what it touched.
+        self.components, self.adopt = components, Mock(wraps=serving_request_factory.adopt_prefill_slot)
         with patch.dict('os.environ', environ), \
-                patch('serving_request_factory.device_components', return_value=components):
+                patch('serving_request_factory.device_components',
+                      return_value=components) as self.device_components, \
+                patch('serving_request_factory.adopt_prefill_slot', self.adopt):
             request = from_prefill(object(), SimpleNamespace(args=SimpleNamespace(vocab_size=100),
-                mesh_device=object()), object(), pages, [object()] * 48, **arguments, **extra)
+                mesh_device=object()), object(), pages, [object()] * helpers, **arguments, **extra)
         return request, components, device, engines
+
+    def assert_no_device_work(self):
+        """Nothing past the host checks ran: no slot adoption (the first device write), no
+        drafter, no proposal, no engine, no collectives."""
+        self.adopt.assert_not_called()
+        self.device_components.assert_not_called()
+        for name in ('device', 'proposal', 'engine', 'collectives'):
+            getattr(self.components, name).assert_not_called()
 
     def test_off_every_engine_session_and_drafter_argument_is_the_one_it_always_was(self):
         for environ in ({}, OFF):
@@ -169,22 +191,56 @@ class FactoryTests(unittest.TestCase):
         self.assertEqual(request.session.eos_ids, (99,))
         request.close('request')
 
-    def test_on_a_host_side_refusal_is_the_requests_alone_and_touches_no_device(self):
-        """Everything before the slot adoption: the sampling contract, the fresh-prefill shape,
-        the KV group, the page check."""
+    def test_on_a_refusal_of_the_requests_own_terms_is_its_alone_and_touches_no_device(self):
+        """The three host-side checks of the request itself: its sampling contract, its budget
+        and its page table."""
         refusals = (
-            dict(max_tokens=0),                                  # sampling contract
-            dict(blocks=64),                                     # scheduler owns no warmup pages
+            (dict(max_tokens=0), 'greedy single-sequence'),                   # sampling contract
+            (dict(blocks=64), 'Scheduler must own capture warmup pages'),     # page table
         )
-        for refusal in refusals:
+        for refusal, message in refusals:
             with self.subTest(refusal=refusal):
-                with self.assertRaises(RequestRefused) as caught:
+                with self.assertRaisesRegex(RequestRefused, message) as caught:
                     self.build(ON, **refusal)
+                self.assert_no_device_work()
                 self.assertIsInstance(caught.exception, ValueError, 'still a ValueError to every old caller')
                 with self.assertRaises(ValueError) as plain:
                     self.build(OFF, **refusal)
+                self.assert_no_device_work()
                 self.assertNotIsInstance(plain.exception, RequestRefused, 'off, the exception type is unchanged')
                 self.assertEqual(str(plain.exception), str(caught.exception), 'the same message either way')
+
+    def test_on_a_budget_the_request_cannot_have_is_its_alone(self):
+        """ON only: off, every request's budget is the server's OUTPUT_BUDGET. request_budget
+        refuses a prompt that fills its page table; a budget of 1 (max_tokens=1, which D4 ends at
+        the lifecycle before it gets here) is the page check's to refuse."""
+        for refusal, message in ((dict(prompt=4352, blocks=68), 'prompt inside its page capacity'),
+                                 (dict(max_tokens=1), 'T16 request bounds')):
+            with self.subTest(refusal=refusal):
+                with self.assertRaisesRegex(RequestRefused, message):
+                    self.build(ON, **refusal)
+                self.assert_no_device_work()
+
+    def test_on_engine_and_runner_invariants_stay_fatal(self):
+        """Not the request's terms but evidence the engine is wrong: a bad sampled seed means a
+        sampler or device fault, an EOS seed here a lifecycle bug. Plain ValueErrors under the
+        flag too - the lifecycle fails the engine rather than let the others decode on it - and
+        still before any device work."""
+        invariants = (
+            (dict(helpers=47), 'all GDN helpers'),
+            (dict(frontier=4096), 'frontier inside the prompt'),
+            (dict(seed=100), 'Valid target-selected prefill seed'),
+            (dict(seed=-1), 'Valid target-selected prefill seed'),
+            (dict(seed=99), 'Terminal prefill must finish without allocating a verifier'),
+            (dict(block_groups=(list(range(65)), list(range(65)))), 'One scheduler-owned KV group'),
+        )
+        for invariant, message in invariants:
+            for environ in (ON, OFF):
+                with self.subTest(invariant=invariant, environ=environ):
+                    with self.assertRaisesRegex(ValueError, message) as caught:
+                        self.build(environ, **invariant)
+                    self.assertIs(type(caught.exception), ValueError)
+                    self.assert_no_device_work()
 
     def test_on_a_device_side_failure_is_not_a_request_refusal(self):
         case = test_serving_request_factory.RequestFactoryTests()
@@ -326,7 +382,30 @@ class AttachSourceCheckTests(unittest.TestCase):
         qualify.assert_called_once_with(Path('/tree'))
         log.assert_called_once()
         self.assertIn('attach source check', log.call_args.args[0])
-        self.assertEqual(log.call_args.args[2:], (2, 'abc'))
+        self.assertEqual(log.call_args.args[2:], ('2 pinned component sources hashed',
+                                                  'report_sha256,runtime_component_sources', 'abc'))
+
+    def test_the_marker_reports_what_the_staged_qualify_target_really_returns(self):
+        """Staged at the served geometry the gate's qualify is frozen_combined_runtime.qualify_target:
+        it runs qualify (which hashes every pinned source) and returns only qualify's 'target'
+        evidence plus the target-replay.json pin - no source list. Driven through the real
+        qualify_target, so the marker is held to the shape it will print on the rig."""
+        import frozen_combined_runtime
+
+        inner = dict(context=32768, target=dict(target_replay_qualified=True, rows=16),
+                     runtime_component_sources={'attention_replay.py': '1', 'attention_batch.py': '2'},
+                     report_sha256='draft-numerical pin')
+        log = Mock()
+        with patch.object(frozen_combined_runtime, 'qualify', return_value=inner) as hashed, \
+                patch.dict('os.environ', {'QWEN_FROZEN_COMBINED_CONTEXT': '32768'}):
+            evidence = serving_request_factory.attach_source_check(
+                '/tree', qualify=frozen_combined_runtime.qualify_target, log=log)
+        hashed.assert_called_once_with(Path('/tree'))
+        target_pin = frozen_combined_runtime.CONTEXT_REPORTS[32768]['target-replay.json']
+        self.assertEqual(evidence, dict(target_replay_qualified=True, rows=16, report_sha256=target_pin))
+        self.assertNotIn('runtime_component_sources', evidence)
+        self.assertEqual(log.call_args.args[2:], ('sources hashed inside qualify, count not returned',
+                                                  'report_sha256,rows,target_replay_qualified', target_pin))
 
     def test_a_mismatch_raises_and_is_not_cached(self):
         qualify = Mock(side_effect=ValueError('Combined runtime component source differs: attention_replay.py'))
