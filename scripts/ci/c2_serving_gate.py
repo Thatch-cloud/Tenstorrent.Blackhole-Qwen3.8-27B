@@ -96,8 +96,9 @@ S2_EXACT_CLAIMS); --policy dc-i (the user's decision D-c(i), with --policy-decis
            zero idle commits, refuse_round rounds, cap refusals and other audit mismatches, the four-live
            per-user rate (net of the audit) above GENERAL_RATE; mixed (M7) always runs the prestage, pair-mask
            and fused-commit audits too (G4_ALL_AUDITS; --audits all adds them to the other G4 plans) and needs a
-           packed round of two families, short the one-bucket ladder (2048,), no DRAM hold with a seat free, no
-           lifted hold or refusal and the before-point floor (FLOOR_GB), boundaries
+           packed round of two families, short the one-bucket ladder (2048,) - on every engine line and on the
+           executed path's 'proposal buckets built' lines - no DRAM hold with a seat free, no lifted hold or
+           refusal and the before-point floor (FLOOR_GB), boundaries
            (ignore_eos, 8192 out) cap events and BOUNDARY_MIN_CROSSINGS 256-key crossings per user, staggered
            (STAGGER_SECONDS apart) padded rounds at two or three live and a padded-probe arm.
   churn    M11, G5: CHURN_LENGTHS (12 users, 8 replacements) over four seats, each user's seat freed and
@@ -1303,24 +1304,23 @@ def s2_g4_problems(label, report):
 
 
 def memory_s2_checks(label, report, seats=MEMORY_USERS):
-    """(problems, shortfalls) of G5 on an S2 profile (s2-design B4, B8; M8, M11). W6b asks its predicate whenever
-    a prompt waits, every seat decoding included: such a hold changes nothing (the prompt could not be admitted
-    anyway - churn has more users than seats), so a hold is a failed fit only with a seat free, its decodes below
-    `seats` (the hold line's, or the held state the wrapper logged when a seat freed and it still did not fit).
-    Also: no lifted hold (admitted with nothing left to wait for) and no refused request; the before-point floor
-    (W6d's margins, a negative one included, and the prefill points) at least FLOOR_GB per chip. A hold or a
-    before-point that read no DRAM, or no engine before-point under the flag, leaves the floor unjudged: a
-    shortfall, never a pass."""
+    """(problems, shortfalls) of G5 on an S2 profile (s2-design B4, B8; M8, M11). A DRAM hold is a failed fit only
+    with a seat free: its decodes below `seats`. W6b now asks only then and logs a hold line per (request,
+    decodes); its first cut asked with every seat decoding too, where a hold changes nothing (the prompt could not
+    be admitted anyway - churn has more users than seats), and such a line is no failure. A deferred step (a stale
+    reading, harness.DRAM_DEFERRED_MARKER) is no hold. Also: no lifted hold (admitted with nothing left to wait
+    for) and no refused request; the before-point floor (W6d's margins, a negative one included, and the prefill
+    points) at least FLOOR_GB per chip. A hold or a before-point that read no DRAM, or no engine before-point
+    under the flag, leaves the floor unjudged: a shortfall, never a pass."""
     s2 = s2_of(report)
     if not s2:
         return [], []
     problems, shortfalls = [], []
     hold = s2.get('dram_hold') or {}
-    free = sorted(set([decodes for decodes in hold.get('hold_decodes') or [] if decodes < seats] +
-                      [decodes for decodes in hold.get('held_states') or [] if decodes < seats]))
+    free = sorted(set(decodes for decodes in hold.get('hold_decodes') or [] if decodes < seats))
     if free:
         problems.append('%s: DRAM held a prompt with a seat free (decodes %s of %d seats): the block and the engines '
-                        'did not fit (%s)' % (label, free, seats, '; '.join(hold.get('lines') or []) or 'held state'))
+                        'did not fit (%s)' % (label, free, seats, '; '.join(hold.get('lines') or [])))
     if hold.get('lifted'):
         problems.append('%s: %d "%s" lines: a prompt that did not fit was admitted with no decode left to wait for '
                         '(%s)' % (label, hold['lifted'], harness.DRAM_LIFTED_MARKER.strip(),
@@ -1372,6 +1372,15 @@ def g4_checks(plan, concurrent, solo, rerun=None, probe=None, seats=MEMORY_USERS
             if wrong or not ladders:
                 problems.append('%s: proposal ladders %s, not the one 2048 bucket every engine builds under %s (W6a)'
                                 % (label, wrong or 'unlogged', EXTENT_FLAG))
+            # The executed path: the buckets read from each built capture (graft-mounted-is-not-graft-executed).
+            built = s2_of(report).get('buckets_built') or []
+            wrong = sorted(set(str(buckets) for buckets in built if buckets != SINGLE_BUCKET))
+            if wrong:
+                problems.append('%s: the engines built proposal buckets %s, not the one 2048 bucket (W6a)'
+                                % (label, wrong))
+            elif len(built) < len(ladders):
+                shortfalls.append('%s: %d "%s" lines for %d engines: the buckets built are unseen for the rest'
+                                  % (label, len(built), '[PINDIAG] proposal buckets built', len(ladders)))
     s2 = s2_of(concurrent)
     live = live4_of(concurrent)
     facts = dict(live4=live, rounds=s2.get('rounds'))

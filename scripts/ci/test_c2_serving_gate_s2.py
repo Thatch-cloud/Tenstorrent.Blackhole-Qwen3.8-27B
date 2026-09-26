@@ -51,6 +51,11 @@ W6_RELEASED_HOLD_LINE = '[PINDIAG] dram hold released prompt={} largest_free={} 
 W6_LIFTED_LINE = ('[PINDIAG] dram hold lifted prompt={} largest_free={} need={} request={}: no decode is left to '
                   'free DRAM, so the prompt is admitted and the bridge backstop decides')
 W6_UNAVAILABLE_LINE = '[PINDIAG] dram hold unavailable request={}: {} (not held)'
+W6_DEFERRED_LINE = ('[PINDIAG] dram admission deferred one step prompt={} largest_free={} need={} request={} '
+                    'finished={}: the reading still counts their engines, which this step detaches first')
+W6_CARRIED_LINE = ('[PINDIAG] dram admission carried finished={} past the discarded prefill pass into the '
+                   'decode-only step')
+W6_BUCKETS_BUILT = '[PINDIAG] proposal buckets built request='    # serving_request_factory.PROPOSAL_BUCKETS_BUILT
 DECISION_LINE = '[PINDIAG] one fresh prefill per step: partials={} decodes={} gate_held={} allowed={} hidden={}'
 # memory_ledger (W6d): MemoryLedger._before's line, cut at LINE_BUDGET onto '[MEMLEDGER] ...' lines by .log.
 W6_BEFORE_FORMAT = '[MEMLEDGER] before op=%s chip%d largest_free=%s free=%s estimate=%s margin=%s floor=%s %s'
@@ -98,6 +103,15 @@ def hold_line(prompt, largest, need, request, decodes):
 
 def decision_line(decodes, allowed=0, hidden=True, partials=0, held=False):
     return 'INFO ' + DECISION_LINE.format(partials, decodes, held, allowed, hidden)
+
+
+def deferred_line(prompt, largest, need, request, finished):
+    return 'INFO ' + W6_DEFERRED_LINE.format(prompt, mb(largest), mb(need), request, list(finished))
+
+
+def buckets_line(user, contexts=(2048,)):
+    """W6a's executed-path line: the buckets read from the built capture (a tuple through loguru's {})."""
+    return 'INFO ' + W6_BUCKETS_BUILT + '{} contexts={}'.format(request_id(user), tuple(contexts))
 
 
 def ledger_lines(message):
@@ -189,7 +203,7 @@ def engine_id(user):
 
 def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.0, audit_ms=2.0, audit=True,
            mismatch=False, drop_audit=0, words_ok=None, cap=None, admission=True, packed=True, extra=(), families=None,
-           ladder=SINGLE_LADDER, sequential_rows=4):
+           ladder=SINGLE_LADDER, sequential_rows=4, buckets=(2048,)):
     """A server log of an S2 arm: the C2-any lines, the S2 attach lines when `on`, and `rounds` decode steps -
     packed (four [PACKED] lines, a packed extent round line and an audit line each) or, `packed` False, one
     [SEQ-PUBLISH] step line per user - on one timestamped clock, `round_ms` apart."""
@@ -204,6 +218,8 @@ def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.
                   'INFO [QWEN-SDPA] q-slice rows_per_kv=48',
                   'INFO [QWEN-SDPA] runtime-extent entries=2',
                   'INFO [PINDIAG] extent replay engaged segments=4 flags=[0x27] mask=narrow capacity=131328']
+        if buckets is not None:
+            lines += [buckets_line(user, buckets) for user in range(users)]
     lines += list(extra)
     at = 0.0
     position = list(positions or [131072] * users)
@@ -1064,17 +1080,21 @@ class ServingDriverTests(unittest.TestCase):
 
     SHORT = [60, 255, 2047, 120000]
 
-    def short(self, extra=(), ladder=SINGLE_LADDER, points=None):
-        """The short plan with both arms' logs carrying `extra`, W6d's engine points (healthy unless `points`) and
-        the prefill point; the verdict."""
+    def short(self, extra=(), ladder=SINGLE_LADDER, points=None, buckets=(2048,)):
+        """The short plan with both arms' logs carrying `extra`, W6d's engine points (healthy unless `points`), the
+        prefill point and W6a's built-bucket lines (`buckets`, None for none); the verdict."""
         ledger = [prefill_point(120000, 1500.0)] + (engine_points() if points is None else list(points))
-        concurrent = s2_log(positions=[128, 255, 2047, 120000], extra=ledger + list(extra), ladder=ladder)
-        solo = s2_log(packed=False, positions=self.SHORT, extra=ledger + list(extra), ladder=ladder)
+        concurrent = s2_log(positions=[128, 255, 2047, 120000], extra=ledger + list(extra), ladder=ladder,
+                            buckets=buckets)
+        solo = s2_log(packed=False, positions=self.SHORT, extra=ledger + list(extra), ladder=ladder, buckets=buckets)
         return self.g4('short', concurrent, solo, lengths=self.SHORT)[1]['results']['short']
 
     def test_short_needs_the_one_bucket_ladder_no_hold_and_the_floor(self):
         self.assertEqual(self.short()['verdict'], 'PASS', self.short()['lines'])
         held = self.short(extra=[hold_line(120000, 900e6, 1568.4e6, engine_id(3), 3), decision_line(3)])
+        deferred = self.short(extra=[deferred_line(120000, 900e6, 1568.4e6, engine_id(3), [engine_id(0)]),
+                                     decision_line(3)])
+        self.assertEqual(deferred['verdict'], 'PASS', 'a deferred step (a stale reading) is no hold')
         self.assertEqual(held['verdict'], 'FAIL')
         self.assertIn('seat free (decodes [3] of 4 seats)', ' '.join(held['s2_problems']))
         self.assertEqual(self.short(ladder=SHORT_LADDER)['verdict'], 'FAIL')
@@ -1086,7 +1106,17 @@ class ServingDriverTests(unittest.TestCase):
         self.assertIn('[256, 512, 1024, 2048]', ' '.join(wrong['s2_problems']))
         self.assertEqual(self.short(ladder='unavailable (ValueError)')['verdict'], 'FAIL')
         report = gate.s2_report({EXTENT: '1'}, s2_log(ladder=SINGLE_LADDER), [], None)
-        self.assertEqual(report['ladders'], [[2048]] * 4)
+        self.assertEqual((report['ladders'], report['buckets_built']), ([[2048]] * 4, [[2048]] * 4))
+
+    def test_short_judges_the_buckets_the_engines_built(self):
+        # The executed path (W6a's 'proposal buckets built' line, read from the capture): the ladder line is only
+        # computed from the environment.
+        built = self.short(buckets=(256, 512, 1024, 2048))
+        self.assertEqual(built['verdict'], 'FAIL')
+        self.assertIn('built proposal buckets [\'[256, 512, 1024, 2048]\']', ' '.join(built['s2_problems']))
+        unseen = self.short(buckets=None)
+        self.assertEqual(unseen['verdict'], 'NOT_EXERCISED')
+        self.assertIn('0 "[PINDIAG] proposal buckets built" lines for 4 engines', ' '.join(unseen['shortfalls']))
 
     def test_short_judges_w6s_engine_margin_not_only_the_prefill_points(self):
         # W6 logs margin=-700.0MB ahead of an engine build; the prefill points alone are healthy.
@@ -1206,9 +1236,10 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
         self.assertEqual(clean['verdict'], 'PASS', clean['lines'])
         held = self.memory([hold_line(123136, 700e6, 1568.4e6, engine_id(3), 3), decision_line(3)])
         self.assertEqual(held['verdict'], 'FAIL')
-        # A hold that began with every seat decoding shows only as the wrapper's held state once a seat frees.
-        state = self.memory([hold_line(123136, 700e6, 1568.4e6, engine_id(3), 4), decision_line(4), decision_line(3)])
-        self.assertEqual(state['verdict'], 'FAIL')
+        # A deferred step logs the wrapper's held decision state too (allowed=0, hidden): it is no hold.
+        deferred = self.memory([deferred_line(123136, 700e6, 1568.4e6, engine_id(3), [engine_id(0)]),
+                                decision_line(3), 'INFO ' + W6_CARRIED_LINE.format([engine_id(0)])])
+        self.assertEqual(deferred['verdict'], 'PASS', deferred['lines'])
         self.assertEqual(self.memory([W6_LIFTED_LINE.format(123136, mb(700e6), mb(1568.4e6), engine_id(3))])['verdict'],
                          'FAIL', 'a lifted hold: admitted though it did not fit')
         unavailable = self.memory(['INFO ' + W6_UNAVAILABLE_LINE.format(engine_id(3), 'no reading')])
@@ -1273,9 +1304,12 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
     def test_churn_holds_while_every_seat_decodes_are_no_failure(self):
         # The review's M11 false FAIL: nine-plus users on four seats, the fifth prompt held at decodes=4.
         self.assertEqual(self.churn(self.churn_log(holds=True))['verdict'], 'PASS')
-        freed = self.churn(self.churn_log(extra=[decision_line(3)]))
-        self.assertEqual(freed['verdict'], 'FAIL', 'held with a seat free (the held state at decodes=3)')
+        freed = self.churn(self.churn_log(extra=[hold_line(120000, 700e6, 1568.4e6, engine_id(9), 3)]))
+        self.assertEqual(freed['verdict'], 'FAIL', 'held with a seat free (decodes=3)')
         self.assertIn('decodes [3] of 4 seats', ' '.join(freed['s2_problems']))
+        deferred = self.churn(self.churn_log(extra=[deferred_line(120000, 700e6, 1568.4e6, engine_id(9),
+                                                                  [engine_id(1)]), decision_line(3)]))
+        self.assertEqual(deferred['verdict'], 'PASS', 'a deferred step behind a departure is no hold')
         region = self.churn(self.churn_log(extra=before_lines('quad', 900e6, QUAD_ESTIMATE, point='slots=0,1,2,3',
                                                               trace=(260e6, 8e6))))
         self.assertEqual(region['facts']['trace_region']['readings'], 2)
@@ -1396,16 +1430,18 @@ class FormatTests(unittest.TestCase):
         blind = gate.trace_region('\n'.join(before_lines('quad', 900e6, QUAD_ESTIMATE)))
         self.assertEqual((blind['readings'], blind['unavailable']), (0, 2))
 
-    def test_w6s_dram_hold_lines_and_held_states(self):
-        text = '\n'.join([hold_line(120000, 700e6, 1568.4e6, 'r5', 4), decision_line(4), decision_line(3),
+    def test_w6s_dram_hold_lines(self):
+        text = '\n'.join([deferred_line(120000, 700e6, 1568.4e6, 'r5', ['r1']), decision_line(3),
+                          'INFO ' + W6_CARRIED_LINE.format(['r1']), hold_line(120000, 700e6, 1568.4e6, 'r5', 3),
                           decision_line(2, held=True), decision_line(3, allowed=1, hidden=False),
                           'INFO ' + W6_RELEASED_HOLD_LINE.format(120000, mb(1700e6), mb(1568.4e6), 'r5'),
                           'INFO ' + W6_LIFTED_LINE.format(60, mb(700e6), mb(1256e6), 'r6'),
                           'INFO ' + W6_UNAVAILABLE_LINE.format('r7', 'no reading')])
         hold = gate.dram_holds(text)
-        self.assertEqual((hold['holds'], hold['hold_decodes'], hold['held_states']), (1, [4], [3, 4]),
-                         'the lifecycle gate\'s hold (gate_held=True) and an admitted step are no DRAM hold')
-        self.assertEqual((hold['released'], hold['lifted'], hold['unavailable']), (1, 1, 1))
+        self.assertEqual((hold['holds'], hold['hold_decodes']), (1, [3]),
+                         'only DRAM_HOLD lines: a deferred step and the wrapper\'s decision lines are none')
+        self.assertEqual((hold['released'], hold['lifted'], hold['unavailable'], hold['deferred'], hold['carried']),
+                         (1, 1, 1, 1, 1))
         self.assertEqual([line.split('] ', 1)[1][:25] for line in hold['lines']], ['dram hold prompt=120000 l'],
                          'released, lifted and unavailable lines are not hold lines')
         healthy = dict(floor_gb=1.0, by_op=dict(engine=8))
@@ -1415,6 +1451,7 @@ class FormatTests(unittest.TestCase):
         self.assertIn('seat free (decodes [3] of 4 seats)', problems[0])
         self.assertIn('dram hold lifted', problems[1])
         self.assertEqual(len(shortfalls), 1)
+        # W6's first cut asked with every seat decoding too: such a hold is the fifth prompt waiting for a seat.
         waiting = gate.dram_holds('\n'.join([hold_line(120000, 700e6, 1568.4e6, 'r5', 4), decision_line(4)]))
         self.assertEqual(driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=waiting, before=healthy,
                                                                      extent_replay=True)), 4), ([], []),
@@ -1593,8 +1630,12 @@ class ProducerContractTests(unittest.TestCase):
         if admission is None:
             self.skipTest('W6 (s2/w6-memory) is not merged into this checkout')
         self.assertEqual((admission.DRAM_HOLD_LINE, admission.DRAM_RELEASED_LINE, admission.DRAM_LIFTED_LINE,
-                          admission.DRAM_UNAVAILABLE_LINE),
-                         (W6_HOLD_LINE, W6_RELEASED_HOLD_LINE, W6_LIFTED_LINE, W6_UNAVAILABLE_LINE))
+                          admission.DRAM_UNAVAILABLE_LINE, admission.DRAM_HOLD),
+                         (W6_HOLD_LINE, W6_RELEASED_HOLD_LINE, W6_LIFTED_LINE, W6_UNAVAILABLE_LINE,
+                          gate.DRAM_HOLD_MARKER))
+        if hasattr(admission, 'DRAM_DEFERRED_LINE'):
+            self.assertEqual((admission.DRAM_DEFERRED_LINE, admission.DRAM_CARRIED_LINE),
+                             (W6_DEFERRED_LINE, W6_CARRIED_LINE))
         self.assertEqual(admission.engine_build_peak(), ENGINE_PEAK)
 
         class Queue(list):
@@ -1607,26 +1648,35 @@ class ProducerContractTests(unittest.TestCase):
         wrapped = admission.wrap(lambda scheduler: None, queue_factory=lambda scheduler: Queue(),
                                  log=lambda message, *values: lines.append(message.format(*values)))
         request = types.SimpleNamespace(request_id='r5', num_prompt_tokens=120000)
-        scheduler = types.SimpleNamespace(waiting=Queue([request]), max_num_running_reqs=4,
+        scheduler = types.SimpleNamespace(waiting=Queue([request]), max_num_running_reqs=4, finished_req_ids=set(),
                                           running=[types.SimpleNamespace(is_prefill_chunk=False)] * 4)
         holder = types.SimpleNamespace(admits=lambda prompt: (fits[0], dict(largest_free=700 * 10 ** 6 if not fits[0]
                                                                              else 1700 * 10 ** 6, need=1568400000)))
+        healthy = dict(floor_gb=1.0, by_op=dict(engine=8))
+
+        def judged():
+            hold = gate.dram_holds(rendered(lines))
+            return hold, driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=hold, before=healthy,
+                                                                     extent_replay=True)), 4)[0]
         from unittest import mock
         with mock.patch.dict(sys.modules, {admission.DRAM_KEY: holder}):
-            wrapped(scheduler)                       # every seat decoding: held, and no fit judged
-            every_seat = gate.dram_holds(rendered(lines))
+            wrapped(scheduler)                       # every seat decoding: the fifth prompt waits for a seat
+            every_seat = judged()
             scheduler.running = scheduler.running[:3]
-            wrapped(scheduler)                       # a seat freed, still no fit: only the held state says so
+            scheduler.finished_req_ids = {'cmpl-gone'}
+            wrapped(scheduler)                       # a seat freed on a stale reading: deferred (W6 71d9aded) or held
+            stale = judged()
+            scheduler.finished_req_ids = set()
+            wrapped(scheduler)                       # a fresh reading, still no fit: a hold with a seat free
+            fresh = judged()
             fits[0] = True
             wrapped(scheduler)                       # fits: released
-        self.assertEqual((every_seat['hold_decodes'], every_seat['held_states']), ([4], [4]))
-        healthy = dict(floor_gb=1.0, by_op=dict(engine=8))
-        self.assertEqual(driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=every_seat, before=healthy,
-                                                                     extent_replay=True)), 4)[0], [])
-        hold = gate.dram_holds(rendered(lines))
-        self.assertEqual((hold['holds'], hold['hold_decodes'], hold['held_states'], hold['released']), (1, [4], [3, 4], 1))
-        problems = driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=hold, before=healthy, extent_replay=True)), 4)[0]
-        self.assertTrue(problems and 'decodes [3] of 4 seats' in problems[0], problems)
+        self.assertEqual(every_seat[1], [], 'no fit failed while every seat decodes')
+        if hasattr(admission, 'DRAM_DEFERRED_LINE'):
+            self.assertEqual((stale[0]['holds'], stale[0]['deferred'], stale[1]), (0, 1, []), 'deferred: no hold')
+        self.assertEqual(fresh[0]['hold_decodes'][-1], 3)
+        self.assertTrue(fresh[1] and 'decodes [3] of 4 seats' in fresh[1][0], fresh[1])
+        self.assertEqual(judged()[0]['released'], 1)
 
     def test_w6c_release_line(self):
         coordinator = producer('dflash_packed_proposal_coordinator', 'RELEASED_LINE')
@@ -1647,6 +1697,13 @@ class ProducerContractTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {EXTENT: flag}):
                 text = 'proposal ladder {}'.format(factory._proposal_ladder(60, 4096))
             found.append(gate.ladder_of(gate.PROPOSAL_LADDER.search(text).group(1)))
+        if hasattr(factory, 'built_proposal_buckets'):
+            self.assertEqual(factory.PROPOSAL_BUCKETS_BUILT, W6_BUCKETS_BUILT)
+            device = types.SimpleNamespace(proposal_capture=types.SimpleNamespace(buckets={2048: object()}))
+            line = (factory.PROPOSAL_BUCKETS_BUILT + '{} contexts={}').format('cmpl-x', factory.built_proposal_buckets(
+                device))
+            match = gate.PROPOSAL_BUCKETS_BUILT_LINE.search(line)
+            self.assertEqual((match.group(1), gate.ladder_of(match.group(2))), ('cmpl-x', [2048]))
         self.assertEqual(found, [[2048], [256, 512, 1024, 2048]])
 
     def test_w3_extent_round_line(self):

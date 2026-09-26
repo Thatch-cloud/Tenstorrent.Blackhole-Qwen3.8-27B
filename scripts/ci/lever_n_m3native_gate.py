@@ -2573,22 +2573,23 @@ LINE_FIELD = re.compile(r'([a-z_]+)=(\S+)')
 CAP_REFUSED_MARKER = '[PINDIAG] packed extent cap refused'       # W3 commit_user backstop
 DEADLINE_MARKER = '[PINDIAG] replay deadline exceeded'           # W3 replay watchdog
 CAPTURE_OVERRIDE_LINE = re.compile(r'\[PINDIAG\] packed capture position override=([0-9]+)')
-# W6b, serving_prefill_admission: DRAM_HOLD_LINE once per held request with the decodes running when it was
-# held; 'released' once it fits, 'lifted' when no decode is left to wait for (admitted anyway, the bridge
-# backstop decides), 'unavailable' when the predicate read no DRAM (it holds nothing). The predicate is asked
-# whenever a prompt waits - with every seat decoding too, where a hold changes nothing (churn has more users than
-# seats) - so only a hold with a seat free is a hold that failed the fit: c2_serving_gate judges the decodes
-# against the profile's seats. A hold that began with every seat decoding logs no new line when a seat frees and
-# it still does not fit; the wrapper's decision line (once per distinct state) shows it: no partials, the gate
-# not held, allowed=0 and the queues hidden is the DRAM hold's state and no other's (admission()).
+# W6b, serving_prefill_admission (s2/w6-memory 71d9aded): DRAM_HOLD_LINE once per held (request, decodes), with
+# the decodes running when it held; 'released' once it fits, 'lifted' when no decode is left to wait for
+# (admitted anyway, the bridge backstop decides), 'unavailable' when the predicate read no DRAM (it holds
+# nothing). Only lines that start with DRAM_HOLD_MARKER are holds: 'dram admission deferred one step' (a reading
+# still counting a finished request's engine, decided on the next step) and 'dram admission carried' are not,
+# though a deferred step logs the same wrapper decision state as a hold (allowed=0, the queues hidden), so the
+# decision lines are never read as holds. W6 asks only with a seat free; its first cut (b74fcd44) asked with
+# every seat decoding too, where a hold changes nothing (churn has more users than seats), so c2_serving_gate
+# still judges each hold's decodes against the profile's seats.
 DRAM_HOLD_MARKER = '[PINDIAG] dram hold prompt='
 DRAM_HOLD_LINE = re.compile(r'\[PINDIAG\] dram hold prompt=(\S+) largest_free=(\S+) need=(\S+) request=(\S+) '
                             r'decodes=([0-9]+)')
 DRAM_RELEASED_MARKER = '[PINDIAG] dram hold released '
 DRAM_LIFTED_MARKER = '[PINDIAG] dram hold lifted '
 DRAM_UNAVAILABLE_MARKER = '[PINDIAG] dram hold unavailable '
-DRAM_HELD_STATE = re.compile(r'\[PINDIAG\] one fresh prefill per step: partials=0 decodes=([0-9]+) gate_held=False '
-                             r'allowed=0 hidden=True')
+DRAM_DEFERRED_MARKER = '[PINDIAG] dram admission deferred '
+DRAM_CARRIED_MARKER = '[PINDIAG] dram admission carried '
 QUARANTINED_MARKER = '[PINDIAG] request quarantined:'            # D2: a RequestRefused (W6b's backstop included)
 # W6c, dflash_packed_proposal_coordinator.RELEASED_LINE: 'quad=0|1 pairs=[[a, b], ...]', logged at every detach
 # once a coordinator exists (serving_worker_hook.release_dead_proposals), from serving_lifecycle before the step
@@ -2603,7 +2604,11 @@ NARROWING_REFUSED_MARKER = '[PINDIAG] packed survivor narrowing refused'
 ABORTED_LINE = re.compile(r'\[PINDIAG\] packed refused round aborted ([0-9]+)/([0-9]+) FINISHED_ABORTED')   # W5b
 # W6a, the any-request engine line (serving_request_factory): the ladder is a Python tuple through loguru's {} -
 # '(2048,)' under the extent flag, '(256, 512, 1024, 2048)' for a short prompt without it - or 'unavailable (..)'.
+# It is computed from the environment before any capture exists; the executed path is PROPOSAL_BUCKETS_BUILT_LINE
+# (serving_request_factory.PROPOSAL_BUCKETS_BUILT, flag on only), the buckets read from the built capture itself.
 PROPOSAL_LADDER = re.compile(r'proposal ladder (\([0-9, ]*\)|\[[0-9, ]*\]|unavailable[^\n]*)')
+PROPOSAL_BUCKETS_BUILT_LINE = re.compile(r'\[PINDIAG\] proposal buckets built request=(\S+) '
+                                         r'contexts=(\([0-9, ]*\)|\[[0-9, ]*\]|unavailable[^\n]*)')
 # The ledger: its phase point ahead of each prefill (serving_runtime, record('prefill', point='before prompt=N'))
 # and W6d's before/after points (memory_ledger.MemoryLedger.before/after: 'before op=<op>[ point=<p>] chip<n>
 # largest_free=..MB free=..GB estimate=..MB margin=..MB floor=..MB' then 'trace_used=..MB trace_largest_free=..MB'
@@ -2724,8 +2729,8 @@ def refused_rounds_report(log_text):
 
 
 def dram_holds(log_text):
-    """W6b's hold lines: each hold's decodes (a seat was free when fewer than the seats decode), the decodes of
-    every held state the wrapper logged, and the released, lifted and unavailable lines."""
+    """W6b's hold lines, each with its decodes (a seat was free when fewer than the seats decode), and the
+    released, lifted, unavailable, deferred and carried lines (the last two are no hold)."""
     lines = log_text.splitlines()
     decodes = [int(match.group(5)) for match in DRAM_HOLD_LINE.finditer(log_text)]
 
@@ -2734,9 +2739,9 @@ def dram_holds(log_text):
 
     held, lifted, unavailable = picked(DRAM_HOLD_MARKER), picked(DRAM_LIFTED_MARKER), picked(DRAM_UNAVAILABLE_MARKER)
     return dict(holds=len(decodes), hold_decodes=decodes[:64], lines=held[:4],
-                held_states=sorted(set(int(value) for value in DRAM_HELD_STATE.findall(log_text))),
                 released=len(picked(DRAM_RELEASED_MARKER)), lifted=len(lifted), lifted_lines=lifted[:2],
-                unavailable=len(unavailable), unavailable_lines=unavailable[:2])
+                unavailable=len(unavailable), unavailable_lines=unavailable[:2],
+                deferred=len(picked(DRAM_DEFERRED_MARKER)), carried=len(picked(DRAM_CARRIED_MARKER)))
 
 
 def pair_count(text):
@@ -2955,6 +2960,7 @@ def s2_report(environ, log_text, streams=None, prompt_lengths=None):
         releases=proposal_releases(log_text),
         quads_built=len(QUAD_BUILT_LINE.findall(log_text)),
         ladders=[ladder_of(text) for text in PROPOSAL_LADDER.findall(log_text)][:32],
+        buckets_built=[ladder_of(text) for _, text in PROPOSAL_BUCKETS_BUILT_LINE.findall(log_text)][:32],
         before=before_points(log_text),
         trace_region=region, trace_region_lines=region['lines'],
         other_audits=other)
