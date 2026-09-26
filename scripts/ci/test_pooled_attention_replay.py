@@ -453,7 +453,9 @@ class SdpaModesTests(unittest.TestCase):
     SDPA configs of a built replay reader carry the grafted factory's q_chunk_size sentinel; unset, nothing
     changes."""
 
-    # The files this change must not touch (their bytes are gate evidence), at HEAD d21cd875+.
+    # The files this change must not touch (their bytes are gate evidence), at HEAD d21cd875+. These are this
+    # CHECKOUT's bytes. Every image serves attention_mask_replay.py as the frozen recipe stages it (6a31981c, not this
+    # 3e431742; test_extent_attention_replay.SERVED_MASK), and the two differ only in validate_ticket and one import.
     PINNED = {
         'attention_replay.py': '4eff1c51fd42bb04adf68fc40bf74a0cca0cd455c3ae2fc50caf720f5281137a',
         'attention_batch.py': '64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0',

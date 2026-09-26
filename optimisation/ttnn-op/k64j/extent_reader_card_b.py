@@ -57,10 +57,17 @@ two-chip readback of every segment's word and cur_pos and, in rotation, its narr
 on M+A; the audit's chip-1 mask comparison is therefore decisive there (its MISMATCH line fails the arm, design 2.2
 step 7), never advisory. The verdict line says chips=1of2.
 
-THE CODE UNDER TEST comes from this checkout's scripts/ci, which run_card_b.sh mounts at /bench/ci (--ci-root): every
-module must be loaded from there, the four pinned sources must keep their frozen bytes, and the sha256 of
-extent_attention_replay.py (what W7's evidence pins), pooled_attention_replay.py and serving_buffer_pool.py are
-recorded; the first is also on the verdict line (extent_sha256=).
+THE CODE UNDER TEST comes from this checkout's scripts/ci, which run_card_b.sh mounts at /bench/ci (--ci-root). Every
+module except the pinned ones must be loaded from there. The harness records the sha256 of extent_attention_replay.py
+(what W7's evidence pins), pooled_attention_replay.py and serving_buffer_pool.py, and puts the first on the verdict
+line (extent_sha256=).
+
+THE PINNED MODULES the reader runs are the IMAGE'S. These are attention_mask_replay and attention_fold_dma, and each
+compiles the .cpp beside it. The harness loads them from the image's served tree, /experiment-scripts/ci
+(--served-root), before anything imports them, so the code under test binds to them as it does in a serving process.
+Their four files must be the served bytes (PINNED). The image's mask module is not the checkout's file: the image
+holds the frozen recipe's stage of it (6a31981c) and the checkout holds 3e431742. The two differ only in
+validate_ticket, which nothing here calls (test_extent_attention_replay test 11), but serving runs only the image's.
 
 FOR W7 (design W7: "the extent readers refuse construction unless admitted() holds"). This harness constructs the
 readers with no admission - its PASS is part of the admission's evidence - and that evidence pins
@@ -85,10 +92,10 @@ Verdict: one 'K64J_READER verdict=...' line.
                PASS is CB2b's evidence.
   FAIL         a decisive comparison differs on an otherwise valid run.
   NO-DECISION  a failure (the wrong binary or kernels, no compact scratch, QWEN_FAST_SDPA_MODES other than
-               tail,share,slice, a module not from --ci-root, a pinned source changed, the host mirrors disagreeing, a
-               requested program without its factory lines, a missing PINDIAG line, a section that raised, the
-               watchdog), a dead liveness control, a decisive section cut by the deadline, SIGTERM, or a requested
-               section without a decisive comparison.
+               tail,share,slice, a module not from --ci-root or --served-root, a pinned source that is not its served
+               bytes, the host mirrors disagreeing, a requested program without its factory lines, a missing PINDIAG
+               line, a section that raised, the watchdog), a dead liveness control, a decisive section cut by the
+               deadline, SIGTERM, or a requested section without a decisive comparison.
 
 RUN with run_card_b.sh and K64J_HARNESS=extent_reader, WATCHER=1 first; on card M through the cardm action (card B is
 reserved for another agent). The helpers above the device part import no ttnn and are tested on CPU by
@@ -100,6 +107,7 @@ import argparse
 from contextlib import contextmanager
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -122,6 +130,7 @@ PLAN = ('s2-design.md W10b / CB2b (section 6.2): R1, R2, R4 and the construction
 CAPACITY = card_b.CAPACITY                     # the served table: 2,052 pages of 64 keys
 K_CHUNK = card_b.K_CHUNK
 CI_ROOT = '/bench/ci'                          # where run_card_b.sh mounts this checkout's scripts/ci
+SERVED_ROOT = '/experiment-scripts/ci'         # the image's served tree (c2_overlay.PINNED_TREE): the pinned modules
 SECTIONS = ('R1', 'S', 'R2', 'R4')
 BLOCK_SECTIONS = ('S', 'R2', 'R4')             # one reader per seed serves these
 DECISIVE_RUNS = ('R1', 'block')
@@ -147,14 +156,18 @@ SDPA_MODES_ENV = 'QWEN_FAST_SDPA_MODES'
 SDPA_MODES = ('share', 'slice', 'tail')        # the image's QWEN_FAST_SDPA_MODES (v235); the reader adds extent
 ENGAGED_MARKER = '[PINDIAG] extent replay engaged'
 MODES_MARKER = '[PINDIAG] sdpa qwen-modes'
-# The pinned sources the reader runs (target_t16_attention_gate.SOURCES, frozen at 8c102b20; test_extent_reader_card_b
-# keeps these equal to test_extent_attention_replay.StructureTests.SOURCES).
+# The pinned sources the reader runs, as the image SERVES them (target_t16_attention_gate.SOURCES: the bytes
+# frozen_combined_runtime.qualify hashes at every attach). The mask module is the frozen recipe's stage of 8c102b20
+# (6a31981c), not the checkout's 3e431742, which no image carries. The other three are the checkout's bytes too.
+# test_extent_reader_card_b keeps these equal to test_extent_attention_replay.StructureTests.SOURCES.
 PINNED = {
-    'attention_mask_replay.py': '3e431742e35a2b94b4a02a60fa334a93a44a471eaefcacd25e52fbafdf03361f',
+    'attention_mask_replay.py': '6a31981cb9203439b8e6e78e8bd712e078f00335a7f211c732d4ac47cabca3a8',
     'attention_mask_replay.cpp': 'e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8',
     'attention_fold_dma.py': '5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5',
     'attention_fold_dma.cpp': '066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9',
 }
+# The modules those four files are: loaded from --served-root, never from the checkout.
+SERVED_MODULES = ('attention_fold_dma', 'attention_mask_replay')
 RECORDED_SOURCES = ('extent_attention_replay.py', 'pooled_attention_replay.py', 'serving_buffer_pool.py',
                     'attention_head_fold.py', 'gdn_multitoken_conv.py')
 MODULES = (('extent', 'extent_attention_replay'), ('mask', 'attention_mask_replay'), ('fold', 'attention_fold_dma'),
@@ -536,36 +549,94 @@ def tee_pindiag(modules, sink):
             module._pindiag = original
 
 
-def load_modules(ci_root, report):
-    """The code under test, from `ci_root` (this checkout's scripts/ci as the runner mounts it; '' takes sys.path as
-    it is): each module's file, the pinned sources' frozen bytes, the recorded shas. None, with failures, when any
-    of it is wrong."""
-    root = None
-    if ci_root:
-        root = Path(ci_root).resolve()
-        if str(root) not in sys.path[:1]:
-            sys.path.insert(0, str(root))
-    modules, files, ok = {}, {}, True
+def load_served(served, failures):
+    """Execute each of SERVED_MODULES from the directory `served` and register it in sys.modules before anything
+    imports it, so the code under test imported afterwards binds to these copies. Each one's own imports resolve in
+    `served` first, as in serving (the mask module's frozen_context_geometry, which only validate_ticket uses). A
+    module already imported from anywhere else is refused, not replaced, because whatever imported it keeps that copy.
+    Returns whether all loaded."""
+    ok = True
+    for name in SERVED_MODULES:
+        path = served / (name + '.py')
+        earlier = sys.modules.get(name)
+        if earlier is not None:
+            if Path(earlier.__file__).resolve() != path:
+                failures.append('%s was imported from %s before its served copy in --served-root %s could be loaded '
+                                '(whatever imported it keeps that copy)' % (name, earlier.__file__, served))
+                ok = False
+            continue
+        if not path.is_file():
+            failures.append('%s.py is not in --served-root %s (the image\'s served tree, where serving imports it)'
+                            % (name, served))
+            ok = False
+            continue
+        spec = importlib.util.spec_from_file_location(name, str(path))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        sys.path.insert(0, str(served))
+        try:
+            spec.loader.exec_module(module)
+        except Exception as error:  # noqa: BLE001 - a served module that cannot load decides nothing
+            sys.modules.pop(name, None)
+            failures.append('the served %s could not be loaded from %s: %s' % (name, path, probe.one_line(error)))
+            ok = False
+        finally:
+            del sys.path[sys.path.index(str(served))]
+    return ok
+
+
+def load_modules(ci_root, report, served_root=SERVED_ROOT):
+    """The code under test from `ci_root` (this checkout's scripts/ci as the runner mounts it), and the pinned modules
+    the reader runs (SERVED_MODULES) from `served_root` (the image's served tree), as a serving process has them. It
+    records each module's file, the pinned sources' served bytes and the recorded shas. '' for either root takes
+    sys.path as it is, for the CPU tests. Returns None, with failures, when any of it is wrong."""
+    root = Path(ci_root).resolve() if ci_root else None
+    served = Path(served_root).resolve() if served_root else None
+    failures, ok = report['failures'], True
+    files, shas = {}, {}
+    report['modules'] = dict(ci_root=str(root) if root else None, served_root=str(served) if served else None,
+                             files=files, sha256=shas)
+    if root is not None and str(root) not in sys.path[:1]:
+        sys.path.insert(0, str(root))
+    if served is not None and not load_served(served, failures):
+        return None
+    modules = {}
     for key, name in MODULES:
         module = importlib.import_module(name)
         modules[key] = module
         path = Path(module.__file__).resolve()
         files[name] = str(path)
-        if root is not None and path.parent != root:
-            report['failures'].append('%s was loaded from %s, not from --ci-root %s (the code under test is this '
-                                      'checkout\'s)' % (name, path, root))
+        if name in SERVED_MODULES:
+            if served is not None and path.parent != served:
+                failures.append('%s was loaded from %s, not from --served-root %s (the pinned modules are the '
+                                'image\'s)' % (name, path, served))
+                ok = False
+        elif root is not None and path.parent != root:
+            failures.append('%s was loaded from %s, not from --ci-root %s (the code under test is this '
+                            'checkout\'s)' % (name, path, root))
             ok = False
-    directory = Path(modules['extent'].__file__).resolve().parent
-    shas = {}
-    for name in tuple(PINNED) + RECORDED_SOURCES:
+    # The code under test must run the loaded pinned modules, not other copies of them.
+    for what, same in (('extent_attention_replay.attention_mask_replay',
+                        modules['extent'].attention_mask_replay is modules['mask']),
+                       ('extent_attention_replay.device_layout_dma',
+                        modules['extent'].device_layout_dma is modules['fold'].device_layout_dma),
+                       ('pooled_attention_replay.validate_ticket',
+                        modules['pooled'].validate_ticket is modules['mask'].validate_ticket)):
+        if not same:
+            failures.append('%s is not the loaded pinned module\'s (another copy was imported first)' % what)
+            ok = False
+    for name in PINNED:
+        path = Path(files[name.rsplit('.', 1)[0]]).parent / name
+        shas[name] = file_sha256(path) if path.is_file() else None
+    directory = Path(files['extent_attention_replay']).parent
+    for name in RECORDED_SOURCES:
         path = directory / name
         shas[name] = file_sha256(path) if path.is_file() else None
     for name, digest in PINNED.items():
         if shas[name] != digest:
-            report['failures'].append('pinned source %s is %s, not its frozen %s'
-                                      % (name, (shas[name] or 'missing')[:16], digest[:16]))
+            failures.append('pinned source %s is %s, not its served %s'
+                            % (name, (shas[name] or 'missing')[:16], digest[:16]))
             ok = False
-    report['modules'] = dict(ci_root=str(root) if root else None, files=files, sha256=shas)
     return type('Modules', (), modules) if ok else None
 
 
@@ -1038,7 +1109,7 @@ def run(args, report, checkpoint=None):
     import torch
     import ttnn
 
-    mods = load_modules(args.ci_root, report)
+    mods = load_modules(args.ci_root, report, args.served_root)
     if mods is None:
         return
     options = dict(device_id=args.device_id, l1_small_size=24576)
@@ -1150,6 +1221,8 @@ def parse_args(argv=None):
     parser.add_argument('--kernel-root', default=card_b.KERNEL_ROOT, help='the mounted sdpa_decode kernels ("" skips)')
     parser.add_argument('--ci-root', default=CI_ROOT,
                         help='the scripts/ci the code under test must come from ("" takes sys.path as it is)')
+    parser.add_argument('--served-root', default=SERVED_ROOT,
+                        help='the image\'s served tree the pinned modules must come from ("" takes sys.path as it is)')
     args = parser.parse_args(argv)
 
     def ints(text):

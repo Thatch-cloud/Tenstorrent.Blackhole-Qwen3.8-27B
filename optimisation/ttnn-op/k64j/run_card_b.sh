@@ -44,14 +44,16 @@
 # run list for the qwen-two-p150a-exclusive group before and after.
 #
 # CB2b (s2-design.md W10b, 6.2: R1, S, R2 and R4 through the REAL S2 extent readers): K64J_HARNESS=extent_reader runs
-# extent_reader_card_b.py instead of k64j_card_b.py (K64J_HARNESS=card, the default), with this checkout's scripts/ci
-# mounted read-only at /bench/ci - the code under test; its four pinned sources (attention_mask_replay.py/.cpp,
-# attention_fold_dma.py/.cpp) are checked against their frozen sha256s here, before anything is launched - and
-# QWEN_FAST_SDPA_MODES=tail,share,slice (the image's; the reader adds extent). Report reader-<stamp>.json, container
-# qwen-k64j-reader-<card tag>, verdict line K64J_READER. Everything else (the graft checks, the board, the holder
-# check, the watchdog, the timeouts) is as above. CARD B IS RESERVED for another agent and is this runner's default
-# QUAL_CARD, so CB2b runs on card M only: through the cardm action (.github/c2-serving-job.env), which sets card M
-# itself -
+# extent_reader_card_b.py instead of k64j_card_b.py (K64J_HARNESS=card, the default). This checkout's scripts/ci,
+# the code under test, is mounted read-only at /bench/ci, and QWEN_FAST_SDPA_MODES=tail,share,slice is set (the
+# image's; the reader adds extent). The pinned sources the reader runs (attention_mask_replay.py/.cpp and
+# attention_fold_dma.py/.cpp) are NEVER taken from the checkout. The harness loads them from the image's served tree,
+# $SERVED_CI, as serving does. Before it opens the device, it refuses any whose sha256 is not the served one. The
+# image's attention_mask_replay.py is the frozen recipe's stage (6a31981c), not the checkout's 3e431742. The container
+# logs their sha256 with the binaries'. Report reader-<stamp>.json, container qwen-k64j-reader-<card tag>, verdict
+# line K64J_READER. Everything else (the graft checks, the board, the holder check, the watchdog, the timeouts) is as
+# above. CARD B IS RESERVED for another agent and is this runner's default QUAL_CARD, so CB2b runs on card M only:
+# through the cardm action (.github/c2-serving-job.env), which sets card M itself -
 #   C2_CARDM_HARNESS=optimisation/ttnn-op/k64j/run_card_b.sh
 #   C2_CARDM_ENV=K64J_HARNESS=extent_reader [WATCHER=1] KOPGRAFT64=/home/thatch/opgraft-K64j
 #     EXPECT_TTNNCPP_SHA256=<K64J_TTNNCPP_SHA256>
@@ -107,14 +109,12 @@ WRITER_ALL=734c90c01c7a7174497133fae9df80110ead55275955faeb566d345bdccb60b8
 COMPUTE_ALL=d24769bdcbb8635f83f5f91a301fe0d89298d38263d4493a39c6d2decb57867f
 DATAFLOW_COMMON=e4623a2254559eaec4450ebfab0f9c5732e02acfe4d8126bd5eeb7efe0fdc608
 RT_ARGS_COMMON=1b52c60d78ada6f08effd326c2ed2407b3a74cf0db2353fadbe51b088610aec8
-# K64J_HARNESS=extent_reader: the scripts/ci sources it loads, and the frozen bytes of the four pinned ones
-# (target_t16_attention_gate.SOURCES at 8c102b20; extent_reader_card_b.PINNED).
+# K64J_HARNESS=extent_reader: the code under test it loads from this checkout's scripts/ci, and the pinned sources it
+# runs from the image's served tree (extent_reader_card_b.SERVED_ROOT and PINNED; the harness checks their bytes).
 CI_SOURCES='extent_attention_replay.py pooled_attention_replay.py serving_buffer_pool.py attention_head_fold.py
-gdn_multitoken_conv.py attention_mask_replay.py attention_mask_replay.cpp attention_fold_dma.py attention_fold_dma.cpp'
-MASK_PY=3e431742e35a2b94b4a02a60fa334a93a44a471eaefcacd25e52fbafdf03361f
-MASK_CPP=e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8
-FOLD_PY=5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5
-FOLD_CPP=066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9
+gdn_multitoken_conv.py'
+SERVED_CI=/experiment-scripts/ci
+SERVED_SOURCES='attention_mask_replay.py attention_mask_replay.cpp attention_fold_dma.py attention_fold_dma.cpp'
 
 # >>> qual_card.sh: which board a qualification harness runs on (canonical copy scripts/ci/qual_card.sh)
 # Every single-card harness under optimisation/ttnn-op embeds this block byte for byte (the scripts in
@@ -436,21 +436,14 @@ for file in "${HARNESS[@]}"; do
 done
 XE=()
 if [ "$MAIN" = extent_reader ]; then
-  # The code under test is this checkout's scripts/ci, mounted read-only; the pinned sources keep their bytes.
+  # The code under test is this checkout's scripts/ci, mounted read-only. The pinned sources it runs are the image's
+  # ($SERVED_CI). The harness loads them from there and checks their served bytes before it opens the device.
   ci=$(cd "$here/../../../scripts/ci" 2>/dev/null && pwd || echo "$here/../../../scripts/ci")
   for file in $CI_SOURCES; do
     test -s "$ci/$file" \
       || { echo "refusing: $ci/$file missing (the extent reader runs this checkout's scripts/ci)" >&2; exit 1; }
   done
-  for pair in "attention_mask_replay.py:$MASK_PY" "attention_mask_replay.cpp:$MASK_CPP" \
-              "attention_fold_dma.py:$FOLD_PY" "attention_fold_dma.cpp:$FOLD_CPP"; do
-    got=$(sha256sum "$ci/${pair%%:*}" | cut -c1-64)
-    if [ "$got" != "${pair#*:}" ]; then
-      echo "refusing: $ci/${pair%%:*} is $got, not its frozen ${pair#*:} (a pinned source changed)" >&2
-      exit 1
-    fi
-  done
-  echo "### code under test: $ci (4 pinned sources at their frozen bytes)"
+  echo "### code under test: $ci; pinned sources: the image's $SERVED_CI"
   XE=(-e QWEN_FAST_SDPA_MODES=tail,share,slice)
 fi
 
@@ -543,7 +536,13 @@ extra=(${CARD_B_ARGS:-})
 inner='sha256sum /opt/tt-metal/build_Release/lib/_ttnncpp.so /opt/tt-metal/build_Release/ttnn/_ttnncpp.so '
 inner+="$KD/dataflow/reader_decode_qwen.cpp $KD/dataflow/reader_decode_qwen_slice.cpp $KD/compute/sdpa_flash_decode_qwen.cpp "
 inner+="$KD/dataflow/writer_decode_qwen_slice.cpp $KD/dataflow/reader_decode_all.cpp $KD/dataflow/writer_decode_all.cpp "
-inner+="$KD/compute/sdpa_flash_decode.cpp $KD/dataflow/dataflow_common.hpp $KD/rt_args_common.hpp 2>&1; "
+inner+="$KD/compute/sdpa_flash_decode.cpp $KD/dataflow/dataflow_common.hpp $KD/rt_args_common.hpp "
+if [ "$MAIN" = extent_reader ]; then
+  for file in $SERVED_SOURCES; do
+    inner+="$SERVED_CI/$file "
+  done
+fi
+inner+='2>&1; '
 if [ "$MAIN" = extent_reader ]; then
   inner+='exec python3 -B /bench/extent_reader_card_b.py "$@"'
 else

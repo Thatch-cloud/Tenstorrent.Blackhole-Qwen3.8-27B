@@ -3,14 +3,18 @@
   - the helpers: the live starts (the floor, the table's end), the family plan (the named first, more than 50 by
     default), the replay plan (every family, the restages), the idle patterns, the decision, the scope and the
     verdict line, the PINDIAG check, the arguments;
-  - the contract: the pinned shas are the frozen ones (test_extent_attention_replay's) and the runner's; the lent
-    storage is what serving_buffer_pool's extent storage is, tensor for tensor; the two host mirrors of the mask kernel
-    agree; the two-chip view (one shard twice, chip 0's program launched, chip 1's counted, sys.modules restored);
-    without the view the real reader refuses a one-chip device;
+  - the contract: the pinned shas are the served ones (test_extent_attention_replay's), and the runner neither ships
+    nor checks a checkout copy of them; the lent storage is what serving_buffer_pool's extent storage is, tensor for
+    tensor; the two host mirrors of the mask kernel agree; the two-chip view (one shard twice, chip 0's program
+    launched, chip 1's counted, sys.modules restored); without the view the real reader refuses a one-chip device;
+  - the served loader, in a fresh interpreter as the container runs it: the pinned modules from a served tree rebuilt
+    from git (the frozen recipe's stage of the mask module), the code under test bound to them, and a served tree
+    with other bytes, a missing module or one imported first refused;
   - the runner (needs bash): K64J_HARNESS=extent_reader's dry run (the harness and this checkout's scripts/ci mounted
-    read-only, QWEN_FAST_SDPA_MODES, the report and container names), its watcher pass, an unknown harness and a
-    changed pinned source refused before anything is launched, card M through the override (the dry run, and the real
-    launch path on test_qual_card's fake rig), and the cardm job file's check of the documented values;
+    read-only, the image's pinned sources logged, QWEN_FAST_SDPA_MODES, the report and container names), its watcher
+    pass, an unknown harness and a missing source refused before anything is launched, card M through the override
+    (the dry run, and the real launch path on test_qual_card's fake rig), and the cardm job file's check of the
+    documented values;
   - the whole flow on a fake ONE-chip ttnn (test_k64j_card_b.FakeExtentTtnn's K64j SDPA, read at replay time, plus
     the pinned mask and fold kernels emulated from their .cpp, slices, concats and traces): the REAL reader classes
     through the two-chip view, PASS end to end, and each broken variant on the section that must catch it - a stale
@@ -76,6 +80,14 @@ def sha(data):
 
 def read(path):
     return Path(path).read_text(encoding='utf-8')
+
+
+def checkout_pinned():
+    """reader_b.PINNED as this checkout holds those files. The in-process flow takes the pinned modules from sys.path
+    (--served-root ''), and those are the checkout's copies, whose mask module is not the served one.
+    ServedLoaderTests loads a served tree in a fresh interpreter."""
+    import test_extent_attention_replay as extent_tests
+    return {name: extent_tests.StructureTests.CHECKOUT[name] for name in reader_b.PINNED}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -597,6 +609,7 @@ class HelperTests(unittest.TestCase):
                           len(args.families), args.r2_restages, args.idle_patterns, args.ci_root, args.output_memory),
                          (131328, ['R1', 'S', 'R2', 'R4'], [0, 1, 2], ['normal', 'peaky'], ['G8B2', 'G4B3', 'G4B1'],
                           [0, 7, 32, 127, 128, 240, 255], 56, 2, [(3,), (2, 3), (0,), (0, 1)], '/bench/ci', 'l1'))
+        self.assertEqual(args.served_root, '/experiment-scripts/ci')
         for bad in (['--sections', 'K2'], ['--variants', 'zeroq'], ['--r1-geometries', 'G8B3'], ['--r1-words', '256'],
                     ['--r2-restages', '3'], ['--r2-residues', ''], ['--idle-patterns', '0+1+2'], ['--capacity', '300'],
                     ['--expect-binary-sha256', 'abc'], ['--r2-families', '600']):
@@ -612,22 +625,31 @@ class HelperTests(unittest.TestCase):
 # ---------------------------------------------------------------------------------------------
 
 class ContractTests(unittest.TestCase):
-    def test_the_pinned_shas_are_the_frozen_ones_and_the_runners(self):
+    def test_the_pinned_shas_are_the_served_ones_and_the_runner_takes_them_from_the_image(self):
+        import c2_overlay
         import test_extent_attention_replay as extent_tests
-        frozen = extent_tests.StructureTests.SOURCES
-        self.assertEqual(reader_b.PINNED, {name: frozen[name] for name in reader_b.PINNED})
+        served = extent_tests.StructureTests.SOURCES
+        self.assertEqual(reader_b.PINNED, {name: served[name] for name in reader_b.PINNED})
+        self.assertEqual(reader_b.PINNED['attention_mask_replay.py'], extent_tests.SERVED_MASK)
+        self.assertEqual(sha(extent_tests.served_mask_source().encode('utf-8')), extent_tests.SERVED_MASK)
+        # The frozen recipe adapts the mask module alone: the image holds the checkout's bytes of the other three.
         for name, digest in reader_b.PINNED.items():
-            self.assertEqual(sha((CI / name).read_bytes()), digest, name)
+            if name != 'attention_mask_replay.py':
+                self.assertEqual(sha((CI / name).read_bytes()), digest, name)
+        self.assertEqual(set(reader_b.SERVED_MODULES), {name[:-3] for name in reader_b.PINNED if name.endswith('.py')})
+        self.assertEqual((reader_b.SERVED_ROOT, reader_b.CI_ROOT), (c2_overlay.PINNED_TREE, '/bench/ci'))
         runner = read(RUNNER)
-        for variable, name in (('MASK_PY', 'attention_mask_replay.py'), ('MASK_CPP', 'attention_mask_replay.cpp'),
-                               ('FOLD_PY', 'attention_fold_dma.py'), ('FOLD_CPP', 'attention_fold_dma.cpp')):
-            self.assertEqual(re.findall(r'^%s=([0-9a-f]{64})$' % variable, runner, flags=re.M), [reader_b.PINNED[name]])
+        # The runner neither ships nor checks a checkout copy of a pinned source. The image's copies run, the harness
+        # checks their bytes before it opens the device, and the container logs their sha256 first.
+        self.assertEqual(re.findall(r'^(?:MASK|FOLD)_(?:PY|CPP)=', runner, flags=re.M), [])
         sources = re.search(r"^CI_SOURCES='([^']*)'$", runner, flags=re.M | re.S).group(1).split()
-        self.assertEqual(sorted(sources), sorted(set(reader_b.PINNED) | set(reader_b.RECORDED_SOURCES)))
-        self.assertEqual({name for _key, name in reader_b.MODULES}, {name[:-3] for name in sources
-                                                                     if name.endswith('.py')})
+        self.assertEqual(sorted(sources), sorted(reader_b.RECORDED_SOURCES))
+        self.assertEqual({name for _key, name in reader_b.MODULES} - set(reader_b.SERVED_MODULES),
+                         {name[:-3] for name in sources})
+        self.assertEqual(re.findall(r'^SERVED_CI=(.*)$', runner, flags=re.M), [reader_b.SERVED_ROOT])
+        served_sources = re.search(r"^SERVED_SOURCES='([^']*)'$", runner, flags=re.M).group(1).split()
+        self.assertEqual(sorted(served_sources), sorted(reader_b.PINNED))
         self.assertIn("exec python3 -B /bench/extent_reader_card_b.py \"$@\"", runner)
-        self.assertEqual(reader_b.CI_ROOT, '/bench/ci')
 
     def test_the_constants_are_the_served_geometrys(self):
         self.assertEqual(reader_b.SEGMENTS, tuple(zip(range(0, 64, 16), range(16, 80, 16))))
@@ -801,7 +823,7 @@ def make_tree(directory):
         shutil.copyfile(source, ops / source.parent.name / source.name)
     ci = root / 'scripts' / 'ci'
     ci.mkdir(parents=True)
-    for name in set(reader_b.PINNED) | set(reader_b.RECORDED_SOURCES):
+    for name in reader_b.RECORDED_SOURCES:                   # the pinned sources are the image's, never these
         shutil.copyfile(CI / name, ci / name)
     return ops / 'k64j' / 'run_card_b.sh', ci
 
@@ -864,14 +886,19 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn('TT_METAL_WATCHER=5', env)
         inner = argv[argv.index('--entrypoint') + 4]
         self.assertTrue(inner.endswith('exec python3 -B /bench/extent_reader_card_b.py "$@"'), inner)
+        for name in reader_b.PINNED:                            # the image's copies, logged before the harness runs
+            self.assertIn('/experiment-scripts/ci/%s ' % name, inner.split('2>&1; ')[0])
+        self.assertNotIn('/experiment-scripts/ci', ' '.join(m.get('src', '') for m in self.mounts(argv)))
         args = self.harness_args(argv)
-        self.assertEqual((args.expect_binary_sha256, args.watchdog, args.deadline_s, args.ci_root, args.sections,
-                          len(args.families)), (sha(card_tests.BINARY), 300.0, 4800.0, '/bench/ci',
-                                                ['R1', 'S', 'R2', 'R4'], 56))
+        self.assertEqual((args.expect_binary_sha256, args.watchdog, args.deadline_s, args.ci_root, args.served_root,
+                          args.sections, len(args.families)),
+                         (sha(card_tests.BINARY), 300.0, 4800.0, '/bench/ci', '/experiment-scripts/ci',
+                          ['R1', 'S', 'R2', 'R4'], 56))
         self.assertRegex(args.out.as_posix(), r'^/results/reader-[0-9]{8}T[0-9]{6}\.json$')
-        # The default harness is untouched by the selection: no /bench/ci, no QWEN_FAST_SDPA_MODES.
+        # The default harness is untouched by the selection: no /bench/ci, no served sources, no QWEN_FAST_SDPA_MODES.
         argv = self.argv(self.run_runner(K64J_HARNESS='card'))
         self.assertNotIn('/bench/ci', [m['dst'] for m in self.mounts(argv)])
+        self.assertNotIn('/experiment-scripts/ci', argv[argv.index('--entrypoint') + 4])
         self.assertNotIn('QWEN_FAST_SDPA_MODES=tail,share,slice', argv)
         self.assertEqual(argv[argv.index('--name') + 1], 'qwen-k64j-card-card-b')
 
@@ -897,18 +924,12 @@ class RunnerTests(unittest.TestCase):
     def tree(self):
         return make_tree(self.dir)
 
-    def test_a_changed_pinned_source_or_a_missing_one_is_refused_before_launch(self):
+    def test_a_missing_source_is_refused_before_launch_and_no_checkout_copy_of_a_pinned_one_is_needed(self):
         runner, ci = self.tree()
-        self.argv(self.run_runner(runner))
-        with open(ci / 'attention_fold_dma.cpp', 'ab') as handle:
-            handle.write(b'// drift\n')
-        result = self.run_runner(runner)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        drifted = sha((ci / 'attention_fold_dma.cpp').read_bytes())
-        self.assertIn('attention_fold_dma.cpp is %s, not its frozen %s (a pinned source changed)'
-                      % (drifted, reader_b.PINNED['attention_fold_dma.cpp']), result.stderr)
-        self.assertNotIn('### argv: ', result.stdout)
-        shutil.copyfile(CI / 'attention_fold_dma.cpp', ci / 'attention_fold_dma.cpp')
+        self.assertFalse([name for name in reader_b.PINNED if (ci / name).exists()])
+        argv = self.argv(self.run_runner(runner))               # the image's pinned sources run, never the checkout's
+        inner = argv[argv.index('--entrypoint') + 4]
+        self.assertTrue(all('/experiment-scripts/ci/' + name in inner for name in reader_b.PINNED), inner)
         (ci / 'serving_buffer_pool.py').unlink()
         result = self.run_runner(runner)
         self.assertEqual(result.returncode, 1)
@@ -1010,6 +1031,99 @@ class CardMRunTests(unittest.TestCase):
         self.assertFalse(self.launched.exists())
 
 
+class ServedLoaderTests(unittest.TestCase):
+    """load_modules in a fresh interpreter, as the container runs it. The pinned modules come from a served tree and
+    the code under test from the checkout's scripts/ci. The served tree is rebuilt from git: the frozen recipe's stage
+    of attention_mask_replay.py, and the checkout's bytes of the other three, which the image holds unchanged."""
+
+    def setUp(self):
+        import test_extent_attention_replay as extent_tests
+        self.tmp = tempfile.TemporaryDirectory()
+        self.served = Path(self.tmp.name) / 'experiment-scripts' / 'ci'
+        self.served.mkdir(parents=True)
+        with open(self.served / 'attention_mask_replay.py', 'w', encoding='utf-8', newline='\n') as handle:
+            handle.write(extent_tests.served_mask_source())
+        for name in ('attention_mask_replay.cpp', 'attention_fold_dma.py', 'attention_fold_dma.cpp',
+                     'frozen_context_geometry.py'):
+            shutil.copyfile(CI / name, self.served / name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def load(self, prelude=''):
+        script = NL.join((
+            'import json, sys',
+            'sys.path[:0] = %r' % [str(HERE), str(PROBE_DIR), str(OPS / 'sdpa_decode_qwen')],
+            prelude,
+            'import extent_reader_card_b as reader_b',
+            'report = dict(failures=[])',
+            'mods = reader_b.load_modules(%r, report, %r)' % (str(CI), str(self.served)),
+            'out = dict(failures=report["failures"], modules=report.get("modules"), loaded=mods is not None)',
+            'if mods is not None:',
+            '    out.update(bound=[mods.extent.attention_mask_replay is mods.mask,',
+            '                      mods.extent.device_layout_dma is mods.fold.device_layout_dma,',
+            '                      mods.pooled.validate_ticket is mods.mask.validate_ticket,',
+            '                      sys.modules["attention_replay"].prepare is mods.mask.prepare,',
+            '                      sys.modules["attention_parallel"].device_layout_dma',
+            '                      is mods.fold.device_layout_dma])',
+            '    out.update(geometry=sys.modules["frozen_context_geometry"].__file__,',
+            '               served_on_path=%r in sys.path)' % str(self.served.resolve()),
+            'print("LOADED " + json.dumps(out))'))
+        environ = dict(os.environ, OMP_NUM_THREADS='2', MKL_NUM_THREADS='2')
+        result = subprocess.run([sys.executable, '-B', '-c', script], capture_output=True, text=True, encoding='utf-8',
+                                errors='replace', timeout=300, env=environ)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.startswith('LOADED ')]
+        self.assertEqual(len(lines), 1, result.stdout + result.stderr)
+        return json.loads(lines[0][len('LOADED '):])
+
+    def test_the_pinned_modules_are_the_served_tree_s_and_the_code_under_test_binds_to_them(self):
+        out = self.load()
+        self.assertEqual((out['failures'], out['loaded']), ([], True))
+        self.assertEqual(out['bound'], [True] * 5)
+        files = {name: Path(path) for name, path in out['modules']['files'].items()}
+        for name in reader_b.SERVED_MODULES:
+            self.assertEqual(files[name], (self.served / (name + '.py')).resolve(), name)
+        for _key, name in reader_b.MODULES:
+            if name not in reader_b.SERVED_MODULES:
+                self.assertEqual(files[name].parent, CI.resolve(), name)
+        self.assertEqual({name: out['modules']['sha256'][name] for name in reader_b.PINNED}, reader_b.PINNED)
+        self.assertEqual(out['modules']['sha256']['extent_attention_replay.py'],
+                         sha((CI / 'extent_attention_replay.py').read_bytes()))
+        self.assertEqual(Path(out['modules']['served_root']), self.served.resolve())
+        # The served mask module's own import resolved in the served tree, as in serving, and the served tree left
+        # sys.path afterwards (the code under test resolves in the checkout's).
+        self.assertEqual(Path(out['geometry']).resolve(), (self.served / 'frozen_context_geometry.py').resolve())
+        self.assertFalse(out['served_on_path'])
+
+    def test_a_served_tree_without_the_served_bytes_decides_nothing(self):
+        with open(self.served / 'attention_mask_replay.cpp', 'ab') as handle:
+            handle.write(b'// drift\n')
+        out = self.load()
+        self.assertFalse(out['loaded'])
+        self.assertTrue(any(failure.startswith('pinned source attention_mask_replay.cpp is ')
+                            for failure in out['failures']), out['failures'])
+        # The checkout's mask module where the image's belongs: the other version, refused.
+        shutil.copyfile(CI / 'attention_mask_replay.cpp', self.served / 'attention_mask_replay.cpp')
+        shutil.copyfile(CI / 'attention_mask_replay.py', self.served / 'attention_mask_replay.py')
+        out = self.load()
+        self.assertFalse(out['loaded'])
+        checkout = sha((CI / 'attention_mask_replay.py').read_bytes())
+        self.assertIn('pinned source attention_mask_replay.py is %s, not its served %s'
+                      % (checkout[:16], reader_b.PINNED['attention_mask_replay.py'][:16]), out['failures'])
+
+    def test_a_missing_served_module_or_one_imported_first_decides_nothing(self):
+        out = self.load(prelude='sys.path.insert(0, %r); import attention_mask_replay' % str(CI))
+        self.assertFalse(out['loaded'])
+        self.assertTrue(any(failure.startswith('attention_mask_replay was imported from ')
+                            and '--served-root' in failure for failure in out['failures']), out['failures'])
+        (self.served / 'attention_fold_dma.py').unlink()
+        out = self.load()
+        self.assertFalse(out['loaded'])
+        self.assertTrue(any(failure.startswith('attention_fold_dma.py is not in --served-root ')
+                            for failure in out['failures']), out['failures'])
+
+
 # ---------------------------------------------------------------------------------------------
 # The device flow on the fake one-chip ttnn, through the real reader classes.
 # ---------------------------------------------------------------------------------------------
@@ -1046,7 +1160,7 @@ class DryRunTests(unittest.TestCase):
         out = self.dir / ('%s.json' % name)
         fake.report_path = out
         markers = dict(flags=True, share=True, stage1=False)
-        argv = ['--out', str(out), '--kernel-root', str(self.kernels), '--ci-root', '',
+        argv = ['--out', str(out), '--kernel-root', str(self.kernels), '--ci-root', '', '--served-root', '',
                 '--expect-binary-sha256', sha(self.binary.read_bytes())]
         environ = {card.SCRATCH_ENV: '1', 'QWEN_FAST_SDPA_MODES': 'tail,share,slice'}
         environ.update(env or {})
@@ -1065,6 +1179,9 @@ class DryRunTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(extent_module, 'print', create=True))          # _pindiag's lines
             stack.enter_context(mock.patch.object(pooled_attention_replay, 'print', create=True))
             stack.enter_context(mock.patch.object(sys, 'path', list(sys.path)))
+            # In process, the pinned modules are this checkout's (--served-root ''). ServedLoaderTests covers the
+            # served tree.
+            stack.enter_context(mock.patch.object(reader_b, 'PINNED', checkout_pinned()))
             stack.enter_context(mock.patch('sys.stdout'))
             stack.enter_context(mock.patch('pooled_attention_replay._binary_checked', []))
             stack.enter_context(mock.patch('pooled_attention_replay.loaded_binary_has_modes',
@@ -1318,12 +1435,18 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(report['decision']['verdict'], 'NO-DECISION')
         self.assertTrue(any('not from --ci-root' in failure for failure in report['failures']), report['failures'])
         self.assertEqual(report['comparisons'], [])
-        pinned = dict(reader_b.PINNED, **{'attention_mask_replay.cpp': '0' * 64})
+        pinned = dict(checkout_pinned(), **{'attention_mask_replay.cpp': '0' * 64})
         status, report = self.run_reader(FakeReaderTtnn(torch), base=self.SMALL, extra=['--sections', 'S'],
                                          patches=[mock.patch.object(reader_b, 'PINNED', pinned)])
         self.assertEqual(report['decision']['verdict'], 'NO-DECISION')
         self.assertTrue(any(failure.startswith('pinned source attention_mask_replay.cpp') for failure in
                             report['failures']), report['failures'])
+        # A served tree the pinned modules were not loaded from decides nothing either (here they came first).
+        status, report = self.run_reader(FakeReaderTtnn(torch), base=self.SMALL,
+                                         extra=['--sections', 'S', '--served-root', str(self.dir)])
+        self.assertEqual(report['decision']['verdict'], 'NO-DECISION')
+        self.assertTrue(any('--served-root' in failure for failure in report['failures']), report['failures'])
+        self.assertEqual(report['comparisons'], [])
 
     def test_the_sdpa_modes_and_the_scratch_are_checked_first(self):
         for env, needle in (({'QWEN_FAST_SDPA_MODES': 'tail,share'}, 'QWEN_FAST_SDPA_MODES must be'),

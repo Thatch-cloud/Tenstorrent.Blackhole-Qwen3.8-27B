@@ -11,6 +11,7 @@ import ast
 from collections import defaultdict
 from contextlib import ExitStack
 import hashlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -33,6 +34,81 @@ ENV = {'QWEN_FAST_SDPA_MODES': 'tail,share,slice', 'QWEN_SDPA_TREE_SCRATCH_ROUND
 C = 131328           # the served capacity: page width 2052
 WIDTH = C // 64
 QWEN_DECODE_MAGIC = 0x51DEC000
+
+# attention_mask_replay.py exists in three versions, and test 11 (StructureTests) tells them apart:
+#   FROZEN_MASK    the frozen recipe's revision (frozen_recipe_context.REVISION, 8c102b20). The frozen T16 and DSpark
+#                  reports in this tree pin it (target-t16-attention-simulator.json, dspark-request-hardware.json).
+#   SERVED_MASK    the version every image SERVES. The frozen recipe stages FROZEN_MASK through
+#                  frozen_target_replay.adapt_target_mask, which lets validate_ticket also admit the selected
+#                  context's capacity. serving_bundle.py packages that staged tree (read-combined), and P8's
+#                  /experiment-scripts/ci is the bundle. frozen-evidence/target-replay.json (92c51875,
+#                  frozen_combined_gate.REPORTS) pins it, so frozen_combined_runtime.qualify hashes it at every
+#                  attach, and c2_overlay's install refuses any other bytes there. The bundle's own manifest
+#                  (artifact qwen-fast-serving-bundle-35489235797, serving-bundle.json, tar 0ee04c47) records it for
+#                  experiment-scripts/ci and frozen-evidence/target, and the C2 build v51 (run 36255706983) found it
+#                  in the image: 6a31981c.
+#   CHECKOUT_MASK  this checkout's copy: FROZEN_MASK plus 29b43224's simulator-only context ladder. No image carries
+#                  it: neither copy list names the file, and the overlay install would refuse it.
+# The three differ only in validate_ticket and one import. prepare, mask_position, execute and source_hashes are the
+# same bytes in all three, and so is attention_mask_replay.cpp (e10cae1d).
+FROZEN_REVISION = '8c102b20df22329106955b4006bf4d650bb94e40'
+FROZEN_MASK = '7841495a15ee090aae7b78edc118ba0de2967bb3ad72b843d53251a091435749'
+SERVED_MASK = '6a31981cb9203439b8e6e78e8bd712e078f00335a7f211c732d4ac47cabca3a8'
+CHECKOUT_MASK = '3e431742e35a2b94b4a02a60fa334a93a44a471eaefcacd25e52fbafdf03361f'
+
+
+def in_checkout():
+    """True in a git checkout. False in an image, whose /experiment-scripts/ci has no repository above it."""
+    return (ROOT / '.git').exists()
+
+
+def frozen_mask_source():
+    """attention_mask_replay.py at FROZEN_REVISION, from git. It raises in a checkout that cannot reach the revision
+    (a shallow clone; CI fetches the full history), so no check built on it passes vacuously."""
+    import subprocess
+
+    result = subprocess.run(['git', '-C', str(ROOT), 'show',
+                             '%s:scripts/ci/attention_mask_replay.py' % FROZEN_REVISION], capture_output=True)
+    if result.returncode:
+        raise AssertionError('frozen revision %s is unreachable from %s (a shallow clone?): %s'
+                             % (FROZEN_REVISION[:8], ROOT, result.stderr.decode('utf-8', 'replace').strip()))
+    return result.stdout.decode('utf-8')
+
+
+def served_mask_source():
+    """attention_mask_replay.py as the image serves it. In an image, this is the file beside this test, which is the
+    served tree itself. In a checkout, it is rebuilt exactly as frozen_recipe_context stages it: FROZEN_REVISION's
+    bytes through frozen_target_replay.adapt_target_mask. The recipe's other adapters leave this file alone, and the
+    tests hold the rebuild to SERVED_MASK."""
+    if not in_checkout():
+        return (HERE / 'attention_mask_replay.py').read_bytes().decode('utf-8')
+    from frozen_target_replay import adapt_target_mask
+    return adapt_target_mask(frozen_mask_source())
+
+
+def top_level(source):
+    """A module's top level: each function's and class's source by name, plus 'imports' (the set of its import
+    statements), 'docstring' and 'statements' (anything else, in order)."""
+    tree = ast.parse(source)
+    found = dict(imports=frozenset(ast.get_source_segment(source, node) for node in tree.body
+                                   if isinstance(node, (ast.Import, ast.ImportFrom))),
+                 docstring=ast.get_docstring(tree), statements=[])
+    for index, node in enumerate(tree.body):
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            found[node.name] = ast.get_source_segment(source, node)
+        elif not isinstance(node, (ast.Import, ast.ImportFrom)) and not (index == 0 and found['docstring'] is not None):
+            found['statements'].append(ast.get_source_segment(source, node))
+    found['statements'] = tuple(found['statements'])
+    return found
+
+
+def function_body(source, name):
+    """(argument names, body) of the top-level function `name`: the body's lines as written, without its docstring."""
+    tree = ast.parse(source)
+    node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    body = node.body[1:] if ast.get_docstring(node) is not None else node.body
+    arguments = [argument.arg for argument in node.args.posonlyargs + node.args.args + node.args.kwonlyargs]
+    return arguments, ''.join(source.splitlines(keepends=True)[body[0].lineno - 1:node.end_lineno])
 
 
 def structure(bundles):
@@ -991,17 +1067,43 @@ class PackedReaderTests(unittest.TestCase):
 class StructureTests(unittest.TestCase):
     """Test 11: beside the pinned readers, never through them."""
 
-    # target_t16_attention_gate.SOURCES and their bytes, as frozen (attention_* at 8c102b20; the four
-    # shared with test_pooled_attention_replay.SdpaModesTests.PINNED agree with it).
+    # target_t16_attention_gate.SOURCES as the image SERVES them: the bytes frozen_combined_runtime.qualify hashes at
+    # every attach, and the files the extent path runs. Each is the frozen recipe's 8c102b20 file, and only
+    # attention_mask_replay.py is also adapted (SERVED_MASK, above). The image is what pins these. Build v51
+    # (run 36255706983) failed at test_11_the_pinned_sources_keep_their_bytes while this map pinned the checkout's
+    # mask module, which no image carries. test_extent_reader_card_b holds the CB2b harness to these bytes, and the
+    # harness loads them from the image.
     SOURCES = {
         'attention_replay.py': '4eff1c51fd42bb04adf68fc40bf74a0cca0cd455c3ae2fc50caf720f5281137a',
-        'attention_mask_replay.py': '3e431742e35a2b94b4a02a60fa334a93a44a471eaefcacd25e52fbafdf03361f',
+        'attention_mask_replay.py': SERVED_MASK,
         'attention_mask_replay.cpp': 'e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8',
         'attention_parallel.py': '7bf5ba445100d184f7b9289fed4c20b4a730dbee29ee382cb97b6c2ad17f0e58',
         'attention_fold_dma.py': '5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5',
         'attention_fold_dma.cpp': '066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9',
         'target-t16-attention-probe.py': '6f5daa43e1379d8c7b06761f6aa1e046a84ec12f9f3b6e22b1dd232b7cbc25cd',
     }
+    # This checkout's copies: the same bytes except the mask module, whose checkout copy no image carries
+    # (CHECKOUT_MASK). test_pooled_attention_replay.SdpaModesTests.PINNED guards the shared ones against an edit.
+    CHECKOUT = dict(SOURCES, **{'attention_mask_replay.py': CHECKOUT_MASK})
+
+    # prepare_narrow against the SERVED attention_mask_replay.prepare: every difference, and why. Line numbers are the
+    # served copy's. The checkout's are five more: prepare :41-84, the family check :48-49. prepare_narrow's docstring
+    # cites the checkout's lines; its bytes are what CB2b qualifies (5633fc3a, packed_any_evidence.json), so they stay.
+    PREPARE_NARROW_CHANGES = (
+        ('(rows, batches, offset, capacity))', '(rows, batches, offset))',
+         ':39 capacity is no argument: the kernel runs at K = 256'),
+        ('    first = max(128, capacity - 256) if short_context else capacity - 256\n'
+         '    validate_ticket(first, offset + rows * batches, capacity, short_context=short_context)\n', '',
+         ':43-44 the family check is left out: the pinned validate_ticket refuses capacity 256 (minimum 4096, '
+         ':18 and :21-22), and the extent reader validates its own starts'),
+        ('(batches, 1, rows * 12, capacity)', '(batches, 1, rows * 12, K)', ':47 the mask is 256 keys wide'),
+        ("'Fixed-shape BF16 folded attention mask required'",
+         "'Fixed-shape BF16 folded narrow attention mask required'", ':48 its refusal names the narrow mask'),
+        ("kernel_source=str(Path(__file__).with_suffix('.cpp')), core_ranges=cores,",
+         "kernel_source=str(Path(attention_mask_replay.__file__).with_suffix('.cpp')),\n            core_ranges=cores,",
+         ':68 the .cpp beside the pinned module, which is the kernel the served prepare compiles'),
+        ('rows, capacity, offset, task]', 'rows, K, offset, task]', ':75 the capacity runtime argument is 256'),
+    )
 
     def test_11_no_class_is_a_pinned_reader(self):
         from attention_replay import ReplayAttentionReader
@@ -1013,15 +1115,71 @@ class StructureTests(unittest.TestCase):
                     self.assertNotIn(PooledReplayAttentionReader, value.__mro__)
 
     def test_11_the_pinned_sources_keep_their_bytes(self):
+        """In an image, every pinned source must be its served bytes. In a checkout, each must be the checkout's own:
+        an edit there changes nothing any image runs, and it breaks this tree's evidence."""
         from target_t16_attention_gate import SOURCES
         self.assertEqual(set(SOURCES), set(self.SOURCES))
-        in_checkout = (ROOT / '.git').exists()
-        for name, digest in sorted(self.SOURCES.items()):
+        checkout = in_checkout()
+        for name, digest in sorted((self.CHECKOUT if checkout else self.SOURCES).items()):
             path = HERE / name
             with self.subTest(name=name):
-                if not path.is_file() and not in_checkout:
+                if not path.is_file() and not checkout:
                     self.skipTest('%s is not in this tree (an image holds what the frozen recipe names)' % name)
                 self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
+
+    def test_11_the_image_serves_the_frozen_recipe_s_stage_of_the_mask_module(self):
+        """SERVED_MASK is the frozen recipe's stage of FROZEN_MASK, rebuilt here from git, and FROZEN_MASK is what the
+        frozen T16 report pins. This runs in a checkout only, because an image has no git."""
+        if not in_checkout():
+            self.skipTest('an image holds the served copy itself (test_11_the_pinned_sources_keep_their_bytes)')
+        self.assertIn("REVISION = '%s'" % FROZEN_REVISION,
+                      (HERE / 'frozen_recipe_context.py').read_text(encoding='utf-8'))
+        self.assertEqual(hashlib.sha256(frozen_mask_source().encode('utf-8')).hexdigest(), FROZEN_MASK)
+        report = json.loads((HERE / 'target-t16-attention-simulator.json').read_text(encoding='utf-8'))
+        self.assertEqual([report[field]['attention_mask_replay.py'] for field in ('sources', 'sources_after')],
+                         [FROZEN_MASK, FROZEN_MASK])
+        self.assertEqual(hashlib.sha256(served_mask_source().encode('utf-8')).hexdigest(), SERVED_MASK)
+        self.assertEqual(self.SOURCES['attention_mask_replay.py'], SERVED_MASK)
+
+    def test_11_prepare_narrow_is_the_served_prepare_but_its_documented_changes(self):
+        """prepare_narrow is a copy of the prepare the image serves, and PREPARE_NARROW_CHANGES lists every
+        difference between the two. In an image the served copy is the file beside this test. In a checkout it is
+        rebuilt from git."""
+        served = served_mask_source()
+        self.assertEqual(hashlib.sha256(served.encode('utf-8')).hexdigest(), SERVED_MASK)
+        pinned_arguments, body = function_body(served, 'prepare')
+        arguments, ours = function_body((HERE / 'extent_attention_replay.py').read_text(encoding='utf-8'),
+                                        'prepare_narrow')
+        self.assertEqual(arguments, [name for name in pinned_arguments if name not in ('capacity', 'short_context')])
+        for before, after, why in self.PREPARE_NARROW_CHANGES:
+            with self.subTest(change=why):
+                self.assertEqual(body.count(before), 1, before)
+            body = body.replace(before, after, 1)
+        self.assertEqual(ours, body)
+
+    def test_11_the_checkout_s_mask_module_differs_from_the_served_one_only_where_the_extent_path_never_runs(self):
+        """Every CPU test here runs the checkout's mask module: PrepareNarrowTests compares against its prepare, and
+        the readers call its execute. Every image runs the served one. The two must be the same bytes everywhere but
+        validate_ticket and one import. The extent module never names validate_ticket, and it uses only execute and
+        __file__ (test_11_imports_...). A change in either copy's prepare, execute or mask_position would leave this
+        evidence describing code that no image runs."""
+        if not in_checkout():
+            self.skipTest('an image holds the served copy only')
+        served = top_level(served_mask_source())
+        ours = top_level((HERE / 'attention_mask_replay.py').read_text(encoding='utf-8'))
+        self.assertEqual(set(ours), set(served))
+        self.assertEqual({name for name in served if served[name] != ours[name]}, {'validate_ticket', 'imports'})
+        self.assertEqual((served['imports'] - ours['imports'], ours['imports'] - served['imports']),
+                         ({'from frozen_context_geometry import selected_geometry'}, {'import os'}))
+        # test_pooled_attention_replay's checkout guard agrees. It is read, never imported: no image carries that
+        # module, and the overlay closure tests (test_c2_overlay_closure, test_c2_image_overlay) refuse any import of
+        # it here, lazy or not.
+        pooled = ast.parse((HERE / 'test_pooled_attention_replay.py').read_text(encoding='utf-8'))
+        shared = next(ast.literal_eval(node.value) for cls in pooled.body
+                      if isinstance(cls, ast.ClassDef) and cls.name == 'SdpaModesTests' for node in cls.body
+                      if isinstance(node, ast.Assign) and [target.id for target in node.targets] == ['PINNED'])
+        self.assertEqual({name: shared[name] for name in set(shared) & set(self.CHECKOUT)},
+                         {name: self.CHECKOUT[name] for name in set(shared) & set(self.CHECKOUT)})
 
     def test_11_imports_only_what_the_design_allows_and_never_the_pinned_validate_or_prepare(self):
         tree = ast.parse((HERE / 'extent_attention_replay.py').read_text(encoding='utf-8'))
