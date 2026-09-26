@@ -591,11 +591,15 @@ class ModelBatch:
                 # S2 (design W3): one extent reader per segment over the block's lent full-width tables
                 # and cur_pos words, each at its segment's capture start. Construction stages each
                 # segment's word, cur_pos and table for that start (design A6), so the initial stage
-                # below finds the starts already equal and skips, soundly.
-                from extent_attention_replay import PackedExtentReplayReader
+                # below finds the starts already equal and skips, soundly. Reached only where a pool
+                # lends extent storage (QWEN_FAST_EXTENT_REPLAY=1), i.e. only in the C2 image, which
+                # overlays extent_attention_replay (docker/qwen-c2-overlay.txt, test_c2_overlay_closure);
+                # the P8 image, whose bundle lacks the module, never takes this branch.
+                import extent_attention_replay
 
-                self.replay_reader = PackedExtentReplayReader(ttnn, model.mesh_device, self.pack['segments'],
-                    pages.shape[1], self.pack['tables'], storage=packed_extent, max_group_rows=self.replay_group_rows,
+                self.replay_reader = extent_attention_replay.PackedExtentReplayReader(ttnn, model.mesh_device,
+                    self.pack['segments'], pages.shape[1], self.pack['tables'], storage=packed_extent,
+                    max_group_rows=self.replay_group_rows,
                     starts=tuple(int(positions[first]) for first, last in self.pack['segments']))
                 self.borrowed.extend(self.replay_reader.borrowed)
             elif self.pack is not None:
