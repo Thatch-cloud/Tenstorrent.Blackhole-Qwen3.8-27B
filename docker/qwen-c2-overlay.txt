@@ -60,6 +60,10 @@ scripts/ci/pooled_attention_replay.py
 # ships half a change (test_c2_overlay_closure).
 scripts/ci/serving_runtime.py
 scripts/ci/serving_request_quarantine.py
+# One fresh prompt per prefill step on the scheduler the engine runs (the TT platform overwrites the
+# fast path's own scheduler_cls): serving_lifecycle installs it beside the quarantine under
+# QWEN_FAST_ANY_REQUEST (run 36211578069).
+scripts/ci/serving_prefill_admission.py
 
 # Stage 1 and 2 of the C2 serving plan change these. Overlaid since before stage 1 landed, so the
 # route was proven before a change depended on it; serving_lifecycle now carries D2 and D4.

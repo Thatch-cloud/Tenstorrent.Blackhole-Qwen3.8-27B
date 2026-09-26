@@ -44,6 +44,7 @@ class FastServingLifecycle:
     # class so an instance built without __init__ behaves exactly as before the flag existed.
     any_request = False
     quarantine = None
+    admission = None
     refused = None
     max_model_len = None
 
@@ -112,13 +113,20 @@ class FastServingLifecycle:
         #   grammar_output, hook and round refusals and the factory's invariants stay fatal;
         # - D4: a first token that already exhausts max_tokens (or the context) is terminal
         #   like EOS - no bridge; the platform's warmup is max_tokens 1.
+        # - one fresh prompt per prefill step on the scheduler the engine runs
+        #   (serving_prefill_admission): any-length prompts can arrive together, and the
+        #   TTScheduler the platform installs batches them into one step, which the step-shape
+        #   check in _execute refuses (run 36211578069).
         self.any_request = any_request_enabled()
         self.max_model_len = getattr(getattr(config, 'model_config', None), 'max_model_len', None)
         self.quarantine = None
+        # The qualified name of the scheduler class that admits one fresh prompt per step, or None.
+        self.admission = None
         # The admission refusal of the request in the prefill phase, served at its sampler.
         self.refused = None
         if self.any_request:
             self.quarantine = self._install_quarantine(config)
+            self.admission = self._install_admission(config)
         self.original_execute, self.original_sample = worker.execute_model, worker.sample_tokens
         self.saved = []
         for name, value in (('_qwen_fast_lifecycle', self),
@@ -148,6 +156,27 @@ class FastServingLifecycle:
                 logger.warning(
                     f"[PINDIAG] request quarantine NOT installed ({type(failure).__name__}: "
                     f"{str(failure)[:200]}); host-side refusals still fail the engine")
+            except BaseException:
+                pass
+            return None
+
+    @staticmethod
+    def _install_admission(config):
+        """One fresh prompt per prefill step (serving_prefill_admission.install) on the scheduler
+        class this config names. Returns that class's qualified name, or None when it cannot be
+        installed. In that case scheduling stays exactly as it was without the flag, and a step
+        carrying two fresh prompts still fails the engine in _execute below."""
+        try:
+            import serving_prefill_admission
+
+            return serving_prefill_admission.install(config)
+        except Exception as failure:
+            try:
+                from loguru import logger
+                logger.warning(
+                    f"[PINDIAG] one fresh prefill per step NOT installed ({type(failure).__name__}: "
+                    f"{str(failure)[:200]}); simultaneous arrivals can still share a prefill step, "
+                    f"which fails the engine")
             except BaseException:
                 pass
             return None

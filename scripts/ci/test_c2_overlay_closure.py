@@ -40,10 +40,11 @@ TREE = '/experiment-scripts/ci/'
 
 # What C2-any (QWEN_FAST_ANY_REQUEST, the c2 and c2-gate profiles) needs from the image: the
 # request factory's Phase 0 and budget, the runtime's attach-time source check, the lifecycle's
-# D2 and D4, the scheduler-side quarantine consumer, the flag, and the contract and profiles.
+# D2 and D4, the scheduler-side quarantine consumer, the one-fresh-prefill-per-step cap on the
+# scheduler (run 36211578069), the flag, and the contract and profiles.
 C2_ANY_MODULES = ('serving_request_factory.py', 'serving_runtime.py', 'serving_lifecycle.py',
-                  'serving_request_quarantine.py', 'serving_fast_policy.py', 'serving_c2_contract.py',
-                  'qwen_c2_profiles.json')
+                  'serving_request_quarantine.py', 'serving_prefill_admission.py', 'serving_fast_policy.py',
+                  'serving_c2_contract.py', 'qwen_c2_profiles.json')
 
 FILE_NAME = re.compile(r'^[A-Za-z0-9_]+[.](?:py|json|cpp)$')
 
