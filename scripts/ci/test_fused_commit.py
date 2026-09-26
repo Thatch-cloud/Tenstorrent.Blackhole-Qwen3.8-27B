@@ -1639,7 +1639,22 @@ def without_no_block(lines):
         if value.strip() == '' and len(collapsed) >= 2 and collapsed[-1].strip() == '' and collapsed[-2].strip() == '':
             continue
         collapsed.append(value)
-    return collapsed
+    return without_packed_any(collapsed)
+
+
+def without_packed_any(lines):
+    """serving_runtime.py less S2's W7 attach hunks (s2-design.md W7, after the no-block changes): the override's
+    record kept for the admission, the packed-any admission block under QWEN_FAST_EXTENT_REPLAY and the DRAM
+    statistics check after the pool. Each is cut exactly once and to its known last line."""
+    kept = '    binary_record = override_runtime_binary(runtime_root, log=pindiag)'
+    if lines.count(kept) != 1:
+        raise AssertionError('%r is not in serving_runtime.py exactly once' % kept)
+    lines = ['    override_runtime_binary(runtime_root, log=pindiag)' if value == kept else value for value in lines]
+    lines = cut_once(lines, "# S2 C2-packed-any (QWEN_FAST_EXTENT_REPLAY, default off; strictly '0' or '1'): packed "
+                            'rounds at any',
+                     'packed_any_admission.admit(runtime_root, m3=m3_shape(policy), binary_record=binary_record, '
+                     'log=pindiag)')
+    return cut_once(lines, 'if extent_replay:', 'packed_any_admission.admit_statistics(pool, log=pindiag)')
 
 
 class ShippingTests(unittest.TestCase):
