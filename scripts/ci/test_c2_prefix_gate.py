@@ -26,6 +26,7 @@ import c2_serving_job as job  # noqa: E402
 import prefix_judge as judge  # noqa: E402
 import prefix_markers as pm  # noqa: E402
 import prefix_replay as replay  # noqa: E402
+import qwen_prefix_model_patch as model_patch  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 import test_prefix_markers as marker_fixture  # noqa: E402
 import test_prefix_replay as fakes  # noqa: E402
@@ -48,8 +49,9 @@ def profiles():
 
 
 SHA = dict(a='a' * 64, b='b' * 64)
-GOOD_ANCHOR = dict(files={}, pins={'mlp.py': SHA['a']}, actual={'mlp.py': SHA['a']}, mismatched=[],
-                   marker_files=['model.py'], prefix_marker_in=['model.py'], unpinned=[])
+GOOD_ANCHOR = dict(files=dict(gate.STAGE_PINS), pins={'mlp.py': SHA['a']}, actual={'mlp.py': SHA['a']}, mismatched=[],
+                   stage_pins=dict(gate.STAGE_PINS), stage_mismatched=[], marker_files=['model.py'],
+                   prefix_marker_in=['model.py'], unpinned=[])
 
 
 class Harness(object):
@@ -301,7 +303,20 @@ class ShapeTests(unittest.TestCase):
         anchor = gate.parse_anchor(text)
         self.assertEqual(sorted(anchor['pins']), sorted(paths), 'every non-.orig pin, not a fixed list')
         self.assertEqual(anchor['mismatched'], sorted(['gdn/tp.py', paths[-1]]))
-        self.assertEqual((anchor['prefix_marker_in'], anchor['unpinned']), (['model.py'], ['model.py', 'qwen36_vllm.py']))
+        self.assertEqual((anchor['prefix_marker_in'], anchor['unpinned']), (['model.py'], []))
+        # The anchor files are the prefix stage's (graft.sha256 pins neither): held to PATCHED_SHA256.
+        self.assertEqual(anchor['stage_pins'], dict(model_patch.PATCHED_SHA256))
+        self.assertEqual(anchor['stage_mismatched'], ['model.py', 'qwen36_vllm.py'])
+        staged = gate.parse_anchor(text.replace('%s  model.py\n' % SHA['a'], '%s  model.py\n' % gate.STAGE_PINS['model.py'])
+                                   .replace('%s  qwen36_vllm.py' % SHA['a'], '%s  qwen36_vllm.py' % gate.STAGE_PINS['qwen36_vllm.py']))
+        self.assertEqual((staged['stage_mismatched'], staged['unpinned']), ([], []))
+        missing = gate.parse_anchor(text.replace('%s  qwen36_vllm.py\n' % SHA['a'], ''))
+        self.assertIn('qwen36_vllm.py', missing['stage_mismatched'], 'an anchor file the probe could not hash')
+        pinned_by_graft = gate.parse_anchor(text.replace('==pinned\n', '%s  graft/model.py\n==pinned\n' % SHA['a'], 1))
+        self.assertEqual((sorted(pinned_by_graft['stage_pins']), pinned_by_graft['stage_mismatched']),
+                         (['qwen36_vllm.py'], ['qwen36_vllm.py']), 'graft.sha256 takes over a file it pins')
+        with mock.patch.object(gate, 'STAGE_PINS', {}):
+            self.assertEqual(gate.parse_anchor(text)['unpinned'], ['model.py', 'qwen36_vllm.py'])
         stray = gate.parse_anchor(text.replace('./model.py\n', ''))
         self.assertEqual((stray['marker_files'], stray['prefix_marker_in']), (['stale_copy.py'], []),
                          'a marker in an unpinned stray file vouches for nothing')
@@ -461,6 +476,51 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(self.results, 'bringup', 'bringup-prefix', name)), name)
         removed = [c for c in harness.calls if c[:3] == ['docker', 'rm', '-f']]
         self.assertEqual(len(removed), 4, 'each container removed before and after its arm')
+        dram = [line for line in result['lines'] if line.startswith('dram')]
+        self.assertEqual(dram[:2], ['dram after registry: ' + fakes.FakeEngine.DRAM_TEXT,
+                                    'dram after first capture: ' + fakes.FakeEngine.DRAM_TEXT])
+        self.assertIn('dram: beside a KV pool of', dram[2])
+        self.assertEqual(result['cross_not_exercised'], [])
+        for line in ('anchor: model.py at the prefix stage\'s pin %s' % gate.STAGE_PINS['model.py'],
+                     'anchor: qwen36_vllm.py at the prefix stage\'s pin %s' % gate.STAGE_PINS['qwen36_vllm.py']):
+            self.assertTrue(any(text.startswith(line) for text in result['lines']), line)
+        self.assertEqual([p for p in result['arms']['bringup-prefix']['dram_readings'] if p['chips']][0]['point'],
+                         pm.DRAM_REGISTRY)
+
+    def test_bringup_without_gs_dram_reading_is_not_exercised(self):
+        cases = dict(
+            none=dict(fault='no_dram', count=2, text=('no "[PINDIAG] dram after registry" reading',
+                                                      'dram: none logged')),
+            unavailable=dict(fault='dram_unavailable', count=2,
+                             text=('no "[PINDIAG] dram after registry" reading with per-chip figures on the prefix arm '
+                                   '(the model warm and the registry created; logged: unavailable (RuntimeError: no '
+                                   'allocator on this device))',)),
+            capture=dict(fault='no_capture_dram', count=1, text=('no "[PINDIAG] dram after first capture" reading',
+                                                        'the arm stored')))
+        for name, case in cases.items():
+            with self.subTest(name=name):
+                result, _, _ = self.plan('bringup', 'dram-' + name, **{'general-prefix': {case['fault']: True}})
+                self.assertEqual(result['verdict'], 'NOT_EXERCISED', result['lines'])
+                self.assertEqual([a['verdict'] for a in result['arms'].values()], ['PASS', 'PASS'])
+                for text in case['text']:
+                    self.assertTrue(any(text in line for line in result['lines']), (text, result['lines']))
+                self.assertEqual(len(result['cross_not_exercised']), case['count'], result['cross_not_exercised'])
+                self.assertTrue(all('G2 has no DRAM reading' in m for m in result['cross_not_exercised']))
+
+    def test_the_dram_findings_read_only_the_parsed_readings(self):
+        reading = lambda point, chips=True: dict(point=point, chips=[dict(chip=0)] if chips else [],  # noqa: E731
+                                                 text='chip0 ...' if chips else 'unavailable (x)')
+        missing, lines = gate.dram_findings(dict(dram_readings=[reading('registry')], stats=dict(captures=0)))
+        self.assertEqual((missing, lines), ([], ['dram after registry: chip0 ...']))
+        missing, _ = gate.dram_findings(dict(dram_readings=[reading('registry')], stats=dict(captures=3)))
+        self.assertEqual(len(missing), 1)
+        self.assertIn('first capture', missing[0])
+        missing, _ = gate.dram_findings(dict(dram_readings=[reading('attach'), reading('registry', chips=False)]))
+        self.assertEqual(len(missing), 1, 'another point does not stand in for the registry reading')
+        self.assertIn('logged: unavailable (x)', missing[0])
+        missing, lines = gate.dram_findings(dict(dram=['[PINDIAG] dram after kv: 7 GB'], kv_tokens=262400))
+        self.assertEqual(len(missing), 1, 'a raw line is not a reading')
+        self.assertEqual(lines, ['dram: none logged', 'dram: beside a KV pool of 262400 tokens (vLLM\'s GPU KV cache size)'])
 
     def test_bringup_fails_on_each_thing_it_checks(self):
         cases = dict(
@@ -473,7 +533,10 @@ class RunnerTests(unittest.TestCase):
             rows=dict(faults={'general-prefix': dict(drop_rows=True)}, text='no [PREFIX] row'),
             anchor=dict(anchor=dict(GOOD_ANCHOR, mismatched=['gdn/tp.py']), text='not the image\'s pinned graft'),
             graft=dict(anchor=dict(GOOD_ANCHOR, prefix_marker_in=[]), text='prefix model graft is not in the served'),
-            no_pins=dict(anchor=dict(GOOD_ANCHOR, pins={}), text='read no pins'))
+            no_pins=dict(anchor=dict(GOOD_ANCHOR, pins={}), text='read no pins'),
+            stage=dict(anchor=dict(GOOD_ANCHOR, files=dict(gate.STAGE_PINS, **{'model.py': SHA['b']}),
+                                   stage_mismatched=['model.py']), text='model.py is not the prefix stage\'s graft'),
+            unpinned=dict(anchor=dict(GOOD_ANCHOR, unpinned=['qwen36_vllm.py']), text='pinned by neither'))
         for name, case in cases.items():
             with self.subTest(name=name):
                 result, _, _ = self.plan('bringup', name, anchor=case.get('anchor', GOOD_ANCHOR), **case.get('faults', {}))

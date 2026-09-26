@@ -330,6 +330,11 @@ class Names(unittest.TestCase):
         self.assertIn('f"' + patcher.MARKER_ROW + '{u} ', model)
         self.assertIn('f"' + patcher.MARKER_WARM + '{chosen} ', model)
         self.assertEqual(model.count('f"' + patcher.MARKER_AUDIT + ' req='), 2)
+        # G2's DRAM reading: one marker, the two points the bring-up gate reads (prefix_markers.DRAM_*).
+        self.assertEqual(model.count('f"' + patcher.MARKER_DRAM + '{point}: {reading}"'), 1)
+        for point in (patcher.DRAM_REGISTRY, patcher.DRAM_FIRST_CAPTURE):
+            self.assertEqual(model.count('_qwen_prefix_dram("%s", ' % point), 1, point)
+        self.assertNotIn('_qwen_prefix_dram', vllm)
 
     def test_the_stage_is_python_3_7_syntax_and_the_graft_python_3_10(self):
         source = (HERE / 'qwen_prefix_model_patch.py').read_text(encoding='utf-8')

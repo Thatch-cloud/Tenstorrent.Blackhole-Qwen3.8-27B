@@ -28,6 +28,11 @@ driven as the scheduler graft (qwen_prefix_scheduler_patch) drives it. What is h
   markers    every row names the registry's presence, the grant and its plan, and the program cache
              before and after it; growth, a missing registry and an unknown count are warned;
   audit      QWEN_PREFIX_AUDIT=1 digests match between hit and cold, and the audit only reads;
+  dram       G2's reading: "[PINDIAG] dram after registry" once, when the route first runs with the
+             registry present, and "dram after first capture" once, after the first row that stored a
+             checkpoint; each is serving_buffer_pool's reading and text, reads only, reports a refused
+             view instead of raising, never appears without the registry or the switch, and
+             prefix_markers reads it;
   contract   the registry's model contract: the warmup declares mid-loop captures (on the holder,
              before the scheduler exists), every capture is filed with the loop's own token count
              (loop_pos), restores and captures are counted through the registry; and the harness
@@ -709,6 +714,119 @@ class RowMarker(ExactTestBase):
         self.assertEqual([level for level, _ in warned], ['warning'])
         engine.turn({'id': 'u'}, F.prompt(5000, seed=75), 0)
         self.assertIn(' programs=None->None ', engine.rows_prefix()[-1])
+
+
+class DramReading(ExactTestBase):
+    """G2's DRAM reading (the bring-up gate's NOT_EXERCISED without it): each chip's DRAM allocator
+    figures, logged by the prefix route once the registry exists and once after the first stored
+    checkpoint, in the fast path's own text."""
+
+    def dram(self, engine):
+        return engine.log.lines(patcher.MARKER_DRAM)
+
+    def probe(self, engine):
+        return engine.model._qwen_prefix_gdn_layers()[0].rec_state
+
+    def test_the_registry_reading_comes_once_when_the_route_first_runs_with_the_registry(self):
+        from serving_buffer_pool import dram_statistics, format_dram
+
+        engine = self.engine()
+        engine.cold(F.prompt(3000, seed=91), req='first')
+        engine.cold(F.prompt(3100, seed=92), req='second')
+        lines = [line for line in self.dram(engine) if patcher.DRAM_REGISTRY + ':' in line]
+        want = patcher.MARKER_DRAM + patcher.DRAM_REGISTRY + ': ' + format_dram(
+            dram_statistics(engine.fake, self.probe(engine)))
+        self.assertEqual(lines, [want])
+        self.assertIn('chip0 allocated=25.90GB free=7.21GB largest_free=7040.0MB of 33.10GB; chip1 ', want)
+        self.assertEqual(sorted(set(device for device, _ in engine.fake.memory_views)), ['chip0', 'chip1'])
+        self.assertEqual(set(kind for _, kind in engine.fake.memory_views), {'DRAM'})
+
+    def test_the_first_capture_reading_follows_the_first_stored_checkpoint_once(self):
+        engine = self.engine()
+        engine.cold(F.prompt(5000, seed=93), req='plain')
+        self.assertEqual([line for line in self.dram(engine) if patcher.DRAM_FIRST_CAPTURE in line], [],
+                         'a row that stored nothing takes no capture reading')
+        refusing = self.engine()
+        refusing.registry.budget_bytes = 10
+        refusing.turn({'id': 'refused'}, F.prompt(5000, seed=94), 0, [4096])
+        self.assertIn('captured=[4096:refused', refusing.rows_prefix()[-1])
+        self.assertEqual([line for line in self.dram(refusing) if patcher.DRAM_FIRST_CAPTURE in line], [],
+                         'a refused capture stored nothing')
+        base = F.prompt(9000, seed=95)
+        conv = {'id': 'captures'}
+        engine.turn(conv, base[:4500], 0)
+        engine.turn(conv, base[:9000], 4096)
+        self.assertEqual(len(engine.registry.entries), 2)
+        captured = [line for line in self.dram(engine) if patcher.DRAM_FIRST_CAPTURE in line]
+        self.assertEqual(len(captured), 1, 'once per process, not once per capture')
+        self.assertTrue(captured[0].startswith(patcher.MARKER_DRAM + patcher.DRAM_FIRST_CAPTURE + ': chip0 allocated='),
+                        captured[0])
+        order = [message for _, message in engine.log.records
+                 if patcher.MARKER_DRAM in message or patcher.MARKER_ROW in message]
+        first_stored = [i for i, message in enumerate(order) if ':stored:' in message][0]
+        self.assertIn(patcher.DRAM_FIRST_CAPTURE, order[first_stored + 1], 'right after the row that stored')
+
+    def test_no_reading_without_the_registry_or_the_switch(self):
+        engine = self.engine(registry=False)
+        engine.prefill([('n', F.prompt(5000, seed=96), engine.pool.row(5000), 0, 0)])
+        self.assertEqual((self.dram(engine), engine.fake.memory_views), ([], []))
+        stock = self.engine(environ={})
+        stock.prefill([('s', F.prompt(5000, seed=97), stock.pool.row(5000), 0, 0)], req_ids=False)
+        self.assertEqual((self.dram(stock), stock.fake.memory_views), ([], []))
+        direct = self.engine()
+        before = (list(self.dram(direct)), list(direct.fake.memory_views))
+        with prefix_env({}):
+            direct.module._qwen_prefix_dram(patcher.DRAM_REGISTRY, self.probe(direct))
+        self.assertEqual((self.dram(direct), direct.fake.memory_views), before, 'QWEN_PREFIX_REUSE unset')
+
+    def test_a_refused_view_is_reported_and_the_request_is_exact(self):
+        engine = self.engine()
+        engine.fake.memory_view_refuse = True
+        tokens = F.prompt(5000, seed=98)
+        self.run_turn_and_cold(engine, {'id': 'r'}, tokens, 0, [4096])
+        self.assertEqual(self.dram(engine), [
+            patcher.MARKER_DRAM + point + ': unavailable (RuntimeError: no allocator on this device)'
+            for point in (patcher.DRAM_REGISTRY, patcher.DRAM_FIRST_CAPTURE)])
+
+    def test_the_reading_is_serving_buffer_pools_and_only_reads(self):
+        from serving_buffer_pool import dram_statistics, format_dram
+
+        engine = self.engine()
+        module, tensor = engine.module, self.probe(engine)
+        engine.fake.dram_views['chip1'] = dict(num_banks=8, total_bytes_per_bank=4138123648,
+                                               total_bytes_allocated_per_bank=4111316352,
+                                               total_bytes_free_per_bank=26807296,
+                                               largest_contiguous_bytes_free_per_bank=712896)
+        dead = F.FakeTensor(torch.zeros(1), engine.fake.float32, 'TILE', True)
+        dead.deallocated = True
+        for case, target in (('two chips', tensor), ('no tensor', None), ('a deallocated tensor', dead)):
+            with self.subTest(case=case):
+                self.assertEqual(module._qwen_prefix_dram_statistics(target), dram_statistics(engine.fake, target))
+                self.assertEqual(module._qwen_prefix_format_dram(module._qwen_prefix_dram_statistics(target)),
+                                 format_dram(dram_statistics(engine.fake, target)))
+        engine.fake.memory_view_refuse = True
+        self.assertEqual(module._qwen_prefix_dram_statistics(tensor), dram_statistics(engine.fake, tensor))
+        engine.fake.memory_view_refuse = False
+        log, programs = list(engine.fake.log), set(engine.fake.programs)
+        with prefix_env(ON):
+            module._qwen_prefix_dram('probe', tensor)
+        self.assertEqual((engine.fake.log, engine.fake.programs), (log, programs), 'allocator views only')
+        self.assertEqual(self.dram(engine)[-1].split(': ', 1)[1], format_dram(dram_statistics(engine.fake, tensor)))
+        self.assertIn('chip1 allocated=32.89GB free=0.21GB largest_free=5.7MB of 33.10GB', self.dram(engine)[-1])
+
+    def test_the_gate_harness_reads_both_readings(self):
+        import prefix_markers
+
+        engine = self.engine()
+        base = F.prompt(7000, seed=99)
+        engine.turn({'id': 'h'}, base[:4500], 0)
+        readings = prefix_markers.scan(self.dram(engine))['dram_readings']
+        self.assertEqual([reading['point'] for reading in readings],
+                         [prefix_markers.DRAM_REGISTRY, prefix_markers.DRAM_FIRST_CAPTURE])
+        for reading in readings:
+            self.assertIsNone(reading['unavailable'])
+            self.assertEqual([chip['chip'] for chip in reading['chips']], [0, 1])
+            self.assertEqual((reading['chips'][0]['free_gb'], reading['chips'][0]['largest_free_mb']), (7.21, 7040.0))
 
 
 class Audit(ExactTestBase):

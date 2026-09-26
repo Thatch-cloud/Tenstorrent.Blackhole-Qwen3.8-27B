@@ -30,8 +30,11 @@ PLANS (--plan, comma-separated, run in order):
              ... disabling it', '[PINDIAG] prefix: install' (TTScheduler, block_size=64,
              QWEN_SDPA_BF8=1), '[TP chunk-replay]', no program compiled by any hit after its cold twin
              (F3; every arm checks it), and the anchor probe: every file the image's graft.sha256
-             pins at its pin, and a '[PREFIX]' marker in model.py, qwen36_vllm.py or a pinned file.
-             A missing '[PINDIAG] dram' reading (for G2) makes it NOT_EXERCISED.
+             pins at its pin, model.py and qwen36_vllm.py at the prefix stage's pins (the bytes
+             qwen_prefix_model_patch stages, PATCHED_SHA256: graft.sha256 pins neither), and a
+             '[PREFIX]' marker in one of them or a pinned file. G2's DRAM reading - the model graft's
+             '[PINDIAG] dram after registry' with per-chip figures, and 'dram after first capture'
+             once the arm stored a checkpoint - missing or 'unavailable' makes it NOT_EXERCISED.
   exactness  exactness-traced: a chained real-text conversation 2.6k -> 60k (hits near 4k, 9k, 16k,
              24k, 33k, 42k, 51k, 60k), every turn cold (fresh salt) vs hit compared in full, output
              tokens and the rows' slot and logits digests; a changed suffix and an early divergence
@@ -104,6 +107,7 @@ import prefix_judge as judge  # noqa: E402
 import prefix_markers as markers  # noqa: E402
 import prefix_replay as replay  # noqa: E402
 import prefix_report as report  # noqa: E402
+import qwen_prefix_model_patch as model_patch  # noqa: E402
 
 PLANS = c2_serving_job.PREFIX_PLANS
 PORT = 8021
@@ -119,6 +123,11 @@ SMALL_STORE_GIB = 0.5         # three checkpoints of CHECKPOINT_NBYTES
 MODEL_ROOT = '/opt/tt-metal/models/demos/blackhole/qwen36/tt'
 GRAFT_PINS = '/opt/qwen-c2/graft.sha256'
 ANCHOR_FILES = ('model.py', 'qwen36_vllm.py')
+# The anchor files are the prefix stage's, not the C2 graft's: the image build runs qwen_prefix_model_patch
+# (qwen_prefix_stage STAGES), which writes nothing but these bytes, and graft.sha256 pins only the files
+# the C2 graft lays. A served anchor file off its stage pin is an image that predates this checkout's
+# model graft, or a tree changed after the stage.
+STAGE_PINS = dict(model_patch.PATCHED_SHA256)
 KILL_SWITCH_OWNER = replay.KILL_SWITCH_OWNER
 # What the platform hands vLLM (the smoke step's argv; TS injects --no-enable-prefix-caching for TT).
 PLATFORM_ARGS = ['--model', 'Qwen/Qwen3.8-27B', '--served-model-name', replay.SERVED_NAME, '--host', '0.0.0.0',
@@ -301,8 +310,10 @@ def anchor_probe(image, run=subprocess.run):
 def parse_anchor(text):
     """-> dict(files: model.py/qwen36_vllm.py sha, pins: every non-.orig graft.sha256 entry (path
     under the model root -> pinned sha), actual: that path's sha as installed (None: missing),
-    mismatched, marker_files, prefix_marker_in: marker files the probe can vouch for (the two anchor
-    files or a pinned one), unpinned: anchor files graft.sha256 does not pin)."""
+    mismatched, stage_pins: each anchor file graft.sha256 does not pin -> its STAGE_PINS sha,
+    stage_mismatched: those whose served sha is not it, marker_files, prefix_marker_in: marker files
+    the probe can vouch for (the two anchor files or a pinned one), unpinned: anchor files pinned by
+    neither)."""
     files, pins, actual, marked, section = {}, {}, {}, [], 'files'
     for line in text.splitlines():
         if line.startswith('==pins'):
@@ -335,10 +346,13 @@ def parse_anchor(text):
         elif section == 'pinned':
             actual[path] = parts[0]
     mismatched = sorted(path for path in pins if actual.get(path) != pins[path])
+    stage_pins = dict((path, STAGE_PINS[path]) for path in ANCHOR_FILES if path not in pins and path in STAGE_PINS)
+    stage_mismatched = sorted(path for path in stage_pins if files.get(path) != stage_pins[path])
     vouched = set(ANCHOR_FILES) | set(pins)
-    return dict(files=files, pins=pins, actual=actual, mismatched=mismatched, marker_files=marked,
+    return dict(files=files, pins=pins, actual=actual, mismatched=mismatched, stage_pins=stage_pins,
+                stage_mismatched=stage_mismatched, marker_files=marked,
                 prefix_marker_in=sorted(path for path in marked if path in vouched),
-                unpinned=sorted(path for path in ANCHOR_FILES if path not in pins))
+                unpinned=sorted(path for path in ANCHOR_FILES if path not in pins and path not in stage_pins))
 
 
 # -- judging one arm -----------------------------------------------------------------------------
@@ -852,7 +866,8 @@ def judge_arm(arm, driver, scanned, stats, error):
     lines += ['not comparable: %s' % text for text in not_comparable] + ['not exercised: %s' % text for text in missing]
     return dict(verdict=verdict, problems=problems, unstable=unstable, not_comparable=not_comparable, rerun=rerun,
                 not_exercised=missing, notes=notes, lines=lines, pairs=len(driver.pairs), identical=identical,
-                dram=scanned.get('dram')[:16] if scanned.get('dram') else [], kv_tokens=scanned.get('kv_tokens'))
+                dram=scanned.get('dram')[:16] if scanned.get('dram') else [],
+                dram_readings=(scanned.get('dram_readings') or [])[:16], kv_tokens=scanned.get('kv_tokens'))
 
 
 def bringup_cross(reference, prefix, anchor):
@@ -891,10 +906,46 @@ def bringup_cross(reference, prefix, anchor):
         if not anchor.get('prefix_marker_in'):
             problems.append('no "[PREFIX]" marker in %s or a file graft.sha256 pins (marker files: %s): the prefix model '
                             'graft is not in the served tree' % (' or '.join(ANCHOR_FILES), anchor.get('marker_files')))
+        files, stage_pins = anchor.get('files') or {}, anchor.get('stage_pins') or {}
+        stale = anchor.get('stage_mismatched') or []
+        if stale:
+            problems.append('the served %s not the prefix stage\'s graft (qwen_prefix_model_patch.PATCHED_SHA256): %s: '
+                            'the image predates this checkout\'s model graft, or its tree changed after the stage' % (
+                                ' and '.join(stale) + (' is' if len(stale) == 1 else ' are'),
+                                '; '.join('%s sha256 %s, pinned %s' % (path, files.get(path), stage_pins.get(path))
+                                          for path in stale)))
+        for path, pin in sorted(stage_pins.items()):
+            if path not in stale:
+                lines.append('anchor: %s at the prefix stage\'s pin %s (qwen_prefix_model_patch.PATCHED_SHA256)' % (
+                    path, pin))
         for path in anchor.get('unpinned') or ():
-            lines.append('anchor: %s (sha256 %s) is not pinned by graft.sha256' % (
-                path, (anchor.get('files') or {}).get(path)))
+            problems.append('anchor: %s (sha256 %s) is pinned by neither graft.sha256 nor the prefix stage: the probe '
+                            'cannot vouch for the served model tree' % (path, files.get(path)))
     return problems, missing, lines
+
+
+def dram_findings(result):
+    """G2's DRAM reading on the bring-up's prefix arm: the model graft's '[PINDIAG] dram after registry'
+    (the model warm, the registry created) and, once the arm stored a checkpoint (the registry's
+    captures counter), 'dram after first capture' - each with per-chip figures, not 'unavailable'.
+    -> (not exercised, lines: every reading the arm logged and the KV pool beside it)."""
+    readings = result.get('dram_readings') or []
+    lines = ['dram after %s: %s' % (reading.get('point'), reading.get('text')) for reading in readings]
+    if not readings:
+        lines.append('dram: none logged')
+    if result.get('kv_tokens'):
+        lines.append('dram: beside a KV pool of %d tokens (vLLM\'s GPU KV cache size)' % result['kv_tokens'])
+    stored = int((result.get('stats') or {}).get('captures') or 0)
+    wanted = [(markers.DRAM_REGISTRY, 'the model warm and the registry created')]
+    if stored:
+        wanted.append((markers.DRAM_FIRST_CAPTURE, 'the arm stored %d checkpoint(s)' % stored))
+    missing = []
+    for point, why in wanted:
+        mine = [reading for reading in readings if reading.get('point') == point]
+        if not any(reading.get('chips') for reading in mine):
+            missing.append('no "[PINDIAG] dram after %s" reading with per-chip figures on the prefix arm (%s%s): G2 has '
+                           'no DRAM reading' % (point, why, '; logged: %s' % mine[0].get('text') if mine else ''))
+    return missing, lines
 
 
 def timing_summary(driver):
@@ -1089,7 +1140,7 @@ class Runner(object):
                                                         'launches', 'apc', 'chunking_off', 'chunk_replay', 'kv_tokens',
                                                         'failures'))
         summary.update(grants=len(scanned['grants']), rows=len(scanned['rows']), audits=len(scanned['audits']),
-                       dram=scanned['dram'][:32])
+                       dram=scanned['dram'][:32], dram_readings=(scanned.get('dram_readings') or [])[:32])
         with open(os.path.join(arm_dir, 'arm.json'), 'w', encoding='utf-8') as handle:
             json.dump(dict(result=result, markers=summary), handle, indent=1, default=str)
 
@@ -1105,10 +1156,9 @@ def run_plan(plan, arms, runner, anchor=None):
     if plan == 'bringup' and len(results) == 2 and all(driver is not None for driver, _ in results.values()):
         reference, prefix = results['bringup-reference'][0], results['bringup-prefix'][0]
         problems, missing, cross = bringup_cross(reference, prefix, anchor or {})
-        dram = results['bringup-prefix'][1].get('dram')
-        cross.append('dram: %s' % (dram or 'none logged'))
-        if not dram:
-            missing.append('no "[PINDIAG] dram" line on the prefix arm: G2 has no DRAM reading')
+        dram_missing, dram_lines = dram_findings(results['bringup-prefix'][1])
+        cross += dram_lines
+        missing += dram_missing
         lines += cross + ['problem: %s' % text for text in problems] + ['not exercised: %s' % text for text in missing]
         verdicts.append('FAIL' if problems else ('NOT_EXERCISED' if missing else 'PASS'))
         extra.update(cross_problems=problems, cross_not_exercised=missing)

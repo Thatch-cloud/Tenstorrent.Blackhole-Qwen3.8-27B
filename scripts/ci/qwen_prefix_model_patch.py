@@ -31,7 +31,15 @@ model.py (models/demos/blackhole/qwen36/tt/model.py in the image)
     every prefill. Every row logs the program cache size before and after it (F3);
     QWEN_PREFIX_DIGESTS=1 (a gate instrument) adds the row's end-of-prefill GDN slot and last-position
     logits digests (slot_sha, logits_sha) to its marker, and QWEN_PREFIX_AUDIT=1 logs program-free
-    KV / GDN-slot / logits digests (F3). Its name is deliberately outside prefill_paged_slots*: the C2 fast path's
+    KV / GDN-slot / logits digests (F3). G2's DRAM reading (the bring-up gate requires it): each chip's
+    DRAM allocator figures as "[PINDIAG] dram after registry: ..." once, when the route first runs with
+    the scheduler's registry present - the model is warm (the plugin warms it before vLLM builds the
+    scheduler that creates the registry) - and "[PINDIAG] dram after first capture: ..." after the
+    first row that stored a checkpoint. The reading and its text are the fast path's "dram after
+    attach" line (serving_buffer_pool.dram_statistics and format_dram), mirrored rather than imported:
+    that module pulls the fast path's device modules into this engine. Allocator views only (no
+    allocation, program or synchronize), under QWEN_PREFIX_REUSE=1 only, and it never raises.
+    Its name is deliberately outside prefill_paged_slots*: the C2 fast path's
     prefill capture (dflash_prefill_window.PrefillWindowCapture.bindings) refuses, on every
     profile of the image, a model exposing a prefill_paged_slots* entry it does not know. For the
     same reason the route refuses to run under a fast-path capture;
@@ -88,7 +96,7 @@ SOURCE_SHA256 = {
 # edit below, or to lever_n_model_patch.patch_tp_replay, changes these on purpose
 # (test_qwen_prefix_model_patch prints the new values).
 PATCHED_SHA256 = {
-    MODEL_FILE: 'feb1a912fd6e70ef03bf537f1953663380340d2908d1e3b16fb5ed77a25619dc',
+    MODEL_FILE: '5be184fa029f80e3431bcbdf4cfbfed94706862ddb69876d3a5cda9e666e3531',
     VLLM_FILE: '4eafb09617ba62f322e259f5610447c251b9e6a093b2ca70f233d5079f403edc',
 }
 
@@ -100,6 +108,11 @@ CHUNK = 2048
 MARKER_ROW = '[PREFIX] row='
 MARKER_WARM = '[PINDIAG] prefix: model warm restore_mode='
 MARKER_AUDIT = '[PREFIX-AUDIT]'
+# G2's DRAM reading, '<MARKER_DRAM><point>: <per-chip figures>' (prefix_markers.DRAM_READING parses it; the
+# bring-up gate requires the DRAM_REGISTRY point, and DRAM_FIRST_CAPTURE once the arm stored a checkpoint).
+MARKER_DRAM = '[PINDIAG] dram after '
+DRAM_REGISTRY = 'registry'
+DRAM_FIRST_CAPTURE = 'first capture'
 STAGED_SIGN_MODEL = '_QWEN_PREFIX_REGISTRY_KEY'
 STAGED_SIGN_VLLM = '_QWEN_PREFIX_REUSE'
 
@@ -148,6 +161,65 @@ def _qwen_prefix_warn_once(key, message):
     if key not in _QWEN_PREFIX_WARNED:
         _QWEN_PREFIX_WARNED.add(key)
         logger.warning(message)
+
+
+# G2's DRAM reading (qwen_prefix_model_patch's docstring): logged once per point per process.
+_QWEN_PREFIX_DRAM_LOGGED = set()
+
+
+def _qwen_prefix_dram_statistics(tensor):
+    """Each chip's DRAM allocator figures, in bytes over all banks, read through the chips `tensor`
+    spans: serving_buffer_pool.dram_statistics(ttnn, tensor), line for line (test_qwen_prefix_model_runtime
+    holds the two equal). A ttnn without the memory view, or one that refuses it, reports the reason."""
+    try:
+        report = []
+        for chip, shard in enumerate(ttnn.get_device_tensors(tensor)):
+            view = ttnn.get_memory_view(shard.device(), ttnn.BufferType.DRAM)
+            banks = int(view.num_banks)
+            report.append(
+                dict(
+                    chip=chip,
+                    banks=banks,
+                    allocated=int(view.total_bytes_allocated_per_bank) * banks,
+                    free=int(view.total_bytes_free_per_bank) * banks,
+                    largest_free=int(view.largest_contiguous_bytes_free_per_bank) * banks,
+                    total=int(view.total_bytes_per_bank) * banks,
+                )
+            )
+        return report
+    except Exception as failure:
+        return dict(unavailable="%s: %s" % (type(failure).__name__, str(failure)[:120]))
+
+
+def _qwen_prefix_format_dram(statistics):
+    """serving_buffer_pool.format_dram: per chip, allocated / free / largest free block of the total."""
+    if isinstance(statistics, dict):
+        return "unavailable (%s)" % statistics.get("unavailable", "no statistics")
+    gigabyte, megabyte = 1e9, 1e6
+    return "; ".join(
+        "chip%d allocated=%.2fGB free=%.2fGB largest_free=%.1fMB of %.2fGB"
+        % (
+            chip["chip"],
+            chip["allocated"] / gigabyte,
+            chip["free"] / gigabyte,
+            chip["largest_free"] / megabyte,
+            chip["total"] / gigabyte,
+        )
+        for chip in statistics
+    )
+
+
+def _qwen_prefix_dram(point, tensor):
+    """Log "[PINDIAG] dram after <point>: <reading>" once per point in this process, and only under
+    QWEN_PREFIX_REUSE=1. Allocator views only: no allocation, no program, no synchronize. Never raises."""
+    if point in _QWEN_PREFIX_DRAM_LOGGED or os.environ.get("QWEN_PREFIX_REUSE") != "1":
+        return
+    _QWEN_PREFIX_DRAM_LOGGED.add(point)
+    try:
+        reading = _qwen_prefix_format_dram(_qwen_prefix_dram_statistics(tensor))
+    except Exception as failure:
+        reading = "unavailable (%s: %s)" % (type(failure).__name__, str(failure)[:120])
+    logger.info(f"[PINDIAG] dram after {point}: {reading}")
 
 
 def _qwen_prefix_registry():
@@ -377,6 +449,8 @@ MODEL_METHODS = r'''
             )
         else:
             _qwen_prefix_declare_mid_loop()
+            # G2's DRAM reading, once per process: the model is warm and the scheduler built the registry.
+            _qwen_prefix_dram("registry", dn_states[0].rec_state if dn_states else None)
         held = "absent" if registry is None else "present"
         chunk_size = self._chunked_chunk_size or _QWEN_PREFIX_CHUNK
         path = "traced" if self._chunked_trace_id is not None else "eager"
@@ -453,6 +527,10 @@ MODEL_METHODS = r'''
                         f"{programs_after - programs_before} program(s) after warmup (F3): a compile after the "
                         "traces are parked is the second-request hang (#48536)"
                     )
+                if registry is not None and any(":stored:" in item for item in captured):
+                    # G2's second reading, once per process: after the first row that stored a
+                    # checkpoint (host tensors: any change is device memory the capture path kept).
+                    _qwen_prefix_dram("first capture", dn_states[0].rec_state if dn_states else None)
         finally:
             # Always rebind the batched decode buffers; the scratch persists (see prefill_paged_slots).
             self._unbind_gdn_prefill_scratch(prev)

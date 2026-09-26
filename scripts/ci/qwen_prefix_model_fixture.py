@@ -107,7 +107,14 @@ class FakeTTNN(object):
     wrongly (review finding 2: 'noop' writes nothing, 'chip0' writes chip 0's shard only,
     'chip0_to_all' writes chip 0's shard to every chip - the host view's dim 0 is the mesh);
     copy_corrupt makes ttnn.copy write wrong bytes; to_torch_hook(tensor) may raise (MemoryError
-    during a capture); program_count_known=False makes the mesh lack num_program_cache_entries."""
+    during a capture); program_count_known=False makes the mesh lack num_program_cache_entries.
+    get_device_tensors / get_memory_view / BufferType model the DRAM allocator view G2's reading uses
+    (one shard per chip of the 1x2 mesh, a view per chip from dram_views or DRAM_VIEW); every view read
+    is recorded in memory_views, not in log, and memory_view_refuse makes the view refuse."""
+
+    # One chip's DRAM as the allocator reports it, per bank (8 banks of 4,138,123,648 B).
+    DRAM_VIEW = dict(num_banks=8, total_bytes_per_bank=4138123648, total_bytes_allocated_per_bank=3237000000,
+                     total_bytes_free_per_bank=901123648, largest_contiguous_bytes_free_per_bank=880000000)
 
     H2D_MODES = ('exact', 'noop', 'chip0', 'chip0_to_all')
 
@@ -119,6 +126,9 @@ class FakeTTNN(object):
         self.copy_corrupt = False
         self.to_torch_hook = None
         self.program_count_known = True
+        self.memory_view_refuse = False
+        self.memory_views = []
+        self.dram_views = {}
         self.bfloat16 = FakeDType('bfloat16', torch.bfloat16)
         self.float32 = FakeDType('float32', torch.float32)
         self.bfloat8_b = FakeDType('bfloat8_b', torch.float32)
@@ -128,15 +138,16 @@ class FakeTTNN(object):
         self.ROW_MAJOR_LAYOUT = 'ROW_MAJOR'
         self.DRAM_MEMORY_CONFIG = 'DRAM'
         self.L1_MEMORY_CONFIG = 'L1'
+        self.BufferType = SimpleNamespace(DRAM='DRAM', L1='L1')
 
     def module(self):
         module = types.ModuleType('ttnn')
         for name in ('bfloat16', 'float32', 'bfloat8_b', 'uint32', 'int32', 'TILE_LAYOUT',
-                     'ROW_MAJOR_LAYOUT', 'DRAM_MEMORY_CONFIG', 'L1_MEMORY_CONFIG'):
+                     'ROW_MAJOR_LAYOUT', 'DRAM_MEMORY_CONFIG', 'L1_MEMORY_CONFIG', 'BufferType'):
             setattr(module, name, getattr(self, name))
         for name in ('from_torch', 'as_tensor', 'to_torch', 'copy', 'copy_host_to_device_tensor',
                      'deallocate', 'synchronize_device', 'execute_trace', 'ConcatMeshToTensor',
-                     'ShardTensorToMesh', 'ReplicateTensorToMesh'):
+                     'ShardTensorToMesh', 'ReplicateTensorToMesh', 'get_device_tensors', 'get_memory_view'):
             setattr(module, name, getattr(self, name))
         module.__getattr__ = Unfaked
         return module
@@ -222,6 +233,18 @@ class FakeTTNN(object):
 
     def ReplicateTensorToMesh(self, mesh):
         return SimpleNamespace(kind='replicate', dim=None)
+
+    # -- the DRAM allocator view (G2's reading) ----------------------------------------------------
+    def get_device_tensors(self, tensor):
+        if tensor is None or tensor.deallocated or not tensor.on_device:
+            raise RuntimeError('ttnn.get_device_tensors needs a live device tensor')
+        return [SimpleNamespace(device=lambda chip=chip: 'chip%d' % chip) for chip in range(2)]
+
+    def get_memory_view(self, device, buffer_type):
+        self.memory_views.append((device, buffer_type))
+        if self.memory_view_refuse:
+            raise RuntimeError('no allocator on this device')
+        return SimpleNamespace(**self.dram_views.get(device, self.DRAM_VIEW))
 
 
 class FakeLogger(object):

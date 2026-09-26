@@ -289,7 +289,11 @@ class FakeEngine(object):
 
     FAULTS = ('diverge_hits', 'diverge_once', 'diverge_after_resume', 'unsalted_differs', 'capture_differs',
               'grow_programs', 'grow_on_capture', 'drop_rows', 'drop_resumed_rows', 'no_digests', 'bad_slot_on_hit',
-              'publish_unsalted', 'publish_when_killed', 'no_stats', 'no_dropped_hits', 'no_counters', 'kill_line_off')
+              'publish_unsalted', 'publish_when_killed', 'no_stats', 'no_dropped_hits', 'no_counters', 'kill_line_off',
+              'no_dram', 'no_capture_dram', 'dram_unavailable')
+    # The model graft's G2 reading (qwen_prefix_model_patch._qwen_prefix_dram), in serving_buffer_pool's text.
+    DRAM_TEXT = ('chip0 allocated=25.90GB free=8.01GB largest_free=7877.5MB of 33.91GB; '
+                 'chip1 allocated=25.90GB free=8.01GB largest_free=7877.5MB of 33.91GB')
 
     def __init__(self, profile=None, name='general-prefix', answer_len=24, path=None, **faults):
         unknown = set(faults) - set(self.FAULTS)
@@ -324,6 +328,18 @@ class FakeEngine(object):
         self.lines.append('2026-09-26T%02d:%02d:%02d.000000001Z %s' % (
             len(self.lines) // 3600 % 24, len(self.lines) // 60 % 60, len(self.lines) % 60, line))
 
+    def dram(self, point):
+        """G2's reading at `point`, once per engine process, as the model graft logs it: the registry
+        point on the first prefix-route prefill, the capture point after the first stored checkpoint."""
+        if point in self.dram_logged or 'no_dram' in self.faults or (
+                point == pm.DRAM_FIRST_CAPTURE and 'no_capture_dram' in self.faults):
+            return
+        self.dram_logged.add(point)
+        text = ('unavailable (RuntimeError: no allocator on this device)' if 'dram_unavailable' in self.faults
+                else self.DRAM_TEXT)
+        self.say('(EngineCore pid=9) INFO | models.demos.blackhole.qwen36.tt.model:_qwen_prefix_dram:180 - '
+                 '[PINDIAG] dram after %s: %s' % (point, text))
+
     def graft_say(self, message, *values):
         if 'kill switch' in message and 'kill_line_off' in self.faults:
             return
@@ -349,6 +365,7 @@ class FakeEngine(object):
         self.dropped_hits = 0
         self.expected, self.expect_since = 0, None
         self.dead = None
+        self.dram_logged = set()
         profile = self.profile
         self.say('(APIServer pid=1) [QWEN-C2] profile %s: vLLM argv %s' % (
             self.name, json.dumps(marker_fixture.launched_argv(profile))))
@@ -359,7 +376,6 @@ class FakeEngine(object):
         if self.prefix:
             line = marker_fixture.install_line().replace('store_gib=8.0', 'store_gib=%.1f' % self.store_gib)
             self.say('(EngineCore pid=9) ' + line)
-            self.say('[PINDIAG] dram after kv: chip0 allocated=20.0GB free=8.0GB largest_free=900MB of 32GB')
 
     # -- tokens ----------------------------------------------------------------------------------
     def render_message(self, message):
@@ -567,6 +583,7 @@ class FakeEngine(object):
             request.resumed_at = len(request.output_ids)
         captured = []
         if self.prefix:
+            self.dram(pm.DRAM_REGISTRY)
             grant = self.registry.grant_for(request.request_id)
             granted = grant.q if grant is not None else 0
             if granted != q:
@@ -604,6 +621,8 @@ class FakeEngine(object):
                          request.request_id, q, len(ids), self.path, 120.0 if q else 0.0,
                          ','.join(str(p) for p in captured), 300.0 if captured else 0.0, before, self.programs,
                          digests))
+        if captured:
+            self.dram(pm.DRAM_FIRST_CAPTURE)
         if self.audit:
             digest = judge.token_sha(ids)[:16]
             self.say('[PREFIX-AUDIT] req=%s Q=%d L=%d kv_range=0:%d kv_sha=%s slot_sha=%s' % (

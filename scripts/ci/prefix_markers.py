@@ -44,6 +44,15 @@ never guessed around):
     admission the oracle judges; the admissions count names the preempted requests.
     The design's own spelling (row=... ms=...) is accepted too: `row` is read as the request id
     when it is not a plain integer, `ms` as capture_ms.
+  model graft, G2's DRAM reading (each chip's DRAM allocator figures, each point once per engine):
+    [PINDIAG] dram after registry: chip0 allocated=<f>GB free=<f>GB largest_free=<f>MB of <f>GB; chip1 ...
+        when the prefix route first runs with the scheduler's registry present: the model is warm and
+        the registry exists. The bring-up requires it (per-chip figures, not 'unavailable (<reason>)').
+    [PINDIAG] dram after first capture: <the same>
+        after the first row that stored a checkpoint; the bring-up requires it once the arm stored one.
+    read into dram_readings: point, chips (chip, allocated_gb, free_gb, largest_free_mb, total_gb),
+    unavailable (the reason, or None) and text. The fast path's 'dram after attach' and 'dram after
+    engine <id>' lines carry the same text (serving_buffer_pool.format_dram) and parse the same way.
   audit mode (QWEN_PREFIX_AUDIT=1, program-free):
     [PREFIX-AUDIT] req=<id> Q=<n> L=<n> kv_range=<a>:<b> kv_sha=<hex> slot_sha=<hex> [logits_sha=<hex>]
     digests of the unpacked K/V values over kv_range and of the row's GDN slot bytes (the model also
@@ -54,7 +63,7 @@ never guessed around):
 Other lines read: the serving contract's '[QWEN-C2] profile <name>: vLLM argv [...]' (the launched
 argv, memory read-the-launched-argv), the TT platform's 'Automatic prefix caching is enabled' and
 'Chunked prefill is not supported ... disabling it', the model's '[TP chunk-replay]' (the traced
-chunk loop ran), '[PINDIAG] dram ...' lines (G2's reading), vLLM's 'GPU KV cache size: N tokens',
+chunk loop ran), every '[PINDIAG] dram ...' line (raw, beside dram_readings), vLLM's 'GPU KV cache size: N tokens',
 and failure signatures (a traceback, an engine death, tt-metal's ethernet-core wedge).
 
 Log lines may carry docker's --timestamps prefix; it is split off and kept.
@@ -85,6 +94,12 @@ APC = re.compile(r'Automatic prefix caching is (enabled|disabled)')
 CHUNKING_OFF = 'Chunked prefill is not supported for'
 CHUNK_REPLAY = '[TP chunk-replay]'
 DRAM = '[PINDIAG] dram'
+# '[PINDIAG] dram after <point>: <reading>' (qwen_prefix_model_patch.MARKER_DRAM; the fast path's lines too).
+DRAM_READING = re.compile(r'\[PINDIAG\] dram after ([^:]+?): (.*?)\s*$')
+DRAM_CHIP = re.compile(r'chip(\d+) allocated=([0-9.]+)GB free=([0-9.]+)GB largest_free=([0-9.]+)MB of ([0-9.]+)GB')
+DRAM_UNAVAILABLE = re.compile(r'^unavailable \((.*)\)$')
+DRAM_REGISTRY = 'registry'              # qwen_prefix_model_patch.DRAM_REGISTRY
+DRAM_FIRST_CAPTURE = 'first capture'    # qwen_prefix_model_patch.DRAM_FIRST_CAPTURE
 KV_TOKENS = re.compile(r'GPU KV cache size: ([0-9,]+) tokens')
 WEDGE = 'Timed out while waiting for active ethernet core'
 TRACEBACK = 'Traceback (most recent call last)'
@@ -185,12 +200,30 @@ def audit_row(text):
                 logits_sha=raw.get('logits_sha'))
 
 
+def dram_reading(line):
+    """A '[PINDIAG] dram after <point>: <reading>' line -> dict(point, chips: [dict(chip, allocated_gb,
+    free_gb, largest_free_mb, total_gb)], unavailable: the reason when there are no per-chip figures
+    (else None), text), or None for any other line."""
+    match = DRAM_READING.search(line)
+    if not match:
+        return None
+    text = match.group(2)
+    chips = [dict(chip=int(chip), allocated_gb=float(allocated), free_gb=float(free), largest_free_mb=float(largest),
+                  total_gb=float(total))
+             for chip, allocated, free, largest, total in DRAM_CHIP.findall(text)]
+    unavailable = None
+    if not chips:
+        found = DRAM_UNAVAILABLE.match(text)
+        unavailable = found.group(1) if found else 'no per-chip figures: %s' % text[:200]
+    return dict(point=match.group(1).strip(), chips=chips, unavailable=unavailable, text=text[:400])
+
+
 def scan(lines):
     """Every marker in a server log (a list of lines, docker timestamps allowed), in order. Each
     entry keeps its line index and timestamp so the driver can window it against a request."""
     out = dict(installs=[], grants=[], rows=[], audits=[], refused=[], capture_skipped=[], kill_switch=[],
-               stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], kv_tokens=None,
-               failures=[])
+               stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
+               kv_tokens=None, failures=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
         where = dict(index=index, time=stamp)
@@ -244,6 +277,10 @@ def scan(lines):
             out['chunk_replay'] += 1
         if DRAM in line:
             out['dram'].append(line.strip()[:400])
+            reading = dram_reading(line)
+            if reading is not None:
+                reading.update(where)
+                out['dram_readings'].append(reading)
         match = KV_TOKENS.search(line)
         if match:
             out['kv_tokens'] = int(match.group(1).replace(',', ''))

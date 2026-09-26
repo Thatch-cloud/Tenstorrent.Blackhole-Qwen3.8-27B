@@ -88,7 +88,9 @@ class ScanTests(unittest.TestCase):
             'INFO platform.py:1153] Automatic prefix caching is enabled',
             'INFO kv_cache_utils.py:2146] GPU KV cache size: 262,144 tokens',
             '(EngineCore pid=9) ' + install_line(),
-            '[PINDIAG] dram after attach: chip0 allocated=1.0GB free=20.0GB largest_free=900MB of 32GB',
+            '(EngineCore pid=9) 2026-09-26 12:00:30.100 | INFO     | models.demos.blackhole.qwen36.tt.model:'
+            '_qwen_prefix_dram:180 - [PINDIAG] dram after registry: chip0 allocated=25.90GB free=8.01GB '
+            'largest_free=7877.5MB of 33.91GB; chip1 allocated=25.90GB free=8.01GB largest_free=7877.5MB of 33.91GB',
             grant_line('chatcmpl-pfx-a-0002-hit-deadbeef', 4160, 4096, [8192]),
             '[PREFIX] req=chatcmpl-pfx-a-0002-hit-deadbeef Q=4096 L=9000 path=traced restored_ms=210.5 '
             'captured=[8192] capture_ms=380.0 programs=1234',
@@ -126,6 +128,9 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(len(out['kill_switch']), 1)
         self.assertEqual(out['stats'], dict(grants=3, pins=0))
         self.assertEqual(len(out['dram']), 1)
+        reading, = out['dram_readings']
+        self.assertEqual((reading['point'], reading['unavailable'], [chip['chip'] for chip in reading['chips']]),
+                         (pm.DRAM_REGISTRY, None, [0, 1]))
         self.assertEqual([f['signature'] for f in out['failures']], [pm.WEDGE])
 
     def test_by_tag_groups_and_drops_untagged(self):
@@ -152,6 +157,44 @@ class ScanTests(unittest.TestCase):
         row = pm.model_row('[PREFIX] row=chatcmpl-pfx-x-0001-cold-12345678 Q=0 L=10 captured=[8192,10240] ms=5')
         self.assertEqual((row['req'], row['tag'], row['captured'], row['capture_ms']),
                          ('chatcmpl-pfx-x-0001-cold-12345678', 'pfx-x-0001-cold', [8192, 10240], 5))
+
+
+class DramReadingTests(unittest.TestCase):
+    """G2's reading: the model graft's '[PINDIAG] dram after registry|first capture' lines, and the fast
+    path's same-text lines, parsed per chip; a line without figures is read as unavailable."""
+
+    def test_the_model_grafts_points_and_their_figures(self):
+        import qwen_prefix_model_patch as model_patch
+
+        self.assertEqual((pm.DRAM_REGISTRY, pm.DRAM_FIRST_CAPTURE),
+                         (model_patch.DRAM_REGISTRY, model_patch.DRAM_FIRST_CAPTURE))
+        self.assertTrue(model_patch.MARKER_DRAM.startswith(pm.DRAM))
+        line = ('2026-09-26T12:00:31.000000001Z (EngineCore pid=67) 2026-09-26 12:00:31.000 | INFO     | '
+                'models.demos.blackhole.qwen36.tt.model:_qwen_prefix_dram:180 - ' + model_patch.MARKER_DRAM
+                + model_patch.DRAM_FIRST_CAPTURE + ': chip0 allocated=26.58GB free=7.33GB largest_free=7188.4MB of '
+                '33.91GB; chip1 allocated=26.60GB free=7.31GB largest_free=7100.0MB of 33.91GB')
+        out = pm.scan([line])
+        reading, = out['dram_readings']
+        self.assertEqual((reading['point'], reading['unavailable'], reading['time'], reading['index']),
+                         (pm.DRAM_FIRST_CAPTURE, None, '2026-09-26T12:00:31.000000001Z', 0))
+        self.assertEqual(reading['chips'], [
+            dict(chip=0, allocated_gb=26.58, free_gb=7.33, largest_free_mb=7188.4, total_gb=33.91),
+            dict(chip=1, allocated_gb=26.60, free_gb=7.31, largest_free_mb=7100.0, total_gb=33.91)])
+        self.assertEqual(out['dram'], [line[len('2026-09-26T12:00:31.000000001Z '):]])
+
+    def test_an_unavailable_view_and_a_line_without_figures(self):
+        refused = pm.dram_reading('[PINDIAG] dram after registry: unavailable (RuntimeError: no allocator on this device)')
+        self.assertEqual((refused['point'], refused['chips'], refused['unavailable']),
+                         ('registry', [], 'RuntimeError: no allocator on this device'))
+        garbled = pm.dram_reading('[PINDIAG] dram after registry: 7 GB or so')
+        self.assertEqual((garbled['chips'], garbled['unavailable']), ([], 'no per-chip figures: 7 GB or so'))
+        self.assertIsNone(pm.dram_reading('[PINDIAG] prefix: stats {"bytes": 0}'))
+
+    def test_the_fast_paths_lines_parse_the_same_way(self):
+        engine = pm.dram_reading('(EngineCore pid=66) 2026-09-26 11:50:50.803 | INFO     | dflash_device:pindiag:30 - '
+                                 '[PINDIAG] dram after engine chatcmpl-b5c7269b0809cd10-b2da3b07: chip0 allocated=26.58GB '
+                                 'free=7.33GB largest_free=7188.4MB of 33.91GB')
+        self.assertEqual((engine['point'], engine['chips'][0]['free_gb']), ('engine chatcmpl-b5c7269b0809cd10-b2da3b07', 7.33))
 
 
 class ArgvTests(unittest.TestCase):
