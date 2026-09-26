@@ -10,6 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import c2_platform_replay as replay  # noqa: E402
 import c2_serving_job as job  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -37,6 +38,7 @@ class ParseTests(unittest.TestCase):
                                                       'image\'s profile (an explicit list is never changed)')
         self.assertEqual((outputs['gate_max_tokens'], outputs['gate_memory_prompt']), ('4096', ''))
         self.assertEqual((outputs['platform_image'], outputs['replay_profile'], outputs['tests']), ('', '', ''))
+        self.assertEqual(outputs['replay_served_model'], '', 'empty: the replay\'s own default, the :tt name')
 
     def test_the_gate_keys(self):
         outputs = read(C2_ACTIONS='reset gate', C2_PROFILE='exact', C2_GATE_PLAN='bringup, matrix memory',
@@ -48,11 +50,22 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((outputs['gate_max_tokens'], outputs['gate_memory_prompt']), ('3000', '123136'))
         self.assertEqual(outputs['replay_profile'], 'general')
 
+    def test_the_replay_served_model(self):
+        """Reviewer defect 3: CI must be able to replay an image without the alias, which advertises the
+        checkpoint, as well as one with it."""
+        for model in ('Qwen/Qwen3.8-27B', 'Qwen/Qwen3.8-27B:tt', 'org_1/name.v2-x:b2'):
+            with self.subTest(model=model):
+                self.assertEqual(read(C2_REPLAY_SERVED_MODEL=model)['replay_served_model'], model)
+
     def test_what_is_refused(self):
         for values in (dict(C2_ACTIONS='status deploy'), dict(C2_IMAGE_TAG='V7!'), dict(C2_IMAGE_TAG=''),
                        dict(C2_PROFILE='c2'), dict(C2_GATE_PLAN='bringup soak'), dict(C2_GATE_LENGTHS='60,x'),
                        dict(C2_GATE_LENGTHS='60,0'), dict(C2_GATE_MAX_TOKENS='-1'), dict(C2_GATE_MEMORY_PROMPT='big'),
-                       dict(C2_PLATFORM_IMAGE='x'), dict(C2_REPLAY_PROFILE='nope')):
+                       dict(C2_PLATFORM_IMAGE='x'), dict(C2_REPLAY_PROFILE='nope'),
+                       dict(C2_REPLAY_SERVED_MODEL='Qwen3.8-27B'), dict(C2_REPLAY_SERVED_MODEL='Qwen/Qwen3.8-27B:'),
+                       dict(C2_REPLAY_SERVED_MODEL=':tt'), dict(C2_REPLAY_SERVED_MODEL='Qwen/Qwen3.8-27B:tt:x'),
+                       dict(C2_REPLAY_SERVED_MODEL='Qwen/a/b'), dict(C2_REPLAY_SERVED_MODEL='Qwen/Qwen3.8 27B'),
+                       dict(C2_REPLAY_SERVED_MODEL='Qwen/$(id)'), dict(C2_REPLAY_SERVED_MODEL='Qwen/x;true')):
             with self.subTest(values=values), self.assertRaises(job.JobError):
                 read(**values)
 
@@ -76,6 +89,7 @@ class FileTests(unittest.TestCase):
             self.assertEqual(job.main([JOB_FILE]), 0)
         lines = dict(line.split('=', 1) for line in out.getvalue().splitlines())
         self.assertIn('actions', lines)
+        self.assertIn('replay_served_model', lines)
 
     def test_main_refuses_with_the_reason(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -100,6 +114,22 @@ class FileTests(unittest.TestCase):
         for action in job.ACTIONS:
             if action != 'status':
                 self.assertIn("contains(steps.job.outputs.actions, '%s')" % action, text, action)
+
+    def test_the_replay_step_passes_the_served_model_only_when_set(self):
+        """Reviewer defect 3: empty leaves c2_platform_replay.py's default (the :tt name); set, it is
+        --served-model, e.g. Qwen/Qwen3.8-27B for an image without the alias."""
+        with open(WORKFLOW, encoding='utf-8') as handle:
+            text = handle.read()
+        step = text[text.index('- name: Replay'):text.index('- name: Push')]
+        self.assertIn('REPLAY_SERVED_MODEL: ${{ steps.job.outputs.replay_served_model }}', step)
+        invocation = step[step.index('python3 scripts/ci/c2_platform_replay.py'):]
+        self.assertIn('${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"}', invocation)
+        self.assertEqual(invocation.count('--served-model'), 1, 'never unconditionally')
+        with open(replay.__file__, encoding='utf-8') as handle:
+            parser_text = handle.read()
+        self.assertIn("parser.add_argument('--served-model', default=SERVED_MODEL", parser_text)
+        self.assertEqual(replay.SERVED_MODEL, 'Qwen/Qwen3.8-27B:tt')
+        self.assertTrue(job.MODEL_ID.fullmatch(replay.SERVED_MODEL) and job.MODEL_ID.fullmatch(replay.CHECKPOINT))
 
     def test_the_workflow_steps_run_in_the_parses_order(self):
         with open(WORKFLOW, encoding='utf-8') as handle:
