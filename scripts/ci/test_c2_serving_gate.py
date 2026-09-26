@@ -850,12 +850,15 @@ def lifecycle_report(events, alive=True, texts=None, profile='c2', drift=0.0, ph
                                        reason='5 s into its prefill', live=0, phase=phases.get(index, 'prefill'))
         elif kind == 'one':
             stream = dict(text=text[:8], finish_reason='length', completion_tokens=1)
+        elif kind == 'cut256':
+            stream = dict(text=text[:20], finish_reason='length', completion_tokens=256)
         elif kind == 'ignore':
             stream = dict(text=text + ' and on past EOS', finish_reason='length', completion_tokens=2048)
         else:
             stream = dict(text=text, finish_reason='stop', completion_tokens=300, prompt_tokens=100)
         streams.append(stream)
-        comparisons.append(dict(user=index, prompt_sha256=shas[index], max_tokens=1 if kind == 'one' else 2048,
+        comparisons.append(dict(user=index, prompt_sha256=shas[index],
+                                max_tokens=dict(one=1, cut256=256).get(kind, 2048),
                                 ignore_eos=kind == 'ignore'))
     seats = 4 if events else 1
     return dict(streams=streams, comparisons=comparisons, max_tokens=2048, qwen_configuration=dict(QWEN_C2_PROFILE=profile),
@@ -879,6 +882,8 @@ class LifecycleTests(unittest.TestCase):
         drops, edges, solo = options
         self.assertEqual(drops.events['drops'], {0: ('build', 0), 1: ('live', 4), 2: ('live', 3), 3: ('live', 2)})
         self.assertEqual(drops.events['ignore_eos'], [5])
+        # User 4 leaves early so user 3's live=2 drop can fire (run 36222651529 left it NOT_EXERCISED).
+        self.assertEqual(drops.events['max_tokens'], {4: 256})
         barrier = ('barrier', (60, (1, 2, 3)))
         self.assertEqual(edges.events, dict(drops={0: ('prefill', 5.0), 1: barrier, 2: barrier, 3: barrier},
                                             max_tokens={4: 1}, ignore_eos=[]))
@@ -970,10 +975,10 @@ class LifecycleTests(unittest.TestCase):
         texts = ['lifecycle answer %d ' % i * 40 for i in range(6)]
         bad = list(texts)
         bad[5] = 'something else entirely ' * 30
-        reports = {'lifecycle-drops': lambda n: lifecycle_report({1: 'drop'}, texts=bad),
+        reports = {'lifecycle-drops': lambda n: lifecycle_report({1: 'drop', 4: 'cut256'}, texts=bad),
                    'lifecycle-edges': lambda n: lifecycle_report({4: 'one'}),
                    'lifecycle-solo': lambda n: lifecycle_report({}),
-                   'lifecycle-drops-rerun': lambda n: lifecycle_report({1: 'drop'}),
+                   'lifecycle-drops-rerun': lambda n: lifecycle_report({1: 'drop', 4: 'cut256'}),
                    'lifecycle-solo-rerun': lambda n: lifecycle_report({})}
         code, summary, calls, lines, _ = DriverTests().run_driver(['--profile', 'c2', '--plan', 'lifecycle'], reports)
         self.assertEqual([c['arm'] for c in calls], ['lifecycle-drops', 'lifecycle-edges', 'lifecycle-solo',
