@@ -24,8 +24,8 @@ stands in for the device: it asserts what the G1 model graft will assert (a pref
 start_pos > 0 has a committed grant whose Q equals start_pos and whose checkpoint tokens match),
 and takes the planned captures. The wrappers under test - cap, trim, per-step commit, eviction
 coupling, fail-closed salt, install assertions - are prefix_scheduler_graft.py, which becomes G1's
-scheduler graft; these checks are its unit tests. Checks 15-17 are extra unit tests of the same
-module (registry LRU, kill switch, reset).
+scheduler graft; these checks are its unit tests. Checks 15-18 are extra unit tests of the same
+module (registry LRU, kill switch, reset, the token-mismatch guard).
 
 Prints PASS or FAIL per check with its evidence and exits 1 if any check fails.
 """
@@ -279,8 +279,9 @@ def variant_main(variant):
 def run_variant(variant):
     command = [sys.executable, os.path.abspath(__file__), '--variant', variant]
     try:
+        # errors='replace': a non-UTF-8 byte in the child's log must not cost the control's verdict.
         process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=1200,
-                                 universal_newlines=True)
+                                 universal_newlines=True, encoding='utf-8', errors='replace')
     except subprocess.TimeoutExpired as error:
         return None, 'timed out after %ss' % error.timeout
     for line in process.stdout.splitlines():
@@ -401,11 +402,20 @@ class SchedEnv(object):
         self.logs = logs
         view = SimpleNamespace(model_config=vllm_config.model_config, parallel_config=vllm_config.parallel_config,
                                cache_config=vllm_config.cache_config, vllm_config=vllm_config)
+        # TTWorker.get_kv_cache_spec (worker.py:258-293): the model class's get_kv_cache_spec hook
+        # when it returns a spec, else the single "foo" FullAttentionSpec. Mirror both branches, so
+        # a hook in the served model tree is what the scheduler checks run on.
+        self.hook_error = None
         try:
             self.hook_spec = tt_worker.TTWorker._try_get_spec_from_model_hook(view)
         except Exception as error:
-            self.hook_spec = 'raised %s: %s' % (type(error).__name__, error)
-        self.spec = tt_worker.TTWorker._build_default_kv_cache_spec(view)
+            self.hook_spec = None
+            self.hook_error = '%s: %s' % (type(error).__name__, error)
+        if isinstance(self.hook_spec, dict):
+            self.spec, self.spec_source = self.hook_spec, 'the model get_kv_cache_spec hook'
+        else:
+            self.spec = tt_worker.TTWorker._build_default_kv_cache_spec(view)
+            self.spec_source = 'the default single spec (_build_default_kv_cache_spec)'
         self.tt_blocks = tt_worker.get_num_available_blocks_tt(vllm_config, 2)
         vllm_config.cache_config.num_gpu_blocks_override = self.tt_blocks
         memory = tt_worker._available_kv_cache_memory_bytes_for_num_blocks(vllm_config, self.spec, self.tt_blocks)
@@ -557,16 +567,19 @@ def check_5(env):
     spec = groups[0].kv_cache_spec if groups else None
     module = sys.modules.get(type(scheduler).__module__)
     ok = (type(scheduler).__name__ == 'TTScheduler' and scheduler.has_mamba_layers is False
+          and env.hook_error is None
           and env.kv_cache_config.has_mamba_layers is False and type(coordinator).__name__ == 'UnitaryKVCacheCoordinator'
           and not scheduler.need_mamba_block_aligned_split and len(groups) == 1
           and type(spec).__name__ == 'FullAttentionSpec' and spec.block_size == BLOCK
           and env.scheduler_block == env.hash_block == BLOCK and scheduler.kv_cache_manager.enable_caching)
     return ok, ('scheduler=%s.%s (%s)\ncoordinator=%s has_mamba_layers=%s need_mamba_block_aligned_split=%s '
-                'enable_caching=%s\nmodel get_kv_cache_spec hook=%s; spec=%r\nTT blocks=%d (get_num_available_blocks_tt), '
-                'KV config num_blocks=%d groups=%d scheduler/hash block=%d/%d'
+                'enable_caching=%s\nmodel get_kv_cache_spec hook=%s%s; spec from %s: %r\nTT blocks=%d '
+                '(get_num_available_blocks_tt), KV config num_blocks=%d groups=%d scheduler/hash block=%d/%d'
                 % (type(scheduler).__module__, type(scheduler).__name__, getattr(module, '__file__', '?'),
                    type(coordinator).__name__, scheduler.has_mamba_layers, scheduler.need_mamba_block_aligned_split,
-                   scheduler.kv_cache_manager.enable_caching, env.hook_spec, spec, env.tt_blocks,
+                   scheduler.kv_cache_manager.enable_caching, env.hook_spec,
+                   (' (RAISED %s: the worker would die here)' % env.hook_error) if env.hook_error else '',
+                   env.spec_source, spec, env.tt_blocks,
                    env.kv_cache_config.num_blocks, len(groups), env.scheduler_block, env.hash_block))
 
 
@@ -592,8 +605,9 @@ def check_6(env):
 
 def check_7(env):
     lines = []
-    # (a) two fresh arrivals sharing a 4096-token prefix, one step: vLLM hands B blocks A has only been
-    # allocated this step.
+    # (a) the hazard, not the rule: two fresh arrivals sharing a 4096-token prefix, one step. vLLM hands B
+    # blocks A has only been allocated this step. B gets Q=0 here because no checkpoint exists yet (A's
+    # capture runs after this schedule()), so (a) passes with or without the rule; (b) tests the rule.
     scheduler, state = env.make()
     drive = Drive(env, scheduler, state, 'c7a')
     shared = tokens(4096, 'c7a-shared')
@@ -602,7 +616,8 @@ def check_7(env):
     drive.step()
     a, b = drive.row('a'), drive.row('b')
     ok_a = a is not None and b is not None and a.step == b.step and b.h == 4096 and b.q == 0 and b.start == 0
-    lines.append('(a) same step=%s; raw hit for b h=%s (blocks a allocated this step) -> Q=%s start_pos=%s'
+    lines.append('(a) hazard: same step=%s; raw hit for b h=%s on blocks a allocated this step -> Q=%s start_pos=%s '
+                 '(no checkpoint exists yet; this part does not exercise the rule)'
                  % (a and b and a.step == b.step, b and b.h, b and b.q, b and b.start))
     drive.run()
     # (b) the rule itself: a checkpoint exists at 4096 but the KV chain below it was broken (block 10
@@ -636,7 +651,25 @@ def check_7(env):
     c = drive.row('c')
     ok_c = c.q == 4096 and c.start == 4096
     lines.append('(c) the next step, same prefix: c Q=%s start_pos=%s (the rule holds only within a step)' % (c.q, c.start))
-    return ok_a and ok_b and ok_c, '\n'.join(lines)
+    # (d) the rule is not over-eager: two same-step arrivals on a prefix cached in an EARLIER step both
+    # hit (vLLM marks hit blocks as already cached, single_type_kv_cache_manager.py:229-233, so the
+    # cap records only blocks this step newly hashes). Sibling sub-agents on one system block.
+    scheduler, state = env.make()
+    drive = Drive(env, scheduler, state, 'c7d')
+    base = tokens(4200, 'c7d-x')
+    drive.add('x', base)
+    drive.run()
+    drive.add('s1', base[0:4096] + tokens(500, 'c7d-s1'))
+    drive.add('s2', base[0:4096] + tokens(600, 'c7d-s2'))
+    drive.step()
+    s1, s2 = drive.row('s1'), drive.row('s2')
+    ok_d = (s1 is not None and s2 is not None and s1.step == s2.step and s1.q == s2.q == 4096
+            and s1.start == s2.start == 4096)
+    lines.append('(d) two same-step arrivals on a prefix cached a step earlier: same step=%s; s1 Q=%s start_pos=%s; '
+                 's2 Q=%s start_pos=%s' % (s1 and s2 and s1.step == s2.step, s1 and s1.q, s1 and s1.start,
+                                           s2 and s2.q, s2 and s2.start))
+    drive.run()
+    return ok_a and ok_b and ok_c and ok_d, '\n'.join(lines)
 
 
 def full_chunk_written(entry, index):
@@ -1030,6 +1063,36 @@ def check_17(env):
                 'then gets start_pos=%d' % (had, reset, cleared, row.start))
 
 
+def check_18(env):
+    # The trim's last guard (design section 2.0.1 item 2a.3, S7): a checkpoint whose stored token ids
+    # differ from the request's (registry corruption, or a hash collision) only lowers Q.
+    scheduler, state = env.make()
+    registry = state.registry
+    drive = Drive(env, scheduler, state, 'c18')
+    text = tokens(4200, 'c18-x')
+    drive.add('x1', text[0:2100])
+    drive.run()
+    x2 = drive.add('x2', text[0:4200])
+    drive.run()
+    key = x2.block_hashes[4096 // BLOCK - 1]
+    entry = registry.get(key)
+    present = entry is not None and registry.get(x2.block_hashes[2048 // BLOCK - 1]) is not None
+    entry.token_ids[100] ^= 1
+    mismatches = registry.stats['token_mismatches']
+    drive.add('b', text[0:4096] + tokens(300, 'c18-b'))
+    drive.run()
+    b = drive.row('b')
+    lowered = b.h == 4096 and b.q == 2048 and b.start == 2048 and registry.stats['token_mismatches'] == mismatches + 1
+    healed = registry.get(key) is not None and registry.get(key) is not entry
+    drive.add('c', text[0:4096] + tokens(400, 'c18-c'))
+    drive.run()
+    c = drive.row('c')
+    ok = present and lowered and healed and c.q == 4096 and c.start == 4096
+    return ok, ('checkpoints at 2048 and 4096: %s; the 4096 entry\'s token 100 corrupted; b: h=%s Q=%s start_pos=%s, '
+                'token mismatches +%d; b\'s own capture replaced the bad entry: %s; then c Q=%s start_pos=%s'
+                % (present, b.h, b.q, b.start, registry.stats['token_mismatches'] - mismatches, healed, c.q, c.start))
+
+
 # --------------------------------------------------------------------------------------------
 def environment_report():
     say('INFO python %s' % sys.version.split()[0])
@@ -1138,7 +1201,8 @@ def main():
             run_check(check, title, function, env)
     run_check('15', 'extra: registry LRU by bytes never evicts a pinned checkpoint', check_15)
     for check, title, function in (('16', 'extra: kill switch polls at most once a second and latches', check_16),
-                                   ('17', 'extra: reset_prefix_cache clears the registry', check_17)):
+                                   ('17', 'extra: reset_prefix_cache clears the registry', check_17),
+                                   ('18', 'extra: a checkpoint whose token ids differ only lowers Q', check_18)):
         if env is None:
             record(check, False, title, 'not run: no scheduler environment')
         else:
