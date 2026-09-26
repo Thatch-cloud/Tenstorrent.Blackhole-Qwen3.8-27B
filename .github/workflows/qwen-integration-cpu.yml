@@ -92,6 +92,8 @@ jobs:
           python -B -m unittest test_serving_worker_hook
           python -B -m unittest test_serving_request_factory
           python -B -m unittest test_serving_lifecycle
+          python -B -m unittest test_serving_any_request test_serving_request_quarantine
+          python -B -m unittest test_serving_c2_contract test_c2_overlay_closure
           python -B -m unittest test_serving_cache_owner
           python -B -m unittest test_serving_runtime
           python -B -m unittest test_dflash_prefill_window test_gdn_snapshot

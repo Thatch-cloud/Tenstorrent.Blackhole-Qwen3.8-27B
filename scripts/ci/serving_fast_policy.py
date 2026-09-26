@@ -46,6 +46,34 @@ def _output_budget(value):
 
 
 OUTPUT_BUDGET = _output_budget(os.environ.get('QWEN_FAST_OUTPUT_BUDGET'))
+
+# C2-any (plan stage S1; the c2 serving profile sets it, `exact` and every gate leave it
+# unset). With it on, the fast path takes any request the edge contract admits instead of
+# only the frozen benchmark shape:
+# - beside the four-user block, whose engines capture only widths 1, 2 and 4, each engine is
+#   built without replay attention and without the per-request T16 gate, which admits only
+#   position == the frozen context with <= 256 left (serving_request_factory.from_prefill);
+# - the source qualification that gate carried runs once, at attach, instead
+#   (serving_request_factory.attach_source_check, called by serving_runtime);
+# - each request's budget is its own max_tokens, not the server ceiling OUTPUT_BUDGET;
+# - a host-side refusal of one request's own terms (its sampling contract, budget or page
+#   table) ends that one request (FINISHED_ABORTED) instead of the engine - every other refusal
+#   stays fatal - and ignore_eos and a first token that exhausts max_tokens are served
+#   (serving_lifecycle, serving_request_quarantine).
+# Unset or '0', every one of those paths is exactly what it was.
+ANY_REQUEST_FLAG = 'QWEN_FAST_ANY_REQUEST'
+
+
+def any_request_enabled(environ=None):
+    """Whether QWEN_FAST_ANY_REQUEST=1. Read per call, so a test or a profile can set it;
+    anything but unset, '0' or '1' is a configuration error, never a silent off."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(ANY_REQUEST_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (ANY_REQUEST_FLAG, value))
+    return value == '1'
+
+
 NATIVE_GDN_SLOTS = 8
 # The proposal block is 32 rows and the verify block is 32 or 64. capture_widths caps a
 # per-request bucket at 32 and dflash_device accepts block_rows in (8, 16, 32), so the

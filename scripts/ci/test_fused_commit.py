@@ -1565,7 +1565,7 @@ class ParentTests(unittest.TestCase):
         if result.returncode != 0:
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
-        after = (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()
+        after = without_any_request((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1575,6 +1575,35 @@ class ParentTests(unittest.TestCase):
         self.assertIn("**({'collectives': collectives}", added)
         self.assertIn("if os.environ.get('QWEN_FAST_FUSED_COMMIT') == '1' else {}))", added)
         self.assertTrue(all(line.startswith('#') for line in added[1:] if 'collectives' not in line and 'FUSED' not in line))
+
+
+def without_any_request(lines):
+    """serving_runtime.py less the C2-any (QWEN_FAST_ANY_REQUEST, plan S1) attach hunk, which
+    landed after this parent: its two widened imports back to theirs, and the one guarded block
+    that refuses a replaying capture cap and runs attach_source_check. Asserted to be exactly
+    that - found once, comments plus those statements - so the exclusion hides nothing else."""
+    imports = {
+        'from serving_fast_policy import any_request_enabled, validate_fast_config':
+            'from serving_fast_policy import validate_fast_config',
+        'from serving_request_factory import attach_source_check, from_prefill, sequential_captures':
+            'from serving_request_factory import from_prefill',
+    }
+    for line, parent in imports.items():
+        if lines.count(line) != 1:
+            raise AssertionError('The C2-any import %r is not in serving_runtime.py exactly once' % line)
+        lines = [parent if value == line else value for value in lines]
+    starts = [index for index, value in enumerate(lines)
+              if value.strip().startswith('# QWEN_FAST_ANY_REQUEST (C2-any, plan S1; default off)')]
+    ends = [index for index, value in enumerate(lines) if value.strip() == 'attach_source_check()']
+    if len(starts) != 1 or len(ends) != 1 or ends[0] < starts[0]:
+        raise AssertionError('The C2-any attach hunk is not in serving_runtime.py exactly once')
+    block = [value.strip() for value in lines[starts[0]:ends[0] + 1]]
+    code = [value for value in block if not value.startswith('#')]
+    if (code[0] != 'if any_request_enabled():' or code[1] != 'if not sequential_captures(capture_rows):'
+            or not code[2].startswith("raise ValueError('QWEN_FAST_ANY_REQUEST=1 needs")
+            or not all(value.startswith("'") for value in code[3:-1]) or code[-1] != 'attach_source_check()'):
+        raise AssertionError('The C2-any attach hunk holds more than its guard: %r' % (code,))
+    return lines[:starts[0]] + lines[ends[0] + 1:]
 
 
 class ShippingTests(unittest.TestCase):

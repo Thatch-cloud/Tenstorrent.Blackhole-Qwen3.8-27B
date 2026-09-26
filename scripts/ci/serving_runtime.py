@@ -9,10 +9,10 @@ from dflash_device import PreparedDraftWeights, pindiag
 import memory_ledger
 from serving_buffer_pool import ServingBufferPool, dram_line
 from serving_cache_owner import ServingCacheOwner
-from serving_fast_policy import validate_fast_config
+from serving_fast_policy import any_request_enabled, validate_fast_config
 from serving_lifecycle import FastServingLifecycle
 from serving_page_binding import VerifierPageBinding
-from serving_request_factory import from_prefill
+from serving_request_factory import attach_source_check, from_prefill, sequential_captures
 from serving_runner_bridge import FastRunnerBridge
 
 
@@ -227,6 +227,20 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             capture_rows = M3_SEQUENTIAL_CAPTURE_ROWS
         else:
             capture_rows = sequential_capture_rows(packed_shapes[0] if packed_shapes else None)
+        # QWEN_FAST_ANY_REQUEST (C2-any, plan S1; default off). Its engines drop replay
+        # attention and the per-request T16 gate, which is only sound where every capture is
+        # narrower than a replayed block (serving_request_factory.sequential_captures): beside
+        # the four-user block. Anywhere else the gate would still refuse every request that is
+        # not the frozen benchmark shape, so the attach is refused instead, before anything is
+        # built. And the gate's source qualification - every pinned component source hashed
+        # against the frozen evidence - runs here, once, in its place: a mismatch fails the
+        # attach, as it failed the first admission before (image v42).
+        if any_request_enabled():
+            if not sequential_captures(capture_rows):
+                raise ValueError('QWEN_FAST_ANY_REQUEST=1 needs per-request captures narrower than a replayed block '
+                                 '(beside the four-user block: QWEN_FAST_PACKED_STEP=1 with four scheduler '
+                                 'requests); this attach caps them at %d rows' % capture_rows)
+            attach_source_check()
         bucket_rows = capture_bucket_rows(policy['verifier_rows'], policy['output_budget'], capture_rows)
         trimmed = capture_rows != policy['verifier_rows']
         if trimmed:

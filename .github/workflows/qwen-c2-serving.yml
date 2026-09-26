@@ -203,6 +203,7 @@ jobs:
           rm -rf "$ctx"; mkdir -p "$ctx/ci"
           cp docker/qwen-c2-serving.Dockerfile "$ctx/Dockerfile"
           for file in serving_fast_policy.py packed_verifier.py serving_request_factory.py pooled_attention_replay.py \
+              serving_runtime.py serving_lifecycle.py serving_request_quarantine.py \
               serving_c2_contract.py test_serving_c2_contract.py test_serving_fast_policy.py qwen_c2_profiles.json \
               qwen_c2_boot.py; do
             cp "scripts/ci/$file" "$ctx/ci/"

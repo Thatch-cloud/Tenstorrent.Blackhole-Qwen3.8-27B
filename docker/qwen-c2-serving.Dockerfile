@@ -43,10 +43,13 @@ RUN set -eu; root=/opt/tt-metal/models/demos/blackhole/qwen36/tt; cd /opt/qwen-c
     done; \
     sed "s#  graft/#  $root/#" /opt/qwen-c2/graft.sha256 | sha256sum -c --quiet
 
-# The fast path's evidence tree changes for serving, and the plugin's copy of the policy.
+# The fast path's evidence tree changes for serving, and the plugin's copy of the policy. C2-any (the
+# c2 profiles) changes serving_request_factory, serving_runtime and serving_lifecycle together and adds
+# serving_request_quarantine: all four here, or c2 ships half a change (test_c2_overlay_closure).
 COPY ci/ /opt/qwen-c2/ci/
 RUN set -eu; cd /opt/qwen-c2/ci; \
     cp serving_fast_policy.py packed_verifier.py serving_request_factory.py pooled_attention_replay.py \
+       serving_runtime.py serving_lifecycle.py serving_request_quarantine.py \
        serving_c2_contract.py test_serving_c2_contract.py test_serving_fast_policy.py qwen_c2_profiles.json \
        /experiment-scripts/ci/; \
     cp serving_fast_policy.py /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_fast_policy.py; \
