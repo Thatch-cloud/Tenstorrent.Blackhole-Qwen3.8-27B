@@ -18,34 +18,47 @@ reads that variable) - and the knob's effect is checked in the log, never assume
 
 PLANS (--plan, comma-separated, run in order):
   bringup    bringup-reference on the BASELINE profile (general): a three-turn real-text conversation;
-             bringup-prefix on the prefix profile: the same conversation UNSALTED (fail-closed tenancy
-             leaves reuse off inside a reuse engine: it must equal the reference byte for byte, with
-             no grant and Q=0 throughout), then salted as cold/hit pairs - the first hit. PASS needs:
-             the launched argv with the prefix cache on and async scheduling off at block size 64, the
+             bringup-prefix on the prefix profile: each turn UNSALTED (fail-closed tenancy leaves reuse
+             off inside a reuse engine: byte-identical to the reference, no grant, and vLLM's
+             prefix_cache_hits unchanged across it - nothing was published), then the same messages
+             under a FRESH salt (a first request that captures at floor2048(L) mid-prefill: it must
+             equal the reference byte for byte too, show captured=[floor2048(L)], match the unsalted
+             row's slot and logits digests, and - the first one - compile nothing after the unsalted
+             row of the same prompt), then salted cold/hit pairs: the first hit. PASS also needs the
+             launched argv with the prefix cache on and async scheduling off at block size 64, the
              platform's 'Automatic prefix caching is enabled' and 'Chunked prefill is not supported
              ... disabling it', '[PINDIAG] prefix: install' (TTScheduler, block_size=64,
-             QWEN_SDPA_BF8=1), '[TP chunk-replay]', the program cache unchanged across the first hit
-             (F3: [PREFIX] programs=), the image's model tree: the five grafted files at the image's
-             own graft.sha256 and a '[PREFIX]' marker in it (the anchor probe, recorded with every
-             sha). A missing '[PINDIAG] dram' reading (for G2) makes it NOT_EXERCISED.
+             QWEN_SDPA_BF8=1), '[TP chunk-replay]', no program compiled by any hit after its cold twin
+             (F3; every arm checks it), and the anchor probe: every file the image's graft.sha256
+             pins at its pin, and a '[PREFIX]' marker in model.py, qwen36_vllm.py or a pinned file.
+             A missing '[PINDIAG] dram' reading (for G2) makes it NOT_EXERCISED.
   exactness  exactness-traced: a chained real-text conversation 2.6k -> 60k (hits near 4k, 9k, 16k,
-             24k, 33k, 42k, 51k, 60k), every turn cold (fresh salt) vs hit compared in full, a
-             changed suffix and an early divergence forked at turn 3, previous prompts of exactly
-             2047/2048/2049 tokens with tail-only hits, one tenant's three conversations sharing the
-             full system block (gap capture); every Q against the oracle (prefix_judge.Oracle).
+             24k, 33k, 42k, 51k, 60k), every turn cold (fresh salt) vs hit compared in full, output
+             tokens and the rows' slot and logits digests; a changed suffix and an early divergence
+             forked at turn 3; previous prompts SERVED at exactly 2047/2048/2049 tokens with tail-only
+             hits; one tenant's three conversations sharing the full system block, each with its own
+             2.6k-token task: the second captures the gap boundary and the third restores exactly it;
+             every Q, h and capture plan against the oracle (prefix_judge.Oracle).
              exactness-audit: the short chain and the boundaries with QWEN_PREFIX_AUDIT=1 (derived):
              each hit's KV [0,L) and GDN slot digests equal its cold twin's. exactness-eager: the same
              with trace_mode decode_only (derived): the eager loop C1 reuses, rows path=eager, no
              '[TP chunk-replay]'.
   lifecycle  lifecycle-evict (VLLM_SERVER_DEV_MODE=1, derived): four arrivals at once (two hits, two
-             same-tenant first turns), an abort while waiting for a seat, an abort during a hit's
-             prefill, a KV flood that evicts conversations built to ~56k, reset_prefix_cache, the
-             kill switch file (grants off, latched), an in-place restart (docker stop/start: the
-             first turn after it misses, the next hits). lifecycle-store (QWEN_PREFIX_STORE_GIB=0.5,
-             derived): checkpoint LRU eviction. lifecycle-tiny (num-gpu-blocks-override=TINY_BLOCKS,
-             derived): allocation failure after a grant and preemption, ignore_eos answers. Every
-             hit against a cold twin; preempted requests may diverge after they resume (recompute
-             re-prefills their own output), which is reported, not failed, when preemptions happened.
+             same-tenant first turns: the same-step rule), an abort while waiting for a seat, an abort
+             during a hit's prefill, a KV flood that evicts conversations built to ~56k (eviction
+             coupling), reset_prefix_cache, the kill switch file (grants off, latched, and nothing
+             published under it: the next turn's raw vLLM hit is bounded by what was published
+             before), an in-place restart (docker stop/start: the first turn after it misses, the next
+             hits). lifecycle-store (QWEN_PREFIX_STORE_GIB=0.5, derived): checkpoint LRU eviction.
+             lifecycle-tiny (QWEN36_MAX_TOKENS_ALL_USERS sized for a 1280-block pool, derived; the TT
+             worker overwrites num-gpu-blocks-override, plugin worker.py:388-390), sized by /tokenize
+             in blocks: an allocation failure after a grant (a cached conversation's next turn cannot
+             fit beside a filler, waits with a staged Q > 0 grant, then restores Q > 0 once the filler
+             ends), then preemption (three ignore_eos answers outgrow the pool); it sends nothing
+             unless vLLM logs exactly that pool. Every hit against a cold twin; a request vLLM preempted and resumed
+             (a second [PREFIX] row) may diverge after it resumes and is reported by name, not failed;
+             concurrent hits run a batch control before any divergence counts. Each arm requires the
+             registry's stats export (prefix_markers.REQUIRED_STATS) for what only it can show.
   timing     timing-prefix and (unless --baseline none) timing-baseline: busy agents in the metering
              shape (~2k-token tool results, exponential 15 s gaps, full system block, compaction past
              60k) at --agents 1,4,5,6, one phase each; TTFT and turn time p50/p90, hit rate from the
@@ -54,14 +67,16 @@ PLANS (--plan, comma-separated, run in order):
              or missing markers.
 
 Verdicts per plan: PASS, FAIL, INFRA (a platform container on M+A, tt-metal's ethernet-core wedge),
-NOT_COMPARABLE, UNSTABLE (the policy: a divergence that did not reproduce, or cold runs that
-disagree), NOT_EXERCISED (a check whose event did not happen, or whose evidence was not logged).
+NOT_COMPARABLE (a preempted request, or an engine whose bytes depend on the batch), UNSTABLE (two
+cold runs of one prompt disagree), NOT_EXERCISED (a check whose event did not happen, or whose
+evidence was not logged). A hit that diverges from two agreeing cold runs is a FAIL.
 
 SAFETY: as c2_serving_gate - no thatch-inference-* container may exist, a leftover container of the
 same name is removed first, every container is removed however the arm ends (SIGTERM included), a
 wedge stops the plan list as INFRA. The kill-switch file is written through the container into the
 host's ~/hf-cache/hub/.qwen-c2 and removed only if its content is KILL_SWITCH_OWNER (the workflow's
-trap does the same from the host). --budget-seconds refuses a plan list whose worst case does not fit.
+trap does the same from the host). --budget-seconds refuses a plan list whose worst case does not
+fit, and no request or readiness wait runs past its arm's deadline.
 
 Writes <results>/<arm>/ (server.log, records.jsonl, pairs.json, events.json, arm.json, docker-run.json,
 profiles.json for a derived arm) and <results>/c2-prefix-summary.json; exits 0 only when every plan
@@ -96,11 +111,13 @@ DERIVED_MOUNT = '/prefix-gate/profiles.json'
 READINESS_SECONDS = 1800
 ARM_OVERHEAD_SECONDS = 180
 SETTLE_SECONDS = 3.0
-TINY_BLOCKS = 1280            # 81,920 tokens: above one 65,536-token request, below three ~25k conversations
+MAX_LISTED = 16
+# 1280 blocks: above one 65,536-token request, small enough to build a failed allocation and a preemption.
+TINY_BLOCKS = replay.TINY_POOL_TOKENS // judge.BLOCK
 SMALL_STORE_GIB = 0.5         # three checkpoints of CHECKPOINT_NBYTES
 MODEL_ROOT = '/opt/tt-metal/models/demos/blackhole/qwen36/tt'
-ANCHOR_FILES = ('model.py', 'qwen36_vllm.py', 'model_config.py', 'attention/tp.py', 'gdn/tp.py', 'mlp.py', 'layer.py')
-GRAFTED = ('model_config.py', 'attention/tp.py', 'gdn/tp.py', 'mlp.py', 'layer.py')
+GRAFT_PINS = '/opt/qwen-c2/graft.sha256'
+ANCHOR_FILES = ('model.py', 'qwen36_vllm.py')
 KILL_SWITCH_OWNER = replay.KILL_SWITCH_OWNER
 # What the platform hands vLLM (the smoke step's argv; TS injects --no-enable-prefix-caching for TT).
 PLATFORM_ARGS = ['--model', 'Qwen/Qwen3.8-27B', '--served-model-name', replay.SERVED_NAME, '--host', '0.0.0.0',
@@ -109,14 +126,26 @@ PLATFORM_ARGS = ['--model', 'Qwen/Qwen3.8-27B', '--served-model-name', replay.SE
                  '--no-enable-prefix-caching', '--additional-config',
                  json.dumps({'tt': {'l1_small_size': 24576, 'fabric_config': 'FABRIC_1D',
                                     'trace_region_size': 1073741824}})]
-# (arm, scenario, which profile, derived changes, docker timeout seconds, strict oracle)
+
+
+def tiny_pool_env(profile, pool=replay.TINY_POOL_TOKENS):
+    """QWEN36_MAX_TOKENS_ALL_USERS for a pool of `pool` tokens: the TT worker adds one block per
+    sequence of padding (plugin worker.py:538-539) and rounds up to blocks (:573), and the profile's
+    engine flags win over the platform's (the contract owns max-num-seqs and block-size)."""
+    engine = profile.get('engine') or {}
+    return pool - int(engine.get('block-size', judge.BLOCK)) * int(engine.get('max-num-seqs', 1))
+
+
+# kind -> the profile's changes: env, engine flags, additional-config tt keys (or a function of the profile).
 DERIVED = dict(
     audit=dict(env=dict(QWEN_PREFIX_AUDIT='1')),
     eager=dict(tt=dict(trace_mode='decode_only')),
     dev=dict(env=dict(VLLM_SERVER_DEV_MODE='1')),
     store=dict(env=dict(QWEN_PREFIX_STORE_GIB=str(SMALL_STORE_GIB))),
-    tiny=dict(engine={'num-gpu-blocks-override': TINY_BLOCKS}, env=dict(VLLM_SERVER_DEV_MODE='1')),
+    tiny=lambda profile: dict(env=dict(QWEN36_MAX_TOKENS_ALL_USERS=str(tiny_pool_env(profile)),
+                                       VLLM_SERVER_DEV_MODE='1')),
 )
+# (arm, scenario, which profile, derived changes, docker timeout seconds, strict oracle)
 PLAN_ARMS = dict(
     bringup=(('bringup-reference', 'bringup_reference', 'baseline', None, 2400, True),
              ('bringup-prefix', 'bringup_prefix', 'prefix', None, 3600, True)),
@@ -143,8 +172,10 @@ def is_prefix_profile(profile):
 def derive(profiles, base, kind):
     """(derived name, a profiles document holding only it): the image's `base` profile with the
     DERIVED[kind] changes (profile env, engine flags, additional-config tt keys)."""
-    changes = DERIVED[kind]
     profile = copy.deepcopy(profiles['profiles'][base])
+    changes = DERIVED[kind]
+    if callable(changes):
+        changes = changes(profile)
     profile.setdefault('env', {}).update(changes.get('env') or {})
     profile.setdefault('engine', {}).update(changes.get('engine') or {})
     if changes.get('tt'):
@@ -205,14 +236,21 @@ def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_pa
     return arguments + ['--entrypoint', 'python3', image, '-m', 'vllm.entrypoints.openai.api_server'] + PLATFORM_ARGS
 
 
+def anchor_script(root=MODEL_ROOT, pins=GRAFT_PINS, files=ANCHOR_FILES):
+    """The shell the anchor probe runs in the image: the sha256 of model.py and qwen36_vllm.py, the
+    image's graft pins, the sha256 of every file they pin (as installed under the model root: the
+    Dockerfile checks the same, qwen-c2-serving.Dockerfile:45) and the files carrying '[PREFIX]'."""
+    listed = "awk '{p=$2; sub(/^[*]/, \"\", p); if (p ~ /^graft[/]/ && p !~ /[.]orig$/) print substr(p, 7)}' " + pins
+    return ('cd ' + root + ' && sha256sum ' + ' '.join(files) + '; echo ==pins; cat ' + pins + '; echo ==pinned; '
+            + listed + ' | while read -r p; do sha256sum "$p" 2>/dev/null || echo "missing  $p"; done; '
+            'echo ==markers; grep -rlF "[PREFIX]" . || true')
+
+
 def anchor_probe(image, run=subprocess.run):
-    """The image's model tree, read in a throwaway container (no devices, no network): the sha256 of
-    model.py, qwen36_vllm.py and the five grafted files, the image's own graft.sha256 pins, and the
-    files under the tree that carry a '[PREFIX]' marker."""
-    script = ('cd %s && sha256sum %s; echo ==pins; cat /opt/qwen-c2/graft.sha256; echo ==markers; '
-              'grep -rlF "[PREFIX]" . || true' % (MODEL_ROOT, ' '.join(ANCHOR_FILES)))
+    """The image's model tree, read in a throwaway container (no devices, no network): see
+    anchor_script and parse_anchor."""
     try:
-        result = run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'sh', image, '-c', script],
+        result = run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'sh', image, '-c', anchor_script()],
                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)
         text = (result.stdout or b'').decode('utf-8', 'replace')
     except (OSError, subprocess.SubprocessError) as error:
@@ -221,47 +259,84 @@ def anchor_probe(image, run=subprocess.run):
 
 
 def parse_anchor(text):
-    files, pins, marked, section = {}, {}, [], 'files'
+    """-> dict(files: model.py/qwen36_vllm.py sha, pins: every non-.orig graft.sha256 entry (path
+    under the model root -> pinned sha), actual: that path's sha as installed (None: missing),
+    mismatched, marker_files, prefix_marker_in: marker files the probe can vouch for (the two anchor
+    files or a pinned one), unpinned: anchor files graft.sha256 does not pin)."""
+    files, pins, actual, marked, section = {}, {}, {}, [], 'files'
     for line in text.splitlines():
         if line.startswith('==pins'):
             section = 'pins'
+            continue
+        if line.startswith('==pinned'):
+            section = 'pinned'
             continue
         if line.startswith('==markers'):
             section = 'markers'
             continue
         if section == 'markers':
-            if line.strip():
-                marked.append(line.strip().lstrip('./'))
+            path = line.strip()
+            if path:
+                marked.append(path[2:] if path.startswith('./') else path)
             continue
         parts = line.split()
-        if len(parts) == 2 and len(parts[0]) == 64:
-            path = parts[1].lstrip('*')
-            if section == 'files':
-                files[path] = parts[0]
-            elif path.startswith('graft/') and not path.endswith('.orig'):
+        if len(parts) != 2:
+            continue
+        path = parts[1].lstrip('*')
+        if section == 'pinned' and parts[0] == 'missing':
+            actual[path] = None
+        elif len(parts[0]) != 64:
+            continue
+        elif section == 'files':
+            files[path] = parts[0]
+        elif section == 'pins':
+            if path.startswith('graft/') and not path.endswith('.orig'):
                 pins[path[len('graft/'):]] = parts[0]
-    mismatched = sorted(path for path in GRAFTED if path not in files or files[path] != pins.get(path))
-    return dict(files=files, pins=dict((path, pins.get(path)) for path in GRAFTED), mismatched=mismatched,
-                marker_files=marked)
+        elif section == 'pinned':
+            actual[path] = parts[0]
+    mismatched = sorted(path for path in pins if actual.get(path) != pins[path])
+    vouched = set(ANCHOR_FILES) | set(pins)
+    return dict(files=files, pins=pins, actual=actual, mismatched=mismatched, marker_files=marked,
+                prefix_marker_in=sorted(path for path in marked if path in vouched),
+                unpinned=sorted(path for path in ANCHOR_FILES if path not in pins))
 
 
 # -- judging one arm -----------------------------------------------------------------------------
 
-def generic_problems(arm, scanned, records, error, expect_profile, store_gib=judge.DEFAULT_STORE_GIB):
+def quiet_windows(events):
+    """Log windows whose failure lines are expected (the restart drill's stop and boot)."""
+    return [tuple(event['log_window']) for event in (events or {}).values()
+            if isinstance(event, dict) and event.get('log_window')]
+
+
+def generic_problems(arm, scanned, records, error, expect_profile, store_gib=judge.DEFAULT_STORE_GIB, windows=()):
     """Everything an arm fails on whatever its plan: the scenario's own error, failure lines in the
     log, the launched argv, and - on a prefix arm - the platform's prefix lines, the install marker,
-    stale grants, markers against the oracle and the loop path. -> (problems, notes, not_exercised)."""
+    stale grants, markers against the oracle, vLLM's raw hit where publishing is the claim, and the
+    loop path. -> (problems, notes, not_exercised)."""
     problems, notes, missing = [], [], []
     if error:
         problems.append('the scenario stopped: %s' % error)
     # A traceback alone is recorded (the lifecycle drops streams on purpose, and a server may log
-    # one for a closed socket); the fatal signatures - an engine death, a refused install, an
-    # assertion (the model graft's grant check), the wedge - fail the arm.
-    for entry in (scanned.get('failures') or [])[:16]:
-        if entry['signature'] == markers.TRACEBACK:
-            notes.append('server log traceback at line %s: %s' % (entry['index'], entry['line'][:200]))
+    # one for a closed socket), and so is any failure line inside a quiet window (the restart
+    # drill's docker stop); every other fatal signature - an engine death, a refused install, an
+    # assertion (the model graft's grant check), the wedge - fails the arm, wherever it is.
+    recorded, fatal = 0, []
+    for entry in scanned.get('failures') or ():
+        quiet = any(start <= entry['index'] <= end for start, end in windows)
+        if entry['signature'] == markers.TRACEBACK or quiet:
+            recorded += 1
+            if recorded <= MAX_LISTED:
+                notes.append('server log %s at line %s: %s' % ('traceback' if not quiet else 'failure line during the '
+                                                               'restart drill', entry['index'], entry['line'][:200]))
         else:
-            problems.append('server log: %s' % entry['line'][:300])
+            fatal.append(entry)
+    if recorded > MAX_LISTED:
+        notes.append('%d more tracebacks or restart-drill failure lines (server.log)' % (recorded - MAX_LISTED))
+    for entry in fatal[:MAX_LISTED]:
+        problems.append('server log line %s: %s' % (entry['index'], entry['line'][:300]))
+    if len(fatal) > MAX_LISTED:
+        problems.append('%d more fatal server log lines (server.log)' % (len(fatal) - MAX_LISTED))
     launches = scanned.get('launches') or []
     if not launches:
         problems.append('no "[QWEN-C2] profile <name>: vLLM argv" line: the serving contract did not launch vLLM')
@@ -313,6 +388,18 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
                 missing.append(text)
             else:
                 notes.append(text)
+        if record.get('expected_raw_h') is not None and record.get('ok'):
+            raw, attempts = judge.raw_hit_per_attempt(record)
+            if raw is None:
+                missing.append('%s: no vllm:prefix_cache_hits reading around it: what it found published is not '
+                               'measured' % record['tag'])
+            elif raw > record['expected_raw_h']:
+                problems.append('%s: vLLM found %d cached tokens (%d attempt(s)) where only %d were published for it: '
+                                'a request published blocks the design forbids (an unsalted one, or one under the '
+                                'kill switch)' % (record['tag'], raw, attempts, record['expected_raw_h']))
+            else:
+                notes.append('%s: vLLM found %d cached tokens (published for it: %d)' % (
+                    record['tag'], raw, record['expected_raw_h']))
     path = 'eager' if arm.get('kind') == 'eager' else 'traced'
     other = 'traced' if path == 'eager' else 'eager'
     paths = sorted(set(str(row.get('path')) for r in records for row in (r.get('markers') or {}).get('rows') or ()
@@ -321,7 +408,7 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
         problems.append('[PREFIX] rows report path %s, the arm serves %s' % (', '.join(paths), path))
     elif paths and path not in paths:
         notes.append('[PREFIX] rows report path %s only (no %s row)' % (', '.join(paths), path))
-    if path == 'traced' and not scanned.get('chunk_replay'):
+    if path == 'traced' and not scanned.get('chunk_replay') and any(r.get('ok') for r in records):
         problems.append('no "[TP chunk-replay]" line: the traced chunk loop never ran')
     if path == 'eager' and scanned.get('chunk_replay'):
         problems.append('%d "[TP chunk-replay]" lines on the eager arm: trace_mode decode_only did not reach the '
@@ -329,18 +416,15 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
     return problems, notes, missing
 
 
-def pair_problems(pairs, allow_divergence_reason=None):
-    """Pair verdicts as (problems, unstable, not_comparable, rerun)."""
+def pair_problems(pairs):
+    """Pair verdicts (settled) as (problems, unstable, not_comparable, rerun)."""
     problems, unstable, not_comparable, rerun = [], [], [], []
     for pair in pairs:
         text = '%s %s turn %s (L=%s, %s vs %s): %s%s' % (pair['case'], pair['conv'], pair['turn'], pair['prompt_tokens'],
                                                        pair['cold'], pair['hit'], pair['verdict'],
                                                        ' - %s' % pair['detail'] if pair.get('detail') else '')
         if pair['verdict'] in ('DIVERGED', 'ERROR'):
-            if allow_divergence_reason and pair['verdict'] == 'DIVERGED':
-                not_comparable.append(text + ' (%s)' % allow_divergence_reason)
-            else:
-                problems.append(text)
+            problems.append(text)
         elif pair['verdict'] == 'UNSTABLE':
             unstable.append(text)
         elif pair['verdict'] == 'NOT_COMPARABLE':
@@ -363,6 +447,39 @@ def q_of(record):
     return (record.get('markers') or {}).get('q')
 
 
+def captured_of(record):
+    return sorted(((record.get('markers') or {}).get('row') or {}).get('captured') or ())
+
+
+def digest_findings(arm, driver):
+    """Every compared pair's slot and logits digests (and, on the bring-up, each fresh-salt capture
+    turn's against its unsalted twin: the capture must not disturb the prefill). A digest missing on
+    every row is one finding, not one per pair. -> (problems, not exercised, notes)."""
+    index = by_tag(driver.records)
+    couples = []
+    for pair in driver.pairs:
+        cold, hit = index.get(pair['cold']), index.get(pair['hit'])
+        if pair['verdict'] != 'ERROR' and cold and hit and cold.get('ok') and hit.get('ok'):
+            couples.append((cold, hit))
+    unsalted = dict((r.get('prompt_sha'), r) for r in driver.records if r.get('role') == 'unsalted' and r.get('ok'))
+    for record in driver.records:
+        if record.get('role') == 'capture' and record.get('ok') and record.get('prompt_sha') in unsalted:
+            couples.append((unsalted[record['prompt_sha']], record))
+    problems, absent = [], []
+    for first, second in couples:
+        for severity, text in judge.digest_problems(first, second):
+            (problems if severity == 'FAIL' else absent).append(text)
+    missing, notes = [], []
+    if absent:
+        target = missing if arm['strict'] else notes
+        if len(absent) >= 2 * len(couples):
+            target.append('no [PREFIX] row carries slot_sha and logits_sha: the GDN state and logits after prefill '
+                          'are not compared (%d pairs)' % len(couples))
+        else:
+            target.extend(absent[:MAX_LISTED])
+    return problems, missing, notes
+
+
 def exercised_exactness(arm, records, events):
     """The exactness cases that must have happened, by the markers: -> (not exercised, problems, lines)."""
     missing, problems, lines = [], [], []
@@ -378,13 +495,18 @@ def exercised_exactness(arm, records, events):
         if not event.get('fitted'):
             missing.append('%s: the first prompt could not be fitted to %d tokens (%s)' % (name, target, event.get('error')))
             continue
+        served = event.get('served')
+        if served != target:
+            missing.append('%s: /tokenize fitted %s tokens but the chat endpoint served %s: the case run is not the one '
+                           'named' % (name, event.get('tokens'), served))
+            continue
         if len(turns) < 2:
             missing.append('%s: fewer than two turns ran' % name)
             continue
         second = turns[1]
         q, length = q_of(second), second.get('prompt_tokens') or 0
-        want = judge.floor_chunk(target)
-        lines.append('%s: turn 2 L=%s Q=%s (want %s)' % (name, length, q, want))
+        want = judge.floor_chunk(served)
+        lines.append('%s: turn 1 served L=%s, turn 2 L=%s Q=%s (want %s)' % (name, served, length, q, want))
         if q is not None and q != want:
             (problems if q > want else missing).append('%s: turn 2 restored Q=%s, the design gives %d' % (name, q, want))
         if want and q == want and judge.floor_chunk(length) == q:
@@ -393,7 +515,7 @@ def exercised_exactness(arm, records, events):
     if not tail_only:
         missing.append('no tail-only hit (Q = floor2048(L)) ran')
     if arm['arm'] == 'exactness-traced':
-        for case in ('changed-suffix', 'early-divergence', 'shared-system'):
+        for case in ('changed-suffix', 'early-divergence'):
             found = hits(records, case)
             lines.append('%s (L, Q): %s' % (case, [(r.get('prompt_tokens'), q_of(r)) for r in found]))
             if not any(q_of(r) for r in found):
@@ -402,6 +524,40 @@ def exercised_exactness(arm, records, events):
         if suffix and early and q_of(suffix[0]) and q_of(early[0]) is not None and q_of(early[0]) >= q_of(suffix[0]):
             missing.append('the early divergence restored Q=%s, not below the changed suffix\'s %s: it did not fall '
                            'back to an older checkpoint' % (q_of(early[0]), q_of(suffix[0])))
+        more_missing, more_problems, more_lines = shared_gap(records)
+        missing += more_missing
+        problems += more_problems
+        lines += more_lines
+    return missing, problems, lines
+
+
+def shared_gap(records):
+    """The gap capture (design 2.0.1 item 2a.5): the tenant's second conversation misses inside the
+    shared block and captures its gap boundary G = floor2048(h) below its own prompt boundary; the
+    third restores exactly G. -> (not exercised, problems, lines)."""
+    missing, problems, lines = [], [], []
+    shared = hits(records, 'shared-system')
+    lines.append('shared-system (L, Q, captured): %s' % [(r.get('prompt_tokens'), q_of(r), captured_of(r))
+                                                        for r in shared])
+    if len(shared) < 3:
+        missing.append('shared-system: %d of 3 conversations ran' % len(shared))
+        return missing, problems, lines
+    second, third = shared[1], shared[2]
+    own = judge.floor_chunk(second.get('prompt_tokens') or 0)
+    gaps = [position for position in captured_of(second) if position < own]
+    if not gaps:
+        missing.append('shared-system: the second conversation captured no gap boundary (captured %s, L=%s, Q=%s): '
+                       'its own first request\'s capture already covered the shared block, or the gap capture did not '
+                       'run' % (captured_of(second), second.get('prompt_tokens'), q_of(second)))
+        return missing, problems, lines
+    gap = max(gaps)
+    lines.append('shared-system: gap boundary %d captured by %s, restored by %s at Q=%s' % (
+        gap, second['tag'], third['tag'], q_of(third)))
+    if q_of(third) is None or q_of(third) < gap:
+        missing.append('shared-system: the third conversation restored Q=%s, not the gap boundary %d' % (q_of(third), gap))
+    elif q_of(third) > gap:
+        problems.append('shared-system: the third conversation restored Q=%s past the shared block\'s gap boundary %d'
+                        % (q_of(third), gap))
     return missing, problems, lines
 
 
@@ -417,10 +573,85 @@ def audit_findings(records, pairs):
     return problems, missing
 
 
+# counter -> (what it shows, what a zero means)
+STAT_REASONS = dict(
+    same_step_rejects=('the same-step rule', 'no same-step reject: the four arrivals never shared a scheduler step'),
+    evicted_coupled=('eviction coupling (F8)', 'no checkpoint left with its evicted block (eviction coupling, F8)'),
+    evicted_lru=('the checkpoint LRU', 'no checkpoint was pushed out of the small store by the LRU'),
+    dropped_hits=('an allocation failure after a grant (F2)',
+                  'no staged grant with Q > 0 was dropped at commit (an allocation failure after a grant, F2)'),
+)
+
+
+def required_stats(stats, names):
+    """-> not-exercised lines for each counter of `names` that the stats export lacks or left at zero
+    (nothing when there is no export at all: lifecycle_findings says that once)."""
+    out = []
+    if stats is None:
+        return out
+    for name in names:
+        what, zero = STAT_REASONS[name]
+        if name not in stats:
+            out.append('the registry stats export has no %s counter: %s is not observable' % (name, what))
+        elif not stats[name]:
+            out.append(zero)
+    return out
+
+
+def tiny_findings(records, events, stats):
+    """The tiny pool's two phases (prefix_replay.tiny_dropped_grant, tiny_preemption).
+    -> (problems, not exercised, lines)."""
+    problems, missing, lines = [], [], []
+    index = by_tag(records)
+    grant = events.get('tiny-grant') or {}
+    tiny = events.get('tiny') or {}
+    if not grant and tiny.get('skipped') and tiny.get('expected_pool'):
+        missing.append('the tiny pool did not run: %s' % tiny.get('reason'))
+        return problems, missing, ['tiny pool: %s' % json.dumps(tiny)]
+    lines.append('allocation failure after a grant: %s' % json.dumps(grant))
+    waited = index.get(grant.get('tag')) or {}
+    if not grant:
+        missing.append('the dropped-grant phase did not run')
+    elif not grant.get('ok'):
+        problems.append('a request of the dropped-grant phase failed')
+    elif not grant.get('filler_running') or not grant.get('waited_for_filler'):
+        missing.append('the next turn did not wait for the filler (its first token came before the filler ended): no '
+                       'allocation failed after a grant (%s)' % json.dumps(grant))
+    elif not q_of(waited):
+        missing.append('the turn that waited was admitted at Q=%s: no grant with Q > 0 was staged while it waited'
+                       % q_of(waited))
+    else:
+        lines.append('%s waited for the filler (its first token at %s s, the filler ended at %s s) with a staged grant '
+                     'on its cached prefix, then restored Q=%s' % (grant['tag'], grant.get('first_token_s'),
+                                                                     grant.get('filler_end_s'), q_of(waited)))
+    direct = bool(grant.get('ok') and grant.get('waited_for_filler') and q_of(waited))
+    if stats is not None and 'dropped_hits' in stats:
+        if not stats['dropped_hits'] and direct:
+            problems.append('the registry counted no dropped grant with Q > 0 though %s waited with one staged: the '
+                            'dropped_hits counter (or the drop) is wrong' % grant.get('tag'))
+        elif not stats['dropped_hits']:
+            missing.append(STAT_REASONS['dropped_hits'][1])
+    elif stats is not None and not direct:
+        missing += required_stats(stats, ('dropped_hits',))
+    lines.append('preemption: %s' % json.dumps(tiny))
+    if not tiny or tiny.get('skipped'):
+        missing.append('the preemption phase did not run: %s' % (tiny.get('reason') or 'no tiny event'))
+        return problems, missing, lines
+    if not tiny.get('ok'):
+        problems.append('a request of the preemption phase failed')
+    resumed = sorted('%s (%d admissions)' % (r['tag'], judge.admissions(r)) for r in records if judge.admissions(r) > 1)
+    lines.append('preempted and resumed: %s' % (', '.join(resumed) or 'none'))
+    if not (tiny.get('preemptions') or 0) > 0:
+        missing.append('no preemption happened on the tiny pool')
+    elif not resumed:
+        missing.append('vLLM counted %s preemptions but no request printed a second [PREFIX] row: the resumed prefill '
+                       'is not measured' % tiny.get('preemptions'))
+    return problems, missing, lines
+
+
 def lifecycle_findings(arm, records, events, scanned, stats):
-    """The lifecycle events against what each must leave. -> (problems, not exercised, lines, reason
-    a divergence is allowed or None)."""
-    problems, missing, lines, allow = [], [], [], None
+    """The lifecycle events against what each must leave. -> (problems, not exercised, lines)."""
+    problems, missing, lines = [], [], []
     index = by_tag(records)
     if arm['arm'] == 'lifecycle-evict':
         arrivals = events.get('arrivals') or {}
@@ -432,7 +663,7 @@ def lifecycle_findings(arm, records, events, scanned, stats):
         aborted = index.get(waiting.get('tag')) or {}
         if waiting.get('phase') != 'waiting' or not waiting.get('aborted') or waiting.get('first_token'):
             missing.append('the abort did not land while the request waited (%s)' % json.dumps(waiting))
-        elif (aborted.get('markers') or {}).get('grant') or (aborted.get('markers') or {}).get('rows'):
+        elif (aborted.get('markers') or {}).get('grants') or (aborted.get('markers') or {}).get('rows'):
             missing.append('the request aborted "while waiting" was admitted after all (it has a grant or a row)')
         prefill = events.get('abort-prefill') or {}
         lines.append('abort during a hit prefill: %s' % json.dumps(prefill))
@@ -467,6 +698,15 @@ def lifecycle_findings(arm, records, events, scanned, stats):
                 for record in hits(records, case):
                     if q_of(record):
                         problems.append('%s: Q=%s with the kill switch engaged' % (record['tag'], q_of(record)))
+            latched = index.get(kill.get('latched_tag')) or {}
+            bound = latched.get('expected_raw_h')
+            if bound is None:
+                missing.append('the kill-latched turn has no published-token bound: publishing under the kill switch '
+                               'is not measured')
+            elif judge.floor_chunk(kill.get('on_prompt') or 0) <= bound:
+                missing.append('the kill-on turn (L=%s) crossed no chunk boundary past the %d tokens published before '
+                               'the kill: publishing under the kill switch is not observable' % (kill.get('on_prompt'),
+                                                                                                bound))
             if not kill.get('removed'):
                 problems.append('the kill switch file this gate wrote could not be removed')
         reload_first, reload_second = hits(records, 'after-reload'), hits(records, 'after-reload-2')
@@ -477,43 +717,65 @@ def lifecycle_findings(arm, records, events, scanned, stats):
                 problems.append('the first turn after the restart restored Q=%s: state outlived the engine' % q_of(reload_first[0]))
             if reload_second and not q_of(reload_second[0]):
                 problems.append('the second turn after the restart missed: reuse did not come back')
+        # The restart drill starts a new registry: its counters so far were read just before it.
+        before = (events.get('stats-before-restart') or {}).get('stats')
+        if before is not None:
+            lines.append('registry stats before the restart: %s' % json.dumps(before, sort_keys=True))
+            if before.get('pins'):
+                problems.append('%s checkpoint pins held before the restart, every request ended' % before['pins'])
+            if before.get('commit_mismatch'):
+                problems.append('%s grants refused at commit before the restart (start_pos != Q)'
+                                % before['commit_mismatch'])
+        missing += required_stats(before if before is not None else stats,
+                                  ('same_step_rejects',) + (('evicted_coupled',) if lost else ()))
     elif arm['arm'] == 'lifecycle-store':
         after = hits(records, 'store-after')
         lines.append('after the store filled (L, Q, oracle Q): %s' % [(r.get('prompt_tokens'), q_of(r),
                                                                       (r.get('expected') or {}).get('q')) for r in after])
         if not any(q_of(r) is not None and q_of(r) < (r.get('expected') or {}).get('q', 0) for r in after):
             missing.append('no checkpoint was pushed out of the small store (the next turn hit as if unbounded)')
-        if stats and not stats.get('evicted_lru'):
-            missing.append('the registry counted no LRU eviction')
+        missing += required_stats(stats, ('evicted_lru',))
     elif arm['arm'] == 'lifecycle-tiny':
-        tiny = events.get('tiny') or {}
-        lines.append('tiny pool: %s' % json.dumps(tiny))
-        if not tiny.get('ok'):
-            problems.append('a request on the tiny pool failed')
-        if (tiny.get('preemptions') or 0) > 0:
-            allow = 'a preempted request re-prefills its own output on resume, not a cold equivalent'
-        else:
-            missing.append('no preemption happened on the tiny pool')
-        if stats is None:
-            missing.append('no registry stats export: an allocation failure after a grant is not observable')
-        elif not stats.get('dropped_attempts'):
-            missing.append('the registry counted no dropped admission attempt (no allocation failure after a grant)')
-    if stats is not None:
+        more_problems, more_missing, more_lines = tiny_findings(records, events, stats)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    if stats is None:
+        missing.append('no registry stats export (%s or a "[PINDIAG] prefix: stats" line): held pins, commit '
+                       'mismatches and the counters this arm needs are not checked' % markers.STATS_FILE)
+    else:
         lines.append('registry stats: %s' % json.dumps(stats, sort_keys=True))
         if stats.get('pins'):
             problems.append('%s checkpoint pins held after every request ended' % stats['pins'])
         if stats.get('commit_mismatch'):
             problems.append('%s grants refused at commit (start_pos != Q)' % stats['commit_mismatch'])
-    return problems, missing, lines, allow
+    return problems, missing, lines
 
 
 def judge_arm(arm, driver, scanned, stats, error):
     """One arm's verdict dict (the plan's cross-arm checks come after, in judge_plan)."""
     records = driver.records
+    index = by_tag(records)
+    for pair in driver.pairs:
+        judge.settle(pair, index)
     problems, notes, missing = generic_problems(arm, scanned, records, error, arm['served'],
-                                                SMALL_STORE_GIB if arm.get('kind') == 'store' else judge.DEFAULT_STORE_GIB)
+                                                SMALL_STORE_GIB if arm.get('kind') == 'store' else judge.DEFAULT_STORE_GIB,
+                                                quiet_windows(driver.events))
     lines = []
-    allow = None
+    if arm['prefix']:
+        bringup = arm['scenario'] == 'bringup_prefix'
+        program, detail, unmeasured = judge.program_cache_problems(scanned.get('rows') or [], driver.pairs,
+                                                                   first_capture=bringup, require_hit=bringup)
+        lines.append('program cache across hits and the first capture: %s' % json.dumps(detail, sort_keys=True))
+        problems += program
+        (missing if bringup else notes).extend(unmeasured)
+        digest_fail, digest_missing, digest_notes = digest_findings(arm, driver)
+        problems += digest_fail
+        missing += digest_missing
+        notes += digest_notes
+        if bringup and stats is not None and stats.get('unsalted_denied'):
+            problems.append('the registry denied %s unsalted requests a hit: an unsalted request published blocks'
+                            % stats['unsalted_denied'])
     if arm['scenario'].startswith('exactness'):
         more_missing, more_problems, more_lines = exercised_exactness(arm, records, driver.events)
         missing += more_missing
@@ -524,11 +786,11 @@ def judge_arm(arm, driver, scanned, stats, error):
             problems += audit_fail
             missing += audit_missing
     elif arm['scenario'].startswith('lifecycle'):
-        more_problems, more_missing, more_lines, allow = lifecycle_findings(arm, records, driver.events, scanned, stats)
+        more_problems, more_missing, more_lines = lifecycle_findings(arm, records, driver.events, scanned, stats)
         problems += more_problems
         missing += more_missing
         lines += more_lines
-    diverged, unstable, not_comparable, rerun = pair_problems(driver.pairs, allow)
+    diverged, unstable, not_comparable, rerun = pair_problems(driver.pairs)
     problems += diverged
     if scanned.get('failures') and any(markers.WEDGE in (entry.get('line') or '') for entry in scanned['failures']):
         verdict = 'INFRA'
@@ -554,34 +816,44 @@ def judge_arm(arm, driver, scanned, stats, error):
 
 
 def bringup_cross(reference, prefix, anchor):
-    """The bring-up's cross-arm checks: the prefix arm's unsalted turns against the baseline's
-    reference turns byte for byte, the first hit's program cache, the anchor probe, the DRAM line.
-    -> (problems, not exercised, lines)."""
+    """The bring-up's cross-arm checks: the prefix arm's unsalted turns AND its fresh-salt capture
+    turns against the baseline's reference turns byte for byte, each capture turn's row showing
+    captured=[floor2048(L)], the anchor probe. -> (problems, not exercised, lines)."""
     problems, missing, lines = [], [], []
     refs = [r for r in reference.records if r.get('role') == 'reference']
     unsalted = [r for r in prefix.records if r.get('role') == 'unsalted']
-    if not refs or len(refs) != len(unsalted):
-        problems.append('the reference ran %d turns and the grants-disabled arm %d' % (len(refs), len(unsalted)))
-    for ref, mine in zip(refs, unsalted):
-        result = judge.compare(ref, mine)
-        lines.append('grants disabled vs %s, turn %s (L=%s): %s%s' % (
-            'baseline', mine.get('turn'), mine.get('prompt_tokens'), result['verdict'],
-            ' - %s' % result['detail'] if result.get('detail') else ''))
-        if result['verdict'] != 'IDENTICAL':
-            problems.append('with QWEN_PREFIX_REUSE=1 and no grant, turn %s is not byte-identical to the baseline '
-                            '(%s): %s' % (mine.get('turn'), result['verdict'], result.get('detail')))
-    program, detail = judge.program_cache_problems(prefix.records)
-    lines.append('program cache across the first hit: %s' % json.dumps(detail))
-    problems += program
+    captures = [r for r in prefix.records if r.get('role') == 'capture']
+    if not refs or len(refs) != len(unsalted) or len(unsalted) != len(captures):
+        problems.append('the reference ran %d turns, the prefix arm %d unsalted and %d capture turns' % (
+            len(refs), len(unsalted), len(captures)))
+    for ref, mine, capture in zip(refs, unsalted, captures):
+        for label, other in (('grants disabled (unsalted)', mine), ('capturing (fresh salt)', capture)):
+            result = judge.compare(ref, other)
+            lines.append('%s vs baseline, turn %s (L=%s): %s%s' % (
+                label, other.get('turn'), other.get('prompt_tokens'), result['verdict'],
+                ' - %s' % result['detail'] if result.get('detail') else ''))
+            if result['verdict'] != 'IDENTICAL':
+                problems.append('turn %s %s is not byte-identical to the baseline (%s): %s' % (
+                    other.get('turn'), label, result['verdict'], result.get('detail')))
+        length = capture.get('prompt_tokens') or 0
+        want = [judge.floor_chunk(length)] if length >= judge.CHUNK else []
+        if capture.get('ok') and captured_of(capture) != want:
+            problems.append('turn %s under a fresh salt (L=%s) captured %s, not %s: the capture path the salted '
+                            'traffic takes was not exercised' % (capture.get('turn'), length, captured_of(capture), want))
     if anchor.get('error'):
         problems.append('the anchor probe could not read the image: %s' % anchor['error'])
     else:
         lines.append('anchor: %s' % json.dumps(anchor, sort_keys=True))
+        if not anchor.get('pins'):
+            problems.append('the anchor probe read no pins from the image\'s %s' % GRAFT_PINS)
         if anchor.get('mismatched'):
             problems.append('the served model tree is not the image\'s pinned graft: %s' % ', '.join(anchor['mismatched']))
-        if not anchor.get('marker_files'):
-            problems.append('no file under %s carries a "[PREFIX]" marker: the prefix model graft is not in the image'
-                            % MODEL_ROOT)
+        if not anchor.get('prefix_marker_in'):
+            problems.append('no "[PREFIX]" marker in %s or a file graft.sha256 pins (marker files: %s): the prefix model '
+                            'graft is not in the served tree' % (' or '.join(ANCHOR_FILES), anchor.get('marker_files')))
+        for path in anchor.get('unpinned') or ():
+            lines.append('anchor: %s (sha256 %s) is not pinned by graft.sha256' % (
+                path, (anchor.get('files') or {}).get(path)))
     return problems, missing, lines
 
 
@@ -678,7 +950,7 @@ class Runner(object):
             if code != 0:
                 raise replay.EngineDead('docker run exited %s: %s' % (code, output[-400:]))
             follower.start()
-            problem = self.wait_ready(client, container)
+            problem = self.wait_ready(client, container, max(60, min(READINESS_SECONDS, deadline - self.clock())))
             if problem:
                 raise replay.EngineDead(problem)
             self.log('[PREFIX-GATE] arm %s: ready after %.0f s' % (arm['arm'], self.clock() - started))
@@ -686,7 +958,7 @@ class Runner(object):
             if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny'):
                 kwargs['pool_tokens'] = markers.scan(follower.lines()).get('kv_tokens')
             if arm['scenario'] == 'lifecycle_evict':
-                kwargs['restart'] = lambda: self.restart(container, client, follower)
+                kwargs['restart'] = lambda: self.restart(container, client, follower, driver)
             if arm['scenario'] == 'timing':
                 kwargs.update(agents=self.agents, turns=self.turns)
             replay.SCENARIOS[arm['scenario']](driver, **kwargs)
@@ -739,19 +1011,25 @@ class Runner(object):
         self.log('[PREFIX-GATE] arm %s: %s after %s s' % (arm['arm'], result['verdict'], result['seconds']))
         return driver, result
 
-    def restart(self, container, client, follower):
+    def restart(self, container, client, follower, driver=None):
         """The reload drill: docker stop (graceful: the image's engine skips tt-metal's teardown),
-        docker start, wait for the API, follow the new log. -> seconds to ready."""
+        docker start, wait for the API (no longer than the arm has left), follow the new log.
+        -> dict(seconds to ready, log_window: the follower's lines from the stop to ready)."""
+        left = driver.remaining() if driver is not None else None
+        if left is not None and left <= 60:
+            raise replay.OutOfTime('no time left for the in-place restart')
+        first = follower.mark()
         since = follower.last_time()
         started = self.clock()
         container.stop()
         follower.stop()
         container.start()
         follower.start(since=since)
-        problem = self.wait_ready(client, container)
+        seconds = READINESS_SECONDS if left is None else max(60, min(READINESS_SECONDS, left - 60))
+        problem = self.wait_ready(client, container, seconds)
         if problem:
             raise replay.EngineDead('after the in-place restart: %s' % problem)
-        return round(self.clock() - started, 1)
+        return dict(seconds=round(self.clock() - started, 1), log_window=[first, follower.mark()])
 
     @staticmethod
     def write(arm_dir, driver, scanned, result):

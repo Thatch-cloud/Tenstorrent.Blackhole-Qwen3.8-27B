@@ -8,17 +8,28 @@ traced/eager, Lifecycle, Timing):
     messages, the model's own answer to it (content, reasoning, tool calls) and the next input;
   - every turn is sent twice: COLD, with a fresh cache_salt (a miss, other physical pages), then
     HIT, with the conversation's salt; the two are compared in full (prefix_judge.pair_verdict:
-    every output token id; a first divergence re-runs both once). The chain continues from the hit;
+    every output token id). A first divergence sends a second cold run and a second hit at the SAME
+    Q: every request the conversation's salt served before the hit is replayed, max_tokens=1, under
+    a fresh salt (the same publishes and captures, so the same grants), then the hit's messages
+    under it. The chain continues from the first hit;
+  - hits that run concurrently (the arrivals, the tiny pool) are compared with cold twins run alone;
+    a divergence there runs a second solo cold run and a batch control (the same messages at once,
+    fresh salts), so a batch-dependent engine reads NOT_COMPARABLE, not DIVERGED;
   - every request carries X-Request-Id = its tag, so the engine's markers name it (prefix_markers);
     return_token_ids gives the prompt and output token ids, from which prefix_judge.Oracle derives
-    the Q each request should get;
+    the Q each request should get (a request aborted before its first output returns none: its
+    prompt ids come from /tokenize);
   - greedy decoding is asked for explicitly (temperature 0): the general profiles have no request
     contract to coerce it;
+  - vllm:prefix_cache_hits and _queries are read around the requests whose publishing is the claim
+    (the unsalted bring-up turns, the turn after the kill switch latched): vLLM's raw hit there must
+    not exceed what the oracle says was published (record['expected_raw_h']);
   - lifecycle drivers: aborts (a socket closed while a request waits for a seat, or during a hit's
     prefill), a KV flood that evicts cached conversations, a small checkpoint store, a tiny pool
     (allocation failure after a grant, preemption), reset_prefix_cache (vLLM dev mode), the runtime
     kill switch file, an in-place engine restart; the timing driver runs busy agents in the metering
-    shape and records TTFT and turn time per turn.
+    shape and records TTFT and turn time per turn;
+  - no request waits past the arm's deadline: each one's socket timeout is the time left.
 
 Scenarios are functions of a Driver; everything the network, docker and the clock do goes through
 objects the CPU tests replace (test_prefix_replay).
@@ -31,10 +42,12 @@ import http.client
 import json
 import os
 import random
+import re
 import socket
 import subprocess
 import threading
 import time
+from collections import Counter
 
 import prefix_agent_corpus as corpus_module
 import prefix_judge as judge
@@ -42,10 +55,15 @@ import prefix_markers as markers
 
 SERVED_NAME = 'Qwen/Qwen3.8-27B'
 STREAM_TIMEOUT_S = 1800
+MIN_REQUEST_TIMEOUT_S = 10
 DEFAULT_MAX_TOKENS = 1024
+PRIME_MAX_TOKENS = 1
 KILL_SWITCH_PATH = '/models/.qwen-c2/prefix-reuse.off'
 KILL_SWITCH_OWNER = 'qwen-c2-prefix-gate'
 KILL_SWITCH_POLL_S = 1.0
+KILL_ON_INPUT_TOKENS = 2500      # past one chunk: what the kill-on turn would publish is observable
+COUNTERS = ('vllm:prefix_cache_hits', 'vllm:prefix_cache_queries', 'vllm:num_preemptions')
+COUNTER_SETTLE_S = 1.0
 # Exactness: the chain's first turn, then one hit near each length the gate names (4k, 16k, 42k,
 # 60k) and the steps between them; the eager and audit arms run the short end.
 CHAIN_FIRST = 2600
@@ -56,6 +74,9 @@ BOUNDARY_PROMPTS = (2047, 2048, 2049)
 BOUNDARY_FIRST_MAX_TOKENS = 256  # so turn 2 stays inside the next chunk: a tail-only hit
 BOUNDARY_FOLLOWUP_TOKENS = 120
 SHARED_CONVERSATIONS = 3
+# Each shared-system conversation's own task text: past one chunk, so the first conversation's own
+# capture lands beyond the ~4.2k-token shared block and the second has to capture the gap.
+SHARED_ATTACHMENT_TOKENS = 2600
 # Lifecycle. Conversations start past two chunks, so every continuation can hit.
 LIFE_FIRST_TOKENS = 4000
 EVICT_CONVERSATIONS = 4
@@ -66,8 +87,25 @@ ABORT_PREFILL_INPUT_TOKENS = 20000
 WAITING_POLL_S = 0.5
 WAITING_TIMEOUT_S = 120
 STORE_CONVERSATIONS = 4
-TINY_SHARE = 0.30                # each tiny-pool conversation's first turn, as a share of the pool
-TINY_MAX_TOKENS = 2048
+# The tiny pool: 1280 blocks of 64. The TT worker overwrites num_gpu_blocks_override with its own
+# count (plugin worker.py:388-390), so the arm sets the image model's QWEN36_MAX_TOKENS_ALL_USERS
+# (qwen36_vllm.py:96-98) instead, and runs only when vLLM logs exactly this pool.
+TINY_POOL_TOKENS = 81920
+TINY_SHARE = 0.30                # each preemption conversation's first turn, as a share of the pool
+TINY_PREEMPT_CONVERSATIONS = 3   # 3 x ~30%: all cached together, all admitted together
+TINY_PREEMPT_MARGIN_BLOCKS = 40  # each answer's decode outgrows the pool left by this many blocks
+CONTEXT_TOKENS = 65536           # the general profiles' max-model-len
+# The dropped grant (F2), by block arithmetic on the 1280-block pool (tiny_dropped_grant): X's first
+# turn (~20%) is cached; the filler takes every block but X's, TINY_GRANT_MARGIN_BLOCKS and its
+# answer's; X's next turn needs TINY_GRANT_EXCESS_BLOCKS more than the filler can ever leave free.
+TINY_GRANT_FIRST_SHARE = 0.20
+TINY_GRANT_MARGIN_BLOCKS = 48
+TINY_GRANT_EXCESS_BLOCKS = 32
+TINY_FILLER_MAX_TOKENS = 1024
+TINY_GRANT_MAX_TOKENS = 256
+# Client-side clocks: X's first token may be stamped a little before the filler's stream end; a turn
+# admitted beside the filler instead would get its first token a whole filler answer earlier.
+TINY_WAIT_SLACK_S = 0.25
 FLOOD_MAX_TOKENS = 32
 # Timing (metering shape).
 TIMING_AGENTS = (1, 4, 5, 6)
@@ -211,15 +249,26 @@ class Client(object):
         status, _ = self.request('POST', '/reset_prefix_cache', timeout=120)
         return status
 
-    def tokenize(self, body):
-        """The prompt token count the chat endpoint will render for `body` (messages, tools)."""
+    def _tokenize(self, body):
         request = dict(model=self.model, messages=body['messages'], add_generation_prompt=True)
         if body.get('tools'):
             request['tools'] = body['tools']
         status, answer = self.json_request('POST', '/tokenize', request, timeout=120)
         if status != 200 or not isinstance(answer, dict):
             raise RuntimeError('/tokenize answered %s: %s' % (status, str(answer)[:300]))
+        return answer
+
+    def tokenize(self, body):
+        """The prompt token count the chat endpoint will render for `body` (messages, tools)."""
+        answer = self._tokenize(body)
         return int(answer.get('count', len(answer.get('tokens') or ())))
+
+    def tokenize_ids(self, body):
+        """The prompt token ids the chat endpoint will render for `body`."""
+        tokens = self._tokenize(body).get('tokens')
+        if not isinstance(tokens, list):
+            raise RuntimeError('/tokenize returned no token list')
+        return [int(token) for token in tokens]
 
     def chat(self, body, tag, salt=None, max_tokens=DEFAULT_MAX_TOKENS, timeout=STREAM_TIMEOUT_S,
              abort_after_s=None, abort_after_tokens=None, extra=None, on_first=None, abort_signal=None):
@@ -310,13 +359,25 @@ class Client(object):
 
 # -- the server log and the container ------------------------------------------------------------
 
+def stamp_key(stamp):
+    """A docker RFC3339Nano timestamp as a sortable key (docker trims the fraction's trailing zeros,
+    so the text alone does not sort)."""
+    match = re.match(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$', stamp or '')
+    if not match:
+        return None
+    return match.group(1), (match.group(2) or '').ljust(9, '0')[:9]
+
+
 class LogFollower(object):
-    """`docker logs -f --timestamps` of the serving container, into a list and a file."""
+    """`docker logs -f --timestamps` of the serving container, into a list and a file. A restart
+    with `since` re-reads the log from that time; lines the list already holds are not added twice
+    (a duplicated [PREFIX] row would read as a second admission)."""
 
     def __init__(self, container, path, popen=subprocess.Popen):
         self.container, self.path, self.popen = container, path, popen
         self.lock = threading.Lock()
         self.buffer = []
+        self.replayed = Counter()
         self.process = None
         self.thread = None
 
@@ -324,6 +385,11 @@ class LogFollower(object):
         arguments = ['docker', 'logs', '-f', '--timestamps']
         if since:
             arguments += ['--since', since]
+            floor = stamp_key(since)
+            with self.lock:
+                self.replayed = Counter(line for line in self.buffer
+                                        if floor is not None and (stamp_key(markers.split_timestamp(line)[0]) or ('',))
+                                        >= floor)
         self.process = self.popen(arguments + [self.container], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.thread = threading.Thread(target=self._read, args=(self.process,))
         self.thread.daemon = True
@@ -333,8 +399,12 @@ class LogFollower(object):
         with open(self.path, 'a', encoding='utf-8') as handle:
             for raw in process.stdout:
                 line = raw.decode('utf-8', 'replace') if isinstance(raw, bytes) else raw
+                text = line.rstrip('\n')
                 with self.lock:
-                    self.buffer.append(line.rstrip('\n'))
+                    if self.replayed.get(text):
+                        self.replayed[text] -= 1
+                        continue
+                    self.buffer.append(text)
                 handle.write(line if line.endswith('\n') else line + '\n')
                 handle.flush()
 
@@ -435,6 +505,7 @@ class Driver(object):
         self.strict = strict
         self.oracle = judge.Oracle(store_capacity)
         self.records, self.pairs, self.events, self.phases = [], [], {}, {}
+        self.history = {}
         self.lock = threading.Lock()
         self.counter = 0
         self.started = clock()
@@ -448,39 +519,77 @@ class Driver(object):
     def salt(self, name):
         return 'pfx-salt-%s-%s-%s' % (self.arm, self.seed, name)
 
-    def fresh_salt(self):
+    def fresh_salt(self, kind='cold'):
         with self.lock:
             self.counter += 1
-            return 'pfx-cold-%s-%s-%04d' % (self.arm, self.seed, self.counter)
+            return 'pfx-%s-%s-%s-%04d' % (kind, self.arm, self.seed, self.counter)
+
+    def remaining(self):
+        """Seconds before the arm's deadline, or None without one."""
+        return None if self.deadline is None else self.deadline - self.clock()
 
     def check_time(self):
-        if self.deadline is not None and self.clock() > self.deadline:
+        left = self.remaining()
+        if left is not None and left <= 0:
             raise OutOfTime('the arm\'s time ran out')
+
+    def request_timeout(self):
+        left = self.remaining()
+        if left is None:
+            return STREAM_TIMEOUT_S
+        return max(MIN_REQUEST_TIMEOUT_S, min(STREAM_TIMEOUT_S, int(left)))
 
     def conversation(self, name, system='compact', first_tokens=0):
         conv = corpus_module.Conversation(self.corpus, name, self.seed, system=system, first_tokens=first_tokens)
         conv.salt = self.salt(name)
         return conv
 
+    def counters(self):
+        values = self.client.metrics() or {}
+        return dict((name, values.get(name)) for name in COUNTERS)
+
     def send(self, body, role, salt, case, conv=None, max_tokens=None, admit=True, continuation=False,
-             abort_after_s=None, abort_after_tokens=None, extra=None, on_first=None, abort_signal=None):
-        """One request. `admit` feeds the oracle (False for a request that never reached a seat)."""
+             abort_after_s=None, abort_after_tokens=None, extra=None, on_first=None, abort_signal=None,
+             counters=False):
+        """One request. `admit` feeds the oracle (False for a request that never reached a seat).
+        `counters` reads vLLM's prefix-cache counters around it (sequential requests only) and
+        records the raw hit the oracle expects (what the salt has published, capped at L - 1)."""
         self.check_time()
         tag = self.tag(role)
         start = self.log.mark() if self.log else None
+        before = self.counters() if counters else None
         sent = self.clock() - self.started
         result = self.client.chat(body, tag, salt=salt, max_tokens=max_tokens or self.max_tokens,
-                                  abort_after_s=abort_after_s, abort_after_tokens=abort_after_tokens, extra=extra,
-                                  on_first=on_first, abort_signal=abort_signal)
+                                  timeout=self.request_timeout(), abort_after_s=abort_after_s,
+                                  abort_after_tokens=abort_after_tokens, extra=extra, on_first=on_first,
+                                  abort_signal=abort_signal)
         prompt_ids = result.pop('prompt_ids', None)
         record = dict(result, tag=tag, arm=self.arm, role=role, salt=salt, case=case, sent_s=round(sent, 3),
                       conv=getattr(conv, 'name', None), turn=getattr(conv, 'turn', None), continuation=continuation,
                       log_window=None)
+        if counters:
+            self.sleep(COUNTER_SETTLE_S)
+            record['counters'] = dict(before=before, after=self.counters())
         if self.log:
             record['log_window'] = [start, self.log.mark() + 64]
+        if admit and prompt_ids is None and record.get('aborted'):
+            # The server sends prompt_token_ids with the first output only; a request aborted before
+            # it was still admitted (published, maybe captured) when the abort landed in its prefill.
+            try:
+                prompt_ids = self.client.tokenize_ids(body)
+                record['prompt_ids_from'] = 'tokenize'
+            except Exception as error:     # noqa: BLE001 - recorded; the oracle then misses it
+                record['prompt_ids_from'] = 'none (%s)' % str(error)[:120]
         if admit and prompt_ids is not None:
             with self.lock:
-                record['expected'] = self.oracle.admit(salt if role != 'unsalted' else None, prompt_ids)
+                owner = salt if role != 'unsalted' else None
+                if counters:
+                    capped = (max(0, len(prompt_ids) - 1) // judge.BLOCK) * judge.BLOCK
+                    record['expected_raw_h'] = min(self.oracle.published_tokens(owner, prompt_ids), capped)
+                record['expected'] = self.oracle.admit(owner, prompt_ids)
+        if admit and salt and role not in judge.FRESH_ROLES:
+            with self.lock:
+                self.history.setdefault(salt, []).append((tag, body))
         with self.lock:
             self.records.append(record)
         status = 'ok' if record['ok'] else 'FAILED %s' % (record.get('error') or record.get('aborted'))
@@ -497,27 +606,45 @@ class Driver(object):
         if not self.client.healthy():
             raise EngineDead('the server\'s /health does not answer 200')
 
-    def pair(self, conv, case, max_tokens=None, rerun=True, extra=None, continuation=None):
+    def history_before(self, salt, tag):
+        """The bodies this salt served before the request `tag`, in order."""
+        with self.lock:
+            entries = list(self.history.get(salt) or ())
+        out = []
+        for entry_tag, body in entries:
+            if entry_tag == tag:
+                break
+            out.append(body)
+        return out
+
+    def pair(self, conv, case, max_tokens=None, rerun=True, extra=None, continuation=None, counters=False):
         """Cold (a fresh salt) then hit (the conversation's salt) on the same messages, compared in
-        full; a divergence re-runs both once. Returns the hit record (the chain continues from it)."""
+        full. A divergence sends a second cold run and a second hit at the same Q: the salt's earlier
+        requests replayed (max_tokens=1) under a fresh salt, then these messages. Returns the first
+        hit record (the chain continues from it)."""
         body = conv.body()
         continuation = conv.turn > 0 if continuation is None else continuation
         cold = self.send(body, 'cold', self.fresh_salt(), case, conv, max_tokens, continuation=continuation,
                          extra=extra)
-        hit = self.send(body, 'hit', conv.salt, case, conv, max_tokens, continuation=continuation, extra=extra)
+        hit = self.send(body, 'hit', conv.salt, case, conv, max_tokens, continuation=continuation, extra=extra,
+                        counters=counters)
         result = judge.pair_verdict(cold, hit)
-        again = None
+        entry = dict(case=case, conv=conv.name, turn=conv.turn, cold=cold['tag'], hit=hit['tag'], kind='sequential',
+                     rerun=None, cold2=None, primes=[])
         if result['verdict'] == 'RERUN' and rerun:
-            self.say('[PREFIX-GATE] %s: %s diverged from %s (%s) - re-running both once' % (
+            self.say('[PREFIX-GATE] %s: %s diverged from %s (%s) - a second cold run, then the same-Q re-run' % (
                 self.arm, hit['tag'], cold['tag'], result['first'].get('detail')))
             cold2 = self.send(body, 'cold', self.fresh_salt(), case + ':rerun', conv, max_tokens,
                               continuation=continuation, extra=extra)
-            hit2 = self.send(body, 'hit', conv.salt, case + ':rerun', conv, max_tokens, continuation=continuation,
+            replay_salt = self.fresh_salt('rerun')
+            primes = [self.send(earlier, 'prime', replay_salt, case + ':prime', conv, PRIME_MAX_TOKENS,
+                                continuation=True, extra=extra)
+                      for earlier in self.history_before(conv.salt, hit['tag'])]
+            hit2 = self.send(body, 'hit', replay_salt, case + ':rerun', conv, max_tokens, continuation=continuation,
                              extra=extra)
             result = judge.pair_verdict(cold, hit, cold2, hit2)
-            again = (cold2['tag'], hit2['tag'])
-        entry = dict(case=case, conv=conv.name, turn=conv.turn, cold=cold['tag'], hit=hit['tag'], rerun=again,
-                     verdict=result['verdict'], detail=result.get('reason') or result['first'].get('detail'),
+            entry.update(rerun=(cold2['tag'], hit2['tag']), cold2=cold2['tag'], primes=[p['tag'] for p in primes])
+        entry.update(verdict=result['verdict'], detail=result.get('reason') or result['first'].get('detail'),
                      prompt_tokens=hit.get('prompt_tokens'))
         with self.lock:
             self.pairs.append(entry)
@@ -574,7 +701,9 @@ def fitted_conversation(driver, name, target, system='compact'):
 
 
 def boundary_cases(driver, prompts=BOUNDARY_PROMPTS):
-    """Previous-prompt lengths 2047, 2048 and 2049, and the tail-only hit their second turns are."""
+    """Previous-prompt lengths 2047, 2048 and 2049, and the tail-only hit their second turns are.
+    The event records what /tokenize fitted and what the chat endpoint then served: the gate
+    judges only a case served at its target length."""
     for target in prompts:
         name = 'boundary-%d' % target
         try:
@@ -582,8 +711,8 @@ def boundary_cases(driver, prompts=BOUNDARY_PROMPTS):
         except (corpus_module.FitError, RuntimeError) as error:
             driver.event(name, fitted=False, error=str(error)[:300])
             continue
-        driver.event(name, fitted=True, tokens=tokens)
         hit = driver.pair(conv, name, BOUNDARY_FIRST_MAX_TOKENS, continuation=False)
+        driver.event(name, fitted=True, tokens=tokens, served=hit.get('prompt_tokens'))
         driver.answer(conv, hit)
         conv.extend(BOUNDARY_FOLLOWUP_TOKENS)
         driver.pair(conv, name, BOUNDARY_FIRST_MAX_TOKENS)
@@ -591,44 +720,48 @@ def boundary_cases(driver, prompts=BOUNDARY_PROMPTS):
 
 def shared_system(driver, count=SHARED_CONVERSATIONS):
     """Conversations of one tenant (one salt) sharing the full system block and tools, each with its
-    own task: the first publishes, the second misses and captures the gap boundary, the third hits
-    it (design 2.0.1 item 2a.5)."""
+    own task of ~2.6k tokens: the first publishes and captures past the shared block, the second
+    misses and captures the gap boundary floor2048(h) inside it, the third hits exactly that
+    (design 2.0.1 item 2a.5)."""
     salt = driver.salt('shared')
     for index in range(count):
-        conv = driver.conversation('shared-%d' % index, system='full')
+        conv = driver.conversation('shared-%d' % index, system='full', first_tokens=SHARED_ATTACHMENT_TOKENS)
         conv.salt = salt
         driver.pair(conv, 'shared-system', continuation=False)
 
 
-def scenario_bringup_reference(driver, turns=3):
-    """On the baseline profile (general): the bring-up conversation, unsalted, as the reference the
-    prefix profile's grants-disabled run must equal byte for byte."""
+def bringup_turns(driver, capture, turns=3):
+    """The bring-up conversation's three unsalted turns, each followed (capture=True) by the same
+    messages under a fresh salt: a first request that captures at floor2048(L) and publishes, which
+    must equal the baseline too. The unsalted turns read vLLM's prefix-cache counters around them."""
     conv = driver.conversation('bringup', first_tokens=corpus_module.first_attachment('compact', CHAIN_FIRST))
     targets = corpus_module.chain_targets(CHAIN_FIRST, CHAIN_HITS_SHORT[:turns - 1])
-    record = driver.send(conv.body(), 'reference', None, 'bringup', conv)
-    driver.answer(conv, record)
-    for target in targets[1:]:
-        if not record.get('ok'):
-            break
-        conv.extend(corpus_module.growth_input(target, record['prompt_tokens'], record.get('completion_tokens') or 0))
-        record = driver.send(conv.body(), 'reference', None, 'bringup', conv, continuation=True)
+    role = 'unsalted' if capture else 'reference'
+    record = None
+    for index, target in enumerate(targets):
+        if index:
+            if not record.get('ok'):
+                break
+            conv.extend(corpus_module.growth_input(target, record['prompt_tokens'], record.get('completion_tokens') or 0))
+        body = conv.body()
+        record = driver.send(body, role, None, 'bringup', conv, continuation=index > 0, counters=capture)
+        if capture:
+            driver.send(body, 'capture', driver.fresh_salt(), 'bringup-capture', conv, continuation=index > 0)
         driver.answer(conv, record)
+    return targets
+
+
+def scenario_bringup_reference(driver, turns=3):
+    """On the baseline profile (general): the bring-up conversation, unsalted, as the reference the
+    prefix profile's unsalted and capturing turns must equal byte for byte."""
+    bringup_turns(driver, capture=False, turns=turns)
 
 
 def scenario_bringup_prefix(driver, turns=3):
-    """On the prefix profile: the same conversation unsalted (fail-closed tenancy: no grant, no
-    publish - reuse off inside a reuse engine), then salted as cold/hit pairs: the first hit, whose
-    program cache must not grow (F3)."""
-    conv = driver.conversation('bringup', first_tokens=corpus_module.first_attachment('compact', CHAIN_FIRST))
-    targets = corpus_module.chain_targets(CHAIN_FIRST, CHAIN_HITS_SHORT[:turns - 1])
-    record = driver.send(conv.body(), 'unsalted', None, 'bringup', conv)
-    driver.answer(conv, record)
-    for target in targets[1:]:
-        if not record.get('ok'):
-            break
-        conv.extend(corpus_module.growth_input(target, record['prompt_tokens'], record.get('completion_tokens') or 0))
-        record = driver.send(conv.body(), 'unsalted', None, 'bringup', conv, continuation=True)
-        driver.answer(conv, record)
+    """On the prefix profile: the bring-up turns unsalted (fail-closed tenancy: no grant, no publish -
+    reuse off inside a reuse engine) and under fresh salts (the capture path), then a salted chain as
+    cold/hit pairs: the first hit, whose program cache must not grow (F3)."""
+    targets = bringup_turns(driver, capture=True, turns=turns)
     salted = driver.conversation('bringup-salted', first_tokens=corpus_module.first_attachment('compact', CHAIN_FIRST))
     run_chain(driver, salted, targets, 'bringup-salted')
 
@@ -672,26 +805,81 @@ def _burst(driver, jobs):
     return _join(_spawn(jobs))
 
 
-def _cold_twins(driver, pending, case):
-    """Cold references (fresh salts) for hits that ran concurrently, one at a time, compared."""
+def concurrent_pairs(driver, pending, case):
+    """Hits that ran concurrently, each against a cold twin (a fresh salt) run alone. When any
+    diverged: a second solo cold run of each divergent one, and a batch control - every message set
+    again at once under fresh salts, the burst's shape - so concurrent_verdict can tell a hit that
+    differs from a batch that does. pending: [(hit record, body, conv, max_tokens, extra)]."""
+    colds = []
     for record, body, conv, max_tokens, extra in pending:
-        cold = driver.send(body, 'cold', driver.fresh_salt(), case, conv, max_tokens, extra=extra,
-                           continuation=record.get('continuation'))
-        result = judge.pair_verdict(cold, record)
-        driver.pairs.append(dict(case=case, conv=getattr(conv, 'name', None), turn=getattr(conv, 'turn', None),
-                                 cold=cold['tag'], hit=record['tag'], rerun=None, verdict=result['verdict'],
-                                 detail=result.get('reason') or result['first'].get('detail'),
-                                 prompt_tokens=record.get('prompt_tokens')))
+        colds.append(driver.send(body, 'cold', driver.fresh_salt(), case, conv, max_tokens, extra=extra,
+                                 continuation=record.get('continuation')))
+    first = [judge.compare(cold, record) for cold, (record, _, _, _, _) in zip(colds, pending)]
+    diverged = [index for index, result in enumerate(first) if result['verdict'] == 'DIVERGED']
+    seconds, batch = {}, [None] * len(pending)
+    if diverged:
+        driver.say('[PREFIX-GATE] %s: %d concurrent hits diverged from their solo cold runs - a second cold run '
+                   'and a batch control' % (driver.arm, len(diverged)))
+        for index in diverged:
+            record, body, conv, max_tokens, extra = pending[index]
+            seconds[index] = driver.send(body, 'cold', driver.fresh_salt(), case + ':rerun', conv, max_tokens,
+                                         extra=extra, continuation=record.get('continuation'))
+        batch = _burst(driver, [lambda body=body, conv=conv, max_tokens=max_tokens, extra=extra, record=record:
+                                driver.send(body, 'cold-batch', driver.fresh_salt(), case + ':batch', conv, max_tokens,
+                                            extra=extra, continuation=record.get('continuation'))
+                                for record, body, conv, max_tokens, extra in pending])
+    for index, ((record, body, conv, max_tokens, extra), cold) in enumerate(zip(pending, colds)):
+        second = seconds.get(index)
+        result = judge.concurrent_verdict(cold, record, second, batch[index] if second is not None else None)
+        entry = dict(case=case, conv=getattr(conv, 'name', None), turn=getattr(conv, 'turn', None), cold=cold['tag'],
+                     hit=record['tag'], kind='concurrent', rerun=None, primes=[],
+                     cold2=second['tag'] if second is not None else None,
+                     batch=batch[index]['tag'] if second is not None and batch[index] is not None else None,
+                     verdict=result['verdict'], detail=result.get('reason') or result['first'].get('detail'),
+                     prompt_tokens=record.get('prompt_tokens'))
+        with driver.lock:
+            driver.pairs.append(entry)
 
 
-def wait_waiting(driver, minimum=1, timeout=WAITING_TIMEOUT_S):
+def wait_waiting(driver, minimum=1, timeout=WAITING_TIMEOUT_S, until=None):
+    """vLLM's waiting gauge once it reaches `minimum`, or None after `timeout` seconds or as soon as
+    until() is true (the request it waits for already ended)."""
     deadline = driver.clock() + timeout
     while driver.clock() < deadline:
         waiting = driver.client.metrics().get('vllm:num_requests_waiting')
         if waiting is not None and waiting >= minimum:
             return waiting
+        if until is not None and until():
+            return None
         driver.sleep(WAITING_POLL_S)
     return None
+
+
+def sized_message(driver, conv, index, target):
+    """Give message `index` of `conv` a real excerpt so that the prompt is about `target` tokens,
+    measured with the server's /tokenize (an estimate, then one correction). -> the prompt's tokens."""
+    base = conv.messages[index]['content']
+    empty = driver.client.tokenize(conv.body())
+    chars = token_chars(max(1, target - empty))
+    got = empty
+    for attempt in range(2):
+        conv.messages[index]['content'] = base + '\n\n' + driver.corpus.excerpt(conv.rng('size'), chars)
+        got = driver.client.tokenize(conv.body())
+        if got <= empty:
+            break
+        chars = max(corpus_module.MIN_INPUT_CHARS, int(chars * float(target - empty) / (got - empty)))
+    return got
+
+
+def read_stats(driver):
+    """The registry's stats export now: the container's STATS_FILE, else the log's last stats line."""
+    text = driver.container.read_file(markers.STATS_FILE) if driver.container is not None else None
+    if text:
+        try:
+            return json.loads(text)
+        except ValueError:
+            pass
+    return markers.scan(driver.log.lines()).get('stats') if driver.log is not None else None
 
 
 def lifecycle_arrivals(driver, convs):
@@ -715,8 +903,8 @@ def lifecycle_arrivals(driver, convs):
         body, 'hit', conv.salt, 'arrivals', conv, continuation=conv.turn > 0) for conv, body in zip(everyone, bodies)])
     driver.event('arrivals', sent=len(records), tags=[record['tag'] for record in records],
                  ok=all(record.get('ok') for record in records))
-    _cold_twins(driver, [(record, body, conv, None, None) for record, body, conv in zip(records, bodies, everyone)],
-                'arrivals')
+    concurrent_pairs(driver, [(record, body, conv, None, None) for record, body, conv in zip(records, bodies, everyone)],
+                     'arrivals')
     for conv, record in zip(first, records[:2]):
         driver.answer(conv, record)
 
@@ -740,12 +928,13 @@ def lifecycle_abort_waiting(driver, conv, seats=4):
     held = _spawn([lambda holder=holder: driver.send(
         holder.body(), 'seat', driver.fresh_salt(), 'seat', holder, SEAT_HOLD_MAX_TOKENS,
         extra=dict(ignore_eos=True), on_first=first_token) for holder in holders])
-    busy.wait(900)
+    left = driver.remaining()
+    busy.wait(900 if left is None else max(1, min(900, left)))
     body = conv.body()
     signal = threading.Event()
     waiter = _spawn([lambda: driver.send(body, 'hit', conv.salt, 'abort-waiting', conv, admit=False,
                                          continuation=True, abort_signal=signal)])
-    waiting = wait_waiting(driver)
+    waiting = wait_waiting(driver, until=lambda: not waiter['threads'][0].is_alive())
     signal.set()
     record = _join(waiter)[0]
     driver.event('abort-waiting', seats_busy=busy.is_set(), waiting_gauge=waiting,
@@ -844,38 +1033,45 @@ def kill_switch_off(container, path=KILL_SWITCH_PATH, owner=KILL_SWITCH_OWNER):
 
 
 def lifecycle_kill_switch(driver):
-    """The runtime kill switch: with the flag present a continuation gets no grant (and nothing is
-    published); after the flag is removed reuse stays off until the engine restarts (it latches)."""
+    """The runtime kill switch: with the flag present a continuation gets no grant and publishes
+    nothing; after the flag is removed reuse stays off until the engine restarts (it latches). The
+    kill-on turn crosses a chunk boundary, so the kill-latched turn's raw vLLM hit (the counters
+    around it) shows whether it published: it must not exceed what was published before the kill."""
     conv = driver.conversation('kill-switch', first_tokens=LIFE_FIRST_TOKENS)
-    hit = driver.pair(conv, 'kill-before')
-    driver.answer(conv, hit)
+    before = driver.pair(conv, 'kill-before')
+    driver.answer(conv, before)
     code, out = kill_switch_on(driver.container)
     driver.sleep(KILL_SWITCH_POLL_S * 2 + 0.5)
     with driver.lock:
         driver.oracle.kill()
     try:
-        conv.extend(800)
-        hit = driver.pair(conv, 'kill-on')
-        driver.answer(conv, hit)
+        conv.extend(KILL_ON_INPUT_TOKENS)
+        on = driver.pair(conv, 'kill-on')
+        driver.answer(conv, on)
     finally:
         removed = kill_switch_off(driver.container)
     driver.sleep(KILL_SWITCH_POLL_S * 2 + 0.5)
     conv.extend(800)
-    hit = driver.pair(conv, 'kill-latched')
-    driver.answer(conv, hit)
-    driver.event('kill-switch', written=code == 0, write_output=(out or '')[:200], removed=removed[0] == 0)
+    latched = driver.pair(conv, 'kill-latched', counters=True)
+    driver.answer(conv, latched)
+    driver.event('kill-switch', written=code == 0, write_output=(out or '')[:200], removed=removed[0] == 0,
+                 before_prompt=before.get('prompt_tokens'), on_prompt=on.get('prompt_tokens'),
+                 latched_tag=latched.get('tag'))
 
 
 def lifecycle_reload(driver, restart):
     """An in-place engine restart with a warm kernel cache, after the kill switch latched reuse off:
     a conversation's turn before it, then the first turn after it misses (the pool and the registry
-    died with the engine; the latch too), and the next one hits again; all against cold twins."""
+    died with the engine; the latch too), and the next one hits again; all against cold twins.
+    restart() returns the seconds to ready, or {seconds, log_window}: the log lines of the stop and
+    the new engine's boot, whose failure lines the gate records instead of failing on."""
     conv = driver.conversation('reload', first_tokens=LIFE_FIRST_TOKENS)
     hit = driver.pair(conv, 'before-reload')
     driver.answer(conv, hit)
-    seconds = restart()
+    info = restart()
+    seconds, window = (info.get('seconds'), info.get('log_window')) if isinstance(info, dict) else (info, None)
     driver.oracle = judge.Oracle(driver.oracle.capacity)
-    driver.event('reload', seconds=seconds)
+    driver.event('reload', seconds=seconds, log_window=window)
     conv.extend(800)
     hit = driver.pair(conv, 'after-reload')
     driver.answer(conv, hit)
@@ -898,6 +1094,8 @@ def scenario_lifecycle_evict(driver, pool_tokens=None, restart=None):
     evicted = lifecycle_flood(driver, pool_tokens)
     lifecycle_reset(driver, evicted[-1])
     lifecycle_kill_switch(driver)
+    # The restart starts a new registry: what the counters saw so far is read now.
+    driver.event('stats-before-restart', stats=read_stats(driver))
     if restart is not None:
         lifecycle_reload(driver, restart)
 
@@ -920,28 +1118,102 @@ def scenario_lifecycle_store(driver):
     driver.pair(main, 'store-after')
 
 
-def scenario_lifecycle_tiny(driver, pool_tokens=None):
-    """A tiny pool: four conversations' second turns at once, each ~30% of the pool with ignore_eos
-    answers, so one waits (its grant staged, then the allocation fails) and decode growth preempts a
-    running one; then each against a cold twin run alone."""
-    pool = int(pool_tokens or 81920)
-    convs = [driver.conversation('tiny-%d' % index) for index in range(4)]
+def tiny_dropped_grant(driver, pool):
+    """An allocation failure after a grant (F2), built rather than hoped for, in blocks of the pool
+    (every size measured with /tokenize): conversation X's first turn (~20%) is cached and captured,
+    its blocks at the free queue's recent end; a fresh-salt filler then takes all but X's blocks, a
+    margin and its answer's, and decodes (ignore_eos); X's next turn needs more blocks than the pool
+    has left beside it, and fits once the filler ends. TTScheduler prefers the prefill: the graft
+    stages a grant with Q > 0 on X's intact cached prefix, the allocation fails and the step falls
+    back to decode (plugin scheduler.py, default mode) - so every step while the filler runs drops
+    that grant uncommitted. X's first token comes after the filler's last; then it restores Q > 0 on
+    a fresh grant and is compared with a cold twin."""
+    blocks = pool // judge.BLOCK
+    conv = driver.conversation('tiny-grant')
+    sized_message(driver, conv, 1, int(pool * TINY_GRANT_FIRST_SHARE))
+    first = driver.send(conv.body(), 'hit', conv.salt, 'tiny-grant-build', conv, 64)
+    driver.answer(conv, first)
+    if not first.get('ok'):
+        driver.event('tiny-grant', ok=False, reason='the first turn failed: %s' % first.get('error'))
+        return
+    held_by_x = -(-(first['prompt_tokens'] + (first.get('completion_tokens') or 0)) // judge.BLOCK)
+    answer_blocks = -(-TINY_FILLER_MAX_TOKENS // judge.BLOCK)
+    filler_blocks = blocks - held_by_x - TINY_GRANT_MARGIN_BLOCKS - answer_blocks
+    filler_target = min(filler_blocks * judge.BLOCK - judge.BLOCK, CONTEXT_TOKENS - TINY_FILLER_MAX_TOKENS - judge.BLOCK)
+    x2_target = (held_by_x + TINY_GRANT_MARGIN_BLOCKS + answer_blocks + TINY_GRANT_EXCESS_BLOCKS) * judge.BLOCK
+    filler = driver.conversation('tiny-filler')
+    filler_tokens = sized_message(driver, filler, 1, filler_target)
+    conv.extend(corpus_module.MIN_INPUT_CHARS // 3)
+    x2_tokens = sized_message(driver, conv, len(conv.messages) - 1, x2_target)
+    running = threading.Event()
+    held = _spawn([lambda: driver.send(filler.body(), 'seat', driver.fresh_salt(), 'tiny-filler', filler,
+                                       TINY_FILLER_MAX_TOKENS, extra=dict(ignore_eos=True), on_first=running.set)])
+    left = driver.remaining()
+    running.wait(900 if left is None else max(1, min(900, left)))
+    body = conv.body()
+    waiter = _spawn([lambda: driver.send(body, 'hit', conv.salt, 'tiny-grant', conv, TINY_GRANT_MAX_TOKENS,
+                                         continuation=True)])
+    waiting = wait_waiting(driver, until=lambda: not waiter['threads'][0].is_alive()) if running.is_set() else None
+    record = _join(waiter)[0]
+    filler_record = _join(held)[0]
+    first_token = (record['sent_s'] + record['ttft_s']) if record.get('ttft_s') is not None else None
+    filler_end = filler_record['sent_s'] + (filler_record.get('wall_s') or 0)
+    driver.event('tiny-grant', filler_running=running.is_set(), waiting_gauge=waiting, tag=record['tag'],
+                 filler=filler_record['tag'], blocks=blocks, held_by_x=held_by_x, filler_tokens=filler_tokens,
+                 x2_tokens=x2_tokens, first_token_s=first_token, filler_end_s=round(filler_end, 3),
+                 waited_for_filler=bool(first_token is not None and first_token >= filler_end - TINY_WAIT_SLACK_S),
+                 ok=bool(record.get('ok') and filler_record.get('ok')))
+    concurrent_pairs(driver, [(record, body, conv, TINY_GRANT_MAX_TOKENS, None)], 'tiny-grant')
+
+
+def scenario_lifecycle_tiny(driver, pool_tokens=None, expected_pool=TINY_POOL_TOKENS):
+    """A tiny pool: the dropped grant (tiny_dropped_grant), then preemption (tiny_preemption). Nothing
+    is sent unless vLLM logged exactly the pool the arm asked for: on any other pool the shares mean
+    nothing (a pool the TT worker sized from max_model_len x max_num_seqs makes every first turn
+    longer than the context)."""
+    if pool_tokens != expected_pool:
+        driver.event('tiny', skipped=True, pool_tokens=pool_tokens, expected_pool=expected_pool,
+                     reason='vLLM logged a %s-token KV pool, not the %d the arm set: the derived profile did not size '
+                            'the pool' % (pool_tokens, expected_pool))
+        return
+    pool = int(expected_pool)
+    tiny_dropped_grant(driver, pool)
+    tiny_preemption(driver, pool)
+
+
+def tiny_preemption(driver, pool):
+    """Preemption, by block arithmetic too: TINY_PREEMPT_CONVERSATIONS conversations (~30% of the
+    pool each, all cached at once) send their next turns together; each prompt's exact size comes
+    from /tokenize, and the ignore_eos answer budget is sized so that every one is admitted and their
+    decode then needs TINY_PREEMPT_MARGIN_BLOCKS more blocks each than the pool has left - vLLM must
+    preempt a running request, which resumes later (a second [PREFIX] row)."""
+    convs = [driver.conversation('tiny-%d' % index) for index in range(TINY_PREEMPT_CONVERSATIONS)]
     first_target = int(pool * TINY_SHARE)
     for conv in convs:
         conv.messages[1]['content'] += '\n\n' + driver.corpus.excerpt(conv.rng('tiny'), token_chars(first_target))
         record = driver.send(conv.body(), 'hit', conv.salt, 'tiny-build', conv, 64)
         driver.answer(conv, record)
         conv.extend(1000)
-    before = driver.client.metrics().get('vllm:num_preemptions', 0.0)
     bodies = [conv.body() for conv in convs]
+    lengths = [driver.client.tokenize(body) for body in bodies]
+    free = pool // judge.BLOCK - sum(-(-length // judge.BLOCK) for length in lengths)
+    room = CONTEXT_TOKENS - max(lengths) - judge.BLOCK
+    max_tokens = min(room, (max(0, free) // len(bodies) + TINY_PREEMPT_MARGIN_BLOCKS) * judge.BLOCK)
+    if free <= 0 or max_tokens * len(bodies) <= free * judge.BLOCK:
+        driver.event('tiny', skipped=True, lengths=lengths, free_blocks=free, max_tokens=max_tokens,
+                     reason='the next turns (%s tokens) leave %d free blocks of %d: no answer budget both admits them '
+                            'all and runs the pool out' % (lengths, free, pool // judge.BLOCK))
+        return
+    before = driver.client.metrics().get('vllm:num_preemptions', 0.0)
     extra = dict(ignore_eos=True)
     records = _burst(driver, [lambda conv=conv, body=body: driver.send(
-        body, 'hit', conv.salt, 'tiny', conv, TINY_MAX_TOKENS, continuation=True, extra=extra)
+        body, 'hit', conv.salt, 'tiny', conv, max_tokens, continuation=True, extra=extra)
         for conv, body in zip(convs, bodies)])
     after = driver.client.metrics().get('vllm:num_preemptions', 0.0)
-    driver.event('tiny', pool_tokens=pool, preemptions=after - before, ok=all(r.get('ok') for r in records))
-    _cold_twins(driver, [(record, body, conv, TINY_MAX_TOKENS, extra)
-                         for record, body, conv in zip(records, bodies, convs)], 'tiny')
+    driver.event('tiny', pool_tokens=pool, lengths=lengths, free_blocks=free, max_tokens=max_tokens,
+                 preemptions=after - before, ok=all(r.get('ok') for r in records), tags=[r['tag'] for r in records])
+    concurrent_pairs(driver, [(record, body, conv, max_tokens, extra)
+                              for record, body, conv in zip(records, bodies, convs)], 'tiny')
 
 
 def token_chars(tokens):

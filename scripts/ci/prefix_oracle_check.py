@@ -17,16 +17,27 @@ conversations of one tenant sharing a 4,300-token block (the gap capture), and a
     python3 scripts/ci/prefix_oracle_check.py          # inside the serving image, as the probe runs
 
 prints one line per request and 'ORACLE_VS_GRAFT <n> requests, <m> mismatches'; exits 1 on any
-mismatch. GOLDEN is what the real graft committed on 2026-09-26 (vLLM 0.25.1 source, plugin
-bf77cd63, scripts/ci at prefix/g1-harness), which test_prefix_oracle_check holds the oracle to on CPU.
+mismatch, and on a GOLDEN change: GOLDEN is what the real graft committed on 2026-09-26 (vLLM 0.25.1
+source, plugin bf77cd63, scripts/ci at prefix/g1-harness), which test_prefix_oracle_check holds the
+oracle to on CPU - a graft that now commits something else has to be re-recorded, not waved through.
+
+WHICH graft: the step runs this from the mounted checkout (/c2/scripts/ci), so by default it drives
+the checkout's prefix_scheduler_graft.py. Once the image carries its own copy (IMAGE_GRAFT, where
+docker/qwen-c2-overlay.txt's default destination puts it), that copy is the one driven, and it must
+be byte-identical to the checkout's: otherwise the oracle is held to a graft the engine does not run.
 """
 
+import hashlib
+import importlib.util
+import os
 import random
 import sys
 
 import prefix_judge as judge
 
 CHUNK = judge.CHUNK
+HERE = os.path.dirname(os.path.abspath(__file__))
+IMAGE_GRAFT = '/experiment-scripts/ci/prefix_scheduler_graft.py'
 
 
 def tokens(count, seed):
@@ -94,10 +105,38 @@ def agrees(oracle_q, oracle_h, graft_q, graft_h):
     return graft_q == oracle_q and (graft_h is None or graft_h == oracle_h)
 
 
-def run_graft(say=print):  # pragma: no cover - needs vLLM 0.25.1 and the TT plugin (the serving image)
-    import prefix_p0a_probe as probe
-    import prefix_scheduler_graft as graft
+def file_sha(path):
+    with open(path, 'rb') as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
 
+
+def choose_graft(checkout=None, image=IMAGE_GRAFT, exists=os.path.exists, sha=file_sha):
+    """-> (path of the graft to drive, problem or None). The image's copy when it has one (it must
+    equal the checkout's byte for byte), else the checkout's, said so."""
+    checkout = checkout or os.path.join(HERE, 'prefix_scheduler_graft.py')
+    if not exists(image):
+        return checkout, None
+    mine, theirs = sha(checkout), sha(image)
+    if mine != theirs:
+        return image, ('the image serves %s (sha256 %s) but the checkout has prefix_scheduler_graft.py %s: the oracle '
+                       'would be held to a graft the engine does not run' % (image, theirs, mine))
+    return image, None
+
+
+def load_graft(path):
+    """The graft module from `path`, installed as sys.modules['prefix_scheduler_graft']."""
+    spec = importlib.util.spec_from_file_location('prefix_scheduler_graft', path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules['prefix_scheduler_graft'] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_graft(say=print, graft_path=None):  # pragma: no cover - needs vLLM 0.25.1 and the TT plugin (the serving image)
+    import prefix_p0a_probe as probe
+
+    graft = load_graft(graft_path) if graft_path else probe.graft
+    probe.graft = graft
     vllm_config, evidence = probe.build_config('general-prefix')
     if vllm_config is None:
         raise RuntimeError('the general-prefix config did not build: %s' % evidence.get('error'))
@@ -115,8 +154,8 @@ def run_graft(say=print):  # pragma: no cover - needs vLLM 0.25.1 and the TT plu
     return out
 
 
-def main(say=print):  # pragma: no cover - see run_graft
-    graft_rows = run_graft(say)
+def verdict(graft_rows, say=print):
+    """Graft rows against the oracle and GOLDEN. -> exit code (1 on a mismatch or a GOLDEN change)."""
     oracle_rows = dict((rid, (q, h, plan)) for rid, q, h, plan in run_oracle())
     mismatches = 0
     for rid, q, h in graft_rows:
@@ -128,7 +167,20 @@ def main(say=print):  # pragma: no cover - see run_graft
     golden = [(rid, q, h) for rid, q, h in graft_rows] == list(GOLDEN)
     say('ORACLE_VS_GRAFT %d requests, %d mismatches; GOLDEN %s' % (len(graft_rows), mismatches,
                                                                      'unchanged' if golden else 'CHANGED'))
-    return 1 if mismatches else 0
+    if not golden:
+        say('FAIL: the graft no longer commits GOLDEN: re-record it (and test_prefix_oracle_check) deliberately')
+    return 1 if mismatches or not golden else 0
+
+
+def main(say=print):  # pragma: no cover - see run_graft
+    path, problem = choose_graft()
+    say('graft driven: %s (sha256 %s)' % (path, file_sha(path)))
+    if problem:
+        say('FAIL: ' + problem)
+        return 1
+    if path != IMAGE_GRAFT:
+        say('NOTE: the image carries no %s: the checkout copy of the graft was driven' % IMAGE_GRAFT)
+    return verdict(run_graft(say, path), say)
 
 
 if __name__ == '__main__':  # pragma: no cover

@@ -21,11 +21,11 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_GATE_MEMORY_PROMPT  G5's prompt length (default: the profile's largest admitted prompt)
   C2_REPLAY_PROFILE   the profile the replay's container serves (default: the source container's)
   C2_PREFIX_PLAN      PREFIX_PLANS for the prefix action (c2_prefix_gate.py), in order (default: bringup)
-  C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; checked against the
-                      checkout's profiles when set or when the prefix action runs)
+  C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
                       the baseline arm)
   C2_PREFIX_AGENTS    the timing plan's busy-agent counts, one phase each (default 1,4,5,6)
+  The C2_PREFIX_* keys are read only when C2_ACTIONS has prefix; otherwise their defaults are output.
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -125,18 +125,22 @@ def read_job(values, profiles):
 
 
 def read_prefix(values, profiles, running):
-    """The prefix action's outputs. A profile named explicitly must be one the checkout defines; the
-    defaults are checked only when the action runs (general-prefix lands in qwen_c2_profiles.json on
-    another track, and the image's own profiles are what c2_prefix_gate.py finally checks)."""
+    """The prefix action's outputs. Its keys are checked only when the action runs: a job that does
+    not run it (an exact or c2 run) is never refused over them, and gets the defaults. The profile
+    must then be one the checkout defines (general-prefix lands in qwen_c2_profiles.json on another
+    track, and the image's own profiles are what c2_prefix_gate.py finally checks)."""
+    if not running:
+        return dict(prefix_plan='bringup', prefix_profile=PREFIX_PROFILE, prefix_baseline=PREFIX_BASELINE,
+                    prefix_agents=','.join(str(count) for count in PREFIX_AGENTS))
     plans = split_list(values.get('C2_PREFIX_PLAN', 'bringup')) or ['bringup']
     unknown = sorted(set(plans) - set(PREFIX_PLANS))
     if unknown:
         raise JobError('C2_PREFIX_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(PREFIX_PLANS)))
     profile = values.get('C2_PREFIX_PROFILE') or PREFIX_PROFILE
-    if (values.get('C2_PREFIX_PROFILE') or running) and profile not in profiles:
+    if profile not in profiles:
         raise JobError('C2_PREFIX_PROFILE %r is not a profile of qwen_c2_profiles.json (%s)' % (profile, ', '.join(profiles)))
     baseline = values.get('C2_PREFIX_BASELINE') or PREFIX_BASELINE
-    if baseline != 'none' and (values.get('C2_PREFIX_BASELINE') or running) and baseline not in profiles:
+    if baseline != 'none' and baseline not in profiles:
         raise JobError('C2_PREFIX_BASELINE %r is not a profile of qwen_c2_profiles.json' % baseline)
     if baseline == 'none' and 'bringup' in plans:
         raise JobError('C2_PREFIX_BASELINE none: the bringup plan compares against a baseline profile')

@@ -133,6 +133,20 @@ class ScanTests(unittest.TestCase):
         grouped = pm.by_tag(out['rows'])
         self.assertEqual(list(grouped), ['pfx-a-0002-hit'])
 
+    def test_digests_stay_text(self):
+        """An all-digit hex digest must not parse as an integer (leading zeros would go)."""
+        row = pm.model_row('[PREFIX] req=chatcmpl-pfx-a-0001-hit-12345678 Q=0 L=10 captured=[] programs=3 '
+                           'slot_sha=0123456789 logits_sha=00ab')
+        self.assertEqual((row['slot_sha'], row['logits_sha'], row['programs']), ('0123456789', '00ab', 3))
+        self.assertIsNone(pm.model_row('[PREFIX] req=x-12345678 Q=0 L=10')['slot_sha'])
+        audit = pm.audit_row('[PREFIX-AUDIT] req=x-12345678 Q=0 L=10 kv_range=0:10 kv_sha=0042 slot_sha=0007')
+        self.assertEqual((audit['kv_range'], audit['kv_sha'], audit['slot_sha']), ('0:10', '0042', '0007'))
+
+    def test_the_stats_the_lifecycle_gates_require(self):
+        """Every required counter but dropped_hits is one the P0a prototype registry already keeps."""
+        missing = set(pm.REQUIRED_STATS) - set(graft.STAT_NAMES) - {'pins'}
+        self.assertEqual(missing, {'dropped_hits'})
+
     def test_a_design_spelling_row_with_a_request_id(self):
         row = pm.model_row('[PREFIX] row=chatcmpl-pfx-x-0001-cold-12345678 Q=0 L=10 captured=[8192,10240] ms=5')
         self.assertEqual((row['req'], row['tag'], row['captured'], row['capture_ms']),

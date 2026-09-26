@@ -174,6 +174,27 @@ class ConversationTests(CorpusCase):
         self.assertNotIn('reasoning', pc.assistant_message(dict(content='x')))
         self.assertNotIn('tool_calls', pc.assistant_message(dict(content='x', tool_calls=[])))
 
+    def test_a_cut_off_tool_call_is_not_sent_back(self):
+        """vLLM json.loads every assistant tool call's arguments it is sent (chat_utils.py:1855-1858): a
+        call streamed half-way would refuse the next turn."""
+        half = dict(id='t1', function=dict(name='read', arguments='{"file_path": "/a'))
+        whole = dict(id='t2', function=dict(name='grep', arguments='{"pattern": "x"}'))
+        message = pc.assistant_message(dict(content='c', tool_calls=[half, whole], finish='tool_calls'))
+        self.assertEqual([call['id'] for call in message['tool_calls']], ['t2'])
+        self.assertNotIn('tool_calls', pc.assistant_message(dict(content='c', tool_calls=[whole], finish='length')),
+                         'an answer cut by max_tokens sends back no call')
+        self.assertNotIn('tool_calls', pc.assistant_message(dict(content='c', tool_calls=[dict(
+            id='t3', function=dict(name='read', arguments='[1, 2]'))])), 'arguments must be an object')
+        self.assertTrue(pc.complete_arguments('') and pc.complete_arguments({'a': 1}))
+        conv = pc.Conversation(self.corpus, 'c', 1)
+        conv.add_answer(dict(content='c', tool_calls=[half], finish='tool_calls'))
+        conv.extend(300)
+        self.assertEqual(conv.messages[-1]['role'], 'user', 'no call to answer: a user follow-up')
+
+    def test_an_excerpt_meets_a_large_budget_from_small_files(self):
+        text = self.corpus.excerpt(random.Random(3), 200000)
+        self.assertGreaterEqual(len(text), 190000)
+
     def test_unparseable_arguments_still_get_a_result(self):
         self.assertEqual(pc.parse_arguments('{not json'), {})
         self.assertEqual(pc.parse_arguments('[1]'), {})

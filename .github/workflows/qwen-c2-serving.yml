@@ -263,7 +263,9 @@ jobs:
           # it opens no card. Prints PASS/FAIL per check and exits 1 on any FAIL.
           # Then the prefix gates' oracle (prefix_judge.Oracle) against the same real graft, request by
           # request (scripts/ci/prefix_oracle_check.py): the hardware gates fail on any Q it did not
-          # predict, so it must be the graft's rules. Both always run; the step fails if either does.
+          # predict, so it must be the graft's rules. It drives the image's own overlaid graft when the
+          # image has one (and fails if that differs from the checkout's), and fails on a GOLDEN change.
+          # Both always run; the step fails if either does.
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
           docker image inspect "$image" --format "probe image $image {{.Id}}"
           name="qwen-prefix-p0a-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"

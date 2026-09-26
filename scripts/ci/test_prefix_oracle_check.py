@@ -38,6 +38,33 @@ class GoldenTests(unittest.TestCase):
         self.assertFalse(check.agrees(2048, 2048, 0, None))
         self.assertFalse(check.agrees(2048, 2048, 2048, 2112))
 
+    def test_a_changed_golden_fails_even_when_the_oracle_agrees(self):
+        said = []
+        self.assertEqual(check.verdict(list(check.GOLDEN), said.append), 0)
+        self.assertIn('GOLDEN unchanged', said[-1])
+        rows = list(check.GOLDEN)
+        index = [rid for rid, _, _ in rows].index('b2047-1')
+        oracle_h = dict((rid, h) for rid, _, h, _ in check.run_oracle())['b2047-1']
+        rows[index] = ('b2047-1', 0, oracle_h)    # a grant line now printed where there was none
+        said = []
+        self.assertEqual(check.verdict(rows, said.append), 1)
+        self.assertTrue(any('0 mismatches; GOLDEN CHANGED' in line for line in said), said)
+        rows[index] = ('b2047-1', 2048, oracle_h)
+        self.assertEqual(check.verdict(rows, lambda line: None), 1)
+
+    def test_the_graft_driven_is_the_images_when_it_has_one(self):
+        shas = {'/c2/g.py': 'aa', '/img/g.py': 'aa'}
+        self.assertEqual(check.choose_graft('/c2/g.py', '/img/g.py', exists=lambda path: False, sha=shas.get),
+                         ('/c2/g.py', None))
+        self.assertEqual(check.choose_graft('/c2/g.py', '/img/g.py', exists=lambda path: True, sha=shas.get),
+                         ('/img/g.py', None))
+        shas['/img/g.py'] = 'bb'
+        path, problem = check.choose_graft('/c2/g.py', '/img/g.py', exists=lambda path: True, sha=shas.get)
+        self.assertEqual(path, '/img/g.py')
+        self.assertIn('does not run', problem)
+        self.assertEqual(check.IMAGE_GRAFT, '/experiment-scripts/ci/prefix_scheduler_graft.py',
+                         'the overlay manifest\'s default destination for scripts/ci files')
+
     def test_scenarios_are_deterministic_and_chunk_sized(self):
         a, b = check.scenarios(), check.scenarios()
         self.assertEqual([(n, c, [(r, p, s) for r, p, s in steps]) for n, c, steps in a],

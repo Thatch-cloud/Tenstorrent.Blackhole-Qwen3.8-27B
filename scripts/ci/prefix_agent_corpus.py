@@ -44,6 +44,9 @@ MIN_FILE_CHARS = 400
 MAX_FILE_CHARS = 400000
 MAX_PROMPT_TOKENS = 60000      # the general profile's 65536 less a long answer
 README_CHARS = 9000
+# An excerpt is file blocks until its budget is met; the bound only stops a corpus of tiny files
+# from looping (the tiny arm's filler asks ~60k tokens of one message).
+MAX_EXCERPT_BLOCKS = 4096
 
 # The metering shape (SKILL "Real traffic to size against"; design SIM): tool results average ~2k
 # tokens, answers ~740 tokens, think gaps average 15 s; a conversation compacts past ~60k.
@@ -303,7 +306,7 @@ class Corpus(object):
         chars = max(MIN_INPUT_CHARS, int(chars))
         parts, used, source, first = [], 0, self.pick(rng, hint), True
         guard = 0
-        while used < chars and guard < 64:
+        while used < chars and guard < MAX_EXCERPT_BLOCKS:
             guard += 1
             if first and offset is not None:
                 start = max(0, min(len(source.lines) - 1, int(offset) - 1))
@@ -413,18 +416,37 @@ def parse_arguments(text):
     return value if isinstance(value, dict) else {}
 
 
+def complete_arguments(text):
+    """True when a streamed tool call's argument string is a whole JSON object. vLLM parses the
+    arguments of every assistant tool call it is sent back with json.loads (chat_utils.py:1855-1858),
+    so one cut short would refuse the conversation's next turn."""
+    if isinstance(text, dict):
+        return True
+    try:
+        return isinstance(json.loads(text or '{}'), dict)
+    except ValueError:
+        return False
+
+
 def assistant_message(result):
     """The assistant turn to send back, from the served answer: content (never None: the template
     trims it), reasoning (the field vLLM 0.25.1 returns and reads back), and the tool calls with the
-    server's own ids and argument strings, in order."""
+    server's own ids and argument strings, in order. An answer cut off by max_tokens sends back no
+    tool calls (its last call may be half-streamed), and a call whose arguments are not a whole JSON
+    object is dropped: the next input is then a user follow-up instead of that call's result."""
     message = {'role': 'assistant', 'content': result.get('content') or ''}
     if result.get('reasoning'):
         message['reasoning'] = result['reasoning']
     calls = []
     for call in result.get('tool_calls') or ():
+        if result.get('finish') == 'length':
+            break
         function = call.get('function') or {}
+        arguments = function.get('arguments') or '{}'
+        if not complete_arguments(arguments):
+            continue
         calls.append({'id': call.get('id') or 'call_%d' % len(calls), 'type': 'function',
-                      'function': {'name': function.get('name') or '', 'arguments': function.get('arguments') or '{}'}})
+                      'function': {'name': function.get('name') or '', 'arguments': arguments}})
     if calls:
         message['tool_calls'] = calls
     return message

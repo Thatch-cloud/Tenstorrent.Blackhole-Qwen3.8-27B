@@ -17,9 +17,21 @@ never guessed around):
   registry counters (the design's cross-process export; either form is read, the last one wins):
     [PINDIAG] prefix: stats {<json of PrefixRegistry.snapshot()>}      in the server log, or
     the JSON file STATS_FILE inside the container (read with docker exec)
+    The lifecycle gates read REQUIRED_STATS from it; `dropped_hits` (a staged grant with Q > 0
+    that commit dropped: an allocation failure after a grant, F2) is not in the P0a prototype's
+    counters yet - the scheduler track adds it, and until then the tiny-pool arm says so.
   model graft (one line per prefill row, from inside the branch that ran):
     [PREFIX] req=<engine request id> Q=<n> L=<n> path=<traced|eager> restored_ms=<f> captured=[<pos>,...]
-        capture_ms=<f> programs=<program-cache entries after the row>
+        capture_ms=<f> programs_before=<program-cache entries before the row> programs=<entries after it>
+        slot_sha=<hex> logits_sha=<hex>
+    programs_before lets the gate judge what the row itself compiled (a decode step between two rows
+    may compile on its own); without it only a row right after its cold twin is measured.
+    slot_sha digests the row's end-of-prefill GDN state (the bytes the row already copies to the
+    host) and logits_sha the last prompt position's logits row (on the host under general, which
+    samples there): every cold/hit pair in every arm compares both byte for byte (design 2.0.4).
+    A request vLLM preempts and resumes prints a second row for the same request id: its L is the
+    prompt plus the output so far (a resumed request re-prefills both). The first row is the
+    admission the oracle judges; the admissions count names the preempted requests.
     The design's own spelling (row=... ms=...) is accepted too: `row` is read as the request id
     when it is not a plain integer, `ms` as capture_ms.
   audit mode (QWEN_PREFIX_AUDIT=1, program-free):
@@ -43,6 +55,8 @@ import json
 import re
 
 STATS_FILE = '/tmp/qwen-prefix-stats.json'
+REQUIRED_STATS = ('pins', 'commit_mismatch', 'dropped_attempts', 'dropped_hits', 'same_step_rejects',
+                  'evicted_coupled', 'evicted_lru', 'unsalted_denied')
 DOCKER_TIME = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) ')
 INSTALL = '[PINDIAG] prefix: install '
 GRANT = re.compile(r'\[PINDIAG\] prefix: grant req=(\S+) h=(\d+) Q=(\d+) plan=\[([0-9, ]*)\]')
@@ -103,8 +117,9 @@ def request_tag(request_id):
 
 def model_row(text):
     """A [PREFIX] row's fields, normalised: req (from req, or from row when that is not a number),
-    Q, L, path, restored_ms, captured, capture_ms, programs."""
-    values = fields(text.split(MODEL_ROW, 1)[1])
+    Q, L, path, restored_ms, captured, capture_ms, programs(_before), slot_sha, logits_sha."""
+    body = text.split(MODEL_ROW, 1)[1]
+    values, raw = fields(body), dict(FIELD.findall(body))
     req = values.get('req')
     if req is None and isinstance(values.get('row'), str):
         req = values['row']
@@ -112,17 +127,22 @@ def model_row(text):
     if captured is not None and not isinstance(captured, list):
         captured = [captured]
     programs = values.get('programs', values.get('program_cache'))
+    programs_before = values.get('programs_before')
     return dict(req=req, tag=request_tag(req) if req else None, q=values.get('Q'), l=values.get('L'),
                 path=values.get('path'), restored_ms=values.get('restored_ms'), captured=captured or [],
                 capture_ms=values.get('capture_ms', values.get('ms')), programs=programs,
-                row=values.get('row'))
+                row=values.get('row'), slot_sha=raw.get('slot_sha'), logits_sha=raw.get('logits_sha'),
+                programs_before=programs_before if isinstance(programs_before, int) else None)
 
 
 def audit_row(text):
-    values = fields(text.split(AUDIT_ROW, 1)[1])
+    """A [PREFIX-AUDIT] row; digests and the range are kept as the text printed (an all-digit hex
+    digest would otherwise parse as an integer)."""
+    body = text.split(AUDIT_ROW, 1)[1]
+    values, raw = fields(body), dict(FIELD.findall(body))
     req = values.get('req') or (values.get('row') if isinstance(values.get('row'), str) else None)
     return dict(req=req, tag=request_tag(req) if req else None, q=values.get('Q'), l=values.get('L'),
-                kv_range=values.get('kv_range'), kv_sha=values.get('kv_sha'), slot_sha=values.get('slot_sha'))
+                kv_range=raw.get('kv_range'), kv_sha=raw.get('kv_sha'), slot_sha=raw.get('slot_sha'))
 
 
 def scan(lines):

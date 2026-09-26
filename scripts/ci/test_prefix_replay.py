@@ -2,12 +2,32 @@
 
 The streaming client is held against a real local HTTP server (server-sent events, slow first
 tokens, closed sockets); the scenarios against FakeEngine, a served general-prefix engine in
-miniature: a deterministic word 'tokenizer' whose prompts extend turn by turn the way the chat
-template's do, greedy answers that depend only on the prompt, grants from the design's rules (the
-judge's own oracle - these tests hold the plumbing, test_prefix_oracle_check holds the rules to the
-real graft), and the marker lines the engine prints (prefix_markers' contract). Faults are switches
-on it. test_c2_prefix_gate reuses it."""
+miniature whose GRANTS COME FROM THE REAL SCHEDULER GRAFT, not from the harness's oracle:
 
+  - prefix_scheduler_graft.SchedulerGraft (the trim, the cap, the per-step commit, eviction
+    coupling, the kill switch) and PrefixRegistry (the checkpoint LRU, pins, grants) are driven over
+    a model of vLLM's KV side - FakePool (a free queue in LRU order, a hash map where the first block
+    cached for a hash wins, blocks freed tail first, a cached block evicted when reallocated),
+    FakeManager.get_computed_blocks (the longest cached run of the request's block hashes, salt in
+    the first, capped at num_tokens - 1) and FakeCoordinator.cache_blocks (publish at allocation and
+    after every output) - so the harness's oracle is checked against the graft, never against itself;
+  - a scheduler loop: steps admit waiting requests FCFS while seats (max-num-seqs) and blocks last
+    (an allocation failure leaves the staged grant uncommitted), print a [PREFIX] row per admission,
+    and decode one token per running request, preempting the last one when a block runs out (it
+    resumes later: a second row whose L is prompt + output so far); concurrent arrivals share a step
+    (burst_aware tells the engine a burst is coming, as vLLM would see it on hardware);
+  - the KV pool is sized as the TT worker sizes it (pool_blocks: QWEN36_MAX_TOKENS_ALL_USERS or
+    max_model_len x max_num_seqs, plus a block per sequence) - num-gpu-blocks-override is ignored,
+    as the worker overwrites it;
+  - a request aborted before its first output gets no prompt ids back, as vLLM streams them with the
+    first output; the vLLM counters (prefix_cache_hits/queries before the trim, preemptions, the
+    waiting gauge) are served on metrics();
+  - greedy answers depend only on the prompt; faults are switches (see FakeEngine.FAULTS).
+
+test_c2_prefix_gate reuses it."""
+
+import copy
+import hashlib
 import http.server
 import json
 import os
@@ -19,6 +39,10 @@ import threading
 import time
 import unittest
 import zlib
+from array import array
+from collections import OrderedDict, deque
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -33,6 +57,8 @@ import test_prefix_markers as marker_fixture  # noqa: E402
 GEN = [9001, 9002]
 ROLE = dict(system=9101, user=9102, assistant=9103, tool=9104)
 VOCAB = ['alpha', 'beta', 'gamma', 'delta', 'return', 'value', 'list', 'None', 'file', 'test', 'call', 'fix']
+BLOCK = judge.BLOCK
+PACE_S = 0.0005        # a seat's decode step, real time: long enough to see a request wait behind it
 
 
 def word(text):
@@ -45,43 +71,268 @@ def words(text):
     return [word(w[i:i + 3]) for w in (text or '').split() for i in range(0, len(w), 3)]
 
 
-class FakeEngine(object):
-    """A general-prefix (or general) engine in miniature; see the module docstring."""
+def served_profile(name='general-prefix'):
+    if name == 'general-prefix':
+        return marker_fixture.prefix_profile()
+    return copy.deepcopy(marker_fixture.PROFILES['profiles'][name])
 
-    def __init__(self, prefix=True, profile='general-prefix', path='traced', diverge_hits=False, grow_programs=False,
-                 drop_rows=False, audit=False, store=None, answer_len=24, dev_mode=True, preempt_on_ignore_eos=0,
-                 unsalted_differs=False, kill_line=True, store_gib=None, kv_tokens=262144):
-        self.prefix, self.profile, self.path = prefix, profile, path
-        self.diverge_hits, self.grow_programs, self.drop_rows = diverge_hits, grow_programs, drop_rows
-        self.audit, self.store, self.answer_len, self.dev_mode = audit, store, answer_len, dev_mode
-        self.preempt_on_ignore_eos, self.unsalted_differs, self.kill_line = preempt_on_ignore_eos, unsalted_differs, kill_line
-        self.store_gib, self.kv_tokens = store_gib, kv_tokens
-        self.lock = threading.Lock()
+
+def pool_blocks(profile):
+    """The TT worker's KV block count (plugin worker.py:479-575): the model's all-user tokens -
+    QWEN36_MAX_TOKENS_ALL_USERS, else max_model_len x max_num_seqs (qwen36_vllm.py:96-100) - plus a
+    block per sequence, in blocks. num-gpu-blocks-override is overwritten by it (worker.py:388-390)."""
+    engine, env = profile.get('engine') or {}, profile.get('env') or {}
+    seqs = int(engine.get('max-num-seqs', 1))
+    size = int(engine.get('block-size', BLOCK))
+    tokens = int(env['QWEN36_MAX_TOKENS_ALL_USERS']) if env.get('QWEN36_MAX_TOKENS_ALL_USERS') else (
+        int(engine.get('max-model-len', 65536)) * seqs)
+    return -(-(tokens + size * seqs) // size)
+
+
+# -- vLLM's KV side, in miniature ----------------------------------------------------------------
+
+class FakeRequest(object):
+    """The Request fields the scheduler graft reads, and the fake scheduler's own bookkeeping."""
+
+    def __init__(self, request_id, tag, prompt_ids, salt, answer, calls, max_tokens):
+        self.request_id, self.tag = request_id, tag
+        self.prompt_token_ids = list(prompt_ids)
+        self.tokens = list(prompt_ids)
+        self.output_ids, self.emitted = [], []
+        self.cache_salt = salt
+        self.num_prompt_tokens = len(prompt_ids)
+        self.num_preemptions = 0
+        self.hashes = []
+        self.answer, self.calls, self.max_tokens = answer, calls, max_tokens
+        self.admissions = 0
+        self.first_q = None
+        self.captured = []
+        self.resumed_at = None
+        self.perturb = False
+        self.on_first = None
+        self.abort_before_first = None
+        self.pace = False
+        self.started = time.time()
+        self.first_at = None
+        self.done = threading.Event()
+        self.result = None
+
+    @property
+    def all_token_ids(self):
+        return self.tokens
+
+    @property
+    def num_tokens(self):
+        return len(self.tokens)
+
+    def append(self, token):
+        self.output_ids.append(token)
+        self.tokens.append(token)
+
+    @property
+    def block_hashes(self):
+        """vLLM's chain of full-block hashes, the salt in the first (kv_cache_utils.py:560-568)."""
+        ids = self.tokens
+        while len(self.hashes) < len(ids) // BLOCK:
+            index = len(self.hashes)
+            digest = hashlib.sha256(self.hashes[-1] if self.hashes else ('salt:%s' % (self.cache_salt or '')).encode())
+            digest.update(array('q', ids[index * BLOCK:(index + 1) * BLOCK]).tobytes())
+            self.hashes.append(digest.digest())
+        return self.hashes
+
+
+class FakeBlock(object):
+    __slots__ = ('block_id', 'block_hash', 'ref')
+
+    def __init__(self, block_id):
+        self.block_id, self.block_hash, self.ref = block_id, None, 0
+
+
+class FakePool(object):
+    """vLLM's block pool: a free queue in LRU order (its head is reallocated, so evicted, first), a
+    hash -> block map where the first block cached for a hash wins (block_pool.py:47-72), blocks
+    freed tail first (so a request's last blocks leave the cache before its first)."""
+
+    def __init__(self, count):
+        self.blocks = [FakeBlock(index) for index in range(count)]
+        self.free = OrderedDict((block.block_id, block) for block in self.blocks)
+        self.cached = {}
+        self.cached_block_hashes_by_block = {}
+        self.cached_block_hash_to_block = self
+        self.evict = self._maybe_evict_cached_block
+
+    def get_one_block(self, key):
+        return self.cached.get(key)
+
+    def _maybe_evict_cached_block(self, block):
+        if block.block_hash is None:
+            return False
+        if self.cached.get(block.block_hash) is block:
+            del self.cached[block.block_hash]
+        block.block_hash = None
+        return True
+
+    def evictable(self, blocks):
+        return sum(1 for block in blocks if block.ref == 0)
+
+    def touch(self, blocks):
+        for block in blocks:
+            if block.ref == 0:
+                self.free.pop(block.block_id, None)
+            block.ref += 1
+
+    def allocate(self, count):
+        if count > len(self.free):
+            return None
+        out = []
+        for _ in range(count):
+            _, block = self.free.popitem(last=False)
+            self.evict(block)
+            block.ref = 1
+            out.append(block)
+        return out
+
+    def release(self, blocks):
+        for block in reversed(blocks):
+            block.ref -= 1
+            if block.ref == 0:
+                self.free[block.block_id] = block
+
+    def reset(self):
+        for block in self.blocks:
+            block.block_hash = None
+        self.cached.clear()
+
+
+class FakeBlocks(object):
+    def __init__(self, groups):
+        self.blocks = groups
+
+
+class FakeCoordinator(object):
+    """cache_blocks: publish a request's full blocks up to num_tokens (the graft caps what it asks)."""
+
+    def __init__(self, pool, single):
+        self.pool, self.single = pool, single
+        self.single_type_managers = [single]
+
+    def cache_blocks(self, request, num_tokens):
+        owned = self.single.req_to_blocks.get(request.request_id) or []
+        start = self.single.num_cached_block.get(request.request_id, 0)
+        hashes = request.block_hashes
+        end = min(num_tokens // BLOCK, len(owned), len(hashes))
+        for index in range(start, end):
+            block = owned[index]
+            if block.block_hash is None and hashes[index] not in self.pool.cached:
+                block.block_hash = hashes[index]
+                self.pool.cached[hashes[index]] = block
+        if end > start:
+            self.single.num_cached_block[request.request_id] = end
+
+
+class FakeManager(object):
+    """get_computed_blocks: the longest run of the request's block hashes the pool has cached,
+    capped at num_tokens - 1, counted into the prefix-cache stats before any trim
+    (kv_cache_manager.py:206-246; a preempted request's attempts are counted apart)."""
+
+    def __init__(self, pool, coordinator):
+        self.block_pool, self.coordinator = pool, coordinator
+        self.empty_kv_cache_blocks = FakeBlocks(([],))
+        self.hits = self.queries = 0
+
+    def create_kv_cache_blocks(self, groups):
+        return FakeBlocks(groups)
+
+    def get_computed_blocks(self, request):
+        limit = (request.num_tokens - 1) // BLOCK
+        found = []
+        for key in request.block_hashes[:limit]:
+            block = self.block_pool.cached.get(key)
+            if block is None:
+                break
+            found.append(block)
+        if not request.num_preemptions:
+            self.queries += request.num_tokens
+            self.hits += len(found) * BLOCK
+        return FakeBlocks((found,)), len(found) * BLOCK
+
+
+# -- the engine ----------------------------------------------------------------------------------
+
+class FakeEngine(object):
+    """A served engine in miniature (see the module docstring). `profile` is what the contract would
+    serve: prefix reuse, the loop path (trace_mode), audit, dev mode, the store and the pool are read
+    from it. FAULTS switch on one defect each."""
+
+    FAULTS = ('diverge_hits', 'diverge_once', 'diverge_after_resume', 'unsalted_differs', 'capture_differs',
+              'grow_programs', 'grow_on_capture', 'drop_rows', 'drop_resumed_rows', 'no_digests', 'bad_slot_on_hit',
+              'publish_unsalted', 'publish_when_killed', 'no_stats', 'no_dropped_hits', 'no_counters', 'kill_line_off')
+
+    def __init__(self, profile=None, name='general-prefix', answer_len=24, path=None, **faults):
+        unknown = set(faults) - set(self.FAULTS)
+        if unknown:
+            raise TypeError('unknown faults %s' % sorted(unknown))
+        self.faults = set(key for key, value in faults.items() if value)
+        self.name = name
+        self.profile = copy.deepcopy(profile) if profile is not None else served_profile(name)
+        env, engine = self.profile.get('env') or {}, self.profile.get('engine') or {}
+        tt = (engine.get('additional-config') or {}).get('tt') or {}
+        self.prefix = str(env.get('QWEN_PREFIX_REUSE')) == '1' and engine.get('enable-prefix-caching') is True
+        self.path = path or ('eager' if tt.get('trace_mode') == 'decode_only' else 'traced')
+        self.audit = str(env.get('QWEN_PREFIX_AUDIT')) == '1'
+        self.dev_mode = str(env.get('VLLM_SERVER_DEV_MODE')) == '1'
+        self.store_gib = float(env.get('QWEN_PREFIX_STORE_GIB', graft.DEFAULT_STORE_GIB))
+        self.max_num_seqs = int(engine.get('max-num-seqs', 4))
+        self.max_model_len = int(engine.get('max-model-len', 65536))
+        self.num_blocks = pool_blocks(self.profile)
+        self.answer_len = answer_len
+        self.kill_path = os.path.join(tempfile.gettempdir(), 'pfx-kill-%d-%d' % (os.getpid(), id(self)))
+        self.cv = threading.Condition()
+        self.thread = None
         self.lines = []
         self.count = 0
         self.programs = 500
-        self.preemptions = 0
-        self.flag = False
-        self.stats = dict(dropped_attempts=2, evicted_lru=3, pins=0, commit_mismatch=0)
+        self.grew_capture = False
+        self.diverged_once = False
         self.boot()
 
     # -- the log ---------------------------------------------------------------------------------
     def say(self, line):
-        self.lines.append('2026-09-26T10:%02d:%02d.000000000Z %s' % (len(self.lines) // 60 % 60, len(self.lines) % 60, line))
+        self.lines.append('2026-09-26T%02d:%02d:%02d.000000001Z %s' % (
+            len(self.lines) // 3600 % 24, len(self.lines) // 60 % 60, len(self.lines) % 60, line))
+
+    def graft_say(self, message, *values):
+        if 'kill switch' in message and 'kill_line_off' in self.faults:
+            return
+        self.say('[PINDIAG] prefix: ' + (message % values if values else message))
 
     def boot(self):
-        self.oracle = judge.Oracle(self.store)
-        self.killed = False
-        profile = marker_fixture.prefix_profile() if self.prefix else marker_fixture.PROFILES['profiles']['general']
-        self.say('[QWEN-C2] profile %s: vLLM argv %s' % (self.profile, json.dumps(marker_fixture.launched_argv(profile))))
+        self.pool = FakePool(self.num_blocks)
+        self.single = SimpleNamespace(num_cached_block={}, req_to_blocks={})
+        self.coordinator = FakeCoordinator(self.pool, self.single)
+        self.manager = FakeManager(self.pool, self.coordinator)
+        self.registry = graft.PrefixRegistry(environ=dict(QWEN_PREFIX_STORE_GIB=str(self.store_gib)))
+        self.graft = graft.SchedulerGraft(SimpleNamespace(kv_cache_manager=self.manager), self.registry,
+                                          self.kill_path, 0.0, time.monotonic, self.graft_say)
+        self.graft.original.update(get_computed_blocks=self.manager.get_computed_blocks,
+                                   cache_blocks=self.coordinator.cache_blocks,
+                                   _maybe_evict_cached_block=self.pool._maybe_evict_cached_block)
+        self.graft.get_block_hash = lambda key: key
+        self.pool.evict = self.graft.evict
+        self.waiting, self.running = deque(), []
+        self.preemptions = 0
+        self.dropped_hits = 0
+        self.expected, self.expect_since = 0, None
+        self.dead = None
+        profile = self.profile
+        self.say('(APIServer pid=1) [QWEN-C2] profile %s: vLLM argv %s' % (
+            self.name, json.dumps(marker_fixture.launched_argv(profile))))
         if self.prefix:
             self.say('INFO platform.py:83] Chunked prefill is not supported for `model_type=qwen3_5`; disabling it.')
         self.say('INFO platform.py:1153] Automatic prefix caching is %s' % ('enabled' if self.prefix else 'disabled'))
-        self.say('INFO kv_cache_utils.py:2146] GPU KV cache size: {:,} tokens'.format(self.kv_tokens))
+        self.say('INFO kv_cache_utils.py:2146] GPU KV cache size: {:,} tokens'.format(self.num_blocks * BLOCK))
         if self.prefix:
-            line = marker_fixture.install_line()
-            if self.store_gib is not None:
-                line = line.replace('store_gib=8.0', 'store_gib=%.1f' % self.store_gib)
+            line = marker_fixture.install_line().replace('store_gib=8.0', 'store_gib=%.1f' % self.store_gib)
             self.say('(EngineCore pid=9) ' + line)
             self.say('[PINDIAG] dram after kv: chip0 allocated=20.0GB free=8.0GB largest_free=900MB of 32GB')
 
@@ -103,71 +354,57 @@ class FakeEngine(object):
     def tokenize(self, body):
         return len(self.render(body))
 
+    def tokenize_ids(self, body):
+        return self.render(body)
+
     # -- the API ---------------------------------------------------------------------------------
     def chat(self, body, tag, salt=None, max_tokens=64, timeout=None, abort_after_s=None, abort_after_tokens=None,
              extra=None, on_first=None, abort_signal=None):
-        if abort_signal is not None:
-            abort_signal.wait(10)
-            return dict(content='', reasoning=None, tool_calls=[], token_ids=None, prompt_ids=None, prompt_sha=None,
-                        prompt_tokens=None, completion_tokens=0, finish=None, error=None, ttft_s=None, wall_s=0.5,
-                        status=200, aborted='closed on signal', ok=False)
         ids = self.render(body)
-        with self.lock:
-            if self.flag and not self.killed:
-                self.killed = True
-                self.oracle.kill()
-                if self.kill_line:
-                    self.say(graft.KILL_SWITCH_PATH and '[PINDIAG] prefix: kill switch %s present: no grants' % graft.KILL_SWITCH_PATH)
-            want = self.oracle.admit(salt if self.prefix else None, ids)
-            self.count += 1
-            req = 'chatcmpl-%s-%08x' % (tag, self.count)
-            if self.prefix:
-                if salt and (want['q'] or want['plan']):
-                    self.say(marker_fixture.grant_line(req, want['h'], want['q'], want['plan']))
-                if self.grow_programs and want['q']:
-                    self.programs += 1
-                if not self.drop_rows:
-                    self.say('[PREFIX] req=%s Q=%d L=%d path=%s restored_ms=%.1f captured=[%s] capture_ms=%.1f programs=%d'
-                             % (req, want['q'], len(ids), self.path, 120.0 if want['q'] else 0.0,
-                                ','.join(str(p) for p in want['plan']), 300.0 if want['plan'] else 0.0, self.programs))
-                if self.audit:
-                    digest = judge.token_sha(ids)[:16]
-                    self.say('[PREFIX-AUDIT] req=%s Q=%d L=%d kv_range=0:%d kv_sha=%s slot_sha=%s' % (
-                        req, want['q'], len(ids), len(ids), digest, digest))
-            if len(ids) >= judge.CHUNK and self.path == 'traced':
-                self.say('INFO [TP chunk-replay] 1/1 chunks')
-            ignore_eos = bool((extra or {}).get('ignore_eos'))
-            if ignore_eos and self.preempt_on_ignore_eos:
-                self.preemptions += self.preempt_on_ignore_eos
+        if len(ids) + int(max_tokens) > self.max_model_len:
+            return dict(content='', reasoning=None, tool_calls=[], token_ids=None, prompt_ids=None, prompt_sha=None,
+                        prompt_tokens=None, completion_tokens=0, finish=None, ttft_s=None, wall_s=0.1, status=400,
+                        aborted=None, ok=False, error='HTTP 400: This model\'s maximum context length is %d tokens '
+                        '(%d in the messages, %d in the completion)' % (self.max_model_len, len(ids), int(max_tokens)))
+        ignore_eos = bool((extra or {}).get('ignore_eos'))
         rng = random.Random(judge.token_sha(ids))
         length = int(max_tokens) if ignore_eos else min(int(max_tokens), self.answer_len)
         answer = [VOCAB[rng.randrange(len(VOCAB))] for _ in range(length)]
         calls = []
         if rng.random() < 0.4:
-            calls = [dict(id='chatcmpl-tool-%d' % self.count, type='function', function=dict(
+            calls = [dict(id='chatcmpl-tool-%d' % len(ids), type='function', function=dict(
                 name='read', arguments=json.dumps({'file_path': '/w/scripts/ci/mod_1.py'})))]
-        token_ids = [word(w) for w in answer]
-        if (self.diverge_hits and want['q']) or (self.unsalted_differs and not salt):
-            token_ids[-1] += 1
-            answer[-1] += 'x'
-        if abort_after_s is not None:
-            return dict(content='', reasoning=None, tool_calls=[], token_ids=None, prompt_ids=ids,
-                        prompt_sha=judge.token_sha(ids), prompt_tokens=len(ids), completion_tokens=0, finish=None,
-                        error=None, ttft_s=None, wall_s=abort_after_s, status=200,
-                        aborted='closed after %.1f s' % abort_after_s, ok=False)
-        if on_first is not None:
-            on_first()
-        half = len(answer) // 2
-        return dict(content=' '.join(answer[half:]), reasoning=' '.join(answer[:half]) or None, tool_calls=calls,
-                    token_ids=token_ids, prompt_ids=ids, prompt_sha=judge.token_sha(ids), prompt_tokens=len(ids),
-                    completion_tokens=len(token_ids), finish='length' if length == int(max_tokens) else 'stop',
-                    error=None, ttft_s=0.05 if not want['q'] else 0.01, wall_s=0.5, status=200, aborted=None, ok=True)
+        with self.cv:
+            self.count += 1
+            request = FakeRequest('chatcmpl-%s-%08x' % (tag, self.count), tag, ids, salt if self.prefix else None,
+                                  answer, calls, int(max_tokens))
+            request.on_first = on_first
+            request.abort_before_first = abort_after_s
+            request.pace = tag.endswith('-seat')
+            if self.dead:
+                request.result = self.failed(request, self.dead)
+                return request.result
+            self.waiting.append(request)
+            self.cv.notify_all()
+            self.ensure_thread()
+        while not request.done.wait(0.01):
+            if abort_signal is not None and abort_signal.is_set():
+                with self.cv:
+                    if not request.done.is_set():
+                        self.abort(request, 'closed on signal')
+        return request.result
 
     def metrics(self):
-        return {'vllm:num_requests_waiting': 1.0, 'vllm:num_preemptions': float(self.preemptions)}
+        with self.cv:
+            values = {'vllm:num_requests_waiting': float(len(self.waiting)),
+                      'vllm:num_preemptions': float(self.preemptions)}
+            if 'no_counters' not in self.faults:
+                values.update({'vllm:prefix_cache_hits': float(self.manager.hits),
+                               'vllm:prefix_cache_queries': float(self.manager.queries)})
+            return values
 
     def healthy(self):
-        return True
+        return not self.dead
 
     def ready(self):
         return True
@@ -175,13 +412,299 @@ class FakeEngine(object):
     def reset_prefix_cache(self):
         if not self.dev_mode:
             return 404
-        with self.lock:
-            self.oracle.reset_prefix_cache()
+        with self.cv:
+            self.pool.reset()
+            self.registry.clear()
         return 200
 
     def restart(self):
-        with self.lock:
+        with self.cv:
+            for request in list(self.waiting) + list(self.running):
+                self.abort(request, 'engine stopped')
+            self.say('INFO launcher.py] Shutting down the engine (docker stop)')
             self.boot()
+
+    def expect(self, count):
+        """A burst of `count` requests is coming: admit them in one step (vLLM sees simultaneous
+        arrivals in one schedule() call)."""
+        with self.cv:
+            self.expected, self.expect_since = count, time.monotonic()
+
+    def stats(self):
+        if 'no_stats' in self.faults:
+            return None
+        with self.cv:
+            values = self.registry.snapshot()
+            if 'no_dropped_hits' not in self.faults:
+                values['dropped_hits'] = self.dropped_hits
+            return values
+
+    def kill_switch(self, on):
+        if on:
+            with open(self.kill_path, 'w') as handle:
+                handle.write(replay.KILL_SWITCH_OWNER + '\n')
+        elif os.path.exists(self.kill_path):
+            os.remove(self.kill_path)
+
+    # -- the scheduler loop ----------------------------------------------------------------------
+    def ensure_thread(self):
+        if self.thread is None or not self.thread.is_alive():
+            self.thread = threading.Thread(target=self.loop)
+            self.thread.daemon = True
+            self.thread.start()
+
+    def loop(self):
+        idle = 0
+        while True:
+            with self.cv:
+                if not self.waiting and not self.running:
+                    self.cv.wait(0.05)
+                    if not self.waiting and not self.running:
+                        idle += 1
+                        if idle > 20:
+                            self.thread = None
+                            return
+                    continue
+                idle = 0
+                progressed = self.step()
+                if not progressed or (self.running and all(request.pace for request in self.running)):
+                    # Held for a burst, or only paced seats running: let the clock (and the callers) move.
+                    self.cv.wait(0.002)
+
+    def step(self):
+        """One schedule() and its model step. -> whether anything was admitted or decoded."""
+        holding = bool(self.expected and len(self.waiting) < self.expected
+                       and time.monotonic() - (self.expect_since or 0) < 2.0)
+        admitted = []
+        if self.waiting and not holding:
+            # The registry logs through the module's log (commit refused, capture skipped).
+            with mock.patch.object(graft, 'log', self.graft_say):
+                self.registry.begin_step()
+                admitted = self.admit()
+                for request, q in admitted:
+                    self.prefill(request, q)
+        else:
+            self.registry.begin_step()
+        return self.decode() or bool(admitted)
+
+    def admit(self):
+        new, seats = [], self.max_num_seqs - len(self.running)
+        for request in list(self.waiting):
+            if seats <= 0:
+                break
+            if self.prefix:
+                blocks, h = self.manager.get_computed_blocks(request)
+                trimmed, q = self.graft.trim(request, blocks, h)
+                hit = list(trimmed.blocks[0])
+            else:
+                hit, q = [], 0
+            need = -(-request.num_tokens // BLOCK) - len(hit)
+            if need + self.pool.evictable(hit) > len(self.pool.free):
+                break      # vLLM stops admitting at an allocation failure; a staged grant is dropped at commit
+            self.pool.touch(hit)
+            self.single.req_to_blocks[request.request_id] = hit + self.pool.allocate(need)
+            self.single.num_cached_block[request.request_id] = len(hit)
+            self.publish(request, request.num_tokens)
+            self.waiting.remove(request)
+            self.running.append(request)
+            seats -= 1
+            new.append((request, q))
+        if new:
+            self.expected = 0
+        if self.prefix:
+            ids = set(request.request_id for request, _ in new)
+            self.dropped_hits += sum(1 for rid, grant in self.registry.staged.items() if rid not in ids and grant.q)
+            fresh = [(r, q) for r, q in new if not r.admissions]
+            resumed = [(r, q) for r, q in new if r.admissions]
+            self.graft.commit(SimpleNamespace(
+                scheduled_new_reqs=[SimpleNamespace(req_id=r.request_id, num_computed_tokens=q) for r, q in fresh],
+                scheduled_cached_reqs=SimpleNamespace(req_ids=[r.request_id for r, _ in resumed],
+                                                      resumed_req_ids=set(r.request_id for r, _ in resumed),
+                                                      num_computed_tokens=[q for _, q in resumed])))
+        return new
+
+    def publish(self, request, tokens):
+        if not self.prefix:
+            return
+        bypass = (('publish_unsalted' in self.faults and not request.cache_salt)
+                  or ('publish_when_killed' in self.faults and self.graft.killed))
+        if bypass:
+            self.coordinator.cache_blocks(request, min(tokens, judge.floor_chunk(request.num_prompt_tokens)))
+        else:
+            self.graft.cap(request, tokens)
+
+    def prefill(self, request, q):
+        """The model's prefill row: the committed grant must be the row's start (the model graft's
+        assertion), the planned boundaries are captured, and the row is printed."""
+        request.admissions += 1
+        first = request.admissions == 1
+        if not first:
+            request.resumed_at = len(request.output_ids)
+        captured = []
+        if self.prefix:
+            grant = self.registry.grant_for(request.request_id)
+            granted = grant.q if grant is not None else 0
+            if granted != q:
+                self.say('ERROR AssertionError: the committed grant Q=%s is not the row start %s (%s)' % (
+                    granted, q, request.request_id))
+            for position, _ in (grant.plan if grant is not None else ()):
+                if self.registry.capture(request.request_id, position) is not None:
+                    captured.append(position)
+        if first:
+            request.first_q, request.captured = q, captured
+            request.perturb = bool(
+                ('diverge_hits' in self.faults and q) or ('unsalted_differs' in self.faults and not request.cache_salt)
+                or ('capture_differs' in self.faults and captured)
+                or ('diverge_once' in self.faults and q and not self.diverged_once))
+            if 'diverge_once' in self.faults and q:
+                self.diverged_once = True
+        if not self.prefix:
+            return
+        before = self.programs
+        if 'grow_programs' in self.faults and q:
+            self.programs += 1
+        if 'grow_on_capture' in self.faults and captured and not self.grew_capture:
+            self.programs += 1
+            self.grew_capture = True
+        ids = list(request.all_token_ids)
+        slot = judge.token_sha(ids)[:16]
+        if 'bad_slot_on_hit' in self.faults and q:
+            slot = 'ff' + slot[2:]
+        digests = '' if 'no_digests' in self.faults else ' slot_sha=%s logits_sha=%s' % (
+            slot, hashlib.sha256(('logits:%s' % judge.token_sha(ids)).encode()).hexdigest()[:16])
+        if not ('drop_rows' in self.faults or ('drop_resumed_rows' in self.faults and not first)):
+            self.say('[PREFIX] req=%s Q=%d L=%d path=%s restored_ms=%.1f captured=[%s] capture_ms=%.1f '
+                     'programs_before=%d programs=%d%s' % (
+                         request.request_id, q, len(ids), self.path, 120.0 if q else 0.0,
+                         ','.join(str(p) for p in captured), 300.0 if captured else 0.0, before, self.programs,
+                         digests))
+        if self.audit:
+            digest = judge.token_sha(ids)[:16]
+            self.say('[PREFIX-AUDIT] req=%s Q=%d L=%d kv_range=0:%d kv_sha=%s slot_sha=%s' % (
+                request.request_id, q, len(ids), len(ids), digest, digest))
+        if len(ids) >= judge.CHUNK and self.path == 'traced':
+            self.say('INFO [TP chunk-replay] %d/%d chunks' % (len(ids) // judge.CHUNK, len(ids) // judge.CHUNK))
+
+    def decode(self):
+        """A token for each running request; a seat (a request whose tag ends -seat) decodes at one
+        token per PACE_S of real time instead, so a waiting request can be seen and aborted behind it
+        as on hardware. -> whether any token was emitted."""
+        now, emitted = time.time(), False
+        for request in list(self.running):
+            if request not in self.running:
+                continue
+            if request.abort_before_first is not None and not request.output_ids:
+                self.finish(request, 'closed after %.1f s' % request.abort_before_first)
+                continue
+            count = 1
+            if request.pace and request.first_at is not None:
+                allowed = int((now - request.first_at) / PACE_S) + 1
+                count = min(allowed, len(request.answer)) - len(request.output_ids)
+            for _ in range(max(0, count)):
+                emitted = True
+                if not self.emit(request):
+                    break
+        return emitted
+
+    def emit(self, request):
+        """One output token for a running request (a block for it first, preempting the last running
+        request when none is free). -> whether the request is still running."""
+        owned = self.single.req_to_blocks[request.request_id]
+        while len(owned) * BLOCK < request.num_tokens + 1:
+            fresh = self.pool.allocate(1)
+            if fresh:
+                owned.extend(fresh)
+                break
+            victim = self.running[-1]
+            self.preempt(victim)
+            if victim is request:
+                return False
+        index = len(request.output_ids)
+        text = request.answer[index]
+        token = word(text)
+        last = index == len(request.answer) - 1
+        if (request.perturb and last) or ('diverge_after_resume' in self.faults and request.resumed_at is not None
+                                          and index >= request.resumed_at):
+            token, text = token + 1, text + 'x'
+        request.append(token)
+        request.emitted.append(text)
+        if index == 0:
+            request.first_at = time.time()
+            if request.on_first is not None:
+                request.on_first()
+        self.publish(request, request.num_tokens)
+        if len(request.output_ids) >= len(request.answer):
+            self.finish(request)
+            return False
+        return True
+
+    def preempt(self, victim):
+        self.release(victim)
+        self.running.remove(victim)
+        victim.num_preemptions += 1
+        self.waiting.appendleft(victim)
+        self.preemptions += 1
+
+    def release(self, request):
+        self.pool.release(self.single.req_to_blocks.pop(request.request_id, []))
+        self.single.num_cached_block.pop(request.request_id, None)
+
+    def finish(self, request, aborted=None):
+        self.release(request)
+        if self.prefix:
+            self.registry.forget_request(request.request_id)
+        if request in self.running:
+            self.running.remove(request)
+        request.result = self.result(request, aborted)
+        request.done.set()
+
+    def abort(self, request, reason):
+        if request in self.waiting:
+            self.waiting.remove(request)
+        self.finish(request, reason)
+
+    def failed(self, request, error):
+        request.done.set()
+        return dict(content='', reasoning=None, tool_calls=[], token_ids=None, prompt_ids=None, prompt_sha=None,
+                    prompt_tokens=None, completion_tokens=0, finish=None, error=error, ttft_s=None, wall_s=0.1,
+                    status=None, aborted=None, ok=False)
+
+    def result(self, request, aborted):
+        emitted = len(request.output_ids)
+        texts = request.emitted
+        half = len(texts) // 2
+        finish, calls = None, []
+        if aborted is None:
+            if emitted >= request.max_tokens:
+                finish = 'length'
+                # A call cut off by max_tokens streams half its arguments.
+                calls = [dict(call, function=dict(call['function'], arguments=call['function']['arguments'][:-6]))
+                         for call in request.calls]
+            elif request.calls:
+                finish, calls = 'tool_calls', copy.deepcopy(request.calls)
+            else:
+                finish = 'stop'
+        prompt = list(request.prompt_token_ids) if emitted else None
+        return dict(content=' '.join(texts[half:]), reasoning=' '.join(texts[:half]) or None, tool_calls=calls,
+                    token_ids=list(request.output_ids) if emitted or finish else None, prompt_ids=prompt,
+                    prompt_sha=judge.token_sha(prompt) if prompt is not None else None,
+                    prompt_tokens=len(prompt) if prompt is not None else None, completion_tokens=emitted,
+                    finish=finish, error=None,
+                    ttft_s=round(request.first_at - request.started, 4) if request.first_at is not None else None,
+                    wall_s=round(time.time() - request.started, 4), status=200, aborted=aborted, ok=aborted is None)
+
+
+def burst_aware(get_engine):
+    """replay._burst, telling the engine how many requests are about to arrive at once."""
+    original = replay._burst
+
+    def burst(driver, jobs):
+        engine = get_engine()
+        if engine is not None:
+            engine.expect(len(jobs))
+        return original(driver, jobs)
+
+    return mock.patch.object(replay, '_burst', burst)
 
 
 class FakeLog(object):
@@ -217,13 +740,16 @@ class FakeContainer(object):
     def exec_shell(self, script, timeout=60):
         self.scripts.append(script)
         if ('echo %s >' % replay.KILL_SWITCH_OWNER) in script:
-            self.engine.flag = True
+            self.engine.kill_switch(True)
         elif 'rm -f' in script:
-            self.engine.flag = False
+            self.engine.kill_switch(False)
         return 0, ''
 
     def read_file(self, path):
-        return json.dumps(self.engine.stats) if path == pm.STATS_FILE else None
+        if path != pm.STATS_FILE:
+            return None
+        stats = self.engine.stats()
+        return json.dumps(stats) if stats is not None else None
 
     def stop(self, grace=60):
         self.stops += 1
@@ -252,6 +778,61 @@ def driver_for(engine, arm='arm', strict=True):
 
 
 CORPUS = corpus()
+
+
+def resolved(driver, engine):
+    judge.resolve(driver.records, pm.scan(engine.lines))
+    return driver.records
+
+
+# -- the fake itself: what the gates' fixes rest on ----------------------------------------------
+
+class FakeEngineTests(unittest.TestCase):
+    def body(self, text, salt=None):
+        return dict(messages=[dict(role='system', content='s'), dict(role='user', content=text)], tools=[])
+
+    def test_the_pool_is_the_workers_not_the_override(self):
+        """The TT worker overwrites num_gpu_blocks_override (plugin worker.py:388-390): the pool comes
+        from the model's all-user tokens, which QWEN36_MAX_TOKENS_ALL_USERS sets."""
+        profile = served_profile('general-prefix')
+        self.assertEqual(pool_blocks(profile), 4100, '65536 x 4 + 4 blocks of padding')
+        profile['engine']['num-gpu-blocks-override'] = 1280
+        self.assertEqual(pool_blocks(profile), 4100)
+        profile['env']['QWEN36_MAX_TOKENS_ALL_USERS'] = '81664'
+        self.assertEqual(pool_blocks(profile), 1280)
+
+    def test_grants_come_from_the_real_graft(self):
+        engine = FakeEngine()
+        first = engine.chat(self.body('alpha ' * 3000), 't1-hit', salt='s', max_tokens=8)
+        second_body = self.body('alpha ' * 3000)
+        second_body['messages'].append(dict(role='assistant', content=first['content'], reasoning=first['reasoning']))
+        second_body['messages'].append(dict(role='user', content='beta ' * 500))
+        engine.chat(second_body, 't2-hit', salt='s', max_tokens=8)
+        rows = pm.scan(engine.lines)['rows']
+        self.assertEqual([row['q'] for row in rows], [0, judge.floor_chunk(first['prompt_tokens'])])
+        self.assertEqual(engine.registry.stats['grants'], 1, 'the real registry committed the grant')
+        self.assertTrue(pm.scan(engine.lines)['grants'])
+
+    def test_an_abort_before_the_first_output_returns_no_prompt_ids(self):
+        engine = FakeEngine()
+        result = engine.chat(self.body('gamma ' * 100), 'a-hit', salt='s', abort_after_s=2.0)
+        self.assertEqual((result['aborted'], result['prompt_ids'], result['prompt_tokens']), ('closed after 2.0 s', None, None))
+        self.assertEqual(len(pm.scan(engine.lines)['rows']), 1, 'it was admitted and prefilled')
+
+    def test_a_preempted_request_is_readmitted_with_prompt_plus_output(self):
+        profile = served_profile('general-prefix')
+        profile['env']['QWEN36_MAX_TOKENS_ALL_USERS'] = str(12 * BLOCK - 4 * BLOCK)   # a 12-block pool
+        engine = FakeEngine(profile=profile)
+        bodies = [self.body('%s ' % name * 120) for name in ('alpha', 'beta')]
+        engine.expect(2)
+        results = replay._join(replay._spawn([lambda body=body, index=index: engine.chat(
+            body, 'p%d-hit' % index, salt='s%d' % index, max_tokens=300, extra=dict(ignore_eos=True))
+            for index, body in enumerate(bodies)]))
+        self.assertTrue(all(r['ok'] for r in results))
+        self.assertGreater(engine.preemptions, 0)
+        rows = pm.scan(engine.lines)['rows']
+        again = [row for row in rows if row['l'] > min(r['prompt_tokens'] for r in results)]
+        self.assertTrue(again, 'a second row at prompt + output')
 
 
 # -- the streaming client against a real local server ------------------------------------------
@@ -286,7 +867,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length) or b'null')
         Handler.seen.append((self.path, dict(self.headers), body))
         if self.path == '/tokenize':
-            payload = json.dumps(dict(count=len(body['messages']) * 10, tokens=[])).encode()
+            payload = json.dumps(dict(count=len(body['messages']) * 10, tokens=list(range(len(body['messages']) * 10)))).encode()
             self.send_response(200)
             self.send_header('content-length', str(len(payload)))
             self.end_headers()
@@ -405,6 +986,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.tokenize(self.body()), 10)
         path, _, sent = Handler.seen[-1]
         self.assertEqual((path, sent['add_generation_prompt'], len(sent['tools'])), ('/tokenize', True, 1))
+        self.assertEqual(self.client.tokenize_ids(self.body()), list(range(10)))
         self.assertEqual(self.client.metrics(), {'vllm:num_requests_waiting': 2.0})
         self.assertTrue(self.client.healthy() and self.client.ready())
         self.assertEqual(self.client.reset_prefix_cache(), 200)
@@ -440,7 +1022,8 @@ class EngineHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get('content-length') or 0)) or b'null')
         if self.path == '/tokenize':
-            self.reply(dict(count=self.engine.tokenize(body)))
+            ids = self.engine.tokenize_ids(body)
+            self.reply(dict(count=len(ids), tokens=ids))
             return
         assert body['return_token_ids'] and body['temperature'] == 0.0 and body['stream']
         result = self.engine.chat(dict(messages=body['messages'], tools=body.get('tools')), self.headers['X-Request-Id'],
@@ -458,7 +1041,8 @@ class EngineHandler(http.server.BaseHTTPRequestHandler):
         if result['tool_calls']:
             call = result['tool_calls'][0]
             chunks.append(dict(choices=[dict(index=0, delta=dict(tool_calls=[dict(index=0, id=call['id'], function=dict(
-                name=call['function']['name'], arguments=call['function']['arguments']))]), finish_reason='tool_calls')]))
+                name=call['function']['name'], arguments=call['function']['arguments']))]),
+                finish_reason=result['finish'])]))
         chunks.append(dict(choices=[], usage=dict(prompt_tokens=len(result['prompt_ids']), completion_tokens=len(ids))))
         for chunk in chunks:
             self.wfile.write(('data: %s\n\n' % json.dumps(chunk)).encode())
@@ -488,11 +1072,11 @@ class EndToEndTests(unittest.TestCase):
         records = resolved(driver, engine)
         self.assertTrue(all(r['ok'] for r in records))
         self.assertTrue(all(r['markers']['matched'] == 'tag' and r['markers']['rows'] for r in records))
-        self.assertEqual([text for r in records for _, text in judge.reuse_problems(r)], [])
+        self.assertEqual([text for r in records for severity, text in judge.reuse_problems(r) if severity != 'NOTE'], [])
         self.assertTrue(all(p['verdict'] == 'IDENTICAL' for p in driver.pairs), driver.pairs)
         self.assertTrue(any(r['markers']['q'] for r in records if r['role'] == 'hit'))
         self.assertTrue(any(r['tool_calls'] for r in records), 'a tool call came back and was sent back')
-        self.assertEqual(driver.events['boundary-2048']['tokens'], 2048)
+        self.assertEqual(driver.events['boundary-2048']['served'], 2048)
 
 
 class StreamStateTests(unittest.TestCase):
@@ -511,9 +1095,13 @@ class StreamStateTests(unittest.TestCase):
 
 
 class PlumbingTests(unittest.TestCase):
-    def test_the_log_follower_reads_docker_logs(self):
+    def test_the_log_follower_reads_docker_logs_and_a_restart_adds_no_line_twice(self):
+        outputs = [[b'2026-09-26T10:00:00.1Z first\n', b'2026-09-26T10:00:01.2Z second\n'],
+                   [b'2026-09-26T10:00:01.2Z second\n', b'2026-09-26T10:00:05Z after the restart\n']]
+
         class Process(object):
-            stdout = [b'2026-09-26T10:00:00.1Z first\n', b'2026-09-26T10:00:01.2Z second\n']
+            def __init__(self, lines):
+                self.stdout = lines
 
             def terminate(self):
                 pass
@@ -522,7 +1110,7 @@ class PlumbingTests(unittest.TestCase):
 
         def popen(arguments, **kwargs):
             calls.append(arguments)
-            return Process()
+            return Process(outputs[len(calls) - 1])
 
         directory = tempfile.mkdtemp()
         try:
@@ -535,10 +1123,17 @@ class PlumbingTests(unittest.TestCase):
             follower.start(since=follower.last_time())
             follower.thread.join(5)
             self.assertEqual(calls[1], ['docker', 'logs', '-f', '--timestamps', '--since', '2026-09-26T10:00:01.2Z', 'c'])
+            self.assertEqual(follower.lines()[2:], ['2026-09-26T10:00:05Z after the restart'],
+                             'the line --since re-read is not added twice')
             with open(os.path.join(directory, 'server.log'), encoding='utf-8') as handle:
-                self.assertEqual(len(handle.read().splitlines()), 4)
+                self.assertEqual(len(handle.read().splitlines()), 3)
         finally:
             shutil.rmtree(directory, ignore_errors=True)
+
+    def test_docker_timestamps_sort_as_times(self):
+        self.assertLess(replay.stamp_key('2026-09-26T10:00:00.1234Z'), replay.stamp_key('2026-09-26T10:00:00.12345Z'))
+        self.assertLess(replay.stamp_key('2026-09-26T10:00:00Z'), replay.stamp_key('2026-09-26T10:00:00.5Z'))
+        self.assertIsNone(replay.stamp_key('nope'))
 
     def test_container_operations(self):
         class Result(object):
@@ -563,7 +1158,9 @@ class PlumbingTests(unittest.TestCase):
     def test_the_kill_switch_file_is_removed_only_when_the_gate_wrote_it(self):
         container = FakeContainer(FakeEngine())
         replay.kill_switch_on(container)
+        self.assertTrue(os.path.exists(container.engine.kill_path))
         replay.kill_switch_off(container)
+        self.assertFalse(os.path.exists(container.engine.kill_path))
         on, off = container.scripts
         self.assertIn('echo %s > %s' % (replay.KILL_SWITCH_OWNER, replay.KILL_SWITCH_PATH), on)
         self.assertIn('if [ "$(cat %s 2>/dev/null)" = %s ]; then rm -f %s; fi' % (
@@ -604,18 +1201,38 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(hit['expected']['q'], 0)
         self.assertNotIn('prompt_ids', hit)
 
-    def test_a_divergent_hit_is_rerun_and_fails_when_it_reproduces(self):
-        engine = FakeEngine(diverge_hits=True)
+    def chain_of_two(self, engine):
         driver = driver_for(engine)
         conv = driver.conversation('c', first_tokens=8000)
         hit = driver.pair(conv, 'case')
         driver.answer(conv, hit)
         conv.extend(600)
         driver.pair(conv, 'case')
+        return driver
+
+    def test_a_divergent_hit_reruns_at_the_same_q_and_fails(self):
+        engine = FakeEngine(diverge_hits=True)
+        driver = self.chain_of_two(engine)
         second = driver.pairs[-1]
         self.assertEqual(second['verdict'], 'DIVERGED')
         self.assertIsNotNone(second['rerun'])
-        self.assertEqual([r['case'] for r in driver.records[-2:]], ['case:rerun', 'case:rerun'])
+        records = resolved(driver, engine)
+        by_tag = dict((r['tag'], r) for r in records)
+        primes = [by_tag[tag] for tag in second['primes']]
+        self.assertEqual([p['role'] for p in primes], ['prime'])
+        self.assertEqual(primes[0]['completion_tokens'], replay.PRIME_MAX_TOKENS)
+        first_hit, rerun_hit = by_tag[second['hit']], by_tag[second['rerun'][1]]
+        self.assertEqual(rerun_hit['case'], 'case:rerun')
+        self.assertNotEqual(rerun_hit['salt'], first_hit['salt'], 'the re-run replays under a fresh salt')
+        self.assertEqual(rerun_hit['markers']['q'], first_hit['markers']['q'], 'the same Q, not a tail-only hit')
+        self.assertGreater(first_hit['markers']['q'], 0)
+        self.assertIn('diverged again', second['detail'])
+
+    def test_a_hit_that_diverges_once_from_agreeing_colds_still_fails(self):
+        driver = self.chain_of_two(FakeEngine(diverge_once=True))
+        second = driver.pairs[-1]
+        self.assertEqual(second['verdict'], 'DIVERGED')
+        self.assertIn('did not reproduce', second['detail'])
 
     def test_a_dead_engine_stops_the_arm(self):
         engine = FakeEngine()
@@ -626,22 +1243,44 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(replay.EngineDead):
             driver.send(dict(messages=[dict(role='user', content='x')]), 'hit', 's', 'c')
 
-    def test_the_arms_time_runs_out(self):
+    def test_the_arms_time_runs_out_and_bounds_every_request(self):
         engine = FakeEngine()
-        driver = driver_for(engine)
-        driver.deadline = driver.clock() - 1
+        clock = [1000.0]
+        driver = replay.Driver(engine, 'arm', CORPUS, clock=lambda: clock[0], sleep=lambda s: None, say=lambda t: None,
+                               pods=lambda: None, deadline=1000.0 + 300)
+        self.assertEqual(driver.request_timeout(), 300)
+        clock[0] += 295
+        self.assertEqual(driver.request_timeout(), replay.MIN_REQUEST_TIMEOUT_S)
+        seen = []
+        engine.chat = lambda *a, **k: seen.append(k.get('timeout')) or dict(
+            content='', reasoning=None, tool_calls=[], token_ids=[1], prompt_ids=[1], prompt_sha='x', prompt_tokens=1,
+            completion_tokens=1, finish='stop', error=None, ttft_s=0.1, wall_s=0.1, status=200, aborted=None, ok=True)
+        driver.send(dict(messages=[dict(role='user', content='x')]), 'hit', 's', 'c')
+        self.assertEqual(seen, [replay.MIN_REQUEST_TIMEOUT_S])
+        clock[0] += 10
         with self.assertRaises(replay.OutOfTime):
             driver.send(dict(messages=[dict(role='user', content='x')]), 'hit', 's', 'c')
 
-
-def resolved(driver, engine):
-    judge.resolve(driver.records, pm.scan(engine.lines))
-    return driver.records
+    def test_an_aborted_request_is_admitted_from_its_tokenized_prompt(self):
+        engine = FakeEngine()
+        driver = driver_for(engine)
+        conv = driver.conversation('c', first_tokens=3000)
+        record = driver.send(conv.body(), 'hit', conv.salt, 'abort', conv, abort_after_s=2.0)
+        self.assertEqual((record['aborted'], record['prompt_ids_from']), ('closed after 2.0 s', 'tokenize'))
+        self.assertEqual(record['expected']['q'], 0)
+        self.assertEqual(driver.oracle.published_tokens(conv.salt, engine.render(conv.body())),
+                         judge.floor_chunk(engine.tokenize(conv.body())), 'the oracle saw what it published')
 
 
 class ScenarioTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = None
+        patcher = burst_aware(lambda: self.engine)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_exactness_traced_runs_every_case_and_every_pair_matches(self):
-        engine = FakeEngine()
+        self.engine = engine = FakeEngine()
         driver = driver_for(engine, 'exactness-traced')
         replay.scenario_exactness(driver, 'traced')
         cases = set(pair['case'] for pair in driver.pairs)
@@ -650,39 +1289,68 @@ class ScenarioTests(unittest.TestCase):
         self.assertTrue(all(pair['verdict'] == 'IDENTICAL' for pair in driver.pairs))
         self.assertEqual(len([p for p in driver.pairs if p['case'] == 'chain']), 1 + len(replay.CHAIN_HITS))
         for name in ('boundary-2047', 'boundary-2048', 'boundary-2049'):
-            self.assertEqual(driver.events[name]['tokens'], int(name[-4:]))
+            self.assertEqual((driver.events[name]['tokens'], driver.events[name]['served']), (int(name[-4:]),) * 2)
         records = resolved(driver, engine)
-        problems = [text for r in records for _, text in judge.reuse_problems(r)]
-        self.assertEqual(problems, [])
-        hit = dict((p['hit'], p) for p in driver.pairs)
+        problems = [text for r in records for severity, text in judge.reuse_problems(r) if severity != 'NOTE']
+        self.assertEqual(problems, [], 'the oracle agrees with the real graft on every request')
         by_tag = dict((r['tag'], r) for r in records)
         second = [by_tag[p['hit']] for p in driver.pairs if p['case'] == 'boundary-2048'][1]
         self.assertEqual(second['markers']['q'], 2048)
-        self.assertTrue(hit)
+        shared = [by_tag[p['hit']] for p in driver.pairs if p['case'] == 'shared-system']
+        own = judge.floor_chunk(shared[1]['prompt_tokens'])
+        gap = [pos for pos in shared[1]['markers']['row']['captured'] if pos < own]
+        self.assertTrue(gap, 'the second shared conversation captured a gap boundary')
+        self.assertEqual(shared[2]['markers']['q'], gap[0], 'the third restored exactly it')
+        self.assertEqual(shared[1]['markers']['q'], 0)
 
     def test_eager_and_audit_run_the_short_chain(self):
-        for variant in ('eager', 'audit'):
-            engine = FakeEngine(path='eager' if variant == 'eager' else 'traced', audit=variant == 'audit')
-            driver = driver_for(engine, 'exactness-' + variant)
-            replay.scenario_exactness(driver, variant)
+        for kind in ('eager', 'audit'):
+            profile = served_profile()
+            if kind == 'eager':
+                profile['engine']['additional-config'].setdefault('tt', {})['trace_mode'] = 'decode_only'
+            else:
+                profile['env']['QWEN_PREFIX_AUDIT'] = '1'
+            self.engine = engine = FakeEngine(profile=profile)
+            driver = driver_for(engine, 'exactness-' + kind)
+            replay.scenario_exactness(driver, kind)
             chain = [p for p in driver.pairs if p['case'] == 'chain']
             self.assertEqual(len(chain), 1 + len(replay.CHAIN_HITS_SHORT))
             self.assertNotIn('shared-system', set(p['case'] for p in driver.pairs))
+            self.assertEqual(engine.path, 'eager' if kind == 'eager' else 'traced')
 
-    def test_bringup_runs_unsalted_then_salted(self):
-        engine = FakeEngine()
+    def test_bringup_runs_unsalted_and_capturing_turns_then_salted_pairs(self):
+        self.engine = engine = FakeEngine()
         driver = driver_for(engine, 'bringup-prefix')
         replay.scenario_bringup_prefix(driver)
         roles = [r['role'] for r in driver.records]
-        self.assertEqual(roles[:3], ['unsalted'] * 3)
-        self.assertEqual(roles[3:], ['cold', 'hit'] * 3)
-        reference = driver_for(FakeEngine(prefix=False, profile='general'), 'bringup-reference')
+        self.assertEqual(roles[:6], ['unsalted', 'capture'] * 3)
+        self.assertEqual(roles[6:], ['cold', 'hit'] * 3)
+        records = resolved(driver, engine)
+        for record in records[:6]:
+            if record['role'] == 'capture':
+                self.assertEqual(record['markers']['row']['captured'], [judge.floor_chunk(record['prompt_tokens'])])
+            else:
+                self.assertEqual((record['markers']['row']['captured'], record['expected_raw_h']), ([], 0))
+                self.assertEqual(judge.raw_hit_per_attempt(record), (0.0, 1))
+        self.engine = reference_engine = FakeEngine(name='general')
+        reference = driver_for(reference_engine, 'bringup-reference')
         replay.scenario_bringup_reference(reference)
-        self.assertEqual([r['prompt_sha'] for r in reference.records], [r['prompt_sha'] for r in driver.records[:3]],
+        self.assertEqual([r['prompt_sha'] for r in reference.records], [r['prompt_sha'] for r in driver.records[:6:2]],
                          'the grants-disabled run and the reference send the same prompts')
 
+    def test_an_unsalted_request_that_publishes_is_seen_in_the_counters(self):
+        self.engine = engine = FakeEngine(publish_unsalted=True)
+        driver = driver_for(engine, 'bringup-prefix')
+        replay.scenario_bringup_prefix(driver)
+        unsalted = [r for r in driver.records if r['role'] == 'unsalted']
+        raw = [judge.raw_hit_per_attempt(r)[0] for r in unsalted]
+        self.assertEqual(raw[0], 0)
+        self.assertGreater(raw[1], 0, 'turn 2 found what turn 1 published')
+        self.assertEqual([r['expected_raw_h'] for r in unsalted], [0, 0, 0])
+
     def test_lifecycle_evict_drives_every_event(self):
-        engine = FakeEngine()
+        self.engine = engine = FakeEngine(profile=dict(served_profile(), env=dict(
+            served_profile()['env'], VLLM_SERVER_DEV_MODE='1')))
         driver = driver_for(engine, 'lifecycle-evict', strict=False)
         restarts = []
 
@@ -690,17 +1358,18 @@ class ScenarioTests(unittest.TestCase):
             driver.container.stop()
             driver.container.start()
             restarts.append(1)
-            return 1.0
+            return dict(seconds=1.0, log_window=[len(engine.lines) - 3, len(engine.lines)])
 
-        replay.scenario_lifecycle_evict(driver, pool_tokens=262144, restart=restart)
+        with mock.patch.object(replay, 'EVICT_LENGTHS', (12000, 24000)):
+            replay.scenario_lifecycle_evict(driver, pool_tokens=engine.num_blocks * BLOCK, restart=restart)
         events = driver.events
         self.assertTrue(events['arrivals']['ok'])
         self.assertEqual(len(events['arrivals']['tags']), 4)
         self.assertEqual((events['abort-waiting']['phase'], events['abort-waiting']['aborted']), ('waiting', 'closed on signal'))
         self.assertFalse(events['abort-prefill']['first_token_before_abort'])
-        self.assertEqual(events['flood']['floods'], 3)
         self.assertEqual(events['reset-prefix-cache']['status'], 200)
         self.assertEqual((events['kill-switch']['written'], events['kill-switch']['removed']), (True, True))
+        self.assertEqual(len(events['reload']['log_window']), 2, 'the restart window reaches the gate')
         self.assertEqual(restarts, [1])
         records = resolved(driver, engine)
         by_case = dict()
@@ -713,22 +1382,54 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(by_case['after-reload'][0], 0)
         self.assertGreater(by_case['after-reload-2'][0], 0)
         self.assertEqual(sum(1 for p in driver.pairs if p['verdict'] != 'IDENTICAL'), 0)
+        before = events['stats-before-restart']['stats']
+        self.assertGreater(before['same_step_rejects'], 0, 'the burst shared a step')
+        self.assertGreater(before['evicted_coupled'], 0, 'the flood took checkpoints with their blocks')
+        self.assertEqual(engine.registry.stats['same_step_rejects'], 0, 'the restart began a new registry')
+        latched = dict((r['tag'], r) for r in records)[events['kill-switch']['latched_tag']]
+        raw, _ = judge.raw_hit_per_attempt(latched)
+        self.assertLessEqual(raw, latched['expected_raw_h'])
+        self.assertGreater(judge.floor_chunk(events['kill-switch']['on_prompt']), latched['expected_raw_h'])
 
-    def test_store_and_tiny(self):
-        engine = FakeEngine(store=3)
+    def test_store_evicts_by_lru(self):
+        profile = served_profile()
+        profile['env']['QWEN_PREFIX_STORE_GIB'] = '0.5'
+        self.engine = engine = FakeEngine(profile=profile)
         driver = driver_for(engine, 'lifecycle-store', strict=False)
         replay.scenario_lifecycle_store(driver)
         self.assertEqual(driver.pairs[-1]['case'], 'store-after')
-        engine = FakeEngine(preempt_on_ignore_eos=1)
+        self.assertGreater(engine.registry.stats['evicted_lru'], 0)
+
+    def tiny_engine(self, **faults):
+        profile = served_profile()
+        profile['env']['QWEN36_MAX_TOKENS_ALL_USERS'] = str(replay.TINY_POOL_TOKENS - 4 * BLOCK)
+        return FakeEngine(profile=profile, **faults)
+
+    def test_tiny_builds_a_dropped_grant_and_a_preemption(self):
+        self.engine = engine = self.tiny_engine()
+        self.assertEqual(engine.num_blocks * BLOCK, replay.TINY_POOL_TOKENS)
         driver = driver_for(engine, 'lifecycle-tiny', strict=False)
-        replay.scenario_lifecycle_tiny(driver, pool_tokens=81920)
-        self.assertEqual(driver.events['tiny']['preemptions'], 4.0)
-        self.assertEqual(len([p for p in driver.pairs if p['case'] == 'tiny']), 4)
-        tiny = [r for r in driver.records if r['case'] == 'tiny']
-        self.assertTrue(all(r['completion_tokens'] == replay.TINY_MAX_TOKENS for r in tiny), 'ignore_eos answers')
+        replay.scenario_lifecycle_tiny(driver, pool_tokens=replay.TINY_POOL_TOKENS)
+        grant, tiny = driver.events['tiny-grant'], driver.events['tiny']
+        self.assertTrue(grant['ok'] and grant['filler_running'] and grant['waiting_gauge'])
+        self.assertGreater(engine.dropped_hits, 0, 'a staged grant with Q > 0 was dropped')
+        self.assertGreater(tiny['preemptions'], 0)
+        records = resolved(driver, engine)
+        waited = dict((r['tag'], r) for r in records)[grant['tag']]
+        self.assertGreater(waited['markers']['q'], 0)
+        self.assertTrue(any(judge.admissions(r) > 1 for r in records), 'a preempted request printed a second row')
+        self.assertEqual(len([p for p in driver.pairs if p['case'] == 'tiny']), replay.TINY_PREEMPT_CONVERSATIONS)
+        self.assertTrue(all(r['completion_tokens'] == tiny['max_tokens'] for r in records if r['case'] == 'tiny'))
+
+    def test_tiny_on_the_wrong_pool_sends_nothing(self):
+        self.engine = engine = FakeEngine()
+        driver = driver_for(engine, 'lifecycle-tiny', strict=False)
+        replay.scenario_lifecycle_tiny(driver, pool_tokens=engine.num_blocks * BLOCK)
+        self.assertTrue(driver.events['tiny']['skipped'])
+        self.assertEqual(driver.records, [])
 
     def test_timing_phases(self):
-        engine = FakeEngine()
+        self.engine = engine = FakeEngine()
         driver = driver_for(engine, 'timing-prefix', strict=False)
         replay.scenario_timing(driver, agents=(1, 2), turns=3, max_tokens=16, gap_mean_s=0.0)
         self.assertEqual(sorted(driver.phases), ['agents-1', 'agents-2'])

@@ -3,8 +3,10 @@
 Nothing here opens a device or runs docker. The arms' `docker run` argv (the S1 gate's agent shape,
 detached, the platform's argv, a derived profile mounted where one is needed), what each plan
 refuses before any container, and the whole Runner against test_prefix_replay.FakeEngine - one per
-arm, built from the docker argv the Runner passes - with faults switched on to see each verdict. The
-workflow step, the job keys and the CPU allowlist are read from the files."""
+arm, built from the profile the arm's docker argv serves (the derived file when it mounts one), so
+the pool, the loop path, audit, dev mode and the store are what that profile would give; grants come
+from the real scheduler graft - with faults switched on to see each verdict. The workflow step, the
+job keys and the CPU allowlist are read from the files."""
 
 import copy
 import json
@@ -35,6 +37,7 @@ CPU_WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'qwen-integration-cpu.
 JOB_FILE = os.path.join(ROOT, '.github', 'c2-serving-job.env')
 NEW_TESTS = ('test_prefix_agent_corpus', 'test_prefix_markers', 'test_prefix_judge', 'test_prefix_report',
              'test_prefix_replay', 'test_prefix_oracle_check', 'test_c2_prefix_gate')
+CURRENT = dict(engine=None)
 
 
 def profiles():
@@ -44,15 +47,18 @@ def profiles():
     return document
 
 
-GOOD_ANCHOR = dict(files={}, pins={}, mismatched=[], marker_files=['model.py'])
+SHA = dict(a='a' * 64, b='b' * 64)
+GOOD_ANCHOR = dict(files={}, pins={'mlp.py': SHA['a']}, actual={'mlp.py': SHA['a']}, mismatched=[],
+                   marker_files=['model.py'], prefix_marker_in=['model.py'], unpinned=[])
 
 
 class Harness(object):
-    """The Runner's docker, client, log and container, faked; a FakeEngine per arm, shaped by the
-    arm's own docker argv (its profile, its derived profile file)."""
+    """The Runner's docker, client, log and container, faked; a FakeEngine per arm, built from the
+    profile the arm's docker argv serves. faults: {kind or profile name or 'all': {fault: True,
+    '_env': {KEY: value or None}, '_engine': FakeEngine subclass}}."""
 
     def __init__(self, engine_class=None, **faults):
-        self.engine_class = engine_class or FloodEngine
+        self.engine_class = engine_class or fakes.FakeEngine
         self.faults = faults
         self.engine = None
         self.engines = []
@@ -61,30 +67,33 @@ class Harness(object):
     def docker(self, arguments, timeout=600):
         self.calls.append(arguments)
         if arguments[:3] == ['docker', 'run', '-d']:
-            profile = [a.split('=', 1)[1] for a in arguments if a.startswith('QWEN_C2_PROFILE=')][0]
+            name = [a.split('=', 1)[1] for a in arguments if a.startswith('QWEN_C2_PROFILE=')][0]
             derived = [a for a in arguments if a.startswith('type=bind,src=') and gate.DERIVED_MOUNT in a]
             if derived:
                 path = derived[0].split('src=', 1)[1].split(',', 1)[0]
                 with open(path, encoding='utf-8') as handle:
-                    doc = json.load(handle)
-                assert profile in doc['profiles'], (profile, list(doc['profiles']))
-            prefix = profile != 'general'
-            options = dict(prefix=prefix, profile=profile, path='eager' if profile.endswith('+eager') else 'traced',
-                           audit=profile.endswith('+audit'), store=3 if profile.endswith('+store') else None,
-                           store_gib=gate.SMALL_STORE_GIB if profile.endswith('+store') else None,
-                           kv_tokens=gate.TINY_BLOCKS * 64 if profile.endswith('+tiny') else 262144,
-                           preempt_on_ignore_eos=1 if profile.endswith('+tiny') else 0,
-                           dev_mode=profile.endswith(('+dev', '+tiny')))
-            options.update(self.faults.get(profile.split('+')[-1] if '+' in profile else profile, {}))
-            options.update(self.faults.get('all', {}))
-            self.engine = self.engine_class(**options)
+                    document = json.load(handle)
+            else:
+                document = profiles()
+            profile = copy.deepcopy(document['profiles'][name])
+            options = {}
+            for key in (name.split('+')[0], name.split('+')[-1] if '+' in name else None, 'all'):
+                options.update(self.faults.get(key) or {})
+            for key, value in (options.pop('_env', None) or {}).items():
+                if value is None:
+                    profile['env'].pop(key, None)
+                else:
+                    profile['env'][key] = value
+            engine_class = options.pop('_engine', None) or self.engine_class
+            self.engine = engine_class(profile=profile, name=name, **options)
+            CURRENT['engine'] = self.engine
             self.engines.append(self.engine)
             return 0, 'container-id'
         if arguments[:3] == ['docker', 'logs', '--timestamps']:
             return 0, '\n'.join(self.engine.lines) if self.engine else ''
         return 0, ''
 
-    def client(self):
+    def proxy(self):
         harness = self
 
         class Proxy(object):
@@ -95,44 +104,21 @@ class Harness(object):
 
     def runner(self, results):
         return gate.Runner('img', results, ROOT, ['/dev/tenstorrent/1', '/dev/tenstorrent/0'], docker=self.docker,
-                           make_client=self.client, make_log=lambda name, path: fakes.FakeLog(self.engine_proxy()),
-                           make_container=lambda name: fakes.FakeContainer(self.engine_proxy()),
+                           make_client=self.proxy, make_log=lambda name, path: fakes.FakeLog(self.proxy()),
+                           make_container=lambda name: fakes.FakeContainer(self.proxy()),
                            containers=lambda: [], log=lambda text: None, sleep=lambda seconds: None,
                            corpus=fakes.CORPUS, agents=(1, 2), turns=2)
 
-    def engine_proxy(self):
-        harness = self
 
-        class Proxy(object):
-            def __getattr__(self, name):
-                return getattr(harness.engine, name)
-
-            def __setattr__(self, name, value):
-                setattr(harness.engine, name, value)
-
-        return Proxy()
-
-
-class FloodEngine(fakes.FakeEngine):
-    """FakeEngine whose pool evicts: a flood request drops the first two evict- conversations'
-    published blocks and their checkpoints (coupled), as a full pool pops its LRU head."""
-
-    def chat(self, body, tag, salt=None, **kwargs):
-        if tag.endswith('-flood'):
-            with self.lock:
-                for conv in ('evict-0', 'evict-1'):
-                    for key in [k for k in self.oracle.published if k.endswith('-' + conv)]:
-                        self.oracle.published.pop(key)
-                    for key in [k for k in self.oracle.checkpoints if k[0].endswith('-' + conv)]:
-                        self.oracle.checkpoints.pop(key)
-        return super(FloodEngine, self).chat(body, tag, salt, **kwargs)
-
-
-def run_plan(plan, results, anchor=GOOD_ANCHOR, baseline='general', **faults):
-    harness = Harness(**faults)
+def run_plan(plan, results, anchor=GOOD_ANCHOR, baseline='general', engine_class=None, **faults):
+    harness = Harness(engine_class, **faults)
     runner = harness.runner(results)
     arms = gate.plan_arms(plan, 'general-prefix', baseline, profiles())
     return gate.run_plan(plan, arms, runner, anchor), harness, runner
+
+
+def arm_of(plan, name):
+    return [arm for arm in gate.plan_arms(plan, 'general-prefix', 'general', profiles()) if arm['arm'] == name][0]
 
 
 class ArmTests(unittest.TestCase):
@@ -164,14 +150,25 @@ class ArmTests(unittest.TestCase):
         eager = gate.derive(document, 'general-prefix', 'eager')[1]['profiles']['general-prefix+eager']
         self.assertEqual(eager['engine']['additional-config']['tt']['trace_mode'], 'decode_only')
         self.assertEqual(eager['engine']['additional-config']['tt']['l1_small_size'], 24576, 'the rest of tt kept')
-        tiny = gate.derive(document, 'general-prefix', 'tiny')[1]['profiles']['general-prefix+tiny']
-        self.assertEqual(tiny['engine']['num-gpu-blocks-override'], gate.TINY_BLOCKS)
-        self.assertGreaterEqual(gate.TINY_BLOCKS * 64, tiny['engine']['max-model-len'],
-                                'one request of the full context still fits the tiny pool')
         store = gate.derive(document, 'general-prefix', 'store')[1]['profiles']['general-prefix+store']
         self.assertEqual(store['env']['QWEN_PREFIX_STORE_GIB'], '0.5')
         self.assertEqual(judge.store_entries(gate.SMALL_STORE_GIB), 3)
         self.assertNotIn('+', json.dumps(document['profiles']['general-prefix']), 'the image profile is untouched')
+
+    def test_the_tiny_pool_is_set_where_the_tt_worker_reads_it(self):
+        """The TT worker overwrites num_gpu_blocks_override (plugin worker.py:388-390); the image's
+        model reads QWEN36_MAX_TOKENS_ALL_USERS (qwen36_vllm.py:96-98) and the worker adds a block
+        per sequence (worker.py:538-539): 81664 + 4 x 64 = 81920 tokens, 1280 blocks."""
+        tiny = gate.derive(profiles(), 'general-prefix', 'tiny')[1]['profiles']['general-prefix+tiny']
+        self.assertNotIn('num-gpu-blocks-override', tiny['engine'])
+        self.assertEqual(tiny['env']['QWEN36_MAX_TOKENS_ALL_USERS'], '81664')
+        self.assertEqual(fakes.pool_blocks(tiny), gate.TINY_BLOCKS)
+        self.assertEqual(gate.TINY_BLOCKS * judge.BLOCK, replay.TINY_POOL_TOKENS)
+        self.assertGreaterEqual(replay.TINY_POOL_TOKENS, tiny['engine']['max-model-len'],
+                                'one request of the full context still fits the tiny pool')
+        overridden = copy.deepcopy(profiles()['profiles']['general-prefix'])
+        overridden['engine']['num-gpu-blocks-override'] = gate.TINY_BLOCKS
+        self.assertEqual(fakes.pool_blocks(overridden), 4100, 'the override alone leaves the default pool')
 
     def test_what_is_refused_before_any_container(self):
         document = profiles()
@@ -211,20 +208,27 @@ class ShapeTests(unittest.TestCase):
         self.assertIn('QWEN_C2_PROFILE=general-prefix+eager', derived)
 
     def test_the_contract_reads_the_derived_file(self):
-        """serving_c2_contract.boot loads QWEN_C2_PROFILES: the derived file is what serves."""
-        name, document = gate.derive(profiles(), 'general-prefix', 'eager')
-        directory = tempfile.mkdtemp()
-        try:
-            path = os.path.join(directory, 'profiles.json')
-            with open(path, 'w', encoding='utf-8') as handle:
-                json.dump(document, handle)
-            profile = contract.load_profile(path, name)
-            argv = contract.rewrite_argv(['api_server.py'] + gate.PLATFORM_ARGS, profile, profile['snapshots'][0])
-            self.assertEqual(pm.prefix_argv_problems(argv[1:]), [])
-            tt = json.loads(argv[argv.index('--additional-config') + 1])['tt']
-            self.assertEqual(tt['trace_mode'], 'decode_only')
-        finally:
-            shutil.rmtree(directory, ignore_errors=True)
+        """serving_c2_contract.boot loads QWEN_C2_PROFILES: the derived file is what serves, and its
+        env reaches every process (apply_environment)."""
+        for kind in ('eager', 'tiny'):
+            name, document = gate.derive(profiles(), 'general-prefix', kind)
+            directory = tempfile.mkdtemp()
+            try:
+                path = os.path.join(directory, 'profiles.json')
+                with open(path, 'w', encoding='utf-8') as handle:
+                    json.dump(document, handle)
+                profile = contract.load_profile(path, name)
+                argv = contract.rewrite_argv(['api_server.py'] + gate.PLATFORM_ARGS, profile, profile['snapshots'][0])
+                self.assertEqual(pm.prefix_argv_problems(argv[1:]), [])
+                environ = contract.apply_environment(profile, {})
+                if kind == 'eager':
+                    tt = json.loads(argv[argv.index('--additional-config') + 1])['tt']
+                    self.assertEqual(tt['trace_mode'], 'decode_only')
+                else:
+                    self.assertEqual(environ['QWEN36_MAX_TOKENS_ALL_USERS'], '81664')
+                    self.assertEqual(pm.argv_flags(argv[1:])['max-num-seqs'], '4', 'the padding the pool assumes')
+            finally:
+                shutil.rmtree(directory, ignore_errors=True)
 
     def test_the_platform_argv_is_the_smoke_steps(self):
         with open(WORKFLOW, encoding='utf-8') as handle:
@@ -235,26 +239,144 @@ class ShapeTests(unittest.TestCase):
             self.assertIn(flag, smoke)
             self.assertIn(flag, ' '.join(gate.PLATFORM_ARGS))
 
-    def test_the_anchor_probe_reads_shas_pins_and_markers(self):
-        sha = lambda c: c * 64  # noqa: E731
-        text = '\n'.join(['%s  %s' % (sha('a'), path) for path in gate.ANCHOR_FILES] + [
-            '==pins', '%s  graft/attention/tp.py.orig' % sha('0')] +
-            ['%s  graft/%s' % (sha('a'), path) for path in gate.GRAFTED if path != 'mlp.py'] +
-            ['%s  graft/mlp.py' % sha('b'), '==markers', './model.py', './prefix_restore.py'])
+    def test_the_anchor_probe_holds_every_pinned_file(self):
+        with open(os.path.join(ROOT, 'docker', 'qwen-c2-graft', 'graft.sha256'), encoding='utf-8') as handle:
+            pinned = handle.read()
+        paths = [line.split()[1][len('graft/'):] for line in pinned.splitlines() if line.strip()]
+        self.assertGreater(len(paths), 5, 'more than the five S1 model files')
+        installed = ['%s  %s' % (line.split()[0], line.split()[1][len('graft/'):]) for line in pinned.splitlines()
+                     if line.strip()]
+        installed[-1] = '%s  %s' % (SHA['b'], paths[-1])
+        text = '\n'.join(['%s  model.py' % SHA['a'], '%s  qwen36_vllm.py' % SHA['a'], '==pins', pinned.rstrip('\n'),
+                          '%s  graft/model.py.orig' % SHA['b'], '==pinned'] + installed +
+                         ['missing  gdn/tp.py', '==markers', './model.py', './stale_copy.py'])
         anchor = gate.parse_anchor(text)
-        self.assertEqual(anchor['mismatched'], ['mlp.py'])
-        self.assertEqual(anchor['marker_files'], ['model.py', 'prefix_restore.py'])
-        self.assertEqual(anchor['files']['qwen36_vllm.py'], sha('a'))
-        self.assertEqual(anchor['pins']['attention/tp.py'], sha('a'), '.orig pins are the sources, not the graft')
+        self.assertEqual(sorted(anchor['pins']), sorted(paths), 'every non-.orig pin, not a fixed list')
+        self.assertEqual(anchor['mismatched'], sorted(['gdn/tp.py', paths[-1]]))
+        self.assertEqual((anchor['prefix_marker_in'], anchor['unpinned']), (['model.py'], ['model.py', 'qwen36_vllm.py']))
+        stray = gate.parse_anchor(text.replace('./model.py\n', ''))
+        self.assertEqual((stray['marker_files'], stray['prefix_marker_in']), (['stale_copy.py'], []),
+                         'a marker in an unpinned stray file vouches for nothing')
+        script = gate.anchor_script()
+        self.assertIn('cat /opt/qwen-c2/graft.sha256', script)
+        self.assertIn('p !~ /[.]orig$/', script)
+        self.assertNotIn('\\', script)
 
         class Result(object):
             stdout, returncode = text.encode(), 0
 
         seen = []
         probe = gate.anchor_probe('img', run=lambda arguments, **k: seen.append(arguments) or Result())
-        self.assertEqual(probe['mismatched'], ['mlp.py'])
+        self.assertEqual(probe['mismatched'], anchor['mismatched'])
         self.assertEqual(seen[0][:6], ['docker', 'run', '--rm', '--network', 'none', '--entrypoint'])
         self.assertNotIn('--device', seen[0])
+
+
+class GenericTests(unittest.TestCase):
+    ARM = dict(arm='lifecycle-evict', prefix=False, strict=False, kind='dev')
+
+    def test_every_failure_line_is_scanned_for_fatal_signatures(self):
+        lines = ['Traceback (most recent call last)'] * 20 + ['AssertionError: grant Q 4096 != start_pos 2048']
+        problems, notes, _ = gate.generic_problems(self.ARM, pm.scan(lines), [], None, 'x')
+        self.assertTrue(any('AssertionError' in p for p in problems), problems)
+        self.assertEqual(len([n for n in notes if 'traceback at line' in n]), gate.MAX_LISTED)
+        self.assertTrue(any('4 more tracebacks' in n for n in notes))
+
+    def test_failure_lines_of_the_restart_drill_are_recorded_not_failed(self):
+        lines = ['ok', 'EngineDeadError: engine stopped', 'ok', 'EngineDeadError: later']
+        problems, notes, _ = gate.generic_problems(self.ARM, pm.scan(lines), [], None, 'x', windows=[(0, 2)])
+        self.assertEqual([p for p in problems if 'EngineDead' in p], ['server log line 3: EngineDeadError: later'])
+        self.assertTrue(any('during the restart drill' in n for n in notes))
+        self.assertEqual(gate.quiet_windows(dict(reload=dict(log_window=[4, 9]), other={})), [(4, 9)])
+
+    def test_the_raw_hit_where_publishing_is_the_claim(self):
+        arm = dict(arm='bringup-prefix', prefix=True, strict=True, kind=None)
+        record = dict(tag='u', role='unsalted', ok=True, prompt_tokens=4000, expected_raw_h=0,
+                      markers=dict(rows=[dict(q=0, l=4000, captured=[])], row=dict(q=0, l=4000, captured=[]), q=0,
+                                   l=4000, grants=[], grant=None, skipped=[], admissions=1),
+                      counters=dict(before={'vllm:prefix_cache_hits': 0.0, 'vllm:prefix_cache_queries': 0.0},
+                                    after={'vllm:prefix_cache_hits': 2048.0, 'vllm:prefix_cache_queries': 4000.0}))
+        problems, _, _ = gate.generic_problems(arm, pm.scan([]), [record], None, 'x')
+        self.assertTrue(any('found 2048 cached tokens' in p for p in problems), problems)
+        record['counters'] = dict(before={}, after={})
+        _, _, missing = gate.generic_problems(arm, pm.scan([]), [record], None, 'x')
+        self.assertTrue(any('no vllm:prefix_cache_hits reading' in m for m in missing), missing)
+
+
+def hit(tag, case, prompt, q, captured=(), role='hit'):
+    row = dict(q=q, l=prompt, captured=list(captured), tag=tag)
+    return dict(tag=tag, case=case, role=role, prompt_tokens=prompt, ok=True,
+                markers=dict(q=q, l=prompt, row=row, rows=[row], admissions=1))
+
+
+class ExactnessCaseTests(unittest.TestCase):
+    ARM = dict(arm='exactness-traced', prefix=True, strict=True)
+
+    def test_a_boundary_case_served_off_its_target_is_not_judged(self):
+        records = [hit('a', 'boundary-2048', 2050, 0), hit('b', 'boundary-2048', 2400, 2048)]
+        events = {'boundary-2047': dict(fitted=True, tokens=2047, served=2047),
+                  'boundary-2048': dict(fitted=True, tokens=2048, served=2050),
+                  'boundary-2049': dict(fitted=True, tokens=2049, served=2049)}
+        missing, problems, _ = gate.exercised_exactness(dict(arm='exactness-audit'), records, events)
+        self.assertTrue(any('boundary-2048: /tokenize fitted 2048 tokens but the chat endpoint served 2050' in m
+                            for m in missing), missing)
+        self.assertEqual(problems, [])
+        events['boundary-2047'] = dict(fitted=True, tokens=2047, served=2049)
+        records = [hit('c', 'boundary-2047', 2049, 0), hit('d', 'boundary-2047', 2300, 2048)]
+        missing, problems, _ = gate.exercised_exactness(dict(arm='exactness-audit'), records, events)
+        self.assertEqual(problems, [], 'the probe\'s false FAIL: a 2047 case served as 2049')
+
+    def test_the_gap_capture_and_its_restore(self):
+        shared = [hit('s0', 'shared-system', 6900, 0, [6144]), hit('s1', 'shared-system', 6800, 0, [4096, 6144]),
+                  hit('s2', 'shared-system', 6850, 4096, [6144])]
+        missing, problems, lines = gate.shared_gap(shared)
+        self.assertEqual((missing, problems), ([], []))
+        self.assertTrue(any('gap boundary 4096 captured by s1, restored by s2' in line for line in lines))
+        no_gap = [hit('s0', 'shared-system', 4300, 0, [4096]), hit('s1', 'shared-system', 4280, 4096, []),
+                  hit('s2', 'shared-system', 4290, 4096, [])]
+        missing, problems, _ = gate.shared_gap(no_gap)
+        self.assertTrue(any('captured no gap boundary' in m for m in missing), 'the reviewer\'s 4.3k case')
+        wrong = shared[:2] + [hit('s2', 'shared-system', 6850, 2048, [6144])]
+        self.assertTrue(gate.shared_gap(wrong)[0])
+        past = shared[:2] + [hit('s2', 'shared-system', 6850, 6144, [])]
+        self.assertTrue(gate.shared_gap(past)[1])
+
+
+class LifecycleCaseTests(unittest.TestCase):
+    def tiny_events(self, **grant):
+        base = dict(ok=True, filler_running=True, waited_for_filler=True, tag='x2', first_token_s=9.0, filler_end_s=8.9)
+        base.update(grant)
+        return {'tiny-grant': base, 'tiny': dict(ok=True, preemptions=1.0)}
+
+    def records(self, q=16384):
+        waited = hit('x2', 'tiny-grant', 22000, q)
+        resumed = hit('t1', 'tiny', 26000, 24576)
+        resumed['markers']['admissions'] = 2
+        return [waited, resumed]
+
+    def test_the_dropped_grant_evidence(self):
+        problems, missing, lines = gate.tiny_findings(self.records(), self.tiny_events(), dict(dropped_hits=3))
+        self.assertEqual((problems, missing), ([], []))
+        self.assertTrue(any('t1 (2 admissions)' in line for line in lines), lines)
+        problems, _, _ = gate.tiny_findings(self.records(), self.tiny_events(), dict(dropped_hits=0))
+        self.assertTrue(any('dropped_hits counter' in p for p in problems), 'the counter contradicts what happened')
+        self.assertEqual(gate.tiny_findings(self.records(), self.tiny_events(), dict(pins=0))[1], [],
+                         'no dropped_hits counter yet: the constructed evidence stands')
+        _, missing, _ = gate.tiny_findings(self.records(), self.tiny_events(waited_for_filler=False), None)
+        self.assertTrue(any('did not wait for the filler' in m for m in missing))
+        _, missing, _ = gate.tiny_findings(self.records(q=0), self.tiny_events(), None)
+        self.assertTrue(any('admitted at Q=0' in m for m in missing))
+
+    def test_a_skipped_pool_is_not_exercised(self):
+        events = dict(tiny=dict(skipped=True, pool_tokens=262400, expected_pool=81920, reason='wrong pool'))
+        problems, missing, _ = gate.tiny_findings([], events, None)
+        self.assertEqual((problems, missing), ([], ['the tiny pool did not run: wrong pool']))
+
+    def test_required_counters(self):
+        self.assertEqual(gate.required_stats(None, ('evicted_lru',)), [])
+        self.assertIn('no evicted_lru counter', gate.required_stats({}, ('evicted_lru',))[0])
+        self.assertIn('LRU', gate.required_stats(dict(evicted_lru=0), ('evicted_lru',))[0])
+        self.assertEqual(gate.required_stats(dict(evicted_lru=2), ('evicted_lru',)), [])
 
 
 class RunnerTests(unittest.TestCase):
@@ -267,124 +389,187 @@ class RunnerTests(unittest.TestCase):
             patcher = mock.patch.object(replay, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        patcher = fakes.burst_aware(lambda: CURRENT['engine'])
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(self.results, ignore_errors=True)
 
+    def plan(self, plan, name=None, **kwargs):
+        return run_plan(plan, os.path.join(self.results, name or plan), **kwargs)
+
     def test_bringup_passes_on_a_good_engine_and_keeps_its_files(self):
-        result, harness, _ = run_plan('bringup', self.results)
+        result, harness, _ = self.plan('bringup')
         self.assertEqual(result['verdict'], 'PASS', result['lines'])
         self.assertEqual([a['verdict'] for a in result['arms'].values()], ['PASS', 'PASS'])
-        self.assertTrue(any('grants disabled vs baseline, turn 1' in line and 'IDENTICAL' in line for line in result['lines']))
+        for label in ('grants disabled (unsalted) vs baseline', 'capturing (fresh salt) vs baseline'):
+            self.assertEqual(len([line for line in result['lines'] if label in line and 'IDENTICAL' in line]), 3, label)
+        prefix = result['arms']['bringup-prefix']
+        detail = [line for line in prefix['lines'] if line.startswith('program cache across')][0]
+        self.assertIn('"capture_compiled": 0', detail)
+        self.assertIn('"hits_measured": 2', detail)
         for name in ('server-final.log', 'records.jsonl', 'pairs.json', 'events.json', 'arm.json', 'docker-run.json'):
-            self.assertTrue(os.path.exists(os.path.join(self.results, 'bringup-prefix', name)), name)
+            self.assertTrue(os.path.exists(os.path.join(self.results, 'bringup', 'bringup-prefix', name)), name)
         removed = [c for c in harness.calls if c[:3] == ['docker', 'rm', '-f']]
         self.assertEqual(len(removed), 4, 'each container removed before and after its arm')
 
     def test_bringup_fails_on_each_thing_it_checks(self):
         cases = dict(
-            programs=dict(faults={'general-prefix': dict(grow_programs=True)}, text='program cache grew'),
-            unsalted=dict(faults={'general-prefix': dict(unsalted_differs=True)}, text='not byte-identical'),
+            programs=dict(faults={'general-prefix': dict(grow_programs=True)}, text='a restore compiled'),
+            capture_compiles=dict(faults={'general-prefix': dict(grow_on_capture=True)}, text='a capture compiled'),
+            capture_differs=dict(faults={'general-prefix': dict(capture_differs=True)},
+                                 text='capturing (fresh salt) is not byte-identical'),
+            unsalted=dict(faults={'general-prefix': dict(unsalted_differs=True)}, text='grants disabled (unsalted) is not'),
+            publishes=dict(faults={'general-prefix': dict(publish_unsalted=True)}, text='cached tokens'),
             rows=dict(faults={'general-prefix': dict(drop_rows=True)}, text='no [PREFIX] row'),
             anchor=dict(anchor=dict(GOOD_ANCHOR, mismatched=['gdn/tp.py']), text='not the image\'s pinned graft'),
-            graft=dict(anchor=dict(GOOD_ANCHOR, marker_files=[]), text='prefix model graft is not in the image'))
+            graft=dict(anchor=dict(GOOD_ANCHOR, prefix_marker_in=[]), text='prefix model graft is not in the served'),
+            no_pins=dict(anchor=dict(GOOD_ANCHOR, pins={}), text='read no pins'))
         for name, case in cases.items():
             with self.subTest(name=name):
-                result, _, _ = run_plan('bringup', os.path.join(self.results, name), anchor=case.get('anchor', GOOD_ANCHOR),
-                                        **case.get('faults', {}))
+                result, _, _ = self.plan('bringup', name, anchor=case.get('anchor', GOOD_ANCHOR), **case.get('faults', {}))
                 self.assertEqual(result['verdict'], 'FAIL', name)
                 self.assertTrue(any(case['text'] in line for line in result['lines']) or any(
                     case['text'] in p for a in result['arms'].values() for p in a.get('problems') or ()),
                     (name, result['lines']))
 
+    def test_the_capture_path_fault_passes_every_cold_hit_pair(self):
+        """The reviewer's false PASS: a capture that disturbs the prefill makes cold equal hit."""
+        result, _, _ = self.plan('bringup', 'capture-pairs', **{'general-prefix': dict(capture_differs=True)})
+        prefix = result['arms']['bringup-prefix']
+        self.assertGreater(prefix['identical'], 0, 'pairs where both runs captured still match')
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertEqual(len([p for p in result['cross_problems'] if 'capturing (fresh salt) is not byte-identical' in p]),
+                         3, 'the baseline comparison catches every capturing turn')
+
     def test_a_missing_install_line_or_a_bad_argv_fails_the_arm(self):
-        harness = Harness()
+        class NoInstall(fakes.FakeEngine):
+            def boot(self):
+                super(NoInstall, self).boot()
+                self.lines[:] = [line for line in self.lines if 'prefix: install' not in line
+                                 and 'Automatic prefix caching' not in line]
+
+        harness = Harness(NoInstall)
         runner = harness.runner(self.results)
-        arms = gate.plan_arms('bringup', 'general-prefix', 'general', profiles())
-        original = FloodEngine.boot
-
-        def boot(engine):
-            original(engine)
-            engine.lines[:] = [line for line in engine.lines if 'prefix: install' not in line
-                               and 'Automatic prefix caching' not in line]
-
-        FloodEngine.boot = boot
-        try:
-            _, result = runner.run(arms[1])
-        finally:
-            FloodEngine.boot = original
+        _, result = runner.run(arm_of('bringup', 'bringup-prefix'))
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertTrue(any('prefix: install' in p for p in result['problems']))
         self.assertTrue(any('Automatic prefix caching is enabled' in p for p in result['problems']))
 
     def test_exactness_passes_and_every_arm_runs_its_path(self):
-        result, harness, _ = run_plan('exactness', self.results)
+        result, harness, _ = self.plan('exactness')
         self.assertEqual(result['verdict'], 'PASS', result['lines'])
-        paths = [e.path for e in harness.engines]
-        self.assertEqual(paths, ['traced', 'traced', 'eager'])
+        self.assertEqual([e.path for e in harness.engines], ['traced', 'traced', 'eager'])
+        self.assertTrue(harness.engines[1].audit)
         traced = result['arms']['exactness-traced']
         self.assertTrue(any('boundary-2048: a tail-only hit' in line for line in traced['lines']), traced['lines'])
         self.assertTrue(any(line.startswith('chain hits (L, Q)') for line in traced['lines']))
+        self.assertTrue(any('gap boundary' in line and 'restored by' in line for line in traced['lines']))
 
-    def test_exactness_fails_on_a_divergent_hit_or_a_bad_audit(self):
-        result, _, _ = run_plan('exactness', self.results, all=dict(diverge_hits=True))
-        self.assertEqual(result['verdict'], 'FAIL')
-        self.assertTrue(all(a['verdict'] == 'FAIL' for a in result['arms'].values()))
+    def test_exactness_fails_on_a_divergent_hit_a_bad_digest_or_a_bad_audit(self):
+        for faults, text in ((dict(all=dict(diverge_hits=True)), 'DIVERGED'),
+                             (dict(all=dict(diverge_once=True)), 'did not reproduce'),
+                             (dict(all=dict(bad_slot_on_hit=True)), 'GDN state after prefill differs')):
+            with self.subTest(faults=faults):
+                result, _, _ = self.plan('exactness', text.split()[0], **faults)
+                traced = result['arms']['exactness-traced']
+                self.assertEqual(traced['verdict'], 'FAIL')
+                self.assertTrue(any(text in p for p in traced['problems']), traced['problems'][:5])
 
-        class BadAudit(FloodEngine):
+        class BadAudit(fakes.FakeEngine):
             def say(self, line):
                 if '[PREFIX-AUDIT]' in line and ' Q=0 ' not in line:
                     line = line.replace('slot_sha=', 'slot_sha=ff')
                 super(BadAudit, self).say(line)
 
-        harness = Harness(engine_class=BadAudit)
+        harness = Harness(BadAudit)
         runner = harness.runner(os.path.join(self.results, 'audit'))
-        arm = gate.plan_arms('exactness', 'general-prefix', 'general', profiles())[1]
-        _, arm_result = runner.run(arm)
+        _, arm_result = runner.run(arm_of('exactness', 'exactness-audit'))
         self.assertEqual(arm_result['verdict'], 'FAIL')
         self.assertTrue(any('GDN slot bytes differ' in p for p in arm_result['problems']))
 
+    def test_rows_without_digests_leave_exactness_not_exercised(self):
+        result, _, _ = self.plan('exactness', 'nodigest', all=dict(no_digests=True))
+        traced = result['arms']['exactness-traced']
+        self.assertEqual(traced['verdict'], 'NOT_EXERCISED')
+        self.assertTrue(any('no [PREFIX] row carries slot_sha and logits_sha' in m for m in traced['not_exercised']))
+
     def test_an_eager_arm_that_ran_the_traced_loop_fails(self):
-        result, _, _ = run_plan('exactness', self.results, eager=dict(path='traced'))
+        result, _, _ = self.plan('exactness', eager=dict(path='traced'))
         eager = result['arms']['exactness-eager']
         self.assertEqual(eager['verdict'], 'FAIL')
         self.assertTrue(any('path traced, the arm serves eager' in p for p in eager['problems']))
 
     def test_lifecycle_passes_with_every_event_exercised(self):
-        result, harness, _ = run_plan('lifecycle', self.results)
+        result, harness, _ = self.plan('lifecycle')
         self.assertEqual(result['verdict'], 'PASS', result['lines'])
         evict = harness.engines[0]
-        self.assertFalse(evict.flag, 'the kill switch file is removed')
+        self.assertFalse(os.path.exists(evict.kill_path), 'the kill switch file is removed')
         tiny = result['arms']['lifecycle-tiny']
-        self.assertTrue(any('tiny pool' in line for line in tiny['lines']))
+        self.assertTrue(any('waited for the filler' in line for line in tiny['lines']), tiny['lines'])
+        self.assertTrue(any(line.startswith('preempted and resumed: pfx-') for line in tiny['lines']))
+        evicted = result['arms']['lifecycle-evict']
+        self.assertTrue(any(line.startswith('registry stats before the restart') for line in evicted['lines']))
+
+    def test_a_preempted_hit_that_diverges_after_it_resumes_is_named_not_failed(self):
+        harness = Harness(tiny=dict(diverge_after_resume=True))
+        _, tiny = harness.runner(self.results).run(arm_of('lifecycle', 'lifecycle-tiny'))
+        self.assertEqual(tiny['verdict'], 'NOT_COMPARABLE', tiny['lines'])
+        self.assertTrue(all('admissions)' in text for text in tiny['not_comparable']), tiny['not_comparable'])
+
+    def test_the_tiny_arm_on_the_default_pool_is_not_exercised_not_failed(self):
+        harness = Harness(tiny={'_env': dict(QWEN36_MAX_TOKENS_ALL_USERS=None)})
+        _, tiny = harness.runner(self.results).run(arm_of('lifecycle', 'lifecycle-tiny'))
+        self.assertEqual(tiny['verdict'], 'NOT_EXERCISED', tiny['lines'])
+        self.assertTrue(any('262,400' in m or '262400' in m for m in tiny['not_exercised']), tiny['not_exercised'])
 
     def test_lifecycle_says_not_exercised_when_an_event_did_not_happen(self):
-        result, _, _ = run_plan('lifecycle', self.results, tiny=dict(preempt_on_ignore_eos=0),
-                                dev=dict(dev_mode=False))
-        self.assertEqual(result['arms']['lifecycle-tiny']['verdict'], 'NOT_EXERCISED')
-        self.assertTrue(any('no preemption' in text for text in result['arms']['lifecycle-tiny']['not_exercised']))
+        result, _, _ = self.plan('lifecycle', 'events', dev={'_env': dict(VLLM_SERVER_DEV_MODE=None)},
+                                 all=dict(no_stats=True))
         evict = result['arms']['lifecycle-evict']
         self.assertEqual(evict['verdict'], 'NOT_EXERCISED')
         self.assertTrue(any('reset_prefix_cache answered 404' in t for t in evict['not_exercised']), evict['not_exercised'])
+        for arm in result['arms'].values():
+            self.assertTrue(any('no registry stats export' in t for t in arm['not_exercised']), arm['not_exercised'])
 
-    def test_a_kill_switch_that_grants_anyway_fails(self):
-        class Leaky(FloodEngine):
-            """Ignores the kill switch file: grants go on."""
+    def test_a_kill_switch_that_grants_or_publishes_anyway_fails(self):
+        class Leaky(fakes.FakeEngine):
+            """Never sees the kill switch file: grants go on."""
 
-            def chat(self, body, tag, salt=None, **kwargs):
-                self.flag = False
-                return super(Leaky, self).chat(body, tag, salt, **kwargs)
+            def kill_switch(self, on):
+                pass
 
-        harness = Harness(engine_class=Leaky)
-        runner = harness.runner(self.results)
-        arm = gate.plan_arms('lifecycle', 'general-prefix', 'general', profiles())[0]
-        _, result = runner.run(arm)
+        harness = Harness(Leaky)
+        _, result = harness.runner(self.results).run(arm_of('lifecycle', 'lifecycle-evict'))
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertTrue(any('kill switch engaged' in p or 'no "[PINDIAG] prefix: kill switch" line' in p
                             for p in result['problems']), result['problems'])
+        harness = Harness(dev=dict(publish_when_killed=True))
+        _, result = harness.runner(os.path.join(self.results, 'publish')).run(arm_of('lifecycle', 'lifecycle-evict'))
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertTrue(any('cached tokens' in p and 'kill switch' in p for p in result['problems']), result['problems'])
+
+    def test_a_failure_line_outside_the_restart_drill_fails_the_evict_arm(self):
+        class Noisy(fakes.FakeEngine):
+            def restart(self):
+                self.say('ERROR EngineDeadError: the engine core died (docker stop)')
+                super(Noisy, self).restart()
+
+        _, result = Harness(Noisy).runner(self.results).run(arm_of('lifecycle', 'lifecycle-evict'))
+        self.assertEqual(result['verdict'], 'PASS', result['problems'])
+        self.assertTrue(any('during the restart drill' in n for n in result['notes']))
+
+        class Dying(fakes.FakeEngine):
+            def reset_prefix_cache(self):
+                self.say('ERROR EngineDeadError: the engine core died')
+                return super(Dying, self).reset_prefix_cache()
+
+        _, result = Harness(Dying).runner(os.path.join(self.results, 'dying')).run(arm_of('lifecycle', 'lifecycle-evict'))
+        self.assertEqual(result['verdict'], 'FAIL')
 
     def test_timing_records_phases_and_compares_with_the_baseline(self):
-        result, _, _ = run_plan('timing', self.results)
+        result, _, _ = self.plan('timing')
         self.assertEqual(result['verdict'], 'PASS', result['lines'])
         prefix = result['arms']['timing-prefix']['phases']
         self.assertEqual(sorted(prefix), ['agents-1', 'agents-2'])
@@ -402,12 +587,12 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse([c for c in harness.calls if c[:3] == ['docker', 'run', '-d']])
 
     def test_the_wedge_is_infra(self):
-        class Wedged(FloodEngine):
+        class Wedged(fakes.FakeEngine):
             def boot(self):
                 super(Wedged, self).boot()
                 self.say('ERROR llrt.cpp:594 %s 31-25' % pm.WEDGE)
 
-        harness = Harness(engine_class=Wedged)
+        harness = Harness(Wedged)
         runner = harness.runner(self.results)
         arms = gate.plan_arms('bringup', 'general-prefix', 'general', profiles())
         result = gate.run_plan('bringup', arms, runner, GOOD_ANCHOR)
@@ -417,7 +602,7 @@ class RunnerTests(unittest.TestCase):
     def test_a_scenario_that_raises_is_a_recorded_failure_and_the_container_still_goes(self):
         harness = Harness()
         runner = harness.runner(self.results)
-        arm = dict(gate.plan_arms('bringup', 'general-prefix', 'general', profiles())[1])
+        arm = dict(arm_of('bringup', 'bringup-prefix'))
         arm['scenario'] = 'boom'
         replay.SCENARIOS['boom'] = lambda driver, **kwargs: 1 / 0
         try:
@@ -427,6 +612,27 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertIn('ZeroDivisionError', result['error'])
         self.assertEqual(harness.calls[-1][:3], ['docker', 'rm', '-f'])
+
+    def test_the_restart_waits_no_longer_than_the_arm_has(self):
+        harness = Harness()
+        runner = harness.runner(self.results)
+        engine = fakes.FakeEngine()
+        waits = []
+        runner.wait_ready = lambda client, container, seconds: waits.append(seconds)
+
+        class Driver(object):
+            def __init__(self, left):
+                self.left = left
+
+            def remaining(self):
+                return self.left
+
+        follower, container = fakes.FakeLog(engine), fakes.FakeContainer(engine)
+        info = runner.restart(container, engine, follower, Driver(400))
+        self.assertEqual(waits, [340])
+        self.assertEqual(len(info['log_window']), 2)
+        with self.assertRaises(replay.OutOfTime):
+            runner.restart(container, engine, follower, Driver(30))
 
 
 class MainTests(unittest.TestCase):
@@ -469,22 +675,23 @@ class MainTests(unittest.TestCase):
             runner.log = kwargs.get('log', runner.log)
             return runner
 
-        code, lines = self.main('--plan', 'bringup', runner_factory=factory, anchor=GOOD_ANCHOR)
-        self.assertEqual(code, 0, lines[-5:])
-        with open(os.path.join(self.results, 'out', 'c2-prefix-summary.json'), encoding='utf-8') as handle:
-            summary = json.load(handle)
-        self.assertEqual((summary['passed'], summary['results']['bringup']['verdict']), (True, 'PASS'))
-        self.assertIn('C2_PREFIX profile=general-prefix plans=bringup passed=True', lines[-1])
-        harness = Harness(**{'general-prefix': dict(grow_programs=True)})
-        code, _ = self.main('--plan', 'bringup', runner_factory=factory, anchor=GOOD_ANCHOR)
-        self.assertEqual(code, 1)
+        with fakes.burst_aware(lambda: CURRENT['engine']):
+            code, lines = self.main('--plan', 'bringup', runner_factory=factory, anchor=GOOD_ANCHOR)
+            self.assertEqual(code, 0, lines[-5:])
+            with open(os.path.join(self.results, 'out', 'c2-prefix-summary.json'), encoding='utf-8') as handle:
+                summary = json.load(handle)
+            self.assertEqual((summary['passed'], summary['results']['bringup']['verdict']), (True, 'PASS'))
+            self.assertIn('C2_PREFIX profile=general-prefix plans=bringup passed=True', lines[-1])
+            harness = Harness(**{'general-prefix': dict(grow_programs=True)})
+            code, _ = self.main('--plan', 'bringup', runner_factory=factory, anchor=GOOD_ANCHOR)
+            self.assertEqual(code, 1)
 
 
 class JobTests(unittest.TestCase):
     PROFILES = ['coding', 'exact', 'general', 'general-prefix']
 
     def read(self, **values):
-        base = dict(C2_IMAGE_TAG='v7-prefix')
+        base = dict(C2_IMAGE_TAG='v7-prefix', C2_ACTIONS='prefix')
         base.update(values)
         return job.read_job(base, self.PROFILES)
 
@@ -501,10 +708,10 @@ class JobTests(unittest.TestCase):
         self.assertEqual(outputs['actions'], 'reset prefix')
         self.assertEqual((outputs['prefix_plan'], outputs['prefix_baseline'], outputs['prefix_agents']),
                          ('exactness,timing', 'none', '1,4'))
-        outputs = self.read(C2_ACTIONS='prefix', C2_PREFIX_PLAN='bringup lifecycle')
+        outputs = self.read(C2_PREFIX_PLAN='bringup lifecycle')
         self.assertEqual(outputs['prefix_plan'], 'bringup,lifecycle')
 
-    def test_what_is_refused(self):
+    def test_what_is_refused_when_the_action_runs(self):
         for values in (dict(C2_PREFIX_PLAN='soak'), dict(C2_PREFIX_PROFILE='nope'), dict(C2_PREFIX_BASELINE='nope'),
                        dict(C2_PREFIX_AGENTS='0'), dict(C2_PREFIX_AGENTS='x'), dict(C2_PREFIX_BASELINE='none')):
             with self.subTest(values=values), self.assertRaises(job.JobError):
@@ -512,6 +719,13 @@ class JobTests(unittest.TestCase):
         with self.assertRaises(job.JobError):
             job.read_job(dict(C2_IMAGE_TAG='v7-prefix', C2_ACTIONS='prefix'), ['general'])
         self.assertEqual(job.PREFIX_PLANS, gate.PLANS)
+
+    def test_a_job_that_does_not_run_prefix_ignores_its_keys(self):
+        """An exact or c2 run is never refused over a prefix key it does not use."""
+        for values in (dict(C2_PREFIX_PLAN='soak'), dict(C2_PREFIX_AGENTS='x'), dict(C2_PREFIX_PROFILE='nope')):
+            with self.subTest(values=values):
+                outputs = self.read(C2_ACTIONS='status smoke gate', **values)
+                self.assertEqual((outputs['prefix_plan'], outputs['prefix_agents']), ('bringup', '1,4,5,6'))
 
 
 class WorkflowTests(unittest.TestCase):
@@ -565,12 +779,16 @@ class WorkflowTests(unittest.TestCase):
                 self.assertNotIn('--device', line)
         self.assertIn('exit "$status"', probe)
 
-    def test_the_job_file_names_the_prefix_action(self):
+    def test_the_job_file_names_the_prefix_action_above_the_replay_key(self):
         with open(JOB_FILE, encoding='utf-8') as handle:
             text = handle.read()
         self.assertIn('gate prefix replay push', text)
         for key in ('C2_PREFIX_PLAN', 'C2_PREFIX_PROFILE', 'C2_PREFIX_BASELINE', 'C2_PREFIX_AGENTS'):
             self.assertIn(key, text)
+        lines = text.splitlines()
+        replay_key = [i for i, line in enumerate(lines) if line.startswith('C2_REPLAY_PROFILE=')][0]
+        self.assertTrue(lines[replay_key - 1].startswith('# C2_REPLAY_PROFILE:'), 'the key follows its own comment')
+        self.assertLess(max(i for i, line in enumerate(lines) if 'C2_PREFIX_' in line), replay_key - 1)
 
     def test_every_new_test_module_is_allowlisted(self):
         with open(CPU_WORKFLOW, encoding='utf-8') as handle:
