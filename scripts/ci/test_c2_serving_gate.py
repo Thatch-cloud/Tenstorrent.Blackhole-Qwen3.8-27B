@@ -722,8 +722,22 @@ class DriverTests(unittest.TestCase):
             profiles=CHECKOUT_PROFILES, server_logs={'bringup-concurrent': any_request_log()})
         self.assertEqual((code, summary['results']['bringup']['verdict']), (1, 'FAIL'))
         self.assertTrue(any('carries C2-any markers' in p for p in summary['results']['bringup']['platform_problems']))
-        self.assertEqual(driver.any_request_check('INFO nothing of it' + chr(10), False), ([], []))
-        self.assertEqual(driver.any_request_check(None, False), ([], []))
+        self.assertEqual(driver.any_request_check('INFO nothing of it' + chr(10), False), ([], [], []))
+        self.assertEqual(driver.any_request_check(None, False), ([], [], []))
+
+    def test_the_consumer_counts_in_any_class_and_its_class_is_recorded(self):
+        """A subclass of the wrapped TTScheduler still runs the inherited wrapper: live, and noted."""
+        problems, _, consumers = driver.any_request_check(
+            'INFO ' + driver.QUARANTINE_LIVE_PREFIX + 'OneInFlightScheduler' + chr(10), True)
+        self.assertEqual((problems, consumers), ([], ['OneInFlightScheduler']))
+        texts = ['answer %d ' % i * 50 for i in range(4)]
+        same = {'matrix-concurrent': lambda n: matrix_report(texts), 'matrix-solo': lambda n: matrix_report(texts)}
+        code, summary, _, lines, _ = self.run_driver(
+            ['--profile', 'c2', '--plan', 'matrix', '--lengths', '60,2048,4096,90'], same,
+            default_log='INFO ' + driver.QUARANTINE_LIVE_PREFIX + 'OneInFlightScheduler' + chr(10))
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(summary['arms']['matrix-solo']['quarantine_consumers'], ['OneInFlightScheduler'])
+        self.assertTrue(any('the D2 consumer ran in OneInFlightScheduler, not TTScheduler' in line for line in lines))
 
     def test_dry_run_and_bad_arguments(self):
         with tempfile.TemporaryDirectory() as directory:

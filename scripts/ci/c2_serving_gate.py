@@ -117,14 +117,18 @@ MEMORY_USERS = 4
 # (256..2048: one per rung from min(position, 2048) to min(2048, position + budget), serving_request_factory),
 # the per-request worst case the large-prompt arm never reaches (R3).
 MEMORY_SHORT_PROMPT = 60
-# C2-any (QWEN_FAST_ANY_REQUEST=1, the c2 profiles). The D2 quarantine's consumer logs QUARANTINE_LIVE
-# from inside the scheduler class it wrapped, on the engine's first step: a consumer on a class the
-# engine never builds is silent until a refusal strands a request (serving_request_quarantine, memory
-# graft-mounted-is-not-graft-executed), so every arm under the switch must show it. Every per-request
+# C2-any (QWEN_FAST_ANY_REQUEST=1, the c2 profiles). The D2 quarantine's consumer logs
+# QUARANTINE_LIVE_PREFIX + the running scheduler's class from inside the wrapper, on the engine's first
+# step (QUARANTINE_LIVE on the TT platform): a consumer on a class the engine never builds is silent
+# until a refusal strands a request (serving_request_quarantine, memory graft-mounted-is-not-graft-
+# executed), so every arm under the switch must show it. A subclass of the wrapped class still runs the
+# inherited wrapper, so any class counts; the class is recorded and one other than TTScheduler is noted.
+# Every per-request
 # engine logs its build with its proposal ladder (ANY_REQUEST_ENGINE; R3, G5), recorded per arm. None of
 # ANY_REQUEST_MARKERS may appear under a profile that leaves the switch off: exact runs v235's path.
 ANY_REQUEST_FLAG = 'QWEN_FAST_ANY_REQUEST'
-QUARANTINE_LIVE = '[PINDIAG] request quarantine consumer live in TTScheduler'
+QUARANTINE_LIVE_PREFIX = '[PINDIAG] request quarantine consumer live in '
+QUARANTINE_LIVE = QUARANTINE_LIVE_PREFIX + 'TTScheduler'
 ANY_REQUEST_ENGINE = '[PINDIAG] any-request engine for '
 ANY_REQUEST_MARKERS = ('[PINDIAG] request quarantine', ANY_REQUEST_ENGINE, '[PINDIAG] attach source check')
 ANY_REQUEST_LINES_KEPT = 32
@@ -609,23 +613,27 @@ def server_log(arm_dir):
 
 
 def any_request_check(log_text, any_request):
-    """(problems, per-request engine lines) of one served arm's server log. Under a C2-any profile the
-    D2 consumer must have logged QUARANTINE_LIVE; under any other no C2-any marker may appear."""
+    """(problems, per-request engine lines, consumer classes) of one served arm's server log. Under a
+    C2-any profile the D2 consumer must have logged its live line (QUARANTINE_LIVE_PREFIX, any class);
+    under any other no C2-any marker may appear."""
     if log_text is None:
         return (['no server.log: the D2 quarantine consumer\'s live line (%s) cannot be checked' % QUARANTINE_LIVE]
-                if any_request else []), []
-    engines = [line.strip() for line in log_text.splitlines() if ANY_REQUEST_ENGINE in line]
+                if any_request else []), [], []
+    lines = log_text.splitlines()
+    engines = [line.strip() for line in lines if ANY_REQUEST_ENGINE in line]
+    consumers = sorted(set(line.split(QUARANTINE_LIVE_PREFIX, 1)[1].strip().split(' ')[0]
+                           for line in lines if QUARANTINE_LIVE_PREFIX in line))
     if any_request:
-        if QUARANTINE_LIVE not in log_text:
+        if not consumers:
             return (['%s=1 but the server log has no "%s": the quarantine consumer never ran in the scheduler '
                      'this engine built, so a refusal would strand its request (serving_request_quarantine)' % (
-                         ANY_REQUEST_FLAG, QUARANTINE_LIVE)], engines)
-        return [], engines
+                         ANY_REQUEST_FLAG, QUARANTINE_LIVE)], engines, consumers)
+        return [], engines, consumers
     leaked = sorted(marker for marker in ANY_REQUEST_MARKERS if marker in log_text)
     if leaked:
         return (['the profile leaves %s off, but the server log carries C2-any markers (%s): this is not the '
-                 'profile\'s path' % (ANY_REQUEST_FLAG, '; '.join(leaked))], engines)
-    return [], engines
+                 'profile\'s path' % (ANY_REQUEST_FLAG, '; '.join(leaked))], engines, consumers)
+    return [], engines, consumers
 
 
 def wedged(arm_dir):
@@ -695,10 +703,10 @@ class Runner(object):
         seconds = round(time.time() - started, 1)
         with open(os.path.join(arm_dir, 'gate-stdout.log'), errors='replace') as handle:
             report = extract(handle.read())
-        engines = []
+        engines, consumers = [], []
         if report is not None:
             # What the server log says about C2-any, judged with the arm's own problems (arm_problems).
-            problems, engines = any_request_check(server_log(arm_dir), self.any_request)
+            problems, engines, consumers = any_request_check(server_log(arm_dir), self.any_request)
             if problems:
                 report['c2_gate_problems'] = list(report.get('c2_gate_problems') or []) + problems
             with open(os.path.join(arm_dir, 'm3native-gate.json'), 'w') as handle:
@@ -717,6 +725,9 @@ class Runner(object):
             self.log('[C2-GATE] arm %s: problem: %s' % (arm, problem))
         for text in engines[:8]:
             self.log('[C2-GATE] arm %s: %s' % (arm, text))
+        if consumers and consumers != ['TTScheduler']:
+            self.log('[C2-GATE] arm %s: note: the D2 consumer ran in %s, not TTScheduler (the scheduler class v235 logged)'
+                     % (arm, ', '.join(consumers)))
         infra = None
         if wedged(arm_dir):
             infra = self.infra = ('arm %s hit tt-metal\'s ethernet-core wedge ("%s", llrt.cpp:594): reset M+A '
@@ -724,7 +735,7 @@ class Runner(object):
             self.log('[C2-GATE] arm %s: INFRA - %s' % (arm, infra))
         self.arms[arm] = dict(exit=status, seconds=seconds, launched=line, gate_passed=(report or {}).get('gate_passed'),
                               fatal=(report or {}).get('fatal'), infra=infra,
-                              any_request_engines=engines[:ANY_REQUEST_LINES_KEPT])
+                              any_request_engines=engines[:ANY_REQUEST_LINES_KEPT], quarantine_consumers=consumers)
         return report
 
 
