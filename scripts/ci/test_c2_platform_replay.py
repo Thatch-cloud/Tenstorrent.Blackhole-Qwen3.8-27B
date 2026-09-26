@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -48,6 +48,9 @@ def sse(*chunks):
 def content(text, finish=None):
     return dict(choices=[dict(index=0, delta=dict(content=text), finish_reason=finish)])
 
+
+TT = 'Qwen/Qwen3.8-27B:tt'
+PLAIN = 'Qwen/Qwen3.8-27B'
 
 STREAM = sse(dict(choices=[dict(index=0, delta=dict(role='assistant', content=''))]), content('Hel'), content('lo'),
              content('', 'stop'), dict(choices=[], usage=dict(prompt_tokens=12, completion_tokens=41)))
@@ -262,6 +265,108 @@ class SourceTests(unittest.TestCase):
         self.assertFalse(any(command[:2] == ['docker', 'run'] for command in commands))
         self.assertFalse(recorded['steps']['source']['ok'])
         self.assertIn('refused', out.getvalue())
+
+
+class ServedNameTests(unittest.TestCase):
+    """TT advertises ONLY Qwen/Qwen3.8-27B:tt (the thin layer's THATCH_SERVING_MODEL_ALIAS): the spine
+    routes on the advertised names by exact match, so plain Qwen/Qwen3.8-27B traffic stays on the Spark."""
+
+    def served(self, status, body, expected=TT, checkpoint=PLAIN):
+        with mock.patch.object(replay, 'http', return_value=(status, body)) as http:
+            result = replay.served_name(8011, checkpoint, expected)
+        http.assert_called_once_with(8011, '/v1/models', timeout=30)
+        return result
+
+    def test_the_default_is_the_tagged_name_and_the_checkpoint_is_loaded(self):
+        self.assertEqual((replay.SERVED_MODEL, replay.CHECKPOINT), (TT, PLAIN))
+
+    def test_the_tagged_name_alone_is_advertised(self):
+        result = self.served(200, dict(status='ok', model=TT, aliases=[TT], healthy=True))
+        self.assertTrue(result['ok'])
+        self.assertEqual((result['served'], result['advertised']), (TT, [TT, TT]))
+
+    def test_an_image_without_the_alias_would_take_plain_traffic(self):
+        result = self.served(200, dict(status='ok', model=PLAIN))
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['served'], PLAIN)
+
+    def test_the_plain_id_advertised_beside_the_tag_fails(self):
+        self.assertFalse(self.served(200, dict(model=TT, aliases=[TT, PLAIN]))['ok'])
+
+    def test_a_refused_or_unreachable_models_endpoint_fails(self):
+        self.assertFalse(self.served(404, 'not found')['ok'])
+        self.assertFalse(self.served(404, dict(model=TT, aliases=[TT]))['ok'])
+        self.assertFalse(self.served(None, 'URLError(connection refused)')['ok'])
+
+    def test_the_legacy_replay_of_an_image_without_the_alias(self):
+        self.assertTrue(self.served(200, dict(model=PLAIN), expected=PLAIN)['ok'])
+        self.assertFalse(self.served(200, dict(model=TT, aliases=[TT]), expected=PLAIN)['ok'])
+
+
+class ReplayNameTests(unittest.TestCase):
+    """main(): serving.manage loads the checkpoint, the agent's warmup names the checkpoint (answered,
+    not advertised), and every later request names the served model."""
+
+    def drive(self, models, *arguments):
+        commands, chats, traffic = [], [], []
+
+        def run(command, timeout=None, check=True):
+            commands.append(command)
+            if command[:3] == ['docker', 'image', 'inspect']:
+                return mock.Mock(returncode=0, stdout=json.dumps([dict(Config=dict(Env=[]))]), stderr='')
+            return mock.Mock(returncode=0, stdout='true', stderr='')
+
+        def http(port, path, body=None, timeout=60):
+            return 200, dict(models)
+
+        def chat(port, model, content, max_tokens, timeout=900, **extra):
+            chats.append((model, content))
+            return dict(ok=True, status=200, completion_tokens=max_tokens, tool_calls=[dict(id='call-0')])
+
+        def traffic_steps(port, model, record, seed, **options):
+            traffic.append(model)
+            return True
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            for name, fake in (('run', run), ('http', http), ('chat', chat), ('traffic_steps', traffic_steps)):
+                stack.enter_context(mock.patch.object(replay, name, side_effect=fake))
+            stack.enter_context(mock.patch.object(replay.subprocess, 'run'))
+            stack.enter_context(mock.patch.object(sys, 'argv', ['replay', '--source', AGENT, '--image',
+                                                                'zot/new@sha256:b', '--results', directory,
+                                                                '--seed', '5'] + list(arguments)))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            code = replay.main()
+            with open(os.path.join(directory, 'platform-replay.json'), encoding='utf-8') as handle:
+                steps = json.load(handle)['steps']
+        loads = [command[command.index('--model') + 1] for command in commands if 'serving.manage' in command]
+        return code, steps, loads, chats, traffic
+
+    def test_the_warmup_names_the_checkpoint_and_every_later_request_the_tag(self):
+        code, steps, loads, chats, traffic = self.drive(dict(model=TT, aliases=[TT]))
+        self.assertEqual(code, 0)
+        self.assertEqual(loads, [PLAIN, PLAIN, PLAIN], 'load, reload and the load after the restart')
+        self.assertEqual(chats[0], (PLAIN, 'warmup'))
+        self.assertEqual(chats[1][0], TT)
+        self.assertIn('merges two sorted lists', chats[1][1])
+        self.assertEqual(len(chats), 9)
+        self.assertEqual({model for model, _ in chats[1:]}, {TT})
+        self.assertEqual(traffic, [TT])
+        self.assertEqual(list(steps), ['seed', 'source', 'start', 'load', 'served_name', 'warmup', 'coding',
+                                       'concurrent4', 'tool_call', 'reload', 'after_reload', 'restart',
+                                       'load_after_restart', 'served_name_after_restart', 'after_restart'])
+        self.assertTrue(steps['served_name']['ok'] and steps['served_name_after_restart']['ok'])
+
+    def test_an_image_that_advertises_the_plain_id_fails_the_replay(self):
+        for models in (dict(model=PLAIN), dict(model=TT, aliases=[TT, PLAIN])):
+            code, steps, _, _, _ = self.drive(models)
+            self.assertEqual(code, 1)
+            self.assertFalse(steps['served_name']['ok'])
+            self.assertFalse(steps['served_name_after_restart']['ok'])
+
+    def test_an_image_without_the_alias_replays_under_its_plain_name(self):
+        code, steps, loads, chats, traffic = self.drive(dict(model=PLAIN), '--served-model', PLAIN)
+        self.assertEqual(code, 0)
+        self.assertEqual({model for model, _ in chats} | set(traffic) | set(loads), {PLAIN})
 
 
 if __name__ == '__main__':
