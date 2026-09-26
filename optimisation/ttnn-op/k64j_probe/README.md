@@ -104,8 +104,9 @@ out of `if constexpr (is_causal)`.
 
 0x20 is free. The factory generators serve 0x1, 0x2, 0x4 and 0x8, and so do `pooled_attention_replay.py` and the
 gate's `SDPA_MODE_FLAGS`. 0x10 is the card tests' unknown-flag control. Every factory refuses what it does not know
-(`[QWEN-SDPA] unknown flags`). `FlagBitTests` checks all of this. Section N also checks it on the loaded binary: a
-0x21 call must be refused as unknown.
+(`[QWEN-SDPA] unknown flags`). Section N also checks it on the loaded binary: a 0x21 call must be refused as
+unknown. K64j (`../k64j`) has since taken 0x20: `FlagBitTests` now checks it is K64j's alone (its factory generator,
+the replay's `extent` mode and the gate) and that 0x10 is still no one's.
 
 ## The probe (`probe_k64j_card_b.py`, `run_card_b.sh`)
 
@@ -214,11 +215,39 @@ CARD_B_ENV=KOPGRAFT64=/home/thatch/opgraft-K64i                 # pass 2: everyt
 **By hand on the rig:** `bash run_card_b.sh` (with `WATCHER=1` first), from a checkout with `sdpa_decode_qwen/` beside
 this directory. Results land in `~/kwork64/k64j/card-b/`.
 
-## K64j itself: the edit list and the build (next step, not built here)
+## K64j itself: the edit list and the build
 
-P0 needs no new kernel: it runs the stock causal and legacy programs of K64i. If it says GO, K64j is the following
-edits over K64i's stage-4 factory `1634369677ae0247…` and kernels. Each is a sha-pinned generator step in the style of
-`apply_factory_slice.py` and `make_slice_kernels.py`, and each inverts to stage 4.
+P0 needs no new kernel: it runs the stock causal and legacy programs of K64i. It said GO (pass 1 run 36218136852,
+pass 2 run 36218529407), and K64j is the following edits over K64i's stage-4 factory `1634369677ae0247…` and
+kernels. Each is a sha-pinned generator step in the style of `apply_factory_slice.py` and `make_slice_kernels.py`,
+and each inverts to stage 4.
+
+**Built in `optimisation/ttnn-op/k64j`** (generators, kernels, CPU tests, the build harness and the card tests):
+
+| Output | sha256 | From |
+|---|---|---|
+| factory | `bb4dc6a759d40054…` | `apply_factory_k64j.py` (F19-F22) on the 3e0a69af base (vendored in `k64j/fixtures/`), stage 3 or stage 4 |
+| `dataflow/reader_decode_qwen.cpp` | `adb60918…` | `make_k64j_kernels.py` R10 on the stage-3 reader 280a847f |
+| `dataflow/reader_decode_qwen_slice.cpp` | `518d8096…` | R10 on the slice reader 0f5a019c |
+| `compute/sdpa_flash_decode_qwen.cpp` | `409a1aaf…` | C3 on 8776fcc7 |
+| `dataflow/writer_decode_qwen_slice.cpp` | `642c36f8…` | W4 on the slice writer ac6cf815 |
+
+Where the edit list left a choice, the build takes it as follows:
+
+- **F20 keeps K64i's literal.** The refusal's condition is relaxed to "no cur_pos tensor unless 0x20", but its text
+  stays `"[QWEN-SDPA] modes are non-causal, full-window and take no cur_pos tensor"` byte for byte: build step 6
+  requires every QWEN string of K64i in the new binary, and a changed literal would drop one. 0x20's own
+  requirements carry their own literals (`[QWEN-SDPA] runtime extent (0x20) needs ...`).
+- **Slot 0 under share is the reader's job.** R10 has each entry of a share bundle copy slot 0's word into its own
+  slot of both CB copies before they are pushed, so the writer and the compute kernel split slot 0's extent without
+  knowing about share. A skipped slot 0 skips the whole bundle.
+- **The slice writer knows whether it slices.** F21 appends `q_slice` (+3) and `runtime_extent` (+4) to K64i's
+  three writer args. At `q_slice = 0` the writer's `q_tile_start` is 0 and K64i's slice asserts are off. The
+  tests prove that the slice writer is then `writer_decode_all.cpp` as code, and under 0x20 the stock writer
+  taking the causal `cur_pos` read without `generate_mask`.
+- **The replay mode needs its reader.** `pooled_attention_replay`'s `extent` mode needs `tail` and the F22 literal.
+  It is refused on any reader that does not declare `runtime_extent`, because the pooled and packed readers stage
+  wide masks and no `cur_pos` words. The S2 extent readers will declare it.
 
 **K64j never edits a stock kernel.** Every 0x20 program is built from qwen-named kernels only: the qwen or slice
 reader, the qwen compute kernel and the slice writer (F21). The stock `reader_decode_all.cpp`,
@@ -260,7 +289,10 @@ The `cb_bytes` of every 0x20 program grows by two sticks. The card tests' L1 tab
 `../sdpa_decode_slice/README.md`):
 
 1. **Ship.** Put the new directory and its siblings (`sdpa_decode_slice`, `sdpa_decode_qwen`,
-   `sdpa_prefill_chain`) under `~/kwork64/k64j/`, as a base64 tar over plink stdin, LF only.
+   `sdpa_prefill_chain`) under `~/kwork64/k64j/`, as a base64 tar over plink stdin, LF only. Through the card-B
+   runner there is nothing to ship: `k64j/build_k64j.sh` runs steps 2-7 from the job's checkout
+   (`CARD_B_HARNESS=optimisation/ttnn-op/k64j/build_k64j.sh`; `K64J_BUILD_DRY_RUN=1` prints every docker and cp
+   command first).
 2. **Preflight.**
    - `docker ps` shows `ttbuild`.
    - `~/opgraft-K64i/MANIFEST.sha256` verifies, and its `_ttnncpp.so` is `cf54d716…`.
@@ -285,7 +317,9 @@ The `cb_bytes` of every 0x20 program grows by two sticks. The card tests' L1 tab
    - Write `MANIFEST.sha256` and print `K64J_TTNNCPP_SHA256`.
 7. **Restore ttbuild.** Put back factory 3e0a69af, remove the qwen kernels, rebuild, and check that no qwen literal
    remains. Use an EXIT trap.
-8. **Card B.** Run K1-K4 with `KOPGRAFT64=~/opgraft-K64j EXPECT_TTNNCPP_SHA256=<K64J sha>`, `WATCHER=1` first.
+8. **Card B.** Run K1-K4 with `KOPGRAFT64=~/opgraft-K64j EXPECT_TTNNCPP_SHA256=<K64J sha>`, `WATCHER=1` first:
+   `CARD_B_HARNESS=optimisation/ttnn-op/k64j/run_card_b.sh` (`k64j_card_b.py`; K2 and K4 are out of this graft's
+   scope and reported as not run).
 9. **The arm.**
    - `QWEN_FAST_RUNTIME_BINARY_SHA256=<K64J sha>`.
    - The `.so` at both `build_Release/lib` and `build_Release/ttnn`, which the arm already does.
