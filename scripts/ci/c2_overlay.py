@@ -44,7 +44,10 @@ BUILD_SCRIPT = 'scripts/ci/build-c2-serving-image.sh'
 # The v235 gate's QWEN_ environment (run 36087022223, m3native-gate.json qwen_configuration):
 # G1 holds the exact profile's booted environment to it.
 V235_ENVIRONMENT = 'docker/qwen-c2-v235-environment.json'
-TOOLS = ('scripts/ci/c2_overlay.py', 'scripts/ci/c2_image_provenance.py', BUILD_SCRIPT)
+# qwen_prefix_stage.py runs the prefix-reuse AST stages in the Dockerfile (from /opt/qwen-c2, not the
+# overlaid tree: it is the build's tool, like this module); c2_image_provenance imports its pins.
+PREFIX_STAGE = 'scripts/ci/qwen_prefix_stage.py'
+TOOLS = ('scripts/ci/c2_overlay.py', 'scripts/ci/c2_image_provenance.py', BUILD_SCRIPT, PREFIX_STAGE)
 # Repo files staged into the context under another name.
 CONTEXT_FILES = ((DOCKERFILE, 'Dockerfile'), (MANIFEST, 'qwen-c2-overlay.txt'),
                  (V235_ENVIRONMENT, 'v235-environment.json'))

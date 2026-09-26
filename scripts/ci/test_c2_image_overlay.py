@@ -38,6 +38,7 @@ import c2_image_layers as layers_model  # noqa: E402
 import c2_image_provenance as provenance  # noqa: E402
 import c2_overlay  # noqa: E402
 import c2_serving_job  # noqa: E402
+import qwen_prefix_stage  # noqa: E402
 import test_serving_image_copy_closure as p8  # noqa: E402
 
 C2_DOCKERFILE = ROOT / c2_overlay.DOCKERFILE
@@ -89,10 +90,6 @@ C2_KNOWN_STALE = {
         '8dd33932b2452ea85b38a0ebb27c95a65ccdf51c',
         '65536 replay numerics (5edded94..0d182ee5); imported by frozen_combined_gate and '
         'frozen_recipe_context. ' + _UNREVIEWED),
-    'scripts/ci/lever_n_model_patch.py': (
-        '1332ff19b8e1820813aa019093aaeea4d0aefaa2',
-        'host-side only: imported by lever_n_m3native_patch in the graft job on the runner, never inside the '
-        'container'),
     'scripts/ci/longctx_cycle_bench.py': (
         '714d89db78fa52b4793b3e5a84105cea97402db6',
         'mounted per arm at /bench/longctx_cycle_bench.py (lever_n_m3native_run_arm.sh, and c2_serving_gate.'
@@ -843,8 +840,29 @@ def context_dirs(context):
     return {op: c2_overlay.tree_digest(str(Path(context) / 'opgraft-K64i' / op)) for op, _ in provenance.GRAFT_OP_DIRS}
 
 
+def faithful_prefix_record(context):
+    """The prefix stage's record and the targets' shas for an image built faithfully from context: each
+    target held its pin, and the stage table's modules (the context's overlaid sources) patched it."""
+    context = Path(context)
+    stages = [dict(target=target, module=module, function=function, path='/experiment-scripts/ci/%s.py' % module,
+                   sha256=c2_overlay.sha256(context / 'overlay' / 'scripts/ci' / (module + '.py')))
+              for target, module, function in qwen_prefix_stage.STAGES]
+    rows, shas = {}, {}
+    for name, path, pin, source in qwen_prefix_stage.TARGETS:
+        patched_by = ['%s.%s' % (stage['module'], stage['function']) for stage in stages if stage['target'] == name]
+        after = hashlib.sha256((pin + ''.join(patched_by)).encode()).hexdigest() if patched_by else pin
+        rows[name] = dict(path=path, pin=pin, pin_source=source, before=pin, after=after, patched_by=patched_by)
+        shas[path] = after
+    imported = [dict(module=stage['module'], path=stage['path'], sha256=stage['sha256'])
+                for stage in {stage['module']: stage for stage in stages}.values()]
+    return dict(schema=qwen_prefix_stage.SCHEMA, targets=rows, stages=stages, imported=imported, warnings=[],
+                complete=bool(stages),
+                resolved=dict(plugin=qwen_prefix_stage.PLUGIN_ROOT, models=qwen_prefix_stage.MODEL_TREE + '/models'),
+                python='3.10.12'), shas
+
+
 def fake_image(context, entries, tampered=None, dropped=None, record=True, ttnn_strings=None, op_dir=None,
-               trees=None, pins=None, base_pins=None):
+               trees=None, pins=None, base_pins=None, prefix=True, prefix_shas=None):
     """Probe results for an image built faithfully from context (with optional faults)."""
     context = Path(context)
     graft = {binary: c2_overlay.sha256(context / 'opgraft-K64i' / binary) for binary in ('_ttnn.so', '_ttnncpp.so')}
@@ -883,8 +901,15 @@ def fake_image(context, entries, tampered=None, dropped=None, record=True, ttnn_
     base_strings = {binary: strings[binary] + list(dropped or ()) for binary in strings}
     base = {path: dict(exists=True, path=path, realpath=path, sha256='0' * 64, qwen=sorted(base_strings[binary]))
             for binary, path in provenance.GRAFT_BINARIES}
+    prefix_record, target_shas = faithful_prefix_record(context)
+    target_shas.update(prefix_shas or {})
+    for path, sha in target_shas.items():
+        files[path] = dict(exists=sha is not None, path=path, realpath=path, sha256=sha)
+    for name, path, pin, _ in qwen_prefix_stage.TARGETS:
+        base[path] = dict(exists=True, path=path, realpath=path, sha256=pin)
     built = dict(files=files, record=dict(files=rows) if record else None, trees=image_trees, dirs=dirs,
                  pins=faithful_pins if pins is None else pins, bundle={})
+    built['prefix'] = prefix_record if prefix is True else (prefix or None)
     return built, dict(files=base, pins=faithful_pins if base_pins is None else base_pins, trees=image_trees, bundle={})
 
 
@@ -897,6 +922,7 @@ class FakeDocker(object):
         self.contract = provenance.load_contract(self.context / 'overlay/scripts/ci/serving_c2_contract.py')
         self.profiles = self.context / 'overlay/scripts/ci/qwen_c2_profiles.json'
         self.images = []
+        self.gates = {}
 
     def probe(self, image, request):
         self.images.append(image)
@@ -907,16 +933,21 @@ class FakeDocker(object):
             provenance.REVISION_LABEL: (self.context / c2_overlay.REVISION_FILE).read_text().strip()}
         return dict(env=dict(self.environment_), labels=dict(labels))
 
-    def environment(self, image, profile):
+    def environment(self, image, profile, gate=False):
+        self.gates[('environment', profile)] = gate
         if profile in self.environments:
             return dict(self.environments[profile])
         loaded = self.contract.load_profile(str(self.profiles), profile)
         env = provenance.dockerfile_env((self.context / 'Dockerfile').read_text())
         return self.contract.apply_environment(loaded, env)
 
-    def boot(self, image, models, profile):
+    def boot(self, image, models, profile, gate=False):
+        self.gates[('boot', profile)] = gate
         name = profile or json.loads(self.profiles.read_text())['default']
         loaded = self.contract.load_profile(str(self.profiles), name)
+        # the contract refuses a gate-only profile without the gate switch: the image exits 78 unlaunched
+        if self.contract.gate_problems(loaded, {provenance.GATE_SWITCH: '1'} if gate else {}):
+            return '[QWEN-C2] boot failed:\nValueError: gate only\n'
         argv = self.argv_override.get(name) or provenance.expected_argv(
             self.contract, self.profiles, name, loaded['snapshots'][0])
         return 'INFO noise\n[QWEN-C2] profile %s: vLLM argv %s\n[QWEN-C2] mesh x\nusage: ...\n' % (
@@ -979,6 +1010,142 @@ class ProvenanceTests(unittest.TestCase):
         self.assertTrue(any('(c) exact: QWEN_ environment sha256' in line and 'equal up to the unset defaults' in line
                             for line in self.log))
         self.assertTrue(any(re.search(r'\(d\) layers .*: \d+ files as modelled, \d+ at the bundle record.s bytes, \d+ never in the bundle, 0 at HEAD', line) for line in self.log))
+
+    def test_prefix_reuse_is_on_exactly_where_the_profile_says(self):
+        """(f): the launched argv and booted environment of every profile agree with its prefix switch."""
+        problems, _ = self.verify()
+        self.assertEqual(problems, [])
+        self.assertIn('[G1] (f) general-prefix: prefix reuse ON in the launched argv (--enable-prefix-caching '
+                      '--enable-chunked-prefill --no-async-scheduling --prefix-caching-hash-algo sha256) and '
+                      'QWEN_PREFIX_REUSE=1', self.log)
+        self.assertIn('[G1] (f) general: prefix reuse off in the launched argv (--no-enable-prefix-caching) and '
+                      'no QWEN_PREFIX_REUSE', self.log)
+        self.assertTrue(any(line.startswith('[G1] (f) prefix-reuse stage: %d stage(s)' % len(qwen_prefix_stage.STAGES))
+                            for line in self.log))
+
+    def test_a_prefix_profile_launched_without_prefix_caching_fails(self):
+        contract = provenance.load_contract(self.context / 'overlay/scripts/ci/serving_c2_contract.py')
+        profiles = self.context / 'overlay/scripts/ci/qwen_c2_profiles.json'
+        snapshot = contract.load_profile(str(profiles), 'general-prefix')['snapshots'][0]
+        argv = provenance.expected_argv(contract, profiles, 'general-prefix', snapshot)
+        argv[argv.index('--enable-prefix-caching')] = '--no-enable-prefix-caching'
+        problems, _ = self.verify(argv_override={'general-prefix': argv})
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn('(c) general-prefix: the image launched', problems[0])
+        self.assertIn("(f) general-prefix: prefix reuse is on in the profile, but the launched argv lacks "
+                      "['--enable-prefix-caching'] and has ['--no-enable-prefix-caching']", problems[1])
+
+    def test_the_gate_only_profile_is_booted_as_a_gate(self):
+        """general-prefix-eager is gate only: provenance boots it (and probes its environment) with the gate
+        switch, and no other profile with it."""
+        problems, docker = self.verify()
+        self.assertEqual(problems, [])
+        gated = sorted(str(key) for key, gate in docker.gates.items() if gate)
+        self.assertEqual(gated, ["('boot', 'general-prefix-eager')", "('environment', 'general-prefix-eager')"])
+        runs = []
+        real = provenance.Docker()
+        real.run = lambda arguments, timeout=None: runs.append(list(arguments)) or (0, 'C2ENV {}\n', '')
+        real.boot('img', '/m', 'general-prefix-eager', gate=True)
+        real.boot('img', '/m', 'general')
+        self.assertIn('QWEN_C2_GATE=1', runs[0])
+        self.assertNotIn('QWEN_C2_GATE=1', runs[1])
+        with mock.patch.object(provenance, 'parse_marked', lambda out, mark: {}):
+            real.environment('img', 'general-prefix-eager', gate=True)
+        self.assertIn('QWEN_C2_GATE=1', runs[2])
+        # the image's contract refuses the gate-only profile without it
+        docker = FakeDocker(self.context, *fake_image(self.context, self.entries), self.env)
+        self.assertIn('boot failed', docker.boot('sha256:built', '/models', 'general-prefix-eager'))
+
+    def test_a_prefix_profile_launched_with_a_weaker_hash_or_a_kv_connector_fails(self):
+        contract = provenance.load_contract(self.context / 'overlay/scripts/ci/serving_c2_contract.py')
+        profiles = self.context / 'overlay/scripts/ci/qwen_c2_profiles.json'
+        snapshot = contract.load_profile(str(profiles), 'general-prefix')['snapshots'][0]
+        argv = provenance.expected_argv(contract, profiles, 'general-prefix', snapshot)
+        argv[argv.index('--prefix-caching-hash-algo') + 1] = 'xxhash'
+        argv += ['--kv-transfer-config', '{}', '--default-chat-template-kwargs', '{"preserve_thinking": false}']
+        problems, _ = self.verify(argv_override={'general-prefix': argv})
+        prefix = [problem for problem in problems if problem.startswith('(f)')]
+        self.assertEqual(len(prefix), 1, problems)
+        self.assertIn("--prefix-caching-hash-algo sha256 (launched ['xxhash'])", prefix[0])
+        self.assertIn('--kv-transfer-config', prefix[0])
+        self.assertIn('preserve_thinking=false', prefix[0])
+
+    def test_a_stage_import_the_overlay_does_not_lay_fails(self):
+        """The bundle-provenance trap for the stages' own imports: a stage module that imports a scripts/ci
+        module the manifest does not name runs the bundle's version of it (lever_n_model_patch at 77d6995a
+        patches the traced loop only)."""
+        built, _ = fake_image(self.context, self.entries)
+        record = json.loads(json.dumps(built['prefix']))
+        record['imported'] = [dict(module='lever_n_stale', path='/experiment-scripts/ci/lever_n_stale.py',
+                                   sha256='1' * 64)]
+        problems, _ = self.verify(prefix=record)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('(f) the stages imported lever_n_stale from /experiment-scripts/ci/lever_n_stale.py, which the '
+                      'overlay does not lay', problems[0])
+        self.assertIn('name scripts/ci/lever_n_stale.py in docker/qwen-c2-overlay.txt', problems[0])
+        laid = '/experiment-scripts/ci/lever_n_model_patch.py'
+        record['imported'] = [dict(module='lever_n_model_patch', path=laid, sha256='2' * 64)]
+        problems, _ = self.verify(prefix=record)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('(f) the stages imported lever_n_model_patch (%s) at %s; the context overlays %s' % (
+            laid, '2' * 64, c2_overlay.sha256(self.context / 'overlay/scripts/ci/lever_n_model_patch.py')), problems[0])
+        record['imported'][0]['sha256'] = c2_overlay.sha256(self.context / 'overlay/scripts/ci/lever_n_model_patch.py')
+        self.assertEqual(self.verify(prefix=record)[0], [])
+        del record['imported']
+        problems, _ = self.verify(prefix=record)
+        self.assertEqual(problems, ['(f) the record does not list the modules the stages imported: an older '
+                                    'qwen_prefix_stage wrote it'])
+
+    def test_an_empty_stage_table_reports_a_moved_base_and_does_not_fail(self):
+        """With STAGES empty nothing is written: a target off its pin, or unresolved trees, are reported."""
+        built, _ = fake_image(self.context, self.entries)
+        record = json.loads(json.dumps(built['prefix']))
+        model = qwen_prefix_stage.MODEL_ROOT + '/model.py'
+        record['targets']['model/model.py'].update(before='7' * 64, after='7' * 64)
+        record['resolved'] = {}
+        record['warnings'] = ['model/model.py: %s is %s, not the pinned ...' % (model, '7' * 64)]
+        problems, _ = self.verify(prefix=record, prefix_shas={model: '7' * 64})
+        self.assertEqual(problems, [])
+        self.assertTrue(any('(f) model/model.py: the build found %s at %s, not the pinned' % ('7' * 64, model) in line
+                            and 'not fatal while the stage table is empty' in line for line in self.log), self.log)
+        self.assertTrue(any(line.startswith('[G1] (f) the prefix stage warned: model/model.py') for line in self.log))
+        with mock.patch.object(qwen_prefix_stage, 'STAGES', (('model/model.py', 'm', 'f'),)):
+            problems, _ = qwen_prefix_stage.record_problems(record, {model: '7' * 64}, {}, {})
+        self.assertTrue(any('the build found' in problem for problem in problems), problems)
+        self.assertTrue(any('does not say which plugin and model trees' in problem for problem in problems), problems)
+
+    def test_a_switch_leaking_into_another_profile_fails(self):
+        contract = provenance.load_contract(self.context / 'overlay/scripts/ci/serving_c2_contract.py')
+        loaded = contract.load_profile(str(self.context / 'overlay/scripts/ci/qwen_c2_profiles.json'), 'general')
+        env = contract.apply_environment(loaded, provenance.dockerfile_env((self.context / 'Dockerfile').read_text()))
+        env['QWEN_PREFIX_REUSE'] = '1'
+        problems, _ = self.verify(environments={'general': env})
+        self.assertEqual(problems, ['(f) general: the booted environment has QWEN_PREFIX_REUSE=1 under a profile '
+                                    'without prefix reuse'])
+
+    def test_a_missing_or_foreign_prefix_stage_record_fails(self):
+        problems, _ = self.verify(prefix=None)
+        self.assertEqual(problems, ['(f) the image has no /opt/qwen-c2/prefix-stage.json: the prefix-reuse stage '
+                                    'never ran'])
+        model = qwen_prefix_stage.MODEL_ROOT + '/model.py'
+        problems, _ = self.verify(prefix_shas={model: 'e' * 64})
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('(f) model/model.py: %s is %s in the image' % (model, 'e' * 64), problems[0])
+
+    def test_base_drift_reads_the_prefix_anchors(self):
+        built, base = fake_image(self.context, self.entries)
+        worker = qwen_prefix_stage.PLUGIN_ROOT + '/worker.py'
+        base['files'][worker] = dict(base['files'][worker], sha256='1' * 64)
+        log = []
+        problems, _ = provenance.base_drift(self.context, None, FakeDocker(self.context, built, base, {}), log.append)
+        # the stage table is empty: the build would record the moved worker, not refuse it
+        self.assertEqual(problems, [])
+        self.assertTrue(any('(f) plugin/worker.py: the base holds %s at %s, not the pinned' % (worker, '1' * 64) in line
+                            and 'empty now: reported, not failed' in line for line in log), log)
+        self.assertTrue(any('(f) model/qwen36_vllm.py: the base holds the pinned' in line for line in log))
+        problems, _ = provenance.check_prefix_anchors(base['files'], stages=(('plugin/worker.py', 'm', 'f'),))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('(f) plugin/worker.py: the base holds %s at %s, not the pinned' % (worker, '1' * 64), problems[0])
 
     def test_a_tampered_overlay_file_fails(self):
         problems, _ = self.verify(tampered='/opt/qwen-c2/profiles.json')
@@ -1064,7 +1231,7 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn('(c) exact: the image launched', problems[0])
 
     def test_a_boot_that_logs_no_argv_fails(self):
-        with mock.patch.object(FakeDocker, 'boot', lambda self, image, models, profile:
+        with mock.patch.object(FakeDocker, 'boot', lambda self, image, models, profile, gate=False:
                                'boot failed:\nTraceback ...\nValueError: x\n'):
             problems, _ = self.verify()
         profiles = json.loads((self.context / 'overlay/scripts/ci/qwen_c2_profiles.json').read_text())
@@ -1189,15 +1356,24 @@ class ProvenanceTests(unittest.TestCase):
             'from unittest import mock\n'
             'sys.argv = ["-m"] + %r\n'
             'with mock.patch.object(contract, "resolve_snapshot", lambda profile: profile["snapshots"][-1]):\n'
-            '    contract.boot(environ={"QWEN_C2_SERVING": "1", "QWEN_C2_PROFILES": %r},\n'
+            '    contract.boot(environ={"QWEN_C2_SERVING": "1", "QWEN_C2_PROFILES": %r,\n'
+            '                           "QWEN_C2_GATE": __import__("os").environ.get("QWEN_C2_GATE", "")},\n'
             '                  orig_argv=["python3", "-m", contract.API_SERVER] + %r)\n'
         ) % (str(self.context / 'overlay/scripts/ci'), list(provenance.BOOT_ARGS), str(profiles),
              list(provenance.BOOT_ARGS))
         contract = provenance.load_contract(self.context / 'overlay/scripts/ci/serving_c2_contract.py')
-        for name in json.loads(profiles.read_text())['profiles']:
+        loaded = json.loads(profiles.read_text())['profiles']
+        for name in loaded:
             with self.subTest(profile=name):
                 env = dict(os.environ, QWEN_C2_PROFILE=name)
                 env.pop('QWEN_C2_SERVING', None)
+                env.pop(provenance.GATE_SWITCH, None)
+                if loaded[name].get('gate_only'):
+                    refused = subprocess.run([sys.executable, '-B', '-c', code], env=env, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE, universal_newlines=True, timeout=120)
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertIn('is gate only: it boots only with QWEN_C2_GATE=1', refused.stderr)
+                    env[provenance.GATE_SWITCH] = '1'
                 result = subprocess.run([sys.executable, '-B', '-c', code], env=env, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, universal_newlines=True, timeout=120)
                 self.assertEqual(result.returncode, 0, result.stderr)
