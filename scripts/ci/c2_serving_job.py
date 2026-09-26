@@ -20,6 +20,12 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_GATE_MAX_TOKENS  the matrix's answer budget per user (default 4096)
   C2_GATE_MEMORY_PROMPT  G5's prompt length (default: the profile's largest admitted prompt)
   C2_REPLAY_PROFILE   the profile the replay's container serves (default: the source container's)
+  C2_PREFIX_PLAN      PREFIX_PLANS for the prefix action (c2_prefix_gate.py), in order (default: bringup)
+  C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; checked against the
+                      checkout's profiles when set or when the prefix action runs)
+  C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
+                      the baseline arm)
+  C2_PREFIX_AGENTS    the timing plan's busy-agent counts, one phase each (default 1,4,5,6)
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -29,8 +35,13 @@ import re
 import sys
 
 ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'drift', 'build', 'probe', 'smoke', 'gate',
-           'replay', 'push')
+           'prefix', 'replay', 'push')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
+# The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing')
+PREFIX_PROFILE = 'general-prefix'
+PREFIX_BASELINE = 'general'
+PREFIX_AGENTS = (1, 4, 5, 6)
 # S1's G4 ladder (c2-serve-for-real-plan 2.2, gate table row G4 part 1): both sides of every page and
 # chunk boundary the fast path has (2048 = the draft window and the prefill chunk), a short prompt
 # far below any of them, and long ones up to the ~123k prompt cap.
@@ -104,10 +115,35 @@ def read_job(values, profiles):
     replay_profile = values.get('C2_REPLAY_PROFILE', '')
     if replay_profile and replay_profile not in profiles:
         raise JobError('C2_REPLAY_PROFILE %r is not a profile of qwen_c2_profiles.json' % replay_profile)
-    return dict(actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
-                platform_image=platform_image, gate_plan=','.join(plans),
-                gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
-                gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile)
+    prefix = read_prefix(values, profiles, 'prefix' in actions)
+    outputs = dict(actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
+                   platform_image=platform_image, gate_plan=','.join(plans),
+                   gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
+                   gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile)
+    outputs.update(prefix)
+    return outputs
+
+
+def read_prefix(values, profiles, running):
+    """The prefix action's outputs. A profile named explicitly must be one the checkout defines; the
+    defaults are checked only when the action runs (general-prefix lands in qwen_c2_profiles.json on
+    another track, and the image's own profiles are what c2_prefix_gate.py finally checks)."""
+    plans = split_list(values.get('C2_PREFIX_PLAN', 'bringup')) or ['bringup']
+    unknown = sorted(set(plans) - set(PREFIX_PLANS))
+    if unknown:
+        raise JobError('C2_PREFIX_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(PREFIX_PLANS)))
+    profile = values.get('C2_PREFIX_PROFILE') or PREFIX_PROFILE
+    if (values.get('C2_PREFIX_PROFILE') or running) and profile not in profiles:
+        raise JobError('C2_PREFIX_PROFILE %r is not a profile of qwen_c2_profiles.json (%s)' % (profile, ', '.join(profiles)))
+    baseline = values.get('C2_PREFIX_BASELINE') or PREFIX_BASELINE
+    if baseline != 'none' and (values.get('C2_PREFIX_BASELINE') or running) and baseline not in profiles:
+        raise JobError('C2_PREFIX_BASELINE %r is not a profile of qwen_c2_profiles.json' % baseline)
+    if baseline == 'none' and 'bringup' in plans:
+        raise JobError('C2_PREFIX_BASELINE none: the bringup plan compares against a baseline profile')
+    agents_text = values.get('C2_PREFIX_AGENTS', '')
+    agents = [positive_int('C2_PREFIX_AGENTS', part) for part in split_list(agents_text)] or list(PREFIX_AGENTS)
+    return dict(prefix_plan=','.join(plans), prefix_profile=profile, prefix_baseline=baseline,
+                prefix_agents=','.join(str(count) for count in agents))
 
 
 def render(outputs):
