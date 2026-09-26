@@ -75,7 +75,9 @@ FAILS, and a flag the card evidence claims exact never makes one NOT_COMPARABLE 
 S2_EXACT_CLAIMS); --policy dc-i (the user's decision D-c(i), with --policy-decision) is the only relaxation.
   warm, warm-off  M1: solo on c2-packed over every later length (WARM_LENGTHS), short prompts decoding
            past 2048 of history, then 4 x 131072, 4 x 16384 and 4 x 4096 on c2-packed-gate (warm) and on
-           c2-gate (warm-off), the two shorter with the capture knob. Completes; kernel-cache entries recorded.
+           c2-gate (warm-off), the two shorter with the capture knob; warm-off also runs exact at v235's shape,
+           so M2's exact bring-up (judged for zero new cache entries) finds exact's programs compiled.
+           Completes; kernel-cache entries recorded.
   control  M3-M4, G3: --pairs A/B pairs (default 2: ABAB) of c2-gate (A) and c2-packed-gate (B) at v235's
            shape. Every arm IDENTICAL to v235; B's median four-live packed round, net of its audit's ms, at
            most CONTROL_TOLERANCE x A's in every pair; B shows the S2 lines and A none of them.
@@ -85,25 +87,33 @@ S2_EXACT_CLAIMS); --policy dc-i (the user's decision D-c(i), with --policy-decis
            c2-packed-gate, both with the capture knob at F - 256, 4 x (F - 256) prompts, 224 out (every ticket
            stays in F). Every user IDENTICAL across the arms; the flag-off arm must serve packed rounds inside
            F, else NO_DECISION (Q22).
-  lifecycle-arrival  M6's added event: the arrival that makes the live count two (user 1) leaves in its build.
-           (lifecycle itself on an S2 profile also needs one 'survivor narrowed' line across its arms, else
-           NOT_EXERCISED, and every refuse_round request ended FINISHED_ABORTED.)
+  lifecycle-arrival  M6's added event: the arrival that makes the live count two (user 1) leaves in its build,
+           with user 0 decoding (one live stream when the drop fired, else NOT_EXERCISED). (lifecycle itself on
+           an S2 profile also needs one 'survivor narrowed' line across its arms, else NOT_EXERCISED, and every
+           refuse_round request ended FINISHED_ABORTED.)
   mixed, short, boundaries, staggered  M7-M10, G4 (--lengths replaces a plan's default set): a concurrent and
            a solo arm under the policy with one re-run, plus: every arm's extent audit clean and complete,
            zero idle commits, refuse_round rounds, cap refusals and other audit mismatches, the four-live
-           per-user rate (net of the audit) above GENERAL_RATE; mixed needs a packed round of two families,
-           short the one-bucket ladder, no hold or refusal and the before-point floor (FLOOR_GB), boundaries
+           per-user rate (net of the audit) above GENERAL_RATE; mixed (M7) always runs the prestage, pair-mask
+           and fused-commit audits too (G4_ALL_AUDITS; --audits all adds them to the other G4 plans) and needs a
+           packed round of two families, short the one-bucket ladder (2048,), no DRAM hold with a seat free, no
+           lifted hold or refusal and the before-point floor (FLOOR_GB), boundaries
            (ignore_eos, 8192 out) cap events and BOUNDARY_MIN_CROSSINGS 256-key crossings per user, staggered
            (STAGGER_SECONDS apart) padded rounds at two or three live and a padded-probe arm.
-  churn    M11, G5: CHURN_LENGTHS over four seats, each user's seat freed and retaken: no engine death, no
-           hold or refusal, the floor, and dead proposal traces released at departures.
+  churn    M11, G5: CHURN_LENGTHS (12 users, 8 replacements) over four seats, each user's seat freed and
+           retaken: no engine death, no DRAM hold with a seat free (holds while every seat decodes are the fifth
+           user waiting, not a failed fit), no lifted hold or refusal, the floor, and at every departure while a
+           quad was formed a released quad (W6c: the release line just ahead of that step's [PHASE] line).
   permuted  built, required only under D-c(i): two concurrent arms, the second admitted in reverse order;
            at least two SAME_PATH users (else NOT_EXERCISED), and no same-path user may differ.
 On an S2 profile the four S1 plans add their S2 checks too (memory: no hold or refusal and the floor).
 Every arm of an S2 plan or on an S2 profile (--jit auto) must leave the kernel cache as it found it: a judged
-arm that compiled is a problem (M1 warms it first). A non-identical user of an S2 arm gets a divergence record
-(t*, character, round, positions, E, paths), and any NOT_COMPARABLE or UNSTABLE one is listed in the summary's
-s2_exit_blockers with it (<results>/<plan>-divergence-records.json).
+arm that compiled is a problem (M1 warms it first), and a judged arm whose cache could not be counted leaves
+its plan NOT_EXERCISED, never PASS. The cache is counted only on such a run (an S2 plan or profile, or --jit
+judge/record): a run of S1 plans on an S1 profile reads nothing more than before (counts_cache). A ledger
+before-point or DRAM hold that read no DRAM is unjudged (NOT_EXERCISED), never a pass. A non-identical user of
+an S2 arm gets a divergence record (t*, character, round, positions, E, paths), and any NOT_COMPARABLE or
+UNSTABLE one is listed in the summary's s2_exit_blockers with it (<results>/<plan>-divergence-records.json).
 
 SAFETY. Before each arm: no thatch-inference-* container may exist (a placement reloading onto M+A
 mid-gate), and a leftover gate container of the same name is removed; after each arm, however it
@@ -212,14 +222,17 @@ VERDICT_ORDER = ('FAIL', 'INFRA', 'RERUN', 'NOT_COMPARABLE', 'UNSTABLE', 'NOT_EX
 # S2 (C2-packed-any; the module docstring's S2 PLANS). The profiles are W8's; the knobs are gate-only.
 EXTENT_FLAG = harness.EXTENT_REPLAY_FLAG
 AUDIT_ENV = ((harness.EXTENT_AUDIT_FLAG, '1'),)
-# C2_GATE_AUDITS=all adds these three on the G4 arms (each already in the image under its parent flag; their
-# mismatch lines FAIL an S2 arm whenever they appear).
+# M7 (mixed) judges zero mismatches from these three (s2-design 6.3), so its arms always carry them
+# (ALL_AUDIT_PLANS); C2_GATE_AUDITS=all adds them to the other G4 arms too. Each is already in the image under its
+# parent flag, and its mismatch lines FAIL an S2 arm whenever they appear.
 G4_ALL_AUDITS = (('QWEN_FAST_PRESTAGE_AUDIT', '1'), ('QWEN_FAST_PAIR_MASK_AUDIT', '1'),
                  ('QWEN_FAST_FUSED_COMMIT_AUDIT', '1'))
+ALL_AUDIT_PLANS = ('mixed',)
 PADDED_PROBE_ENV = (('QWEN_FAST_PADDED_PROBE', '1'),)
 # What an arm may add with -e: the gate-only knobs, the padded probe and the G4 audits - never a profile key.
 ARM_ENV_NAMES = frozenset(harness.S2_GATE_KNOBS + ('QWEN_FAST_PADDED_PROBE',) + tuple(name for name, _ in G4_ALL_AUDITS))
 S2_OFF_PROFILE, S2_GATE_PROFILE, S2_TRAFFIC_PROFILE = 'c2-gate', 'c2-packed-gate', 'c2-packed'
+EXACT_PROFILE = 'exact'
 S2_PLANS = c2_serving_job.S2_GATE_PLANS
 WARM_PLANS = ('warm', 'warm-off')
 DEFAULT_PAIRS = 2
@@ -235,8 +248,13 @@ BOUNDARY_LENGTHS = (8192, 30000, 70000, 110000)
 BOUNDARY_MAX_TOKENS = 8192
 BOUNDARY_MIN_CROSSINGS = 16
 STAGGER_SECONDS = 30.0
-CHURN_LENGTHS = (110000, 120000, 123136, 110000, 120000, 123136, 110000, 120000, 1536)
-CHURN_MAX_TOKENS = (768, 1024, 1280, 1536, 768, 1024, 1280, 1536, 2304)
+# M11: at least 8 replacements (s2-design 3.3): 12 users over the four seats, prompts 100k-123k and one short
+# (the one-bucket ladder under churn), last. Budgets 256 tokens apart, so departures are spread and each
+# replacement's quad re-forms before the next member leaves; the short user decodes past 2048 of history.
+CHURN_LENGTHS = (110000, 120000, 123136, 110000, 120000, 123136, 110000, 120000, 123136, 110000, 120000, 1536)
+CHURN_MAX_TOKENS = (768, 1024, 1280, 1536, 768, 1024, 1280, 1536, 768, 1024, 1280, 2304)
+CHURN_MIN_REPLACEMENTS = 8
+SINGLE_BUCKET = [2048]           # W6a: the one proposal bucket every engine builds under the extent flag
 # M1: every length a later arm serves (G4's sets, the lifecycle's, G3b's), solo; below 2048 decoding past 2048 of
 # history (WARM_SHORT_TOKENS, ignore_eos) so the drafter's ramp shapes are compiled too.
 WARM_LENGTHS = (60, 255, 1536, 2047, 2049, 4096, 5000, 8192, 16384, 20000, 30000, 40000, 60000, 70000, 90000,
@@ -589,11 +607,17 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
             arms.append(Arm('%s-4x%d' % (plan, prompt), four_user_args(profiles, gate, plan, prompt), WARM_SHORTER_SECONDS,
                             profile=gate, env=((harness.CAPTURE_POSITION_FLAG, str(prompt)),) + s2_env(profiles, gate),
                             judged=False, role='four'))
+        if plan == 'warm-off':
+            # M2 judges exact's bring-up for zero new cache entries, and exact's environment is neither c2-gate's nor
+            # an S2 profile's: its programs are warmed here, at the shape M2 serves.
+            need_profile(profiles, EXACT_PROFILE, False, plan)
+            arms.append(Arm('warm-off-exact-4x%d' % BRINGUP_PROMPT, v235_args(profiles, EXACT_PROFILE, plan),
+                            ARM_SECONDS['warm-off'], profile=EXACT_PROFILE, judged=False, role='four'))
         return arms
     if profile not in profiles['profiles'] or not s2_profile(profiles, profile):
         raise PlanError('%s is an S2 plan: run it on c2-packed (a profile with %s=1), not %s' % (plan, EXTENT_FLAG, profile))
     context, ceiling, room = profile_limits(profiles, profile)
-    env = s2_env(profiles, profile, s2.get('audits'), g4=plan in G4_PLANS)
+    env = s2_env(profiles, profile, 'all' if plan in ALL_AUDIT_PLANS else s2.get('audits'), g4=plan in G4_PLANS)
     seats = str(profile_seats(profiles, profile))
     if plan == 'lifecycle-arrival':
         check_lengths(profile, LIFECYCLE_LENGTHS, room, 'lifecycle prompt lengths')
@@ -602,8 +626,10 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
             '--prompt-lengths', ','.join(str(length) for length in LIFECYCLE_LENGTHS),
             '--max-tokens', str(LIFECYCLE_MAX_TOKENS)]
         users = str(len(LIFECYCLE_LENGTHS))
+        # The event is VR4:150's only while user 0 decodes when user 1's build is dropped: one live stream then.
         return [Arm('lifecycle-arrival', base + ['--users', users, '--stagger', str(STAGGER), '--alive-check', seats,
-                                                 '--drops', '1:build'], seconds, env=env, rerun=True, role='event'),
+                                                 '--drops', '1:build'], seconds, env=env, rerun=True, role='event',
+                    expect_live={1: 1}),
                 Arm('lifecycle-arrival-solo', base + ['--users', '1', '--sequential-users', users, '--alive-check', '1'],
                     seconds, env=env, rerun=True, role='solo')]
     if plan == 'churn':
@@ -614,8 +640,9 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
                          '--user-max-tokens', ','.join('%d:%d' % item for item in enumerate(budgets)),
                          '--user-ignore-eos', ','.join(str(index) for index in range(len(churn))),
                          '--stagger', str(STAGGER), '--alive-check', seats]
-        if len(churn) < 2 * int(seats):
-            notes.append('churn: %d users over %s seats is fewer than two replacements per seat' % (len(churn), seats))
+        if len(churn) - int(seats) < CHURN_MIN_REPLACEMENTS:
+            notes.append('churn: %d users over %s seats is %d replacements, fewer than the %d M11 asks for'
+                         % (len(churn), seats, len(churn) - int(seats), CHURN_MIN_REPLACEMENTS))
         return [Arm('churn', args, seconds, env=env, role='churn')]
     if plan == 'permuted':
         chosen = list(lengths or MIXED_LENGTHS)
@@ -1080,6 +1107,9 @@ class Runner(object):
         self.policy, self.decision = policy, decision
         self.arms = {}
         self.infra = None
+        # What an arm could not judge (a judged arm whose kernel cache could not be counted): run_plan turns a
+        # plan that would pass into NOT_EXERCISED with these.
+        self.unjudged = []
 
     def any_request_for(self, profile):
         if self.profiles is not None and profile in self.profiles['profiles']:
@@ -1089,6 +1119,12 @@ class Runner(object):
     def s2_for(self, profile):
         return bool(self.profiles is not None and profile in self.profiles['profiles']
                     and s2_profile(self.profiles, profile))
+
+    def seats_for(self, profile):
+        """The profile's seats (max-num-seqs), MEMORY_USERS when the profiles are not known."""
+        if self.profiles is not None and profile in self.profiles['profiles']:
+            return profile_seats(self.profiles, profile)
+        return MEMORY_USERS
 
     def judges(self, plan, profile, judged=True):
         """Whether an arm's kernel-cache growth fails it: never a warm arm, and under --jit auto only an S2
@@ -1169,6 +1205,11 @@ class Runner(object):
             if judged and cache['added']:
                 problems.append('the kernel cache grew by %d entries during this arm: it compiled what M1 (warm) did '
                                 'not (s2-design B6)' % cache['added'])
+            if judged and cache['added'] is None:
+                self.unjudged.append('%s: its kernel-cache growth is judged but could not be counted (%s): zero new '
+                                     'entries is unshown (s2-design B6)' % (
+                                         arm, 'no counter: the image\'s cache is not on the hub'
+                                         if self.cache_entries is None else 'a count failed'))
             if log_text is not None and (measure or self.s2_for(profile) or env):
                 report['c2_gate_live4'] = host_live_rate(log_text)
             if cache['before'] is not None or self.s2_for(profile) or env:
@@ -1261,26 +1302,49 @@ def s2_g4_problems(label, report):
     return problems
 
 
-def memory_s2_problems(label, report):
-    """G5 on an S2 profile (s2-design B4, B8; M8, M11): no DRAM hold and no refused request at four users or
-    fewer, and the before-point floor at least FLOOR_GB per chip."""
+def memory_s2_checks(label, report, seats=MEMORY_USERS):
+    """(problems, shortfalls) of G5 on an S2 profile (s2-design B4, B8; M8, M11). W6b asks its predicate whenever
+    a prompt waits, every seat decoding included: such a hold changes nothing (the prompt could not be admitted
+    anyway - churn has more users than seats), so a hold is a failed fit only with a seat free, its decodes below
+    `seats` (the hold line's, or the held state the wrapper logged when a seat freed and it still did not fit).
+    Also: no lifted hold (admitted with nothing left to wait for) and no refused request; the before-point floor
+    (W6d's margins, a negative one included, and the prefill points) at least FLOOR_GB per chip. A hold or a
+    before-point that read no DRAM, or no engine before-point under the flag, leaves the floor unjudged: a
+    shortfall, never a pass."""
     s2 = s2_of(report)
     if not s2:
-        return []
-    problems = []
-    if s2.get('dram_holds'):
-        problems.append('%s: %d "%s" lines at no more than four users: the block and four engines did not fit (%s)'
-                        % (label, s2['dram_holds'], harness.DRAM_HOLD_MARKER, '; '.join(s2.get('dram_hold_lines') or [])))
+        return [], []
+    problems, shortfalls = [], []
+    hold = s2.get('dram_hold') or {}
+    free = sorted(set([decodes for decodes in hold.get('hold_decodes') or [] if decodes < seats] +
+                      [decodes for decodes in hold.get('held_states') or [] if decodes < seats]))
+    if free:
+        problems.append('%s: DRAM held a prompt with a seat free (decodes %s of %d seats): the block and the engines '
+                        'did not fit (%s)' % (label, free, seats, '; '.join(hold.get('lines') or []) or 'held state'))
+    if hold.get('lifted'):
+        problems.append('%s: %d "%s" lines: a prompt that did not fit was admitted with no decode left to wait for '
+                        '(%s)' % (label, hold['lifted'], harness.DRAM_LIFTED_MARKER.strip(),
+                                  '; '.join(hold.get('lifted_lines') or [])))
+    if hold.get('unavailable'):
+        shortfalls.append('%s: the DRAM hold read no DRAM for %d requests (%s): their fit is unjudged' % (
+            label, hold['unavailable'], '; '.join(hold.get('unavailable_lines') or [])))
     if s2.get('quarantined'):
-        problems.append('%s: %d requests refused (RequestRefused, quarantined) at no more than four users (%s)' % (
+        problems.append('%s: %d requests refused (RequestRefused, quarantined) (%s)' % (
             label, s2['quarantined'], '; '.join(s2.get('quarantined_lines') or [])))
     before = s2.get('before') or {}
     if before.get('floor_gb') is None:
         problems.append('%s: no ledger before-point carries an estimate: the floor cannot be judged' % label)
     elif before['floor_gb'] < FLOOR_GB:
-        problems.append('%s: before-point floor %.3f GB per chip, below %.2f (%s)' % (
-            label, before['floor_gb'], FLOOR_GB, (before.get('floor_point') or {}).get('detail')))
-    return problems
+        problems.append('%s: before-point floor %.3f GB per chip, below %.2f (%s %s chip%s)' % (
+            label, before['floor_gb'], FLOOR_GB, (before.get('floor_point') or {}).get('op'),
+            (before.get('floor_point') or {}).get('detail'), (before.get('floor_point') or {}).get('chip')))
+    if before.get('unread'):
+        shortfalls.append('%s: %d ledger before-points read no DRAM (%s): the floor over them is unjudged' % (
+            label, before['unread'], '; '.join(before.get('unread_lines') or [])))
+    if s2.get('extent_replay') and not (before.get('by_op') or {}).get('engine'):
+        shortfalls.append('%s: no "[MEMLEDGER] before op=engine" point (W6d): the floor was judged without the '
+                          'engine builds' % label)
+    return problems, shortfalls
 
 
 def live4_of(report):
@@ -1289,7 +1353,7 @@ def live4_of(report):
     return live if live and 'error' not in live else None
 
 
-def g4_checks(plan, concurrent, solo, rerun=None, probe=None):
+def g4_checks(plan, concurrent, solo, rerun=None, probe=None, seats=MEMORY_USERS):
     """(problems, shortfalls, facts) of a G4 plan beyond the policy and matrix_verdict (module docstring)."""
     problems, shortfalls = [], []
     arms = [('concurrent', concurrent), ('solo', solo)]
@@ -1300,9 +1364,11 @@ def g4_checks(plan, concurrent, solo, rerun=None, probe=None):
             continue
         problems += s2_g4_problems(label, report)
         if plan == 'short':
-            problems += memory_s2_problems(label, report)
+            memory, unjudged = memory_s2_checks(label, report, seats)
+            problems += memory
+            shortfalls += unjudged
             ladders = s2_of(report).get('ladders') or []
-            wrong = sorted(set(ladder for ladder in ladders if ladder.replace(' ', '') != '[2048]'))
+            wrong = sorted(set(str(ladder) for ladder in ladders if ladder != SINGLE_BUCKET))
             if wrong or not ladders:
                 problems.append('%s: proposal ladders %s, not the one 2048 bucket every engine builds under %s (W6a)'
                                 % (label, wrong or 'unlogged', EXTENT_FLAG))
@@ -1385,9 +1451,27 @@ def run_matrix(plan, runner, arms, checks=None):
     if checks is not None:
         probe = run_arm(runner, plan, by_role['probe']) if 'probe' in by_role else None
         if concurrent is not None and solo is not None:
-            problems, shortfalls, facts = g4_checks(checks, concurrent, solo, rerun, probe)
+            problems, shortfalls, facts = g4_checks(checks, concurrent, solo, rerun, probe,
+                                                    seats=runner.seats_for(spec_profile(runner, c_spec)))
             result = with_checks(result, problems, shortfalls, facts)
     return result
+
+
+def live_shortfalls(spec, report, suffix=''):
+    """An event arm's drops that fired at another live count than the arm expects (Arm expect_live: {user: live
+    streams when that user's drop fires}); a drop that never fired is event_shortfalls'."""
+    expected = (getattr(spec, 'extra', None) or {}).get('expect_live') or {}
+    if not expected or report is None:
+        return []
+    events = ((report or {}).get('lifecycle') or {}).get('events') or {}
+    shortfalls = []
+    for user, live in sorted(expected.items()):
+        event = events.get(str(user), events.get(user)) or {}
+        if event.get('fired') and event.get('live') != live:
+            shortfalls.append('%s%s: user %s\'s %s fired at %s live streams, not %d: the arrival that makes the live '
+                              'count two was not the one dropped (VR4:150)' % (spec[0], suffix, user, event.get('spec'),
+                                                                               event.get('live'), live))
+    return shortfalls
 
 
 def run_lifecycle(plan, runner, arms):
@@ -1402,13 +1486,14 @@ def run_lifecycle(plan, runner, arms):
                                                     relaxation=relaxation))
                         for spec, report in reports[:-1])
     again = [spec for spec, _ in reports[:-1] if arms_results[spec[0]]['verdict'] == 'RERUN']
+    reruns = {}
     if again:
         runner.log('[C2-GATE] %s: a first divergence - re-running %s and the solo arm once (the exactness '
                    'policy)' % (plan, ', '.join(spec[0] for spec in again)))
         solo_again = run_arm(runner, plan, s_spec, '-rerun')
         first = dict((spec[0], report) for spec, report in reports)
         for spec in again:
-            event_again = run_arm(runner, plan, spec, '-rerun')
+            event_again = reruns[spec[0]] = run_arm(runner, plan, spec, '-rerun')
             rerun = (event_again, solo_again) if event_again is not None and solo_again is not None else None
             arms_results[spec[0]] = lifecycle_verdict(first[spec[0]], solo, rerun, want=asked(spec[1]),
                                                       solo_want=solo_want, relaxation=relaxation)
@@ -1425,6 +1510,8 @@ def run_lifecycle(plan, runner, arms):
                 problems.append('%s: %d refuse_round rounds, but %d complete FINISHED_ABORTED groups: a refused '
                                 'request was left to kill the engine (W5b)' % (spec[0], refused.get('refused'),
                                                                                refused.get('complete_groups')))
+        for spec, report in reports[:-1]:
+            shortfalls += live_shortfalls(spec, report) + live_shortfalls(spec, reruns.get(spec[0]), ' re-run')
         narrowed = sum(s2_of(report).get('narrowed') or 0 for _, report in reports[:-1])
         if plan == 'lifecycle' and not narrowed:
             shortfalls.append('no "%s" line across the event arms: D1 was not exercised (M6: re-run)'
@@ -1435,14 +1522,15 @@ def run_lifecycle(plan, runner, arms):
 
 def run_memory(plan, runner, arms):
     """G5: each arm judged alone (memory_verdict), the plan the worst of them; on an S2 profile with
-    memory_s2_problems."""
+    memory_s2_checks."""
     results = []
     for spec in arms:
         report = run_arm(runner, plan, spec)
         one = memory_verdict(report, want=asked(spec[1]))
         if report is not None and runner.s2_for(spec_profile(runner, spec)):
-            one = with_checks(one, memory_s2_problems(spec[0], report), [],
-                              dict(before=s2_of(report).get('before'), dram_holds=s2_of(report).get('dram_holds')))
+            problems, shortfalls = memory_s2_checks(spec[0], report, runner.seats_for(spec_profile(runner, spec)))
+            one = with_checks(one, problems, shortfalls,
+                              dict(before=s2_of(report).get('before'), dram_hold=s2_of(report).get('dram_hold')))
         one['any_request_engines'] = (runner.arms.get(spec[0]) or {}).get('any_request_engines') or []
         results.append((spec[0], one))
     if len(results) == 1:
@@ -1589,30 +1677,56 @@ def run_warm(plan, runner, arms):
                 ['%s %s kernel cache %s' % (arm, one['verdict'], one['kernel_cache']) for arm, one in results.items()])
 
 
+def trace_region_text(region):
+    """The trace region's readings as a line: its peak use and smallest free block, or why there are none (Q18)."""
+    region = region or {}
+    if region.get('readings'):
+        return '%d readings, at most %s GB used, smallest largest-free %s GB' % (
+            region['readings'], region.get('max_used_gb'), region.get('min_largest_free_gb'))
+    if region.get('unavailable'):
+        return 'unavailable at %d points: this ttnn exposes no TRACE view (Q18)' % region['unavailable']
+    return 'not logged (Q18)'
+
+
 def run_churn(plan, runner, profiles, arms):
-    """M11 (G5 churn): no engine death, no hold or refusal, the floor, and dead proposal traces released."""
+    """M11 (G5 churn): no engine death, no DRAM hold with a seat free, no lifted hold or refusal, the floor, and a
+    released quad at every departure while a quad was formed (harness.proposal_releases), over at least
+    CHURN_MIN_REPLACEMENTS replacements seen as departures; the trace region's readings recorded (Q18)."""
     spec, = arms
     report = run_arm(runner, plan, spec)
     if report is None:
         return dict(verdict='FAIL', reason='the arm left no gate report', lines=[])
-    problems = arm_problems('churn', report, asked(spec[1])) + memory_s2_problems('churn', report)
+    seats = profile_seats(profiles, spec_profile(runner, spec))
+    memory, shortfalls = memory_s2_checks('churn', report, seats)
+    problems = arm_problems('churn', report, asked(spec[1])) + memory
     if not report.get('alive'):
         problems.append('churn: the engine did not answer every seat after the streams')
-    shortfalls = []
     s2 = s2_of(report)
     releases = s2.get('releases') or {}
     users = asked(spec[1])['streams']
-    replacements = users - profile_seats(profiles, spec_profile(runner, spec))
-    if not s2.get('quads_built'):
-        shortfalls.append('no quad was built: no departure met a formed quad')
-    elif not releases.get('lines') or not releases.get('quad'):
-        problems.append('%d "[PACKED-PROPOSE] released" lines (%d with a quad) over %d replacements: dead proposal '
-                        'traces were not released at detach (W6c)' % (releases.get('lines') or 0,
-                                                                        releases.get('quad') or 0, replacements))
+    replacements = users - seats
+    if (releases.get('departures') or 0) < replacements:
+        shortfalls.append('%s departures seen ([PHASE] finished ids) for %d replacements: the seats did not churn '
+                          'as asked' % (releases.get('departures') or 0, replacements))
+    if not releases.get('quad_rounds'):
+        shortfalls.append('no quad round ran: no departure met a formed quad (W6c unexercised)')
+    elif not releases.get('quad_departures'):
+        shortfalls.append('%d quad rounds, but no request left while a quad was formed (W6c unexercised)'
+                          % releases['quad_rounds'])
+    elif releases.get('unreleased'):
+        problems.append('%d of %d departures while a quad was formed carry no "[PACKED-PROPOSE] released quad=1" '
+                        'line (%s): dead proposal traces were not released at detach (W6c)' % (
+                            releases['unreleased'], releases['quad_departures'],
+                            '; '.join(releases.get('unreleased_steps') or [])))
+    region = s2.get('trace_region') or {}
     facts = dict(releases=releases, replacements=replacements, quads_built=s2.get('quads_built'),
-                 before=s2.get('before'), trace_region_lines=s2.get('trace_region_lines'))
-    result = dict(verdict='PASS', lines=['releases %s over %d replacements; trace region %s' % (
-        releases, replacements, s2.get('trace_region_lines') or 'not logged (Q18)')])
+                 before=s2.get('before'), dram_hold=s2.get('dram_hold'), trace_region=region)
+    result = dict(verdict='PASS', lines=[
+        'departures %s (%s while a quad was formed, %s released it) over %d replacements; release lines %s (%s '
+        'quads, %s pairs); trace region %s' % (
+            releases.get('departures'), releases.get('quad_departures'),
+            (releases.get('quad_departures') or 0) - (releases.get('unreleased') or 0), replacements,
+            releases.get('lines'), releases.get('quad'), releases.get('pairs'), trace_region_text(region))])
     return with_checks(result, problems, shortfalls, facts)
 
 
@@ -1672,9 +1786,28 @@ def divergence_records(result):
     return found
 
 
+def counts_cache(plans, profiles, profile, jit):
+    """Whether a run counts the kernel cache before and after every arm: an S2 plan or profile, or an explicit --jit
+    judge or record. S1 plans on an S1 profile under --jit auto read nothing more than before W11 (no docker image
+    inspect, no find) and their reports and summary gain no kernel-cache keys."""
+    return any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, profile) or jit != 'auto'
+
+
+def with_unjudged(result, unjudged):
+    """A plan's result with what its arms could not judge (Runner.unjudged): NOT_EXERCISED where it would pass."""
+    if not unjudged:
+        return result
+    result['shortfalls'] = list(result.get('shortfalls') or []) + list(unjudged)
+    result['lines'] = list(result.get('lines') or []) + ['not exercised: %s' % s for s in unjudged]
+    if result.get('verdict') == 'PASS':
+        result['verdict'] = 'NOT_EXERCISED'
+    return result
+
+
 def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2_serving_job.DEFAULT_MAX_TOKENS,
              memory_prompt=None, s2=None):
     notes = []
+    unjudged_from = len(runner.unjudged)
     arms = plan_arms(plan, runner.profile, profiles, lengths, max_tokens, memory_prompt, notes, s2)
     for note in notes:
         runner.log('[C2-GATE] note: %s' % note)
@@ -1702,6 +1835,7 @@ def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2
         result = run_lifecycle(plan, runner, arms)
     else:
         result = run_matrix(plan, runner, arms)
+    result = with_unjudged(result, runner.unjudged[unjudged_from:])
     if runner.infra is not None:
         result.update(verdict='INFRA', reason=runner.infra)
     if notes:
@@ -1872,14 +2006,16 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     env=getattr(spec, 'env', ())))))
         return 0
     cache_dir = None
-    if cache_entries is None and execute is None:
-        # The kernel cache the image's arms read and write (B6), counted before and after every arm.
+    s2_run = any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, options.profile)
+    if cache_entries is None and execute is None and counts_cache(plans, profiles, options.profile, options.jit):
+        # The kernel cache the image's arms read and write (B6), counted before and after every arm - only on a run
+        # that judges or records it: S1 plans on an S1 profile (--jit auto) read nothing more than before W11.
         cache_dir = image_kernel_cache(options.image, options.hub)
         if cache_dir is not None:
             cache_entries = lambda: count_entries(cache_dir)
         else:
-            log('[C2-GATE] note: the image\'s kernel cache (%s) is not on the hub: kernel-cache growth is not counted'
-                % KERNEL_CACHE_ENV)
+            log('[C2-GATE] note: the image\'s kernel cache (%s) is not on the hub: kernel-cache growth is not counted, '
+                'and every arm that judges it leaves its plan NOT_EXERCISED' % KERNEL_CACHE_ENV)
     runner = Runner(options.image, options.profile, options.results, options.checkout,
                     devices if devices is not None else serving_pair(), options.hub, execute, log, containers, corpus,
                     any_request=any_request_profile(profiles, options.profile), profiles=profiles,
@@ -1889,7 +2025,6 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
     summary = dict(image=options.image, profile=options.profile, plans=plans, context=context,
                    output_ceiling=ceiling, largest_prompt=room, worst_case_seconds=worst_case,
                    budget_seconds=options.budget_seconds, results={}, arms=runner.arms)
-    s2_run = any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, options.profile)
     if s2_run:
         summary.update(policy=options.policy, policy_decision=options.policy_decision, jit=options.jit,
                        kernel_cache=cache_dir, s2_exit_blockers=[])

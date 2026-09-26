@@ -289,16 +289,17 @@ def arithmetic_neutral(name):
 
 def arithmetic_diff(first, second):
     """{flag: [first, second]} for every arithmetic flag the two reports differ by, a flag either
-    side leaves unset read as its EFFECTIVE_DEFAULTS value; None when either carries no configuration.
-    S2_EXACT_CLAIMS never count: the strict policy holds arms that differ only in them to IDENTICAL."""
+    side leaves unset read as its EFFECTIVE_DEFAULTS value; None when either carries no configuration."""
     differ = configuration_diff(first, second)
     if differ is None:
         return None
+    # S2_EXACT_CLAIMS never count: the strict policy holds arms that differ only in them to IDENTICAL.
+    differ = dict((name, values) for name, values in differ.items() if name not in S2_EXACT_CLAIMS)
     def effective(name, value):
         return EFFECTIVE_DEFAULTS.get(name) if value is None else value
 
     return {name: values for name, values in differ.items() if not arithmetic_neutral(name)
-            and name not in S2_EXACT_CLAIMS and effective(name, values[0]) != effective(name, values[1])}
+            and effective(name, values[0]) != effective(name, values[1])}
 
 
 def policy_user(verdict):

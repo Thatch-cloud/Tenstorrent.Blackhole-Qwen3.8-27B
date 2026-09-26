@@ -42,7 +42,7 @@ Keys (every one optional but C2_IMAGE_TAG):
                       which a cross-path divergence reads NOT_COMPARABLE; dc-i needs C2_GATE_POLICY_DECISION,
                       where the user's decision is recorded (a plain word: a path, URL or id)
   C2_GATE_AUDITS      extent (default: QWEN_FAST_EXTENT_AUDIT on every S2 arm) or all (also the prestage,
-                      pair-mask and fused-commit audits on the G4 arms)
+                      pair-mask and fused-commit audits on the G4 arms); mixed (M7) runs all four either way
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """

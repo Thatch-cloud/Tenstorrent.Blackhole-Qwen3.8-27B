@@ -3,14 +3,23 @@ records and four-live rate, the strict policy with its divergence records and th
 verdicts, and the whole driver with injected docker, server logs and kernel-cache counter.
 
 Nothing here opens a device or runs docker. The S2 profiles are W8's; until they land in the checkout this
-module builds them as the design defines them (s2_profiles), and uses the checkout's once they exist."""
+module builds them as the design defines them (s2_profiles), and uses the checkout's once they exist.
+
+Every server-log line a fixture writes is rendered from its producer's own format (the W* constants below,
+copied verbatim with their sources), never invented: the W11 review found four formats the gate read one way
+and W3/W6 write another. ProducerContractTests renders each producer's real lines and parses them with the
+harness whenever the checkout carries that producer (W3 on s2/w3-block-step, W6 on s2/w6-memory), and holds
+the copies here equal to the producers' constants."""
 
 import datetime
+import inspect
 import io
 import json
 import os
+import re
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -29,6 +38,113 @@ CAPTURE = gate.CAPTURE_POSITION_FLAG
 FORCE = gate.FORCE_CAP_FLAG
 EXTENT = gate.EXTENT_REPLAY_FLAG
 BLOCK_KEYS = ('QWEN_FAST_PACKED_STEP', 'QWEN_FAST_PADDED_BLOCK')
+
+# The producers' line formats, verbatim (ProducerContractTests holds each against its producer).
+W3_ROUND_FORMAT = '%s round=%d live=%d families=[%s] idle=[%s] capped=[%s]'   # packed_verifier.note_extent_round
+W3_AUDIT_FORMAT = ('%s round=%d segments=%d words_ok=%d cur_pos_ok=%d mask_ok=%d tables_ok=%d rotated=%d '
+                   'ms=%.2f')                                                  # packed_verifier.audit_extent
+W3_MISMATCH_FORMAT = '%s round=%d at=%s'                                       # packed_verifier.audit_extent
+W3_AUDIT_MARKER, W3_MISMATCH_MARKER = '[EXTENT-AUDIT]', '[EXTENT-AUDIT] MISMATCH'
+# serving_prefill_admission (W6b): the hold's lines and the wrapper's decision line (once per distinct state).
+W6_HOLD_LINE = '[PINDIAG] dram hold prompt={} largest_free={} need={} request={} decodes={}'
+W6_RELEASED_HOLD_LINE = '[PINDIAG] dram hold released prompt={} largest_free={} need={} request={}'
+W6_LIFTED_LINE = ('[PINDIAG] dram hold lifted prompt={} largest_free={} need={} request={}: no decode is left to '
+                  'free DRAM, so the prompt is admitted and the bridge backstop decides')
+W6_UNAVAILABLE_LINE = '[PINDIAG] dram hold unavailable request={}: {} (not held)'
+DECISION_LINE = '[PINDIAG] one fresh prefill per step: partials={} decodes={} gate_held={} allowed={} hidden={}'
+# memory_ledger (W6d): MemoryLedger._before's line, cut at LINE_BUDGET onto '[MEMLEDGER] ...' lines by .log.
+W6_BEFORE_FORMAT = '[MEMLEDGER] before op=%s chip%d largest_free=%s free=%s estimate=%s margin=%s floor=%s %s'
+W6_BEFORE_UNREAD_FORMAT = '[MEMLEDGER] before op=%s dram unavailable (%s)'
+LEDGER_LINE_BUDGET, LEDGER_CONTINUATION = 180, '[MEMLEDGER] ...'
+W6_RELEASED_LINE = '[PACKED-PROPOSE] released quad={quad} pairs={pairs}'     # dflash_packed_proposal_coordinator
+QUAD_ROUND_FORMAT = '[QUAD-DRAFT] round={round} built={built} ms={ms}'        # quad_draft.ROUND_LINE
+PHASE_EXECUTE_FORMAT = '[PHASE] execute total={} new={} cached={} spec={} finished={} preempted={}'   # worker hook
+# serving_request_factory's any-request engine line: the ladder is a tuple through loguru's {} (W6a).
+SINGLE_LADDER, SHORT_LADDER = '{}'.format((2048,)), '{}'.format((256, 512, 1024, 2048))
+ENGINE_PEAK = 1000 * 10 ** 6       # serving_prefill_admission.engine_build_peak(): 800 MB resident + 200 MB transient
+QUAD_ESTIMATE = 450 * 2 ** 20      # quad_draft.QUAD_CAPTURE_BYTES_EST (0.450 GiB), W6d's quad estimate
+
+
+def mb(value):
+    """memory_ledger._mb and serving_prefill_admission._megabytes."""
+    return '%.1fMB' % (value / 1e6)
+
+
+def gb(value):
+    return '%.3fGB' % (value / 1e9)
+
+
+def round_line(number, families, idle=(), capped=()):
+    """W3's line for a packed round: live segment i at family families[i] (segment:E), idle segments, and
+    (segment, limit) caps."""
+    return 'INFO ' + W3_ROUND_FORMAT % (gate.S2_ROUND_MARKER, number, len(families),
+                                        ','.join('%d:%d' % pair for pair in enumerate(families)),
+                                        ','.join(str(segment) for segment in idle),
+                                        ','.join('%d:%d' % pair for pair in capped))
+
+
+def audit_line(number, segments=4, words_ok=None, cur_pos_ok=None, rotated=0, ms=2.0):
+    return 'INFO ' + W3_AUDIT_FORMAT % (W3_AUDIT_MARKER, number, segments, segments if words_ok is None else words_ok,
+                                        segments if cur_pos_ok is None else cur_pos_ok, 1, 1, rotated, ms)
+
+
+def mismatch_line(number, at='word:2'):
+    return 'WARNING ' + W3_MISMATCH_FORMAT % (W3_MISMATCH_MARKER, number, at)
+
+
+def hold_line(prompt, largest, need, request, decodes):
+    return 'INFO ' + W6_HOLD_LINE.format(prompt, mb(largest), mb(need), request, decodes)
+
+
+def decision_line(decodes, allowed=0, hidden=True, partials=0, held=False):
+    return 'INFO ' + DECISION_LINE.format(partials, decodes, held, allowed, hidden)
+
+
+def ledger_lines(message):
+    """memory_ledger.MemoryLedger.log: the message cut at LINE_BUDGET, the rest on continuation lines."""
+    head, rest = message[:LEDGER_LINE_BUDGET], message[LEDGER_LINE_BUDGET:]
+    lines = ['INFO ' + head]
+    width = LEDGER_LINE_BUDGET - len(LEDGER_CONTINUATION)
+    while rest:
+        lines.append('INFO ' + LEDGER_CONTINUATION + rest[:width])
+        rest = rest[width:]
+    return lines
+
+
+def before_lines(op, largest, estimate, point=None, chips=(0, 1), free=3e9, trace=None):
+    """W6d's before point, one line (or more) per chip: `largest` free bytes (one value, or one per chip), the
+    operation's estimate, the running floor as the margin itself; `trace` (used, largest free) bytes, or None for
+    'trace=unavailable'."""
+    label = op if point is None else '%s point=%s' % (op, point)
+    lines = []
+    for index, chip in enumerate(chips):
+        free_block = largest[index] if isinstance(largest, (list, tuple)) else largest
+        margin = free_block - estimate
+        text = 'trace=unavailable' if trace is None else 'trace_used=%s trace_largest_free=%s' % (mb(trace[0]),
+                                                                                                 mb(trace[1]))
+        lines += ledger_lines(W6_BEFORE_FORMAT % (label, chip, mb(free_block), gb(free), mb(estimate), mb(margin),
+                                                  mb(margin), text))
+    return lines
+
+
+def prefill_point(prompt, largest_mb, chip=0):
+    """The ledger's phase point ahead of a prefill (serving_runtime: record('prefill', point='before prompt=N'))."""
+    return ('INFO [MEMLEDGER] phase=prefill point=before prompt=%d chip%d allocated=1.000GB free=3.000GB '
+            'largest_free=%.1fMB total=34.000GB known=1.000GB residual=0.000GB' % (prompt, chip, largest_mb))
+
+
+def engine_points(users=4, largest=1500e6):
+    """W6d's before point ahead of each user's engine build, healthy unless `largest` says otherwise."""
+    return [line for user in range(users) for line in before_lines('engine', largest, ENGINE_PEAK,
+                                                                   point='req=%s' % engine_id(user)[-12:])]
+
+
+def released_line(quad, pairs=()):
+    return 'INFO ' + W6_RELEASED_LINE.format(quad=quad, pairs=[list(pair) for pair in pairs])
+
+
+def quad_line(number, built=0, ms=1.5):
+    return 'INFO ' + QUAD_ROUND_FORMAT.format(round=number, built=built, ms=ms)
 
 
 def s2_profiles():
@@ -57,9 +173,10 @@ def stamp(seconds):
     return (BASE_TIME + datetime.timedelta(seconds=seconds)).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
 
-def execute_line(seconds, live):
-    return ('%s | INFO     | serving_worker_hook:execute_model:272 - [PHASE] execute total=%d new=0 cached=%d spec=%d '
-            'finished=0 preempted=0' % (stamp(seconds), 16 * live, live, 15 * live))
+def execute_line(seconds, live, finished=()):
+    """serving_worker_hook's step line: finished= is the step's sorted finished request ids."""
+    return '%s | INFO     | serving_worker_hook:execute_model:272 - ' % stamp(seconds) + PHASE_EXECUTE_FORMAT.format(
+        16 * live, 0, live, 15 * live, sorted(finished), [])
 
 
 def request_id(user):
@@ -72,7 +189,7 @@ def engine_id(user):
 
 def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.0, audit_ms=2.0, audit=True,
            mismatch=False, drop_audit=0, words_ok=None, cap=None, admission=True, packed=True, extra=(), families=None,
-           ladder='[2048]', sequential_rows=4):
+           ladder=SINGLE_LADDER, sequential_rows=4):
     """A server log of an S2 arm: the C2-any lines, the S2 attach lines when `on`, and `rounds` decode steps -
     packed (four [PACKED] lines, a packed extent round line and an audit line each) or, `packed` False, one
     [SEQ-PUBLISH] step line per user - on one timestamped clock, `round_ms` apart."""
@@ -99,14 +216,11 @@ def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.
                 lines.append('INFO [PACKED] request=%s segment=%d position=%d prefix=%d emitted=%d predictions=[1, 2, 3]%s'
                              % (engine_id(user), user, position[user], emitted, emitted, suffix))
             if on:
-                lines.append('INFO [PINDIAG] packed extent round round=%d live=%d families=[%s] idle=[] capped=[]'
-                             % (index + 1, users, ','.join(str(f) for f in fams)))
+                lines.append(round_line(index + 1, fams))
                 if audit and index >= drop_audit:
-                    ok = users if words_ok is None else words_ok
-                    lines.append('INFO [EXTENT-AUDIT] round=%d segments=%d words_ok=%d cur_pos_ok=%d mask_ok=1 '
-                                 'tables_ok=1 ms=%.2f' % (index + 1, users, ok, users, audit_ms))
+                    lines.append(audit_line(index + 1, users, words_ok=words_ok, rotated=index % users, ms=audit_ms))
                 if mismatch and index == 3:
-                    lines.append('WARNING [EXTENT-AUDIT] MISMATCH round=4 segment=2 word=131072 expected=0')
+                    lines.append(mismatch_line(4, 'word:2,cur_pos:2'))
             position = [p + emitted for p in position]
         else:
             for user in range(users):
@@ -212,6 +326,17 @@ class ArmTests(unittest.TestCase):
         runner.policy, runner.decision = 'dc-i', 'user-decision'
         self.assertEqual((runner.relaxation('c2-packed'), runner.relaxation('c2')), ('dc-i', None))
 
+    def test_mixed_always_runs_the_three_other_audits(self):
+        # M7: zero PRESTAGE/PAIR_MASK/FUSED_COMMIT audit mismatches - vacuous unless the audits run.
+        for audits in (None, 'extent', 'all'):
+            with self.subTest(audits=audits):
+                mixed = driver.plan_arms('mixed', 'c2-packed', PROFILES, s2=dict(audits=audits))
+                self.assertEqual([arm.env for arm in mixed], [driver.AUDIT_ENV + driver.G4_ALL_AUDITS] * 2)
+        short = driver.plan_arms('short', 'c2-packed', PROFILES)
+        self.assertEqual([arm.env for arm in short], [driver.AUDIT_ENV] * 2, 'the others only with --audits all')
+        self.assertEqual(driver.plan_arms('short', 'c2-packed', PROFILES, s2=dict(audits='all'))[0].env,
+                         driver.AUDIT_ENV + driver.G4_ALL_AUDITS)
+
     def test_the_s1_plans_on_an_s2_profile_audit_every_arm(self):
         for plan in job.GATE_PLANS:
             with self.subTest(plan=plan):
@@ -316,7 +441,14 @@ class PlanTests(unittest.TestCase):
         warm = driver.plan_arms('warm', 'c2', PROFILES)
         warm_off = driver.plan_arms('warm-off', 'c2', PROFILES)
         self.assertEqual([arm[0] for arm in warm], ['warm-solo', 'warm-4x131072', 'warm-4x16384', 'warm-4x4096'])
-        self.assertEqual([arm.profile for arm in warm_off], ['c2-gate'] * 3)
+        self.assertEqual([arm.profile for arm in warm_off], ['c2-gate'] * 3 + ['exact'])
+        # M2 judges exact's bring-up for zero new entries: warm-off compiles exact at exactly M2's shape.
+        exact = warm_off[-1]
+        self.assertEqual((exact[0], exact.env, exact.judged), ('warm-off-exact-4x131072', (), False))
+        self.assertEqual(exact[1], driver.v235_args(PROFILES, 'exact', 'warm-off'))
+        m2, = driver.plan_arms('bringup', 'exact', PROFILES)
+        self.assertEqual(self.parse(exact).prompt_tokens, self.parse(m2).prompt_tokens)
+        self.assertEqual(self.parse(exact).max_tokens, self.parse(m2).max_tokens)
         self.assertTrue(all(arm.judged is False for arm in warm + warm_off))
         solo = self.parse(warm[0])
         served = set(solo.prompt_lengths)
@@ -334,14 +466,19 @@ class PlanTests(unittest.TestCase):
         self.assertEqual([arm.env[0][0] for arm in warm[2:]], [CAPTURE, CAPTURE])
 
     def test_churn_lifecycle_arrival_and_permuted(self):
-        churn, = driver.plan_arms('churn', 'c2-packed', PROFILES)
+        notes = []
+        churn, = driver.plan_arms('churn', 'c2-packed', PROFILES, notes=notes)
         options = self.parse(churn)
-        self.assertGreaterEqual(options.users, 8)
-        self.assertEqual(options.alive_check, 4)
+        self.assertGreaterEqual(options.users - options.alive_check, 8, 'M11: at least eight replacements')
+        self.assertEqual((options.users, options.alive_check, notes), (12, 4, []))
         self.assertTrue(any(length < 2048 for length in options.prompt_lengths))
         self.assertTrue(all(100000 <= length <= 123136 for length in options.prompt_lengths if length >= 2048))
+        self.assertEqual(options.events['max_tokens'], dict(enumerate(driver.CHURN_MAX_TOKENS)))
+        driver.plan_arms('churn', 'c2-packed', PROFILES, lengths=[110000] * 9, notes=notes)
+        self.assertIn('fewer than the 8 M11 asks for', ' '.join(notes))
         event, solo = driver.plan_arms('lifecycle-arrival', 'c2-packed', PROFILES)
         self.assertEqual(self.parse(event).events['drops'], {1: ('build', 0)})
+        self.assertEqual(event.extra, dict(expect_live={1: 1}), 'user 0 decodes when user 1 is dropped')
         self.assertEqual(self.parse(solo).sequential_users, 6)
         forward, reverse = driver.plan_arms('permuted', 'c2-packed', PROFILES)
         self.assertEqual(self.parse(reverse).start_order, [3, 2, 1, 0])
@@ -432,25 +569,22 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(untouched, dict(flag_markers=dict(found={}, missing=[])), 'a flag-off arm keeps its keys')
 
     def test_extent_rounds_refused_rounds_and_before_points(self):
-        text = '\n'.join([
-            'INFO [PINDIAG] packed extent round round=1 live=4 families=[256,2304,16640,131328] idle=[] capped=[2:6]',
-            'INFO [PINDIAG] packed extent round round=2 live=2 families=[512,512] idle=[0,32] capped=[]',
+        lines = [
+            round_line(1, [256, 2304, 16640, 131328], capped=[(2, 6)]),
+            round_line(2, [512, 512], idle=[2, 3]),
             'WARNING [PACKED] A round the block cannot serve (x) holds tickets no request engine captured (y)',
             'WARNING [PINDIAG] packed refused round aborted 1/2 FINISHED_ABORTED via the request quarantine, engine kept: '
             'request=a',
             'WARNING [PINDIAG] packed refused round aborted 2/2 FINISHED_ABORTED via the request quarantine, engine kept: '
             'request=b',
-            '[MEMLEDGER] phase=prefill point=before prompt=120000 chip0 allocated=1.000GB free=2.000GB '
-            'largest_free=1500.0MB total=34.000GB known=1.000GB residual=0.000GB',
-            '[MEMLEDGER] phase=prefill point=before prompt=60 chip1 allocated=1.000GB free=2.000GB '
-            'largest_free=400.0MB total=34.000GB known=1.000GB residual=0.000GB',
-            '[MEMLEDGER] phase=quad point=before round=4 estimate=0.700GB chip0 allocated=1.000GB free=2.000GB '
-            'largest_free=900.0MB total=34.000GB known=1.000GB residual=0.000GB',
-            '[MEMLEDGER] phase=engine point=before req=abc chip0 allocated=1.000GB free=2.000GB largest_free=1100.0MB '
-            'total=34.000GB known=1.000GB residual=0.000GB'])
+            prefill_point(120000, 1500.0, chip=0), prefill_point(60, 400.0, chip=1)]
+        lines += before_lines('quad', 900e6, QUAD_ESTIMATE, point='slots=0,1,2,3', chips=(0,))
+        lines += before_lines('engine', 1100e6, ENGINE_PEAK, point='req=abc', chips=(0,))
+        text = '\n'.join(lines)
         rounds = gate.extent_rounds(text)
         self.assertEqual((rounds['count'], rounds['max_families'], rounds['multi_family_rounds']), (2, 4, 1))
         self.assertEqual((rounds['capped_segments'], rounds['idle_rounds'], rounds['by_live']), (1, 1, {'4': 1, '2': 1}))
+        self.assertEqual(rounds['families_seen'], [256, 512, 2304, 16640, 131328], 'the E after each segment:')
         refused = gate.refused_rounds_report(text)
         self.assertEqual((refused['refused'], refused['complete_groups'], refused['accounted']), (1, 1, True))
         self.assertFalse(gate.refused_rounds_report(text.replace('2/2 FINISHED', '9/9 FINISHED'))['accounted'])
@@ -459,7 +593,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(before['floor_gb'], 0.1, 'the engine build: 1.1 GB largest free less its 1.0 GB')
         single = [gate.before_points(line)['floor_point'] for line in text.split('\n') if 'MEMLEDGER' in line]
         self.assertEqual([(point['op'], point['estimate_gb'], point['margin_gb']) for point in single],
-                         [('prefill', 0.3, 1.2), ('prefill', 0.0, 0.4), ('quad', 0.7, 0.2), ('engine', 1.0, 0.1)])
+                         [('prefill', 0.3, 1.2), ('prefill', 0.0, 0.4), ('quad', 0.4719, 0.4281), ('engine', 1.0, 0.1)])
 
 
 class PathTests(unittest.TestCase):
@@ -645,13 +779,18 @@ class JobTests(unittest.TestCase):
             self.assertIn('${%s:+%s "$%s"}' % (name, option, name), step)
 
 
+def flat_cache():
+    """A kernel cache no arm grows: every judged arm's growth is counted, and is zero."""
+    return 100
+
+
 class Driver(object):
-    """The driver with FakeDocker, S2 profiles and an optional kernel-cache counter."""
+    """The driver with FakeDocker, S2 profiles and a kernel-cache counter (flat_cache unless given; None: none)."""
 
     def __init__(self, test):
         self.test = test
 
-    def run(self, argv, reports, server_logs, cache=None, profiles=None):
+    def run(self, argv, reports, server_logs, cache=flat_cache, profiles=None):
         profiles = profiles or PROFILES
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, 'profiles.json')
@@ -677,7 +816,7 @@ class Driver(object):
 
 
 class ControlDriverTests(unittest.TestCase):
-    def control(self, on_log=None, off_log=None, on_env=((AUDIT, '1'),), off_texts=None, pairs='2', cache=None,
+    def control(self, on_log=None, off_log=None, on_env=((AUDIT, '1'),), off_texts=None, pairs='2', cache=flat_cache,
                 on_logs=None):
         """The control plan with every flag-off arm on `off_log` and every flag-on arm on `on_log`, or on its own
         log in `on_logs` (arm name -> server log; its report is built from the same log)."""
@@ -744,6 +883,27 @@ class ControlDriverTests(unittest.TestCase):
         on = summary['results']['control']['arms']['control-on-1']
         self.assertTrue(any('never reached the container' in p for p in on['platform_problems']))
 
+    def test_a_judged_arm_whose_cache_could_not_be_counted_is_not_exercised(self):
+        # Kernel-cache growth unknown (no counter: the cache is not on the hub, or sudo find failed): never PASS.
+        code, summary, _, lines, _ = self.control(pairs='1', cache=None)
+        result = summary['results']['control']
+        self.assertEqual((code, result['verdict']), (1, 'NOT_EXERCISED'), result['lines'])
+        self.assertTrue(any('could not be counted (no counter' in s for s in result['shortfalls']), result['shortfalls'])
+        failing = iter([100, None, 100, 100])
+        result = self.control(pairs='1', cache=lambda: next(failing))[1]['results']['control']
+        self.assertEqual(result['verdict'], 'NOT_EXERCISED')
+        self.assertTrue(any('control-off-1' in s and 'a count failed' in s for s in result['shortfalls']))
+
+    def test_a_flag_on_arm_without_a_packed_extent_round_fails(self):
+        # G3 must not pass with every flag-on round sequential.
+        code, summary, _, _, _ = self.control(on_log=s2_log(packed=False), pairs='1')
+        result = summary['results']['control']
+        self.assertEqual(result['verdict'], 'FAIL')
+        on = result['arms']['control-on-1']
+        self.assertEqual(on['verdict'], 'FAIL')
+        self.assertIn('problem: the flag-on arm served no packed extent round', on['lines'])
+        self.assertEqual(result['arms']['control-off-1']['verdict'], 'PASS')
+
     def test_a_judged_arm_that_compiled_fails_and_the_growth_is_recorded(self):
         counts = iter(range(100, 200, 3))
         code, summary, _, lines, _ = self.control(pairs='1', cache=lambda: next(counts))
@@ -769,6 +929,19 @@ class ControlDriverTests(unittest.TestCase):
         self.assertEqual(run(capped)['verdict'], 'PASS')
         self.assertEqual(run(uncapped)['verdict'], 'FAIL', 'a cap of 16 under the forced cap of 8')
         self.assertEqual(run(s2_log())['verdict'], 'NOT_EXERCISED', 'no cap= in the [PACKED] lines')
+
+    def test_forced_cap_compares_the_capped_text_with_the_uncapped(self):
+        texts = [s['text'] for s in V235['streams']]
+        texts[2] = texts[2][:90] + '#' + texts[2][91:]
+        capped = s2_log(cap=8)
+        result = Driver(self).run(['--profile', 'c2-packed', '--plan', 'forced-cap'], {
+            'forced-cap-off': lambda n: s2_arm_report(s2_log(cap=16), 'c2-packed-gate', env=((AUDIT, '1'),)),
+            'forced-cap-on': lambda n: s2_arm_report(capped, 'c2-packed-gate', env=((AUDIT, '1'), (FORCE, '8')),
+                                                     texts=texts)},
+            {'forced-cap-off': s2_log(cap=16), 'forced-cap-on': capped})[1]['results']['forced-cap']
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertTrue(any('user 2: the capped arm is DIVERGED against the uncapped' in p and 'Q5' in p
+                            for p in result['s2_problems']), result['s2_problems'])
 
 
 class BelowDriverTests(unittest.TestCase):
@@ -803,14 +976,24 @@ class BelowDriverTests(unittest.TestCase):
         texts[3] = texts[3][:50] + '#' + texts[3][51:]
         self.assertEqual(self.below(on_texts=texts)['verdict'], 'FAIL')
 
+    def test_a_flag_off_packed_round_outside_family_f_fails(self):
+        prompt = 16384
+        override = ['INFO [PINDIAG] packed capture position override=%d (gate only)' % prompt]
+        outside = s2_log(on=False, positions=[prompt, prompt, prompt, 16630], rounds=12, extra=override)
+        result = self.below(off_log=outside)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('flag-off: packed rounds outside family 16640 (user 3 round', ' '.join(
+            result['pairs']['16640-1']['problems']))
+
 
 class ServingDriverTests(unittest.TestCase):
     LENGTHS = [1536, 20000, 60000, 120000]
 
     def g4(self, plan, concurrent_log, solo_log, concurrent_texts=None, extra_reports=None, extra_logs=None,
-           max_tokens=4096, argv=(), cache=None, lengths=None):
+           max_tokens=4096, argv=(), cache=flat_cache, lengths=None):
         lengths = lengths or self.LENGTHS
-        env = ((AUDIT, '1'),)
+        # What the plan's arms add, as the harness's configuration records it (mixed: all four audits, M7).
+        env = driver.AUDIT_ENV + (driver.G4_ALL_AUDITS if plan in driver.ALL_AUDIT_PLANS else ())
         reports = {
             '%s-concurrent' % plan: lambda n: s2_arm_report(concurrent_log, 'c2-packed', env=env, lengths=lengths,
                                                            max_tokens=max_tokens, finish='stop', completion=300,
@@ -879,22 +1062,43 @@ class ServingDriverTests(unittest.TestCase):
         refused = Driver(self).run(['--profile', 'c2-packed', '--plan', 'mixed', '--policy', 'dc-i'], {}, {})
         self.assertEqual(refused[0], 2, 'dc-i without the decision is refused')
 
+    SHORT = [60, 255, 2047, 120000]
+
+    def short(self, extra=(), ladder=SINGLE_LADDER, points=None):
+        """The short plan with both arms' logs carrying `extra`, W6d's engine points (healthy unless `points`) and
+        the prefill point; the verdict."""
+        ledger = [prefill_point(120000, 1500.0)] + (engine_points() if points is None else list(points))
+        concurrent = s2_log(positions=[128, 255, 2047, 120000], extra=ledger + list(extra), ladder=ladder)
+        solo = s2_log(packed=False, positions=self.SHORT, extra=ledger + list(extra), ladder=ladder)
+        return self.g4('short', concurrent, solo, lengths=self.SHORT)[1]['results']['short']
+
     def test_short_needs_the_one_bucket_ladder_no_hold_and_the_floor(self):
-        lengths = [60, 255, 2047, 120000]
-        floor = ('[MEMLEDGER] phase=prefill point=before prompt=120000 chip0 allocated=1.000GB free=3.000GB '
-                 'largest_free=%s total=34.000GB known=1.000GB residual=0.000GB')
-        good = s2_log(positions=[128, 255, 2047, 120000], extra=[floor % '1500.0MB'])
-        solo = s2_log(packed=False, positions=lengths, extra=[floor % '1500.0MB'])
-        self.assertEqual(self.g4('short', good, solo, lengths=lengths)[1]['results']['short']['verdict'], 'PASS')
-        held = s2_log(positions=[128, 255, 2047, 120000],
-                      extra=[floor % '1500.0MB', 'INFO [PINDIAG] dram hold prompt=120000 largest_free=900MB need=1300MB'])
-        result = self.g4('short', held, solo, lengths=lengths)[1]['results']['short']
-        self.assertEqual(result['verdict'], 'FAIL')
-        self.assertIn('dram hold', ' '.join(result['s2_problems']))
-        ladder = s2_log(positions=[128, 255, 2047, 120000], extra=[floor % '1500.0MB'], ladder='[256, 512, 1024, 2048]')
-        self.assertEqual(self.g4('short', ladder, solo, lengths=lengths)[1]['results']['short']['verdict'], 'FAIL')
-        low = s2_log(positions=[128, 255, 2047, 120000], extra=[floor % '400.0MB'])
-        self.assertEqual(self.g4('short', low, solo, lengths=lengths)[1]['results']['short']['verdict'], 'FAIL')
+        self.assertEqual(self.short()['verdict'], 'PASS', self.short()['lines'])
+        held = self.short(extra=[hold_line(120000, 900e6, 1568.4e6, engine_id(3), 3), decision_line(3)])
+        self.assertEqual(held['verdict'], 'FAIL')
+        self.assertIn('seat free (decodes [3] of 4 seats)', ' '.join(held['s2_problems']))
+        self.assertEqual(self.short(ladder=SHORT_LADDER)['verdict'], 'FAIL')
+        self.assertEqual(self.short(extra=[prefill_point(120000, 400.0)])['verdict'], 'FAIL', 'prefill floor 0.1 GB')
+
+    def test_short_reads_the_ladder_as_w6_logs_it(self):
+        # W6a logs a tuple through loguru ('(2048,)'); a wrong ladder is named, an unlogged one fails.
+        wrong = self.short(ladder=SHORT_LADDER)
+        self.assertIn('[256, 512, 1024, 2048]', ' '.join(wrong['s2_problems']))
+        self.assertEqual(self.short(ladder='unavailable (ValueError)')['verdict'], 'FAIL')
+        report = gate.s2_report({EXTENT: '1'}, s2_log(ladder=SINGLE_LADDER), [], None)
+        self.assertEqual(report['ladders'], [[2048]] * 4)
+
+    def test_short_judges_w6s_engine_margin_not_only_the_prefill_points(self):
+        # W6 logs margin=-700.0MB ahead of an engine build; the prefill points alone are healthy.
+        starved = self.short(points=engine_points(largest=300e6))
+        self.assertEqual(starved['verdict'], 'FAIL')
+        self.assertIn('below 0.25 (engine req=', ' '.join(starved['s2_problems']))
+        self.assertIn('-0.700 GB', ' '.join(starved['s2_problems']))
+        unread = self.short(extra=['INFO ' + W6_BEFORE_UNREAD_FORMAT % ('quad point=slots=0,1,2,3', 'no statistics')])
+        self.assertEqual(unread['verdict'], 'NOT_EXERCISED', 'a before-point that read no DRAM is never a pass')
+        self.assertIn('read no DRAM', ' '.join(unread['shortfalls']))
+        blind = self.short(points=())
+        self.assertEqual(blind['verdict'], 'NOT_EXERCISED', 'no engine point: the floor saw no engine build')
 
     def test_boundaries_need_cap_events_and_crossings(self):
         lengths = list(driver.BOUNDARY_LENGTHS)
@@ -908,9 +1112,7 @@ class ServingDriverTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'NOT_EXERCISED')
 
     def test_staggered_needs_padded_rounds_and_a_clean_probe(self):
-        padded = s2_log(positions=self.LENGTHS, extra=[
-            'INFO [PINDIAG] packed extent round round=99 live=2 families=[1792,20224] idle=[0,32] capped=[]',
-            'INFO [EXTENT-AUDIT] round=99 segments=4 words_ok=4 cur_pos_ok=4 mask_ok=1 tables_ok=1 ms=2.00'])
+        padded = s2_log(positions=self.LENGTHS, extra=[round_line(99, [1792, 20224], idle=[2, 3]), audit_line(99)])
         probe_log = padded + 'INFO [PINDIAG] padded probe round=3 live=0,1,2 exact=1 trace_ms=5.0 idle_carry_intact=1\n'
         probe = lambda n: dict(s2_arm_report(probe_log, 'c2-packed', env=((AUDIT, '1'), ('QWEN_FAST_PADDED_PROBE', '1')),
                                              lengths=self.LENGTHS, max_tokens=4096, finish='stop', completion=300),
@@ -945,6 +1147,31 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
             return build
         return dict((name, arm(name)) for name in events), dict((name, text) for name in events)
 
+    def arrival(self, live):
+        """lifecycle-arrival with user 1's build drop fired at `live` live streams."""
+        text = s2_log(rounds=2)
+
+        def arm(name):
+            def build(n):
+                report = base.lifecycle_report({1: 'drop'} if name == 'lifecycle-arrival' else {}, profile='c2-packed')
+                if name == 'lifecycle-arrival':
+                    event = report['lifecycle']['events']['1']
+                    event.update(kind='build', spec='build', phase='build', live=live)
+                    report['user_events']['drops'] = {'1': 'build'}
+                report['qwen_configuration'] = configuration('c2-packed', ((AUDIT, '1'),))
+                gate.add_s2_report(report, report['qwen_configuration'], text, report['streams'], None)
+                return report
+            return build
+        names = ('lifecycle-arrival', 'lifecycle-arrival-solo')
+        return self.run_plan('lifecycle-arrival', dict((name, arm(name)) for name in names),
+                             dict((name, text) for name in names))
+
+    def test_lifecycle_arrival_needs_user_0_decoding_when_user_1_is_dropped(self):
+        self.assertEqual(self.arrival(1)['verdict'], 'PASS', self.arrival(1)['lines'])
+        early = self.arrival(0)
+        self.assertEqual(early['verdict'], 'NOT_EXERCISED', 'user 1 dropped before user 0 decoded: not VR4:150')
+        self.assertIn('fired at 0 live streams, not 1', ' '.join(early['shortfalls']))
+
     def test_lifecycle_on_c2_packed_needs_a_narrowed_survivor(self):
         factories, logs = self.lifecycle_reports(s2_log(rounds=2))
         passed = self.run_plan('lifecycle', factories, logs)
@@ -962,23 +1189,33 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertIn('W5b', ' '.join(result['s2_problems']))
 
-    def test_memory_on_c2_packed_fails_on_a_hold(self):
-        floor = ('[MEMLEDGER] phase=prefill point=before prompt=123136 chip0 allocated=1.000GB free=3.000GB '
-                 'largest_free=1500.0MB total=34.000GB known=1.000GB residual=0.000GB')
+    def memory(self, extra=()):
+        floor = [prefill_point(123136, 1500.0)] + engine_points()
+
         def arm(log_text, users=4):
             return lambda n: s2_arm_report(log_text, 'c2-packed', env=((AUDIT, '1'),), users=users,
                                            lengths=[123136] * users, max_tokens=8192, completion=8192)
-        good = s2_log(positions=[123136] * 4, extra=[floor])
-        short_log = s2_log(positions=[128] * 4, extra=[floor])   # packed only from 128 on (the admission floor)
-        clean = self.run_plan('memory', {'memory-concurrent': arm(good), 'memory-short': lambda n: s2_arm_report(
+        good = s2_log(positions=[123136] * 4, extra=floor + list(extra))
+        short_log = s2_log(positions=[128] * 4, extra=floor)   # packed only from 128 on (the admission floor)
+        return self.run_plan('memory', {'memory-concurrent': arm(good), 'memory-short': lambda n: s2_arm_report(
             short_log, 'c2-packed', env=((AUDIT, '1'),), lengths=[60] * 4, max_tokens=16384, completion=16384)},
             {'memory-concurrent': good, 'memory-short': short_log})
+
+    def test_memory_on_c2_packed_fails_on_a_hold(self):
+        clean = self.memory()
         self.assertEqual(clean['verdict'], 'PASS', clean['lines'])
-        held = good + 'INFO [PINDIAG] dram hold prompt=123136 largest_free=700MB need=1300MB\n'
-        result = self.run_plan('memory', {'memory-concurrent': arm(held), 'memory-short': lambda n: s2_arm_report(
-            short_log, 'c2-packed', env=((AUDIT, '1'),), lengths=[60] * 4, max_tokens=16384, completion=16384)},
-            {'memory-concurrent': held, 'memory-short': short_log})
-        self.assertEqual(result['verdict'], 'FAIL')
+        held = self.memory([hold_line(123136, 700e6, 1568.4e6, engine_id(3), 3), decision_line(3)])
+        self.assertEqual(held['verdict'], 'FAIL')
+        # A hold that began with every seat decoding shows only as the wrapper's held state once a seat frees.
+        state = self.memory([hold_line(123136, 700e6, 1568.4e6, engine_id(3), 4), decision_line(4), decision_line(3)])
+        self.assertEqual(state['verdict'], 'FAIL')
+        self.assertEqual(self.memory([W6_LIFTED_LINE.format(123136, mb(700e6), mb(1568.4e6), engine_id(3))])['verdict'],
+                         'FAIL', 'a lifted hold: admitted though it did not fit')
+        unavailable = self.memory(['INFO ' + W6_UNAVAILABLE_LINE.format(engine_id(3), 'no reading')])
+        self.assertEqual(unavailable['verdict'], 'NOT_EXERCISED', 'a hold that read no DRAM is unjudged, never a pass')
+        released = self.memory([hold_line(123136, 700e6, 1568.4e6, engine_id(3), 4), decision_line(4),
+                                'INFO ' + W6_RELEASED_HOLD_LINE.format(123136, mb(1700e6), mb(1568.4e6), engine_id(3))])
+        self.assertEqual(released['verdict'], 'PASS', 'every seat decoding: the prompt waited for a seat, not DRAM')
 
     def churn(self, log_text):
         lengths = list(driver.CHURN_LENGTHS)
@@ -991,16 +1228,59 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
             return one
         return self.run_plan('churn', {'churn': report}, {'churn': log_text})
 
+    @staticmethod
+    def churn_log(quad_departures=8, release=1, others=3, holds=True, extra=()):
+        """A churn arm's log: the ledger's points, `quad_departures` departures each while a quad was formed (a quad
+        round, then the detach's release line - quad=`release` (one value, or one per departure), or none for None
+        - just ahead of the step's [PHASE] line), then `others` departures with no quad (the last wave), and -
+        `holds` - the fifth user's W6b holds while every seat decodes (decodes=4, the seats: no failed fit)."""
+        lines = [prefill_point(110000, 1500.0)] + engine_points()
+        for index in range(quad_departures):
+            lines.append(quad_line(10 * index + 1, built=1))
+            lines.append(quad_line(10 * index + 2, built=0))
+            if holds:
+                lines += [hold_line(120000, 700e6, 1568.4e6, engine_id(index + 4), 4), decision_line(4)]
+            quad = release[index] if isinstance(release, list) else release
+            if quad is not None:
+                lines.append(released_line(quad, [(0, 1), (2, 3)]))
+            lines.append(execute_line(100.0 + index, 4, finished=[engine_id(index)]))
+            if holds:
+                lines.append('INFO ' + W6_RELEASED_HOLD_LINE.format(120000, mb(1900e6), mb(1568.4e6), engine_id(index + 4)))
+        for index in range(quad_departures, quad_departures + others):
+            lines.append(released_line(0))
+            lines.append(execute_line(200.0 + index, 3, finished=[engine_id(index)]))
+        return s2_log(extra=lines + list(extra))
+
     def test_churn_needs_dead_traces_released(self):
-        floor = ('[MEMLEDGER] phase=prefill point=before prompt=110000 chip0 allocated=1.000GB free=3.000GB '
-                 'largest_free=1500.0MB total=34.000GB known=1.000GB residual=0.000GB')
-        quads = ['INFO [QUAD-DRAFT] round=4 built=1 ms=60.0']
-        released = ['INFO [PACKED-PROPOSE] released quad=1 pairs=2'] * 5
-        passed = self.churn(s2_log(extra=[floor] + quads + released))
+        passed = self.churn(self.churn_log())
         self.assertEqual(passed['verdict'], 'PASS', passed['lines'])
-        self.assertEqual(passed['facts']['replacements'], 5)
-        self.assertEqual(self.churn(s2_log(extra=[floor] + quads))['verdict'], 'FAIL')
-        self.assertEqual(self.churn(s2_log(extra=[floor]))['verdict'], 'NOT_EXERCISED')
+        self.assertEqual(passed['facts']['replacements'], 8)
+        self.assertEqual((passed['facts']['releases']['quad_departures'], passed['facts']['releases']['departures']),
+                         (8, 11))
+        self.assertEqual(self.churn(self.churn_log(release=None))['verdict'], 'FAIL', 'no release line at all')
+        stale = self.churn(self.churn_log(release=0))
+        self.assertEqual(stale['verdict'], 'FAIL', 'released quad=0 while the quad was formed')
+        self.assertIn('released quad=0', ' '.join(stale['s2_problems']))
+        # One departure of eight left its quad behind: the others' releases do not cover it.
+        one = self.churn(self.churn_log(release=[1, 1, 1, 0, 1, 1, 1, 1]))
+        self.assertEqual(one['verdict'], 'FAIL')
+        self.assertIn('1 of 8 departures while a quad was formed', ' '.join(one['s2_problems']))
+        self.assertEqual(self.churn(self.churn_log(release=[1, 1, 1, None, 1, 1, 1, 1]))['verdict'], 'FAIL')
+        self.assertEqual(self.churn(self.churn_log(quad_departures=0, others=11))['verdict'], 'NOT_EXERCISED')
+        self.assertEqual(self.churn(self.churn_log(quad_departures=4, others=1))['verdict'], 'NOT_EXERCISED',
+                         'five departures for eight replacements: the seats did not churn')
+
+    def test_churn_holds_while_every_seat_decodes_are_no_failure(self):
+        # The review's M11 false FAIL: nine-plus users on four seats, the fifth prompt held at decodes=4.
+        self.assertEqual(self.churn(self.churn_log(holds=True))['verdict'], 'PASS')
+        freed = self.churn(self.churn_log(extra=[decision_line(3)]))
+        self.assertEqual(freed['verdict'], 'FAIL', 'held with a seat free (the held state at decodes=3)')
+        self.assertIn('decodes [3] of 4 seats', ' '.join(freed['s2_problems']))
+        region = self.churn(self.churn_log(extra=before_lines('quad', 900e6, QUAD_ESTIMATE, point='slots=0,1,2,3',
+                                                              trace=(260e6, 8e6))))
+        self.assertEqual(region['facts']['trace_region']['readings'], 2)
+        self.assertIn('2 readings, at most 0.26 GB used', ' '.join(region['lines']))
+        self.assertIn('unavailable at', ' '.join(self.churn(self.churn_log())['lines']))
 
     def test_warm_records_the_cache_and_never_judges_it(self):
         counts = iter(range(0, 1000, 50))
@@ -1041,6 +1321,374 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
         result = self.run_plan('permuted', {'permuted-forward': report, 'permuted-reverse': other},
                                {'permuted-forward': log_text, 'permuted-reverse': solo_log})
         self.assertEqual(result['verdict'], 'NOT_EXERCISED')
+
+    def test_a_same_path_divergence_fails_the_permuted_arm(self):
+        lengths = ServingDriverTests.LENGTHS
+        log_text = s2_log(positions=lengths)
+        texts = [s['text'] for s in V235['streams']]
+        texts[1] = texts[1][:70] + '#' + texts[1][71:]
+        forward = lambda n: s2_arm_report(log_text, 'c2-packed', env=((AUDIT, '1'),), lengths=lengths, max_tokens=4096,
+                                          finish='stop', completion=300)
+        reverse = lambda n: s2_arm_report(log_text, 'c2-packed', env=((AUDIT, '1'),), lengths=lengths, max_tokens=4096,
+                                          finish='stop', completion=300, texts=texts)
+        result = self.run_plan('permuted', {'permuted-forward': forward, 'permuted-reverse': reverse},
+                               {'permuted-forward': log_text, 'permuted-reverse': log_text})
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertTrue(any(p.startswith('user 1 took the same path in both arms') and 'FAILS under any policy' in p
+                            for p in result['s2_problems']), result['s2_problems'])
+
+
+class FormatTests(unittest.TestCase):
+    """The harness reads each producer's line as the producer writes it (the W11 review's defects 1-5, 8, 10)."""
+
+    def s2(self, text, env=((AUDIT, '1'),)):
+        environ = dict(QWEN_FAST_SDPA_MODES='tail,share,slice')
+        environ[EXTENT] = '1'
+        environ.update(env)
+        return gate.s2_report(environ, text, [dict(request_id=request_id(u)) for u in range(4)], [131072] * 4)
+
+    def test_w3s_audit_line_with_rotated_is_read_by_field_name(self):
+        text = '\n'.join([round_line(5, [131328] * 4), audit_line(5, rotated=1, ms=2.13)])
+        audit = gate.extent_audit(text)
+        self.assertEqual((audit['lines'], audit['malformed'], audit['incomplete'], audit['median_ms']), (1, 0, 0, 2.13))
+        self.assertEqual([p for p in self.s2(text)['problems'] if AUDIT in p], [])
+        # A field W3 adds later never hides the line; one it drops is named, never read as a clean round.
+        self.assertEqual(gate.extent_audit(audit_line(5).replace(' ms=', ' reads=12 ms='))['lines'], 1)
+        cut = re.sub(r' cur_pos_ok=[0-9]+', '', audit_line(5))
+        problems = ' '.join(self.s2(round_line(5, [131328] * 4) + '\n' + cut)['problems'])
+        self.assertIn('1 audit lines without round/segments/words_ok/cur_pos_ok', problems)
+        incomplete = round_line(5, [131328] * 4) + '\n' + audit_line(5, words_ok=3)
+        self.assertIn('did not read back', ' '.join(self.s2(incomplete)['problems']))
+
+    def test_an_unaudited_round_is_named_by_its_number(self):
+        text = '\n'.join([round_line(5, [131328] * 4), audit_line(5), round_line(6, [131328] * 4), audit_line(5)])
+        self.assertIn('unaudited rounds [6]', ' '.join(self.s2(text)['problems']))
+
+    def test_w3s_families_are_the_extents_after_each_segment(self):
+        # The review's probe: a same-family four-live round and a same-family padded round are one family each.
+        same = '\n'.join([round_line(5, [131328] * 4), round_line(6, [20224, 20224], idle=[2, 3], capped=[(1, 6)])])
+        rounds = gate.extent_rounds(same)
+        self.assertEqual((rounds['multi_family_rounds'], rounds['max_families'], rounds['families_seen']),
+                         (0, 1, [20224, 131328]))
+        self.assertEqual((rounds['capped_segments'], rounds['idle_rounds']), (1, 1))
+        mixed = gate.extent_rounds(round_line(7, [1792, 20224, 60160, 120064]))
+        self.assertEqual((mixed['multi_family_rounds'], mixed['max_families']), (1, 4))
+        self.assertEqual(gate.round_families('131328,4352'), [131328, 4352], 'a bare E is read too')
+
+    def test_w6s_proposal_ladder_is_read_as_its_tuple(self):
+        self.assertEqual([gate.ladder_of(text) for text in (SINGLE_LADDER, SHORT_LADDER, '[2048]', 'unavailable (X)')],
+                         [[2048], [256, 512, 1024, 2048], [2048], 'unavailable (X)'])
+        log_text = base.any_request_log(ladder=SINGLE_LADDER) + base.any_request_log(ladder=SHORT_LADDER)
+        self.assertEqual(self.s2(log_text)['ladders'], [[2048]] * 4 + [[256, 512, 1024, 2048]] * 4)
+
+    def test_w6s_before_points_negative_margins_unread_points_and_continuations(self):
+        # The review's probe: W6's own line, margin=-700.0MB ahead of an engine build, here long enough to continue.
+        lines = before_lines('engine', 300e6, ENGINE_PEAK, point='req=%s' % engine_id(0)[-12:], trace=(268.4e6, 12.5e6))
+        self.assertTrue(any(LEDGER_CONTINUATION in line for line in lines), 'past the ledger\'s line budget')
+        lines += ['INFO ' + W6_BEFORE_UNREAD_FORMAT % ('quad point=slots=0,1,2,3', 'no statistics'),
+                  'INFO [MEMLEDGER] phase=prefill point=before prompt=60 dram unavailable (no statistics)']
+        before = gate.before_points('\n'.join(lines))
+        self.assertEqual((before['points'], before['judged'], before['unread'], before['by_op']), (2, 2, 2, {'engine': 2}))
+        self.assertEqual((before['floor_gb'], before['logged_floor_gb']), (-0.7, -0.7))
+        self.assertEqual((before['floor_point']['op'], before['floor_point']['detail']), ('engine', 'req=1-0-abcd1234'))
+        region = gate.trace_region('\n'.join(lines))
+        self.assertEqual((region['readings'], region['max_used_gb'], region['min_largest_free_gb']), (2, 0.2684, 0.0125))
+        blind = gate.trace_region('\n'.join(before_lines('quad', 900e6, QUAD_ESTIMATE)))
+        self.assertEqual((blind['readings'], blind['unavailable']), (0, 2))
+
+    def test_w6s_dram_hold_lines_and_held_states(self):
+        text = '\n'.join([hold_line(120000, 700e6, 1568.4e6, 'r5', 4), decision_line(4), decision_line(3),
+                          decision_line(2, held=True), decision_line(3, allowed=1, hidden=False),
+                          'INFO ' + W6_RELEASED_HOLD_LINE.format(120000, mb(1700e6), mb(1568.4e6), 'r5'),
+                          'INFO ' + W6_LIFTED_LINE.format(60, mb(700e6), mb(1256e6), 'r6'),
+                          'INFO ' + W6_UNAVAILABLE_LINE.format('r7', 'no reading')])
+        hold = gate.dram_holds(text)
+        self.assertEqual((hold['holds'], hold['hold_decodes'], hold['held_states']), (1, [4], [3, 4]),
+                         'the lifecycle gate\'s hold (gate_held=True) and an admitted step are no DRAM hold')
+        self.assertEqual((hold['released'], hold['lifted'], hold['unavailable']), (1, 1, 1))
+        self.assertEqual([line.split('] ', 1)[1][:25] for line in hold['lines']], ['dram hold prompt=120000 l'],
+                         'released, lifted and unavailable lines are not hold lines')
+        healthy = dict(floor_gb=1.0, by_op=dict(engine=8))
+        problems, shortfalls = driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=hold, before=healthy,
+                                                                           extent_replay=True)), 4)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn('seat free (decodes [3] of 4 seats)', problems[0])
+        self.assertIn('dram hold lifted', problems[1])
+        self.assertEqual(len(shortfalls), 1)
+        waiting = gate.dram_holds('\n'.join([hold_line(120000, 700e6, 1568.4e6, 'r5', 4), decision_line(4)]))
+        self.assertEqual(driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=waiting, before=healthy,
+                                                                     extent_replay=True)), 4), ([], []),
+                         'every seat decoding: the fifth prompt waits for a seat, and no fit failed')
+
+    def test_w6c_releases_are_matched_to_departures_while_a_quad_was_formed(self):
+        text = '\n'.join([
+            quad_line(1, built=1), released_line(1, [(0, 1), (2, 3)]), execute_line(1.0, 4, finished=[engine_id(0)]),
+            released_line(0), execute_line(2.0, 3, finished=[engine_id(1)]),              # no quad formed: none owed
+            quad_line(2), released_line(0, [(0, 1)]), execute_line(3.0, 4, finished=[engine_id(2)]),   # owed: quad=0
+            quad_line(3), execute_line(4.0, 4, finished=[engine_id(3), engine_id(4)]),       # owed: no release line
+            quad_line(4), released_line(1), released_line(0), execute_line(5.0, 4, finished=[engine_id(5), engine_id(6)]),
+            execute_line(6.0, 4)])
+        releases = gate.proposal_releases(text)
+        self.assertEqual((releases['lines'], releases['quad'], releases['pairs'], releases['quad_rounds']), (5, 2, 3, 4))
+        self.assertEqual((releases['departures'], releases['departure_steps'], releases['quad_departures'],
+                          releases['unreleased']), (7, 5, 4, 2))
+        self.assertIn('released quad=0', releases['unreleased_steps'][0])
+        self.assertIn('no release line', releases['unreleased_steps'][1])
+        self.assertEqual([gate.pair_count(text) for text in ('[[0, 1], [2, 3]]', '[]', '[[1, 3]]', '2')], [2, 0, 1, 2])
+
+    def test_the_trace_region_is_recorded_from_w6s_fields(self):
+        text = '\n'.join(before_lines('pair', 700e6, 44e6, point='slots=0,1', trace=(100e6, 150e6)))
+        report = self.s2(text)
+        self.assertEqual((report['trace_region']['readings'], report['trace_region']['max_used_gb']), (2, 0.1))
+        self.assertEqual(len(report['trace_region_lines']), 2)
+        self.assertIn('2 readings, at most 0.1 GB used', driver.trace_region_text(report['trace_region']))
+        self.assertEqual(driver.trace_region_text(None), 'not logged (Q18)')
+
+
+class HostCheckTests(unittest.TestCase):
+    def test_the_host_reads_s2_markers_itself_without_the_harness_record(self):
+        leaked = driver.s2_log_check(s2_log(on=True), False, (), dict(qwen_configuration={}))
+        self.assertTrue(any('this is not the profile' in p for p in leaked), leaked)
+        self.assertEqual(driver.s2_log_check(s2_log(on=False), False, (), dict(qwen_configuration={})), [])
+        missing = driver.s2_log_check(s2_log(on=True), True, (), dict(qwen_configuration={}))
+        self.assertTrue(any('carries no S2 record' in p for p in missing), missing)
+        self.assertEqual(driver.s2_log_check(s2_log(on=True), True, (), dict(qwen_configuration={},
+                                                                            s2=dict(problems=['x']))), ['S2: x'])
+
+    def test_only_an_s2_run_or_an_explicit_jit_counts_the_kernel_cache(self):
+        self.assertFalse(driver.counts_cache(list(job.GATE_PLANS), PROFILES, 'c2', 'auto'))
+        self.assertFalse(driver.counts_cache(['bringup'], PROFILES, 'exact', 'auto'))
+        self.assertTrue(driver.counts_cache(['matrix'], PROFILES, 'c2-packed', 'auto'))
+        self.assertTrue(driver.counts_cache(['bringup', 'control'], PROFILES, 'c2', 'auto'))
+        self.assertTrue(driver.counts_cache(['bringup'], PROFILES, 'exact', 'judge'))
+        self.assertTrue(driver.counts_cache(['bringup'], PROFILES, 'exact', 'record'))
+
+    def main_run(self, argv, reports, server_logs):
+        """The driver's main with its real kernel-cache path (no cache_entries, no execute): docker is FakeDocker
+        through Runner._execute, the image's cache lookup and count recorded."""
+        from unittest import mock
+        looked = []
+
+        def image_cache(image, hub=driver.HUB):
+            looked.append(image)
+            return '/hub/.qwen-c2/kernels-x'
+        docker = base.FakeDocker(reports, server_logs)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'profiles.json')
+            with open(path, 'w', encoding='utf-8') as handle:
+                json.dump(PROFILES, handle)
+            results = os.path.join(directory, 'results')
+            with mock.patch.object(driver, 'image_kernel_cache', image_cache), \
+                    mock.patch.object(driver, 'count_entries', lambda path: 100), \
+                    mock.patch.object(driver.Runner, '_execute', staticmethod(docker)):
+                driver.main(argv + ['--image', 'zot/img:s2', '--results', results, '--profiles', path],
+                            devices=['/dev/tenstorrent/3', '/dev/tenstorrent/1'], log=lambda line: None,
+                            containers=lambda: [], corpus=lambda: dict(V235['real_text']['corpus']))
+            with open(os.path.join(results, 'c2-gate-summary.json'), encoding='utf-8') as handle:
+                summary = json.load(handle)
+        return looked, summary
+
+    def test_an_s1_run_reads_no_kernel_cache_and_gains_no_cache_keys(self):
+        report = lambda n: base.served_report(profile='c2-gate', configuration=configuration('c2-gate'),
+                                              argv=base.served_argv('c2-gate', PROFILES))
+        looked, summary = self.main_run(['--profile', 'c2-gate', '--plan', 'bringup'], {'bringup-concurrent': report},
+                                        {'bringup-concurrent': base.any_request_log()})
+        self.assertEqual(looked, [], 'no docker image inspect, no find: S1 as before W11')
+        self.assertNotIn('kernel_cache', summary['arms']['bringup-concurrent'])
+        self.assertNotIn('kernel_cache', summary)
+        looked, summary = self.main_run(['--profile', 'c2-packed', '--plan', 'control', '--pairs', '1'], {
+            'control-off-1': lambda n: s2_arm_report(s2_log(on=False, round_ms=172.0), 'c2-gate'),
+            'control-on-1': lambda n: s2_arm_report(s2_log(), 'c2-packed-gate', env=((AUDIT, '1'),))},
+            {'control-off-1': s2_log(on=False, round_ms=172.0), 'control-on-1': s2_log()})
+        self.assertEqual(looked, ['zot/img:s2'])
+        self.assertEqual(summary['arms']['control-on-1']['kernel_cache'], dict(before=100, after=100, added=0,
+                                                                                judged=True))
+        self.assertEqual(summary['results']['control']['verdict'], 'PASS', summary['results']['control']['lines'])
+
+
+def producer(name, attribute):
+    """The checkout's `name` module when it carries `attribute` (its S2 work item merged), else None."""
+    try:
+        module = __import__(name)
+    except Exception:
+        return None
+    return module if hasattr(module, attribute) else None
+
+
+def source_literal(function, prefix):
+    """The one string literal in `function`'s source that starts with `prefix` (quotes stripped)."""
+    found = re.findall(r"'(%s[^']*)'" % re.escape(prefix), inspect.getsource(function))
+    assert len(found) == 1, (prefix, found)
+    return found[0]
+
+
+def rendered(lines):
+    return '\n'.join('INFO ' + line for line in lines)
+
+
+class ProducerContractTests(unittest.TestCase):
+    """Each producer's own lines through the harness: rendered by the producer's code (or its format literal, where
+    the line needs a device), parsed here, and the fixtures' copies held equal. A producer whose work item is not
+    merged into this checkout skips; merged, it is live (W3: packed_verifier, W6: serving_prefill_admission,
+    memory_ledger.MemoryLedger.before, the coordinator's RELEASED_LINE, serving_request_factory's ladder)."""
+
+    def test_quad_rounds_and_step_lines(self):
+        import quad_draft
+        import serving_worker_hook
+        self.assertEqual(quad_draft.ROUND_LINE, QUAD_ROUND_FORMAT)
+        self.assertTrue(gate.QUAD_ROUND_LINE.search(quad_draft.ROUND_LINE.format(round=7, built=1, ms=61.25)))
+        self.assertEqual(quad_draft.QUAD_CAPTURE_BYTES_EST, QUAD_ESTIMATE)
+        self.assertEqual(source_literal(serving_worker_hook.FastWorkerHook._execute, '[PHASE] execute '),
+                         PHASE_EXECUTE_FORMAT)
+        line = PHASE_EXECUTE_FORMAT.format(64, 0, 4, 60, sorted(['cmpl-b-0-x', 'cmpl-a-0-y']), [])
+        self.assertEqual(gate.finished_ids(gate.PHASE_FINISHED.search(line).group(1)), ['cmpl-a-0-y', 'cmpl-b-0-x'])
+
+    def test_the_prefill_admission_decision_line(self):
+        import serving_prefill_admission
+        self.assertEqual(source_literal(serving_prefill_admission, '[PINDIAG] one fresh prefill per step: '),
+                         DECISION_LINE)
+
+    def test_the_ledgers_prefill_phase_point(self):
+        import memory_ledger
+        lines = []
+        ledger = memory_ledger.MemoryLedger(None, None, log=lines.append, emit=lambda text: None)
+        ledger.reading = lambda: [dict(chip=chip, largest_free=largest, free=3 * 10 ** 9, allocated=30 * 10 ** 9,
+                                       total=34 * 10 ** 9, banks=8) for chip, largest in ((0, 1500 * 10 ** 6),
+                                                                                         (1, 400 * 10 ** 6))]
+        ledger.phase('prefill', point='before prompt=120000')
+        before = gate.before_points(rendered(lines))
+        self.assertEqual(before['points'], 2)
+        point = before['floor_point']
+        self.assertEqual((point['op'], point['chip'], point['estimate_gb'], point['margin_gb']), ('prefill', 1, 0.3, 0.1))
+
+    def test_w6d_before_points(self):
+        memory_ledger = producer('memory_ledger', 'BEFORE_MARKER')
+        if memory_ledger is None:
+            self.skipTest('W6 (s2/w6-memory) is not merged into this checkout')
+        self.assertEqual((memory_ledger.LINE_BUDGET, memory_ledger.BEFORE_MARKER), (LEDGER_LINE_BUDGET,
+                                                                                   '[MEMLEDGER] before op='))
+        lines = []
+        ledger = memory_ledger.MemoryLedger(None, None, log=lines.append, emit=lambda text: None)
+        ledger.reading = lambda: [dict(chip=0, largest_free=300 * 10 ** 6, free=1200 * 10 ** 6, allocated=30 * 10 ** 9,
+                                       total=32 * 10 ** 9, banks=8),
+                                  dict(chip=1, largest_free=900 * 10 ** 6, free=1300 * 10 ** 6, allocated=30 * 10 ** 9,
+                                       total=32 * 10 ** 9, banks=8)]
+        ledger.trace_reading = lambda: [dict(chip=chip, allocated=268400000, largest_free=12500000, free=0, total=0,
+                                             banks=1) for chip in (0, 1)]
+        ledger.before('engine', estimate=ENGINE_PEAK, point='req=%s' % engine_id(0)[-12:])
+        ledger.trace_reading = lambda: {'unavailable': 'no TRACE view'}
+        ledger.before('quad', estimate=QUAD_ESTIMATE, point='slots=0,1,2,3')
+        ledger.reading = lambda: {'unavailable': 'no statistics'}
+        ledger.before('pair', estimate=44 * 10 ** 6, point='slots=0,1')
+        text = rendered(lines)
+        before = gate.before_points(text)
+        self.assertEqual((before['points'], before['unread'], before['by_op']), (4, 1, dict(engine=2, quad=2)))
+        self.assertEqual(before['floor_gb'], -0.7, 'W6\'s own margin below zero, never passed over')
+        self.assertEqual(before['logged_floor_gb'], round(min(ledger.floor.values()) / 1e9, 4))
+        region = gate.trace_region(text)
+        self.assertEqual((region['readings'], region['unavailable'], region['min_largest_free_gb']), (2, 2, 0.0125))
+
+    def test_w6b_dram_hold_through_the_wrapper(self):
+        admission = producer('serving_prefill_admission', 'DRAM_HOLD_LINE')
+        if admission is None:
+            self.skipTest('W6 (s2/w6-memory) is not merged into this checkout')
+        self.assertEqual((admission.DRAM_HOLD_LINE, admission.DRAM_RELEASED_LINE, admission.DRAM_LIFTED_LINE,
+                          admission.DRAM_UNAVAILABLE_LINE),
+                         (W6_HOLD_LINE, W6_RELEASED_HOLD_LINE, W6_LIFTED_LINE, W6_UNAVAILABLE_LINE))
+        self.assertEqual(admission.engine_build_peak(), ENGINE_PEAK)
+
+        class Queue(list):
+            def prepend_requests(self, other):
+                self[:0] = list(other)
+
+            def peek_request(self):
+                return self[0]
+        lines, fits = [], [False]
+        wrapped = admission.wrap(lambda scheduler: None, queue_factory=lambda scheduler: Queue(),
+                                 log=lambda message, *values: lines.append(message.format(*values)))
+        request = types.SimpleNamespace(request_id='r5', num_prompt_tokens=120000)
+        scheduler = types.SimpleNamespace(waiting=Queue([request]), max_num_running_reqs=4,
+                                          running=[types.SimpleNamespace(is_prefill_chunk=False)] * 4)
+        holder = types.SimpleNamespace(admits=lambda prompt: (fits[0], dict(largest_free=700 * 10 ** 6 if not fits[0]
+                                                                             else 1700 * 10 ** 6, need=1568400000)))
+        from unittest import mock
+        with mock.patch.dict(sys.modules, {admission.DRAM_KEY: holder}):
+            wrapped(scheduler)                       # every seat decoding: held, and no fit judged
+            every_seat = gate.dram_holds(rendered(lines))
+            scheduler.running = scheduler.running[:3]
+            wrapped(scheduler)                       # a seat freed, still no fit: only the held state says so
+            fits[0] = True
+            wrapped(scheduler)                       # fits: released
+        self.assertEqual((every_seat['hold_decodes'], every_seat['held_states']), ([4], [4]))
+        healthy = dict(floor_gb=1.0, by_op=dict(engine=8))
+        self.assertEqual(driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=every_seat, before=healthy,
+                                                                     extent_replay=True)), 4)[0], [])
+        hold = gate.dram_holds(rendered(lines))
+        self.assertEqual((hold['holds'], hold['hold_decodes'], hold['held_states'], hold['released']), (1, [4], [3, 4], 1))
+        problems = driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=hold, before=healthy, extent_replay=True)), 4)[0]
+        self.assertTrue(problems and 'decodes [3] of 4 seats' in problems[0], problems)
+
+    def test_w6c_release_line(self):
+        coordinator = producer('dflash_packed_proposal_coordinator', 'RELEASED_LINE')
+        if coordinator is None:
+            self.skipTest('W6 (s2/w6-memory) is not merged into this checkout')
+        self.assertEqual(coordinator.RELEASED_LINE, W6_RELEASED_LINE)
+        line = coordinator.RELEASED_LINE.format(quad=1, pairs=[list(group) for group in ((0, 1), (2, 3))])
+        match = gate.RELEASED_LINE.search(line)
+        self.assertEqual((match.group(1), gate.pair_count(match.group(2))), ('1', 2))
+
+    def test_w6a_proposal_ladder(self):
+        factory = producer('serving_request_factory', 'single_bucket_contexts')
+        if factory is None:
+            self.skipTest('W6 (s2/w6-memory) is not merged into this checkout')
+        from unittest import mock
+        found = []
+        for flag in ('1', '0'):
+            with mock.patch.dict(os.environ, {EXTENT: flag}):
+                text = 'proposal ladder {}'.format(factory._proposal_ladder(60, 4096))
+            found.append(gate.ladder_of(gate.PROPOSAL_LADDER.search(text).group(1)))
+        self.assertEqual(found, [[2048], [256, 512, 1024, 2048]])
+
+    def test_w3_extent_round_line(self):
+        verifier = producer('packed_verifier', 'EXTENT_ROUND_MARKER')
+        if verifier is None or not hasattr(verifier.PackedVerifierEngine, 'note_extent_round'):
+            self.skipTest('W3 (s2/w3-block-step) is not merged into this checkout')
+        import extent_attention_replay
+        self.assertEqual((verifier.EXTENT_ROUND_MARKER, verifier.EXTENT_CAP_REFUSED_MARKER,
+                          verifier.REPLAY_DEADLINE_MARKER),
+                         (gate.S2_ROUND_MARKER, gate.CAP_REFUSED_MARKER, gate.DEADLINE_MARKER))
+        self.assertEqual(source_literal(verifier.PackedVerifierEngine.note_extent_round, '%s round=%d live='),
+                         W3_ROUND_FORMAT)
+        lines = []
+        engine = types.SimpleNamespace(rounds=4, rows_per_user=16, extent_counts=dict(rounds=0, cap_events=0,
+                                                                                         mixed_rounds=0),
+                                       accept_limit=lambda start: min(16, extent_attention_replay.extent(start) - start))
+        from unittest import mock
+        with mock.patch.object(verifier, 'diagnostic', lines.append):
+            verifier.PackedVerifierEngine.note_extent_round(
+                engine, {0: (None, 131072), 1: (None, 131080), 2: (None, 131090), 3: (None, 131320)}, [0, 1, 2, 3], [])
+            verifier.PackedVerifierEngine.note_extent_round(engine, {0: (None, 20000), 1: (None, 20010)}, [0, 1], [2, 3])
+            verifier.PackedVerifierEngine.note_extent_round(engine, {0: (None, 1500), 1: (None, 60000)}, [0, 1], [2, 3])
+        rounds = gate.extent_rounds(rendered(lines))
+        self.assertEqual((rounds['count'], rounds['multi_family_rounds']), (3, engine.extent_counts['mixed_rounds']))
+        self.assertEqual((rounds['multi_family_rounds'], rounds['families_seen']), (1, [1536, 20224, 60160, 131328]))
+        self.assertEqual((rounds['capped_segments'], engine.extent_counts['cap_events']), (1, 1))
+
+    def test_w3_extent_audit_lines(self):
+        verifier = producer('packed_verifier', 'EXTENT_AUDIT_MISMATCH_MARKER')
+        if verifier is None or not hasattr(verifier.PackedVerifierEngine, 'audit_extent'):
+            self.skipTest('W3 (s2/w3-block-step) is not merged into this checkout')
+        self.assertEqual((verifier.EXTENT_AUDIT_MARKER, verifier.EXTENT_AUDIT_MISMATCH_MARKER),
+                         (W3_AUDIT_MARKER, W3_MISMATCH_MARKER))
+        audit = verifier.PackedVerifierEngine.audit_extent
+        self.assertEqual(source_literal(audit, '%s round=%d segments='), W3_AUDIT_FORMAT)
+        self.assertEqual(source_literal(audit, '%s round=%d at='), W3_MISMATCH_FORMAT)
+        text = '\n'.join([round_line(9, [131328] * 4), 'INFO ' + W3_AUDIT_FORMAT % (
+            verifier.EXTENT_AUDIT_MARKER, 9, 4, 4, 4, 1, 1, 2, 1.25)])
+        found = gate.extent_audit(text)
+        self.assertEqual((found['lines'], found['malformed'], found['incomplete'], found['median_ms']), (1, 0, 0, 1.25))
+        mismatch = 'WARNING ' + W3_MISMATCH_FORMAT % (verifier.EXTENT_AUDIT_MISMATCH_MARKER, 9, 'mask:2')
+        self.assertEqual(gate.extent_audit(text + '\n' + mismatch)['mismatches'], 1)
 
 
 if __name__ == '__main__':
