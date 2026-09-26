@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -48,6 +48,9 @@ def sse(*chunks):
 def content(text, finish=None):
     return dict(choices=[dict(index=0, delta=dict(content=text), finish_reason=finish)])
 
+
+TT = 'Qwen/Qwen3.8-27B:tt'
+PLAIN = 'Qwen/Qwen3.8-27B'
 
 STREAM = sse(dict(choices=[dict(index=0, delta=dict(role='assistant', content=''))]), content('Hel'), content('lo'),
              content('', 'stop'), dict(choices=[], usage=dict(prompt_tokens=12, completion_tokens=41)))
@@ -231,6 +234,86 @@ class TrafficTests(unittest.TestCase):
         self.assertIn('not exercised', dict(steps)['streamed_long_answer']['note'])
 
 
+#: Lines of the G7 replay's runtime log (run 36227190700, thatch-serving-tt:e570ee2), as docker logs
+#: gave them: every step passed, and the runtime reloaded the engine three times on its own.
+G7_LOG = """\
+2026-09-26 07:37:34,569 thatch.serving serving Qwen/Qwen3.8-27B on http://0.0.0.0:8000
+2026-09-26 07:38:04,569 thatch.serving generation health probe failed (1 consecutive)
+2026-09-26 07:38:34,570 thatch.serving generation health probe failed (2 consecutive)
+2026-09-26 07:38:34,570 thatch.serving attempting generation health recovery: reload Qwen/Qwen3.8-27B (attempt 1/2)
+2026-09-26 07:39:27,647 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 2)
+2026-09-26 07:39:27,647 thatch.serving POST /v1/models/load
+2026-09-26 07:39:27,671 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 3)
+2026-09-26 07:39:27,671 thatch.serving health recovery reload succeeded for Qwen/Qwen3.8-27B
+2026-09-26 07:44:57,672 thatch.serving generation health probe failed (3 consecutive)
+2026-09-26 07:44:57,672 thatch.serving attempting generation health recovery: reload Qwen/Qwen3.8-27B (attempt 2/2)
+2026-09-26 07:44:57,676 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 4)
+2026-09-26 07:45:03,844 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 5)
+2026-09-26 07:45:06,849 thatch.serving received shutdown signal, stopping serving server
+2026-09-26 07:47:53,965 thatch.serving serving Qwen/Qwen3.8-27B on http://0.0.0.0:8000
+2026-09-26 07:48:54,048 thatch.serving attempting generation health recovery: reload Qwen/Qwen3.8-27B (attempt 1/2)
+2026-09-26 07:50:54,056 thatch.serving health recovery reload timed out after 120.0s
+2026-09-26 07:50:58,272 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 2)
+2026-09-26 07:50:58,416 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 3)
+"""
+REPLAY_STEPS = dict.fromkeys(('seed', 'source', 'start', 'load', 'warmup', 'reload', 'after_reload', 'restart',
+                              'load_after_restart', 'after_restart'), dict(ok=True))
+
+
+class RuntimeLogTests(unittest.TestCase):
+    def test_the_runtimes_own_reloads_fail_the_replay_and_are_recorded(self):
+        verdict = replay.runtime_log_verdict(G7_LOG, REPLAY_STEPS)
+        self.assertFalse(verdict['ok'])
+        self.assertIn('3 health recovery reload(s) the replay did not ask for', verdict['problems'])
+        self.assertIn('6 engine loads, the replay asked for 3', verdict['problems'])
+        self.assertEqual(len(verdict['problems']), 2, 'two starts were asked for, and no exit happened')
+        self.assertIn('2026-09-26 07:44:57,672 thatch.serving attempting generation health recovery: reload '
+                      'Qwen/Qwen3.8-27B (attempt 2/2)', verdict['lines'])
+        self.assertEqual(sum('model reload' in line for line in verdict['lines']), 6)
+
+    def test_only_what_the_replay_asked_for_passes(self):
+        asked = '\n'.join(line for line in G7_LOG.splitlines()
+                          if 'health' not in line and 'generation 3' not in line and 'generation 4' not in line)
+        verdict = replay.runtime_log_verdict(asked, REPLAY_STEPS)
+        self.assertEqual(verdict, dict(ok=True, problems=[], lines=[]))
+
+    def test_an_exit_and_the_restart_after_it_fail_the_replay(self):
+        log = ('x thatch.serving serving Qwen/Qwen3.8-27B on http://0.0.0.0:8000\n'
+               'x thatch.serving attempting generation health recovery: reload Qwen/Qwen3.8-27B (attempt 2/2)\n'
+               'x thatch.serving generation health recovery failed after 2 attempt(s); exiting\n'
+               'x thatch.serving serving Qwen/Qwen3.8-27B on http://0.0.0.0:8000\n')
+        verdict = replay.runtime_log_verdict(log, dict(start=dict(ok=True)))
+        self.assertFalse(verdict['ok'])
+        self.assertEqual(verdict['problems'], ['1 health recovery reload(s) the replay did not ask for',
+                                               'the runtime exited on its own (os._exit)',
+                                               '2 runtime starts, the replay asked for 1'])
+        self.assertEqual(len(verdict['lines']), 4)
+
+    def test_main_records_the_runtime_log_and_fails_on_it(self):
+        def run(command, timeout=None, check=True):
+            if command[:3] == ['docker', 'image', 'inspect']:
+                return mock.Mock(returncode=0, stdout='[{"Config": {"Env": []}}]', stderr='')
+            if command[:2] == ['docker', 'logs']:
+                return mock.Mock(returncode=0, stdout='', stderr=G7_LOG)
+            return mock.Mock(returncode=0, stdout='', stderr='')
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(replay, 'run', side_effect=run), \
+                mock.patch.object(replay.subprocess, 'run'), \
+                mock.patch.object(replay, 'wait_http', return_value='container exited'), \
+                mock.patch.object(sys, 'argv', ['replay', '--source', AGENT, '--image', 'zot/new@sha256:b',
+                                                '--results', directory]), \
+                redirect_stdout(io.StringIO()):
+            code = replay.main()
+            with open(os.path.join(directory, 'platform-replay.json'), encoding='utf-8') as handle:
+                recorded = json.load(handle)
+        self.assertEqual(code, 1)
+        self.assertFalse(recorded['passed'])
+        verdict = recorded['runtime_log']
+        self.assertFalse(verdict['ok'])
+        self.assertIn('3 health recovery reload(s) the replay did not ask for', verdict['problems'])
+        self.assertNotIn('runtime_log', recorded['steps'])
+
+
 class SourceTests(unittest.TestCase):
     """Review finding 8: the recorded Env copied whole onto another image served that image with the old
     image's kernel cache key and defaults, and the replay still passed."""
@@ -264,6 +347,135 @@ class SourceTests(unittest.TestCase):
         self.assertFalse(any(command[:2] == ['docker', 'run'] for command in commands))
         self.assertFalse(recorded['steps']['source']['ok'])
         self.assertIn('refused', out.getvalue())
+
+
+class ServedNameTests(unittest.TestCase):
+    """TT advertises ONLY Qwen/Qwen3.8-27B:tt (the thin layer's THATCH_SERVING_MODEL_ALIAS): the spine
+    routes on the advertised names by exact match, so plain Qwen/Qwen3.8-27B traffic stays on the Spark."""
+
+    def served(self, status, body, expected=TT, checkpoint=PLAIN):
+        with mock.patch.object(replay, 'http', return_value=(status, body)) as http:
+            result = replay.served_name(8011, checkpoint, expected)
+        http.assert_called_once_with(8011, '/v1/models', timeout=30)
+        return result
+
+    def test_the_default_is_the_tagged_name_and_the_checkpoint_is_loaded(self):
+        self.assertEqual((replay.SERVED_MODEL, replay.CHECKPOINT), (TT, PLAIN))
+
+    def test_the_tagged_name_alone_is_advertised(self):
+        result = self.served(200, dict(status='ok', model=TT, aliases=[TT], healthy=True))
+        self.assertTrue(result['ok'])
+        self.assertEqual((result['served'], result['advertised']), (TT, [TT, TT]))
+
+    def test_an_image_without_the_alias_would_take_plain_traffic(self):
+        result = self.served(200, dict(status='ok', model=PLAIN))
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['served'], PLAIN)
+
+    def test_the_plain_id_advertised_beside_the_tag_fails(self):
+        self.assertFalse(self.served(200, dict(model=TT, aliases=[TT, PLAIN]))['ok'])
+
+    def test_a_refused_or_unreachable_models_endpoint_fails(self):
+        self.assertFalse(self.served(404, 'not found')['ok'])
+        self.assertFalse(self.served(404, dict(model=TT, aliases=[TT]))['ok'])
+        self.assertFalse(self.served(None, 'URLError(connection refused)')['ok'])
+
+    def test_the_legacy_replay_of_an_image_without_the_alias(self):
+        self.assertTrue(self.served(200, dict(model=PLAIN), expected=PLAIN)['ok'])
+        self.assertFalse(self.served(200, dict(model=TT, aliases=[TT]), expected=PLAIN)['ok'])
+
+
+class ReplayNameTests(unittest.TestCase):
+    """main(): serving.manage loads the checkpoint, the agent's warmup names the checkpoint (answered,
+    not advertised), and every later request names the served model."""
+
+    GOOD = dict(model=TT, aliases=[TT])
+    BAD = dict(model=PLAIN)   # what an image without the alias advertises: it would take plain traffic
+
+    def drive(self, models, *arguments):
+        """`models` is the /v1/models body, or a sequence of them: the one before the restart (the
+        first load's) and the one after `docker start` (the redeploy's)."""
+        commands, chats, traffic = [], [], []
+        answers = list(models) if isinstance(models, (list, tuple)) else [models, models]
+
+        def run(command, timeout=None, check=True):
+            commands.append(command)
+            if command[:2] == ['docker', 'start']:
+                answers.pop(0)
+            if command[:3] == ['docker', 'image', 'inspect']:
+                return mock.Mock(returncode=0, stdout=json.dumps([dict(Config=dict(Env=[]))]), stderr='')
+            return mock.Mock(returncode=0, stdout='true', stderr='')
+
+        def http(port, path, body=None, timeout=60):
+            return 200, dict(answers[0])
+
+        def chat(port, model, content, max_tokens, timeout=900, **extra):
+            chats.append((model, content))
+            return dict(ok=True, status=200, completion_tokens=max_tokens, tool_calls=[dict(id='call-0')])
+
+        def traffic_steps(port, model, record, seed, **options):
+            traffic.append(model)
+            return True
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            for name, fake in (('run', run), ('http', http), ('chat', chat), ('traffic_steps', traffic_steps)):
+                stack.enter_context(mock.patch.object(replay, name, side_effect=fake))
+            stack.enter_context(mock.patch.object(replay.subprocess, 'run'))
+            stack.enter_context(mock.patch.object(sys, 'argv', ['replay', '--source', AGENT, '--image',
+                                                                'zot/new@sha256:b', '--results', directory,
+                                                                '--seed', '5'] + list(arguments)))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            code = replay.main()
+            with open(os.path.join(directory, 'platform-replay.json'), encoding='utf-8') as handle:
+                steps = json.load(handle)['steps']
+        loads = [command[command.index('--model') + 1] for command in commands if 'serving.manage' in command]
+        return code, steps, loads, chats, traffic
+
+    def test_the_warmup_names_the_checkpoint_and_every_later_request_the_tag(self):
+        code, steps, loads, chats, traffic = self.drive(dict(model=TT, aliases=[TT]))
+        self.assertEqual(code, 0)
+        self.assertEqual(loads, [PLAIN, PLAIN, PLAIN], 'load, reload and the load after the restart')
+        self.assertEqual(chats[0], (PLAIN, 'warmup'))
+        self.assertEqual(chats[1][0], TT)
+        self.assertIn('merges two sorted lists', chats[1][1])
+        self.assertEqual(len(chats), 9)
+        self.assertEqual({model for model, _ in chats[1:]}, {TT})
+        self.assertEqual(traffic, [TT])
+        self.assertEqual(list(steps), ['seed', 'source', 'start', 'load', 'served_name', 'warmup', 'coding',
+                                       'concurrent4', 'tool_call', 'reload', 'after_reload', 'restart',
+                                       'load_after_restart', 'served_name_after_restart', 'after_restart'])
+        self.assertTrue(steps['served_name']['ok'] and steps['served_name_after_restart']['ok'])
+
+    def test_an_image_that_advertises_the_plain_id_fails_the_replay(self):
+        for models in (dict(model=PLAIN), dict(model=TT, aliases=[TT, PLAIN])):
+            code, steps, _, _, _ = self.drive(models)
+            self.assertEqual(code, 1)
+            self.assertFalse(steps['served_name']['ok'])
+            self.assertFalse(steps['served_name_after_restart']['ok'])
+
+    def failed(self, steps):
+        return [name for name, step in steps.items() if not step.get('ok', True)]
+
+    def test_the_plain_id_advertised_only_after_the_restart_fails_the_replay(self):
+        """Reviewer defect 1: the check after the restart counts on its own - a redeploy that comes
+        back advertising the checkpoint fails the replay though everything before it passed."""
+        code, steps, _, _, _ = self.drive((self.GOOD, self.BAD))
+        self.assertEqual(self.failed(steps), ['served_name_after_restart'])
+        self.assertEqual((steps['served_name']['served'], steps['served_name_after_restart']['served']), (TT, PLAIN))
+        self.assertEqual(code, 1)
+
+    def test_the_plain_id_advertised_only_before_the_restart_fails_the_replay(self):
+        """Reviewer defect 1: the check after the first load counts on its own - a restart that comes
+        back advertising the tag does not clear it."""
+        code, steps, _, _, _ = self.drive((self.BAD, self.GOOD))
+        self.assertEqual(self.failed(steps), ['served_name'])
+        self.assertEqual((steps['served_name']['served'], steps['served_name_after_restart']['served']), (PLAIN, TT))
+        self.assertEqual(code, 1)
+
+    def test_an_image_without_the_alias_replays_under_its_plain_name(self):
+        code, steps, loads, chats, traffic = self.drive(dict(model=PLAIN), '--served-model', PLAIN)
+        self.assertEqual(code, 0)
+        self.assertEqual({model for model, _ in chats} | set(traffic) | set(loads), {PLAIN})
 
 
 if __name__ == '__main__':

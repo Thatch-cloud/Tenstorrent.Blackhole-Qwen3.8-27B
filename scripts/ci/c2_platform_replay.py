@@ -12,8 +12,14 @@ This replays what the agent does, step by step, in a copy of the agent's own con
      subtract its ENV, else the replay refuses (source_problem) rather than serve the old image's
      kernel cache key and defaults;
   2. load:  `serving.manage --model <model> --release-first` (the placed job; release-first is
-     forced on Tenstorrent), then the agent's warmup chat (max_tokens 1, no temperature);
-  3. serve: a coding request, four concurrent requests, a tool call;
+     forced on Tenstorrent; <model> is the checkpoint), then the served name: /v1/models ({model,
+     aliases}) must name --served-model (default Qwen/Qwen3.8-27B:tt, the thin layer's
+     THATCH_SERVING_MODEL_ALIAS) and, unless that IS the checkpoint, must not advertise the checkpoint:
+     the spine routes on the advertised names, so a TT image that advertises plain Qwen/Qwen3.8-27B
+     takes the Spark's traffic. Then the agent's warmup chat (max_tokens 1, no temperature), which
+     names the checkpoint as the agent's does: the runtime answers it without advertising it;
+  3. serve: a coding request, four concurrent requests, a tool call. These and every later request
+     name the served model, as agents opting in to TT do;
   4. traffic (G7, c2-serve-for-real-plan 2.2 item 5): a long prompt (~60% of the served context),
      a streamed answer of at least 1000 tokens (not exercised, and said so, when the profile's
      ceiling is lower), four arrivals at seeded random times, n=2 refused AT THE EDGE under a
@@ -21,13 +27,15 @@ This replays what the agent does, step by step, in a copy of the agent's own con
      engine still answering after it, max_tokens=1 (exactly one token) and the engine still
      answering after it;
   5. reload: a second release-first load in the same container - the in-place restart;
-  6. restart: docker stop (SIGTERM, graceful) and docker start, load again - a redeploy. The
-     restart time (docker start to HTTP, and to the load's end) is recorded.
+  6. restart: docker stop (SIGTERM, graceful) and docker start, load again and check the served
+     name again - a redeploy. The restart time (docker start to HTTP, and to the load's end) is
+     recorded.
 A chat after 5 and 6 must succeed. Everything the runtime and vLLM wrote under /tmp is copied
 out before the container is removed. Exit 0 only if every step passed.
 
 Usage: c2_platform_replay.py --source thatch-inference-Qwen-Qwen3.8-27B|<inspect.json> --image <ref> --results <dir>
-       [--profile NAME] [--seed N]
+       [--profile NAME] [--seed N] [--model CHECKPOINT] [--served-model NAME] [--env NAME=value ...]
+To replay an image without the alias (a rollback candidate), pass --served-model Qwen/Qwen3.8-27B.
 """
 import argparse
 import glob
@@ -44,6 +52,8 @@ import urllib.request
 
 CARD_M = 'blackhole-CEF5729692C19E6D'
 CARD_A = 'blackhole-3707293C249A5E67'
+CHECKPOINT = 'Qwen/Qwen3.8-27B'
+SERVED_MODEL = 'Qwen/Qwen3.8-27B:tt'   # what TT advertises; agents opt in to TT by naming it
 ARRIVAL_WINDOW_S = 30.0
 LONG_ANSWER_TOKENS = 3000
 LONG_PROMPT_SHARE = 0.6       # of the served max_model_len
@@ -410,6 +420,19 @@ def traffic_steps(port, model, record, seed, stream=stream_chat, ask=chat, sleep
     return ok
 
 
+def served_name(port, checkpoint, expected):
+    """Whether the runtime advertises `expected` as its model and, unless `expected` is the
+    checkpoint itself, does not advertise the checkpoint. It reads the py/serving /v1/models shape,
+    {model, aliases} (no data[]); the node agent folds both into the node's served_models, which the
+    spine routes on by exact match."""
+    status, body = http(port, '/v1/models', timeout=30)
+    body = body if isinstance(body, dict) else {}
+    served = body.get('model') or ''
+    advertised = [served] + list(body.get('aliases') or ())
+    ok = status == 200 and served == expected and (expected == checkpoint or checkpoint not in advertised)
+    return dict(ok=ok, status=status, served=served, advertised=advertised, expected=expected)
+
+
 def wait_http(port, container, seconds):
     deadline = time.time() + seconds
     while time.time() < deadline:
@@ -431,12 +454,49 @@ def load(container, model):
                 seconds=round(time.time() - started, 1))
 
 
+#: The runtime acting on its own, which no replay step asks for: a health recovery reloads the engine
+#: (minutes with no model on a node), and two failed recoveries end in os._exit, logged just before.
+HEALTH_RECOVERY = 'attempting generation health recovery'
+RUNTIME_STARTS = ('start', 'restart')                  # the replay's docker run and docker start
+ENGINE_LOADS = ('load', 'reload', 'load_after_restart')  # the replay's serving.manage loads
+
+
+def runtime_log_verdict(text, steps):
+    """After the steps, the runtime log (docker logs): the runtime did only what the replay asked.
+    Fails on a health recovery, an os._exit ('generation health ...; exiting'), more runtime starts
+    ('serving X on http://') than the replay's start steps, or more engine loads ('model reload:')
+    than its load steps; every such line is recorded (platform-replay.json runtime_log). The G7
+    replay of e570ee2 (run 36227190700) passed every step while its runtime reloaded a healthy
+    engine three times: only this log showed it."""
+    starts = sum(step in steps for step in RUNTIME_STARTS)
+    loads = sum(step in steps for step in ENGINE_LOADS)
+    lines = text.splitlines()
+    recoveries = [line for line in lines if HEALTH_RECOVERY in line]
+    exits = [line for line in lines if 'generation health' in line and '; exiting' in line]
+    banners = [line for line in lines if 'thatch.serving serving ' in line and ' on http://' in line]
+    reloads = [line for line in lines if 'thatch.serving model reload: ' in line]
+    problems = []
+    if recoveries:
+        problems.append('%d health recovery reload(s) the replay did not ask for' % len(recoveries))
+    if exits:
+        problems.append('the runtime exited on its own (os._exit)')
+    if len(banners) > starts:
+        problems.append('%d runtime starts, the replay asked for %d' % (len(banners), starts))
+    if len(reloads) > loads:
+        problems.append('%d engine loads, the replay asked for %d' % (len(reloads), loads))
+    flagged = set(recoveries + exits + (banners if len(banners) > starts else [])
+                  + (reloads if len(reloads) > loads else []))
+    return dict(ok=not problems, problems=problems, lines=[line for line in lines if line in flagged])
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', required=True, help='the agent\'s container, or a saved `docker inspect` JSON')
     parser.add_argument('--image', required=True)
     parser.add_argument('--results', required=True)
-    parser.add_argument('--model', default='Qwen/Qwen3.8-27B')
+    parser.add_argument('--model', default=CHECKPOINT, help='the checkpoint serving.manage loads')
+    parser.add_argument('--served-model', default=SERVED_MODEL,
+                        help='the name /v1/models must advertise and every request after the warmup names')
     parser.add_argument('--name', default='qwen-c2-platform')
     parser.add_argument('--port', type=int, default=8011)
     parser.add_argument('--profile', default=None, help='QWEN_C2_PROFILE for the copy (default: the source\'s)')
@@ -444,7 +504,7 @@ def main():
     parser.add_argument('--env', action='append', default=None, metavar='NAME=value',
                         help='extra container env, repeatable (default: %s)' % ' '.join(DEFAULT_ENV))
     options = parser.parse_args()
-    name, port, model = options.name, options.port, options.model
+    name, port, model, served = options.name, options.port, options.model, options.served_model
     seed = options.seed if options.seed is not None else int(time.time())
     os.makedirs(options.results, exist_ok=True)
     steps = dict(seed=dict(ok=True, seed=seed))
@@ -488,20 +548,21 @@ def main():
         problem = wait_http(port, name, 600)
         if record('start', dict(ok=problem is None, problem=problem, http_s=round(time.time() - started, 1))):
             if record('load', load(name, model)):
-                ok = record('warmup', chat(port, model, 'warmup', 1))
-                ok = record('coding', chat(port, model, 'Write a Python function that merges two sorted lists, '
-                                                        'with doctests. Code only.', 600)) and ok
+                ok = record('served_name', served_name(port, model, served))
+                ok = record('warmup', chat(port, model, 'warmup', 1)) and ok
+                ok = record('coding', chat(port, served, 'Write a Python function that merges two sorted lists, '
+                                                         'with doctests. Code only.', 600)) and ok
                 outs = [None] * 4
 
                 def one(index):
-                    outs[index] = chat(port, model, 'Write a unit test for a %s parser in Python.'
+                    outs[index] = chat(port, served, 'Write a unit test for a %s parser in Python.'
                                        % ('CSV', 'JSON', 'INI', 'TOML')[index], 300)
 
                 threads = [threading.Thread(target=one, args=(index,)) for index in range(4)]
                 [thread.start() for thread in threads]
                 [thread.join() for thread in threads]
                 ok = record('concurrent4', dict(ok=all(o and o['ok'] for o in outs), users=outs)) and ok
-                tool = chat(port, model, 'Read src/main.rs using the tool.', 300, tool_choice='auto',
+                tool = chat(port, served, 'Read src/main.rs using the tool.', 300, tool_choice='auto',
                             tools=[{'type': 'function', 'function': {'name': 'read_file', 'description': 'Read a file',
                                     'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}},
                                                    'required': ['path']}}}])
@@ -509,9 +570,9 @@ def main():
                 ok = record('tool_call', tool) and ok
                 logs = run(['docker', 'logs', name], check=False)
                 contract = CONTRACT_INSTALLED in (logs.stdout or '') + (logs.stderr or '')
-                ok = traffic_steps(port, model, record, seed, contract=contract) and ok
+                ok = traffic_steps(port, served, record, seed, contract=contract) and ok
                 ok = record('reload', load(name, model)) and ok
-                ok = record('after_reload', chat(port, model, 'Say OK.', 8)) and ok
+                ok = record('after_reload', chat(port, served, 'Say OK.', 8)) and ok
                 capture('before-restart')
                 run(['docker', 'stop', '-t', '60', name], timeout=120, check=False)
                 restarted = time.time()
@@ -523,16 +584,20 @@ def main():
                     loaded = load(name, model)
                     loaded['restart_to_loaded_s'] = round(time.time() - restarted, 1)
                     ok = record('load_after_restart', loaded) and ok
-                    ok = record('after_restart', chat(port, model, 'Say OK.', 8)) and ok
+                    ok = record('served_name_after_restart', served_name(port, model, served)) and ok
+                    ok = record('after_restart', chat(port, served, 'Say OK.', 8)) and ok
                 passed = ok
     finally:
         capture('final')
         logs = run(['docker', 'logs', name], check=False)
         with open(os.path.join(options.results, 'platform-container.log'), 'w') as handle:
             handle.write(logs.stdout + '\n----- stderr -----\n' + logs.stderr)
+        runtime_log = runtime_log_verdict(logs.stdout + '\n' + logs.stderr, steps)
+        print('RUNTIME_LOG %s' % json.dumps(runtime_log)[:1500], flush=True)
+        passed = passed and runtime_log['ok']
         run(['docker', 'rm', '-f', name], check=False)
         with open(os.path.join(options.results, 'platform-replay.json'), 'w') as handle:
-            json.dump(dict(passed=passed, steps=steps), handle, indent=1)
+            json.dump(dict(passed=passed, steps=steps, runtime_log=runtime_log), handle, indent=1)
     restart = steps.get('load_after_restart') or {}
     print('PLATFORM_REPLAY passed=%s restart_http_s=%s restart_to_loaded_s=%s seed=%s' % (
         passed, (steps.get('restart') or {}).get('http_s'), restart.get('restart_to_loaded_s'), seed), flush=True)
