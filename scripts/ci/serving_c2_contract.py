@@ -22,6 +22,13 @@ process match it:
    profiles (QWEN_FAST_ANY_REQUEST=1), where a host-side refusal of one request's own terms
    (its sampling contract, budget or page table) ends only that request, as FINISHED_ABORTED
    (serving_request_quarantine); every other in-engine refusal still fails the engine.
+5. streaming parsers: C2 commits 3-16 tokens per engine step, so the API server's reasoning and
+   tool-call parsers see multi-token deltas, which they parse differently from one token per step
+   (R21: a real </think> or <tool_call> bound to a later lookalike, whitespace after a tool call).
+   A profile with "parser_rechunk": true (c2, c2-gate) arms c2_parser_rechunk (fix M) in the API
+   server: when vLLM imports vllm.parser.abstract_parser, DelegatingParser.parse_delta is wrapped
+   to feed the parsers one token per sub-delta where that matters and merge the results into one
+   message per step. general and exact never arm it (general decodes one token per step).
 
 Nothing here changes a gate: every step is off unless QWEN_C2_SERVING=1.
 """
@@ -349,6 +356,26 @@ class PostImportHook(object):
         return spec
 
 
+def parser_rechunk(profile):
+    """Whether the profile arms fix M (c2_parser_rechunk); off unless it says true."""
+    value = profile.get('parser_rechunk', False)
+    if value not in (True, False):
+        raise ValueError('parser_rechunk must be true or false, got %r' % (value,))
+    return value
+
+
+def arm_parser_rechunk(profile_name):
+    """Wrap DelegatingParser.parse_delta with fix M when vLLM imports its module. The module is
+    imported here, at boot, so an image without it fails the API server's boot (status 78)
+    instead of serving the c2 profile without M; install refuses a parser that is not vLLM
+    0.25.1's, which fails the server's own import of the parsers."""
+    import c2_parser_rechunk
+
+    sys.meta_path.insert(0, PostImportHook(c2_parser_rechunk.MODULE, c2_parser_rechunk.install))
+    log('profile %s: parser M armed: %s.%s.parse_delta re-chunks multi-token deltas at marker tokens (R21)',
+        profile_name, c2_parser_rechunk.MODULE, c2_parser_rechunk.CLASS)
+
+
 def boot(environ=None, orig_argv=None):
     environ = os.environ if environ is None else environ
     if environ.get('QWEN_C2_SERVING') != '1':
@@ -369,6 +396,8 @@ def boot(environ=None, orig_argv=None):
         log('profile %s: vLLM argv %s', profile['name'], json.dumps(sys.argv[1:]))
         log('mesh %s, output budget %d, context %s', environ['TT_MESH_GRAPH_DESC_PATH'], budget,
             profile['engine'].get('max-model-len'))
+        if parser_rechunk(profile):
+            arm_parser_rechunk(profile['name'])
         if profile.get('request_contract', True) is False:
             log('profile %s: no request contract (the fast path is off)', profile['name'])
             return profile
