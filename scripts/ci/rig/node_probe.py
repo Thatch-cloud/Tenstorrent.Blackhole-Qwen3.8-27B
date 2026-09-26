@@ -13,6 +13,7 @@ import subprocess
 import sys
 import urllib.parse
 
+NL = chr(10)
 SITE = sys.argv[1] if len(sys.argv) > 1 else 'spark-76cb'
 SHORT = SITE.replace('spark-', '')
 
