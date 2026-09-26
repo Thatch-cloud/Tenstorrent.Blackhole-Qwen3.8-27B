@@ -478,8 +478,9 @@ class StepGuardTests(unittest.TestCase):
     (packed_shapes.M3_SEQUENTIAL_CAPTURE_ROWS), so the guard must act BEFORE the round is drafted
     at the block's 16 rows: proposal_rows answers None and the round is drafted at the engines'
     own widths, which the exact sequential step serves. A conflict first seen at the step (the
-    backstop) finds 16-row tickets nothing else captured: the round is refused and nothing is
-    written."""
+    backstop) finds 16-row tickets nothing else captured: S2 D1 (serving_packed_step.narrow_round)
+    cuts each to its engine's widest capture and the sequential step serves the round, the block
+    never touched; only tickets nothing narrower serves still refuse it, writing nothing."""
 
     TRIMMED = (1, 2, 4)
 
@@ -552,7 +553,7 @@ class StepGuardTests(unittest.TestCase):
         self.assertEqual([output.request_id for output in outputs], ['C', 'A', 'D', 'B'])
         self.assertTrue(all(owner.session.phase == 'pending' for owner in owners), 'no session failed')
 
-    def test_a_conflict_first_seen_at_the_step_refuses_the_round_and_writes_nothing(self):
+    def test_a_conflict_first_seen_at_the_step_narrows_the_round_to_the_sequential_step(self):
         from serving_packed_step import ineligible, packed_device_step
 
         self.block.kv_chains = True
@@ -567,6 +568,23 @@ class StepGuardTests(unittest.TestCase):
             outputs = packed_device_step(entries, cancelled=lambda: False, block=self.block)
         self.assertEqual(reason, 'verify t2 kv tile rows shared: users 0,2 page 7 tile row 1')
         self.assertEqual(logged, ['[PINDIAG] verify t2 kv shared site=ineligible ' + reason] * 2)
+        self.assertEqual(self.block.calls, [], 'the block was never touched')
+        self.assertEqual(self.stepped, [('C', False), ('A', False), ('D', False), ('B', False)],
+                         'each 16-row ticket cut to 4 rows, served by the exact sequential step')
+        self.assertEqual([owner.rows_stepped for owner in owners], [[4]] * 4)
+        self.assertFalse(any(output.cancelled for output in outputs))
+        self.assertTrue(all(owner.session.phase == 'pending' for owner in owners), 'narrowed, not failed')
+
+    def test_a_conflict_whose_tickets_nothing_narrower_serves_refuses_the_round_and_writes_nothing(self):
+        from serving_packed_step import packed_device_step
+
+        self.block.kv_chains = True
+        owners = self.owners(widths=(32,))
+        entries = self.draft(owners, 16)
+        owners[2].engine.pages = torch.full((1, 68), 7, dtype=torch.int32)
+        owners[2].session.pending.position = owners[2].engine.position = owners[2].session.position = 110
+        with patch.object(t2, 'log_line'), patch('sys.stdout'):
+            outputs = packed_device_step(entries, cancelled=lambda: False, block=self.block)
         self.assertEqual(self.block.calls, [], 'the block was never touched')
         self.assertEqual(self.stepped, [], 'nothing captured the 16-row tickets: no sequential step either')
         self.assertTrue(all(output.finished and output.cancelled for output in outputs))
