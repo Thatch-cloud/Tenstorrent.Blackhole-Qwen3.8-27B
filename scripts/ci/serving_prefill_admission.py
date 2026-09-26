@@ -61,18 +61,37 @@ traces are still held (W6c releases them at detach). A prefill or build that run
 and every live user with it, and a refusal raised after the prefill (the bridge's RequestRefused backstop,
 serving_request_factory.dram_backstop) has already spent the prefill. So the worker parks a predicate under
 DRAM_KEY at attach (serving_request_factory.register_dram_admission), the prefill gate's sys.modules pattern,
-and the wrapper asks it about the request the base scheduler would admit next (head_request) before one fresh
-prompt is let in. While it refuses, allowed = 0 and both queues are hidden, exactly as behind a held gate: the
-plugin falls back to a decode-only step, the running users keep decoding, and the hold resolves when one of
-them finishes and its engine is freed. With no decode left to wait for nothing can free DRAM, so the prompt is
-admitted anyway ('lifted') and the backstop decides after its prefill: a hold never livelocks the engine.
+and the wrapper asks it before one fresh prompt is let in - and only then: with a partial in flight, the gate
+held, or every seat decoding (max-num-seqs) the waiting loop admits nobody anyway, so nothing is asked or logged.
+It is asked about the request whose need binds among those the waiting loop may admit this step
+(admission_candidates: a head vLLM skips for a blocked status, and the requests up to the first unblocked one).
+While it refuses, allowed = 0 and both queues are hidden, exactly as behind a held gate: the plugin falls back
+to a decode-only step, the running users keep decoding, and the hold resolves when one of them finishes and its
+engine is freed. With no decode left to wait for nothing can free DRAM, so the prompt is admitted anyway
+('lifted') and the backstop decides after its prefill: a hold never livelocks the engine.
+Two timing facts of vLLM 0.25.1 and the plugin shape it:
+- THE READING IS ONE STEP STALE AFTER A FINISH. vLLM names a request that finished in the NEXT step's output
+  (Scheduler.finished_req_ids, scheduler.py:2108, :1105), and the worker detaches it - its engine and dead
+  proposal traces freed - at the start of executing that step (serving_lifecycle._execute), before any prefill
+  the step carries. A refusal on a step whose output will name finished requests is therefore DEFERRED one step:
+  held, but not a hold - no hold line, the held state untouched - and decided on the next step's fresh reading.
+- A HELD PASS TAKES THE FINISHED IDS WITH IT. schedule() hands finished_req_ids to its output and starts a new
+  set (:1105, :1210). A held pass schedules nothing, so with a decode running the plugin discards it and runs a
+  decode-only pass (plugin bf77cd63 scheduler.py:136-143) whose output would name no finished request: the
+  worker would never detach it or free its engine, and the next decode step would find a bridge vLLM no longer
+  schedules (serving_vllm_packed.ordered_tickets refuses that set). So after a DRAM-held pass the plugin
+  discards, the wrapper puts the ids back (carry_finished) for the decode-only pass to carry.
 The need is ONE set of defaults, here (dram_need): the engine build's resident cost and transient margin, the
 prefill transient of a prompt of PREFILL_TRANSIENT_FROM tokens or more, and the coordinator's DRAM reserve,
 against the SMALLEST largest free block over the chips (largest_free), never the total free. No predicate, an
 unreadable one, or a reading that is unavailable holds nothing: the rule above, call for call.
-    [PINDIAG] dram hold prompt=<n> largest_free=<MB> need=<MB> request=<id> decodes=<d>   once per held request
+    [PINDIAG] dram hold prompt=<n> largest_free=<MB> need=<MB> request=<id> decodes=<d>   once per (request, decodes)
     [PINDIAG] dram hold released prompt=<n> ...                                        once, when it fits
     [PINDIAG] dram hold lifted prompt=<n> ...                                          no decode left to wait for
+    [PINDIAG] dram admission deferred one step prompt=<n> ... finished=[<ids>]         a stale reading, not a hold
+    [PINDIAG] dram admission carried finished=[<ids>] ...                              the ids put back
+Only lines that start with DRAM_HOLD are holds (what a gate counts). Each state logs once; the state kept to
+decide that is the held (request, decodes) and the last line noted, so it stays bounded whatever the traffic.
 """
 
 import importlib
@@ -98,6 +117,10 @@ DRAM_RELEASED_LINE = '[PINDIAG] dram hold released prompt={} largest_free={} nee
 DRAM_LIFTED_LINE = ('[PINDIAG] dram hold lifted prompt={} largest_free={} need={} request={}: no decode is left to '
                     'free DRAM, so the prompt is admitted and the bridge backstop decides')
 DRAM_UNAVAILABLE_LINE = '[PINDIAG] dram hold unavailable request={}: {} (not held)'
+DRAM_DEFERRED_LINE = ('[PINDIAG] dram admission deferred one step prompt={} largest_free={} need={} request={} '
+                      'finished={}: the reading still counts their engines, which this step detaches first')
+DRAM_CARRIED_LINE = ('[PINDIAG] dram admission carried finished={} past the discarded prefill pass into the '
+                     'decode-only step')
 MEGABYTE = 10 ** 6
 # The need: one set of defaults, per chip (s2-design.md section 3.2 item 2). M8 and M11 calibrate them.
 ENGINE_BUILD_BYTES = 800 * MEGABYTE          # (m) an engine with one 2048 proposal bucket (v26, run 36218104858)
@@ -226,19 +249,40 @@ def dram_admits(modules=None):
     return admits if callable(admits) else None
 
 
-def head_request(scheduler):
-    """The request the base scheduler's waiting loop takes first - skipped_waiting's head, else waiting's
-    (vLLM 0.25.1: `queue = self.skipped_waiting or self.waiting`) - or None."""
+def _blocked(check, request):
+    """vLLM's own Scheduler._is_blocked_waiting_status on the request's status. A scheduler without it, or a
+    check that raises, blocks nothing."""
+    if not callable(check):
+        return False
+    try:
+        return bool(check(getattr(request, 'status', None)))
+    except Exception:
+        return False
+
+
+def admission_candidates(scheduler):
+    """The waiting requests the base scheduler's waiting loop may admit this step, in the order it takes them.
+
+    vLLM 0.25.1 FCFS takes `skipped_waiting or waiting` (scheduler.py:1867-1869) and reads the head with
+    peek_request (:650), which is the queue's iteration order. A head with a blocked status (a structured-output
+    grammar still compiling, remote KV, a paused stream: _is_blocked_waiting_status, :1853-1858) is popped and
+    skipped unless that status is promoted in this very pass (:652-664), and the loop goes on to the next. So the
+    request admitted is any of the blocked heads or the first request that is not blocked: all of them, up to
+    and including that one. Empty when nothing waits."""
+    check = getattr(scheduler, '_is_blocked_waiting_status', None)
+    candidates = []
     for name in ('skipped_waiting', 'waiting'):
         queue = getattr(scheduler, name, None)
         if not queue:
             continue
         try:
-            peek = getattr(queue, 'peek_request', None)
-            return peek() if callable(peek) else next(iter(queue))
+            for request in queue:
+                candidates.append(request)
+                if not _blocked(check, request):
+                    return candidates
         except Exception:
             continue
-    return None
+    return candidates
 
 
 def prompt_tokens(request):
@@ -252,49 +296,109 @@ def prompt_tokens(request):
         return None
 
 
+def binding_request(candidates):
+    """The candidate whose need binds: dram_need grows with the prompt, and a prompt whose length cannot be read
+    counts as the longest. The first of equals; None when there is none."""
+    if not candidates:
+        return None
+
+    def length(request):
+        tokens = prompt_tokens(request)
+        return float('inf') if tokens is None else tokens
+
+    return max(candidates, key=length)
+
+
+def finished_since_last_step(scheduler):
+    """The requests vLLM finished since its last schedule() (Scheduler.finished_req_ids, scheduler.py:2108),
+    sorted: the output of the step being scheduled names them (:1105), and the worker detaches them at the start
+    of executing it, before any prefill (serving_lifecycle._execute). () when there are none or they cannot be
+    read."""
+    try:
+        return tuple(sorted(getattr(scheduler, 'finished_req_ids', None) or (), key=str))
+    except Exception:
+        return ()
+
+
 def _megabytes(value):
     return '%.1fMB' % (value / MEGABYTE)
 
 
+def _note(state, log, key, template, *values):
+    """Log `template` unless the last line noted was for this same key: one line per distinct state, keeping
+    only the last key, so the state is bounded however many requests pass."""
+    if state.get('dram_noted') != key:
+        state['dram_noted'] = key
+        log(template, *values)
+
+
 def dram_hold(scheduler, decodes, state, log, modules=None):
-    """Whether the fresh prompt at the head of the queue waits this step (S2 W6b, the module docstring).
-    False when no predicate is registered, nothing waits, the predicate raises or reads nothing, the prompt
-    fits, or no decode is left to wait for. `state` holds the held request and the lines already logged, so
-    each state logs once."""
+    """Whether the fresh prompt this step would admit waits (S2 W6b, the module docstring). The wrapper asks only
+    when a seat is free and nothing else holds the step. False when no predicate is registered, nothing waits,
+    the predicate raises or reads nothing, the prompt fits, or no decode is left to wait for. True when it does
+    not fit - silently deferred for one step when the reading still counts the engines of requests that finished
+    since the last step. `state` keeps the held (request, decodes) and the last line noted, so each state logs
+    once and the state stays bounded."""
     admits = dram_admits(modules)
     if admits is None:
         return False
-    request = head_request(scheduler)
+    request = binding_request(admission_candidates(scheduler))
     if request is None:
         return False
     request_id = getattr(request, 'request_id', None)
     prompt = prompt_tokens(request)
-    seen = state.setdefault('dram_seen', set())
     try:
         ok, detail = admits(prompt)
         largest, need, unavailable = detail['largest_free'], detail['need'], detail.get('unavailable')
     except Exception as failure:
         ok, largest, need, unavailable = True, None, None, '%s: %s' % (type(failure).__name__, str(failure)[:120])
     if largest is None:
-        if ('unavailable', request_id) not in seen:
-            seen.add(('unavailable', request_id))
-            log(DRAM_UNAVAILABLE_LINE, request_id, unavailable or 'no reading')
+        _note(state, log, ('unavailable', request_id), DRAM_UNAVAILABLE_LINE, request_id, unavailable or 'no reading')
         return False
+    held = state.get('dram_held')
     if ok:
-        if state.get('dram_held') == request_id:
+        if held is not None and held[0] == request_id:
             state['dram_held'] = None
             log(DRAM_RELEASED_LINE, prompt, _megabytes(largest), _megabytes(need), request_id)
         return False
+    finished = finished_since_last_step(scheduler)
+    if finished:
+        # Stale: this step's output names them, and the worker frees their engines before any prefill in it. Wait
+        # one step for a reading without them; this is not a hold, so neither the hold line nor the held state.
+        _note(state, log, ('deferred', request_id, finished), DRAM_DEFERRED_LINE, prompt, _megabytes(largest),
+              _megabytes(need), request_id, list(finished))
+        return True
     if not decodes:
         state['dram_held'] = None
-        if ('lifted', request_id) not in seen:
-            seen.add(('lifted', request_id))
-            log(DRAM_LIFTED_LINE, prompt, _megabytes(largest), _megabytes(need), request_id)
+        _note(state, log, ('lifted', request_id), DRAM_LIFTED_LINE, prompt, _megabytes(largest), _megabytes(need),
+              request_id)
         return False
-    if state.get('dram_held') != request_id:
-        state['dram_held'] = request_id
+    if held != (request_id, decodes):
+        state['dram_held'] = (request_id, decodes)
         log(DRAM_HOLD_LINE, prompt, _megabytes(largest), _megabytes(need), request_id, decodes)
     return True
+
+
+def carry_finished(scheduler, result, decodes, log):
+    """After a DRAM-held pass: put back the finished request ids it took when the plugin will discard it.
+
+    schedule() handed them to `result` and started a new set (scheduler.py:1105, :1210). With a decode running and
+    nothing scheduled, the plugin's default mode discards this pass and schedules a decode-only one (plugin
+    bf77cd63 scheduler.py:136-143), whose output must name them or the worker never detaches them (the module
+    docstring). Not when no decode runs, or in a forced mode: the plugin then returns this pass as it is, and it
+    already names them. Returns the ids carried."""
+    if not decodes or getattr(result, 'total_num_scheduled_tokens', None) != 0:
+        return ()
+    mode = getattr(scheduler, '_forced_mode', None)
+    if mode is not None and getattr(mode, 'name', None) != 'DEFAULT':
+        return ()
+    taken = getattr(result, 'finished_req_ids', None)
+    if not taken:
+        return ()
+    scheduler.finished_req_ids = set(taken) | set(getattr(scheduler, 'finished_req_ids', None) or ())
+    carried = tuple(sorted(taken, key=str))
+    log(DRAM_CARRIED_LINE, list(carried))
+    return carried
 
 
 def waiting_capacity(saved_max, decodes, allowed):
@@ -314,15 +418,19 @@ def _module_queue_factory(original):
 
 def wrap(original, *, queue_factory, log):
     """The wrapper installed as <class>._schedule_prefill_only around `original`."""
-    state = dict(live=False, seen=set(), dram_held=None, dram_seen=set())
+    state = dict(live=False, seen=set(), dram_held=None, dram_noted=None)
 
     def _schedule_prefill_only(self):
         decodes = sum(1 for request in self.running if not request.is_prefill_chunk)
         partials = len(self.running) - decodes
         held = gate_held()
         allowed, hide = admission(partials, held)
-        if allowed and not partials and dram_hold(self, decodes, state, log):
-            # S2 W6b: the head prompt does not fit the DRAM left, so it waits as behind a held gate.
+        # S2 W6b: asked only when this step would admit a fresh prompt - nothing in flight, the gate free and a
+        # seat free (with every seat decoding the waiting loop admits nobody, and nothing is asked or logged).
+        # When the prompt does not fit the DRAM left, it waits as behind a held gate.
+        dram_held = (not hide and waiting_capacity(self.max_num_running_reqs, decodes, allowed) > 0
+                     and dram_hold(self, decodes, state, log))
+        if dram_held:
             allowed, hide = 0, True
         if not state['live']:
             state['live'] = True
@@ -343,7 +451,7 @@ def wrap(original, *, queue_factory, log):
             if saved_skipped is not None:
                 self.skipped_waiting = queue_factory(self)
         try:
-            return original(self)
+            result = original(self)
         finally:
             if hide:
                 # Anything the base scheduler put back (a preemption) is merged ahead of what
@@ -356,6 +464,10 @@ def wrap(original, *, queue_factory, log):
                     self.skipped_waiting = saved_skipped
                 self.waiting = saved_waiting
             self.max_num_running_reqs = saved_max
+        if dram_held:
+            # S2 W6b: the pass the plugin is about to discard took the finished ids; its decode-only pass carries them.
+            carry_finished(self, result, decodes, log)
+        return result
 
     setattr(_schedule_prefill_only, WRAPPED, True)
     _schedule_prefill_only.__wrapped__ = original

@@ -83,6 +83,8 @@ EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 SINGLE_PROPOSAL_CONTEXT = 2048
 DRAM_REGISTERED = '[PINDIAG] dram admission hold registered: '
 DRAM_BACKSTOP_REFUSED = '[PINDIAG] dram backstop refused request '
+# W6a's executed-path marker: the buckets the engine's proposal capture actually holds, read after the build.
+PROPOSAL_BUCKETS_BUILT = '[PINDIAG] proposal buckets built request='
 
 
 def extent_replay_enabled(environ=None):
@@ -118,6 +120,18 @@ def single_proposal_bucket():
 
     with patch.object(dflash_proposal_trace, 'proposal_contexts', single_bucket_contexts):
         yield
+
+
+def built_proposal_buckets(device):
+    """The contexts of the proposal buckets `device`'s capture holds (PreparedDFlashProposal.buckets, one entry per
+    context, in build order): what W6a actually built, where _proposal_ladder is computed from the environment
+    before any capture exists (memory: graft-mounted-is-not-graft-executed). () when no capture was built
+    (QWEN_FAST_EAGER_PROPOSAL=1); 'unavailable (...)' rather than fail a request over a diagnostic."""
+    try:
+        capture = getattr(device, 'proposal_capture', None)
+        return () if capture is None else tuple(capture.buckets)
+    except Exception as failure:
+        return 'unavailable (%s)' % type(failure).__name__
 
 
 def register_dram_admission(pool, *, log=None):
@@ -499,6 +513,10 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             **(dict(storage=verifier_storage) if verifier_storage is not None else {}),
             **(dict(capture_rows=capture_rows) if capture_rows is not None else {}))
         owned.callback(engine.close)
+        if extent_memory:
+            # S2 W6a, the executed path: before_capture (prepare_proposal) has built the capture inside the engine
+            # build, so its buckets are read from the capture itself - the line M8 checks for (2048,).
+            _log(PROPOSAL_BUCKETS_BUILT + '{} contexts={}', state.req_id, built_proposal_buckets(device))
         # QWEN_FAST_PUBLISH_PREWARM (M3NATIVE_PUBLISH_PREWARM; default off): the drafter's
         # publication prepared and discarded once per process per captured (rows, prefix),
         # so its eager programs exist before the first sequential commit needs them

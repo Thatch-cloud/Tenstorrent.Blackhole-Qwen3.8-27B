@@ -673,6 +673,25 @@ class DeadProposalReleaseTests(unittest.TestCase):
             self.assertIsNone(release_dead_proposals(hook))
         self.assertEqual(coordinator.release_closed.call_count, 2)
 
+    def test_the_flag_is_the_coordinators(self):
+        import dflash_packed_proposal_coordinator
+        import serving_worker_hook
+
+        self.assertEqual(serving_worker_hook.EXTENT_REPLAY_FLAG, dflash_packed_proposal_coordinator.EXTENT_REPLAY_FLAG)
+
+    def test_a_detach_imports_nothing_so_a_missing_or_older_coordinator_cannot_fail_it(self):
+        """Review W6 defect 3: a hook shipped beside a coordinator module that is missing, or that predates
+        release_closed, still detaches - flag on or off."""
+        import sys
+
+        for on in (False, True):
+            with self.subTest(flag=on), self.environment(on), \
+                    patch.dict(sys.modules, {'dflash_packed_proposal_coordinator': None}):
+                events = []
+                hook = self.hook(events, SimpleNamespace())
+                self.assertEqual(sorted(hook.detach('a')), ['b'])
+                self.assertEqual(events, [('close', 'a')])
+
 
 class PhaseLogTests(unittest.TestCase):
     def test_phase_runs_the_call_and_returns_its_result_when_logging_is_off(self):

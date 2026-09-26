@@ -2,7 +2,8 @@
 one 2048 proposal bucket whatever the prompt (single_bucket_contexts, a scoped patch of
 dflash_proposal_trace.proposal_contexts), the post-prefill DRAM backstop and the scheduler hold's registration
 (dram_backstop, register_dram_admission), and the engine build's ledger before point. Without the flag the
-engine captures today's ladder and nothing else runs.
+engine captures today's ladder and nothing else runs. The W6 review's defect 2: the proposal-bucket line is read
+from the capture the engine actually built (built_proposal_buckets), not from the environment.
 
 Its own module rather than test_serving_request_factory: that one is imported by test_serving_lifecycle, which
 runs inside the C2 image, so changing it would put it on the image's in-image test path
@@ -11,6 +12,7 @@ runs inside the C2 image, so changing it would put it on the image's in-image te
     py -3.11 -B -m unittest test_serving_extent_memory      (from scripts/ci)
 """
 
+import contextlib
 import os
 from pathlib import Path
 import sys
@@ -138,6 +140,41 @@ class ExtentMemoryTests(unittest.TestCase):
                 build().close('request')
                 self.assertEqual(ladders, expected)
         self.assertEqual(proposal_contexts(60, 256), (256, 512), 'off, the short prompt takes two buckets')
+
+    def bucket_lines(self, on, *, eager=False, broken_scope=False):
+        """Build the short request with a capture holding one bucket per context of the ladder it read (as
+        PreparedDFlashProposal does), and return the proposal-bucket lines the factory logged. broken_scope: the
+        W6a scope does nothing, as a scope that failed to apply would."""
+        import dflash_proposal_trace
+
+        with self.environ(on):
+            os.environ.pop('QWEN_FAST_EAGER_PROPOSAL', None)
+            if eager:
+                os.environ['QWEN_FAST_EAGER_PROPOSAL'] = '1'
+            components, _, _, build = self.short_request()
+            components.proposal.side_effect = lambda drafter, max_new_tokens: SimpleNamespace(buckets={
+                context: object() for context in dflash_proposal_trace.proposal_contexts(drafter.position,
+                                                                                         max_new_tokens)})
+            scope = (patch.object(serving_request_factory, 'single_proposal_bucket', contextlib.nullcontext)
+                     if broken_scope else contextlib.nullcontext())
+            with scope, patch('serving_request_factory._log') as log:
+                build().close('request')
+        return [entry.args[1:] for entry in log.call_args_list
+                if entry.args[0] == serving_request_factory.PROPOSAL_BUCKETS_BUILT + '{} contexts={}']
+
+    def test_the_engine_logs_the_buckets_its_capture_actually_built(self):
+        """Review W6 defect 2: M8 needs an executed-path marker for W6a. The line is read from the capture after the
+        engine build, so a scope that did not apply shows the ladder even though _proposal_ladder (computed from the
+        environment before any capture exists) still says (2048,). With no capture it says (); flag off, no line."""
+        self.assertEqual(self.bucket_lines(True), [('request', (2048,))])
+        with self.environ(True):
+            self.assertEqual(serving_request_factory._proposal_ladder(60, 256), (2048,))
+        self.assertEqual(self.bucket_lines(True, broken_scope=True), [('request', (256, 512))],
+                         'the capture, not the environment')
+        self.assertEqual(self.bucket_lines(True, eager=True), [('request', ())])
+        self.assertEqual(self.bucket_lines(False), [])
+        self.assertEqual(serving_request_factory.built_proposal_buckets(SimpleNamespace(proposal_capture=object())),
+                         'unavailable (AttributeError)')
 
     def test_the_ladder_line_names_the_single_bucket_under_the_flag(self):
         with self.environ(True):
