@@ -802,6 +802,20 @@ class StreamWatchTests(unittest.TestCase):
             self.assertEqual((len(sock.shut), watch.cancelled(3)), (1, 'no byte within 2.0 s'))
             self.assertEqual(watch.report()['events']['3']['phase'], 'queued')
 
+    def test_a_cancel_that_cannot_reach_a_socket_is_never_reported_as_a_drop(self):
+        """With no socket under the response the stream runs on: it must not read as dropped."""
+        clock = Clock()
+        with tempfile.TemporaryDirectory() as directory:
+            watch = self.watch({3: ('seconds', 2.0)}, directory, clock)
+            watch.begin(3, clock.now)
+            watch.opened(3, None)
+            clock.now = 102.5
+            watch.check(clock.now)
+            self.assertIsNone(watch.cancelled(3))
+            event = watch.report()['events']['3']
+        self.assertEqual((event['fired'], event['delivered']), (True, False))
+        self.assertIn('no socket under the response', event['undelivered'])
+
     def test_a_first_byte_before_its_drop_was_due_is_a_miss(self):
         clock = Clock()
         with tempfile.TemporaryDirectory() as directory:

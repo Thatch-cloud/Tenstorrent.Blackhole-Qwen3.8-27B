@@ -797,6 +797,11 @@ class LifecycleTests(unittest.TestCase):
         unwatched = lifecycle_report({1: 'drop'})
         del unwatched['lifecycle']
         self.assertEqual(driver.lifecycle_verdict(unwatched, solo)['verdict'], 'NOT_EXERCISED')
+        undelivered = lifecycle_report({0: 'cancel'})
+        undelivered['lifecycle']['events']['0'].update(delivered=False, undelivered='no socket under the response')
+        result = driver.lifecycle_verdict(undelivered, solo)
+        self.assertEqual(result['verdict'], 'NOT_EXERCISED')
+        self.assertIn('its cancel never reached the socket', result['shortfalls'][0])
 
     def test_a_multiple_drop_must_close_together(self):
         solo = lifecycle_report({})

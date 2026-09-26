@@ -2189,6 +2189,7 @@ class StreamWatch(object):
         self.state = threading.Condition()
         self.started, self.first, self.ended, self.chunks = {}, {}, {}, {}
         self.sockets, self.fired, self.cancels, self.missed = {}, {}, {}, {}
+        self.delivered, self.undelivered = set(), {}
         self.requests, self.order = {}, []
         self.current = None
         self.ledger_seen = False
@@ -2276,6 +2277,8 @@ class StreamWatch(object):
     def opened(self, user, sock):
         with self.state:
             self.sockets[user] = sock
+            if sock is None:
+                self.undelivered.setdefault(user, 'no socket under the response: a cancel cannot be delivered')
             if user in self.cancels:
                 self._shutdown(user)
 
@@ -2328,8 +2331,10 @@ class StreamWatch(object):
             self.state.notify_all()
 
     def cancelled(self, user):
+        """The reason the watch cancelled `user`'s stream - only once the socket was really shut down:
+        a cancel that could not be delivered leaves the stream running, and it is recorded as such."""
         with self.state:
-            return self.cancels.get(user)
+            return self.cancels.get(user) if user in self.delivered else None
 
     # --- the pre-first-byte drops --------------------------------------------------------------
 
@@ -2340,8 +2345,9 @@ class StreamWatch(object):
         try:
             import socket
             sock.shutdown(socket.SHUT_RDWR)
-        except (OSError, ValueError):
-            pass
+            self.delivered.add(user)
+        except (OSError, ValueError, AttributeError) as error:
+            self.undelivered[user] = '%s: %s' % (type(error).__name__, error)
 
     def due(self, user, kind, value, now):
         if kind == 'seconds':
@@ -2430,6 +2436,11 @@ class StreamWatch(object):
                 if fired:
                     entry.update(fired_s=self.seconds(fired['t']), reason=fired['reason'], live=fired['live'],
                                  phase=self.phase_at(user, fired['t'], marks_of.get(user) or {}))
+                    if user in self.cancels:
+                        # A cancel acts only once the socket is shut; one never delivered left the stream running.
+                        entry['delivered'] = user in self.delivered
+                        if not entry['delivered']:
+                            entry['undelivered'] = self.undelivered.get(user) or 'the stream never opened'
                 else:
                     entry['missed'] = self.missed.get(user) or 'never due before the stream ended'
                 events[str(user)] = entry

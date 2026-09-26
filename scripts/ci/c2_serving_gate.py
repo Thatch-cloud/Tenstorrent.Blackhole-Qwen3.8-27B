@@ -440,6 +440,9 @@ def event_shortfalls(report):
         if not event.get('fired'):
             shortfalls.append('user %s: %s never fired (%s)' % (user, spec, event.get('missed')))
             continue
+        if event.get('delivered') is False:
+            shortfalls.append('user %s: %s fired but its cancel never reached the socket (%s): the stream ran on' % (
+                user, spec, event.get('undelivered')))
         if event.get('phase') not in EVENT_PHASES.get(kind, ()):
             shortfalls.append('user %s: %s fired during %s, not %s' % (
                 user, spec, event.get('phase'), ' or '.join(EVENT_PHASES.get(kind, ('?',)))))
