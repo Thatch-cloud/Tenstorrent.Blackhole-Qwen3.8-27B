@@ -231,6 +231,86 @@ class TrafficTests(unittest.TestCase):
         self.assertIn('not exercised', dict(steps)['streamed_long_answer']['note'])
 
 
+#: Lines of the G7 replay's runtime log (run 36227190700, thatch-serving-tt:e570ee2), as docker logs
+#: gave them: every step passed, and the runtime reloaded the engine three times on its own.
+G7_LOG = """\
+2026-09-26 07:37:34,569 thatch.serving serving Qwen/Qwen3.8-27B on http://0.0.0.0:8000
+2026-09-26 07:38:04,569 thatch.serving generation health probe failed (1 consecutive)
+2026-09-26 07:38:34,570 thatch.serving generation health probe failed (2 consecutive)
+2026-09-26 07:38:34,570 thatch.serving attempting generation health recovery: reload Qwen/Qwen3.8-27B (attempt 1/2)
+2026-09-26 07:39:27,647 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 2)
+2026-09-26 07:39:27,647 thatch.serving POST /v1/models/load
+2026-09-26 07:39:27,671 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 3)
+2026-09-26 07:39:27,671 thatch.serving health recovery reload succeeded for Qwen/Qwen3.8-27B
+2026-09-26 07:44:57,672 thatch.serving generation health probe failed (3 consecutive)
+2026-09-26 07:44:57,672 thatch.serving attempting generation health recovery: reload Qwen/Qwen3.8-27B (attempt 2/2)
+2026-09-26 07:44:57,676 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 4)
+2026-09-26 07:45:03,844 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 5)
+2026-09-26 07:45:06,849 thatch.serving received shutdown signal, stopping serving server
+2026-09-26 07:47:53,965 thatch.serving serving Qwen/Qwen3.8-27B on http://0.0.0.0:8000
+2026-09-26 07:48:54,048 thatch.serving attempting generation health recovery: reload Qwen/Qwen3.8-27B (attempt 1/2)
+2026-09-26 07:50:54,056 thatch.serving health recovery reload timed out after 120.0s
+2026-09-26 07:50:58,272 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 2)
+2026-09-26 07:50:58,416 thatch.serving model reload: Qwen/Qwen3.8-27B -> Qwen/Qwen3.8-27B (generation 3)
+"""
+REPLAY_STEPS = dict.fromkeys(('seed', 'source', 'start', 'load', 'warmup', 'reload', 'after_reload', 'restart',
+                              'load_after_restart', 'after_restart'), dict(ok=True))
+
+
+class RuntimeLogTests(unittest.TestCase):
+    def test_the_runtimes_own_reloads_fail_the_replay_and_are_recorded(self):
+        verdict = replay.runtime_log_verdict(G7_LOG, REPLAY_STEPS)
+        self.assertFalse(verdict['ok'])
+        self.assertIn('3 health recovery reload(s) the replay did not ask for', verdict['problems'])
+        self.assertIn('6 engine loads, the replay asked for 3', verdict['problems'])
+        self.assertEqual(len(verdict['problems']), 2, 'two starts were asked for, and no exit happened')
+        self.assertIn('2026-09-26 07:44:57,672 thatch.serving attempting generation health recovery: reload '
+                      'Qwen/Qwen3.8-27B (attempt 2/2)', verdict['lines'])
+        self.assertEqual(sum('model reload' in line for line in verdict['lines']), 6)
+
+    def test_only_what_the_replay_asked_for_passes(self):
+        asked = '\n'.join(line for line in G7_LOG.splitlines()
+                          if 'health' not in line and 'generation 3' not in line and 'generation 4' not in line)
+        verdict = replay.runtime_log_verdict(asked, REPLAY_STEPS)
+        self.assertEqual(verdict, dict(ok=True, problems=[], lines=[]))
+
+    def test_an_exit_and_the_restart_after_it_fail_the_replay(self):
+        log = ('x thatch.serving serving Qwen/Qwen3.8-27B on http://0.0.0.0:8000\n'
+               'x thatch.serving attempting generation health recovery: reload Qwen/Qwen3.8-27B (attempt 2/2)\n'
+               'x thatch.serving generation health recovery failed after 2 attempt(s); exiting\n'
+               'x thatch.serving serving Qwen/Qwen3.8-27B on http://0.0.0.0:8000\n')
+        verdict = replay.runtime_log_verdict(log, dict(start=dict(ok=True)))
+        self.assertFalse(verdict['ok'])
+        self.assertEqual(verdict['problems'], ['1 health recovery reload(s) the replay did not ask for',
+                                               'the runtime exited on its own (os._exit)',
+                                               '2 runtime starts, the replay asked for 1'])
+        self.assertEqual(len(verdict['lines']), 4)
+
+    def test_main_records_the_runtime_log_and_fails_on_it(self):
+        def run(command, timeout=None, check=True):
+            if command[:3] == ['docker', 'image', 'inspect']:
+                return mock.Mock(returncode=0, stdout='[{"Config": {"Env": []}}]', stderr='')
+            if command[:2] == ['docker', 'logs']:
+                return mock.Mock(returncode=0, stdout='', stderr=G7_LOG)
+            return mock.Mock(returncode=0, stdout='', stderr='')
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(replay, 'run', side_effect=run), \
+                mock.patch.object(replay.subprocess, 'run'), \
+                mock.patch.object(replay, 'wait_http', return_value='container exited'), \
+                mock.patch.object(sys, 'argv', ['replay', '--source', AGENT, '--image', 'zot/new@sha256:b',
+                                                '--results', directory]), \
+                redirect_stdout(io.StringIO()):
+            code = replay.main()
+            with open(os.path.join(directory, 'platform-replay.json'), encoding='utf-8') as handle:
+                recorded = json.load(handle)
+        self.assertEqual(code, 1)
+        self.assertFalse(recorded['passed'])
+        verdict = recorded['runtime_log']
+        self.assertFalse(verdict['ok'])
+        self.assertIn('3 health recovery reload(s) the replay did not ask for', verdict['problems'])
+        self.assertNotIn('runtime_log', recorded['steps'])
+
+
 class SourceTests(unittest.TestCase):
     """Review finding 8: the recorded Env copied whole onto another image served that image with the old
     image's kernel cache key and defaults, and the replay still passed."""

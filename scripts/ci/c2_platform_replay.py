@@ -431,6 +431,41 @@ def load(container, model):
                 seconds=round(time.time() - started, 1))
 
 
+#: The runtime acting on its own, which no replay step asks for: a health recovery reloads the engine
+#: (minutes with no model on a node), and two failed recoveries end in os._exit, logged just before.
+HEALTH_RECOVERY = 'attempting generation health recovery'
+RUNTIME_STARTS = ('start', 'restart')                  # the replay's docker run and docker start
+ENGINE_LOADS = ('load', 'reload', 'load_after_restart')  # the replay's serving.manage loads
+
+
+def runtime_log_verdict(text, steps):
+    """After the steps, the runtime log (docker logs): the runtime did only what the replay asked.
+    Fails on a health recovery, an os._exit ('generation health ...; exiting'), more runtime starts
+    ('serving X on http://') than the replay's start steps, or more engine loads ('model reload:')
+    than its load steps; every such line is recorded (platform-replay.json runtime_log). The G7
+    replay of e570ee2 (run 36227190700) passed every step while its runtime reloaded a healthy
+    engine three times: only this log showed it."""
+    starts = sum(step in steps for step in RUNTIME_STARTS)
+    loads = sum(step in steps for step in ENGINE_LOADS)
+    lines = text.splitlines()
+    recoveries = [line for line in lines if HEALTH_RECOVERY in line]
+    exits = [line for line in lines if 'generation health' in line and '; exiting' in line]
+    banners = [line for line in lines if 'thatch.serving serving ' in line and ' on http://' in line]
+    reloads = [line for line in lines if 'thatch.serving model reload: ' in line]
+    problems = []
+    if recoveries:
+        problems.append('%d health recovery reload(s) the replay did not ask for' % len(recoveries))
+    if exits:
+        problems.append('the runtime exited on its own (os._exit)')
+    if len(banners) > starts:
+        problems.append('%d runtime starts, the replay asked for %d' % (len(banners), starts))
+    if len(reloads) > loads:
+        problems.append('%d engine loads, the replay asked for %d' % (len(reloads), loads))
+    flagged = set(recoveries + exits + (banners if len(banners) > starts else [])
+                  + (reloads if len(reloads) > loads else []))
+    return dict(ok=not problems, problems=problems, lines=[line for line in lines if line in flagged])
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', required=True, help='the agent\'s container, or a saved `docker inspect` JSON')
@@ -530,9 +565,12 @@ def main():
         logs = run(['docker', 'logs', name], check=False)
         with open(os.path.join(options.results, 'platform-container.log'), 'w') as handle:
             handle.write(logs.stdout + '\n----- stderr -----\n' + logs.stderr)
+        runtime_log = runtime_log_verdict(logs.stdout + '\n' + logs.stderr, steps)
+        print('RUNTIME_LOG %s' % json.dumps(runtime_log)[:1500], flush=True)
+        passed = passed and runtime_log['ok']
         run(['docker', 'rm', '-f', name], check=False)
         with open(os.path.join(options.results, 'platform-replay.json'), 'w') as handle:
-            json.dump(dict(passed=passed, steps=steps), handle, indent=1)
+            json.dump(dict(passed=passed, steps=steps, runtime_log=runtime_log), handle, indent=1)
     restart = steps.get('load_after_restart') or {}
     print('PLATFORM_REPLAY passed=%s restart_http_s=%s restart_to_loaded_s=%s seed=%s' % (
         passed, (steps.get('restart') or {}).get('http_s'), restart.get('restart_to_loaded_s'), seed), flush=True)
