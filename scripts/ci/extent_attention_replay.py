@@ -39,9 +39,7 @@ QUALIFIED GEOMETRY ONLY. K64j's card-B pass (CB1) qualified 0x27 at G8B2 (eight-
 two-entry bundle per sixteen-row user): tail 0x1 | share 0x2 | slice 0x4 | extent 0x20. A reader
 whose bundles are not all two eight-row groups, or whose flags come out other than 0x27, refuses
 itself. Nothing here runs unless the S2 block builds these readers (QWEN_FAST_EXTENT_REPLAY=1);
-with the flag off every byte path is the pinned or pooled one, unchanged. Under the flag a reader
-refuses construction unless the attach's packed-any admission passed in this process
-(packed_any_admission.require_admitted, design W7); the card harnesses run without the flag.
+with the flag off every byte path is the pinned or pooled one, unchanged.
 """
 
 from contextlib import ExitStack, contextmanager
@@ -52,7 +50,6 @@ import attention_mask_replay
 from attention_fold_dma import device_layout_dma
 from attention_head_fold import parallel_groups
 from gdn_multitoken_conv import addresses, release_owned
-from packed_any_admission import require_admitted
 from pooled_attention_replay import QWEN_SDPA_EXTENT_MARKER, apply_sdpa_modes, sdpa_modes, validate_segments
 
 
@@ -321,8 +318,7 @@ class ExtentSegmentReader:
     def __init__(self, operations, mesh, rows, page_width, pages_host, *, storage, max_group_rows, start):
         import torch
 
-        # Every refusal before anything is allocated; the first, that a c2-packed server admitted this path.
-        require_admitted('ExtentSegmentReader')
+        # Every refusal before anything is allocated.
         if type(rows) is not int or rows not in (8, 16, 32):
             raise ValueError('Extent reader requires an explicit T8/T16/T32 segment')
         if type(max_group_rows) is not int or max_group_rows != EXTENT_GROUP_ROWS:

@@ -1,7 +1,7 @@
 {
  "schema": "qwen-c2-packed-any-evidence/1",
  "what": "The hardware evidence that qualifies S2 C2-packed-any (QWEN_FAST_EXTENT_REPLAY=1): packed rounds at any position through one K64j 0x27 program per bundle (s2-design.md rev 2, W7 and 6.2). packed_any_admission.check_evidence reads it at every c2-packed attach; its sha256 is pinned there (EVIDENCE_SHA256), so a new record changes both in one commit.",
- "provenance": "CB1 and CB2a are transcribed from the goal-c2-serving memory note and the S2 build brief (2026-09-26); their run artifacts were not re-read when this file was written. CB2b has not run: until its record is PASS, every c2-packed attach is refused.",
+ "provenance": "CB1 and CB2a are transcribed from the goal-c2-serving memory note and the S2 build brief (2026-09-26); their run artifacts were not re-read when this file was written. CB2b has not run: until its record is PASS, every c2-packed attach is refused. sources names extent_attention_replay.py as every S2 branch holds it (5633fc3a, W1 b35bb070, merged at 937bd2f7), so a CB2b dispatched from any of them qualifies these bytes; the admission guard is in serving_buffer_pool, never in the reader.",
  "binary": {
   "graft": "/home/thatch/opgraft-K64j",
   "ttnncpp_sha256": "152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7",
@@ -16,7 +16,7 @@
   "dataflow/writer_decode_qwen_slice.cpp": "642c36f809be0f1ad1664deb405dc310dabaa32d5628710320a118eb37a6cc7a"
  },
  "sources": {
-  "extent_attention_replay.py": "e55c3192eeb9e389988764e45f3e78351ca474a6ef4a8fd08a115897dc26835d"
+  "extent_attention_replay.py": "5633fc3a21a400360542913fb47559db999117e2e3b6e8d540c770d45720cd31"
  },
  "sections": {
   "CB1": {
@@ -166,19 +166,28 @@
   },
   "CB2b": {
    "status": "PENDING",
-   "what": "W10b: the real extent readers over pool-like lent storage - R1 (the pinned mask kernel at capacity 256 == narrow_mask_host), R2 (each segment == the 0x7 compile-time call with the wide -inf mask at capacity E), R4 (idle segments at 0/32 on the zero table), construction staging",
-   "harness": "optimisation/ttnn-op/k64j/extent_reader_card_b.py (W10b)",
+   "what": "W10b: the real extent readers over pool-like lent storage - R1 (the pinned mask kernel at capacity 256 == narrow_mask_host, at G8B2, G4B3 and G4B1), S (construction and restage staging: word, cur_pos and tables read back), R2 (each segment == the 0x7 compile-time call with the wide -inf mask at capacity E, over more than 50 families), R4 (idle segments at 0/32 on the zero table)",
+   "harness": "optimisation/ttnn-op/k64j/extent_reader_card_b.py (W10b) through run_card_b.sh, K64J_HARNESS=extent_reader, WATCHER=1 first; the full-scope pass is the evidence",
    "required": {
     "status": "PASS",
-    "run": "the run id",
+    "run": "the run id (an integer)",
     "failures": 0,
+    "scope": "full (the verdict line's scope=; a reduced run is never the evidence)",
+    "chips": "1of2 (the verdict line's chips=)",
+    "capacity": 131328,
+    "seeds": "the report's seeds_run, covering [0, 1, 2]",
+    "variants": "the report's variants_run, covering [normal, peaky]",
+    "r1_geometries": "the report's r1_run: {geometry: [words]}, G8B2, G4B3 and G4B1 each covering 0, 7, 127, 240, 255",
+    "r2_families": "the report's r2_families_replayed: more than 50 distinct families including 256, 2304, 16640, 65792 and 131328",
+    "idle_starts": "the report's idle_starts_run, covering [0, 32]",
     "counts": {
-     "R1": "[passed, total], all passed",
-     "R2": "[passed, total], all passed",
-     "R4": "[passed, total], all passed",
-     "construction": "[passed, total], all passed"
+     "R1": "[passed, total]: the verdict line's r1 plus r1_reader, all passed",
+     "S": "[passed, total]: staging, all passed",
+     "R2": "[passed, total]: r2 plus r2_trace, all passed",
+     "R4": "[passed, total]: r4, all passed",
+     "liveness": "[passed, total]: live, all moved"
     },
-    "sources": "the sha256 of every file of top-level sources, as the run held them"
+    "sources": "the verdict line's extent_sha256 as {\"extent_attention_replay.py\": sha256}: the top-level sources' own"
    }
   }
  }

@@ -1642,10 +1642,25 @@ def without_no_block(lines):
     return without_packed_any(collapsed)
 
 
+def cut_guarded(lines, last):
+    """lines less the one `if extent_replay:` block that ends in the line equal (stripped) to `last`: that
+    guard, its comment lines and `last`, and nothing else; exactly one such block, or AssertionError."""
+    ends = [index for index, value in enumerate(lines) if value.strip() == last]
+    if len(ends) != 1:
+        raise AssertionError('%r is not in serving_runtime.py exactly once' % last)
+    start = ends[0] - 1
+    while start >= 0 and lines[start].strip().startswith('#'):
+        start -= 1
+    if start < 0 or lines[start].strip() != 'if extent_replay:':
+        raise AssertionError('%r is not guarded by `if extent_replay:` alone' % last)
+    return lines[:start] + lines[ends[0] + 1:]
+
+
 def without_packed_any(lines):
     """serving_runtime.py less S2's W7 attach hunks (s2-design.md W7, after the no-block changes): the override's
-    record kept for the admission, the packed-any admission block under QWEN_FAST_EXTENT_REPLAY and the DRAM
-    statistics check after the pool. Each is cut exactly once and to its known last line."""
+    record kept for the admission, the packed-any admission block under QWEN_FAST_EXTENT_REPLAY, the refusal of
+    the flag with no block, the pool's extent_replay keyword, and the pool and block checks after each is built.
+    Each is cut exactly once and to its known last line."""
     kept = '    binary_record = override_runtime_binary(runtime_root, log=pindiag)'
     if lines.count(kept) != 1:
         raise AssertionError('%r is not in serving_runtime.py exactly once' % kept)
@@ -1654,7 +1669,15 @@ def without_packed_any(lines):
                             'rounds at any',
                      'packed_any_admission.admit(runtime_root, m3=m3_shape(policy), binary_record=binary_record, '
                      'log=pindiag)')
-    return cut_once(lines, 'if extent_replay:', 'packed_any_admission.admit_statistics(pool, log=pindiag)')
+    lines = cut_once(lines, '# S2 (QWEN_FAST_EXTENT_REPLAY=1) serves its rounds through the packed block alone - the '
+                            'pool lends the',
+                     "% (os.environ.get('QWEN_FAST_PACKED_STEP', 'unset'), policy['scheduler_requests']))")
+    lines = cut_once(lines, "**({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}),",
+                     "**({'extent_replay': True} if extent_replay else {}))))",
+                     ["                **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two "
+                      "else {}))))"])
+    lines = cut_guarded(lines, 'packed_any_admission.admit_pool(pool, log=pindiag)')
+    return cut_guarded(lines, 'packed_any_admission.admit_blocks(packed_blocks, log=pindiag)')
 
 
 class ShippingTests(unittest.TestCase):

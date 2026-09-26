@@ -235,6 +235,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                             'serves the rounds', policy['scheduler_requests'])
                 else:
                     packed_shapes = (shape,)
+        # S2 (QWEN_FAST_EXTENT_REPLAY=1) serves its rounds through the packed block alone - the pool lends the
+        # block its extent storage and the block keys on it - so with no block to build the flag would build
+        # nothing and every round would run sequentially. The admission's M3 shape check already makes this
+        # unreachable; refused here too, before the pool, the first allocation.
+        if extent_replay and not packed_shapes:
+            raise ValueError('QWEN_FAST_EXTENT_REPLAY=1 serves its rounds through the packed block, and this attach '
+                             'builds none (QWEN_FAST_PACKED_STEP=%s, %d scheduler requests)'
+                             % (os.environ.get('QWEN_FAST_PACKED_STEP', 'unset'), policy['scheduler_requests']))
         # The per-request engines' capture widths, and the pool's buckets that hold them:
         # the full T16 set by default and beside the 32-row block, the sequential widths
         # (1, 2, 4) beside the 64-row block, whose four engines' 8- and 16-row captures do
@@ -305,13 +313,17 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             feature_taps=len(TARGET_TAPS), rope=rope,
             **({} if not packed_shapes else dict(packed_shapes=distinct_shapes,
                 packed_replay_group_rows=replay_group_rows(),
-                **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}))))
+                **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}),
+                # S2: the extent storage in place of the per-family tables; flag off, no keyword at all.
+                **({'extent_replay': True} if extent_replay else {}))))
         scopes.callback(pool.close)
         if extent_replay:
-            # Design B4: the scheduler-side DRAM hold reads the pool's statistics for every request, so a
-            # c2-packed attach that cannot read them fails closed here, before any trace (the pool closes
-            # with the scopes).
-            packed_any_admission.admit_statistics(pool, log=pindiag)
+            # The pool must hold the extent storage the S2 block keys on (design W2: without it the block
+            # would be the per-family one, packed only in [131072, 131312], and nothing would say so), and
+            # (design B4) its DRAM statistics must be readable, since the scheduler-side DRAM hold reads them
+            # for every request. Either fails the attach here, before any trace (the pool closes with the
+            # scopes).
+            packed_any_admission.admit_pool(pool, log=pindiag)
         memory_ledger.record('P2', buffer_pool=pool)
         owner = ServingCacheOwner(operations, runner, model)
         # Built once and shared by every request: two TT_CCL objects cycling semaphore
@@ -392,6 +404,11 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         elif packed_requested:
             step_description = dict(step_description,
                 packed_block_skipped='no packed block shape for %d scheduler requests' % policy['scheduler_requests'])
+        if extent_replay:
+            # The executed path is the admitted one (memory graft-mounted-is-not-graft-executed): every block
+            # is the extent block and every segment reader reports runtime_extent, or the attach fails here,
+            # before the lifecycle admits a request (the scopes close the block, the weights and the pool).
+            packed_any_admission.admit_blocks(packed_blocks, log=pindiag)
         # One line with every pre-trace address - the pooled history pairs, each named
         # shared weight and, when built, the packed block's taps, checkpoints and carries -
         # so a diverged address from the shard check can be placed against what was

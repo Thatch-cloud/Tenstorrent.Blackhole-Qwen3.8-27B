@@ -267,13 +267,14 @@ class C2OverlayClosureTests(unittest.TestCase):
     def test_the_c2_packed_any_modules_are_overlaid(self):
         """Every S2 module reaches the image at HEAD, and the admission's import closure with it."""
         self.assertEqual(sorted(set(C2_PACKED_ANY_MODULES) - self.overlay), [])
-        missing = unsatisfied_imports(self.view, {'packed_any_admission.py', 'extent_attention_replay.py'})
+        missing = unsatisfied_imports(self.view, {'packed_any_admission.py', 'extent_attention_replay.py',
+                                                  'serving_buffer_pool.py', 'serving_runtime.py'})
         self.assertEqual(missing, [])
-        # A positive control on the real layers: the admission exists in no older layer, so the reader that
-        # imports it, laid over an image without it, is named.
-        found = unsatisfied_imports(ImageView({'extent_attention_replay.py'}, self.p8, self.view.p8_modules),
-                                    {'extent_attention_replay.py'})
-        self.assertIn(('extent_attention_replay.py', 'packed_any_admission.py', None, 'bundle %s' % BUNDLE_COMMIT), found)
+        # A positive control on the real layers: the admission exists in no older layer, so the pool that imports
+        # it (its extent-storage guard), laid over an image without it, is named.
+        found = unsatisfied_imports(ImageView({'serving_buffer_pool.py'}, self.p8, self.view.p8_modules),
+                                    {'serving_buffer_pool.py'})
+        self.assertIn(('serving_buffer_pool.py', 'packed_any_admission.py', None, 'bundle %s' % BUNDLE_COMMIT), found)
 
     def test_an_overlaid_module_imports_only_what_the_image_holds(self):
         """The symbol-level closure (the seam that cost run 35683127469 on P8), for C2's overlay."""

@@ -17,21 +17,42 @@ here runs; any other value is refused by extent_replay_enabled):
      QWEN_FAST_REPLAY_GROUP_ROWS=8 (G8B2, the one geometry CB1 qualified 0x27 at) and
      QWEN_SDPA_TREE_SCRATCH_ROUNDS=1, the pinned reader's G8 precondition (attention_replay.py:23-24;
      design B7), which the image sets but nothing checked before;
-  2. the modes: QWEN_FAST_SDPA_MODES includes tail and does not name extent (the extent reader adds it
-     itself; any pinned or pooled reader in the process would refuse it, design 1.4 #5);
+  2. the modes: QWEN_FAST_SDPA_MODES is exactly tail, share and slice - the extent reader adds extent
+     itself and serves 0x27 (tail | share | slice | extent), the one flag set CB2a and CB2b qualified, so
+     a missing mode or readahead (0x2F) is refused here, host only, and not by the reader after the pool,
+     the runtime and the weights are built; extent is refused by name (any pinned or pooled reader in the
+     process would refuse it, design 1.4 #5);
   3. the binary (check_runtime): QWEN_FAST_RUNTIME_BINARY_SHA256 names K64j's _ttnncpp.so, both paths
      dflash_combined_sim_runtime.BINARIES names hash to it and carry the K64j literals (a graft .so
      replaces the whole binary: memory graft-so-drops-image-patches), the four K64j kernels are their
      recorded bytes, and sdpa_tree_scratch.audit(root, patched=True) holds;
   4. the evidence (check_evidence): packed_any_evidence.json at its pinned sha256, naming that binary and
-     those kernels, recording CB1, CB2a and CB2b as PASS with the coverage each must have, and the
+     those kernels, recording CB1, CB2a and CB2b as PASS with the coverage each must have (evidence_problems:
+     the design's seeds, variants, families, starts and geometries, and a count floor per section), and the
      sha256 of every reader source they qualified - which must be the live file's.
-Right after the pool is built, admit_statistics requires its DRAM statistics to be readable (design
-B4): the scheduler-side DRAM hold reads them per request, so an attach that cannot read them fails here
-instead of admitting requests blind.
+After the pool is built, admit_pool requires it to hold the extent storage (extent_replay True: the S2
+block keys on that storage alone, so a pool built without it would serve through the per-family block,
+packed only in [131072, 131312], and nothing would say so) and its DRAM statistics to be readable (design
+B4: the scheduler-side DRAM hold reads them per request). After the packed block is built, admit_blocks
+requires it to be the extent block, every segment reader reporting runtime_extent. Each fails the attach
+before the lifecycle admits a request.
 
-The result is cached for the process (admitted()); the extent readers refuse construction under the flag
-unless it holds (require_admitted), so no serving process builds an extent path it did not admit.
+ONE LINE PER PROBLEM. Every refusal names each failed condition on its own [PINDIAG] line (the server
+log's capture cuts lines at about 250 characters), and the exception carries them all.
+
+The result is cached for the process (admitted()). Under the flag the pool refuses to build the extent
+storage unless it holds (serving_buffer_pool calls require_admitted), so no serving process builds an
+extent path it did not admit. The guard is in the pool - the one source of the storage every extent
+reader is built over - and never in extent_attention_replay.py, whose bytes the evidence pins: CB2b
+qualifies the reader as every S2 branch holds it.
+
+WHEN CB2b LANDS. Transcribe its full-scope run into sections.CB2b, from the 'K64J_READER verdict=PASS
+scope=full ...' line and the report JSON of optimisation/ttnn-op/k64j/extent_reader_card_b.py: status PASS,
+run, failures 0, scope, chips, capacity, seeds and variants run, r1_geometries (the report's r1_run:
+geometry -> words), r2_families (r2_families_replayed), idle_starts (idle_starts_run), counts R1 (the line's
+r1 plus r1_reader), S (staging), R2 (r2 plus r2_trace), R4 (r4) and liveness (live), and sources (the
+line's extent_sha256, which must be the top-level sources' own). Re-pin EVIDENCE_SHA256 in the same
+commit. Nothing else changes: the tests that read the checked-in file follow its CB2b status.
 
 Stdlib only at import: the image build runs this module's in-image test (check_runtime on /opt/tt-metal).
 """
@@ -48,7 +69,7 @@ HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / 'packed_any_evidence.json'
 # The sha256 of packed_any_evidence.json as reviewed. A new record (CB2b's result, a re-qualified reader)
 # changes the file, and then this pin, in the same commit: the pin is what makes the file evidence.
-EVIDENCE_SHA256 = '501e628cfadd5427b0b8f290de3818ccc3d66f3557aab8ccc8e6c40ea404ce04'
+EVIDENCE_SHA256 = '3a2d4b79ca8558f7d58dbffe3935fc9f8d0d6a4cded674545735fc1d5fc7fce7'
 EVIDENCE_SCHEMA = 'qwen-c2-packed-any-evidence/1'
 
 RUNTIME_BINARY_ENV = 'QWEN_FAST_RUNTIME_BINARY_SHA256'
@@ -80,6 +101,9 @@ REQUIRED_ENV = (
     ('QWEN_SDPA_TREE_SCRATCH_ROUNDS', '1', 'the pinned reader\'s G8 precondition (attention_replay.py:23-24)'),
 )
 SDPA_MODES_ENV = 'QWEN_FAST_SDPA_MODES'
+# The modes the environment must name, exactly: with the extent the reader adds, 0x27 - the one flag set
+# CB2a (K2, X7, Z) and CB2b ran and the extent reader asserts at G8B2. The image's v235 value.
+QUALIFIED_MODES = frozenset(('tail', 'share', 'slice'))
 
 # The reader sources the evidence qualified, next to this module: the live bytes must be the recorded ones.
 QUALIFIED_SOURCES = ('extent_attention_replay.py',)
@@ -89,14 +113,42 @@ K1_EXTENTS = (2304, 16896, 33024, 65792, 98560, 131328)       # K1's six familie
 CB1_COUNTS = ('extent', 'mixed', 'share_slot0', 'trace', 'skip')
 CB2A_VARIANTS = ('normal', 'peaky')
 CB2A_K2_TICKETS = 1980                                         # k64j_card_b.k2_coverage at seeds 0-4, both variants
+CB2_EXTENTS = (2304, 4352, 16640, 65792, 131328)               # K2's and X7's families (k64j_card_b.CB2_EXTENTS)
+CB2_STARTS = (0, 7, 127, 240, 255)                             # their s mod 256 (k64j_card_b.CB2_STARTS)
 Z_FAMILIES = tuple(range(256, 4096, 256))                      # the 15 families with E / 256 < 16 cores per head
-CB2B_COUNTS = ('R1', 'R2', 'R4', 'construction')
+Z_STARTS = (0, 32, 7, 127, 240, 255)                           # the idle starts, then the boundary ones (k64j_card_b)
+# The count floors, as k64j_card_b.verdict_line counts them over the design's set (seeds 0-4): X7 compares
+# 0x7 narrow and 0x27 each against 0x7 wide, per family, start, seed and variant; Z compares each replay with
+# the eager call and with the compile-time 0x7 call, per family, start and seed (normal queries only).
+X7_FLOOR = len(CB2_EXTENTS) * len(CB2_STARTS) * len(SEEDS) * len(CB2A_VARIANTS) * 2          # 500
+Z_FLOOR = len(Z_FAMILIES) * len(Z_STARTS) * len(SEEDS) * 2                                   # 900
+# CB2b (W10b, extent_reader_card_b.py): only its full scope is evidence, and the admission reads the coverage
+# itself instead of trusting the word: R1 at three geometries and the design residues, R2 over more than 50
+# families including the five named, R4 at both idle starts, seeds 0-2 and both variants, at C = 131,328.
+CB2B_SCOPE = 'full'
+CB2B_CHIPS = ('1of2',)            # TwoChipView on a one-chip p150a: chip 1 is left to the extent audit and G3/G3b
+CB2B_CAPACITY = 131328
+CB2B_SEEDS = (0, 1, 2)
+CB2B_R1_GEOMETRIES = ('G8B2', 'G4B3', 'G4B1')
+CB2B_RESIDUES = (0, 7, 127, 240, 255)
+CB2B_R2_MIN_FAMILIES = 51         # design W10b R2: "restaged across more than 50 families"
+CB2B_R2_NAMED = (256, 2304, 16640, 65792, 131328)
+CB2B_IDLE_STARTS = (0, 32)
+# Its sections as the harness names them (R1, S = the construction and restage staging, R2, R4) and its
+# liveness controls; from the verdict line: R1 = r1 + r1_reader, S = staging, R2 = r2 + r2_trace, R4 = r4,
+# liveness = live.
+CB2B_COUNTS = ('R1', 'S', 'R2', 'R4', 'liveness')
 
 _STATE = {}
 
 
 class AdmissionRefused(ValueError):
-    """The c2-packed attach may not proceed; the message names every failed condition."""
+    """The c2-packed attach may not proceed. The message names every failed condition; `problems` holds
+    them one per entry, which is how the attach logs them."""
+
+    def __init__(self, message, problems=None):
+        super().__init__(message)
+        self.problems = list(problems) if problems else [message]
 
 
 def _log(template, *values):
@@ -109,6 +161,13 @@ def _log(template, *values):
         print(text, flush=True)
         return
     logger.info('{}', text)
+
+
+def _refuse(log, what, problems):
+    """Log each problem on its own line, then raise one AdmissionRefused carrying them all."""
+    for index, problem in enumerate(problems, 1):
+        log('{} refused ({}/{}): {}', MARKER, index, len(problems), problem)
+    raise AdmissionRefused('%s=1 refused %s: %s' % (FLAG, what, ' | '.join(problems)), problems)
 
 
 def extent_replay_enabled(environ=None):
@@ -126,9 +185,10 @@ def admitted():
 
 
 def require_admitted(what, environ=None):
-    """For the extent readers' constructors: under QWEN_FAST_EXTENT_REPLAY=1 nothing builds an extent
-    reader unless this process's attach admitted it. With the flag unset (the card harnesses, the CPU
-    tests) this checks nothing: the flag is what makes a process a c2-packed server."""
+    """For what builds the extent path's storage (serving_buffer_pool under extent_replay): under
+    QWEN_FAST_EXTENT_REPLAY=1 nothing is built unless this process's attach admitted it. With the flag
+    unset (the card harnesses, the CPU tests) this checks nothing: the flag is what makes a process a
+    c2-packed server."""
     if extent_replay_enabled(environ) and not admitted():
         raise AdmissionRefused('%s under %s=1 needs the attach\'s packed-any admission first '
                                '(packed_any_admission.admit, serving_runtime); none passed in this process'
@@ -160,16 +220,24 @@ def check_environment(environ, m3):
             problems.append('%s=%s, not %s: %s' % (name, environ.get(name, '(unset)'), wanted, why))
     from pooled_attention_replay import sdpa_modes
 
+    value = environ.get(SDPA_MODES_ENV, '')
     try:
         modes = sdpa_modes(environ)
     except ValueError as error:
         problems.append(str(error))
     else:
-        if 'tail' not in modes:
-            problems.append('%s=%s lacks tail: K64j refuses 0x20 without 0x1' % (SDPA_MODES_ENV, environ.get(SDPA_MODES_ENV, '')))
+        missing = sorted(QUALIFIED_MODES - modes)
+        if missing:
+            problems.append('%s=%s lacks %s: the extent reader serves 0x27 (tail, share, slice and extent) only, '
+                            'and K64j refuses 0x20 without 0x1' % (SDPA_MODES_ENV, value, ','.join(missing)))
         if 'extent' in modes:
             problems.append('%s=%s names extent: the extent reader adds it itself, and any pinned or pooled reader '
-                            'in the process would refuse it' % (SDPA_MODES_ENV, environ.get(SDPA_MODES_ENV, '')))
+                            'in the process would refuse it' % (SDPA_MODES_ENV, value))
+        others = sorted(modes - QUALIFIED_MODES - {'extent'})
+        if others:
+            problems.append('%s=%s names %s: CB2a and CB2b qualified 0x27 only (readahead makes 0x2F, which the '
+                            'extent reader refuses after the attach has built everything)'
+                            % (SDPA_MODES_ENV, value, ','.join(others)))
     return problems
 
 
@@ -189,7 +257,8 @@ def check_runtime(root, binaries=None):
     """Item 3 without the environment: the K64j binary at every path BINARIES names, carrying
     BINARY_LITERALS; the four K64j kernels; the audited tree-scratch sources. `binaries`, when given, is
     {path: sha256} already read this process (runtime_binary_override.install's record), so the attach
-    does not hash the binaries twice. Returns a record; raises AdmissionRefused with every problem."""
+    does not hash the binaries twice. Returns a record; raises AdmissionRefused with every problem, each
+    naming its file relative to `root` (one short line each)."""
     from dflash_combined_sim_runtime import BINARIES
 
     root = Path(root)
@@ -197,29 +266,33 @@ def check_runtime(root, binaries=None):
     for name in BINARIES:
         path = root / name
         if not path.is_file():
-            problems.append('%s is missing' % path.as_posix())
+            problems.append('%s is missing' % name)
             continue
         digest = (binaries or {}).get(name) or sha256_file(path)
         record['binaries'][name] = digest
         if digest != K64J_TTNNCPP_SHA256:
-            problems.append('%s is %s, not K64j\'s %s' % (path.as_posix(), digest[:16], K64J_TTNNCPP_SHA256[:16]))
+            problems.append('%s is %s, not K64j\'s %s' % (name, digest[:16], K64J_TTNNCPP_SHA256[:16]))
         missing = literals_missing(path)
         if missing:
-            problems.append('%s lacks %s' % (path.as_posix(), ', '.join(repr(literal.decode()) for literal in missing)))
+            problems.append('%s lacks %s' % (name, ', '.join(repr(literal.decode()) for literal in missing)))
     for name, wanted in sorted(K64J_KERNELS.items()):
         path = root / KERNEL_ROOT / name
         digest = sha256_file(path) if path.is_file() else None
         record['kernels'][name] = digest
         if digest != wanted:
-            problems.append('%s is %s, not the K64j kernel %s' % (path.as_posix(), (digest or 'absent')[:16], wanted[:16]))
+            problems.append('kernel %s is %s, not the K64j kernel %s' % (name, (digest or 'absent')[:16], wanted[:16]))
     from sdpa_tree_scratch import audit
 
     try:
         record['tree_scratch'] = audit(root, patched=True)
-    except (OSError, ValueError) as error:
+    except OSError as error:
+        problems.append('sdpa_tree_scratch.audit(patched=True): %s %s' % (
+            type(error).__name__, Path(error.filename).name if getattr(error, 'filename', None) else error))
+    except ValueError as error:
         problems.append('sdpa_tree_scratch.audit(patched=True): %s' % error)
     if problems:
-        raise AdmissionRefused('the runtime is not K64j as qualified: ' + '; '.join(problems))
+        raise AdmissionRefused('the runtime under %s is not K64j as qualified: %s' % (root.as_posix(), '; '.join(problems)),
+                               ['runtime: %s' % problem for problem in problems])
     return record
 
 
@@ -231,13 +304,16 @@ def _count(value):
     return None
 
 
-def _full(value):
+def _full(value, floor=1):
+    """A full pass of at least `floor` comparisons."""
     counted = _count(value)
-    return counted is not None and counted[1] > 0 and counted[0] == counted[1]
+    return counted is not None and counted[1] >= floor and counted[0] == counted[1]
 
 
-def _covers(found, wanted):
-    return isinstance(found, list) and set(wanted) <= set(found)
+def _missing(found, wanted):
+    """What of `wanted` a recorded list lacks (all of it when the record is not a list)."""
+    found = set(found) if isinstance(found, list) else set()
+    return [item for item in wanted if item not in found]
 
 
 def _passed(section, name, problems):
@@ -254,6 +330,89 @@ def _passed(section, name, problems):
     return True
 
 
+def _cover(problems, section, key, wanted, what):
+    missing = _missing(section.get(key), wanted)
+    if missing:
+        problems.append('%s: %s lack %s' % (what, key, missing))
+
+
+def _cb1_problems(cb1, problems):
+    _cover(problems, cb1, 'seeds', SEEDS, 'CB1')
+    missing = _missing(cb1.get('extents'), K1_EXTENTS)
+    if missing:
+        problems.append('CB1: extents lack K1\'s %s' % missing)
+    combos = cb1.get('combos') or []
+    if not any(isinstance(combo, dict) and combo.get('geometry') == 'G8B2' and '0x27' in (combo.get('flags') or [])
+               for combo in combos):
+        problems.append('CB1: no G8B2 0x27 combo, the one the extent reader serves')
+    counts = cb1.get('counts') or {}
+    for key in CB1_COUNTS:
+        if not _full(counts.get(key)):
+            problems.append('CB1: %s %s is not a full pass' % (key, counts.get(key)))
+
+
+def _cb2a_problems(cb2a, problems):
+    _cover(problems, cb2a, 'seeds', SEEDS, 'CB2a')
+    _cover(problems, cb2a, 'variants', CB2A_VARIANTS, 'CB2a')
+    k2 = cb2a.get('k2') or {}
+    if k2.get('verdict') != 'PASS':
+        problems.append('CB2a: K2 verdict %s, not PASS (a failed or coverage-reduced K2 leaves the exactness '
+                        'policy to the user, design 6.1 D-c)' % k2.get('verdict'))
+    if not _full(k2.get('tickets'), CB2A_K2_TICKETS):
+        problems.append('CB2a: K2 tickets %s, not a full pass of the %d the design asks' % (k2.get('tickets'),
+                                                                                         CB2A_K2_TICKETS))
+    if not _full(k2.get('rows')):
+        problems.append('CB2a: K2 rows %s are not all bitwise equal' % k2.get('rows'))
+    if not _full(cb2a.get('x7'), X7_FLOOR):
+        problems.append('CB2a: X7 %s, not a full pass of the %d the design asks' % (cb2a.get('x7'), X7_FLOOR))
+    z = cb2a.get('z') or {}
+    if not _full(z.get('passed'), Z_FLOOR):
+        problems.append('CB2a: Z %s, not a full pass of the %d the design asks' % (z.get('passed'), Z_FLOOR))
+    missing = _missing(z.get('families'), Z_FAMILIES)
+    if missing:
+        problems.append('CB2a: Z families lack %s of the 15 below 4096' % missing)
+
+
+def _cb2b_problems(cb2b, sources, problems):
+    if cb2b.get('scope') != CB2B_SCOPE:
+        problems.append('CB2b: scope %s, not full (a reduced run - the watcher pass, one seed - is never CB2b\'s '
+                        'evidence)' % cb2b.get('scope'))
+    if cb2b.get('chips') not in CB2B_CHIPS:
+        problems.append('CB2b: chips %s, not the harness\'s %s' % (cb2b.get('chips'), '/'.join(CB2B_CHIPS)))
+    if cb2b.get('capacity') != CB2B_CAPACITY:
+        problems.append('CB2b: capacity %s, not the served C = %d' % (cb2b.get('capacity'), CB2B_CAPACITY))
+    _cover(problems, cb2b, 'seeds', CB2B_SEEDS, 'CB2b')
+    _cover(problems, cb2b, 'variants', CB2A_VARIANTS, 'CB2b')
+    geometries = cb2b.get('r1_geometries') if isinstance(cb2b.get('r1_geometries'), dict) else {}
+    missing = [name for name in CB2B_R1_GEOMETRIES if name not in geometries]
+    if missing:
+        problems.append('CB2b: R1 ran no %s (the design asks G8B2, G4B3 and G4B1)' % ','.join(missing))
+    for name in CB2B_R1_GEOMETRIES:
+        short = _missing(geometries.get(name), CB2B_RESIDUES) if name in geometries else []
+        if short:
+            problems.append('CB2b: R1 %s lacks words %s' % (name, short))
+    families = cb2b.get('r2_families')
+    if (not isinstance(families, list) or any(type(family) is not int or family % 256 or not 256 <= family <= CB2B_CAPACITY
+                                              for family in families) or len(set(families)) != len(families)):
+        problems.append('CB2b: r2_families is not a list of distinct 256-key families up to %d' % CB2B_CAPACITY)
+    else:
+        if len(families) < CB2B_R2_MIN_FAMILIES:
+            problems.append('CB2b: R2 replayed %d families, not more than 50' % len(families))
+        named = _missing(families, CB2B_R2_NAMED)
+        if named:
+            problems.append('CB2b: R2 families lack the named %s' % named)
+    _cover(problems, cb2b, 'idle_starts', CB2B_IDLE_STARTS, 'CB2b')
+    counts = cb2b.get('counts') or {}
+    for key in CB2B_COUNTS:
+        if not _full(counts.get(key)):
+            problems.append('CB2b: %s %s is not a full pass' % (key, counts.get(key)))
+    ran = cb2b.get('sources') or {}
+    for name in QUALIFIED_SOURCES:
+        if ran.get(name) != sources.get(name):
+            problems.append('CB2b: ran %s at %s, not the qualified %s' % (name, str(ran.get(name))[:16],
+                                                                         str(sources.get(name))[:16]))
+
+
 def evidence_problems(evidence, sources_root=HERE):
     """Every reason the evidence does not qualify the extent path for these bytes; [] when it does."""
     problems = []
@@ -261,7 +420,7 @@ def evidence_problems(evidence, sources_root=HERE):
         return ['the evidence is not a %s record' % EVIDENCE_SCHEMA]
     binary = evidence.get('binary') or {}
     if binary.get('ttnncpp_sha256') != K64J_TTNNCPP_SHA256:
-        problems.append('binary: the evidence qualified %s, not K64j %s' % (binary.get('ttnncpp_sha256'),
+        problems.append('binary: the evidence qualified %s, not K64j %s' % (str(binary.get('ttnncpp_sha256'))[:16],
                                                                            K64J_TTNNCPP_SHA256[:16]))
     if evidence.get('kernels') != K64J_KERNELS:
         problems.append('kernels: the evidence names other kernel bytes than K64j\'s four')
@@ -278,80 +437,44 @@ def evidence_problems(evidence, sources_root=HERE):
     sections = evidence.get('sections') or {}
     for name in sorted(set(sections) - set(SECTIONS)):
         problems.append('%s: not a section this admission knows' % name)
-    cb1 = sections.get('CB1')
-    if _passed(cb1, 'CB1', problems):
-        if not _covers(cb1.get('seeds'), SEEDS):
-            problems.append('CB1: seeds %s do not cover %s' % (cb1.get('seeds'), list(SEEDS)))
-        if not _covers(cb1.get('extents'), K1_EXTENTS):
-            problems.append('CB1: extents %s do not cover K1\'s six %s' % (cb1.get('extents'), list(K1_EXTENTS)))
-        combos = cb1.get('combos') or []
-        if not any(isinstance(combo, dict) and combo.get('geometry') == 'G8B2' and '0x27' in (combo.get('flags') or [])
-                   for combo in combos):
-            problems.append('CB1: no G8B2 0x27 combo, the one the extent reader serves')
-        counts = cb1.get('counts') or {}
-        for key in CB1_COUNTS:
-            if not _full(counts.get(key)):
-                problems.append('CB1: %s %s is not a full pass' % (key, counts.get(key)))
-    cb2a = sections.get('CB2a')
-    if _passed(cb2a, 'CB2a', problems):
-        if not _covers(cb2a.get('seeds'), SEEDS):
-            problems.append('CB2a: seeds %s do not cover %s' % (cb2a.get('seeds'), list(SEEDS)))
-        if not _covers(cb2a.get('variants'), CB2A_VARIANTS):
-            problems.append('CB2a: variants %s do not cover %s' % (cb2a.get('variants'), list(CB2A_VARIANTS)))
-        k2 = cb2a.get('k2') or {}
-        if k2.get('verdict') != 'PASS':
-            problems.append('CB2a: K2 verdict %s, not PASS (a failed or coverage-reduced K2 leaves the exactness '
-                            'policy to the user, design 6.1 D-c)' % k2.get('verdict'))
-        if not _full(k2.get('tickets')) or _count(k2.get('tickets'))[1] < CB2A_K2_TICKETS:
-            problems.append('CB2a: K2 tickets %s, not a full pass of the %d the design asks' % (k2.get('tickets'),
-                                                                                             CB2A_K2_TICKETS))
-        if not _full(k2.get('rows')):
-            problems.append('CB2a: K2 rows %s are not all bitwise equal' % k2.get('rows'))
-        if not _full(cb2a.get('x7')):
-            problems.append('CB2a: X7 %s is not a full pass' % cb2a.get('x7'))
-        z = cb2a.get('z') or {}
-        if not _full(z.get('passed')):
-            problems.append('CB2a: Z %s is not a full pass' % z.get('passed'))
-        if not _covers(z.get('families'), Z_FAMILIES):
-            problems.append('CB2a: Z families %s do not cover the 15 below 4096' % z.get('families'))
-    cb2b = sections.get('CB2b')
-    if _passed(cb2b, 'CB2b', problems):
-        counts = cb2b.get('counts') or {}
-        for key in CB2B_COUNTS:
-            if not _full(counts.get(key)):
-                problems.append('CB2b: %s %s is not a full pass' % (key, counts.get(key)))
-        ran = cb2b.get('sources') or {}
-        for name in QUALIFIED_SOURCES:
-            if ran.get(name) != sources.get(name):
-                problems.append('CB2b: ran %s at %s, not the qualified %s' % (name, ran.get(name), sources.get(name)))
+    if _passed(sections.get('CB1'), 'CB1', problems):
+        _cb1_problems(sections['CB1'], problems)
+    if _passed(sections.get('CB2a'), 'CB2a', problems):
+        _cb2a_problems(sections['CB2a'], problems)
+    if _passed(sections.get('CB2b'), 'CB2b', problems):
+        _cb2b_problems(sections['CB2b'], sources, problems)
     return problems
 
 
 def check_evidence(path=EVIDENCE, *, expected_sha256=None, sources_root=HERE):
     """Item 4: the evidence file at its pinned sha256, and evidence_problems empty. Returns the parsed
-    record; raises AdmissionRefused naming every problem."""
+    record; raises AdmissionRefused naming every problem (one entry each in its `problems`)."""
     expected_sha256 = EVIDENCE_SHA256 if expected_sha256 is None else expected_sha256
     path = Path(path)
     if not path.is_file():
-        raise AdmissionRefused('the extent path has no evidence: %s is missing' % path)
+        raise AdmissionRefused('the extent path has no evidence: %s is missing' % path,
+                               ['evidence: %s is missing' % path.name])
     payload = path.read_bytes()
     digest = hashlib.sha256(payload).hexdigest()
     if digest != expected_sha256:
-        raise AdmissionRefused('%s is %s, not the reviewed %s' % (path.name, digest[:16], expected_sha256[:16]))
+        raise AdmissionRefused('%s is %s, not the reviewed %s' % (path.name, digest[:16], expected_sha256[:16]),
+                               ['evidence: %s is %s, not the reviewed %s' % (path.name, digest[:16], expected_sha256[:16])])
     try:
         evidence = json.loads(payload.decode('utf-8'))
     except ValueError as error:
-        raise AdmissionRefused('%s does not parse: %s' % (path.name, error))
+        raise AdmissionRefused('%s does not parse: %s' % (path.name, error),
+                               ['evidence: %s does not parse: %s' % (path.name, str(error)[:120])])
     problems = evidence_problems(evidence, sources_root)
     if problems:
-        raise AdmissionRefused('the evidence does not qualify the extent path: ' + '; '.join(problems))
+        raise AdmissionRefused('the evidence does not qualify the extent path: ' + '; '.join(problems),
+                               ['evidence: %s' % problem for problem in problems])
     return evidence
 
 
 def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evidence=EVIDENCE):
     """Items 1-4, once per process: the record on success (cached; a second call returns it), else
-    AdmissionRefused naming every failed condition, logged before it is raised. `binary_record` is
-    runtime_binary_override.install's return value (None when it admitted nothing)."""
+    AdmissionRefused naming every failed condition, each logged on its own line before it is raised.
+    `binary_record` is runtime_binary_override.install's return value (None when it admitted nothing)."""
     if 'record' in _STATE:
         return _STATE['record']
     environ = os.environ if environ is None else environ
@@ -362,21 +485,19 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
     problems.extend(check_environment(environ, m3))
     requested = (environ.get(RUNTIME_BINARY_ENV) or '').lower()
     if requested != K64J_TTNNCPP_SHA256:
-        problems.append('%s=%s, not K64j\'s %s' % (RUNTIME_BINARY_ENV, requested or '(unset)', K64J_TTNNCPP_SHA256))
+        problems.append('%s=%s, not K64j\'s %s' % (RUNTIME_BINARY_ENV, requested[:16] or '(unset)',
+                                                  K64J_TTNNCPP_SHA256[:16]))
     if binary_record is not None and binary_record.get('override') != K64J_TTNNCPP_SHA256:
-        problems.append('the runtime binary override admitted %s, not K64j' % binary_record.get('override'))
+        problems.append('the runtime binary override admitted %s, not K64j' % str(binary_record.get('override'))[:16])
     record = dict(flag=FLAG, shape=m3[1])
     for name, check in (('runtime', lambda: check_runtime(runtime_root, (binary_record or {}).get('binaries'))),
                         ('evidence', lambda: check_evidence(evidence))):
         try:
             record[name] = check()
         except AdmissionRefused as refusal:
-            problems.append(str(refusal))
+            problems.extend(refusal.problems)
     if problems:
-        # One line per problem: the server log's capture truncates long lines (dflash_device.AUDIT_SWITCH's note).
-        for index, problem in enumerate(problems, 1):
-            log('{} refused ({}/{}): {}', MARKER, index, len(problems), problem)
-        raise AdmissionRefused('%s=1 refused at attach: %s' % (FLAG, ' | '.join(problems)))
+        _refuse(log, 'at attach', problems)
     sections = record['evidence']['sections']
     log('{} passed: K64j {} x{}; kernels {}; evidence {}; CB1 {} CB2a {} CB2b {}; reader {}',
         MARKER, K64J_TTNNCPP_SHA256[:16], len(record['runtime']['binaries']),
@@ -394,11 +515,11 @@ def admit_statistics(pool, *, log=None):
     log = _log if log is None else log
     statistics = pool.dram_statistics()
     if isinstance(statistics, dict):
-        reason = statistics.get('unavailable', 'no statistics')
+        reason = str(statistics.get('unavailable', 'no statistics'))[:160]
     elif (not isinstance(statistics, list) or not statistics
           or any(not isinstance(chip, dict) or type(chip.get('largest_free')) is not int or chip['largest_free'] < 0
                  for chip in statistics)):
-        reason = 'no per-chip largest free block in %r' % (statistics,)
+        reason = 'no per-chip largest free block in %s' % (repr(statistics)[:120],)
     else:
         log('{} DRAM statistics readable: largest_free={}', MARKER,
             ','.join('%.1fMB' % (chip['largest_free'] / 1e6) for chip in statistics))
@@ -406,3 +527,42 @@ def admit_statistics(pool, *, log=None):
     log('{} refused: DRAM statistics unavailable ({})', MARKER, reason)
     raise AdmissionRefused('%s=1 needs readable DRAM statistics (the DRAM admission hold reads them per request): %s'
                            % (FLAG, reason))
+
+
+def admit_pool(pool, *, log=None):
+    """Right after the pool (design W2, B4): it holds the extent storage - extent_replay exactly True, the
+    storage the S2 block keys on (without it the block would be the per-family one, packed only in
+    [131072, 131312], every other round sequential, and nothing at attach would say so) - and its DRAM
+    statistics are readable (admit_statistics). Refuses the attach otherwise; returns the statistics."""
+    log = _log if log is None else log
+    if getattr(pool, 'extent_replay', None) is not True:
+        _refuse(log, 'after the pool', ['the pool holds no extent storage (extent_replay %r): the block would '
+                                        'serve the per-family path, not the admitted one'
+                                        % (getattr(pool, 'extent_replay', None),)])
+    return admit_statistics(pool, log=log)
+
+
+def admit_blocks(blocks, *, log=None):
+    """After the packed blocks are built (design W3): each is the extent block (PackedVerifierEngine.extent
+    True) and every segment reader of its fixture's replay reader reports runtime_extent - the executed
+    path is the one admitted (memory graft-mounted-is-not-graft-executed). Refuses the attach otherwise,
+    before the lifecycle admits a request; returns the segment count per block."""
+    log = _log if log is None else log
+    blocks, problems, segments = list(blocks), [], []
+    if not blocks:
+        problems.append('no packed block was built: the extent path serves its rounds through the block')
+    for index, block in enumerate(blocks):
+        if getattr(block, 'extent', None) is not True:
+            problems.append('block %d is not the extent block (extent %r)' % (index, getattr(block, 'extent', None)))
+        replay = getattr(getattr(block, 'fixture', None), 'replay_reader', None)
+        readers = list(getattr(replay, 'readers', None) or ())
+        segments.append(len(readers))
+        if not readers:
+            problems.append('block %d has no segment readers to check (fixture.replay_reader.readers)' % index)
+        wrong = [segment for segment, reader in enumerate(readers) if getattr(reader, 'runtime_extent', None) is not True]
+        if wrong:
+            problems.append('block %d segments %s do not report runtime_extent: not the extent readers' % (index, wrong))
+    if problems:
+        _refuse(log, 'after the block', problems)
+    log('{} extent block engaged: blocks={} segments={}', MARKER, len(blocks), ','.join(map(str, segments)))
+    return segments
