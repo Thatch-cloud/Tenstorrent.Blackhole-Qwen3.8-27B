@@ -47,6 +47,15 @@ C2_ANY_MODULES = ('serving_request_factory.py', 'serving_runtime.py', 'serving_l
                   'serving_request_quarantine.py', 'serving_prefill_admission.py', 'serving_fast_policy.py',
                   'serving_c2_contract.py', 'qwen_c2_profiles.json', 'c2_parser_rechunk.py')
 
+# What C2-packed-any (S2, the c2-packed profiles, QWEN_FAST_EXTENT_REPLAY=1) needs from the image on top of
+# C2-any: the extent readers and the pool that lends them their tables and cur_pos words (W1/W2), the attach's
+# admission and the evidence it pins (W7), the block's model_batch (W3), the proposal coordinator (W6c/W12)
+# and the memory ledger (W6d). Any one left at an older layer ships half of S2, and the admission or a reader
+# dies at attach (or, worse, an older copy serves without the change and nothing says so).
+C2_PACKED_ANY_MODULES = ('extent_attention_replay.py', 'serving_buffer_pool.py', 'packed_any_admission.py',
+                         'packed_any_evidence.json', 'model_batch.py', 'dflash_packed_proposal_coordinator.py',
+                         'memory_ledger.py')
+
 FILE_NAME = re.compile(r'^[A-Za-z0-9_]+[.](?:py|json|cpp)$')
 
 
@@ -254,6 +263,18 @@ class C2OverlayClosureTests(unittest.TestCase):
     def test_the_c2_any_modules_are_overlaid(self):
         """Every half of C2-any reaches the image, or a selectable c2 profile dies on its first warmup."""
         self.assertEqual(sorted(set(C2_ANY_MODULES) - self.overlay), [])
+
+    def test_the_c2_packed_any_modules_are_overlaid(self):
+        """Every S2 module reaches the image at HEAD, and the admission's import closure with it."""
+        self.assertEqual(sorted(set(C2_PACKED_ANY_MODULES) - self.overlay), [])
+        missing = unsatisfied_imports(self.view, {'packed_any_admission.py', 'extent_attention_replay.py',
+                                                  'serving_buffer_pool.py', 'serving_runtime.py'})
+        self.assertEqual(missing, [])
+        # A positive control on the real layers: the admission exists in no older layer, so the pool that imports
+        # it (its extent-storage guard), laid over an image without it, is named.
+        found = unsatisfied_imports(ImageView({'serving_buffer_pool.py'}, self.p8, self.view.p8_modules),
+                                    {'serving_buffer_pool.py'})
+        self.assertIn(('serving_buffer_pool.py', 'packed_any_admission.py', None, 'bundle %s' % BUNDLE_COMMIT), found)
 
     def test_an_overlaid_module_imports_only_what_the_image_holds(self):
         """The symbol-level closure (the seam that cost run 35683127469 on P8), for C2's overlay."""

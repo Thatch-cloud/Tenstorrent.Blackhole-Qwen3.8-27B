@@ -1,0 +1,194 @@
+{
+ "schema": "qwen-c2-packed-any-evidence/1",
+ "what": "The hardware evidence that qualifies S2 C2-packed-any (QWEN_FAST_EXTENT_REPLAY=1): packed rounds at any position through one K64j 0x27 program per bundle (s2-design.md rev 2, W7 and 6.2). packed_any_admission.check_evidence reads it at every c2-packed attach; its sha256 is pinned there (EVIDENCE_SHA256), so a new record changes both in one commit.",
+ "provenance": "CB1 and CB2a are transcribed from the goal-c2-serving memory note and the S2 build brief (2026-09-26); their run artifacts were not re-read when this file was written. CB2b has not run: until its record is PASS, every c2-packed attach is refused. sources names extent_attention_replay.py as every S2 branch holds it (5633fc3a, W1 b35bb070, merged at 937bd2f7), so a CB2b dispatched from any of them qualifies these bytes; the admission guard is in serving_buffer_pool, never in the reader.",
+ "binary": {
+  "graft": "/home/thatch/opgraft-K64j",
+  "ttnncpp_sha256": "152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7",
+  "build": "optimisation/ttnn-op/k64j/build_k64j.sh through the card-B job, card-b-v7 run 36222920898",
+  "qwen_strings": 34,
+  "base": "K64i cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4 (its 30 QWEN strings kept)"
+ },
+ "kernels": {
+  "compute/sdpa_flash_decode_qwen.cpp": "409a1aafc3ffaaca2c6afba0e999525b7d141491f0a52e5583efa70447ee5c0e",
+  "dataflow/reader_decode_qwen.cpp": "adb6091878ba3f0a0805846ff56f05352610d7fe779b5ae96320c437c095db49",
+  "dataflow/reader_decode_qwen_slice.cpp": "518d8096e3cceb160eaef8ab4f0ae976ccbffd3904d31176b7f9d02828c37f8a",
+  "dataflow/writer_decode_qwen_slice.cpp": "642c36f809be0f1ad1664deb405dc310dabaa32d5628710320a118eb37a6cc7a"
+ },
+ "sources": {
+  "extent_attention_replay.py": "5633fc3a21a400360542913fb47559db999117e2e3b6e8d540c770d45720cd31"
+ },
+ "sections": {
+  "CB1": {
+   "status": "PASS",
+   "what": "K64j K1/K3: the runtime extent (0x20) at cur_pos E - 1 equals the compile-time call at capacity E",
+   "run": 36223820488,
+   "tag": "card-b-v9",
+   "card": "B",
+   "harness": "optimisation/ttnn-op/k64j/k64j_card_b.py via run_card_b.sh, --seeds 0,1,2,3,4",
+   "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ],
+   "extents": [
+    2304,
+    16896,
+    33024,
+    65792,
+    98560,
+    131328
+   ],
+   "combos": [
+    {
+     "geometry": "G4B3",
+     "flags": [
+      "0x21",
+      "0x23"
+     ]
+    },
+    {
+     "geometry": "G8B2",
+     "flags": [
+      "0x21",
+      "0x23",
+      "0x27",
+      "0x2f"
+     ]
+    }
+   ],
+   "comparisons": 2387,
+   "failures": 0,
+   "families": 114,
+   "counts": {
+    "extent": [
+     2100,
+     2100
+    ],
+    "mixed": [
+     75,
+     75
+    ],
+    "share_slot0": [
+     25,
+     25
+    ],
+    "trace": [
+     144,
+     144
+    ],
+    "skip": [
+     24,
+     24
+    ]
+   },
+   "skipped_rows": "partial-unpoisoned",
+   "watcher_pass": {
+    "run": 36223057469,
+    "tag": "card-b-v8",
+    "status": "PASS"
+   }
+  },
+  "CB2a": {
+   "status": "PASS",
+   "what": "K2 (native causal B1 per row == the extent path, bitwise; it sets the exactness policy), X7 (0x7 narrow == 0x7 wide with the real -inf tail) and Z (the 15 stale-writer families in one trace)",
+   "run": 36239779235,
+   "tag": "experiment/c2-serving-v44",
+   "card": "M",
+   "harness": "optimisation/ttnn-op/k64j/k64j_card_b.py --sections K2,X7,Z --seeds 0,1,2,3,4 --variants normal,peaky --no-timing (the cardm action; card B is reserved)",
+   "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ],
+   "variants": [
+    "normal",
+    "peaky"
+   ],
+   "k2": {
+    "verdict": "PASS",
+    "tickets": [
+     1980,
+     1980
+    ],
+    "rows": [
+     29730,
+     29730
+    ],
+    "floor_rows_differing": [
+     0,
+     3280
+    ]
+   },
+   "x7": [
+    500,
+    500
+   ],
+   "z": {
+    "passed": [
+     900,
+     900
+    ],
+    "families": [
+     256,
+     512,
+     768,
+     1024,
+     1280,
+     1536,
+     1792,
+     2048,
+     2304,
+     2560,
+     2816,
+     3072,
+     3328,
+     3584,
+     3840
+    ]
+   },
+   "liveness": [
+    1035,
+    1035
+   ],
+   "comparisons": 3660,
+   "failures": 0,
+   "watcher_pass": {
+    "run": 36239717029,
+    "tag": "experiment/c2-serving-v43",
+    "status": "PASS",
+    "k2_verdict": "REDUCED-PASS 38/1980"
+   }
+  },
+  "CB2b": {
+   "status": "PENDING",
+   "what": "W10b: the real extent readers over pool-like lent storage - R1 (the pinned mask kernel at capacity 256 == narrow_mask_host, at G8B2, G4B3 and G4B1), S (construction and restage staging: word, cur_pos and tables read back), R2 (each segment == the 0x7 compile-time call with the wide -inf mask at capacity E, over more than 50 families), R4 (idle segments at 0/32 on the zero table)",
+   "harness": "optimisation/ttnn-op/k64j/extent_reader_card_b.py (W10b) through run_card_b.sh, K64J_HARNESS=extent_reader, WATCHER=1 first; the full-scope pass is the evidence",
+   "required": {
+    "status": "PASS",
+    "run": "the run id (an integer)",
+    "failures": 0,
+    "scope": "full (the verdict line's scope=; a reduced run is never the evidence)",
+    "chips": "1of2 (the verdict line's chips=)",
+    "capacity": 131328,
+    "seeds": "the report's seeds_run, covering [0, 1, 2]",
+    "variants": "the report's variants_run, covering [normal, peaky]",
+    "r1_geometries": "the report's r1_run: {geometry: [words]}, G8B2, G4B3 and G4B1 each covering 0, 7, 127, 240, 255",
+    "r2_families": "the report's r2_families_replayed: more than 50 distinct families including 256, 2304, 16640, 65792 and 131328",
+    "idle_starts": "the report's idle_starts_run, covering [0, 32]",
+    "counts": {
+     "R1": "[passed, total]: the verdict line's r1 plus r1_reader, all passed",
+     "S": "[passed, total]: staging, all passed",
+     "R2": "[passed, total]: r2 plus r2_trace, all passed",
+     "R4": "[passed, total]: r4, all passed",
+     "liveness": "[passed, total]: live, all moved"
+    },
+    "sources": "the verdict line's extent_sha256 as {\"extent_attention_replay.py\": sha256}: the top-level sources' own"
+   }
+  }
+ }
+}

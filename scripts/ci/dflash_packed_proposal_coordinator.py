@@ -38,6 +38,26 @@ PAIR_FALLBACK_LINE = '[PACKED-PROPOSE] pair={pair} fallback={fallback}'
 RECAPTURE_LINE = '[PACKED-PROPOSE] recapture slot={slot}'
 PACKED_CONTEXT = 2048
 
+# S2 W12 (design 4, W12): which users draft on their own single-user capture in a round, and why - under
+# QWEN_FAST_EXTENT_REPLAY=1 (the c2-packed profiles) with QWEN_FAST_PACKED_AUDIT=1, one line per round that has
+# any. A round's slots and reasons are parallel lists, in the order the singles were prepared:
+#   ramp          a pair member below the steady-state 2048-row history (the prefill ramp): packs from 2048 on
+#   unpackable    a pair at 2048 that packable() still refuses (no native proposal path, K/V history or capture)
+#   absent        the pair's other slot has no user this round
+#   split         QWEN_FAST_PAIRS_PACKED_ONLY split the pair for a round the packed step serves sequentially
+#   dram_reserve  a fresh pair capture refused for DRAM headroom (PAIR_FALLBACK_LINE says how much)
+#   failure       the pair's traced pass raised this round (PAIR_FALLBACK_LINE names it)
+#   declined      the pair's prepare_device answered False
+#   unslotted     a device with no pool slot, which never pairs
+# Rounds the quad serves have no singles. Nothing else changes: the line only reports what prepare() did.
+EXTENT_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
+SINGLES_LINE = '[PACKED-PROPOSE] singles round={round} slots={slots} reasons={reasons}'
+SINGLE_REASONS = ('ramp', 'unpackable', 'absent', 'split', 'dram_reserve', 'failure', 'declined', 'unslotted')
+# S2 W12 (Report 5 W1): a pair bucket exists only at the steady-state context. packable() gates both users to
+# history_rows == 2048 and the trace keys its buckets by (history_rows_a, history_rows_b), so any other key is a
+# regression that would capture a new bucket nearly every round of the ramp (and hold its DRAM).
+PAIR_BUCKET_CONTEXT = (PACKED_CONTEXT, PACKED_CONTEXT)
+
 DRAM_RESERVE_FLAG = 'QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB'
 DRAM_RESERVE_DEFAULT_MB = 256
 
@@ -187,6 +207,33 @@ def dram_headroom(device):
 
 def audit_enabled(environ=None):
     return (os.environ if environ is None else environ).get(AUDIT_FLAG) == '1'
+
+
+def singles_enabled(environ=None):
+    """SINGLES_LINE: QWEN_FAST_EXTENT_REPLAY=1 (the S2 profiles) and QWEN_FAST_PACKED_AUDIT=1. Off, the log is
+    exactly today's."""
+    environ = os.environ if environ is None else environ
+    return environ.get(EXTENT_FLAG) == '1' and audit_enabled(environ)
+
+
+def unpacked_reason(device_a, device_b):
+    """None when packable(device_a, device_b); else why the pair drafts singly: 'ramp' while either member's
+    history is below the steady-state context, 'unpackable' for any other refusal of packable()."""
+    if packable(device_a, device_b):
+        return None
+    if (getattr(device_a, 'history_rows', None) != PACKED_CONTEXT
+            or getattr(device_b, 'history_rows', None) != PACKED_CONTEXT):
+        return 'ramp'
+    return 'unpackable'
+
+
+def check_pair_buckets(trace, pair):
+    """Raise AssertionError when a pair trace holds a bucket at any context but PAIR_BUCKET_CONTEXT (S2 W12)."""
+    off = sorted(tuple(key) for key in (getattr(trace, 'buckets', None) or {}) if tuple(key) != PAIR_BUCKET_CONTEXT)
+    if off:
+        raise AssertionError('[PACKED-PROPOSE] pair %s holds buckets at contexts %s: a pair bucket exists only at %s '
+                             '(packable() gates both users to history_rows == %d)'
+                             % (list(pair), off, PAIR_BUCKET_CONTEXT, PACKED_CONTEXT))
 
 
 def audit_log(message, **values):
@@ -507,10 +554,15 @@ class PackedProposalCoordinator:
         by_slot = {entry['slot']: entry for entry in entries if entry['slot'] is not None}
         unpaired = [entry for entry in entries if entry['slot'] is None]
         groups = pair_slots(by_slot) if by_slot else []
+        # S2 W12: the slots a QWEN_FAST_PAIRS_PACKED_ONLY split leaves on their own this round.
+        split = set()
         if packed_round is False and pairs_packed_only_enabled():
+            split = {slot for group in groups if len(group) == 2 for slot in group}
             groups = unpair_groups(groups, round_number)
 
         prepared, fence = [], None
+        # S2 W12: (slot, reason) of every device this round prepares on its own capture (SINGLES_LINE).
+        singles = []
         pair_labels, pair_ms = [], []
         # QWEN_FAST_ROUND_B1 (C1): the traces this round prepared, selected together after
         # the fence below. None with the flag off, and nothing then reads it.
@@ -518,7 +570,8 @@ class PackedProposalCoordinator:
         # QWEN_FAST_QUAD_DRAFT: this round's quad (_prepare_quad), None in every round it does not serve.
         quad = None
 
-        def prepare_single(entry):
+        def prepare_single(entry, reason):
+            singles.append((entry['slot'], reason))
             device = entry['device']
             # A no-op unless a pair had already released this device's own single-
             # user capture (PackedProposalCoordinator._release_single_user) and this
@@ -544,7 +597,8 @@ class PackedProposalCoordinator:
                     slot_a, slot_b = group
                     entry_a, entry_b = by_slot[slot_a], by_slot[slot_b]
                     device_a, device_b = entry_a['device'], entry_b['device']
-                    if packable(device_a, device_b):
+                    single_reason = unpacked_reason(device_a, device_b)
+                    if single_reason is None:
                         fresh_build = self._cached_trace(group, device_a, device_b) is None
                         headroom_ok = True
                         if fresh_build:
@@ -555,6 +609,7 @@ class PackedProposalCoordinator:
                             headroom = dram_headroom(device_a)
                             if headroom is not None and headroom < estimated_pair_capture_bytes() + dram_reserve_bytes():
                                 headroom_ok = False
+                                single_reason = 'dram_reserve'
                                 if audit_enabled():
                                     audit_log(PAIR_FALLBACK_LINE, pair=[slot_a, slot_b], fallback='dram_reserve')
                         if headroom_ok:
@@ -596,6 +651,9 @@ class PackedProposalCoordinator:
                                     audit_log(PAIR_FALLBACK_LINE, pair=[slot_a, slot_b],
                                               fallback='%s: %s' % (type(failure).__name__, str(failure)[:160]))
                                 ready = False
+                                single_reason = 'failure'
+                            else:
+                                single_reason = 'declined'
                             ledger_after(ledger_token)
                         else:
                             ready = False
@@ -607,6 +665,9 @@ class PackedProposalCoordinator:
                                 batched.append(([slot_a, slot_b], trace))
                             if fence is None:
                                 fence = (device_a.operations, device_a.mesh)
+                            # S2 W12: after the pair is among `prepared` and the fence named, so a failure here
+                            # takes the exception path below (fence, the shared trace's pending dropped once).
+                            check_pair_buckets(trace, group)
                             if started is not None:
                                 pair_labels.append([slot_a, slot_b])
                                 pair_ms.append((time.perf_counter() - started) * 1000)
@@ -617,14 +678,14 @@ class PackedProposalCoordinator:
                                 self.pairs[group] = (cached[0], cached[1], cached[2], True)
                             continue
                     for entry in (entry_a, entry_b):
-                        if prepare_single(entry) and fence is None:
+                        if prepare_single(entry, single_reason) and fence is None:
                             fence = (entry['device'].operations, entry['device'].mesh)
                 else:
                     entry = by_slot[group[0]]
-                    if prepare_single(entry) and fence is None:
+                    if prepare_single(entry, 'split' if group[0] in split else 'absent') and fence is None:
                         fence = (entry['device'].operations, entry['device'].mesh)
             for entry in unpaired:
-                if prepare_single(entry) and fence is None:
+                if prepare_single(entry, 'unslotted') and fence is None:
                     fence = (entry['device'].operations, entry['device'].mesh)
         except BaseException:
             if fence is not None:
@@ -662,6 +723,9 @@ class PackedProposalCoordinator:
         if audit_enabled() and pair_labels:
             audit_log(AUDIT_LINE, round=round_number, pairs=pair_labels,
                       propose_ms=['%.1f' % value for value in pair_ms])
+        if singles and singles_enabled():
+            audit_log(SINGLES_LINE, round=round_number, slots=[slot for slot, _ in singles],
+                      reasons=[reason for _, reason in singles])
         return prepared
 
     # -- QWEN_FAST_QUAD_DRAFT (quad_draft.py) --------------------------------------------------------------

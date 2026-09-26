@@ -1652,7 +1652,50 @@ def without_no_block(lines):
         if value.strip() == '' and len(collapsed) >= 2 and collapsed[-1].strip() == '' and collapsed[-2].strip() == '':
             continue
         collapsed.append(value)
-    return collapsed
+    return without_packed_any(collapsed)
+
+
+def cut_guarded(lines, last):
+    """lines less the one `if extent_replay:` block that ends in the line equal (stripped) to `last`: that
+    guard, its comment lines and `last`, and nothing else; exactly one such block, or AssertionError."""
+    ends = [index for index, value in enumerate(lines) if value.strip() == last]
+    if len(ends) != 1:
+        raise AssertionError('%r is not in serving_runtime.py exactly once' % last)
+    start = ends[0] - 1
+    while start >= 0 and lines[start].strip().startswith('#'):
+        start -= 1
+    if start < 0 or lines[start].strip() != 'if extent_replay:':
+        raise AssertionError('%r is not guarded by `if extent_replay:` alone' % last)
+    return lines[:start] + lines[ends[0] + 1:]
+
+
+def cut_run(lines, run):
+    """lines less the one contiguous run whose lines equal (stripped) `run`, in order; exactly one, or
+    AssertionError."""
+    stripped = [value.strip() for value in lines]
+    starts = [index for index in range(len(lines) - len(run) + 1) if stripped[index:index + len(run)] == list(run)]
+    if len(starts) != 1:
+        raise AssertionError('%r is not in serving_runtime.py exactly once' % (run,))
+    return lines[:starts[0]] + lines[starts[0] + len(run):]
+
+
+def without_packed_any(lines):
+    """serving_runtime.py less S2's W7 attach hunks (s2-design.md W7, after the no-block changes): the override's
+    record kept for the admission, the packed-any admission block under QWEN_FAST_EXTENT_REPLAY, and the pool
+    and block checks after each is built. Each is cut exactly once and to its known last line. W7's own refusal
+    of the flag with no block and its pool keyword are the same hunks W3 landed (merged into W3's form, with
+    W7's admission read after W3's strict one), so without_extent_replay cuts those, once."""
+    kept = '    binary_record = override_runtime_binary(runtime_root, log=pindiag)'
+    if lines.count(kept) != 1:
+        raise AssertionError('%r is not in serving_runtime.py exactly once' % kept)
+    lines = ['    override_runtime_binary(runtime_root, log=pindiag)' if value == kept else value for value in lines]
+    lines = cut_run(lines, ('if extent_replay:', 'import packed_any_admission', '',
+                            "packed_any_admission.extent_replay_enabled()   # strictly '1' from here: any other value "
+                            'is refused',
+                            'packed_any_admission.admit(runtime_root, m3=m3_shape(policy), binary_record=binary_record, '
+                            'log=pindiag)'))
+    lines = cut_guarded(lines, 'packed_any_admission.admit_pool(pool, log=pindiag)')
+    return cut_guarded(lines, 'packed_any_admission.admit_blocks(packed_blocks, log=pindiag)')
 
 
 def without_capture_position(lines):
@@ -1681,8 +1724,8 @@ def without_extent_replay(lines):
     its known last line, so nothing else is hidden."""
     lines = cut_once(lines, "EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'", "EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'")
     lines = cut_once(lines, 'def extent_replay_requested(environ=None):', "return value == '1'")
-    lines = cut_once(lines, "# QWEN_FAST_EXTENT_REPLAY (S2, default off; strictly '0' or '1'): read here, before anything is "
-                            'built.', 'extent_replay = extent_replay_requested()')
+    lines = cut_once(lines, "# S2 C2-packed-any (QWEN_FAST_EXTENT_REPLAY, default off; strictly '0' or '1', read here "
+                            'before anything', 'extent_replay = extent_replay_requested()')
     lines = cut_once(lines, '# S2 (QWEN_FAST_EXTENT_REPLAY=1) serves its rounds through the packed block alone - the pool '
                             'lends', "policy['scheduler_requests']))")
     replicas = "**({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {})"

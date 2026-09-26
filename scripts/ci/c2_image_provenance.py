@@ -3,14 +3,18 @@
 Run by build-c2-serving-image.sh on the rig host right after `docker build`, before the image
 gets its tag; a problem exits 1, so a failed image is never tagged, smoked or pushed.
 
-(a) binaries: the installed _ttnncpp.so (both paths the K64i graft is copied to) and _ttnn.so
-    are the graft's bytes and carry the graft's QWEN_ strings; a QWEN_ flag the image or a
-    profile SETS that the P8 base's binaries read but the installed ones do not is a failure. A
+(a) binaries: the installed _ttnncpp.so (both paths the graft, GRAFT_NAME = K64j, is copied to)
+    and _ttnn.so are the graft's bytes and carry the graft's QWEN_ strings; a QWEN_ flag the image
+    or a profile SETS that the P8 base's binaries read but the installed ones do not is a failure. A
     graft replaces the whole binary, so a patch the base carried and the graft's source tree
     lacked is silently dropped and its flag goes inert (memory graft-so-drops-image-patches:
-    K64c lost QWEN_SDPA_TREE_SCRATCH_ROUNDS). Each op directory the JIT compiles from
-    (attn_prep, nlp_concat_heads_decode, sdpa_decode, sdpa) must be the context's K64i copy,
-    tree for tree: a wrong kernel directory is silent at run time.
+    K64c lost QWEN_SDPA_TREE_SCRATCH_ROUNDS). The graft's _ttnncpp.so carries GRAFT_LITERALS (K64j's
+    [QWEN-SDPA] factory literals, which the QWEN_ token regex cannot see) and, with
+    --previous-graft, every QWEN_ / [QWEN- string of the graft it replaces (K64i), as build_k64j.sh
+    step 6 checked when it was built - that graft first shown to be K64i (its MANIFEST.sha256 holds
+    and its _ttnncpp.so is the v235 gate's cf54d716), or the superset is vacuous. Each op directory
+    the JIT compiles from (attn_prep, nlp_concat_heads_decode, sdpa_decode, sdpa) must be the
+    context's graft copy, tree for tree: a wrong kernel directory is silent at run time.
 (b) overlay: every destination docker/qwen-c2-overlay.txt names holds the sha256 of its source
     in the build context; the install record says which base files the overlay changed. The
     image's revision label and /opt/qwen-c2/source-revision name the commit the context was
@@ -21,7 +25,8 @@ gets its tag; a problem exits 1, so a failed image is never tagged, smoked or pu
     the same platform argv; and exact's QWEN_ environment, as a process in the image sees it
     after the boot hook, is the v235 gate's (run 36087022223 m3native-gate.json
     qwen_configuration, docker/qwen-c2-v235-environment.json) - not the contract's own idea of
-    it (memory read-the-launched-argv).
+    it (memory read-the-launched-argv). ENVIRONMENT_SUCCESSIONS names the one reviewed way it may
+    differ: the runtime binary pin, K64i's -> K64j's.
 (d) layers: every file of the image's /experiment-scripts/ci and /speculative-decoding/harness
     that the layer model (layers.json, c2_image_layers.expected_tree) names holds its modelled
     version or HEAD's. Anything else - bytes neither version has, or a file the model says the
@@ -52,20 +57,50 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import c2_overlay  # noqa: E402
 
-# The K64i binaries and where docker/qwen-c2-serving.Dockerfile copies them (its first RUN).
+# The graft the context carries and the image installs (S2 design W9: K64j replaces K64i).
+GRAFT_NAME = 'opgraft-K64j'
+GRAFT_LABEL = 'K64j'
+# The graft's binaries and where docker/qwen-c2-serving.Dockerfile copies them (its first RUN).
 GRAFT_BINARIES = (
     ('_ttnn.so', '/opt/tt-metal/ttnn/ttnn/_ttnn.so'),
     ('_ttnncpp.so', '/opt/tt-metal/build_Release/ttnn/_ttnncpp.so'),
     ('_ttnncpp.so', '/opt/tt-metal/build_Release/lib/_ttnncpp.so'),
 )
-# The K64i op directories and where the Dockerfile's second loop puts them.
+# The graft's op directories and where the Dockerfile's second loop puts them.
 GRAFT_OP_DIRS = (
     ('attn_prep', '/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/attn_prep'),
     ('nlp_concat_heads_decode', '/opt/tt-metal/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode'),
     ('sdpa_decode', '/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa_decode'),
     ('sdpa', '/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa'),
 )
-GRAFT_IN_IMAGE = '/opt/qwen-c2/opgraft-K64i'
+GRAFT_IN_IMAGE = '/opt/qwen-c2/' + GRAFT_NAME
+# Literals the graft's _ttnncpp.so must carry: the [QWEN-SDPA] factory branches the served modes need (F4
+# flags, F9 KV share, F18 q-slice, F22 K64j's runtime extent) and the tree-scratch patch's variable.
+# packed_any_admission.BINARY_LITERALS checks the same at every c2-packed attach (test_c2_image_overlay
+# holds the two equal); this module is stdlib-only and runs from the build context, so it keeps its own.
+GRAFT_LITERALS = ('[QWEN-SDPA] flags=', '[QWEN-SDPA] KV-share twin bands', '[QWEN-SDPA] q-slice rows_per_kv=',
+                  '[QWEN-SDPA] runtime-extent entries=', 'QWEN_SDPA_TREE_SCRATCH_ROUNDS')
+# Reviewed successions of the v235 gate's environment, (c): {variable: (the gate's value, this image's
+# value, reason)}. The only way exact's QWEN_ environment may differ from the gate's without failing G1;
+# an entry is a review of that one pair, never a variable-wide exemption.
+ENVIRONMENT_SUCCESSIONS = {
+    'QWEN_FAST_RUNTIME_BINARY_SHA256': (
+        'cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4',
+        '152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7',
+        'graft K64j replaces K64i (S2 design W9): K64i plus the runtime-extent decode factory branch (0x20, '
+        'F19-F22) and four kernels, K64i\'s 30 QWEN strings kept; exact never builds a 0x20 program, and M2 '
+        'holds exact on the K64j image IDENTICAL to v235'),
+}
+# The graft GRAFT_NAME replaces, whose strings (a)'s superset check holds the new binaries to: K64i, the v235
+# gate's binary - the older value of the reviewed succession. The superset is only as good as the graft it
+# compares with, so that graft must verify against its own MANIFEST.sha256 and its _ttnncpp.so must be this
+# binary; a replaced or rebuilt ~/opgraft-K64i would otherwise make "keeps all of K64i's strings" vacuous.
+PREVIOUS_GRAFT_LABEL = 'K64i'
+PREVIOUS_GRAFT_TTNNCPP_SHA256 = ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][0]
+GRAFT_MANIFEST = 'MANIFEST.sha256'
+# sha256sum's lines, as the graft builds write them ((cd $G && find . -type f ! -name MANIFEST.sha256 | sort |
+# xargs sha256sum) > MANIFEST.sha256): the digest, a space, ' ' or '*' for the mode, the ./-relative path.
+MANIFEST_LINE = re.compile(r'^([0-9a-f]{64}) [ *](.+)$')
 # QWEN_ flags the base binaries read, the image sets, and the graft is KNOWN not to read, each
 # with the reason that is acceptable (e.g. the gate that qualified the graft ran without it
 # too). Empty until a build reports one; never add a flag without reading which patch it is.
@@ -174,6 +209,116 @@ def qwen_strings(data):
     return sorted({match.group(0).decode() for match in QWEN_TOKEN.finditer(data)})
 
 
+PRINTABLE = frozenset(range(0x20, 0x7f)) | {0x09}
+
+
+def qwen_literals(data):
+    """Every printable run (as `strings` cuts them: ASCII 0x20-0x7e and tab, at least four long) that holds
+    QWEN_ or [QWEN-: build_k64j.sh's `strings | grep -E 'QWEN_|\\[QWEN-' | sort -u`. `data` is bytes or an
+    mmap; only the runs around each QWEN are read, so a 300 MB binary costs one scan."""
+    found, index, size = set(), data.find(b'QWEN'), len(data)
+    while index >= 0:
+        start, end = index, index + 4
+        while start > 0 and data[start - 1] in PRINTABLE:
+            start -= 1
+        while end < size and data[end] in PRINTABLE:
+            end += 1
+        run = bytes(data[start:end])
+        if len(run) >= 4 and (b'QWEN_' in run or b'[QWEN-' in run):
+            found.add(run.decode('ascii'))
+        index = data.find(b'QWEN', end)
+    return sorted(found)
+
+
+def binary_literals(path):
+    """qwen_literals of a file, read through a read-only map."""
+    import mmap
+
+    with open(str(path), 'rb') as handle:
+        if not Path(path).stat().st_size:
+            return []
+        with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as view:
+            return qwen_literals(view)
+
+
+def previous_graft_problems(previous):
+    """(a)'s check of the graft the superset compares with (--previous-graft, the rig's ~/opgraft-K64i): its
+    MANIFEST.sha256 lists each binary read here at the binary's own sha256 (the build script runs the full
+    `sha256sum -c` before the build; this holds the two files read here to it again), and its _ttnncpp.so is
+    PREVIOUS_GRAFT_TTNNCPP_SHA256. A binary that is missing is named by the superset check itself."""
+    previous = Path(previous)
+    manifest = previous / GRAFT_MANIFEST
+    if not manifest.is_file():
+        return ['(a) the previous graft %s has no %s: it cannot be shown to be %s' % (previous, GRAFT_MANIFEST,
+                                                                                    PREVIOUS_GRAFT_LABEL)]
+    listed = {}
+    for line in manifest.read_text(encoding='utf-8').splitlines():
+        match = MANIFEST_LINE.match(line)
+        if match:
+            name = match.group(2)
+            listed[name[2:] if name.startswith('./') else name] = match.group(1)
+    problems = []
+    for binary in sorted({binary for binary, _ in GRAFT_BINARIES}):
+        path = previous / binary
+        if not path.is_file():
+            continue
+        digest = c2_overlay.sha256(path)
+        if binary not in listed:
+            problems.append('(a) the previous graft\'s %s does not list %s' % (GRAFT_MANIFEST, binary))
+        elif listed[binary] != digest:
+            problems.append('(a) the previous graft\'s %s is %s, not the %s its %s lists: changed after it was built'
+                            % (binary, digest[:16], listed[binary][:16], GRAFT_MANIFEST))
+        if binary == '_ttnncpp.so' and digest != PREVIOUS_GRAFT_TTNNCPP_SHA256:
+            problems.append('(a) the previous graft\'s _ttnncpp.so is %s, not %s\'s %s (the v235 gate\'s runtime pin): '
+                            'the superset would compare with another binary' % (
+                                digest[:16], PREVIOUS_GRAFT_LABEL, PREVIOUS_GRAFT_TTNNCPP_SHA256[:16]))
+    return problems
+
+
+def check_graft_literals(graft, previous=None):
+    """Problems and report lines for (a)'s literals, read on the host from the context's graft (its binaries'
+    sha256 are the installed ones', checked in check_binaries): GRAFT_LITERALS in its _ttnncpp.so, and with
+    `previous` (the graft it replaces, K64i) every QWEN_ / [QWEN- string of each previous binary still in the
+    new one - a graft .so replaces the whole binary, and a patch its source tree lacked goes silently."""
+    problems, lines = [], []
+    graft = Path(graft)
+    main = graft / '_ttnncpp.so'
+    if not main.is_file():
+        return ['(a) the context has no %s/_ttnncpp.so to read literals from' % graft.name], lines
+    import mmap
+
+    if not main.stat().st_size:
+        missing = list(GRAFT_LITERALS)
+    else:
+        with open(str(main), 'rb') as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as view:
+            missing = [literal for literal in GRAFT_LITERALS if view.find(literal.encode('ascii')) < 0]
+    if missing:
+        problems.append('(a) the %s _ttnncpp.so lacks %s: not a %s build' % (GRAFT_LABEL, missing, GRAFT_LABEL))
+    else:
+        lines.append('(a) the %s _ttnncpp.so carries %s' % (GRAFT_LABEL, ', '.join(GRAFT_LITERALS)))
+    if previous is None:
+        lines.append('(a) QWEN_ / [QWEN- superset against the previous graft: not checked (no --previous-graft)')
+        return problems, lines
+    found = previous_graft_problems(previous)
+    problems += found
+    if not found:
+        lines.append('(a) the previous graft %s verifies against its %s and its _ttnncpp.so is %s\'s %s' % (
+            Path(previous).name, GRAFT_MANIFEST, PREVIOUS_GRAFT_LABEL, PREVIOUS_GRAFT_TTNNCPP_SHA256[:16]))
+    for binary in sorted({binary for binary, _ in GRAFT_BINARIES}):
+        old, new = Path(previous) / binary, graft / binary
+        if not old.is_file():
+            problems.append('(a) the previous graft has no %s to compare with' % old)
+            continue
+        before, after = binary_literals(old), (binary_literals(new) if new.is_file() else [])
+        lost = sorted(set(before) - set(after))
+        if lost:
+            problems.append('(a) %s %s lost %d QWEN string(s) the previous graft\'s carries (%s): %s' % (
+                GRAFT_LABEL, binary, len(lost), old, lost))
+        lines.append('(a) %s %s: %d QWEN strings, the previous graft\'s %d all kept%s' % (
+            GRAFT_LABEL, binary, len(after), len(before), '' if not lost else ' EXCEPT %d' % len(lost)))
+    return problems, lines
+
+
 def base_image(dockerfile_text):
     """The P8 base the C2 Dockerfile builds FROM (its ARG BASE default)."""
     match = re.search(r'^ARG BASE=(\S+)\s*$', dockerfile_text, re.MULTILINE)
@@ -183,18 +328,18 @@ def base_image(dockerfile_text):
 
 
 def graft_pairs(dockerfile_text):
-    """The (binary, path) pairs the Dockerfile's K64i loop copies, to hold GRAFT_BINARIES to it."""
+    """The (binary, path) pairs the Dockerfile's graft loop copies, to hold GRAFT_BINARIES to it."""
     match = re.search(r'for pair in ((?:[A-Za-z0-9_.]+\.so:\S+\s*\\?\s*)+); do', dockerfile_text)
     if not match:
-        raise ValueError('no K64i binary loop in the C2 Dockerfile')
+        raise ValueError('no graft binary loop in the C2 Dockerfile')
     return tuple(tuple(pair.split(':', 1)) for pair in match.group(1).replace('\\', ' ').split())
 
 
 def graft_dirs(dockerfile_text):
-    """The (op, path) pairs the Dockerfile's K64i directory loop replaces, to hold GRAFT_OP_DIRS to it."""
+    """The (op, path) pairs the Dockerfile's graft directory loop replaces, to hold GRAFT_OP_DIRS to it."""
     match = re.search(r'for pair in ((?:[A-Za-z0-9_]+:/\S+\s*\\?\s*)+); do', dockerfile_text)
     if not match:
-        raise ValueError('no K64i op directory loop in the C2 Dockerfile')
+        raise ValueError('no graft op directory loop in the C2 Dockerfile')
     return tuple(tuple(pair.split(':', 1)) for pair in match.group(1).replace('\\', ' ').split())
 
 
@@ -309,20 +454,20 @@ def check_binaries(host_graft, image_files, base_files, qwen_names):
 
 def check_op_dirs(host_dirs, image_dirs):
     """Problems and report lines for (a)'s op directories: {op: tree digest} of the context's
-    K64i copy against the probe's 'dirs' of the built image."""
+    graft copy against the probe's 'dirs' of the built image."""
     problems, lines = [], []
     for op, path in GRAFT_OP_DIRS:
         want = host_dirs.get(op)
         found = image_dirs.get(path, {})
         if want is None:
-            problems.append('(a) the context has no opgraft-K64i/%s to compare %s with' % (op, path))
+            problems.append('(a) the context has no %s/%s to compare %s with' % (GRAFT_NAME, op, path))
         elif found.get('sha256') is None:
             problems.append('(a) %s is not a directory in the image' % path)
         elif found['sha256'] != want:
-            problems.append('(a) %s (%s) is tree %s, not the K64i %s tree %s: the JIT would compile other '
-                            'kernels' % (path, found.get('realpath'), found['sha256'][:16], op, want[:16]))
+            problems.append('(a) %s (%s) is tree %s, not the %s %s tree %s: the JIT would compile other '
+                            'kernels' % (path, found.get('realpath'), found['sha256'][:16], GRAFT_LABEL, op, want[:16]))
         else:
-            lines.append('(a) %s is the K64i %s tree %s' % (path, op, want[:16]))
+            lines.append('(a) %s is the %s %s tree %s' % (path, GRAFT_LABEL, op, want[:16]))
     return problems, lines
 
 
@@ -426,13 +571,19 @@ def environment_sha(env):
 def environment_differences(reference, env):
     """(differences, equivalents) of a QWEN_ environment against the v235 gate's: each difference
     names a variable the gate ran otherwise; equivalents are variables the gate left unset whose
-    value here is the code's own default for unset (reference['unset_equivalents'])."""
+    value here is the code's own default for unset (reference['unset_equivalents']), and the reviewed
+    ENVIRONMENT_SUCCESSIONS - that variable, from the gate's value to exactly that value."""
     gate = reference['qwen_configuration']
     unset = {name: record['value'] for name, record in reference.get('unset_equivalents', {}).items()}
     got = qwen_environment(env)
     differences, equivalents = [], []
     for name in sorted(gate):
         if got.get(name) != gate[name]:
+            succession = ENVIRONMENT_SUCCESSIONS.get(name)
+            if succession is not None and (gate[name], got.get(name)) == succession[:2]:
+                equivalents.append('%s=%s succeeds the v235 gate\'s %s, reviewed: %s' % (
+                    name, got[name], gate[name], succession[2]))
+                continue
             differences.append('%s=%s, the v235 gate ran %s' % (name, got.get(name, '(unset)'), gate[name]))
     for name in sorted(set(got) - set(gate)):
         if unset.get(name) == got[name]:
@@ -454,7 +605,7 @@ def check_environment(reference, environments):
     lines.append('(c) %s: QWEN_ environment sha256 %s over %d variables; the v235 gate\'s %s over %d%s' % (
         PROFILE_OF_RECORD, environment_sha(qwen_environment(exact)), len(qwen_environment(exact)),
         environment_sha(reference['qwen_configuration']), len(reference['qwen_configuration']),
-        '' if differences else ' (equal up to the unset defaults)'))
+        '' if differences else ' (equal up to the unset defaults and the reviewed successions)'))
     baseline = qwen_environment(exact)
     for name in sorted(environments):
         if name == PROFILE_OF_RECORD:
@@ -640,8 +791,9 @@ def overlay_destinations(entries, source_shas):
             if not destination.startswith(c2_overlay.PURELIB)}
 
 
-def verify(image, context, models, checkout=None, docker=None, log=print):
-    """Run (a)-(e) (and (i) with a checkout); return (problems, report)."""
+def verify(image, context, models, checkout=None, docker=None, log=print, previous_graft=None):
+    """Run (a)-(e) (and (i) with a checkout); return (problems, report). previous_graft: the graft
+    GRAFT_NAME replaces (the rig's ~/opgraft-K64i), whose strings the new binaries must keep."""
     docker = docker or Docker()
     context = Path(context)
     entries = c2_overlay.read_manifest(context / 'qwen-c2-overlay.txt')
@@ -652,7 +804,7 @@ def verify(image, context, models, checkout=None, docker=None, log=print):
     if tuple(graft_dirs(dockerfile)) != GRAFT_OP_DIRS:
         problems.append('(a) the Dockerfile replaces %s, not GRAFT_OP_DIRS %s' % (graft_dirs(dockerfile), GRAFT_OP_DIRS))
     base = base_image(dockerfile)
-    graft = context / 'opgraft-K64i'
+    graft = context / GRAFT_NAME
     host_graft = {binary: c2_overlay.sha256(graft / binary) for binary in sorted({binary for binary, _ in GRAFT_BINARIES})
                   if (graft / binary).is_file()}
     host_dirs = {op: c2_overlay.tree_digest(str(graft / op)) for op, _ in GRAFT_OP_DIRS}
@@ -676,6 +828,9 @@ def verify(image, context, models, checkout=None, docker=None, log=print):
     report = ['(image) %s, base %s' % (image, base)]
     found, lines = check_binaries(host_graft, built['files'], based['files'], qwen_names)
     problems += found + check_runtime_sha(env, built['files'])
+    report += lines
+    found, lines = check_graft_literals(graft, previous_graft)
+    problems += found
     report += lines
     found, lines = check_op_dirs(host_dirs, built.get('dirs') or {})
     problems += found
@@ -720,8 +875,8 @@ def verify(image, context, models, checkout=None, docker=None, log=print):
 def base_drift(context, graft=None, docker=None, log=print):
     """Read-only, before any build: what the first build's (a) strings, (d) and (e) would fail on,
     measured on the P8 base image the context builds FROM. context needs the staged files
-    (c2_overlay.py stage); graft, when given, is a K64i directory holding _ttnn.so and
-    _ttnncpp.so. Returns (problems, report); nothing is built, tagged or written."""
+    (c2_overlay.py stage); graft, when given, is a graft directory (GRAFT_NAME's, K64j) holding
+    _ttnn.so and _ttnncpp.so. Returns (problems, report); nothing is built, tagged or written."""
     docker = docker or Docker()
     context = Path(context)
     entries = c2_overlay.read_manifest(context / 'qwen-c2-overlay.txt')
@@ -781,16 +936,21 @@ def main(argv=None):
     parser.add_argument('--report', help='write the full JSON report here')
     parser.add_argument('--base-drift', action='store_true',
                         help='read-only: check the P8 base the context names, before any build')
-    parser.add_argument('--graft', help='with --base-drift: a K64i directory to diff the base binaries\' strings with')
+    parser.add_argument('--graft', help='with --base-drift: a graft directory (K64j) to diff the base binaries\' '
+                                        'strings with')
+    parser.add_argument('--previous-graft', help='the graft this image\'s replaces (the rig\'s ~/opgraft-K64i): every '
+                                                 'QWEN_ / [QWEN- string of its binaries must survive; required with '
+                                                 '--image')
     arguments = parser.parse_args(argv)
     if arguments.base_drift:
         if arguments.image:
             parser.error('--base-drift reads the base the context names; it takes no --image')
         problems, report = base_drift(arguments.context, arguments.graft)
     else:
-        if not arguments.image or not arguments.models:
-            parser.error('--image and --models are required')
-        problems, report = verify(arguments.image, arguments.context, arguments.models, arguments.checkout)
+        if not arguments.image or not arguments.models or not arguments.previous_graft:
+            parser.error('--image, --models and --previous-graft are required')
+        problems, report = verify(arguments.image, arguments.context, arguments.models, arguments.checkout,
+                                  previous_graft=arguments.previous_graft)
     if arguments.report:
         Path(arguments.report).write_text(json.dumps(report, indent=1, sort_keys=True) + '\n', encoding='utf-8')
     return 1 if problems else 0

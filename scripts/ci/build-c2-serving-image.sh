@@ -9,19 +9,30 @@
 #     tar -xzf <tgz> -O ./build-c2-serving-image.sh > /tmp/build-c2.sh && bash /tmp/build-c2.sh <tgz> <tag>
 #   An older copy writes no build-stamp, so the Dockerfile's last COPY fails its build; a copy
 #   that is not the context's is refused below, and G1 checks the stamp again.
-#   This script checks the context against the manifest and adds what only the rig has: the K64i
-#   op graft, the DFlash2 fixtures and draft config, and a persistent copy of the gate's cache
-#   volume under the platform's /models mount (~/hf-cache/hub/.qwen-c2).
+#   This script checks the context against the manifest and adds what only the rig has: the K64j
+#   op graft (checked against its MANIFEST.sha256 and its _ttnncpp.so pin first), the DFlash2 fixtures
+#   and draft config, and a persistent copy of the gate's cache volume under the platform's /models
+#   mount (~/hf-cache/hub/.qwen-c2).
 #   The image is tagged only after G1 provenance (c2_image_provenance.py) passes; a failed build
 #   is removed (C2_KEEP_FAILED_IMAGE=1 tags it <image>-g1-failed instead).
 #   Optional env: C2_CHECKOUT (a checkout to compare the image's trees with, informational),
 #   C2_PROVENANCE_REPORT (where to write the provenance JSON).
+#   The graft is K64j (S2, design W9): its _ttnncpp.so must be $graft_sha, and G1 holds every
+#   QWEN_ / [QWEN- string of the previous graft (K64i, $previous_graft, itself checked against its
+#   MANIFEST.sha256 and $previous_graft_sha first) to be in it too (a graft .so replaces the whole
+#   binary: memory graft-so-drops-image-patches). The kernel-cache key below hashes
+#   the graft's own *qwen*.cpp, so K64j's first start compiles every kernel (TT_METAL_CACHE is that
+#   whole directory); never seed it from K64i's.
 set -euo pipefail
 context_tgz=$1
 tag=$2
 image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$tag
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
-graft=/home/thatch/opgraft-K64i
+graft=/home/thatch/opgraft-K64j
+graft_name=opgraft-K64j
+graft_sha=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7
+previous_graft=/home/thatch/opgraft-K64i
+previous_graft_sha=cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4
 fixtures=/home/thatch/.cache/qwen-experiments
 models=/home/thatch/hf-cache/hub
 ctx=/home/thatch/c2-serving-ctx
@@ -44,7 +55,21 @@ printf '%s\n' "$stamp" > "$ctx/build-stamp"
 source_revision=$(cat "$ctx/source-revision")
 echo "context staged from $source_revision"
 mkdir -p "$ctx/fixture" "$ctx/draft-config"
-cp -al "$graft" "$ctx/opgraft-K64i"
+(cd "$graft" && sha256sum -c --quiet MANIFEST.sha256) || { echo "$graft does not verify against its MANIFEST.sha256" >&2; exit 2; }
+if [ "$(sha256sum < "$graft/_ttnncpp.so" | cut -c1-64)" != "$graft_sha" ]; then
+  echo "$graft/_ttnncpp.so is not the K64j binary $graft_sha" >&2
+  exit 2
+fi
+# G1 holds the graft's strings to the previous graft's, so that graft must be K64i as built: its MANIFEST.sha256
+# verifies and its _ttnncpp.so is the v235 gate's binary (a replaced or rebuilt ~/opgraft-K64i would make the
+# superset vacuous).
+test -f "$previous_graft/_ttnncpp.so" || { echo "$previous_graft/_ttnncpp.so is missing: G1 compares the graft's strings with it" >&2; exit 2; }
+(cd "$previous_graft" && sha256sum -c --quiet MANIFEST.sha256) || { echo "$previous_graft does not verify against its MANIFEST.sha256" >&2; exit 2; }
+if [ "$(sha256sum < "$previous_graft/_ttnncpp.so" | cut -c1-64)" != "$previous_graft_sha" ]; then
+  echo "$previous_graft/_ttnncpp.so is not the K64i binary $previous_graft_sha" >&2
+  exit 2
+fi
+cp -al "$graft" "$ctx/$graft_name"
 for component in attention convolution mlp projection selector; do
   cp -al "$fixtures/dflash2-$component-$revision" "$ctx/fixture/$component"
 done
@@ -103,13 +128,14 @@ DOCKER_BUILDKIT=1 docker build -f "$ctx/Dockerfile" --build-arg "KERNEL_CACHE=$k
 built=$(cat "$iid")
 echo "built $built: G1 provenance before it is tagged $image"
 
-# G1 provenance: (a) the installed binaries and op directories are the K64i graft's and no QWEN_
-# flag the image sets lost its patch, (b) every overlaid file's sha256 in the image is its source's
+# G1 provenance: (a) the installed binaries and op directories are the K64j graft's, no QWEN_
+# flag the image sets lost its patch, and every QWEN_ / [QWEN- string of the previous graft is still
+# there (plus K64j's own literals), (b) every overlaid file's sha256 in the image is its source's
 # and the image names the staged commit and this script, (c) the boot argv of every profile is the
 # contract's and exact's environment is the v235 gate's, (d) the image's trees match the layer
 # model, (e) every frozen-recipe pin holds. Any problem exits non-zero here, so the image never
 # gets its tag.
-provenance=(--image "$built" --context "$ctx" --models "$models")
+provenance=(--image "$built" --context "$ctx" --models "$models" --previous-graft "$previous_graft")
 if [ -n "${C2_CHECKOUT:-}" ]; then provenance+=(--checkout "$C2_CHECKOUT"); fi
 if [ -n "${C2_PROVENANCE_REPORT:-}" ]; then provenance+=(--report "$C2_PROVENANCE_REPORT"); fi
 python3 -B "$ctx/c2_image_provenance.py" "${provenance[@]}"

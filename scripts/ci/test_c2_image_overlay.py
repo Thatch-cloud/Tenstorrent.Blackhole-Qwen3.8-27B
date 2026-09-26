@@ -112,6 +112,12 @@ C2_KNOWN_STALE = {
         'READER_SHA256 for the drain. ' + _UNREVIEWED),
 }
 
+# S2 (design W9): what C2-packed-any adds to the image, and the modules S2 edits that no layer re-laid at HEAD.
+S2_MODULES = ('scripts/ci/extent_attention_replay.py', 'scripts/ci/serving_buffer_pool.py',
+              'scripts/ci/packed_any_admission.py', 'scripts/ci/packed_any_evidence.json',
+              'scripts/ci/model_batch.py', 'scripts/ci/dflash_packed_proposal_coordinator.py',
+              'scripts/ci/memory_ledger.py')
+
 # What the C2 layer overlaid before the manifest existed (the workflow's nine-file loop and the
 # Dockerfile's cp line, image v6-teardown). Each must keep reaching the same place.
 PRE_MANIFEST = {
@@ -340,6 +346,38 @@ class ImageContentTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn(path, sources)
                 self.assertEqual(self.layers[path], 'HEAD')
+
+    def test_the_s2_modules_are_overlaid(self):
+        """S2 (design W9): the extent readers and the admission with its evidence, and the modules S2 edits that
+        the image would otherwise hold at P8's commit (model_batch, the coordinator, memory_ledger) or the
+        bundle's: each reaches the image at HEAD."""
+        sources = {entry.source for entry in manifest_entries()}
+        for path in S2_MODULES:
+            with self.subTest(path=path):
+                self.assertIn(path, sources)
+                self.assertEqual(self.layers[path], 'HEAD')
+
+    def test_dropping_an_s2_module_from_the_manifest_ships_it_stale(self):
+        """Positive control (design W9): without its manifest line model_batch.py falls back to the layer below
+        (P8's commit), and the moment HEAD's copy differs from that layer - as S2's W3 edit makes it - the
+        stale-file check names it. Where HEAD still equals P8's copy the edit is simulated in the diff the
+        check reads; where it already differs the real diff is used."""
+        path = 'scripts/ci/model_batch.py'
+        entries = [entry for entry in manifest_entries() if entry.source != path]
+        with mock.patch.object(layers_model, 'manifest_entries', return_value=entries):
+            dropped = layers_model.image_layers(REPO)
+        self.assertEqual(dropped[path], p8_commit(), 'without its line the image holds P8\'s model_batch.py')
+        real = layers_model.stale_files(dropped, REPO)
+        if path not in real:
+            class EditedRepo(object):
+                def paths(self, *arguments):
+                    found = REPO.paths(*arguments)
+                    return found | {path} if arguments[0] == 'diff' and arguments[2] == p8_commit() else found
+
+            real = layers_model.stale_files(dropped, EditedRepo())
+        self.assertIn(path, real)
+        self.assertNotIn(path, C2_KNOWN_STALE, 'nothing may excuse it: it must be overlaid')
+        self.assertNotIn(path, self.stale, 'with its line (HEAD) it is never stale')
 
     def test_an_entry_off_its_tree_path_does_not_relay_the_tree_copy(self):
         """A source listed only elsewhere (qwen_c2_boot -> @purelib) leaves the tree's copy at
@@ -577,6 +615,54 @@ class OneListTests(unittest.TestCase):
         self.assertEqual(provenance.graft_pairs(text), provenance.GRAFT_BINARIES)
         self.assertEqual(provenance.graft_dirs(text), provenance.GRAFT_OP_DIRS)
 
+    def test_the_image_installs_k64j_and_pins_it_where_the_attach_reads_it(self):
+        """S2 (design W9): one graft name everywhere - the Dockerfile's copy, its sha256 test, the runtime pin the
+        attach admits (runtime_binary_override, packed_any_admission), the rig script's graft and the drift
+        action's - and K64i only as the previous graft G1 compares strings with."""
+        import packed_any_admission
+
+        k64j = packed_any_admission.K64J_TTNNCPP_SHA256
+        text = code_lines(C2_DOCKERFILE)
+        self.assertEqual(provenance.GRAFT_NAME, 'opgraft-K64j')
+        self.assertIn('COPY %s/ %s/' % (provenance.GRAFT_NAME, provenance.GRAFT_IN_IMAGE), text)
+        self.assertIn('g=%s;' % provenance.GRAFT_IN_IMAGE, text)
+        self.assertIn('_ttnncpp.so | cut -c1-64)" = %s;' % k64j, text)
+        self.assertEqual(provenance.dockerfile_env(text)['QWEN_FAST_RUNTIME_BINARY_SHA256'], k64j)
+        self.assertNotIn('K64i', text)
+        self.assertNotIn(packed_any_admission.K64I_TTNNCPP_SHA256, text)
+        script = code_lines(BUILD_SCRIPT)
+        self.assertIn('graft=/home/thatch/%s\n' % provenance.GRAFT_NAME, script)
+        self.assertIn('graft_name=%s\n' % provenance.GRAFT_NAME, script)
+        self.assertIn('graft_sha=%s\n' % k64j, script)
+        self.assertIn('previous_graft=/home/thatch/opgraft-K64i\n', script)
+        # Review W7 #3: the previous graft is K64i as built - its manifest verifies and its binary is the v235
+        # gate's - before anything is built from the context.
+        self.assertEqual(provenance.PREVIOUS_GRAFT_TTNNCPP_SHA256,
+                         provenance.ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][0])
+        self.assertIn('previous_graft_sha=%s\n' % provenance.PREVIOUS_GRAFT_TTNNCPP_SHA256, script)
+        verify_previous = '(cd "$previous_graft" && sha256sum -c --quiet MANIFEST.sha256)'
+        self.assertIn(verify_previous, script)
+        self.assertIn('sha256sum < "$previous_graft/_ttnncpp.so" | cut -c1-64)" != "$previous_graft_sha"', script)
+        for step in (verify_previous, '!= "$previous_graft_sha"'):
+            self.assertLess(script.index(step), script.index('cp -al "$graft"'))
+            self.assertLess(script.index(step), script.index('docker build'))
+        self.assertIn('cp -al "$graft" "$ctx/$graft_name"', script)
+        self.assertIn('--previous-graft "$previous_graft"', script)
+        # The graft is checked before it is linked into the context.
+        self.assertLess(script.index('sha256sum -c --quiet MANIFEST.sha256'), script.index('cp -al "$graft"'))
+        self.assertLess(script.index('!= "$graft_sha"'), script.index('cp -al "$graft"'))
+        # The kernel-cache key reads the graft being installed, so K64j's is its own (never K64i's cache).
+        self.assertIn('kernels="$graft/sdpa_decode/device/kernels"', script)
+        self.assertIn('pf=$(cd "$graft/sdpa"', script)
+        drift = workflow_step(C2_WORKFLOW.read_text(encoding='utf-8'), 'G1 base drift')
+        self.assertIn('--graft /home/thatch/%s' % provenance.GRAFT_NAME, drift)
+
+    def test_the_graft_literals_are_the_admission_s(self):
+        import packed_any_admission
+
+        self.assertEqual(provenance.GRAFT_LITERALS,
+                         tuple(literal.decode('ascii') for literal in packed_any_admission.BINARY_LITERALS))
+
 
 class EnvironmentTests(unittest.TestCase):
     """Exact's environment is the v235 gate's, read from the gate's own record."""
@@ -614,7 +700,49 @@ class EnvironmentTests(unittest.TestCase):
     def test_the_exact_profile_boots_into_the_v235_environment(self):
         differences, equivalents = provenance.environment_differences(self.reference, self.booted('exact'))
         self.assertEqual(differences, [])
-        self.assertEqual(equivalents, ["QWEN_FAST_OUTPUT_BUDGET=256 is the gate's unset default"])
+        self.assertEqual(len(equivalents), 2, equivalents)
+        self.assertTrue(equivalents[0].startswith(
+            "QWEN_FAST_RUNTIME_BINARY_SHA256=%s succeeds the v235 gate's %s, reviewed: graft K64j" % (
+                '152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7', 'cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4')))
+        self.assertEqual(equivalents[1], "QWEN_FAST_OUTPUT_BUDGET=256 is the gate's unset default")
+
+    def test_the_gate_reads_the_same_succession(self):
+        """The bring-up gate (real_text_compare.arithmetic_diff) holds the K64j image to v235's reference under the
+        same review: exact on K64j against v235 is the same arithmetic, so a divergence there FAILS (M2), while any
+        other binary pin is still an arithmetic difference."""
+        import real_text_compare
+
+        self.assertEqual(real_text_compare.REVIEWED_SUCCESSIONS,
+                         {name: pair[:2] for name, pair in provenance.ENVIRONMENT_SUCCESSIONS.items()})
+        gate, image, _ = provenance.ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256']
+
+        def report(value):
+            return dict(qwen_configuration={'QWEN_FAST_RUNTIME_BINARY_SHA256': value, 'QWEN_FAST_QUAD_DRAFT': '1'})
+
+        self.assertEqual(real_text_compare.arithmetic_diff(report(image), report(gate)), {})
+        self.assertEqual(real_text_compare.arithmetic_diff(report(gate), report(image)), {})
+        self.assertEqual(real_text_compare.arithmetic_diff(report('a' * 64), report(gate)),
+                         {'QWEN_FAST_RUNTIME_BINARY_SHA256': ['a' * 64, gate]})
+
+    def test_exactly_one_succession_and_only_for_its_own_pair(self):
+        """S2 (design W9): the runtime pin moves from K64i's binary to K64j's and nowhere else; any other value
+        of that variable, or another variable moved, is still a difference."""
+        self.assertEqual(sorted(provenance.ENVIRONMENT_SUCCESSIONS), ['QWEN_FAST_RUNTIME_BINARY_SHA256'])
+        gate, image, reason = provenance.ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256']
+        self.assertEqual(gate, self.reference['qwen_configuration']['QWEN_FAST_RUNTIME_BINARY_SHA256'])
+        self.assertEqual((gate, image), ('cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4', '152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7'))
+        self.assertGreater(len(reason), 40)
+        env = self.booted('exact')
+        for value in ('a' * 64, '(unset)'):
+            moved = dict(env)
+            if value == '(unset)':
+                del moved['QWEN_FAST_RUNTIME_BINARY_SHA256']
+            else:
+                moved['QWEN_FAST_RUNTIME_BINARY_SHA256'] = value
+            with self.subTest(value=value):
+                differences, equivalents = provenance.environment_differences(self.reference, moved)
+                self.assertEqual(differences, ['QWEN_FAST_RUNTIME_BINARY_SHA256=%s, the v235 gate ran %s' % (value, gate)])
+                self.assertFalse(any('succeeds' in line for line in equivalents))
 
     def test_a_difference_from_the_gate_is_reported(self):
         env = self.booted('exact')
@@ -840,15 +968,16 @@ class OverlayToolTests(unittest.TestCase):
 
 
 def context_dirs(context):
-    return {op: c2_overlay.tree_digest(str(Path(context) / 'opgraft-K64i' / op)) for op, _ in provenance.GRAFT_OP_DIRS}
+    return {op: c2_overlay.tree_digest(str(Path(context) / provenance.GRAFT_NAME / op))
+            for op, _ in provenance.GRAFT_OP_DIRS}
 
 
 def fake_image(context, entries, tampered=None, dropped=None, record=True, ttnn_strings=None, op_dir=None,
                trees=None, pins=None, base_pins=None):
     """Probe results for an image built faithfully from context (with optional faults)."""
     context = Path(context)
-    graft = {binary: c2_overlay.sha256(context / 'opgraft-K64i' / binary) for binary in ('_ttnn.so', '_ttnncpp.so')}
-    strings = {binary: provenance.qwen_strings((context / 'opgraft-K64i' / binary).read_bytes())
+    graft = {binary: c2_overlay.sha256(context / provenance.GRAFT_NAME / binary) for binary in ('_ttnn.so', '_ttnncpp.so')}
+    strings = {binary: provenance.qwen_strings((context / provenance.GRAFT_NAME / binary).read_bytes())
                for binary in graft}
     files = {}
     for binary, path in provenance.GRAFT_BINARIES:
@@ -886,6 +1015,25 @@ def fake_image(context, entries, tampered=None, dropped=None, record=True, ttnn_
     built = dict(files=files, record=dict(files=rows) if record else None, trees=image_trees, dirs=dirs,
                  pins=faithful_pins if pins is None else pins, bundle={})
     return built, dict(files=base, pins=faithful_pins if base_pins is None else base_pins, trees=image_trees, bundle={})
+
+
+# Fixture binaries: K64j's carries every GRAFT_LITERAL; the K64i it replaces carries all but F22, plus nothing
+# K64j lost. Both hold the flags the image sets (QWEN_SDPA_TREE_SCRATCH_ROUNDS, ...).
+K64I_SO = (b'\x7fELF..QWEN_SDPA_TREE_SCRATCH_ROUNDS\x00QWEN_FAST_X\x00QWEN_A\x00[QWEN-SDPA] flags=0x%x B=%d\x00'
+           b'[QWEN-SDPA] KV-share twin bands\x00[QWEN-SDPA] q-slice rows_per_kv=%d\x00')
+K64J_SO = K64I_SO + b'[QWEN-SDPA] runtime-extent entries=%d kv_share=%s\x00'
+
+
+def previous_graft(directory, ttnncpp=K64I_SO, ttnn=b'\x7fELF ttnn QWEN_TTNN_ONLY\x00'):
+    """A previous graft as its build leaves it (~/opgraft-K64i): the two binaries and the MANIFEST.sha256 that
+    lists them, sha256sum's './'-relative lines."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / '_ttnncpp.so').write_bytes(ttnncpp)
+    (directory / '_ttnn.so').write_bytes(ttnn)
+    (directory / provenance.GRAFT_MANIFEST).write_text(''.join(
+        '%s  ./%s\n' % (c2_overlay.sha256(directory / name), name) for name in ('_ttnn.so', '_ttnncpp.so')))
+    return directory
 
 
 class FakeDocker(object):
@@ -929,10 +1077,12 @@ class ProvenanceTests(unittest.TestCase):
         cls.class_tmp = Path(tempfile.mkdtemp(prefix='c2-provenance-'))
         cls.staged = cls.class_tmp / 'ctx'
         cls.entries = c2_overlay.stage(ROOT, cls.staged, require_clean=False)
-        graft = cls.staged / 'opgraft-K64i'
+        graft = cls.staged / provenance.GRAFT_NAME
         graft.mkdir()
-        (graft / '_ttnncpp.so').write_bytes(b'\x7fELF..QWEN_SDPA_TREE_SCRATCH_ROUNDS\x00QWEN_FAST_X\x00QWEN_A')
+        (graft / '_ttnncpp.so').write_bytes(K64J_SO)
         (graft / '_ttnn.so').write_bytes(b'\x7fELF ttnn QWEN_TTNN_ONLY\x00')
+        # The graft K64j replaces, outside the context as on the rig (~/opgraft-K64i): a subset of its strings.
+        cls.previous = previous_graft(cls.class_tmp / 'opgraft-K64i')
         for op, _ in provenance.GRAFT_OP_DIRS:
             (graft / op / 'device').mkdir(parents=True)
             (graft / op / 'device' / (op + '.cpp')).write_text('// %s\n' % op)
@@ -949,6 +1099,10 @@ class ProvenanceTests(unittest.TestCase):
         shutil.copytree(str(self.staged), str(self.context))
         self.env = {'QWEN_SDPA_TREE_SCRATCH_ROUNDS': '1', 'QWEN_DROPPED_FLAG': '1', 'PATH': '/usr/bin'}
         self.log = []
+        # The fixture's K64i stands for the real one (cf54d716): the pin the previous graft is held to.
+        pin = mock.patch.object(provenance, 'PREVIOUS_GRAFT_TTNNCPP_SHA256', hashlib.sha256(K64I_SO).hexdigest())
+        pin.start()
+        self.addCleanup(pin.stop)
 
     def tearDown(self):
         shutil.rmtree(str(self.tmp), ignore_errors=True)
@@ -957,10 +1111,11 @@ class ProvenanceTests(unittest.TestCase):
         argv_override = faults.pop('argv_override', None)
         labels = faults.pop('labels', None)
         environments = faults.pop('environments', None)
+        previous = faults.pop('previous', self.previous)
         built, base = fake_image(self.context, self.entries, **faults)
         docker = FakeDocker(self.context, built, base, self.env, argv_override, labels, environments)
         problems, report = provenance.verify('sha256:built', self.context, '/models', docker=docker,
-                                             log=self.log.append)
+                                             log=self.log.append, previous_graft=previous)
         return problems, docker
 
     def test_a_faithful_image_passes(self):
@@ -974,7 +1129,11 @@ class ProvenanceTests(unittest.TestCase):
         for name in profiles['profiles']:
             self.assertIn("[G1] (c) %s: argv matches the context's contract and profile" % name, self.log)
         for op, path in provenance.GRAFT_OP_DIRS:
-            self.assertTrue(any(line.startswith('[G1] (a) %s is the K64i %s tree' % (path, op)) for line in self.log))
+            self.assertTrue(any(line.startswith('[G1] (a) %s is the K64j %s tree' % (path, op)) for line in self.log))
+        self.assertIn('[G1] (a) the K64j _ttnncpp.so carries ' + ', '.join(provenance.GRAFT_LITERALS), self.log)
+        self.assertIn("[G1] (a) K64j _ttnncpp.so: 7 QWEN strings, the previous graft's 6 all kept", self.log)
+        self.assertIn("[G1] (a) the previous graft opgraft-K64i verifies against its MANIFEST.sha256 and its "
+                      "_ttnncpp.so is K64i's %s" % hashlib.sha256(K64I_SO).hexdigest()[:16], self.log)
         self.assertTrue(any('(b) built by the context\'s build-c2-serving-image.sh' in line for line in self.log))
         self.assertTrue(any('(c) exact: QWEN_ environment sha256' in line and 'equal up to the unset defaults' in line
                             for line in self.log))
@@ -1023,12 +1182,86 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn('the JIT would compile other kernels', problems[0])
 
     def test_a_context_without_an_op_directory_fails(self):
-        shutil.rmtree(str(self.context / 'opgraft-K64i' / 'sdpa'))
+        shutil.rmtree(str(self.context / provenance.GRAFT_NAME / 'sdpa'))
         built, base = fake_image(self.staged, self.entries)
         problems, _ = provenance.verify('sha256:built', self.context, '/models', log=self.log.append,
                                         docker=FakeDocker(self.context, built, base, self.env))
-        self.assertEqual(problems, ['(a) the context has no opgraft-K64i/sdpa to compare '
+        self.assertEqual(problems, ['(a) the context has no opgraft-K64j/sdpa to compare '
                                     '/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa with'])
+
+    def test_a_graft_without_the_f22_literal_fails(self):
+        """A K64i-shaped binary under the K64j name (or a rebuild that lost the extent factory): its sha is
+        consistent everywhere, and only the literal check sees it."""
+        (self.context / provenance.GRAFT_NAME / '_ttnncpp.so').write_bytes(K64I_SO)
+        problems, _ = self.verify()
+        self.assertEqual(problems, ["(a) the K64j _ttnncpp.so lacks ['[QWEN-SDPA] runtime-extent entries=']: "
+                                    'not a K64j build'])
+
+    def test_a_string_the_previous_graft_carried_and_the_new_one_lost_fails(self):
+        carried = K64I_SO + b'[QWEN-SDPA] a patch K64j dropped\x00QWEN_LOST_FLAG\x00'
+        previous = previous_graft(self.tmp / 'previous', ttnncpp=carried)
+        with mock.patch.object(provenance, 'PREVIOUS_GRAFT_TTNNCPP_SHA256', hashlib.sha256(carried).hexdigest()):
+            problems, _ = self.verify(previous=previous)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("K64j _ttnncpp.so lost 2 QWEN string(s) the previous graft's carries", problems[0])
+        self.assertIn("['QWEN_LOST_FLAG', '[QWEN-SDPA] a patch K64j dropped']", problems[0])
+        missing = self.tmp / 'missing'
+        missing.mkdir()
+        problems, _ = self.verify(previous=missing)
+        self.assertEqual(len(problems), 3, problems)
+        self.assertEqual(problems[0], '(a) the previous graft %s has no MANIFEST.sha256: it cannot be shown to be K64i'
+                         % missing)
+        self.assertTrue(all('the previous graft has no' in problem for problem in problems[1:]))
+
+    def test_a_previous_graft_that_is_not_k64i_fails(self):
+        """Review W7 #3: the superset is only as good as the graft it compares with. A ~/opgraft-K64i replaced by
+        another build - even one that verifies against its own manifest and whose strings the new graft keeps -
+        is not K64i, and G1 says so instead of passing vacuously."""
+        other = previous_graft(self.tmp / 'rebuilt', ttnncpp=b'\x7fELF..QWEN_SDPA_TREE_SCRATCH_ROUNDS\x00')
+        problems, _ = self.verify(previous=other)
+        self.assertEqual(problems, ["(a) the previous graft's _ttnncpp.so is %s, not K64i's %s (the v235 gate's runtime "
+                                    'pin): the superset would compare with another binary' % (
+                                        c2_overlay.sha256(other / '_ttnncpp.so')[:16],
+                                        hashlib.sha256(K64I_SO).hexdigest()[:16])])
+        # The real pin is the reviewed succession's older value, cf54d716 - which the fixture is not.
+        with mock.patch.object(provenance, 'PREVIOUS_GRAFT_TTNNCPP_SHA256',
+                               provenance.ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][0]):
+            problems, _ = self.verify()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("not K64i's cf54d716669be6b7", problems[0])
+
+    def test_a_previous_graft_that_does_not_verify_against_its_manifest_fails(self):
+        changed = previous_graft(self.tmp / 'changed')
+        (changed / '_ttnn.so').write_bytes(b'\x7fELF ttnn QWEN_TTNN_ONLY\x00 edited after the build')
+        problems, _ = self.verify(previous=changed)
+        self.assertEqual(problems, ["(a) the previous graft's _ttnn.so is %s, not the %s its MANIFEST.sha256 lists: "
+                                    'changed after it was built' % (
+                                        c2_overlay.sha256(changed / '_ttnn.so')[:16],
+                                        hashlib.sha256(b'\x7fELF ttnn QWEN_TTNN_ONLY\x00').hexdigest()[:16])])
+        unlisted = previous_graft(self.tmp / 'unlisted')
+        manifest = unlisted / provenance.GRAFT_MANIFEST
+        manifest.write_text(''.join(line + '\n' for line in manifest.read_text().splitlines()
+                                    if not line.endswith('_ttnncpp.so')))
+        problems, _ = self.verify(previous=unlisted)
+        self.assertEqual(problems, ["(a) the previous graft's MANIFEST.sha256 does not list _ttnncpp.so"])
+        (unlisted / provenance.GRAFT_MANIFEST).unlink()
+        problems, _ = self.verify(previous=unlisted)
+        self.assertEqual(problems, ['(a) the previous graft %s has no MANIFEST.sha256: it cannot be shown to be K64i'
+                                    % unlisted])
+
+    def test_the_previous_graft_pin_is_the_succession_s_older_value(self):
+        self.assertEqual(provenance.ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][0],
+                         'cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4')
+        self.assertEqual(provenance.PREVIOUS_GRAFT_LABEL, 'K64i')
+        # sha256sum's text and binary modes, './'-relative or not.
+        for line, name in (('%s  ./_ttnncpp.so' % ('a' * 64), './_ttnncpp.so'), ('%s *_ttnn.so' % ('b' * 64), '_ttnn.so')):
+            self.assertEqual(provenance.MANIFEST_LINE.match(line).group(2), name)
+
+    def test_without_a_previous_graft_the_superset_is_reported_unchecked(self):
+        problems, _ = self.verify(previous=None)
+        self.assertEqual(problems, [])
+        self.assertIn('[G1] (a) QWEN_ / [QWEN- superset against the previous graft: not checked (no --previous-graft)',
+                      self.log)
 
     def test_a_wrong_revision_label_fails(self):
         problems, _ = self.verify(labels={provenance.REVISION_LABEL: 'be9e184e672756c8eee040f03e48dbff58e68fda'})
@@ -1169,7 +1402,8 @@ class ProvenanceTests(unittest.TestCase):
         docker = FakeDocker(self.context, built, base, {})
         log = []
         with mock.patch.object(provenance, 'dockerfile_env', return_value={'QWEN_DROPPED_FLAG': '1'}):
-            problems, report = provenance.base_drift(self.context, self.context / 'opgraft-K64i', docker, log.append)
+            problems, report = provenance.base_drift(self.context, self.context / provenance.GRAFT_NAME, docker,
+                                                     log.append)
         self.assertEqual(docker.images, [provenance.base_image((self.context / 'Dockerfile').read_text())])
         self.assertEqual(len(problems), 3, problems)
         self.assertIn("the graft binaries lack ['QWEN_DROPPED_FLAG']", problems[0])
@@ -1251,6 +1485,7 @@ class ProvenanceTests(unittest.TestCase):
 
     def test_the_command_line_refuses_a_mixed_mode(self):
         for argv in (['--context', 'x'], ['--context', 'x', '--image', 'i'],
+                     ['--context', 'x', '--image', 'i', '--models', 'm'],
                      ['--context', 'x', '--base-drift', '--image', 'i']):
             with self.subTest(argv=argv):
                 with mock.patch('sys.stderr'), self.assertRaises(SystemExit):
@@ -1258,6 +1493,11 @@ class ProvenanceTests(unittest.TestCase):
 
     def test_helpers(self):
         self.assertEqual(provenance.qwen_strings(b'..QWEN_B\x00QWEN_A_1 QWEN_B'), ['QWEN_A_1', 'QWEN_B'])
+        # `strings | grep -E 'QWEN_|\\[QWEN-'`: whole printable runs, the [QWEN- literals included, runs under
+        # four bytes and bare QWEN words left out.
+        self.assertEqual(provenance.qwen_literals(b'\x00[QWEN-SDPA] flags=0x%x\x01QWEN\x00x QWEN_A\ty\x00QWEN_B'),
+                         ['QWEN_B', '[QWEN-SDPA] flags=0x%x', 'x QWEN_A\ty'])
+        self.assertEqual(provenance.qwen_literals(b''), [])
         self.assertEqual(provenance.base_image('FROM x\nARG BASE=img:tag\n'), 'img:tag')
         self.assertEqual(provenance.argv_line('[QWEN-C2] profile exact: vLLM argv ["--a", "1"]\n', 'exact'),
                          ('[QWEN-C2] profile exact: vLLM argv ["--a", "1"]', ['--a', '1']))

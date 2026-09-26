@@ -429,6 +429,18 @@ class ServingBufferPool:
 
         if type(extent_replay) is not bool:
             raise ValueError('Extent replay storage must be selected by an explicit bool')
+        if extent_replay:
+            # Design W7: under QWEN_FAST_EXTENT_REPLAY=1 no process builds the extent storage - the one source
+            # of the tables and cur_pos words the extent readers are built over, and what the S2 block keys on -
+            # unless its attach admitted the extent path (packed_any_admission.admit), before anything is
+            # allocated. The guard sits here, not in extent_attention_replay.py, whose bytes the hardware
+            # evidence pins (CB2b qualifies them). A module import, and only here: the P8 route copies this
+            # module without the admission and never asks for extent storage (serving_runtime's own import of
+            # it is the same, test_serving_image_copy_closure). With the flag unset (the card harnesses, the
+            # CPU tests) it checks nothing.
+            import packed_any_admission
+
+            packed_any_admission.require_admitted('ServingBufferPool extent storage')
         if type(users) is not int or not 1 <= users <= NATIVE_GDN_SLOTS:
             raise ValueError('Explicit scheduler request count within the %d native GDN slots required'
                              % NATIVE_GDN_SLOTS)

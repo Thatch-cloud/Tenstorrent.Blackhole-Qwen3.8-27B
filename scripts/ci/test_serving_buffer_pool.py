@@ -913,6 +913,30 @@ class PackedExtentStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'without extent_replay'):
             pool.packed_extent(4, 16)
 
+    def test_under_the_flag_the_extent_storage_needs_the_attach_s_admission_before_any_allocation(self):
+        """Design W7: under QWEN_FAST_EXTENT_REPLAY=1 no process builds the extent storage - what every extent
+        reader is built over and what the S2 block keys on - unless its attach admitted the extent path. The
+        guard is the pool's, not extent_attention_replay.py's, whose bytes the evidence pins. Flag unset (the
+        card harnesses, this suite) it checks nothing; the per-family pool never asks."""
+        import packed_any_admission
+
+        with patch.dict('os.environ', {'QWEN_FAST_EXTENT_REPLAY': '1'}), \
+                patch.dict(packed_any_admission._STATE, clear=True):
+            operations = FakeOperations()
+            with self.assertRaisesRegex(packed_any_admission.AdmissionRefused,
+                                        'ServingBufferPool extent storage under QWEN_FAST_EXTENT_REPLAY=1 needs the '
+                                        "attach's packed-any admission first"):
+                extent_pool(operations)
+            self.assertEqual(operations.live, [], 'refused before the first allocation')
+            flag_on_per_family = verifier_pool(FakeOperations(), users=1, bucket_rows=(8,), packed_shapes=((4, 16),),
+                                               packed_replay_group_rows=8)
+            self.assertFalse(flag_on_per_family.extent_replay)
+            packed_any_admission._STATE['record'] = {}
+            self.assertTrue(extent_pool(FakeOperations()).extent_replay)
+        with patch.dict('os.environ', {'QWEN_FAST_EXTENT_REPLAY': '0'}), \
+                patch.dict(packed_any_admission._STATE, clear=True):
+            self.assertTrue(extent_pool(FakeOperations()).extent_replay)
+
     def test_storage_needs_one_table_and_one_cur_pos_per_bundle_per_user(self):
         with self.assertRaisesRegex(ValueError, 'one table and one cur_pos per bundle'):
             PackedExtentStorage(2, 16, [[1], [2]], [[3]])
