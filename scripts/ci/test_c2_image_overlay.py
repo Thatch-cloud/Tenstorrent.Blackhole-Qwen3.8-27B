@@ -978,7 +978,7 @@ class ProvenanceTests(unittest.TestCase):
         self.assertTrue(any('(b) built by the context\'s build-c2-serving-image.sh' in line for line in self.log))
         self.assertTrue(any('(c) exact: QWEN_ environment sha256' in line and 'equal up to the unset defaults' in line
                             for line in self.log))
-        self.assertTrue(any(re.search(r'\(d\) layers .*: \d+ files as modelled, 0 at HEAD', line) for line in self.log))
+        self.assertTrue(any(re.search(r'\(d\) layers .*: \d+ files as modelled, \d+ at the bundle record.s bytes, \d+ never in the bundle, 0 at HEAD', line) for line in self.log))
 
     def test_a_tampered_overlay_file_fails(self):
         problems, _ = self.verify(tampered='/opt/qwen-c2/profiles.json')
@@ -1106,6 +1106,29 @@ class ProvenanceTests(unittest.TestCase):
         problems, _ = self.verify(trees={path: layers['files'][path]['read_combined']})
         self.assertEqual(len(problems), 1, problems)
         self.assertIn('[= read-combined 8c102b20]', problems[0])
+
+    def test_layer_drift_defers_to_the_bundle_record(self):
+        # Base drift v20 (run 36210232102): the git model expected 572 files the bundle archive never
+        # held and 35 at git's bytes the archive's staging had rewritten. P8's bundle record decides.
+        def entry(name, sha):
+            return {'sha256': sha, 'head': sha, 'layer': '77d6995a', 'source': 'scripts/ci/' + name}
+
+        ci = '/experiment-scripts/ci/'
+        layers = {'commits': {}, 'files': {ci + 'staged.py': entry('staged.py', '1' * 64),
+                                           ci + 'never.py': entry('never.py', '2' * 64),
+                                           ci + 'stray.py': entry('stray.py', '3' * 64),
+                                           ci + 'lost.py': entry('lost.py', '4' * 64)}}
+        bundle = {'experiment-scripts/ci/staged.py': '9' * 64, 'experiment-scripts/ci/stray.py': '3' * 64,
+                  'experiment-scripts/ci/lost.py': '4' * 64}
+        trees = {ci + 'staged.py': '9' * 64, ci + 'stray.py': '8' * 64}
+        problems, _, counts = provenance.check_layers(layers, trees, bundle=bundle, accepted={})
+        self.assertEqual((counts['bundle'], counts['unbundled']), (1, 1))
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(problems[0].startswith('(d) %slost.py is absent' % ci), problems[0])
+        self.assertTrue(problems[1].startswith('(d) %sstray.py is 8888888888888888' % ci), problems[1])
+        for missing in (None, {}):
+            problems, _, counts = provenance.check_layers(layers, trees, bundle=missing, accepted={})
+            self.assertEqual(len(problems), 4, problems)
 
     def test_a_broken_frozen_pin_fails(self):
         pinned = '/experiment-scripts/ci/attention_replay.py'

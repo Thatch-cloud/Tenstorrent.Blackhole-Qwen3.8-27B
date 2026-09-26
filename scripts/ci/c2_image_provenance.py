@@ -475,7 +475,7 @@ def check_layers(layers, trees, bundle=None, replaced=(), accepted=None):
     test modules it runs, and serving imports none."""
     accepted = ACCEPTED_LAYER_DRIFT if accepted is None else accepted
     problems, lines, notes = [], [], []
-    counts = dict(model=0, head=0, accepted=0, drift=0, absent=0, replaced=0, tests=0)
+    counts = dict(model=0, head=0, accepted=0, drift=0, absent=0, replaced=0, tests=0, bundle=0, unbundled=0)
     commits = layers.get('commits', {})
     for path, want in sorted(layers['files'].items()):
         if path in replaced:
@@ -485,6 +485,19 @@ def check_layers(layers, trees, bundle=None, replaced=(), accepted=None):
         if got is not None and got == want['sha256']:
             counts['model'] += 1
             continue
+        # P8's bundle record (BUNDLE_RECORD) is the archive's own manifest, and it outranks a model
+        # rebuilt from git at the bundle commit: the archive was a curated subset of scripts/ci (base
+        # drift v20, run 36210232102: 572 files the git model expected were never in it) and some of
+        # its files were staged rewrites (35 held the record's bytes, not git's). A file at the
+        # record's bytes is as built; a file the record never listed was never in the base.
+        if bundle:  # an empty or missing record says nothing: the git model stands
+            recorded = bundle.get(path.lstrip('/'))
+            if got is not None and recorded == got:
+                counts['bundle'] += 1
+                continue
+            if got is None and recorded is None:
+                counts['unbundled'] += 1
+                continue
         if got is not None and got == want.get('head'):
             counts['head'] += 1
             notes.append('(d) %s holds HEAD\'s version; the model said %s\'s' % (path, want['layer'][:8]))
@@ -511,12 +524,13 @@ def check_layers(layers, trees, bundle=None, replaced=(), accepted=None):
             path, what, want['source'], (want['sha256'] or '-')[:16], want['layer'][:8], (want.get('head') or 'none')[:16],
             (' [%s]' % ', '.join(hints)) if hints else ''))
     unmodelled = sorted(path for path in trees if path not in layers['files'])
-    lines.append('(d) layers (bundle %s, P8 %s, HEAD %s): %d files as modelled, %d at HEAD\'s version, %d accepted, '
+    lines.append('(d) layers (bundle %s, P8 %s, HEAD %s): %d files as modelled, %d at the bundle record\'s bytes, '
+                 '%d never in the bundle, %d at HEAD\'s version, %d accepted, '
                  '%d at other bytes, %d absent, %d replaced later, %d test modules off the model (not gated); '
                  '%d image files the model does not name' % (
                      commits.get('bundle', '?')[:8], commits.get('p8', '?')[:8], commits.get('head', '?')[:8],
-                     counts['model'], counts['head'], counts['accepted'], counts['drift'], counts['absent'],
-                     counts['replaced'], counts['tests'], len(unmodelled)))
+                     counts['model'], counts['bundle'], counts['unbundled'], counts['head'], counts['accepted'],
+                     counts['drift'], counts['absent'], counts['replaced'], counts['tests'], len(unmodelled)))
     lines.extend(notes)
     return problems, lines, dict(counts, unmodelled=unmodelled)
 
