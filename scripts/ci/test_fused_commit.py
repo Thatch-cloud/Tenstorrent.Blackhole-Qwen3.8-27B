@@ -1633,6 +1633,7 @@ def without_no_block(lines):
     lines = cut_once(lines, '# C2-any with no packed block at all (the c2 profile sets QWEN_FAST_PACKED_STEP=0): its',
                      'capture_rows = M3_SEQUENTIAL_CAPTURE_ROWS')
     lines = cut_once(lines, 'if trimmed and no_block_any_request:', 'elif trimmed:', ['        if trimmed:'])
+    lines = without_capture_position(lines)
     # The cuts leave the blank lines around the removed constant and function doubled.
     collapsed = []
     for value in lines:
@@ -1640,6 +1641,24 @@ def without_no_block(lines):
             continue
         collapsed.append(value)
     return collapsed
+
+
+def without_capture_position(lines):
+    """serving_runtime.py less S2's gate-only capture-position knob (design W3, B1:
+    QWEN_FAST_PACKED_CAPTURE_POSITION, G3b), which landed after C2-any: its `re` import, its two
+    constants, packed_capture_position, the parse beside the padded admission, the override line
+    and the block keyword. Each is cut exactly once and to its known last line, so nothing else is
+    hidden."""
+    lines = cut_once(lines, 'import re', 'import re')
+    lines = cut_once(lines, "CAPTURE_POSITION_FLAG = 'QWEN_FAST_PACKED_CAPTURE_POSITION'",
+                     "CAPTURE_POSITION_MARKER = '[PINDIAG] packed capture position override='")
+    lines = cut_once(lines, 'def packed_capture_position(environ=None):', 'return int(text)')
+    lines = cut_once(lines, '# QWEN_FAST_PACKED_CAPTURE_POSITION (S2 G3b, gate only, default unset): parsed here, before',
+                     'capture_position = packed_capture_position()')
+    lines = cut_once(lines, 'if capture_position is not None:',
+                     "pindiag('{}{} (gate only)', CAPTURE_POSITION_MARKER, capture_position)")
+    return cut_once(lines, "# S2 G3b's gate-only knob; unset, no keyword at all.",
+                    'if capture_position is not None else {}),')
 
 
 class ShippingTests(unittest.TestCase):

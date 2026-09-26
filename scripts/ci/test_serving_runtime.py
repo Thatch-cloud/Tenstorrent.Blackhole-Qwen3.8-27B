@@ -30,7 +30,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
     STREAM = {'streams': 'serial', 'evidence': 'stream'}
 
     def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None, four_as_two=None,
-                 replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None):
+                 replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None,
+                 capture_position=None):
         events = []
 
         def diag(template, *values):
@@ -203,6 +204,9 @@ class RuntimeAttachmentTests(unittest.TestCase):
                             if padded is not None:
                                 # QWEN_FAST_PADDED_BLOCK: the one keyword it adds, only where admitted.
                                 expected_options['padded_min_users'] = padded
+                            if capture_position is not None:
+                                # S2 G3b's gate-only QWEN_FAST_PACKED_CAPTURE_POSITION: its one keyword.
+                                expected_options['capture_position'] = capture_position
                             self.assertEqual(call.kwargs, expected_options)
                         self.assertIsInstance(packed_step, serving_packed_step.PackedStep)
                         if two_blocks:
@@ -227,6 +231,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         expected.append(('[PINDIAG] per-request captures trimmed to widths {} for C2-any with no packed block', (1, 2, 4)))
                     elif trimmed:
                         expected.append(('[PINDIAG] per-request captures trimmed to widths {} for the four-user block', (1, 2, 4)))
+                    if capture_position is not None and built:
+                        expected.append(('{}{} (gate only)', serving_runtime.CAPTURE_POSITION_MARKER, capture_position))
                     expected.append(('[PINDIAG] dram after attach: {}', 'unavailable (pool without device statistics)'))
                     self.assertEqual([call.args for call in diagnostic.call_args_list], expected)
                     if probe is not None:
@@ -433,6 +439,38 @@ class RuntimeAttachmentTests(unittest.TestCase):
     def test_the_padded_block_minimum_alone_changes_nothing(self):
         # Unread while the flag is off: the attach is exactly today's.
         self.exercise(packed=True, users=4, four_as_two=False, extra_env={'QWEN_FAST_PADDED_BLOCK_MIN_USERS': '3'})
+
+
+    # --- S2 G3b: the gate-only capture position (QWEN_FAST_PACKED_CAPTURE_POSITION) ------------
+
+    def test_the_capture_position_knob_reaches_every_block_and_is_logged_as_gate_only(self):
+        # G3b's flag-off arm: the family block captured at 16384 (family 16640); and at C - 256 on the
+        # M3 block. Every other keyword of the block, the pool and the recipe is unchanged.
+        for users, four_as_two in ((4, False), (2, None)):
+            for position in (16384, 4096):
+                with self.subTest(users=users, position=position):
+                    self.exercise(packed=True, users=users, four_as_two=four_as_two, capture_position=position,
+                                  extra_env={'QWEN_FAST_PACKED_CAPTURE_POSITION': str(position)})
+        # both blocks of the four-as-two pair
+        self.exercise(packed=True, users=4, capture_position=16384,
+                      extra_env={'QWEN_FAST_PACKED_CAPTURE_POSITION': '16384'})
+
+    def test_a_malformed_capture_position_is_refused_before_anything_is_built(self):
+        for value in ('', '16384.0', ' 16384', '016384', '-1', 'C-256', '1e4'):
+            with self.subTest(value=value), \
+                    self.assertRaisesRegex(ValueError, 'QWEN_FAST_PACKED_CAPTURE_POSITION must be a decimal integer'):
+                self.exercise(packed=True, users=4, four_as_two=False, refused=True,
+                              extra_env={'QWEN_FAST_PACKED_CAPTURE_POSITION': value})
+
+    def test_the_capture_position_is_read_strictly(self):
+        read = serving_runtime.packed_capture_position
+        self.assertIsNone(read({}))
+        self.assertEqual([read({'QWEN_FAST_PACKED_CAPTURE_POSITION': value}) for value in ('0', '4096', '131072')],
+                         [0, 4096, 131072])
+
+    def test_the_capture_position_with_no_block_changes_nothing(self):
+        # parsed (so a malformed value is still refused) but no block takes it and nothing is logged
+        self.exercise(packed=False, users=4, extra_env={'QWEN_FAST_PACKED_CAPTURE_POSITION': '16384'})
 
 
 class RegisterReaderReasonTests(unittest.TestCase):

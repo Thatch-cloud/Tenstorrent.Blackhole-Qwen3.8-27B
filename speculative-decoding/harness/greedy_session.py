@@ -110,11 +110,23 @@ class GreedySession:
         self.pending, self.phase = narrowed, 'pending'
         return narrowed
 
-    def commit(self, request_id, ticket, predictions, publish):
+    def commit(self, request_id, ticket, predictions, publish, *, max_rows=None):
+        """Decide and publish the live ticket from the target's predictions. `max_rows` (S2's
+        boundary cap, design 2.4; None: every row) keeps only the ticket's first max_rows rows:
+        the decision reads tokens[1:max_rows] against predictions[:max_rows], so at most max_rows
+        rows commit and the rows past them are handled like rejected drafts (the verify's K/V past
+        the frontier is overwritten later, and the GDN state commits at the prefix). The packed
+        step passes the block's accept_limit: the extent path's rows at or past their family end
+        read all of it and never their own key, so their predictions are never used."""
         self.check_ticket(request_id, ticket)
         if not callable(publish):
             raise ValueError('Synchronized state publication callback required')
-        decision = select_prefix(ticket.tokens[1:], predictions, vocab_size=self.vocab_size, eos_ids=self.eos_ids,
+        proposals, targets = ticket.tokens[1:], predictions
+        if max_rows is not None:
+            if type(max_rows) is not int or not 1 <= max_rows <= len(ticket.tokens):
+                raise ValueError('A commit cap of 1 to %d rows is required, got %r' % (len(ticket.tokens), max_rows))
+            proposals, targets = ticket.tokens[1:max_rows], tuple(predictions)[:max_rows]
+        decision = select_prefix(proposals, targets, vocab_size=self.vocab_size, eos_ids=self.eos_ids,
                                  max_proposals=self.verifier_rows - 1)
         self.phase = 'committing'
         try:

@@ -126,11 +126,40 @@ pairs have been read back (or at the end of the early draft), inside the same ex
 re-owes the retained block's fence (gdn_records.RetainedGDNBlock.note_deferred_publications) so the
 next replay pays it. verify() flushes anything still held first (site=verify, R1 broken, logged).
 Without the flags nothing is armed and every path is today's.
+
+S2 C2-PACKED-ANY (design s2-design.md W3; QWEN_FAST_EXTENT_REPLAY=1 builds the pool with
+extent_replay, serving_buffer_pool.PackedExtentStorage, and the block keys on that storage alone).
+The block serves every live user at its OWN 256-key family E = (start // 256 + 1) * 256 through one
+captured program (K64j flag 0x20): model_batch builds extent_attention_replay.PackedExtentReplayReader
+over the pool's full-width tables and cur_pos words instead of the per-family readers, the capacity
+is the whole table, C = page_width * 64, and:
+  - `admits(position)` (128 <= start, start + rows <= C) replaces validate_ticket - in
+    serving_packed_step before drafting and at the step, and in verify() as the raising backstop;
+  - packed_values stages each extent reader's own values: its word (start & 255), each bundle's
+    cur_pos (E - 1) and full-width table, from the one helper that computes word and cur_pos;
+  - an idle segment is an ordinary user at start 0 or 32 on the zero table (E = 256), on page 0
+    tile row 0 or 1 exactly as before; the page-0 rule also checks every page the extent reads,
+    [0, E // 64) (design 2.6);
+  - `accept_limit(position)` = min(rows, E - start): rows at or past E see all of [0, E) and never
+    their own key, so the session commits at most that many (serving_packed_step.commit_entry,
+    GreedySession.commit max_rows) and commit_user refuses more - before its try, so the refusal
+    leaves the block verified - as the backstop (design 2.4);
+  - one EXTENT_ROUND_MARKER line per packed round, from verify: the executed path's own proof;
+  - QWEN_FAST_EXTENT_AUDIT=1 (gate profiles only): after each replay, every segment's word and
+    cur_pos, and in rotation one segment's narrow masks and tables, read back from both chips
+    against the host values; a mismatch is logged and the round restaged in full (audit_extent);
+  - a replay deadline (QWEN_FAST_REPLAY_DEADLINE_S, default 30 s) around every verify and commit
+    trace: a replay that overruns it logs the families it held and ends the process (exit 70)
+    rather than wedging it (ReplayDeadline);
+  - validate_bindings also checks the cur_pos words, and each reader's word and masks, unmoved;
+  - QWEN_FAST_PACKED_CAPTURE_POSITION (serving_runtime, gate only) moves the capture position.
+Without the pool's extent storage none of this is built or read, and every path is today's.
 """
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager, nullcontext
 import os
 import sys
+import threading
 import time
 import traceback
 from types import SimpleNamespace
@@ -302,6 +331,11 @@ def packed_values(operations, model, fixture, shape, users, *, guard=True):
     for own, (user_tokens, start, table) in zip(readers, users, strict=True):
         # Host only, before any copy: this user's ticket inside its reader's family.
         own.validate(start)
+        if getattr(own, 'runtime_extent', False):
+            # S2: the extent reader's own values for this start - its word (start & 255), then per
+            # bundle its cur_pos (E - 1) and its full-width table - word and cur_pos from one helper.
+            values.extend(own.stage_values(start, table))
+            continue
         words = torch.zeros(8, dtype=torch.int32)
         words[0] = start
         values.append((own.positions, words, operations.int32, operations.ROW_MAJOR_LAYOUT))
@@ -437,16 +471,157 @@ def gdn_after_pairs_requested(environ=None):
     return (os.environ if environ is None else environ).get('QWEN_FAST_GDN_AFTER_PAIRS', '0') != '0'
 
 
-def page_zero_index(table, start, rows):
+# S2 (design W3): the extent block's lines, its gate-only audit and its replay deadline. The gate (W11)
+# reads the markers; QWEN_FAST_EXTENT_AUDIT is never in the image ENV or a traffic profile.
+EXTENT_ROUND_MARKER = '[PINDIAG] packed extent round'
+EXTENT_CAP_REFUSED_MARKER = '[PINDIAG] packed extent cap refused'
+EXTENT_AUDIT_FLAG = 'QWEN_FAST_EXTENT_AUDIT'
+EXTENT_AUDIT_MARKER = '[EXTENT-AUDIT]'
+EXTENT_AUDIT_MISMATCH_MARKER = '[EXTENT-AUDIT] MISMATCH'
+REPLAY_DEADLINE_FLAG = 'QWEN_FAST_REPLAY_DEADLINE_S'
+REPLAY_DEADLINE_DEFAULT_S = 30.0
+REPLAY_DEADLINE_MARKER = '[PINDIAG] replay deadline exceeded'
+REPLAY_DEADLINE_EXIT_CODE = 70
+
+
+def extent_audit_enabled(environ=None):
+    """QWEN_FAST_EXTENT_AUDIT (S2, gate only): '1' audits every packed round of an extent block
+    (PackedVerifierEngine.audit_extent), '0' or unset does not; any other value is a configuration
+    error. Read by an extent block only."""
+    value = (os.environ if environ is None else environ).get(EXTENT_AUDIT_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1' % EXTENT_AUDIT_FLAG)
+    return value == '1'
+
+
+def replay_deadline_seconds(environ=None):
+    """QWEN_FAST_REPLAY_DEADLINE_S (S2): how long one verify or commit replay of an extent block may
+    run before ReplayDeadline ends the process; default 30 (a round is ~0.17 s). A positive decimal
+    number of seconds; anything else is a configuration error. Read by an extent block only."""
+    import re
+
+    text = (os.environ if environ is None else environ).get(REPLAY_DEADLINE_FLAG)
+    if text is None:
+        return REPLAY_DEADLINE_DEFAULT_S
+    if type(text) is not str or re.fullmatch('[0-9]+([.][0-9]+)?', text) is None or float(text) <= 0:
+        raise ValueError('%s must be a positive number of seconds, got %r' % (REPLAY_DEADLINE_FLAG, text))
+    return float(text)
+
+
+class ReplayDeadline:
+    """S2's replay deadline (design W3, B5): one daemon watchdog per extent block, armed around each
+    verify and commit replay (`armed`). A replay still running `seconds` after it was armed logs
+    REPLAY_DEADLINE_MARKER with what it was replaying (round, trace, segments, families) and the
+    stack of the thread that armed it, then ends the process with exit code 70: a hung card then
+    ends the engine with the families it held in the log, instead of wedging it for the rest of the
+    run (the E < 4096 stale-writer zone of K64j's probe README is what this covers; card-M Z passed
+    all fifteen families). Whether the platform's restart recovers a hung card without an M+A reset
+    is UNVERIFIED (design Q21).
+
+    Host only. The thread starts at the first arming and sleeps while nothing is armed; a scope
+    armed inside another is a no-op (the outer one covers it)."""
+
+    def __init__(self, seconds, *, exit=None, log=None, clock=None):
+        if type(seconds) not in (int, float) or not 0 < seconds < float('inf'):
+            raise ValueError('A positive, finite replay deadline is required, got %r' % (seconds,))
+        self.seconds = float(seconds)
+        self.exit = os._exit if exit is None else exit
+        self.log = log
+        self.clock = time.monotonic if clock is None else clock
+        self.condition = threading.Condition()
+        self.current = None
+        self.thread = None
+        self.closed = False
+        self.fired = None
+
+    @contextmanager
+    def armed(self, what):
+        with self.condition:
+            if self.closed:
+                raise RuntimeError('The replay deadline of a closed packed block cannot be armed')
+            nested = self.current is not None
+            if not nested:
+                self.current = (self.clock() + self.seconds, str(what), threading.get_ident())
+                if self.thread is None:
+                    self.thread = threading.Thread(target=self.watch, name='qwen-replay-deadline', daemon=True)
+                    self.thread.start()
+                self.condition.notify_all()
+        try:
+            yield
+        finally:
+            if not nested:
+                with self.condition:
+                    self.current = None
+                    self.condition.notify_all()
+
+    def watch(self):
+        while True:
+            with self.condition:
+                while self.current is None and not self.closed:
+                    self.condition.wait()
+                if self.closed:
+                    return
+                deadline, what, ident = self.current
+                remaining = deadline - self.clock()
+                if remaining > 0:
+                    self.condition.wait(remaining)
+                    continue
+                self.fired = what
+            self.fire(what, ident)
+            return
+
+    def fire(self, what, ident):
+        """The deadline passed with the replay still armed: the line, the replaying thread's stack,
+        then the exit. The exit is unconditional: a failed report must not keep a wedged engine."""
+        try:
+            log = self.log or diagnostic
+            frame = sys._current_frames().get(ident)
+            stack = ''.join(traceback.format_stack(frame)) if frame is not None else '(the replaying thread is gone)\n'
+            log('%s %s seconds=%g' % (REPLAY_DEADLINE_MARKER, what, self.seconds))
+            log('[PINDIAG] replay deadline traceback of the replaying thread\n' + stack)
+        except BaseException:
+            pass
+        finally:
+            self.exit(REPLAY_DEADLINE_EXIT_CODE)
+
+    def close(self):
+        with self.condition:
+            self.closed = True
+            self.current = None
+            self.condition.notify_all()
+
+
+def same_bits(expected, actual):
+    """Whether a readback holds exactly these BF16 bit patterns (the narrow mask: 0x0000 and 0xff80)."""
+    import torch
+
+    try:
+        expected = expected.to(torch.bfloat16).contiguous().reshape(-1)
+        actual = actual.to(torch.bfloat16).contiguous().reshape(-1)
+        return actual.numel() == expected.numel() and bool(torch.equal(actual.view(torch.int16),
+                                                                          expected.view(torch.int16)))
+    except (RuntimeError, TypeError, AttributeError):
+        return False
+
+
+def page_zero_index(table, start, rows, *, extent=False):
     """The first index inside [0, (start + rows + 63) // 64) at which this (1, page_width) page
     table holds physical page 0, or None: every page a user at `start` reads or writes in a
     `rows`-row round (padded_probe.used_pages). Raises ValueError when the table cannot map that
-    range, and whatever indexing raises for a table that is not one."""
-    used = (int(start) + int(rows) + 63) // 64
+    range, and whatever indexing raises for a table that is not one.
+
+    S2 (`extent=True`, design 2.6): also every page the extent SDPA reads, [0, E // 64) with
+    E = (start // 256 + 1) * 256 - a page-0 key there sits at a masked position, and a NaN one would
+    survive the -inf add. Rows of a ticket crossing E still write past it, so the range is the
+    larger of the two."""
+    limit = int(start) + int(rows)
+    if extent:
+        limit = max(limit, (int(start) // 256 + 1) * 256)
+    used = (limit + 63) // 64
     values = table[0][:used]
     values = values.tolist() if hasattr(values, 'tolist') else list(values)
     if len(values) < used:
-        raise ValueError('a %d-entry page table cannot map positions [0, %d)' % (len(values), int(start) + int(rows)))
+        raise ValueError('a %d-entry page table cannot map positions [0, %d)' % (len(values), limit))
     for index, value in enumerate(values):
         if int(value) == 0:
             return index
@@ -530,15 +705,29 @@ class PackedVerifierEngine:
         # the pool's table sets for this shape (serving_buffer_pool.PackedReplayTables), lent
         # once to this block. Refused, like everything above, before anything is allocated.
         self.replay = None
-        self.replay_capacity = (capture_position // 256 + 1) * 256
-        packed = pool.packed_replay(shape.users, shape.rows_per_user)
-        if self.replay_capacity not in packed.replay_pages:
-            raise ValueError('The pool holds packed replay page tables for families %r; the block captures in family %d'
-                             % (sorted(packed.replay_pages), self.replay_capacity))
-        validate_ticket(capture_position, shape.rows_per_user, self.replay_capacity, short_context=False)
-        self.replay = packed.take()
-        self.replay_tables = [list(tables) for tables in packed.replay_pages[self.replay_capacity]]
-        self.replay_addresses = [[addresses(operations, table) for table in tables] for tables in self.replay_tables]
+        # S2 (QWEN_FAST_EXTENT_REPLAY=1, design W3): a pool built with extent_replay lends full-width
+        # tables and cur_pos words instead of per-family tables, and the block is then the extent one:
+        # one capture serving every user at its own family (module docstring). Keyed on the pool's
+        # storage alone, and only on an explicit True. Everything below reads `extent`; False, every
+        # path is today's.
+        self.extent = getattr(pool, 'extent_replay', False) is True
+        self.extent_storage = self.extent_cur_pos = self.cur_pos_addresses = self.reader_addresses = None
+        self.extent_audit, self.deadline = False, None
+        self.round_starts = {}
+        self.extent_audit_cursor = 0
+        self.extent_counts = dict(rounds=0, cap_events=0, mixed_rounds=0, cap_refused=0, audit_mismatches=0)
+        if self.extent:
+            self.take_extent_storage(operations, pool, shape, capture_position)
+        else:
+            self.replay_capacity = (capture_position // 256 + 1) * 256
+            packed = pool.packed_replay(shape.users, shape.rows_per_user)
+            if self.replay_capacity not in packed.replay_pages:
+                raise ValueError('The pool holds packed replay page tables for families %r; the block captures in family %d'
+                                 % (sorted(packed.replay_pages), self.replay_capacity))
+            validate_ticket(capture_position, shape.rows_per_user, self.replay_capacity, short_context=False)
+            self.replay = packed.take()
+            self.replay_tables = [list(tables) for tables in packed.replay_pages[self.replay_capacity]]
+            self.replay_addresses = [[addresses(operations, table) for table in tables] for tables in self.replay_tables]
         self.operations, self.model, self.mesh, self.sampler = operations, model, model.mesh_device, sampler
         self.helpers = helpers
         self.name = 'PackedVerifierEngine@%x users=%d rows=%d' % (id(self), shape.users, shape.rows_per_user)
@@ -687,6 +876,10 @@ class PackedVerifierEngine:
                 warm.close()
             self.stage = 'verify trace capture'
             self.fixture = self.build_fixture(placeholders)
+            if self.extent:
+                # S2: each extent reader's own word and narrow masks, allocated by this fixture before
+                # any trace: validate_bindings checks them unmoved from here on.
+                self.reader_addresses = self.extent_reader_addresses()
             if self.verify_t1:
                 verify_trace_t1.take()  # count only what the captured forward engages
             if self.verify_t2:
@@ -761,6 +954,200 @@ class PackedVerifierEngine:
             self.close(wait=False)
             raise
 
+    def take_extent_storage(self, operations, pool, shape, capture_position):
+        """S2 (design W3): take the pool's extent storage for this shape (serving_buffer_pool.
+        PackedExtentStorage: per user, per bundle of the extent layout, a full-width table and a
+        cur_pos word), set the capacity every extent reader of the block takes - the whole table,
+        C = page_width * 64 - and read the extent block's own flags. Refused before anything is taken:
+        a capture start the extent path does not admit, a replay group width other than K64j's
+        qualified eight, a bad QWEN_FAST_EXTENT_AUDIT or QWEN_FAST_REPLAY_DEADLINE_S."""
+        import extent_attention_replay
+
+        self.replay_capacity = shape.page_width * 64
+        if not extent_attention_replay.admits(capture_position, shape.rows_per_user, self.replay_capacity):
+            raise ValueError('The extent block captures at a start the extent path admits (%d <= start, start + %d <= %d); '
+                             'got %r' % (extent_attention_replay.MIN_LIVE_START, shape.rows_per_user,
+                                         self.replay_capacity, capture_position))
+        if replay_group_rows() != extent_attention_replay.EXTENT_GROUP_ROWS:
+            raise ValueError('The extent block is qualified at eight-row replay groups only (K64j CB1, G8B2): %s=8 required'
+                             % REPLAY_GROUP_ROWS_FLAG)
+        self.extent_audit = extent_audit_enabled()
+        self.deadline = ReplayDeadline(replay_deadline_seconds())
+        storage = pool.packed_extent(shape.users, shape.rows_per_user)
+        if getattr(storage, 'users', None) != shape.users or getattr(storage, 'rows', None) != shape.rows_per_user:
+            raise ValueError('The pool lent extent storage for %r x T%r users; the block is %d x T%d'
+                             % (getattr(storage, 'users', None), getattr(storage, 'rows', None), shape.users,
+                                shape.rows_per_user))
+        self.replay = storage.take()
+        self.extent_storage = [list(pairs) for pairs in storage.segment_storage()]
+        self.replay_tables = [list(tables) for tables in storage.tables]
+        self.extent_cur_pos = [list(values) for values in storage.cur_pos]
+        self.replay_addresses = [[addresses(operations, table) for table in tables] for tables in self.replay_tables]
+        self.cur_pos_addresses = [[addresses(operations, value) for value in values] for values in self.extent_cur_pos]
+
+    def extent_reader_addresses(self):
+        """Per segment, the chip addresses of its extent reader's own positions word and narrow masks."""
+        return [[addresses(self.operations, own.positions)]
+                + [addresses(self.operations, entry[2]) for entry in own.metadata]
+                for own in self.fixture.replay_reader.readers]
+
+    def admits(self, position):
+        """Whether this block serves a live ticket at `position`. S2's extent path: any integer start
+        with 128 <= start and start + rows_per_user <= C (extent_attention_replay.admits), each at its
+        own family. Without it, the block's one captured family (validate_ticket), as always. Host
+        only: serving_packed_step asks it before drafting (proposal_rows) and at the step (ineligible,
+        extent only), and verify() repeats it as the raising backstop."""
+        if getattr(self, 'extent', False):
+            import extent_attention_replay
+
+            return extent_attention_replay.admits(position, self.rows_per_user, self.replay_capacity)
+        try:
+            validate_ticket(position, self.rows_per_user, self.replay_capacity, short_context=False)
+        except ValueError:
+            return False
+        return True
+
+    def accept_limit(self, position):
+        """How many rows of a ticket at `position` may commit, or None for all of them. S2's extent
+        path: min(rows_per_user, E - position) - a row at or past its family end E sees all of [0, E)
+        and never its own key, so it is capped like a rejected draft (design 2.4). The family block's
+        tickets never cross its family (validate_ticket): None."""
+        if not getattr(self, 'extent', False):
+            return None
+        import extent_attention_replay
+
+        return extent_attention_replay.accept_limit(position, self.rows_per_user)
+
+    def replay_deadline(self, trace, segments, prefix=None):
+        """The replay deadline's scope for one verify, commit or flush replay (S2), or a no-op for a
+        block without one."""
+        deadline = getattr(self, 'deadline', None)
+        if deadline is None:
+            return nullcontext()
+        starts = getattr(self, 'round_starts', None) or {}
+        segments = tuple(segments)
+        what = 'round=%d trace=%s segments=%s families=%s' % (
+            self.rounds + (1 if trace == 'verify' else 0), trace, ','.join(str(segment) for segment in segments),
+            ','.join(str((starts[segment] // 256 + 1) * 256) if segment in starts else '-' for segment in segments))
+        if prefix is not None:
+            what += ' prefix=%d' % prefix
+        return deadline.armed(what)
+
+    def note_extent_round(self, users, segments, idle):
+        """S2: one EXTENT_ROUND_MARKER line per packed round, from verify after its replay - the executed
+        path, not a flag (memory graft-mounted-is-not-graft-executed): each live segment's family, the
+        idle segments, and each live segment whose commit the family end caps (segment:limit)."""
+        import extent_attention_replay
+
+        live = sorted(segments)
+        families = [extent_attention_replay.extent(users[segment][1]) for segment in live]
+        capped = [(segment, self.accept_limit(users[segment][1])) for segment in live]
+        capped = [(segment, limit) for segment, limit in capped if limit < self.rows_per_user]
+        self.extent_counts['rounds'] += 1
+        self.extent_counts['cap_events'] += len(capped)
+        if len(set(families)) > 1:
+            self.extent_counts['mixed_rounds'] += 1
+        diagnostic('%s round=%d live=%d families=[%s] idle=[%s] capped=[%s]' % (
+            EXTENT_ROUND_MARKER, self.rounds + 1, len(live),
+            ','.join('%d:%d' % pair for pair in zip(live, families)), ','.join(str(segment) for segment in idle),
+            ','.join('%d:%d' % pair for pair in capped)))
+
+    def audit_extent(self, users, round_number):
+        """QWEN_FAST_EXTENT_AUDIT (gate profiles only; design 2.2 step 7, A1). After the replay, read
+        back from both chips every segment's positions word and cur_pos words, and - in rotation, one
+        segment a round - that segment's narrow masks and full-width tables, and compare them with
+        the host's own values: extent_values(start), the pinned mask kernel's host transliteration at
+        capacity 256 (narrow_mask_host) and the staged table. One EXTENT_AUDIT_MARKER line per packed
+        round; any mismatch also logs EXTENT_AUDIT_MISMATCH_MARKER and restages the round in full, so
+        the next verify reads what was meant (the gate fails the arm on the line). The reads are after
+        the replay: they perturb timing, never arithmetic, and the line carries their ms. Returns the
+        mismatches, as 'what:segment' strings."""
+        import torch
+
+        import extent_attention_replay
+        from verify_prestage import same_readback
+
+        started = time.perf_counter()
+        operations = self.operations
+        readers = list(self.fixture.replay_reader.readers)
+        rotated = self.extent_audit_cursor % len(readers)
+        self.extent_audit_cursor += 1
+        counts = dict(words=0, cur_pos=0, mask=0, tables=0)
+        mismatched = []
+
+        def chips(tensor):
+            return [operations.to_torch(shard) for shard in operations.get_device_tensors(tensor)]
+
+        for segment, (own, (tokens, start, table)) in enumerate(zip(readers, users, strict=True)):
+            word, position = extent_attention_replay.extent_values(start)
+            words = torch.zeros(8, dtype=torch.int32)
+            words[0] = word
+            if all(same_readback(words, value) for value in chips(own.positions)):
+                counts['words'] += 1
+            else:
+                mismatched.append('word:%d' % segment)
+            if all(same_readback(torch.full((len(entry[0]),), position, dtype=torch.int32), value)
+                   for entry, cur_pos in zip(own.metadata, own.cur_pos, strict=True) for value in chips(cur_pos)):
+                counts['cur_pos'] += 1
+            else:
+                mismatched.append('cur_pos:%d' % segment)
+            if segment != rotated:
+                continue
+            masks = tables = True
+            for bundle, pages, mask, config in own.metadata:
+                expected = extent_attention_replay.narrow_mask_host(word, bundle[0]['rows'], len(bundle),
+                                                                    bundle[0]['offset'])
+                masks = masks and all(same_bits(expected, value) for value in chips(mask))
+                host = table[:, :own.page_width].repeat(len(bundle), 1)
+                tables = tables and all(same_readback(host, value) for value in chips(pages))
+            counts['mask'] += int(masks)
+            counts['tables'] += int(tables)
+            if not masks:
+                mismatched.append('mask:%d' % segment)
+            if not tables:
+                mismatched.append('table:%d' % segment)
+        if mismatched:
+            self.extent_counts['audit_mismatches'] += len(mismatched)
+            diagnostic('%s round=%d at=%s' % (EXTENT_AUDIT_MISMATCH_MARKER, round_number, ','.join(mismatched[:8])))
+            # Every buffer again, fenced: the next verify reads what was meant (stage_packed bumps the
+            # pre-stage epoch and sets every reader's start).
+            stage_packed(operations, self.model, self.fixture, self.shape, users)
+        diagnostic('%s round=%d segments=%d words_ok=%d cur_pos_ok=%d mask_ok=%d tables_ok=%d rotated=%d ms=%.2f' % (
+            EXTENT_AUDIT_MARKER, round_number, len(readers), counts['words'], counts['cur_pos'], counts['mask'],
+            counts['tables'], rotated, (time.perf_counter() - started) * 1000))
+        return mismatched
+
+    def check_extent_cap(self, segment, prefix):
+        """S2's block backstop (design 2.4): a live segment commits at most accept_limit(its round start)
+        rows. The session's own cap (GreedySession.commit max_rows, serving_packed_step.commit_entry) is
+        the control and makes this unreachable (test_packed_extent_step's property test); a firing still
+        fails every request of the round (fail_round), so it is logged first. Host only, and called
+        before commit_user's try, so a refusal leaves the block verified - fail_round then releases every
+        segment at prefix 0 - rather than failed."""
+        if prefix == 0 or segment in self.idle_segments:
+            return
+        start = self.round_starts.get(segment)
+        limit = None if start is None else self.accept_limit(start)
+        if limit is None or prefix > limit:
+            self.extent_counts['cap_refused'] += 1
+            diagnostic('%s round=%d segment=%d start=%s prefix=%d limit=%s'
+                       % (EXTENT_CAP_REFUSED_MARKER, self.rounds, segment, start, prefix, limit))
+            raise ValueError('Packed extent segment %d at %s commits at most %s rows; prefix %d refused'
+                             % (segment, start, limit, prefix))
+
+    def extent_attention(self):
+        """describe()'s attention entry for the extent block."""
+        operations = self.operations
+        reader = getattr(self.fixture, 'replay_reader', None) if self.fixture is not None else None
+        flags = [value for own in getattr(reader, 'readers', ()) for value in getattr(own, 'sdpa_modes_applied', ())]
+        return dict(reader='per-user extent replay', capacity=self.replay_capacity, mask='narrow',
+                    replay_group_rows=self.replay_group_rows, flags=['0x%x' % value for value in flags],
+                    bundles_per_user=[len(tables) for tables in self.replay_tables],
+                    tables=[[list(address) for address in tables] for tables in self.replay_addresses],
+                    cur_pos=[[list(addresses(operations, value)) for value in values] for values in self.extent_cur_pos],
+                    audit=self.extent_audit, deadline_s=None if self.deadline is None else self.deadline.seconds,
+                    **self.extent_counts)
+
     def report_failure(self, failure):
         """The construction failure and its traceback into the log, so the next run's log
         shows the cause even when the device never completes the work already enqueued."""
@@ -785,7 +1172,10 @@ class PackedVerifierEngine:
         pack = build_pack([participant(placeholder, self.rows_per_user, 0, self.checkpoints[user], self.carries[user])
                            for user, placeholder in enumerate(placeholders)], block_rows=self.block_rows)
         return ModelBatch(self.model, [1] * self.block_rows, self.capture_position, placeholders[0].pages, self.helpers,
-            self.checkpoints[0], self.block_rows, pack=pack, packed_replay_pages=self.replay_tables,
+            self.checkpoints[0], self.block_rows, pack=pack,
+            # S2: the extent readers over the pool's full-width tables and cur_pos words, else today's.
+            **({'packed_extent': self.extent_storage} if getattr(self, 'extent', False)
+               else {'packed_replay_pages': self.replay_tables}),
             serial_sdpa=True, compact_gdn=True, reuse_gdn_input=True,
             skip_row_clones=True, hoist_row_layout=True, device_loop_gdn=True, compact_prologue=True,
             batch_conv=True, packed_checkpoints=True, retain_records=True, ordered_cache=True,
@@ -898,6 +1288,14 @@ class PackedVerifierEngine:
             raise ValueError('A carried GDN state moved under the packed block')
         if [[addresses(self.operations, table) for table in tables] for tables in self.replay_tables] != self.replay_addresses:
             raise ValueError('A pooled replay page table moved under the packed block')
+        if getattr(self, 'extent', False):
+            # S2: the pool's cur_pos words, and each extent reader's own word and narrow masks.
+            if [[addresses(self.operations, value) for value in values] for values in self.extent_cur_pos] \
+                    != self.cur_pos_addresses:
+                raise ValueError('A pooled extent cur_pos word moved under the packed block')
+            if (self.reader_addresses is not None and self.fixture is not None
+                    and self.extent_reader_addresses() != self.reader_addresses):
+                raise ValueError("An extent reader's positions word or narrow mask moved under the packed block")
 
     def segment_of(self, engine):
         """The segment whose carry this request's engine borrowed."""
@@ -977,7 +1375,8 @@ class PackedVerifierEngine:
         for segment in live:
             tokens, start, table = users[segment]
             try:
-                index = page_zero_index(table, start, self.rows_per_user)
+                index = page_zero_index(table, start, self.rows_per_user,
+                                        **({'extent': True} if getattr(self, 'extent', False) else {}))
             except (IndexError, TypeError, ValueError, AttributeError) as error:
                 return 'page0 unmapped: segment %d position %s: %s' % (segment, start, error)
             if index is not None:
@@ -998,7 +1397,11 @@ class PackedVerifierEngine:
         native chunk family, so every reader accepts it), through an all-zero (1, page_width)
         int32 table: page 0, tile row j % 2 - two idle segments never share a tile row. Host
         only; what stage_packed takes in an idle segment's place. Refuses live segments that
-        are not distinct segments of this block, and a third idle segment."""
+        are not distinct segments of this block, and a third idle segment.
+
+        S2's extent block: F = 0, so an idle segment is an ordinary user at start 0 or 32 in family
+        E = 256 on the zero table (design 1.4 #1) - the same page-0 tile row as F = C - 256, since C
+        is a multiple of 64 - and its SDPA reads one 256-key chunk instead of the whole table."""
         import torch
 
         live = tuple(live_segments)
@@ -1009,7 +1412,7 @@ class PackedVerifierEngine:
         if len(idle) > self.MAX_IDLE_SEGMENTS:
             raise ValueError('At most %d idle segments: page 0 holds two 32-row tile rows, so idle segments %s '
                              'would share one' % (self.MAX_IDLE_SEGMENTS, idle))
-        first = self.replay_capacity - 256
+        first = 0 if getattr(self, 'extent', False) else self.replay_capacity - 256
         return {segment: ((1,) * self.rows_per_user, first + 32 * (index % 2),
                           torch.zeros((1, self.shape.page_width), dtype=torch.int32))
                 for index, segment in enumerate(idle)}
@@ -1034,6 +1437,14 @@ class PackedVerifierEngine:
                     or ticket.position != engine.position or len(ticket.tokens) != self.rows_per_user):
                 raise ValueError('Every packed entry needs an idle engine and a full %d-row ticket at its frontier'
                                  % self.rows_per_user)
+            if getattr(self, 'extent', False):
+                # S2: any start the extent path admits, each at its own family; proposal_rows and
+                # ineligible (serving_packed_step) asked the same admits first, so this is the backstop.
+                if not self.admits(ticket.position):
+                    raise ValueError('Packed ticket of request %s at %r is outside the extent path: 128 <= start and '
+                                     'start + %d <= %d required' % (str(entry['request_id'])[:48], ticket.position,
+                                                                  self.rows_per_user, self.replay_capacity))
+                continue
             # Each user's reader is captured in the block's one family; a ticket outside it
             # (never under the serving pin: position 32768, budget 256) has no trace here.
             try:
@@ -1052,6 +1463,14 @@ class PackedVerifierEngine:
                 diagnostic('%s site=verify %s' % (PADDED_PAGE0_MARKER if reason.startswith('page0')
                                                   else PADDED_REFUSED_MARKER, reason))
                 raise ValueError('The padded packed block cannot serve this round: %s' % reason)
+        extent_users = None
+        if getattr(self, 'extent', False):
+            # S2: every segment's start this round, live and idle, before anything is staged - the
+            # commit cap (check_extent_cap), the deadline's line and the extent audit read them.
+            extent_users = self.segment_users(entries, segments)
+            if idle:
+                extent_users = self.padded_users(extent_users, segments)
+            self.round_starts = {segment: user[1] for segment, user in enumerate(extent_users)}
         self.phase = 'verifying'
         self.validated_this_round = False
         try:
@@ -1078,7 +1497,8 @@ class PackedVerifierEngine:
             def operation():
                 nonlocal trace_ms
                 trace_started = time.perf_counter()
-                result = self.operations.execute_trace(self.mesh, self.trace, cq_id=0, blocking=True)
+                with self.replay_deadline('verify', segments):
+                    result = self.operations.execute_trace(self.mesh, self.trace, cq_id=0, blocking=True)
                 trace_ms += (time.perf_counter() - trace_started) * 1000
                 return result
 
@@ -1114,6 +1534,12 @@ class PackedVerifierEngine:
                                           self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
+            if extent_users is not None:
+                # S2, after the replay and outside the round's phase timings: the executed path's line,
+                # then (QWEN_FAST_EXTENT_AUDIT, gate profiles only) the read-back audit.
+                self.note_extent_round(extent_users, segments, idle)
+                if self.extent_audit:
+                    self.audit_extent(extent_users, self.rounds + 1)
             if self.padded_probe:
                 # QWEN_FAST_PADDED_PROBE (M1): after this round's readback, before its commit.
                 # The predictions above are already on the host; the probe ends with this
@@ -1221,7 +1647,8 @@ class PackedVerifierEngine:
             return 0.0
         blocking = not self.pipelined_commits
         started = time.perf_counter()
-        self.operations.execute_trace(self.mesh, self.commits[segment][prefix], cq_id=0, blocking=blocking)
+        with self.replay_deadline('commit', (segment,), prefix):
+            self.operations.execute_trace(self.mesh, self.commits[segment][prefix], cq_id=0, blocking=blocking)
         return (time.perf_counter() - started) * 1000
 
     def arm_deferred_commits(self):
@@ -1259,8 +1686,9 @@ class PackedVerifierEngine:
         blocking = not self.pipelined_commits
         started = time.perf_counter()
         try:
-            for segment, prefix in pending:
-                self.operations.execute_trace(self.mesh, self.commits[segment][prefix], cq_id=0, blocking=blocking)
+            with self.replay_deadline('flush', [segment for segment, prefix in pending]):
+                for segment, prefix in pending:
+                    self.operations.execute_trace(self.mesh, self.commits[segment][prefix], cq_id=0, blocking=blocking)
         except BaseException:
             # A half-enqueued round of carries cannot be replayed over (gdn_records' own rule).
             retained.poisoned = True
@@ -1298,6 +1726,10 @@ class PackedVerifierEngine:
         self.check_segment(segment)
         if type(prefix) is not int or not 0 <= prefix <= self.rows_per_user:
             raise ValueError('Selected prefix outside the user segment')
+        if getattr(self, 'extent', False):
+            # S2: no live segment commits a row at or past its family end (design 2.4). Before the try:
+            # a refusal must not also mark the block failed.
+            self.check_extent_cap(segment, prefix)
         # Each commit trace already blocks the host; the one fence that matters is the
         # last user's, which arms the retained block's replay for the next round.
         last = self.pending_segments == {segment}
@@ -1370,7 +1802,8 @@ class PackedVerifierEngine:
             taps=[list(addresses(operations, tap)) for tap in self.taps],
             checkpoints=[list(addresses(operations, checkpoints[0][0])) for checkpoints in self.checkpoints],
             carries=[list(carry[0][0]) for carry in self.carry_addresses],
-            attention=dict(reader='per-user bundled replay', family=self.replay_capacity, replay_group_rows=self.replay_group_rows,
+            attention=self.extent_attention() if getattr(self, 'extent', False) else
+            dict(reader='per-user bundled replay', family=self.replay_capacity, replay_group_rows=self.replay_group_rows,
                            bundles_per_user=[len(tables) for tables in self.replay_tables],
                            tables=[[list(address) for address in tables] for tables in self.replay_addresses]),
             setup_ms=getattr(self, 'setup_ms', None), rounds=self.rounds,
@@ -1432,6 +1865,11 @@ class PackedVerifierEngine:
             self.replay.release()
             self.replay = None
         self.replay_tables, self.replay_addresses = [], []
+        if getattr(self, 'deadline', None) is not None:
+            # S2: the extent block's watchdog thread (the pool's cur_pos words went back above).
+            self.deadline.close()
+        if getattr(self, 'extent', False):
+            self.extent_storage, self.extent_cur_pos, self.cur_pos_addresses = None, [], []
         release_owned(operations, self.taps)
         release_owned(operations, [value for checkpoints in self.checkpoints for snapshot in checkpoints for value in snapshot])
         release_owned(operations, [value for snapshot in self.initial for value in snapshot])

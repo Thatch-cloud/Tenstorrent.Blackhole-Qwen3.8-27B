@@ -44,6 +44,16 @@ knows it is last - `PackedVerifierEngine.commit_user` fences exactly the commit 
 empties its pending segments - so this step adds nothing for that beyond committing every
 segment, even on cancellation (prefix 0) or after a failure (prefix 0 for what was left).
 
+S2 W4 (the extent block, packed_verifier's S2 paragraph): which positions a block serves is the
+block's own `admits` (any start with 128 <= start, start + rows <= C on the extent block; its one
+family otherwise), asked before drafting (proposal_rows), for the padded skip line and - extent only
+- at the step (ineligible, so a ticket outside it is narrowed rather than refused by the verify).
+Each user commits at most the block's `accept_limit` rows (commit_limit, GreedySession.commit
+max_rows): the extent path's rows at or past their family end are never committed, so the block's
+own backstop in commit_user is unreachable. QWEN_FAST_GATE_FORCE_CAP (gate only) caps every packed
+commit lower still, for the ticket-width arm (design Q5). A block without the methods (every block
+before S2) is asked exactly what it was before.
+
 Variable-user rounds (M2, QWEN_FAST_PADDED_BLOCK=1 at the 64-row block, default off): a block
 built with `padded_min_users` also serves padded_min_users <= n < users live requests as one
 pass, the other segments idle (packed_verifier.py, VARIABLE-USER ROUNDS). proposal_rows drafts
@@ -74,6 +84,13 @@ import verifier_engine
 # request at which position, what it accepted and emitted, and the first predictions.
 AUDIT_LINE = ('[PACKED] request={request} segment={segment} position={position} '
               'prefix={prefix} emitted={emitted} predictions={predictions}')
+# S2 W4: appended to AUDIT_LINE whenever the round's commit had a cap (commit_limit: an extent block,
+# or the gate-only forced cap), so a family block's line is byte for byte what it was.
+AUDIT_CAP = ' cap={cap}'
+# QWEN_FAST_GATE_FORCE_CAP (S2 design Q5, M4's forced-cap arm; GATE ONLY, unset by default): every
+# packed commit capped at this many rows, to show that commit granularity does not change the text.
+FORCE_CAP_FLAG = 'QWEN_FAST_GATE_FORCE_CAP'
+FORCE_CAP_MARKER = '[PINDIAG] packed forced cap='
 
 # Under QWEN_FAST_PACKED_AUDIT=1, one line per ROUND (not per user, unlike AUDIT_LINE
 # above): the packed_commit phase's host wall time split into commit_entry's own
@@ -166,6 +183,50 @@ def format_publish_stages(publish_stage_timings):
     return '{%s}' % ', '.join(parts)
 
 
+def forced_cap(environ=None):
+    """QWEN_FAST_GATE_FORCE_CAP (gate only): None unset, else the cap every packed commit takes at most,
+    a decimal integer from 1 to 32; anything else is a configuration error (PackedStep refuses it at
+    attach, before any request)."""
+    import re
+
+    text = (os.environ if environ is None else environ).get(FORCE_CAP_FLAG)
+    if text is None:
+        return None
+    if type(text) is not str or re.fullmatch('[1-9][0-9]?', text) is None or int(text) > 32:
+        raise ValueError('%s must be a row count from 1 to 32, got %r' % (FORCE_CAP_FLAG, text))
+    return int(text)
+
+
+def admitted(block, position):
+    """Whether `block` serves a live ticket at `position`: the block's own admits when it has one
+    (packed_verifier.PackedVerifierEngine: the extent path's range on an S2 block, its one family
+    otherwise), else - a block without it - the family check on its replay_capacity, as before S2,
+    and no check at all without that."""
+    admits = getattr(block, 'admits', None)
+    if callable(admits):
+        return bool(admits(position))
+    capacity = getattr(block, 'replay_capacity', None)
+    if capacity is None:
+        return True
+    try:
+        validate_ticket(position, block.shape.rows_per_user, capacity, short_context=False)
+    except ValueError:
+        return False
+    return True
+
+
+def commit_limit(block, ticket):
+    """How many of this ticket's rows its user may commit, or None for all of them: the block's
+    accept_limit at the ticket's position (S2: min(rows, E - start) on the extent block; None on a
+    family block, or a block without it), then at most QWEN_FAST_GATE_FORCE_CAP when that is set."""
+    accept = getattr(block, 'accept_limit', None)
+    limit = accept(ticket.position) if callable(accept) else None
+    forced = forced_cap()
+    if forced is not None:
+        limit = min(len(ticket.tokens) if limit is None else limit, forced)
+    return limit
+
+
 def proposal_rows(block, requests):
     """The ticket width every live request drafts for the coming round, asked by the worker
     hook before any proposal: the block's rows per user when the block will serve the round
@@ -233,16 +294,13 @@ def proposal_rows(block, requests):
             width = shape.rows_per_user
         elif width != shape.rows_per_user:
             return None
-        capacity = getattr(matched, 'replay_capacity', None)
         for request in group:
             session = request.session
             if session.max_new_tokens - len(session.emitted) < shape.rows_per_user:
                 return None
-            if capacity is not None:
-                try:
-                    validate_ticket(session.position, shape.rows_per_user, capacity, short_context=False)
-                except ValueError:
-                    return None
+            # The block's own admits (S2 W4): the extent path's range, or its one family.
+            if not admitted(matched, session.position):
+                return None
         # QWEN_FAST_PADDED_BLOCK: the idle slot rule and page 0, before the T2 tile rows (a
         # page-0 hit would otherwise surface there as a shared tile row).
         if padded and padded_refused_at_proposal(group, matched) is not None:
@@ -331,6 +389,10 @@ class PackedStep:
         if not self.blocks:
             raise ValueError('At least one packed verify block is required')
         self.block = self.blocks[0] if len(self.blocks) == 1 else None
+        # QWEN_FAST_GATE_FORCE_CAP (gate only): refused here, at attach, if malformed; logged once when set.
+        cap = forced_cap()
+        if cap is not None:
+            audit_log('{}{} (gate only)', FORCE_CAP_MARKER, cap)
 
     def __call__(self, entries, *, cancelled):
         if len(self.blocks) == 1:
@@ -392,6 +454,11 @@ def ineligible(entries, block):
             block.segment_of(entry['request'].engine)
         except ValueError:
             return 'request=%s engine not bound to the block' % str(entry['request_id'])[:48]
+        if getattr(block, 'extent', False) and not admitted(block, entry['ticket'].position):
+            # S2 W4: a ticket the extent path does not serve (below 128, or past C) - D1 narrows it for
+            # the sequential step rather than the verify refusing the whole round.
+            return 'request=%s position=%d outside the extent path' % (str(entry['request_id'])[:48],
+                                                                        entry['ticket'].position)
     if padded:
         # QWEN_FAST_PADDED_BLOCK: the backstop behind proposal_rows, over the round's tickets.
         reason = padded_refusal([(entry['request'].engine, entry['ticket'].position) for entry in entries], block)
@@ -611,18 +678,14 @@ def note_padded_skip(entries, block, reason):
         from packed_verifier import PADDED_SKIPPED_MARKER
 
         rows = block.shape.rows_per_user
-        capacity = getattr(block, 'replay_capacity', None)
         eligible = True
         for entry in entries:
             if remaining_budget(entry) < rows:
                 eligible = False
                 break
-            if capacity is not None:
-                try:
-                    validate_ticket(entry['request'].session.position, rows, capacity, short_context=False)
-                except ValueError:
-                    eligible = False
-                    break
+            if not admitted(block, entry['request'].session.position):
+                eligible = False
+                break
         padded_log('%s live=%d eligible=%d reason=%s' % (PADDED_SKIPPED_MARKER, len(entries), int(eligible),
                                                          str(reason).replace(' ', '_')[:120]))
     except Exception:
@@ -771,13 +834,19 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
         # it, packed_verifier.PackedVerifierEngine.commit_user: this one interval covers all
         # of that, for either outcome.
         session_started = time.perf_counter()
+        # S2 W4: the rows this user may commit (the extent block's boundary cap, the gate's forced
+        # cap), or None - every block before S2 - for the call exactly as it was.
+        limit = commit_limit(block, ticket)
         if cancelled():
             session.abort(request_id, ticket, runtime.publish)
             request.cancelled = True
             decision = None
             output = CommittedOutput(request_id, (), session.position, True, True)
-        else:
+        elif limit is None:
             decision = session.commit(request_id, ticket, rows, runtime.publish)
+            output = CommittedOutput(request_id, tuple(decision.emitted), session.position, session.finished)
+        else:
+            decision = session.commit(request_id, ticket, rows, runtime.publish, max_rows=limit)
             output = CommittedOutput(request_id, tuple(decision.emitted), session.position, session.finished)
         session_ms = (time.perf_counter() - session_started) * 1000
     finally:
@@ -791,9 +860,10 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
             PUBLICATION_SPLITS.reset(split_token)
     finished = time.perf_counter()
     if audit_enabled():
-        audit_log(AUDIT_LINE, request=str(request_id)[:48], segment=segment, position=ticket.position,
-                  prefix=0 if decision is None else decision.state_rows,
-                  emitted=0 if decision is None else len(decision.emitted), predictions=list(rows[:8]))
+        audit_log(AUDIT_LINE if limit is None else AUDIT_LINE + AUDIT_CAP, request=str(request_id)[:48],
+                  segment=segment, position=ticket.position, prefix=0 if decision is None else decision.state_rows,
+                  emitted=0 if decision is None else len(decision.emitted), predictions=list(rows[:8]),
+                  **({} if limit is None else dict(cap=limit)))
     if decision is not None and getattr(request, 'collect_timings', False):
         record_timing(request, ticket, decision, metrics, segment,
                       verify_started=verify_started, verified=verified, started=started, finished=finished)
