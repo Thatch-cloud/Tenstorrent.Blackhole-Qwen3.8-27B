@@ -248,8 +248,8 @@ jobs:
         run: |
           set -euo pipefail
           # Design section 2.1, P0a: the general-prefix engine config through the image's own vLLM
-          # 0.25.1 and TT plugin, then the prefix scheduler graft (scripts/ci/prefix_scheduler_graft.py)
-          # driven on the real TTScheduler. The checkout is mounted read-only at /c2; no --device, so
+          # 0.25.1 and TT plugin, then G1's prefix scheduler graft (scripts/ci/qwen_prefix_scheduler_patch.py
+          # over qwen_prefix_registry.py) driven on the real TTScheduler. The checkout is mounted read-only at /c2; no --device, so
           # it opens no card. Prints PASS/FAIL per check and exits 1 on any FAIL.
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
           docker image inspect "$image" --format "probe image $image {{.Id}}"

@@ -23,9 +23,11 @@ on it, and drive it with real Requests, SchedulerOutputs and ModelRunnerOutputs.
 stands in for the device: it asserts what the G1 model graft will assert (a prefill row with
 start_pos > 0 has a committed grant whose Q equals start_pos and whose checkpoint tokens match),
 and takes the planned captures. The wrappers under test - cap, trim, per-step commit, eviction
-coupling, fail-closed salt, install assertions - are prefix_scheduler_graft.py, which becomes G1's
-scheduler graft; these checks are its unit tests. Checks 15-18 are extra unit tests of the same
-module (registry LRU, kill switch, reset, the token-mismatch guard).
+coupling, fail-closed salt, install assertions - are G1's scheduler graft,
+qwen_prefix_scheduler_patch.py over qwen_prefix_registry.py (the P0a prototype,
+prefix_scheduler_graft.py, productionised); test_qwen_prefix_scheduler_vllm carries checks 5-14 and
+16-18 as unit tests. Checks 15-18 are extra unit tests of the same modules (registry LRU, kill
+switch, reset, the token-mismatch guard).
 
 Prints PASS or FAIL per check with its evidence and exits 1 if any check fails.
 """
@@ -65,7 +67,11 @@ def load_local(name):
     return module
 
 
-graft = load_local('prefix_scheduler_graft')
+# The probe checks the wrappers, not the stats export: its log line only, no file.
+os.environ.setdefault('QWEN_PREFIX_STATS_PATH', '')
+# The registry first: the scheduler graft, loaded outside a package, imports it by its plain name.
+load_local('qwen_prefix_registry')
+graft = load_local('qwen_prefix_scheduler_patch')
 
 PROFILES_IMAGE = '/opt/qwen-c2/profiles.json'
 PROFILES_CHECKOUT = os.path.join(HERE, 'qwen_c2_profiles.json')
@@ -519,8 +525,11 @@ class Drive(object):
             if not grant.checkpoint.matches(request.all_token_ids[0:start]):
                 raise ModelAssertion('row %s: checkpoint tokens differ from the prompt below %d' % (rid, start))
         if grant is not None:
+            # The stand-in takes each capture where the contract says, after exactly pos tokens
+            # (qwen_prefix_registry's model contract); test_qwen_prefix_scheduler_vllm's FakeGdnModel
+            # also checks the state it restores.
             for pos, _ in grant.plan:
-                self.registry.capture(rid, pos)
+                self.registry.capture(rid, pos, loop_pos=pos)
 
     def execute(self, output):
         from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
