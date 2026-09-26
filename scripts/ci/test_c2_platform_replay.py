@@ -72,6 +72,8 @@ class ArgumentTests(unittest.TestCase):
 
     def test_a_profile_replaces_the_agents(self):
         arguments = replay.run_arguments(INSPECT, 'img', 'copy', 8011, profile='c2', devices=[])
+        capped = replay.run_arguments(INSPECT, 'img', 'copy', 8011, devices=[], extra_env=replay.DEFAULT_ENV)
+        self.assertEqual(capped[-3:], ['-e', 'THATCH_SERVING_SESSION_CAP=0', 'img'])
         env = [arguments[i + 1] for i, token in enumerate(arguments) if token == '-e']
         self.assertEqual(env, ['THATCH_VLLM_KWARGS={}', 'HF_HOME=/models', 'QWEN_C2_PROFILE=c2'])
 

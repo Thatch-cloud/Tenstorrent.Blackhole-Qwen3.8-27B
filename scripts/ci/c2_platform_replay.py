@@ -145,14 +145,22 @@ def serving_devices(root='/dev/tenstorrent/by-id'):
     return [os.path.realpath(os.path.join(root, board)) for board in (CARD_M, CARD_A)]
 
 
-def run_arguments(info, image, name, port, profile=None, devices=None, image_env=()):
+# The runtime's Tenstorrent session cap (Thatch.Server #2628: 4 sessions, each held 10 minutes after
+# its last request) would refuse this replay's own one-off requests - about a dozen distinct sessions
+# inside ten minutes - so the replay turns it off unless --env says otherwise. The cap is its own check.
+DEFAULT_ENV = ('THATCH_SERVING_SESSION_CAP=0',)
+
+
+def run_arguments(info, image, name, port, profile=None, devices=None, image_env=(), extra_env=()):
     """`docker run -d` of a copy of the agent's container (config `info`), with `image`, a new name
     and port, cards M then A, and QWEN_C2_PROFILE=`profile` in place of the agent's when given.
     `image_env` is the SOURCE image's own ENV: a container's Env merges it with what the agent passed,
     and copied whole it would override the replayed image's ENV with the old image's (its kernel
-    cache key, a changed QWEN_* default) - so only what the agent added is copied."""
+    cache key, a changed QWEN_* default) - so only what the agent added is copied. `extra_env`
+    (NAME=value) goes last and replaces any recorded variable of the same name."""
     config, host = info['Config'], info['HostConfig']
     inherited = set(image_env or ())
+    overridden = set(variable.split('=', 1)[0] for variable in extra_env)
     arguments = ['docker', 'run', '-d', '--name', name, '-p', '127.0.0.1:%d:8000' % port]
     if host.get('ReadonlyRootfs'):
         arguments.append('--read-only')
@@ -177,11 +185,14 @@ def run_arguments(info, image, name, port, profile=None, devices=None, image_env
     for device in (devices if devices is not None else serving_devices()):
         arguments += ['--device', device]
     for variable in config.get('Env') or ():
-        if (profile and variable.startswith('QWEN_C2_PROFILE=')) or variable in inherited:
+        if ((profile and variable.startswith('QWEN_C2_PROFILE=')) or variable in inherited
+                or variable.split('=', 1)[0] in overridden):
             continue
         arguments += ['-e', variable]
     if profile:
         arguments += ['-e', 'QWEN_C2_PROFILE=%s' % profile]
+    for variable in extra_env:
+        arguments += ['-e', variable]
     return arguments + [image]
 
 
@@ -430,6 +441,8 @@ def main():
     parser.add_argument('--port', type=int, default=8011)
     parser.add_argument('--profile', default=None, help='QWEN_C2_PROFILE for the copy (default: the source\'s)')
     parser.add_argument('--seed', type=int, default=None, help='the arrivals\' seed (default: the clock)')
+    parser.add_argument('--env', action='append', default=None, metavar='NAME=value',
+                        help='extra container env, repeatable (default: %s)' % ' '.join(DEFAULT_ENV))
     options = parser.parse_args()
     name, port, model = options.name, options.port, options.model
     seed = options.seed if options.seed is not None else int(time.time())
@@ -461,7 +474,11 @@ def main():
             json.dump(dict(passed=False, steps=steps), handle, indent=1)
         print('PLATFORM_REPLAY passed=False refused: %s' % problem, flush=True)
         return 1
-    arguments = run_arguments(info, options.image, name, port, options.profile, image_env=inherited or ())
+    extra_env = tuple(options.env) if options.env is not None else DEFAULT_ENV
+    if any('=' not in variable for variable in extra_env):
+        parser.error('--env takes NAME=value')
+    arguments = run_arguments(info, options.image, name, port, options.profile, image_env=inherited or (),
+                              extra_env=extra_env)
     with open(os.path.join(options.results, 'docker-run.json'), 'w') as handle:
         json.dump(arguments, handle, indent=1)
     passed = False
