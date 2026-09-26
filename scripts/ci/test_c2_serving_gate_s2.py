@@ -370,15 +370,24 @@ class PlanTests(unittest.TestCase):
 
     def test_control_is_abab_on_its_two_fixed_profiles_at_v235s_shape(self):
         arms = driver.plan_arms('control', 'c2-packed', PROFILES)
-        self.assertEqual([arm[0] for arm in arms], ['control-off-1', 'control-on-1', 'control-off-2', 'control-on-2'])
-        self.assertEqual([arm.profile for arm in arms], ['c2-gate', 'c2-packed-gate'] * 2)
-        self.assertEqual([arm.env for arm in arms], [(), driver.AUDIT_ENV] * 2)
+        self.assertEqual([arm[0] for arm in arms], ['control-off-1', 'control-on-1', 'control-off-2', 'control-on-2',
+                                                    'control-audit'])
+        self.assertEqual([arm.profile for arm in arms], ['c2-gate', 'c2-packed-gate'] * 2 + ['c2-packed-gate'])
+        # The pairs time the flag without its audit (runs 36270917139, 36272682217: the audit's cost reaches past
+        # the ms its line reports); the audited arm, after them, judges exactness and the audit only.
+        self.assertEqual([arm.env for arm in arms], [(), ()] * 2 + [driver.AUDIT_ENV])
+        self.assertEqual([arm.role for arm in arms], ['off', 'on'] * 2 + ['audit'])
+        self.assertEqual([arm.extra.get('pair') for arm in arms], [1, 1, 2, 2, None])
+        self.assertEqual(arms[1][1], arms[4][1], 'the audited arm serves the timing arms\' requests')
         for arm in arms:
             options = self.parse(arm)
             self.assertEqual((options.users, options.prompt_tokens, options.max_tokens, options.stagger),
                              (4, 131072, 256, 0.25))
             self.assertEqual(options.expect_profile, arm.profile)
-        self.assertEqual(len(driver.plan_arms('control', 'c2', PROFILES, s2=dict(pairs=1))), 2)
+        self.assertEqual([arm[0] for arm in driver.plan_arms('control', 'c2', PROFILES, s2=dict(pairs=1))],
+                         ['control-off-1', 'control-on-1', 'control-audit'])
+        self.assertEqual(driver.worst_case_seconds(['control'], dict(control=arms)),
+                         5 * (driver.ARM_SECONDS['control'] + driver.ARM_OVERHEAD_SECONDS))
         self.assertIn('c2-packed-gate', driver.REFERENCE_PROFILES)
 
     def test_forced_cap_caps_one_arm_only(self):
@@ -832,12 +841,14 @@ class Driver(object):
 
 
 class ControlDriverTests(unittest.TestCase):
-    def control(self, on_log=None, off_log=None, on_env=((AUDIT, '1'),), off_texts=None, pairs='2', cache=flat_cache,
-                on_logs=None):
-        """The control plan with every flag-off arm on `off_log` and every flag-on arm on `on_log`, or on its own
-        log in `on_logs` (arm name -> server log; its report is built from the same log)."""
-        on_log = on_log or s2_log()
+    def control(self, on_log=None, off_log=None, on_env=(), off_texts=None, pairs='2', cache=flat_cache,
+                on_logs=None, audit_log=None, audit_env=((AUDIT, '1'),)):
+        """The control plan with every flag-off arm on `off_log`, every flag-on timing arm on `on_log` (unaudited)
+        or on its own log in `on_logs` (arm name -> server log; its report is built from the same log), and the
+        audited arm on `audit_log`; `on_env` and `audit_env` are what reaches each report's harness."""
+        on_log = on_log or s2_log(audit=False)
         off_log = off_log or s2_log(on=False, round_ms=172.0)
+        audit_log = audit_log or s2_log()
         logs, factories = {}, {}
         for index in range(1, int(pairs) + 1):
             off_name, on_name = 'control-off-%d' % index, 'control-on-%d' % index
@@ -845,6 +856,8 @@ class ControlDriverTests(unittest.TestCase):
             logs[off_name], logs[on_name] = off_log, mine
             factories[off_name] = lambda n, t=off_texts: s2_arm_report(off_log, 'c2-gate', texts=t)
             factories[on_name] = lambda n, text=mine: s2_arm_report(text, 'c2-packed-gate', env=on_env)
+        logs[driver.CONTROL_AUDIT_ARM] = audit_log
+        factories[driver.CONTROL_AUDIT_ARM] = lambda n: s2_arm_report(audit_log, 'c2-packed-gate', env=audit_env)
         return Driver(self).run(['--profile', 'c2-packed', '--plan', 'control', '--pairs', pairs], factories, logs,
                                 cache=cache)
 
@@ -852,24 +865,57 @@ class ControlDriverTests(unittest.TestCase):
         code, summary, calls, lines, _ = self.control()
         result = summary['results']['control']
         self.assertEqual((code, result['verdict']), (0, 'PASS'), result.get('lines'))
-        self.assertEqual([c['arm'] for c in calls], ['control-off-1', 'control-on-1', 'control-off-2', 'control-on-2'])
-        on_argv = calls[1]['arguments']
+        self.assertEqual([c['arm'] for c in calls], ['control-off-1', 'control-on-1', 'control-off-2', 'control-on-2',
+                                                     'control-audit'])
+        on_argv, audit_argv = calls[1]['arguments'], calls[4]['arguments']
         self.assertIn('QWEN_C2_PROFILE=c2-packed-gate', on_argv)
-        self.assertIn('%s=1' % AUDIT, on_argv)
+        self.assertNotIn('%s=1' % AUDIT, on_argv, 'the timing arm runs without the audit')
+        self.assertIn('QWEN_C2_PROFILE=c2-packed-gate', audit_argv)
+        self.assertIn('%s=1' % AUDIT, audit_argv)
         self.assertIn('QWEN_C2_PROFILE=c2-gate', calls[0]['arguments'])
         self.assertNotIn('%s=1' % AUDIT, calls[0]['arguments'])
-        self.assertEqual([(p['pair'], p['ratio']) for p in result['pairs']], [(1, 0.9884), (2, 0.9884)])
+        self.assertEqual([(p['pair'], p['on_ms'], p['off_ms'], p['ratio']) for p in result['pairs']],
+                         [(1, 170.0, 172.0, 0.9884), (2, 170.0, 172.0, 0.9884)])
+        self.assertEqual(result['audited'], dict(arm='control-audit', median_round_ms=172.0, median_audit_ms=2.0))
+        self.assertIn('pair 1: flag-off 172.0 ms, flag-on 170.0 ms (unaudited): 0.9884 x', result['lines'])
+        self.assertEqual(result['arms']['control-audit']['verdict'], 'PASS')
         self.assertEqual(summary['policy'], 'strict')
         self.assertEqual(summary['s2_exit_blockers'], [])
 
     def test_a_slower_flag_on_round_fails(self):
-        code, summary, _, _, _ = self.control(on_log=s2_log(round_ms=180.0))
+        code, summary, _, _, _ = self.control(on_log=s2_log(round_ms=180.0, audit=False))
         result = summary['results']['control']
         self.assertEqual((code, result['verdict']), (1, 'FAIL'))
         self.assertIn('past 1.02', ' '.join(result['s2_problems']))
 
+    def test_the_tolerance_is_1_02_of_the_unaudited_round(self):
+        for round_ms, verdict in ((175.0, 'PASS'), (176.0, 'FAIL')):
+            with self.subTest(round_ms=round_ms):
+                result = self.control(on_log=s2_log(round_ms=round_ms, audit=False), pairs='1')[1]['results']['control']
+                self.assertEqual(result['verdict'], verdict, result['lines'])
+                self.assertEqual(result['pairs'][0]['ratio'], round(round_ms / 172.0, 4))
+
+    def test_the_audited_arm_is_never_timed(self):
+        # The audit lengthens its rounds past the ms its line reports; control-audit judges exactness only.
+        code, summary, _, _, _ = self.control(audit_log=s2_log(round_ms=200.0, audit_ms=9.0), pairs='1')
+        result = summary['results']['control']
+        self.assertEqual((code, result['verdict']), (0, 'PASS'), result['lines'])
+        self.assertEqual([p['ratio'] for p in result['pairs']], [0.9884])
+        self.assertEqual(result['audited'], dict(arm='control-audit', median_round_ms=209.0, median_audit_ms=9.0))
+
+    def test_a_timing_arm_that_ran_the_audit_fails(self):
+        # Its round is not the flag's: the pair is refused, whichever way the audit got there.
+        for on_env in ((), ((AUDIT, '1'),)):
+            with self.subTest(on_env=on_env):
+                code, summary, _, _, _ = self.control(on_log=s2_log(), on_env=on_env, pairs='1')
+                result = summary['results']['control']
+                self.assertEqual((code, result['verdict']), (1, 'FAIL'))
+                self.assertEqual(result['pairs'], [])
+                self.assertIn('pair 1: the flag-on timing arm ran the extent audit (12 "[EXTENT-AUDIT]" lines)',
+                              ' '.join(result['s2_problems']))
+
     def test_the_tolerance_must_hold_in_every_pair(self):
-        code, summary, _, _, _ = self.control(on_logs={'control-on-2': s2_log(round_ms=180.0)})
+        code, summary, _, _, _ = self.control(on_logs={'control-on-2': s2_log(round_ms=180.0, audit=False)})
         result = summary['results']['control']
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertEqual([p['pair'] for p in result['pairs']], [1, 2])
@@ -883,10 +929,11 @@ class ControlDriverTests(unittest.TestCase):
 
     def test_an_audit_mismatch_or_a_missing_audit_line_fails(self):
         for log_text in (s2_log(mismatch=True), s2_log(drop_audit=2)):
-            code, summary, _, _, _ = self.control(on_log=log_text, pairs='1')
+            code, summary, _, _, _ = self.control(audit_log=log_text, pairs='1')
             self.assertEqual(summary['results']['control']['verdict'], 'FAIL')
-            on = summary['results']['control']['arms']['control-on-1']
-            self.assertTrue(any('EXTENT_AUDIT' in p for p in on['platform_problems']), on['platform_problems'])
+            audited = summary['results']['control']['arms']['control-audit']
+            self.assertTrue(any('EXTENT_AUDIT' in p for p in audited['platform_problems']), audited['platform_problems'])
+            self.assertEqual(summary['results']['control']['arms']['control-on-1']['verdict'], 'PASS')
 
     def test_a_marker_leak_into_the_flag_off_arm_fails(self):
         code, summary, _, _, _ = self.control(off_log=s2_log(on=True), pairs='1')
@@ -895,9 +942,12 @@ class ControlDriverTests(unittest.TestCase):
         self.assertTrue(any('not the profile' in p for p in off['platform_problems']))
 
     def test_a_knob_that_never_reached_the_container_fails(self):
-        code, summary, _, _, _ = self.control(on_env=(), pairs='1')
-        on = summary['results']['control']['arms']['control-on-1']
-        self.assertTrue(any('never reached the container' in p for p in on['platform_problems']))
+        code, summary, _, _, _ = self.control(audit_env=(), pairs='1')
+        result = summary['results']['control']
+        self.assertEqual(result['verdict'], 'FAIL')
+        audited = result['arms']['control-audit']
+        self.assertTrue(any('never reached the container' in p for p in audited['platform_problems']))
+        self.assertIn('control-audit: the extent audit did not run', ' '.join(result['s2_problems']))
 
     def test_a_judged_arm_whose_cache_could_not_be_counted_is_not_exercised(self):
         # Kernel-cache growth unknown (no counter: the cache is not on the hub, or sudo find failed): never PASS.
@@ -905,20 +955,23 @@ class ControlDriverTests(unittest.TestCase):
         result = summary['results']['control']
         self.assertEqual((code, result['verdict']), (1, 'NOT_EXERCISED'), result['lines'])
         self.assertTrue(any('could not be counted (no counter' in s for s in result['shortfalls']), result['shortfalls'])
-        failing = iter([100, None, 100, 100])
+        failing = iter([100, None, 100, 100, 100, 100])
         result = self.control(pairs='1', cache=lambda: next(failing))[1]['results']['control']
         self.assertEqual(result['verdict'], 'NOT_EXERCISED')
         self.assertTrue(any('control-off-1' in s and 'a count failed' in s for s in result['shortfalls']))
 
     def test_a_flag_on_arm_without_a_packed_extent_round_fails(self):
         # G3 must not pass with every flag-on round sequential.
-        code, summary, _, _, _ = self.control(on_log=s2_log(packed=False), pairs='1')
+        code, summary, _, _, _ = self.control(on_log=s2_log(packed=False, audit=False), pairs='1')
         result = summary['results']['control']
         self.assertEqual(result['verdict'], 'FAIL')
         on = result['arms']['control-on-1']
         self.assertEqual(on['verdict'], 'FAIL')
         self.assertIn('problem: the flag-on arm served no packed extent round', on['lines'])
         self.assertEqual(result['arms']['control-off-1']['verdict'], 'PASS')
+        result = self.control(audit_log=s2_log(packed=False), pairs='1')[1]['results']['control']
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('problem: the flag-on arm served no packed extent round', result['arms']['control-audit']['lines'])
 
     def test_a_judged_arm_that_compiled_fails_and_the_growth_is_recorded(self):
         counts = iter(range(100, 200, 3))
@@ -1535,8 +1588,10 @@ class HostCheckTests(unittest.TestCase):
         self.assertNotIn('kernel_cache', summary)
         looked, summary = self.main_run(['--profile', 'c2-packed', '--plan', 'control', '--pairs', '1'], {
             'control-off-1': lambda n: s2_arm_report(s2_log(on=False, round_ms=172.0), 'c2-gate'),
-            'control-on-1': lambda n: s2_arm_report(s2_log(), 'c2-packed-gate', env=((AUDIT, '1'),))},
-            {'control-off-1': s2_log(on=False, round_ms=172.0), 'control-on-1': s2_log()})
+            'control-on-1': lambda n: s2_arm_report(s2_log(audit=False), 'c2-packed-gate'),
+            'control-audit': lambda n: s2_arm_report(s2_log(), 'c2-packed-gate', env=((AUDIT, '1'),))},
+            {'control-off-1': s2_log(on=False, round_ms=172.0), 'control-on-1': s2_log(audit=False),
+             'control-audit': s2_log()})
         self.assertEqual(looked, ['zot/img:s2'])
         self.assertEqual(summary['arms']['control-on-1']['kernel_cache'], dict(before=100, after=100, added=0,
                                                                                 judged=True))

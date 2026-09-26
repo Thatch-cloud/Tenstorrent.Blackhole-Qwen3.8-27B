@@ -68,19 +68,25 @@ of the C2-any markers may appear (ANY_REQUEST_MARKERS): either is a problem that
 S2 PLANS (C2-packed-any, s2-design.md W11 and 6.3; the S2 image, graft K64j, with its profiles c2-packed
 (traffic: c2 plus the block and QWEN_FAST_EXTENT_REPLAY=1) and c2-packed-gate (c2-gate plus the flag)).
 Each arm may serve its own profile and add gate-only environment (Arm: -e NAME=value, never a profile's key):
-QWEN_FAST_EXTENT_AUDIT=1 on every arm whose profile has the flag, the capture-position knob on G3b's, the
-forced cap on M4's. Each knob must reach the harness's own process (its qwen_configuration) or the arm fails
-(read-the-launched-argv). The exactness policy is strict (CB2a K2 passed bitwise): a reproduced divergence
-FAILS, and a flag the card evidence claims exact never makes one NOT_COMPARABLE (real_text_compare.
-S2_EXACT_CLAIMS); --policy dc-i (the user's decision D-c(i), with --policy-decision) is the only relaxation.
+QWEN_FAST_EXTENT_AUDIT=1 on every arm whose profile has the flag but the control plan's timing arms, the
+capture-position knob on G3b's, the forced cap on M4's. Each knob must reach the harness's own process (its
+qwen_configuration) or the arm fails (read-the-launched-argv). The exactness policy is strict (CB2a K2 passed
+bitwise): a reproduced divergence FAILS, and a flag the card evidence claims exact never makes one
+NOT_COMPARABLE (real_text_compare.S2_EXACT_CLAIMS); --policy dc-i (the user's decision D-c(i), with
+--policy-decision) is the only relaxation.
   warm, warm-off  M1: solo on c2-packed over every later length (WARM_LENGTHS), short prompts decoding
            past 2048 of history, then 4 x 131072, 4 x 16384 and 4 x 4096 on c2-packed-gate (warm) and on
            c2-gate (warm-off), the two shorter with the capture knob; warm-off also runs exact at v235's shape,
            so M2's exact bring-up (judged for zero new cache entries) finds exact's programs compiled.
            Completes; kernel-cache entries recorded.
   control  M3-M4, G3: --pairs A/B pairs (default 2: ABAB) of c2-gate (A) and c2-packed-gate (B) at v235's
-           shape. Every arm IDENTICAL to v235; B's median four-live packed round, net of its audit's ms, at
-           most CONTROL_TOLERANCE x A's in every pair; B shows the S2 lines and A none of them.
+           shape, then one audited B arm (control-audit, QWEN_FAST_EXTENT_AUDIT=1). Every arm IDENTICAL to
+           v235; B's median four-live packed round at most CONTROL_TOLERANCE x A's in every pair; B shows the S2
+           lines and A none of them. The pairs' B arms are the timing arms and run WITHOUT the audit (no audit
+           line may appear in them): runs 36270917139 and 36272682217 showed the audit's cost is not confined
+           to the ms its line reports - rounds with a slow audit (median 8.0 ms) were 4.4 ms slower still than
+           their flag-off twins, rounds with a quick one (1.4 ms) 0.6 ms - so a round net of its audit's ms is
+           not the flag's round. control-audit judges exactness and the audit (clean, every round), not time.
   forced-cap  M4, Q5: c2-packed-gate with QWEN_FAST_GATE_FORCE_CAP=8 against without, at v235's shape: both
            IDENTICAL to v235 and to each other, and the capped arm's [PACKED] caps all at most 8.
   control-below  M5, G3b: per family F (--families, default 16640 and 4352) and pair, c2-gate against
@@ -240,6 +246,7 @@ DEFAULT_PAIRS = 2
 BELOW_FAMILIES = (16640, 4352)
 BELOW_MAX_TOKENS = 224           # F - 256 + 223 + 16 <= F: every ticket of a 224-token answer stays in F (B1)
 CONTROL_TOLERANCE = 1.02         # flag-on median four-live round against flag-off, per pair (M3-M4; Q16)
+CONTROL_AUDIT_ARM = 'control-audit'   # G3's audited flag-on arm: exactness and the audit, never timed
 FORCE_CAP = 8
 GENERAL_RATE, TARGET_RATE = 13.0, 27.0   # tok/s per user at four live: general's (MEM goal-c2-serving.md:11), S2's aim
 FLOOR_GB = 0.25                  # before-point floor, GB per chip (s2-design 3.3, M8)
@@ -489,7 +496,8 @@ G4_PLANS = ('mixed', 'short', 'boundaries', 'staggered')
 
 def s2_env(profiles, profile, audits=None, g4=False):
     """What an arm on `profile` adds: the extent audit where the profile has the flag (every packed round of
-    every S2 gate arm is audited, s2-design 6.1), and on a G4 arm under audits 'all' the other three audits."""
+    every S2 gate arm is audited, s2-design 6.1, but the control plan's timing arms, which s2_plan_arms builds
+    without it), and on a G4 arm under audits 'all' the other three audits."""
     if profile not in profiles['profiles'] or not s2_profile(profiles, profile):
         return ()
     return AUDIT_ENV + (G4_ALL_AUDITS if g4 and audits == 'all' else ())
@@ -568,9 +576,11 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
         off_args = v235_args(profiles, S2_OFF_PROFILE, plan)
         arms = []
         for index in range(1, pairs + 1):
+            # The timing pair: the flag-on arm without the audit (the module docstring's control).
             arms.append(Arm('control-off-%d' % index, off_args, seconds, profile=S2_OFF_PROFILE, role='off', pair=index))
-            arms.append(Arm('control-on-%d' % index, on_args, seconds, profile=S2_GATE_PROFILE, env=on_env, role='on',
-                            pair=index))
+            arms.append(Arm('control-on-%d' % index, on_args, seconds, profile=S2_GATE_PROFILE, role='on', pair=index))
+        # Exactness and the extent audit, after the pairs so their order (ABAB) and spacing are unchanged.
+        arms.append(Arm(CONTROL_AUDIT_ARM, on_args, seconds, profile=S2_GATE_PROFILE, env=on_env, role='audit'))
         return arms
     if plan == 'control-below':
         need_profile(profiles, S2_OFF_PROFILE, False, plan)
@@ -1562,8 +1572,9 @@ def corpus_first(plan, runner, reference):
 
 
 def run_reference_pairs(plan, runner, reference, arms):
-    """control (G3) and forced-cap (Q5): every arm against v235 (bringup_verdict); control's flag-on arms timed
-    against the flag-off arm of their pair; forced-cap's arms against each other and its caps."""
+    """control (G3) and forced-cap (Q5): every arm against v235 (bringup_verdict); control's flag-on timing arms
+    (unaudited) timed against the flag-off arm of their pair, and its audited arm (CONTROL_AUDIT_ARM) judged for
+    exactness and the audit only; forced-cap's arms against each other and its caps."""
     mismatch = corpus_first(plan, runner, reference)
     if mismatch:
         return dict(verdict='NOT_COMPARABLE', reason=mismatch, lines=['corpus: %s' % mismatch])
@@ -1571,26 +1582,42 @@ def run_reference_pairs(plan, runner, reference, arms):
     for spec in arms:
         report = reports[spec[0]] = run_arm(runner, plan, spec)
         verdict = bringup_verdict(report, reference, spec.profile, asked(spec[1]))
-        if spec.role == 'on' and report is not None and not (s2_of(report).get('rounds') or {}).get('count'):
+        if spec.role in ('on', 'audit') and report is not None and not (s2_of(report).get('rounds') or {}).get('count'):
             verdict.update(verdict='FAIL')
             verdict['lines'] = list(verdict.get('lines') or []) + ['problem: the flag-on arm served no packed extent round']
         results[spec[0]] = verdict
-    problems, shortfalls, pairs = [], [], []
+    problems, shortfalls, pairs, audited = [], [], [], None
     if plan == 'control':
-        for index in sorted(set(spec.extra['pair'] for spec in arms)):
-            off, on = live4_of(reports.get('control-off-%d' % index)), live4_of(reports.get('control-on-%d' % index))
+        for index in sorted(set(spec.extra['pair'] for spec in arms if 'pair' in spec.extra)):
+            off_report, on_report = reports.get('control-off-%d' % index), reports.get('control-on-%d' % index)
+            lines = (s2_of(on_report).get('extent_audit') or {}).get('lines') or 0
+            if on_report is not None and (lines or s2_of(on_report).get('audit')):
+                # Fail closed: an audited round is not the flag's round (the module docstring's control).
+                marker = harness.EXTENT_AUDIT_MARKER.strip()
+                problems.append('pair %d: the flag-on timing arm ran the extent audit (%d "%s" lines): its round is '
+                                'not the flag\'s round, so the pair is not timed' % (index, lines, marker))
+                continue
+            off, on = live4_of(off_report), live4_of(on_report)
             if off is None or on is None:
                 shortfalls.append('pair %d: no timed four-live packed round in the %s arm: the round is not compared' % (
                     index, 'flag-off' if off is None else 'flag-on'))
                 continue
-            ratio = on['net_median_round_ms'] / off['median_round_ms']
+            ratio = on['median_round_ms'] / off['median_round_ms']
             pairs.append(dict(pair=index, off_ms=off['median_round_ms'], on_ms=on['median_round_ms'],
-                              on_net_ms=on['net_median_round_ms'], on_audit_ms=on.get('median_audit_ms'),
-                              ratio=round(ratio, 4), raw_ratio=round(on['median_round_ms'] / off['median_round_ms'], 4)))
+                              ratio=round(ratio, 4)))
             if ratio > CONTROL_TOLERANCE:
-                problems.append('pair %d: the flag-on median four-live round, %.2f ms net of its audit, is %.4f x the '
-                                'flag-off %.2f ms, past %.2f' % (index, on['net_median_round_ms'], ratio,
+                problems.append('pair %d: the flag-on median four-live round, %.2f ms (unaudited), is %.4f x the '
+                                'flag-off %.2f ms, past %.2f' % (index, on['median_round_ms'], ratio,
                                                                  off['median_round_ms'], CONTROL_TOLERANCE))
+        audit_report = reports.get(CONTROL_AUDIT_ARM)
+        if audit_report is not None and not s2_of(audit_report).get('audit'):
+            problems.append('%s: the extent audit did not run (the harness saw no %s=1): exactness under the audit '
+                            'is unjudged' % (CONTROL_AUDIT_ARM, harness.EXTENT_AUDIT_FLAG))
+        live = live4_of(audit_report)
+        if live is not None:
+            # Recorded, never judged: the audit's reads lengthen more than the ms its line reports.
+            audited = dict(arm=CONTROL_AUDIT_ARM, median_round_ms=live['median_round_ms'],
+                           median_audit_ms=live.get('median_audit_ms'))
     else:
         off, on = reports.get('forced-cap-off'), reports.get('forced-cap-on')
         if off is not None and on is not None:
@@ -1612,8 +1639,12 @@ def run_reference_pairs(plan, runner, reference, arms):
     result = dict(verdict=worst(verdicts), arms=results, pairs=pairs,
                   lines=['%s: %s' % (arm, line) for arm, one in results.items() for line in one.get('lines') or []] +
                   ['%s %s' % (arm, one['verdict']) for arm, one in results.items()] +
-                  ['pair %(pair)d: flag-off %(off_ms)s ms, flag-on %(on_ms)s ms (net %(on_net_ms)s, audit '
-                   '%(on_audit_ms)s): %(ratio)s x' % entry for entry in pairs])
+                  ['pair %(pair)d: flag-off %(off_ms)s ms, flag-on %(on_ms)s ms (unaudited): %(ratio)s x' % entry
+                   for entry in pairs] +
+                  (['%(arm)s: median four-live round %(median_round_ms)s ms, audit %(median_audit_ms)s ms (recorded, '
+                    'not timed)' % audited] if audited else []))
+    if audited:
+        result['audited'] = audited
     return with_checks(result, problems, shortfalls)
 
 
@@ -1922,7 +1953,8 @@ def build_parser():
     parser.add_argument('--hub', default=HUB)
     parser.add_argument('--dry-run', action='store_true', help='print every arm\'s docker argv and run nothing')
     # S2 (the module docstring's S2 PLANS; c2_serving_job's C2_GATE_* keys).
-    parser.add_argument('--pairs', type=int, default=None, help='control and control-below A/B pairs (default %d)'
+    parser.add_argument('--pairs', type=int, default=None, help='control and control-below A/B pairs (default %d; '
+                                                                'control adds one audited arm after them)'
                                                                 % DEFAULT_PAIRS)
     parser.add_argument('--families', default=None, help='control-below families (default %s)'
                                                           % ','.join(str(family) for family in BELOW_FAMILIES))
@@ -1933,8 +1965,8 @@ def build_parser():
                         help='strict (default), or dc-i: the user\'s decision D-c(i) (needs --policy-decision)')
     parser.add_argument('--policy-decision', default=None, help='where the user\'s D-c decision is recorded')
     parser.add_argument('--audits', choices=c2_serving_job.AUDIT_SETS, default='extent',
-                        help='extent (the extent audit on every S2 arm) or all (also prestage, pair-mask and '
-                             'fused-commit on the G4 arms)')
+                        help='extent (the extent audit on every S2 arm but control\'s timing arms) or all (also '
+                             'prestage, pair-mask and fused-commit on the G4 arms)')
     return parser
 
 

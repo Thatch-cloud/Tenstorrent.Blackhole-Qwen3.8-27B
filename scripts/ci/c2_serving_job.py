@@ -33,7 +33,8 @@ Keys (every one optional but C2_IMAGE_TAG):
                       what would redirect the shell, the loader or docker (CARDM_REFUSED_ENV)
   S2 (C2-packed-any, s2-design.md W11 and 6.3; C2_GATE_PLAN may name S2_GATE_PLANS too):
   C2_GATE_PAIRS       the A/B pairs control and control-below run (default, rendered empty: the gate's
-                      two, ABAB), 1..MAX_PAIRS
+                      two, ABAB), 1..MAX_PAIRS; control times its unaudited flag-on arms against the pairs'
+                      flag-off arms and adds one audited flag-on arm (control-audit) after them
   C2_GATE_FAMILIES    control-below's (G3b) families F, each a multiple of 256 in BELOW_FAMILY_RANGE
                       (default, rendered empty: the gate's 16640,4352)
   C2_GATE_JIT         whose kernel-cache growth fails an arm: auto (default: S2 arms and plans, never warm),
@@ -41,8 +42,9 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_GATE_POLICY      strict (default) or dc-i: the user's decision D-c(i) - only if K2 had failed - under
                       which a cross-path divergence reads NOT_COMPARABLE; dc-i needs C2_GATE_POLICY_DECISION,
                       where the user's decision is recorded (a plain word: a path, URL or id)
-  C2_GATE_AUDITS      extent (default: QWEN_FAST_EXTENT_AUDIT on every S2 arm) or all (also the prestage,
-                      pair-mask and fused-commit audits on the G4 arms); mixed (M7) runs all four either way
+  C2_GATE_AUDITS      extent (default: QWEN_FAST_EXTENT_AUDIT on every S2 arm but control's timing arms) or
+                      all (also the prestage, pair-mask and fused-commit audits on the G4 arms); mixed (M7) runs
+                      all four either way
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
