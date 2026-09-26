@@ -519,7 +519,19 @@ class ReplayDeadline:
     is UNVERIFIED (design Q21).
 
     Host only. The thread starts at the first arming and sleeps while nothing is armed; a scope
-    armed inside another is a no-op (the outer one covers it)."""
+    armed inside another is a no-op (the outer one covers it).
+
+    The watchdog is a Python thread, so it runs only while the replaying thread does not hold the GIL.
+    Every armed scope holds ttnn.execute_trace calls and nothing else (test_packed_extent_block pins the
+    three scope bodies), and ttnn.execute_trace releases the GIL for the whole call, its blocking wait on
+    the card included: its nanobind binding carries nb::call_guard<nb::gil_scoped_release>
+    (ttnn/cpp/ttnn-nanobind/operations/trace.cpp:53-63 at the image's tt-metal 9f9cd4fd, v0.77.0-rc1,
+    re-exported unwrapped by ttnn/ttnn/__init__.py:149-155). A replay hung on the card therefore leaves
+    this thread free to fire; test_packed_extent_block shows it end a real process with exit 70 while
+    the main thread is blocked in C with the GIL released, and, as the control, a call that KEPT the GIL
+    starving it until the call returned. So anything armed here must be a GIL-releasing call; a signal
+    timeout (docs/gotchas.md, 'Hangs need an external watchdog') is a different mechanism - its handler
+    runs only on the main thread between bytecodes - and does not apply to a thread."""
 
     def __init__(self, seconds, *, exit=None, log=None, clock=None):
         if type(seconds) not in (int, float) or not 0 < seconds < float('inf'):

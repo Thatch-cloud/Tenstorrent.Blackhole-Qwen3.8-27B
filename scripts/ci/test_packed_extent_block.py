@@ -14,9 +14,13 @@ staged. Covered:
     rows 0 and 1, the T2 tile rows disjoint;
   - the boundary cap's block backstop (before commit_user's try) and admits' floor and ceiling;
   - the extent page-0 range; the prestage diff (cur_pos written only on a family change);
-  - the extent audit, clean and against an absolute word, a stale cur_pos and a corrupted mask tile;
+  - the extent audit, clean and against an absolute word, a stale cur_pos and a corrupted mask tile, and
+    against each of those (and a table) wrong on the second chip alone;
+  - that each round keys the cap and the deadline's line on its own starts, not the first round's;
   - the gate-only capture position (flag off in family 16640, and on the extent block);
-  - the replay deadline;
+  - the replay deadline: verify, commit and the deferred-commit flush armed; every armed scope holds
+    ttnn.execute_trace calls only; and, in a real process, the exit (70, with the families) while the
+    replaying thread is blocked in C with the GIL released, as ttnn.execute_trace's binding releases it;
   - validate_bindings over the new buffers, describe, the construction refusals;
   - model_batch's own extent branch, and that verify_prestage.py and padded_probe.py need no edit.
 Flag off - a pool without extent storage - every existing test of the block is unchanged
@@ -26,10 +30,13 @@ comparisons in test_round_fences, test_fused_commit and test_gdn_seq_block).
 
 from contextlib import ExitStack
 from itertools import count
+import ast
 import os
 from pathlib import Path
+import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -77,6 +84,17 @@ class ExtentTTNN(base.FakeTTNN):
         super().execute_trace(mesh, trace, cq_id=cq_id, blocking=blocking)
         if self.on_trace is not None:
             self.on_trace(trace)
+
+    def to_torch(self, shard):
+        # A shard may hold a value its chip alone has (`chip_value`, a one-chip fault); otherwise both
+        # chips hold the tensor's one value, as a replicated upload leaves them.
+        value = getattr(shard, 'chip_value', None)
+        return shard.tensor.value if value is None else value
+
+    def copy_host_to_device_tensor(self, host, destination):
+        super().copy_host_to_device_tensor(host, destination)
+        for shard in destination.shards:     # a host copy writes every chip
+            shard.chip_value = None
 
 
 def extent_pool(ttnn, shared, users=4, rows=16, page_width=WIDTH):
@@ -129,10 +147,24 @@ class ExtentModelBatch(base.FakeModelBatch):
         self.readers = [self.replay_reader] * 16
 
 
+class FencedExtentModelBatch(ExtentModelBatch):
+    """ExtentModelBatch over gdn_records' real retained block (test_round_fences.CountingRetained): the
+    round-fence diet QWEN_FAST_GDN_AFTER_PAIRS defers the commit traces on."""
+
+    def __init__(self, model, tokens, start, pages, helpers, checkpoints, prefix, **options):
+        super().__init__(model, tokens, start, pages, helpers, checkpoints, prefix, **options)
+        if self.retained is not None:
+            from test_round_fences import CountingRetained
+
+            self.retained = CountingRetained(self.rows, type(self).ttnn, model.mesh_device)
+
+
 def simulated_mask_kernel(positions, mask, program):
     """attention_mask_replay.execute's stand-in: the pinned kernel at capacity 256, from the device's
     own word (its host transliteration, narrow_mask_host, is what CB2b R1 compares the kernel with)."""
     mask.value = narrow_mask_host(int(positions.value[0]), program['rows'], program['batches'], program['offset'])
+    for shard in mask.shards:                # the kernel writes the mask on every chip
+        shard.chip_value = None
 
 
 def owner(block_fixture, segment, position, page_value=7):
@@ -286,6 +318,29 @@ class ExtentRoundTests(ExtentFixture):
             block.commit_user(segment, 16)
         self.assertEqual(block.phase, 'idle')
         self.assertEqual(block.extent_counts['cap_events'], 1)
+
+    def test_each_round_keys_the_cap_and_the_deadline_on_its_own_starts(self):
+        """round_starts is this round's, every round: segment 1 at 20000 (uncapped) then 20218 (capped at 6),
+        segment 0 from family 5120 into 5376 - the cap and the deadline's families follow."""
+        block = self.build()
+        armed = []
+        original = block.deadline.armed
+        block.deadline.armed = lambda what: armed.append(what) or original(what)
+        block.verify(self.round((5000, 20000, 70000, 131072)))
+        self.assertEqual(block.round_starts, {0: 5000, 1: 20000, 2: 70000, 3: 131072})
+        block.commit_user(1, 7)                                  # limit 16 at 20000
+        self.finish(block)
+        block.verify(self.round((5200, 20218, 70005, 131080)))
+        self.assertEqual(block.round_starts, {0: 5200, 1: 20218, 2: 70005, 3: 131080})
+        self.assertEqual(armed[-1], 'round=2 trace=verify segments=3,2,1,0 families=131328,70144,20224,5376')
+        with self.assertRaisesRegex(ValueError, 'at 20218 commits at most 6 rows; prefix 7 refused'):
+            block.commit_user(1, 7)
+        self.assertEqual(block.phase, 'verified')
+        block.commit_user(0, 3)
+        self.assertEqual(armed[-1], 'round=2 trace=commit segments=0 families=5376 prefix=3')
+        self.assertIn('capped=[1:6]', [line for line in self.lines
+                                       if line.startswith(packed_verifier.EXTENT_ROUND_MARKER)][1])
+        self.finish(block, prefix=6)
 
     def test_admits_is_the_extent_range_and_verify_refuses_outside_it_before_anything_is_staged(self):
         block = self.build()
@@ -453,6 +508,46 @@ class ExtentAuditTests(ExtentFixture):
 
         self.check_mismatch(damage, 'table:0', lambda readers: self.assertTrue(bool(readers[0].metadata[0][1].value.all())))
 
+    # Every read is of BOTH chips: a value wrong on the second chip alone is a mismatch too.
+
+    def test_a_word_wrong_on_the_second_chip_alone_is_a_mismatch(self):
+        def damage(readers):
+            readers[2].positions.shards[1].chip_value = torch.tensor([70000] + [0] * 7, dtype=torch.int32)
+
+        def restaged(readers):
+            self.assertEqual([self.ttnn.to_torch(shard).tolist() for shard in readers[2].positions.shards],
+                             [[70000 & 255] + [0] * 7] * 2)
+
+        self.check_mismatch(damage, 'word:2', restaged)
+
+    def test_a_cur_pos_wrong_on_the_second_chip_alone_is_a_mismatch(self):
+        def damage(readers):
+            readers[1].cur_pos[0].shards[1].chip_value = torch.tensor([19967, 19967], dtype=torch.int32)
+
+        def restaged(readers):
+            self.assertEqual([self.ttnn.to_torch(shard).tolist() for shard in readers[1].cur_pos[0].shards],
+                             [[20223, 20223]] * 2)
+
+        self.check_mismatch(damage, 'cur_pos:1', restaged)
+
+    def test_a_table_wrong_on_the_second_chip_alone_is_a_mismatch(self):
+        def damage(readers):
+            readers[0].metadata[0][1].shards[1].chip_value = torch.zeros(2, WIDTH, dtype=torch.int32)
+
+        def restaged(readers):
+            self.assertTrue(all(bool(self.ttnn.to_torch(shard).all()) for shard in readers[0].metadata[0][1].shards))
+
+        self.check_mismatch(damage, 'table:0', restaged)
+
+    def test_a_mask_wrong_on_the_second_chip_alone_is_a_mismatch(self):
+        def damage(readers):
+            mask = readers[0].metadata[0][2]
+            value = mask.value.clone()
+            value[0, 0, 0, 0] = 0.0 if bool(torch.isinf(value[0, 0, 0, 0])) else float('-inf')
+            mask.shards[1].chip_value = value
+
+        self.check_mismatch(damage, 'mask:0', lambda readers: None)
+
     def test_the_audit_is_off_by_default_and_refuses_a_bad_value(self):
         self.env(QWEN_FAST_EXTENT_AUDIT='0')
         block = self.build()
@@ -566,6 +661,51 @@ class ReplayDeadlineTests(ExtentFixture):
         block.close()
         self.assertTrue(block.deadline.closed)
 
+    def test_the_deferred_commit_flush_is_armed_too(self):
+        """Round-fence plan H2 (QWEN_FAST_GDN_AFTER_PAIRS): the round's commit traces are held at the
+        decisions and enqueued by flush_commits - under the deadline, every one of them."""
+        self.env(QWEN_FAST_ROUND_FENCES='1', QWEN_FAST_EARLY_DRAFT='1', QWEN_FAST_GDN_AFTER_PAIRS='1',
+                 QWEN_FAST_PIPELINED_COMMITS='1')
+        self.stack.enter_context(patch('packed_verifier.ModelBatch', FencedExtentModelBatch))
+        block = self.build()
+        self.assertTrue(block.gdn_after_pairs)
+        armed, during = [], []
+        original = block.deadline.armed
+        block.deadline.armed = lambda what: armed.append(what) or original(what)
+        self.assertTrue(block.arm_deferred_commits())
+        block.verify(self.round((5000, 20218, 70000, 131100)))
+        for segment, prefix in ((0, 16), (1, 6), (2, 3), (3, 0)):
+            block.commit_user(segment, prefix)
+        self.assertEqual(block.deferred_commits, [(0, 16), (1, 6), (2, 3)])
+        self.assertEqual(armed, ['round=1 trace=verify segments=3,2,1,0 families=131328,70144,20224,5120'],
+                         'a deferred decision replays nothing, so arms nothing')
+        replayed = self.ttnn.on_trace
+
+        def hook(trace):
+            replayed(trace)
+            during.append(block.deadline.current is not None)
+
+        self.ttnn.on_trace = hook
+        self.assertEqual(block.flush_commits('window'), 3)
+        self.assertEqual(armed[1:], ['round=1 trace=flush segments=0,1,2 families=5120,20224,70144'])
+        self.assertEqual(during, [True] * 3, 'each enqueued commit trace ran with the deadline armed')
+        self.assertIsNone(block.deadline.current)
+
+    def test_every_armed_scope_holds_execute_trace_calls_only(self):
+        """The watchdog is a Python thread: it runs while the replaying thread is blocked in a call that
+        released the GIL, which ttnn.execute_trace does (ReplayDeadline's docstring). So nothing else may be
+        called inside an armed scope - verify's, commit's and the flush's."""
+        tree = ast.parse((HERE / 'packed_verifier.py').read_text(encoding='utf-8'))
+        scopes = [node for node in ast.walk(tree) if isinstance(node, ast.With)
+                  and any(isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Attribute)
+                          and item.context_expr.func.attr == 'replay_deadline' for item in node.items)]
+        self.assertEqual(sorted(scope.items[0].context_expr.args[0].value for scope in scopes), ['commit', 'flush', 'verify'])
+        for scope in scopes:
+            calls = [node for statement in scope.body for node in ast.walk(statement) if isinstance(node, ast.Call)]
+            with self.subTest(scope=scope.items[0].context_expr.args[0].value):
+                self.assertTrue(calls)
+                self.assertEqual({ast.unparse(call.func) for call in calls}, {'self.operations.execute_trace'})
+
     def test_nested_arming_is_one_deadline_and_a_closed_one_cannot_be_armed(self):
         deadline = packed_verifier.ReplayDeadline(30, exit=Mock())
         with deadline.armed('outer'):
@@ -581,6 +721,63 @@ class ReplayDeadlineTests(ExtentFixture):
         for seconds in (0, -1, float('inf'), '30', None):
             with self.subTest(seconds=seconds), self.assertRaises(ValueError):
                 packed_verifier.ReplayDeadline(seconds)
+
+
+# A real process whose replaying thread blocks in C: ctypes' CDLL/WinDLL release the GIL for the call, as
+# ttnn.execute_trace's nanobind binding does (nb::call_guard<nb::gil_scoped_release>); PyDLL keeps it, as a
+# binding without that guard would. argv: deadline seconds, block seconds, 'release' or 'hold'.
+DEADLINE_CHILD = '''
+import ctypes
+import sys
+
+import packed_verifier
+
+
+def block_in_c(seconds, hold_gil):
+    if sys.platform == 'win32':
+        (ctypes.PyDLL if hold_gil else ctypes.WinDLL)('kernel32').Sleep(seconds * 1000)
+    else:
+        (ctypes.PyDLL if hold_gil else ctypes.CDLL)(None).sleep(seconds)
+
+
+deadline = packed_verifier.ReplayDeadline(float(sys.argv[1]))
+print('armed', flush=True)
+with deadline.armed('round=7 trace=verify segments=3,2,1,0 families=131328,70144,20224,5120'):
+    block_in_c(int(sys.argv[2]), sys.argv[3] == 'hold')
+print('returned', flush=True)
+'''
+
+
+class ReplayDeadlineProcessTests(unittest.TestCase):
+    def run_child(self, block_seconds, gil):
+        environ = {name: value for name, value in os.environ.items() if not name.startswith('QWEN_')}
+        environ['PYTHONPATH'] = str(HERE)
+        child = subprocess.Popen([sys.executable, '-B', '-c', DEADLINE_CHILD, '0.2', str(block_seconds), gil],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environ, cwd=str(HERE))
+        try:
+            self.assertEqual(child.stdout.readline().strip(), b'armed')
+            armed = time.monotonic()
+            out, err = child.communicate(timeout=block_seconds + 60)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate()
+        return child.returncode, time.monotonic() - armed, out.decode('utf-8', 'replace'), err.decode('utf-8', 'replace')
+
+    def test_a_replay_blocked_in_c_with_the_gil_released_ends_the_process_with_seventy_and_its_families(self):
+        code, elapsed, out, err = self.run_child(30, 'release')
+        self.assertEqual(code, packed_verifier.REPLAY_DEADLINE_EXIT_CODE, err[-2000:])
+        self.assertLess(elapsed, 15, 'ended during the 30 s call, not after it')
+        self.assertNotIn('returned', out)
+        self.assertIn('[PINDIAG] replay deadline exceeded round=7 trace=verify segments=3,2,1,0 '
+                      'families=131328,70144,20224,5120 seconds=0.2', err)
+        self.assertIn('block_in_c', err, "the replaying thread's stack names the call it is blocked in")
+
+    def test_control_a_call_that_keeps_the_gil_starves_the_watchdog_until_it_returns(self):
+        """The premise the scopes rely on, shown by its converse: a blocking call that kept the GIL would
+        hold the process past its deadline for as long as it blocked."""
+        code, elapsed, out, err = self.run_child(3, 'hold')
+        self.assertGreaterEqual(elapsed, 2.5, (code, out, err[-2000:]))
 
 
 class BindingAndDescribeTests(ExtentFixture):
@@ -712,6 +909,14 @@ class ModelBatchExtentTests(unittest.TestCase):
                 with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'Packed extent storage needs|Packed replay page tables need'):
                     ModelBatch(SimpleNamespace(), [1] * 32, C - 256, torch.zeros(1, WIDTH, dtype=torch.int32),
                                [None] * 48, [None] * 48, 32, packed_extent=[['p'], ['p']], **dict(options, **extra))
+            # a short-context packed replay fixture (four-row groups, which short context requires): the extent
+            # readers are long-context only
+            with self.subTest(name='short context'), \
+                    self.assertRaisesRegex(ValueError, 'Packed extent storage needs a long-context packed replay fixture'):
+                ModelBatch(SimpleNamespace(), [1] * 32, C - 256, torch.zeros(1, WIDTH, dtype=torch.int32),
+                           [None] * 48, [None] * 48, 32, packed_extent=[['p'], ['p']],
+                           **dict(options, attention_replay=True, pack=self.pack(), short_context=True,
+                                  replay_group_rows=4))
 
     def test_flag_off_the_packed_fixture_is_todays_call(self):
         import inspect
