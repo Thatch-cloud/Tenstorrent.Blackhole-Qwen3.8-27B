@@ -55,6 +55,12 @@ scripts/ci/packed_verifier.py
 scripts/ci/serving_request_factory.py
 scripts/ci/pooled_attention_replay.py
 
+# The drafter skips its feature-history write through the prefill ramp (history_rows < 2048) under
+# C7 (dflash_device.history_unread), which every any-request engine is in: a short prompt's rounds
+# compiled new slice/concat/pad shapes every round (~1 s each on a cold kernel cache, run 36211578069).
+# P8 lays this file at its base commit; without this line the C2 image ships that version.
+scripts/ci/dflash_device.py
+
 # C2-any (stage 1, the c2 profiles) changes serving_request_factory, serving_runtime and
 # serving_lifecycle together and adds serving_request_quarantine (D2): all of them here, or c2
 # ships half a change (test_c2_overlay_closure).
