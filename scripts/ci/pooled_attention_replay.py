@@ -73,18 +73,26 @@ from gdn_multitoken_conv import addresses
 #     rows keep their config). Exact by construction; card-B byte comparison proves it.
 #   'readahead' (flag 0x8, stage 4): the share leader reads chunk n+1 while chunk n's multicast is in
 #     flight. Needs 'share' and, like 0x2, only bundles of more than one entry get it.
+#   'extent' (flag 0x20, K64j onward; optimisation/ttnn-op/k64j): the reader, compute and writer take each
+#     entry's position from a cur_pos tensor (E - 1 of its 256-key family, or UINT32_MAX to skip the entry)
+#     instead of the compile-time capacity, so one program serves every family; under share every entry uses
+#     slot 0's word. Needs 'tail' (the factory refuses 0x20 without 0x1), the narrow one-chunk tail mask and
+#     one cur_pos word per entry, which only the S2 extent readers stage: apply_sdpa_modes refuses it on a
+#     reader that does not declare runtime_extent (this module's readers do not).
 # The pinned reader's bytes are untouched: only its per-bundle config entries are replaced,
 # before any trace is captured. Unset, nothing here runs and every config is the pinned one.
 SDPA_MODES_ENV = 'QWEN_FAST_SDPA_MODES'
 QWEN_DECODE_MAGIC = 0x51DEC000                    # factory F1; the low byte holds the flags
 QWEN_MASK_TAIL, QWEN_KV_SHARE = 0x1, 0x2
 QWEN_Q_SLICE, QWEN_KV_READAHEAD = 0x4, 0x8        # stage 4 (K64i)
-SDPA_MODE_NAMES = ('tail', 'share', 'slice', 'readahead')   # what this build serves
+QWEN_RUNTIME_EXTENT = 0x20                         # K64j (0x10 is the card tests' unknown-flag control)
+SDPA_MODE_NAMES = ('tail', 'share', 'slice', 'readahead', 'extent')   # what this build serves
 # Named by the spec, not in this build: refused by name rather than as unknown.
 SDPA_MODES_LATER = {'narrow': 'stage 1b (the narrow (b,1,48,256) tail mask)'}
 QWEN_SDPA_BINARY_MARKER = b'[QWEN-SDPA] flags='   # factory F4's format literal, only in a graft .so
 QWEN_SDPA_SHARE_MARKER = b'[QWEN-SDPA] KV-share twin bands'   # factory F9's, only in the stage-3 .so
 QWEN_SDPA_SLICE_MARKER = b'[QWEN-SDPA] q-slice rows_per_kv='  # factory F18's, only in the stage-4 .so
+QWEN_SDPA_EXTENT_MARKER = b'[QWEN-SDPA] runtime-extent entries='  # factory F22's, only in the K64j .so
 FOLDED_ROWS_PER_TOKEN, KV_HEADS_PER_CHIP, TILE_ROWS = 12, 2, 32  # attention_head_fold.fold_query's layout
 SDPA_MODES_MARKER = '[PINDIAG] sdpa qwen-modes'
 _binary_checked = []
@@ -106,13 +114,15 @@ def sdpa_modes(environ=None):
     modes = frozenset(name.strip() for name in value.split(',') if name.strip())
     later = sorted(modes.intersection(SDPA_MODES_LATER))
     if later:
-        raise ValueError('%s=%s: %s not in this build (it serves tail, share, slice and readahead): %s'
+        raise ValueError('%s=%s: %s not in this build (it serves tail, share, slice, readahead and extent): %s'
                          % (SDPA_MODES_ENV, value, ','.join(later), '; '.join(SDPA_MODES_LATER[name] for name in later)))
     unknown = modes.difference(SDPA_MODE_NAMES)
     if unknown:
         raise ValueError('Unknown %s entries: %s' % (SDPA_MODES_ENV, ','.join(sorted(unknown))))
     if 'readahead' in modes and 'share' not in modes:
         raise ValueError('%s=%s: readahead needs share (the factory refuses 0x8 without 0x2)' % (SDPA_MODES_ENV, value))
+    if 'extent' in modes and 'tail' not in modes:
+        raise ValueError('%s=%s: extent needs tail (the factory refuses 0x20 without 0x1)' % (SDPA_MODES_ENV, value))
     return modes
 
 
@@ -133,16 +143,19 @@ def mode_flags(modes, batches, rows=None):
     share = 'share' in modes and batches > 1
     return ((QWEN_MASK_TAIL if 'tail' in modes else 0) | (QWEN_KV_SHARE if share else 0)
             | (QWEN_Q_SLICE if 'slice' in modes and rows is not None and q_slice_saves(rows) else 0)
-            | (QWEN_KV_READAHEAD if 'readahead' in modes and share else 0))
+            | (QWEN_KV_READAHEAD if 'readahead' in modes and share else 0)
+            | (QWEN_RUNTIME_EXTENT if 'extent' in modes else 0))
 
 
 def required_binary_markers(modes):
     """The factory format literals the loaded binary must carry for these modes: the
     [QWEN-SDPA] branch always, and the stage-3 KV-share branch for 'share' (a stage-1 .so
     such as K64e would refuse flag 0x2 by TT_FATAL at the first capture), and the stage-4 q-slice factory
-    for 'slice' or 'readahead' (K64g and older refuse 0x4 / 0x8 as unknown flags)."""
+    for 'slice' or 'readahead' (K64g and older refuse 0x4 / 0x8 as unknown flags), and the K64j runtime-extent
+    factory for 'extent' (K64i and older refuse 0x20 as an unknown flag)."""
     return ((QWEN_SDPA_BINARY_MARKER,) + ((QWEN_SDPA_SHARE_MARKER,) if 'share' in modes else ())
-            + ((QWEN_SDPA_SLICE_MARKER,) if modes & {'slice', 'readahead'} else ()))
+            + ((QWEN_SDPA_SLICE_MARKER,) if modes & {'slice', 'readahead'} else ())
+            + ((QWEN_SDPA_EXTENT_MARKER,) if 'extent' in modes else ()))
 
 
 def loaded_binary_has_modes(markers=(QWEN_SDPA_BINARY_MARKER,), maps='/proc/self/maps'):
@@ -174,10 +187,17 @@ def apply_sdpa_modes(reader, modes, *, log=None, binary_check=None):
         raise ValueError('Qwen sdpa modes %s are not in this build' % ','.join(sorted(modes.difference(SDPA_MODE_NAMES))))
     if reader.short_context:
         raise ValueError('Qwen sdpa modes are long-context only')
+    if 'extent' in modes and not getattr(reader, 'runtime_extent', False):
+        raise ValueError('Qwen sdpa mode extent (flag 0x20, K64j) needs a replay reader that stages one cur_pos word per '
+                         'entry and the narrow one-chunk tail masks (the S2 extent readers); %s declares no '
+                         'runtime_extent, and the factory would refuse its wide masks' % type(reader).__name__)
     markers = required_binary_markers(modes)
     if not any(checked == markers for _path, checked in _binary_checked):
         path, present = binary_check(markers)
         if not present:
+            if 'extent' in modes:
+                raise RuntimeError('%s=%s needs the K64j [QWEN-SDPA] runtime-extent factory; %s lacks it'
+                                   % (SDPA_MODES_ENV, ','.join(sorted(modes)), path))
             if modes & {'slice', 'readahead'}:
                 raise RuntimeError('%s=%s needs the stage-4 [QWEN-SDPA] q-slice factory (K64i onward); %s lacks it'
                                    % (SDPA_MODES_ENV, ','.join(sorted(modes)), path))
@@ -186,9 +206,10 @@ def apply_sdpa_modes(reader, modes, *, log=None, binary_check=None):
                                    '%s lacks it' % (SDPA_MODES_ENV, ','.join(sorted(modes)), path))
             raise RuntimeError('%s is set but %s lacks the [QWEN-SDPA] factory branch' % (SDPA_MODES_ENV, path))
         _binary_checked.append((path, markers))
-        log('%s binary %s carries the [QWEN-SDPA] branch%s%s'
+        log('%s binary %s carries the [QWEN-SDPA] branch%s%s%s'
             % (SDPA_MODES_MARKER, path, ' with KV share' if 'share' in modes else '',
-               ' and the stage-4 q-slice' if modes & {'slice', 'readahead'} else ''))
+               ' and the stage-4 q-slice' if modes & {'slice', 'readahead'} else '',
+               ' and the K64j runtime extent' if 'extent' in modes else ''))
     operations = reader.operations
     grid = reader.mesh.compute_with_storage_grid_size()
     replaced, applied = [], []
@@ -202,9 +223,10 @@ def apply_sdpa_modes(reader, modes, *, log=None, binary_check=None):
         applied.append(flags)
     reader.metadata[:] = replaced
     reader.sdpa_modes_applied = tuple(applied)
-    log('%s modes=%s rows=%d capacity=%d bundles=%s flags=%s mask=wide'
+    log('%s modes=%s rows=%d capacity=%d bundles=%s flags=%s mask=%s'
         % (SDPA_MODES_MARKER, ','.join(sorted(modes)), reader.rows, reader.capacity,
-           [len(entry[0]) for entry in reader.metadata], ['0x%x' % value for value in applied]))
+           [len(entry[0]) for entry in reader.metadata], ['0x%x' % value for value in applied],
+           'narrow' if 'extent' in modes else 'wide'))
     return reader.sdpa_modes_applied
 
 
