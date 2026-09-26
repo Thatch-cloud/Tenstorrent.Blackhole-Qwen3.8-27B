@@ -72,6 +72,14 @@ LIFECYCLE (the C2 serving gate's lifecycle arms, detail mode): --drops (DROP_GRA
 and --user-ignore-eos act per user; a StreamWatch puts every stream and the server log's admission
 markers on one clock, fires the drops, and records the phase each one hit (report['lifecycle']).
 --alive-check N then sends N requests at once (the engine's seats) that must all answer.
+
+S2 (C2-packed-any, s2-design.md W11; detail mode). Under QWEN_FAST_EXTENT_REPLAY=1 the promised SDPA modes gain
+'extent' (flags 0x27 and K64j's F22 line), and an arm with that flag, a gate-only knob (QWEN_FAST_EXTENT_AUDIT,
+QWEN_FAST_PACKED_CAPTURE_POSITION, QWEN_FAST_GATE_FORCE_CAP) or any S2 line gets report['s2'] (s2_report): the
+extent rounds and their families, the extent audit, cap-refused / deadline / idle-commit / refuse_round / narrowed
+/ aborted / dram hold / quarantine / release lines, the ledger's before-points and their floor, the per-user path
+records (P packed or S sequential per round, acceptance_report.path_records) and the four-live rate. Its
+problems join flag_markers['missing']. Every other arm's report is unchanged.
 """
 
 import argparse
@@ -1359,8 +1367,14 @@ def sdpa_mode_markers(names):
 
 def sdpa_mode_names(environ):
     """QWEN_FAST_SDPA_MODES as pooled_attention_replay.sdpa_modes splits it (no validation here:
-    a value that reader refuses fails the run on its own)."""
-    return {name.strip() for name in (environ.get('QWEN_FAST_SDPA_MODES') or '').split(',') if name.strip()}
+    a value that reader refuses fails the run on its own). Under QWEN_FAST_EXTENT_REPLAY=1 (S2) the
+    extent readers add 'extent' to the environment's modes themselves (s2-design decision 5: the env
+    keeps v235's tail,share,slice), so the promised modes line is 'modes=extent,share,slice,tail', the
+    factory line flags=0x27 and K64j's F22 runtime-extent line is required too."""
+    names = {name.strip() for name in (environ.get('QWEN_FAST_SDPA_MODES') or '').split(',') if name.strip()}
+    if environ.get(EXTENT_REPLAY_FLAG) == '1':
+        names.add('extent')
+    return names
 
 
 def flag_marker_report(environ, users, log_text, prompt_tokens=None, gdn_layers=GDN_LAYERS):
@@ -2515,6 +2529,281 @@ def ledger_report(log_text, alive_index=None):
                 first_idle=first, idle_after_streams=after, idle_drift_gb=drift)
 
 
+# S2, C2-PACKED-ANY (s2-design.md W11). QWEN_FAST_EXTENT_REPLAY=1 - set only by the c2-packed profiles, never
+# the image ENV - builds the block's extent readers (extent_attention_replay): one K64j 0x27 SDPA program
+# serving every live user at its own 256-key family. The gate-only knobs are never in a profile or the image
+# ENV; c2_serving_gate sets them per arm with -e, and qwen_configuration records that they reached this
+# process: QWEN_FAST_EXTENT_AUDIT=1 reads every packed round's words, cur_pos, masks and tables back and
+# compares them with the host (one [EXTENT-AUDIT] line per packed round, MISMATCH on a difference; W3);
+# QWEN_FAST_PACKED_CAPTURE_POSITION=<p> captures the block at p instead of C - 256 (G3b; W3 logs the
+# override); QWEN_FAST_GATE_FORCE_CAP=8 caps every packed commit at 8 rows (the M4 forced-cap pair; W4's
+# [PACKED] lines carry cap=). Line formats are the design's (section 4, W1-W7); where a builder's line
+# differs, the constant here is what the gate expects. s2_report reads all of it into report['s2'] and
+# puts what fails an arm into flag_markers['missing'], so gate_passed carries it:
+#   flag on:  the admission line (W7), the engaged line (W1), K64j's F22 line, and a 'packed extent round'
+#             line (W3, logged inside verify: the executed path, memory graft-mounted-is-not-graft-executed)
+#             for every packed round's [PACKED] lines; with the audit, no MISMATCH, every word and cur_pos
+#             read back, and at least one audit line per packed round; never a packed round below 128;
+#   flag off: none of S2_MARKERS (this is not the profile's path);
+#   either:   no cap-refused (the block backstop, W3/W4) or replay-deadline line; a capture knob that the
+#             block logged taking.
+# Everything else - holds, refusals, narrowing, releases, before-points, per-user paths, cap events and
+# boundary crossings - is recorded for c2_serving_gate's plan verdicts.
+EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
+EXTENT_AUDIT_FLAG = 'QWEN_FAST_EXTENT_AUDIT'
+CAPTURE_POSITION_FLAG = 'QWEN_FAST_PACKED_CAPTURE_POSITION'
+FORCE_CAP_FLAG = 'QWEN_FAST_GATE_FORCE_CAP'
+S2_GATE_KNOBS = (EXTENT_AUDIT_FLAG, CAPTURE_POSITION_FLAG, FORCE_CAP_FLAG)
+S2_ADMISSION_MARKER = '[PINDIAG] packed-any admission'   # W7, packed_any_admission.admit
+S2_ENGAGED_MARKER = '[PINDIAG] extent replay engaged'    # W1, extent_attention_replay.ENGAGED_MARKER
+S2_ROUND_MARKER = '[PINDIAG] packed extent round'        # W3, packed_verifier.verify
+S2_ROUND_LINE = re.compile(r'\[PINDIAG\] packed extent round round=([0-9]+) live=([0-9]+) families=\[([^\]\n]*)\]'
+                           r'(?: idle=\[([^\]\n]*)\])?(?: capped=\[([^\]\n]*)\])?')
+EXTENT_AUDIT_MARKER = '[EXTENT-AUDIT] '
+EXTENT_AUDIT_LINE = re.compile(r'\[EXTENT-AUDIT\] round=([0-9]+) segments=([0-9]+) words_ok=([0-9]+) '
+                               r'cur_pos_ok=([0-9]+) mask_ok=([0-9]+) tables_ok=([0-9]+) ms=([0-9.]+)')
+EXTENT_AUDIT_MISMATCH = '[EXTENT-AUDIT] MISMATCH'
+CAP_REFUSED_MARKER = '[PINDIAG] packed extent cap refused'       # W3 commit_user backstop
+DEADLINE_MARKER = '[PINDIAG] replay deadline exceeded'           # W3 replay watchdog
+CAPTURE_OVERRIDE_LINE = re.compile(r'\[PINDIAG\] packed capture position override=([0-9]+)')
+DRAM_HOLD_MARKER = '[PINDIAG] dram hold'                         # W6b scheduler-side admission hold
+QUARANTINED_MARKER = '[PINDIAG] request quarantined:'            # D2: a RequestRefused (W6b's backstop included)
+RELEASED_LINE = re.compile(r'\[PACKED-PROPOSE\] released quad=([0-9]+) pairs=([0-9]+)')   # W6c
+QUAD_BUILT_LINE = re.compile(r'\[QUAD-DRAFT\] round=[0-9]+ built=1 ')
+NARROWED_MARKER = '[PINDIAG] packed survivor narrowed'           # W5a, serving_packed_step.NARROWED_MARKER
+NARROWING_REFUSED_MARKER = '[PINDIAG] packed survivor narrowing refused'
+ABORTED_LINE = re.compile(r'\[PINDIAG\] packed refused round aborted ([0-9]+)/([0-9]+) FINISHED_ABORTED')   # W5b
+PROPOSAL_LADDER = re.compile(r'proposal ladder (\[[^\]\n]*\])')
+LEDGER_BEFORE = re.compile(r'\[MEMLEDGER\] phase=(\S+) point=before ?([^\n]*?) chip([0-9]+) allocated=([0-9.]+)GB '
+                           r'free=([0-9.]+)GB largest_free=([0-9.]+)MB')
+LEDGER_ESTIMATE = re.compile(r'(?:estimate|need)=([0-9.]+)GB')
+S2_MARKERS = (S2_ADMISSION_MARKER, S2_ENGAGED_MARKER, S2_ROUND_MARKER, EXTENT_AUDIT_MARKER, CAP_REFUSED_MARKER,
+              SDPA_EXTENT_MARKER)
+S2_MIN_LIVE_START = 128   # extent_attention_replay.MIN_LIVE_START: no packed round below it
+# What each 'before' ledger point's operation may take beyond what the point reads, GB per chip (s2-design
+# 3.2 item 2 and 3.3; the design's one set of defaults, UNVERIFIED: M8 and M11 calibrate them). A point that
+# names its own estimate=/need= uses that instead. 'prefill' is the transient of a prompt of at least
+# PREFILL_TRANSIENT_FROM tokens (0 below): its engine build has its own point (W6d).
+BEFORE_ESTIMATES_GB = dict(engine=1.00, quad=0.483, pair=0.044, single=1.00)
+PREFILL_TRANSIENT_GB, PREFILL_TRANSIENT_FROM = 0.30, 2048
+EXTENT_KEYS = 256
+
+
+def extent_of(position):
+    """The 256-key family a row at `position` reads (extent_attention_replay.extent)."""
+    return (position // EXTENT_KEYS + 1) * EXTENT_KEYS
+
+
+def s2_relevant(environ, log_text):
+    """Whether an arm gets report['s2']: the flag or a gate knob is set, or the log carries an S2 marker."""
+    return (environ.get(EXTENT_REPLAY_FLAG) == '1' or any(environ.get(name) for name in S2_GATE_KNOBS)
+            or any(marker in log_text for marker in S2_MARKERS))
+
+
+def extent_rounds(log_text):
+    """The 'packed extent round' lines: how many, by live count, the most distinct live families in one
+    round, the rounds with two or more, the capped segments and the rounds with idle segments."""
+    rounds = []
+    for match in S2_ROUND_LINE.finditer(log_text):
+        families = [int(value) for value in re.findall(r'[0-9]+', match.group(3) or '')]
+        idle = [value for value in re.findall(r'[0-9]+', match.group(4) or '')]
+        capped = [(int(segment), int(limit)) for segment, limit in re.findall(r'([0-9]+):([0-9]+)', match.group(5) or '')]
+        rounds.append(dict(round=int(match.group(1)), live=int(match.group(2)), families=families, idle=len(idle),
+                           capped=capped))
+    by_live = {}
+    for entry in rounds:
+        by_live[str(entry['live'])] = by_live.get(str(entry['live']), 0) + 1
+    return dict(count=len(rounds), by_live=by_live,
+                max_families=max((len(set(entry['families'])) for entry in rounds), default=0),
+                multi_family_rounds=sum(1 for entry in rounds if len(set(entry['families'])) >= 2),
+                capped_rounds=sum(1 for entry in rounds if entry['capped']),
+                capped_segments=sum(len(entry['capped']) for entry in rounds),
+                idle_rounds=sum(1 for entry in rounds if entry['idle']),
+                families_seen=sorted(set(value for entry in rounds for value in entry['families']))[:64])
+
+
+def extent_audit(log_text):
+    """The extent audit's lines: how many, the mismatch lines, the rounds that did not read back every
+    segment's word and cur_pos, and the median ms it added."""
+    lines = [match.groups() for match in EXTENT_AUDIT_LINE.finditer(log_text)]
+    mismatches = [line.strip()[:240] for line in log_text.splitlines() if EXTENT_AUDIT_MISMATCH in line]
+    incomplete = [line[0] for line in lines if int(line[2]) != int(line[1]) or int(line[3]) != int(line[1])]
+    times = [float(line[6]) for line in lines]
+    return dict(lines=len(lines), mismatches=len(mismatches), mismatch_lines=mismatches[:4],
+                incomplete_rounds=incomplete[:8], incomplete=len(incomplete),
+                median_ms=round(statistics.median(times), 3) if times else None)
+
+
+def refused_rounds_report(log_text):
+    """refuse_round's lines against W5b's aborted lines: each refused round must end all of its requests
+    (index 1..count) as FINISHED_ABORTED through the quarantine (s2-design W5b; M6)."""
+    refused = sum(1 for line in log_text.splitlines() if REFUSED_ROUND_MARKER in line and '[PACKED]' in line)
+    groups, current = [], None
+    for match in ABORTED_LINE.finditer(log_text):
+        index, count = int(match.group(1)), int(match.group(2))
+        if index == 1 or current is None or current['count'] != count or current['seen'] + 1 != index:
+            current = dict(count=count, seen=0)
+            groups.append(current)
+        current['seen'] = index
+    complete = sum(1 for group in groups if group['seen'] == group['count'])
+    return dict(refused=refused, aborted_lines=sum(group['seen'] for group in groups), aborted_groups=len(groups),
+                complete_groups=complete, accounted=refused == 0 or (len(groups) == refused and complete == refused))
+
+
+def before_points(log_text):
+    """Every 'before' ledger point (the prefill's 'before prompt=' and W6d's ahead of each engine build, pair
+    and quad capture and single-user rebuild): per chip its largest free block, the operation's estimate
+    (BEFORE_ESTIMATES_GB, or the point's own), and the margin = largest free - estimate. floor_gb is the
+    smallest margin (s2-design 3.3: G5 judges it)."""
+    points = []
+    for match in LEDGER_BEFORE.finditer(log_text):
+        phase, detail, chip = match.group(1), match.group(2).strip(), int(match.group(3))
+        largest = float(match.group(6)) / 1000.0
+        words = detail.split()
+        op = phase if phase in BEFORE_ESTIMATES_GB or phase == 'prefill' else (
+            words[0].split('=')[0] if words else phase)
+        stated = LEDGER_ESTIMATE.search(detail)
+        if stated:
+            estimate = float(stated.group(1))
+        elif op == 'prefill':
+            prompt = re.search(r'prompt=([0-9]+)', detail)
+            estimate = PREFILL_TRANSIENT_GB if prompt and int(prompt.group(1)) >= PREFILL_TRANSIENT_FROM else 0.0
+        else:
+            estimate = BEFORE_ESTIMATES_GB.get(op)
+        points.append(dict(op=op, detail=detail[:80], chip=chip, largest_free_gb=round(largest, 3),
+                           estimate_gb=estimate, margin_gb=None if estimate is None else round(largest - estimate, 3)))
+    judged = [point for point in points if point['margin_gb'] is not None]
+    floor = min(judged, key=lambda point: point['margin_gb']) if judged else None
+    return dict(points=len(points), unestimated=sorted(set(point['op'] for point in points if point['estimate_gb'] is None)),
+                floor_gb=floor['margin_gb'] if floor else None, floor_point=floor,
+                ops=sorted(set(point['op'] for point in points)))
+
+
+def user_paths(log_text, streams, prompt_lengths):
+    """acceptance_report.path_records, with per user the packed rounds, the cap events (a packed commit
+    capped below its 16 rows: W4's cap=), the 256-key boundaries its rounds crossed, and any packed round
+    below S2_MIN_LIVE_START; the records encoded as the report carries them."""
+    from acceptance_report import encode_paths, path_records
+    found = path_records(log_text, streams, prompt_lengths)
+    users, low = {}, []
+    for user, records in sorted(found['users'].items()):
+        caps = [record['cap'] for record in records if record['path'] == 'P' and record['cap'] is not None]
+        extents = [extent_of(record['position']) for record in records if record['position'] is not None]
+        crossings = sum(1 for before, after in zip(extents, extents[1:]) if after != before)
+        low.extend('user %d round %d at %d' % (user, record['round'], record['position']) for record in records
+                   if record['path'] == 'P' and record['position'] is not None and record['position'] < S2_MIN_LIVE_START)
+        users[str(user)] = dict(rounds=len(records), packed=sum(1 for record in records if record['path'] == 'P'),
+                                sequential=sum(1 for record in records if record['path'] == 'S'),
+                                cap_fields=len(caps), cap_events=sum(1 for cap in caps if cap < 16),
+                                max_cap=max(caps) if caps else None, boundaries=crossings,
+                                encoded=encode_paths(records))
+    return dict(users=users, unattributed=len(found['unattributed']), malformed=found['malformed'],
+                position_checks=found['position_checks'], position_mismatches=found['position_mismatches'],
+                position_mismatch_count=found['position_mismatch_count'], packed_below_floor=low[:8])
+
+
+def s2_report(environ, log_text, streams=None, prompt_lengths=None):
+    """What an S2-relevant arm's server log says (the section comment above), with the arm-failing problems
+    under 'problems'."""
+    on = environ.get(EXTENT_REPLAY_FLAG) == '1'
+    audit_on = environ.get(EXTENT_AUDIT_FLAG) == '1'
+    capture = (environ.get(CAPTURE_POSITION_FLAG) or '').strip() or None
+    lines = log_text.splitlines()
+    rounds = extent_rounds(log_text)
+    audit = extent_audit(log_text)
+    packed_lines = sum(1 for line in lines if '[PACKED] request=' in line)
+    releases = [(int(quad), int(pairs)) for quad, pairs in RELEASED_LINE.findall(log_text)]
+    other = dict(prestage=h1a_summary(log_text)['audit_mismatches'],
+                 fused=h1b_summary(log_text)['audit_mismatches'] + log_text.count(FUSED_AUDIT_MISMATCH_MARKER),
+                 pair_mask=(pair_mask_audit_summary(log_text) or {}).get('clobbered', 0))
+    markers = dict(admission=S2_ADMISSION_MARKER in log_text, engaged=S2_ENGAGED_MARKER in log_text,
+                   f22=SDPA_EXTENT_MARKER in log_text)
+    first = lambda marker: [line.strip()[:240] for line in lines if marker in line][:2]
+    report = dict(
+        extent_replay=on, audit=audit_on, capture_position=capture, force_cap=environ.get(FORCE_CAP_FLAG) or None,
+        markers=markers, admission_lines=first(S2_ADMISSION_MARKER), engaged_lines=first(S2_ENGAGED_MARKER),
+        rounds=rounds, packed_lines=packed_lines, extent_audit=audit,
+        capture_overrides=sorted(set(CAPTURE_OVERRIDE_LINE.findall(log_text))),
+        cap_refused=sum(1 for line in lines if CAP_REFUSED_MARKER in line),
+        deadline=sum(1 for line in lines if DEADLINE_MARKER in line),
+        idle_commits=sum(1 for line in lines if PADDED_IDLE_COMMIT_MARKER in line),
+        refused=refused_rounds_report(log_text),
+        narrowed=sum(1 for line in lines if NARROWED_MARKER in line),
+        narrowing_refused=sum(1 for line in lines if NARROWING_REFUSED_MARKER in line),
+        dram_holds=sum(1 for line in lines if DRAM_HOLD_MARKER in line), dram_hold_lines=first(DRAM_HOLD_MARKER),
+        quarantined=sum(1 for line in lines if QUARANTINED_MARKER in line), quarantined_lines=first(QUARANTINED_MARKER),
+        releases=dict(lines=len(releases), quad=sum(1 for quad, _ in releases if quad), pairs=sum(p for _, p in releases)),
+        quads_built=len(QUAD_BUILT_LINE.findall(log_text)),
+        ladders=PROPOSAL_LADDER.findall(log_text)[:32],
+        before=before_points(log_text),
+        trace_region_lines=[line.strip()[:240] for line in lines
+                            if '[MEMLEDGER]' in line and ('trace_region' in line or 'trace region' in line)][:16],
+        other_audits=other)
+    try:
+        from acceptance_report import live_rate
+        report['live4'] = live_rate(log_text, 4)
+    except Exception as error:
+        report['live4'] = dict(error='%s: %s' % (type(error).__name__, error))
+    try:
+        report['paths'] = user_paths(log_text, streams or [], prompt_lengths)
+    except Exception as error:
+        report['paths'] = dict(error='%s: %s' % (type(error).__name__, error))
+    problems = []
+    if on:
+        for key, marker, what in (('admission', S2_ADMISSION_MARKER, 'the packed-any admission (W7) never ran'),
+                                  ('engaged', S2_ENGAGED_MARKER, 'no extent reader was built (W1)'),
+                                  ('f22', SDPA_EXTENT_MARKER, 'no 0x20 program was built: the K64j runtime-extent '
+                                                              'factory never ran')):
+            if not markers[key]:
+                problems.append('%s=1: no "%s" line: %s' % (EXTENT_REPLAY_FLAG, marker, what))
+        if packed_lines and not rounds['count']:
+            problems.append('%s=1: %d [PACKED] lines but no "%s" line: the packed rounds did not run the extent verify '
+                            '(W3)' % (EXTENT_REPLAY_FLAG, packed_lines, S2_ROUND_MARKER))
+        if audit_on:
+            if audit['mismatches']:
+                problems.append('%s: %d MISMATCH lines (%s)' % (EXTENT_AUDIT_FLAG, audit['mismatches'],
+                                                                 '; '.join(audit['mismatch_lines'][:2])))
+            if audit['lines'] < rounds['count']:
+                problems.append('%s: %d audit lines for %d packed extent rounds: a packed round went unaudited'
+                                % (EXTENT_AUDIT_FLAG, audit['lines'], rounds['count']))
+            if audit['incomplete']:
+                problems.append('%s: %d rounds did not read back every segment\'s word and cur_pos (rounds %s)'
+                                % (EXTENT_AUDIT_FLAG, audit['incomplete'], audit['incomplete_rounds']))
+        low = (report['paths'] or {}).get('packed_below_floor') or []
+        if low:
+            problems.append('%s=1: packed rounds below position %d (%s): the admission floor broke'
+                            % (EXTENT_REPLAY_FLAG, S2_MIN_LIVE_START, '; '.join(low[:3])))
+    else:
+        leaked = sorted(marker for marker in S2_MARKERS if marker in log_text)
+        if leaked:
+            problems.append('%s is off, but the server log carries S2 markers (%s): this is not the profile\'s path'
+                            % (EXTENT_REPLAY_FLAG, '; '.join(leaked)))
+    if report['cap_refused']:
+        problems.append('%d "%s" lines: a commit past its boundary cap reached the block backstop (an outage for '
+                        'the round)' % (report['cap_refused'], CAP_REFUSED_MARKER))
+    if report['deadline']:
+        problems.append('"%s": a replay overran its deadline and the engine exited' % DEADLINE_MARKER)
+    if capture is not None and capture not in report['capture_overrides']:
+        problems.append('%s=%s but no "[PINDIAG] packed capture position override=%s" line: the knob never reached '
+                        'the block' % (CAPTURE_POSITION_FLAG, capture, capture))
+    report['problems'] = problems
+    return report
+
+
+def add_s2_report(report, environ, log_text, streams, prompt_lengths):
+    """report['s2'] for an S2-relevant arm, its problems added to flag_markers['missing'] (so gate_passed
+    carries them); a failure here is itself such a problem, never a lost report."""
+    if not s2_relevant(environ, log_text):
+        return
+    try:
+        report['s2'] = s2_report(environ, log_text, streams, prompt_lengths)
+    except Exception as error:
+        report['s2'] = dict(error='%s: %s' % (type(error).__name__, str(error)[:300]),
+                            problems=['s2_report failed: %s: %s' % (type(error).__name__, str(error)[:300])])
+    markers = report.setdefault('flag_markers', dict(found={}, missing=[]))
+    markers.setdefault('missing', []).extend(report['s2']['problems'])
+
+
 def parse_options(argv=None):
     """The gate's options, with --eos resolved and the real-text combinations it refuses refused."""
     parser = build_parser()
@@ -2946,6 +3235,10 @@ def main():
         else:
             report['flag_markers'] = flag_marker_report(os.environ, streams, log_text,
                                                         prompt_tokens=marker_prompt_tokens(options, report))
+        if detail:
+            # S2 (s2-design W11): only an arm with the extent flag, a gate knob or an S2 line gets report['s2'];
+            # every other arm's report keeps exactly its keys.
+            add_s2_report(report, os.environ, log_text, results, (report.get('real_text') or {}).get('prompt_lengths'))
         checked = [c for c in comparisons if c.get('reference_present')]
         report['users_checked'] = len(checked)
         report['allow_missing_references'] = options.allow_missing_references

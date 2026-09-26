@@ -39,6 +39,15 @@ flip within 0-758 characters when the arithmetic changes (docs/real-text-2026-09
 Verdicts: PASS (exit 0), FAIL (1), NOT_COMPARABLE (3), UNSTABLE (4), RERUN (5: a first divergence and
 no --rerun given - the caller's cue to run both arms again). exactness_policy is the pure decision.
 
+S2 (C2-packed-any, s2-design.md 6.1). Concurrent and solo run two arithmetic paths (packed K64j 0x27 on
+16-row tickets against the solo 4-row engine's native causal call). CB2a K2 passed bitwise, so the strict
+policy stands: a reproduced concurrent-vs-solo divergence FAILS. The S2 flags the card evidence claims exact
+(S2_EXACT_CLAIMS: the extent flag, the capture-position and forced-cap knobs) are never arithmetic
+differences, so G3, G3b and the forced-cap pair are decisive too. Reports that carry path records get a
+divergence record per non-identical user (t*, the character, each arm's round, position, family E and path;
+the margin is not logged). --relaxation dc-i (with --decision) applies the user's decision D-c(i) - only if
+K2 had failed - under which a cross-path divergence reads NOT_COMPARABLE; it is never a default.
+
 BRING-UP (--against-reference FILE): one served arm against a tracked reference's texts (the C2
 serving image at 4 x 131072 against v235, scripts/ci/references/c2-serving/): IDENTICAL or DIVERGED per
 user, NOT_COMPARABLE where the prompts differ (another corpus or tokenizer) or a divergence meets an
@@ -257,6 +266,21 @@ ARITHMETIC_NEUTRAL_SUFFIXES = ('_AUDIT',)
 # image (serving_c2_contract.apply_environment), so a served arm carries 256 where v235 carried none.
 EFFECTIVE_DEFAULTS = {'QWEN_FAST_OUTPUT_BUDGET': '256'}
 POLICY_EXIT = dict(PASS=0, FAIL=1, NOT_COMPARABLE=3, UNSTABLE=4, RERUN=5)
+# S2 (s2-design.md 6.1). The card evidence claims these flags do not change the arithmetic of what they
+# serve: CB2a K2 passed bitwise (card M, run 36239779235: 1980/1980 tickets, X7 500/500, Z 900/900), so the
+# K64j extent path equals the solo path's native call and the pinned 0x7 path, and a commit cap (the forced-cap
+# pair, Q5) or a capture position (G3b) only chooses rows and paths the same arithmetic serves. Two arms that
+# differ only in them are held to the strict policy: a reproduced divergence between them FAILS, never
+# NOT_COMPARABLE - that is what makes G3, G3b and the forced-cap pair decisive. (QWEN_FAST_EXTENT_AUDIT is
+# already neutral as an *_AUDIT flag.)
+S2_EXACT_CLAIMS = frozenset(('QWEN_FAST_EXTENT_REPLAY', 'QWEN_FAST_PACKED_CAPTURE_POSITION',
+                             'QWEN_FAST_GATE_FORCE_CAP'))
+# The strict policy is the user's standing default and K2 upheld it. The one relaxation the design allows is
+# decision D-c(i), taken by the user and only if K2 had failed: a reproduced concurrent-vs-solo divergence
+# whose first differing token was committed on DIFFERENT paths in the two arms (packed in one, sequential in
+# the other) reads NOT_COMPARABLE instead of FAIL; same-path divergences still FAIL. exactness_policy applies
+# it only when asked by name (RELAXATIONS), and the gate only with a recorded decision.
+RELAXATIONS = ('dc-i',)
 
 
 def arithmetic_neutral(name):
@@ -265,7 +289,8 @@ def arithmetic_neutral(name):
 
 def arithmetic_diff(first, second):
     """{flag: [first, second]} for every arithmetic flag the two reports differ by, a flag either
-    side leaves unset read as its EFFECTIVE_DEFAULTS value; None when either carries no configuration."""
+    side leaves unset read as its EFFECTIVE_DEFAULTS value; None when either carries no configuration.
+    S2_EXACT_CLAIMS never count: the strict policy holds arms that differ only in them to IDENTICAL."""
     differ = configuration_diff(first, second)
     if differ is None:
         return None
@@ -273,7 +298,7 @@ def arithmetic_diff(first, second):
         return EFFECTIVE_DEFAULTS.get(name) if value is None else value
 
     return {name: values for name, values in differ.items() if not arithmetic_neutral(name)
-            and effective(name, values[0]) != effective(name, values[1])}
+            and name not in S2_EXACT_CLAIMS and effective(name, values[0]) != effective(name, values[1])}
 
 
 def policy_user(verdict):
@@ -376,7 +401,111 @@ def lifecycle_pass(concurrent, single):
     return dict(users=users, arithmetic_diff=arithmetic, configuration_recorded=arithmetic is not None)
 
 
-def exactness_policy(concurrent, single, rerun=None, pass_function=None):
+def extent_of(position):
+    """The 256-key family a row at `position` reads (extent_attention_replay.extent)."""
+    return (position // 256 + 1) * 256
+
+
+def decode_paths(text):
+    """One user's path records as a report carries them (acceptance_report.encode_paths): a list of
+    {round, path, position, prefix, emitted, rows, cap}, None where the line did not say."""
+    records = []
+    for index, token in enumerate((text or '').split()):
+        values = token[1:].split(':')
+        values += ['-'] * (5 - len(values))
+        number = lambda value: None if value in ('-', '') else int(value)
+        records.append(dict(round=index, path=token[0], position=number(values[0]), prefix=number(values[1]),
+                            emitted=number(values[2]), rows=number(values[3]), cap=number(values[4])))
+    return records
+
+
+def report_paths(report, user):
+    """A report's path records for one user (report['s2']['paths'], S2 arms), or None."""
+    entry = ((((report or {}).get('s2') or {}).get('paths') or {}).get('users') or {}).get(str(user))
+    return decode_paths(entry['encoded']) if entry and entry.get('encoded') is not None else None
+
+
+def token_at(stream, character):
+    """The completion tokens a character falls in: (first token, tokens in its chunk, chunk index), the
+    seed being token 0, from a detail stream's per-chunk characters and tokens (chunk_chars, chunk_tokens);
+    None without them or past the text."""
+    chars, tokens = (stream or {}).get('chunk_chars'), (stream or {}).get('chunk_tokens')
+    if character is None or not chars or not tokens or len(chars) != len(tokens) or None in tokens:
+        return None
+    seen_chars = seen_tokens = 0
+    for index, (length, count) in enumerate(zip(chars, tokens)):
+        if seen_chars + length > character:
+            return seen_tokens, count, index
+        seen_chars += length
+        seen_tokens += count
+    return None
+
+
+def round_of(records, token):
+    """The record whose round committed completion token `token` (seed = token 0, before any round): rounds
+    commit their emitted tokens - their prefix where the line gave no emitted count - in order."""
+    if records is None or token is None or token < 1:
+        return None
+    seen = 1
+    for record in records:
+        taken = record['emitted'] if record['emitted'] is not None else record['prefix']
+        if taken is None:
+            return None
+        if seen + taken > token:
+            return record
+        seen += taken
+    return None
+
+
+def divergence_record(concurrent, single, user, character=None):
+    """What S2 exit needs written for a user whose texts differ (s2-design W11): t* (the completion tokens
+    the first differing character falls in, from the concurrent arm's chunks), the character, and in each
+    arm the round that committed t*, its ticket position, its family E, its path (P packed, S sequential),
+    rows and cap, whether the paths differ, and the logit margin - not logged, so None (Q13)."""
+    streams_c, streams_s = concurrent.get('streams') or [], single.get('streams') or []
+    mine = (streams_c[user] if user < len(streams_c) else None) or {}
+    theirs = (streams_s[user] if user < len(streams_s) else None) or {}
+    if character is None:
+        character = first_divergence(mine.get('text') or '', theirs.get('text') or '')
+    located = token_at(mine, character)
+    record = dict(user=user, character=character, t_star=None, t_star_chunk=None, margin=None,
+                  margin_note='logit margins are not logged (s2-design Q13)')
+    if located is not None:
+        first, count, chunk = located
+        record.update(t_star=[first, first + count], t_star_chunk=chunk)
+    arms = {}
+    for label, report in (('concurrent', concurrent), ('solo', single)):
+        paths = report_paths(report, user)
+        hit = round_of(paths, located[0]) if located is not None and located[0] >= 1 else None
+        if located is not None and located[0] == 0:
+            arms[label] = dict(round='prefill', path='prefill')
+        elif hit is None:
+            arms[label] = dict(round=None, path=None, recorded=paths is not None)
+        else:
+            arms[label] = dict(round=hit['round'], path=hit['path'], position=hit['position'],
+                               extent=extent_of(hit['position']) if hit['position'] is not None else None,
+                               rows=hit['rows'], cap=hit['cap'], prefix=hit['prefix'])
+    record.update(arms)
+    paths = (arms['concurrent'].get('path'), arms['solo'].get('path'))
+    record['cross_path'] = None if None in paths else paths[0] != paths[1]
+    return record
+
+
+def same_path_users(first, second):
+    """The users whose every round took the same path at the same position in both arms (the permuted arm,
+    s2-design A4): their texts must match under any policy. None when either arm carries no path records."""
+    streams = max(len(first.get('streams') or []), len(second.get('streams') or []))
+    users = []
+    for user in range(streams):
+        mine, theirs = report_paths(first, user), report_paths(second, user)
+        if mine is None or theirs is None:
+            return None
+        if [(r['path'], r['position']) for r in mine] == [(r['path'], r['position']) for r in theirs] and mine:
+            users.append(user)
+    return users
+
+
+def exactness_policy(concurrent, single, rerun=None, pass_function=None, relaxation=None):
     """The policy's verdict for a concurrent arm against its solo reference, given the first pass
     and, after a first divergence, the re-run of both arms (rerun = (concurrent2, single2)).
 
@@ -386,7 +515,54 @@ def exactness_policy(concurrent, single, rerun=None, pass_function=None):
     yet). Overall: FAIL on any DIVERGED or ERROR, else RERUN, else NOT_COMPARABLE, else UNSTABLE,
     else PASS. 'reproducible' says, per arm, whether the re-run repeated the first run's texts byte
     for byte. `pass_function` (default policy_pass; lifecycle_pass for the gate's lifecycle arms)
-    makes one pass's verdicts."""
+    makes one pass's verdicts.
+
+    S2: when either report carries path records (report['s2']), every user that is not IDENTICAL gets a
+    divergence_record under 'records' (t*, the character, each arm's round, position, family and path).
+    `relaxation` 'dc-i' (RELAXATIONS: the user's decision D-c(i), never the default) turns a reproduced
+    DIVERGED whose t* was committed on different paths into NOT_COMPARABLE; a same-path one, or one whose
+    paths are unknown, still FAILS."""
+    if relaxation not in (None, 'strict') + RELAXATIONS:
+        raise ValueError('relaxation must be strict or one of %s, got %r' % (', '.join(RELAXATIONS), relaxation))
+    result = _exactness_policy(concurrent, single, rerun, pass_function)
+    if not any('s2' in (report or {}) for report in (concurrent, single)):
+        return result
+    records = []
+    for entry in result['users']:
+        if entry['verdict'] == 'IDENTICAL' or entry.get('first_divergence') is None:
+            continue
+        record = divergence_record(concurrent, single, entry['user'], entry.get('first_divergence'))
+        record['verdict'] = entry['verdict']
+        if relaxation == 'dc-i' and entry['verdict'] == 'DIVERGED' and record['cross_path'] is True:
+            entry.update(verdict='NOT_COMPARABLE', reason='cross-path divergence under decision D-c(i): t* committed '
+                         '%s in the concurrent arm, %s in the solo' % (record['concurrent'].get('path'),
+                                                                       record['solo'].get('path')))
+            record['verdict'] = 'NOT_COMPARABLE'
+        records.append(record)
+    result['records'] = records
+    result['relaxation'] = relaxation or 'strict'
+    if relaxation == 'dc-i':
+        result['verdict'] = overall_verdict([entry['verdict'] for entry in result['users']])
+    return result
+
+
+def overall_verdict(finals):
+    """The policy's overall verdict from its per-user finals."""
+    if not finals:
+        return 'FAIL'
+    if 'DIVERGED' in finals or 'ERROR' in finals:
+        return 'FAIL'
+    if 'RERUN' in finals:
+        return 'RERUN'
+    if 'NOT_COMPARABLE' in finals:
+        return 'NOT_COMPARABLE'
+    if 'UNSTABLE' in finals:
+        return 'UNSTABLE'
+    return 'PASS'
+
+
+def _exactness_policy(concurrent, single, rerun=None, pass_function=None):
+    """exactness_policy without the S2 records and relaxation (its docstring)."""
     pass_function = pass_function or policy_pass
     first = pass_function(concurrent, single)
     second = pass_function(*rerun) if rerun is not None else None
@@ -557,8 +733,26 @@ def render_policy(result):
     if result.get('reproducible') is not None:
         lines.append('re-run reproduced its first run byte for byte: concurrent=%s single=%s' % (
             result['reproducible']['concurrent'], result['reproducible']['single']))
+    for record in result.get('records') or ():
+        lines.append(render_record(record))
+    if result.get('relaxation') not in (None, 'strict'):
+        lines.append('relaxation %s in force (the user\'s decision): cross-path divergences read NOT_COMPARABLE'
+                     % result['relaxation'])
     lines.append('POLICY %s' % result['verdict'])
     return '\n'.join(lines)
+
+
+def render_record(record):
+    """One divergence record (divergence_record) as a line."""
+    def arm(entry):
+        entry = entry or {}
+        if entry.get('path') in (None, 'prefill'):
+            return 'round %s' % (entry.get('round') if entry.get('path') is None else 'prefill')
+        return 'round %s %s at %s (E %s, rows %s, cap %s)' % (entry.get('round'), entry.get('path'), entry.get('position'),
+                                                               entry.get('extent'), entry.get('rows'), entry.get('cap'))
+    return ('record user %s (%s): t*=%s character %s | concurrent %s | solo %s | cross_path=%s margin=%s' % (
+        record.get('user'), record.get('verdict'), record.get('t_star'), record.get('character'),
+        arm(record.get('concurrent')), arm(record.get('solo')), record.get('cross_path'), record.get('margin')))
 
 
 def _f(value, pattern='%.2f'):
@@ -611,11 +805,17 @@ def main(argv=None):
                         help='with --policy: the re-run of both arms after a first divergence')
     parser.add_argument('--against-reference', type=Path, metavar='FILE',
                         help='bring-up: compare CONCURRENT (a served arm) with a tracked reference file instead')
+    parser.add_argument('--relaxation', choices=RELAXATIONS, default=None,
+                        help='with --policy: the user\'s decision D-c(i) (s2-design 6.1) - cross-path divergences '
+                             'read NOT_COMPARABLE; needs --decision')
+    parser.add_argument('--decision', default=None, help='with --relaxation: where the user\'s decision is recorded')
     options = parser.parse_args(argv)
     if options.against_reference is None and options.sequential is None:
         parser.error('the sequential arm is required (or --against-reference)')
     if options.rerun and not options.policy:
         parser.error('--rerun needs --policy')
+    if options.relaxation and (not options.policy or not (options.decision or '').strip()):
+        parser.error('--relaxation needs --policy and --decision (only the user\'s D-c decision turns it on)')
     try:
         concurrent = load_report(options.concurrent)
         if options.against_reference is not None:
@@ -631,7 +831,7 @@ def main(argv=None):
         print(render_reference(result))
         code = 0 if result['verdict'] == 'IDENTICAL' else 1
     elif options.policy:
-        result = exactness_policy(concurrent, single, rerun)
+        result = exactness_policy(concurrent, single, rerun, relaxation=options.relaxation)
         print(render(compare(concurrent, single)))
         print(render_policy(result))
         code = POLICY_EXIT[result['verdict']]

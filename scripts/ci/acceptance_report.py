@@ -903,6 +903,149 @@ def rate_line(rates):
                 _fmt(rates.get('aggregate_tok_s'), '%.1f'), _fmt(rates.get('decode_wall_s'), '%.2f')))
 
 
+# S2 PATH RECORDS (s2-design.md W11 and section 6.1). Concurrent and solo run two arithmetic paths in S2:
+# a round is either served by the packed block (P: one '[PACKED] request=' line per user,
+# serving_packed_step.AUDIT_LINE under QWEN_FAST_PACKED_AUDIT) or by the sequential step (S: a
+# '[SEQUENTIAL] request= position= prefix=' line, or the '[SEQ-PUBLISH] request= rows= prefix=' step line
+# serving_sequential_step.SEQ_PUBLISH_LINE writes under QWEN_FAST_SEQ_PUBLISH_LOG, which the C2 image
+# bakes). Per user and round: the path, the ticket position, the committed prefix (state rows), the
+# emitted tokens, the ticket rows and the boundary cap (W4's cap=), each where its line carries it. Fields
+# are read by name, so a field added to a line never shifts another. A [SEQ-PUBLISH] line names no
+# position: it is chained from the user's prompt length (its first decode ticket sits there) by every
+# round's prefix, and the chain is checked against each position a [PACKED] or [SEQUENTIAL] line does carry
+# (position_mismatches). round_split cannot give this for staggered arms (it needs every live user in every
+# step); these records explain a divergence and count SAME_PATH users, they judge nothing themselves.
+PATH_LINE = re.compile(r'\[(PACKED|SEQUENTIAL|SEQ-PUBLISH)\] request=(\S+) ([^\n]*)')
+PATH_FIELD = re.compile(r'(?<![A-Za-z0-9_])(segment|position|prefix|emitted|rows|cap)=([0-9]+|n/a)(?![0-9A-Za-z_])')
+PATH_KINDS = {'PACKED': 'P', 'SEQUENTIAL': 'S', 'SEQ-PUBLISH': 'S'}
+# One record in a report: '<P|S><position>:<prefix>:<emitted>:<rows>:<cap>', '-' where unknown, records
+# space-separated in round order (real_text_compare.decode_paths reads it back).
+PATH_FORMAT_FIELDS = ('position', 'prefix', 'emitted', 'rows', 'cap')
+EMITTED_FIELD = re.compile(r'(?<![A-Za-z0-9_])emitted=([0-9]+)')
+AUDIT_MS_FIELD = re.compile(r'\[EXTENT-AUDIT\] round=[0-9]+ [^\n]*?(?<![A-Za-z0-9_])ms=([0-9.]+)')
+
+
+def path_records(log_text, streams, prompt_lengths=None):
+    """{users: {user: [record, ...]}, ...} - every [PACKED], [SEQUENTIAL] and [SEQ-PUBLISH] step line
+    attributed to its user (audit_owner), in log order, each record {round, path, position, prefix, emitted,
+    rows, cap, logged_position}. Positions a line does not carry are chained from the user's prompt length
+    (prompt_lengths) by the prefixes; position_checks counts the logged positions the chain was checked
+    against and position_mismatches lists where it disagreed (a missed line or a prefix read wrong)."""
+    users, unattributed, malformed = {}, [], 0
+    for match in PATH_LINE.finditer(log_text):
+        kind, request_id, rest = match.groups()
+        if kind == 'SEQ-PUBLISH' and not rest.startswith('rows='):
+            continue   # the same step's stages / splits lines
+        fields = {}
+        for name, value in PATH_FIELD.findall(rest):
+            fields.setdefault(name, None if value == 'n/a' else int(value))
+        path = PATH_KINDS[kind]
+        if path == 'P' and (fields.get('position') is None or fields.get('prefix') is None):
+            malformed += 1
+            continue
+        user = audit_owner(request_id, streams)
+        if user is None:
+            if request_id not in unattributed:
+                unattributed.append(request_id)
+            continue
+        users.setdefault(user, []).append(dict(path=path, position=fields.get('position'), prefix=fields.get('prefix'),
+                                               emitted=fields.get('emitted'), rows=fields.get('rows'),
+                                               cap=fields.get('cap'),
+                                               logged_position=fields.get('position') is not None))
+    checks, mismatches = 0, []
+    lengths = list(prompt_lengths or [])
+    for user, records in users.items():
+        expected = lengths[user] if user < len(lengths) else None
+        for index, record in enumerate(records):
+            record['round'] = index
+            if record['position'] is not None:
+                if expected is not None:
+                    checks += 1
+                    if expected != record['position']:
+                        mismatches.append(dict(user=user, round=index, chained=expected, logged=record['position']))
+                expected = record['position']
+            else:
+                record['position'] = expected
+            expected = expected + record['prefix'] if expected is not None and record['prefix'] is not None else None
+    return dict(users=users, unattributed=unattributed, malformed=malformed, position_checks=checks,
+                position_mismatches=mismatches[:16], position_mismatch_count=len(mismatches))
+
+
+def encode_paths(records):
+    """One user's records as the report carries them (PATH_FORMAT_FIELDS, space-separated)."""
+    def text(value):
+        return '-' if value is None else str(value)
+    return ' '.join(record['path'] + ':'.join(text(record.get(name)) for name in PATH_FORMAT_FIELDS)
+                    for record in records)
+
+
+def decode_steps(log_text):
+    """Every decode step - a timestamped '[PHASE] execute ... new=0 cached=C' line (serving_worker_hook, logged
+    as the step begins) - with what its stretch of the log, up to the next execute line, says: the emitted
+    count of each '[PACKED] request=' line (a packed round), the sequential step lines, and the extent audit's
+    ms ([EXTENT-AUDIT], S2 gate arms). Timed to the next execute line when that is a decode step too, as
+    round_split times them. Unlike round_split it needs no alignment of records to steps, so a staggered
+    or mixed-length arm is read as well."""
+    from datetime import datetime
+    steps, current, origin = [], None, None
+    for line in log_text.split('\n'):
+        match = TIMED_EXECUTE_LINE.search(line)
+        if match:
+            stamp = match.group(1)
+            moment = datetime.strptime(stamp, '%Y-%m-%d %H:%M:%S.%f' if '.' in stamp else '%Y-%m-%d %H:%M:%S')
+            origin = moment if origin is None else origin
+            at = (moment - origin).total_seconds()
+            _total, new, cached, _spec = (int(value) for value in match.groups()[1:])
+            if current is not None:
+                current['next'] = (at, new, cached)
+            current = dict(at=at, new=new, live=cached, packed=[], sequential=0, audit_ms=None, next=None)
+            steps.append(current)
+            continue
+        if current is None:
+            continue
+        if '[PACKED] request=' in line:
+            emitted = EMITTED_FIELD.search(line)
+            current['packed'].append(int(emitted.group(1)) if emitted else 0)
+        elif '[SEQUENTIAL] request=' in line or ('[SEQ-PUBLISH] request=' in line and ' rows=' in line):
+            current['sequential'] += 1
+        elif '[EXTENT-AUDIT] round=' in line:
+            audit = AUDIT_MS_FIELD.search(line)
+            if audit:
+                current['audit_ms'] = float(audit.group(1))
+    decode = []
+    for step in steps:
+        if step['new'] != 0 or step['live'] <= 0:
+            continue
+        following = step['next']
+        seconds = following[0] - step['at'] if following is not None and following[1] == 0 and following[2] > 0 else None
+        decode.append(dict(at=step['at'], live=step['live'], seconds=seconds, packed=step['packed'],
+                           sequential=step['sequential'], audit_ms=step['audit_ms']))
+    return decode
+
+
+def live_rate(log_text, live=4):
+    """The packed rounds with `live` live users (decode steps whose stretch carries `live` [PACKED] lines):
+    how many, the median round, the median extent-audit ms inside them, the tokens each user took per round,
+    and the per-user decode rate = those tokens over the median round - and the same net of the audit's ms
+    (an S2 gate arm's audit reads back after the replay, so it lengthens the round it checks). None without
+    a timed round."""
+    rounds = [step for step in decode_steps(log_text) if step['live'] == live and len(step['packed']) == live]
+    timed = [step for step in rounds if step['seconds'] is not None and step['seconds'] > 0]
+    if not timed:
+        return None
+    median = statistics.median(step['seconds'] for step in timed)
+    emitted = [value for step in rounds for value in step['packed']]
+    per_round = sum(emitted) / len(emitted)   # not fmean: c2_serving_gate reads this on the rig host (3.7 syntax)
+    audits = [step['audit_ms'] for step in timed if step['audit_ms'] is not None]
+    audit_ms = statistics.median(audits) if audits else None
+    net = median - (audit_ms or 0.0) / 1000.0
+    return dict(live=live, rounds=len(rounds), timed_rounds=len(timed), median_round_ms=round(median * 1000.0, 2),
+                median_audit_ms=round(audit_ms, 3) if audit_ms is not None else None,
+                net_median_round_ms=round(net * 1000.0, 2), tokens_per_user_per_round=round(per_round, 3),
+                per_user_tok_s=round(per_round / median, 2),
+                net_per_user_tok_s=round(per_round / net, 2) if net > 0 else None)
+
+
 def read_gate_report(path):
     """A gate report: m3native-gate.json, or the gate's stdout with the JSON between BEGIN and END."""
     text = path.read_text(encoding='utf-8', errors='replace')
