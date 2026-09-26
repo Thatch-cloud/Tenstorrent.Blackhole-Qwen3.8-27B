@@ -53,6 +53,8 @@ EMBEDDING = [
     OPS / 'sdpa_decode_slice' / 'run_card_b.sh',
     OPS / 'pair_row_probe' / 'run_card_b.sh',
     OPS / 'k64j_probe' / 'run_card_b.sh',
+    OPS / 'k64j' / 'run_card_b.sh',
+    OPS / 'k64j' / 'build_k64j.sh',
     OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh',
     OPS / 'kernels-batch64' / 'nlp_concat_heads_decode' / 'build-and-test-b64.sh',
 ]
@@ -60,7 +62,7 @@ EMBEDDING = [
 SOURCING = [HERE / 'verify-t1-g0-rig.sh', HERE / 'matmul64_sweep_rig.sh', HERE / 'gdn-user-batch-rig.sh',
             HERE / 'sdpa_bench_rig.sh', HERE / 'gdn-seq-block-rig.sh']
 # The line each embedding harness launches its device container with (k0_session.sh launches none:
-# every run goes through run_m1.sh).
+# every run goes through run_m1.sh; k64j/build_k64j.sh launches none either: it builds in ttbuild and opens no card).
 LAUNCH = {
     OPS / 'sdpa_prefill_bench' / 'run_m1.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'sdpa_prefill_chain' / 'run_card_m_pf.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
@@ -73,6 +75,7 @@ LAUNCH = {
     OPS / 'sdpa_decode_slice' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'pair_row_probe' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'k64j_probe' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
+    OPS / 'k64j' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh': r'^docker run -d --name "\$CONTAINER"',
     OPS / 'kernels-batch64' / 'nlp_concat_heads_decode' / 'build-and-test-b64.sh': r'^timeout 900 docker run',
 }
@@ -89,7 +92,7 @@ NL = chr(10)
 SCRUB = ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'M1_READER', 'IMAGE', 'M1_ARGS', 'M1_DRY_RUN', 'M1_REQUIRE_SOURCES',
          'RESULTS', 'M1_SRC', 'KOPGRAFT_PF', 'PF_SRC', 'PF_DRY_RUN', 'WATCHER', 'REFERENCE', 'CARD', 'NAME',
          'CONTAINER', 'GDN_USER_BATCH_DEVICE', 'K64F_SRC', 'KOPGRAFT64', 'REPO', 'RUNNER_NAME', 'FAKE_HELD', 'MSYS',
-         'PROBE_DRY_RUN', 'EXPECT_TTNNCPP_SHA256', 'K64I_DRY_RUN', 'KOPGRAFT64_REFERENCE', 'PAIR_ROW_DRY_RUN', 'K64J_DRY_RUN',
+         'PROBE_DRY_RUN', 'EXPECT_TTNNCPP_SHA256', 'K64I_DRY_RUN', 'KOPGRAFT64_REFERENCE', 'PAIR_ROW_DRY_RUN', 'K64J_DRY_RUN', 'K64J_CARD_DRY_RUN', 'K64J_BUILD_DRY_RUN',
          'GDN_SEQ_BLOCK_IMAGE')
 
 
