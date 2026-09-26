@@ -47,6 +47,7 @@ jobs:
           python -B -m unittest test_serving_fast_policy
           python -B -m unittest test_lever_n_prefill_range
           python -B -m unittest test_lever_n_model_patch
+          python -B -m unittest test_qwen_prefix_model_patch test_qwen_prefix_model_runtime
           python -B -m unittest test_lever_n_m1_gate_report
           python -B -m unittest test_lever_n_scheduler_patch
           python -B -m unittest test_lever_n_m2_gate_report
