@@ -78,7 +78,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          python3 scripts/ci/rig/serving_metering.py 14 2>&1 | tee "$RUNNER_TEMP/c2-results/metering.log"
+          python3 scripts/ci/rig/node_probe.py "${NODE_PROBE_SITE:-spark-76cb}" 2>&1 | tee "$RUNNER_TEMP/c2-results/node-probe.log"
       - name: Platform serving container (read-only)
         if: contains(steps.job.outputs.actions, 'platform')
         shell: bash
