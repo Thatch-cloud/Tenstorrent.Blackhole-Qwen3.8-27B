@@ -1657,8 +1657,27 @@ def without_capture_position(lines):
                      'capture_position = packed_capture_position()')
     lines = cut_once(lines, 'if capture_position is not None:',
                      "pindiag('{}{} (gate only)', CAPTURE_POSITION_MARKER, capture_position)")
-    return cut_once(lines, "# S2 G3b's gate-only knob; unset, no keyword at all.",
-                    'if capture_position is not None else {}),')
+    lines = cut_once(lines, "# S2 G3b's gate-only knob; unset, no keyword at all.",
+                     'if capture_position is not None else {}),')
+    return without_extent_replay(lines)
+
+
+def without_extent_replay(lines):
+    """serving_runtime.py less S2's QWEN_FAST_EXTENT_REPLAY plumbing (design W2/W3), which landed after the
+    capture-position knob: its constant, extent_replay_requested, the read beside the knob's, the no-block
+    refusal, the pool keyword and the check that every block took the flag. Each is cut exactly once and to
+    its known last line, so nothing else is hidden."""
+    lines = cut_once(lines, "EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'", "EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'")
+    lines = cut_once(lines, 'def extent_replay_requested(environ=None):', "return value == '1'")
+    lines = cut_once(lines, "# QWEN_FAST_EXTENT_REPLAY (S2, default off; strictly '0' or '1'): read here, before anything is "
+                            'built.', 'extent_replay = extent_replay_requested()')
+    lines = cut_once(lines, '# S2 (QWEN_FAST_EXTENT_REPLAY=1) serves its rounds through the packed block alone - the pool '
+                            'lends', "policy['scheduler_requests']))")
+    replicas = "**({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {})"
+    lines = cut_once(lines, replicas + ',', "**({'extent_replay': True} if extent_replay else {}))))",
+                     [' ' * 16 + replicas + ')))'])
+    return cut_once(lines, '# S2: every block must be the extent block under the flag, and none may be without it. The',
+                    '% (EXTENT_REPLAY_FLAG, int(extent_replay), extents))')
 
 
 class ShippingTests(unittest.TestCase):
