@@ -13,8 +13,19 @@ traced/eager, Lifecycle, Timing):
     a fresh salt (the same publishes and captures, so the same grants), then the hit's messages
     under it. The chain continues from the first hit;
   - hits that run concurrently (the arrivals, the tiny pool) are compared with cold twins run alone;
-    a divergence there runs a second solo cold run and a batch control (the same messages at once,
-    fresh salts), so a batch-dependent engine reads NOT_COMPARABLE, not DIVERGED;
+    a divergence there runs a second solo cold run and a batch-matched cold control (the same
+    messages at once, fresh salts, the same co-runners in the same order), judged by the batching
+    rule (prefix_judge.concurrent_verdict): equal to the control is IDENTICAL, a control equal to
+    the solo run is a FAIL, a control that moved too is NOT_COMPARABLE. A family that ends with a
+    NOT_COMPARABLE (or DIVERGED) pair then gets its SOLO ANCHOR: one of those hits replayed alone at
+    the same Q against its solo cold twin, the IDENTICAL solo pair the rule asks of every family
+    whose concurrent pairs it excuses;
+  - every prompt plus its max_tokens fits the SERVED context (max_model_len from /v1/models, else
+    the arm's profile; never a constant): Driver.fit measures a conversation's next prompt with
+    /tokenize (the chat template included) and cuts its newest input to fit, and Driver.send never
+    sends a request the API edge would refuse (G1 v48, run 36251045616: a flood of 65,505 tokens + 32
+    and kill-switch turns of 64,513+ tokens + 1,024 got HTTP 400 and the kill switch was never seen);
+  - the scenario's own aborts (a socket closed on purpose) are recorded as intended, not as failures;
   - every request carries X-Request-Id = its tag, so the engine's markers name it (prefix_markers);
     return_token_ids gives the prompt and output token ids, from which prefix_judge.Oracle derives
     the Q each request should get (a request aborted before its first output returns none: its
@@ -95,7 +106,20 @@ TINY_POOL_TOKENS = 81920
 TINY_SHARE = 0.30                # each preemption conversation's first turn, as a share of the pool
 TINY_PREEMPT_CONVERSATIONS = 3   # 3 x ~30%: all cached together, all admitted together
 TINY_PREEMPT_MARGIN_BLOCKS = 40  # each answer's decode outgrows the pool left by this many blocks
-CONTEXT_TOKENS = 65536           # the general profiles' max-model-len
+# Prompt sizing against the served context (Driver.fit, Driver.send). A request needs prompt +
+# max_tokens <= max_model_len (vLLM refuses it at the API edge otherwise); fit leaves FIT_MARGIN_TOKENS
+# more. token_bound is an upper bound on the prompt's tokens without a /tokenize call: a byte-level BPE
+# token covers at least one byte of the rendered text, which is the messages' and tools' text (their
+# JSON is longer) plus the chat template's own, bounded by the slack below.
+FIT_MARGIN_TOKENS = 64
+TEMPLATE_SLACK_TOKENS = 2048
+TEMPLATE_TOKENS_PER_MESSAGE = 64
+TEMPLATE_TOKENS_PER_CALL = 64
+FIT_ATTEMPTS = 6
+FIT_CUT_FACTOR = 1.25            # characters cut per excess token, over CHARS_PER_TOKEN: one pass, usually
+# What the evict conversations' later turns add past their build length: after-flood (1,500 in, an
+# answer) and after-reset (800 in, an answer), then a turn's max_tokens.
+EVICT_HEADROOM_TOKENS = 1500 + 800 + 3 * DEFAULT_MAX_TOKENS + 2 * FIT_MARGIN_TOKENS
 # The dropped grant (F2), by block arithmetic on the 1280-block pool (tiny_dropped_grant): X's first
 # turn (~20%) is cached; the filler takes every block but X's, TINY_GRANT_MARGIN_BLOCKS and its
 # answer's; X's next turn needs TINY_GRANT_EXCESS_BLOCKS more than the filler can ever leave free.
@@ -123,6 +147,37 @@ class EngineDead(RuntimeError):
 
 class OutOfTime(RuntimeError):
     """The arm's time ran out before its scenario finished."""
+
+
+class HarnessError(RuntimeError):
+    """The harness cannot build what its scenario asks (a gate fault, not the engine's)."""
+
+
+class PromptTooLong(HarnessError):
+    """A conversation's next prompt plus its answer cannot be made to fit the served context."""
+
+
+def body_key(body):
+    """What /tokenize sees of a request body (its messages and tools), as a digest."""
+    return hashlib.sha256(json.dumps([body.get('messages'), body.get('tools') or []], sort_keys=True,
+                                     ensure_ascii=False).encode('utf-8')).hexdigest()
+
+
+def token_bound(body):
+    """An upper bound on `body`'s prompt tokens, from its bytes (see TEMPLATE_SLACK_TOKENS)."""
+    messages = body.get('messages') or []
+    size = len(json.dumps([messages, body.get('tools') or []], ensure_ascii=False).encode('utf-8'))
+    calls = sum(len(message.get('tool_calls') or ()) for message in messages)
+    return (size + TEMPLATE_SLACK_TOKENS + TEMPLATE_TOKENS_PER_MESSAGE * len(messages)
+            + TEMPLATE_TOKENS_PER_CALL * calls)
+
+
+def input_indexes(messages):
+    """The conversation's newest input: the user and tool messages after its last assistant message
+    (every user message when there is none: a first turn's task and attachment)."""
+    last = max([index for index, message in enumerate(messages) if message.get('role') == 'assistant'] or [0])
+    return [index for index, message in enumerate(messages) if index > last and index > 0
+            and message.get('role') in ('user', 'tool') and isinstance(message.get('content'), str)]
 
 
 # -- the streamed chat completion ----------------------------------------------------------------
@@ -241,6 +296,16 @@ class Client(object):
     def healthy(self):
         status, _ = self.request('GET', '/health', timeout=30)
         return status == 200
+
+    def context_tokens(self):
+        """The served max_model_len (vLLM's /v1/models card for this model), or None."""
+        status, answer = self.json_request('GET', '/v1/models', timeout=30)
+        if status != 200 or not isinstance(answer, dict):
+            return None
+        cards = [card for card in answer.get('data') or () if isinstance(card, dict)]
+        named = [card for card in cards if card.get('id') == self.model] or (cards if len(cards) == 1 else [])
+        value = named[0].get('max_model_len') if named else None
+        return value if isinstance(value, int) and value > 0 else None
 
     def metrics(self):
         status, text = self.request('GET', '/metrics', timeout=30)
@@ -518,9 +583,12 @@ class Driver(object):
 
     def __init__(self, client, arm, corpus, log=None, container=None, seed=0, max_tokens=DEFAULT_MAX_TOKENS,
                  deadline=None, clock=time.time, sleep=time.sleep, say=print, pods=ci_pods, strict=True,
-                 store_capacity=None, salt_key=None):
+                 store_capacity=None, salt_key=None, context_tokens=None):
         self.client, self.arm, self.corpus, self.log, self.container = client, arm, corpus, log, container
         self.salt_key = salt_key
+        self.context_tokens = context_tokens
+        self.measured = {}
+        self.fitted = []
         self.seed, self.max_tokens, self.deadline = seed, max_tokens, deadline
         self.clock, self.sleep, self.say, self.pods = clock, sleep, say, pods
         self.strict = strict
@@ -574,6 +642,89 @@ class Driver(object):
         values = self.client.metrics() or {}
         return dict((name, values.get(name)) for name in COUNTERS)
 
+    # -- sizing against the served context --------------------------------------------------------
+    def context(self):
+        """The served max_model_len: what the gate read (/v1/models, else the profile), else the
+        client's /v1/models now. HarnessError when nobody can say."""
+        if self.context_tokens is None:
+            reader = getattr(self.client, 'context_tokens', None)
+            value = reader() if callable(reader) else None
+            if not value:
+                raise HarnessError('the served max_model_len is unknown (/v1/models names none and the gate gave '
+                                   'none): prompts cannot be sized against it')
+            self.context_tokens = int(value)
+        return self.context_tokens
+
+    def measure(self, body):
+        """`body`'s prompt tokens as the chat endpoint renders them (/tokenize), remembered by body."""
+        key = body_key(body)
+        with self.lock:
+            known = self.measured.get(key)
+        if known is None:
+            known = int(self.client.tokenize(body))
+            with self.lock:
+                self.measured[key] = known
+        return known
+
+    def room_problem(self, body, max_tokens):
+        """Why `body` with `max_tokens` cannot be served in the context (prompt + max_tokens past
+        max_model_len: vLLM refuses it at the API edge), or None. /tokenize only when token_bound
+        cannot already tell, so a burst of fitted or small bodies makes no call."""
+        context = self.context()
+        with self.lock:
+            tokens = self.measured.get(body_key(body))
+        if tokens is None:
+            if token_bound(body) + max_tokens <= context:
+                return None
+            try:
+                tokens = self.measure(body)
+            except Exception:     # noqa: BLE001 - unmeasured: the server answers for itself
+                return None
+        if tokens + max_tokens > context:
+            return 'prompt %d tokens + max_tokens %d > max_model_len %d' % (tokens, max_tokens, context)
+        return None
+
+    def fit(self, conv, max_tokens=None):
+        """Make `conv`'s next prompt plus `max_tokens` fit the served context, FIT_MARGIN_TOKENS below
+        it, measured with /tokenize (the chat template included): its newest input (input_indexes) is
+        cut from the end until it does. A prompt that fits is never touched. -> its tokens (None when
+        token_bound alone shows it fits); PromptTooLong when the history alone is past the context."""
+        max_tokens = int(max_tokens or self.max_tokens)
+        limit = self.context() - max_tokens - FIT_MARGIN_TOKENS
+        body = conv.body()
+        if token_bound(body) <= limit:
+            return None
+        tokens = first = self.measure(body)
+        for _ in range(FIT_ATTEMPTS):
+            if tokens <= limit:
+                break
+            cut = int((tokens - limit) * corpus_module.CHARS_PER_TOKEN * FIT_CUT_FACTOR) + corpus_module.MIN_INPUT_CHARS
+            cut_any = False
+            for index in reversed(input_indexes(conv.messages)):
+                text = conv.messages[index]['content']
+                keep = max(corpus_module.MIN_INPUT_CHARS, len(text) - cut)
+                if keep < len(text):
+                    conv.messages[index]['content'] = text[:keep]
+                    cut -= len(text) - keep
+                    cut_any = True
+                if cut <= 0:
+                    break
+            if not cut_any:
+                break
+            tokens = self.measure(conv.body())
+        if tokens > limit:
+            raise PromptTooLong('%s turn %s: %d prompt tokens + max_tokens %d past max_model_len %d (less %d), and its '
+                                'newest input cannot be cut further' % (conv.name, conv.turn, tokens, max_tokens,
+                                                                         self.context(), FIT_MARGIN_TOKENS))
+        if tokens != first:
+            entry = dict(conv=conv.name, turn=conv.turn, tokens=first, fitted=tokens, max_tokens=max_tokens,
+                         context=self.context())
+            with self.lock:
+                self.fitted.append(entry)
+            self.say('[PREFIX-GATE] %s fitted %s turn %s: %d -> %d prompt tokens (+ %d out, max_model_len %d)' % (
+                self.arm, conv.name, conv.turn, first, tokens, max_tokens, self.context()))
+        return tokens
+
     def send(self, body, role, salt, case, conv=None, max_tokens=None, admit=True, continuation=False,
              abort_after_s=None, abort_after_tokens=None, extra=None, on_first=None, abort_signal=None,
              counters=False):
@@ -582,10 +733,14 @@ class Driver(object):
         records the raw hit the oracle expects (what the salt has published, capped at L - 1)."""
         self.check_time()
         tag = self.tag(role)
+        max_tokens = int(max_tokens or self.max_tokens)
+        refused = self.room_problem(body, max_tokens)
+        if refused:
+            return self.refuse(tag, role, salt, case, conv, continuation, refused)
         start = self.log.mark() if self.log else None
         before = self.counters() if counters else None
         sent = self.clock() - self.started
-        result = self.client.chat(body, tag, salt=salt, max_tokens=max_tokens or self.max_tokens,
+        result = self.client.chat(body, tag, salt=salt, max_tokens=max_tokens,
                                   timeout=self.request_timeout(), abort_after_s=abort_after_s,
                                   abort_after_tokens=abort_after_tokens, extra=extra, on_first=on_first,
                                   abort_signal=abort_signal)
@@ -593,6 +748,10 @@ class Driver(object):
         record = dict(result, tag=tag, arm=self.arm, role=role, salt=salt, case=case, sent_s=round(sent, 3),
                       conv=getattr(conv, 'name', None), turn=getattr(conv, 'turn', None), continuation=continuation,
                       log_window=None)
+        # The harness closes a socket only when the scenario asked it to: that abort is the event under
+        # test, an expected outcome, never a failed request.
+        record['intended_abort'] = bool(record.get('aborted')) and (
+            abort_after_s is not None or abort_after_tokens is not None or abort_signal is not None)
         if counters:
             self.sleep(COUNTER_SETTLE_S)
             record['counters'] = dict(before=before, after=self.counters())
@@ -618,12 +777,32 @@ class Driver(object):
                 self.history.setdefault(salt, []).append((tag, body))
         with self.lock:
             self.records.append(record)
-        status = 'ok' if record['ok'] else 'FAILED %s' % (record.get('error') or record.get('aborted'))
+        if record['ok']:
+            status = 'ok'
+        elif record.get('intended_abort'):
+            status = 'aborted as intended (%s)' % record['aborted']
+        else:
+            status = 'FAILED %s' % (record.get('error') or record.get('aborted'))
         self.say('[PREFIX-GATE] %s %s %s conv=%s turn=%s L=%s out=%s ttft=%s wall=%s %s' % (
             self.arm, tag, case, record['conv'], record['turn'], record.get('prompt_tokens'),
             record.get('completion_tokens'), record.get('ttft_s'), record.get('wall_s'), status))
         if not record['ok'] and not record.get('aborted'):
             self.check_alive()
+        return record
+
+    def refuse(self, tag, role, salt, case, conv, continuation, reason):
+        """The record of a request the harness did not send: its prompt and max_tokens do not fit the
+        served context (a sizing fault in the gate, which judges it as one)."""
+        record = dict(content='', reasoning=None, tool_calls=[], token_ids=None, prompt_sha=None, prompt_tokens=None,
+                      completion_tokens=0, finish=None, error='not sent: %s (the harness sized it past the context)'
+                      % reason, ttft_s=None, wall_s=0.0, status=None, aborted=None, ok=False, intended_abort=False,
+                      refused=reason, tag=tag, arm=self.arm, role=role, salt=salt, case=case,
+                      sent_s=round(self.clock() - self.started, 3), conv=getattr(conv, 'name', None),
+                      turn=getattr(conv, 'turn', None), continuation=continuation, log_window=None)
+        with self.lock:
+            self.records.append(record)
+        self.say('[PREFIX-GATE] %s %s %s conv=%s turn=%s NOT SENT: %s' % (self.arm, tag, case, record['conv'],
+                                                                          record['turn'], reason))
         return record
 
     def check_alive(self):
@@ -648,6 +827,7 @@ class Driver(object):
         full. A divergence sends a second cold run and a second hit at the same Q: the salt's earlier
         requests replayed (max_tokens=1) under a fresh salt, then these messages. Returns the first
         hit record (the chain continues from it)."""
+        self.fit(conv, max_tokens)
         body = conv.body()
         continuation = conv.turn > 0 if continuation is None else continuation
         cold = self.send(body, 'cold', self.fresh_salt(), case, conv, max_tokens, continuation=continuation,
@@ -662,12 +842,8 @@ class Driver(object):
                 self.arm, hit['tag'], cold['tag'], result['first'].get('detail')))
             cold2 = self.send(body, 'cold', self.fresh_salt(), case + ':rerun', conv, max_tokens,
                               continuation=continuation, extra=extra)
-            replay_salt = self.fresh_salt('rerun')
-            primes = [self.send(earlier, 'prime', replay_salt, case + ':prime', conv, PRIME_MAX_TOKENS,
-                                continuation=True, extra=extra)
-                      for earlier in self.history_before(conv.salt, hit['tag'])]
-            hit2 = self.send(body, 'hit', replay_salt, case + ':rerun', conv, max_tokens, continuation=continuation,
-                             extra=extra)
+            primes, hit2 = self.same_q_hit(body, conv.salt, hit['tag'], case + ':rerun', case + ':prime', conv,
+                                           max_tokens, extra, continuation)
             result = judge.pair_verdict(cold, hit, cold2, hit2)
             entry.update(rerun=(cold2['tag'], hit2['tag']), cold2=cold2['tag'], primes=[p['tag'] for p in primes])
         entry.update(verdict=result['verdict'], detail=result.get('reason') or result['first'].get('detail'),
@@ -678,6 +854,17 @@ class Driver(object):
                                                                    entry['verdict'], ' (%s)' % entry['detail']
                                                                    if entry['detail'] else ''))
         return hit
+
+    def same_q_hit(self, body, salt, before, case, prime_case, conv, max_tokens, extra, continuation):
+        """A hit at the same Q as the request `before` of `salt`, run alone: every request that salt
+        served before it replayed (max_tokens=1) under a fresh salt - the same publishes and
+        captures, so the same grant - then `body` under that salt. -> (primes, hit)."""
+        replay_salt = self.fresh_salt('rerun')
+        primes = [self.send(earlier, 'prime', replay_salt, prime_case, conv, PRIME_MAX_TOKENS, continuation=True,
+                            extra=extra)
+                  for earlier in self.history_before(salt, before)]
+        hit = self.send(body, 'hit', replay_salt, case, conv, max_tokens, continuation=continuation, extra=extra)
+        return primes, hit
 
     def answer(self, conv, record):
         conv.add_answer(record)
@@ -769,6 +956,7 @@ def bringup_turns(driver, capture, turns=3):
             if not record.get('ok'):
                 break
             conv.extend(corpus_module.growth_input(target, record['prompt_tokens'], record.get('completion_tokens') or 0))
+        driver.fit(conv)
         body = conv.body()
         record = driver.send(body, role, None, 'bringup', conv, continuation=index > 0, counters=capture)
         if capture:
@@ -833,9 +1021,11 @@ def _burst(driver, jobs):
 
 def concurrent_pairs(driver, pending, case):
     """Hits that ran concurrently, each against a cold twin (a fresh salt) run alone. When any
-    diverged: a second solo cold run of each divergent one, and a batch control - every message set
-    again at once under fresh salts, the burst's shape - so concurrent_verdict can tell a hit that
-    differs from a batch that does. pending: [(hit record, body, conv, max_tokens, extra)]."""
+    diverged: a second solo cold run of each divergent one, and the batch-matched cold control -
+    every message set again at once under fresh salts, in the burst's order, the same co-runners -
+    judged by the batching rule (prefix_judge.concurrent_verdict). A family left with a pair that is
+    NOT_COMPARABLE, or DIVERGED (settle may yet excuse a preempted one), gets its solo anchor
+    (solo_anchor). pending: [(hit record, body, conv, max_tokens, extra)]."""
     colds = []
     for record, body, conv, max_tokens, extra in pending:
         colds.append(driver.send(body, 'cold', driver.fresh_salt(), case, conv, max_tokens, extra=extra,
@@ -854,6 +1044,7 @@ def concurrent_pairs(driver, pending, case):
                                 driver.send(body, 'cold-batch', driver.fresh_salt(), case + ':batch', conv, max_tokens,
                                             extra=extra, continuation=record.get('continuation'))
                                 for record, body, conv, max_tokens, extra in pending])
+    entries = []
     for index, ((record, body, conv, max_tokens, extra), cold) in enumerate(zip(pending, colds)):
         second = seconds.get(index)
         result = judge.concurrent_verdict(cold, record, second, batch[index] if second is not None else None)
@@ -861,10 +1052,46 @@ def concurrent_pairs(driver, pending, case):
                      hit=record['tag'], kind='concurrent', rerun=None, primes=[],
                      cold2=second['tag'] if second is not None else None,
                      batch=batch[index]['tag'] if second is not None and batch[index] is not None else None,
-                     verdict=result['verdict'], detail=result.get('reason') or result['first'].get('detail'),
+                     verdict=result['verdict'], basis=result.get('basis'),
+                     detail=result.get('reason') or result['first'].get('detail'),
                      prompt_tokens=record.get('prompt_tokens'))
+        entries.append(entry)
         with driver.lock:
             driver.pairs.append(entry)
+        driver.say('[PREFIX-GATE] %s pair %s %s turn %s L=%s (concurrent): %s%s' % (
+            driver.arm, case, entry['conv'], entry['turn'], entry['prompt_tokens'], entry['verdict'],
+            ' (%s)' % entry['detail'] if entry['detail'] else ''))
+    open_pairs = [index for index, entry in enumerate(entries) if entry['verdict'] in ('NOT_COMPARABLE', 'DIVERGED')]
+    if open_pairs:
+        index = min(open_pairs, key=lambda i: (entries[i]['verdict'] != 'NOT_COMPARABLE', i))
+        solo_anchor(driver, pending[index], colds[index], seconds.get(index), case)
+
+
+def solo_anchor(driver, item, cold, cold_again, case):
+    """A concurrent family's solo pair (the batching rule, prefix_judge docstring item 3): the hit of
+    `item` replayed ALONE (Driver.same_q_hit: its salt's earlier requests primed under a fresh salt,
+    so the same publishes and captures and the same Q, unless the same-step rule held the original
+    back) against its solo cold twin and second cold run, recorded as a solo pair of the family
+    ('<case>:solo'). A NOT_COMPARABLE pair is excused only beside an IDENTICAL solo pair of its
+    family, and none of a concurrent family's own pairs is solo. -> the anchor's pair entry."""
+    record, body, conv, max_tokens, extra = item
+    driver.say('[PREFIX-GATE] %s: the %s family\'s solo anchor - %s replayed alone at the same Q' % (
+        driver.arm, case, record['tag']))
+    primes, hit = driver.same_q_hit(body, record['salt'], record['tag'], case + ':solo', case + ':prime', conv,
+                                    max_tokens, extra, record.get('continuation'))
+    result = judge.pair_verdict(cold, hit, cold_again)
+    entry = dict(case=case + ':solo', conv=getattr(conv, 'name', None), turn=getattr(conv, 'turn', None),
+                 cold=cold['tag'], hit=hit['tag'], kind='sequential', rerun=None,
+                 cold2=cold_again['tag'] if cold_again is not None else None, primes=[p['tag'] for p in primes],
+                 anchor_for=record['tag'], verdict=result['verdict'],
+                 basis='solo' if result['verdict'] == 'IDENTICAL' else None,
+                 detail=result.get('reason') or result['first'].get('detail'), prompt_tokens=hit.get('prompt_tokens'))
+    with driver.lock:
+        driver.pairs.append(entry)
+    driver.say('[PREFIX-GATE] %s pair %s turn %s L=%s: %s%s' % (driver.arm, entry['case'], entry['turn'],
+                                                                entry['prompt_tokens'], entry['verdict'],
+                                                                ' (%s)' % entry['detail'] if entry['detail'] else ''))
+    return entry
 
 
 def wait_waiting(driver, minimum=1, timeout=WAITING_TIMEOUT_S, until=None):
@@ -885,12 +1112,12 @@ def sized_message(driver, conv, index, target):
     """Give message `index` of `conv` a real excerpt so that the prompt is about `target` tokens,
     measured with the server's /tokenize (an estimate, then one correction). -> the prompt's tokens."""
     base = conv.messages[index]['content']
-    empty = driver.client.tokenize(conv.body())
+    empty = driver.measure(conv.body())
     chars = token_chars(max(1, target - empty))
     got = empty
     for attempt in range(2):
         conv.messages[index]['content'] = base + '\n\n' + driver.corpus.excerpt(conv.rng('size'), chars)
-        got = driver.client.tokenize(conv.body())
+        got = driver.measure(conv.body())
         if got <= empty:
             break
         chars = max(corpus_module.MIN_INPUT_CHARS, int(chars * float(target - empty) / (got - empty)))
@@ -913,6 +1140,7 @@ def lifecycle_arrivals(driver, convs):
     tenant sharing a fresh system block (the same-step rule), then their cold twins."""
     first = []
     for conv in convs[:2]:
+        driver.fit(conv)
         hit = driver.send(conv.body(), 'hit', conv.salt, 'arrivals-setup', conv)
         driver.answer(conv, hit)
         conv.extend(600)
@@ -924,6 +1152,8 @@ def lifecycle_arrivals(driver, convs):
         conv.salt = tenant
         fresh.append(conv)
     everyone = first + fresh
+    for conv in everyone:
+        driver.fit(conv)
     bodies = [conv.body() for conv in everyone]
     records = _burst(driver, [lambda conv=conv, body=body: driver.send(
         body, 'hit', conv.salt, 'arrivals', conv, continuation=conv.turn > 0) for conv, body in zip(everyone, bodies)])
@@ -956,6 +1186,7 @@ def lifecycle_abort_waiting(driver, conv, seats=4):
         extra=dict(ignore_eos=True), on_first=first_token) for holder in holders])
     left = driver.remaining()
     busy.wait(900 if left is None else max(1, min(900, left)))
+    driver.fit(conv)
     body = conv.body()
     signal = threading.Event()
     waiter = _spawn([lambda: driver.send(body, 'hit', conv.salt, 'abort-waiting', conv, admit=False,
@@ -1002,6 +1233,7 @@ def lifecycle_abort_prefill(driver, conv):
     """A hit whose resumed prefill is long (~20k new tokens) is aborted ~2 s after it is sent, before
     its first token; the same turn is then sent again with its cold twin."""
     conv.extend(ABORT_PREFILL_INPUT_TOKENS)
+    driver.fit(conv)
     body = conv.body()
     record = driver.send(body, 'hit', conv.salt, 'abort-prefill', conv, abort_after_s=ABORT_PREFILL_AFTER_S,
                          continuation=True)
@@ -1012,24 +1244,32 @@ def lifecycle_abort_prefill(driver, conv):
 
 
 def lifecycle_flood(driver, pool_tokens):
-    """Forced KV eviction under 4 x 60k: four conversations built to ~60k, then fresh-salt floods of
-    ~60k each sized to push about one and a half of them out of the pool, then every conversation's
-    next turn (some must miss) against its cold twin."""
+    """Forced KV eviction under 4 x 60k: four conversations built to ~56k (never past the served
+    context less EVICT_HEADROOM_TOKENS, what their later turns add), then fresh-salt floods sized by
+    /tokenize to ~56k each (a flood plus its answer inside the context) to push about one and a half
+    of them out of the pool, then every conversation's next turn (some must miss) against its cold
+    twin."""
+    targets = [min(target, driver.context() - EVICT_HEADROOM_TOKENS) for target in EVICT_LENGTHS]
     convs = [driver.conversation('evict-%d' % index) for index in range(EVICT_CONVERSATIONS)]
     for conv in convs:
+        driver.fit(conv)
         record = driver.send(conv.body(), 'hit', conv.salt, 'evict-build', conv)
         driver.answer(conv, record)
-        for target in EVICT_LENGTHS:
+        for target in targets:
             conv.extend(corpus_module.growth_input(target, record['prompt_tokens'], record.get('completion_tokens') or 0))
+            driver.fit(conv)
             record = driver.send(conv.body(), 'hit', conv.salt, 'evict-build', conv, continuation=True)
             driver.answer(conv, record)
-    length = EVICT_LENGTHS[-1]
+    length = min(targets[-1], driver.context() - FLOOD_MAX_TOKENS - FIT_MARGIN_TOKENS)
     floods = max(1, -(-(int(pool_tokens or 0) - int(2.5 * length)) // length)) if pool_tokens else 2
+    sizes = []
     for index in range(floods):
         flood = driver.conversation('flood-%d' % index)
-        flood.extend(length)
+        sized_message(driver, flood, 1, length)
+        sizes.append(driver.fit(flood, FLOOD_MAX_TOKENS) or driver.measure(flood.body()))
         driver.send(flood.body(), 'flood', driver.fresh_salt(), 'flood', flood, FLOOD_MAX_TOKENS)
-    driver.event('flood', pool_tokens=pool_tokens, floods=floods, flood_tokens=floods * length)
+    driver.event('flood', pool_tokens=pool_tokens, floods=floods, flood_tokens=sum(sizes), sizes=sizes,
+                 context=driver.context())
     for conv in convs:
         conv.extend(1500)
         hit = driver.pair(conv, 'after-flood')
@@ -1157,6 +1397,7 @@ def tiny_dropped_grant(driver, pool):
     blocks = pool // judge.BLOCK
     conv = driver.conversation('tiny-grant')
     sized_message(driver, conv, 1, int(pool * TINY_GRANT_FIRST_SHARE))
+    driver.fit(conv, 64)
     first = driver.send(conv.body(), 'hit', conv.salt, 'tiny-grant-build', conv, 64)
     driver.answer(conv, first)
     if not first.get('ok'):
@@ -1165,12 +1406,15 @@ def tiny_dropped_grant(driver, pool):
     held_by_x = -(-(first['prompt_tokens'] + (first.get('completion_tokens') or 0)) // judge.BLOCK)
     answer_blocks = -(-TINY_FILLER_MAX_TOKENS // judge.BLOCK)
     filler_blocks = blocks - held_by_x - TINY_GRANT_MARGIN_BLOCKS - answer_blocks
-    filler_target = min(filler_blocks * judge.BLOCK - judge.BLOCK, CONTEXT_TOKENS - TINY_FILLER_MAX_TOKENS - judge.BLOCK)
+    filler_target = min(filler_blocks * judge.BLOCK - judge.BLOCK,
+                        driver.context() - TINY_FILLER_MAX_TOKENS - FIT_MARGIN_TOKENS - judge.BLOCK)
     x2_target = (held_by_x + TINY_GRANT_MARGIN_BLOCKS + answer_blocks + TINY_GRANT_EXCESS_BLOCKS) * judge.BLOCK
     filler = driver.conversation('tiny-filler')
     filler_tokens = sized_message(driver, filler, 1, filler_target)
+    filler_tokens = driver.fit(filler, TINY_FILLER_MAX_TOKENS) or filler_tokens
     conv.extend(corpus_module.MIN_INPUT_CHARS // 3)
     x2_tokens = sized_message(driver, conv, len(conv.messages) - 1, x2_target)
+    x2_tokens = driver.fit(conv, TINY_GRANT_MAX_TOKENS) or x2_tokens
     running = threading.Event()
     held = _spawn([lambda: driver.send(filler.body(), 'seat', driver.fresh_salt(), 'tiny-filler', filler,
                                        TINY_FILLER_MAX_TOKENS, extra=dict(ignore_eos=True), on_first=running.set)])
@@ -1217,13 +1461,14 @@ def tiny_preemption(driver, pool):
     first_target = int(pool * TINY_SHARE)
     for conv in convs:
         conv.messages[1]['content'] += '\n\n' + driver.corpus.excerpt(conv.rng('tiny'), token_chars(first_target))
+        driver.fit(conv, 64)
         record = driver.send(conv.body(), 'hit', conv.salt, 'tiny-build', conv, 64)
         driver.answer(conv, record)
         conv.extend(1000)
     bodies = [conv.body() for conv in convs]
-    lengths = [driver.client.tokenize(body) for body in bodies]
+    lengths = [driver.measure(body) for body in bodies]
     free = pool // judge.BLOCK - sum(-(-length // judge.BLOCK) for length in lengths)
-    room = CONTEXT_TOKENS - max(lengths) - judge.BLOCK
+    room = driver.context() - max(lengths) - judge.BLOCK
     max_tokens = min(room, (max(0, free) // len(bodies) + TINY_PREEMPT_MARGIN_BLOCKS) * judge.BLOCK)
     if free <= 0 or max_tokens * len(bodies) <= free * judge.BLOCK:
         driver.event('tiny', skipped=True, lengths=lengths, free_blocks=free, max_tokens=max_tokens,
@@ -1263,6 +1508,7 @@ def agent_loop(driver, phase, index, turns, max_tokens, gap_mean_s, stop):
             first = rng.randint(*TIMING_FIRST_RANGE) if conversation_index == 0 else shape['compaction_tokens']
             conv.messages[1]['content'] += '\n\n' + driver.corpus.excerpt(conv.rng('first'), token_chars(first))
             conversation_index += 1
+        driver.fit(conv, max_tokens)
         record = driver.send(conv.body(), 'agent', salt, phase, conv, max_tokens, continuation=conv.turn > 0)
         done += 1
         if not record.get('ok'):
@@ -1270,7 +1516,8 @@ def agent_loop(driver, phase, index, turns, max_tokens, gap_mean_s, stop):
             continue
         driver.answer(conv, record)
         size = corpus_module.metering_input(rng, shape)
-        if record['prompt_tokens'] + (record.get('completion_tokens') or 0) + size + max_tokens > shape['max_prompt_tokens']:
+        ceiling = min(shape['max_prompt_tokens'], driver.context() - FIT_MARGIN_TOKENS)
+        if record['prompt_tokens'] + (record.get('completion_tokens') or 0) + size + max_tokens > ceiling:
             conv = None
         else:
             conv.extend(size)

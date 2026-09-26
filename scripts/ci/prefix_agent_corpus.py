@@ -38,6 +38,7 @@ import re
 
 CHARS_PER_TOKEN = 3.2          # Qwen3.8's tokenizer on this repo's numbered excerpts: 3.23 measured (a sizing estimate)
 MIN_INPUT_CHARS = 160
+MIN_LINE_CHARS = 16            # a line cut to its budget keeps at least its number and a few characters
 SOURCE_DIRS = ('scripts/ci', 'docs', 'docker', '.github/workflows')
 SOURCE_EXTENSIONS = ('.py', '.md', '.sh', '.yml', '.yaml', '.txt', '.cpp', '.h', '.toml', '.json')
 MIN_FILE_CHARS = 400
@@ -111,12 +112,18 @@ def token_chars(tokens):
 
 
 def numbered(lines, start, limit_chars):
-    """`cat -n` lines (the read tool's shape) from index `start`, up to limit_chars characters."""
+    """`cat -n` lines (the read tool's shape) from index `start`, up to limit_chars characters. The
+    first line always comes, but cut to the budget when it alone is longer (a read tool truncates a
+    long line too): G1 v48 (run 36251045616) sent a 2,500-token tool result whose excerpt began on
+    scripts/ci/frozen-ladder-corpus.json's single 322,263-character line, and the prompt passed the
+    65,536-token context at the API edge."""
     out, used = [], 0
     for index in range(start, len(lines)):
         line = '%6d\t%s' % (index + 1, lines[index])
-        if out and used + len(line) + 1 > limit_chars:
-            break
+        if used + len(line) + 1 > limit_chars:
+            if out:
+                break
+            line = line[:max(MIN_LINE_CHARS, int(limit_chars) - 1)]
         out.append(line)
         used += len(line) + 1
     return '\n'.join(out)
@@ -314,7 +321,7 @@ class Corpus(object):
                 start = rng.randrange(max(1, len(source.lines) - 20)) if len(source.lines) > 40 else 0
             block = numbered(source.lines, start, chars - used)
             if not block:
-                block = numbered(source.lines, start, len(source.lines[start]) + 16)
+                block = numbered(source.lines, start, max(MIN_LINE_CHARS, chars - used))
             text = block if first else '\n==> %s <==\n%s' % (source.path, block)
             parts.append(text)
             used += len(text) + 1

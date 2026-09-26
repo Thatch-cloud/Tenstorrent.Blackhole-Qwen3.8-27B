@@ -7,6 +7,7 @@ import ast
 import json
 import os
 import random
+import shutil
 import sys
 import tempfile
 import unittest
@@ -89,7 +90,42 @@ class SourceTests(CorpusCase):
     def test_numbered_is_the_read_tools_shape(self):
         text = pc.numbered(['a', 'b', 'c'], 1, 1000)
         self.assertEqual(text, '     2\tb\n     3\tc')
-        self.assertEqual(pc.numbered(['x' * 50], 0, 10), '     1\t' + 'x' * 50, 'one line always, even over budget')
+        self.assertEqual(pc.numbered(['x' * 50], 0, 20), ('     1\t' + 'x' * 50)[:19],
+                         'one line always, cut to the budget when it alone is over')
+        self.assertEqual(pc.numbered(['x' * 50], 0, 4), ('     1\t' + 'x' * 50)[:pc.MIN_LINE_CHARS])
+        self.assertEqual(pc.numbered(['ab', 'x' * 50], 0, 20), '     1\tab', 'a later long line ends the block')
+
+    def test_a_single_long_line_stays_inside_the_budget(self):
+        """G1 v48 (run 36251045616): a 2,500-token tool result whose excerpt began on
+        scripts/ci/frozen-ladder-corpus.json's single 322,263-character line took the kill-switch turn
+        past 64,513 tokens, and the API edge refused it (HTTP 400) against a 65,536-token context."""
+        root = tempfile.mkdtemp()
+        try:
+            make_tree(root)
+            line = json.dumps(dict(version=1, task='Implement merge_intervals(intervals) in Python.',
+                                   rows=[dict(index=i, text='interval %d ends at %d' % (i, 2 * i)) for i in range(6000)]))
+            self.assertTrue(300000 < len(line) <= pc.MAX_FILE_CHARS, len(line))
+            with open(os.path.join(root, 'scripts', 'ci', 'frozen-ladder-corpus.json'), 'w', encoding='utf-8') as handle:
+                handle.write(line)
+            corpus = pc.Corpus(pc.load_sources(root))
+            self.assertIn('scripts/ci/frozen-ladder-corpus.json', [source.path for source in corpus.sources])
+            budget = pc.token_chars(2500)
+            for seed in range(6):
+                text = corpus.excerpt(random.Random(seed), budget, hint='frozen-ladder-corpus.json')
+                self.assertLessEqual(len(text), budget + 200, seed)
+            grep = corpus.grep(random.Random(1), 'merge_intervals', budget)
+            self.assertLessEqual(len(grep), 2 * budget + 400)
+            conv = pc.Conversation(corpus, 'kill-switch', 0, system='compact', first_tokens=4000)
+            conv.add_answer(dict(content='', finish='tool_calls', tool_calls=[
+                dict(id='a', function=dict(name='read', arguments=json.dumps(
+                    {'file_path': '/w/scripts/ci/frozen-ladder-corpus.json'}))),
+                dict(id='b', function=dict(name='grep', arguments=json.dumps({'pattern': 'merge_intervals'})))]))
+            before = sum(len(m['content']) for m in conv.messages)
+            conv.extend(2500)
+            added = sum(len(m['content']) for m in conv.messages) - before
+            self.assertLess(added, 3 * budget, 'the next input stays near its 2,500-token budget')
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class SystemTests(CorpusCase):

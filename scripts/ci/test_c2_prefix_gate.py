@@ -16,6 +16,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -201,6 +202,28 @@ class ArmTests(unittest.TestCase):
             with self.subTest(plan=plan), self.assertRaises(ValueError):
                 gate.plan_arms(plan, 'general-prefix', 'general', document)
 
+    def test_every_arm_carries_its_served_profiles_context(self):
+        document = profiles()
+        for plan in gate.PLANS:
+            for arm in gate.plan_arms(plan, 'general-prefix', 'general', document):
+                self.assertEqual(arm['context'], 65536, (plan, arm['arm']))
+        document['profiles']['general-prefix']['engine']['max-model-len'] = 32768
+        arms = gate.plan_arms('lifecycle', 'general-prefix', 'general', document)
+        self.assertEqual([arm['context'] for arm in arms], [32768] * 3, 'derived arms keep their base\'s context')
+
+    def test_the_context_is_the_served_one_else_the_profiles(self):
+        events = {}
+        driver = SimpleNamespace(event=lambda name, **values: events.update({name: values}), say=lambda text: None)
+        arm = dict(arm='lifecycle-evict', served='general-prefix+dev', context=65536)
+        served = SimpleNamespace(context_tokens=lambda: 16384)
+        self.assertEqual(gate.Runner.served_context(served, arm, driver), 16384)
+        self.assertEqual(events['context'], dict(served=16384, profile=65536, used=16384, source='/v1/models'))
+        silent = SimpleNamespace(context_tokens=lambda: None)
+        self.assertEqual(gate.Runner.served_context(silent, arm, driver), 65536)
+        self.assertEqual(events['context']['source'], 'profile')
+        with self.assertRaises(replay.HarnessError):
+            gate.Runner.served_context(silent, dict(arm, context=None), driver)
+
     def test_the_worst_case_fits_one_plan_per_step(self):
         document = profiles()
         for plan in gate.PLANS:
@@ -370,6 +393,21 @@ class GenericTests(unittest.TestCase):
         self.assertEqual([p for p in problems if 'EngineDead' in p], ['server log line 3: EngineDeadError: later'])
         self.assertTrue(any('during the restart drill' in n for n in notes))
         self.assertEqual(gate.quiet_windows(dict(reload=dict(log_window=[4, 9]), other={})), [(4, 9)])
+
+    def test_intended_aborts_are_expected_and_unsent_requests_are_the_harness_s_fault(self):
+        """G1 v48's abort-waiting and abort-prefill rows logged 'FAILED closed on signal / after 2.0 s': the
+        drills' own aborts, which never counted as failed requests and now say so."""
+        records = [dict(tag='w', ok=False, aborted='closed on signal', intended_abort=True, error=None),
+                   dict(tag='p', ok=False, aborted='closed after 2.0 s', intended_abort=True, error=None),
+                   dict(tag='f', ok=False, aborted=None, error='HTTP 500'),
+                   dict(tag='n', ok=False, aborted=None, refused='prompt 65505 tokens + max_tokens 32 > max_model_len '
+                        '65536', error='not sent')]
+        problems, notes, _ = gate.generic_problems(arm_of('bringup', 'bringup-reference'), pm.scan([]), records, None,
+                                                   'general')
+        self.assertIn('1 requests failed: f', problems)
+        self.assertTrue(any('1 requests were not sent' in p and 'harness sizing fault' in p and '65505' in p
+                            for p in problems), problems)
+        self.assertIn('2 requests aborted as the scenario intended (not failures): w, p', notes)
 
     def test_the_raw_hit_where_publishing_is_the_claim(self):
         arm = dict(arm='bringup-prefix', prefix=True, strict=True, kind=None)
@@ -672,6 +710,9 @@ class RunnerTests(unittest.TestCase):
     def test_lifecycle_passes_with_every_event_exercised(self):
         result, harness, _ = self.plan('lifecycle')
         self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        self.assertEqual([line.split(' - ')[0] for line in result['lines'][:3]],
+                         ['lifecycle-evict PASS', 'lifecycle-store PASS', 'lifecycle-tiny PASS'])
+        self.assertTrue(all(' - pairs: ' in line for line in result['lines'][:3]), result['lines'][:3])
         evict = harness.engines[0]
         self.assertFalse(os.path.exists(evict.kill_path), 'the kill switch file is removed')
         tiny = result['arms']['lifecycle-tiny']
@@ -680,11 +721,71 @@ class RunnerTests(unittest.TestCase):
         evicted = result['arms']['lifecycle-evict']
         self.assertTrue(any(line.startswith('registry stats before the restart') for line in evicted['lines']))
 
-    def test_a_preempted_hit_that_diverges_after_it_resumes_is_named_not_failed(self):
+    def test_a_preempted_hit_passes_beside_its_control_or_its_solo_anchor(self):
+        """A hit that diverges after vLLM preempted and resumed it. When its batch-matched control was
+        preempted alike, the two match token for token - IDENTICAL by the control (G1 v48's tiny-0, which
+        v48 judged NOT_COMPARABLE). When the burst's timing preempted the control differently, the pair is
+        NOT_COMPARABLE by preemption, tolerated beside the family's solo anchor. Which one happens depends
+        on thread timing in the fake; the arm passes either way."""
         harness = Harness(tiny=dict(diverge_after_resume=True))
         _, tiny = harness.runner(self.results).run(arm_of('lifecycle', 'lifecycle-tiny'))
-        self.assertEqual(tiny['verdict'], 'NOT_COMPARABLE', tiny['lines'])
-        self.assertTrue(all('admissions)' in text for text in tiny['not_comparable']), tiny['not_comparable'])
+        self.assertEqual(tiny['verdict'], 'PASS', tiny['lines'])
+        self.assertTrue(any(line.startswith('preempted and resumed: pfx-') for line in tiny['lines']))
+        by_control = 'pairs: 4 identical (1 by the batch-matched control), 0 not-comparable-by-batching, 0 failed'
+        by_anchor = ('pairs: 4 identical (0 by the batch-matched control), 1 not-comparable-by-batching (1 preempted), '
+                     '0 failed; solo 1 of 1 identical')
+        self.assertTrue(tiny['lines'][0].startswith((by_control, by_anchor)), tiny['lines'][0])
+        if tiny['lines'][0].startswith(by_anchor):
+            self.assertTrue(tiny['not_comparable_tolerated'])
+            self.assertTrue(all('admissions)' in text for text in tiny['not_comparable']), tiny['not_comparable'])
+
+    def test_the_batching_rule_on_the_evict_arrivals(self):
+        """The four arrivals under three engines: batching that a cold burst of the same shape reproduces
+        (IDENTICAL by the control), batching no control reproduces (NOT_COMPARABLE, tolerated beside the
+        family's solo anchor), and reuse that moves only a concurrent hit (FAIL)."""
+        arm = arm_of('lifecycle', 'lifecycle-evict')
+        _, result = Harness(dev=dict(batch_variant=True)).runner(os.path.join(self.results, 'variant')).run(arm)
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        self.assertIn('(4 by the batch-matched control), 0 not-comparable-by-batching, 0 failed', result['pair_line'])
+        self.assertFalse(result['not_comparable_tolerated'])
+        self.assertFalse([line for line in result['lines'] if line.startswith('not comparable')])
+
+        _, result = Harness(dev=dict(batch_unmatched=True)).runner(os.path.join(self.results, 'unmatched')).run(arm)
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        self.assertTrue(result['not_comparable_tolerated'])
+        self.assertIn('4 not-comparable-by-batching, 0 failed', result['pair_line'])
+        self.assertIn('not comparable tolerated (4): every solo pair is IDENTICAL and arrivals has an IDENTICAL solo '
+                      'pair', result['lines'])
+        self.assertEqual(len([line for line in result['lines'] if line.startswith('not comparable (tolerated): '
+                                                                                   'arrivals ')]), 4)
+
+        _, result = Harness(dev=dict(diverge_concurrent_hits=True)).runner(os.path.join(self.results, 'reuse')).run(arm)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertEqual(len([p for p in result['problems'] if 'prefix reuse introduced the divergence' in p]), 2,
+                         result['problems'])
+
+    def test_not_comparable_without_a_solo_pair_in_its_family_holds_the_arm(self):
+        arm = arm_of('lifecycle', 'lifecycle-evict')
+        with mock.patch.object(replay, 'solo_anchor', lambda *args: None):
+            _, result = Harness(dev=dict(batch_unmatched=True)).runner(self.results).run(arm)
+        self.assertEqual(result['verdict'], 'NOT_COMPARABLE', result['lines'])
+        self.assertIn('not comparable NOT tolerated (4): family arrivals has 4 not comparable and no IDENTICAL solo '
+                      'pair', result['lines'])
+
+    def test_the_evict_arm_sizes_its_prompts_to_the_served_context(self):
+        """v48's evict sizing, scaled down: the image serves 16,384 (its /v1/models) while the profile names
+        65,536, and the text tokenizes denser than the estimate. Every request is served, the kill switch
+        is seen, and the context event names both."""
+        harness = Harness(dev={'_engine': fakes.SmallDense})
+        _, result = harness.runner(self.results).run(arm_of('lifecycle', 'lifecycle-evict'))
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        with open(os.path.join(self.results, 'lifecycle-evict', 'events.json'), encoding='utf-8') as handle:
+            events = json.load(handle)['events']
+        self.assertEqual(events['context'], dict(served=16384, profile=65536, used=16384, source='/v1/models'))
+        self.assertTrue(any(note.startswith('fitted life-1 turn 3 to the context') for note in result['notes']),
+                        result['notes'])
+        self.assertTrue(any('aborted as the scenario intended' in note for note in result['notes']))
+        self.assertFalse([p for p in result['problems'] if 'not sent' in p or 'failed' in p])
 
     def test_the_tiny_arm_on_the_default_pool_is_not_exercised_not_failed(self):
         harness = Harness(tiny={'_env': dict(QWEN36_MAX_TOKENS_ALL_USERS=None)})

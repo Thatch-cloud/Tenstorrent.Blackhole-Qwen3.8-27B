@@ -66,8 +66,10 @@ named as the arm - c2_serving_job.PREFIX_ARM_PLANS - that runs only it, judged e
              ends), then preemption (three ignore_eos answers outgrow the pool); it sends nothing
              unless vLLM logs exactly that pool. Every hit against a cold twin; a request vLLM preempted and resumed
              (a second [PREFIX] row) may diverge after it resumes and is reported by name, not failed;
-             concurrent hits run a batch control before any divergence counts. Each arm requires the
-             registry's stats export (prefix_markers.REQUIRED_STATS) for what only it can show.
+             concurrent hits are judged by the batching rule below. Each arm requires the registry's
+             stats export (prefix_markers.REQUIRED_STATS) for what only it can show. The scenario's own
+             aborts (the waiting and prefill drills close their sockets on purpose) are expected outcomes,
+             logged 'aborted as intended', never counted as failed requests.
   timing     timing-prefix and (unless --baseline none) timing-baseline: busy agents in the metering
              shape (~2k-token tool results, exponential 15 s gaps, full system block, compaction past
              60k) at --agents 1,4,5,6, one phase each; TTFT and turn time p50/p90, hit rate from the
@@ -75,10 +77,35 @@ named as the arm - c2_serving_job.PREFIX_ARM_PLANS - that runs only it, judged e
              the CI pod count per phase (prefix_report). It records; it fails only on failed turns
              or missing markers.
 
+PROMPT SIZING: every request's prompt plus its max_tokens fits the SERVED context - max_model_len
+from the container's /v1/models, else the arm's profile's max-model-len, never a constant (the arm's
+'context' event records both). The driver measures a conversation's next prompt with /tokenize (the
+chat template included) and cuts its newest input to fit (prefix_replay.Driver.fit, each cut logged
+'fitted'), and sends nothing the API edge would refuse: such a request is recorded NOT SENT and fails
+the arm as a harness fault. G1 v48 (run 36251045616) lost its kill-switch drill to HTTP 400s at the
+API edge (a 65,505-token flood + 32 out; kill-switch turns of 64,513+ tokens + 1,024 out, inflated by a
+single 322k-character corpus line) against general-prefix's 65,536.
+
+THE BATCHING RULE (prefix_judge docstring item 3): prefix reuse must not add divergence beyond what
+batching alone adds - the general path's batched decode is not batch-invariant (v48: concurrent cold
+runs differed from solo ones with reuse off). SOLO pairs (a hit and its cold twin each run with
+nothing else running) must be IDENTICAL. A CONCURRENT hit is IDENTICAL when it equals its solo cold
+twin or, failing that, its batch-matched cold control (the same messages under fresh salts, sent at
+once with the same co-runners in the same order); it FAILS when that control equals the solo cold run
+and the hit differs (prefix reuse moved it); only when the same run proves the baseline itself moved
+under batching (the control differs from the solo run too) - or vLLM preempted and resumed one of the
+requests - is it NOT_COMPARABLE. NOT_COMPARABLE pairs are listed and counted and do not fail or hold
+back the arm, provided every solo pair of the arm is IDENTICAL and each scenario family (a pair's case
+before any ':' suffix) with a NOT_COMPARABLE pair has at least one IDENTICAL solo pair; the driver
+gives such a concurrent family a solo anchor (one of its hits replayed alone at the same Q). Every arm
+prints 'pairs: N identical (M by the batch-matched control), K not-comparable-by-batching, F failed;
+solo S of T identical' and, when any pair is not comparable, whether the rule tolerates them.
+
 Verdicts per plan: PASS, FAIL, INFRA (a platform container on M+A, tt-metal's ethernet-core wedge),
-NOT_COMPARABLE (a preempted request, or an engine whose bytes depend on the batch), UNSTABLE (two
-cold runs of one prompt disagree), NOT_EXERCISED (a check whose event did not happen, or whose
-evidence was not logged). A hit that diverges from two agreeing cold runs is a FAIL.
+NOT_COMPARABLE (not-comparable pairs the batching rule does not tolerate), UNSTABLE (two cold runs of
+one prompt disagree), NOT_EXERCISED (a check whose event did not happen, or whose evidence was not
+logged). A hit that diverges from two agreeing cold runs (and, run concurrently, from a batch-matched
+control that equals them) is a FAIL.
 
 SAFETY: as c2_serving_gate - no thatch-inference-* container may exist, a leftover container of the
 same name is removed first, every container is removed however the arm ends (SIGTERM included), a
@@ -216,6 +243,11 @@ def plan_arms(plan, profile, baseline, profiles):
         raise PlanError('profile %r is not a prefix-reuse profile: it needs env QWEN_PREFIX_REUSE=1 and engine '
                         'enable-prefix-caching true' % profile)
     arms = []
+
+    def context_of(document, name):
+        value = ((document['profiles'][name].get('engine') or {}).get('max-model-len'))
+        return int(value) if value else None
+
     for arm, scenario, which, kind, timeout, strict in PLAN_ARMS[plan]:
         if which == 'baseline':
             if not baseline or baseline == 'none':
@@ -233,8 +265,9 @@ def plan_arms(plan, profile, baseline, profiles):
             served, derived = derive(profiles, profile, kind)
         else:
             served, derived = profile, None
+        context = context_of(derived, served) if derived else context_of(profiles, served)
         arms.append(dict(arm=arm, scenario=scenario, served=served, derived=derived, timeout=timeout, strict=strict,
-                         prefix=which == 'prefix', kind=kind))
+                         prefix=which == 'prefix', kind=kind, context=context))
     return arms
 
 
@@ -408,9 +441,18 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
         if launched['profile'] != expect_profile:
             problems.append('served profile %r, expected %r' % (launched['profile'], expect_profile))
         notes.append('launched argv (%s): %s' % (launched['profile'], json.dumps(launched['argv'])[:1500]))
-    failed = [r['tag'] for r in records if not r.get('ok') and not r.get('aborted')]
+    refused = [r for r in records if r.get('refused')]
+    if refused:
+        problems.append('%d requests were not sent: their prompt and max_tokens do not fit the served context, a '
+                        'harness sizing fault (%s)' % (len(refused), '; '.join('%s: %s' % (r['tag'], r['refused'])
+                                                                              for r in refused[:4])))
+    failed = [r['tag'] for r in records if not r.get('ok') and not r.get('aborted') and not r.get('refused')]
     if failed:
         problems.append('%d requests failed: %s' % (len(failed), ', '.join(failed[:8])))
+    intended = [r['tag'] for r in records if r.get('aborted')]
+    if intended:
+        notes.append('%d requests aborted as the scenario intended (not failures): %s' % (
+            len(intended), ', '.join(intended[:8])))
     if not arm['prefix']:
         return problems, notes, missing
     if launches:
@@ -882,13 +924,18 @@ def judge_arm(arm, driver, scanned, stats, error):
         lines += more_lines
     diverged, unstable, not_comparable, rerun = pair_problems(driver.pairs)
     problems += diverged
+    summary = judge.pair_summary(driver.pairs)
+    tolerated = bool(not_comparable) and summary['tolerated']
+    for entry in getattr(driver, 'fitted', None) or ():
+        notes.append('fitted %s turn %s to the context: %d -> %d prompt tokens (+ %d out, max_model_len %d)' % (
+            entry['conv'], entry['turn'], entry['tokens'], entry['fitted'], entry['max_tokens'], entry['context']))
     if scanned.get('failures') and any(markers.WEDGE in (entry.get('line') or '') for entry in scanned['failures']):
         verdict = 'INFRA'
     elif problems:
         verdict = 'FAIL'
     elif rerun:
         verdict = 'RERUN'
-    elif not_comparable:
+    elif not_comparable and not tolerated:
         verdict = 'NOT_COMPARABLE'
     elif unstable:
         verdict = 'UNSTABLE'
@@ -896,12 +943,15 @@ def judge_arm(arm, driver, scanned, stats, error):
         verdict = 'NOT_EXERCISED'
     else:
         verdict = 'PASS'
-    identical = sum(1 for pair in driver.pairs if pair['verdict'] == 'IDENTICAL')
-    lines = ['%d pairs identical of %d' % (identical, len(driver.pairs))] + lines
+    identical = summary['identical']
+    lines = [summary['line']] + ([summary['tolerance']] if summary['tolerance'] else []) + lines
     lines += ['problem: %s' % text for text in problems] + ['unstable: %s' % text for text in unstable]
-    lines += ['not comparable: %s' % text for text in not_comparable] + ['not exercised: %s' % text for text in missing]
+    lines += ['not comparable%s: %s' % (' (tolerated)' if tolerated else '', text) for text in not_comparable]
+    lines += ['not exercised: %s' % text for text in missing]
+    pair_counts = dict((key, value) for key, value in summary.items() if key not in ('line', 'tolerance', 'families'))
     return dict(verdict=verdict, problems=problems, unstable=unstable, not_comparable=not_comparable, rerun=rerun,
                 not_exercised=missing, notes=notes, lines=lines, pairs=len(driver.pairs), identical=identical,
+                pair_line=summary['line'], pair_summary=pair_counts, not_comparable_tolerated=tolerated,
                 dram=scanned.get('dram')[:16] if scanned.get('dram') else [],
                 dram_readings=(scanned.get('dram_readings') or [])[:16], kv_tokens=scanned.get('kv_tokens'))
 
@@ -1087,6 +1137,7 @@ class Runner(object):
             if problem:
                 raise replay.EngineDead(problem)
             self.log('[PREFIX-GATE] arm %s: ready after %.0f s' % (arm['arm'], self.clock() - started))
+            driver.context_tokens = self.served_context(client, arm, driver)
             kwargs = {}
             if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny'):
                 kwargs['pool_tokens'] = markers.scan(follower.lines()).get('kv_tokens')
@@ -1144,6 +1195,28 @@ class Runner(object):
         self.log('[PREFIX-GATE] arm %s: %s after %s s' % (arm['arm'], result['verdict'], result['seconds']))
         return driver, result
 
+    @staticmethod
+    def served_context(client, arm, driver):
+        """The context every prompt is sized against: the served max_model_len from /v1/models, else
+        the arm's profile's max-model-len (the 'context' event records both). -> tokens."""
+        served = None
+        reader = getattr(client, 'context_tokens', None)
+        if callable(reader):
+            try:
+                served = reader()
+            except Exception:     # noqa: BLE001 - the profile's value stands in
+                served = None
+        profile = arm.get('context')
+        used = served or profile
+        driver.event('context', served=served, profile=profile, used=used, source='/v1/models' if served else 'profile')
+        if not used:
+            raise replay.HarnessError('neither /v1/models nor the profile %s names a max_model_len: prompts cannot be '
+                                      'sized against the context' % arm.get('served'))
+        if served and profile and served != profile:
+            driver.say('[PREFIX-GATE] %s: /v1/models serves max_model_len %d, the profile names %d: prompts are sized '
+                       'to the served one' % (arm['arm'], served, profile))
+        return int(used)
+
     def restart(self, container, client, follower, driver=None):
         """The reload drill: docker stop (graceful: the image's engine skips tt-metal's teardown),
         docker start, wait for the API (no longer than the arm has left), follow the new log.
@@ -1187,7 +1260,8 @@ def run_plan(plan, arms, runner, anchor=None):
         driver, result = runner.run(arm)
         results[arm['arm']] = (driver, result)
     verdicts = [result['verdict'] for _, result in results.values()]
-    lines = ['%s %s' % (name, result['verdict']) for name, (_, result) in results.items()]
+    lines = ['%s %s%s' % (name, result['verdict'], ' - %s' % result['pair_line'] if result.get('pair_line') else '')
+             for name, (_, result) in results.items()]
     extra = {}
     if plan == 'bringup' and len(results) == 2 and all(driver is not None for driver, _ in results.values()):
         reference, prefix = results['bringup-reference'][0], results['bringup-prefix'][0]

@@ -25,12 +25,28 @@
    replayed under a fresh salt, prefix_replay.Driver.pair). The two cold runs disagreeing is
    UNSTABLE (the engine is not run-to-run deterministic for that prompt, itself a finding); when
    they agree, the hit's divergence is DIVERGED - a FAIL - whatever the second hit does (whether it
-   diverged again, and where, is reported). Hits that ran CONCURRENTLY are compared with cold twins
-   run alone; a divergence there also runs a batch control (the same messages again, all at once,
-   fresh salts): a concurrent cold run that differs from its solo run too means the engine's bytes
-   depend on the batch, and the pair is NOT_COMPARABLE rather than DIVERGED (concurrent_verdict).
+   diverged again, and where, is reported).
+   THE BATCHING RULE (concurrent_verdict, pair_summary): prefix reuse must not add divergence beyond
+   what batching alone adds. The general path (the stock TT plugin's batched decode) is not batch-
+   invariant - G1 v48 (run 36251045616) saw concurrent COLD runs differ from their solo runs with
+   reuse off - so a hit that ran concurrently is judged against a cold run of the same batch:
+     - a SOLO pair (kind 'sequential': the hit and its cold twin each ran with nothing else running)
+       must be IDENTICAL, under the re-run policy above;
+     - a CONCURRENT hit equal to its solo cold twin is IDENTICAL; one that differs is compared with
+       its batch-matched cold control (the same messages under a fresh salt, sent again at once with
+       the same co-runners in the same order): equal to it, IDENTICAL (basis 'batch');
+     - the control equal to the solo cold run while the hit differs from both is DIVERGED, a FAIL:
+       this batch leaves the baseline's bytes alone, so prefix reuse moved the hit;
+     - only when the same run proves the baseline itself diverged under batching (the control
+       differs from the solo cold run, and from the hit) is the pair NOT_COMPARABLE (basis
+       'batching'); two disagreeing solo cold runs are UNSTABLE;
+     - NOT_COMPARABLE pairs are listed and counted and do not hold the arm back, provided every solo
+       pair of the arm is IDENTICAL and each scenario family (a pair's case before any ':' suffix)
+       with a NOT_COMPARABLE pair has at least one IDENTICAL solo pair; prefix_replay gives each
+       concurrent family that needs one a solo anchor (its hit replayed alone at the same Q).
    settle() then excuses a DIVERGED pair whose hit or cold run vLLM preempted and resumed (more
-   than one admission): the resumed prefill re-reads its own output, not a cold equivalent.
+   than one admission; basis 'preemption', a batching effect: the pool was shared): the resumed
+   prefill re-reads its own output, not a cold equivalent.
 4. MARKERS: every request's [PREFIX] rows, grants and audit digests, matched by the harness's
    X-Request-Id tag (prefix_markers.request_tag), else by the request's log window and prompt length.
 
@@ -227,24 +243,67 @@ def pair_verdict(cold, hit, cold_again=None, hit_again=None):
 
 
 def concurrent_verdict(cold, hit, cold_again=None, batch_cold=None):
-    """A hit that ran concurrently, against its cold twin run alone: pair_verdict's cold check, then
-    the batch control - the same messages run again at the burst's concurrency (fresh salt). A
-    control that differs from the solo cold run means the bytes depend on the batch (or the control
-    was itself preempted): NOT_COMPARABLE, never DIVERGED."""
-    result = pair_verdict(cold, hit, cold_again)
-    if result['verdict'] != 'DIVERGED':
+    """A hit that ran CONCURRENTLY, under the batching rule (module docstring, item 3): prefix reuse
+    must not add divergence beyond what batching alone adds. `cold` and `cold_again` are its cold
+    twin run ALONE, twice; `batch_cold` its batch-matched cold control - the same messages under a
+    fresh salt, sent again at once with the same co-runners in the same order.
+      - the hit equals its solo cold run: IDENTICAL (basis 'solo');
+      - it differs, and equals its batch-matched control: IDENTICAL (basis 'batch');
+      - it differs from both while the control equals the solo cold run: DIVERGED (basis 'reuse'),
+        a FAIL - this batch leaves the baseline alone, so prefix reuse moved the hit;
+      - it differs from both and the control differs from the solo cold run too: NOT_COMPARABLE
+        (basis 'batching') - the run proves the baseline itself diverges under this batch;
+      - the two solo cold runs disagree: UNSTABLE; a failed second cold run or control: ERROR; a
+        second cold run or control that never ran: RERUN.
+    -> dict(verdict, basis, first, [batch_hit, cold_repeat, batch], reason)."""
+    first = compare(cold, hit)
+    result = dict(first=first)
+    if first['verdict'] != 'DIVERGED':
+        basis = dict(IDENTICAL='solo', NOT_COMPARABLE='prompts').get(first['verdict'])
+        result.update(verdict=first['verdict'], basis=basis)
+        return result
+    if cold_again is None:
+        result.update(verdict='RERUN', reason='no second solo cold run')
         return result
     if batch_cold is None:
         result.update(verdict='RERUN', reason='no batch control ran')
         return result
+    matched = compare(batch_cold, hit)
+    result['batch_hit'] = matched
+    if matched['verdict'] == 'IDENTICAL':
+        result.update(verdict='IDENTICAL', basis='batch', reason='the hit differs from its solo cold run at %s and '
+                      'equals its batch-matched cold control: batching moved both alike, prefix reuse added nothing'
+                      % _where(first))
+        return result
+    colds = compare(cold, cold_again)
+    result['cold_repeat'] = colds
+    if colds['verdict'] == 'ERROR':
+        result.update(verdict='ERROR', reason='the second solo cold run failed (%s): the divergence at %s is '
+                      'unconfirmed' % (colds.get('detail'), _where(first)))
+        return result
+    if colds['verdict'] != 'IDENTICAL':
+        result.update(verdict='UNSTABLE', reason='the two solo cold runs of the same prompt differ (%s): the engine is '
+                      'not deterministic run to run' % colds.get('detail', colds['verdict']))
+        return result
     control = compare(cold, batch_cold)
     result['batch'] = control
-    if control['verdict'] != 'IDENTICAL':
-        result.update(verdict='NOT_COMPARABLE', reason='the concurrent cold control differs from the solo cold run '
-                      'too (%s): this batch shape changes the bytes, so a concurrent hit cannot be compared with a '
-                      'solo cold run' % control.get('detail', control['verdict']))
-        return result
-    result['reason'] += '; the concurrent cold control matched the solo cold run'
+    if control['verdict'] == 'ERROR':
+        result.update(verdict='ERROR', reason='the batch-matched cold control failed (%s): the divergence at %s is '
+                      'unconfirmed' % (control.get('detail'), _where(first)))
+    elif control['verdict'] == 'IDENTICAL':
+        result.update(verdict='DIVERGED', basis='reuse', reason='the batch-matched cold control equals the solo cold '
+                      'run (this batch leaves the baseline alone) and the hit differs from both (at %s from the solo '
+                      'run, at %s from the control): prefix reuse introduced the divergence' % (
+                          _where(first), _where(matched)))
+    elif control['verdict'] == 'NOT_COMPARABLE':
+        result.update(verdict='NOT_COMPARABLE', basis='prompts', reason='the batch-matched cold control rendered '
+                      'another prompt than the solo cold run: a harness fault')
+    else:
+        result.update(verdict='NOT_COMPARABLE', basis='batching', reason='the batch-matched cold control differs from '
+                      'the solo cold run (%s) and from the hit (%s): this batch moves the baseline itself, so the hit\'s '
+                      'divergence from its solo run (at %s) is not put on prefix reuse' % (
+                          control.get('detail', control['verdict']), matched.get('detail', matched['verdict']),
+                          _where(first)))
     return result
 
 
@@ -267,9 +326,93 @@ def settle(pair, index):
     if resumed:
         if pair['verdict'] == 'DIVERGED':
             pair['verdict'] = 'NOT_COMPARABLE'
+            pair['basis'] = 'preemption'
         pair['detail'] = ('%s; preempted and resumed: %s - a resumed prefill re-reads its own output, not a cold '
                           'equivalent' % (pair.get('detail'), ', '.join(resumed)))
     return pair
+
+
+SOLO_KIND = 'sequential'
+EXCUSED_BASES = ('batching', 'preemption')
+
+
+def family(case):
+    """A pair's scenario family: its case without a ':rerun', ':solo' or other suffix."""
+    return str(case or '').split(':')[0]
+
+
+def pair_summary(pairs):
+    """The batching rule over one arm's settled pairs (module docstring, item 3). NOT_COMPARABLE pairs
+    (basis batching or preemption) are TOLERATED - listed and counted, not the arm's verdict - when
+    every solo pair of the arm is IDENTICAL and each family with a NOT_COMPARABLE pair has at least
+    one IDENTICAL solo pair; any other NOT_COMPARABLE (different prompts: a harness fault) never is.
+    -> dict(counts, families, tolerated, untolerated: the reasons it is not, line: the arm's summary
+    line, tolerance: the line saying which)."""
+    counts = dict(pairs=len(pairs), identical=0, identical_by_batch=0, not_comparable_batching=0,
+                  not_comparable_preempted=0, not_comparable_other=0, failed=0, unstable=0, rerun=0, solo=0,
+                  solo_identical=0)
+    families = OrderedDict()
+    for pair in pairs:
+        verdict, basis = pair.get('verdict'), pair.get('basis')
+        solo = pair.get('kind') == SOLO_KIND
+        entry = families.setdefault(family(pair.get('case')), dict(pairs=0, solo=0, solo_identical=0,
+                                                                   not_comparable=0))
+        entry['pairs'] += 1
+        if solo:
+            counts['solo'] += 1
+            entry['solo'] += 1
+        if verdict == 'IDENTICAL':
+            counts['identical'] += 1
+            counts['identical_by_batch'] += 1 if basis == 'batch' else 0
+            if solo:
+                counts['solo_identical'] += 1
+                entry['solo_identical'] += 1
+        elif verdict == 'NOT_COMPARABLE':
+            entry['not_comparable'] += 1
+            key = dict(batching='not_comparable_batching', preemption='not_comparable_preempted').get(
+                basis, 'not_comparable_other')
+            counts[key] += 1
+        elif verdict in ('DIVERGED', 'ERROR'):
+            counts['failed'] += 1
+        elif verdict == 'UNSTABLE':
+            counts['unstable'] += 1
+        elif verdict == 'RERUN':
+            counts['rerun'] += 1
+    not_comparable = [pair for pair in pairs if pair.get('verdict') == 'NOT_COMPARABLE']
+    untolerated = []
+    if not_comparable:
+        other = [pair for pair in not_comparable if pair.get('basis') not in EXCUSED_BASES]
+        if other:
+            untolerated.append('%d not comparable for a reason other than batching (%s): never excused' % (
+                len(other), ', '.join(sorted(set(str(pair.get('basis')) for pair in other)))))
+        solo_bad = counts['solo'] - counts['solo_identical']
+        if solo_bad:
+            untolerated.append('%d of %d solo pairs are not IDENTICAL' % (solo_bad, counts['solo']))
+        for name, entry in families.items():
+            if entry['not_comparable'] and not entry['solo_identical']:
+                untolerated.append('family %s has %d not comparable and no IDENTICAL solo pair' % (
+                    name, entry['not_comparable']))
+    tolerated = bool(not_comparable) and not untolerated
+    batching = counts['not_comparable_batching'] + counts['not_comparable_preempted']
+    line = 'pairs: %d identical (%d by the batch-matched control), %d not-comparable-by-batching%s, %d failed; ' \
+           'solo %d of %d identical; of %d' % (
+               counts['identical'], counts['identical_by_batch'], batching,
+               ' (%d preempted)' % counts['not_comparable_preempted'] if counts['not_comparable_preempted'] else '',
+               counts['failed'], counts['solo_identical'], counts['solo'], counts['pairs'])
+    for key, label in (('not_comparable_other', 'not comparable otherwise'), ('unstable', 'unstable'),
+                       ('rerun', 'without their re-run')):
+        if counts[key]:
+            line += ', %d %s' % (counts[key], label)
+    if not not_comparable:
+        tolerance = None
+    elif tolerated:
+        tolerance = ('not comparable tolerated (%d): every solo pair is IDENTICAL and %s %s an IDENTICAL solo pair' % (
+            len(not_comparable), ', '.join(name for name, entry in families.items() if entry['not_comparable']),
+            'has' if sum(1 for entry in families.values() if entry['not_comparable']) == 1 else 'each have'))
+    else:
+        tolerance = 'not comparable NOT tolerated (%d): %s' % (len(not_comparable), '; '.join(untolerated))
+    return dict(counts, families=families, tolerated=tolerated, untolerated=untolerated, line=line,
+                tolerance=tolerance)
 
 
 # -- markers onto records ------------------------------------------------------------------------

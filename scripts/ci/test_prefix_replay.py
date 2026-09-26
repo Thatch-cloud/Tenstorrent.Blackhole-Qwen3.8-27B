@@ -23,7 +23,9 @@ miniature whose GRANTS COME FROM THE REAL SCHEDULER GRAFT, not from the harness'
   - a request aborted before its first output gets no prompt ids back, as vLLM streams them with the
     first output; the vLLM counters (prefix_cache_hits/queries before the trim, preemptions, the
     waiting gauge) are served on metrics();
-  - greedy answers depend only on the prompt; faults are switches (see FakeEngine.FAULTS).
+  - greedy answers depend only on the prompt, unless a batching fault makes a token decoded beside
+    others move (the general path's batched decode is not batch-invariant: G1 v48); faults are
+    switches (see FakeEngine.FAULTS), `piece` the tokenizer's density (a subclass sets it).
 
 test_c2_prefix_gate reuses it."""
 
@@ -67,10 +69,10 @@ def word(text):
     return zlib.crc32(text.encode('utf-8')) % 150000 + 1000
 
 
-def words(text):
+def words(text, piece=3):
     """About one token per 3.2 characters, as Qwen3.8's tokenizer on this text: each whitespace-
-    separated word in 3-character pieces."""
-    return [word(w[i:i + 3]) for w in (text or '').split() for i in range(0, len(w), 3)]
+    separated word in 3-character pieces (`piece` 2: text denser than the harness's estimate)."""
+    return [word(w[i:i + piece]) for w in (text or '').split() for i in range(0, len(w), piece)]
 
 
 def served_profile(name='general-prefix'):
@@ -135,6 +137,7 @@ class FakeRequest(object):
         self.on_first = None
         self.abort_before_first = None
         self.pace = False
+        self.burst = 0
         self.started = time.time()
         self.first_at = None
         self.done = threading.Event()
@@ -290,7 +293,14 @@ class FakeEngine(object):
     FAULTS = ('diverge_hits', 'diverge_once', 'diverge_after_resume', 'unsalted_differs', 'capture_differs',
               'grow_programs', 'grow_on_capture', 'drop_rows', 'drop_resumed_rows', 'no_digests', 'bad_slot_on_hit',
               'publish_unsalted', 'publish_when_killed', 'no_stats', 'no_dropped_hits', 'no_counters', 'kill_line_off',
-              'no_dram', 'no_capture_dram', 'dram_unavailable', 'no_eager_warm')
+              'no_dram', 'no_capture_dram', 'dram_unavailable', 'no_eager_warm',
+              # The batching rule's three cases (G1 v48), keyed to burst membership (a request sent in a burst,
+              # not the step it happened to share, so a loaded host cannot split them): a burst's tokens move
+              # the same way in any burst (batch_variant), or by the burst itself, which no control reproduces
+              # (batch_unmatched); a hit restored in a burst diverges, reuse off it does not
+              # (diverge_concurrent_hits).
+              'batch_variant', 'batch_unmatched', 'diverge_concurrent_hits')
+    piece = 3
     # The model graft's G2 reading (qwen_prefix_model_patch._qwen_prefix_dram), in serving_buffer_pool's text.
     DRAM_TEXT = ('chip0 allocated=25.90GB free=8.01GB largest_free=7877.5MB of 33.91GB; '
                  'chip1 allocated=25.90GB free=8.01GB largest_free=7877.5MB of 33.91GB')
@@ -321,6 +331,7 @@ class FakeEngine(object):
         self.programs = 500
         self.grew_capture = False
         self.diverged_once = False
+        self.bursts, self.burst_left = 0, 0
         self.boot()
 
     # -- the log ---------------------------------------------------------------------------------
@@ -387,12 +398,12 @@ class FakeEngine(object):
         if message['role'] == 'assistant':
             calls = ' '.join('%s %s' % (c['function']['name'], c['function']['arguments'])
                              for c in message.get('tool_calls') or ())
-            return (GEN + words(message.get('reasoning')) + [9005] + words(message.get('content')) + words(calls)
-                    + [9003])
-        return [9100, ROLE[message['role']]] + words(message.get('content')) + [9003]
+            return (GEN + words(message.get('reasoning'), self.piece) + [9005]
+                    + words(message.get('content'), self.piece) + words(calls, self.piece) + [9003])
+        return [9100, ROLE[message['role']]] + words(message.get('content'), self.piece) + [9003]
 
     def render(self, body):
-        ids = words(json.dumps(body.get('tools') or []))
+        ids = words(json.dumps(body.get('tools') or []), self.piece)
         for message in body['messages']:
             ids += self.render_message(message)
         return ids + GEN
@@ -427,6 +438,8 @@ class FakeEngine(object):
             request.on_first = on_first
             request.abort_before_first = abort_after_s
             request.pace = tag.endswith('-seat')
+            request.burst = self.bursts if self.burst_left > 0 else 0
+            self.burst_left = max(0, self.burst_left - 1)
             if self.dead:
                 request.result = self.failed(request, self.dead)
                 return request.result
@@ -455,6 +468,10 @@ class FakeEngine(object):
     def ready(self):
         return True
 
+    def context_tokens(self):
+        """vLLM's /v1/models max_model_len: the profile's max-model-len."""
+        return self.max_model_len
+
     def reset_prefix_cache(self):
         if not self.dev_mode:
             return 404
@@ -475,6 +492,8 @@ class FakeEngine(object):
         arrivals in one schedule() call)."""
         with self.cv:
             self.expected, self.expect_since = count, time.monotonic()
+            self.bursts += 1
+            self.burst_left = count
 
     def stats(self):
         if 'no_stats' in self.faults:
@@ -603,7 +622,8 @@ class FakeEngine(object):
             request.perturb = bool(
                 ('diverge_hits' in self.faults and q) or ('unsalted_differs' in self.faults and not request.cache_salt)
                 or ('capture_differs' in self.faults and captured)
-                or ('diverge_once' in self.faults and q and not self.diverged_once))
+                or ('diverge_once' in self.faults and q and not self.diverged_once)
+                or ('diverge_concurrent_hits' in self.faults and q and request.burst))
             if 'diverge_once' in self.faults and q:
                 self.diverged_once = True
         if not self.prefix:
@@ -676,6 +696,9 @@ class FakeEngine(object):
         if (request.perturb and last) or ('diverge_after_resume' in self.faults and request.resumed_at is not None
                                           and index >= request.resumed_at):
             token, text = token + 1, text + 'x'
+        if request.burst and self.faults & {'batch_variant', 'batch_unmatched'}:
+            shift = 1 + (request.burst % 5 if 'batch_unmatched' in self.faults else 0)
+            token, text = token + 100 * shift, text + 'b%d' % shift
         request.append(token)
         request.emitted.append(text)
         if index == 0:
@@ -742,6 +765,19 @@ class FakeEngine(object):
                     finish=finish, error=None,
                     ttft_s=round(request.first_at - request.started, 4) if request.first_at is not None else None,
                     wall_s=round(time.time() - request.started, 4), status=200, aborted=aborted, ok=aborted is None)
+
+
+class SmallDense(FakeEngine):
+    """An engine that serves max_model_len 16,384 whatever the gate's profile says (its /v1/models and
+    its API edge say so; the KV pool stays the profile's), on text that tokenizes denser than the
+    harness's 3.2 characters a token: G1 v48's flood (65,505 + 32) and kill-switch (64,513+ + 1,024)
+    sizes against 65,536, scaled down."""
+    piece = 2
+    CONTEXT = 16384
+
+    def __init__(self, profile=None, name='general-prefix', **faults):
+        super(SmallDense, self).__init__(profile=profile, name=name, **faults)
+        self.max_model_len = self.CONTEXT
 
 
 def burst_aware(get_engine):
@@ -900,7 +936,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/metrics':
             body = b'vllm:num_requests_waiting{engine="0"} 2.0\n'
-        elif self.path in ('/health', '/v1/models'):
+        elif self.path == '/v1/models':
+            body = json.dumps(dict(object='list', data=[dict(id=replay.SERVED_NAME, object='model',
+                                                             max_model_len=65536)])).encode()
+        elif self.path == '/health':
             body = b'{}'
         else:
             self.send_response(404)
@@ -1040,11 +1079,15 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.metrics(), {'vllm:num_requests_waiting': 2.0})
         self.assertTrue(self.client.healthy() and self.client.ready())
         self.assertEqual(self.client.reset_prefix_cache(), 200)
+        self.assertEqual(self.client.context_tokens(), 65536, 'the served max_model_len, from /v1/models')
+        self.assertEqual(replay.Client(self.server.server_address[1], model='other/model').context_tokens(), 65536,
+                         'one card is the served model whatever its id')
 
     def test_a_dead_server_is_not_ready(self):
         dead = replay.Client(1)
         self.assertFalse(dead.ready())
         self.assertEqual(dead.metrics(), {})
+        self.assertIsNone(dead.context_tokens())
         result = dead.chat(self.body(), 'x')
         self.assertFalse(result['ok'])
         self.assertIsNotNone(result['error'])
@@ -1067,6 +1110,10 @@ class EngineHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == '/v1/models':
+            self.reply(dict(object='list', data=[dict(id=replay.SERVED_NAME, object='model',
+                                                      max_model_len=self.engine.max_model_len)]))
+            return
         self.reply({})
 
     def do_POST(self):
@@ -1311,6 +1358,97 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(replay.OutOfTime):
             driver.send(dict(messages=[dict(role='user', content='x')]), 'hit', 's', 'c')
 
+    def test_the_context_is_the_served_one(self):
+        engine = FakeEngine()
+        driver = driver_for(engine)
+        self.assertEqual(driver.context(), 65536, 'read from the engine\'s /v1/models when the gate gave none')
+        engine.max_model_len = 1000
+        self.assertEqual(driver.context(), 65536, 'read once')
+        self.assertEqual(replay.Driver(engine, 'arm', CORPUS, context_tokens=4096).context(), 4096)
+        with self.assertRaises(replay.HarnessError):
+            replay.Driver(SimpleNamespace(context_tokens=lambda: None), 'arm', CORPUS).context()
+        self.assertFalse(hasattr(replay, 'CONTEXT_TOKENS'), 'no hard-coded context')
+
+    def test_the_v48_sizes_are_never_sent(self):
+        """G1 v48 (run 36251045616): a flood of 65,505 tokens with 32 out and kill-switch turns of 64,513
+        tokens (at least) with 1,024 out, against general-prefix's 65,536: vLLM refused them at the API
+        edge (HTTP 400). prompt + max_tokens must fit max_model_len."""
+        sizes, asked = {}, []
+
+        def tokenize(body):
+            label = body['messages'][0]['content'].split()[0]
+            asked.append(label)
+            return sizes[label]
+
+        def body(label):
+            return dict(messages=[dict(role='user', content=label + ' ' + 'y' * 200000)])
+
+        client = SimpleNamespace(context_tokens=lambda: 65536, tokenize=tokenize,
+                                 chat=lambda *a, **k: self.fail('a request past the context was sent'))
+        driver = replay.Driver(client, 'arm', CORPUS, say=lambda text: None)
+        for label, tokens, max_tokens in (('flood-2', 65505, 32), ('kill-on', 64513, 1024), ('kill-latched', 64513, 1024)):
+            sizes[label] = tokens
+            self.assertEqual(driver.room_problem(body(label), max_tokens),
+                             'prompt %d tokens + max_tokens %d > max_model_len 65536' % (tokens, max_tokens))
+            record = driver.send(body(label), 'hit', 's', label, max_tokens=max_tokens)
+            self.assertEqual((record['ok'], record['aborted']), (False, None))
+            self.assertIn('not sent: prompt %d tokens' % tokens, record['error'])
+            self.assertTrue(record['refused'])
+        self.assertEqual(asked, ['flood-2', 'kill-on', 'kill-latched'], 'measured once per body')
+        sizes['fits'] = 65504
+        self.assertIsNone(driver.room_problem(body('fits'), 32), '65,504 + 32 is exactly the context')
+        self.assertIsNone(driver.room_problem(dict(messages=[dict(role='user', content='short')]), 1024))
+        self.assertNotIn('short', asked, 'a small body is bounded by its bytes: no /tokenize call')
+
+    def test_fit_cuts_only_the_newest_input_and_only_when_it_must(self):
+        engine = SmallDense()
+        driver = driver_for(engine)
+        said = []
+        driver.say = said.append
+        conv = driver.conversation('c', first_tokens=900)
+        before = copy.deepcopy(conv.messages)
+        self.assertIsNone(driver.fit(conv), 'a prompt its bytes already bound is not measured')
+        self.assertEqual(conv.messages, before)
+        hit = driver.pair(conv, 'case')
+        driver.answer(conv, hit)
+        conv.extend(14000)    # estimated at 3.2 characters a token; this tokenizer counts more
+        history = copy.deepcopy(conv.messages[:-1])
+        long = engine.tokenize(conv.body())
+        self.assertGreater(long + driver.max_tokens, SmallDense.CONTEXT)
+        tokens = driver.fit(conv)
+        self.assertEqual(tokens, engine.tokenize(conv.body()))
+        self.assertLessEqual(tokens + driver.max_tokens + replay.FIT_MARGIN_TOKENS, SmallDense.CONTEXT)
+        self.assertEqual(conv.messages[:-1], history, 'only the newest input is cut')
+        self.assertEqual(driver.fitted[0]['tokens'], long)
+        self.assertTrue(any('fitted c turn 1' in line for line in said), said)
+        again = copy.deepcopy(conv.messages)
+        self.assertEqual(driver.fit(conv), tokens)
+        self.assertEqual(conv.messages, again, 'a prompt that fits is never touched')
+        record = driver.pair(conv, 'case')
+        self.assertTrue(record['ok'], record.get('error'))
+
+    def test_a_history_past_the_context_cannot_be_fitted(self):
+        engine = SmallDense()
+        driver = driver_for(engine)
+        conv = driver.conversation('c', first_tokens=900)
+        conv.messages.append(dict(role='assistant', content='x ' * 40000))
+        conv.messages.append(dict(role='user', content='next'))
+        with self.assertRaises(replay.PromptTooLong):
+            driver.fit(conv)
+
+    def test_an_intended_abort_is_an_expected_outcome(self):
+        engine = FakeEngine()
+        driver = driver_for(engine)
+        said = []
+        driver.say = said.append
+        conv = driver.conversation('c', first_tokens=3000)
+        record = driver.send(conv.body(), 'hit', conv.salt, 'abort-prefill', conv, abort_after_s=2.0)
+        self.assertEqual((record['ok'], record['aborted'], record['intended_abort']), (False, 'closed after 2.0 s', True))
+        self.assertTrue(said[-1].endswith('aborted as intended (closed after 2.0 s)'), said[-1])
+        self.assertNotIn('FAILED', said[-1])
+        normal = driver.send(conv.body(), 'hit', conv.salt, 'x', conv)
+        self.assertFalse(normal['intended_abort'])
+
     def test_an_aborted_request_is_admitted_from_its_tokenized_prompt(self):
         engine = FakeEngine()
         driver = driver_for(engine)
@@ -1440,6 +1578,86 @@ class ScenarioTests(unittest.TestCase):
         raw, _ = judge.raw_hit_per_attempt(latched)
         self.assertLessEqual(raw, latched['expected_raw_h'])
         self.assertGreater(judge.floor_chunk(events['kill-switch']['on_prompt']), latched['expected_raw_h'])
+
+    def test_every_evict_request_fits_the_served_context(self):
+        """v48's lifecycle-evict, scaled down: the served context (16,384 from /v1/models) is smaller than
+        the build targets, and the text tokenizes denser than the estimate. Before the sizing fix the
+        build and the floods went past the context and the API edge refused them (HTTP 400)."""
+        self.engine = engine = SmallDense(profile=dict(served_profile(), env=dict(
+            served_profile()['env'], VLLM_SERVER_DEV_MODE='1')))
+        driver = driver_for(engine, 'lifecycle-evict', strict=False)
+
+        def restart():
+            driver.container.stop()
+            driver.container.start()
+            return dict(seconds=1.0, log_window=[len(engine.lines) - 3, len(engine.lines)])
+
+        with mock.patch.object(replay, 'EVICT_LENGTHS', (12000, 24000)):
+            replay.scenario_lifecycle_evict(driver, pool_tokens=engine.num_blocks * BLOCK, restart=restart)
+        failed = [(r['tag'], r.get('error')) for r in driver.records if not r['ok'] and not r.get('aborted')]
+        self.assertEqual(failed, [])
+        self.assertEqual(driver.context(), SmallDense.CONTEXT)
+        self.assertTrue(all(r['prompt_tokens'] + r['completion_tokens'] <= SmallDense.CONTEXT
+                            for r in driver.records if r['ok']))
+        flood = driver.events['flood']
+        self.assertTrue(all(size + replay.FLOOD_MAX_TOKENS <= SmallDense.CONTEXT for size in flood['sizes']), flood)
+        self.assertEqual(flood['context'], SmallDense.CONTEXT)
+        self.assertTrue(driver.fitted, 'the 20k-token abort-prefill input was cut to the context')
+        kill = driver.events['kill-switch']
+        self.assertIsNotNone(kill['on_prompt'], 'the kill-on turn was served')
+        self.assertTrue(pm.scan(engine.lines)['kill_switch'], 'the scheduler saw the kill switch')
+        records = [r for r in driver.records if r.get('aborted')]
+        self.assertEqual(sorted(r['case'] for r in records), ['abort-prefill', 'abort-waiting'])
+        self.assertTrue(all(r['intended_abort'] for r in records))
+
+    def arrivals(self, **faults):
+        self.engine = engine = FakeEngine(**faults)
+        driver = driver_for(engine, 'lifecycle-evict', strict=False)
+        convs = [driver.conversation('life-%d' % index, first_tokens=replay.LIFE_FIRST_TOKENS) for index in range(2)]
+        for conv in convs:
+            hit = driver.pair(conv, 'life-first')
+            driver.answer(conv, hit)
+            conv.extend(1200)
+        replay.lifecycle_arrivals(driver, convs)
+        return driver, engine
+
+    def test_a_batch_dependent_engine_matches_its_batch_control(self):
+        """The general path's batched decode moves a token decoded beside others; a cold burst of the same
+        shape moves the same way (G1 v48: life-0, same-step-1, tiny-0..2)."""
+        driver, _ = self.arrivals(batch_variant=True)
+        arrivals = [p for p in driver.pairs if p['case'] == 'arrivals']
+        self.assertEqual(len(arrivals), 4)
+        self.assertTrue(all((p['verdict'], p['basis']) == ('IDENTICAL', 'batch') for p in arrivals), arrivals)
+        self.assertTrue(all(p['batch'] for p in arrivals))
+        self.assertFalse([p for p in driver.pairs if p['case'] == 'arrivals:solo'], 'nothing to anchor')
+
+    def test_a_family_the_batch_control_cannot_settle_gets_a_solo_anchor(self):
+        """A batch no control reproduces (G1 v48: life-1): NOT_COMPARABLE by batching, then one of those hits
+        replayed alone at the same Q against its solo cold twin - the IDENTICAL solo pair the rule asks."""
+        driver, engine = self.arrivals(batch_unmatched=True)
+        arrivals = [p for p in driver.pairs if p['case'] == 'arrivals']
+        self.assertTrue(all((p['verdict'], p['basis']) == ('NOT_COMPARABLE', 'batching') for p in arrivals), arrivals)
+        anchors = [p for p in driver.pairs if p['case'] == 'arrivals:solo']
+        self.assertEqual(len(anchors), 1)
+        anchor = anchors[0]
+        self.assertEqual((anchor['verdict'], anchor['kind'], anchor['basis']), ('IDENTICAL', 'sequential', 'solo'))
+        concurrent = [p for p in arrivals if p['hit'] == anchor['anchor_for']][0]
+        self.assertEqual((anchor['cold'], anchor['cold2']), (concurrent['cold'], concurrent['cold2']))
+        records = dict((r['tag'], r) for r in resolved(driver, engine))
+        self.assertEqual(records[anchor['hit']]['markers']['q'], records[concurrent['hit']]['markers']['q'],
+                         'the anchor restores the same Q, alone')
+        self.assertGreater(records[anchor['hit']]['markers']['q'], 0)
+        self.assertTrue(anchor['primes'] and all(records[tag]['role'] == 'prime' for tag in anchor['primes']))
+        summary = judge.pair_summary(driver.pairs)
+        self.assertTrue(summary['tolerated'], summary['untolerated'])
+
+    def test_a_hit_that_reuse_moves_in_a_batch_fails(self):
+        driver, _ = self.arrivals(diverge_concurrent_hits=True)
+        moved = [p for p in driver.pairs if p['case'] == 'arrivals' and p['verdict'] == 'DIVERGED']
+        self.assertEqual(len(moved), 2, 'the two continuations restored Q > 0 beside others')
+        self.assertTrue(all(p['basis'] == 'reuse' and 'prefix reuse introduced' in p['detail'] for p in moved))
+        anchor = [p for p in driver.pairs if p['case'] == 'arrivals:solo'][0]
+        self.assertEqual(anchor['verdict'], 'IDENTICAL', 'alone, the same hit is exact')
 
     def test_store_evicts_by_lru(self):
         profile = served_profile()

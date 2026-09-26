@@ -4,8 +4,9 @@ The oracle is held to the design's own worked cases (2.0.1, 2.0.2, 2.0.4; P0b's 
 measurements): a chain hits at floor2048 of the previous prompt, 2047/2048/2049, the num_tokens-1
 cap, the gap capture across one tenant's conversations, an early divergence falling back, the
 salt, the kill switch, reset, and the store's LRU. Then the comparison, the re-run policy (two
-agreeing cold runs make any hit divergence a FAIL), concurrent hits and their batch control, the
-preemption allowance by admissions, a resumed request's rows, restores against grants, captures
+agreeing cold runs make any hit divergence a FAIL), the batching rule for concurrent hits (their
+batch-matched control, pair_summary's tolerance, G1 v48's own concurrent pairs replayed from its
+records), the preemption allowance by admissions, a resumed request's rows, restores against grants, captures
 against plans, the program cache across every hit and the first capture, the digests, and vLLM's
 raw hit read from its counters."""
 
@@ -195,17 +196,32 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(pj.pair_verdict(cold, hit, cold2, hit2)['verdict'], 'DIVERGED')
         self.assertEqual(pj.pair_verdict(cold, hit, cold2, record('h2', tokens=(1, 2, 3, 4)))['verdict'], 'DIVERGED')
 
-    def test_a_concurrent_hit_needs_the_batch_control_before_it_fails(self):
+    def test_the_batching_rule(self):
+        """Prefix reuse must not add divergence beyond what batching alone adds (G1 v48): a concurrent
+        hit is judged against its batch-matched cold control, not only its solo cold twin."""
         cold, hit = record('c'), record('h', tokens=(1, 9, 3))
-        self.assertEqual(pj.concurrent_verdict(cold, record('h'))['verdict'], 'IDENTICAL')
-        self.assertEqual(pj.concurrent_verdict(cold, hit)['verdict'], 'RERUN')
+        solo = pj.concurrent_verdict(cold, record('h'))
+        self.assertEqual((solo['verdict'], solo['basis']), ('IDENTICAL', 'solo'))
+        self.assertEqual(pj.concurrent_verdict(cold, hit)['verdict'], 'RERUN', 'no second solo cold run')
         self.assertEqual(pj.concurrent_verdict(cold, hit, record('c2'))['verdict'], 'RERUN', 'no batch control ran')
-        batch_same = pj.concurrent_verdict(cold, hit, record('c2'), record('b'))
-        self.assertEqual(batch_same['verdict'], 'DIVERGED')
-        batch_differs = pj.concurrent_verdict(cold, hit, record('c2'), record('b', tokens=(1, 2, 8)))
-        self.assertEqual(batch_differs['verdict'], 'NOT_COMPARABLE')
-        self.assertIn('batch shape changes the bytes', batch_differs['reason'])
+        matched = pj.concurrent_verdict(cold, hit, record('c2'), record('b', tokens=(1, 9, 3)))
+        self.assertEqual((matched['verdict'], matched['basis']), ('IDENTICAL', 'batch'))
+        self.assertIn('equals its batch-matched cold control', matched['reason'])
+        reuse = pj.concurrent_verdict(cold, hit, record('c2'), record('b'))
+        self.assertEqual((reuse['verdict'], reuse['basis']), ('DIVERGED', 'reuse'), 'the control is the solo run')
+        self.assertIn('prefix reuse introduced the divergence', reuse['reason'])
+        batching = pj.concurrent_verdict(cold, hit, record('c2'), record('b', tokens=(1, 2, 8)))
+        self.assertEqual((batching['verdict'], batching['basis']), ('NOT_COMPARABLE', 'batching'))
+        self.assertIn('this batch moves the baseline itself', batching['reason'])
         self.assertEqual(pj.concurrent_verdict(cold, hit, record('c2', tokens=(5,)), record('b'))['verdict'], 'UNSTABLE')
+        failed = pj.concurrent_verdict(cold, hit, record('c2'), record('b', ok=False, error='HTTP 500'))
+        self.assertEqual(failed['verdict'], 'ERROR')
+        self.assertIn('batch-matched cold control failed', failed['reason'])
+        self.assertEqual(pj.concurrent_verdict(cold, hit, record('c2', ok=False, error='x'), record('b'))['verdict'],
+                         'ERROR')
+        other = pj.concurrent_verdict(cold, hit, record('c2'), record('b', prompt='q'))
+        self.assertEqual((other['verdict'], other['basis']), ('NOT_COMPARABLE', 'prompts'))
+        self.assertEqual(pj.concurrent_verdict(cold, record('h', prompt='q'))['basis'], 'prompts')
 
     def test_settle_excuses_only_a_preempted_request(self):
         index = dict(h=dict(markers=dict(admissions=2)), c=dict(markers=dict(admissions=1)),
@@ -219,6 +235,256 @@ class CompareTests(unittest.TestCase):
         control = pj.settle(dict(verdict='NOT_COMPARABLE', hit='h1', cold='c', batch='h', detail='batch'), index)
         self.assertEqual(control['verdict'], 'NOT_COMPARABLE')
         self.assertIn('h (2 admissions)', control['detail'], 'a preempted batch control is named')
+
+
+def pair(case, verdict, kind='sequential', basis=None):
+    return dict(case=case, verdict=verdict, kind=kind, basis=basis, cold='c', hit='h')
+
+
+class PairSummaryTests(unittest.TestCase):
+    """pair_summary: the batching rule over an arm's pairs, and the line every arm prints."""
+
+    def test_not_comparable_beside_an_identical_solo_pair_of_its_family_is_tolerated(self):
+        pairs = [pair('life-first', 'IDENTICAL'), pair('arrivals', 'IDENTICAL', 'concurrent', 'batch'),
+                 pair('arrivals', 'NOT_COMPARABLE', 'concurrent', 'batching'), pair('arrivals:solo', 'IDENTICAL'),
+                 pair('tiny', 'NOT_COMPARABLE', 'concurrent', 'preemption'), pair('tiny:solo', 'IDENTICAL')]
+        summary = pj.pair_summary(pairs)
+        self.assertTrue(summary['tolerated'], summary['untolerated'])
+        self.assertEqual((summary['identical'], summary['identical_by_batch'], summary['not_comparable_batching'],
+                          summary['not_comparable_preempted'], summary['failed']), (4, 1, 1, 1, 0))
+        self.assertEqual(summary['line'], 'pairs: 4 identical (1 by the batch-matched control), 2 '
+                                          'not-comparable-by-batching (1 preempted), 0 failed; solo 3 of 3 identical; of 6')
+        self.assertEqual(summary['tolerance'], 'not comparable tolerated (2): every solo pair is IDENTICAL and arrivals, '
+                                               'tiny each have an IDENTICAL solo pair')
+        self.assertEqual(pj.family('arrivals:solo'), 'arrivals')
+
+    def test_what_is_never_tolerated(self):
+        cases = dict(
+            no_solo_in_family=([pair('life-first', 'IDENTICAL'), pair('arrivals', 'NOT_COMPARABLE', 'concurrent',
+                                                                         'batching')],
+                               'family arrivals has 1 not comparable and no IDENTICAL solo pair'),
+            a_solo_pair_unstable=([pair('arrivals', 'NOT_COMPARABLE', 'concurrent', 'batching'),
+                                   pair('arrivals:solo', 'IDENTICAL'), pair('store', 'UNSTABLE')],
+                                  '1 of 2 solo pairs are not IDENTICAL'),
+            a_solo_pair_preempted=([pair('arrivals', 'NOT_COMPARABLE', 'concurrent', 'batching'),
+                                    pair('arrivals:solo', 'IDENTICAL'), pair('chain', 'NOT_COMPARABLE', basis='preemption')],
+                                   '1 of 2 solo pairs are not IDENTICAL'),
+            prompts=([pair('arrivals', 'NOT_COMPARABLE', 'concurrent', 'prompts'), pair('arrivals:solo', 'IDENTICAL')],
+                     'for a reason other than batching (prompts)'))
+        for name, (pairs, reason) in cases.items():
+            with self.subTest(name=name):
+                summary = pj.pair_summary(pairs)
+                self.assertFalse(summary['tolerated'])
+                self.assertTrue(any(reason in text for text in summary['untolerated']), summary['untolerated'])
+                self.assertTrue(summary['tolerance'].startswith('not comparable NOT tolerated'))
+
+    def test_without_not_comparable_there_is_nothing_to_tolerate(self):
+        summary = pj.pair_summary([pair('chain', 'IDENTICAL'), pair('chain', 'DIVERGED'), pair('x', 'ERROR'),
+                                   pair('y', 'RERUN')])
+        self.assertEqual((summary['tolerated'], summary['tolerance']), (False, None))
+        self.assertEqual(summary['line'], 'pairs: 1 identical (0 by the batch-matched control), 0 '
+                                          'not-comparable-by-batching, 2 failed; solo 1 of 4 identical; of 4, '
+                                          '1 without their re-run')
+
+    def test_settle_names_preemption_as_the_basis(self):
+        index = dict(h=dict(markers=dict(admissions=2)), c=dict(markers=dict(admissions=1)))
+        settled = pj.settle(dict(verdict='DIVERGED', basis='reuse', hit='h', cold='c', detail='x', kind='concurrent',
+                                 case='tiny'), index)
+        self.assertEqual((settled['verdict'], settled['basis']), ('NOT_COMPARABLE', 'preemption'))
+        self.assertEqual(pj.pair_summary([settled, pair('tiny:solo', 'IDENTICAL')])['not_comparable_preempted'], 1)
+
+
+# G1 v48 (run 36251045616, image g1-c654916, lifecycle plan): every concurrent pair of lifecycle-evict and
+# lifecycle-tiny as its records.jsonl logged it - each record's (token sequence, finish, admissions, tag) and
+# the group's distinct output token sequences, cut just past the group's last divergence, which keeps every
+# pairwise first divergence and every identity the judge reads. v48 judged six of them NOT_COMPARABLE.
+V48_CONCURRENT = (
+    dict(arm='lifecycle-evict', case='arrivals', conv='life-0', v48='NOT_COMPARABLE',
+         records=dict(cold=(0, 'tool_calls', 1, 'pfx-lifecycle-evict-0014-cold'),
+                      cold2=(0, 'tool_calls', 1, 'pfx-lifecycle-evict-0022-cold'),
+                      hit=(1, 'tool_calls', 1, 'pfx-lifecycle-evict-0009-hit'),
+                      batch=(1, 'tool_calls', 1, 'pfx-lifecycle-evict-0028-cold-batch')),
+         sequences=(
+             '760 2468 314 279 26156 5224 4816 310 381 7132 36412 1892 424 5686 1040 279 2468 369',
+             '760 2468 314 279 26156 5224 4816 310 381 7132 36412 1892 424 5686 1040 279 2468 314',
+         )),
+    dict(arm='lifecycle-evict', case='arrivals', conv='life-1', v48='NOT_COMPARABLE',
+         records=dict(cold=(0, 'tool_calls', 1, 'pfx-lifecycle-evict-0016-cold'),
+                      cold2=(0, 'tool_calls', 1, 'pfx-lifecycle-evict-0024-cold'),
+                      hit=(1, 'tool_calls', 1, 'pfx-lifecycle-evict-0010-hit'),
+                      batch=(2, 'tool_calls', 1, 'pfx-lifecycle-evict-0030-cold-batch')),
+         sequences=(
+             '81404 1892 279 2468 314 1510 4466 471 77 63 369 8755 2086 2144 1056 1092 279 1156 3162 290 13 561 '
+             '999 383 12977 4816 310 381 2086 494 1092 279 1156 369 3221 506 13 13428 11 279 2468 369 8755 4965 '
+             '220 18 16 4006 20 20 314 264 2086 999 30 2844 579 15804 13 6558 728 1716 1495 13 271 50821 11 279 '
+             '2468 4774 279 2614 25 198 71093 198 262 220 18 16 2672 33341 283 498 8217 29933 28 13927 11 51623 '
+             '47980 53897 11 2923 28 9239 11 15911 28 28693 11 3817 68672 3497 11 11857 68672 3497 8 198 71093 271 '
+             '1919 3070 914 2353 279 1156 579 24147 13 85152 11 3655 1892 6970 279 2468 2597 57739 506 279 6941 '
+             '318 1719 1118 220 18 15 4965 998 3799 974 45690 561',
+             '81404 1892 279 2468 314 1510 4466 471 77 63 369 8755 2086 2144 1056 1092 353 3481 13 1049 4816 1040 '
+             '279 999 2144 369 1602 12234 67247 13 13428 11 279 2468 4774 4965 220 18 16 4006 20 20 11 321 279 '
+             '2144 369 883 1510 265 1315 7561 1510 1307 1217 1098 7561 1510 1689 1386 63 1076 1061 3070 914 2353 '
+             '279 1510 1200 5437 537 63 709 353 5312 6575 13 271 77264 11 3655 13 32645 11 279 2468 369 15804 13 '
+             '561 1118 1510 851 63 1562 8280 4965 220 22 4006 19 16 8222 279 1510 1200 5437 537 63 709 13 4543 '
+             '1510 4466 471 77 63 369 8755 4965 220 18 16 4006 20 20 440 2086 2144 13 1061 369 1546 14457 13 271 '
+             '13784 11 6970 279 2468 369 1602 57739 466',
+             '81404 1892 279 2468 314 1510 4466 471 77 63 369 8755 2086 2144 1056 1092 353 3481 13 1049 4816 1040 '
+             '279 999 2144 369 1602 12234 67247 13 13428 11 279 2468 4774 4965 220 18 16 4006 20 20 11 321 279 '
+             '2144 369 883 1510 265 1315 7561 1510 1307 1217 1098 7561 1510 1689 1386 63 1076 1061 3070 914 2353 '
+             '279 1510 1200 5437 537 63 709 353 5312 6575 13 271 77264 11 3655 13 32645 11 279 2468 369 15804 13 '
+             '561 1118 1510 851 63 1562 8280 4965 220 22 4006 19 16 8222 279 1510 1200 5437 537 63 709 13 4543 '
+             '1510 4466 471 77 63 369 8755 4965 220 18 16 4006 20 20 440 2086 2144 13 1061 369 1546 14457 13 271 '
+             '13784 11 6970 279 2468 369 1602 57739 303',
+         )),
+    dict(arm='lifecycle-evict', case='arrivals', conv='same-step-0', v48='IDENTICAL',
+         records=dict(cold=(0, 'tool_calls', 1, 'pfx-lifecycle-evict-0018-cold'),
+                      hit=(0, 'tool_calls', 1, 'pfx-lifecycle-evict-0011-hit')),
+         sequences=(
+             '9764',
+         )),
+    dict(arm='lifecycle-evict', case='arrivals', conv='same-step-1', v48='NOT_COMPARABLE',
+         records=dict(cold=(0, 'tool_calls', 1, 'pfx-lifecycle-evict-0020-cold'),
+                      cold2=(0, 'tool_calls', 1, 'pfx-lifecycle-evict-0026-cold'),
+                      hit=(1, 'tool_calls', 1, 'pfx-lifecycle-evict-0012-hit'),
+                      batch=(1, 'tool_calls', 1, 'pfx-lifecycle-evict-0034-cold-batch')),
+         sequences=(
+             '760 1156 369 9859 728 310 1301 1510 19226 2805 72 3082 765 33717 9546 1323 6971 7561 10033 1092 1510 '
+             '8987 63 1503 321 1332 424 579 2512 494 11 321 1179 28647 264',
+             '760 1156 369 9859 728 310 1301 1510 19226 2805 72 3082 765 33717 9546 1323 6971 7561 10033 1092 1510 '
+             '8987 63 1503 321 1332 424 579 2512 494 11 321 1179 28647 799',
+         )),
+    dict(arm='lifecycle-tiny', case='tiny-grant', conv='tiny-grant', v48='IDENTICAL',
+         records=dict(cold=(0, 'tool_calls', 1, 'pfx-lifecycle-tiny-0006-cold'),
+                      hit=(0, 'tool_calls', 1, 'pfx-lifecycle-tiny-0004-hit')),
+         sequences=(
+             '760',
+         )),
+    dict(arm='lifecycle-tiny', case='tiny', conv='tiny-0', v48='NOT_COMPARABLE',
+         records=dict(cold=(0, 'tool_calls', 1, 'pfx-lifecycle-tiny-0014-cold'),
+                      cold2=(0, 'tool_calls', 1, 'pfx-lifecycle-tiny-0020-cold'),
+                      hit=(1, 'tool_calls', 2, 'pfx-lifecycle-tiny-0010-hit'),
+                      batch=(1, 'tool_calls', 2, 'pfx-lifecycle-tiny-0026-cold-batch')),
+         sequences=(
+             '760 1156 369 9859 728 310 1301 1510 19226 2805 72 3082 765 33717 9546 1323 6971 63 321 10033 1092 '
+             '1510 11900 63 1503 321 1332 424 579 2512 494 11 321 1179 310 28647 264 4821 1228 364 424 13 271 760 '
+             '3555',
+             '760 1156 369 9859 728 310 1301 1510 19226 2805 72 3082 765 33717 9546 1323 6971 63 321 10033 1092 '
+             '1510 11900 63 1503 321 1332 424 579 2512 494 11 321 1179 310 28647 264 4821 1228 364 424 13 271 760 '
+             '2193',
+         )),
+    dict(arm='lifecycle-tiny', case='tiny', conv='tiny-1', v48='NOT_COMPARABLE',
+         records=dict(cold=(0, 'tool_calls', 1, 'pfx-lifecycle-tiny-0016-cold'),
+                      cold2=(0, 'tool_calls', 1, 'pfx-lifecycle-tiny-0022-cold'),
+                      hit=(1, 'tool_calls', 1, 'pfx-lifecycle-tiny-0011-hit'),
+                      batch=(1, 'tool_calls', 1, 'pfx-lifecycle-tiny-0028-cold-batch')),
+         sequences=(
+             '760 1156 369 9859 728 310 10033 821 3019 303 2250 16916 3387 1518 3154 866 4203 13 561 1156 682 1048 '
+             '3766 1010 5604 1970 66320 11 694 279 4880 3274 369 310 89109 1510 1877 1611 306 5830 85763 27625 '
+             '12678 82 33030 18 17 25018 25092 7663 62 4111 7402 8685 63 303 1510 19226 2805 72 12333 788 51976 '
+             '85023 6971 27653 271 5170 11 1042 728 1301 279 2100 999 310 3418 1092 353 2688 14131 440 13 198 '
+             '248069 271 248058 198 27 1628 86779 29 198 27 15704 57242 2551 29 198 17674 33901 33902 16240 268 '
+             '45787 7725 27887 29430 27325 16451 18 13 23 12 17 22 33 38068 2805 72 12333 788 51976 85023 6971 198 '
+             '510 15704 29 198 510 1628 29 198 248059 248046 198 248045 846 248046 198 248045 248046 198 248045 '
+             '74455 198 248068 198 760 999 369 4147 30 6558 728 1716 13 198 248069 271 248058 198 27 1628 21402 '
+             '956 29 198 27 15704 28 5454 29 198 4577 471 4120 593 4955 33901 33902 16240 268 45787 7725 27887 '
+             '29430 27325 16451 18 13 23 12 17 22 33 38068 2805 72 12333 788 51976 85023 6971 976 25700 471 75 593 '
+             '4955 33901 33902 16240 268 45787 7725 27887 29430 27325 16451 18 13 23 12 17 22 33 38068 2805 72 '
+             '12333 788 51976 85023 6971 198 510 15704 29 198 27 15704 28 4532 29 198 3840 2100 999 1331 321',
+             '760 1156 369 9859 728 310 10033 821 3019 303 2250 16916 3387 1518 3154 866 4203 13 561 1156 682 1048 '
+             '3766 1010 5604 1970 66320 11 694 279 4880 3274 369 310 89109 1510 1877 1611 306 5830 85763 27625 '
+             '12678 82 33030 18 17 25018 25092 7663 62 4111 7402 8685 63 303 1510 19226 2805 72 12333 788 51976 '
+             '85023 6971 27653 271 5170 11 1042 728 1301 279 2100 999 310 3418 1092 353 2688 14131 440 13 198 '
+             '248069 271 248058 198 27 1628 86779 29 198 27 15704 57242 2551 29 198 17674 33901 33902 16240 268 '
+             '45787 7725 27887 29430 27325 16451 18 13 23 12 17 22 33 38068 2805 72 12333 788 51976 85023 6971 198 '
+             '510 15704 29 198 510 1628 29 198 248059 248046 198 248045 846 248046 198 248045 248046 198 248045 '
+             '74455 198 248068 198 760 999 369 4147 30 6558 728 1716 13 198 248069 271 248058 198 27 1628 21402 '
+             '956 29 198 27 15704 28 5454 29 198 4577 471 4120 593 4955 33901 33902 16240 268 45787 7725 27887 '
+             '29430 27325 16451 18 13 23 12 17 22 33 38068 2805 72 12333 788 51976 85023 6971 976 25700 471 75 593 '
+             '4955 33901 33902 16240 268 45787 7725 27887 29430 27325 16451 18 13 23 12 17 22 33 38068 2805 72 '
+             '12333 788 51976 85023 6971 198 510 15704 29 198 27 15704 28 4532 29 198 3840 2100 999 1331 198',
+         )),
+    dict(arm='lifecycle-tiny', case='tiny', conv='tiny-2', v48='NOT_COMPARABLE',
+         records=dict(cold=(0, 'tool_calls', 1, 'pfx-lifecycle-tiny-0018-cold'),
+                      cold2=(0, 'tool_calls', 1, 'pfx-lifecycle-tiny-0024-cold'),
+                      hit=(1, 'tool_calls', 1, 'pfx-lifecycle-tiny-0012-hit'),
+                      batch=(1, 'tool_calls', 1, 'pfx-lifecycle-tiny-0030-cold-batch')),
+         sequences=(
+             '760 1156 369 9859 728 310 10033 821',
+             '760 1156 369 9859 728 310 10033 279',
+         )),
+)
+
+
+def v48_records(group):
+    out = {}
+    for role, (index, finish, admissions, tag) in group['records'].items():
+        tokens = [int(token) for token in group['sequences'][index].split()]
+        out[role] = dict(tag=tag, token_ids=tokens, finish=finish, ok=True, prompt_sha='v48-%s' % group['conv'],
+                         prompt_tokens=1000, markers=dict(admissions=admissions))
+    return out
+
+
+class V48ReplayTests(unittest.TestCase):
+    """The batching rule on G1 v48's own concurrent pairs, from its records.jsonl."""
+
+    # (arm, conv) -> (verdict, basis) under the batching rule; v48's verdict is in the fixture.
+    EXPECTED = {('lifecycle-evict', 'life-0'): ('IDENTICAL', 'batch'),
+                ('lifecycle-evict', 'life-1'): ('NOT_COMPARABLE', 'batching'),
+                ('lifecycle-evict', 'same-step-0'): ('IDENTICAL', 'solo'),
+                ('lifecycle-evict', 'same-step-1'): ('IDENTICAL', 'batch'),
+                ('lifecycle-tiny', 'tiny-grant'): ('IDENTICAL', 'solo'),
+                ('lifecycle-tiny', 'tiny-0'): ('IDENTICAL', 'batch'),
+                ('lifecycle-tiny', 'tiny-1'): ('IDENTICAL', 'batch'),
+                ('lifecycle-tiny', 'tiny-2'): ('IDENTICAL', 'batch')}
+
+    def verdicts(self):
+        out = {}
+        for group in V48_CONCURRENT:
+            records = v48_records(group)
+            result = pj.concurrent_verdict(records['cold'], records['hit'], records.get('cold2'), records.get('batch'))
+            out[(group['arm'], group['conv'])] = (group, records, result)
+        return out
+
+    def test_each_v48_concurrent_pair_under_the_batching_rule(self):
+        verdicts = self.verdicts()
+        self.assertEqual(set(verdicts), set(self.EXPECTED))
+        for key, (group, records, result) in verdicts.items():
+            with self.subTest(pair=key):
+                self.assertEqual((result['verdict'], result.get('basis')), self.EXPECTED[key], result.get('reason'))
+        self.assertEqual(sum(1 for group, _, _ in verdicts.values() if group['v48'] == 'NOT_COMPARABLE'), 6)
+        # life-1: the control moved from the solo run at token 16, and from the hit at 144.
+        _, _, life1 = verdicts[('lifecycle-evict', 'life-1')]
+        self.assertEqual((life1['batch']['token'], life1['batch_hit']['token'], life1['first']['token']), (16, 144, 16))
+        # tiny-0: the hit and its control were both preempted and resumed, and still match.
+        _, records, tiny0 = verdicts[('lifecycle-tiny', 'tiny-0')]
+        self.assertEqual((records['hit']['markers']['admissions'], records['batch']['markers']['admissions']), (2, 2))
+        self.assertEqual(pj.settle(dict(tiny0, hit='h', cold='c'), {})['verdict'], 'IDENTICAL')
+
+    def test_the_v48_arms_pass_the_rule_with_a_solo_anchor_and_not_without(self):
+        """lifecycle-tiny's four concurrent pairs are all IDENTICAL now; lifecycle-evict keeps life-1 not
+        comparable, tolerated only beside an IDENTICAL solo pair of the arrivals family (the anchor
+        prefix_replay now runs) and with every solo pair IDENTICAL (v48's kill-switch pairs were ERRORs:
+        HTTP 400 at the API edge, the sizing fault fixed apart)."""
+        verdicts = self.verdicts()
+        arms = {}
+        for (arm, conv), (group, _, result) in verdicts.items():
+            arms.setdefault(arm, []).append(dict(case=group['case'], conv=conv, kind='concurrent', cold='c', hit='h',
+                                                 verdict=result['verdict'], basis=result.get('basis')))
+        tiny = pj.pair_summary(arms['lifecycle-tiny'])
+        self.assertEqual((tiny['identical'], tiny['identical_by_batch'], tiny['tolerance']), (4, 3, None))
+        solo = [pair(case, 'IDENTICAL') for case in ('life-first', 'life-first', 'abort-waiting-retry',
+                                                      'abort-prefill-retry', 'after-flood', 'after-reset', 'kill-before',
+                                                      'before-reload', 'after-reload', 'after-reload-2')]
+        evict = arms['lifecycle-evict'] + solo
+        self.assertFalse(pj.pair_summary(evict)['tolerated'], 'no IDENTICAL solo pair in the arrivals family')
+        anchored = pj.pair_summary(evict + [pair('arrivals:solo', 'IDENTICAL')])
+        self.assertTrue(anchored['tolerated'], anchored['untolerated'])
+        self.assertIn('1 not-comparable-by-batching, 0 failed', anchored['line'])
+        v48_kill = pj.pair_summary(evict + [pair('arrivals:solo', 'IDENTICAL'), pair('kill-on', 'ERROR'),
+                                            pair('kill-latched', 'ERROR')])
+        self.assertFalse(v48_kill['tolerated'])
+        self.assertIn('2 failed', v48_kill['line'])
+
 
 class ResolveTests(unittest.TestCase):
     def scanned(self):
