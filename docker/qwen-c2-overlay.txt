@@ -8,7 +8,13 @@
 #   - scripts/ci/build-c2-serving-image.sh checks the staged context against it, and
 #     scripts/ci/c2_image_provenance.py checks every DESTINATION's sha256 in the built image;
 #   - scripts/ci/test_c2_image_overlay.py fails when a file the image holds differs from HEAD but is
-#     named neither here nor in the P8 copy lists (the P8 base commit's), unless it is KNOWN_STALE.
+#     named neither here nor in the P8 copy lists (the P8 base commit's), unless C2_KNOWN_STALE pins
+#     its HEAD blob with a reason.
+#
+# COUPLING, deliberate: a pull request that changes any file the C2 image carries at an older layer
+# (the bundle or the P8 base commit) fails the CPU suite's test_c2_image_overlay until the file is
+# named here or re-reviewed in C2_KNOWN_STALE - otherwise the change never reaches the C2 image and
+# nothing says so (the ordered_cache trap, run 35790454545).
 #
 # The image's fast-path tree has three delivery routes, and a file NOT named here ships at the
 # version its route froze (memory serving-image-bundle-provenance):
@@ -25,8 +31,16 @@
 #   Listed DESTINATIONs replace that default (repeat it to keep it). @purelib/ is python's
 #   site-packages directory in the image.
 #
-# Never list frozen_combined_runtime.py: the native cache pins its bytes
-# (serving_native_install.py:57). Change its callers instead.
+# The parser (c2_overlay.parse_manifest) refuses, with the reason:
+#   - frozen_combined_runtime.py or tp_common.py as a source or a destination (pinned bytes; change
+#     their callers instead);
+#   - serving_native_install.py, serving_plugin_patch.py, serving_image_preflight.py: P8 RUNs them
+#     once at build, so an overlay changes nothing (a P8 rebuild or a re-apply RUN does);
+#   - serving_fast_policy.py or serving_dflash_registry.py without the TT plugin's own copy
+#     (/opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_fast_policy.py, qwen_dflash_registry.py) among
+#     the destinations.
+# install refuses a source whose bytes differ from the frozen recipe's pin for its destination
+# (frozen_combined_runtime.qualify hashes those on every exact request).
 
 # The serving contract, its profiles and boot hook.
 scripts/ci/serving_c2_contract.py
@@ -48,7 +62,11 @@ scripts/ci/serving_lifecycle.py
 scripts/ci/serving_packed_step.py
 
 # The third route: GreedySession arrives with the bundle's /speculative-decoding tree. Unchanged
-# since 77d6995a today; decision D1 (plan stage 2) changes it.
+# since 77d6995a today; decision D1 (plan stage 2) changes it. Its sha256 is recorded in
+# scripts/ci/dspark-request-hardware.json, but only dspark_request_experiment.request_preflight
+# reads such records, and only dspark-target-hardware.py calls that - not the serving path. If the
+# frozen evidence (target-replay.json, which qualify does not filter for '../') ever names it, the
+# install refuses a changed copy and G1 (e) fails the build.
 speculative-decoding/harness/greedy_session.py
 
 # Tests run inside the image at build time (every overlaid scripts/ci/test_*.py is).

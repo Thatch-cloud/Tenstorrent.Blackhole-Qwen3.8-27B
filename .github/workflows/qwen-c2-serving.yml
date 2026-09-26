@@ -6,7 +6,13 @@ name: Qwen C2 serving image
 #   status - what the rig holds: the last manual build log, C2 images, card holders, the agent
 #   build  - build tt-vllm:qwen38-c2-$C2_IMAGE_TAG unless present (waits for a build in flight);
 #            the overlay is docker/qwen-c2-overlay.txt, and the tag lands only after G1 provenance
-#            (binaries, overlay sha256s, boot argv; provenance.json in the results) passes
+#            (binaries and op directories, overlay sha256s and revision, boot argv and exact's v235
+#            environment, the layer model, the frozen-recipe pins; provenance.json in the results)
+#            passes. Before a first build, `c2_image_provenance.py --base-drift` on the P8 base shows
+#            what G1 would fail on, read-only.
+#   drift  - read-only, no cards: G1's strings, layer and frozen-pin checks on the P8 base
+#            (c2_image_provenance.py --base-drift), base-drift.log/.json in the results; reports,
+#            never fails the job - the build's G1 enforces
 #   smoke  - run it on cards M+A shaped like the node agent's container, then the API smoke
 #            (scripts/ci/c2_serving_smoke.py); the container is always removed
 #   push   - push it to zot and print the digest
@@ -46,7 +52,7 @@ jobs:
                   key, _, value = line.partition('=')
                   values[key.strip()] = value.strip()
           actions = values.get('C2_ACTIONS', 'status').split()
-          assert set(actions) <= {'status', 'platform', 'unserve', 'priority', 'reset', 'build', 'smoke', 'replay', 'push'}, actions
+          assert set(actions) <= {'status', 'platform', 'unserve', 'priority', 'reset', 'drift', 'build', 'smoke', 'replay', 'push'}, actions
           assert re.fullmatch(r'[0-9a-z.-]{3,40}', values.get('C2_IMAGE_TAG', '')), 'C2_IMAGE_TAG'
           assert values.get('C2_PROFILE', 'general') in ('general', 'coding', 'exact')
           print('actions=' + ' '.join(actions))
@@ -184,6 +190,24 @@ jobs:
           echo "reset_exit=$status heal_exit=$heal"
           serving_pair_resolve 120
           test "$status" = 0 && test "$heal" = 0
+      - name: G1 base drift
+        if: contains(steps.job.outputs.actions, 'drift')
+        working-directory: c2
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Read-only: what the first build's G1 would fail on, measured on the P8 base (no build, no tag,
+          # no cards). Exit 1 means problems were found; it is reported, not raised.
+          ctx="$RUNNER_TEMP/c2drift"
+          rm -rf "$ctx"
+          python3 -B scripts/ci/c2_overlay.py stage --repo . --out "$ctx"
+          status=0
+          python3 -B "$ctx/c2_image_provenance.py" --base-drift --context "$ctx" --graft /home/thatch/opgraft-K64i \
+            --report "$RUNNER_TEMP/c2-results/base-drift.json" > "$RUNNER_TEMP/c2-results/base-drift.log" 2>&1 || status=$?
+          tail -60 "$RUNNER_TEMP/c2-results/base-drift.log"
+          rm -rf "$ctx"
+          echo "base drift exit $status (1: the first build's G1 would fail on the WOULD FAIL lines)"
       - name: Build
         if: contains(steps.job.outputs.actions, 'build')
         working-directory: c2
@@ -206,8 +230,12 @@ jobs:
           # after G1 provenance (c2_image_provenance.py) passes. A tag present above skipped it:
           # images built before the manifest (v6-teardown and older) were never checked.
           # G1 closure, from git: no file the image carries may ship older than this commit unless
-          # KNOWN_STALE says why. The CPU suite runs these on pull requests only; images come from tags.
-          (cd scripts/ci && python3 -B -m unittest test_serving_image_copy_closure test_c2_image_overlay)
+          # C2_KNOWN_STALE says why. The CPU suite runs these on pull requests only; images come from
+          # tags. They run in the P8 base (python 3.10, the image's; git), not on the host's python.
+          base=$(sed -n 's/^ARG BASE=//p' docker/qwen-c2-serving.Dockerfile)
+          docker run --rm --network none --user "$(id -u):$(id -g)" -e HOME=/tmp -e VLLM_PLUGINS= \
+            -v "$PWD:/src:ro" -w /src/scripts/ci --entrypoint python3 "$base" \
+            -B -m unittest test_serving_image_copy_closure test_c2_image_overlay
           ctx="$RUNNER_TEMP/c2ctx"
           rm -rf "$ctx"
           python3 -B scripts/ci/c2_overlay.py stage --repo . --out "$ctx"

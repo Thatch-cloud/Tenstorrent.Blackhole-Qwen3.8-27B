@@ -2,7 +2,7 @@
 # m3native gate arm bind-mounted for tags v235/v238 baked in, plus the serving contract
 # (scripts/ci/serving_c2_contract.py) that makes a platform-launched vLLM match the gate's.
 # Thatch.Server's tt-serving-image.yml layers its runtime on top (docker/tenstorrent-serving.Dockerfile).
-# Built on the rig by scripts/ci/build-c2-serving-image.sh, from a context that
+# Built on the rig by the context's own build-c2-serving-image.sh, from a context that
 # `python3 scripts/ci/c2_overlay.py stage --repo . --out <dir>` stages and the script completes.
 ARG BASE=qwen-fast-serving:ci-be9e184e672756c8eee040f03e48dbff58e68fda
 FROM ${BASE}
@@ -91,3 +91,13 @@ ENV QWEN_ATTN_PREP=1 QWEN_CARDS_ALLOCATED=1 QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 QWE
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 VLLM_USE_V2_MODEL_RUNNER=0 TT_METAL_HOME=/opt/tt-metal \
     MESH_DEVICE=P300 OMP_NUM_THREADS=8 TT_CACHE_PATH=/experiment-cache/weights TT_METAL_CACHE=${KERNEL_CACHE} \
     VLLM_CACHE_ROOT=/tmp/vllm-cache QWEN_C2_SERVING=1
+
+# Provenance, last so a new commit or stamp never invalidates the cached layers above (an ARG
+# busts the cache of every RUN after it). P8's revision label names P8's commit; this one names
+# the commit the context was staged from (c2_overlay.py stage writes source-revision). The build
+# script writes build-stamp (its own sha256), so an older copy of the script, which writes none,
+# fails here instead of tagging an image G1 never checked; G1 holds the stamp to the context's script.
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=${SOURCE_REVISION}
+COPY source-revision build-stamp /opt/qwen-c2/
+RUN test -n "${SOURCE_REVISION}" && test "$(cat /opt/qwen-c2/source-revision)" = "${SOURCE_REVISION}"
