@@ -17,28 +17,37 @@ model.py (models/demos/blackhole/qwen36/tt/model.py in the image)
     when prefix reuse engages. RoPE stays staged for the whole prompt on every call: Lever N's
     "build RoPE only at start == 0" edit targets the same anchor and is NOT adopted, and a tree
     carrying it is refused (F5);
-  * prefill_paged_slots_prefix, the per-row prefill for the QWEN_PREFIX_REUSE route: every row is
+  * _qwen_prefix_prefill_slots, the per-row prefill for the QWEN_PREFIX_REUSE route: every row is
     checked against its committed grant before any row runs (grant.q == start_pos, the grant is the
-    row's, the checkpoint's token ids equal the prompt's; F2), a hit restores fp32 rec_state and
-    conv_carry into the bound B=1 scratch in place and resumes at Q/2048, planned boundaries are
-    captured to host (a failure skips the checkpoint and is counted, never fails the request; S7),
-    and QWEN_PREFIX_AUDIT=1 logs program-free KV / GDN-slot / logits digests (F3);
-  * the restore path is chosen and compiled at warmup, before any trace is parked (F3):
-    copy_host_to_device_tensor (no allocation, no program) when a per-chip pattern round-trips
-    exactly, else from_torch + ttnn.copy, whose programs the warmup has already compiled.
+    row's, the checkpoint's token ids equal the prompt's, its GDN states match the scratch's layer
+    count, shapes and dtypes; F2), a hit restores fp32 rec_state and conv_carry into the bound B=1
+    scratch in place and resumes at Q/2048, planned boundaries are captured to host (a failure
+    skips the checkpoint and is counted, never fails the request; S7), every row logs the program
+    cache size before and after it (F3), and QWEN_PREFIX_AUDIT=1 logs program-free KV / GDN-slot /
+    logits digests (F3). Its name is deliberately outside prefill_paged_slots*: the C2 fast path's
+    prefill capture (dflash_prefill_window.PrefillWindowCapture.bindings) refuses, on every
+    profile of the image, a model exposing a prefill_paged_slots* entry it does not know. For the
+    same reason the route refuses to run under a fast-path capture;
+  * the restore path is chosen and compiled at warmup, before any trace is parked (F3): each path
+    starts from a zeroed scratch, writes a pattern only it writes, and is read back chip by chip;
+    copy_host_to_device_tensor (no allocation, no program) when it round-trips exactly, else
+    from_torch + ttnn.copy, whose programs the warmup has already compiled.
 
 qwen36_vllm.py (models/demos/blackhole/qwen36/tt/qwen36_vllm.py)
   * supports_prefix_caching = QWEN_PREFIX_REUSE == "1", read once at import. The flag and the graft
     ship in this one stage: with the flag on and no graft, the stock model ignores start_pos and
     silently rewrites shared blocks;
-  * the batched TP prefill routes to prefill_paged_slots_prefix with the runner's start_pos and the
+  * the batched TP prefill routes to _qwen_prefix_prefill_slots with the runner's start_pos and the
     row request ids (REQ_IDS_KWARG, supplied by the runner patch); a resumed row reaching the
     unbatched path is an assertion;
-  * warmup_model_prefill warms the restore path on its first call (the plugin's compile-only phase).
+  * warmup_model_prefill warms the restore path on its first call (the plugin's compile-only phase),
+    once per model.
 
 With QWEN_PREFIX_REUSE unset every served path is the stock one: the new keyword arguments default
-to the stock behaviour, prefill_paged_slots is untouched, and the capability evaluates to False.
-test_qwen_prefix_model_runtime executes both files against a recording fake ttnn and holds that.
+to the stock behaviour, prefill_paged_slots is untouched, the model's prefill_paged_slots* entries
+are the stock ones, and the capability evaluates to False. test_qwen_prefix_model_runtime executes
+both files against a recording fake ttnn and holds that. Every new guard raises; none is a bare
+assert, so none vanishes under python -O.
 
 Anchor checks: the stage refuses unless the two files' sha256 equal SOURCE_SHA256 (the IMG tree,
 md5 e4ba08d9 / b5230935; the image's copy is UNVERIFIED to match until the bring-up anchor probe
@@ -46,9 +55,10 @@ reads it), and refuses to write unless the result equals PATCHED_SHA256 - so a d
 lever_n_model_patch (the bundle's 77d6995a copy has no eager-loop edit) cannot stage a different
 graft. Every edit is also scoped to one method and must match exactly once.
 
-Usage (in the image, after the C2 model-tree graft):
-    python3 qwen_prefix_model_patch.py --tree /opt/tt-metal/models/demos/blackhole/qwen36/tt
-    python3 qwen_prefix_model_patch.py --tree ... --probe       # original / staged / unknown
+Usage (in the image, after the C2 model-tree graft; -B because the repository tracks a
+scripts/ci/__pycache__ .pyc of lever_n_model_patch that an import would rewrite):
+    python3 -B qwen_prefix_model_patch.py --tree /opt/tt-metal/models/demos/blackhole/qwen36/tt
+    python3 -B qwen_prefix_model_patch.py --tree ... --probe       # original / staged / unknown
 Applying nothing on import: stage() is explicit, like serving_plugin_patch and lever_n_model_patch.
 """
 
@@ -71,8 +81,8 @@ SOURCE_SHA256 = {
 # edit below, or to lever_n_model_patch.patch_tp_replay, changes these on purpose
 # (test_qwen_prefix_model_patch prints the new values).
 PATCHED_SHA256 = {
-    MODEL_FILE: 'e5414fb9d06680cf213399e4ee78d95ed4dcd0d814009acaf016ce21cbf772b8',
-    VLLM_FILE: 'e59106fbc15d00e8f399803a36c65d9ae16f667a6b8624d20687d2086694455f',
+    MODEL_FILE: '79a08c8a7d864b78440e9758b2998eed2dc7cc9b547f09c8fb7e2992bd2beab9',
+    VLLM_FILE: '904952a6947b56f066248b6d7c70ce057617fb4ccccb2a00299d2c566cc6927c',
 }
 
 # Shared with the scheduler graft (prefix_scheduler_graft.REGISTRY_KEY) and the runner patch.
@@ -108,12 +118,28 @@ IMPORT_ANCHOR = 'from models.tt_transformers.tt.common import Mode, get_block_si
 MODEL_ADAPTER = r'''
 # ---- Prefix reuse (G1): the model side of the TT prefix-reuse design, section 2.0.1 item 4. ----
 # Staged by scripts/ci/qwen_prefix_model_patch.py. Only qwen36_vllm's QWEN_PREFIX_REUSE route
-# (Qwen36Model.prefill_paged_slots_prefix) reaches this code; the stock methods take the new
+# (Qwen36Model._qwen_prefix_prefill_slots) reaches this code; the stock methods take the new
 # keyword arguments at defaults that reproduce their old behaviour exactly.
 import time as _qwen_time
 
 _QWEN_PREFIX_REGISTRY_KEY = "_qwen_prefix_registry"
 _QWEN_PREFIX_CHUNK = 2048
+# The attributes the C2 fast path's prefill captures bind on the model while they are open
+# (dflash_prefill_window, dspark_prefill, target_features). Those captures wrap only the stock
+# prefill_paged_slots* entries, so a prefill through the prefix route would leave the admitted
+# GDN slot unrecorded: the route refuses to run while any of them is bound.
+_QWEN_PREFIX_FAST_PATH_MARKERS = (
+    "_qwen_dflash_prefill_capture",
+    "_qwen_dspark_prefill_capture",
+    "_qwen_target_feature_capture",
+)
+_QWEN_PREFIX_WARNED = set()
+
+
+def _qwen_prefix_warn_once(key, message):
+    if key not in _QWEN_PREFIX_WARNED:
+        _QWEN_PREFIX_WARNED.add(key)
+        logger.warning(message)
 
 
 def _qwen_prefix_registry():
@@ -154,9 +180,9 @@ def _qwen_prefix_plan(grant):
 class _QwenPrefixRow:
     """One prefill row's reuse decision, checked before any row of the step runs."""
 
-    __slots__ = ("index", "req_id", "start", "actual", "rec", "carry", "plan", "dropped")
+    __slots__ = ("index", "req_id", "start", "actual", "rec", "carry", "plan", "dropped", "granted")
 
-    def __init__(self, index, req_id, start, actual, rec=None, carry=None, plan=(), dropped=()):
+    def __init__(self, index, req_id, start, actual, rec=None, carry=None, plan=(), dropped=(), granted=False):
         self.index = index
         self.req_id = req_id
         self.start = start
@@ -165,10 +191,21 @@ class _QwenPrefixRow:
         self.carry = carry
         self.plan = list(plan)
         self.dropped = list(dropped)
+        self.granted = granted
 
 
-def _qwen_prefix_row(index, req_id, start, actual, toks, registry, chunk_size):
+def _qwen_prefix_state_spec(rec_list, carry_list):
+    """Per GDN layer: the host-view (shape, dtype) of rec_state and of conv_carry."""
+    return [(tuple(r.shape), r.dtype, tuple(c.shape), c.dtype) for r, c in zip(rec_list, carry_list)]
+
+
+def _qwen_prefix_row(index, req_id, start, actual, toks, registry, chunk_size, spec):
     """Check one row against its committed grant (F2) and return what the model runs.
+
+    spec is the bound scratch's GDN state as _qwen_prefix_warm_restore read it
+    (_qwen_prefix_state_spec), or None before the warmup chose a restore path. A checkpoint is
+    checked against it here - layer count, shapes and dtypes - so a bad checkpoint in any row
+    stops the step before any row runs.
 
     The scheduler graft commits a grant only for a request the step's output admits at
     start_pos == Q, so every refusal here is a broken invariant, not a miss: the engine stops
@@ -205,11 +242,26 @@ def _qwen_prefix_row(index, req_id, start, actual, toks, registry, chunk_size):
         rec, carry = checkpoint.rec, checkpoint.carry
         if rec is None or carry is None:
             raise AssertionError(f"{where}: the checkpoint holds no GDN state")
+        if spec is None:
+            raise AssertionError(
+                f"{where}: GDN restore before _qwen_prefix_warm_restore chose a path "
+                "(a first compile after the traces are parked hangs the engine)"
+            )
+        if len(rec) != len(spec) or len(carry) != len(spec):
+            raise AssertionError(
+                f"{where}: the checkpoint holds {len(rec)}/{len(carry)} GDN states, the model {len(spec)}"
+            )
+        for layer, (want, got) in enumerate(zip(spec, _qwen_prefix_state_spec(rec, carry))):
+            if got != want:
+                raise AssertionError(
+                    f"{where}: GDN layer {layer} checkpoint (rec shape, dtype, carry shape, dtype) {got} "
+                    f"is not the scratch's {want}"
+                )
     last = actual // chunk_size * chunk_size
     plan, dropped = [], []
     for pos in _qwen_prefix_plan(grant):
         (plan if q < pos <= last and pos % chunk_size == 0 else dropped).append(pos)
-    return _QwenPrefixRow(index, req_id, q, actual, rec, carry, plan, dropped)
+    return _QwenPrefixRow(index, req_id, q, actual, rec, carry, plan, dropped, granted=True)
 
 
 def _qwen_prefix_bytes(tensor):
@@ -217,7 +269,7 @@ def _qwen_prefix_bytes(tensor):
 '''
 
 MODEL_METHODS = r'''
-    def prefill_paged_slots_prefix(
+    def _qwen_prefix_prefill_slots(
         self, token_ids_list, page_table, empty_slots, valid_lens=None, starts=None, req_ids=None
     ):
         """prefill_paged_slots with conversation prefix reuse (QWEN_PREFIX_REUSE=1; G1).
@@ -231,29 +283,54 @@ MODEL_METHODS = r'''
             section 2.0.4);
           * at each planned 2048-token boundary the loop hands the scratch's state to the registry,
             which keys it by vLLM's block hash at that boundary.
-        Every row is checked before any row runs (_qwen_prefix_row): a stale or missing grant is an
-        assertion, never a silent rewrite of blocks another conversation shares.
+        Every row is checked before any row runs (_qwen_prefix_row): a stale or missing grant, or a
+        checkpoint that does not fit the scratch, is an assertion, never a silent rewrite of blocks
+        another conversation shares.
+
+        The name stays outside prefill_paged_slots* on purpose: the C2 fast path's prefill capture
+        enumerates that prefix on the model and refuses any entry it does not know
+        (dflash_prefill_window.BATCHED_PREFILL_ENTRIES), on every profile of the image. It wraps
+        only the stock entries, so this route refuses to run while a fast-path capture is bound.
         """
-        assert self.num_devices > 1, "prefill_paged_slots_prefix is the TP (num_devices>1) path"
+        for marker in _QWEN_PREFIX_FAST_PATH_MARKERS:
+            if hasattr(self, marker):
+                raise AssertionError(
+                    f"prefix reuse: {marker} is bound - QWEN_PREFIX_REUSE=1 does not run under the C2 fast "
+                    "path, whose prefill capture records the GDN slot only through prefill_paged_slots"
+                )
+        if self.num_devices <= 1:
+            raise AssertionError("prefix reuse: _qwen_prefix_prefill_slots is the TP (num_devices>1) path")
         N = len(token_ids_list)
-        assert len(empty_slots) == N, "one slot per request"
         starts = [0] * N if starts is None else [int(s) for s in starts]
         req_ids = [None] * N if req_ids is None else list(req_ids)
-        assert len(starts) == N and len(req_ids) == N, "one start_pos and one request id per row"
+        if len(empty_slots) != N or len(starts) != N or len(req_ids) != N:
+            raise AssertionError("prefix reuse: one slot, one start_pos and one request id per row")
         pt = page_table if isinstance(page_table, torch.Tensor) else ttnn.to_torch(page_table)
-        assert pt.shape[0] == N, "page_table must have one row per request"
+        if pt.shape[0] != N:
+            raise AssertionError("prefix reuse: page_table must have one row per request")
         comp = ttnn.ConcatMeshToTensor(self.mesh_device, dim=0)
         dn_states = self._qwen_prefix_gdn_layers()
         registry = _qwen_prefix_registry()
+        if registry is None:
+            _qwen_prefix_warn_once(
+                "registry",
+                f"[PREFIX] QWEN_PREFIX_REUSE=1 but no prefix registry is installed in this process "
+                f"(sys.modules[{_QWEN_PREFIX_REGISTRY_KEY!r}]): every row runs cold and reuse never engages - "
+                "the scheduler graft is missing or runs in another process",
+            )
+        held = "absent" if registry is None else "present"
         chunk_size = self._chunked_chunk_size or _QWEN_PREFIX_CHUNK
         path = "traced" if self._chunked_trace_id is not None else "eager"
+        spec = getattr(self, "_qwen_prefix_state_spec", None)
         rows = []
         for u in range(N):
             toks = token_ids_list[u]
-            assert toks.shape[0] == 1, f"request {u}: token_ids must be [1, T_u]"
+            if toks.shape[0] != 1:
+                raise AssertionError(f"prefix reuse: request {u}: token_ids must be [1, T_u]")
             actual = int(valid_lens[u]) if valid_lens is not None else toks.shape[1]
-            assert actual >= 1, f"request {u}: empty prompt (actual_len={actual})"
-            rows.append(_qwen_prefix_row(u, req_ids[u], starts[u], actual, toks, registry, chunk_size))
+            if actual < 1:
+                raise AssertionError(f"prefix reuse: request {u}: empty prompt (actual_len={actual})")
+            rows.append(_qwen_prefix_row(u, req_ids[u], starts[u], actual, toks, registry, chunk_size, spec))
         audit = os.environ.get("QWEN_PREFIX_AUDIT") == "1"
 
         prev = self._bind_gdn_prefill_scratch()
@@ -265,13 +342,15 @@ MODEL_METHODS = r'''
                 u, actual = row.index, row.actual
                 toks = token_ids_list[u]
                 began = _qwen_time.perf_counter()
+                # F3: the program cache before and after every row; any growth after warmup is a
+                # compile after the traces are parked (the #48536 hang hazard).
+                programs_before = self._qwen_prefix_program_cache_entries()
                 restored_ms = None
                 programs = None
                 if row.start:
-                    before = self._qwen_prefix_program_cache_entries()
                     self._qwen_prefix_restore(row.rec, row.carry)
                     restored_ms = (_qwen_time.perf_counter() - began) * 1000.0
-                    programs = (before, self._qwen_prefix_program_cache_entries())
+                    programs = (programs_before, self._qwen_prefix_program_cache_entries())
                     _qwen_prefix_note(registry, "restore_ms", restored_ms)
                 captured = []
                 resume = {}
@@ -293,13 +372,23 @@ MODEL_METHODS = r'''
                 )
                 if audit:
                     self._qwen_prefix_audit(row, pt[u : u + 1], per_user_rec[-1], per_user_conv[-1], host_logits[-1])
+                programs_after = self._qwen_prefix_program_cache_entries()
                 elapsed = (_qwen_time.perf_counter() - began) * 1000.0
                 restored = "-" if restored_ms is None else f"{restored_ms:.1f}"
                 logger.info(
-                    f"[PREFIX] row={u} req={row.req_id} path={path} Q={row.start} L={actual} "
+                    f"[PREFIX] row={u} req={row.req_id} path={path} registry={held} "
+                    f"grant={'committed' if row.granted else 'none'} Q={row.start} L={actual} plan={row.plan} "
                     f"restored_ms={restored} captured=[{','.join(captured)}] dropped={row.dropped} "
-                    f"ms={elapsed:.1f} programs_across_restore={programs}"
+                    f"ms={elapsed:.1f} programs={programs_before}->{programs_after} "
+                    f"programs_across_restore={programs}"
                 )
+                if programs_before is not None and programs_after is not None and programs_after > programs_before:
+                    _qwen_prefix_note(registry, "program_growth", 1)
+                    logger.warning(
+                        f"[PREFIX] program growth: row={u} req={row.req_id} Q={row.start} L={actual} compiled "
+                        f"{programs_after - programs_before} program(s) after warmup (F3): a compile after the "
+                        "traces are parked is the second-request hang (#48536)"
+                    )
         finally:
             # Always rebind the batched decode buffers; the scratch persists (see prefill_paged_slots).
             self._unbind_gdn_prefill_scratch(prev)
@@ -312,7 +401,8 @@ MODEL_METHODS = r'''
         return [layer.attention for layer in self.layers if not layer.is_full_attention]
 
     def _qwen_prefix_program_cache_entries(self):
-        """Program-cache size, for the F3 check that a restore compiles nothing (None if unknown)."""
+        """Program-cache size, for the F3 check that a row compiles nothing (None if unknown; the
+        warmup warns once when it is unknown, so the check never goes blind silently)."""
         try:
             return int(self.mesh_device.num_program_cache_entries())
         except Exception:
@@ -359,7 +449,14 @@ MODEL_METHODS = r'''
         copy: from_torch + ttnn.copy (_restore_gdn_scratch's pattern plus the carry); its programs
               are compiled by _qwen_prefix_warm_restore before any trace is parked.
         A restore before the warmup chose a path is refused: a first compile after parking is the
-        second-request hang (#48536), not a wrong answer."""
+        second-request hang (#48536), not a wrong answer. _qwen_prefix_row already refuses such a
+        row, and a checkpoint that does not fit the scratch, before any row of the step runs.
+
+        Tile padding (UNVERIFIED): a restore writes conv_carry's tile padding as zeros (from_torch);
+        a cold run's carry holds whatever ttnn.copy(conv_new_state, conv_carry) copied from the
+        sliced state. If the next chunk's ttnn.concat([conv_state, qkv], dim=1) read padding, a hit
+        would differ from cold. The warmup compares logical values only and cannot see this; the
+        salted-cold exactness gate on hardware is the check."""
         mode = mode or getattr(self, "_qwen_prefix_restore_mode", None)
         if mode not in ("h2d", "copy"):
             raise AssertionError(
@@ -393,27 +490,47 @@ MODEL_METHODS = r'''
     def _qwen_prefix_warm_restore(self):
         """Choose the GDN restore path and compile it before any trace is parked (F3).
 
-        Called with the B=1 scratch bound, from Qwen36ForCausalLM.warmup_model_prefill's first
-        call (the plugin's compile-only phase). Each path writes a per-chip pattern and reads it
-        back. copy runs first and always, so that falling back to it can never be a first compile
-        after parking; h2d is preferred when it round-trips exactly. QWEN_PREFIX_RESTORE=h2d|copy
-        forces one. The engine refuses to start when no path round-trips."""
+        Called with the B=1 scratch bound, from Qwen36ForCausalLM._qwen_prefix_warm on the
+        plugin's compile-only warmup call. Each path is judged on its own: the scratch is zeroed
+        first, the path writes a pattern no other path writes (a per-chip offset plus a per-path
+        offset, never zero, exact in bf16), and the read-back is compared chip by chip. So a path
+        that writes nothing, writes one chip only, or writes one chip's shard to every chip reads
+        back as "differs on chip(s) [...]" - the earlier path's pattern is not there to be read
+        back instead. copy runs first and always, so that falling back to it can never be a first
+        compile after parking; h2d is preferred when it round-trips exactly. QWEN_PREFIX_RESTORE=
+        h2d|copy forces one. The engine refuses to start when no allowed path round-trips. Logical
+        values only: tile padding is not compared (see _qwen_prefix_restore)."""
         rec_now, carry_now, nbytes = self._qwen_prefix_read_scratch()
+        chips = max(1, int(self.num_devices))
 
-        def pattern(t):
+        def pattern(t, offset):
+            rows = t.shape[0]
             base = (torch.arange(t.numel()) % 64).to(torch.float32).reshape(t.shape) / 8.0
-            chip = torch.arange(t.shape[0], dtype=torch.float32).reshape([-1] + [1] * (t.dim() - 1))
-            return (base + chip * 0.5).to(t.dtype)
+            chip = (torch.arange(rows) // max(1, rows // chips)).to(torch.float32)
+            return (base + chip.reshape([-1] + [1] * (t.dim() - 1)) * 0.5 + offset).to(t.dtype)
 
-        rec_pat = [pattern(t) for t in rec_now]
-        carry_pat = [pattern(t) for t in carry_now]
+        def chips_differing(back, want):
+            bad = set()
+            for a, b in zip(back, want):
+                if tuple(a.shape) != tuple(b.shape) or a.dtype != b.dtype:
+                    bad.update(range(chips))
+                    continue
+                for chip, (x, y) in enumerate(zip(torch.chunk(a, chips, dim=0), torch.chunk(b, chips, dim=0))):
+                    if not torch.equal(x, y):
+                        bad.add(chip)
+            return sorted(bad)
+
         results = {}
-        for mode in ("copy", "h2d"):
+        for index, mode in enumerate(("copy", "h2d")):
+            offset = 0.25 * (index + 1)
+            rec_pat = [pattern(t, offset) for t in rec_now]
+            carry_pat = [pattern(t, offset) for t in carry_now]
             try:
+                self._reset_gdn_state_for_new_sequence()
                 self._qwen_prefix_restore(rec_pat, carry_pat, mode=mode)
                 rec_back, carry_back, _ = self._qwen_prefix_read_scratch()
-                exact = all(torch.equal(a, b) for a, b in zip(rec_back + carry_back, rec_pat + carry_pat))
-                results[mode] = "exact" if exact else "differs"
+                bad = chips_differing(rec_back + carry_back, rec_pat + carry_pat)
+                results[mode] = "exact" if not bad else f"differs on chip(s) {bad}"
             except Exception as error:
                 results[mode] = f"refused ({type(error).__name__}: {error})"
         self._reset_gdn_state_for_new_sequence()
@@ -421,14 +538,23 @@ MODEL_METHODS = r'''
         order = (forced,) if forced in ("h2d", "copy") else ("h2d", "copy")
         chosen = next((mode for mode in order if results.get(mode) == "exact"), None)
         if chosen is None:
-            raise RuntimeError(f"prefix reuse: no GDN restore path round-trips the prefill scratch: {results}")
+            raise RuntimeError(
+                f"prefix reuse: no allowed GDN restore path {list(order)} round-trips the prefill scratch: {results}"
+            )
+        self._qwen_prefix_state_spec = _qwen_prefix_state_spec(rec_now, carry_now)
         self._qwen_prefix_restore_mode = chosen
+        programs = self._qwen_prefix_program_cache_entries()
+        if programs is None:
+            logger.warning(
+                "[PINDIAG] prefix: the program-cache size is unavailable "
+                "(mesh_device.num_program_cache_entries); the per-row F3 no-compile check is blind"
+            )
         kv = self._paged_kv_caches[0][0].dtype if self._paged_kv_caches else None
         logger.info(
             f"[PINDIAG] prefix: model warm restore_mode={chosen} results={results} "
             f"gdn_layers={len(rec_now)} checkpoint_bytes={nbytes} "
             f"rec={tuple(rec_now[0].shape)}/{rec_now[0].dtype} carry={tuple(carry_now[0].shape)}/{carry_now[0].dtype} "
-            f"kv_dtype={kv} programs={self._qwen_prefix_program_cache_entries()}"
+            f"kv_dtype={kv} programs={programs}"
         )
 
     def _qwen_prefix_audit(self, row, page_row, rec_snap, conv_snap, logits):
@@ -521,13 +647,16 @@ ENTRY_RESUME = ENTRY_ROPE + (
     '        # Nothing below changes a call that passes neither start nor capture_at.\n'
     '        _qwen_resume = {}\n'
     '        if start or capture_at:\n'
-    '            assert start % chunk_size == 0 and 0 <= start < actual_len, (\n'
-    '                f"prefix reuse: start_pos {start} is not a chunk boundary inside the prompt (L={actual_len})"\n'
-    '            )\n'
-    '            assert num_full >= 1 and self.num_devices > 1, (\n'
-    '                f"prefix reuse needs the chunked TP path: start={start} L={actual_len} num_full={num_full}"\n'
-    '            )\n'
-    '            assert not capture_at or on_capture is not None, "prefix reuse: capture_at without on_capture"\n'
+    '            if start % chunk_size or not 0 <= start < actual_len:\n'
+    '                raise AssertionError(\n'
+    '                    f"prefix reuse: start_pos {start} is not a chunk boundary inside the prompt (L={actual_len})"\n'
+    '                )\n'
+    '            if num_full < 1 or self.num_devices <= 1:\n'
+    '                raise AssertionError(\n'
+    '                    f"prefix reuse needs the chunked TP path: start={start} L={actual_len} num_full={num_full}"\n'
+    '                )\n'
+    '            if capture_at and on_capture is None:\n'
+    '                raise AssertionError("prefix reuse: capture_at without on_capture")\n'
     '            _qwen_resume = dict(\n'
     '                chunk_from=start // chunk_size,\n'
     '                chunk_to=num_full,\n'
@@ -606,7 +735,7 @@ VLLM_SLOTS_OLD = '        host_logits = model.prefill_paged_slots(token_ids_list
 VLLM_SLOTS_NEW = (
     '        if _QWEN_PREFIX_REUSE:\n'
     '            # start_pos is the runner\'s num_computed_tokens: Q on a committed hit, else 0.\n'
-    '            host_logits = model.prefill_paged_slots_prefix(\n'
+    '            host_logits = model._qwen_prefix_prefill_slots(\n'
     '                token_ids_list, pt, empty_slots, valid_lens=plens, starts=start_pos, req_ids=req_ids\n'
     '            )\n'
     '        else:\n'
@@ -624,11 +753,11 @@ VLLM_WARM_METHOD = r'''
 
         Runs on the first warmup_model_prefill call, which the plugin makes in its compile-only
         phase (enable_trace=False, before any trace capture), so it precedes the chunk trace on the
-        traced path and the decode trace on both. Once per process."""
-        if getattr(self, "_qwen_prefix_warmed", False):
-            return
-        self._qwen_prefix_warmed = True
+        traced path and the decode trace on both. Once per model: keyed on the restore mode the
+        model itself holds, so a model that has not chosen one is always warmed here."""
         model = self.model[0]
+        if getattr(model, "_qwen_prefix_restore_mode", None) is not None:
+            return
         if not (model.num_devices > 1 and model.args.max_batch_size > 1):
             logger.warning(
                 "[PINDIAG] prefix: model warm skipped - not the batched TP path "

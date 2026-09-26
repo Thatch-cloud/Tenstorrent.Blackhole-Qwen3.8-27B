@@ -158,11 +158,34 @@ class Scope(unittest.TestCase):
         changed = {name for name in before if before[name] != after[name]}
         self.assertEqual(changed, {'prefill_traced_chunked', '_prefill_chunked_eager_tp', '_prefill_traced_chunked_tp'})
         added = set(after) - set(before)
-        self.assertEqual(added, {'prefill_paged_slots_prefix', '_qwen_prefix_gdn_layers',
+        self.assertEqual(added, {'_qwen_prefix_prefill_slots', '_qwen_prefix_gdn_layers',
                                  '_qwen_prefix_program_cache_entries', '_qwen_prefix_read_scratch',
                                  '_qwen_prefix_capture', '_qwen_prefix_restore', '_qwen_prefix_warm_restore',
                                  '_qwen_prefix_audit'})
         self.assertEqual(before['prefill_paged_slots'], after['prefill_paged_slots'])
+
+    def test_the_batched_prefill_entries_are_the_stock_ones(self):
+        """The C2 fast path's prefill capture enumerates prefill_paged_slots* on the model and
+        refuses any name outside BATCHED_PREFILL_ENTRIES, on every profile of the image (review
+        finding 1). The stage adds none; test_qwen_prefix_model_runtime runs the capture itself."""
+        import dflash_prefill_window
+        before, after = model_methods(model_text()), model_methods(staged()[0])
+        entries = lambda names: {name for name in names if name.startswith('prefill_paged_slots')}  # noqa: E731
+        self.assertEqual(entries(after), entries(before))
+        self.assertLessEqual(entries(after), set(dflash_prefill_window.BATCHED_PREFILL_ENTRIES))
+        self.assertNotIn('def prefill_paged_slots', patcher.MODEL_METHODS)
+
+    def test_the_new_guards_raise_and_are_not_bare_asserts(self):
+        """python -O strips assert statements; every guard the stage adds must survive it."""
+        blocks = {'MODEL_ADAPTER': patcher.MODEL_ADAPTER,
+                  'MODEL_METHODS': 'class _Methods:\n' + patcher.MODEL_METHODS,
+                  'VLLM_WARM_METHOD': 'class _Methods:\n' + patcher.VLLM_WARM_METHOD}
+        for name, block in blocks.items():
+            asserts = [node.lineno for node in ast.walk(ast.parse(block)) if isinstance(node, ast.Assert)]
+            self.assertEqual(asserts, [], name)
+        for name in ('ENTRY_RESUME', 'EAGER_TAIL_NEW', 'TRACED_CAPTURE_NEW', 'VLLM_ENTRY_NEW',
+                     'VLLM_BATCHED_CALL_NEW', 'VLLM_SLOTS_NEW', 'VLLM_WARM_NEW'):
+            self.assertNotIn('assert ', getattr(patcher, name), name)
 
     def test_model_module_level_additions_sit_after_the_imports(self):
         stock, graft = model_text(), staged()[0]

@@ -16,7 +16,14 @@ fixtures/qwen36_vllm.py, the IMG bytes qwen_prefix_model_patch pins), stock or s
     the carry, or over the wrong blocks changes the bytes; an exact resume reproduces them.
 
 The registry is prefix_scheduler_graft.PrefixRegistry (the P0a prototype of qwen_prefix_registry),
-driven the way the scheduler graft drives it: begin_step, stage, commit.
+driven the way the scheduler graft drives it: begin_step, stage, commit, with the capture plan
+computed by the graft's own SchedulerGraft.plan and Q checked by the trim's token check.
+
+What the fixture does NOT model (review finding 10): mesh mappers are recorded but a device tensor
+is its logical host view (dim 0 = the chips), so how copy_host_to_device_tensor distributes a
+sharded host tensor into a replicated scratch is only modelled through the h2d_mode failure cases;
+bfloat8_b is stored as fp32 (bf8 exactness is a hardware property the design marks UNVERIFIED);
+tile padding does not exist here.
 """
 
 import contextlib
@@ -78,6 +85,8 @@ class FakeMesh(object):
         return 2
 
     def num_program_cache_entries(self):
+        if not self.fake.program_count_known:
+            raise AttributeError("'MeshDevice' object has no attribute 'num_program_cache_entries'")
         return len(self.fake.programs)
 
 
@@ -92,15 +101,22 @@ class Unfaked(object):
 
 class FakeTTNN(object):
     """A ttnn stand-in that records every call. h2d_refuse makes copy_host_to_device_tensor refuse
-    the spec (the design's UNVERIFIED case), copy_corrupt makes ttnn.copy write wrong bytes, and
-    to_torch_hook(tensor) may raise (MemoryError during a capture)."""
+    the spec (the design's UNVERIFIED case); h2d_mode makes it accept the spec and then write
+    wrongly (review finding 2: 'noop' writes nothing, 'chip0' writes chip 0's shard only,
+    'chip0_to_all' writes chip 0's shard to every chip - the host view's dim 0 is the mesh);
+    copy_corrupt makes ttnn.copy write wrong bytes; to_torch_hook(tensor) may raise (MemoryError
+    during a capture); program_count_known=False makes the mesh lack num_program_cache_entries."""
+
+    H2D_MODES = ('exact', 'noop', 'chip0', 'chip0_to_all')
 
     def __init__(self):
         self.log = []
         self.programs = set()
         self.h2d_refuse = False
+        self.h2d_mode = 'exact'
         self.copy_corrupt = False
         self.to_torch_hook = None
+        self.program_count_known = True
         self.bfloat16 = FakeDType('bfloat16', torch.bfloat16)
         self.float32 = FakeDType('float32', torch.float32)
         self.bfloat8_b = FakeDType('bfloat8_b', torch.float32)
@@ -170,7 +186,16 @@ class FakeTTNN(object):
             raise RuntimeError('copy_host_to_device_tensor: spec %s/%s/%s into %s/%s/%s' % (
                 host.shape, host.dtype.name, host.layout, device_tensor.shape,
                 device_tensor.dtype.name, device_tensor.layout))
-        device_tensor.data.copy_(host.data)
+        if self.h2d_mode not in self.H2D_MODES:
+            raise ValueError('unknown h2d_mode %r' % self.h2d_mode)
+        chip = host.data.shape[0] // 2
+        if self.h2d_mode == 'exact':
+            device_tensor.data.copy_(host.data)
+        elif self.h2d_mode == 'chip0':
+            device_tensor.data[:chip].copy_(host.data[:chip])
+        elif self.h2d_mode == 'chip0_to_all':
+            device_tensor.data[:chip].copy_(host.data[:chip])
+            device_tensor.data[chip:].copy_(host.data[:chip])
 
     def deallocate(self, tensor):
         if tensor is None:
@@ -425,7 +450,9 @@ class Toy(object):
             else:
                 dn = layer.attention
                 carry = dn.conv_carry.data.to(torch.float32)
-                window = torch.cat([carry[0, :, 0], toks])
+                # Both chips' carries feed the next chunk (each chip holds its own shard on the
+                # device), so a restore that loses or corrupts either chip's carry changes the bytes.
+                window = torch.cat([carry[0, :, 0] + 0.25 * carry[1, :, -1], toks])
                 conv = window[3:] + 0.5 * window[2:-1] + 0.25 * window[1:-2] + 0.125 * window[:-3]
                 update = conv.sum() * 1e-4 + h * 1e-3 + dn.index
                 dn.rec_state.data.copy_(dn.rec_state.data * 0.99 + update)
@@ -524,19 +551,52 @@ class Pool(object):
         return torch.tensor([blocks + [0] * (self.width - len(blocks))], dtype=torch.int32)
 
 
-def admit(registry, req_id, tokens, q, plan=(), h=None, step=True):
-    """Stage and commit one grant exactly as SchedulerGraft.trim + commit do; returns start_pos."""
+class BlockHashes(object):
+    """request.block_hashes as vLLM keeps it (one per full 64-token block), computed on demand:
+    entry i is key_at(tokens, (i + 1) * 64)."""
+
+    def __init__(self, tokens):
+        self.tokens = tokens
+
+    def __len__(self):
+        return len(self.tokens) // BLOCK
+
+    def __getitem__(self, index):
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        return key_at(self.tokens, (index + 1) * BLOCK)
+
+
+def admit(registry, req_id, tokens, q, plan=None, h=None, step=True, force_plan=False):
+    """Stage and commit one grant as SchedulerGraft.trim + commit do; returns start_pos.
+
+    The plan is the scheduler graft's own (SchedulerGraft.plan: the prompt's last boundary above Q
+    plus the gap boundary floor2048(h)); a test's explicit plan must equal it unless force_plan,
+    which hands the model a plan the scheduler would not make. Q's checkpoint must pass the trim's
+    token check (Checkpoint.matches), or the scheduler would have lowered Q."""
     if step:
         registry.begin_step()
     tokens = as_ids(tokens)
+    h = q if h is None else h
     request = SimpleNamespace(request_id=req_id, all_token_ids=tokens, num_prompt_tokens=len(tokens),
-                              num_tokens=len(tokens))
+                              num_tokens=len(tokens), block_hashes=BlockHashes(tokens))
     key = key_at(tokens, q) if q else None
     checkpoint = registry.get(key) if q else None
     if q and checkpoint is None:
         raise AssertionError('the test asked for a hit at %d with no checkpoint' % q)
-    registry.stage(graft.Grant(req_id, q, q if h is None else h, key, checkpoint,
-                               [(pos, key_at(tokens, pos)) for pos in plan], request))
+    if q and (checkpoint.pos != q or not checkpoint.matches(tokens[0:q])):
+        raise AssertionError('the trim would refuse the checkpoint at %d (token mismatch)' % q)
+    planned = graft.SchedulerGraft.plan(None, request, h, q)
+    if plan is None:
+        pairs = planned
+    elif force_plan:
+        pairs = [(pos, key_at(tokens, pos)) for pos in plan]
+    else:
+        if list(plan) != [pos for pos, _ in planned]:
+            raise AssertionError('the test plan %r is not the scheduler graft\'s %r (L=%d h=%d Q=%d)' % (
+                list(plan), [pos for pos, _ in planned], len(tokens), h, q))
+        pairs = planned
+    registry.stage(graft.Grant(req_id, q, h, key, checkpoint, pairs, request))
     registry.commit({req_id: q})
     return q
 

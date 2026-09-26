@@ -13,15 +13,26 @@ qwen_prefix_registry, driven as the scheduler graft drives it. What is held:
   sensitive  the harness sees what the design says breaks exactness: no conv_carry, no restore;
              and the unguarded eager tail (Lever N's loop alone) raises ttnn.deallocate(None);
   guards     start_pos > 0 without a registry, a request id, a committed grant, a current grant,
-             the row's grant or matching tokens is an assertion before any chunk runs (F2); a
-             resumed row on the unbatched path asserts; a restore before warmup asserts (F3);
+             the row's grant or matching tokens, or with a checkpoint whose layer count, shapes or
+             dtypes are not the scratch's, is an assertion before any row runs (F2); a resumed row
+             on the unbatched path asserts; a restore before warmup asserts (F3);
   warmup     the restore path is chosen on the plugin's compile-only call and compiles nothing on a
-             hit (copy_host_to_device_tensor when it round-trips, else ttnn.copy warmed), once;
+             hit (copy_host_to_device_tensor when it round-trips, else ttnn.copy warmed), once per
+             model; each path is judged from a zeroed scratch with its own pattern, chip by chip,
+             so an h2d that writes nothing, one chip, or chip 0 to both is not chosen;
   capture    a MemoryError while capturing skips the checkpoint, counts it, and the request is exact
              (S7); a registry refusal is reported; unreachable plan positions are dropped;
+  fast path  the C2 fast path's prefill capture binds the staged model on every profile (its
+             prefill_paged_slots* entries are the stock ones), and the prefix route refuses to run
+             under any fast-path capture;
+  markers    every row names the registry's presence, the grant and its plan, and the program cache
+             before and after it; growth, a missing registry and an unknown count are warned;
   audit      QWEN_PREFIX_AUDIT=1 digests match between hit and cold, and the audit only reads;
   off        with QWEN_PREFIX_REUSE unset the staged files make exactly the stock files' ttnn calls
-             and results (prefill and warmup, traced and eager), and the capability is False.
+             and results (prefill and warmup, traced and eager), add only private _qwen_prefix*
+             names to the classes, and the capability is False.
+
+Grants carry the scheduler graft's own capture plan (SchedulerGraft.plan) unless a test forces one.
 """
 
 import contextlib
@@ -67,9 +78,10 @@ def registry_scope(registry):
 class Engine(object):
     """One engine process: a model (stock or staged), its vLLM wrapper, a registry and a block pool."""
 
-    def __init__(self, traced=False, environ=ON, sources=None, registry=True, h2d_refuse=False):
+    def __init__(self, traced=False, environ=ON, sources=None, registry=True, h2d_refuse=False, h2d_mode='exact'):
         self.fake = F.FakeTTNN()
         self.fake.h2d_refuse = h2d_refuse
+        self.fake.h2d_mode = h2d_mode
         self.log = F.FakeLogger()
         model_source, vllm_source = sources or F.staged_sources()
         self.module = F.load_source(model_source, 'qwen36_model_under_test', F.model_stubs(self.fake, self.log))
@@ -102,13 +114,14 @@ class Engine(object):
                 batch, torch.cat([row[2] for row in rows], dim=0), None, [len(row[1]) for row in rows], **kwargs)
         return logits
 
-    def turn(self, conv, tokens, q, plan=(), slot=0, h=None, shared_row=None):
-        """One admitted turn: the grant the scheduler commits, a page row sharing the first Q/64
-        blocks vLLM's cache returned, the prefill. Returns (logits, row, slot)."""
+    def turn(self, conv, tokens, q, plan=None, slot=0, h=None, shared_row=None, force_plan=False):
+        """One admitted turn: the grant the scheduler commits (its plan is SchedulerGraft.plan's
+        unless force_plan), a page row sharing the first Q/64 blocks vLLM's cache returned, the
+        prefill. Returns (logits, row, slot)."""
         source = shared_row if shared_row is not None else conv.get('row')
         shared = source[0, :q // F.BLOCK].tolist() if q else []
         row = self.pool.row(len(tokens), shared)
-        F.admit(self.registry, conv['id'], tokens, q, plan, h=h)
+        F.admit(self.registry, conv['id'], tokens, q, plan, h=h, force_plan=force_plan)
         logits = self.prefill([(conv['id'], tokens, row, q, slot)])
         conv['row'] = row
         return logits, row, slot
@@ -133,7 +146,7 @@ class ExactTestBase(unittest.TestCase):
         engine.warm()
         return engine
 
-    def run_turn_and_cold(self, engine, conv, tokens, q, plan=(), **kwargs):
+    def run_turn_and_cold(self, engine, conv, tokens, q, plan=None, **kwargs):
         hit = engine.turn(conv, tokens, q, plan, **kwargs)
         hit_slot = [(rec.clone(), [c.clone() for c in convs]) for rec, convs in engine.toy.slot(hit[2])]
         cold = engine.cold(tokens, req='cold-%s-%d' % (conv['id'], len(tokens)))
@@ -282,7 +295,7 @@ class Sensitivity(ExactTestBase):
         engine.turn(conv, base[:4500], 0, [4096])
         if mutate:
             mutate(engine)
-        hit = engine.turn(conv, base[:8000], 4096, [])
+        hit = engine.turn(conv, base[:8000], 4096)
         hit_slot = [r.clone() for r, _ in engine.toy.slot(0)]
         cold = engine.cold(base[:8000])
         same_slot = all(torch.equal(a, b) for a, (b, _) in zip(hit_slot, engine.toy.slot(3)))
@@ -296,6 +309,16 @@ class Sensitivity(ExactTestBase):
             checkpoint = next(iter(engine.registry.entries.values()))
             checkpoint.carry = [torch.zeros_like(c) for c in checkpoint.carry]
         self.assertFalse(self.hit_after(self.engine(), drop_carry))
+
+    def test_a_restore_that_loses_chip_1s_carry_is_caught(self):
+        """Review finding 10: the toy reads both chips' carries, so chip 1 alone matters."""
+        def drop_chip1_carry(engine):
+            checkpoint = next(iter(engine.registry.entries.values()))
+            carry = [c.clone() for c in checkpoint.carry]
+            for c in carry:
+                c[1:] = 0
+            checkpoint.carry = carry
+        self.assertFalse(self.hit_after(self.engine(), drop_chip1_carry))
 
     def test_a_resume_without_restore_is_caught(self):
         def no_restore(engine):
@@ -381,6 +404,26 @@ class GrantGuards(ExactTestBase):
         good = ('fresh', F.prompt(3000, seed=62), self.engine_.pool.row(3000), 0, 1)
         self.assert_refused('no committed grant', [good, self.row(4096)])
 
+    def test_a_checkpoint_with_the_wrong_layer_count_stops_the_step_before_any_row_runs(self):
+        """Review finding 5: the layer count is checked with the grant, not inside the row loop."""
+        F.admit(self.engine_.registry, 'g', self.tokens, 4096)
+        checkpoint = self.engine_.registry.grant_for('g').checkpoint
+        checkpoint.rec = checkpoint.rec[:2]
+        good = ('fresh', F.prompt(3000, seed=63), self.engine_.pool.row(3000), 0, 1)
+        self.assert_refused('holds 2/3 GDN states, the model 3', [good, self.row(4096)])
+
+    def test_a_checkpoint_whose_shape_is_not_the_scratchs_is_refused(self):
+        F.admit(self.engine_.registry, 'g', self.tokens, 4096)
+        checkpoint = self.engine_.registry.grant_for('g').checkpoint
+        checkpoint.carry = [c[:, :2] for c in checkpoint.carry]
+        self.assert_refused(r"GDN layer 0 checkpoint .* is not the scratch's", [self.row(4096)])
+
+    def test_a_checkpoint_whose_dtype_is_not_the_scratchs_is_refused(self):
+        F.admit(self.engine_.registry, 'g', self.tokens, 4096)
+        checkpoint = self.engine_.registry.grant_for('g').checkpoint
+        checkpoint.rec = [r.to(torch.bfloat16) for r in checkpoint.rec]
+        self.assert_refused(r"GDN layer 0 checkpoint .*bfloat16.* is not the scratch's", [self.row(4096)])
+
     def test_the_unbatched_path_refuses_a_resumed_row(self):
         F.admit(self.engine_.registry, 'g', self.tokens, 4096)
         self.engine_.model.args.max_batch_size = 1
@@ -391,8 +434,11 @@ class GrantGuards(ExactTestBase):
         engine = Engine(traced=self.traced)
         conv = {'id': 'cold-engine'}
         engine.turn(conv, self.tokens[:4500], 0, [4096])
+        engine.toy.segments.clear()
         with self.assertRaisesRegex(AssertionError, 'before _qwen_prefix_warm_restore chose a path'):
             engine.turn(conv, self.tokens, 4096, [])
+        # Refused with the grant, before the scratch was bound or any chunk ran.
+        self.assertEqual(engine.toy.segments, [])
 
 
 class Warmup(ExactTestBase):
@@ -435,8 +481,62 @@ class Warmup(ExactTestBase):
     def test_no_exact_path_refuses_to_start(self):
         engine = Engine(h2d_refuse=True)
         engine.fake.copy_corrupt = True
-        with self.assertRaisesRegex(RuntimeError, 'no GDN restore path round-trips'):
+        with self.assertRaisesRegex(RuntimeError, r"no allowed GDN restore path \['h2d', 'copy'\] round-trips"):
             engine.warm()
+
+    def test_an_h2d_that_accepts_the_spec_but_writes_wrongly_is_not_chosen(self):
+        """Review finding 2: each path is judged from a zeroed scratch with its own pattern and
+        chip by chip, so copy's pattern cannot vouch for an h2d that writes nothing, writes chip 0
+        only, or writes chip 0's shard to both chips. The hit then restores through copy, exactly."""
+        for mode, chips in (('noop', '[0, 1]'), ('chip0', '[1]'), ('chip0_to_all', '[1]')):
+            with self.subTest(h2d_mode=mode):
+                engine = self.engine(h2d_mode=mode)
+                warm = engine.log.lines(patcher.MARKER_WARM)[0]
+                self.assertIn("restore_mode=copy results={'copy': 'exact', 'h2d': 'differs on chip(s) %s'}" % chips,
+                              warm)
+                base = F.prompt(8000, seed=72)
+                conv = {'id': 'wrong-h2d-' + mode}
+                self.run_turn_and_cold(engine, conv, base[:4500], 0)
+                self.run_turn_and_cold(engine, conv, base[:8000], 4096)
+                self.assertEqual([op for op in engine.fake.log if op[0] == 'h2d' and op[1] == (2, 3, 4)],
+                                 [('h2d', (2, 3, 4), 'bfloat16')] * 3, 'h2d ran only at warmup')
+
+    def test_a_forced_h2d_that_writes_wrongly_refuses_to_start(self):
+        engine = Engine(environ=dict(ON, QWEN_PREFIX_RESTORE='h2d'), h2d_mode='chip0')
+        with self.assertRaisesRegex(RuntimeError, r"no allowed GDN restore path \['h2d'\]"):
+            engine.warm()
+
+    def test_each_path_is_written_into_a_zeroed_scratch(self):
+        engine = Engine()
+        seen = []
+        restore = engine.model._qwen_prefix_restore
+
+        def spy(rec, carry, mode=None):
+            states = [(layer.attention.rec_state.data.clone(), layer.attention.conv_carry.data.clone())
+                      for layer in engine.model.layers if not layer.is_full_attention]
+            seen.append((mode, all(not r.any() and not c.any() for r, c in states),
+                         sorted({float(t.min()) for t in rec + carry})))
+            return restore(rec, carry, mode=mode)
+        engine.model._qwen_prefix_restore = spy
+        engine.warm()
+        self.assertEqual([(mode, zeroed) for mode, zeroed, _ in seen], [('copy', True), ('h2d', True)])
+        # Each path writes its own pattern, and no pattern holds a zero a no-op would leave.
+        self.assertNotEqual(seen[0][2], seen[1][2])
+        self.assertGreater(min(seen[0][2] + seen[1][2]), 0.0)
+
+    def test_the_warmup_is_keyed_on_the_model_not_the_wrapper(self):
+        """Review finding 6: a model that has not chosen a restore path is warmed whatever the
+        wrapper did before; a model that has is not warmed again through another wrapper."""
+        engine = self.engine()
+        again = F.build_wrapper(engine.vllm, engine.toy)
+        with prefix_env(engine.environ):
+            again.warmup_model_prefill(engine.model._paged_kv_caches, False)
+        self.assertEqual(len(engine.log.lines(patcher.MARKER_WARM)), 1)
+        fresh = F.Toy(engine.module, engine.fake).model
+        engine.wrapper.model = [fresh]
+        engine.warm()
+        self.assertEqual(len(engine.log.lines(patcher.MARKER_WARM)), 2)
+        self.assertEqual(fresh._qwen_prefix_restore_mode, 'h2d')
 
     def test_it_runs_once_on_the_compile_only_call_before_the_trace_capture(self):
         engine = Engine(traced=True)
@@ -509,8 +609,99 @@ class Capture(ExactTestBase):
 
     def test_unreachable_plan_positions_are_dropped_and_reported(self):
         engine = self.engine()
-        engine.turn({'id': 'd'}, F.prompt(5000, seed=85), 0, [4096, 6144])
+        # A plan the scheduler graft would not make (6144 lies past a 5000-token prompt).
+        engine.turn({'id': 'd'}, F.prompt(5000, seed=85), 0, [4096, 6144], force_plan=True)
+        self.assertIn('plan=[4096] ', engine.rows_prefix()[-1])
         self.assertIn('dropped=[6144]', engine.rows_prefix()[-1])
+
+
+class FastPathCoexistence(ExactTestBase):
+    """Review finding 1: the C2 fast path's prefill capture enumerates prefill_paged_slots* on the
+    model and refuses any entry it does not know, on every profile of the image. The staged model
+    must stay bindable, and the prefix route must refuse to run under a capture."""
+
+    def test_the_fast_path_capture_binds_the_staged_model_on_every_profile(self):
+        import dflash_prefill_window as window
+        stock = Engine(environ={}, sources=F.stock_sources())
+        entries = lambda model: sorted(n for n in dir(model) if n.startswith('prefill_paged_slots'))  # noqa: E731
+        for environ in ({}, ON):
+            with self.subTest(environ=environ):
+                engine = Engine(environ=environ)
+                self.assertEqual(entries(engine.model), entries(stock.model))
+                bindings = window.PrefillWindowCapture(None, engine.model, 4000, ()).bindings()
+                self.assertEqual(sorted(name for _, name, _ in bindings if name.startswith('prefill_paged_slots')),
+                                 ['prefill_paged_slots'])
+                # The capture's own marker is one the prefix route refuses under.
+                markers = [name for _, name, value in bindings if not callable(value)]
+                self.assertEqual(markers, ['_qwen_dflash_prefill_capture'])
+                self.assertLessEqual(set(markers), set(engine.module._QWEN_PREFIX_FAST_PATH_MARKERS))
+
+    def test_the_prefix_route_refuses_to_run_under_a_fast_path_capture(self):
+        engine = self.engine()
+        for marker in engine.module._QWEN_PREFIX_FAST_PATH_MARKERS:
+            with self.subTest(marker=marker):
+                setattr(engine.model, marker, object())
+                engine.toy.segments.clear()
+                engine.registry.begin_step()
+                with self.assertRaisesRegex(AssertionError, 'does not run under the C2 fast path'):
+                    engine.prefill([('f', F.prompt(3000, seed=5), engine.pool.row(3000), 0, 0)])
+                self.assertEqual(engine.toy.segments, [])
+                delattr(engine.model, marker)
+        self.assertEqual(set(engine.module._QWEN_PREFIX_FAST_PATH_MARKERS),
+                         {'_qwen_dflash_prefill_capture', '_qwen_dspark_prefill_capture', '_qwen_target_feature_capture'})
+
+
+class RowMarker(ExactTestBase):
+    """Review findings 3 and 4: every row says whether the registry is there, what was granted,
+    and how the program cache moved; a missing registry and an unknown program count are warned."""
+
+    def test_the_marker_names_the_registry_the_grant_and_the_plan(self):
+        engine = self.engine()
+        base = F.prompt(7000, seed=76)
+        conv = {'id': 'm'}
+        engine.turn(conv, base[:4500], 0)
+        self.assertIn('registry=present grant=committed Q=0 L=4500 plan=[4096] ', engine.rows_prefix()[-1])
+        engine.turn(conv, base[:7000], 4096)
+        self.assertIn('registry=present grant=committed Q=4096 L=7000 plan=[6144] ', engine.rows_prefix()[-1])
+        engine.cold(base[:7000])
+        self.assertIn('registry=present grant=none Q=0 L=7000 plan=[] ', engine.rows_prefix()[-1])
+
+    def test_a_missing_registry_is_named_on_every_row_and_warned_once(self):
+        engine = self.engine(registry=False)
+        for seed in (1, 2):
+            engine.prefill([('n%d' % seed, F.prompt(3000, seed=seed), engine.pool.row(3000), 0, 0)])
+        rows = engine.rows_prefix()
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all('registry=absent grant=none' in row for row in rows), rows)
+        warned = [(level, message) for level, message in engine.log.records
+                  if 'no prefix registry is installed in this process' in message]
+        self.assertEqual([level for level, _ in warned], ['warning'])
+
+    def test_every_row_logs_the_program_cache_before_and_after_it(self):
+        engine = self.engine()
+        engine.turn({'id': 'p'}, F.prompt(5000, seed=73), 0)
+        self.assertRegex(engine.rows_prefix()[-1], r' programs=(\d+)->\1 programs_across_restore=None$')
+        self.assertEqual(engine.log.lines('program growth'), [])
+
+    def test_a_compile_during_any_row_is_warned(self):
+        engine = self.engine()
+        engine.fake.programs.clear()   # as if the warmup had compiled nothing: the row's reset compiles
+        engine.turn({'id': 'p'}, F.prompt(5000, seed=74), 0)
+        self.assertRegex(engine.rows_prefix()[-1], r' programs=0->[1-9]\d* ')
+        warned = [(level, message) for level, message in engine.log.records if 'program growth' in message]
+        self.assertEqual(len(warned), 1)
+        self.assertEqual(warned[0][0], 'warning')
+        self.assertIn('after warmup (F3)', warned[0][1])
+
+    def test_an_unknown_program_count_is_warned_at_warmup(self):
+        engine = Engine()
+        engine.fake.program_count_known = False
+        engine.warm()
+        warned = [(level, message) for level, message in engine.log.records
+                  if 'the per-row F3 no-compile check is blind' in message]
+        self.assertEqual([level for level, _ in warned], ['warning'])
+        engine.turn({'id': 'u'}, F.prompt(5000, seed=75), 0)
+        self.assertIn(' programs=None->None ', engine.rows_prefix()[-1])
 
 
 class Audit(ExactTestBase):
@@ -602,6 +793,20 @@ class OffIsStock(unittest.TestCase):
             self.assertEqual(stock.fake.log, staged.fake.log)
             self.assertEqual(stock.toy.segments, staged.toy.segments)
             self.assertEqual(staged.log.lines('prefix'), [])
+
+    def test_the_staged_classes_add_only_private_prefix_names(self):
+        """The call logs above cannot see a class attribute, and the fast path's capture reads the
+        model's attributes (review finding 1): whatever the flag, the staged classes add only
+        _qwen_prefix* names, none of them public."""
+        for environ in ({}, ON):
+            stock, staged = Engine(environ=environ, sources=F.stock_sources()), Engine(environ=environ)
+            for cls in ('Qwen36Model', 'Qwen36ForCausalLM'):
+                module = 'module' if cls == 'Qwen36Model' else 'vllm'
+                before = set(dir(getattr(getattr(stock, module), cls)))
+                after = set(dir(getattr(getattr(staged, module), cls)))
+                self.assertLessEqual(before, after, cls)
+                self.assertTrue(all(name.startswith('_qwen_prefix') for name in after - before),
+                                sorted(after - before))
 
     def test_the_capability_is_off_unless_the_flag_is_exactly_one(self):
         for environ, expected in (({}, False), ({'QWEN_PREFIX_REUSE': '0'}, False),
