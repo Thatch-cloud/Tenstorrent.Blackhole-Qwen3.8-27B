@@ -46,6 +46,7 @@ jobs:
           python -B -m unittest test_serving_request_factory
           python -B -m unittest test_serving_lifecycle
           VLLM_USE_V2_MODEL_RUNNER=0 python -B -m unittest test_serving_request_quarantine
+          VLLM_USE_V2_MODEL_RUNNER=0 python -B -m unittest test_qwen_prefix_scheduler_vllm test_qwen_prefix_scheduler_patch test_qwen_prefix_registry test_qwen_prefix_runner_patch
           python -B -m unittest test_serving_cache_owner test_serving_runtime test_serving_startup
           QWEN_PLUGIN_SOURCE=upstream-plugin python -B -m unittest test_serving_plugin_patch test_serving_fast_policy
           python scripts/ci/serving_plugin_patch.py upstream-plugin

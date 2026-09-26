@@ -84,6 +84,7 @@ jobs:
           python -B -m unittest test_qual_card
           python -B -m unittest test_real_text_prompts test_acceptance_report test_real_text_compare test_real_text_gate
           python -B -m unittest test_c2_serving_job test_c2_serving_gate test_c2_platform_replay
+          python -B -m unittest test_qwen_prefix_registry test_qwen_prefix_scheduler_patch test_qwen_prefix_runner_patch test_qwen_prefix_scheduler_vllm
           python -B -m unittest test_lever_n_prefill_profile_report
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_bench -p 'test_*.py'
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_chain -p 'test_*.py'

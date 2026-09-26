@@ -23,9 +23,11 @@ on it, and drive it with real Requests, SchedulerOutputs and ModelRunnerOutputs.
 stands in for the device: it asserts what the G1 model graft will assert (a prefill row with
 start_pos > 0 has a committed grant whose Q equals start_pos and whose checkpoint tokens match),
 and takes the planned captures. The wrappers under test - cap, trim, per-step commit, eviction
-coupling, fail-closed salt, install assertions - are prefix_scheduler_graft.py, which becomes G1's
-scheduler graft; these checks are its unit tests. Checks 15-18 are extra unit tests of the same
-module (registry LRU, kill switch, reset, the token-mismatch guard).
+coupling, fail-closed salt, install assertions - are G1's scheduler graft,
+qwen_prefix_scheduler_patch.py over qwen_prefix_registry.py (the P0a prototype,
+prefix_scheduler_graft.py, productionised); test_qwen_prefix_scheduler_vllm carries checks 5-14 and
+16-18 as unit tests. Checks 15-18 are extra unit tests of the same modules (registry LRU, kill
+switch, reset, the token-mismatch guard).
 
 Prints PASS or FAIL per check with its evidence and exits 1 if any check fails.
 """
@@ -65,7 +67,9 @@ def load_local(name):
     return module
 
 
-graft = load_local('prefix_scheduler_graft')
+# The registry first: the scheduler graft, loaded outside a package, imports it by its plain name.
+load_local('qwen_prefix_registry')
+graft = load_local('qwen_prefix_scheduler_patch')
 
 PROFILES_IMAGE = '/opt/qwen-c2/profiles.json'
 PROFILES_CHECKOUT = os.path.join(HERE, 'qwen_c2_profiles.json')
