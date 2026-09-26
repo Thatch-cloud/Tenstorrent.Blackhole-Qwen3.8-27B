@@ -65,6 +65,57 @@ a profile that turns C2-any on (QWEN_FAST_ANY_REQUEST=1) every arm that served m
 quarantine consumer's live line (QUARANTINE_LIVE) in its server log, and under any other profile none
 of the C2-any markers may appear (ANY_REQUEST_MARKERS): either is a problem that fails the arm.
 
+S2 PLANS (C2-packed-any, s2-design.md W11 and 6.3; the S2 image, graft K64j, with its profiles c2-packed
+(traffic: c2 plus the block and QWEN_FAST_EXTENT_REPLAY=1) and c2-packed-gate (c2-gate plus the flag)).
+Each arm may serve its own profile and add gate-only environment (Arm: -e NAME=value, never a profile's key):
+QWEN_FAST_EXTENT_AUDIT=1 on every arm whose profile has the flag, the capture-position knob on G3b's, the
+forced cap on M4's. Each knob must reach the harness's own process (its qwen_configuration) or the arm fails
+(read-the-launched-argv). The exactness policy is strict (CB2a K2 passed bitwise): a reproduced divergence
+FAILS, and a flag the card evidence claims exact never makes one NOT_COMPARABLE (real_text_compare.
+S2_EXACT_CLAIMS); --policy dc-i (the user's decision D-c(i), with --policy-decision) is the only relaxation.
+  warm, warm-off  M1: solo on c2-packed over every later length (WARM_LENGTHS), short prompts decoding
+           past 2048 of history, then 4 x 131072, 4 x 16384 and 4 x 4096 on c2-packed-gate (warm) and on
+           c2-gate (warm-off), the two shorter with the capture knob; warm-off also runs exact at v235's shape,
+           so M2's exact bring-up (judged for zero new cache entries) finds exact's programs compiled.
+           Completes; kernel-cache entries recorded.
+  control  M3-M4, G3: --pairs A/B pairs (default 2: ABAB) of c2-gate (A) and c2-packed-gate (B) at v235's
+           shape. Every arm IDENTICAL to v235; B's median four-live packed round, net of its audit's ms, at
+           most CONTROL_TOLERANCE x A's in every pair; B shows the S2 lines and A none of them.
+  forced-cap  M4, Q5: c2-packed-gate with QWEN_FAST_GATE_FORCE_CAP=8 against without, at v235's shape: both
+           IDENTICAL to v235 and to each other, and the capped arm's [PACKED] caps all at most 8.
+  control-below  M5, G3b: per family F (--families, default 16640 and 4352) and pair, c2-gate against
+           c2-packed-gate, both with the capture knob at F - 256, 4 x (F - 256) prompts, 224 out (every ticket
+           stays in F). Every user IDENTICAL across the arms; the flag-off arm must serve packed rounds inside
+           F, else NO_DECISION (Q22).
+  lifecycle-arrival  M6's added event: the arrival that makes the live count two (user 1) leaves in its build,
+           with user 0 decoding (one live stream when the drop fired, else NOT_EXERCISED). (lifecycle itself on
+           an S2 profile also needs one 'survivor narrowed' line across its arms, else NOT_EXERCISED, and every
+           refuse_round request ended FINISHED_ABORTED.)
+  mixed, short, boundaries, staggered  M7-M10, G4 (--lengths replaces a plan's default set): a concurrent and
+           a solo arm under the policy with one re-run, plus: every arm's extent audit clean and complete,
+           zero idle commits, refuse_round rounds, cap refusals and other audit mismatches, the four-live
+           per-user rate (net of the audit) above GENERAL_RATE; mixed (M7) always runs the prestage, pair-mask
+           and fused-commit audits too (G4_ALL_AUDITS; --audits all adds them to the other G4 plans) and needs a
+           packed round of two families, short the one-bucket ladder (2048,) - on every engine line and on the
+           executed path's 'proposal buckets built' lines - no DRAM hold with a seat free, no lifted hold or
+           refusal and the before-point floor (FLOOR_GB), boundaries
+           (ignore_eos, 8192 out) cap events and BOUNDARY_MIN_CROSSINGS 256-key crossings per user, staggered
+           (STAGGER_SECONDS apart) padded rounds at two or three live and a padded-probe arm.
+  churn    M11, G5: CHURN_LENGTHS (12 users, 8 replacements) over four seats, each user's seat freed and
+           retaken: no engine death, no DRAM hold with a seat free (holds while every seat decodes are the fifth
+           user waiting, not a failed fit), no lifted hold or refusal, the floor, and at every departure while a
+           quad was formed a released quad (W6c: the release line just ahead of that step's [PHASE] line).
+  permuted  built, required only under D-c(i): two concurrent arms, the second admitted in reverse order;
+           at least two SAME_PATH users (else NOT_EXERCISED), and no same-path user may differ.
+On an S2 profile the four S1 plans add their S2 checks too (memory: no hold or refusal and the floor).
+Every arm of an S2 plan or on an S2 profile (--jit auto) must leave the kernel cache as it found it: a judged
+arm that compiled is a problem (M1 warms it first), and a judged arm whose cache could not be counted leaves
+its plan NOT_EXERCISED, never PASS. The cache is counted only on such a run (an S2 plan or profile, or --jit
+judge/record): a run of S1 plans on an S1 profile reads nothing more than before (counts_cache). A ledger
+before-point or DRAM hold that read no DRAM is unjudged (NOT_EXERCISED), never a pass. A non-identical user of
+an S2 arm gets a divergence record (t*, character, round, positions, E, paths), and any NOT_COMPARABLE or
+UNSTABLE one is listed in the summary's s2_exit_blockers with it (<results>/<plan>-divergence-records.json).
+
 SAFETY. Before each arm: no thatch-inference-* container may exist (a placement reloading onto M+A
 mid-gate), and a leftover gate container of the same name is removed; after each arm, however it
 ended (a SIGTERM from a cancelled or timed-out step included), its container is removed. An arm
@@ -89,6 +140,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import c2_serving_job  # noqa: E402
+import lever_n_m3native_gate as harness  # noqa: E402  (stdlib only; real_text_compare imports it too)
 import real_text_compare  # noqa: E402
 import real_text_prompts  # noqa: E402
 import serving_c2_contract  # noqa: E402  (stdlib only at import: json, os, sys)
@@ -110,7 +162,7 @@ REFERENCE = os.path.join(HERE, 'references', 'c2-serving', 'v235-real-text-4x131
 # v235's served engine is what these profiles rewrite the platform argv to (test_real_text_gate; c2-gate
 # is exact's engine with c2's environment, test_serving_c2_contract): on them a launched argv that is
 # not v235's engine fails the bring-up; on any other it is reported.
-REFERENCE_PROFILES = ('exact', 'c2-gate')
+REFERENCE_PROFILES = ('exact', 'c2-gate', 'c2-packed-gate')
 BRINGUP_USERS, BRINGUP_PROMPT, BRINGUP_MAX_TOKENS = 4, 131072, 256
 MEMORY_USERS = 4
 # G5's short-prompt arm, on a profile that takes any request (ANY_REQUEST_FLAG): four users with prompts
@@ -166,7 +218,61 @@ LEDGER_FLAT_GB = 0.064           # idle drift beyond the solo arm's, per chip (t
 # accepts 2.76-4.0 per step (c2-serve-for-real-plan 2.2), a corrupt target about one (the bonus token).
 MIN_ACCEPTANCE_MEAN, MIN_ACCEPTANCE_ROUNDS = 1.5, 50
 WEDGE = 'Timed out while waiting for active ethernet core'
-VERDICT_ORDER = ('FAIL', 'INFRA', 'RERUN', 'NOT_COMPARABLE', 'UNSTABLE', 'NOT_EXERCISED')
+VERDICT_ORDER = ('FAIL', 'INFRA', 'RERUN', 'NOT_COMPARABLE', 'UNSTABLE', 'NOT_EXERCISED', 'NO_DECISION')
+
+# S2 (C2-packed-any; the module docstring's S2 PLANS). The profiles are W8's; the knobs are gate-only.
+EXTENT_FLAG = harness.EXTENT_REPLAY_FLAG
+AUDIT_ENV = ((harness.EXTENT_AUDIT_FLAG, '1'),)
+# M7 (mixed) judges zero mismatches from these three (s2-design 6.3), so its arms always carry them
+# (ALL_AUDIT_PLANS); C2_GATE_AUDITS=all adds them to the other G4 arms too. Each is already in the image under its
+# parent flag, and its mismatch lines FAIL an S2 arm whenever they appear.
+G4_ALL_AUDITS = (('QWEN_FAST_PRESTAGE_AUDIT', '1'), ('QWEN_FAST_PAIR_MASK_AUDIT', '1'),
+                 ('QWEN_FAST_FUSED_COMMIT_AUDIT', '1'))
+ALL_AUDIT_PLANS = ('mixed',)
+PADDED_PROBE_ENV = (('QWEN_FAST_PADDED_PROBE', '1'),)
+# What an arm may add with -e: the gate-only knobs, the padded probe and the G4 audits - never a profile key.
+ARM_ENV_NAMES = frozenset(harness.S2_GATE_KNOBS + ('QWEN_FAST_PADDED_PROBE',) + tuple(name for name, _ in G4_ALL_AUDITS))
+S2_OFF_PROFILE, S2_GATE_PROFILE, S2_TRAFFIC_PROFILE = 'c2-gate', 'c2-packed-gate', 'c2-packed'
+EXACT_PROFILE = 'exact'
+S2_PLANS = c2_serving_job.S2_GATE_PLANS
+WARM_PLANS = ('warm', 'warm-off')
+DEFAULT_PAIRS = 2
+BELOW_FAMILIES = (16640, 4352)
+BELOW_MAX_TOKENS = 224           # F - 256 + 223 + 16 <= F: every ticket of a 224-token answer stays in F (B1)
+CONTROL_TOLERANCE = 1.02         # flag-on median four-live round against flag-off, per pair (M3-M4; Q16)
+FORCE_CAP = 8
+GENERAL_RATE, TARGET_RATE = 13.0, 27.0   # tok/s per user at four live: general's (MEM goal-c2-serving.md:11), S2's aim
+FLOOR_GB = 0.25                  # before-point floor, GB per chip (s2-design 3.3, M8)
+MIXED_LENGTHS = (1536, 20000, 60000, 120000)       # M7's first set; the second, 5000,40000,90000,123136, by --lengths
+SHORT_LENGTHS = (60, 255, 2047, 120000)
+BOUNDARY_LENGTHS = (8192, 30000, 70000, 110000)
+BOUNDARY_MAX_TOKENS = 8192
+BOUNDARY_MIN_CROSSINGS = 16
+STAGGER_SECONDS = 30.0
+# M11: at least 8 replacements (s2-design 3.3): 12 users over the four seats, prompts 100k-123k and one short
+# (the one-bucket ladder under churn), last. Budgets 256 tokens apart, so departures are spread and each
+# replacement's quad re-forms before the next member leaves; the short user decodes past 2048 of history.
+CHURN_LENGTHS = (110000, 120000, 123136, 110000, 120000, 123136, 110000, 120000, 123136, 110000, 120000, 1536)
+CHURN_MAX_TOKENS = (768, 1024, 1280, 1536, 768, 1024, 1280, 1536, 768, 1024, 1280, 2304)
+CHURN_MIN_REPLACEMENTS = 8
+SINGLE_BUCKET = [2048]           # W6a: the one proposal bucket every engine builds under the extent flag
+# M1: every length a later arm serves (G4's sets, the lifecycle's, G3b's), solo; below 2048 decoding past 2048 of
+# history (WARM_SHORT_TOKENS, ignore_eos) so the drafter's ramp shapes are compiled too.
+WARM_LENGTHS = (60, 255, 1536, 2047, 2049, 4096, 5000, 8192, 16384, 20000, 30000, 40000, 60000, 70000, 90000,
+                110000, 120000, 123136)
+WARM_TOKENS, WARM_SHORT_TOKENS = 256, 2304
+ARM_SECONDS.update({'warm': 5400, 'warm-off': 3600, 'control': 3600, 'forced-cap': 3600, 'control-below': 2400,
+                    'lifecycle-arrival': 3300, 'mixed': 5400, 'short': 5400, 'boundaries': 5400, 'staggered': 4200,
+                    'churn': 9000, 'permuted': 5400})
+STREAM_SECONDS.update({'warm': 1800, 'warm-off': 900, 'control': 900, 'forced-cap': 900, 'control-below': 900,
+                       'lifecycle-arrival': 1800, 'mixed': 3600, 'short': 3600, 'boundaries': 3600,
+                       'staggered': 3600, 'churn': 7200, 'permuted': 3600})
+WARM_SHORTER_SECONDS = 2400      # the 4 x 16384 and 4 x 4096 warm arms
+# The kernel cache (B6): the image's TT_METAL_CACHE, under /experiment-cache (a link to /models/.qwen-c2, the
+# hub's .qwen-c2 on the host: Dockerfile) or /models (the hub).
+KERNEL_CACHE_ENV = 'TT_METAL_CACHE'
+CACHE_MOUNTS = (('/experiment-cache/', '.qwen-c2'), ('/models/', ''))
+JIT_MODES = c2_serving_job.JIT_MODES
 
 
 class PlanError(ValueError):
@@ -187,10 +293,12 @@ AGENT_ENV = ('HF_HOME=/models', 'HF_HUB_CACHE=/models', 'MESH_DEVICE=P300', 'QWE
              'DO_NOT_TRACK=1', 'VLLM_NO_USAGE_STATS=1', 'PYTHONDONTWRITEBYTECODE=1')
 
 
-def agent_shape(image, name, profile, devices, hub=HUB):
+def agent_shape(image, name, profile, devices, hub=HUB, env=()):
     """`docker run` of the node agent's container, up to the image: read-only root, the agent's tmpfs
     set, 8 CPUs, 80g, 4g shm, the two cards in the order given, hugepages, SYS_NICE, the hub at
-    /models, the environment the platform adds (AGENT_ENV), and QWEN_C2_SERVING=1 with the profile."""
+    /models, the environment the platform adds (AGENT_ENV), and QWEN_C2_SERVING=1 with the profile.
+    `env` (an S2 arm's gate-only knobs, ARM_ENV_NAMES) follows as more -e pairs; empty, the argv is
+    exactly the agent's."""
     arguments = ['docker', 'run', '--rm', '--name', name, '--read-only']
     for tmpfs in AGENT_TMPFS:
         arguments += ['--tmpfs', tmpfs]
@@ -200,13 +308,18 @@ def agent_shape(image, name, profile, devices, hub=HUB):
     arguments += ['-v', '/dev/hugepages-1G:/dev/hugepages-1G', '--cap-add', 'SYS_NICE', '-v', '%s:/models' % hub]
     for variable in AGENT_ENV + ('QWEN_C2_SERVING=1', 'QWEN_C2_PROFILE=%s' % profile):
         arguments += ['-e', variable]
+    for name_, value in env:
+        if name_ not in ARM_ENV_NAMES:
+            raise PlanError('%s is not an environment an arm may add (%s): a profile\'s keys are the profile\'s'
+                            % (name_, ', '.join(sorted(ARM_ENV_NAMES))))
+        arguments += ['-e', '%s=%s' % (name_, value)]
     return arguments
 
 
-def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HUB):
+def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HUB, env=()):
     """The whole `docker run` of one arm: the agent's shape, the harness mounted read-only at /bench,
     the arm's results directory, and the harness as the entrypoint."""
-    arguments = agent_shape(image, name, profile, devices, hub)
+    arguments = agent_shape(image, name, profile, devices, hub, env)
     for script in BENCH_SCRIPTS:
         arguments += ['--mount', 'type=bind,src=%s,dst=/bench/%s,readonly' % (
             os.path.join(checkout, 'scripts', 'ci', script), script)]
@@ -235,6 +348,30 @@ def profile_seats(profiles, name):
 def any_request_profile(profiles, name):
     """Whether the profile turns C2-any on (serving_fast_policy.any_request_enabled's switch)."""
     return str((profiles['profiles'][name].get('env') or {}).get(ANY_REQUEST_FLAG, '0')) == '1'
+
+
+def s2_profile(profiles, name):
+    """Whether the profile builds the S2 extent readers (QWEN_FAST_EXTENT_REPLAY=1: c2-packed, c2-packed-gate)."""
+    return str((profiles['profiles'][name].get('env') or {}).get(EXTENT_FLAG, '0')) == '1'
+
+
+class Arm(tuple):
+    """One arm: (name, harness arguments, docker timeout) - a plain 3-tuple to everything that unpacks or
+    compares it - carrying what an S2 plan adds: the profile it serves when not the gate's --profile, the
+    environment it adds (gate-only knobs, ARM_ENV_NAMES), whether a first divergence re-runs it (None: its
+    plan's rule, RERUN_PLANS), whether its kernel-cache growth may be judged, and its role in the plan."""
+
+    def __new__(cls, name, args, timeout, profile=None, env=(), rerun=None, judged=True, role=None, **extra):
+        arm = tuple.__new__(cls, (name, args, timeout))
+        arm.profile, arm.env, arm.rerun, arm.judged, arm.role = profile, tuple(env), rerun, judged, role
+        arm.extra = extra
+        return arm
+
+
+def arm_runs(plan, arm):
+    """How often an arm may run in the worst case: twice when a first divergence re-runs it."""
+    rerun = getattr(arm, 'rerun', None)
+    return 2 if (plan in RERUN_PLANS if rerun is None else rerun) else 1
 
 
 def answer_room(context, lengths, max_tokens):
@@ -269,10 +406,24 @@ def check_budget(profile, max_tokens, ceiling, what):
 
 
 def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.DEFAULT_MAX_TOKENS,
-              memory_prompt=None, notes=None):
+              memory_prompt=None, notes=None, s2=None):
     """The arms one plan runs, in order: [(arm name, harness arguments, docker timeout seconds)].
     Refuses (PlanError) what the profile cannot serve as asked; `lengths` None is the default ladder,
-    whose rungs past the profile's largest admitted prompt are lowered to it (noted in `notes`)."""
+    whose rungs past the profile's largest admitted prompt are lowered to it (noted in `notes`). An S2
+    plan's arms, and the S1 plans' on an S2 profile, are Arms (s2: pairs, families, audits); on any
+    other profile the S1 plans' arms are exactly what they were."""
+    if plan in S2_PLANS:
+        return s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2 or {})
+    arms = base_plan_arms(plan, profile, profiles, lengths, max_tokens, memory_prompt, notes)
+    if profile in profiles['profiles'] and s2_profile(profiles, profile):
+        env = s2_env(profiles, profile, (s2 or {}).get('audits'), g4=plan == 'matrix')
+        arms = [Arm(name, args, timeout, env=env) for name, args, timeout in arms]
+    return arms
+
+
+def base_plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.DEFAULT_MAX_TOKENS,
+                   memory_prompt=None, notes=None):
+    """plan_arms for the four S1 plans."""
     context, ceiling, room = profile_limits(profiles, profile)
     notes = notes if notes is not None else []
     if plan == 'bringup':
@@ -333,13 +484,203 @@ def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.D
     raise ValueError('unknown plan %r' % plan)
 
 
+G4_PLANS = ('mixed', 'short', 'boundaries', 'staggered')
+
+
+def s2_env(profiles, profile, audits=None, g4=False):
+    """What an arm on `profile` adds: the extent audit where the profile has the flag (every packed round of
+    every S2 gate arm is audited, s2-design 6.1), and on a G4 arm under audits 'all' the other three audits."""
+    if profile not in profiles['profiles'] or not s2_profile(profiles, profile):
+        return ()
+    return AUDIT_ENV + (G4_ALL_AUDITS if g4 and audits == 'all' else ())
+
+
+def need_profile(profiles, name, s2, plan):
+    """Refuse a plan whose fixed profile the image lacks, or has without (with) the extent flag."""
+    if name not in profiles['profiles']:
+        raise PlanError('%s serves profile %s, which the image\'s profiles do not carry (s2-design W8 adds c2-packed '
+                        'and c2-packed-gate)' % (plan, name))
+    if s2_profile(profiles, name) != s2:
+        raise PlanError('%s needs profile %s %s %s=1' % (plan, name, 'with' if s2 else 'without', EXTENT_FLAG))
+
+
+def v235_args(profiles, profile, plan):
+    """v235's shape (the bring-up's arguments) on `profile`, or PlanError where its edge refuses it."""
+    warning = bringup_warning(profiles, profile)
+    if warning:
+        raise PlanError('%s: %s' % (plan, warning))
+    context = profile_limits(profiles, profile)[0]
+    return common_args(profile, context, STREAM_SECONDS[plan]) + [
+        '--users', str(BRINGUP_USERS), '--prompt-tokens', str(BRINGUP_PROMPT), '--max-tokens', str(BRINGUP_MAX_TOKENS),
+        '--stagger', str(STAGGER)]
+
+
+def four_user_args(profiles, profile, plan, prompt, max_tokens=BELOW_MAX_TOKENS):
+    """Four users at one prompt length (G3b's and M1's 4 x 16384 and 4 x 4096)."""
+    context, ceiling, room = profile_limits(profiles, profile)
+    check_lengths(profile, [prompt], room, '%s prompt' % plan)
+    check_budget(profile, max_tokens, ceiling, '%s --max-tokens' % plan)
+    if prompt + max_tokens > context:
+        raise PlanError('%s: a %d-token prompt leaves %d of profile %s\'s context, not %d' % (
+            plan, prompt, context - prompt, profile, max_tokens))
+    return common_args(profile, context, STREAM_SECONDS[plan]) + [
+        '--users', '4', '--prompt-tokens', str(prompt), '--max-tokens', str(max_tokens), '--stagger', str(STAGGER)]
+
+
+def below_families(families):
+    """G3b's families, each a multiple of 256 the flag-off block serves (c2_serving_job.BELOW_FAMILY_RANGE)."""
+    low, high = c2_serving_job.BELOW_FAMILY_RANGE
+    for family in families:
+        if family % 256 or not low <= family <= high:
+            raise PlanError('control-below: family %d is not one the flag-off block serves (a multiple of 256 in %d..%d)'
+                            % (family, low, high))
+    return list(families)
+
+
+def sized_arm_args(profile, profiles, plan, lengths, budget):
+    """(common arguments, lengths text, context) for a per-user-length plan, refused as the matrix is."""
+    context, ceiling, room = profile_limits(profiles, profile)
+    check_lengths(profile, lengths, room, '%s prompt lengths' % plan)
+    check_budget(profile, budget, ceiling, '%s --max-tokens' % plan)
+    fits = answer_room(context, lengths, budget)
+    if fits < budget:
+        raise PlanError('%s --max-tokens %d: a %d-token prompt leaves %d tokens of profile %s\'s context %d' % (
+            plan, budget, context - fits, fits, profile, context))
+    return common_args(profile, context, STREAM_SECONDS[plan]), ','.join(str(length) for length in lengths), context
+
+
+def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
+    """plan_arms for S2_PLANS (the module docstring's S2 PLANS). control, forced-cap, control-below and the
+    warm plans serve their own fixed profiles (c2-gate, c2-packed-gate, c2-packed) whatever --profile is;
+    every other S2 plan serves --profile, which must have the extent flag."""
+    notes = notes if notes is not None else []
+    pairs = int(s2.get('pairs') or DEFAULT_PAIRS)
+    seconds = ARM_SECONDS[plan]
+    if plan in ('control', 'forced-cap'):
+        need_profile(profiles, S2_GATE_PROFILE, True, plan)
+        on_env = s2_env(profiles, S2_GATE_PROFILE)
+        on_args = v235_args(profiles, S2_GATE_PROFILE, plan)
+        if plan == 'forced-cap':
+            return [Arm('forced-cap-off', on_args, seconds, profile=S2_GATE_PROFILE, env=on_env, role='off'),
+                    Arm('forced-cap-on', on_args, seconds, profile=S2_GATE_PROFILE,
+                        env=on_env + ((harness.FORCE_CAP_FLAG, str(FORCE_CAP)),), role='on')]
+        need_profile(profiles, S2_OFF_PROFILE, False, plan)
+        off_args = v235_args(profiles, S2_OFF_PROFILE, plan)
+        arms = []
+        for index in range(1, pairs + 1):
+            arms.append(Arm('control-off-%d' % index, off_args, seconds, profile=S2_OFF_PROFILE, role='off', pair=index))
+            arms.append(Arm('control-on-%d' % index, on_args, seconds, profile=S2_GATE_PROFILE, env=on_env, role='on',
+                            pair=index))
+        return arms
+    if plan == 'control-below':
+        need_profile(profiles, S2_OFF_PROFILE, False, plan)
+        need_profile(profiles, S2_GATE_PROFILE, True, plan)
+        arms = []
+        for family in below_families(s2.get('families') or BELOW_FAMILIES):
+            prompt = family - 256
+            knob = ((harness.CAPTURE_POSITION_FLAG, str(prompt)),)
+            for index in range(1, pairs + 1):
+                for role, name in (('off', S2_OFF_PROFILE), ('on', S2_GATE_PROFILE)):
+                    arms.append(Arm('below-%d-%s-%d' % (family, role, index), four_user_args(profiles, name, plan, prompt),
+                                    seconds, profile=name, env=knob + s2_env(profiles, name), role=role, pair=index,
+                                    family=family))
+        return arms
+    if plan in WARM_PLANS:
+        gate = S2_GATE_PROFILE if plan == 'warm' else S2_OFF_PROFILE
+        need_profile(profiles, gate, plan == 'warm', plan)
+        arms = []
+        if plan == 'warm':
+            need_profile(profiles, S2_TRAFFIC_PROFILE, True, plan)
+            warm = list(lengths or WARM_LENGTHS)
+            short = [index for index, length in enumerate(warm) if length < 2048]
+            common, text, _ = sized_arm_args(S2_TRAFFIC_PROFILE, profiles, plan, warm, WARM_SHORT_TOKENS if short
+                                             else WARM_TOKENS)
+            args = common + ['--prompt-lengths', text, '--max-tokens', str(WARM_TOKENS), '--users', '1',
+                             '--sequential-users', str(len(warm))]
+            if short:
+                args += ['--user-max-tokens', ','.join('%d:%d' % (index, WARM_SHORT_TOKENS) for index in short),
+                         '--user-ignore-eos', ','.join(str(index) for index in short)]
+            arms.append(Arm('warm-solo', args, ARM_SECONDS['warm'], profile=S2_TRAFFIC_PROFILE,
+                            env=s2_env(profiles, S2_TRAFFIC_PROFILE), judged=False, role='solo'))
+        arms.append(Arm('%s-4x%d' % (plan, BRINGUP_PROMPT), v235_args(profiles, gate, plan), ARM_SECONDS['warm-off'],
+                        profile=gate, env=s2_env(profiles, gate), judged=False, role='four'))
+        for prompt in (BELOW_FAMILIES[0] - 256, BELOW_FAMILIES[1] - 256):
+            arms.append(Arm('%s-4x%d' % (plan, prompt), four_user_args(profiles, gate, plan, prompt), WARM_SHORTER_SECONDS,
+                            profile=gate, env=((harness.CAPTURE_POSITION_FLAG, str(prompt)),) + s2_env(profiles, gate),
+                            judged=False, role='four'))
+        if plan == 'warm-off':
+            # M2 judges exact's bring-up for zero new cache entries, and exact's environment is neither c2-gate's nor
+            # an S2 profile's: its programs are warmed here, at the shape M2 serves.
+            need_profile(profiles, EXACT_PROFILE, False, plan)
+            arms.append(Arm('warm-off-exact-4x%d' % BRINGUP_PROMPT, v235_args(profiles, EXACT_PROFILE, plan),
+                            ARM_SECONDS['warm-off'], profile=EXACT_PROFILE, judged=False, role='four'))
+        return arms
+    if profile not in profiles['profiles'] or not s2_profile(profiles, profile):
+        raise PlanError('%s is an S2 plan: run it on c2-packed (a profile with %s=1), not %s' % (plan, EXTENT_FLAG, profile))
+    context, ceiling, room = profile_limits(profiles, profile)
+    env = s2_env(profiles, profile, 'all' if plan in ALL_AUDIT_PLANS else s2.get('audits'), g4=plan in G4_PLANS)
+    seats = str(profile_seats(profiles, profile))
+    if plan == 'lifecycle-arrival':
+        check_lengths(profile, LIFECYCLE_LENGTHS, room, 'lifecycle prompt lengths')
+        check_budget(profile, LIFECYCLE_MAX_TOKENS, ceiling, 'lifecycle --max-tokens')
+        base = common_args(profile, context, STREAM_SECONDS[plan]) + [
+            '--prompt-lengths', ','.join(str(length) for length in LIFECYCLE_LENGTHS),
+            '--max-tokens', str(LIFECYCLE_MAX_TOKENS)]
+        users = str(len(LIFECYCLE_LENGTHS))
+        # The event is VR4:150's only while user 0 decodes when user 1's build is dropped: one live stream then.
+        return [Arm('lifecycle-arrival', base + ['--users', users, '--stagger', str(STAGGER), '--alive-check', seats,
+                                                 '--drops', '1:build'], seconds, env=env, rerun=True, role='event',
+                    expect_live={1: 1}),
+                Arm('lifecycle-arrival-solo', base + ['--users', '1', '--sequential-users', users, '--alive-check', '1'],
+                    seconds, env=env, rerun=True, role='solo')]
+    if plan == 'churn':
+        churn = list(lengths or CHURN_LENGTHS)
+        budgets = list(CHURN_MAX_TOKENS) if lengths is None else [max_tokens] * len(churn)
+        common, text, _ = sized_arm_args(profile, profiles, plan, churn, max(budgets))
+        args = common + ['--prompt-lengths', text, '--max-tokens', str(max(budgets)), '--users', str(len(churn)),
+                         '--user-max-tokens', ','.join('%d:%d' % item for item in enumerate(budgets)),
+                         '--user-ignore-eos', ','.join(str(index) for index in range(len(churn))),
+                         '--stagger', str(STAGGER), '--alive-check', seats]
+        if len(churn) - int(seats) < CHURN_MIN_REPLACEMENTS:
+            notes.append('churn: %d users over %s seats is %d replacements, fewer than the %d M11 asks for'
+                         % (len(churn), seats, len(churn) - int(seats), CHURN_MIN_REPLACEMENTS))
+        return [Arm('churn', args, seconds, env=env, role='churn')]
+    if plan == 'permuted':
+        chosen = list(lengths or MIXED_LENGTHS)
+        common, text, _ = sized_arm_args(profile, profiles, plan, chosen, max_tokens)
+        base = common + ['--prompt-lengths', text, '--max-tokens', str(max_tokens), '--users', str(len(chosen)),
+                         '--stagger', str(STAGGER)]
+        reverse = ','.join(str(index) for index in reversed(range(len(chosen))))
+        return [Arm('permuted-forward', base, seconds, env=env, role='forward'),
+                Arm('permuted-reverse', base + ['--start-order', reverse], seconds, env=env, role='reverse')]
+    defaults = dict(mixed=MIXED_LENGTHS, short=SHORT_LENGTHS, boundaries=BOUNDARY_LENGTHS, staggered=MIXED_LENGTHS)
+    chosen = list(lengths or defaults[plan])
+    budget = BOUNDARY_MAX_TOKENS if plan == 'boundaries' else max_tokens
+    if plan == 'boundaries' and max_tokens != BOUNDARY_MAX_TOKENS:
+        notes.append('boundaries: every user answers %d tokens with ignore_eos (--max-tokens %d not used), so each '
+                     'crosses at least %d 256-key boundaries' % (BOUNDARY_MAX_TOKENS, max_tokens, BOUNDARY_MIN_CROSSINGS))
+    common, text, _ = sized_arm_args(profile, profiles, plan, chosen, budget)
+    base = common + ['--prompt-lengths', text, '--max-tokens', str(budget)]
+    if plan == 'boundaries':
+        base += ['--user-ignore-eos', ','.join(str(index) for index in range(len(chosen)))]
+    stagger = STAGGER_SECONDS if plan == 'staggered' else STAGGER
+    users = str(len(chosen))
+    arms = [Arm('%s-concurrent' % plan, base + ['--users', users, '--stagger', str(stagger)], seconds, env=env, rerun=True,
+                role='concurrent'),
+            Arm('%s-solo' % plan, base + ['--users', '1', '--sequential-users', users], seconds, env=env, rerun=True,
+                role='solo')]
+    if plan == 'staggered':
+        arms.append(Arm('staggered-probe', base + ['--users', users, '--stagger', str(stagger)], seconds,
+                        env=env + PADDED_PROBE_ENV, rerun=False, role='probe'))
+    return arms
+
+
 def worst_case_seconds(plans, arms_of):
     """Every arm to its docker limit, every re-run a first divergence can ask for, plus per-arm overhead."""
     total = 0
     for plan in plans:
-        for _, _, timeout in arms_of[plan]:
-            runs = 2 if plan in RERUN_PLANS else 1
-            total += runs * (timeout + ARM_OVERHEAD_SECONDS)
+        for arm in arms_of[plan]:
+            total += arm_runs(plan, arm) * (arm[2] + ARM_OVERHEAD_SECONDS)
     return total
 
 
@@ -473,14 +814,14 @@ def memory_verdict(report, users=MEMORY_USERS, want=None):
                 lines=dram_lines(report) + ['problem: %s' % p for p in problems])
 
 
-def matrix_verdict(concurrent, solo, rerun=None, wants=None):
+def matrix_verdict(concurrent, solo, rerun=None, wants=None, relaxation=None):
     """The exactness policy over the concurrent arm and its solo reference (and their re-run), and
     every arm's own problems (arm_problems, acceptance included): any problem FAILS the plan outright
-    (no re-run can clear it)."""
+    (no re-run can clear it). `relaxation` is the user's D-c decision (Runner.relaxation), never a default."""
     if concurrent is None or solo is None:
         return dict(verdict='FAIL', reason='an arm left no gate report', lines=[])
     wants = wants or {}
-    result = real_text_compare.exactness_policy(concurrent, solo, rerun)
+    result = real_text_compare.exactness_policy(concurrent, solo, rerun, relaxation=relaxation)
     problems = []
     for label, report in (('concurrent', concurrent), ('solo', solo)) + (
             (('concurrent re-run', rerun[0]), ('solo re-run', rerun[1])) if rerun else ()):
@@ -530,7 +871,7 @@ def ledger_drift(report):
     return ((report or {}).get('ledger') or {}).get('idle_drift_gb')
 
 
-def lifecycle_verdict(event, solo, rerun=None, want=None, solo_want=None):
+def lifecycle_verdict(event, solo, rerun=None, want=None, solo_want=None, relaxation=None):
     """One lifecycle event arm against the solo reference, under the exactness policy (a dropped or
     budget-cut user must be a prefix of its solo text, an ignore_eos user must run past it, every other
     user identical), plus what the row asks beyond the texts: the engine answered every seat's request
@@ -539,7 +880,8 @@ def lifecycle_verdict(event, solo, rerun=None, want=None, solo_want=None):
     phase (else NOT_EXERCISED). The P7 residual status (attach time) is reported, not judged."""
     if event is None or solo is None:
         return dict(verdict='FAIL', reason='an arm left no gate report', lines=[])
-    policy = real_text_compare.exactness_policy(event, solo, rerun, real_text_compare.lifecycle_pass)
+    policy = real_text_compare.exactness_policy(event, solo, rerun, real_text_compare.lifecycle_pass,
+                                                relaxation=relaxation)
     problems = []
     for label, report, report_want in (('event', event, want), ('solo', solo, solo_want)) + (
             (('event re-run', rerun[0], want), ('solo re-run', rerun[1], solo_want)) if rerun else ()):
@@ -651,6 +993,87 @@ def any_request_check(log_text, any_request):
     return [], engines, consumers
 
 
+def s2_log_check(log_text, s2_on, env, report):
+    """An arm's S2 problems as the host sees them: the harness's own (report['s2']['problems']), or without
+    that record an S2 arm's missing record and a flag-off arm's S2 lines; and every -e knob the arm added
+    must be in the harness process's configuration with its value (read-the-launched-argv: three runs were
+    lost to variables that never crossed into the container)."""
+    problems = []
+    configuration = (report or {}).get('qwen_configuration')
+    for name, value in env:
+        if configuration is None:
+            problems.append('-e %s=%s: the report records no configuration, so the knob cannot be shown to have '
+                            'reached the container' % (name, value))
+        elif configuration.get(name) != value:
+            problems.append('-e %s=%s was passed, but the harness process carries %s=%r: the knob never reached the '
+                            'container' % (name, value, name, configuration.get(name)))
+    s2 = (report or {}).get('s2')
+    if s2 is not None:
+        return problems + ['S2: %s' % problem for problem in s2.get('problems') or []]
+    if s2_on:
+        return problems + ['%s=1 but the report carries no S2 record (report[\'s2\']): the harness mounted is not '
+                           'W11\'s, or it died before reading the log' % EXTENT_FLAG]
+    if log_text is not None:
+        leaked = sorted(marker for marker in harness.S2_MARKERS if marker in log_text)
+        if leaked:
+            problems.append('the profile leaves %s off, but the server log carries S2 markers (%s): this is not the '
+                            'profile\'s path' % (EXTENT_FLAG, '; '.join(leaked)))
+    return problems
+
+
+def host_live_rate(log_text):
+    """acceptance_report.live_rate over the whole server log (both arms of a G3 pair read the same way), or
+    an error record; never raises."""
+    try:
+        import acceptance_report
+        return acceptance_report.live_rate(log_text, 4)
+    except Exception as error:
+        return dict(error='%s: %s' % (type(error).__name__, error))
+
+
+def host_cache_dir(container_path, hub=HUB):
+    """Where the image's kernel cache (its TT_METAL_CACHE) lives on the host: the image links /experiment-cache
+    to /models/.qwen-c2, and /models is the hub (CACHE_MOUNTS); None for any other path."""
+    for prefix, below in CACHE_MOUNTS:
+        if container_path and container_path.startswith(prefix):
+            rest = container_path[len(prefix):].strip('/')
+            return os.path.join(*([hub] + ([below] if below else []) + ([rest] if rest else [])))
+    return None
+
+
+def count_entries(path):
+    """The files under a kernel-cache directory (every JIT build adds some), or None when it cannot be read:
+    as this user first, then with sudo -n (the container writes it as root)."""
+    if not path:
+        return None
+    if os.path.isdir(path):
+        total, failed = 0, []
+        for _root, _dirs, files in os.walk(path, onerror=failed.append):
+            total += len(files)
+        if not failed:
+            return total
+    try:
+        output = subprocess.run(['sudo', '-n', 'find', path, '-type', 'f'], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=300)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if output.returncode:
+        return None
+    return len([line for line in output.stdout.decode('utf-8', 'replace').splitlines() if line.strip()])
+
+
+def image_kernel_cache(image, hub=HUB):
+    """The image's kernel cache directory on the host (its ENV TT_METAL_CACHE through host_cache_dir), or None."""
+    try:
+        output = subprocess.run(['docker', 'image', 'inspect', '--format', '{{json .Config.Env}}', image],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120)
+        environ = dict(item.split('=', 1) for item in json.loads(output.stdout.decode('utf-8') or 'null') or []
+                       if '=' in item)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return host_cache_dir(environ.get(KERNEL_CACHE_ENV), hub)
+
+
 def wedged(arm_dir):
     """Whether the arm's server log (or the gate's stdout, which quotes its tail) shows the wedge."""
     for name in ('server.log', 'gate-stdout.log'):
@@ -670,15 +1093,58 @@ class Runner(object):
     ethernet-core wedge) every later arm is skipped."""
 
     def __init__(self, image, profile, results, checkout, devices, hub=HUB, execute=None, log=print,
-                 containers=None, corpus=None, any_request=False):
+                 containers=None, corpus=None, any_request=False, profiles=None, cache_entries=None, jit='auto',
+                 policy='strict', decision=None):
         self.image, self.profile, self.results, self.checkout = image, profile, results, checkout
         self.devices, self.hub, self.log = devices, hub, log
         self.execute = execute or self._execute
         self.containers = containers or platform_containers
         self.corpus = corpus or (lambda: image_corpus(image, checkout))
         self.any_request = any_request   # the profile turns C2-any on (any_request_profile)
+        # S2: the profiles (an arm may serve another than --profile), the kernel-cache entry counter (None:
+        # not counted), whose growth is judged (JIT_MODES) and the exactness policy (strict, or dc-i with the
+        # user's recorded decision).
+        self.profiles, self.cache_entries, self.jit = profiles, cache_entries, jit
+        self.policy, self.decision = policy, decision
         self.arms = {}
         self.infra = None
+        # What an arm could not judge (a judged arm whose kernel cache could not be counted): run_plan turns a
+        # plan that would pass into NOT_EXERCISED with these.
+        self.unjudged = []
+
+    def any_request_for(self, profile):
+        if self.profiles is not None and profile in self.profiles['profiles']:
+            return any_request_profile(self.profiles, profile)
+        return self.any_request
+
+    def s2_for(self, profile):
+        return bool(self.profiles is not None and profile in self.profiles['profiles']
+                    and s2_profile(self.profiles, profile))
+
+    def seats_for(self, profile):
+        """The profile's seats (max-num-seqs), MEMORY_USERS when the profiles are not known."""
+        if self.profiles is not None and profile in self.profiles['profiles']:
+            return profile_seats(self.profiles, profile)
+        return MEMORY_USERS
+
+    def judges(self, plan, profile, judged=True):
+        """Whether an arm's kernel-cache growth fails it: never a warm arm, and under --jit auto only an S2
+        plan's or an S2 profile's (M1 warms exactly those); judge takes every other arm too (M2), record none."""
+        if plan in WARM_PLANS or not judged or self.jit == 'record':
+            return False
+        return self.jit == 'judge' or plan in S2_PLANS or self.s2_for(profile)
+
+    def relaxation(self, profile):
+        """The relaxation a verdict on `profile` applies: dc-i only on an S2 profile, only with the decision."""
+        return 'dc-i' if self.policy == 'dc-i' and self.decision and self.s2_for(profile) else None
+
+    def count_cache(self):
+        if self.cache_entries is None:
+            return None
+        try:
+            return self.cache_entries()
+        except Exception:
+            return None
 
     @staticmethod
     def _execute(arguments, stdout_path, timeout, name):
@@ -695,7 +1161,11 @@ class Runner(object):
         finally:
             remove_container(name)
 
-    def run(self, arm, gate_args, timeout):
+    def run(self, arm, gate_args, timeout, profile=None, env=(), judged=False, measure=False):
+        """One arm on --profile, or (an S2 arm) on `profile` with `env` added; `judged`: its kernel-cache
+        growth is a problem (judges()); `measure`: the host reads its four-live rounds from the whole server
+        log (report['c2_gate_live4']: both arms of a G3 pair read the same way)."""
+        profile = profile or self.profile
         arm_dir = os.path.join(self.results, arm)
         os.makedirs(arm_dir, exist_ok=True)
         os.chmod(arm_dir, 0o777)
@@ -709,19 +1179,42 @@ class Runner(object):
             self.arms[arm] = dict(exit='skipped', infra=self.infra)
             return None
         name = CONTAINER_PREFIX + arm
-        arguments = gate_run(self.image, name, self.profile, self.devices, self.checkout, arm_dir, gate_args, self.hub)
+        arguments = gate_run(self.image, name, profile, self.devices, self.checkout, arm_dir, gate_args, self.hub,
+                             env=env)
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
-        self.log('[C2-GATE] arm %s: %s' % (arm, ' '.join(gate_args)))
+        self.log('[C2-GATE] arm %s: %s%s%s' % (arm, ' '.join(gate_args),
+                                                ' [profile %s]' % profile if profile != self.profile else '',
+                                                ''.join(' [-e %s=%s]' % pair for pair in env)))
+        cache_before = self.count_cache()
         started = time.time()
         status = self.execute(arguments, os.path.join(arm_dir, 'gate-stdout.log'), timeout, name)
         seconds = round(time.time() - started, 1)
+        cache_after = self.count_cache()
+        cache = dict(before=cache_before, after=cache_after, judged=judged,
+                     added=None if cache_before is None or cache_after is None else cache_after - cache_before)
         with open(os.path.join(arm_dir, 'gate-stdout.log'), errors='replace') as handle:
             report = extract(handle.read())
         engines, consumers = [], []
         if report is not None:
             # What the server log says about C2-any, judged with the arm's own problems (arm_problems).
-            problems, engines, consumers = any_request_check(server_log(arm_dir), self.any_request)
+            log_text = server_log(arm_dir)
+            problems, engines, consumers = any_request_check(log_text, self.any_request_for(profile))
+            # S2: the harness's S2 problems, the S2 lines off the flag, the knobs reaching the container, the
+            # kernel cache, and the four-live rate from the whole server log.
+            problems += s2_log_check(log_text, self.s2_for(profile), env, report)
+            if judged and cache['added']:
+                problems.append('the kernel cache grew by %d entries during this arm: it compiled what M1 (warm) did '
+                                'not (s2-design B6)' % cache['added'])
+            if judged and cache['added'] is None:
+                self.unjudged.append('%s: its kernel-cache growth is judged but could not be counted (%s): zero new '
+                                     'entries is unshown (s2-design B6)' % (
+                                         arm, 'no counter: the image\'s cache is not on the hub'
+                                         if self.cache_entries is None else 'a count failed'))
+            if log_text is not None and (measure or self.s2_for(profile) or env):
+                report['c2_gate_live4'] = host_live_rate(log_text)
+            if cache['before'] is not None or self.s2_for(profile) or env:
+                report['c2_gate_kernel_cache'] = cache
             if problems:
                 report['c2_gate_problems'] = list(report.get('c2_gate_problems') or []) + problems
             with open(os.path.join(arm_dir, 'm3native-gate.json'), 'w') as handle:
@@ -751,6 +1244,12 @@ class Runner(object):
         self.arms[arm] = dict(exit=status, seconds=seconds, launched=line, gate_passed=(report or {}).get('gate_passed'),
                               fatal=(report or {}).get('fatal'), infra=infra,
                               any_request_engines=engines[:ANY_REQUEST_LINES_KEPT], quarantine_consumers=consumers)
+        if profile != self.profile or env or cache['before'] is not None:
+            # S2 arms (and any counted cache): what served and what the kernel cache did.
+            self.arms[arm].update(profile=profile, env=['%s=%s' % pair for pair in env], kernel_cache=cache)
+            if cache['added'] is not None:
+                self.log('[C2-GATE] arm %s: kernel cache %s -> %s entries (%+d%s)' % (
+                    arm, cache['before'], cache['after'], cache['added'], ', judged' if judged else ''))
         return report
 
 
@@ -767,17 +1266,567 @@ def bringup_warning(profiles, profile):
                 profile, room, context, ceiling, BRINGUP_PROMPT))
 
 
+def spec_profile(runner, spec):
+    """The profile an arm serves: its own (an S2 Arm's), or the gate's --profile."""
+    return getattr(spec, 'profile', None) or runner.profile
+
+
+def run_arm(runner, plan, spec, suffix=''):
+    """Run one arm - a plain (name, args, timeout) or an Arm - with its profile, environment and kernel-cache
+    judgement (Runner.judges); `suffix` names a re-run ('-rerun')."""
+    name, args, timeout = spec
+    profile = spec_profile(runner, spec)
+    return runner.run(name + suffix, args, timeout, profile=getattr(spec, 'profile', None), env=getattr(spec, 'env', ()),
+                      judged=runner.judges(plan, profile, getattr(spec, 'judged', True)), measure=plan in S2_PLANS)
+
+
+def s2_of(report):
+    return (report or {}).get('s2') or {}
+
+
+def s2_g4_problems(label, report):
+    """What fails an S2 serving arm beyond the harness's problems (s2-design M7): an idle commit, a round that
+    went to refuse_round, and any prestage, pair-mask or fused-commit audit mismatch."""
+    s2 = s2_of(report)
+    if not s2:
+        return []
+    problems = []
+    if s2.get('idle_commits'):
+        problems.append('%s: %d "%s" lines' % (label, s2['idle_commits'], harness.PADDED_IDLE_COMMIT_MARKER))
+    refused = s2.get('refused') or {}
+    if refused.get('refused'):
+        problems.append('%s: %d rounds went to refuse_round (%d requests aborted): a serving arm must serve every '
+                        'round' % (label, refused['refused'], refused.get('aborted_lines') or 0))
+    for name, count in sorted((s2.get('other_audits') or {}).items()):
+        if count:
+            problems.append('%s: %d %s audit mismatches' % (label, count, name))
+    return problems
+
+
+def memory_s2_checks(label, report, seats=MEMORY_USERS):
+    """(problems, shortfalls) of G5 on an S2 profile (s2-design B4, B8; M8, M11). A DRAM hold is a failed fit only
+    with a seat free: its decodes below `seats`. W6b now asks only then and logs a hold line per (request,
+    decodes); its first cut asked with every seat decoding too, where a hold changes nothing (the prompt could not
+    be admitted anyway - churn has more users than seats), and such a line is no failure. A deferred step (a stale
+    reading, harness.DRAM_DEFERRED_MARKER) is no hold. Also: no lifted hold (admitted with nothing left to wait
+    for) and no refused request; the before-point floor (W6d's margins, a negative one included, and the prefill
+    points) at least FLOOR_GB per chip. A hold or a before-point that read no DRAM, or no engine before-point
+    under the flag, leaves the floor unjudged: a shortfall, never a pass."""
+    s2 = s2_of(report)
+    if not s2:
+        return [], []
+    problems, shortfalls = [], []
+    hold = s2.get('dram_hold') or {}
+    free = sorted(set(decodes for decodes in hold.get('hold_decodes') or [] if decodes < seats))
+    if free:
+        problems.append('%s: DRAM held a prompt with a seat free (decodes %s of %d seats): the block and the engines '
+                        'did not fit (%s)' % (label, free, seats, '; '.join(hold.get('lines') or [])))
+    if hold.get('lifted'):
+        problems.append('%s: %d "%s" lines: a prompt that did not fit was admitted with no decode left to wait for '
+                        '(%s)' % (label, hold['lifted'], harness.DRAM_LIFTED_MARKER.strip(),
+                                  '; '.join(hold.get('lifted_lines') or [])))
+    if hold.get('unavailable'):
+        shortfalls.append('%s: the DRAM hold read no DRAM for %d requests (%s): their fit is unjudged' % (
+            label, hold['unavailable'], '; '.join(hold.get('unavailable_lines') or [])))
+    if s2.get('quarantined'):
+        problems.append('%s: %d requests refused (RequestRefused, quarantined) (%s)' % (
+            label, s2['quarantined'], '; '.join(s2.get('quarantined_lines') or [])))
+    before = s2.get('before') or {}
+    if before.get('floor_gb') is None:
+        problems.append('%s: no ledger before-point carries an estimate: the floor cannot be judged' % label)
+    elif before['floor_gb'] < FLOOR_GB:
+        problems.append('%s: before-point floor %.3f GB per chip, below %.2f (%s %s chip%s)' % (
+            label, before['floor_gb'], FLOOR_GB, (before.get('floor_point') or {}).get('op'),
+            (before.get('floor_point') or {}).get('detail'), (before.get('floor_point') or {}).get('chip')))
+    if before.get('unread'):
+        shortfalls.append('%s: %d ledger before-points read no DRAM (%s): the floor over them is unjudged' % (
+            label, before['unread'], '; '.join(before.get('unread_lines') or [])))
+    if s2.get('extent_replay') and not (before.get('by_op') or {}).get('engine'):
+        shortfalls.append('%s: no "[MEMLEDGER] before op=engine" point (W6d): the floor was judged without the '
+                          'engine builds' % label)
+    return problems, shortfalls
+
+
+def live4_of(report):
+    """The four-live packed rounds of an arm: the host's reading of its whole log, else the harness's."""
+    live = (report or {}).get('c2_gate_live4') or s2_of(report).get('live4')
+    return live if live and 'error' not in live else None
+
+
+def g4_checks(plan, concurrent, solo, rerun=None, probe=None, seats=MEMORY_USERS):
+    """(problems, shortfalls, facts) of a G4 plan beyond the policy and matrix_verdict (module docstring)."""
+    problems, shortfalls = [], []
+    arms = [('concurrent', concurrent), ('solo', solo)]
+    if rerun is not None and None not in rerun:
+        arms += [('concurrent re-run', rerun[0]), ('solo re-run', rerun[1])]
+    for label, report in arms:
+        if report is None:
+            continue
+        problems += s2_g4_problems(label, report)
+        if plan == 'short':
+            memory, unjudged = memory_s2_checks(label, report, seats)
+            problems += memory
+            shortfalls += unjudged
+            ladders = s2_of(report).get('ladders') or []
+            wrong = sorted(set(str(ladder) for ladder in ladders if ladder != SINGLE_BUCKET))
+            if wrong or not ladders:
+                problems.append('%s: proposal ladders %s, not the one 2048 bucket every engine builds under %s (W6a)'
+                                % (label, wrong or 'unlogged', EXTENT_FLAG))
+            # The executed path: the buckets read from each built capture (graft-mounted-is-not-graft-executed).
+            built = s2_of(report).get('buckets_built') or []
+            wrong = sorted(set(str(buckets) for buckets in built if buckets != SINGLE_BUCKET))
+            if wrong:
+                problems.append('%s: the engines built proposal buckets %s, not the one 2048 bucket (W6a)'
+                                % (label, wrong))
+            elif len(built) < len(ladders):
+                shortfalls.append('%s: %d "%s" lines for %d engines: the buckets built are unseen for the rest'
+                                  % (label, len(built), '[PINDIAG] proposal buckets built', len(ladders)))
+    s2 = s2_of(concurrent)
+    live = live4_of(concurrent)
+    facts = dict(live4=live, rounds=s2.get('rounds'))
+    rate = (live or {}).get('net_per_user_tok_s')
+    if rate is None:
+        shortfalls.append('concurrent: no timed four-live packed round: the per-user rate is unmeasured')
+    elif rate <= GENERAL_RATE:
+        problems.append('concurrent: %.1f tok/s per user at four live (net of the audit), not above general\'s %.1f '
+                        '(target %.0f)' % (rate, GENERAL_RATE, TARGET_RATE))
+    rounds = s2.get('rounds') or {}
+    if plan == 'mixed' and not rounds.get('multi_family_rounds'):
+        shortfalls.append('concurrent: no packed round of two or more live families: mixed positions not exercised')
+    if plan == 'boundaries':
+        users = (s2.get('paths') or {}).get('users') or {}
+        if not users:
+            shortfalls.append('concurrent: no path records: cap events and boundary crossings unseen')
+        for user, entry in sorted(users.items(), key=lambda item: int(item[0])):
+            if not entry.get('cap_fields'):
+                shortfalls.append('user %s: its [PACKED] lines carry no cap= (W4): cap events unseen' % user)
+            elif not entry.get('cap_events'):
+                shortfalls.append('user %s: no commit capped at a boundary' % user)
+            if (entry.get('boundaries') or 0) < BOUNDARY_MIN_CROSSINGS:
+                shortfalls.append('user %s crossed %s 256-key boundaries, fewer than %d' % (
+                    user, entry.get('boundaries'), BOUNDARY_MIN_CROSSINGS))
+    if plan == 'staggered':
+        by_live = rounds.get('by_live') or {}
+        if not (by_live.get('2') or by_live.get('3')):
+            shortfalls.append('concurrent: no packed round at two or three live: the padded path not exercised')
+        if probe is None:
+            problems.append('probe: the arm left no gate report')
+        else:
+            problems += arm_problems('probe', probe)
+            problems += s2_g4_problems('probe', probe)
+            markers = probe.get('flag_markers') or {}
+            problems += ['probe: %s' % line for line in markers.get('missing') or []
+                         if line.startswith('QWEN_FAST_PADDED_PROBE')]
+            if not markers.get('padded_probe'):
+                shortfalls.append('probe: no padded probe line')
+    return problems, shortfalls, facts
+
+
+def with_checks(result, problems, shortfalls, facts=None):
+    """A verdict with a plan's own problems (FAIL) and shortfalls (NOT_EXERCISED where it would pass)."""
+    if problems:
+        result['verdict'] = 'FAIL'
+    elif shortfalls and result.get('verdict') == 'PASS':
+        result['verdict'] = 'NOT_EXERCISED'
+    result['s2_problems'], result['shortfalls'] = problems, shortfalls
+    if facts:
+        result['facts'] = facts
+    result['lines'] = list(result.get('lines') or []) + ['problem: %s' % p for p in problems] + [
+        'not exercised: %s' % s for s in shortfalls]
+    return result
+
+
+def run_matrix(plan, runner, arms, checks=None):
+    """A concurrent arm against its solo reference under the policy, one re-run on a first divergence (matrix,
+    and the G4 plans with `checks`)."""
+    by_role = dict((getattr(spec, 'role', None) or ('concurrent', 'solo')[index], spec)
+                   for index, spec in enumerate(arms[:2]))
+    by_role.update((spec.role, spec) for spec in arms[2:])
+    c_spec, s_spec = by_role['concurrent'], by_role['solo']
+    wants = dict(concurrent=asked(c_spec[1]), solo=asked(s_spec[1]))
+    relaxation = runner.relaxation(spec_profile(runner, c_spec))
+    concurrent, solo = run_arm(runner, plan, c_spec), run_arm(runner, plan, s_spec)
+    result = matrix_verdict(concurrent, solo, wants=wants, relaxation=relaxation)
+    rerun = None
+    if result['verdict'] == 'RERUN':
+        runner.log('[C2-GATE] %s: a first divergence - re-running both arms once (the exactness policy)' % plan)
+        rerun = (run_arm(runner, plan, c_spec, '-rerun'), run_arm(runner, plan, s_spec, '-rerun'))
+        result = matrix_verdict(concurrent, solo, rerun if None not in rerun else None, wants=wants,
+                                relaxation=relaxation)
+        if None in rerun:
+            result.update(verdict='FAIL', reason='a re-run arm left no gate report')
+    if checks is None and runner.s2_for(spec_profile(runner, c_spec)):
+        checks = 'matrix'
+    if checks is not None:
+        probe = run_arm(runner, plan, by_role['probe']) if 'probe' in by_role else None
+        if concurrent is not None and solo is not None:
+            problems, shortfalls, facts = g4_checks(checks, concurrent, solo, rerun, probe,
+                                                    seats=runner.seats_for(spec_profile(runner, c_spec)))
+            result = with_checks(result, problems, shortfalls, facts)
+    return result
+
+
+def live_shortfalls(spec, report, suffix=''):
+    """An event arm's drops that fired at another live count than the arm expects (Arm expect_live: {user: live
+    streams when that user's drop fires}); a drop that never fired is event_shortfalls'."""
+    expected = (getattr(spec, 'extra', None) or {}).get('expect_live') or {}
+    if not expected or report is None:
+        return []
+    events = ((report or {}).get('lifecycle') or {}).get('events') or {}
+    shortfalls = []
+    for user, live in sorted(expected.items()):
+        event = events.get(str(user), events.get(user)) or {}
+        if event.get('fired') and event.get('live') != live:
+            shortfalls.append('%s%s: user %s\'s %s fired at %s live streams, not %d: the arrival that makes the live '
+                              'count two was not the one dropped (VR4:150)' % (spec[0], suffix, user, event.get('spec'),
+                                                                               event.get('live'), live))
+    return shortfalls
+
+
+def run_lifecycle(plan, runner, arms):
+    """The event arms against the last (solo) arm, each divergent one re-run with the solo once; on an S2
+    profile also every refuse_round request ended FINISHED_ABORTED (W5b) and, for lifecycle itself, at least
+    one narrowed survivor across the event arms (D1 exercised, M6)."""
+    reports = [(spec, run_arm(runner, plan, spec)) for spec in arms]
+    s_spec, solo = reports[-1]
+    solo_want = asked(s_spec[1])
+    relaxation = runner.relaxation(spec_profile(runner, s_spec))
+    arms_results = dict((spec[0], lifecycle_verdict(report, solo, want=asked(spec[1]), solo_want=solo_want,
+                                                    relaxation=relaxation))
+                        for spec, report in reports[:-1])
+    again = [spec for spec, _ in reports[:-1] if arms_results[spec[0]]['verdict'] == 'RERUN']
+    reruns = {}
+    if again:
+        runner.log('[C2-GATE] %s: a first divergence - re-running %s and the solo arm once (the exactness '
+                   'policy)' % (plan, ', '.join(spec[0] for spec in again)))
+        solo_again = run_arm(runner, plan, s_spec, '-rerun')
+        first = dict((spec[0], report) for spec, report in reports)
+        for spec in again:
+            event_again = reruns[spec[0]] = run_arm(runner, plan, spec, '-rerun')
+            rerun = (event_again, solo_again) if event_again is not None and solo_again is not None else None
+            arms_results[spec[0]] = lifecycle_verdict(first[spec[0]], solo, rerun, want=asked(spec[1]),
+                                                      solo_want=solo_want, relaxation=relaxation)
+            if rerun is None:
+                arms_results[spec[0]].update(verdict='FAIL', reason='a re-run arm left no gate report')
+    result = dict(verdict=worst([r['verdict'] for r in arms_results.values()]), arms=arms_results,
+                  lines=['%s: %s' % (arm, line) for arm, r in arms_results.items() for line in r['lines']] +
+                  ['%s %s' % (arm, r['verdict']) for arm, r in arms_results.items()])
+    if runner.s2_for(spec_profile(runner, s_spec)):
+        problems, shortfalls = [], []
+        for spec, report in reports[:-1]:
+            refused = s2_of(report).get('refused') or {}
+            if refused and not refused.get('accounted', True):
+                problems.append('%s: %d refuse_round rounds, but %d complete FINISHED_ABORTED groups: a refused '
+                                'request was left to kill the engine (W5b)' % (spec[0], refused.get('refused'),
+                                                                               refused.get('complete_groups')))
+        for spec, report in reports[:-1]:
+            shortfalls += live_shortfalls(spec, report) + live_shortfalls(spec, reruns.get(spec[0]), ' re-run')
+        narrowed = sum(s2_of(report).get('narrowed') or 0 for _, report in reports[:-1])
+        if plan == 'lifecycle' and not narrowed:
+            shortfalls.append('no "%s" line across the event arms: D1 was not exercised (M6: re-run)'
+                              % harness.NARROWED_MARKER)
+        result = with_checks(result, problems, shortfalls, dict(narrowed=narrowed))
+    return result
+
+
+def run_memory(plan, runner, arms):
+    """G5: each arm judged alone (memory_verdict), the plan the worst of them; on an S2 profile with
+    memory_s2_checks."""
+    results = []
+    for spec in arms:
+        report = run_arm(runner, plan, spec)
+        one = memory_verdict(report, want=asked(spec[1]))
+        if report is not None and runner.s2_for(spec_profile(runner, spec)):
+            problems, shortfalls = memory_s2_checks(spec[0], report, runner.seats_for(spec_profile(runner, spec)))
+            one = with_checks(one, problems, shortfalls,
+                              dict(before=s2_of(report).get('before'), dram_hold=s2_of(report).get('dram_hold')))
+        one['any_request_engines'] = (runner.arms.get(spec[0]) or {}).get('any_request_engines') or []
+        results.append((spec[0], one))
+    if len(results) == 1:
+        return results[0][1]
+    # memory-short on a C2-any profile: each arm judged alone, the plan the worst of them; every per-request
+    # engine's proposal ladder recorded with its arm (R3).
+    return dict(verdict=worst([one['verdict'] for _, one in results]), arms=dict(results),
+                lines=['%s: %s' % (arm, line) for arm, one in results
+                       for line in (one.get('lines') or []) + one['any_request_engines']] +
+                ['%s %s' % (arm, one['verdict']) for arm, one in results])
+
+
+def corpus_first(plan, runner, reference):
+    """The image's corpus against the reference's before any card is opened: the mismatch, or None."""
+    try:
+        return corpus_mismatch(runner.corpus(), reference)
+    except Exception as error:
+        runner.log('[C2-GATE] %s WARNING: the image\'s corpus could not be read first (%s)' % (plan, error))
+        return None
+
+
+def run_reference_pairs(plan, runner, reference, arms):
+    """control (G3) and forced-cap (Q5): every arm against v235 (bringup_verdict); control's flag-on arms timed
+    against the flag-off arm of their pair; forced-cap's arms against each other and its caps."""
+    mismatch = corpus_first(plan, runner, reference)
+    if mismatch:
+        return dict(verdict='NOT_COMPARABLE', reason=mismatch, lines=['corpus: %s' % mismatch])
+    reports, results = {}, {}
+    for spec in arms:
+        report = reports[spec[0]] = run_arm(runner, plan, spec)
+        verdict = bringup_verdict(report, reference, spec.profile, asked(spec[1]))
+        if spec.role == 'on' and report is not None and not (s2_of(report).get('rounds') or {}).get('count'):
+            verdict.update(verdict='FAIL')
+            verdict['lines'] = list(verdict.get('lines') or []) + ['problem: the flag-on arm served no packed extent round']
+        results[spec[0]] = verdict
+    problems, shortfalls, pairs = [], [], []
+    if plan == 'control':
+        for index in sorted(set(spec.extra['pair'] for spec in arms)):
+            off, on = live4_of(reports.get('control-off-%d' % index)), live4_of(reports.get('control-on-%d' % index))
+            if off is None or on is None:
+                shortfalls.append('pair %d: no timed four-live packed round in the %s arm: the round is not compared' % (
+                    index, 'flag-off' if off is None else 'flag-on'))
+                continue
+            ratio = on['net_median_round_ms'] / off['median_round_ms']
+            pairs.append(dict(pair=index, off_ms=off['median_round_ms'], on_ms=on['median_round_ms'],
+                              on_net_ms=on['net_median_round_ms'], on_audit_ms=on.get('median_audit_ms'),
+                              ratio=round(ratio, 4), raw_ratio=round(on['median_round_ms'] / off['median_round_ms'], 4)))
+            if ratio > CONTROL_TOLERANCE:
+                problems.append('pair %d: the flag-on median four-live round, %.2f ms net of its audit, is %.4f x the '
+                                'flag-off %.2f ms, past %.2f' % (index, on['net_median_round_ms'], ratio,
+                                                                 off['median_round_ms'], CONTROL_TOLERANCE))
+    else:
+        off, on = reports.get('forced-cap-off'), reports.get('forced-cap-on')
+        if off is not None and on is not None:
+            compared = real_text_compare.policy_pass(on, off)
+            for user in compared['users']:
+                if user['verdict'] != 'IDENTICAL':
+                    problems.append('user %s: the capped arm is %s against the uncapped at character %s: commit '
+                                    'granularity changed the text (Q5)' % (user['user'], user['verdict'],
+                                                                          user.get('first_divergence')))
+            caps = (s2_of(on).get('paths') or {}).get('users') or {}
+            seen = [entry for entry in caps.values() if entry.get('cap_fields')]
+            if not seen:
+                shortfalls.append('the capped arm\'s [PACKED] lines carry no cap= (W4): the forced cap is unseen')
+            for user, entry in sorted(caps.items(), key=lambda item: int(item[0])):
+                if entry.get('max_cap') is not None and entry['max_cap'] > FORCE_CAP:
+                    problems.append('user %s: a packed commit capped at %d under %s=%d' % (
+                        user, entry['max_cap'], harness.FORCE_CAP_FLAG, FORCE_CAP))
+    verdicts = [result['verdict'] for result in results.values()]
+    result = dict(verdict=worst(verdicts), arms=results, pairs=pairs,
+                  lines=['%s: %s' % (arm, line) for arm, one in results.items() for line in one.get('lines') or []] +
+                  ['%s %s' % (arm, one['verdict']) for arm, one in results.items()] +
+                  ['pair %(pair)d: flag-off %(off_ms)s ms, flag-on %(on_ms)s ms (net %(on_net_ms)s, audit '
+                   '%(on_audit_ms)s): %(ratio)s x' % entry for entry in pairs])
+    return with_checks(result, problems, shortfalls)
+
+
+def below_pair(family, off_spec, off, on_spec, on):
+    """One G3b pair at family F: both arms served as asked, the flag-off block served packed rounds inside F
+    (else NO_DECISION, Q22), the flag-on arm served packed extent rounds, and every user IDENTICAL across them."""
+    problems, shortfalls = [], []
+    if off is None or on is None:
+        return dict(verdict='FAIL', reason='an arm left no gate report', lines=[])
+    problems += arm_problems('flag-off', off, asked(off_spec[1])) + arm_problems('flag-on', on, asked(on_spec[1]))
+    low, high = family - 256, family - 16
+    packed, outside = 0, []
+    for user, entry in sorted(((s2_of(off).get('paths') or {}).get('users') or {}).items()):
+        for record in real_text_compare.decode_paths(entry.get('encoded')):
+            if record['path'] == 'P':
+                packed += 1
+                if record['position'] is not None and not low <= record['position'] <= high:
+                    outside.append('user %s round %d at %d' % (user, record['round'], record['position']))
+    if outside:
+        problems.append('flag-off: packed rounds outside family %d (%s)' % (family, '; '.join(outside[:3])))
+    if not (s2_of(on).get('rounds') or {}).get('count'):
+        shortfalls.append('flag-on: no packed extent round')
+    compared = real_text_compare.policy_pass(on, off)
+    texts = [user['verdict'] for user in compared['users']]
+    for user in compared['users']:
+        if user['verdict'] != 'IDENTICAL':
+            problems.append('user %s: flag-on is %s against flag-off at character %s (%s)' % (
+                user['user'], user['verdict'], user.get('first_divergence'), user.get('reason') or user.get('detail')))
+    if problems:
+        verdict = 'FAIL'
+    elif not packed:
+        verdict = 'NO_DECISION'
+        shortfalls.append('flag-off: the block served no packed round at family %d (Q22): G3b decides nothing here; '
+                          'fall back to CB2b R2 and the audit' % family)
+    elif shortfalls:
+        verdict = 'NOT_EXERCISED'
+    else:
+        verdict = 'PASS'
+    return dict(verdict=verdict, family=family, users=texts, flag_off_packed_rounds=packed, problems=problems,
+                shortfalls=shortfalls, lines=['problem: %s' % p for p in problems] + [
+                    'not exercised: %s' % s for s in shortfalls] + ['users %s; flag-off packed rounds %d' % (texts, packed)])
+
+
+def run_below(plan, runner, arms):
+    """control-below (G3b): each family's pairs in order, each pair judged alone (below_pair)."""
+    reports = dict((spec[0], (spec, run_arm(runner, plan, spec))) for spec in arms)
+    pairs = {}
+    for spec in arms:
+        if spec.role != 'off':
+            continue
+        family, index = spec.extra['family'], spec.extra['pair']
+        off_spec, off = reports['below-%d-off-%d' % (family, index)]
+        on_spec, on = reports['below-%d-on-%d' % (family, index)]
+        pairs['%d-%d' % (family, index)] = below_pair(family, off_spec, off, on_spec, on)
+    return dict(verdict=worst([pair['verdict'] for pair in pairs.values()]), pairs=pairs,
+                lines=['family %s: %s' % (key, line) for key, pair in pairs.items() for line in pair['lines']] +
+                ['family %s %s' % (key, pair['verdict']) for key, pair in pairs.items()])
+
+
+def run_warm(plan, runner, arms):
+    """M1: every arm must complete as asked; the kernel cache's growth is recorded, never judged."""
+    results = {}
+    for spec in arms:
+        report = run_arm(runner, plan, spec)
+        problems = arm_problems(spec[0], report, asked(spec[1])) if report is not None else ['%s: no gate report' % spec[0]]
+        results[spec[0]] = dict(verdict='FAIL' if problems else 'PASS', problems=problems,
+                                kernel_cache=(runner.arms.get(spec[0]) or {}).get('kernel_cache'))
+    return dict(verdict=worst([one['verdict'] for one in results.values()]), arms=results,
+                lines=['%s: problem: %s' % (arm, p) for arm, one in results.items() for p in one['problems']] +
+                ['%s %s kernel cache %s' % (arm, one['verdict'], one['kernel_cache']) for arm, one in results.items()])
+
+
+def trace_region_text(region):
+    """The trace region's readings as a line: its peak use and smallest free block, or why there are none (Q18)."""
+    region = region or {}
+    if region.get('readings'):
+        return '%d readings, at most %s GB used, smallest largest-free %s GB' % (
+            region['readings'], region.get('max_used_gb'), region.get('min_largest_free_gb'))
+    if region.get('unavailable'):
+        return 'unavailable at %d points: this ttnn exposes no TRACE view (Q18)' % region['unavailable']
+    return 'not logged (Q18)'
+
+
+def run_churn(plan, runner, profiles, arms):
+    """M11 (G5 churn): no engine death, no DRAM hold with a seat free, no lifted hold or refusal, the floor, and a
+    released quad at every departure while a quad was formed (harness.proposal_releases), over at least
+    CHURN_MIN_REPLACEMENTS replacements seen as departures; the trace region's readings recorded (Q18)."""
+    spec, = arms
+    report = run_arm(runner, plan, spec)
+    if report is None:
+        return dict(verdict='FAIL', reason='the arm left no gate report', lines=[])
+    seats = profile_seats(profiles, spec_profile(runner, spec))
+    memory, shortfalls = memory_s2_checks('churn', report, seats)
+    problems = arm_problems('churn', report, asked(spec[1])) + memory
+    if not report.get('alive'):
+        problems.append('churn: the engine did not answer every seat after the streams')
+    s2 = s2_of(report)
+    releases = s2.get('releases') or {}
+    users = asked(spec[1])['streams']
+    replacements = users - seats
+    if (releases.get('departures') or 0) < replacements:
+        shortfalls.append('%s departures seen ([PHASE] finished ids) for %d replacements: the seats did not churn '
+                          'as asked' % (releases.get('departures') or 0, replacements))
+    if not releases.get('quad_rounds'):
+        shortfalls.append('no quad round ran: no departure met a formed quad (W6c unexercised)')
+    elif not releases.get('quad_departures'):
+        shortfalls.append('%d quad rounds, but no request left while a quad was formed (W6c unexercised)'
+                          % releases['quad_rounds'])
+    elif releases.get('unreleased'):
+        problems.append('%d of %d departures while a quad was formed carry no "[PACKED-PROPOSE] released quad=1" '
+                        'line (%s): dead proposal traces were not released at detach (W6c)' % (
+                            releases['unreleased'], releases['quad_departures'],
+                            '; '.join(releases.get('unreleased_steps') or [])))
+    region = s2.get('trace_region') or {}
+    facts = dict(releases=releases, replacements=replacements, quads_built=s2.get('quads_built'),
+                 before=s2.get('before'), dram_hold=s2.get('dram_hold'), trace_region=region)
+    result = dict(verdict='PASS', lines=[
+        'departures %s (%s while a quad was formed, %s released it) over %d replacements; release lines %s (%s '
+        'quads, %s pairs); trace region %s' % (
+            releases.get('departures'), releases.get('quad_departures'),
+            (releases.get('quad_departures') or 0) - (releases.get('unreleased') or 0), replacements,
+            releases.get('lines'), releases.get('quad'), releases.get('pairs'), trace_region_text(region))])
+    return with_checks(result, problems, shortfalls, facts)
+
+
+def run_permuted(plan, runner, arms):
+    """The permuted arm (A4; required only under D-c(i)): two concurrent arms, the second admitted in reverse;
+    the users whose every round took the same path in both (SAME_PATH) must match, and there must be two."""
+    forward_spec, reverse_spec = arms
+    forward, reverse = run_arm(runner, plan, forward_spec), run_arm(runner, plan, reverse_spec)
+    if forward is None or reverse is None:
+        return dict(verdict='FAIL', reason='an arm left no gate report', lines=[])
+    problems = arm_problems('forward', forward, asked(forward_spec[1])) + arm_problems('reverse', reverse,
+                                                                                       asked(reverse_spec[1]))
+    shortfalls = []
+    same = real_text_compare.same_path_users(forward, reverse)
+    if same is None:
+        shortfalls.append('an arm carries no path records: SAME_PATH users cannot be counted')
+        same = []
+    elif len(same) < 2:
+        shortfalls.append('%d SAME_PATH users, fewer than two: NOT_EXERCISED (A4)' % len(same))
+    streams_f, streams_r = forward.get('streams') or [], reverse.get('streams') or []
+    for user in same:
+        compared = real_text_compare.compare_user(streams_f[user] if user < len(streams_f) else None,
+                                                  streams_r[user] if user < len(streams_r) else None)
+        if compared['verdict'] != 'exact':
+            problems.append('user %d took the same path in both arms but is %s at character %s: a same-path '
+                            'divergence FAILS under any policy' % (user, compared['verdict'],
+                                                                   compared.get('first_divergence')))
+    result = dict(verdict='PASS', same_path_users=same,
+                  lines=['SAME_PATH users %s (required only under decision D-c(i))' % same])
+    return with_checks(result, problems, shortfalls)
+
+
+def run_s2_plan(plan, runner, profiles, reference, arms):
+    """The S2 plans (module docstring's S2 PLANS)."""
+    if plan in ('control', 'forced-cap'):
+        return run_reference_pairs(plan, runner, reference, arms)
+    if plan == 'control-below':
+        return run_below(plan, runner, arms)
+    if plan in WARM_PLANS:
+        return run_warm(plan, runner, arms)
+    if plan == 'lifecycle-arrival':
+        return run_lifecycle(plan, runner, arms)
+    if plan == 'churn':
+        return run_churn(plan, runner, profiles, arms)
+    if plan == 'permuted':
+        return run_permuted(plan, runner, arms)
+    return run_matrix(plan, runner, arms, checks=plan)
+
+
+def divergence_records(result):
+    """Every divergence record a plan's policies carry (exactness_policy's 'records'), as (where, record)."""
+    found = []
+    policy = result.get('policy') or {}
+    found += [('', record) for record in policy.get('records') or []]
+    for name, one in sorted((result.get('arms') or {}).items()):
+        found += [(name, record) for record in ((one or {}).get('policy') or {}).get('records') or []]
+    return found
+
+
+def counts_cache(plans, profiles, profile, jit):
+    """Whether a run counts the kernel cache before and after every arm: an S2 plan or profile, or an explicit --jit
+    judge or record. S1 plans on an S1 profile under --jit auto read nothing more than before W11 (no docker image
+    inspect, no find) and their reports and summary gain no kernel-cache keys."""
+    return any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, profile) or jit != 'auto'
+
+
+def with_unjudged(result, unjudged):
+    """A plan's result with what its arms could not judge (Runner.unjudged): NOT_EXERCISED where it would pass."""
+    if not unjudged:
+        return result
+    result['shortfalls'] = list(result.get('shortfalls') or []) + list(unjudged)
+    result['lines'] = list(result.get('lines') or []) + ['not exercised: %s' % s for s in unjudged]
+    if result.get('verdict') == 'PASS':
+        result['verdict'] = 'NOT_EXERCISED'
+    return result
+
+
 def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2_serving_job.DEFAULT_MAX_TOKENS,
-             memory_prompt=None):
+             memory_prompt=None, s2=None):
     notes = []
-    arms = plan_arms(plan, runner.profile, profiles, lengths, max_tokens, memory_prompt, notes)
+    unjudged_from = len(runner.unjudged)
+    arms = plan_arms(plan, runner.profile, profiles, lengths, max_tokens, memory_prompt, notes, s2)
     for note in notes:
         runner.log('[C2-GATE] note: %s' % note)
-    if plan == 'bringup':
+    if plan in S2_PLANS:
+        result = run_s2_plan(plan, runner, profiles, reference, arms)
+    elif plan == 'bringup':
         warning = bringup_warning(profiles, runner.profile)
         if warning:
             runner.log('[C2-GATE] bringup WARNING: %s' % warning)
-        (arm, args, timeout), = arms
+        spec, = arms
         try:
             mismatch = corpus_mismatch(runner.corpus(), reference)
         except Exception as error:
@@ -786,56 +1835,16 @@ def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2
         if mismatch:
             result = dict(verdict='NOT_COMPARABLE', reason=mismatch, lines=['corpus: %s' % mismatch])
         else:
-            result = bringup_verdict(runner.run(arm, args, timeout), reference, runner.profile, asked(args))
+            result = bringup_verdict(run_arm(runner, plan, spec), reference, runner.profile, asked(spec[1]))
         if warning:
             result['warning'] = warning
     elif plan == 'memory':
-        results = []
-        for arm, args, timeout in arms:
-            one = memory_verdict(runner.run(arm, args, timeout), want=asked(args))
-            one['any_request_engines'] = (runner.arms.get(arm) or {}).get('any_request_engines') or []
-            results.append((arm, one))
-        if len(results) == 1:
-            result = results[0][1]
-        else:
-            # memory-short on a C2-any profile: each arm judged alone, the plan the worst of them; every
-            # per-request engine's proposal ladder recorded with its arm (R3).
-            result = dict(verdict=worst([one['verdict'] for _, one in results]), arms=dict(results),
-                          lines=['%s: %s' % (arm, line) for arm, one in results
-                                 for line in (one.get('lines') or []) + one['any_request_engines']] +
-                          ['%s %s' % (arm, one['verdict']) for arm, one in results])
+        result = run_memory(plan, runner, arms)
     elif plan == 'lifecycle':
-        reports = [(arm, args, timeout, runner.run(arm, args, timeout)) for arm, args, timeout in arms]
-        (s_arm, s_args, s_timeout, solo) = reports[-1]
-        solo_want = asked(s_args)
-        arms_results = dict((arm, lifecycle_verdict(report, solo, want=asked(args), solo_want=solo_want))
-                            for arm, args, _, report in reports[:-1])
-        again = [(arm, args, timeout) for arm, args, timeout, _ in reports[:-1] if arms_results[arm]['verdict'] == 'RERUN']
-        if again:
-            runner.log('[C2-GATE] lifecycle: a first divergence - re-running %s and the solo arm once (the exactness '
-                       'policy)' % ', '.join(arm for arm, _, _ in again))
-            solo_again = runner.run(s_arm + '-rerun', s_args, s_timeout)
-            first = dict((arm, report) for arm, _, _, report in reports)
-            for arm, args, timeout in again:
-                event_again = runner.run(arm + '-rerun', args, timeout)
-                rerun = (event_again, solo_again) if event_again is not None and solo_again is not None else None
-                arms_results[arm] = lifecycle_verdict(first[arm], solo, rerun, want=asked(args), solo_want=solo_want)
-                if rerun is None:
-                    arms_results[arm].update(verdict='FAIL', reason='a re-run arm left no gate report')
-        result = dict(verdict=worst([r['verdict'] for r in arms_results.values()]), arms=arms_results,
-                      lines=['%s: %s' % (arm, line) for arm, r in arms_results.items() for line in r['lines']] +
-                      ['%s %s' % (arm, r['verdict']) for arm, r in arms_results.items()])
+        result = run_lifecycle(plan, runner, arms)
     else:
-        (c_arm, c_args, c_timeout), (s_arm, s_args, s_timeout) = arms
-        wants = dict(concurrent=asked(c_args), solo=asked(s_args))
-        concurrent, solo = runner.run(c_arm, c_args, c_timeout), runner.run(s_arm, s_args, s_timeout)
-        result = matrix_verdict(concurrent, solo, wants=wants)
-        if result['verdict'] == 'RERUN':
-            runner.log('[C2-GATE] matrix: a first divergence - re-running both arms once (the exactness policy)')
-            rerun = (runner.run(c_arm + '-rerun', c_args, c_timeout), runner.run(s_arm + '-rerun', s_args, s_timeout))
-            result = matrix_verdict(concurrent, solo, rerun if None not in rerun else None, wants=wants)
-            if None in rerun:
-                result.update(verdict='FAIL', reason='a re-run arm left no gate report')
+        result = run_matrix(plan, runner, arms)
+    result = with_unjudged(result, runner.unjudged[unjudged_from:])
     if runner.infra is not None:
         result.update(verdict='INFRA', reason=runner.infra)
     if notes:
@@ -898,10 +1907,11 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--image', required=True)
     parser.add_argument('--profile', required=True)
-    parser.add_argument('--plan', default='bringup', help='comma-separated: %s' % ', '.join(c2_serving_job.GATE_PLANS))
+    parser.add_argument('--plan', default='bringup', help='comma-separated: %s' % ', '.join(c2_serving_job.ALL_GATE_PLANS))
     parser.add_argument('--results', required=True)
     parser.add_argument('--lengths', default=None, help='matrix prompt lengths (default: the G4 ladder, its top '
-                                                        'rung lowered to what the profile admits)')
+                                                        'rung lowered to what the profile admits); an S2 plan\'s '
+                                                        'set in place of its default')
     parser.add_argument('--max-tokens', type=int, default=c2_serving_job.DEFAULT_MAX_TOKENS)
     parser.add_argument('--memory-prompt', type=int, default=None)
     parser.add_argument('--budget-seconds', type=int, default=None,
@@ -911,15 +1921,61 @@ def build_parser():
     parser.add_argument('--profiles', default=None, help='a profiles JSON instead of the image\'s own')
     parser.add_argument('--hub', default=HUB)
     parser.add_argument('--dry-run', action='store_true', help='print every arm\'s docker argv and run nothing')
+    # S2 (the module docstring's S2 PLANS; c2_serving_job's C2_GATE_* keys).
+    parser.add_argument('--pairs', type=int, default=None, help='control and control-below A/B pairs (default %d)'
+                                                                % DEFAULT_PAIRS)
+    parser.add_argument('--families', default=None, help='control-below families (default %s)'
+                                                          % ','.join(str(family) for family in BELOW_FAMILIES))
+    parser.add_argument('--jit', choices=JIT_MODES, default='auto',
+                        help='whose kernel-cache growth fails an arm: auto (S2 arms and plans), judge (every arm but '
+                             'warm), record (none)')
+    parser.add_argument('--policy', choices=c2_serving_job.POLICIES, default='strict',
+                        help='strict (default), or dc-i: the user\'s decision D-c(i) (needs --policy-decision)')
+    parser.add_argument('--policy-decision', default=None, help='where the user\'s D-c decision is recorded')
+    parser.add_argument('--audits', choices=c2_serving_job.AUDIT_SETS, default='extent',
+                        help='extent (the extent audit on every S2 arm) or all (also prestage, pair-mask and '
+                             'fused-commit on the G4 arms)')
     return parser
 
 
-def main(argv=None, execute=None, devices=None, log=print, containers=None, corpus=None):
+def s2_options(options, log):
+    """The S2 options as plan_arms takes them, or None (logged) when they are refused."""
+    try:
+        if options.pairs is not None and not 1 <= options.pairs <= c2_serving_job.MAX_PAIRS:
+            raise c2_serving_job.JobError('--pairs must be 1..%d, got %d' % (c2_serving_job.MAX_PAIRS, options.pairs))
+        families = [c2_serving_job.below_family('--families', part)
+                    for part in c2_serving_job.split_list(options.families)] if options.families else None
+    except c2_serving_job.JobError as error:
+        log('refused: %s' % error)
+        return None
+    if options.policy == 'dc-i' and not (options.policy_decision or '').strip():
+        log('refused: --policy dc-i needs --policy-decision: only the user\'s D-c decision relaxes the strict policy')
+        return None
+    return dict(pairs=options.pairs, families=families, audits=options.audits)
+
+
+def write_records(results, plan, result):
+    """Every divergence record of a plan to <results>/<plan>-divergence-records.json, and the S2 exit blockers
+    among them: a NOT_COMPARABLE or UNSTABLE user blocks S2 exit until its record is read (s2-design W11)."""
+    found = divergence_records(result)
+    if not found:
+        return []
+    path = os.path.join(results, '%s-divergence-records.json' % plan)
+    with open(path, 'w') as handle:
+        json.dump([dict(record, arm=where) for where, record in found], handle, indent=2)
+    return [dict(plan=plan, arm=where, user=record.get('user'), verdict=record.get('verdict'), record=path)
+            for where, record in found if record.get('verdict') in ('NOT_COMPARABLE', 'UNSTABLE')]
+
+
+def main(argv=None, execute=None, devices=None, log=print, containers=None, corpus=None, cache_entries=None):
     options = build_parser().parse_args(argv)
     plans = c2_serving_job.split_list(options.plan)
-    unknown = sorted(set(plans) - set(c2_serving_job.GATE_PLANS))
+    unknown = sorted(set(plans) - set(c2_serving_job.ALL_GATE_PLANS))
     if not plans or unknown:
         log('unknown plan(s): %s' % ', '.join(unknown or ['(none)']))
+        return 2
+    s2 = s2_options(options, log)
+    if s2 is None:
         return 2
     lengths = [c2_serving_job.positive_int('--lengths', part) for part in c2_serving_job.split_list(options.lengths)] \
         if options.lengths else None
@@ -935,7 +1991,8 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
     arms_of = {}
     for plan in plans:
         try:
-            arms_of[plan] = plan_arms(plan, options.profile, profiles, lengths, options.max_tokens, options.memory_prompt)
+            arms_of[plan] = plan_arms(plan, options.profile, profiles, lengths, options.max_tokens, options.memory_prompt,
+                                      s2=s2)
         except PlanError as error:
             log('refused: %s' % error)
             return 2
@@ -950,22 +2007,46 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
     if options.dry_run:
         log(json.dumps(dict(worst_case_seconds=worst_case, budget_seconds=options.budget_seconds)))
         for plan in plans:
-            for arm, args, timeout in arms_of[plan]:
+            for spec in arms_of[plan]:
+                arm, args, timeout = spec
                 log(json.dumps(dict(arm=arm, timeout=timeout, docker=gate_run(
-                    options.image, CONTAINER_PREFIX + arm, options.profile, devices or ['<M>', '<A>'],
-                    options.checkout, os.path.join(options.results, arm), args, options.hub))))
+                    options.image, CONTAINER_PREFIX + arm, getattr(spec, 'profile', None) or options.profile,
+                    devices or ['<M>', '<A>'], options.checkout, os.path.join(options.results, arm), args, options.hub,
+                    env=getattr(spec, 'env', ())))))
         return 0
+    cache_dir = None
+    s2_run = any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, options.profile)
+    if cache_entries is None and execute is None and counts_cache(plans, profiles, options.profile, options.jit):
+        # The kernel cache the image's arms read and write (B6), counted before and after every arm - only on a run
+        # that judges or records it: S1 plans on an S1 profile (--jit auto) read nothing more than before W11.
+        cache_dir = image_kernel_cache(options.image, options.hub)
+        if cache_dir is not None:
+            cache_entries = lambda: count_entries(cache_dir)
+        else:
+            log('[C2-GATE] note: the image\'s kernel cache (%s) is not on the hub: kernel-cache growth is not counted, '
+                'and every arm that judges it leaves its plan NOT_EXERCISED' % KERNEL_CACHE_ENV)
     runner = Runner(options.image, options.profile, options.results, options.checkout,
                     devices if devices is not None else serving_pair(), options.hub, execute, log, containers, corpus,
-                    any_request=any_request_profile(profiles, options.profile))
+                    any_request=any_request_profile(profiles, options.profile), profiles=profiles,
+                    cache_entries=cache_entries, jit=options.jit, policy=options.policy,
+                    decision=options.policy_decision)
     context, ceiling, room = profile_limits(profiles, options.profile)
     summary = dict(image=options.image, profile=options.profile, plans=plans, context=context,
                    output_ceiling=ceiling, largest_prompt=room, worst_case_seconds=worst_case,
                    budget_seconds=options.budget_seconds, results={}, arms=runner.arms)
+    if s2_run:
+        summary.update(policy=options.policy, policy_decision=options.policy_decision, jit=options.jit,
+                       kernel_cache=cache_dir, s2_exit_blockers=[])
     try:
         for plan in plans:
             summary['results'][plan] = run_plan(plan, runner, profiles, reference, lengths, options.max_tokens,
-                                                options.memory_prompt)
+                                                options.memory_prompt, s2=s2)
+            blockers = write_records(options.results, plan, summary['results'][plan])
+            if blockers:
+                summary.setdefault('s2_exit_blockers', []).extend(blockers)
+                for blocker in blockers:
+                    log('[C2-GATE] S2 EXIT BLOCKED: %(plan)s %(arm)s user %(user)s is %(verdict)s - its record is '
+                        '%(record)s' % blocker)
     finally:
         summary['passed'] = bool(summary['results']) and len(summary['results']) == len(plans) and all(
             result['verdict'] == 'PASS' for result in summary['results'].values())

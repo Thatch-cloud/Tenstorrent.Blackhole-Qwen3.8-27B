@@ -31,6 +31,18 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_CARDM_ENV        its extra environment, space-separated NAME=value; never QUAL_* (QUAL_CARD is card
                       M's, set by the step), ALLOW_SERVING_CARD, RESULTS or CARD_B_ARGS (the step's), nor
                       what would redirect the shell, the loader or docker (CARDM_REFUSED_ENV)
+  S2 (C2-packed-any, s2-design.md W11 and 6.3; C2_GATE_PLAN may name S2_GATE_PLANS too):
+  C2_GATE_PAIRS       the A/B pairs control and control-below run (default, rendered empty: the gate's
+                      two, ABAB), 1..MAX_PAIRS
+  C2_GATE_FAMILIES    control-below's (G3b) families F, each a multiple of 256 in BELOW_FAMILY_RANGE
+                      (default, rendered empty: the gate's 16640,4352)
+  C2_GATE_JIT         whose kernel-cache growth fails an arm: auto (default: S2 arms and plans, never warm),
+                      judge (every arm but warm: M2's exact bring-up), record (none)
+  C2_GATE_POLICY      strict (default) or dc-i: the user's decision D-c(i) - only if K2 had failed - under
+                      which a cross-path divergence reads NOT_COMPARABLE; dc-i needs C2_GATE_POLICY_DECISION,
+                      where the user's decision is recorded (a plain word: a path, URL or id)
+  C2_GATE_AUDITS      extent (default: QWEN_FAST_EXTENT_AUDIT on every S2 arm) or all (also the prestage,
+                      pair-mask and fused-commit audits on the G4 arms); mixed (M7) runs all four either way
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -42,6 +54,19 @@ import sys
 ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'cardm', 'drift', 'build', 'smoke', 'gate', 'replay',
            'push')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
+# S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
+# each runs. warm and warm-off are M1 (never judged for kernel-cache growth); control and forced-cap M3-M4 (G3);
+# control-below M5 (G3b); lifecycle-arrival M6's added event; mixed, short, boundaries and staggered M7-M10 (G4);
+# churn M11 (G5); permuted is built but required only under decision D-c(i).
+S2_GATE_PLANS = ('warm', 'warm-off', 'control', 'forced-cap', 'control-below', 'lifecycle-arrival', 'mixed', 'short',
+                 'boundaries', 'staggered', 'churn', 'permuted')
+ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS
+MAX_PAIRS = 4
+BELOW_FAMILY_RANGE = (4096, 16640)   # capacities the pinned (flag-off) mask admits: attention_mask_replay.py:18,26
+JIT_MODES = ('auto', 'judge', 'record')
+POLICIES = ('strict', 'dc-i')
+AUDIT_SETS = ('extent', 'all')
+DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # S1's G4 ladder (c2-serve-for-real-plan 2.2, gate table row G4 part 1): both sides of every page and
 # chunk boundary the fast path has (2048 = the draft window and the prefill chunk), a short prompt
 # far below any of them, and long ones up to the ~123k prompt cap.
@@ -175,9 +200,10 @@ def read_job(values, profiles, root=ROOT):
     if platform_image and not PLATFORM_IMAGE.fullmatch(platform_image):
         raise JobError('C2_PLATFORM_IMAGE must match %s' % PLATFORM_IMAGE.pattern)
     plans = split_list(values.get('C2_GATE_PLAN', 'bringup')) or ['bringup']
-    unknown = sorted(set(plans) - set(GATE_PLANS))
+    unknown = sorted(set(plans) - set(ALL_GATE_PLANS))
     if unknown:
-        raise JobError('C2_GATE_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(GATE_PLANS)))
+        raise JobError('C2_GATE_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(ALL_GATE_PLANS)))
+    s2 = read_s2_gate(values)
     lengths_text = values.get('C2_GATE_LENGTHS', '')
     lengths = [positive_int('C2_GATE_LENGTHS', part) for part in split_list(lengths_text)]
     max_tokens = positive_int('C2_GATE_MAX_TOKENS', values['C2_GATE_MAX_TOKENS']) \
@@ -191,12 +217,54 @@ def read_job(values, profiles, root=ROOT):
     if replay_served_model and not MODEL_ID.fullmatch(replay_served_model):
         raise JobError('C2_REPLAY_SERVED_MODEL must match %s, got %r' % (MODEL_ID.pattern, replay_served_model))
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
-    return dict(actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
-                platform_image=platform_image, gate_plan=','.join(plans),
-                gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
-                gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,
-                replay_served_model=replay_served_model, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                cardm_env=cardm_env)
+    outputs = dict(actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
+                   platform_image=platform_image, gate_plan=','.join(plans),
+                   gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
+                   gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,
+                   replay_served_model=replay_served_model, cardm_harness=cardm_harness, cardm_args=cardm_args,
+                   cardm_env=cardm_env)
+    outputs.update(s2)
+    return outputs
+
+
+def below_family(name, text):
+    """One G3b family: a multiple of 256 inside BELOW_FAMILY_RANGE, or JobError."""
+    family = positive_int(name, text)
+    if family % 256 or not BELOW_FAMILY_RANGE[0] <= family <= BELOW_FAMILY_RANGE[1]:
+        raise JobError('%s: %d is not a family the flag-off block serves (a multiple of 256 in %d..%d)'
+                       % (name, family, BELOW_FAMILY_RANGE[0], BELOW_FAMILY_RANGE[1]))
+    return family
+
+
+def read_s2_gate(values):
+    """The S2 gate keys (module docstring) as workflow outputs, each rendered empty when unset (the gate's
+    own default), or JobError."""
+    pairs = values.get('C2_GATE_PAIRS', '')
+    if pairs:
+        count = positive_int('C2_GATE_PAIRS', pairs)
+        if count > MAX_PAIRS:
+            raise JobError('C2_GATE_PAIRS: at most %d pairs, got %d' % (MAX_PAIRS, count))
+        pairs = str(count)
+    families = [below_family('C2_GATE_FAMILIES', part) for part in split_list(values.get('C2_GATE_FAMILIES', ''))]
+    if len(set(families)) != len(families):
+        raise JobError('C2_GATE_FAMILIES names a family twice')
+    jit = values.get('C2_GATE_JIT', '')
+    if jit and jit not in JIT_MODES:
+        raise JobError('C2_GATE_JIT must be one of %s, got %r' % (', '.join(JIT_MODES), jit))
+    policy = values.get('C2_GATE_POLICY', '')
+    if policy and policy not in POLICIES:
+        raise JobError('C2_GATE_POLICY must be one of %s, got %r' % (', '.join(POLICIES), policy))
+    decision = values.get('C2_GATE_POLICY_DECISION', '')
+    if decision and not DECISION.fullmatch(decision):
+        raise JobError('C2_GATE_POLICY_DECISION must match %s' % DECISION.pattern)
+    if policy == 'dc-i' and not decision:
+        raise JobError('C2_GATE_POLICY=dc-i needs C2_GATE_POLICY_DECISION: only the user\'s D-c decision relaxes the '
+                       'strict policy, and the gate records where it is')
+    audits = values.get('C2_GATE_AUDITS', '')
+    if audits and audits not in AUDIT_SETS:
+        raise JobError('C2_GATE_AUDITS must be one of %s, got %r' % (', '.join(AUDIT_SETS), audits))
+    return dict(gate_pairs=pairs, gate_families=','.join(str(family) for family in families), gate_jit=jit,
+                gate_policy=policy, gate_policy_decision=decision, gate_audits=audits)
 
 
 def render(outputs):

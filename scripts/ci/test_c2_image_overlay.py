@@ -94,11 +94,11 @@ C2_KNOWN_STALE = {
         'host-side only: imported by lever_n_m3native_patch in the graft job on the runner, never inside the '
         'container'),
     'scripts/ci/longctx_cycle_bench.py': (
-        '714d89db78fa52b4793b3e5a84105cea97402db6',
+        '2ba798095c5374ae96ca438bd56dfc797aa53e54',
         'mounted per arm at /bench/longctx_cycle_bench.py (lever_n_m3native_run_arm.sh, and c2_serving_gate.'
         'BENCH_SCRIPTS since s1/gates), not imported from the baked tree: its only importer is the harness, '
         'lever_n_m3native_gate, mounted beside it. Re-pinned at the S1 integration for the stream_once of s1/gates '
-        '(a cancel through the StreamWatch)'),
+        '(a cancel through the StreamWatch), and at S2 W11 for chunk_chars (detail streams only)'),
     'scripts/ci/mlp_clock_samples.py': (
         'e3e5d6602c4296e7927ac5689a7139f357d96fc6',
         'clock evidence tooling; HEAD re-pins the drain regeneration (d08c1140). ' + _UNREVIEWED),

@@ -83,7 +83,10 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *,
     pieces = []
     first_token_at = None
     entry = {}
-    details = dict(request_id=None, finish_reason=None, started_s=started, chunk_s=[], chunk_tokens=[]) if detail else None
+    # chunk_chars (S2 W11): each recorded chunk's text length, beside its token count, so a first differing
+    # character maps to the chunk - one engine round - that carried it (real_text_compare.divergence_record).
+    details = dict(request_id=None, finish_reason=None, started_s=started, chunk_s=[], chunk_tokens=[],
+                   chunk_chars=[]) if detail else None
     completed = 0
     if watch is not None:
         watch.begin(index, started)
@@ -135,6 +138,7 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *,
                         if text or delta:
                             details['chunk_s'].append(round(time.perf_counter() - started, 6))
                             details['chunk_tokens'].append(delta)
+                            details['chunk_chars'].append(len(text))
                 if not text:
                     continue
                 now = time.perf_counter()
