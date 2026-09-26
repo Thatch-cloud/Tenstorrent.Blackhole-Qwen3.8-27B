@@ -20,6 +20,7 @@ SKIP_BLOCK_STREAM_FLAG = 'QWEN_FAST_SKIP_BLOCK_STREAM'
 SINGLE_GATEUP_FLAG = 'QWEN_FAST_SINGLE_GATEUP'
 SINGLE_GATEUP_SHAPE = 'the single gate/up copy'
 M3_SHAPE = 'the 64-row block'
+C2_ANY_SHAPE = 'C2-any with no packed block'
 PADDED_BLOCK_FLAG = 'QWEN_FAST_PADDED_BLOCK'
 
 
@@ -34,6 +35,15 @@ def m3_shape(policy, environ=None):
                                   environ.get('QWEN_FAST_PACKED_STEP', 'unset'))
     met = users == 4 and four_as_two == '0' and packed == '1'
     return met, 'users=%s FOUR_AS_TWO=%s PACKED_STEP=%s' % (users, four_as_two, packed)
+
+
+def c2_any_without_block(environ=None):
+    """Whether this is C2-any with no packed block: QWEN_FAST_ANY_REQUEST=1 and QWEN_FAST_PACKED_STEP
+    not 1 (the c2 profile). attach_combined_runtime then builds no block and caps every per-request
+    engine at the sequential widths (1, 2, 4), so, as at the 64-row block, no target MLP ever sees 16
+    rows and FusedT16Arm and the block stream behind it are never read."""
+    environ = os.environ if environ is None else environ
+    return environ.get('QWEN_FAST_ANY_REQUEST') == '1' and environ.get('QWEN_FAST_PACKED_STEP', 'unset') != '1'
 
 
 def register_reader_reason(policy, environ=None):
@@ -54,12 +64,21 @@ def register_reader_reason(policy, environ=None):
     - QWEN_FAST_SKIP_BLOCK_STREAM=1: elsewhere None, the stream is built as always (and
       serving_startup.weight_streams says so in a marker).
 
+    The same holds for C2-any with no packed block (c2_any_without_block, the c2 profile): its
+    engines capture 1, 2 and 4 rows and nothing else runs a verify, so both flags are admitted there
+    too. Run 36219636175 refused SINGLE_GATEUP there, and turning it off would build w_gate_up and
+    its stream again, about as much DRAM as dropping the block freed.
+
     The policy is evaluated only once either flag is set."""
     environ = os.environ if environ is None else environ
     single = environ.get(SINGLE_GATEUP_FLAG) == '1'
     if not single and environ.get(SKIP_BLOCK_STREAM_FLAG) != '1':
         return None
     met, shape = m3_shape(policy, environ)
+    if not met and c2_any_without_block(environ):
+        if single:
+            return (SINGLE_GATEUP_SHAPE, 'QWEN_FAST_SINGLE_GATEUP=1 builds no w_gate_up to stream')
+        return (C2_ANY_SHAPE, 'register-epilogue reader on native w_gate_up')
     if single:
         if not met:
             raise ValueError('QWEN_FAST_SINGLE_GATEUP=1 is admitted only at the 64-row M3 block '

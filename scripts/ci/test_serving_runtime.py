@@ -390,6 +390,12 @@ class RuntimeAttachmentTests(unittest.TestCase):
                       extra_env={'QWEN_FAST_SINGLE_GATEUP': '1'})
         self.assertIs(self.single_gateup_admitted, True)
 
+    def test_the_single_gate_up_flag_is_admitted_for_c2_any_with_no_block(self):
+        with patch.object(serving_runtime, 'attach_source_check'):
+            self.exercise(packed=False, users=4, block_stream=None,
+                          extra_env={'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_ANY_REQUEST': '1'})
+        self.assertIs(self.single_gateup_admitted, True)
+
     def test_the_single_gate_up_flag_is_refused_at_every_other_shape(self):
         # There FusedT16Arm serves the 16-row verify MLP (one user beside the M1 block, the
         # FOUR_AS_TWO rounds), and its BF4 register-epilogue projection is not bit-identical
@@ -473,6 +479,27 @@ class RegisterReaderReasonTests(unittest.TestCase):
         for environ, requests in refused:
             with self.subTest(environ=environ, requests=requests), \
                     self.assertRaisesRegex(ValueError, 'admitted only at the 64-row M3 block .*, not users='):
+                self.reason(environ, requests)
+
+    def test_c2_any_with_no_packed_block_admits_both_flags(self):
+        """The c2 profile: no block, engines capped at (1, 2, 4), so no 16-row MLP runs (run 36219636175)."""
+        c2 = {'QWEN_FAST_ANY_REQUEST': '1', 'QWEN_FAST_PACKED_STEP': '0'}
+        for requests in (1, 4):
+            with self.subTest(requests=requests):
+                self.assertEqual(self.reason(dict(c2, QWEN_FAST_SINGLE_GATEUP='1'), requests),
+                                 ('the single gate/up copy', 'QWEN_FAST_SINGLE_GATEUP=1 builds no w_gate_up to stream'))
+                self.assertEqual(self.reason(dict(c2, QWEN_FAST_SKIP_BLOCK_STREAM='1'), requests),
+                                 ('C2-any with no packed block', 'register-epilogue reader on native w_gate_up'))
+        self.assertIsNone(self.reason(c2))
+        self.assertTrue(serving_runtime.c2_any_without_block({'QWEN_FAST_ANY_REQUEST': '1'}))
+        # Not C2-any, or C2-any beside a block the switch builds: the old rule, refused off the M3 block.
+        for environ, requests in (({'QWEN_FAST_PACKED_STEP': '0', 'QWEN_FAST_SINGLE_GATEUP': '1'}, 4),
+                                  ({'QWEN_FAST_ANY_REQUEST': '0', 'QWEN_FAST_SINGLE_GATEUP': '1'}, 4),
+                                  (dict(c2, QWEN_FAST_PACKED_STEP='1', QWEN_FAST_SINGLE_GATEUP='1'), 2),
+                                  (dict(c2, QWEN_FAST_PACKED_STEP='1', QWEN_FAST_FOUR_AS_TWO='1',
+                                        QWEN_FAST_SINGLE_GATEUP='1'), 4)):
+            with self.subTest(environ=environ), \
+                    self.assertRaisesRegex(ValueError, 'admitted only at the 64-row M3 block'):
                 self.reason(environ, requests)
 
     def test_the_shape_description_names_what_is_configured(self):

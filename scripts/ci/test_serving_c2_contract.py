@@ -86,6 +86,8 @@ class ProfileTest(unittest.TestCase):
         # No packed block: it cannot engage under the 123136-token cap and its 3.84 GB per chip is what
         # the fourth per-request engine needs (run 36218104858).
         self.assertEqual(env['QWEN_FAST_PACKED_STEP'], '0')
+        # ...and so no padded block, which is admitted at the 64-row block only (run 36219636175).
+        self.assertEqual(env['QWEN_FAST_PADDED_BLOCK'], '0')
         limits = contract.request_limits(c2)
         self.assertEqual(limits, dict(budget=16384, max_prompt_tokens=123136, min_answer_tokens=8192,
                                       default_max_tokens=8192))
@@ -104,9 +106,11 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(gate['engine'], exact['engine'])
         # c2's code paths and ceiling, but WITH the packed block: the bring-up's 4 x 131072 users are the
         # one shape it serves, and the image's own QWEN_FAST_PACKED_STEP=1 builds it.
-        self.assertEqual(gate['env'], {key: value for key, value in c2['env'].items() if key != 'QWEN_FAST_PACKED_STEP'},
+        block_only = ('QWEN_FAST_PACKED_STEP', 'QWEN_FAST_PADDED_BLOCK')
+        self.assertEqual(gate['env'], {key: value for key, value in c2['env'].items() if key not in block_only},
                          'the c2 code paths, the c2 ceiling')
-        self.assertNotIn('QWEN_FAST_PACKED_STEP', gate['env'])
+        for key in block_only:
+            self.assertNotIn(key, gate['env'])
         for key in ('eos_ids', 'snapshots', 'mesh_graph_descriptor', 'default_max_tokens'):
             self.assertEqual(gate.get(key), c2.get(key), key)
         limits = contract.request_limits(gate)
