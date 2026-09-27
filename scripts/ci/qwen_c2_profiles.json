@@ -1,5 +1,5 @@
 {
-  "default": "general",
+  "default": "general-prefix",
   "profiles": {
     "exact": {
       "description": "C2 exactly as measured at gate v235/v238: 4 users x 131072-token context, 256-token output budget",

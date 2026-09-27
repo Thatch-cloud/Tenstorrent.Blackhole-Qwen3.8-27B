@@ -81,7 +81,12 @@ jobs:
           echo "=== build in flight"; pgrep -af build-c2-serving-image || echo none
           echo "=== images"; docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}} {{.Size}}' | grep -E 'qwen38-c2|thatch-serving-tt' | head
           echo "=== persistent cache"; sudo -n du -sh /home/thatch/hf-cache/hub/.qwen-c2 /home/thatch/hf-cache/hub/.qwen-c2.partial 2>&1
-          echo "=== cards"; ls -l /dev/tenstorrent/by-id/; sudo -n fuser -v /dev/tenstorrent/* 2>&1
+          # Card M and card A only, resolved by board id as the reset step resolves them (scripts/ci/serving_pair.sh):
+          # card B is reserved for another project, so its link, its node and its holders are never listed here.
+          echo "=== cards M and A"
+          . scripts/ci/serving_pair.sh
+          for card in $QUAL_SERVING_CARDS; do ls -l "$QUAL_BYID_ROOT/$card" 2>&1; done
+          if serving_pair_nodes; then sudo -n fuser -v "${SERVING_PAIR_NODES[@]}" 2>&1 || echo "no holders"; fi
           echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
           echo "=== agent"; journalctl --user -u thatch-node-agent --since -3h --no-pager 2>&1 | grep -v -i heartbeat | tail -15
       - name: Platform serving container (read-only)

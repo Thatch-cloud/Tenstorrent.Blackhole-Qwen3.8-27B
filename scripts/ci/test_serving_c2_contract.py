@@ -153,11 +153,12 @@ class ProfileTest(unittest.TestCase):
         with open(path, encoding='utf-8') as handle:
             self.assertNotIn('QWEN_FAST_ANY_REQUEST', handle.read(), 'only the c2 profiles may set it')
 
-    def test_default_profile_is_general(self):
+    def test_default_profile_is_general_prefix(self):
+        # From the G1 release on, the image serves general-prefix when the platform names no profile.
         environ = dict(os.environ)
         os.environ.pop('QWEN_C2_PROFILE', None)
         try:
-            self.assertEqual(contract.load_profile(PROFILES)['name'], 'general')
+            self.assertEqual(contract.load_profile(PROFILES)['name'], 'general-prefix')
         finally:
             os.environ.clear()
             os.environ.update(environ)

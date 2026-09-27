@@ -998,7 +998,7 @@ class ProvenanceTests(unittest.TestCase):
         problems, docker = self.verify()
         self.assertEqual(problems, [], problems)
         self.assertEqual(docker.images[1], provenance.base_image((self.context / 'Dockerfile').read_text()))
-        self.assertTrue(any(line.startswith('[G1] (c) default: [QWEN-C2] profile general: vLLM argv')
+        self.assertTrue(any(line.startswith('[G1] (c) default: [QWEN-C2] profile general-prefix: vLLM argv')
                             for line in self.log))
         self.assertIn('[G1] PASS: 0 problem(s)', self.log)
         profiles = json.loads((self.context / 'overlay/scripts/ci/qwen_c2_profiles.json').read_text())
@@ -1030,10 +1030,13 @@ class ProvenanceTests(unittest.TestCase):
         argv = provenance.expected_argv(contract, profiles, 'general-prefix', snapshot)
         argv[argv.index('--enable-prefix-caching')] = '--no-enable-prefix-caching'
         problems, _ = self.verify(argv_override={'general-prefix': argv})
-        self.assertEqual(len(problems), 2, problems)
+        # The default boot is general-prefix from the G1 release on, so (c) reports the fault for it and for
+        # the named boot.
+        self.assertEqual(len(problems), 3, problems)
         self.assertIn('(c) general-prefix: the image launched', problems[0])
+        self.assertIn('(c) general-prefix: the image launched', problems[1])
         self.assertIn("(f) general-prefix: prefix reuse is on in the profile, but the launched argv lacks "
-                      "['--enable-prefix-caching'] and has ['--no-enable-prefix-caching']", problems[1])
+                      "['--enable-prefix-caching'] and has ['--no-enable-prefix-caching']", problems[2])
 
     def test_the_gate_only_profile_is_booted_as_a_gate(self):
         """general-prefix-eager is gate only: provenance boots it (and probes its environment) with the gate
