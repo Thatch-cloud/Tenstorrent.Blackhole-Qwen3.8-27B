@@ -78,7 +78,8 @@ S2 (C2-packed-any, s2-design.md W11; detail mode). Under QWEN_FAST_EXTENT_REPLAY
 QWEN_FAST_PACKED_CAPTURE_POSITION, QWEN_FAST_GATE_FORCE_CAP) or any S2 line gets report['s2'] (s2_report): the
 extent rounds and their families, the extent audit, cap-refused / deadline / idle-commit / refuse_round / narrowed
 / aborted / dram hold / quarantine / release lines, the ledger's before-points and their floor, the per-user path
-records (P packed or S sequential per round, acceptance_report.path_records) and the four-live rate. Its
+records (P packed or S sequential per round, acceptance_report.path_records), the attach's eager publication
+warm (B6, publication_warm; its warmed line is required under the flag) and the four-live rate. Its
 problems join flag_markers['missing']. Every other arm's report is unchanged.
 """
 
@@ -2542,7 +2543,8 @@ def ledger_report(log_text, alive_index=None):
 # parses them here whenever the checkout carries it), and key=value lines are read by field name, so a field a
 # producer adds never hides a line. s2_report reads all of it into report['s2'] and puts what fails an arm into
 # flag_markers['missing'], so gate_passed carries it:
-#   flag on:  the admission line (W7), the engaged line (W1), K64j's F22 line, and a 'packed extent round'
+#   flag on:  the admission line (W7), the engaged line (W1), K64j's F22 line, B6's eager publication warmed
+#             line (publication_warm, at attach), and a 'packed extent round'
 #             line (W3, logged inside verify: the executed path, memory graft-mounted-is-not-graft-executed)
 #             for every packed round's [PACKED] lines; with the audit, no MISMATCH, every word and cur_pos
 #             read back, and an audit line for every packed extent round; never a packed round below 128;
@@ -2623,8 +2625,16 @@ LEDGER_OP_UNREAD = re.compile(r'\[MEMLEDGER\] (before|after) op=(\S+)(?: point=(
                               r'(dram unavailable[^\n]*|error=[^\n]*)')
 LEDGER_SIZE = re.compile(r'(?<![a-z_])(largest_free|free|estimate|margin|floor|cost|trace_used|trace_largest_free)='
                          r'(-?[0-9.]+)(MB|GB)')
+# B6, publication_warm (called by the extent block at attach, after its last capture): the drafter's eager
+# publication published once at every shape serving can ask of it, so no refused fused commit or sequential step
+# compiles after attach. One warmed line - '<n> shapes in <ms> ms packed=.. sequential=.. merge_release=..
+# fused_steady_state=.. program_cache=a->b' - or a skipped line naming why (no collectives, no prepared weights).
+S2_WARM_MARKER = '[PINDIAG] eager publication warmed:'         # publication_warm.MARKER
+S2_WARM_SKIPPED_MARKER = '[PINDIAG] eager publication warm skipped'   # publication_warm.SKIPPED_MARKER
+S2_WARM_LINE = re.compile(r'\[PINDIAG\] eager publication warmed: ([0-9]+) shapes in ([0-9.]+) ms'
+                          r'(?: packed=(\S+))?(?: sequential=(\S+))?(?:[^\n]*? program_cache=(\S+))?')
 S2_MARKERS = (S2_ADMISSION_MARKER, S2_ENGAGED_MARKER, S2_ROUND_MARKER, EXTENT_AUDIT_MARKER, CAP_REFUSED_MARKER,
-              SDPA_EXTENT_MARKER)
+              SDPA_EXTENT_MARKER, S2_WARM_MARKER, S2_WARM_SKIPPED_MARKER)
 S2_MIN_LIVE_START = 128   # extent_attention_replay.MIN_LIVE_START: no packed round below it
 # The prefill point's operation (s2-design 3.2 item 2, serving_prefill_admission's one set of defaults, UNVERIFIED:
 # M8 and M11 calibrate them): the transient of a prompt of at least PREFILL_TRANSIENT_FROM tokens, 0 below. W6d's
@@ -2927,6 +2937,16 @@ def user_paths(log_text, streams, prompt_lengths):
                 position_mismatch_count=found['position_mismatch_count'], packed_below_floor=low[:8])
 
 
+def publication_warm_report(log_text):
+    """B6's warm (publication_warm): each warmed line's shape count, milliseconds, plan and program-cache counts,
+    and any skipped line."""
+    warmed = [dict(shapes=int(shapes), ms=float(ms), packed=packed or None, sequential=sequential or None,
+                   program_cache=cache or None)
+              for shapes, ms, packed, sequential, cache in S2_WARM_LINE.findall(log_text)]
+    skipped = [line.strip()[:240] for line in log_text.splitlines() if S2_WARM_SKIPPED_MARKER in line][:4]
+    return dict(warmed=warmed[:8], skipped=skipped)
+
+
 def s2_report(environ, log_text, streams=None, prompt_lengths=None):
     """What an S2-relevant arm's server log says (the section comment above), with the arm-failing problems
     under 'problems'."""
@@ -2941,7 +2961,7 @@ def s2_report(environ, log_text, streams=None, prompt_lengths=None):
                  fused=h1b_summary(log_text)['audit_mismatches'] + log_text.count(FUSED_AUDIT_MISMATCH_MARKER),
                  pair_mask=(pair_mask_audit_summary(log_text) or {}).get('clobbered', 0))
     markers = dict(admission=S2_ADMISSION_MARKER in log_text, engaged=S2_ENGAGED_MARKER in log_text,
-                   f22=SDPA_EXTENT_MARKER in log_text)
+                   f22=SDPA_EXTENT_MARKER in log_text, warm=S2_WARM_MARKER in log_text)
     first = lambda marker: [line.strip()[:240] for line in lines if marker in line][:2]
     region = trace_region(log_text)
     report = dict(
@@ -2963,6 +2983,7 @@ def s2_report(environ, log_text, streams=None, prompt_lengths=None):
         buckets_built=[ladder_of(text) for _, text in PROPOSAL_BUCKETS_BUILT_LINE.findall(log_text)][:32],
         before=before_points(log_text),
         trace_region=region, trace_region_lines=region['lines'],
+        publication_warm=publication_warm_report(log_text),
         other_audits=other)
     try:
         from acceptance_report import live_rate
@@ -2978,7 +2999,11 @@ def s2_report(environ, log_text, streams=None, prompt_lengths=None):
         for key, marker, what in (('admission', S2_ADMISSION_MARKER, 'the packed-any admission (W7) never ran'),
                                   ('engaged', S2_ENGAGED_MARKER, 'no extent reader was built (W1)'),
                                   ('f22', SDPA_EXTENT_MARKER, 'no 0x20 program was built: the K64j runtime-extent '
-                                                              'factory never ran')):
+                                                              'factory never ran'),
+                                  ('warm', S2_WARM_MARKER, 'the eager publication was not warmed at attach (B6), so a '
+                                                           'refused fused commit or a sequential step can compile '
+                                                           'mid-request%s' % ''.join(
+                                                               ' (%s)' % line for line in first(S2_WARM_SKIPPED_MARKER)))):
             if not markers[key]:
                 problems.append('%s=1: no "%s" line: %s' % (EXTENT_REPLAY_FLAG, marker, what))
         if packed_lines and not rounds['count']:

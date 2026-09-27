@@ -78,6 +78,7 @@ jobs:
           python -B -m unittest test_serving_survivor_narrowing
           python -B -m unittest test_verify_prestage test_round_fences
           python -B -m unittest test_fused_commit
+          python -B -m unittest test_publication_warm
           python -B -m unittest test_early_draft
           python -B -m unittest test_pair_row_exact
           python -B -m unittest test_quad_draft
