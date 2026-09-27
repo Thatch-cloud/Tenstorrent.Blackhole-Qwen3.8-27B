@@ -66,6 +66,7 @@ import quad_candidates as quad  # noqa: E402
 
 RUNNER = HERE / 'run_card_b.sh'
 CARD_B = 'blackhole-F36F768B9A5CAFA0'
+CARD_X = 'blackhole-0000000000000001'   # a board id qual_card.sh does not name (card B is reserved and refused)
 NL = chr(10)
 # K spans at least four in0 blocks at these widths, so the K-split control (two halves added in fp32) changes the
 # stand-in's association as the device's does at K = 5120 (40 blocks); at two blocks the two would coincide.
@@ -1393,7 +1394,7 @@ class FileTests(unittest.TestCase):
 class RunnerTests(unittest.TestCase):
     def run_runner(self, directory, **env):
         base = {name: value for name, value in os.environ.items() if name not in SCRUB}
-        base.update(HOME=Path(directory).as_posix(), QUAD_DRY_RUN='1', MSYS_NO_PATHCONV='1')
+        base.update(QUAL_CARD=CARD_X, HOME=Path(directory).as_posix(), QUAD_DRY_RUN='1', MSYS_NO_PATHCONV='1')
         base.update(env)
         return subprocess.run([BASH, RUNNER.as_posix()], capture_output=True, text=True, timeout=120, env=base)
 
@@ -1418,8 +1419,8 @@ class RunnerTests(unittest.TestCase):
             result = self.run_runner(directory)
             self.assertEqual(result.returncode, 0, result.stderr)
             argv = self.argv(result)
-        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_B)
-        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-quaddraft-card-b')
+        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_X)
+        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-quaddraft-' + CARD_X)
         mounts = [argv[index + 1] for index, word in enumerate(argv) if word == '--mount']
         for name in ('probe_quad_draft_card_b.py', 'quad_candidates.py', 'quad_conv_io.cpp', 'pair_row_exact.py',
                      'draft_attention.py', 'dflash_batched_mask.py', 'draft_shared_head.py', 'draft_head_preparation.py',

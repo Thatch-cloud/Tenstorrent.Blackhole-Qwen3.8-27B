@@ -30,6 +30,13 @@ probe_exit=$(docker inspect --format '{{.State.ExitCode}}' "$probe_id")
 test "$probe_exit" = 0
 docker rm "$probe_id" >/dev/null
 probe_id=''
+# /dev/tenstorrent/0 and /2 must be card A and card M by board id before either is checked or mapped: nodes
+# renumber across resets, and card B (reserved for another project) must never be one of them.
+tt_a=$(readlink -e /dev/tenstorrent/by-id/blackhole-3707293C249A5E67 || true)
+tt_m=$(readlink -e /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D || true)
+if [ "$tt_a" != /dev/tenstorrent/0 ] || [ "$tt_m" != /dev/tenstorrent/2 ]; then
+  echo 'refusing: /dev/tenstorrent/0 and /2 are not card A and card M by board id' >&2; exit 1
+fi
 test_id=$(docker create --network none --cap-drop ALL --cap-add SYS_NICE \
     --security-opt no-new-privileges --pids-limit 2048 --memory 32g --cpus 12 \
     --device /dev/tenstorrent/0 --device /dev/tenstorrent/2 \

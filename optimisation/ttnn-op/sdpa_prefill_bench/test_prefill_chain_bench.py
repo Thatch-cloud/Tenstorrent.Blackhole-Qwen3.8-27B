@@ -387,7 +387,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("3|124|137) hung=1 ;;", tail)
         self.assertIn("1) grep -qF 'Timeout (' \"$R/m1-$stamp.log\" && hung=1 ;;", tail)   # the faulthandler backstop
         self.assertIn('qual_reset_hint >&2', tail)          # the node and PCI address, resolved now
-        for token in ('$QUAL_SYS_ROOT/dev/char/', 'tt-smi -ls', 'qual_card_recheck   #', '{{.HostConfig.Privileged}}', 'fuser -v "$QUAL_NODE"',
+        for token in ('$QUAL_SYS_ROOT/dev/char/', 'tt-smi -ls', 'qual_card_recheck   #', '{{.HostConfig.Privileged}}', 'fuser -v "${QUAL_GUARD_NODES[@]}"',
                       '\n  qual_refuse_holders\n'):
             self.assertIn(token, text)
 

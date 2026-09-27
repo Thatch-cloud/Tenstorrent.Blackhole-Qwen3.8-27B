@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # K64i card-B qualification (the K1 head-sliced Q design, section 7): run sdpa_decode_slice_card_b.py on the
-# qualification card (QUAL_CARD, default card B), in the gate's image, with a graft mounted exactly as
+# target card (QUAL_CARD, required; card B is refused), in the gate's image, with a graft mounted exactly as
 # lever_n_m3native_run_arm.sh mounts it for the gate's argv (KOPGRAFT64 and M3NATIVE_SDPA_PF=1): _ttnn.so,
 # _ttnncpp.so (both paths), attn_prep, nlp_concat_heads_decode, sdpa_decode and sdpa. No build, no weights.
 # NOT a CI workflow: invoke by hand on the rig.
@@ -25,7 +25,7 @@
 # The harness checks the mapped binary and the mounted kernels again inside the container.
 #
 # Env: KOPGRAFT64 (the candidate, ~/opgraft-K64i), KOPGRAFT64_REFERENCE (the reference, ~/opgraft-K64g), IMAGE
-# (default image P3, the v194-v199 gate image), RESULTS (~/kwork64/k64i/<card tag>: card-b, card-m, card-a),
+# (default image P3, the v194-v199 gate image), RESULTS (~/kwork64/k64i/<card tag>: card-m, card-a),
 # CARD_B_ARGS (extra harness args, appended last, e.g. "--capacities 33024,131328 --seeds 0"), EXPECT_TTNNCPP_SHA256,
 # WATCHER=1, WATCHDOG_S, K64I_DRY_RUN=1, QUAL_CARD (the target board id under /dev/tenstorrent/by-id; default card
 # B, blackhole-F36F768B9A5CAFA0; card M or card A, the serving pair, is refused unless ALLOW_SERVING_CARD=1, which
@@ -56,28 +56,31 @@ SLICE_MARKER='[QWEN-SDPA] q-slice rows_per_kv='
 #
 # The rig has three p150a. Card M (blackhole-CEF5729692C19E6D) and card A (blackhole-3707293C249A5E67)
 # are the serving pair: Ethernet-linked, mounted by every CI gate arm (lever_n_m3native_run_arm.sh), and
-# reset together by the gate. Card B (blackhole-F36F768B9A5CAFA0, PCIe only) is the qualification card.
-# /dev/tenstorrent/N numbers change across resets and switch power-cycles, and tt-smi's own board index
-# is a different numbering again, so nothing here hard-codes either: the target is a board id, its node
-# is resolved with readlink -f at launch and again right before the container starts, and the reset
-# hint prints commands that resolve the board id when they are run (never a bare index) plus the PCI
-# address that identifies the board's row in tt-smi -ls.
+# reset together by the gate. Card B (blackhole-F36F768B9A5CAFA0) is reserved for another project: no
+# harness may select it, so there is no default target, and nothing here opens, maps, resets or waits
+# on it. /dev/tenstorrent/N numbers change across resets and switch power-cycles, and tt-smi's own board
+# index is a different numbering again, so nothing here hard-codes either: the target is a board id, its
+# node is resolved with readlink -f at launch and again right before the container starts, and the
+# reset hint prints commands that resolve the board id when they are run (never a bare index) plus the
+# PCI address that identifies the board's row in tt-smi -ls.
 #
-# Only the m3native gate (qwen-lever-n-m3native-gate.yml) is scoped to the serving pair. qwen-card-reset.yml
-# and most other qwen-* hardware workflows still act on every node, or on fixed node numbers, in the same
-# qwen-two-p150a-exclusive group: check gh run list for that group before and during a card-B session.
+# The qwen-* hardware workflows in the qwen-two-p150a-exclusive group act on card M and card A: a run on
+# either must not overlap them - check gh run list for that group before and during it.
 #
-#   QUAL_CARD=<board id>    the target, a name under /dev/tenstorrent/by-id (default: card B)
+#   QUAL_CARD=<board id>    the target, a name under /dev/tenstorrent/by-id (required: there is no default)
 #   ALLOW_SERVING_CARD=1    required to target card M or card A (half of the serving pair); loud warning
 #
-#   qual_card_select      sets QUAL_CARD, QUAL_BYID, QUAL_TAG, QUAL_SERVING; refuses a serving card
-#                         without the override. Touches no device: dry runs call it too.
-#   qual_card_resolve     sets QUAL_NODE (readlink -f, now) and QUAL_PCI; refuses a missing board and
-#                         treats a board id that resolves to a serving card's node as that serving card.
-#   qual_refuse_holders   refuses while a container or a host process can reach the target.
+#   qual_card_select      sets QUAL_CARD, QUAL_BYID, QUAL_TAG, QUAL_SERVING; refuses an unset QUAL_CARD,
+#                         card B, and a serving card without the override. Touches no device: dry runs
+#                         call it too.
+#   qual_card_resolve     sets QUAL_NODE (readlink -f, now) and QUAL_PCI; refuses a missing board and a
+#                         board id that resolves to card B's node, and treats one that resolves to a
+#                         serving card's node as that serving card.
+#   qual_refuse_holders   refuses while a container or a host process can reach the target (for a serving
+#                         target, either end of the pair).
 #   qual_card_recheck     readlink -f again right before the container starts; refuses if the node moved.
 #   qual_reset_hint       the recovery lines after a hang, on stdout; it never resets anything itself.
-QUAL_CARD_B=blackhole-F36F768B9A5CAFA0
+QUAL_RESERVED_CARD=blackhole-F36F768B9A5CAFA0
 QUAL_SERVING_CARDS='blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67'
 QUAL_TT_ROOT=/dev/tenstorrent
 QUAL_BYID_ROOT=$QUAL_TT_ROOT/by-id
@@ -87,23 +90,31 @@ qual_card_label() {
   case ${1:-$QUAL_CARD} in
     blackhole-CEF5729692C19E6D) echo 'card M, half of the serving pair' ;;
     blackhole-3707293C249A5E67) echo 'card A, half of the serving pair' ;;
-    "$QUAL_CARD_B") echo 'card B, the qualification card' ;;
+    "$QUAL_RESERVED_CARD") echo 'card B, reserved for another project' ;;
     *) echo 'a board this harness does not name' ;;
   esac
 }
 
 qual_card_select() {
-  QUAL_CARD=${QUAL_CARD:-$QUAL_CARD_B}
+  if [ -z "${QUAL_CARD:-}" ]; then
+    echo "refusing: QUAL_CARD is not set; name the target's board id under $QUAL_BYID_ROOT. There is no default:" >&2
+    echo "  card B is reserved for another project, and card M or card A needs ALLOW_SERVING_CARD=1." >&2
+    exit 1
+  fi
   case $QUAL_CARD in
     .*|*/*|*[!A-Za-z0-9._-]*)
-      echo "refusing: QUAL_CARD=$QUAL_CARD is not a board id under $QUAL_BYID_ROOT (default $QUAL_CARD_B, card B)" >&2
+      echo "refusing: QUAL_CARD=$QUAL_CARD is not a board id under $QUAL_BYID_ROOT" >&2
       exit 1 ;;
   esac
+  if [ "$QUAL_CARD" = "$QUAL_RESERVED_CARD" ]; then
+    echo "refusing: QUAL_CARD=$QUAL_CARD is $(qual_card_label); no qualification harness may use it." >&2
+    echo "  Run on card M instead (QUAL_CARD=card M's board id, ALLOW_SERVING_CARD=1: qwen-c2-serving.yml's cardm)." >&2
+    exit 1
+  fi
   QUAL_BYID=$QUAL_BYID_ROOT/$QUAL_CARD
   case $QUAL_CARD in
     blackhole-CEF5729692C19E6D) QUAL_TAG=card-m ;;
     blackhole-3707293C249A5E67) QUAL_TAG=card-a ;;
-    "$QUAL_CARD_B") QUAL_TAG=card-b ;;
     *) QUAL_TAG=$QUAL_CARD ;;
   esac
   QUAL_SERVING=0
@@ -116,7 +127,7 @@ qual_serving_override() {
   QUAL_SERVING=1
   if [ "${ALLOW_SERVING_CARD:-0}" != 1 ]; then
     echo "refusing: QUAL_CARD=$QUAL_CARD is $(qual_card_label), which the CI gate and the endpoint use." >&2
-    echo "  Qualify on card B (unset QUAL_CARD, or QUAL_CARD=$QUAL_CARD_B); ALLOW_SERVING_CARD=1 overrides." >&2
+    echo "  ALLOW_SERVING_CARD=1 overrides (card B is reserved for another project: it is never an alternative)." >&2
     exit 1
   fi
   echo '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!' >&2
@@ -138,6 +149,11 @@ qual_card_resolve() {
     echo "refusing: $QUAL_CARD ($(qual_card_label)) has no device node here: $QUAL_BYID does not resolve to one" >&2
     exit 1
   fi
+  node=$(readlink -f -- "$QUAL_BYID_ROOT/$QUAL_RESERVED_CARD" 2>/dev/null || true)
+  if [ -n "$node" ] && [ "$node" = "$QUAL_NODE" ]; then
+    echo "refusing: $QUAL_CARD resolves to the node of $(qual_card_label "$QUAL_RESERVED_CARD")" >&2
+    exit 1
+  fi
   if [ "$QUAL_SERVING" != 1 ]; then
     for card in $QUAL_SERVING_CARDS; do
       node=$(readlink -f -- "$QUAL_BYID_ROOT/$card" 2>/dev/null || true)
@@ -149,10 +165,6 @@ qual_card_resolve() {
   fi
   QUAL_PCI=$(qual_pci_of "$QUAL_NODE")
   echo "### target card: $QUAL_CARD ($(qual_card_label)) -> $QUAL_NODE, PCI ${QUAL_PCI:-unknown}"
-  if [ "$QUAL_SERVING" != 1 ]; then
-    echo "### note: only the m3native gate spares this card; qwen-card-reset.yml and most other hardware workflows"
-    echo "###   still act on every node - check gh run list for the qwen-two-p150a-exclusive group"
-  fi
 }
 
 # A path's device numbers (major:minor, hex, following symlinks), or nothing.
@@ -175,19 +187,51 @@ qual_pci_of() {
   esac
 }
 
-# Why a container (qual_refuse_holders' docker inspect lines) can reach the target; nothing when it cannot.
-# A non-privileged container reaches a device only through its device list, its device cgroup rules and
-# its device requests: a bind mount of /dev or /dev/tenstorrent shows node files it cannot open (every CI
-# gate arm mounts /dev/tenstorrent read-only for its board-mapping check and is given card M and card A
-# only). So for a non-serving target it names: --privileged; any device cgroup rule; a device request
-# naming Tenstorrent (CDI); a mapped device path that is the target's node, has the target's device
-# numbers, is a directory holding the node, or is a /dev/tenstorrent path that is not a device node now
-# (which board it was given is unknowable); a mount of the target's node itself. For a serving target
-# (ALLOW_SERVING_CARD=1) it names any container that can reach any Tenstorrent device: --privileged, a
-# device cgroup rule, a Tenstorrent device request, or /dev or a tenstorrent path among its devices or
-# mounts.
+# The nodes nothing else may be able to reach while the target runs (qual_refuse_holders sets them): the
+# target's, and for a serving target its Ethernet partner's as well (a program on either end of the pair
+# reaches the other across the link), each with what it is and its device numbers. Any other board's node
+# (card B's included) is never among them. A serving target whose partner has no node here is refused:
+# no container's devices could then be told apart from the partner's.
+QUAL_GUARD_NODES=()
+QUAL_GUARD_WHAT=()
+QUAL_GUARD_MAJMIN=()
+
+qual_guard_set() {
+  local card node
+  QUAL_GUARD_NODES=("$QUAL_NODE")
+  QUAL_GUARD_WHAT=('the target')
+  if [ "$QUAL_SERVING" = 1 ]; then
+    for card in $QUAL_SERVING_CARDS; do
+      node=$(readlink -f -- "$QUAL_BYID_ROOT/$card" 2>/dev/null || true)
+      [ "$node" != "$QUAL_NODE" ] || continue
+      if [ -z "$node" ] || ! qual_is_char "$node"; then
+        echo "refusing: $card ($(qual_card_label "$card")), the target's Ethernet partner, has no device node here:" >&2
+        echo "  a container's devices cannot be told apart from it" >&2
+        exit 1
+      fi
+      QUAL_GUARD_NODES+=("$node")
+      QUAL_GUARD_WHAT+=("$(qual_card_label "$card"), the target's Ethernet partner")
+    done
+  fi
+  QUAL_GUARD_MAJMIN=()
+  for node in "${QUAL_GUARD_NODES[@]}"; do
+    QUAL_GUARD_MAJMIN+=("$(qual_majmin_of "$node")")
+  done
+}
+
+# Why a container (qual_refuse_holders' docker inspect lines) can reach a guarded node; nothing when it
+# cannot. It names: --privileged; any device cgroup rule; a device request naming Tenstorrent (CDI); a
+# device or a mount that is a guarded node, a directory holding one (/dev, /dev/tenstorrent - every CI
+# gate arm mounts /dev/tenstorrent read-only for its board-mapping check, beside card M and card A), or
+# the host's root; a device with a guarded node's numbers; a /dev/tenstorrent path that is not a device
+# node now (which board it was given is unknowable). Anything else - a container given only card B's node,
+# or any other board's - cannot reach the target and is not looked at further. With no guarded node set,
+# every container is refused.
 qual_container_reach() {
-  local head=${1%%$'\n'*} line kind path resolved
+  local head=${1%%$'\n'*} line kind path resolved i
+  if [ "${#QUAL_GUARD_NODES[@]}" = 0 ]; then
+    echo 'was inspected before any target node was set (qual_guard_set)'; return 0
+  fi
   case $head in
     *' true') echo 'is --privileged (it can open every device)'; return 0 ;;
   esac
@@ -205,41 +249,45 @@ qual_container_reach() {
       *) continue ;;
     esac
     resolved=$(readlink -f -- "$path" 2>/dev/null || true)
-    if [ "$QUAL_SERVING" = 1 ]; then
-      case "$path $resolved" in
-        "${QUAL_TT_ROOT%/*} "*|"${QUAL_TT_ROOT%/*}/ "*|*" ${QUAL_TT_ROOT%/*}"|*tenstorrent*)
-          echo "has $path among its ${kind}s (a Tenstorrent device; the target is a serving card)"; return 0 ;;
-      esac
-      continue
+    if [ "$resolved" = / ]; then
+      echo "has $path among its ${kind}s, the host's root (it holds every device node)"; return 0
     fi
-    if [ "$resolved" = "$QUAL_NODE" ]; then
-      echo "has $path among its ${kind}s, which is $QUAL_NODE (the target)"; return 0
-    fi
-    [ "$kind" = dev ] || continue
-    if [ -n "${QUAL_MAJMIN:-}" ] && [ "$(qual_majmin_of "$path")" = "$QUAL_MAJMIN" ]; then
-      echo "is given $path, a device with the target's numbers ($QUAL_MAJMIN)"; return 0
-    fi
-    case $QUAL_NODE in
-      "$resolved"/*) echo "is given $path, a directory holding the target's node"; return 0 ;;
-    esac
+    for i in "${!QUAL_GUARD_NODES[@]}"; do
+      if [ "$resolved" = "${QUAL_GUARD_NODES[$i]}" ]; then
+        echo "has $path among its ${kind}s, which is ${QUAL_GUARD_NODES[$i]} (${QUAL_GUARD_WHAT[$i]})"; return 0
+      fi
+      if [ -n "$resolved" ]; then
+        case ${QUAL_GUARD_NODES[$i]} in
+          "$resolved"/*)
+            echo "has $path among its ${kind}s, a directory holding ${QUAL_GUARD_NODES[$i]} (${QUAL_GUARD_WHAT[$i]})"
+            return 0 ;;
+        esac
+      fi
+      if [ "$kind" = dev ] && [ -n "${QUAL_GUARD_MAJMIN[$i]}" ] \
+          && [ "$(qual_majmin_of "$path")" = "${QUAL_GUARD_MAJMIN[$i]}" ]; then
+        echo "is given $path, a device with the numbers of ${QUAL_GUARD_NODES[$i]} (${QUAL_GUARD_WHAT[$i]}," \
+          "${QUAL_GUARD_MAJMIN[$i]})"
+        return 0
+      fi
+    done
     case $path in
       "$QUAL_TT_ROOT"|"$QUAL_TT_ROOT"/*)
         if [ -z "$resolved" ] || ! qual_is_char "$resolved"; then
-          echo "is given $path, which is not a device node now (it may be the target)"; return 0
+          echo "has $path among its ${kind}s, which is not a device node now (it may be the target)"; return 0
         fi ;;
     esac
   done <<< "${1#*$'\n'}"
 }
 
-# Refuses while anything else can reach the target. Containers: qual_container_reach. Host processes:
-# fuser on the target's node (with sudo -n when that works, else this user's processes, said so) - which
-# also sees a process in a container holding it, however the container was given it - up to five tries
-# two seconds apart (the rig's telemetry exporter holds every card for a moment every 30 s), refusing
-# while any holder persists.
+# Refuses while anything else can reach the target. Containers: qual_container_reach, against the guarded
+# nodes (qual_guard_set). Host processes: fuser on the guarded nodes (with sudo -n when that works, else
+# this user's processes, said so) - which also sees a process in a container holding one, however the
+# container was given it - up to five tries two seconds apart (the rig's telemetry exporter holds every
+# card for a moment every 30 s), refusing while any holder persists.
 qual_refuse_holders() {
   local id info why st out try scope
   local pre=()
-  QUAL_MAJMIN=$(qual_majmin_of "$QUAL_NODE")
+  qual_guard_set
   for id in $(docker ps -q); do
     info=$(docker inspect "$id" --format '{{.Name}} {{.HostConfig.Privileged}}{{println}}{{range .HostConfig.Devices}}dev {{println .PathOnHost}}{{end}}{{range .HostConfig.DeviceCgroupRules}}rule {{println .}}{{end}}{{range .HostConfig.DeviceRequests}}req {{.Driver}} {{println .DeviceIDs}}{{end}}{{range .Mounts}}mnt {{println .Source}}{{end}}') || continue
     why=$(qual_container_reach "$info")
@@ -248,9 +296,9 @@ qual_refuse_holders() {
       exit 1
     fi
   done
-  echo "### containers: none can reach $QUAL_NODE ($QUAL_CARD)"
+  echo "### containers: none can reach ${QUAL_GUARD_NODES[*]} ($QUAL_CARD)"
   if ! command -v fuser >/dev/null 2>&1; then
-    echo "WARN: fuser is not installed; host processes holding $QUAL_NODE were not checked" >&2
+    echo "WARN: fuser is not installed; host processes holding ${QUAL_GUARD_NODES[*]} were not checked" >&2
     return 0
   fi
   scope="this user's processes only (no passwordless sudo)"
@@ -262,22 +310,21 @@ qual_refuse_holders() {
   fi
   for try in 1 2 3 4 5; do
     st=0
-    out=$(${pre[@]+"${pre[@]}"} fuser -v "$QUAL_NODE" 2>&1) || st=$?
+    out=$(${pre[@]+"${pre[@]}"} fuser -v "${QUAL_GUARD_NODES[@]}" 2>&1) || st=$?
     if [ "$st" != 0 ] && [ -z "$out" ]; then
-      echo "### device holders on $QUAL_NODE: none ($scope)"
+      echo "### device holders on ${QUAL_GUARD_NODES[*]}: none ($scope)"
       return 0
     fi
     [ "$try" = 5 ] || sleep 2
   done
-  echo "refusing: host processes hold $QUAL_NODE (or fuser failed):" >&2
+  echo "refusing: host processes hold ${QUAL_GUARD_NODES[*]} (or fuser failed):" >&2
   echo "$out" >&2
   exit 1
 }
 
 # readlink -f again right before the container starts: refuses when a board is not on the node the holder
-# check cleared (the boards re-enumerated in between - a switch event, or the gate resetting card A on the
-# switch card B shares - so the old node may now be another board's). Args: [board id] [node]; the
-# target by default.
+# check cleared (the boards re-enumerated in between - a switch event, or the gate resetting the pair - so
+# the old node may now be another board's). Args: [board id] [node]; the target by default.
 qual_card_recheck() {
   local card=${1:-$QUAL_CARD} was=${2:-$QUAL_NODE} now
   now=$(readlink -f -- "$QUAL_BYID_ROOT/$card" 2>/dev/null || true)
@@ -323,7 +370,7 @@ qual_reset_hint() {
       echo "  CONFIRM in ~/.local/bin/tt-smi -ls which row is ${node:-this board} (its PCI address is unknown here); then reset it alone:"
     fi
     echo "    n=\$(readlink -e $QUAL_BYID) && ~/.local/bin/tt-smi -r \"\$n\""
-    echo "  then a passing smoke run. Never card M or card A: they are the serving pair, and this card needs neither."
+    echo "  then a passing smoke run. Never card M or card A (the serving pair), and never card B (reserved)."
   fi
 }
 # <<< qual_card.sh

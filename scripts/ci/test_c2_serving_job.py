@@ -258,7 +258,8 @@ class CardMParseTests(unittest.TestCase):
         good = '#!/usr/bin/env bash' + NL + self.library + 'qual_card_select' + NL + 'echo run' + NL
         self.assertEqual(self.fake(C2_CARDM_HARNESS=self.harness('optimisation/ttnn-op/a/good.sh', good))[0],
                          'optimisation/ttnn-op/a/good.sh')
-        drifted = self.library.replace("QUAL_CARD_B=blackhole-F36F768B9A5CAFA0", "QUAL_CARD_B=blackhole-CEF5729692C19E6D")
+        drifted = self.library.replace("QUAL_RESERVED_CARD=blackhole-F36F768B9A5CAFA0",
+                                       "QUAL_RESERVED_CARD=blackhole-CEF5729692C19E6D")
         self.assertNotEqual(drifted, self.library)
         cases = {
             'none.sh': '#!/usr/bin/env bash' + NL + 'docker run --device /dev/tenstorrent/0 x' + NL,
@@ -575,6 +576,52 @@ class CardMStepRunTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.read('removed'), '')
         self.assertFalse(os.path.exists(os.path.join(self.runner_temp, 'c2-results', 'cardm')))
+
+
+class CardBTests(unittest.TestCase):
+    """Card B is reserved for another project: no step of this workflow lists every node, and the status step
+    lists card M's and card A's by-id links and holders only, resolved by board id as the reset step resolves
+    them (scripts/ci/serving_pair.sh)."""
+
+    def test_no_step_lists_every_node_or_names_card_b(self):
+        code = NL.join(line for line in workflow_text().splitlines() if not line.lstrip().startswith('#'))
+        for banned in ('/dev/tenstorrent/*', 'ls /dev/tenstorrent', 'ls -l /dev/tenstorrent', CARD_B,
+                       CARD_B.split('-')[1], 'f4:00.0'):
+            self.assertNotIn(banned, code)
+
+    def test_the_status_step_names_card_m_and_card_a_only(self):
+        step, script = step_text('Status'), step_script('Status')
+        self.assertIn('working-directory: c2', step)
+        self.assertIn('. scripts/ci/serving_pair.sh', script)
+        self.assertIn('for card in $QUAL_SERVING_CARDS; do ls -l "$QUAL_BYID_ROOT/$card" 2>&1; done', script)
+        self.assertIn('if serving_pair_nodes; then sudo -n fuser -v "${SERVING_PAIR_NODES[@]}" 2>&1', script)
+        self.assertEqual(script.count('fuser'), 1)
+
+    @unittest.skipUnless(BASH, 'bash not found')
+    def test_the_status_step_run_on_a_fake_rig_never_touches_card_b(self):
+        from test_qual_card import FakeRig, SERVING_PAIR, q  # noqa: E402 (bash-only helpers)
+        with tempfile.TemporaryDirectory() as directory:
+            rig = FakeRig(directory)
+            work = os.path.join(directory, 'c2')
+            os.makedirs(os.path.join(work, 'scripts', 'ci'))
+            shim = NL.join(['. %s' % q(SERVING_PAIR)] + rig.stubs()) + NL
+            with open(os.path.join(work, 'scripts', 'ci', 'serving_pair.sh'), 'w', encoding='utf-8', newline=NL) as out:
+                out.write(shim)
+            fakes = NL.join(['sudo() { [ "$1" = -n ] && shift; "$@"; }',
+                             'fuser() { echo "$*" >> "$FAKE_DIR/fuser.log"; return 1; }',
+                             'docker() { :; }', 'journalctl() { :; }', 'pgrep() { return 1; }', 'du() { :; }',
+                             'tail() { :; }', ''])
+            with open(os.path.join(work, 'step.sh'), 'w', encoding='utf-8', newline=NL) as out:
+                out.write(fakes + step_script('Status'))
+            result = subprocess.run([BASH, '--noprofile', '--norc', 'step.sh'], cwd=work, capture_output=True, text=True,
+                                    encoding='utf-8', errors='replace', timeout=120)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(rig.fuser_calls(), ['-v %s %s' % (rig.node(CARD_M), rig.node(CARD_A))])
+            self.assertIn('=== cards M and A', result.stdout)
+            self.assertIn(CARD_M, result.stdout)
+            self.assertIn(CARD_A, result.stdout)
+            for banned in (CARD_B, rig.node(CARD_B)):
+                self.assertNotIn(banned, result.stdout + result.stderr)
 
 
 if __name__ == '__main__':

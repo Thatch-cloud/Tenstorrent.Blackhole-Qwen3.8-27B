@@ -224,7 +224,9 @@ jobs:
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           # Checkpoint 2. The override stays unset; capability must be native.
           image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           devices=()
           for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
           name="qwen-prefetch-run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -276,7 +278,9 @@ jobs:
           # memcmps every pushed page against the source tensor. Override stays unset,
           # so the tests skip rather than pass if capability is not native.
           image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           devices=()
           for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
           name="qwen-prefetch-upstream-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -309,7 +313,9 @@ jobs:
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           # Geometry sweep plus upstream helper signatures. Claims no speedup.
           image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           devices=()
           for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
           name="qwen-prefetch-feas-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -328,42 +334,6 @@ jobs:
             > experiment-results/prefetch-feasibility.json || true
           python3 -B -c "import json;d=json.load(open('experiment-results/prefetch-feasibility.json'));print('supported:',d.get('supported'));print('grid:',d.get('grid_probe'));print('gather rings:',d.get('gather_legal_receivers'));print('mcast rings:',d.get('mcast_legal_receivers'));print('helpers:',sorted((d.get('helpers') or {}).keys()))" \
             || tail -25 experiment-results/prefetch-feasibility.log
-      - name: Diagnose the missing third card on the PCIe switch
-        working-directory: dram-harvest-probe
-        timeout-minutes: 3
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
-          # Read-only. A device reset cannot restore a card absent from PCI
-          # enumeration, so establish first whether the bus sees it at all.
-          {
-            printf '=== all tenstorrent endpoints ===\n'
-            lspci -D -nn -d 1e52: 2>&1 || echo 'lspci unavailable'
-            printf '\n=== full bridge tree ===\n'
-            lspci -Dt 2>&1 || true
-            printf '\n=== switch at f2 and its downstream ports ===\n'
-            lspci -D 2>/dev/null | grep -iE '^0000:f2:|bridge' | head -30 || true
-            printf '\n=== downstream port link status ===\n'
-            for slot in $(lspci -D 2>/dev/null | awk "/^0000:f2:/ {print \$1}"); do
-              printf -- '--- %s ---\n' "$slot"
-              lspci -s "$slot" -vv 2>/dev/null | grep -E 'LnkCap:|LnkSta:|SltSta:|DevSta:|^\s+Kernel' || true
-            done
-            printf '\n=== expected slots ===\n'
-            for slot in 0000:d1:00.0 0000:f3:00.0 0000:f4:00.0; do
-              if [ -e "/sys/bus/pci/devices/$slot" ]; then
-                printf '%s PRESENT\n' "$slot"
-              else
-                printf '%s ABSENT from /sys/bus/pci/devices\n' "$slot"
-              fi
-            done
-            printf '\n=== pci removal/rescan capability ===\n'
-            [ -w /sys/bus/pci/rescan ] && echo 'rescan node writable' || echo 'rescan node not writable by this user'
-            printf '\n=== kernel messages: tenstorrent / pcie errors ===\n'
-            (journalctl -k --no-pager -n 4000 2>/dev/null || dmesg 2>/dev/null || true) \
-              | grep -iE 'tenstorrent|tt_|pcie|aer|link (down|up)|bus error' | tail -60 || true
-          } > experiment-results/pcie-card-b.txt 2>&1
-          cat experiment-results/pcie-card-b.txt
       - name: Survey python packages for a UMD binding
         working-directory: dram-harvest-probe
         timeout-minutes: 2

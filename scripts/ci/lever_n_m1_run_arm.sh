@@ -30,7 +30,9 @@ if [ -n "$peer" ] && [ -s "$peer" ]; then
   mounts+=(--mount "type=bind,src=$PWD/$peer,dst=/bench/peer.json,readonly")
   peer_args=(--peer /bench/peer.json)
 fi
-mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+# Card M and card A only, by board id (card B is reserved for another project and never listed).
+mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+[ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
 devices=()
 for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
 

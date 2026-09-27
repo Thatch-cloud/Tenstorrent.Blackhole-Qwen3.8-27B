@@ -61,6 +61,7 @@ PROBE_RUNNER = PROBE_DIR / 'run_card_b.sh'
 QUAL_CARD = ROOT / 'scripts' / 'ci' / 'qual_card.sh'
 ARM = ROOT / 'scripts' / 'ci' / 'lever_n_m3native_run_arm.sh'
 CARD_B = probe_tests.CARD_B
+CARD_X = probe_tests.CARD_X
 CARD_M = probe_tests.CARD_M
 CARD_A = 'blackhole-3707293C249A5E67'
 NL = chr(10)
@@ -348,6 +349,7 @@ class RunnerTests(unittest.TestCase):
 
     def run_runner(self, **env):
         environ = {key: value for key, value in os.environ.items() if key not in SCRUB}
+        environ['QUAL_CARD'] = CARD_X   # QUAL_CARD has no default
         environ.update(HOME=self.dir.as_posix(), RESULTS=(self.dir / 'results').as_posix(), K64J_CARD_DRY_RUN='1')
         environ.update(env)
         return subprocess.run([BASH, RUNNER.as_posix()], env=environ, capture_output=True, text=True,
@@ -387,9 +389,9 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('### graft %s: _ttnncpp.so %s with the F22 literal, 4 K64j qwen kernels, 5 stock decode sources, '
                       'manifest verified' % (graft.as_posix(), sha(BINARY)[:16]), result.stdout)
         self.assertEqual(argv[:3], ['docker', 'run', '--rm'])
-        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_B)
+        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_X)
         self.assertEqual(argv.count('--device'), 1)
-        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-k64j-card-card-b')
+        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-k64j-card-' + CARD_X)
         mounts = self.mounts(argv)
         prefix = graft.as_posix() + '/'
         grafted = {(m['src'][len(prefix):], m['dst']) for m in mounts if m['src'].startswith(prefix)}
@@ -446,10 +448,10 @@ class RunnerTests(unittest.TestCase):
         graft = make_graft(self.dir)
         self.refused(self.run_runner(KOPGRAFT64=graft.as_posix(), K64J_CARD_DRY_RUN='0'),
                      'refusing: EXPECT_TTNNCPP_SHA256 is required')
-        if Path('/dev/tenstorrent/by-id', CARD_B).exists():
-            self.skipTest('card B is present on this host: the harness would run')
+        if Path('/dev/tenstorrent/by-id', CARD_X).exists():
+            self.skipTest('the test board id is present on this host: the harness would run')
         result = self.run_runner(KOPGRAFT64=graft.as_posix(), K64J_CARD_DRY_RUN='0', EXPECT_TTNNCPP_SHA256=sha(BINARY))
-        self.refused(result, 'refusing: %s (card B, the qualification card) has no device node here' % CARD_B)
+        self.refused(result, 'refusing: %s (a board this harness does not name) has no device node here' % CARD_X)
         self.assertFalse((self.dir / 'results').exists())
 
     def test_the_graft_checks_refuse_anything_but_k64j(self):
@@ -536,8 +538,9 @@ class CardMRunTests(unittest.TestCase):
             'docker() { case $1 in ps) echo %s ;; inspect) cat "$FAKE_DIR/container-$2" ;; image) return 0 ;; '
             'run) printf "%%q " "$@" > "$FAKE_DIR/docker-run.argv"; echo "K64J_CARD verdict=PASS"; '
             'return "${FAKE_RUN_STATUS:-0}" ;; rm) return 0 ;; esac; }' % ' '.join(self.rig.containers),
-            'fuser() { echo "$*" >> "$FAKE_DIR/fuser.log"; local n=${@: -1}; case " ${FAKE_HELD:-} " in *" $n "*) '
-            'echo "$n: thatch 4242 F.... python3" >&2; return 0 ;; esac; return 1; }',
+            'fuser() { echo "$*" >> "$FAKE_DIR/fuser.log"; local n held=1; for n in "$@"; do '
+            'case " ${FAKE_HELD:-} " in *" $n "*) echo "$n: thatch 4242 F.... python3" >&2; held=0 ;; esac; done; '
+            'return $held; }',
             'sudo() { return 1; }',
             'id() { echo 1000; }',
             'timeout() { while [ $# -gt 0 ]; do case $1 in -k) shift 2 ;; [0-9]*) shift; break ;; *) break ;; esac; '
@@ -561,17 +564,19 @@ class CardMRunTests(unittest.TestCase):
         self.assertFalse(self.launched.exists(), 'launched despite: ' + needle)
 
     def test_card_m_launches_on_its_node_with_the_watchdog(self):
-        node = self.rig.node(CARD_M)
+        node, partner = self.rig.node(CARD_M), self.rig.node(CARD_A)
         result = self.run_on()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('WARNING: ALLOW_SERVING_CARD=1: this run is on %s, card M, half of the serving pair' % CARD_M,
                       result.stderr)
         for line in ('### target card: %s (card M, half of the serving pair) -> %s' % (CARD_M, node),
-                     '### containers: none can reach %s (%s)' % (node, CARD_M),
-                     '### device holders on %s: none' % node, '### %s is still %s' % (CARD_M, node),
+                     '### containers: none can reach %s %s (%s)' % (node, partner, CARD_M),
+                     '### device holders on %s %s: none' % (node, partner), '### %s is still %s' % (CARD_M, node),
                      '### K64J_CARD verdict=PASS'):
             self.assertIn(line, result.stdout)
-        self.assertIn('-v ' + node, self.rig.fuser_calls())
+        # Host holders of card M and of its Ethernet partner, card A; never card B's node.
+        self.assertIn('-v %s %s' % (node, partner), self.rig.fuser_calls())
+        self.assertNotIn(self.rig.node(CARD_B), ' '.join(self.rig.fuser_calls()))
         argv = self.launch_argv()
         self.assertEqual(argv[:2], ['run', '--rm'])
         self.assertEqual((argv.count('--device'), argv[argv.index('--device') + 1]), (1, node))
@@ -593,18 +598,19 @@ class CardMRunTests(unittest.TestCase):
         self.refused(self.run_on(ALLOW_SERVING_CARD='0'), 'refusing: QUAL_CARD=%s is card M' % CARD_M)
 
     def test_a_host_holder_of_card_m_refuses(self):
-        node = self.rig.node(CARD_M)
-        self.refused(self.run_on(FAKE_HELD=node), 'refusing: host processes hold %s' % node)
-        self.assertEqual(self.rig.fuser_calls(), ['-v ' + node] * 5)
+        node, partner = self.rig.node(CARD_M), self.rig.node(CARD_A)
+        self.refused(self.run_on(FAKE_HELD=node), 'refusing: host processes hold %s %s' % (node, partner))
+        self.assertEqual(self.rig.fuser_calls(), ['-v %s %s' % (node, partner)] * 5)
 
     def test_a_privileged_container_refuses(self):
         self.rig.container('privileged', privileged=True)
         self.refused(self.run_on(), 'refusing: container /privileged is --privileged')
 
-    def test_any_container_on_any_card_refuses_a_card_m_run(self):
-        """Card M is a serving card: a container that can reach ANY Tenstorrent device blocks the launch - card M's
-        own, card A's, and the card-B agent's (card B only). One on no device does not."""
-        for name, card in (('on-card-m', CARD_M), ('on-card-a', CARD_A), ('card-b-agent', CARD_B)):
+    def test_a_container_on_the_pair_refuses_a_card_m_run_and_one_on_card_b_does_not(self):
+        """Card M is a serving card: a container that can reach card M or its Ethernet partner, card A, blocks the
+        launch. Card B is reserved for another project: a container given only card B's node, like one on no device,
+        does not block it."""
+        for name, card in (('on-card-m', CARD_M), ('on-card-a', CARD_A)):
             with self.subTest(card=card):
                 rig = self.rig
                 self.rig = qual_tests.FakeRig(self.dir / ('rig-' + name))
@@ -615,6 +621,7 @@ class CardMRunTests(unittest.TestCase):
                 self.rig = rig
                 self.launched = self.rig.dir / 'docker-run.argv'
         self.rig.container('no-device', mounts=('/home/thatch/hf-cache',))
+        self.rig.container('card-b-agent', devices=(self.rig.node(CARD_B),))
         result = self.run_on()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.launched.exists())

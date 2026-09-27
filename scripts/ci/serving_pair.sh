@@ -3,7 +3,7 @@
 #
 # Card M and card A only, by board id: QUAL_SERVING_CARDS, the two ids lever_n_m3native_run_arm.sh
 # mounts (its M3NATIVE_CARDS default; test_qual_card.py keeps the two lists equal). Card B (PCIe only, no
-# Ethernet cable) is the qualification card and may be mid-session: nothing here names it, and the gate
+# Ethernet cable) is reserved for another project and may be in use: nothing here names it, and the gate
 # passes tt-smi -r only the two nodes resolved here. tt-smi itself still enumerates every board when it
 # lists them (-ls) and when it re-initialises after a reset, as the rig's telemetry exporter does every
 # 30 s; a hung card B can therefore fail that re-init, and the gate's reset step with it - the gate
@@ -107,7 +107,7 @@ serving_pair_resolve() {
 # node exists and tt-smi -ls lists it, but udev never creates its by-id link, so every later lookup by
 # board id refuses (run v190 lost card A: the arm waited 120 s for the link and refused). Re-probing the
 # driver for that one PCI device - unbind, 3 s, bind - brings the link back within seconds, without
-# another reset (proven on the qualification card, 2026-09-24 06:09 UTC).
+# another reset (proven on card B, 2026-09-24 06:09 UTC, before it was reserved).
 #
 # Or the board does not re-enumerate at all (run v217): card A's switch port logged 'pciehp 0000:f2:00.0:
 # Slot(1): Cannot train link' after the reset, and 0000:f3:00.0 was gone - no PCI device, no node, no

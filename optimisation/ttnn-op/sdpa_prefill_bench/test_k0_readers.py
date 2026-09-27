@@ -38,7 +38,8 @@ IMAGE_A1 = 'sha256:1b9b644549d4409c4fc80e2f92c183e665e7e693c37cccc95b4bb760a6d7d
 SCRUB = ('M1_READER', 'IMAGE', 'K64F_IMAGE', 'M1_ARGS', 'M1_DRY_RUN', 'M1_REQUIRE_SOURCES', 'K0_ONLY', 'K0_STARTS',
          'K0_ROUNDS', 'K0_WATCHDOG_S', 'K0_Q4096', 'K0_DRY_RUN', 'K0_DIR', 'RESULTS', 'M1_SRC', 'QUAL_CARD',
          'ALLOW_SERVING_CARD')
-CARD_B = 'blackhole-F36F768B9A5CAFA0'           # the default qualification card (scripts/ci/qual_card.sh)
+CARD_B = 'blackhole-F36F768B9A5CAFA0'           # card B: reserved for another project and refused
+CARD_X = 'blackhole-0000000000000001'           # the board the runs name (QUAL_CARD has no default)
 
 
 def sha(data):
@@ -80,6 +81,7 @@ def run_bash(script, env=None, args=()):
     full = dict(os.environ)
     for name in SCRUB:
         full.pop(name, None)
+    full['QUAL_CARD'] = CARD_X
     full.update(env or {})
     return subprocess.run([BASH, posix(script), *args], env=full, capture_output=True, text=True,
                           encoding='utf-8', errors='replace', timeout=120)
@@ -590,7 +592,7 @@ class SessionTests(unittest.TestCase):
                 if label in ('stock', 'stock2'):
                     self.assertEqual(reader, 'served')
                     self.assertEqual(mounts, [])
-                    self.assertEqual('--coords-out /results/worker_coords-card-b-' in args, label == 'stock')
+                    self.assertEqual('--coords-out /results/worker_coords-%s-' % CARD_X in args, label == 'stock')
                 else:
                     self.assertEqual(len(mounts), 1)
                     self.assertTrue(mounts[0].split(',')[1].endswith('/k0/reader_%s.cpp' % label))
@@ -638,9 +640,9 @@ class SessionTests(unittest.TestCase):
         self.assertIn('IMAGE=%s M1_SRC=%s RESULTS=' % (IMAGE_A1, posix(HERE)), smoke[0])
         self.assertIn('--no-fallback-scalar', smoke[0])
         self.assertIn('kcache-m1-20260923T120000', out)          # the warmup hint names the run's cache
-        self.assertIn('### recovery (spec 6), %s (card B, the qualification card) only:' % CARD_B, out)
-        self.assertIn('docker rm -f qwen-sdpa-m1-card-b', out)
-        self.assertIn('QUAL_CARD=%s ALLOW_SERVING_CARD=0 IMAGE=' % CARD_B, smoke[0])   # the smoke run: same card
+        self.assertIn('### recovery (spec 6), %s (a board this harness does not name) only:' % CARD_X, out)
+        self.assertIn('docker rm -f qwen-sdpa-m1-' + CARD_X, out)
+        self.assertIn('QUAL_CARD=%s ALLOW_SERVING_CARD=0 IMAGE=' % CARD_X, smoke[0])   # the smoke run: same card
         self.assertIn('Never card M or card A', out)
         self.assertIn('K0 SUMMARY', out)
 
@@ -649,7 +651,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 4)
         out = result.stdout
         self.assertEqual(self.fake_runs(out), ['stock', 'k0a'])
-        self.assertIn('K0 STOPPED at k0a: exit 1 after a container ran on %s' % CARD_B, out)
+        self.assertIn('K0 STOPPED at k0a: exit 1 after a container ran on %s' % CARD_X, out)
         self.assertIn('tt-smi -r', out)
         self.assertIn('K0 SUMMARY', out)
         self.assertNotIn('continuing', out)
@@ -659,7 +661,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         out = result.stdout
         self.assertEqual(self.fake_runs(out), ['stock', 'k0a', 'k0b4'])
-        self.assertIn('K0 STOPPED at k0b32: exit 1 before any container ran on %s' % CARD_B, out)
+        self.assertIn('K0 STOPPED at k0b32: exit 1 before any container ran on %s' % CARD_X, out)
         self.assertNotIn('tt-smi', out)
 
     def test_kill_rules_are_withheld_when_k0a_is_not_shown_to_have_run(self):

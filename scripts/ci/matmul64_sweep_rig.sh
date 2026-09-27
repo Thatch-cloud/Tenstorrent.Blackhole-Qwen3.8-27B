@@ -12,14 +12,14 @@
 # offline env vars below mean it is the ONLY way that call can resolve without network
 # access.
 #
-# Device: the qualification card, QUAL_CARD (a board id; default card B,
-# blackhole-F36F768B9A5CAFA0; card M or card A, the serving pair, only with
+# Device: the card QUAL_CARD names (a board id; required, no default:
+# card B is reserved for another project and refused; card M or card A, the serving pair, only with
 # ALLOW_SERVING_CARD=1), via scripts/ci/qual_card.sh. Resolved by board id at run time, not
 # hardcoded, since device numbers renumber across a board reset (docs/gotchas.md) - this
 # script does no reset itself, so resolving right before `docker run` is the safe
 # ordering that memory describes. The run is refused while a container or a host process
 # can reach that card. Card M's wider PCIe link (tt-rig-hardware-topology memory) makes it
-# the board earlier sweeps ran on; a sweep on card B is a different host-link baseline.
+# the board earlier sweeps ran on (card B, which ran some, is now reserved for another project).
 #
 # Usage:
 #   scripts/ci/matmul64_sweep_rig.sh <host-output-dir> <image-sha> [extra matmul64_sweep.py args...]

@@ -55,7 +55,9 @@ jobs:
           mkdir -p experiment-results
           prefix=()
           if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           paths=()
           for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
           # The telemetry exporter's tt-smi snapshot is a read-only holder that leaves within
@@ -86,7 +88,9 @@ jobs:
           prefix=()
           if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
           smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E "^[0-9]+$" | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           paths=()
           for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
           status=0
@@ -114,7 +118,9 @@ jobs:
           # mounted at /bench; /experiment-scripts/ci stays the image's baked tree.
           mkdir -p experiment-results/probe
           chmod 0777 experiment-results/probe
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           devices=()
           for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
           expected=$(sha256sum scripts/ci/ordered_cache.py | cut -c1-64)

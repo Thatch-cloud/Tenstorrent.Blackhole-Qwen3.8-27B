@@ -1043,6 +1043,7 @@ BASH = find_bash()
 SCRUB = ('KOPGRAFT_PF', 'IMAGE', 'RESULTS', 'PF_SRC', 'WATCHER', 'WATCHDOG_S', 'CARD_M_ARGS', 'PF_DRY_RUN', 'REFERENCE',
          'PF_PYTHON', 'QUAL_CARD', 'ALLOW_SERVING_CARD')
 IMAGE_A2 = 'sha256:eceb2daa744c3345368a638488a804f0ffe8b76f6b0680945a47bb527bdb55a9'
+CARD_X = 'blackhole-0000000000000001'   # the board the runs name: QUAL_CARD has no default, and card B is refused
 
 
 @unittest.skipUnless(BASH, 'bash not found')
@@ -1060,7 +1061,8 @@ class CardMRunnerTests(unittest.TestCase):
             full = dict(os.environ)
             for name in SCRUB:
                 full.pop(name, None)
-            full.update(PF_DRY_RUN='1', PF_SRC=HERE.as_posix(), RESULTS=(root / 'r').as_posix(), KOPGRAFT_PF=g.as_posix())
+            full.update(PF_DRY_RUN='1', PF_SRC=HERE.as_posix(), RESULTS=(root / 'r').as_posix(), KOPGRAFT_PF=g.as_posix(),
+                        QUAL_CARD=CARD_X)
             full.update(env)
             return subprocess.run([BASH, (HERE / 'run_card_m_pf.sh').as_posix(), role], env=full, capture_output=True,
                                   text=True, encoding='utf-8', errors='replace', timeout=60)
@@ -1076,8 +1078,11 @@ class CardMRunnerTests(unittest.TestCase):
         self.assertNotIn('QWEN_SDPA_PF_TEST', argv)
         self.assertIn('--role reference', argv)
         self.assertIn('eceb2daa744c3345368a638488a804f0ffe8b76f6b0680945a47bb527bdb55a9', argv)
-        self.assertIn('--device /dev/tenstorrent/by-id/blackhole-F36F768B9A5CAFA0', argv)     # card B, the default
-        self.assertIn('card=blackhole-F36F768B9A5CAFA0 (card-b)', result.stdout)
+        self.assertIn('--device /dev/tenstorrent/by-id/' + CARD_X, argv)     # the named board (there is no default)
+        self.assertIn('card=%s (%s)' % (CARD_X, CARD_X), result.stdout)
+        refused = self.run_script('reference', QUAL_CARD='blackhole-F36F768B9A5CAFA0')     # card B: reserved
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('is card B, reserved for another project', refused.stderr)
 
     def test_candidate_mounts_the_graft_like_the_arm_and_sets_the_test_env(self):
         argv = self.argv(self.run_script('candidate'))
@@ -1118,7 +1123,7 @@ class CardMRunnerTests(unittest.TestCase):
 
     def test_holders_and_the_reset_hint(self):
         text = (HERE / 'run_card_m_pf.sh').read_text(encoding='utf-8')
-        for token in ('{{.HostConfig.Privileged}}', 'fuser -v "$QUAL_NODE"', 'sudo -n true',
+        for token in ('{{.HostConfig.Privileged}}', 'fuser -v "${QUAL_GUARD_NODES[@]}"', 'sudo -n true',
                       '\n  qual_refuse_holders\n'):
             self.assertIn(token, text)
         hint = text[text.index('qual_pci_of() {'):text.index('# <<< qual_card.sh')]

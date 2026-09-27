@@ -589,7 +589,7 @@ class FlagTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
-    """run_m1.sh: the qualification card (QUAL_CARD, default card B), never a shared card, a fresh kernel
+    """run_m1.sh: the card QUAL_CARD names (no default; card B refused), never a shared card, a fresh kernel
     cache, the 131k serving image."""
 
     def setUp(self):
@@ -597,7 +597,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_the_qualification_card_and_refuses_a_held_device(self):
         self.assertNotIn('CARD_M=', self.text)
-        self.assertIn('QUAL_CARD_B=blackhole-F36F768B9A5CAFA0', self.text)          # the embedded qual_card.sh block
+        self.assertIn('QUAL_RESERVED_CARD=blackhole-F36F768B9A5CAFA0', self.text)   # the embedded qual_card.sh block
         self.assertLess(self.text.index('\nqual_card_select\n'), self.text.index('name=qwen-sdpa-m1-$QUAL_TAG'))
         self.assertIn('--device "$node"', self.text)
         self.assertEqual(self.text.count('--device '), 1)

@@ -155,7 +155,8 @@ missing_card=
 until resolve_serving_nodes; do
   if [ "$card_waited" -ge "$card_wait_s" ]; then
     echo "serving card $missing_card has no device node under /dev/tenstorrent/by-id after ${card_waited}s; refusing to guess" >&2
-    ls -la /dev/tenstorrent/by-id >&2 || true
+    # The serving cards' links only: card B is reserved for another project and is never listed here.
+    for card in $serving_cards; do ls -la "/dev/tenstorrent/by-id/$card" >&2 || true; done
     # The likely cause (run v190): the telemetry race after the reset. Named, never acted on here.
     case $missing_card in
       blackhole-CEF5729692C19E6D) missing_pci=0000:d1:00.0 ;;

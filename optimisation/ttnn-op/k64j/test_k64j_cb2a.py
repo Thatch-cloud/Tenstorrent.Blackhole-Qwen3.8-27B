@@ -585,6 +585,7 @@ class RunnerTests(unittest.TestCase):
 
     def harness_args(self, **env):
         environ = {key: value for key, value in os.environ.items() if key not in base.SCRUB}
+        environ['QUAL_CARD'] = base.CARD_X   # QUAL_CARD has no default
         environ.update(HOME=self.dir.as_posix(), RESULTS=(self.dir / 'results').as_posix(), K64J_CARD_DRY_RUN='1',
                        KOPGRAFT64=self.graft.as_posix(), EXPECT_TTNNCPP_SHA256=sha(base.BINARY))
         environ.update(env)

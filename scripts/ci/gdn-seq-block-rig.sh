@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manual rig runner for the K5-A card-B probe (scripts/ci/gdn_seq_block_device_test.py): the served
+# Manual rig runner for the K5-A probe (scripts/ci/gdn_seq_block_device_test.py; qualified on card B): the served
 # batched GDN launch (arm C) against K5-A (A), its bisection build (A0) and its negative control (N),
 # byte for byte over regimes R1-R4, then trace-timed. NOT a CI workflow - invoke by hand on the rig;
 # no allowlisting, no runner group (see hardware-ci-runner-allowlist memory). Cloned from
@@ -22,14 +22,17 @@
 # container, so no stale JIT binary can stand in for a changed source (the kernels also carry
 # SRC_TAG, a compile arg from each generated source's sha256).
 #
-# Device: card B and nothing else. ALLOW_SERVING_CARD is forced to 0 whatever the caller's
-# environment holds, and after qual_card_resolve the run is refused unless the target is
-# $QUAL_CARD_B and not a serving card (a leftover QUAL_CARD or ALLOW_SERVING_CARD=1 cannot move it
-# to card M or card A). The board is resolved by board id right before the run - never a
-# /dev/tenstorrent number, which renumbers across a board reset (tt-rig-hardware-topology memory).
+# Device: never card M or card A, and never card B. The probe ran on card B, which is now reserved
+# for another project: qual_card.sh refuses it, and QUAL_CARD must name some other board (there is no
+# default) - this rig has none, so the probe does not run here until it is given a card.
+# ALLOW_SERVING_CARD is forced to 0 whatever the caller's environment holds, and after
+# qual_card_resolve the run is refused if the target is a serving card (a leftover QUAL_CARD or
+# ALLOW_SERVING_CARD=1 cannot move it to card M or card A). The board is resolved by board id right
+# before the run - never a /dev/tenstorrent number, which renumbers across a board reset
+# (tt-rig-hardware-topology memory).
 # This script never resets anything; on a timeout (exit 124/137) or any exit but 0 (pass) and 1
 # (a completed fail or partial pass) it prints qual_reset_hint's recovery lines. Run it only while
-# the serving pair's runner group is idle (qual_card.sh prints the reminder).
+# the serving pair's runner group (qwen-two-p150a-exclusive) is idle.
 #
 # Usage:
 #   scripts/ci/gdn-seq-block-rig.sh <host-output-dir> [extra gdn_seq_block_device_test.py args...]
@@ -50,13 +53,13 @@ extra_args=("$@")
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The card first, before docker or any file is touched (test_qual_card: every harness refuses the
-# serving pair, and the default card B's missing node, before anything else).
+# serving pair, card B and an unset QUAL_CARD before anything else).
 . "$here/qual_card.sh"
 ALLOW_SERVING_CARD=0   # never card M or card A, whatever the caller's environment says
 qual_card_select
 qual_card_resolve
-if [ "$QUAL_CARD" != "$QUAL_CARD_B" ] || [ "$QUAL_SERVING" != 0 ]; then
-  echo "refusing: this probe runs on card B ($QUAL_CARD_B) only, not $QUAL_CARD ($(qual_card_label))" >&2
+if [ "$QUAL_SERVING" != 0 ]; then
+  echo "refusing: this probe never runs on card M or card A, the serving pair: not $QUAL_CARD ($(qual_card_label))" >&2
   exit 2
 fi
 qual_refuse_holders
@@ -120,7 +123,7 @@ case "$status" in
     echo "HANG SUSPECTED (exit $status: the 2700 s timeout fired): the container is removed on exit." >&2
     qual_reset_hint >&2 ;;
   *)
-    echo "exit $status: if the console log shows a device timeout or a dispatch error, card B may be wedged:" >&2
+    echo "exit $status: if the console log shows a device timeout or a dispatch error, the card may be wedged:" >&2
     qual_reset_hint >&2 ;;
 esac
 if [ ! -s "$outdir/gdn-seq-block.json" ]; then

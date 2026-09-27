@@ -1,5 +1,10 @@
 # The card-B runner
 
+> **Retired.** Card B is now reserved for another project. `.github/workflows/qwen-card-b.yml` and
+> `.github/card-b-job.env` are removed, `scripts/ci/qual_card.sh` refuses card B and has no default target,
+> and single-card harnesses run on card M through the `cardm` action of `qwen-c2-serving.yml`. The rest of
+> this page is kept as a record of how the runner worked.
+
 Card B (board `blackhole-F36F768B9A5CAFA0`, PCI `0000:f4:00.0`) is the rig's PCIe-only qualification card. It
 has its own GitHub runner so card-B tests queue through CI instead of being run by hand over SSH, and run in
 parallel with the serving-pair gates on cards M and A.

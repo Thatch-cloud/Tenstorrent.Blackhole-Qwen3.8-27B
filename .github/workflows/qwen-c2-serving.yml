@@ -3,9 +3,9 @@ name: Qwen C2 serving image
 # driven by .github/c2-serving-job.env at the tagged commit. The rig's LAN is not always
 # reachable; its runners reach GitHub outbound, so this is the way in from offsite.
 # Actions (C2_ACTIONS, space-separated, run in this order):
-#   status - what the rig holds: the last manual build log, C2 images, card holders, the agent
+#   status - what the rig holds: the last manual build log, C2 images, card M's and card A's holders, the agent
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
-#            on card M alone, card B being reserved for other work: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
+#            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
 #            the same refusals as the gate (anything holding M or A, a platform serving container); never card
 #            A or card B, and never a reset (put reset before it after a hang); results in cardm/
 #   build  - build tt-vllm:qwen38-c2-$C2_IMAGE_TAG unless present (waits for a build in flight);
@@ -65,6 +65,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/c2-results"
       - name: Status
         if: contains(steps.job.outputs.actions, 'status')
+        working-directory: c2
         shell: bash
         run: |
           set +e
@@ -72,7 +73,12 @@ jobs:
           echo "=== build in flight"; pgrep -af build-c2-serving-image || echo none
           echo "=== images"; docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}} {{.Size}}' | grep -E 'qwen38-c2|thatch-serving-tt' | head
           echo "=== persistent cache"; sudo -n du -sh /home/thatch/hf-cache/hub/.qwen-c2 /home/thatch/hf-cache/hub/.qwen-c2.partial 2>&1
-          echo "=== cards"; ls -l /dev/tenstorrent/by-id/; sudo -n fuser -v /dev/tenstorrent/* 2>&1
+          # Card M and card A only, resolved by board id as the reset step resolves them (scripts/ci/serving_pair.sh):
+          # card B is reserved for another project, so its link, its node and its holders are never listed here.
+          echo "=== cards M and A"
+          . scripts/ci/serving_pair.sh
+          for card in $QUAL_SERVING_CARDS; do ls -l "$QUAL_BYID_ROOT/$card" 2>&1; done
+          if serving_pair_nodes; then sudo -n fuser -v "${SERVING_PAIR_NODES[@]}" 2>&1 || echo "no holders"; fi
           echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
           echo "=== agent"; journalctl --user -u thatch-node-agent --since -3h --no-pager 2>&1 | grep -v -i heartbeat | tail -15
       - name: Platform serving container (read-only)
@@ -199,13 +205,15 @@ jobs:
           HARNESS_ENV: ${{ steps.job.outputs.cardm_env }}
         run: |
           set -euo pipefail
-          # Card B is reserved for other work, so a single-card harness (qwen-card-b.yml's kind, e.g. the K64j
-          # CB2a sections of optimisation/ttnn-op/k64j/run_card_b.sh) runs here on card M, in the pair's
-          # concurrency group. Card M only: QUAL_CARD is card M's board id and ALLOW_SERVING_CARD=1 lifts the
-          # harness's serving-pair refusal, both set here after the job's environment (c2_serving_job.py refuses
-          # either, RESULTS, CARD_B_ARGS and any QUAL_* in C2_CARDM_ENV, and accepts only a harness that selects
-          # its board by the canonical qual_card.sh block). The harness maps card M's node alone, refuses while
-          # anything can reach card M or any container any Tenstorrent device (a card-B job's included), and
+          # Card B is reserved for another project, so a single-card harness (e.g. the K64j CB2a sections of
+          # optimisation/ttnn-op/k64j/run_card_b.sh) runs here on card M, in the pair's concurrency group. Card M
+          # only: QUAL_CARD is card M's board id and ALLOW_SERVING_CARD=1 lifts the harness's serving-pair
+          # refusal, both set here after the job's environment (c2_serving_job.py refuses either, RESULTS,
+          # CARD_B_ARGS and any QUAL_* in C2_CARDM_ENV, and accepts only a harness that selects its board by the
+          # canonical qual_card.sh block, which refuses card B outright). The harness maps card M's node alone,
+          # refuses while a host process holds card M or card A or a container can reach either (--privileged,
+          # a device cgroup rule or Tenstorrent device request, /dev or /dev/tenstorrent bound, either node
+          # mapped; a container given only card B's node is not in the way and not looked at further), and
           # never resets: after a hang it prints the pair's reset, which is the reset action's, never this step's.
           test -n "$HARNESS"
           results="/tmp/c2-cardm-results/$GITHUB_RUN_ID"

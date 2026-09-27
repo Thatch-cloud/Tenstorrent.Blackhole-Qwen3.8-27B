@@ -717,7 +717,7 @@ class RunScriptTests(unittest.TestCase):
     def test_the_qualification_card_the_a5_image_and_the_refusal(self):
         text = script_text()
         self.assertNotIn('CARD_M=', text)
-        self.assertIn('QUAL_CARD_B=blackhole-F36F768B9A5CAFA0', text)          # the embedded qual_card.sh block
+        self.assertIn('QUAL_RESERVED_CARD=blackhole-F36F768B9A5CAFA0', text)   # the embedded qual_card.sh block
         self.assertIn('R=${RESULTS:-$HOME/kwork64/vt2/$QUAL_TAG}', text)
         self.assertIn('IMAGE=${IMAGE:-sha256:126b30dfa72b0e008884f3a8a1cfcb5b7f79eadcdeaeda1cd0f91350dde6ee73}', text)
         self.assertIn('--device "$node"', text)

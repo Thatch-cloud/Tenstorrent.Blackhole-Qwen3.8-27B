@@ -9,8 +9,8 @@
 # no offline-env requirement - --network none is still set because nothing here should ever
 # need the network, not because anything would otherwise reach for it.
 #
-# Device: the qualification card, QUAL_CARD (a board id; default card B,
-# blackhole-F36F768B9A5CAFA0; card M or card A, the serving pair, only with
+# Device: the card QUAL_CARD names (a board id; required, no default:
+# card B is reserved for another project and refused; card M or card A, the serving pair, only with
 # ALLOW_SERVING_CARD=1), via scripts/ci/qual_card.sh. It used to be /dev/tenstorrent/2, a node
 # number - card M after the 2026-09-23 renumbering, half of the serving pair. Device numbers
 # renumber across a board reset and a switch power-cycle, so the card is resolved by board id

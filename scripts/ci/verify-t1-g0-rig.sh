@@ -11,7 +11,7 @@
 # is set INSIDE the container, not only on the host.
 #
 # One card by default (--mesh 1x1: the two vocab shards run one after the other on it): the
-# qualification card, QUAL_CARD (a board id; default card B, blackhole-F36F768B9A5CAFA0), via
+# card QUAL_CARD names (a board id; required, no default: card B is reserved for another project and refused), via
 # scripts/ci/qual_card.sh. Card M and card A are the serving pair (tt-rig-hardware-topology
 # memory): QUAL_CARD may name one only with ALLOW_SERVING_CARD=1. Pass `--mesh 1x2` to open the
 # pair with the fabric, as the model does - the only run that also proves the chip-to-vocab-offset

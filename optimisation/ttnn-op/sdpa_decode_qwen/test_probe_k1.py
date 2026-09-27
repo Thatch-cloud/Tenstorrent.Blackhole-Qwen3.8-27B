@@ -50,6 +50,7 @@ ARM = CI / 'lever_n_m3native_run_arm.sh'
 GATE = ROOT / '.github' / 'workflows' / 'qwen-lever-n-m3native-gate.yml'
 STAGE3 = HERE / 'stage3'
 CARD_B = 'blackhole-F36F768B9A5CAFA0'
+CARD_X = 'blackhole-0000000000000001'   # a board id qual_card.sh does not name (card B is reserved and refused)
 CARD_M = 'blackhole-CEF5729692C19E6D'
 NL = chr(10)
 
@@ -373,6 +374,7 @@ class RunnerTests(unittest.TestCase):
 
     def run_runner(self, *args, **env):
         environ = {key: value for key, value in os.environ.items() if key not in SCRUB}
+        environ['QUAL_CARD'] = CARD_X   # QUAL_CARD has no default
         environ.update(HOME=self.dir.as_posix(), RESULTS=(self.dir / 'results').as_posix(), PROBE_DRY_RUN='1')
         environ.update(env)
         return subprocess.run([BASH, RUNNER.as_posix()] + list(args), env=environ, capture_output=True, text=True,
@@ -410,10 +412,10 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('### graft %s: _ttnncpp.so %s, qwen kernels 280a847f / 8776fcc7, manifest verified'
                       % (graft.as_posix(), sha(b'fake _ttnncpp.so')[:16]), result.stdout)
         self.assertEqual(argv[:3], ['docker', 'run', '--rm'])
-        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_B)
+        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_X)
         self.assertEqual(argv.count('--device'), 1)
-        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-k1probe-card-b')
-        self.assertIn('card=%s (card-b)' % CARD_B, result.stdout)
+        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-k1probe-' + CARD_X)
+        self.assertIn('card=%s (%s)' % (CARD_X, CARD_X), result.stdout)
         mounts = self.mounts(argv)
         prefix = graft.as_posix() + '/'
         grafted = {(m['src'][len(prefix):], m['dst']) for m in mounts if m['src'].startswith(prefix)}
@@ -505,10 +507,10 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(result.stdout, '### no K1_PROBE line' + NL, result.stderr)
 
     def test_a_real_run_resolves_the_board_before_anything_else(self):
-        if Path('/dev/tenstorrent/by-id', CARD_B).exists():
-            self.skipTest('card B is present on this host: the probe would run')
+        if Path('/dev/tenstorrent/by-id', CARD_X).exists():
+            self.skipTest('the test board id is present on this host: the probe would run')
         result = self.run_runner(PROBE_DRY_RUN='0')
-        self.refused(result, 'refusing: %s (card B, the qualification card) has no device node here' % CARD_B)
+        self.refused(result, 'refusing: %s (a board this harness does not name) has no device node here' % CARD_X)
         self.assertFalse((self.dir / 'results').exists())
 
 

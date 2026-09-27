@@ -67,7 +67,8 @@ import test_k64j_probe as probe_tests  # noqa: E402 - FakeTensor, HostTensor, EL
 probe = card_b.probe
 card = probe.card
 RUNNER = HERE / 'run_card_b.sh'
-CARD_B, CARD_M = probe_tests.CARD_B, probe_tests.CARD_M
+CARD_B, CARD_M, CARD_A = probe_tests.CARD_B, probe_tests.CARD_M, card_tests.qual_tests.CARD_A
+CARD_X = probe_tests.CARD_X
 BASH = probe_tests.BASH
 SCRUB = probe_tests.SCRUB + ('K64J_CARD_DRY_RUN', 'K64J_HARNESS', 'QWEN_FAST_SDPA_MODES')
 NL = chr(10)
@@ -786,7 +787,7 @@ class ContractTests(unittest.TestCase):
             reader_b.read(ttnn, 'mesh tensor', 'x')
 
     def test_the_runners_cb2b_examples_name_card_m(self):
-        """Card B is reserved for another agent and is the runner's default QUAL_CARD: every CB2b example command in
+        """Card B is reserved for another project and there is no default QUAL_CARD: every CB2b example command in
         the runner's header names card M by its board id, with ALLOW_SERVING_CARD=1, and none names card B."""
         text = read(RUNNER)
         start = text.index('# CB2b (')
@@ -840,6 +841,7 @@ class RunnerTests(unittest.TestCase):
 
     def run_runner(self, runner=RUNNER, **env):
         environ = {key: value for key, value in os.environ.items() if key not in SCRUB}
+        environ['QUAL_CARD'] = CARD_X   # QUAL_CARD has no default
         environ.update(HOME=self.dir.as_posix(), RESULTS=(self.dir / 'results').as_posix(), K64J_CARD_DRY_RUN='1',
                        K64J_HARNESS='extent_reader', KOPGRAFT64=self.graft.as_posix(),
                        EXPECT_TTNNCPP_SHA256=sha(card_tests.BINARY))
@@ -870,8 +872,8 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result.stderr, '')
         self.assertIn('### code under test: ', result.stdout)
         self.assertIn(' harness=extent_reader', result.stdout)
-        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-k64j-reader-card-b')
-        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_B)
+        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-k64j-reader-' + CARD_X)
+        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_X)
         bench = {m['dst']: m for m in self.mounts(argv) if m['dst'].startswith('/bench/')}
         self.assertEqual(sorted(bench), ['/bench/ci', '/bench/extent_reader_card_b.py', '/bench/k64j_card_b.py',
                                          '/bench/probe_k1_card_b.py', '/bench/probe_k64j_card_b.py',
@@ -900,7 +902,7 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn('/bench/ci', [m['dst'] for m in self.mounts(argv)])
         self.assertNotIn('/experiment-scripts/ci', argv[argv.index('--entrypoint') + 4])
         self.assertNotIn('QWEN_FAST_SDPA_MODES=tail,share,slice', argv)
-        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-k64j-card-card-b')
+        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-k64j-card-' + CARD_X)
 
     def test_the_watcher_pass_and_the_full_pass(self):
         argv = self.argv(self.run_runner(WATCHER='1'))
@@ -991,8 +993,8 @@ class CardMRunTests(unittest.TestCase):
             'docker() { case $1 in ps) echo %s ;; inspect) cat "$FAKE_DIR/container-$2" ;; image) return 0 ;; '
             'run) printf "%%q " "$@" > "$FAKE_DIR/docker-run.argv"; echo "K64J_READER verdict=PASS scope=full"; '
             'return "${FAKE_RUN_STATUS:-0}" ;; rm) return 0 ;; esac; }' % ' '.join(self.rig.containers),
-            'fuser() { local n=${@: -1}; case " ${FAKE_HELD:-} " in *" $n "*) '
-            'echo "$n: thatch 4242 F.... python3" >&2; return 0 ;; esac; return 1; }',
+            'fuser() { local n held=1; for n in "$@"; do case " ${FAKE_HELD:-} " in *" $n "*) '
+            'echo "$n: thatch 4242 F.... python3" >&2; held=0 ;; esac; done; return $held; }',
             'sudo() { return 1; }',
             'id() { echo 1000; }',
             'timeout() { while [ $# -gt 0 ]; do case $1 in -k) shift 2 ;; [0-9]*) shift; break ;; *) break ;; esac; '
@@ -1027,7 +1029,7 @@ class CardMRunTests(unittest.TestCase):
         node = self.rig.node(CARD_M)
         result = self.run_on(FAKE_HELD=node)
         self.assertEqual(result.returncode, 1)
-        self.assertIn('refusing: host processes hold %s' % node, result.stderr)
+        self.assertIn('refusing: host processes hold %s %s' % (node, self.rig.node(CARD_A)), result.stderr)
         self.assertFalse(self.launched.exists())
 
 

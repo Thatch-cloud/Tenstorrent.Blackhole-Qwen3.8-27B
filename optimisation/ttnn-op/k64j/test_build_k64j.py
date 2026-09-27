@@ -1,4 +1,4 @@
-"""CPU checks for build_k64j.sh, the K64j graft's build on the rig host through ttbuild (the card-B CI route).
+"""CPU checks for build_k64j.sh, the K64j graft's build on the rig host through ttbuild (the cardm CI route).
 
   - the contract: every recorded sha in the script is the generators' (apply_factory_k64j, make_k64j_kernels, the
     K64i generators) and build_k64i.sh's (the prefill factory and reader, the stock decode sources), the K64j
@@ -60,6 +60,7 @@ PF_FIXTURE = OPS / 'sdpa_prefill_chain' / 'fixtures' / 'sdpa_program_factory.fd8
 QUAL_CARD_LIB = CI / 'qual_card.sh'
 BEGIN, END = '# >>> qual_card.sh', '# <<< qual_card.sh'
 CARD_M, CARD_A = 'blackhole-CEF5729692C19E6D', 'blackhole-3707293C249A5E67'
+CARD_X = 'blackhole-0000000000000001'   # QUAL_CARD has no default; the build opens no card, so any board id serves
 UNPATCHED = '05708e6d9ddeddfdf13303d8f8fa391941d73b742ea3a380beeb0883ce8d4792'
 GATE_IMAGE = re.search(r'^GATE_IMAGE=(sha256:[0-9a-f]{64})', BUILD.read_text(encoding='utf-8'), flags=re.M).group(1)
 SCRUB = ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'RESULTS', 'CARD_B_ARGS', 'MSYS', 'K64J_BASE_GRAFT', 'K64J_BASE_SHA256',
@@ -291,7 +292,7 @@ class DryRunTests(unittest.TestCase):
         write_exe(cls.bin / 'docker', '#!/bin/sh\necho "$@" >> "%s"\nexit 1\n' % cls.log.as_posix())
         python_shim(cls.bin)
         cls.env = clean_env(PATH=str(cls.bin) + os.pathsep + os.environ.get('PATH', ''), HOME=cls.home.as_posix(),
-                            K64J_BUILD_DRY_RUN='1')
+                            K64J_BUILD_DRY_RUN='1', QUAL_CARD=CARD_X)
         cls.result = run_build(cls.env)
 
     @classmethod
@@ -379,6 +380,9 @@ class DryRunTests(unittest.TestCase):
 
     def test_the_refusals(self):
         self.refused(run_build(dict(self.env, QUAL_CARD=CARD_M)), 'refusing: QUAL_CARD=%s is card M' % CARD_M)
+        self.refused(run_build(dict(self.env, QUAL_CARD='')), 'refusing: QUAL_CARD is not set')
+        self.refused(run_build(dict(self.env, QUAL_CARD='blackhole-F36F768B9A5CAFA0', ALLOW_SERVING_CARD='1')),
+                     'is card B, reserved for another project')
         self.refused(run_build(dict(self.env, CARD_B_ARGS='--graft /tmp/x')),
                      "refusing: CARD_B_ARGS='--graft /tmp/x': build_k64j.sh takes no arguments from the job file")
         base = (self.home / 'opgraft-K64i').as_posix()
@@ -695,7 +699,7 @@ class FullRunTests(unittest.TestCase):
         env = clean_env(PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', ''), HOME=self.home.as_posix(),
                         RESULTS=self.results.as_posix(), K64J_BASE_SHA256=self.base_so, FAKE_TTBUILD=str(self.ttbuild),
                         FAKE_IMAGES=str(self.images), FAKE_STATE=str(self.dir / 'state.json'),
-                        FAKE_DOCKER_LOG=str(self.log), FAKE_BASH=BASH, FAKE_MSYS_TMP=msys_tmp())
+                        FAKE_DOCKER_LOG=str(self.log), FAKE_BASH=BASH, FAKE_MSYS_TMP=msys_tmp(), QUAL_CARD=CARD_X)
         env.update(extra)
         return run_build(env)
 
@@ -712,7 +716,7 @@ class FullRunTests(unittest.TestCase):
         self.assertFalse((self.home / 'opgraft-K64j.partial').exists())
         so = sha((graft / '_ttnncpp.so').read_bytes())
         self.assertIn('K64J_TTNNCPP_SHA256=%s' % so, result.stdout.splitlines())
-        self.assertIn('next: the card tests with CARD_B_ENV=WATCHER=1 KOPGRAFT64=', result.stdout)
+        self.assertIn('next: the card tests with C2_CARDM_ENV=WATCHER=1 KOPGRAFT64=', result.stdout)
         self.assertNotEqual(so, self.base_so)
         manifest = (graft / 'MANIFEST.sha256').read_text(encoding='utf-8').splitlines()
         listed = {}

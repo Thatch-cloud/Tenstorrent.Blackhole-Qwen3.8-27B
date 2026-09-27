@@ -24,6 +24,13 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
+# /dev/tenstorrent/0 and /2 must be card A and card M by board id before either is checked or mapped: nodes
+# renumber across resets, and card B (reserved for another project) must never be one of them.
+tt_a=$(readlink -e /dev/tenstorrent/by-id/blackhole-3707293C249A5E67 || true)
+tt_m=$(readlink -e /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D || true)
+if [ "$tt_a" != /dev/tenstorrent/0 ] || [ "$tt_m" != /dev/tenstorrent/2 ]; then
+  echo 'refusing: /dev/tenstorrent/0 and /2 are not card A and card M by board id' >&2; exit 1
+fi
 container=$(timeout -k 5 45 docker create --network none --hostname qwen-experiment --add-host qwen-experiment:127.0.0.1 \
     --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
     --pids-limit 4096 --memory 96g --cpus 24 --shm-size 8g \

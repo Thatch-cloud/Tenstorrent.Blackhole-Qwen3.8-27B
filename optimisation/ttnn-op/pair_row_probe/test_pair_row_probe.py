@@ -54,6 +54,7 @@ import probe_pair_row_card_b as probe  # noqa: E402
 
 RUNNER = HERE / 'run_card_b.sh'
 CARD_B = 'blackhole-F36F768B9A5CAFA0'
+CARD_X = 'blackhole-0000000000000001'   # a board id qual_card.sh does not name (card B is reserved and refused)
 CARD_M = 'blackhole-CEF5729692C19E6D'
 NL = chr(10)
 
@@ -571,7 +572,7 @@ class RunnerTests(unittest.TestCase):
         base = {name: value for name, value in os.environ.items()
                 if name not in ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'KOPGRAFT64', 'IMAGE', 'RESULTS', 'CARD_B_ARGS',
                                 'EXPECT_TTNNCPP_SHA256', 'WATCHER', 'WATCHDOG_S', 'PAIR_ROW_DRY_RUN')}
-        base.update(HOME=Path(directory).as_posix(), PAIR_ROW_DRY_RUN='1', MSYS_NO_PATHCONV='1')
+        base.update(QUAL_CARD=CARD_X, HOME=Path(directory).as_posix(), PAIR_ROW_DRY_RUN='1', MSYS_NO_PATHCONV='1')
         base.update(env)
         return subprocess.run([BASH, RUNNER.as_posix()], capture_output=True, text=True, timeout=120, env=base)
 
@@ -596,8 +597,8 @@ class RunnerTests(unittest.TestCase):
             result = self.run_runner(directory)
             self.assertEqual(result.returncode, 0, result.stderr)
             argv = self.argv(result)
-        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_B)
-        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-pairrow-card-b')
+        self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_X)
+        self.assertEqual(argv[argv.index('--name') + 1], 'qwen-pairrow-' + CARD_X)
         mounts = [argv[index + 1] for index, word in enumerate(argv) if word == '--mount']
         for name in ('probe_pair_row_card_b.py', 'pair_row_exact.py', 'draft_attention.py', 'dflash_batched_mask.py',
                      'draft_shared_head.py'):

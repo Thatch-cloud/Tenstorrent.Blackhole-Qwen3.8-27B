@@ -17,6 +17,7 @@ jobs:
           path: firmware-flash
           persist-credentials: false
       - name: Gate on clear device ownership and a digest-matched bundle
+        id: gate
         working-directory: firmware-flash
         timeout-minutes: 5
         shell: bash
@@ -24,6 +25,13 @@ jobs:
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           mkdir -p experiment-results
+          # tt-flash flash writes EVERY board on the host, and card B is reserved for another project: refusing to
+          # flash unless card M and card A are the only boards here (with card B installed, this always refuses).
+          boards=$(find /dev/tenstorrent -maxdepth 1 -type c | wc -l)
+          if [ "$boards" != 2 ]; then
+            echo "refusing to flash: $boards boards are present, and tt-flash would write every one of them"
+            exit 1
+          fi
           staging=/home/thatch/firmware-staging-19.12.0
           bundle="$staging/fw_pack-19.12.0.fwbundle"
           # Refuse to flash anything whose bytes are not the pinned upstream release.
@@ -36,7 +44,9 @@ jobs:
           # Refuse to flash while any process holds a card.
           prefix=()
           if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           printf 'cards present: %s\n' "${nodes[*]}" | tee experiment-results/pre-flash-cards.txt
           test "${#nodes[@]}" -ge 1
           paths=()
@@ -90,7 +100,8 @@ jobs:
           tail -60 experiment-results/flash.log || true
           exit "$status"
       - name: Confirm both cards report 19.12.0
-        if: always()
+        # Only once the gate passed (card M and card A the only boards): tt-flash verify and tt-smi -f read every board.
+        if: always() && steps.gate.outcome == 'success'
         working-directory: firmware-flash
         timeout-minutes: 6
         shell: bash

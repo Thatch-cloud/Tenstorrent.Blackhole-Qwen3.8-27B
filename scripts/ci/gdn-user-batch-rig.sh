@@ -20,7 +20,7 @@
 # imports verify_trace_t1.py, so it is mounted beside it whether or not the flag is set - an
 # image built before verify-trace T1 does not carry it.
 #
-# Device: the qualification card, QUAL_CARD (a board id, default card B), resolved by board
+# Device: the card QUAL_CARD names (a board id, required; card B is refused), resolved by board
 # id right before the run - never a /dev/tenstorrent number, which renumbers across a board
 # reset (tt-rig-hardware-topology memory). This script does no reset itself. The --chips 2
 # arm needs a second, linked card: that is the serving pair, which this runner does not open.
@@ -47,7 +47,7 @@ outdir=$(cd "$outdir" && pwd)
 # Device nodes RENUMBER across a board reset, and tt-smi indices do not track them: on
 # 2026-09-21 after a reset, tt-smi index 1 (PCI 0000:f3:00) was /dev/tenstorrent/0 while
 # tt-smi index 0 (PCI 0000:d1:00) was /dev/tenstorrent/2. So no number is trusted: the card
-# is QUAL_CARD, a board id (default card B, blackhole-F36F768B9A5CAFA0; card M or card A, the
+# is QUAL_CARD, a board id (required, no default: card B is reserved for another project and refused; card M or card A, the
 # serving pair, only with ALLOW_SERVING_CARD=1), resolved by readlink -f right before the run
 # (scripts/ci/qual_card.sh), which is refused while a container or a host process can reach
 # it. GDN_USER_BATCH_DEVICE (a node path) is retired.

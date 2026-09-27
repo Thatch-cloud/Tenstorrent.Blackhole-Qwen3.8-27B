@@ -390,7 +390,7 @@ class RunScriptTests(unittest.TestCase):
     def test_the_qualification_card_the_pinned_image_and_the_refusal(self):
         text = script_text()
         self.assertNotIn('CARD_M=', text)
-        self.assertIn('QUAL_CARD_B=blackhole-F36F768B9A5CAFA0', text)          # the embedded qual_card.sh block
+        self.assertIn('QUAL_RESERVED_CARD=blackhole-F36F768B9A5CAFA0', text)   # the embedded qual_card.sh block
         self.assertIn('R=${RESULTS:-$HOME/kwork64/pcx/$QUAL_TAG}', text)
         self.assertIn('IMAGE=${IMAGE:-sha256:0648ca9ad663acc72e7d8ea59d9cde0f9218b583ad74a60d58ff2f31bddd6fae}', text)
         self.assertIn('--device "$node"', text)

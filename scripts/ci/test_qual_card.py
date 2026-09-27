@@ -1,9 +1,11 @@
 """Which board a qualification harness runs on, and which boards the CI gate touches.
 
-scripts/ci/qual_card.sh picks the target by QUAL_CARD, a board id (default card B, the PCIe-only
-qualification card), refuses card M and card A (the serving pair) unless ALLOW_SERVING_CARD=1,
-resolves the node by board id at launch and again right before docker run, refuses only while
-something can reach THAT card, and prints a reset hint whose tt-smi -r command resolves the board id
+scripts/ci/qual_card.sh picks the target by QUAL_CARD, a board id that must be given (there is no
+default), refuses card B (reserved for another project) whatever the environment says, refuses card M
+and card A (the serving pair) unless ALLOW_SERVING_CARD=1, resolves the node by board id at launch and
+again right before docker run, refuses only while something can reach THAT card (or, for a serving
+card, its Ethernet partner) - a container given only card B's node is never in the way - and prints a
+reset hint whose tt-smi -r command resolves the board id
 when it is run (never a bare index, which tt-smi reads as its own renumbering board index). Every
 single-card harness under optimisation/ttnn-op embeds it byte for byte; the scripts/ci rig runners
 source it. scripts/ci/serving_pair.sh gives the m3native gate its holder-check and reset targets: card
@@ -53,6 +55,7 @@ EMBEDDING = [
     OPS / 'sdpa_decode_slice' / 'run_card_b.sh',
     OPS / 'pair_row_probe' / 'run_card_b.sh',
     OPS / 'k64j_probe' / 'run_card_b.sh',
+    OPS / 'quad_draft_probe' / 'run_card_b.sh',
     OPS / 'k64j' / 'run_card_b.sh',
     OPS / 'k64j' / 'build_k64j.sh',
     OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh',
@@ -75,6 +78,7 @@ LAUNCH = {
     OPS / 'sdpa_decode_slice' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'pair_row_probe' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'k64j_probe' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
+    OPS / 'quad_draft_probe' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'k64j' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh': r'^docker run -d --name "\$CONTAINER"',
     OPS / 'kernels-batch64' / 'nlp_concat_heads_decode' / 'build-and-test-b64.sh': r'^timeout 900 docker run',
@@ -84,6 +88,9 @@ CARD_M = 'blackhole-CEF5729692C19E6D'
 CARD_A = 'blackhole-3707293C249A5E67'
 CARD_B = 'blackhole-F36F768B9A5CAFA0'
 PCI_M, PCI_A, PCI_B = '0000:d1:00.0', '0000:f3:00.0', '0000:f4:00.0'
+# A board the library does not name (a board of some other host): the only target that is neither
+# refused outright nor half of the serving pair.
+CARD_X, PCI_X = 'blackhole-0000000000000001', '0000:e1:00.0'
 # Their upstream ports: card M's AMD root port, card A's and card B's PCIe switch downstream ports.
 PORT_M, PORT_A, PORT_B = '0000:d0:01.1', '0000:f2:00.0', '0000:f2:01.0'
 RUNNER = 'thatch-build-amd64-02-cp-temp'
@@ -94,6 +101,12 @@ SCRUB = ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'M1_READER', 'IMAGE', 'M1_ARGS', 'M1
          'CONTAINER', 'GDN_USER_BATCH_DEVICE', 'K64F_SRC', 'KOPGRAFT64', 'REPO', 'RUNNER_NAME', 'FAKE_HELD', 'MSYS',
          'PROBE_DRY_RUN', 'EXPECT_TTNNCPP_SHA256', 'K64I_DRY_RUN', 'KOPGRAFT64_REFERENCE', 'PAIR_ROW_DRY_RUN', 'K64J_DRY_RUN', 'K64J_CARD_DRY_RUN', 'K64J_BUILD_DRY_RUN',
          'GDN_SEQ_BLOCK_IMAGE')
+
+
+def with_x():
+    """FakeRig options for a rig that also holds CARD_X, on node 3 (fresh dicts: a FakeRig mutates its own)."""
+    return dict(nodes={CARD_B: '0', CARD_A: '1', CARD_M: '2', CARD_X: '3'},
+                pci={CARD_M: PCI_M, CARD_A: PCI_A, CARD_B: PCI_B, CARD_X: PCI_X})
 
 
 def read(path):
@@ -255,8 +268,9 @@ class FakeRig:
         ] + self.stubs() + [
             'docker() { case $1 in ps) printf "%%s\\n" %s ;; inspect) cat "$FAKE_DIR/container-$2" ;; esac; }'
             % ' '.join(self.containers),
-            'fuser() { echo "$*" >> "$FAKE_DIR/fuser.log"; local n=${@: -1}; '
-            'case " ${FAKE_HELD:-} " in *" $n "*) echo "$n: thatch 4242 F.... python3" >&2; return 0 ;; esac; return 1; }',
+            'fuser() { echo "$*" >> "$FAKE_DIR/fuser.log"; local n held=1; for n in "$@"; do '
+            'case " ${FAKE_HELD:-} " in *" $n "*) echo "$n: thatch 4242 F.... python3" >&2; held=0 ;; esac; done; '
+            'return $held; }',
             'sudo() { return 1; }',
             'id() { echo 1000; }',
             '',
@@ -351,7 +365,9 @@ class EmbeddingTests(unittest.TestCase):
         self.assertNotRegex(text, r'tt-smi -r [0-9<]')                 # never a bare index, not even a placeholder
         self.assertNotIn('--device ', text)            # the harness tests count their one --device
         self.assertNotIn('docker run', text)
-        self.assertIn("QUAL_CARD_B=%s" % CARD_B, text)
+        self.assertIn("QUAL_RESERVED_CARD=%s" % CARD_B, text)
+        self.assertNotIn('QUAL_CARD_B', text)
+        self.assertNotIn('${QUAL_CARD:-$', text)                        # no default target
         self.assertIn("QUAL_SERVING_CARDS='%s %s'" % (CARD_M, CARD_A), text)
         self.assertIn('{{range .HostConfig.DeviceRequests}}req {{.Driver}} {{println .DeviceIDs}}{{end}}', text)
 
@@ -384,10 +400,29 @@ class SelectTests(unittest.TestCase):
 
     SHOW = 'qual_card_select; echo "card=$QUAL_CARD tag=$QUAL_TAG serving=$QUAL_SERVING byid=$QUAL_BYID"'
 
-    def test_the_default_target_is_card_b(self):
-        result = self.rig.run(self.SHOW)
+    def test_there_is_no_default_target(self):
+        for env in (dict(), dict(QUAL_CARD=''), dict(ALLOW_SERVING_CARD='1')):
+            with self.subTest(env=env):
+                result = self.rig.run(self.SHOW, **env)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('refusing: QUAL_CARD is not set', result.stderr)
+                self.assertIn('There is no default', result.stderr)
+                self.assertNotIn('card=', result.stdout)
+
+    def test_card_b_is_refused_whatever_the_environment_says(self):
+        for env in (dict(), dict(ALLOW_SERVING_CARD='1')):
+            with self.subTest(env=env):
+                result = self.rig.run(self.SHOW, QUAL_CARD=CARD_B, **env)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('refusing: QUAL_CARD=%s is card B, reserved for another project; no qualification '
+                              'harness may use it' % CARD_B, result.stderr)
+                self.assertNotIn('card=', result.stdout)
+                self.assertNotIn('WARNING', result.stderr)
+
+    def test_a_board_the_library_does_not_name_selects_without_the_override(self):
+        result = self.rig.run(self.SHOW, QUAL_CARD=CARD_X)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('card=%s tag=card-b serving=0 byid=%s' % (CARD_B, self.rig.byid(CARD_B)), result.stdout)
+        self.assertIn('card=%s tag=%s serving=0 byid=%s' % (CARD_X, CARD_X, self.rig.byid(CARD_X)), result.stdout)
         self.assertEqual(result.stderr, '')
 
     def test_the_serving_pair_is_refused_without_the_override(self):
@@ -417,20 +452,45 @@ class SelectTests(unittest.TestCase):
                 self.assertIn('is not a board id', result.stderr)
 
     def test_resolve_finds_the_node_by_board_id_now(self):
-        result = self.rig.run('qual_card_select; qual_card_resolve; echo "node=$QUAL_NODE pci=$QUAL_PCI"')
+        body = 'qual_card_select; qual_card_resolve; echo "node=$QUAL_NODE pci=$QUAL_PCI"'
+        result = self.rig.run(body, QUAL_CARD=CARD_M, ALLOW_SERVING_CARD='1')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('node=%s pci=%s' % (self.rig.node(CARD_B), PCI_B), result.stdout)
-        self.assertIn('### target card: %s (card B, the qualification card) -> %s, PCI %s'
-                      % (CARD_B, self.rig.node(CARD_B), PCI_B), result.stdout)
-        # Only the m3native gate spares card B: the other workflows are named, not implied safe.
-        self.assertIn('qwen-card-reset.yml and most other hardware workflows', result.stdout)
+        self.assertIn('node=%s pci=%s' % (self.rig.node(CARD_M), PCI_M), result.stdout)
+        self.assertIn('### target card: %s (card M, half of the serving pair) -> %s, PCI %s'
+                      % (CARD_M, self.rig.node(CARD_M), PCI_M), result.stdout)
+        self.assertNotIn(CARD_B, result.stdout + result.stderr)
+        other = FakeRig(tempfile.mkdtemp(dir=self.tmp.name), **with_x())
+        result = other.run(body, QUAL_CARD=CARD_X)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('### target card: %s (a board this harness does not name) -> %s, PCI %s'
+                      % (CARD_X, other.node(CARD_X), PCI_X), result.stdout)
 
     def test_a_missing_board_is_refused(self):
-        (self.rig.tt / 'by-id' / CARD_B).unlink()
-        result = self.rig.run('qual_card_select; qual_card_resolve; echo resolved')
+        (self.rig.tt / 'by-id' / CARD_M).unlink()
+        result = self.rig.run('qual_card_select; qual_card_resolve; echo resolved', QUAL_CARD=CARD_M,
+                              ALLOW_SERVING_CARD='1')
         self.assertEqual(result.returncode, 1)
-        self.assertIn('refusing: %s (card B, the qualification card) has no device node here' % CARD_B, result.stderr)
+        self.assertIn('refusing: %s (card M, half of the serving pair) has no device node here' % CARD_M,
+                      result.stderr)
         self.assertNotIn('resolved', result.stdout)
+        # A board of some other host is not on this one.
+        result = self.rig.run('qual_card_select; qual_card_resolve; echo resolved', QUAL_CARD=CARD_X)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('refusing: %s (a board this harness does not name) has no device node here' % CARD_X,
+                      result.stderr)
+
+    def test_an_alias_of_card_b_is_refused(self):
+        # Another name for card B's node is card B: refused with or without the override, and before anything
+        # else is looked at.
+        (self.rig.tt / 'by-id' / 'blackhole-0000000000000000').write_text(self.rig.node(CARD_B))
+        body = 'qual_card_select; qual_card_resolve; echo "resolved $QUAL_NODE"'
+        for env in (dict(), dict(ALLOW_SERVING_CARD='1')):
+            with self.subTest(env=env):
+                result = self.rig.run(body, QUAL_CARD='blackhole-0000000000000000', **env)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('refusing: blackhole-0000000000000000 resolves to the node of card B, reserved for '
+                              'another project', result.stderr)
+                self.assertNotIn('resolved', result.stdout)
 
     def test_an_alias_of_a_serving_card_is_that_serving_card(self):
         (self.rig.tt / 'by-id' / 'blackhole-0000000000000000').write_text(self.rig.node(CARD_M))
@@ -447,7 +507,7 @@ class SelectTests(unittest.TestCase):
 @unittest.skipUnless(BASH, 'bash not found')
 class RecheckTests(unittest.TestCase):
     """Right before docker run the board id is read again: a re-enumeration between the holder check
-    and the launch (a switch event, the gate resetting card A beside card B) refuses the launch."""
+    and the launch (a switch event, the gate resetting the pair) refuses the launch."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -457,20 +517,21 @@ class RecheckTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def check(self, move=''):
-        return self.rig.run('qual_card_select; qual_card_resolve; %s qual_card_recheck; echo LAUNCH' % move)
+        return self.rig.run('qual_card_select; qual_card_resolve; %s qual_card_recheck; echo LAUNCH' % move,
+                            QUAL_CARD=CARD_M, ALLOW_SERVING_CARD='1')
 
     def test_an_unmoved_board_launches(self):
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('### %s is still %s' % (CARD_B, self.rig.node(CARD_B)), result.stdout)
+        self.assertIn('### %s is still %s' % (CARD_M, self.rig.node(CARD_M)), result.stdout)
         self.assertIn('LAUNCH', result.stdout)
 
     def test_a_board_that_moved_is_refused(self):
-        # Card B now on node 2, the node card M had at the holder check.
-        result = self.check('printf %%s %s > "$QUAL_BYID";' % q(self.rig.node(CARD_M)))
+        # Card M now on node 1, the node card A had at the holder check.
+        result = self.check('printf %%s %s > "$QUAL_BYID";' % q(self.rig.node(CARD_A)))
         self.assertEqual(result.returncode, 1)
-        self.assertIn('refusing: %s (card B, the qualification card) was %s at the holder check and is %s now'
-                      % (CARD_B, self.rig.node(CARD_B), self.rig.node(CARD_M)), result.stderr)
+        self.assertIn('refusing: %s (card M, half of the serving pair) was %s at the holder check and is %s now'
+                      % (CARD_M, self.rig.node(CARD_M), self.rig.node(CARD_A)), result.stderr)
         self.assertNotIn('LAUNCH', result.stdout)
 
     def test_a_board_that_vanished_is_refused(self):
@@ -490,10 +551,15 @@ class RecheckTests(unittest.TestCase):
 
 @unittest.skipUnless(BASH, 'bash not found')
 class HolderTests(unittest.TestCase):
-    """The holder check is scoped to the target: a CI gate on the serving pair does not block card B,
-    anything that can reach card B does; with a serving target, any container on any card blocks."""
+    """The holder check is scoped to what can reach the target: for a serving target (card M, as the cardm
+    action runs it, or card A) the target and its Ethernet partner; for any other board, that board. A
+    container that can reach only card B - or any other board - neither blocks it nor is looked at further;
+    one that is --privileged, has a device cgroup rule or a Tenstorrent device request, binds /dev or
+    /dev/tenstorrent, or maps a guarded node (by path, by its numbers, or by a path that is no device node now)
+    does."""
 
     BODY = 'qual_card_select; qual_card_resolve; qual_refuse_holders; echo CLEAR'
+    CARD_M_RUN = dict(QUAL_CARD=CARD_M, ALLOW_SERVING_CARD='1')
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -502,91 +568,143 @@ class HolderTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def check(self, **env):
-        return self.rig.run(self.BODY, **env)
+    def check(self, rig=None, **env):
+        return (rig or self.rig).run(self.BODY, **dict(self.CARD_M_RUN, **env))
 
-    def test_a_ci_gate_on_the_serving_pair_does_not_block_card_b(self):
-        self.rig.gate_arm()
+    def other_project(self, rig):
+        """What the other project's containers on card B look like here: card B's node, by node, by id, by numbers."""
+        rig.container('card-b-job', devices=(rig.node(CARD_B),), mounts=('/dev/hugepages-1G',))
+        rig.container('card-b-job-by-id', devices=(rig.byid(CARD_B),))
+        rig.container('card-b-copy', devices=(rig.device_copy(CARD_B),))
+
+    def test_a_container_on_card_b_does_not_block_card_m(self):
+        self.other_project(self.rig)
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('CLEAR', result.stdout)
-        self.assertIn('### containers: none can reach %s' % self.rig.node(CARD_B), result.stdout)
-        self.assertEqual(self.rig.fuser_calls(), ['-v ' + self.rig.node(CARD_B)])   # the target's node only
+        self.assertIn('### containers: none can reach %s %s' % (self.rig.node(CARD_M), self.rig.node(CARD_A)),
+                      result.stdout)
+        # Host processes: card M's and card A's nodes only, never card B's.
+        self.assertEqual(self.rig.fuser_calls(), ['-v %s %s' % (self.rig.node(CARD_M), self.rig.node(CARD_A))])
+        self.assertNotIn(self.rig.node(CARD_B), result.stdout + result.stderr)
 
-    def test_the_same_gate_blocks_a_serving_target(self):
+    def test_a_ci_gate_on_the_serving_pair_blocks_either_serving_target(self):
         self.rig.gate_arm()
-        for card in (CARD_M, CARD_A):
+        # Its first device is card M's node: the target itself for card M, the target's partner for card A.
+        for card, what in ((CARD_M, '(the target)'),
+                           (CARD_A, "(card M, half of the serving pair, the target's Ethernet partner)")):
             with self.subTest(card=card):
-                result = self.check(QUAL_CARD=card, ALLOW_SERVING_CARD='1')
+                result = self.check(QUAL_CARD=card)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn('refusing: container /qwen-m3native-1-1 has', result.stderr)
-                self.assertIn('the target is a serving card', result.stderr)
+                self.assertIn('which is %s %s' % (self.rig.node(CARD_M), what), result.stderr)
+                self.assertNotIn('CLEAR', result.stdout)
 
-    def test_any_container_on_any_card_blocks_a_serving_target(self):
-        self.rig.container('qual-b', devices=(self.rig.node(CARD_B),))
-        result = self.check(QUAL_CARD=CARD_M, ALLOW_SERVING_CARD='1')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('refusing: container /qual-b', result.stderr)
-
-    def test_whatever_can_reach_card_b_blocks_card_b(self):
+    def test_whatever_can_reach_the_pair_blocks_card_m(self):
+        partner = "(card A, half of the serving pair, the target's Ethernet partner)"
         cases = (
-            (lambda rig: dict(devices=(rig.node(CARD_B),)), 'which is {node} (the target)'),
-            (lambda rig: dict(devices=(rig.byid(CARD_B),)), 'which is {node} (the target)'),
-            (lambda rig: dict(mounts=(rig.byid(CARD_B),)), 'among its mnts, which is {node}'),
+            (lambda rig: dict(devices=(rig.node(CARD_M),)), 'which is {m} (the target)'),
+            (lambda rig: dict(devices=(rig.byid(CARD_M),)), 'which is {m} (the target)'),
+            (lambda rig: dict(mounts=(rig.byid(CARD_M),)), 'among its mnts, which is {m} (the target)'),
+            (lambda rig: dict(devices=(rig.node(CARD_A),)), 'which is {a} ' + partner),
+            (lambda rig: dict(devices=(rig.byid(CARD_A),)), 'which is {a} ' + partner),
             (lambda rig: dict(privileged=True), 'is --privileged'),
             (lambda rig: dict(rules=('c 234:* rwm',)), 'has a device cgroup rule (c 234:* rwm)'),
             (lambda rig: dict(requests=('cdi [tenstorrent.com/device=0]',)),
              'has a device request for a Tenstorrent device (cdi [tenstorrent.com/device=0])'),
-            (lambda rig: dict(devices=(rig.device_copy(CARD_B),)), "a device with the target's numbers (ea:0)"),
-            (lambda rig: dict(devices=(rig.tt.as_posix(),)), "a directory holding the target's node"),
+            (lambda rig: dict(devices=(rig.device_copy(CARD_M),)), 'a device with the numbers of {m} (the target, ea:2)'),
+            (lambda rig: dict(devices=(rig.device_copy(CARD_A),)), 'a device with the numbers of {a} (card A'),
+            (lambda rig: dict(devices=(rig.tt.as_posix(),)), 'among its devs, a directory holding {m} (the target)'),
+            (lambda rig: dict(mounts=(rig.tt.as_posix(),)), 'among its mnts, a directory holding {m} (the target)'),
+            (lambda rig: dict(mounts=((rig.dir / 'dev').as_posix(),)), 'among its mnts, a directory holding {m}'),
+            (lambda rig: dict(mounts=('/',)), "the host's root (it holds every device node)"),
             (lambda rig: dict(devices=(rig.tt.as_posix() + '/7',)), 'which is not a device node now'),
+            (lambda rig: dict(mounts=(rig.tt.as_posix() + '/7',)), 'which is not a device node now'),
             (lambda rig: dict(devices=((rig.tt / 'by-id').as_posix(),)), 'which is not a device node now'),
         )
         for index, (options, why) in enumerate(cases):
             with self.subTest(case=index, why=why):
                 rig = FakeRig(tempfile.mkdtemp(dir=self.tmp.name))
-                rig.gate_arm()
+                self.other_project(rig)                     # never the one named: it cannot reach the pair
                 rig.container('holder', **options(rig))
-                why = why.format(node=rig.node(CARD_B))
-                result = rig.run(self.BODY)
+                why = why.format(m=rig.node(CARD_M), a=rig.node(CARD_A))
+                result = self.check(rig)
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn('refusing: container /holder', result.stderr)
                 self.assertIn(why, result.stderr)
                 self.assertNotIn('CLEAR', result.stdout)
+                self.assertEqual(rig.fuser_calls(), [])     # refused before any host process is looked at
 
-    def test_what_cannot_reach_card_b_does_not_block_it(self):
-        self.rig.gate_arm()
+    def test_what_cannot_reach_the_pair_does_not_block_card_m(self):
+        self.other_project(self.rig)
         self.rig.container('gpu', requests=('nvidia [0]',))                       # not a Tenstorrent request
-        self.rig.container('copy-of-m', devices=(self.rig.device_copy(CARD_M),))   # card M's numbers
+        self.rig.container('cache', mounts=('/dev/hugepages-1G', '/home/thatch/hf-cache'))
+        self.rig.container('nodevice')
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('CLEAR', result.stdout)
 
-    def test_a_host_holder_of_the_target_blocks_and_one_of_another_card_does_not(self):
-        held = self.check(FAKE_HELD=self.rig.node(CARD_B))
-        self.assertEqual(held.returncode, 1)
-        self.assertIn('refusing: host processes hold %s' % self.rig.node(CARD_B), held.stderr)
-        self.assertEqual(len(self.rig.fuser_calls()), 5)                    # retried, then refused
-        other = FakeRig(tempfile.mkdtemp(dir=self.tmp.name))
-        result = other.run(self.BODY, FAKE_HELD=other.node(CARD_M) + ' ' + other.node(CARD_A))
+    def test_a_serving_target_whose_partner_has_no_node_is_refused(self):
+        self.other_project(self.rig)
+        (self.rig.tt / 'by-id' / CARD_A).unlink()
+        result = self.check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refusing: %s (card A, half of the serving pair), the target's Ethernet partner, has no device "
+                      "node here" % CARD_A, result.stderr)
+        self.assertEqual(self.rig.fuser_calls(), [])
+
+    def test_a_board_the_library_does_not_name_guards_its_own_node_only(self):
+        rig = FakeRig(tempfile.mkdtemp(dir=self.tmp.name), **with_x())
+        rig.container('pair', devices=(rig.node(CARD_M), rig.node(CARD_A)))     # the pair's devices alone
+        self.other_project(rig)
+        result = rig.run(self.BODY, QUAL_CARD=CARD_X)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(other.fuser_calls(), ['-v ' + other.node(CARD_B)])
+        self.assertIn('### containers: none can reach %s (%s)' % (rig.node(CARD_X), CARD_X), result.stdout)
+        self.assertEqual(rig.fuser_calls(), ['-v ' + rig.node(CARD_X)])
+        # A CI gate arm also binds /dev/tenstorrent, which holds this board's node too: it blocks.
+        rig.gate_arm()
+        result = rig.run(self.BODY, QUAL_CARD=CARD_X)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('a directory holding %s (the target)' % rig.node(CARD_X), result.stderr)
+
+    def test_a_host_holder_of_either_end_blocks_and_one_of_card_b_does_not(self):
+        for held in (CARD_M, CARD_A):
+            with self.subTest(held=held):
+                rig = FakeRig(tempfile.mkdtemp(dir=self.tmp.name))
+                result = self.check(rig, FAKE_HELD=rig.node(held))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('refusing: host processes hold %s %s' % (rig.node(CARD_M), rig.node(CARD_A)),
+                              result.stderr)
+                self.assertIn('%s: thatch 4242' % rig.node(held), result.stderr)
+                self.assertEqual(len(rig.fuser_calls()), 5)                 # retried, then refused
+        other = FakeRig(tempfile.mkdtemp(dir=self.tmp.name))
+        result = self.check(other, FAKE_HELD=other.node(CARD_B))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(other.fuser_calls(), ['-v %s %s' % (other.node(CARD_M), other.node(CARD_A))])
+
+    def test_a_container_is_refused_when_no_node_is_guarded(self):
+        # qual_container_reach on its own (no qual_refuse_holders before it) refuses every container.
+        result = self.rig.run('echo "why=$(qual_container_reach "/c false")"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('why=was inspected before any target node was set', result.stdout)
 
 
 @unittest.skipUnless(BASH, 'bash not found')
 class ResetHintTests(unittest.TestCase):
     """The hint never prints a bare number: tt-smi -r reads one as tt-smi's own board index, which
     renumbers across resets. It prints a command that resolves the board id when it is run, and the
-    PCI address that identifies the board's row in tt-smi -ls."""
+    PCI address that identifies the board's row in tt-smi -ls. A single board's hint is shown on CARD_X (card B,
+    reserved for another project, is never a target; the serving pair's hint resets both ends)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.rig = FakeRig(self.tmp.name)
+        self.rig = FakeRig(self.tmp.name, **with_x())
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def hint(self, rig=None, **env):
+        env.setdefault('QUAL_CARD', CARD_X)
         result = (rig or self.rig).run('qual_card_select; qual_reset_hint', **env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotRegex(result.stdout, r'tt-smi -r [0-9<]')
@@ -604,25 +722,26 @@ class ResetHintTests(unittest.TestCase):
         self.assertIn('DONE', result.stdout)
         return [line for line in result.stdout.splitlines() if line.startswith('ARGS')]
 
-    def test_card_b_is_reset_by_its_board_id_and_confirmed_by_its_pci_row(self):
+    def test_a_single_board_is_reset_by_its_board_id_and_confirmed_by_its_pci_row(self):
         out = self.hint()
-        self.assertIn('It is %s now, PCI %s;' % (self.rig.node(CARD_B), PCI_B), out)
-        self.assertIn("CONFIRM its row (PCI BDF %s): ~/.local/bin/tt-smi -ls | grep -i 'f4:00.0'" % PCI_B, out)
-        self.assertEqual(self.command(out), 'n=$(readlink -e %s) && ~/.local/bin/tt-smi -r "$n"' % self.rig.byid(CARD_B))
-        self.assertIn('Never card M or card A', out)
+        self.assertIn('It is %s now, PCI %s;' % (self.rig.node(CARD_X), PCI_X), out)
+        self.assertIn("CONFIRM its row (PCI BDF %s): ~/.local/bin/tt-smi -ls | grep -i 'e1:00.0'" % PCI_X, out)
+        self.assertEqual(self.command(out), 'n=$(readlink -e %s) && ~/.local/bin/tt-smi -r "$n"' % self.rig.byid(CARD_X))
+        self.assertIn('Never card M or card A (the serving pair), and never card B (reserved)', out)
         self.assertNotIn(CARD_M, out)
+        self.assertNotIn(CARD_B, out)
 
     def test_the_printed_command_resolves_the_board_id_when_it_is_run(self):
         command = self.command(self.hint())
-        # The boards renumber after the hint was printed: card B is node 5 by the time it is run.
+        # The boards renumber after the hint was printed: the board is node 5 by the time it is run.
         (self.rig.tt / '5').write_text('')
-        (self.rig.tt / 'by-id' / CARD_B).write_text((self.rig.tt / '5').as_posix())
+        (self.rig.tt / 'by-id' / CARD_X).write_text((self.rig.tt / '5').as_posix())
         self.assertEqual(self.execute(command), ['ARGS -r %s' % (self.rig.tt / '5').as_posix()])
 
     def test_the_printed_command_never_runs_tt_smi_without_the_board(self):
         # An empty argument would make tt-smi -r reset every board: with the board id gone, no call at all.
         command = self.command(self.hint())
-        (self.rig.tt / 'by-id' / CARD_B).unlink()
+        (self.rig.tt / 'by-id' / CARD_X).unlink()
         self.assertEqual(self.execute(command), [])
         pair = self.command(self.hint(QUAL_CARD=CARD_M, ALLOW_SERVING_CARD='1'))
         self.assertEqual(self.execute(pair), ['ARGS -r %s %s' % (self.rig.node(CARD_M), self.rig.node(CARD_A))])
@@ -642,11 +761,13 @@ class ResetHintTests(unittest.TestCase):
         self.assertNotIn(CARD_B, out)
 
     def test_an_unknown_address_still_resets_by_board_id(self):
-        rig = FakeRig(tempfile.mkdtemp(dir=self.tmp.name), pci={CARD_M: PCI_M, CARD_A: PCI_A, CARD_B: ''})
+        options = with_x()
+        options['pci'][CARD_X] = ''
+        rig = FakeRig(tempfile.mkdtemp(dir=self.tmp.name), **options)
         out = self.hint(rig)
         self.assertIn('PCI unknown', out)
-        self.assertIn('which row is %s (its PCI address is unknown here)' % rig.node(CARD_B), out)
-        self.assertEqual(self.command(out), 'n=$(readlink -e %s) && ~/.local/bin/tt-smi -r "$n"' % rig.byid(CARD_B))
+        self.assertIn('which row is %s (its PCI address is unknown here)' % rig.node(CARD_X), out)
+        self.assertEqual(self.command(out), 'n=$(readlink -e %s) && ~/.local/bin/tt-smi -r "$n"' % rig.byid(CARD_X))
 
 
 @unittest.skipUnless(BASH, 'bash not found')
@@ -1328,7 +1449,7 @@ class GateStepExecutionTests(unittest.TestCase):
         result = self.run_step(crossed, self.reset, after_reset=lines, heal_after=1)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.driver_calls(crossed), [])
-        self.assertIn('is the by-id target of %s (card B, the qualification card)' % CARD_B, result.stdout)
+        self.assertIn('is the by-id target of %s (card B, reserved for another project)' % CARD_B, result.stdout)
 
     def test_a_holder_of_the_card_refuses_the_re_probe(self):
         rig = self.rig()
@@ -1570,8 +1691,9 @@ class GateStepExecutionTests(unittest.TestCase):
 
 @unittest.skipUnless(BASH, 'bash not found')
 class HarnessTests(unittest.TestCase):
-    """The harnesses themselves: the default target is card B, the serving pair is refused before
-    anything touches docker or a device, and the dry runs launch on card B's board id."""
+    """The harnesses themselves: there is no default target, card B and the serving pair (without the
+    override) are refused before anything touches docker or a device, and the dry runs launch on the named
+    board's id."""
 
     ARGS = {
         OPS / 'sdpa_decode_qwen' / 'run_card_m.sh': ['reference'],
@@ -1607,14 +1729,29 @@ class HarnessTests(unittest.TestCase):
                     self.assertIn('refusing: QUAL_CARD=%s is card ' % card, result.stderr)
                     self.assertNotIn('docker', result.stderr.lower().replace('docker run', ''))
 
-    def test_the_default_target_is_card_b_everywhere(self):
-        if Path('/dev/tenstorrent/by-id', CARD_B).exists():
-            self.skipTest('card B is present on this host: the harnesses would run')
+    def test_every_harness_refuses_card_b_and_an_unset_card_before_anything_else(self):
+        cases = ((dict(QUAL_CARD=CARD_B), 'refusing: QUAL_CARD=%s is card B, reserved for another project' % CARD_B),
+                 (dict(QUAL_CARD=CARD_B, ALLOW_SERVING_CARD='1'), 'is card B, reserved for another project'),
+                 (dict(), 'refusing: QUAL_CARD is not set'),
+                 (dict(ALLOW_SERVING_CARD='1'), 'refusing: QUAL_CARD is not set'))
+        for path in EMBEDDING + SOURCING:
+            for env, needle in cases:
+                with self.subTest(path=path.relative_to(ROOT).as_posix(), env=env), \
+                        tempfile.TemporaryDirectory() as directory:
+                    result = self.invoke(path, directory, **env)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(needle, result.stderr)
+                    self.assertNotIn('docker', result.stderr.lower().replace('docker run', ''))
+                    self.assertNotIn('WARNING', result.stderr)
+
+    def test_the_named_target_is_resolved_first_everywhere(self):
+        if Path('/dev/tenstorrent/by-id', CARD_X).exists():
+            self.skipTest('%s is present on this host: the harnesses would run' % CARD_X)
         for path in self.RESOLVE_FIRST:
             with self.subTest(path=path.relative_to(ROOT).as_posix()), tempfile.TemporaryDirectory() as directory:
-                result = self.invoke(path, directory)
+                result = self.invoke(path, directory, QUAL_CARD=CARD_X)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn('refusing: %s (card B, the qualification card) has no device node here' % CARD_B,
+                self.assertIn('refusing: %s (a board this harness does not name) has no device node here' % CARD_X,
                               result.stderr)
 
     def dry_argv(self, result):
@@ -1622,36 +1759,38 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(len(lines), 1, result.stdout + result.stderr)
         return shlex.split(lines[0][len('### argv: '):])
 
-    def test_the_dry_runs_launch_on_card_b_by_board_id(self):
+    def test_the_dry_runs_launch_on_the_named_board_by_board_id(self):
         runs = (
-            (OPS / 'sdpa_prefill_bench' / 'run_m1.sh', dict(M1_DRY_RUN='1', M1_ARGS='--arms baseline'), 'qwen-sdpa-m1-card-b'),
-            (OPS / 'sdpa_prefill_chain' / 'run_card_m_pf.sh', dict(PF_DRY_RUN='1'), 'qwen-sdpa-pf-card-b'),
-            (OPS / 'sdpa_decode_qwen' / 'run_probe_k1.sh', dict(PROBE_DRY_RUN='1'), 'qwen-k1probe-card-b'),
-            (OPS / 'sdpa_decode_slice' / 'run_card_b.sh', dict(K64I_DRY_RUN='1'), 'qwen-k64i-card-b'),
-            (OPS / 'pair_row_probe' / 'run_card_b.sh', dict(PAIR_ROW_DRY_RUN='1'), 'qwen-pairrow-card-b'),
-            (OPS / 'k64j_probe' / 'run_card_b.sh', dict(K64J_DRY_RUN='1'), 'qwen-k64j-card-b'),
+            (OPS / 'sdpa_prefill_bench' / 'run_m1.sh', dict(M1_DRY_RUN='1', M1_ARGS='--arms baseline'), 'qwen-sdpa-m1-card-m'),
+            (OPS / 'sdpa_prefill_chain' / 'run_card_m_pf.sh', dict(PF_DRY_RUN='1'), 'qwen-sdpa-pf-card-m'),
+            (OPS / 'sdpa_decode_qwen' / 'run_probe_k1.sh', dict(PROBE_DRY_RUN='1'), 'qwen-k1probe-card-m'),
+            (OPS / 'sdpa_decode_slice' / 'run_card_b.sh', dict(K64I_DRY_RUN='1'), 'qwen-k64i-card-m'),
+            (OPS / 'pair_row_probe' / 'run_card_b.sh', dict(PAIR_ROW_DRY_RUN='1'), 'qwen-pairrow-card-m'),
+            (OPS / 'k64j_probe' / 'run_card_b.sh', dict(K64J_DRY_RUN='1'), 'qwen-k64j-card-m'),
         )
         for path, env, name in runs:
             with self.subTest(path=path.name), tempfile.TemporaryDirectory() as directory:
-                result = self.invoke(path, directory, **env)
+                result = self.invoke(path, directory, QUAL_CARD=CARD_M, ALLOW_SERVING_CARD='1', **env)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 argv = self.dry_argv(result)
-                self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_B)
-                self.assertEqual(argv[argv.index('--name') + 1], name)
-                self.assertIn('card=%s (card-b)' % CARD_B, result.stdout)
-                self.assertEqual(result.stderr, '')
-                override = self.invoke(path, directory, QUAL_CARD=CARD_M, ALLOW_SERVING_CARD='1', **env)
-                self.assertEqual(override.returncode, 0, override.stderr)
-                argv = self.dry_argv(override)
                 self.assertEqual(argv[argv.index('--device') + 1], '/dev/tenstorrent/by-id/' + CARD_M)
-                self.assertIn('WARNING: ALLOW_SERVING_CARD=1', override.stderr)
+                self.assertEqual(argv[argv.index('--name') + 1], name)
+                self.assertIn('card=%s (card-m)' % CARD_M, result.stdout)
+                self.assertIn('WARNING: ALLOW_SERVING_CARD=1', result.stderr)
+                self.assertNotIn(CARD_B, result.stdout + result.stderr)
+                # A dry run names its card too: without one, and with card B, it is refused before any argv.
+                for refused in (dict(), dict(QUAL_CARD=CARD_B)):
+                    result = self.invoke(path, directory, **dict(env, **refused))
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertNotIn('### argv: ', result.stdout)
 
     def test_the_pf_results_default_to_one_directory_per_board(self):
         with tempfile.TemporaryDirectory() as directory:
-            result = self.invoke(OPS / 'sdpa_prefill_chain' / 'run_card_m_pf.sh', directory, PF_DRY_RUN='1', RESULTS='')
+            result = self.invoke(OPS / 'sdpa_prefill_chain' / 'run_card_m_pf.sh', directory, PF_DRY_RUN='1', RESULTS='',
+                                 QUAL_CARD=CARD_M, ALLOW_SERVING_CARD='1')
             self.assertEqual(result.returncode, 0, result.stderr)
             mounts = [word for word in self.dry_argv(result) if word.endswith(',dst=/results')]
-            self.assertEqual(mounts, ['type=bind,src=%s/card-b,dst=/results' % (OPS / 'sdpa_prefill_chain').as_posix()])
+            self.assertEqual(mounts, ['type=bind,src=%s/card-m,dst=/results' % (OPS / 'sdpa_prefill_chain').as_posix()])
 
     def test_retired_card_overrides_are_refused(self):
         for path, variable in ((OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh', 'CARD'),

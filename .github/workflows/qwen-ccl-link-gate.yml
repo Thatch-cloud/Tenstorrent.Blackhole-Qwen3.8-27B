@@ -63,7 +63,9 @@ jobs:
           prefix=()
           if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
           smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           paths=()
           for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
           status=0
@@ -80,7 +82,9 @@ jobs:
           mkdir -p experiment-results
           prefix=()
           if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           paths=()
           for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
           status=0
@@ -101,7 +105,9 @@ jobs:
           target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
           model=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
           graft=/opt/tt-metal/models/common/modules/tt_ccl.py
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           devices=()
           for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
           name="qwen-ccl-baseline-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -163,7 +169,9 @@ jobs:
           prefix=()
           if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
           smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           paths=()
           for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
           status=0
@@ -180,7 +188,9 @@ jobs:
           mkdir -p experiment-results
           prefix=()
           if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           paths=()
           for node in "${nodes[@]}"; do paths+=("/dev/tenstorrent/$node"); done
           status=0
@@ -201,7 +211,9 @@ jobs:
           target=/home/thatch/hf-cache/hub/models--Qwen--Qwen3.8-27B
           model=/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
           graft=/opt/tt-metal/models/common/modules/tt_ccl.py
-          mapfile -t nodes < <(ls /dev/tenstorrent | grep -E '^[0-9]+$' | sort)
+          # Card M and card A only, by board id (card B is reserved for another project and never listed).
+          mapfile -t nodes < <(for id in blackhole-CEF5729692C19E6D blackhole-3707293C249A5E67; do readlink -e "/dev/tenstorrent/by-id/$id"; done | sed -n 's#^/dev/tenstorrent/\([0-9][0-9]*\)$#\1#p')
+          [ "${#nodes[@]}" = 2 ] && [ "${nodes[0]}" != "${nodes[1]}" ] || { echo "refusing: card M and card A do not both resolve by board id" >&2; exit 1; }
           devices=()
           for node in "${nodes[@]}"; do devices+=(--device "/dev/tenstorrent/$node"); done
           name="qwen-ccl-fixed-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"

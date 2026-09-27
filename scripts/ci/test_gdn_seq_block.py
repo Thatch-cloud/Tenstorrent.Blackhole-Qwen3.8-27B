@@ -10,7 +10,7 @@ What is held here, all on the host:
   - QUALIFIED: empty, and an unqualified triple refused everywhere but the probe's builder argument;
   - descriptor parity with gdn_user_batch over the same recording fake;
   - the model_batch marker and the gate regex; the audit launch kept out of the T1 gate's count;
-  - the rig runner's pins (card B only, the hang hint); the probe's compare helpers and its P0,
+  - the rig runner's pins (never card M, card A or card B; the hang hint); the probe's compare helpers and its P0,
     traced and P1 verdicts, as pure functions;
   - QUALIFIED: the card-B level-0 triple, and (where the evidence export is checked out) that the
     pinned sources generate exactly it;
@@ -802,16 +802,18 @@ class RigTests(unittest.TestCase):
         self.assertNotIn('docker run', self.TEXT[recheck:launch])
         self.assertIn('device=$QUAL_NODE', self.TEXT)
 
-    def test_the_rig_forces_card_b_whatever_the_environment_says(self):
+    def test_the_rig_never_runs_on_the_serving_pair_whatever_the_environment_says(self):
         self.assertLess(self.TEXT.index('ALLOW_SERVING_CARD=0'), self.TEXT.index('\nqual_card_select'))
-        refuse = self.TEXT.index('[ "$QUAL_CARD" != "$QUAL_CARD_B" ] || [ "$QUAL_SERVING" != 0 ]')
+        refuse = self.TEXT.index('if [ "$QUAL_SERVING" != 0 ]; then')
         self.assertLess(self.TEXT.index('\nqual_card_resolve'), refuse)
         self.assertLess(refuse, self.TEXT.index('\nqual_refuse_holders'))
+        self.assertNotIn('QUAL_CARD_B', self.TEXT)
 
     @unittest.skipUnless(BASH, 'bash not found')
-    def test_the_card_b_pin_refuses_every_other_board(self):
+    def test_the_rig_refuses_card_b_the_serving_pair_and_an_unset_card(self):
         # The rig's own selection lines, run against the real qual_card.sh, with qual_card_resolve
-        # stubbed after sourcing (it would readlink the rig's /dev/tenstorrent).
+        # stubbed after sourcing (it would readlink the rig's /dev/tenstorrent). Card B, where the probe was
+        # qualified, is reserved for another project: the probe now runs on no board of this rig.
         start = self.TEXT.index('. "$here/qual_card.sh"')
         block = self.TEXT[start:self.TEXT.index('\nqual_refuse_holders', start)].splitlines()
         with tempfile.TemporaryDirectory() as directory:
@@ -823,21 +825,24 @@ class RigTests(unittest.TestCase):
                                     % (q(HERE), block[0], resolve, '\n'.join(block[1:]))).encode())
                 return run_bash([script.as_posix()], **env)
 
-            chosen = select()
-            self.assertEqual(chosen.returncode, 0, chosen.stderr)
-            self.assertIn('SELECTED %s 0' % CARD_B, chosen.stdout)
-            self.assertIn('SELECTED %s 0' % CARD_B, select(QUAL_CARD=CARD_B).stdout)
-            # A serving card is refused even with the caller's override left set.
-            refused = select(QUAL_CARD=CARD_M, ALLOW_SERVING_CARD='1')
-            self.assertEqual(refused.returncode, 1)
-            self.assertIn('refusing', refused.stderr)
-            self.assertNotIn('SELECTED', refused.stdout)
-            # A board this harness does not name, or card B's id resolving to a serving node.
+            for env, needle in ((dict(), 'QUAL_CARD is not set'),
+                                (dict(QUAL_CARD=CARD_B), 'is card B, reserved for another project'),
+                                (dict(QUAL_CARD=CARD_B, ALLOW_SERVING_CARD='1'), 'is card B, reserved for another project'),
+                                (dict(QUAL_CARD=CARD_M, ALLOW_SERVING_CARD='1'), 'half of the serving pair')):
+                with self.subTest(env=env):
+                    refused = select(**env)
+                    self.assertEqual(refused.returncode, 1)
+                    self.assertIn('refusing', refused.stderr)
+                    self.assertIn(needle, refused.stderr)
+                    self.assertNotIn('SELECTED', refused.stdout)
+            # A board this rig does not name passes the selection (and then needs a node of its own), and one
+            # that resolves to a serving node is refused.
             other = select(QUAL_CARD='blackhole-0000000000000000')
-            self.assertEqual(other.returncode, 2)
-            self.assertIn('runs on card B', other.stderr)
-            aliased = select(resolve='QUAL_NODE=/dev/null; QUAL_SERVING=1')
+            self.assertEqual(other.returncode, 0, other.stderr)
+            self.assertIn('SELECTED blackhole-0000000000000000 0', other.stdout)
+            aliased = select(resolve='QUAL_NODE=/dev/null; QUAL_SERVING=1', QUAL_CARD='blackhole-0000000000000000')
             self.assertEqual(aliased.returncode, 2)
+            self.assertIn('never runs on card M or card A', aliased.stderr)
             self.assertNotIn('SELECTED', aliased.stdout)
 
     def test_a_hang_prints_the_recovery_lines_and_the_status_is_kept(self):
