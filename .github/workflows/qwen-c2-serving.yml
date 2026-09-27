@@ -79,6 +79,10 @@ jobs:
           . scripts/ci/serving_pair.sh
           for card in $QUAL_SERVING_CARDS; do ls -l "$QUAL_BYID_ROOT/$card" 2>&1; done
           if serving_pair_nodes; then sudo -n fuser -v "${SERVING_PAIR_NODES[@]}" 2>&1 || echo "no holders"; fi
+          # Whether this tt-smi can reset M and A without re-detecting every board afterwards (card B is reserved):
+          # the reset step passes --no_reinit only once this listing shows the flag.
+          echo "=== tt-smi reset options"; smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          "$smi" --version 2>&1 | head -2; "$smi" --help 2>&1 | grep -i -E -A1 "reinit|--reset|-r " | head -12
           echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
           echo "=== agent"; journalctl --user -u thatch-node-agent --since -3h --no-pager 2>&1 | grep -v -i heartbeat | tail -15
       - name: Platform serving container (read-only)
