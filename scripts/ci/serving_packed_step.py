@@ -392,7 +392,7 @@ class PackedStep:
         # QWEN_FAST_GATE_FORCE_CAP (gate only): refused here, at attach, if malformed; logged once when set.
         cap = forced_cap()
         if cap is not None:
-            audit_log('{}{} (gate only)', FORCE_CAP_MARKER, cap)
+            audit_log(FORCE_CAP_MARKER + '{cap} (gate only)', cap=cap)
 
     def __call__(self, entries, *, cancelled):
         if len(self.blocks) == 1:

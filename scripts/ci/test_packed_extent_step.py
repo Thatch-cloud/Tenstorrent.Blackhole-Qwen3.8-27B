@@ -234,13 +234,18 @@ class CommitEntryTests(unittest.TestCase):
                 forced_cap({'QWEN_FAST_GATE_FORCE_CAP': value})
         with patch.dict(os.environ, {'QWEN_FAST_GATE_FORCE_CAP': 'x'}), self.assertRaises(ValueError):
             PackedStep(steps.FakeBlock())
+        # The fake keeps audit_log's real signature (one message, keyword values): a looser fake let a
+        # three-positional call through here, and the engine died at attach on the rig (v62).
         logged = []
+
+        def audit_log(message, **values):
+            logged.append(message.format(**values))
         with patch.dict(os.environ, {'QWEN_FAST_GATE_FORCE_CAP': '8'}), \
-                patch.object(serving_packed_step, 'audit_log', side_effect=lambda *args, **values: logged.append(args)):
+                patch.object(serving_packed_step, 'audit_log', side_effect=audit_log):
             PackedStep(steps.FakeBlock())
-        self.assertEqual(logged, [('{}{} (gate only)', FORCE_CAP_MARKER, 8)])
+        self.assertEqual(logged, [FORCE_CAP_MARKER + '8 (gate only)'])
         logged.clear()
-        with patch.object(serving_packed_step, 'audit_log', side_effect=lambda *args, **values: logged.append(args)):
+        with patch.object(serving_packed_step, 'audit_log', side_effect=audit_log):
             PackedStep(steps.FakeBlock())
         self.assertEqual(logged, [], 'unset, nothing is logged')
 
