@@ -64,6 +64,12 @@ LEDGER_LINE_BUDGET, LEDGER_CONTINUATION = 180, '[MEMLEDGER] ...'
 W6_RELEASED_LINE = '[PACKED-PROPOSE] released quad={quad} pairs={pairs}'     # dflash_packed_proposal_coordinator
 QUAD_ROUND_FORMAT = '[QUAD-DRAFT] round={round} built={built} ms={ms}'        # quad_draft.ROUND_LINE
 PHASE_EXECUTE_FORMAT = '[PHASE] execute total={} new={} cached={} spec={} finished={} preempted={}'   # worker hook
+# publication_warm (B6): the extent block's attach-time eager publication warm, as warmed_line renders the M3 plan.
+WARM_LINE = ('[PINDIAG] eager publication warmed: 71 shapes in 1830.4 ms packed=0,16,32,48:1-16 '
+             'sequential=1:1,2:1-2,4:1-4 merge_release=1 fused_steady_state=1 program_cache=412->655')
+WARM_SUMMARY = dict(shapes=71, ms=1830.4, packed='0,16,32,48:1-16', sequential='1:1,2:1-2,4:1-4', merge_release=True,
+                    fused_steady_state=True, program_cache=(412, 655))
+WARM_SKIPPED_LINE = '[PINDIAG] eager publication warm skipped reason=no-collectives'
 # serving_request_factory's any-request engine line: the ladder is a tuple through loguru's {} (W6a).
 SINGLE_LADDER, SHORT_LADDER = '{}'.format((2048,)), '{}'.format((256, 512, 1024, 2048))
 ENGINE_PEAK = 1000 * 10 ** 6       # serving_prefill_admission.engine_build_peak(): 800 MB resident + 200 MB transient
@@ -203,7 +209,7 @@ def engine_id(user):
 
 def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.0, audit_ms=2.0, audit=True,
            mismatch=False, drop_audit=0, words_ok=None, cap=None, admission=True, packed=True, extra=(), families=None,
-           ladder=SINGLE_LADDER, sequential_rows=4, buckets=(2048,)):
+           ladder=SINGLE_LADDER, sequential_rows=4, buckets=(2048,), warm=True):
     """A server log of an S2 arm: the C2-any lines, the S2 attach lines when `on`, and `rounds` decode steps -
     packed (four [PACKED] lines, a packed extent round line and an audit line each) or, `packed` False, one
     [SEQ-PUBLISH] step line per user - on one timestamped clock, `round_ms` apart."""
@@ -218,6 +224,8 @@ def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.
                   'INFO [QWEN-SDPA] q-slice rows_per_kv=48',
                   'INFO [QWEN-SDPA] runtime-extent entries=2',
                   'INFO [PINDIAG] extent replay engaged segments=4 flags=[0x27] mask=narrow capacity=131328']
+        if warm:
+            lines.append('INFO ' + WARM_LINE)
         if buckets is not None:
             lines += [buckets_line(user, buckets) for user in range(users)]
     lines += list(extra)
@@ -550,6 +558,26 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(report['paths']['users']['0']['packed'], 12)
         self.assertEqual(report['paths']['position_mismatch_count'], 0)
         self.assertTrue(all(report['markers'].values()))
+
+    def test_the_eager_publication_warm_is_required_with_the_flag_and_leaks_without_it(self):
+        report = self.s2(s2_log())
+        self.assertTrue(report['markers']['warm'])
+        self.assertEqual(report['publication_warm'], dict(
+            warmed=[dict(shapes=71, ms=1830.4, packed='0,16,32,48:1-16', sequential='1:1,2:1-2,4:1-4',
+                         program_cache='412->655')], skipped=[]))
+        missing = self.s2(s2_log(warm=False))
+        self.assertFalse(missing['markers']['warm'])
+        self.assertEqual([problem for problem in missing['problems'] if gate.S2_WARM_MARKER in problem],
+                         ['%s=1: no "%s" line: the eager publication was not warmed at attach (B6), so a refused '
+                          'fused commit or a sequential step can compile mid-request' % (EXTENT, gate.S2_WARM_MARKER)])
+        skipped = self.s2(s2_log(warm=False, extra=['INFO ' + WARM_SKIPPED_LINE]))
+        self.assertIn('(INFO %s)' % WARM_SKIPPED_LINE, ' '.join(skipped['problems']))
+        self.assertEqual(skipped['publication_warm']['skipped'], ['INFO ' + WARM_SKIPPED_LINE])
+        for line in (WARM_LINE, WARM_SKIPPED_LINE):
+            with self.subTest(line=line):
+                leaked = self.s2(s2_log(on=False, extra=['INFO ' + line]), on=False)
+                self.assertIn('carries S2 markers', ' '.join(leaked['problems']))
+                self.assertTrue(gate.s2_relevant({}, 'INFO ' + line))
 
     def test_audit_mismatch_missing_and_incomplete_lines_fail(self):
         on = ((AUDIT, '1'),)
@@ -1623,6 +1651,20 @@ class ProducerContractTests(unittest.TestCase):
     the line needs a device), parsed here, and the fixtures' copies held equal. A producer whose work item is not
     merged into this checkout skips; merged, it is live (W3: packed_verifier, W6: serving_prefill_admission,
     memory_ledger.MemoryLedger.before, the coordinator's RELEASED_LINE, serving_request_factory's ladder)."""
+
+    def test_the_eager_publication_warm_lines(self):
+        import publication_warm
+        self.assertEqual((publication_warm.MARKER, publication_warm.SKIPPED_MARKER),
+                         (gate.S2_WARM_MARKER, gate.S2_WARM_SKIPPED_MARKER))
+        self.assertEqual(publication_warm.warmed_line(WARM_SUMMARY), WARM_LINE)
+        self.assertEqual(gate.publication_warm_report(rendered([publication_warm.warmed_line(WARM_SUMMARY)]))['warmed'],
+                         [dict(shapes=71, ms=1830.4, packed='0,16,32,48:1-16', sequential='1:1,2:1-2,4:1-4',
+                               program_cache='412->655')])
+        lines = []
+        block = types.SimpleNamespace(extent=True)
+        self.assertIsNone(publication_warm.warm(block, operations=None, mesh=None, pool=None, shared_weights=None,
+                                                collectives=None, log=lines.append))
+        self.assertEqual(lines, [WARM_SKIPPED_LINE])
 
     def test_quad_rounds_and_step_lines(self):
         import quad_draft

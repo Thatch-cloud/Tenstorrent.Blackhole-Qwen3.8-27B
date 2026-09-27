@@ -101,6 +101,11 @@ scripts/ci/model_batch.py
 # bytes they qualified), flat beside it: packed_any_admission reads packed_any_evidence.json from its own directory.
 scripts/ci/packed_any_admission.py
 scripts/ci/packed_any_evidence.json
+# S2 B6: the extent block (packed_verifier, overlaid above) imports publication_warm at attach and publishes the
+# drafter's eager publication once at every shape serving can ask of it, so a refused fused commit or a sequential
+# step compiles nothing after attach. New: no older layer holds it, so without this line the extent block's attach
+# dies on the import.
+scripts/ci/publication_warm.py
 # The modules S2 edits that the image otherwise holds at P8's commit (the P8 copy lists): model_batch (W3: the
 # extent readers in the block), dflash_packed_proposal_coordinator (W6c: dead-trace release on detach; W12: the
 # singles line) and memory_ledger (W6d: before-points) are overlaid above, once each, by W6's and W3's lines

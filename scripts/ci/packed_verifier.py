@@ -152,7 +152,10 @@ is the whole table, C = page_width * 64, and:
     trace: a replay that overruns it logs the families it held and ends the process (exit 70)
     rather than wedging it (ReplayDeadline);
   - validate_bindings also checks the cur_pos words, and each reader's word and masks, unmoved;
-  - QWEN_FAST_PACKED_CAPTURE_POSITION (serving_runtime, gate only) moves the capture position.
+  - QWEN_FAST_PACKED_CAPTURE_POSITION (serving_runtime, gate only) moves the capture position;
+  - after the last capture, publication_warm.warm (B6): the drafter's eager publication - a refused
+    fused commit's and every sequential step's - published and discarded on scratch at each segment's
+    row offset x every prefix and each pooled width x its prefixes, so none compiles after attach.
 Without the pool's extent storage none of this is built or read, and every path is today's.
 """
 
@@ -810,6 +813,9 @@ class PackedVerifierEngine:
         # predate the verify capture (R2) - and captured after the GDN commit traces. None without
         # the flag or when fused_commit refused it; every path below is then today's.
         self.fused = None
+        # S2 B6 (publication_warm.py): the summary of the eager publication warm the extent block runs at
+        # attach, after its last capture; None without the extent block, or when the warm was skipped.
+        self.publication_warm = None
         # Round-fence plan H2 (early_draft.py; QWEN_FAST_GDN_AFTER_PAIRS under QWEN_FAST_EARLY_DRAFT, default
         # off): read once here, like the flags above. The block defers a round's GDN commit traces only
         # when the early draft arms it (arm_deferred_commits) and only on the fence diet, whose owed fence
@@ -921,6 +927,18 @@ class PackedVerifierEngine:
                 # next to the GDN commit traces and after the verify trace.
                 self.stage = 'fused commit capture'
                 self.fused.capture(capture_operation)
+            if self.extent:
+                # S2 B6 (publication_warm.py): today's eager publication - what a packed round the fused
+                # commit refuses and every sequential step run - published and discarded once at every shape
+                # serving can ask of it (each segment's row offset x prefix, each pooled width x prefix), on
+                # scratch, fenced and released here, so no serving path compiles a publication program after
+                # attach. After every capture; a raise fails the attach like every stage here.
+                import publication_warm
+
+                self.stage = 'eager publication warm'
+                self.publication_warm = publication_warm.warm(self, operations=operations, mesh=self.mesh, pool=pool,
+                                                              shared_weights=shared_weights, collectives=collectives,
+                                                              log=diagnostic)
             # Warming the commit traces wrote every carry and slot 0 (as verifier_engine's
             # own warming does): slot 0 goes back to what attach found, and the carries go
             # back to the zeros the pool lends - a request's engine seeds its own on
@@ -1825,6 +1843,8 @@ class PackedVerifierEngine:
             **({} if self.prestaged is None else dict(prestage=dict(self.prestaged.counts, audit=self.prestaged.audit))),
             **({} if not self.round_fences else dict(round_fences=True)),
             **({} if self.fused is None else dict(fused_commit=self.fused.describe())),
+            **({} if getattr(self, 'publication_warm', None) is None else dict(publication_warm=dict(
+                self.publication_warm, program_cache=list(self.publication_warm['program_cache'])))),
             **({} if not getattr(self, 'gdn_after_pairs', False) else dict(gdn_after_pairs=True)))
 
     def close(self, *, wait=True):

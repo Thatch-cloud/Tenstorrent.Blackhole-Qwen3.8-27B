@@ -100,6 +100,9 @@ COPY scripts/ci/quad_draft.py scripts/ci/quad_conv_io.cpp /experiment-scripts/ci
 # Publish prewarm (QWEN_FAST_PUBLISH_PREWARM, default off): serving_request_factory imports publish_prewarm when the
 # flag is set, so it must reach the image beside it.
 COPY scripts/ci/publish_prewarm.py /experiment-scripts/ci/
+# S2 B6 (publication_warm): packed_verifier imports it at an extent block's attach (QWEN_FAST_EXTENT_REPLAY=1, never
+# set in this image), so it travels beside it.
+COPY scripts/ci/publication_warm.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

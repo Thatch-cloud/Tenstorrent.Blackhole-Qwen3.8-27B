@@ -1363,9 +1363,10 @@ class ShippingTests(unittest.TestCase):
                'serving_sequential_step.py')
     # Carries B1 code but is not an image module: the arm bind-mounts the checkout's gate.
     GATE = ('lever_n_m3native_gate.py',)
-    # Names B1 in its documentation only (which prepare_publication branch it warms) and reads no
-    # flag of it; an image module all the same, in both copy lists (test_publish_prewarm).
-    NAMED = ('publish_prewarm.py',)
+    # Name B1 in their documentation only (which prepare_publication branch they warm) and read no
+    # flag of it; image modules all the same, in both copy lists (test_publish_prewarm,
+    # test_publication_warm).
+    NAMED = ('publish_prewarm.py', 'publication_warm.py')
     # Ship from the frozen bundle, in neither copy list: an edit to one never reaches the rig.
     FROZEN = ('draft_selector.py', 'draft_kv_projection.py', 'draft_head_layout.py', 'feature_collective.py',
               'draft_kv_slide.py')
