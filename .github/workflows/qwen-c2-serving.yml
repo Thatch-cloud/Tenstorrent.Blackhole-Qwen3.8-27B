@@ -74,18 +74,11 @@ jobs:
       - name: Serving metering from the control plane's Prometheus (read-only)
         if: contains(steps.job.outputs.actions, 'metering')
         working-directory: c2
-        env:
-          SPARK_PASSWORD: ${{ secrets.SPARK_THATCH_PASSWORD }}
         timeout-minutes: 15
         shell: bash
         run: |
           set -uo pipefail
-          ask="$(mktemp)"; chmod 700 "$ask"
-          printf '#!/bin/sh\nprintf "%%s" "$SPARK_PASSWORD"\n' > "$ask"
-          SSH_ASKPASS="$ask" SSH_ASKPASS_REQUIRE=force DISPLAY=none setsid -w ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive -o ConnectTimeout=8 \
-            thatch@192.168.2.68 'bash -s' < scripts/ci/rig/spark_remote.sh 2>&1 | tee "$RUNNER_TEMP/c2-results/spark-remote.log"
-          rm -f "$ask"
+          python3 scripts/ci/rig/serving_metering.py 14 2>&1 | tee "$RUNNER_TEMP/c2-results/metering.log"
       - name: Platform serving container (read-only)
         if: contains(steps.job.outputs.actions, 'platform')
         shell: bash
