@@ -58,6 +58,36 @@ _UNREVIEWED = ('UNREVIEWED whether serving reaches the changed code; blob-pinned
 # path, never by basename, and never inherited from P8's KNOWN_STALE (whose UNREVIEWED entries
 # are basename-keyed and unpinned).
 C2_KNOWN_STALE = {
+    'scripts/ci/lever_n_m1_run_arm.sh': (
+        '804b9382408287bb9a8d1421be6f628024468b79',
+        'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
+    'scripts/ci/run-baseline.sh': (
+        '4b46eb2128c9c6ced753976de14e22fda3f53a2f',
+        'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
+    'scripts/ci/run-draft-tail-hardware.sh': (
+        '54a5642be1156dab8e96f203d0221bdee6beb12e',
+        'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
+    'scripts/ci/run-dspark-hardware.sh': (
+        '4a42ee6145dc9777a34a470c33d48b2c09cb96fa',
+        'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
+    'scripts/ci/run-dspark-splitk-hardware.sh': (
+        'a2a5ddab6c0798b94e7da8b4078e00b198f09e84',
+        'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
+    'scripts/ci/run-hardware.sh': (
+        '7675e965f336ccb207f9888ff159e75b6a8d240e',
+        'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
+    'scripts/ci/run-history-append-hardware.sh': (
+        '59afe46e9609674b21a937c63bdf6dc243f0d449',
+        'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
+    'scripts/ci/run-ladder-hardware.sh': (
+        'a32a8c8f63016c3a4421dbc035a57f98d6183c3c',
+        'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
+    'scripts/ci/run-t32-combined-hardware.sh': (
+        'c419e6590ecb845fb4b679d27decd76756347b80',
+        'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
+    'scripts/ci/run-wait-zone-hardware.sh': (
+        'e3af3246ed2e19a317eda6e6806ff718bc5c3935',
+        'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
     'scripts/ci/feature_collective.py': (
         '70e1936e608eb450539f8c88d04a59d8de740b0b',
         'serving imports it (dflash_device, draft_attention_branch, draft_mlp_branch). HEAD adds only the '
