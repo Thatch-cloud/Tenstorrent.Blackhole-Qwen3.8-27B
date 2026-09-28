@@ -110,7 +110,7 @@ SOURCE_SHA256 = {
 # edit below, or to lever_n_model_patch.patch_tp_replay, changes these on purpose
 # (test_qwen_prefix_model_patch prints the new values).
 PATCHED_SHA256 = {
-    MODEL_FILE: 'f81ccf7c9e47b5e420f06af50dbfcea375d2448e8b646af0d3bc52907f9e3ed1',
+    MODEL_FILE: 'ff1e72b0bf8c4b1cb355e8d974a1a1976fb5f02ff996d721cd265be785ca37ca',
     VLLM_FILE: 'bd742abe2ebb67bbcc14cb58301c1ec27ac5810983d9521d52bf6e344e3ef189',
 }
 
@@ -170,6 +170,10 @@ _QWEN_PREFIX_FAST_PATH_MARKERS = (
     "_qwen_dspark_prefill_capture",
     "_qwen_target_feature_capture",
 )
+# Sticky sessions: the one capture that may bind while the route runs, and only when it declares
+# records_prefix_route (dflash_prefill_window.PrefillWindowCapture built with prefix_route=True
+# wraps this route by name, so the GDN slot it writes is recorded like prefill_paged_slots').
+_QWEN_PREFIX_RECORDING_CAPTURE = "_qwen_dflash_prefill_capture"
 _QWEN_PREFIX_WARNED = set()
 
 
@@ -435,14 +439,22 @@ MODEL_METHODS = r'''
         The name stays outside prefill_paged_slots* on purpose: the C2 fast path's prefill capture
         enumerates that prefix on the model and refuses any entry it does not know
         (dflash_prefill_window.BATCHED_PREFILL_ENTRIES), on every profile of the image. It wraps
-        only the stock entries, so this route refuses to run while a fast-path capture is bound.
+        only the stock entries, so this route refuses to run while a fast-path capture is bound -
+        unless that capture is the DFlash prefill capture of sticky sessions and declares
+        records_prefix_route: it wraps this route by name and records the slot it writes.
         """
         for marker in _QWEN_PREFIX_FAST_PATH_MARKERS:
-            if hasattr(self, marker):
-                raise AssertionError(
-                    f"prefix reuse: {marker} is bound - QWEN_PREFIX_REUSE=1 does not run under the C2 fast "
-                    "path, whose prefill capture records the GDN slot only through prefill_paged_slots"
-                )
+            if not hasattr(self, marker):
+                continue
+            if marker == _QWEN_PREFIX_RECORDING_CAPTURE and (
+                getattr(getattr(self, marker), "records_prefix_route", False) is True
+            ):
+                continue
+            raise AssertionError(
+                f"prefix reuse: {marker} is bound - QWEN_PREFIX_REUSE=1 does not run under the C2 fast path, "
+                "whose prefill capture records the GDN slot only through prefill_paged_slots unless it "
+                "declares records_prefix_route"
+            )
         if self.num_devices <= 1:
             raise AssertionError("prefix reuse: _qwen_prefix_prefill_slots is the TP (num_devices>1) path")
         N = len(token_ids_list)

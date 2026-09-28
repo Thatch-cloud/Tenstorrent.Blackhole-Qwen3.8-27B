@@ -155,6 +155,17 @@ scripts/ci/qwen_prefix_model_patch.py
 scripts/ci/qwen_prefix_metrics.py
 scripts/ci/lever_n_model_patch.py
 
+# Sticky sessions, phase 1 (QWEN_FAST_STICKY_SESSIONS; the c2-packed-prefix profiles): the fast path's
+# prefill capture counts from a granted 2048-token boundary and wraps the prefix-reuse route, so the GDN
+# slot the route writes is recorded (dflash_prefill_window). P8 lays that file at its base commit; without
+# this line the image ships that copy, which cannot record the route, and the route refuses every prefill
+# under it. The frozen recipe does not pin it (the pin probe in docs/batch-spec-tasks-2026-09-19.md). Flag
+# off, the capture is its P8 self call for call (test_sticky_sessions). Every other module sticky sessions
+# change is overlaid above: serving_fast_policy (both copies), serving_lifecycle, serving_runtime,
+# serving_packed_step, serving_c2_contract, qwen_c2_profiles.json, qwen_prefix_scheduler_patch (both
+# copies) and qwen_prefix_model_patch.
+scripts/ci/dflash_prefill_window.py
+
 # Tests run inside the image at build time (every overlaid scripts/ci/test_*.py is).
 scripts/ci/test_serving_c2_contract.py
 scripts/ci/test_serving_fast_policy.py
