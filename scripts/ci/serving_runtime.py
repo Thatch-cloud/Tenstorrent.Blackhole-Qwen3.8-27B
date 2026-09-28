@@ -5,12 +5,13 @@ from functools import partial
 import json
 import os
 import re
+import time
 
 from dflash_device import PreparedDraftWeights, pindiag
 import memory_ledger
 from serving_buffer_pool import ServingBufferPool, dram_line
 from serving_cache_owner import ServingCacheOwner
-from serving_fast_policy import any_request_enabled, validate_fast_config
+from serving_fast_policy import STICKY_SESSIONS_FLAG, any_request_enabled, sticky_sessions_enabled, validate_fast_config
 from serving_lifecycle import FastServingLifecycle
 from serving_page_binding import VerifierPageBinding
 from serving_request_factory import attach_source_check, from_prefill, sequential_captures
@@ -27,6 +28,9 @@ PADDED_BLOCK_FLAG = 'QWEN_FAST_PADDED_BLOCK'
 CAPTURE_POSITION_FLAG = 'QWEN_FAST_PACKED_CAPTURE_POSITION'
 CAPTURE_POSITION_MARKER = '[PINDIAG] packed capture position override='
 EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
+# Sticky sessions (QWEN_FAST_STICKY_SESSIONS=1 only): one line per admitted request's engine build,
+# '<marker><request> ms=<build> frontier=<R, 0 cold> prompt=<P>'.
+STICKY_ENGINE_MARKER = '[PINDIAG] sticky engine built req='
 
 
 def m3_shape(policy, environ=None):
@@ -495,12 +499,23 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         pindiag('[PINDIAG] dram after attach: {}', dram_line(pool))
         memory_ledger.record('P7', point='after_attach')
 
-        def capture_factory(position):
+        # Sticky sessions (QWEN_FAST_STICKY_SESSIONS, read once at attach; default off). On, every
+        # prefill capture wraps the prefix-reuse route (QWEN_PREFIX_REUSE=1 sends every prefill,
+        # cold or resumed, through it), a granted hit's capture counts from its R, and each engine
+        # build is timed (STICKY_ENGINE_MARKER). Off, the factories below build exactly what they
+        # always did.
+        sticky = sticky_sessions_enabled()
+
+        def capture_factory(position, start=0):
             owner.validate()
             # The allocator just before this user's prefill; the bridge factory reads it
             # again just after, so the pair bounds what the prefill leaves resident.
             memory_ledger.record('prefill', point='before prompt=%d' % position)
-            return PrefillWindowCapture(operations, model, position, TARGET_TAPS)
+            if not sticky:
+                if start:
+                    raise ValueError('A prefill resumed at %d needs %s=1' % (start, STICKY_SESSIONS_FLAG))
+                return PrefillWindowCapture(operations, model, position, TARGET_TAPS)
+            return PrefillWindowCapture(operations, model, position, TARGET_TAPS, start=start, prefix_route=True)
 
         def bridge_factory(state, capture):
             owner.validate()
@@ -520,7 +535,15 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                     collectives=collectives, buffer_pool=pool, shared_weights=weights,
                     **(dict(capture_rows=capture_rows) if trimmed else {}))
 
+            if sticky:
+                began = time.perf_counter()
             request = create_request() if experiment is None else experiment.create(create_request)
+            if sticky:
+                # Sticky sessions: the engine build per request, so a gate can split a hit's TTFT into
+                # its tail prefill and the build phase 1 still pays (STICKY_ENGINE_MARKER).
+                pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}', str(state.req_id)[:48],
+                        (time.perf_counter() - began) * 1000.0, state.num_computed_tokens,
+                        len(state.prompt_token_ids))
             # The allocator after this request's engine and its captures: one line per
             # admitted request, so the log shows what each costs and what is left.
             pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))

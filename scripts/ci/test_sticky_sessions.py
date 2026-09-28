@@ -133,6 +133,226 @@ def holder_with(registry):
 
 
 # ------------------------------------------------------------------------------------------------
+# The lifecycle (A3)
+# ------------------------------------------------------------------------------------------------
+class LifecycleFixture(unittest.TestCase):
+    def fixture(self, cls=serving_lifecycle.FastServingLifecycle, prompt=4096, computed=0, chunk=None,
+                records_route=True):
+        worker, bridge, _, _ = worker_hook_tests.WorkerHookTests().fixture()
+        worker.model_runner.execute_model.return_value = None
+        worker.model_runner.sample_tokens.return_value = SimpleNamespace(req_ids=['request'], sampled_token_ids=[[10]])
+        _, _, _, arguments = factory_tests.RequestFactoryTests().fixture()
+        chunk = prompt - computed if chunk is None else chunk
+        new = SimpleNamespace(req_id='request', prompt_token_ids=[1] * prompt, num_computed_tokens=computed,
+                              mm_features=[], prompt_embeds=None, lora_request=None,
+                              sampling_params=arguments['state'].sampling_params)
+        scheduled = SimpleNamespace(finished_req_ids=set(), scheduled_new_reqs=[new],
+                                    scheduled_cached_reqs=SimpleNamespace(req_ids=[]), scheduled_spec_decode_tokens={},
+                                    num_scheduled_tokens={'request': chunk}, total_num_scheduled_tokens=chunk)
+        capture = SimpleNamespace(capture=Mock(side_effect=lambda: nullcontext()), close=Mock(),
+                                  segment=Mock(side_effect=lambda: nullcontext()), complete=False,
+                                  records_prefix_route=records_route)
+
+        def factory(state, features):
+            features.close()
+            return bridge
+
+        build = Mock(side_effect=factory)
+        capture_factory = Mock(return_value=capture)
+        lifecycle = cls(worker, config=policy_tests.FastPolicyTests().fixture(), capture_factory=capture_factory,
+                        bridge_factory=build, eos_ids=(99,), cancelled=lambda: False)
+        # the runner's own methods, as the fixture made them (a hook replaces them once it attaches)
+        return SimpleNamespace(lifecycle=lifecycle, worker=worker, bridge=bridge, capture=capture, build=build,
+                               scheduled=scheduled, new=new, capture_factory=capture_factory,
+                               runner_execute=worker.model_runner.execute_model,
+                               runner_sample=worker.model_runner.sample_tokens)
+
+
+class StickyAdmissionTests(LifecycleFixture):
+    """A granted hit is admitted at R == Q; everything else the trim should have made impossible fails
+    the engine, as the uncached clause's refusal always did."""
+
+    def admit(self, prompt, computed, q, chunk=None, records_route=True, holder=True):
+        registry = prefix_registry.PrefixRegistry(budget_bytes=1 << 30)
+        tokens = [1] * prompt
+        if q is not None:
+            committed(registry, 'request', q, tokens)
+        with sticky_env('1'):
+            case = self.fixture(prompt=prompt, computed=computed, chunk=chunk, records_route=records_route)
+        with registry_holder(holder_with(registry) if holder else None):
+            try:
+                case.result = case.worker.execute_model(case.scheduled)
+                case.error = None
+            except ValueError as error:
+                case.error = error
+        return case
+
+    def test_a_granted_exact_extension_is_admitted_at_its_boundary(self):
+        logger = Mock()
+        with patch.dict(sys.modules, {'loguru': SimpleNamespace(logger=logger)}):
+            case = self.admit(8192, 4096, 4096)
+        info = logger.info
+        self.assertIsNone(case.error)
+        self.assertTrue(case.lifecycle.sticky)
+        case.capture_factory.assert_called_once_with(8192, start=4096)
+        case.capture.capture.assert_called_once_with()
+        case.runner_execute.assert_called_once_with(case.scheduled)
+        self.assertTrue(case.lifecycle.prefill_pending, 'the whole tail ran: the seed is due')
+        self.assertEqual(case.lifecycle.request_id, 'request')
+        self.assertIn("[PINDIAG] sticky admit req='request' Q=4096 P=8192 tail=4096",
+                      [entry.args[0] for entry in info.call_args_list])
+        # the seed is bridged as any other: the engine is built from the capture as on the cold path
+        self.assertIs(case.worker.sample_tokens(None), case.runner_sample.return_value)
+        case.build.assert_called_once()
+        self.assertEqual(case.lifecycle.decoding_ids, ['request'])
+
+    def test_the_largest_resume_leaves_the_draft_window_to_the_prefill(self):
+        case = self.admit(6144, 4096, 4096)
+        self.assertIsNone(case.error)
+        case.capture_factory.assert_called_once_with(6144, start=4096)
+
+    def assert_fault(self, case, words):
+        self.assertIsNotNone(case.error)
+        self.assertIn(words, str(case.error))
+        self.assertTrue(case.lifecycle.failed, 'an impossible admission fails the engine')
+        case.runner_execute.assert_not_called()
+
+    def test_no_committed_grant_is_an_engine_fault(self):
+        self.assert_fault(self.admit(8192, 4096, None), 'no committed prefix grant')
+
+    def test_no_registry_in_the_process_is_an_engine_fault(self):
+        self.assert_fault(self.admit(8192, 4096, None, holder=False), 'no committed prefix grant')
+
+    def test_a_stale_grant_is_an_engine_fault(self):
+        self.assert_fault(self.admit(8192, 4096, 2048), 'the committed grant is at Q=2048')
+        self.assert_fault(self.admit(8192, 4096, 0), 'the committed grant is at Q=0')
+
+    def test_a_misaligned_resume_is_an_engine_fault(self):
+        case = self.admit(8192, 4032, None)
+        self.assert_fault(case, 'R is not a 2048-token boundary')
+
+    def test_a_resume_inside_the_draft_window_is_an_engine_fault(self):
+        self.assert_fault(self.admit(8000, 6144, 6144), 'R is above the prompt minus 2048')
+
+    def test_a_split_tail_is_an_engine_fault(self):
+        self.assert_fault(self.admit(8192, 4096, 4096, chunk=2048), 'the step carries 2048 of the 4096 tokens after R')
+
+    def test_a_capture_that_does_not_record_the_route_is_an_engine_fault(self):
+        case = self.admit(8192, 4096, 4096, records_route=False)
+        self.assertIn('does not record the prefix-reuse route', str(case.error))
+        self.assertTrue(case.lifecycle.failed)
+        case.runner_execute.assert_not_called()
+
+    def test_a_cold_prompt_under_the_flag_is_the_uncached_path_and_reads_no_registry(self):
+        with sticky_env('1'):
+            case = self.fixture(prompt=4096)
+        with registry_holder(Tripwire(prefix_registry.REGISTRY_KEY)):
+            self.assertIsNone(case.worker.execute_model(case.scheduled))
+        case.capture_factory.assert_called_once_with(4096)
+        self.assertTrue(case.lifecycle.prefill_pending)
+
+    def test_a_hit_is_refused_as_always_with_the_flag_off(self):
+        registry = prefix_registry.PrefixRegistry(budget_bytes=1 << 30)
+        committed(registry, 'request', 4096, [1] * 8192)
+        for value in (None, '0'):
+            with self.subTest(flag=value):
+                with sticky_env(value):
+                    case = self.fixture(prompt=8192, computed=4096)
+                with registry_holder(Tripwire(prefix_registry.REGISTRY_KEY)):
+                    with self.assertRaisesRegex(ValueError, 'Text-only uncached prompt, whole or first chunk, '
+                                                            'required: computed=4096 chunk=4096'):
+                        case.worker.execute_model(case.scheduled)
+                self.assertFalse(case.lifecycle.sticky)
+                case.capture_factory.assert_not_called()
+
+    def test_a_bad_flag_value_refuses_the_lifecycle(self):
+        with sticky_env('yes'), self.assertRaisesRegex(ValueError, 'QWEN_FAST_STICKY_SESSIONS must be 0 or 1'):
+            self.fixture()
+
+    def test_an_abort_mid_prefill_releases_the_resumed_capture(self):
+        case = self.admit(8192, 4096, 4096)
+        self.assertIsNone(case.error)
+        # vLLM aborted it after its prefill step, before its seed was sampled: the prefill side goes
+        case.lifecycle.prefill_pending = False
+        finished = SimpleNamespace(finished_req_ids={'request'}, scheduled_new_reqs=[],
+                                   scheduled_cached_reqs=SimpleNamespace(req_ids=[]), scheduled_spec_decode_tokens={},
+                                   num_scheduled_tokens={}, total_num_scheduled_tokens=0)
+        case.worker.execute_model(finished)
+        self.assertIsNone(case.lifecycle.request_id)
+        self.assertIsNone(case.lifecycle.capture)
+        case.capture.close.assert_called_once_with()
+        self.assertIsNone(serving_lifecycle.prefill_gate().held)
+        self.assertFalse(case.lifecycle.failed)
+
+
+def shape_of(entry):
+    """A recorded call as (name, argument types, keyword names): the objects differ between two runs."""
+    name, args, kwargs = entry
+    return name, tuple(type(value).__name__ for value in args), tuple(sorted(kwargs))
+
+
+class LifecycleParityTests(LifecycleFixture):
+    """With the flag off (unset or 0) today's lifecycle makes exactly the pre-sticky lifecycle's calls."""
+
+    def scenario(self, cls, value, shape):
+        with sticky_env(value):
+            case = self.fixture(cls=cls, **shape['fixture'])
+        trace = []
+        registry = prefix_registry.PrefixRegistry(budget_bytes=1 << 30)
+        committed(registry, 'request', 4096, [1] * 8192)
+        with registry_holder(Tripwire(prefix_registry.REGISTRY_KEY)):
+            for kind, argument in shape['steps']:
+                try:
+                    if kind == 'execute':
+                        scheduled = case.scheduled if argument is None else argument(case)
+                        result = case.worker.execute_model(scheduled)
+                    else:
+                        result = case.worker.sample_tokens(None)
+                    trace.append(('ok', kind, type(result).__name__))
+                except ValueError as error:
+                    trace.append(('raise', kind, str(error)))
+        trace.append(('execute', [shape_of(entry) for entry in case.runner_execute.mock_calls]))
+        trace.append(('sample', [shape_of(entry) for entry in case.runner_sample.mock_calls]))
+        trace.append(('capture_factory', case.capture_factory.mock_calls))
+        trace.append(('capture', case.capture.capture.mock_calls, case.capture.segment.mock_calls,
+                      case.capture.close.mock_calls))
+        trace.append(('bridge', len(case.build.mock_calls)))
+        trace.append(('state', case.lifecycle.request_id, list(case.lifecycle.decoding_ids),
+                      case.lifecycle.prefill_pending, case.lifecycle.failed, case.lifecycle.chunk_in_flight))
+        return trace
+
+    SHAPES = (
+        dict(fixture=dict(prompt=4096), steps=[('execute', None), ('sample', None)]),
+        dict(fixture=dict(prompt=8192, computed=4096), steps=[('execute', None)]),
+        dict(fixture=dict(prompt=8192, computed=4032), steps=[('execute', None)]),
+        dict(fixture=dict(prompt=4096, chunk=4000), steps=[('execute', None)]),
+        dict(fixture=dict(prompt=4096), steps=[
+            ('execute', None), ('sample', None),
+            ('execute', lambda case: SimpleNamespace(
+                finished_req_ids={'request'}, scheduled_new_reqs=[], scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+                scheduled_spec_decode_tokens={}, num_scheduled_tokens={}, total_num_scheduled_tokens=0))]),
+    )
+
+    def test_every_shape_matches_the_parent_call_for_call(self):
+        parent = parent_module('serving_lifecycle.py')
+        if parent is None:
+            self.skipTest('no git history for %s' % PARENT)
+        for index, shape in enumerate(self.SHAPES):
+            for value in (None, '0'):
+                with self.subTest(shape=index, flag=value):
+                    self.assertEqual(self.scenario(serving_lifecycle.FastServingLifecycle, value, shape),
+                                     self.scenario(parent.FastServingLifecycle, value, shape))
+
+    def test_the_sticky_helper_is_never_called_with_the_flag_off(self):
+        for shape in self.SHAPES:
+            with patch.object(serving_lifecycle.FastServingLifecycle, '_granted_resume',
+                              side_effect=AssertionError('sticky admission reached with the flag off')), \
+                    patch.object(serving_lifecycle, 'committed_grant',
+                                 side_effect=AssertionError('registry read with the flag off')):
+                self.scenario(serving_lifecycle.FastServingLifecycle, None, shape)
+
+
+# ------------------------------------------------------------------------------------------------
 # The prefill capture (A1)
 # ------------------------------------------------------------------------------------------------
 class FakeLayerCapture(object):
@@ -316,6 +536,105 @@ class CaptureParityTests(unittest.TestCase):
                       for start in range(0, position, CHUNK)]
             self.assertEqual(window.validate_prefill_chunks(position, chunks),
                              parent.validate_prefill_chunks(position, chunks))
+
+
+# ------------------------------------------------------------------------------------------------
+# The runtime factories (A3 signature, A8 telemetry)
+# ------------------------------------------------------------------------------------------------
+class RuntimeFactoryTests(unittest.TestCase):
+    def run_attach(self, environ):
+        seen = {}
+
+        def probe(install, diagnostic):
+            capture_factory = install.call_args.kwargs['capture_factory']
+            bridge_factory = install.call_args.kwargs['bridge_factory']
+            serving_runtime.ServingCacheOwner.return_value.physical_pages = 100
+            capture_factory(4096)
+            seen['cold'] = built.call_args
+            if environ.get(STICKY) == '1':
+                capture_factory(8192, start=4096)
+                seen['resumed'] = built.call_args
+            else:
+                with self.assertRaisesRegex(ValueError, 'A prefill resumed at 4096 needs QWEN_FAST_STICKY_SESSIONS=1'):
+                    capture_factory(8192, start=4096)
+            state = SimpleNamespace(req_id='request-1', block_ids=([3, 4],), num_computed_tokens=4096,
+                                    prompt_token_ids=[1] * 8192)
+            diagnostic.reset_mock()
+            with patch.object(serving_runtime, 'from_prefill', return_value=SimpleNamespace(engine=object(), close=Mock())), \
+                    patch.object(serving_runtime, 'VerifierPageBinding'), \
+                    patch.object(serving_runtime, 'FastRunnerBridge', return_value='bridge'):
+                bridge_factory(state, 'capture')
+            seen['diag'] = [entry.args for entry in diagnostic.call_args_list]
+
+        with patch('dflash_prefill_window.PrefillWindowCapture') as built:
+            runtime_tests.RuntimeAttachmentTests().exercise(packed=True, users=4, four_as_two=False, probe=probe,
+                                                            extra_env=environ)
+        return seen
+
+    def test_flag_off_builds_the_capture_it_always_built_and_logs_no_build_time(self):
+        with sticky_env(None):
+            seen = self.run_attach({})
+        from dflash_request_runtime import TARGET_TAPS
+
+        self.assertEqual(seen['cold'].args[2:], (4096, TARGET_TAPS))
+        self.assertEqual(seen['cold'].kwargs, {}, 'exactly the pre-sticky call')
+        self.assertFalse(any(serving_runtime.STICKY_ENGINE_MARKER in str(args[0]) for args in seen['diag']))
+
+    def test_flag_on_resumes_the_capture_wraps_the_route_and_times_the_build(self):
+        seen = self.run_attach(dict(ON))
+        self.assertEqual(seen['cold'].kwargs, dict(start=0, prefix_route=True))
+        self.assertEqual(seen['cold'].args[2], 4096)
+        self.assertEqual(seen['resumed'].kwargs, dict(start=4096, prefix_route=True))
+        self.assertEqual(seen['resumed'].args[2], 8192)
+        marks = [args for args in seen['diag'] if args[0].startswith(serving_runtime.STICKY_ENGINE_MARKER)]
+        self.assertEqual(len(marks), 1, seen['diag'])
+        template, request, ms, frontier, prompt = marks[0]
+        self.assertEqual(template, serving_runtime.STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}')
+        self.assertEqual((request, frontier, prompt), ('request-1', 4096, 8192))
+        self.assertGreaterEqual(ms, 0.0)
+        # the line parses as a gate would read it
+        line = template.format(request, ms, frontier, prompt)
+        self.assertRegex(line, r'^\[PINDIAG\] sticky engine built req=request-1 ms=\d+\.\d frontier=4096 prompt=8192$')
+
+
+# ------------------------------------------------------------------------------------------------
+# The policy and the contract (A5)
+# ------------------------------------------------------------------------------------------------
+class PolicyTests(unittest.TestCase):
+    def config(self, caching, algorithm='sha256'):
+        config = policy_tests.FastPolicyTests().fixture()
+        config.cache_config.enable_prefix_caching = caching
+        config.cache_config.prefix_caching_hash_algo = algorithm
+        return config
+
+    def test_the_prefix_cache_is_admitted_only_with_both_switches_and_sha256(self):
+        both = {STICKY: '1', policy.PREFIX_REUSE_FLAG: '1'}
+        with patch.dict(os.environ, both):
+            self.assertEqual(policy.validate_fast_config(self.config(True))['scheduler_requests'], 1)
+        refused = ({STICKY: '1'}, {policy.PREFIX_REUSE_FLAG: '1'}, {STICKY: '0', policy.PREFIX_REUSE_FLAG: '1'}, {})
+        for environ in refused:
+            with self.subTest(environ=environ), sticky_env(None), patch.dict(os.environ, environ), \
+                    self.assertRaisesRegex(ValueError, 'no prefix cache or LoRA'):
+                os.environ.pop(policy.PREFIX_REUSE_FLAG, None) if policy.PREFIX_REUSE_FLAG not in environ else None
+                policy.validate_fast_config(self.config(True))
+        with patch.dict(os.environ, both), self.assertRaisesRegex(ValueError, 'no prefix cache or LoRA'):
+            policy.validate_fast_config(self.config(True, 'xxhash'))
+        with patch.dict(os.environ, both), self.assertRaisesRegex(ValueError, 'no prefix cache or LoRA'):
+            policy.validate_fast_config(self.config('yes'))
+
+    def test_the_flag_is_read_strictly(self):
+        self.assertEqual(policy.STICKY_SESSIONS_FLAG, STICKY)
+        self.assertFalse(policy.sticky_sessions_enabled({}))
+        self.assertFalse(policy.sticky_sessions_enabled({STICKY: '0'}))
+        self.assertTrue(policy.sticky_sessions_enabled({STICKY: '1'}))
+        for value in ('true', '', 'on', '2'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'must be 0 or 1'):
+                policy.sticky_sessions_enabled({STICKY: value})
+
+    def test_flag_off_the_prefix_cache_is_refused_without_reading_the_switches(self):
+        with sticky_env(None), patch.object(policy, 'prefix_cache_admitted',
+                                            side_effect=AssertionError('consulted with the cache off')):
+            policy.validate_fast_config(self.config(False))
 
 
 if __name__ == '__main__':

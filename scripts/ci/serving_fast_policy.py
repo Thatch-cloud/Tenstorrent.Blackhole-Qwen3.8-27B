@@ -74,6 +74,47 @@ def any_request_enabled(environ=None):
     return value == '1'
 
 
+# Sticky sessions, phase 1 (default off; the c2-packed-prefix profiles set it beside
+# QWEN_PREFIX_REUSE=1). A turn that extends an earlier one resumes exactly from the last
+# 2048-token boundary at or below its prompt minus 2048 whose GDN checkpoint and KV prefix
+# the prefix-reuse grafts kept (qwen_prefix_scheduler_patch trims vLLM's hit to it and commits
+# a grant; qwen_prefix_model_patch restores it); the fast path then prefills only the tail and
+# builds its engine as it always does. On, and only together with QWEN_PREFIX_REUSE=1:
+# - validate_fast_config accepts vLLM's prefix cache (sha256 block hashes only);
+# - serving_lifecycle admits a new request at num_computed_tokens == R > 0 when the shared
+#   registry holds this step's committed grant at Q == R and R is a boundary at or below the
+#   prompt minus 2048 (serving_lifecycle.FastServingLifecycle._granted_resume); the prefill
+#   capture then counts from R and records the prefix-reuse route's GDN slot;
+# - the scheduler graft accepts DFlash's lookahead and plans the checkpoint vLLM's EAGLE-style
+#   last-block drop makes reachable (floor2048(P) - 2048);
+# - the packed K/V guard maps a row past an engine's bound blocks to a per-request sentinel
+#   page instead of the shared page-table pad (serving_packed_step.kv_guard).
+# Unset or '0', every one of those paths is exactly what it was.
+STICKY_SESSIONS_FLAG = 'QWEN_FAST_STICKY_SESSIONS'
+# The prefix-reuse switch the sticky flag needs beside it (serving_c2_contract.PREFIX_SWITCH).
+PREFIX_REUSE_FLAG = 'QWEN_PREFIX_REUSE'
+# The block-hash algorithm a prefix hit's exactness leans on (serving_c2_contract.PREFIX_HASH_ALGO).
+PREFIX_HASH_ALGO = 'sha256'
+
+
+def sticky_sessions_enabled(environ=None):
+    """Whether QWEN_FAST_STICKY_SESSIONS=1. Read per call, like any_request_enabled; anything
+    but unset, '0' or '1' is a configuration error, never a silent off."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(STICKY_SESSIONS_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (STICKY_SESSIONS_FLAG, value))
+    return value == '1'
+
+
+def prefix_cache_admitted(cache, environ=None):
+    """Whether the fast path may run with vLLM's prefix cache on: sticky sessions and prefix
+    reuse both on, and a sha256 block-hash chain. Only consulted when the cache is on."""
+    environ = os.environ if environ is None else environ
+    return (sticky_sessions_enabled(environ) and environ.get(PREFIX_REUSE_FLAG) == '1'
+            and getattr(cache, 'prefix_caching_hash_algo', None) == PREFIX_HASH_ALGO)
+
+
 NATIVE_GDN_SLOTS = 8
 # The proposal block is 32 rows and the verify block is 32 or 64. capture_widths caps a
 # per-request bucket at 32 and dflash_device accepts block_rows in (8, 16, 32), so the
@@ -134,7 +175,11 @@ def validate_fast_config(config):
         raise ValueError('Synchronous serving of at most %d requests on a single worker '
                          'required; TT mesh supplies TP2' % NATIVE_GDN_SLOTS)
     model_len = config.model_config.max_model_len
-    if (cache.block_size != 64 or cache.enable_prefix_caching is not False
+    # The prefix cache stays refused unless sticky sessions admit it (prefix_cache_admitted,
+    # consulted only when the cache is on, so with it off this clause is what it always was).
+    if (cache.block_size != 64
+            or (cache.enable_prefix_caching is not False
+                and not (cache.enable_prefix_caching is True and prefix_cache_admitted(cache)))
             or config.lora_config is not None or type(model_len) is not int
             or model_len < MINIMUM_MODEL_LEN or model_len % cache.block_size):
         raise ValueError('Fast profile requires 64-token pages, at least %d positions in whole '
