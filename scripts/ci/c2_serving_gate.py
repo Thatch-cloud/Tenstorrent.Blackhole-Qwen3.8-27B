@@ -1395,7 +1395,14 @@ def g4_checks(plan, concurrent, solo, rerun=None, probe=None, seats=MEMORY_USERS
     live = live4_of(concurrent)
     facts = dict(live4=live, rounds=s2.get('rounds'))
     rate = (live or {}).get('net_per_user_tok_s')
-    if rate is None:
+    if rate is None and plan == 'staggered':
+        # Staggered arrivals (STAGGER_SECONDS apart, EOS on) need not ever have four users live at once on real text
+        # (v76, v78: at most three). Its own evidence is the padded path at two or three live and the probe below;
+        # the four-live rate is judged when such rounds exist and measured by mixed (M7) regardless.
+        by_live = (s2.get('rounds') or {}).get('by_live') or {}
+        most = max([int(live_count) for live_count, count in by_live.items() if count] or [0])
+        facts['four_live_rate'] = 'not measured: at most %d live (staggered arrivals)' % most
+    elif rate is None:
         shortfalls.append('concurrent: no timed four-live packed round: the per-user rate is unmeasured')
     elif rate <= GENERAL_RATE:
         problems.append('concurrent: %.1f tok/s per user at four live (net of the audit), not above general\'s %.1f '

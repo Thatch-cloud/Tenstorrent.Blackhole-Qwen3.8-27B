@@ -1238,6 +1238,25 @@ class ServingDriverTests(unittest.TestCase):
                                         extra_reports={'staggered-probe': probe}, extra_logs={'staggered-probe': probe_log})
         self.assertEqual(summary['results']['staggered']['verdict'], 'NOT_EXERCISED', 'no round at two or three live')
 
+    def test_staggered_without_a_four_live_round_is_judged_on_its_padded_path(self):
+        # v76/v78: staggered arrivals on real text (EOS on) reached at most three live, so there is no four-live
+        # rate to judge; the plan passes on the padded rounds and the probe, and says the rate went unmeasured.
+        padded_only = s2_log(positions=self.LENGTHS, rounds=0,
+                             extra=[round_line(99, [1792, 20224], idle=[2, 3]), audit_line(99),
+                                    round_line(100, [1792, 20224, 60160], idle=[3]), audit_line(100)])
+        probe_log = padded_only + ('INFO [PINDIAG] padded probe round=3 live=0,1,2 exact=1 trace_ms=5.0 '
+                                   'idle_carry_intact=1\n')
+        probe = lambda n: dict(s2_arm_report(probe_log, 'c2-packed', env=((AUDIT, '1'), ('QWEN_FAST_PADDED_PROBE', '1')),
+                                             lengths=self.LENGTHS, max_tokens=4096, finish='stop', completion=300),
+                               flag_markers=dict(missing=[], padded_probe=[dict(round=3, exact='1')]))
+        code, summary, _, _, _ = self.g4('staggered', padded_only, self.solo_log(),
+                                        extra_reports={'staggered-probe': probe},
+                                        extra_logs={'staggered-probe': probe_log})
+        result = summary['results']['staggered']
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        self.assertNotIn('the per-user rate is unmeasured', ' '.join(result.get('shortfalls') or []))
+        self.assertIn('not measured', json.dumps(result))
+
 
 class LifecycleMemoryChurnTests(unittest.TestCase):
     def run_plan(self, plan, factories, logs):
