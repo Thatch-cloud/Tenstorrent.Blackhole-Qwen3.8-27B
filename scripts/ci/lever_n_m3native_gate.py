@@ -2650,7 +2650,14 @@ PREFILL_TRANSIENT_GB, PREFILL_TRANSIENT_FROM = 0.30, 2048
 # its free less STRANDED_GB less the operation's estimate (floor_gb) and on its largest free block less
 # LARGEST_BUFFER_GB (contiguous_floor_gb), both recomputed here from the free, largest_free and estimate every point
 # logs - so a log from before the split (whose margin= was the largest block less the estimate) reads the same way.
+# A prefill point's contiguous term also takes its prefill transient off the block, as the admission asks it
+# (serving_prefill_admission.admission_contiguous_need).
 STRANDED_GB, LARGEST_BUFFER_GB = 0.300, 0.128
+# memory_ledger.REQUEST_ITEMS: the ledger items allocated at request time, the only ones whose largest= (the largest
+# single buffer the walk newly found) bounds LARGEST_BUFFER_GB from below. A startup item's largest= is no bound
+# (gate v79's P0 model.embedding is one 1.271 GB buffer per chip).
+REQUEST_ITEMS = ('engine_request', 'model_after_prefill', 'quad_intermediates', 'quad_placeholders')
+LEDGER_ITEM = re.compile(r'\[MEMLEDGER\] phase=(\S+)(?: point=([^\n]*?))? item=(\S+) [^\n]*? largest=([0-9.]+)MB ')
 EXTENT_KEYS = 256
 
 
@@ -2862,15 +2869,16 @@ def before_points(log_text):
     """Every 'before' ledger point - the prefill's phase point ('before prompt=', its estimate the prefill
     transient) and W6d's ahead of each engine build, pair and quad capture and single-user rebuild (its own
     estimate) - per chip, judged on the S2 admission's split: its margin = free - STRANDED_GB - the operation's
-    estimate (a negative one included), and its contiguous term = largest free - LARGEST_BUFFER_GB. floor_gb is the
-    smallest margin and contiguous_floor_gb the smallest contiguous term (s2-design 3.3: G5 judges both); a point
-    that read no DRAM ('dram unavailable', 'error=') is 'unread', never a pass. logged_floor_gb is the smallest
-    floor the ledger itself logged (the largest block less the estimate before the split)."""
+    estimate (a negative one included), and its contiguous term = largest free - LARGEST_BUFFER_GB, less the
+    prefill transient at a prefill point (the admission asks a long prompt's transient of the block too). floor_gb
+    is the smallest margin and contiguous_floor_gb the smallest contiguous term (s2-design 3.3: G5 judges both); a
+    point that read no DRAM ('dram unavailable', 'error=') is 'unread', never a pass. logged_floor_gb is the
+    smallest floor the ledger itself logged (the largest block less the estimate before the split)."""
     points, unread = [], []
 
-    def point(op, detail, chip, largest, free, estimate, logged):
+    def point(op, detail, chip, largest, free, estimate, logged, transient=0.0):
         margin = None if free is None or estimate is None else free - STRANDED_GB - estimate
-        contiguous = None if largest is None else largest - LARGEST_BUFFER_GB
+        contiguous = None if largest is None else largest - LARGEST_BUFFER_GB - transient
         return dict(op=op, detail=detail[:80], chip=chip,
                     largest_free_gb=None if largest is None else round(largest, 4),
                     free_gb=None if free is None else round(free, 4),
@@ -2902,7 +2910,7 @@ def before_points(log_text):
             long_prompt = prompt is not None and int(prompt.group(1)) >= PREFILL_TRANSIENT_FROM
             estimate = (PREFILL_TRANSIENT_GB if long_prompt else 0.0) if match.group(1) == 'prefill' else None
             points.append(point(match.group(1), detail, int(match.group(3)), float(match.group(6)) / 1000.0,
-                                float(match.group(5)), estimate, None))
+                                float(match.group(5)), estimate, None, transient=estimate or 0.0))
     judged = [item for item in points if item['margin_gb'] is not None]
     floor = min(judged, key=lambda item: item['margin_gb']) if judged else None
     blocks = [item for item in points if item['contiguous_gb'] is not None]
@@ -2939,6 +2947,24 @@ def trace_region(log_text):
             lines.append(message.strip()[:240])
     return dict(readings=len(used), unavailable=unavailable, max_used_gb=round(max(used), 4) if used else None,
                 min_largest_free_gb=round(min(largest), 4) if largest else None, lines=lines)
+
+
+def request_buffers(log_text):
+    """The largest single buffer of each REQUEST_ITEMS item line the ledger logged (largest=; startup items are left
+    out, being no bound), the largest of them, and those above LARGEST_BUFFER_GB: a lower bound on the S2 split's
+    largest buffer, never a measure of it (memory_ledger's docstring: the walk sees no transient peak). items is 0
+    when no request item line carries largest= (a ledger from before it, or the ledger off)."""
+    found = []
+    for message in memledger_messages(log_text):
+        match = LEDGER_ITEM.match(message)
+        if match is None or match.group(3) not in REQUEST_ITEMS:
+            continue
+        found.append(dict(phase=match.group(1), point=(match.group(2) or '')[:40], item=match.group(3),
+                          largest_gb=round(float(match.group(4)) / 1000.0, 4)))
+    largest = max(found, key=lambda entry: entry['largest_gb']) if found else None
+    over = [entry for entry in found if entry['largest_gb'] > LARGEST_BUFFER_GB]
+    return dict(items=len(found), limit_gb=LARGEST_BUFFER_GB, largest_gb=largest['largest_gb'] if largest else None,
+                largest_entry=largest, over=len(over), over_entries=over[:8])
 
 
 def user_paths(log_text, streams, prompt_lengths):
@@ -3008,7 +3034,7 @@ def s2_report(environ, log_text, streams=None, prompt_lengths=None):
         quads_built=len(QUAD_BUILT_LINE.findall(log_text)),
         ladders=[ladder_of(text) for text in PROPOSAL_LADDER.findall(log_text)][:32],
         buckets_built=[ladder_of(text) for _, text in PROPOSAL_BUCKETS_BUILT_LINE.findall(log_text)][:32],
-        before=before_points(log_text),
+        before=before_points(log_text), request_buffers=request_buffers(log_text),
         trace_region=region, trace_region_lines=region['lines'],
         publication_warm=publication_warm_report(log_text),
         other_audits=other)

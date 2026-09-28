@@ -104,7 +104,8 @@ NOT_COMPARABLE (real_text_compare.S2_EXACT_CLAIMS); --policy dc-i (the user's de
            and fused-commit audits too (G4_ALL_AUDITS; --audits all adds them to the other G4 plans) and needs a
            packed round of two families, short the one-bucket ladder (2048,) - on every engine line and on the
            executed path's 'proposal buckets built' lines - no DRAM hold with a seat free, no lifted hold or
-           refusal and the before-point floors (FLOOR_GB and RESERVE_GB, the S2 admission's split), boundaries
+           refusal, the before-point floors (FLOOR_GB and RESERVE_GB, the S2 admission's split) and no
+           request-time buffer above the split's largest-buffer bound, boundaries
            (ignore_eos, 8192 out) cap events and BOUNDARY_MIN_CROSSINGS 256-key crossings per user, staggered
            (STAGGER_SECONDS apart) padded rounds at two or three live and a padded-probe arm.
   churn    M11, G5: CHURN_LENGTHS (12 users, 8 replacements) over four seats, each user's seat freed and
@@ -254,7 +255,12 @@ GENERAL_RATE, TARGET_RATE = 13.0, 27.0   # tok/s per user at four live: general'
 # every point's free less the stranded bytes less its operation's estimate at least FLOOR_GB, and its largest free
 # block less the largest single buffer at least RESERVE_GB, the coordinator's DRAM reserve (256 MiB,
 # dflash_packed_proposal_coordinator.DRAM_RESERVE_DEFAULT_MB), the one the profiles serve. v79's floor was the largest
-# block less the estimate: admitting at its 1079.7 MB block would have read 79.7 MB ahead of the engine build.
+# block less the estimate: admitting at its 1079.7 MB block would have read 79.7 MB ahead of the engine build. A
+# prefill point's block also loses its prefill transient first, as the admission asks it
+# (serving_prefill_admission.admission_contiguous_need): a long prompt's prefill needs a 696.4 MB block. And no ledger
+# item allocated at request time (harness.REQUEST_ITEMS) may hold a buffer above the split's LARGEST_BUFFER_BYTES
+# (harness.LARGEST_BUFFER_GB): the contiguous term would then be judged on a bound the run broke, so it fails, and the
+# remedy is a larger bound. At or below it the bound is not shown to be enough (the walk sees no transient peak).
 FLOOR_GB = 0.25
 RESERVE_GB = 256 * 2 ** 20 / 1e9
 MIXED_LENGTHS = (1536, 20000, 60000, 120000)       # M7's first set; the second, 5000,40000,90000,123136, by --lengths
@@ -1328,9 +1334,10 @@ def memory_s2_checks(label, report, seats=MEMORY_USERS):
     reading, harness.DRAM_DEFERRED_MARKER) is no hold. Also: no lifted hold (admitted with nothing left to wait
     for) and no refused request; the before-point floors of the S2 admission's split over W6d's points and the
     prefill points (harness.before_points): the free less the stranded bytes less the estimate at least FLOOR_GB
-    per chip, a negative one included, and the largest free block less the largest single buffer at least
-    RESERVE_GB. A hold or a before-point that read no DRAM, or no engine before-point under the flag, leaves the
-    floors unjudged: a shortfall, never a pass."""
+    per chip, a negative one included, and the largest free block less the largest single buffer (and, at a prefill
+    point, its transient) at least RESERVE_GB; and no request-time ledger item (harness.request_buffers) holding a
+    buffer above the split's largest-buffer bound. A hold or a before-point that read no DRAM, or no engine
+    before-point under the flag, leaves the floors unjudged: a shortfall, never a pass."""
     s2 = s2_of(report)
     if not s2:
         return [], []
@@ -1365,9 +1372,15 @@ def memory_s2_checks(label, report, seats=MEMORY_USERS):
     elif before.get('contiguous_floor_gb') is not None and before['contiguous_floor_gb'] < RESERVE_GB:
         point = before.get('contiguous_point') or {}
         problems.append('%s: before-point contiguous floor %.3f GB per chip (the largest free block less the largest '
-                        'buffer), below the %.3f GB reserve (%s %s chip%s)' % (
+                        'buffer, and a prefill\'s transient), below the %.3f GB reserve (%s %s chip%s)' % (
                             label, before['contiguous_floor_gb'], RESERVE_GB, point.get('op'), point.get('detail'),
                             point.get('chip')))
+    buffers = s2.get('request_buffers') or {}
+    if buffers.get('over'):
+        problems.append('%s: %d request-time ledger items hold a buffer above the split\'s %.3f GB largest-buffer bound '
+                        '(%s): raise serving_prefill_admission.LARGEST_BUFFER_BYTES' % (
+                            label, buffers['over'], buffers.get('limit_gb') or 0.0,
+                            '; '.join(request_buffer_text(entry) for entry in buffers.get('over_entries') or [])))
     if before.get('unread'):
         shortfalls.append('%s: %d ledger before-points read no DRAM (%s): the floor over them is unjudged' % (
             label, before['unread'], '; '.join(before.get('unread_lines') or [])))
@@ -1375,6 +1388,24 @@ def memory_s2_checks(label, report, seats=MEMORY_USERS):
         shortfalls.append('%s: no "[MEMLEDGER] before op=engine" point (W6d): the floor was judged without the '
                           'engine builds' % label)
     return problems, shortfalls
+
+
+def request_buffer_text(entry):
+    """One request-time ledger item's largest buffer (harness.request_buffers) as text."""
+    entry = entry or {}
+    return '%s at %s%s: %.4f GB' % (entry.get('item'), entry.get('phase'),
+                                    ' ' + entry['point'] if entry.get('point') else '', entry.get('largest_gb') or 0.0)
+
+
+def request_buffers_text(buffers):
+    """The request-time ledger items' largest buffer against the split's bound, as a line (recorded; above the bound
+    is memory_s2_checks' problem)."""
+    buffers = buffers or {}
+    if not buffers.get('items'):
+        return 'request-time largest buffer: not logged (no request item line carries largest=)'
+    return 'request-time largest buffer %s over %d items (bound %.3f GB, %d above it; a lower bound only)' % (
+        request_buffer_text(buffers.get('largest_entry')), buffers['items'], buffers.get('limit_gb') or 0.0,
+        buffers.get('over') or 0)
 
 
 def live4_of(report):
@@ -1780,14 +1811,16 @@ def run_churn(plan, runner, profiles, arms):
                             '; '.join(releases.get('unreleased_steps') or [])))
     region = s2.get('trace_region') or {}
     facts = dict(releases=releases, replacements=replacements, quads_built=s2.get('quads_built'),
-                 before=s2.get('before'), dram_hold=s2.get('dram_hold'), trace_region=region)
+                 before=s2.get('before'), dram_hold=s2.get('dram_hold'), trace_region=region,
+                 request_buffers=s2.get('request_buffers'))
     result = dict(verdict='PASS', lines=[
         'departures %s (%s while a quad was formed, %s released it) over %d replacements; release lines %s (%s '
         'quads, %s pairs); trace region %s' % (
             releases.get('departures'), releases.get('quad_departures'),
             (releases.get('quad_departures') or 0) - (releases.get('unreleased') or 0), replacements,
             releases.get('lines'), releases.get('quad'), releases.get('pairs'), trace_region_text(region)),
-        full_seat_admissions_text((s2.get('dram_hold') or {}).get('fit_readings'), seats)])
+        full_seat_admissions_text((s2.get('dram_hold') or {}).get('fit_readings'), seats),
+        request_buffers_text(s2.get('request_buffers'))])
     return with_checks(result, problems, shortfalls, facts)
 
 

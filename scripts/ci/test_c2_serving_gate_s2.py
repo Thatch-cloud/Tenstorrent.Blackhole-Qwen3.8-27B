@@ -170,6 +170,14 @@ def before_lines(op, largest, estimate, point=None, chips=(0, 1), free=3e9, trac
     return lines
 
 
+def item_lines(phase, item, largest_mb, point=None, buffers=2600):
+    """A ledger phase's item line (memory_ledger.MemoryLedger._phase): `item`'s new bytes per chip, its buffer count
+    and the largest single buffer the walk newly found for it."""
+    label = phase if point is None else '%s point=%s' % (phase, point)
+    return ledger_lines('[MEMLEDGER] phase=%s item=%s chip0=0.800GB chip1=0.800GB buffers=%d largest=%.1fMB '
+                        'unreadable=0' % (label, item, buffers, largest_mb))
+
+
 def prefill_point(prompt, largest_mb, chip=0, free_gb=3.0):
     """The ledger's phase point ahead of a prefill (serving_runtime: record('prefill', point='before prompt=N'))."""
     return ('INFO [MEMLEDGER] phase=prefill point=before prompt=%d chip%d allocated=1.000GB free=%.3fGB '
@@ -673,9 +681,40 @@ class HarnessTests(unittest.TestCase):
         single = [gate.before_points(line)['floor_point'] for line in text.split('\n') if 'MEMLEDGER' in line]
         self.assertEqual([(point['op'], point['estimate_gb'], point['margin_gb'], point['contiguous_gb'])
                           for point in single],
-                         [('prefill', 0.3, 2.4, 1.372), ('prefill', 0.0, 2.7, 0.272), ('quad', 0.4719, 2.2281, 0.772),
-                          ('engine', 1.0, 1.7, 0.972)])
+                         [('prefill', 0.3, 2.4, 1.072), ('prefill', 0.0, 2.7, 0.272), ('quad', 0.4719, 2.2281, 0.772),
+                          ('engine', 1.0, 1.7, 0.972)], 'a long prefill\'s block also loses its 0.3 GB transient')
         self.assertEqual((gate.STRANDED_GB, gate.LARGEST_BUFFER_GB), (STRANDED / 1e9, LARGEST_BUFFER / 1e9))
+
+    def test_request_buffers_read_only_the_request_time_items(self):
+        """The ledger's largest= bounds the split's LARGEST_BUFFER_BYTES from below only on the items allocated at
+        request time: gate v79's P0 model.embedding is one 1.271 GB buffer per chip, lm_head 675 MB and each
+        kv_caches buffer about 286 MB, none of which is ever asked of the block."""
+        startup = (item_lines('P0', 'model.embedding', 1271.0) + item_lines('P0', 'model.lm_head', 675.0)
+                   + item_lines('P0', 'kv_caches', 285.9, buffers=64))
+        request = (item_lines('prefill', 'model_after_prefill', 12.3, point='after req=5-0-8a1d1474')
+                   + item_lines('P8', 'engine_request', 21.3, point='req=5-0-8a1d1474')
+                   + item_lines('quad_built', 'quad_intermediates', 128.0, point='slots=0,1,2,3')
+                   + item_lines('quad_built', 'quad_placeholders', 0.1, point='slots=0,1,2,3'))
+        buffers = gate.request_buffers('\n'.join(startup + request))
+        self.assertEqual((buffers['items'], buffers['largest_gb'], buffers['over'], buffers['limit_gb']),
+                         (4, 0.128, 0, LARGEST_BUFFER / 1e9), 'at the bound is not above it')
+        self.assertEqual(buffers['largest_entry'], dict(phase='quad_built', point='slots=0,1,2,3',
+                                                        item='quad_intermediates', largest_gb=0.128))
+        self.assertEqual(gate.request_buffers('\n'.join(startup))['items'], 0, 'startup items are no bound')
+        over = gate.request_buffers('\n'.join(request + item_lines('engine5', 'engine_request', 150.2,
+                                                                   point='req=b-0-b02c1ec8')))
+        self.assertEqual((over['over'], over['largest_gb'], over['over_entries']),
+                         (1, 0.1502, [dict(phase='engine5', point='req=b-0-b02c1ec8', item='engine_request',
+                                           largest_gb=0.1502)]))
+        # A line from before largest= (v79's) carries none: nothing is read from it.
+        old = 'INFO [MEMLEDGER] phase=P8 point=req=x item=engine_request chip0=0.788GB chip1=0.788GB buffers=2730 ' \
+              'unreadable=0'
+        self.assertEqual(gate.request_buffers(old)['items'], 0)
+        # A long point cut at the ledger's LINE_BUDGET is joined back first.
+        long_point = 'req=%s' % ('x' * 150)
+        self.assertGreater(len(item_lines('engine9', 'engine_request', 131.0, point=long_point)), 1)
+        self.assertEqual(gate.request_buffers('\n'.join(item_lines('engine9', 'engine_request', 131.0,
+                                                                   point=long_point)))['over'], 1)
 
 
 class PathTests(unittest.TestCase):
@@ -1208,12 +1247,19 @@ class ServingDriverTests(unittest.TestCase):
         self.assertEqual(held['verdict'], 'FAIL')
         self.assertIn('seat free (decodes [3] of 4 seats)', ' '.join(held['s2_problems']))
         self.assertEqual(self.short(ladder=SHORT_LADDER)['verdict'], 'FAIL')
-        # The split's floors (gate v79): a 400 MB block beside 3 GB free passes both; a 390 MB block cannot hold the
-        # largest buffer and the reserve; 0.8 GB free leaves 0.2 GB past the stranded bytes and the prefill's 0.3.
-        self.assertEqual(self.short(extra=[prefill_point(120000, 400.0)])['verdict'], 'PASS')
-        narrow = self.short(extra=[prefill_point(120000, 390.0)])
-        self.assertEqual(narrow['verdict'], 'FAIL', 'contiguous floor 0.262 GB')
-        self.assertIn('contiguous floor 0.262 GB', ' '.join(narrow['s2_problems']))
+        # The split's floors (gate v79): a long prefill's block holds the largest buffer, the reserve and its 0.3 GB
+        # transient (the admission's term), so 700 MB passes and 690 MB does not; a short prompt carries no transient,
+        # so 400 MB passes and 390 MB does not; 0.8 GB free leaves 0.2 GB past the stranded bytes and the prefill's 0.3.
+        self.assertEqual(self.short(extra=[prefill_point(120000, 700.0)])['verdict'], 'PASS')
+        self.assertEqual(self.short(extra=[prefill_point(1536, 400.0)])['verdict'], 'PASS')
+        for prompt, block in ((120000, 690.0), (1536, 390.0)):
+            with self.subTest(prompt=prompt):
+                narrow = self.short(extra=[prefill_point(prompt, block)])
+                self.assertEqual(narrow['verdict'], 'FAIL', 'contiguous floor 0.262 GB')
+                self.assertIn('contiguous floor 0.262 GB', ' '.join(narrow['s2_problems']))
+        beside = self.short(extra=[prefill_point(120000, 400.0)])
+        self.assertEqual(beside['verdict'], 'FAIL', 'a long prefill beside the backstop\'s own 396.4 MB block')
+        self.assertIn('contiguous floor -0.028 GB', ' '.join(beside['s2_problems']))
         short_free = self.short(extra=[prefill_point(120000, 700.0, free_gb=0.8)])
         self.assertEqual(short_free['verdict'], 'FAIL', 'prefill floor 0.2 GB')
         self.assertIn('before-point floor 0.200 GB', ' '.join(short_free['s2_problems']))
@@ -1246,13 +1292,32 @@ class ServingDriverTests(unittest.TestCase):
         # A 300 MB block cannot hold the largest buffer and the reserve, however much is free.
         narrow = self.short(points=engine_points(largest=300e6))
         self.assertEqual(narrow['verdict'], 'FAIL')
-        self.assertIn('contiguous floor 0.172 GB per chip (the largest free block less the largest buffer), below the '
-                      '0.268 GB reserve (engine req=', ' '.join(narrow['s2_problems']))
+        self.assertIn('contiguous floor 0.172 GB per chip (the largest free block less the largest buffer, and a '
+                      'prefill\'s transient), below the 0.268 GB reserve (engine req=', ' '.join(narrow['s2_problems']))
         unread = self.short(extra=['INFO ' + W6_BEFORE_UNREAD_FORMAT % ('quad point=slots=0,1,2,3', 'no statistics')])
         self.assertEqual(unread['verdict'], 'NOT_EXERCISED', 'a before-point that read no DRAM is never a pass')
         self.assertIn('read no DRAM', ' '.join(unread['shortfalls']))
         blind = self.short(points=())
         self.assertEqual(blind['verdict'], 'NOT_EXERCISED', 'no engine point: the floor saw no engine build')
+
+    def test_short_fails_a_request_time_buffer_above_the_splits_bound_and_never_a_startup_one(self):
+        # The contiguous floor is judged on LARGEST_BUFFER_BYTES; a request-time item holding a larger buffer breaks
+        # it, so the run fails and names the remedy. v79's startup buffers (1.271 GB embedding) are no bound.
+        startup = item_lines('P0', 'model.embedding', 1271.0) + item_lines('P0', 'kv_caches', 285.9, buffers=64)
+        request = (item_lines('P8', 'engine_request', 21.3, point='req=5-0-8a1d1474')
+                   + item_lines('quad_built', 'quad_intermediates', 128.0, point='slots=0,1,2,3'))
+        fine = self.short(extra=startup + request)
+        self.assertEqual(fine['verdict'], 'PASS', fine['lines'])
+        for item, phase, point in (('engine_request', 'engine5', 'req=b-0-b02c1ec8'),
+                                   ('model_after_prefill', 'prefill', 'after req=5-0-8a1d1474'),
+                                   ('quad_intermediates', 'quad_built', 'slots=0,1,2,3')):
+            with self.subTest(item=item):
+                over = self.short(extra=startup + request + item_lines(phase, item, 150.2, point=point))
+                self.assertEqual(over['verdict'], 'FAIL')
+                self.assertIn('concurrent: 1 request-time ledger items hold a buffer above the split\'s 0.128 GB '
+                              'largest-buffer bound (%s at %s %s: 0.1502 GB): raise '
+                              'serving_prefill_admission.LARGEST_BUFFER_BYTES' % (item, phase, point),
+                              over['s2_problems'])
 
     def test_boundaries_need_cap_events_and_crossings(self):
         lengths = list(driver.BOUNDARY_LENGTHS)
@@ -1449,6 +1514,22 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
         narrow = self.churn(self.churn_log(extra=before_lines('quad', 390e6, QUAD_ESTIMATE, free=1.5e9)))
         self.assertEqual(narrow['verdict'], 'FAIL', 'a block that cannot hold the largest buffer and the reserve')
         self.assertIn('contiguous floor 0.262 GB', ' '.join(narrow['s2_problems']))
+
+    def test_churn_records_the_request_time_largest_buffer_and_fails_one_above_the_bound(self):
+        self.assertIn('request-time largest buffer: not logged (no request item line carries largest=)',
+                      self.churn(self.churn_log())['lines'])
+        items = (item_lines('P0', 'model.embedding', 1271.0)
+                 + item_lines('P8', 'engine_request', 21.3, point='req=5-0-8a1d1474')
+                 + item_lines('engine5', 'engine_request', 24.0, point='req=b-0-b02c1ec8'))
+        recorded = self.churn(self.churn_log(extra=items))
+        self.assertEqual(recorded['verdict'], 'PASS', recorded.get('s2_problems'))
+        self.assertIn('request-time largest buffer engine_request at engine5 req=b-0-b02c1ec8: 0.0240 GB over 2 items '
+                      '(bound 0.128 GB, 0 above it; a lower bound only)', recorded['lines'])
+        self.assertEqual(recorded['facts']['request_buffers']['items'], 2)
+        over = self.churn(self.churn_log(extra=items + item_lines('quad_built', 'quad_intermediates', 200.0,
+                                                                  point='slots=0,1,2,3')))
+        self.assertEqual(over['verdict'], 'FAIL')
+        self.assertIn('raise serving_prefill_admission.LARGEST_BUFFER_BYTES', ' '.join(over['s2_problems']))
 
     def test_churn_holds_while_every_seat_decodes_are_no_failure(self):
         # The review's M11 false FAIL: nine-plus users on four seats, the fifth prompt held at decodes=4.
@@ -1790,7 +1871,27 @@ class ProducerContractTests(unittest.TestCase):
         self.assertEqual((point['op'], point['chip'], point['estimate_gb'], point['margin_gb']),
                          ('prefill', 1, 0.3, 0.3), '0.9 GB free less 0.3 stranded less the prefill transient')
         point = before['contiguous_point']
-        self.assertEqual((point['op'], point['chip'], point['contiguous_gb']), ('prefill', 1, 0.272))
+        self.assertEqual((point['op'], point['chip'], point['contiguous_gb']), ('prefill', 1, -0.028),
+                         'the 400 MB block less the 128 MB largest buffer less the 300 MB prefill transient')
+
+    def test_the_ledgers_item_lines_and_its_request_items(self):
+        import memory_ledger
+        from test_memory_ledger import FakeOperations, ledger_for
+        self.assertEqual(gate.REQUEST_ITEMS, memory_ledger.REQUEST_ITEMS)
+        operations = FakeOperations()
+        ledger, lines, _ = ledger_for(operations)
+        ledger.phase('P0', **{'model.embedding': operations.tensor((16384, 5120))})       # 167.8 MB: startup
+        ledger.phase('P8', point='req=%s' % engine_id(0)[-12:],
+                     engine_request=dict(small=operations.tensor((32, 1024)), large=operations.tensor((64, 5120))))
+        ledger.phase('prefill', point='after req=%s' % engine_id(0)[-12:],
+                     model_after_prefill=operations.tensor((32, 5120)))
+        buffers = gate.request_buffers(rendered(lines))
+        self.assertEqual((buffers['items'], buffers['over']), (2, 0), 'the startup buffer is no bound')
+        self.assertEqual(buffers['largest_entry'], dict(phase='P8', point='req=%s' % engine_id(0)[-12:],
+                                                        item='engine_request', largest_gb=0.0007))
+        ledger.phase('quad_built', point='slots=0,1,2,3', quad_intermediates=operations.tensor((16384, 5120)))
+        over = gate.request_buffers(rendered(lines))
+        self.assertEqual((over['items'], over['over'], over['largest_gb']), (3, 1, 0.1678))
 
     def test_w6d_before_points(self):
         memory_ledger = producer('memory_ledger', 'BEFORE_MARKER')

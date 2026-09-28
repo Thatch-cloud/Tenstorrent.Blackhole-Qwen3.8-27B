@@ -223,6 +223,32 @@ class ExtentMemoryTests(unittest.TestCase):
                           'an unreadable pool is a diagnostic, not a refusal')
         self.assertEqual(log.call_args_list[-1].args[1:], ('r', 'pool without device statistics'))
 
+    def test_a_long_prompt_admitted_at_its_edge_reaches_the_backstop_with_the_prefills_gap(self):
+        """The admission asks a long prompt's block for its prefill transient too (admission_contiguous_need), and
+        the backstop does not (the prefill has run). Gate v79's 110000-token prefill at 2.077 GB free left 53 MB
+        allocated and took 63.8 MB off the largest block (1886.4 to 1822.6 MB). Admitted at the 696.4 MB edge, that
+        leaves 632.6 MB and the backstop builds. Before the fix the admission asked the backstop's own 396.4 MB, so a
+        prompt admitted beside a 420 MB block reached the backstop at 356 MB and was refused after its prefill."""
+        import serving_prefill_admission as admission
+
+        reserve = 256 * 2 ** 20
+        residue, allocated = 63_800_000, 53 * MB
+        edge = admission.admission_contiguous_need(120_000, reserve)
+        admits = admission.dram_predicate(TracePool((2_319 * MB, edge), trace=49 * MB), reserve)
+        self.assertEqual(admits(120_000)[1]['short'], ())
+        after = TracePool((2_319 * MB - allocated, edge - residue), trace=49 * MB)
+        self.assertEqual(serving_request_factory.dram_backstop(after, request_id='r', reserve=reserve, log=Mock()),
+                         edge - residue)
+        self.assertGreaterEqual(edge - residue - admission.contiguous_need(reserve), 236 * MB,
+                                'the gap left for a transient larger than v79\'s residue')
+        narrow = TracePool((2_319 * MB, 420 * MB), trace=49 * MB)
+        self.assertEqual(admission.dram_predicate(narrow, reserve)(120_000)[1]['short'], ('contiguous',),
+                         'the admission holds the prompt the backstop would refuse')
+        with self.assertRaisesRegex(serving_request_factory.RequestRefused, 'DRAM backstop: short of contiguous '):
+            serving_request_factory.dram_backstop(TracePool((2_319 * MB - allocated, 420 * MB - residue),
+                                                            trace=49 * MB), request_id='r', reserve=reserve,
+                                                  log=Mock())
+
     def test_under_the_flag_a_short_pool_refuses_the_request_before_any_device_state(self):
         pool = Pool((9_000 * MB, 100 * MB), (9_000 * MB, 100 * MB))
         with self.environ(True):

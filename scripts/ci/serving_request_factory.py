@@ -148,9 +148,10 @@ def register_dram_admission(pool, *, log=None):
     reading, reason = admission.dram_reading(pool)
     (_log if log is None else log)(
         DRAM_REGISTERED + 'need = engine {} + build margin {} + prefill {} at >= {} prompt tokens + reserve {} bytes '
-        'per chip, of the free less {} stranded; the largest free block >= the reserve + {} (the largest buffer); '
-        'the trace region\'s >= {}; now {}', admission.ENGINE_BUILD_BYTES, admission.ENGINE_BUILD_MARGIN_BYTES,
-        admission.PREFILL_TRANSIENT_BYTES, admission.PREFILL_TRANSIENT_FROM, reserve, admission.STRANDED_BYTES,
+        'per chip, of the free less {} stranded; the largest free block >= the reserve + {} (the largest buffer), + '
+        'that prefill at admission; the trace region\'s >= {}; now {}', admission.ENGINE_BUILD_BYTES,
+        admission.ENGINE_BUILD_MARGIN_BYTES, admission.PREFILL_TRANSIENT_BYTES, admission.PREFILL_TRANSIENT_FROM,
+        reserve, admission.STRANDED_BYTES,
         admission.LARGEST_BUFFER_BYTES, admission.TRACE_CONTIGUOUS_BYTES,
         'unavailable (%s)' % reason if reading is None else
         'free {} largest_free {} trace_largest_free {}'.format(reading['free'], reading['largest_free'],
@@ -163,7 +164,9 @@ def dram_backstop(pool, *, request_id, reserve=None, log=None):
     request ends FINISHED_ABORTED and the engine lives) when the pool's reading is short of a term of the
     admission's split (serving_prefill_admission.split_short, gate v79's fix) for the engine build's peak plus
     the reserve: the smallest chip's free less the stranded bytes, its largest free block against the reserve plus
-    the largest buffer, and its trace region's largest free block. Returns the smallest largest free block, or
+    the largest buffer, and its trace region's largest free block. The prefill has run, so its transient is in
+    neither term; the admission asked it of both (admission_contiguous_need), which leaves a long prompt 300 MB of
+    the block for what its prefill takes before this point. Returns the smallest largest free block, or
     None when the pool cannot be read: then it is a diagnostic, as the coordinator's headroom is (the attach refuses
     such a pool under the flag, W7)."""
     import serving_prefill_admission as admission

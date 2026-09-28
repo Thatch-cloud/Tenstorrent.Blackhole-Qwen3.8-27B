@@ -93,13 +93,21 @@ So a reading now fits only when all three terms hold (split_short), each on the 
   free        the total free less STRANDED_BYTES (what no request can use) covers the need, whose 200 MB build
               margin stays in it;
   contiguous  the largest free block holds the reserve plus LARGEST_BUFFER_BYTES (contiguous_need): the one
-              buffer that must land in one block, with the reserve still free beside it;
+              buffer that must land in one block, with the reserve still free beside it. At admission a prompt of
+              PREFILL_TRANSIENT_FROM tokens or more also needs its prefill transient in that block
+              (admission_contiguous_need: 696.4 MB at the 256 MiB reserve), because a prefill takes what it
+              leaves from the largest block, not the holes: v79's 110000-token prompt at 2.077 GB free took the
+              block from 1886.4 to 1822.6 MB. Without it a long prompt was admitted beside the same 396.4 MB
+              block the backstop asks after the prefill, so the prefill's residue alone could push the backstop
+              into refusing a spent 120k prefill, and the unmeasured transient (Q8/Q9) had no contiguous cover;
   trace       the trace region's largest free block holds TRACE_CONTIGUOUS_BYTES (an engine's traces), where the
               pool can read the region; where it cannot, this term holds nothing.
 The bridge's backstop (serving_request_factory.dram_backstop) and the proposal coordinator's fresh pair and quad
 captures and its pair release (dflash_packed_proposal_coordinator.capture_headroom, under the same flag) apply
-the same terms. No predicate, an unreadable one, or a reading that is unavailable holds nothing: the rule above,
-call for call.
+the same terms, with the contiguous term that carries no prefill transient: the backstop runs after the prefill,
+so a long prompt keeps the 300 MB gap between its admission and its backstop that it had before the split
+(1568.4 against 1268.4 MB then). No predicate, an unreadable one, or a reading that is unavailable holds nothing:
+the rule above, call for call.
     [PINDIAG] dram hold prompt=<n> largest_free=<MB> need=<MB> request=<id> decodes=<d> free=<MB>
         trace_largest_free=<MB> short=<terms>                                         once per (request, decodes)
     [PINDIAG] dram hold released prompt=<n> ...                                        once, when it fits
@@ -158,10 +166,16 @@ PREFILL_TRANSIENT_FROM = 2048                # prompts shorter than this: no pre
 # model_after_prefill (161 MB in 742 buffers) stays resident for the process among small holes. Rounded up.
 STRANDED_BYTES = 300 * MEGABYTE
 # (e, UNVERIFIED Q8/Q9) The largest single buffer an engine build, a long prefill or a proposal capture allocates:
-# never measured, so a conservative bound until the ledger's per-item largest= (memory_ledger) measures it. The
-# largest sized in source is 21.3 MB (a single-user capture's (1,1,2080,5120) bf16 history; the prepare_publication
-# transient is 20.97 MB). With the 256 MiB reserve the largest block must hold 396.4 MB (contiguous_need); v79's
-# smallest largest block at any hold or before point was 673.2 MB.
+# never measured, so a conservative bound. The largest sized in source is 21.3 MB (a single-user capture's
+# (1,1,2080,5120) bf16 history; the prepare_publication transient is 20.97 MB). With the 256 MiB reserve the largest
+# block must hold 396.4 MB (contiguous_need); v79's smallest largest block at any hold or before point was 673.2 MB.
+# The ledger's largest= (memory_ledger) only BOUNDS it from below, and only on the items a request allocates
+# (memory_ledger.REQUEST_ITEMS: engine_request, model_after_prefill, quad_intermediates, quad_placeholders): the
+# startup items are no measure of it (v79's P0 model.embedding is one 1.271 GB buffer per chip, lm_head 675 MB, each
+# kv_caches buffer about 286 MB; all resident before any admission, none asked of the block), and the walk sees only
+# what is resident, never a transient peak (prefill intermediates, engine-build scratch), which is freed before it
+# walks and is the Q8/Q9 risk itself. A request item above this bound says raise it (the c2 gate fails on one); one
+# at or below it does not show the bound is enough.
 LARGEST_BUFFER_BYTES = 128 * MEGABYTE
 # (m) The trace region's largest free block an engine build needs: each v79 engine's traces took 41.6 MB (its
 # ledger's trace_used, 39.6 to 81.2 MB across one build), and at the holds with three decoding the region's largest
@@ -217,12 +231,17 @@ def _reserve(reserve):
     return reserve
 
 
-def dram_need(prompt_tokens, reserve):
-    """The largest free DRAM block per chip a fresh prompt needs before its prefill is scheduled: the engine
-    build's peak, the prefill's transient (none below PREFILL_TRANSIENT_FROM tokens; a length that cannot be
-    read counts as long) and the reserve."""
+def prefill_transient(prompt_tokens):
+    """The prefill's transient per chip: PREFILL_TRANSIENT_BYTES from PREFILL_TRANSIENT_FROM tokens on (a length
+    that cannot be read counts as long), none below."""
     long_prompt = type(prompt_tokens) is not int or prompt_tokens >= PREFILL_TRANSIENT_FROM
-    return engine_build_peak() + (PREFILL_TRANSIENT_BYTES if long_prompt else 0) + _reserve(reserve)
+    return PREFILL_TRANSIENT_BYTES if long_prompt else 0
+
+
+def dram_need(prompt_tokens, reserve):
+    """The DRAM per chip a fresh prompt needs before its prefill is scheduled (THE SPLIT's free term): the engine
+    build's peak, the prefill's transient (prefill_transient) and the reserve."""
+    return engine_build_peak() + prefill_transient(prompt_tokens) + _reserve(reserve)
 
 
 def backstop_need(reserve):
@@ -233,22 +252,36 @@ def backstop_need(reserve):
 
 def contiguous_need(reserve):
     """THE SPLIT's contiguous term: the largest free block must hold the largest single buffer and leave the
-    reserve beside it (396.4 MB at the 256 MiB default)."""
+    reserve beside it (396.4 MB at the 256 MiB default). What the backstop and the coordinator's captures ask."""
     return _reserve(reserve) + LARGEST_BUFFER_BYTES
 
 
-def split_short(free, largest, need, reserve, trace_largest=None):
+def admission_contiguous_need(prompt_tokens, reserve):
+    """The contiguous term the admission asks of a fresh prompt: contiguous_need plus the prefill's transient
+    (prefill_transient), which the prefill takes from the largest block (the module docstring). 696.4 MB for a
+    prompt of PREFILL_TRANSIENT_FROM tokens or more at the 256 MiB reserve, 396.4 MB below it; the backstop, after
+    the prefill, asks contiguous_need alone, so a long prompt reaches it with 300 MB of the block to spare."""
+    return contiguous_need(reserve) + prefill_transient(prompt_tokens)
+
+
+def split_short(free, largest, need, reserve, trace_largest=None, contiguous=None):
     """The terms of THE SPLIT (the module docstring) a reading is short of, in SPLIT_TERMS order; () when it fits.
 
     free and largest are the smallest chip's total free and largest free DRAM block; need what the operation needs
     with the reserve in it (dram_need, backstop_need, or a capture's estimate plus the reserve); trace_largest the
-    smallest chip's largest free trace-region block, None where it cannot be read (that term then holds nothing).
-    Gate v79 (run 36368363993) held 2.319 GB free beside a 1079.7 MB largest block against a 1568.4 MB need: free
-    less STRANDED_BYTES is 2019 MB, the block holds the 396.4 MB contiguous need, so it fits."""
+    smallest chip's largest free trace-region block, None where it cannot be read (that term then holds nothing);
+    contiguous the block the operation needs (the admission's admission_contiguous_need), contiguous_need(reserve)
+    when None. Gate v79 (run 36368363993) held 2.319 GB free beside a 1079.7 MB largest block against a 1568.4 MB
+    need: free less STRANDED_BYTES is 2019 MB, the block holds a 120000-token prompt's 696.4 MB contiguous need, so
+    it fits."""
     short = []
+    if contiguous is None:
+        contiguous = contiguous_need(reserve)
+    elif type(contiguous) is not int or contiguous < 0:
+        raise ValueError('A non-negative integer contiguous need in bytes is required, got %r' % (contiguous,))
     if free - STRANDED_BYTES < need:
         short.append('free')
-    if largest < contiguous_need(reserve):
+    if largest < contiguous:
         short.append('contiguous')
     if trace_largest is not None and trace_largest < TRACE_CONTIGUOUS_BYTES:
         short.append('trace')
@@ -308,8 +341,9 @@ def dram_reading(pool):
 
 def dram_predicate(pool, reserve):
     """The predicate the worker registers, admits(prompt_tokens) -> (ok, detail): ok is False only when the
-    pool's reading exists and is short of a term of THE SPLIT for dram_need (detail['short'] names them). An
-    unavailable reading admits, and detail['unavailable'] says why (the attach refuses a pool without statistics
+    pool's reading exists and is short of a term of THE SPLIT for dram_need, its contiguous term the admission's
+    (admission_contiguous_need: the prefill transient in the block for a long prompt), detail['short'] naming them.
+    An unavailable reading admits, and detail['unavailable'] says why (the attach refuses a pool without statistics
     under the flag, W7)."""
     _reserve(reserve)
 
@@ -318,7 +352,8 @@ def dram_predicate(pool, reserve):
         reading, reason = dram_reading(pool)
         if reading is None:
             return True, dict(largest_free=None, need=need, unavailable=reason)
-        short = split_short(reading['free'], reading['largest_free'], need, reserve, reading['trace_largest_free'])
+        short = split_short(reading['free'], reading['largest_free'], need, reserve, reading['trace_largest_free'],
+                            contiguous=admission_contiguous_need(prompt_tokens, reserve))
         return not short, dict(largest_free=reading['largest_free'], need=need, free=reading['free'],
                                trace_largest_free=reading['trace_largest_free'], short=short)
 
@@ -401,8 +436,8 @@ def prompt_tokens(request):
 
 
 def binding_request(candidates):
-    """The candidate whose need binds: dram_need grows with the prompt, and a prompt whose length cannot be read
-    counts as the longest. The first of equals; None when there is none."""
+    """The candidate whose need binds: dram_need and admission_contiguous_need both grow with the prompt, and a
+    prompt whose length cannot be read counts as the longest. The first of equals; None when there is none."""
     if not candidates:
         return None
 

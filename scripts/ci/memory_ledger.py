@@ -64,9 +64,14 @@ delta checks above, their readings and the known set are exactly what they are w
 Their callers (serving_request_factory, dflash_packed_proposal_coordinator) call them only under
 QWEN_FAST_EXTENT_REPLAY=1.
 
-Each phase's item line also names the largest single buffer the walk found for that item (largest=, per chip in the
-JSON), read-only from the sizes it already takes: the measurement of the split's LARGEST_BUFFER_BYTES, an
-estimate until then (s2-design.md Q8/Q9). The trace a capture retains is not walked, so it is not in it.
+Each phase's item line also names the largest single buffer the walk newly found for that item (largest=, per chip
+in the JSON), read-only from the sizes it already takes. It is NOT a measurement of the split's
+LARGEST_BUFFER_BYTES (serving_prefill_admission, s2-design.md Q8/Q9). It only bounds that constant from below, and
+only on REQUEST_ITEMS, the items allocated at request time. The startup items are resident before any
+admission and never asked of the block: v79's P0 model.embedding is one 1.271 GB buffer per chip. The walk also sees
+only what is resident, never a transient peak (prefill intermediates, engine-build scratch), which is freed before
+it walks. The pair and single-user captures are before/after points, not walked, and the trace a capture retains is
+not walked either, so neither is in it.
 """
 
 import json
@@ -93,6 +98,10 @@ MAX_WALK_DEPTH = 12
 UNMATCHED_LISTED = 50
 BEFORE_MARKER = '[MEMLEDGER] before op='
 AFTER_MARKER = '[MEMLEDGER] after op='
+# The items allocated at request time, after attach (serving_runtime's prefill 'after' point and engine_admitted,
+# quad_draft's quad_built): the only ones whose largest= bounds the S2 split's LARGEST_BUFFER_BYTES (the module
+# docstring). Every other item is startup state.
+REQUEST_ITEMS = ('engine_request', 'model_after_prefill', 'quad_intermediates', 'quad_placeholders')
 # Never descended into: classes, modules and code objects hold no device tensor of a phase.
 NOT_WALKED = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType, types.MethodType)
 
@@ -369,8 +378,8 @@ class MemoryLedger:
     def claim(self, category, root, phase):
         """Record every not-yet-known DRAM shard under `root`; returns, per chip, the new
         bytes, the new buffer count and the new buffers' pages summed (the rounding bound per
-        bank), how many tensors could not be read, and per chip the largest new buffer (the
-        S2 split's LARGEST_BUFFER_BYTES measured; the module docstring)."""
+        bank), how many tensors could not be read, and per chip the largest new buffer (a lower
+        bound on the S2 split's LARGEST_BUFFER_BYTES for REQUEST_ITEMS only; the module docstring)."""
         added, buffers, pages, unreadable, largest = {}, {}, {}, 0, {}
         for tensor in self.tensors(root):
             try:
