@@ -1714,7 +1714,7 @@ def control_timing(runner, arms, reports):
     four-live round / the flag-off, at most CONTROL_NET_TOLERANCE, else FAIL.
     REPORTED, never judged (CONTROL_INFORMATIONAL): the flag-phase cost over every pair's rounds whose phases both arms
     measured (flag_phase_cost: c, u, their bounds with the arms' offset, flag_phase_sigma over the A/A reads,
-    aa_reads), each pair's and phase's split, the rounds left unmeasured, and a NOTICE when c is above
+    aa_reads), each pair's and phase's split, the rounds left unmeasured, and a NOTICE when c or u is above
     CONTROL_PHASE_NOTICE. Returns dict(problems, shortfalls, verdicts, pairs, flag_phase, lines, record, notices)."""
     problems, shortfalls, verdicts, net_lines, net = [], [], [], [], []
     measured, arm_rounds, record_pairs, per_pair, unmeasured = [], {}, [], [], []
