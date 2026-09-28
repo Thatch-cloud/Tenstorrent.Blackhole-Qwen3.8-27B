@@ -577,15 +577,15 @@ class DramNeedTests(DramFreeCase):
 
     def test_the_predicate_refuses_only_a_reading_short_of_a_term_of_the_split(self):
         short, long = admission.dram_need(60, 0), admission.dram_need(4096, 0)
-        stranded, block = admission.STRANDED_BYTES, admission.contiguous_need(0)
+        stranded, block = admission.STRANDED_BYTES, admission.admission_contiguous_need(60, 0)
         # The free less the stranded bytes covers a short prompt's need and not a long one's; the block holds the
-        # largest buffer, and not a long prompt's prefill transient beside it.
+        # largest buffer and a short prefill's residue, and not a long prompt's prefill transient beside them.
         admits = admission.dram_predicate(Pool((short + stranded, block), (9_000 * MB, 9_000 * MB)), 0)
         self.assertEqual(admits(60), (True, dict(largest_free=block, need=short, free=short + stranded,
                                                  trace_largest_free=None, short=())))
         self.assertEqual(admits(4096), (False, dict(largest_free=block, need=long, free=short + stranded,
                                                     trace_largest_free=None, short=('free', 'contiguous'))))
-        # Plenty free in total, but no block for the largest buffer and the reserve: held.
+        # Plenty free in total, but no block for the largest buffer, the reserve and the prefill's residue: held.
         fragmented = admission.dram_predicate(Pool((20_000 * MB, block - 1), (20_000 * MB, 20_000 * MB)), 0)
         self.assertEqual(fragmented(60)[0:1] + (fragmented(60)[1]['short'],), (False, ('contiguous',)))
         self.assertEqual(admission.dram_predicate(object(), 0)(4096),
@@ -1021,15 +1021,18 @@ class DramSplitTests(DramFreeCase):
         with self.assertRaises(ValueError):
             admission.contiguous_need(-1)
         # The admission's contiguous term: the prefill transient joins it from PREFILL_TRANSIENT_FROM tokens on (a
-        # length that cannot be read counts as long), exactly as it joins the need.
+        # length that cannot be read counts as long), exactly as it joins the need; below that the prefill's
+        # PREFILL_RESIDUE_BYTES does (the need carries no transient there).
         for prompt, transient in ((1, 0), (1_536, 0), (2_047, 0), (2_048, 300 * MB), (120_000, 300 * MB),
                                   (None, 300 * MB), ('4096', 300 * MB)):
             with self.subTest(prompt=prompt):
                 self.assertEqual(admission.prefill_transient(prompt), transient)
                 self.assertEqual(admission.admission_contiguous_need(prompt, RESERVE),
-                                 admission.contiguous_need(RESERVE) + transient)
+                                 admission.contiguous_need(RESERVE) + max(transient, 100 * MB))
                 self.assertEqual(admission.dram_need(prompt, RESERVE), admission.backstop_need(RESERVE) + transient)
         self.assertEqual(admission.admission_contiguous_need(120_000, RESERVE), 696_435_456, '696.4 MB')
+        self.assertEqual(admission.admission_contiguous_need(1_536, RESERVE), 496_435_456, '496.4 MB')
+        self.assertEqual(admission.PREFILL_RESIDUE_BYTES, 100 * MB)
         with self.assertRaises(ValueError):
             admission.admission_contiguous_need(120_000, -1)
         for contiguous in (-1, 1.5, '1', True):
@@ -1092,12 +1095,17 @@ class DramSplitTests(DramFreeCase):
         gap the old rule kept between them (1568.4 against 1268.4 MB) was gone, and the prefill takes what it leaves
         from the largest block (v79: a 110000-token prompt at 2.077 GB free, 1886.4 to 1822.6 MB). At 2.319 GB free
         beside a 420 MB block a 120000-token prompt was admitted, its 64 MB residue left 356 MB, and the backstop
-        refused the spent prefill. Now it holds on the contiguous term; a 1536-token prompt still fits there."""
+        refused the spent prefill. Now it holds on the contiguous term. So does a 1536-token prompt there: a short
+        prefill takes up to 86.9 MB of the block (v26), which would leave the backstop short of its 396.4 MB too.
+        Beside a 500 MB block the short prompt fits and the long one still waits."""
         pool = TracePool((2_319 * MB, 420 * MB), (2_319 * MB, 420 * MB), trace=self.V79_TRACE)
         ok, detail = admission.dram_predicate(pool, RESERVE)(120_000)
         self.assertEqual((ok, detail['short']), (False, ('contiguous',)))
+        ok, detail = admission.dram_predicate(pool, RESERVE)(1_536)
+        self.assertEqual((ok, detail['short']), (False, ('contiguous',)), 'a short prefill\'s residue too')
+        pool = TracePool((2_319 * MB, 500 * MB), (2_319 * MB, 500 * MB), trace=self.V79_TRACE)
         self.assertEqual(admission.dram_predicate(pool, RESERVE)(1_536), (True, dict(
-            largest_free=420 * MB, need=admission.dram_need(1_536, RESERVE), free=2_319 * MB,
+            largest_free=500 * MB, need=admission.dram_need(1_536, RESERVE), free=2_319 * MB,
             trace_largest_free=self.V79_TRACE, short=())))
         # Through the hold, three decoding and a seat free: the long prompt waits and names the term.
         log = Mock()
@@ -1107,7 +1115,7 @@ class DramSplitTests(DramFreeCase):
             self.assertFalse(admission.dram_hold(SimpleNamespace(waiting=Queue([DramRequest('u11', 1_536)])), 3, {},
                                                  log))
         self.assertEqual(logged(log, admission.DRAM_HOLD_LINE),
-                         [(120_000, '420.0MB', '1568.4MB', 'u10', 3, '2319.0MB', '49.0MB', 'contiguous')])
+                         [(120_000, '500.0MB', '1568.4MB', 'u10', 3, '2319.0MB', '49.0MB', 'contiguous')])
         # The edge: the block holds the reserve, the largest buffer and the prefill transient, not a byte less. The
         # backstop's term (split_short's default) is 300 MB below it.
         edge = admission.admission_contiguous_need(120_000, RESERVE)
@@ -1116,7 +1124,7 @@ class DramSplitTests(DramFreeCase):
             with self.subTest(block=block):
                 fits = admission.dram_predicate(TracePool((2_319 * MB, block), trace=self.V79_TRACE), RESERVE)
                 self.assertEqual(fits(120_000)[1]['short'], short)
-                self.assertEqual(fits(2_047)[1]['short'], (), 'a short prompt carries no transient')
+                self.assertEqual(fits(2_047)[1]['short'], (), 'a short prompt carries only its 100 MB residue')
         need = admission.dram_need(120_000, RESERVE)
         self.assertEqual(admission.split_short(2_319 * MB, 420 * MB, need, RESERVE, self.V79_TRACE), (),
                          'without the admission\'s term: the backstop\'s 396.4 MB block')

@@ -160,6 +160,11 @@ ENGINE_BUILD_BYTES = 800 * MEGABYTE          # (m) an engine with one 2048 propo
 ENGINE_BUILD_MARGIN_BYTES = 200 * MEGABYTE   # (e) the build's transient above what stays resident
 PREFILL_TRANSIENT_BYTES = 300 * MEGABYTE     # (e, UNVERIFIED Q8) the prefill of a long prompt beside the block
 PREFILL_TRANSIENT_FROM = 2048                # prompts shorter than this: no prefill transient (e)
+# (m) What any prefill leaves in the largest block until the backstop reads it: 2047-token prefills took 86.9 MB
+# (v26, 1475.8 to 1388.9 MB) and 85.2 MB (v23, 3873.9 to 3788.7 MB), v79's 1536-token ones 47 to 71 MB and its long
+# ones 0 to 76.2 MB. The admission asks at least this much of the block beside the backstop's term, so a short prompt
+# it admits is not refused after its prefill (a hold costs a wait; a refusal throws the prefill away).
+PREFILL_RESIDUE_BYTES = 100 * MEGABYTE
 # THE SPLIT's terms (the module docstring; gate v79, GitHub run 36368363993, gate/churn/server.log), per chip.
 # (m) Free DRAM no request can use, left out of the free term. With no user live v79 read free 4.490 GB beside a
 # largest block of 4191.7 MB (298.3 MB apart; 4.489 GB and 4190.5 MB, 298.5 MB, at its end): the first prefill's
@@ -256,12 +261,19 @@ def contiguous_need(reserve):
     return _reserve(reserve) + LARGEST_BUFFER_BYTES
 
 
+def prefill_residue(prompt_tokens):
+    """What the admission keeps free in the largest block for the prefill: its transient (prefill_transient), and
+    never less than PREFILL_RESIDUE_BYTES, which a short prefill also takes from the block."""
+    return max(prefill_transient(prompt_tokens), PREFILL_RESIDUE_BYTES)
+
+
 def admission_contiguous_need(prompt_tokens, reserve):
-    """The contiguous term the admission asks of a fresh prompt: contiguous_need plus the prefill's transient
-    (prefill_transient), which the prefill takes from the largest block (the module docstring). 696.4 MB for a
-    prompt of PREFILL_TRANSIENT_FROM tokens or more at the 256 MiB reserve, 396.4 MB below it; the backstop, after
-    the prefill, asks contiguous_need alone, so a long prompt reaches it with 300 MB of the block to spare."""
-    return contiguous_need(reserve) + prefill_transient(prompt_tokens)
+    """The contiguous term the admission asks of a fresh prompt: contiguous_need plus the prefill's residue
+    (prefill_residue), which the prefill takes from the largest block (the module docstring). 696.4 MB for a
+    prompt of PREFILL_TRANSIENT_FROM tokens or more at the 256 MiB reserve, 496.4 MB below it; the backstop, after
+    the prefill, asks contiguous_need alone (396.4 MB), so a long prompt reaches it with 300 MB of the block to
+    spare and a short one with 100 MB, above the 86.9 MB the largest short prefill seen took."""
+    return contiguous_need(reserve) + prefill_residue(prompt_tokens)
 
 
 def split_short(free, largest, need, reserve, trace_largest=None, contiguous=None):

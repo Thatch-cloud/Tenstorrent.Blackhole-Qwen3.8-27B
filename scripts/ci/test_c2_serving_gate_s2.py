@@ -676,12 +676,12 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual((before['points'], before['ops']), (4, ['engine', 'prefill', 'quad']))
         self.assertEqual(before['floor_gb'], 1.7, 'the engine build: 3.0 GB free less 0.3 stranded less its 1.0 GB')
         self.assertEqual((before['contiguous_floor_gb'], before['contiguous_point']['op'],
-                          before['contiguous_point']['chip']), (0.272, 'prefill', 1),
-                         'the 400 MB block less the 128 MB largest buffer')
+                          before['contiguous_point']['chip']), (0.172, 'prefill', 1),
+                         'the 400 MB block less the 128 MB largest buffer less the short prefill\'s 100 MB residue')
         single = [gate.before_points(line)['floor_point'] for line in text.split('\n') if 'MEMLEDGER' in line]
         self.assertEqual([(point['op'], point['estimate_gb'], point['margin_gb'], point['contiguous_gb'])
                           for point in single],
-                         [('prefill', 0.3, 2.4, 1.072), ('prefill', 0.0, 2.7, 0.272), ('quad', 0.4719, 2.2281, 0.772),
+                         [('prefill', 0.3, 2.4, 1.072), ('prefill', 0.0, 2.7, 0.172), ('quad', 0.4719, 2.2281, 0.772),
                           ('engine', 1.0, 1.7, 0.972)], 'a long prefill\'s block also loses its 0.3 GB transient')
         self.assertEqual((gate.STRANDED_GB, gate.LARGEST_BUFFER_GB), (STRANDED / 1e9, LARGEST_BUFFER / 1e9))
 
@@ -1248,11 +1248,12 @@ class ServingDriverTests(unittest.TestCase):
         self.assertIn('seat free (decodes [3] of 4 seats)', ' '.join(held['s2_problems']))
         self.assertEqual(self.short(ladder=SHORT_LADDER)['verdict'], 'FAIL')
         # The split's floors (gate v79): a long prefill's block holds the largest buffer, the reserve and its 0.3 GB
-        # transient (the admission's term), so 700 MB passes and 690 MB does not; a short prompt carries no transient,
-        # so 400 MB passes and 390 MB does not; 0.8 GB free leaves 0.2 GB past the stranded bytes and the prefill's 0.3.
+        # transient (the admission's term), so 700 MB passes and 690 MB does not; a short prompt carries its 100 MB
+        # residue, so 500 MB passes and 490 MB does not; 0.8 GB free leaves 0.2 GB past the stranded bytes and the
+        # prefill's 0.3.
         self.assertEqual(self.short(extra=[prefill_point(120000, 700.0)])['verdict'], 'PASS')
-        self.assertEqual(self.short(extra=[prefill_point(1536, 400.0)])['verdict'], 'PASS')
-        for prompt, block in ((120000, 690.0), (1536, 390.0)):
+        self.assertEqual(self.short(extra=[prefill_point(1536, 500.0)])['verdict'], 'PASS')
+        for prompt, block in ((120000, 690.0), (1536, 490.0)):
             with self.subTest(prompt=prompt):
                 narrow = self.short(extra=[prefill_point(prompt, block)])
                 self.assertEqual(narrow['verdict'], 'FAIL', 'contiguous floor 0.262 GB')
@@ -1937,6 +1938,9 @@ class ProducerContractTests(unittest.TestCase):
         if hasattr(admission, 'DRAM_FIT_LINE'):
             self.assertEqual(admission.DRAM_FIT_LINE, W6_FIT_LINE)
             self.assertEqual((admission.STRANDED_BYTES, admission.LARGEST_BUFFER_BYTES), (STRANDED, LARGEST_BUFFER))
+            self.assertEqual((gate.PREFILL_TRANSIENT_GB, gate.PREFILL_TRANSIENT_FROM, gate.PREFILL_RESIDUE_GB),
+                             (admission.PREFILL_TRANSIENT_BYTES / 1e9, admission.PREFILL_TRANSIENT_FROM,
+                              admission.PREFILL_RESIDUE_BYTES / 1e9), 'the gate judges the admission\'s prefill terms')
             self.assertEqual((gate.STRANDED_GB, gate.LARGEST_BUFFER_GB), (STRANDED / 1e9, LARGEST_BUFFER / 1e9))
             from dflash_packed_proposal_coordinator import dram_reserve_bytes
             self.assertEqual(driver.RESERVE_GB, dram_reserve_bytes({}) / 1e9, 'the gate judges the profiles\' reserve')

@@ -2645,6 +2645,9 @@ S2_MIN_LIVE_START = 128   # extent_attention_replay.MIN_LIVE_START: no packed ro
 # M8 and M11 calibrate them): the transient of a prompt of at least PREFILL_TRANSIENT_FROM tokens, 0 below. W6d's
 # points carry their own estimate (the engine build's peak, the capture's estimate).
 PREFILL_TRANSIENT_GB, PREFILL_TRANSIENT_FROM = 0.30, 2048
+# serving_prefill_admission.PREFILL_RESIDUE_BYTES: the least a prefill point's contiguous term keeps for the prefill
+# (a short prompt's residue), as the admission asks it.
+PREFILL_RESIDUE_GB = 0.10
 # The S2 admission's split (serving_prefill_admission.STRANDED_BYTES and LARGEST_BUFFER_BYTES; gate v79, GitHub run
 # 36368363993, whose replacement engines landed wholly in the holes departed users left): a before point is judged on
 # its free less STRANDED_GB less the operation's estimate (floor_gb) and on its largest free block less
@@ -2909,8 +2912,9 @@ def before_points(log_text):
             prompt = re.search(r'prompt=([0-9]+)', detail)
             long_prompt = prompt is not None and int(prompt.group(1)) >= PREFILL_TRANSIENT_FROM
             estimate = (PREFILL_TRANSIENT_GB if long_prompt else 0.0) if match.group(1) == 'prefill' else None
+            residue = max(estimate, PREFILL_RESIDUE_GB) if match.group(1) == 'prefill' else 0.0
             points.append(point(match.group(1), detail, int(match.group(3)), float(match.group(6)) / 1000.0,
-                                float(match.group(5)), estimate, None, transient=estimate or 0.0))
+                                float(match.group(5)), estimate, None, transient=residue))
     judged = [item for item in points if item['margin_gb'] is not None]
     floor = min(judged, key=lambda item: item['margin_gb']) if judged else None
     blocks = [item for item in points if item['contiguous_gb'] is not None]
