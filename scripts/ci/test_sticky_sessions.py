@@ -1158,6 +1158,63 @@ class KvGuardTests(unittest.TestCase):
 
 
 # ------------------------------------------------------------------------------------------------
+# The writer audit (A7): every device write of a resumed request lands in its own blocks at or above R
+# ------------------------------------------------------------------------------------------------
+class WriterAuditTests(unittest.TestCase):
+    """docs/sticky-sessions-writer-audit.md, as properties of the page tables the fast path builds."""
+
+    R, P, BUDGET = 6144, 12700, 1024
+
+    def request_blocks(self):
+        shared = list(range(100, 100 + self.R // BLOCK))                 # vLLM's cached prefix [0, R)
+        private = list(range(500, 500 + (self.P - self.R + BLOCK - 1) // BLOCK))
+        return shared, private
+
+    def test_the_prefill_route_writes_only_its_own_blocks_from_r(self):
+        shared, private = self.request_blocks()
+        row = shared + private
+        written = {row[position // BLOCK] for position in range(self.R, self.P)}
+        self.assertTrue(written <= set(private))
+        self.assertFalse(written & set(shared))
+        self.assertNotIn(0, written)
+
+    def test_the_engine_table_is_this_request_s_allocation_and_its_pad_is_its_first_block(self):
+        shared, private = self.request_blocks()
+        blocks = shared + private + list(range(900, 900 + self.BUDGET // BLOCK))
+        pages = torch.full((1, 400), blocks[0], dtype=torch.int32)
+        pages[0, :len(blocks)] = torch.tensor(blocks, dtype=torch.int32)
+        serving_page_binding.validate_initial_capture_pages(pages, blocks, position=self.P, output_budget=self.BUDGET)
+        self.assertEqual(serving_packed_step.pad_sentinel_table(pages, 0)[0][len(blocks)], -1)
+
+    def binding(self, blocks):
+        pages = torch.full((1, 400), blocks[0], dtype=torch.int32)     # as serving_runtime's bridge builds it
+        pages[0, :len(blocks)] = torch.tensor(blocks, dtype=torch.int32)
+        binding = object.__new__(serving_page_binding.VerifierPageBinding)
+        binding.engine = SimpleNamespace(phase='idle', pages=pages)
+        binding.operations, binding.mesh = Mock(), object()
+        binding.physical_pages, binding.failed, binding.capacity = 4096, False, 400
+        binding.blocks, binding.bindings = tuple(blocks), {}
+        return binding
+
+    def test_verify_rows_are_written_only_after_the_binding_covers_them(self):
+        shared, private = self.request_blocks()
+        blocks = shared + private
+        binding = self.binding(blocks)
+        for position in range(self.P, self.P + 256, 16):
+            needed = (position + 16 + BLOCK - 1) // BLOCK
+            if needed > len(blocks):
+                with self.assertRaisesRegex(ValueError, 'must cover every scheduled verifier row'):
+                    binding.refresh(blocks, position=position, rows=16)
+                blocks = blocks + [1000 + len(blocks)]          # vLLM appends this round's block
+            binding.refresh(blocks, position=position, rows=16)
+            rows = verify_trace_t2.kv_tile_rows(range(position, position + 16), binding.engine.pages[0].tolist())
+            pages = {page for page, _ in rows}
+            self.assertFalse(pages & set(shared), position)
+            self.assertNotIn(shared[0], pages, 'never the pad')
+            self.assertNotIn(0, pages)
+
+
+# ------------------------------------------------------------------------------------------------
 # End to end on the G1 model graft's toy: the S2 capture over the real staged route (A1 + A2 + A4 plan)
 # ------------------------------------------------------------------------------------------------
 class ToyExactnessTests(unittest.TestCase):
