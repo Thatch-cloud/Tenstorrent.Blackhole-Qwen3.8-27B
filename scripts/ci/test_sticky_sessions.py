@@ -637,5 +637,443 @@ class PolicyTests(unittest.TestCase):
             policy.validate_fast_config(self.config(False))
 
 
+# ------------------------------------------------------------------------------------------------
+# The scheduler graft (A4) on the fakes of test_qwen_prefix_scheduler_patch, with vLLM's DFlash drop
+# ------------------------------------------------------------------------------------------------
+class EagleManager(graft_fakes.Manager):
+    """vLLM's KV cache manager with use_eagle set (dflash): the unitary coordinator drops a hit's last
+    matched block (single_type_kv_cache_manager.find_longest_cache_hit, drop_eagle_block)."""
+
+    def __init__(self, num_blocks):
+        super(EagleManager, self).__init__(num_blocks)
+        self.coordinator.eagle_group_ids = {0}
+
+    def get_computed_blocks(self, request):
+        blocks, _ = super(EagleManager, self).get_computed_blocks(request)
+        hits = list(blocks.blocks[0])
+        if hits:
+            hits.pop()
+        return graft_fakes.Blocks((hits,)), len(hits) * BLOCK
+
+
+def dflash_scheduler(num_blocks=600, max_model_len=65536, lookahead=16, method='dflash', proposals=15, eagle=True):
+    scheduler = graft_fakes.FakeScheduler(num_blocks=num_blocks, max_model_len=max_model_len)
+    if eagle:
+        scheduler.kv_cache_manager = EagleManager(num_blocks)
+    scheduler.num_lookahead_tokens = lookahead
+    scheduler.vllm_config.speculative_config = SimpleNamespace(method=method, num_speculative_tokens=proposals)
+    return scheduler
+
+
+def tokens(count, seed):
+    return graft_fakes.tokens(count, seed)
+
+
+class SchedulerGraftTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(sys.modules, graft_fakes.fake_vllm_modules())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        environment = mock.patch.dict(os.environ, {'QWEN_PREFIX_STATS_PATH': ''})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.logs = []
+
+    def logger(self, message, *values):
+        self.logs.append(message % values if values else message)
+
+    def make(self, registry=None, environ=ON, **kwargs):
+        scheduler = dflash_scheduler(**kwargs)
+        registry = registry or prefix_registry.PrefixRegistry(budget_bytes=1 << 40)
+        with graft_fakes.Quiet():
+            registry.enable_mid_loop_capture()   # the model graft declares it at warmup
+        installed = graft.install(scheduler, registry=registry, kill_switch_path=None, logger=self.logger,
+                                  stats=graft.StatsExport(path='', logger=self.logger), environ=environ)
+        self.model = graft_fakes.FakeGdnModel(registry)
+        return scheduler, installed
+
+    def step(self, scheduler):
+        out = scheduler.schedule()
+        registry = scheduler._qwen_prefix.registry
+        rows = {}
+        for data in out.scheduled_new_reqs:
+            grant = registry.grant_for(data.req_id)
+            rows[data.req_id] = (data.num_computed_tokens, grant)
+            with graft_fakes.Quiet():
+                self.model.prefill(data.req_id, scheduler.requests[data.req_id].all_token_ids, data.num_computed_tokens)
+            # the lifecycle's own rule, on every admission the graft let through
+            prompt = scheduler.requests[data.req_id].num_prompt_tokens
+            if data.num_computed_tokens:
+                self.assertEqual(data.num_computed_tokens % CHUNK, 0)
+                self.assertLessEqual(data.num_computed_tokens, prompt - CHUNK, 'a resume inside the draft window')
+        return rows
+
+    def serve(self, scheduler, request):
+        scheduler.add(request)
+        rows = self.step(scheduler)
+        scheduler.finish(request)
+        return rows[request.request_id]
+
+    # -- install ----------------------------------------------------------------------------------
+    def test_the_dflash_lookahead_is_refused_without_the_flag(self):
+        for environ in ({}, {STICKY: '0'}):
+            with self.subTest(environ=environ), \
+                    self.assertRaisesRegex(graft.PrefixInstallError, 'speculative lookahead is on$'):
+                self.make(environ=environ)
+
+    def test_only_dflash_with_fifteen_proposals_is_accepted_under_the_flag(self):
+        for kwargs in (dict(lookahead=15), dict(lookahead=5, proposals=4), dict(method='eagle'),
+                       dict(proposals=7)):
+            with self.subTest(kwargs=kwargs), \
+                    self.assertRaisesRegex(graft.PrefixInstallError, 'sticky sessions accept only dflash with 15'):
+                self.make(**kwargs)
+        scheduler, installed = self.make()
+        self.assertTrue(installed.sticky and installed.drop_last)
+        self.assertIn('install sticky=1 lookahead=16 drop_last=True ceiling=floor2048(P-2048)', self.logs)
+
+    def test_the_flag_without_lookahead_still_installs_as_g1(self):
+        scheduler, installed = self.make(lookahead=0, eagle=False)
+        self.assertTrue(installed.sticky)
+        self.assertFalse(installed.drop_last)
+
+    # -- retain and extend --------------------------------------------------------------------------
+    def test_a_turn_retains_its_prefix_and_the_checkpoint_the_drop_makes_reachable(self):
+        scheduler, installed = self.make()
+        registry = installed.registry
+        turn = tokens(9000, 1)
+        start, grant = self.serve(scheduler, graft_fakes.Request('n', turn))
+        self.assertEqual((start, grant.q, grant.capture_positions()), (0, 0, [6144]))
+        self.assertEqual(scheduler.kv_cache_manager.coordinator.calls[-1], ('n', 8192), 'published up to floor2048(P)')
+        self.assertIsNotNone(registry.get(graft_fakes.Request('probe', turn).block_hashes[6144 // BLOCK - 1]))
+        self.assertIsNone(registry.get(graft_fakes.Request('probe', turn).block_hashes[8192 // BLOCK - 1]),
+                          'nothing at floor2048(P): no later hit could be granted there')
+
+    def test_the_next_turn_resumes_at_the_checkpoint_and_plans_its_own(self):
+        """The metered shape, scaled: previous prompt + a short answer + a new message."""
+        scheduler, installed = self.make()
+        turn = tokens(9000, 2)
+        self.serve(scheduler, graft_fakes.Request('n', turn))
+        extended = turn + tokens(115, 3) + tokens(3500, 4)
+        start, grant = self.serve(scheduler, graft_fakes.Request('n1', extended))
+        self.assertEqual((grant.h, grant.q, start), (8192 - BLOCK, 6144, 6144))
+        self.assertEqual(grant.capture_positions(), [floor(len(extended)) - CHUNK])
+        self.assertEqual(self.model.restored['n1'], 6144)
+        self.assertEqual(self.model.chunks['n1'], (floor(len(extended)) - 6144) // CHUNK)
+        # and the turn after that, from the checkpoint this one took
+        again = extended + tokens(700, 5) + tokens(2000, 6)
+        start, grant = self.serve(scheduler, graft_fakes.Request('n2', again))
+        self.assertEqual((grant.q, start), (floor(len(extended)) - CHUNK, floor(len(extended)) - CHUNK))
+
+    def test_a_small_extension_resumes_and_plans_nothing(self):
+        scheduler, installed = self.make()
+        turn = tokens(9000, 7)
+        self.serve(scheduler, graft_fakes.Request('n', turn))
+        start, grant = self.serve(scheduler, graft_fakes.Request('n1', turn + tokens(500, 8)))
+        self.assertEqual((grant.q, start, grant.capture_positions()), (6144, 6144, []))
+
+    def test_a_sibling_gets_the_gap_boundary(self):
+        scheduler, installed = self.make()
+        system = tokens(5000, 9)
+        start, grant = self.serve(scheduler, graft_fakes.Request('a', system + tokens(5000, 10)))
+        self.assertEqual(grant.capture_positions(), [6144], 'a checkpoints past the shared block only')
+        start, grant = self.serve(scheduler, graft_fakes.Request('b', system + tokens(3500, 11)))
+        # b shares 4992 tokens (78 blocks) with a, less the dropped block; no checkpoint below them yet,
+        # so b plans the gap boundary floor2048(h) beside its own C0
+        self.assertEqual((grant.h, grant.q), (4992 - BLOCK, 0))
+        self.assertEqual(grant.capture_positions(), [4096, 8192 - CHUNK])
+        start, grant = self.serve(scheduler, graft_fakes.Request('c', system + tokens(2500, 12)))
+        self.assertEqual((grant.q, start), (4096, 4096))
+
+    def test_a_short_fork_never_resumes_inside_its_draft_window(self):
+        """A prompt that is a prefix of a longer cached conversation: vLLM's hit can reach past P - 2048,
+        where a checkpoint exists (the longer turn took it); the ceiling keeps Q at or below
+        floor2048(P - 2048), here with no checkpoint there, so the fork is cold."""
+        scheduler, installed = self.make()
+        long_turn = tokens(15000, 13)
+        self.serve(scheduler, graft_fakes.Request('long', long_turn))
+        self.assertIsNotNone(installed.registry.get(graft_fakes.Request('p', long_turn).block_hashes[12288 // BLOCK - 1]))
+        start, grant = self.serve(scheduler, graft_fakes.Request('fork', long_turn[:12500]))
+        self.assertGreater(floor(grant.h), floor(12500 - CHUNK), 'the hit itself reaches past the draft window')
+        self.assertEqual((grant.q, start), (0, 0))
+
+    # -- mismatch -> cold ---------------------------------------------------------------------------
+    def test_a_divergence_below_the_checkpoint_is_cold(self):
+        scheduler, installed = self.make()
+        turn = tokens(9000, 14)
+        self.serve(scheduler, graft_fakes.Request('n', turn))
+        edited = list(turn)
+        edited[100] += 1   # the template rewrote history early
+        start, grant = self.serve(scheduler, graft_fakes.Request('n1', edited + tokens(3000, 15)))
+        # block 0 still matches, and is the block vLLM drops: no hit at all
+        self.assertEqual((grant.h, grant.q, start), (0, 0, 0))
+
+    def test_another_salt_or_no_salt_never_hits(self):
+        scheduler, installed = self.make()
+        turn = tokens(9000, 16)
+        self.serve(scheduler, graft_fakes.Request('n', turn))
+        start, grant = self.serve(scheduler, graft_fakes.Request('other', turn + tokens(3000, 17), salt='tenant-b'))
+        self.assertEqual((grant.h, grant.q, start), (0, 0, 0))
+        start, grant = self.serve(scheduler, graft_fakes.Request('none', turn + tokens(3000, 18), salt=None))
+        self.assertEqual((start, grant), (0, None))
+        start, grant = self.serve(scheduler, graft_fakes.Request('same', turn + tokens(3000, 19)))
+        self.assertEqual((grant.q, start), (6144, 6144), 'the owning salt still resumes')
+
+    # -- eviction -------------------------------------------------------------------------------------
+    def test_slot_demand_evicts_the_prefix_and_its_checkpoint_with_it(self):
+        scheduler, installed = self.make(num_blocks=300)
+        registry = installed.registry
+        turn = tokens(9000, 20)
+        self.serve(scheduler, graft_fakes.Request('n', turn))
+        self.assertEqual(len(registry.entries), 1)
+        # other conversations fill the pool: vLLM's LRU takes the free-but-cached prefix blocks
+        for index in range(3):
+            self.serve(scheduler, graft_fakes.Request('flood-%d' % index, tokens(9000, 30 + index), salt='tenant-%d' % index))
+        self.assertGreater(registry.stats['evicted_coupled'], 0)
+        start, grant = self.serve(scheduler, graft_fakes.Request('n1', turn + tokens(3000, 21)))
+        self.assertEqual((grant.q, start), (0, 0), 'the continuation is cold, and exact')
+
+    def test_host_store_pressure_evicts_the_oldest_checkpoint(self):
+        registry = prefix_registry.PrefixRegistry(budget_bytes=1)   # one checkpoint's worth (nbytes=1 each)
+        scheduler, installed = self.make(registry=registry)
+        first, second = tokens(9000, 22), tokens(9000, 23)
+        self.serve(scheduler, graft_fakes.Request('a', first))
+        self.serve(scheduler, graft_fakes.Request('b', second, salt='tenant-b'))
+        self.assertEqual(registry.stats['evicted_lru'], 1)
+        start, grant = self.serve(scheduler, graft_fakes.Request('a1', first + tokens(3000, 24)))
+        self.assertEqual((grant.h, grant.q, start), (8192 - BLOCK, 0, 0), 'KV kept, checkpoint gone: cold')
+        self.assertEqual(registry.stats['kv_hit_without_checkpoint'], 1)
+        start, grant = self.serve(scheduler, graft_fakes.Request('b1', second + tokens(3000, 25), salt='tenant-b'))
+        self.assertEqual(start, 0, 'b\'s checkpoint went when a1 captured its own')
+
+    def test_the_kill_switch_sends_every_continuation_cold(self):
+        scheduler, installed = self.make()
+        turn = tokens(9000, 26)
+        self.serve(scheduler, graft_fakes.Request('n', turn))
+        installed.kill_switch.engaged = True
+        installed.registry.disable('kill switch (test)')
+        start, grant = self.serve(scheduler, graft_fakes.Request('n1', turn + tokens(3000, 27)))
+        self.assertEqual((start, grant), (0, None))
+
+    def test_nothing_ages_out_on_the_engine_side(self):
+        """The node's session cap and idle TTL are upstream (design 1); retention here is bounded by vLLM's
+        pool and the host store alone, so a continuation long after its turn still resumes."""
+        clock = [0.0]
+        scheduler, installed = self.make()
+        installed.kill_switch.clock = lambda: clock[0]
+        turn = tokens(9000, 28)
+        self.serve(scheduler, graft_fakes.Request('n', turn))
+        clock[0] += 3600.0
+        start, grant = self.serve(scheduler, graft_fakes.Request('n1', turn + tokens(3000, 29)))
+        self.assertEqual(start, 6144)
+
+    # -- abort --------------------------------------------------------------------------------------
+    def test_an_aborted_granted_request_releases_its_grant_and_pin(self):
+        scheduler, installed = self.make()
+        registry = installed.registry
+        turn = tokens(9000, 40)
+        self.serve(scheduler, graft_fakes.Request('n', turn))
+        request = graft_fakes.Request('n1', turn + tokens(3000, 41))
+        scheduler.add(request)
+        rows = self.step(scheduler)
+        self.assertEqual(rows['n1'][0], 6144)
+        self.assertEqual(registry.pins(), 1)
+        scheduler.finish(request)   # aborted: vLLM frees it through _free_request
+        self.assertIsNone(registry.grant_for('n1'))
+        self.assertEqual(registry.pins(), 0)
+        # the prefill ran before the abort: its own C0 (8192) was captured and outlives it
+        start, grant = self.serve(scheduler, graft_fakes.Request('n2', turn + tokens(3000, 41)))
+        self.assertEqual(start, 8192)
+
+    def test_a_waiting_request_aborted_before_admission_leaves_nothing_staged(self):
+        scheduler, installed = self.make(num_blocks=160)
+        registry = installed.registry
+        turn = tokens(9000, 42)
+        self.serve(scheduler, graft_fakes.Request('n', turn))
+        blocker = graft_fakes.Request('big', tokens(9000, 43), salt='tenant-z')
+        scheduler.add(blocker)
+        self.step(scheduler)
+        waiting = graft_fakes.Request('n1', turn + tokens(3000, 44))
+        scheduler.add(waiting)
+        scheduler.schedule()     # no room: the grant is staged and dropped, never committed
+        self.assertIsNone(registry.grant_for('n1'))
+        scheduler.waiting.remove(waiting)
+        scheduler._free_request(waiting)
+        self.assertEqual(registry.pins(), 0)
+        self.assertNotIn('n1', registry.staged)
+
+
+def floor(value):
+    return prefix_registry.floor_chunk(value)
+
+
+class SchedulerParityTests(unittest.TestCase):
+    """With the flag off the graft decides what the pre-sticky graft decided, step for step."""
+
+    def setUp(self):
+        patcher = mock.patch.dict(sys.modules, graft_fakes.fake_vllm_modules())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        environment = mock.patch.dict(os.environ, {'QWEN_PREFIX_STATS_PATH': ''})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def scenario(self, module):
+        scheduler = graft_fakes.FakeScheduler(num_blocks=300)
+        registry = prefix_registry.PrefixRegistry(budget_bytes=1 << 40)
+        with graft_fakes.Quiet():
+            registry.enable_mid_loop_capture()
+        logs = []
+        module.install(scheduler, registry=registry, kill_switch_path=None,
+                       logger=lambda message, *values: logs.append(message % values if values else message),
+                       stats=module.StatsExport(path='', logger=lambda *a: None))
+        model = graft_fakes.FakeGdnModel(registry)
+        trace = []
+        text = tokens(9000, 50)
+        requests = [graft_fakes.Request('a', text), graft_fakes.Request('b', text + tokens(3000, 51)),
+                    graft_fakes.Request('c', text[:5000] + tokens(4000, 52)), graft_fakes.Request('d', tokens(15000, 53)),
+                    graft_fakes.Request('e', tokens(15000, 53)[:12500]), graft_fakes.Request('f', text, salt=None)]
+        for request in requests:
+            scheduler.add(request)
+            out = scheduler.schedule()
+            for data in out.scheduled_new_reqs:
+                grant = registry.grant_for(data.req_id)
+                trace.append((data.req_id, data.num_computed_tokens, grant.describe() if grant else None))
+                with graft_fakes.Quiet():
+                    model.prefill(data.req_id, scheduler.requests[data.req_id].all_token_ids, data.num_computed_tokens)
+            scheduler.finish(request)
+        stats = dict(registry.stats)
+        for name in ('capture_ms', 'restore_ms'):
+            stats.pop(name)
+        return trace, stats, [line for line in logs if not line.startswith('install ')]
+
+    def test_the_flag_off_graft_matches_the_parent(self):
+        parent = parent_module('qwen_prefix_scheduler_patch.py')
+        if parent is None:
+            self.skipTest('no git history for %s' % PARENT)
+        for value in (None, '0'):
+            with self.subTest(flag=value), sticky_env(value):
+                self.assertEqual(self.scenario(graft), self.scenario(parent))
+
+    def test_the_flag_off_install_rules_match_the_parent(self):
+        parent = parent_module('qwen_prefix_scheduler_patch.py')
+        if parent is None:
+            self.skipTest('no git history for %s' % PARENT)
+        cases = [dflash_scheduler(), dflash_scheduler(lookahead=5), graft_fakes.FakeScheduler()]
+        broken = graft_fakes.FakeScheduler()
+        broken.scheduler_config.async_scheduling = True
+        broken.cache_config.prefix_caching_hash_algo = 'xxhash'
+        cases.append(broken)
+        for value in (None, '0'):
+            with sticky_env(value):
+                for index, scheduler in enumerate(cases):
+                    with self.subTest(flag=value, case=index):
+                        self.assertEqual(graft.install_problems(scheduler), parent.install_problems(scheduler))
+
+
+# ------------------------------------------------------------------------------------------------
+# End to end on the G1 model graft's toy: the S2 capture over the real staged route (A1 + A2 + A4 plan)
+# ------------------------------------------------------------------------------------------------
+class ToyExactnessTests(unittest.TestCase):
+    def setUp(self):
+        import qwen_prefix_model_fixture as F
+        import test_qwen_prefix_model_runtime as model_runtime
+
+        self.F, self.model_runtime = F, model_runtime
+        self.engine = model_runtime.Engine(traced=False)
+        self.engine.warm()
+        toy = self.engine.toy
+        model = self.engine.model
+
+        # The real prefill_masked_bucket reaches the chunk forward (_forward_prefill_chunk_masked ->
+        # _tp); the toy's does not, so route the tail through it as the model does.
+        def masked_bucket(token_ids, page_table, actual_len, chunk_start=0, bucket=None, flex_sdpa=True,
+                          vision_tokens=None, vis_row_offset=0):
+            if chunk_start == 0:
+                model._reset_gdn_state_for_new_sequence()
+                model._build_request_rope(token_ids[:, :actual_len], vision_tokens)
+            bucket = (actual_len + 31) // 32 * 32
+            hidden = model._forward_prefill_chunk_masked_tp(token_ids, actual_len, chunk_start, page_table, bucket)
+            return toy.logits(hidden.data[0, 0])
+
+        model.prefill_masked_bucket = masked_bucket
+
+    def admit(self, req_id, tokens, q, h=None):
+        """The scheduler graft's stage and commit under sticky sessions (its own plan, with the drop)."""
+        F = self.F
+        registry = self.engine.registry
+        registry.begin_step()
+        ids = F.as_ids(tokens)
+        h = q if h is None else h
+        request = SimpleNamespace(request_id=req_id, all_token_ids=ids, num_prompt_tokens=len(ids),
+                                  num_tokens=len(ids), block_hashes=F.BlockHashes(ids))
+        stand_in = SimpleNamespace(registry=registry, sticky=True, drop_last=True)
+        plan, unplanned, drain = graft.SchedulerGraft.plan(stand_in, request, h, q)
+        key = F.key_at(ids, q) if q else None
+        checkpoint = registry.get(key) if q else None
+        registry.stage(prefix_registry.Grant(req_id, q, h, key, checkpoint, plan, request, drain, unplanned))
+        registry.commit({req_id: q})
+        return [pos for pos, _ in plan]
+
+    def prefill(self, req_id, tokens, row, q, slot, capture):
+        with patch.object(window, 'LayerOutputCapture', FakeLayerCapture), capture.capture():
+            return self.engine.prefill([(req_id, tokens, row, q, slot)])
+
+    def capture(self, position, start=0, prefix_route=True):
+        return window.PrefillWindowCapture(SimpleNamespace(deallocate=Mock()), self.engine.model, position, (0,),
+                                           start=start, prefix_route=prefix_route)
+
+    def test_a_resumed_turn_equals_a_cold_prefill_under_the_fast_path_capture(self):
+        F, engine = self.F, self.engine
+        base = F.prompt(12700, seed=91)
+        first = base[:9000]
+        self.assertEqual(self.admit('n', first, 0), [6144])
+        row_n = engine.pool.row(9000)
+        cold_capture = self.capture(9000)
+        self.prefill('n', first, row_n, 0, 1, cold_capture)
+        self.assertEqual((cold_capture.complete, cold_capture.prefill_slot), (True, 1))
+        self.assertIsNotNone(engine.registry.get(F.key_at(first.tolist(), 6144)), 'C0 captured mid-loop')
+        self.assertIsNone(engine.registry.get(F.key_at(first.tolist(), 8192)))
+
+        self.assertEqual(self.admit('n1', base, 6144, h=8192 - BLOCK), [10240])
+        row = engine.pool.row(12700, row_n[0, :6144 // BLOCK].tolist())
+        engine.toy.segments.clear()
+        hit_capture = self.capture(12700, start=6144)
+        hit = self.prefill('n1', base, row, 6144, 2, hit_capture)
+        self.assertEqual(engine.toy.segments[0][1], 6144, 'only [Q, P) ran')
+        self.assertEqual([chunk['chunk_start'] for chunk in hit_capture.chunks], [6144, 8192, 10240, 12288])
+        self.assertEqual((hit_capture.complete, hit_capture.prefill_slot), (True, 2))
+        hit_slot = [(rec.clone(), [c.clone() for c in convs]) for rec, convs in engine.toy.slot(2)]
+
+        engine.registry.begin_step()
+        cold_row = engine.pool.row(12700)
+        twin = self.capture(12700)
+        cold = self.prefill('cold', base, cold_row, 0, 3, twin)
+        self.assertTrue(torch.equal(hit, cold), 'logits')
+        for a, b in zip(engine.toy.kv(row, 12700), engine.toy.kv(cold_row, 12700)):
+            self.assertTrue(torch.equal(a, b), 'KV [0, P)')
+        for (rec, convs), (rec2, convs2) in zip(hit_slot, engine.toy.slot(3)):
+            self.assertTrue(torch.equal(rec, rec2) and all(torch.equal(x, y) for x, y in zip(convs, convs2)), 'GDN slot')
+        # the two captures hold the same draft window of the same chunks
+        self.assertEqual(window.validate_prefill_chunks(12700, hit_capture.chunks, 6144),
+                         window.validate_prefill_chunks(12700, twin.chunks))
+
+    def test_the_route_still_refuses_under_a_capture_that_does_not_record_it(self):
+        F, engine = self.F, self.engine
+        tokens_ = F.prompt(5000, seed=92)
+        self.admit('r', tokens_, 0)
+        with self.assertRaisesRegex(AssertionError, 'does not run under the C2 fast path'):
+            self.prefill('r', tokens_, engine.pool.row(5000), 0, 0, self.capture(5000, prefix_route=False))
+        self.assertEqual([segment for segment in engine.toy.segments if segment[0] != 'warm-eager'], [])
+
+    def test_a_route_call_that_does_not_resume_at_the_capture_start_never_reaches_the_device(self):
+        F, engine = self.F, self.engine
+        tokens_ = F.prompt(9000, seed=93)
+        self.admit('r', tokens_, 0)
+        engine.toy.segments.clear()
+        with self.assertRaisesRegex(ValueError, 'must start at this capture'):
+            self.prefill('r', tokens_, engine.pool.row(9000), 0, 0, self.capture(9000, start=4096))
+        self.assertEqual(engine.toy.segments, [])
+
+
 if __name__ == '__main__':
     unittest.main()

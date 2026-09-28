@@ -50,6 +50,24 @@ e. reset_prefix_cache clears the registry when vLLM's reset succeeded (it return
 The kill switch (qwen_prefix_registry.KillSwitch, the flag file /models/.qwen-c2/prefix-reuse.off,
 polled at most once a second from the trim) disables the registry for the life of the process.
 
+Sticky sessions (QWEN_FAST_STICKY_SESSIONS=1 beside QWEN_PREFIX_REUSE=1; the C2 fast path's phase 1,
+serving_fast_policy.STICKY_SESSIONS_FLAG). The fast path decodes with DFlash (15 proposals), so vLLM
+runs the scheduler with a lookahead of 16 and, because SpeculativeConfig.use_eagle() includes
+dflash, its unitary coordinator drops the last matched block of every hit (use_eagle; vLLM 0.25.1
+kv_cache_coordinator.py, single_type_kv_cache_manager.py). Under the flag, and only then:
+  * install accepts that lookahead - exactly 16, for a dflash config with 15 proposals - and
+    nothing else speculative;
+  * the trim's ceiling is floor2048(P - 2048): the fast path's drafter window [P - 2048, P) must be
+    this prefill's own chunks (serving_lifecycle refuses a resume above it);
+  * the plan captures floor2048(P) - 2048 in place of the prompt boundary floor2048(P) when the
+    coordinator drops the last block: the cap publishes KV up to floor2048(P), the next turn's hit
+    is at most 64 tokens short of it, so its trim lands one chunk lower and a checkpoint at
+    floor2048(P) could never be granted. The gap boundary is planned as before, and nothing
+    above floor2048(P) ever is;
+  * the cap is unchanged, and a second install line says "install sticky=1 lookahead=<n>
+    drop_last=<bool>".
+Unset, every path here is G1's own.
+
 install() refuses to start - the engine dies in TTScheduler.__init__ - unless async scheduling is
 off (blocks hashed at allocation in step t are unwritten when step t+1 reads them), chunked prefill
 is off with a whole-prompt token budget and long_prefill_token_threshold 0 (vLLM splits a prefill
@@ -120,6 +138,13 @@ HOOK_TAG = 'qwen_prefix_scheduler_patch'
 HASH_ALGORITHMS = ('sha256', 'sha256_cbor')
 # The registry reaches the model through sys.modules: the model must run in the scheduler's process.
 EXECUTOR_BACKEND = 'uni'
+# Sticky sessions (see the module docstring): the fast path's switch, and the one speculative
+# shape it relaxes the lookahead refusal for - DFlash with 15 proposals, vLLM's lookahead 16
+# (num_speculative_tokens + 1, v1/core/sched/scheduler.py).
+STICKY_ENV = 'QWEN_FAST_STICKY_SESSIONS'
+STICKY_METHOD = 'dflash'
+STICKY_PROPOSALS = 15
+STICKY_LOOKAHEAD = STICKY_PROPOSALS + 1
 # Lever N's scheduler edits (lever_n_scheduler_patch, lever_n_model_patch.patch_scheduler) turn
 # vLLM chunking on; prefix reuse is not exact beside them (design F5).
 LEVER_N_TAGS = ('Lever N M2', '[PINDIAG] m2 one-in-flight:', '_qwen_saved_waiting')
@@ -248,10 +273,36 @@ def _resolve(root, dotted):
     return value
 
 
-def install_problems(scheduler):
+def sticky_enabled(environ=None):
+    """Whether QWEN_FAST_STICKY_SESSIONS=1 (serving_fast_policy.sticky_sessions_enabled validates the
+    value at the fast path's attach; here anything but '1' is off)."""
+    environ = os.environ if environ is None else environ
+    return environ.get(STICKY_ENV) == '1'
+
+
+def sticky_speculation(scheduler):
+    """Whether the scheduler's speculative config is the one sticky sessions serve: dflash, 15
+    proposals."""
+    spec = getattr(getattr(scheduler, 'vllm_config', None), 'speculative_config', None)
+    return (getattr(spec, 'method', None) == STICKY_METHOD
+            and getattr(spec, 'num_speculative_tokens', None) == STICKY_PROPOSALS)
+
+
+def drops_last_block(coordinator):
+    """Whether vLLM's unitary coordinator drops the last matched block of a hit (the EAGLE drop,
+    applied to group 0 when use_eagle is set)."""
+    groups = getattr(coordinator, 'eagle_group_ids', None)
+    if groups is not None:
+        return 0 in groups
+    singles = getattr(coordinator, 'single_type_managers', None) or ()
+    return bool(singles and getattr(singles[0], 'use_eagle', False))
+
+
+def install_problems(scheduler, environ=None):
     """Every reason prefix reuse would not be exact on this scheduler (F5, F6, F7). All of them are
     reported, so the refusal names the root cause (a hybrid coordinator, say) and not only the
-    first internal it lacks."""
+    first internal it lacks. Under sticky sessions the lookahead of DFlash with 15 proposals (16)
+    is accepted; any other lookahead is still refused."""
     problems = []
     missing = []
     for owner, names in REQUIRED_INTERNALS:
@@ -332,8 +383,14 @@ def install_problems(scheduler):
         problems.append('the KV config has Mamba layers: vLLM would run its own align-mode split')
     if getattr(scheduler, 'connector', None) is not None:
         problems.append('a KV connector is configured: external tokens would move start_pos past Q')
-    if getattr(scheduler, 'num_lookahead_tokens', 0):
-        problems.append('speculative lookahead is on')
+    lookahead = getattr(scheduler, 'num_lookahead_tokens', 0)
+    if lookahead:
+        if not sticky_enabled(environ):
+            problems.append('speculative lookahead is on')
+        elif lookahead != STICKY_LOOKAHEAD or not sticky_speculation(scheduler):
+            problems.append('speculative lookahead is on: sticky sessions accept only %s with %d proposals '
+                            '(lookahead %d), not lookahead %r' % (STICKY_METHOD, STICKY_PROPOSALS,
+                                                                   STICKY_LOOKAHEAD, lookahead))
     if parallel is not None and getattr(parallel, 'pipeline_parallel_size', 1) != 1:
         problems.append('pipeline parallel size %s: a step\'s grants must be read before the next '
                         'schedule()' % parallel.pipeline_parallel_size)
@@ -346,17 +403,20 @@ def maybe_install(scheduler, environ=None):
     """The hook TTScheduler.__init__ calls last (see INIT_HOOK). Off unless QWEN_PREFIX_REUSE=1."""
     if not prefix_registry.reuse_enabled(environ):
         return None
+    if sticky_enabled(environ):
+        return install(scheduler, environ=environ)
     return install(scheduler)
 
 
 def install(scheduler, registry=None, kill_switch_path=KILL_SWITCH_PATH, poll_s=KILL_SWITCH_POLL_S,
-            clock=time.monotonic, logger=log, stats=None):
+            clock=time.monotonic, logger=log, stats=None, environ=None):
     """Wrap scheduler (see the module docstring). stats: the StatsExport (default: from the
-    environment, QWEN_PREFIX_STATS_PATH and QWEN_PREFIX_STATS_S)."""
+    environment, QWEN_PREFIX_STATS_PATH and QWEN_PREFIX_STATS_S). environ: where the sticky-session
+    switch is read (default os.environ)."""
     existing = scheduler.__dict__.get('_qwen_prefix')
     if existing is not None:
         return existing
-    problems = install_problems(scheduler)
+    problems = install_problems(scheduler, environ)
     if problems:
         raise PrefixInstallError('prefix reuse refused: ' + '; '.join(problems))
     registry = registry if registry is not None else shared_registry()
@@ -366,14 +426,20 @@ def install(scheduler, registry=None, kill_switch_path=KILL_SWITCH_PATH, poll_s=
         raise PrefixInstallError('prefix reuse refused: %s' % error)
     if stats is None:
         stats = StatsExport(clock=clock, logger=logger)
-    graft = SchedulerGraft(scheduler, registry, KillSwitch(kill_switch_path, poll_s, clock), logger, stats)
+    graft = SchedulerGraft(scheduler, registry, KillSwitch(kill_switch_path, poll_s, clock), logger, stats,
+                           sticky=sticky_enabled(environ))
     graft.wrap()
     scheduler._qwen_prefix = graft
     return graft
 
 
 class SchedulerGraft(object):
-    def __init__(self, scheduler, registry, kill_switch, logger, stats=None):
+    # Sticky sessions (the module docstring); off on the class, so a graft built without them - or
+    # a stand-in carrying only a registry (the model fixture calls plan() that way) - plans as G1.
+    sticky = False
+    drop_last = False
+
+    def __init__(self, scheduler, registry, kill_switch, logger, stats=None, sticky=False):
         self.scheduler = scheduler
         self.registry = registry
         self.manager = scheduler.kv_cache_manager
@@ -386,6 +452,8 @@ class SchedulerGraft(object):
         self.stats_export = stats
         self.original = {}
         self.get_block_hash = None
+        self.sticky = sticky is True
+        self.drop_last = self.sticky and drops_last_block(self.coordinator)
 
     # -- kill switch -----------------------------------------------------------------------------
     @property
@@ -429,12 +497,18 @@ class SchedulerGraft(object):
         floor2048(num_tokens) - above P for a resumed (preempted) request, whose prefill covers its
         output tokens too. A candidate below the drain needs a mid-loop capture: planned only once
         the model has declared it takes them (registry.enable_mid_loop_capture). Nothing above
-        floor2048(P) is ever planned: the cap publishes nothing there, so no request could hit it."""
+        floor2048(P) is ever planned: the cap publishes nothing there, so no request could hit it.
+
+        Sticky sessions, with the coordinator dropping a hit's last block: the prompt's candidate is
+        floor2048(P) - 2048 instead. The next turn's hit stops at least one block short of what this
+        turn publishes (floor2048(P)), so its trim can land no higher than one chunk below it."""
         prompt_boundary = floor_chunk(request.num_prompt_tokens)
         drain = floor_chunk(request.num_tokens)
         candidates = set()
-        if prompt_boundary > q:
-            candidates.add(prompt_boundary)
+        sticky = getattr(self, 'sticky', False) and getattr(self, 'drop_last', False)
+        capture_boundary = prompt_boundary - CHUNK if sticky else prompt_boundary
+        if capture_boundary > q:
+            candidates.add(capture_boundary)
         gap_boundary = floor_chunk(h)
         if gap_boundary - q >= CHUNK:
             candidates.add(gap_boundary)
@@ -479,6 +553,9 @@ class SchedulerGraft(object):
         q, key, checkpoint = 0, None, None
         rejected_same_step = False
         k = h // CHUNK
+        if self.sticky:
+            # The fast path's drafter window [P - 2048, P) must be this prefill's own chunks.
+            k = min(k, max(0, request.num_prompt_tokens - CHUNK) // CHUNK)
         while k > 0:
             candidate = k * CHUNK
             count = candidate // BLOCK
@@ -624,6 +701,9 @@ class SchedulerGraft(object):
                  scheduler.vllm_config.parallel_config.distributed_executor_backend,
                  registry.budget_bytes / float(1 << 30), self.kill_switch_path,
                  getattr(self.stats_export, 'path', None), vllm_version)
+        if self.sticky:
+            self.log('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)',
+                     getattr(scheduler, 'num_lookahead_tokens', 0), self.drop_last, CHUNK)
         self.export(force=True)
 
     def original_get_computed_blocks(self, request):
