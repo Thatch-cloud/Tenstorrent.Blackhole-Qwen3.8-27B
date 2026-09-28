@@ -872,7 +872,8 @@ class ProfileGatingTests(unittest.TestCase):
         # ...and their S2 twins, c2-packed and c2-packed-gate (design W8: c2's and c2-gate's limits and parser).
         asked = {name: profile.get('parser_rechunk') for name, profile in self.profiles().items()}
         self.assertEqual(asked, {'exact': None, 'c2': True, 'c2-gate': True, 'c2-packed': True, 'c2-packed-gate': True,
-                                 'coding': None, 'general': None})
+                                 'coding': None, 'general': None, 'general-prefix': None,
+                                 'general-prefix-eager': None})
         for name, profile in self.profiles().items():
             self.assertEqual(contract.parser_rechunk(profile), name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate'),
                              name)

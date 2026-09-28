@@ -136,6 +136,25 @@ scripts/ci/publication_warm.py
 # install refuses a changed copy and G1 (e) fails the build.
 speculative-decoding/harness/greedy_session.py
 
+# Conversation prefix reuse (the TT prefix-reuse design, G1; the general-prefix profiles). Every G1
+# runtime module goes here - the registry and scheduler graft the patched TTScheduler.__init__
+# installs from, the metrics exporter and collector the contract boots - and so does every stage module
+# scripts/ci/qwen_prefix_stage.py (a build tool, staged beside c2_overlay.py, never overlaid) runs, AND
+# every scripts/ci module those import, directly or not: test_qwen_prefix_image fails while one is
+# missing here, and c2_image_provenance (f) fails an image whose stages ran a module this list does not
+# lay at the context's bytes. lever_n_model_patch is the model stage's (its patch_tp_replay makes both
+# chunk loops resumable; the bundle's 77d6995a copy patches the traced loop only). Nothing else in the
+# container imports it, so laying it changes no profile. The patched TTScheduler.__init__ imports the
+# scheduler graft and the registry from the plugin package itself (a relative import, only under
+# QWEN_PREFIX_REUSE=1), so both also land at the plugin path, and provenance (b) hashes those copies
+# against the same source (test_qwen_prefix_image_closure).
+scripts/ci/qwen_prefix_registry.py  /experiment-scripts/ci/qwen_prefix_registry.py  /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_prefix_registry.py
+scripts/ci/qwen_prefix_scheduler_patch.py  /experiment-scripts/ci/qwen_prefix_scheduler_patch.py  /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_prefix_scheduler_patch.py
+scripts/ci/qwen_prefix_runner_patch.py
+scripts/ci/qwen_prefix_model_patch.py
+scripts/ci/qwen_prefix_metrics.py
+scripts/ci/lever_n_model_patch.py
+
 # Tests run inside the image at build time (every overlaid scripts/ci/test_*.py is).
 scripts/ci/test_serving_c2_contract.py
 scripts/ci/test_serving_fast_policy.py
@@ -146,6 +165,7 @@ scripts/ci/test_extent_attention_replay.py
 # S2 W7: the admission against fake runtimes and evidence, and (InImageRuntimeTests) check_runtime on the image's
 # own /opt/tt-metal: K64j at both binary paths with its literals, its four kernels, the patched tree scratch.
 scripts/ci/test_packed_any_admission.py
+scripts/ci/test_qwen_prefix_metrics.py
 # Fix M against the image's own vLLM parsers and tokenizers (CorpusTests), on its token-id corpus.
 scripts/ci/test_c2_parser_rechunk.py
 scripts/ci/c2_parser_corpus.json

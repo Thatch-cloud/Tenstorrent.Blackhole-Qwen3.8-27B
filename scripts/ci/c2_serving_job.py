@@ -47,6 +47,15 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_GATE_AUDITS      extent (default: QWEN_FAST_EXTENT_AUDIT on every S2 arm but control's timing arms) or
                       all (also the prestage, pair-mask and fused-commit audits on the G4 arms); mixed (M7) runs
                       all four either way
+  C2_PREFIX_PLAN      PREFIX_PLANS for the prefix action (c2_prefix_gate.py), in order (default: bringup);
+                      each exactness and lifecycle arm is a plan too (PREFIX_ARM_PLANS): exactness-eager
+                      re-runs that arm alone. Never beside its own plan, and no plan twice (one arm, one
+                      results directory)
+  C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
+  C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
+                      the baseline arm)
+  C2_PREFIX_AGENTS    the timing plan's busy-agent counts, one phase each (default 1,4,5,6)
+  The C2_PREFIX_* keys are read only when C2_ACTIONS has prefix; otherwise their defaults are output.
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -55,8 +64,8 @@ import os
 import re
 import sys
 
-ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'cardm', 'drift', 'build', 'smoke', 'gate', 'replay',
-           'push')
+ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
+           'prefix', 'replay', 'push')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
 # each runs. warm and warm-off are M1 (never judged for kernel-cache growth); control and forced-cap M3-M4 (G3);
@@ -71,6 +80,17 @@ JIT_MODES = ('auto', 'judge', 'record')
 POLICIES = ('strict', 'dc-i')
 AUDIT_SETS = ('extent', 'all')
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
+# The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing')
+# (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
+# only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
+# G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.
+PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exactness'),
+                    ('exactness-eager', 'exactness'), ('lifecycle-evict', 'lifecycle'),
+                    ('lifecycle-store', 'lifecycle'), ('lifecycle-tiny', 'lifecycle'))
+PREFIX_PROFILE = 'general-prefix'
+PREFIX_BASELINE = 'general'
+PREFIX_AGENTS = (1, 4, 5, 6)
 # S1's G4 ladder (c2-serve-for-real-plan 2.2, gate table row G4 part 1): both sides of every page and
 # chunk boundary the fast path has (2048 = the draft window and the prefill chunk), a short prompt
 # far below any of them, and long ones up to the ~123k prompt cap.
@@ -221,6 +241,7 @@ def read_job(values, profiles, root=ROOT):
     if replay_served_model and not MODEL_ID.fullmatch(replay_served_model):
         raise JobError('C2_REPLAY_SERVED_MODEL must match %s, got %r' % (MODEL_ID.pattern, replay_served_model))
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
+    prefix = read_prefix(values, profiles, 'prefix' in actions)
     outputs = dict(actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
@@ -228,6 +249,7 @@ def read_job(values, profiles, root=ROOT):
                    replay_served_model=replay_served_model, cardm_harness=cardm_harness, cardm_args=cardm_args,
                    cardm_env=cardm_env)
     outputs.update(s2)
+    outputs.update(prefix)
     return outputs
 
 
@@ -269,6 +291,38 @@ def read_s2_gate(values):
         raise JobError('C2_GATE_AUDITS must be one of %s, got %r' % (', '.join(AUDIT_SETS), audits))
     return dict(gate_pairs=pairs, gate_families=','.join(str(family) for family in families), gate_jit=jit,
                 gate_policy=policy, gate_policy_decision=decision, gate_audits=audits)
+
+
+def read_prefix(values, profiles, running):
+    """The prefix action's outputs. Its keys are checked only when the action runs: a job that does
+    not run it (an exact or c2 run) is never refused over them, and gets the defaults. The profile
+    must then be one the checkout defines (general-prefix lands in qwen_c2_profiles.json on another
+    track, and the image's own profiles are what c2_prefix_gate.py finally checks)."""
+    if not running:
+        return dict(prefix_plan='bringup', prefix_profile=PREFIX_PROFILE, prefix_baseline=PREFIX_BASELINE,
+                    prefix_agents=','.join(str(count) for count in PREFIX_AGENTS))
+    plans = split_list(values.get('C2_PREFIX_PLAN', 'bringup')) or ['bringup']
+    known = PREFIX_PLANS + tuple(arm for arm, _ in PREFIX_ARM_PLANS)
+    unknown = sorted(set(plans) - set(known))
+    if unknown:
+        raise JobError('C2_PREFIX_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(known)))
+    parent = dict(PREFIX_ARM_PLANS)
+    twice = sorted(set(plan for plan in plans if plans.count(plan) > 1 or parent.get(plan) in plans))
+    if twice:
+        raise JobError('C2_PREFIX_PLAN: %s would run an arm twice into one results directory (a plan named twice, '
+                       'or an arm beside its own plan)' % ', '.join(twice))
+    profile = values.get('C2_PREFIX_PROFILE') or PREFIX_PROFILE
+    if profile not in profiles:
+        raise JobError('C2_PREFIX_PROFILE %r is not a profile of qwen_c2_profiles.json (%s)' % (profile, ', '.join(profiles)))
+    baseline = values.get('C2_PREFIX_BASELINE') or PREFIX_BASELINE
+    if baseline != 'none' and baseline not in profiles:
+        raise JobError('C2_PREFIX_BASELINE %r is not a profile of qwen_c2_profiles.json' % baseline)
+    if baseline == 'none' and 'bringup' in plans:
+        raise JobError('C2_PREFIX_BASELINE none: the bringup plan compares against a baseline profile')
+    agents_text = values.get('C2_PREFIX_AGENTS', '')
+    agents = [positive_int('C2_PREFIX_AGENTS', part) for part in split_list(agents_text)] or list(PREFIX_AGENTS)
+    return dict(prefix_plan=','.join(plans), prefix_profile=profile, prefix_baseline=baseline,
+                prefix_agents=','.join(str(count) for count in agents))
 
 
 def render(outputs):
