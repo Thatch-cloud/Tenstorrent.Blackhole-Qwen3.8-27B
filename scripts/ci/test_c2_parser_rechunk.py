@@ -869,14 +869,17 @@ class ProfileGatingTests(unittest.TestCase):
             return json.load(handle)['profiles']
 
     def test_only_c2_and_c2_gate_ask_for_m(self):
-        # ...and their S2 twins, c2-packed and c2-packed-gate (design W8: c2's and c2-gate's limits and parser).
+        # ...and their S2 twins, c2-packed and c2-packed-gate (design W8: c2's and c2-gate's limits and parser),
+        # and those twins' sticky-session profiles, c2-packed-prefix and c2-packed-prefix-gate (the same parser).
         asked = {name: profile.get('parser_rechunk') for name, profile in self.profiles().items()}
         self.assertEqual(asked, {'exact': None, 'c2': True, 'c2-gate': True, 'c2-packed': True, 'c2-packed-gate': True,
+                                 'c2-packed-prefix': True, 'c2-packed-prefix-gate': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
                                  'general-prefix-eager': None})
         for name, profile in self.profiles().items():
-            self.assertEqual(contract.parser_rechunk(profile), name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate'),
-                             name)
+            self.assertEqual(contract.parser_rechunk(profile),
+                             name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate', 'c2-packed-prefix',
+                                      'c2-packed-prefix-gate'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 

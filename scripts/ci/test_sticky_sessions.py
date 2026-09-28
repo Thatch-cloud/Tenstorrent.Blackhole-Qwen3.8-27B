@@ -637,6 +637,107 @@ class PolicyTests(unittest.TestCase):
             policy.validate_fast_config(self.config(False))
 
 
+def load_profiles():
+    import json
+
+    with open(HERE / 'qwen_c2_profiles.json', encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def profile(name):
+    data = load_profiles()['profiles'][name]
+    return dict(data, name=name)
+
+
+class ProfileTests(unittest.TestCase):
+    PAIRS = (('c2-packed-prefix', 'c2-packed'), ('c2-packed-prefix-gate', 'c2-packed-gate'))
+
+    def test_each_sticky_profile_is_its_twin_with_the_prefix_deltas_only(self):
+        for name, twin in self.PAIRS:
+            with self.subTest(profile=name):
+                mine, theirs = profile(name), profile(twin)
+                self.assertEqual(mine['env'], dict(theirs['env'], QWEN_PREFIX_REUSE='1', QWEN_PREFIX_STORE_GIB='8',
+                                                   QWEN_FAST_STICKY_SESSIONS='1'))
+                engine = dict(theirs['engine'])
+                self.assertIs(engine.pop('no-enable-prefix-caching'), True)
+                self.assertIs(engine.pop('no-enable-chunked-prefill'), True)
+                engine.update({'enable-prefix-caching': True, 'enable-chunked-prefill': True,
+                               'prefix-caching-hash-algo': 'sha256'})
+                self.assertEqual(mine['engine'], engine)
+                for key in set(theirs) | set(mine):
+                    if key not in ('env', 'engine', 'description', 'name'):
+                        self.assertEqual(mine.get(key), theirs.get(key), key)
+                self.assertEqual(contract.prefix_reuse_problems(mine), [])
+                self.assertTrue(contract.prefix_reuse(mine) and contract.sticky_sessions(mine))
+        self.assertEqual(load_profiles()['default'], 'general-prefix', 'the image default stays general-prefix')
+
+    def test_only_the_sticky_profiles_set_the_switch(self):
+        names = sorted(name for name, data in load_profiles()['profiles'].items() if STICKY in data['env'])
+        self.assertEqual(names, ['c2-packed-prefix', 'c2-packed-prefix-gate'])
+
+    def test_the_argv_turns_prefix_caching_on_beside_dflash(self):
+        argv = contract.engine_arguments(profile('c2-packed-prefix'), '/snap')
+        for flag in ('--enable-prefix-caching', '--enable-chunked-prefill', '--no-async-scheduling',
+                     '--speculative-config'):
+            self.assertIn(flag, argv)
+        for flag in ('--no-enable-prefix-caching', '--no-enable-chunked-prefill'):
+            self.assertNotIn(flag, argv)
+        self.assertEqual(argv[argv.index('--prefix-caching-hash-algo') + 1], 'sha256')
+
+    def test_the_contract_refuses_every_half_configuration(self):
+        base = profile('c2-packed-prefix')
+
+        def broken(env=None, engine=None, drop_env=(), drop_engine=()):
+            data = dict(base, env=dict(base['env']), engine=dict(base['engine']))
+            data['env'].update(env or {})
+            data['engine'].update(engine or {})
+            for key in drop_env:
+                data['env'].pop(key)
+            for key in drop_engine:
+                data['engine'].pop(key)
+            return contract.prefix_reuse_problems(data)
+
+        cases = (
+            (broken(drop_env=[STICKY]), 'cannot admit a prefix hit without QWEN_FAST_STICKY_SESSIONS=1'),
+            (broken(drop_env=[STICKY]), 'refuses lookahead'),
+            (broken(env={STICKY: 'yes'}), 'QWEN_FAST_STICKY_SESSIONS=\'yes\' is neither 1 nor 0'),
+            (broken(env={'QWEN_PREFIX_REUSE': '0'}), 'needs QWEN_PREFIX_REUSE=1'),
+            (broken(drop_env=['QWEN_PREFIX_REUSE']), 'needs QWEN_PREFIX_REUSE=1'),
+            (broken(engine={'additional-config': {'tt': {}}}), 'does not run the fast path'),
+            (broken(engine={'speculative-config': dict(base['engine']['speculative-config'], num_speculative_tokens=7)}),
+             'sticky sessions serve only dflash with 15 proposals'),
+            (broken(engine={'speculative-config': dict(base['engine']['speculative-config'], method='eagle')}),
+             'sticky sessions serve only dflash with 15 proposals'),
+            (broken(engine={'prefix-caching-hash-algo': 'xxhash'}), 'prefix-caching-hash-algo must be sha256'),
+        )
+        for problems, words in cases:
+            with self.subTest(words=words):
+                self.assertTrue(any(words in problem for problem in problems), problems)
+        # sticky beside a profile with no prefix reuse at all (c2-packed plus the switch)
+        packed = profile('c2-packed')
+        packed['env'] = dict(packed['env'], QWEN_FAST_STICKY_SESSIONS='1')
+        self.assertTrue(any('needs QWEN_PREFIX_REUSE=1' in problem for problem in contract.prefix_reuse_problems(packed)))
+
+    def test_the_environment_drops_an_inherited_switch_under_every_other_profile(self):
+        for name in ('c2-packed', 'general-prefix', 'exact'):
+            with self.subTest(profile=name):
+                environ = contract.apply_environment(profile(name), {STICKY: '1', 'QWEN_PREFIX_REUSE': '1'})
+                self.assertNotIn(STICKY, environ)
+        environ = contract.apply_environment(profile('c2-packed-prefix'), {})
+        self.assertEqual((environ[STICKY], environ['QWEN_PREFIX_REUSE']), ('1', '1'))
+
+    def test_the_flag_off_contract_matches_the_parent_on_every_other_profile(self):
+        parent = parent_module('serving_c2_contract.py')
+        if parent is None:
+            self.skipTest('no git history for %s' % PARENT)
+        for name in sorted(load_profiles()['profiles']):
+            if name.startswith('c2-packed-prefix'):
+                continue
+            with self.subTest(profile=name):
+                self.assertEqual(contract.prefix_reuse_problems(profile(name)), parent.prefix_reuse_problems(profile(name)))
+                self.assertEqual(contract.engine_arguments(profile(name), '/s'), parent.engine_arguments(profile(name), '/s'))
+
+
 # ------------------------------------------------------------------------------------------------
 # The scheduler graft (A4) on the fakes of test_qwen_prefix_scheduler_patch, with vLLM's DFlash drop
 # ------------------------------------------------------------------------------------------------

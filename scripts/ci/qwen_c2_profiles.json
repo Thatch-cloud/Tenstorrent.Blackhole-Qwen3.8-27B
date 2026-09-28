@@ -302,6 +302,137 @@
       "default_max_tokens": 8192,
       "parser_rechunk": true
     },
+    "c2-packed-prefix": {
+      "description": "c2-packed with conversation prefix reuse (sticky sessions): c2-packed's environment, limits and packed extent block, plus the prefix-reuse grafts. Sticky sessions, phase 1 (QWEN_FAST_STICKY_SESSIONS=1 beside QWEN_PREFIX_REUSE=1): a turn that extends an earlier one of the same salted conversation resumes exactly from the last 2048-token boundary at or below its prompt minus 2048 whose GDN checkpoint and KV prefix the prefix-reuse grafts kept - vLLM's prefix cache (sha256 block hashes, published below floor2048(P)) and the host checkpoint store (QWEN_PREFIX_STORE_GIB) - and prefills only the tail; the engine is built as on the no-reuse twin, and anything else takes the twin's cold path. A hit is byte-identical to a cold prefill of the same prompt (the G1 exactness argument: the same chunk program from a canonical checkpoint). The argv is the twin's with enable-prefix-caching and enable-chunked-prefill in place of the no- flags (vLLM asserts chunking for a hybrid model with prefix caching; the TT platform turns it off again) and prefix-caching-hash-algo sha256. Hits need a platform-minted cache_salt (serving_c2_contract.salt_verdict); unsalted requests neither hit nor publish. Kill switch: /models/.qwen-c2/prefix-reuse.off. NOT QUALIFIED for traffic until the sticky-session hardware gates pass.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_graph_descriptor": "/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8",
+        "QWEN_FAST_STICKY_SESSIONS": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable-chunked-prefill": true,
+        "prefix-caching-hash-algo": "sha256",
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "max_prompt_tokens": 123136,
+      "min_answer_tokens": 8192,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true
+    },
+    "c2-packed-prefix-gate": {
+      "description": "GATE ONLY: c2-packed-gate (c2-gate's limits, so 4 x 131072 runs) with sticky sessions, the flag-on twin of c2-packed-gate for the sticky-session gates. Not for traffic. Sticky sessions, phase 1 (QWEN_FAST_STICKY_SESSIONS=1 beside QWEN_PREFIX_REUSE=1): a turn that extends an earlier one of the same salted conversation resumes exactly from the last 2048-token boundary at or below its prompt minus 2048 whose GDN checkpoint and KV prefix the prefix-reuse grafts kept - vLLM's prefix cache (sha256 block hashes, published below floor2048(P)) and the host checkpoint store (QWEN_PREFIX_STORE_GIB) - and prefills only the tail; the engine is built as on the no-reuse twin, and anything else takes the twin's cold path. A hit is byte-identical to a cold prefill of the same prompt (the G1 exactness argument: the same chunk program from a canonical checkpoint). The argv is the twin's with enable-prefix-caching and enable-chunked-prefill in place of the no- flags (vLLM asserts chunking for a hybrid model with prefix caching; the TT platform turns it off again) and prefix-caching-hash-algo sha256. Hits need a platform-minted cache_salt (serving_c2_contract.salt_verdict); unsalted requests neither hit nor publish. Kill switch: /models/.qwen-c2/prefix-reuse.off. NOT QUALIFIED for traffic until the sticky-session hardware gates pass.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_graph_descriptor": "/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8",
+        "QWEN_FAST_STICKY_SESSIONS": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable-chunked-prefill": true,
+        "prefix-caching-hash-algo": "sha256",
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true
+    },
     "coding": {
       "description": "NOT SERVABLE: the fast path refuses any request whose prompt is not exactly the frozen context or whose remaining budget exceeds 256 (frozen_combined_runtime.validate_target_option; smoke v3, run 36099730091). Kept for the record.",
       "eos_ids": [

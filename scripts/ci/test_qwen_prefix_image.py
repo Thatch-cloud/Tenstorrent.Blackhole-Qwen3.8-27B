@@ -39,6 +39,8 @@ DOCKERFILE = ROOT / 'docker' / 'qwen-c2-serving.Dockerfile'
 MANIFEST = ROOT / 'docker' / 'qwen-c2-overlay.txt'
 CPU_WORKFLOW = ROOT / '.github' / 'workflows' / 'qwen-integration-cpu.yml'
 PREFIX_PROFILES = ('general-prefix', 'general-prefix-eager')
+# The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
+STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate')
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')
 PLUGIN_CHECKOUT = Path(os.environ.get('QWEN_TT_PLUGIN_CHECKOUT') or JOB / 'risks' / 'vllm-tt-plugin')
 IMG_TREE = Path(os.environ.get('QWEN_IMG_TREE') or JOB / 'matmul-attr' / 'img')
@@ -257,7 +259,7 @@ class ProfileTests(unittest.TestCase):
     def test_every_other_profile_is_untouched(self):
         """exact, c2, c2-gate, coding and general: no switch, prefix caching off in the argv, and the
         guard has nothing to say - their boots are what they were."""
-        for name in sorted(set(profiles()['profiles']) - set(PREFIX_PROFILES)):
+        for name in sorted(set(profiles()['profiles']) - set(PREFIX_PROFILES) - set(STICKY_PROFILES)):
             with self.subTest(profile=name):
                 profile = load(name)
                 self.assertNotIn(contract.PREFIX_SWITCH, profile['env'])
@@ -398,7 +400,7 @@ class GuardTests(unittest.TestCase):
             (dict(**{'no-async-scheduling': None}), 'no-async-scheduling is required'),
             (dict(**{'block-size': 128}), 'block-size must be 64'),
             (dict(**{'max-num-batched-tokens': 2048}), 'must cover max-model-len'),
-            (dict(**{'additional-config': {'qwen_fast_t16': True}}), 'cannot admit a prefix hit yet'),
+            (dict(**{'additional-config': {'qwen_fast_t16': True}}), 'cannot admit a prefix hit without'),
             (dict(**{'speculative-config': {'method': 'dflash'}}), 'refuses lookahead'),
             (dict(**{'prefix-caching-hash-algo': 'xxhash'}), 'prefix-caching-hash-algo must be sha256'),
             (dict(**{'prefix-caching-hash-algo': None}), 'prefix-caching-hash-algo must be sha256'),
@@ -489,7 +491,7 @@ class GuardTests(unittest.TestCase):
 
     def test_the_other_profiles_boot_as_before(self):
         """No prefix hook, no salt policy, no metrics and no launch check outside the prefix profiles."""
-        for name in sorted(set(profiles()['profiles']) - set(PREFIX_PROFILES)):
+        for name in sorted(set(profiles()['profiles']) - set(PREFIX_PROFILES) - set(STICKY_PROFILES)):
             with self.subTest(profile=name):
                 profile, environ, logged, hooks, launched = boot_api_server(
                     name, platform_argv=['--kv-transfer-config', '{}'])

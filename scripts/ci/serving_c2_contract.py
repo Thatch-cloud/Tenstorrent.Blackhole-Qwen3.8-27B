@@ -31,7 +31,10 @@ process match it:
    against the platform's salt key (salt_verdict), so a client cannot choose the cache partition it
    shares; it refuses a launched KV connector and warns on a server default that strips past
    reasoning (prefix_launch_problems); and every process logs where the model entry was imported
-   from (the bring-up check, qwen_prefix_stage bringup).
+   from (the bring-up check, qwen_prefix_stage bringup). The fast path joins prefix reuse only
+   through sticky sessions (QWEN_FAST_STICKY_SESSIONS, the c2-packed-prefix profiles): the profile
+   alone owns that switch too, it needs QWEN_PREFIX_REUSE=1 and the fast path beside it, and the
+   one speculative shape reuse then accepts is DFlash with 15 proposals.
 6. gate-only profiles (gate_only: true) boot only with QWEN_C2_GATE=1: they exist for a gate and
    must never take traffic.
 7. streaming parsers: C2 commits 3-16 tokens per engine step, so the API server's reasoning and
@@ -60,6 +63,11 @@ INPUT_PROCESSOR = 'vllm.v1.engine.input_processor'
 # The prefix-reuse switch (design section 2.0.1): the model graft's supports_prefix_caching, the
 # scheduler graft's install and the runner patch all read it. Only a profile sets it.
 PREFIX_SWITCH = 'QWEN_PREFIX_REUSE'
+# Sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG): the fast path's side of prefix reuse. Only a
+# profile sets it, and only beside PREFIX_SWITCH and the fast path (prefix_reuse_problems).
+STICKY_SWITCH = 'QWEN_FAST_STICKY_SESSIONS'
+# The one speculative shape sticky sessions serve (the fast path's policy, serving_fast_policy).
+STICKY_SPECULATION = dict(method='dflash', num_speculative_tokens=15)
 # vLLM's default (config/cache.py:95), pinned in the prefix profiles: the block-hash chain is what makes
 # a cached block's content its prompt's, and the exactness argument leans on it (design L2).
 PREFIX_HASH_ALGO = 'sha256'
@@ -158,12 +166,40 @@ def apply_environment(profile, environ=None):
     # give the model the capability while the profile's argv leaves prefix caching off.
     if PREFIX_SWITCH not in profile['env']:
         environ.pop(PREFIX_SWITCH, None)
+    # The same for the fast path's side of it (sticky sessions).
+    if STICKY_SWITCH not in profile['env']:
+        environ.pop(STICKY_SWITCH, None)
     return environ
 
 
 def prefix_reuse(profile):
     """Whether the profile turns conversation prefix reuse on (general-prefix and its gate variant)."""
     return str(profile.get('env', {}).get(PREFIX_SWITCH, '')) == '1'
+
+
+def sticky_sessions(profile):
+    """Whether the profile turns the fast path's sticky sessions on (c2-packed-prefix and its gate twin)."""
+    return str(profile.get('env', {}).get(STICKY_SWITCH, '')) == '1'
+
+
+def sticky_problems(profile):
+    """Every way the profile's sticky-session switch is set without what it needs, [] when none: it is
+    the fast path's side of prefix reuse, so it needs the fast path (qwen_fast_t16) and
+    QWEN_PREFIX_REUSE=1 beside it."""
+    engine = profile.get('engine', {})
+    value = profile.get('env', {}).get(STICKY_SWITCH)
+    problems = []
+    if value is not None and str(value) not in ('0', '1'):
+        problems.append('%s=%r is neither 1 nor 0' % (STICKY_SWITCH, value))
+    if not sticky_sessions(profile):
+        return problems
+    if not prefix_reuse(profile):
+        problems.append('%s=1 needs %s=1: the fast path would admit hits no checkpoint makes exact'
+                        % (STICKY_SWITCH, PREFIX_SWITCH))
+    if not (engine.get('additional-config') or {}).get('qwen_fast_t16'):
+        problems.append('%s=1 is the fast path\'s switch, but the profile does not run the fast path (qwen_fast_t16)'
+                        % STICKY_SWITCH)
+    return problems
 
 
 def prefix_reuse_problems(profile):
@@ -174,11 +210,13 @@ def prefix_reuse_problems(profile):
     with vLLM's own prefix cache on; vLLM's align-mode assertion also needs chunked prefill on in
     the argv, which the TT platform turns off again for qwen3_5 (design 2.0.1 item 5; P0a checks
     1-2). Prefix caching without the switch would serve hits no checkpoint makes exact, and the
-    fast path cannot admit a hit yet (C1: serving_lifecycle refuses num_computed_tokens != 0)."""
+    fast path admits a hit only under sticky sessions (serving_lifecycle refuses num_computed_tokens
+    != 0 without QWEN_FAST_STICKY_SESSIONS=1), which is then also the only way a speculative config
+    passes: DFlash with 15 proposals, whose lookahead the scheduler graft accepts under that switch."""
     engine = profile.get('engine', {})
     value = profile.get('env', {}).get(PREFIX_SWITCH)
     caching = engine.get('enable-prefix-caching') is True
-    problems = []
+    problems = sticky_problems(profile)
     if value is not None and str(value) not in ('0', '1'):
         problems.append('%s=%r is neither 1 nor 0' % (PREFIX_SWITCH, value))
     if caching and engine.get('no-enable-prefix-caching'):
@@ -202,10 +240,19 @@ def prefix_reuse_problems(profile):
     if type(budget) is not int or type(context) is not int or budget < context:
         problems.append('max-num-batched-tokens %r must cover max-model-len %r: a prefill must never split'
                         % (budget, context))
-    if (engine.get('additional-config') or {}).get('qwen_fast_t16'):
-        problems.append('the fast path (qwen_fast_t16) cannot admit a prefix hit yet (C1)')
-    if engine.get('speculative-config'):
-        problems.append('speculative decoding: the scheduler graft refuses lookahead')
+    sticky = sticky_sessions(profile)
+    if (engine.get('additional-config') or {}).get('qwen_fast_t16') and not sticky:
+        problems.append('the fast path (qwen_fast_t16) cannot admit a prefix hit without %s=1 (sticky sessions)'
+                        % STICKY_SWITCH)
+    speculative = engine.get('speculative-config')
+    if speculative:
+        if not sticky:
+            problems.append('speculative decoding: the scheduler graft refuses lookahead')
+        elif not isinstance(speculative, dict) or any(speculative.get(key) != want
+                                                      for key, want in sorted(STICKY_SPECULATION.items())):
+            problems.append('speculative decoding: sticky sessions serve only %s with %d proposals, not %r'
+                            % (STICKY_SPECULATION['method'], STICKY_SPECULATION['num_speculative_tokens'],
+                               speculative))
     if engine.get('prefix-caching-hash-algo') != PREFIX_HASH_ALGO:
         problems.append('prefix-caching-hash-algo must be %s (the block-hash chain a hit\'s exactness leans on), '
                         'not %r' % (PREFIX_HASH_ALGO, engine.get('prefix-caching-hash-algo')))
