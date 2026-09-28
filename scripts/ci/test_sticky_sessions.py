@@ -1072,6 +1072,92 @@ class SchedulerParityTests(unittest.TestCase):
 
 
 # ------------------------------------------------------------------------------------------------
+# The K/V guard (A6)
+# ------------------------------------------------------------------------------------------------
+class FakeBlock(object):
+    def __init__(self, engines, rows=16):
+        self.engines = list(engines)
+        self.shape = SimpleNamespace(users=len(self.engines), rows_per_user=rows)
+
+    def segment_of(self, engine):
+        for index, candidate in enumerate(self.engines):
+            if candidate is engine:
+                return index
+        raise ValueError('engine not bound')
+
+
+def engine_with(blocks, width=68):
+    pages = torch.full((1, width), blocks[0], dtype=torch.int32)
+    pages[0, :len(blocks)] = torch.tensor(blocks, dtype=torch.int32)
+    return SimpleNamespace(pages=pages)
+
+
+class KvGuardTests(unittest.TestCase):
+    def owners(self, shared_first=True):
+        # A and B: same tenant, same cached first block 7 (their shared prefix); C and D: others.
+        a = engine_with([7, 10, 11])
+        b = engine_with([7 if shared_first else 8, 20, 21])
+        c = engine_with([30, 31, 32, 33])
+        d = engine_with([40, 41, 42, 43])
+        return a, b, c, d
+
+    def test_same_tenant_users_crossing_a_boundary_are_not_a_conflict(self):
+        a, b, c, d = self.owners()
+        block = FakeBlock([a, b, c, d])
+        # both at 184: rows 184..199, the last eight past their bound blocks (192 // 64 = 3)
+        owners = [(a, 184), (b, 184), (c, 100), (d, 100)]
+        with sticky_env(None):
+            self.assertEqual(serving_packed_step.kv_guard(owners, block),
+                             'verify t2 kv tile rows shared: users 0,1 page 7 tile row 0')
+        with sticky_env('1'):
+            self.assertIsNone(serving_packed_step.kv_guard(owners, block))
+            with patch.object(verify_trace_t2, 'log_once') as logged:
+                self.assertIsNone(serving_packed_step.kv_shared_at_proposal(
+                    [SimpleNamespace(engine=engine, session=SimpleNamespace(position=position))
+                     for engine, position in owners], block))
+            logged.assert_not_called()
+
+    def test_a_real_conflict_is_still_caught(self):
+        a, b, c, d = self.owners()
+        b.pages[0, 1] = 10     # B's table names A's private block
+        block = FakeBlock([a, b, c, d])
+        with sticky_env('1'):
+            self.assertEqual(serving_packed_step.kv_guard([(a, 70), (b, 70), (c, 100), (d, 100)], block),
+                             'verify t2 kv tile rows shared: users 0,1 page 10 tile row 0')
+        # and the shared first block itself, written at its own rows by both (never on a real path)
+        with sticky_env('1'):
+            self.assertEqual(serving_packed_step.kv_guard([(a, 0), (b, 0), (c, 100), (d, 100)], block),
+                             'verify t2 kv tile rows shared: users 0,1 page 7 tile row 0')
+
+    def test_an_unmappable_table_still_fails_closed(self):
+        a, b, c, d = self.owners()
+        b.pages = None
+        with sticky_env('1'):
+            self.assertIn('verify t2 kv tile rows unmapped',
+                          serving_packed_step.kv_guard([(a, 70), (b, 70), (c, 100), (d, 100)], FakeBlock([a, b, c, d])))
+
+    def test_the_sentinel_table(self):
+        self.assertEqual(serving_packed_step.pad_sentinel_table(torch.tensor([[7, 10, 11, 7, 7]]), 2),
+                         [[7, 10, 11, -3, -3]])
+        self.assertEqual(serving_packed_step.pad_sentinel_table([[5, 6]], 0), [[5, 6]])
+        self.assertIsNone(serving_packed_step.pad_sentinel_table(None, 0))
+
+    def test_flag_off_the_guard_is_the_parent_guard(self):
+        parent = parent_module('serving_packed_step.py')
+        if parent is None:
+            self.skipTest('no git history for %s' % PARENT)
+        a, b, c, d = self.owners()
+        e, f, g, h = self.owners(shared_first=False)
+        cases = [([(a, 184), (b, 184), (c, 100), (d, 100)], FakeBlock([a, b, c, d])),
+                 ([(e, 184), (f, 184), (g, 100), (h, 100)], FakeBlock([e, f, g, h])),
+                 ([(a, 0), (b, 0), (c, 0), (d, 0)], FakeBlock([a, b, c, d]))]
+        with sticky_env(None), patch.object(serving_packed_step, 'pad_sentinel_table',
+                                            side_effect=AssertionError('mapped with the flag off')):
+            for owners, block in cases:
+                self.assertEqual(serving_packed_step.kv_guard(owners, block), parent.kv_guard(owners, block))
+
+
+# ------------------------------------------------------------------------------------------------
 # End to end on the G1 model graft's toy: the S2 capture over the real staged route (A1 + A2 + A4 plan)
 # ------------------------------------------------------------------------------------------------
 class ToyExactnessTests(unittest.TestCase):
