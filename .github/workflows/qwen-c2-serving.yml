@@ -414,6 +414,7 @@ jobs:
           GATE_POLICY: ${{ steps.job.outputs.gate_policy }}
           GATE_POLICY_DECISION: ${{ steps.job.outputs.gate_policy_decision }}
           GATE_AUDITS: ${{ steps.job.outputs.gate_audits }}
+          GATE_CONTROL_POOL: ${{ steps.job.outputs.gate_control_pool }}
         run: |
           set -euo pipefail
           # The fast path has never completed a request inside the serving image: every C2 rate was
@@ -464,7 +465,8 @@ jobs:
             ${GATE_MEMORY_PROMPT:+--memory-prompt "$GATE_MEMORY_PROMPT"} --results "$results" \
             ${GATE_PAIRS:+--pairs "$GATE_PAIRS"} ${GATE_FAMILIES:+--families "$GATE_FAMILIES"} \
             ${GATE_JIT:+--jit "$GATE_JIT"} ${GATE_POLICY:+--policy "$GATE_POLICY"} \
-            ${GATE_POLICY_DECISION:+--policy-decision "$GATE_POLICY_DECISION"} ${GATE_AUDITS:+--audits "$GATE_AUDITS"} 2>&1 \
+            ${GATE_POLICY_DECISION:+--policy-decision "$GATE_POLICY_DECISION"} ${GATE_AUDITS:+--audits "$GATE_AUDITS"} \
+            ${GATE_CONTROL_POOL:+--control-pool "$GATE_CONTROL_POOL"} 2>&1 \
             | tee "$RUNNER_TEMP/c2-results/gate.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv): the contract's own line, per arm.
           for log in "$results"/*/server.log; do

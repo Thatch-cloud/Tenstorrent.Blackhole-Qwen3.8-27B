@@ -45,6 +45,9 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_GATE_AUDITS      extent (default: QWEN_FAST_EXTENT_AUDIT on every S2 arm but control's timing arms) or
                       all (also the prestage, pair-mask and fused-commit audits on the G4 arms); mixed (M7) runs
                       all four either way
+  C2_GATE_CONTROL_POOL  control's (G3) one re-run: a NOT_RESOLVED first run's control-phase-rounds.json,
+                      committed under scripts/ci/references/c2-serving/ (CONTROL_POOL); the gate pools it into this
+                      run's decision and refuses one that is not that plan's unresolved first run
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -69,6 +72,9 @@ JIT_MODES = ('auto', 'judge', 'record')
 POLICIES = ('strict', 'dc-i')
 AUDIT_SETS = ('extent', 'all')
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
+# G3's one re-run: the first run's phase record, committed to the checkout (no '..': each component starts with a
+# letter or digit).
+CONTROL_POOL = re.compile(r'scripts/ci/references/c2-serving/[A-Za-z0-9][A-Za-z0-9_.-]*\.json')
 # S1's G4 ladder (c2-serve-for-real-plan 2.2, gate table row G4 part 1): both sides of every page and
 # chunk boundary the fast path has (2048 = the draft window and the prefill chunk), a short prompt
 # far below any of them, and long ones up to the ~123k prompt cap.
@@ -265,8 +271,11 @@ def read_s2_gate(values):
     audits = values.get('C2_GATE_AUDITS', '')
     if audits and audits not in AUDIT_SETS:
         raise JobError('C2_GATE_AUDITS must be one of %s, got %r' % (', '.join(AUDIT_SETS), audits))
+    pool = values.get('C2_GATE_CONTROL_POOL', '')
+    if pool and not CONTROL_POOL.fullmatch(pool):
+        raise JobError('C2_GATE_CONTROL_POOL must match %s, got %r' % (CONTROL_POOL.pattern, pool))
     return dict(gate_pairs=pairs, gate_families=','.join(str(family) for family in families), gate_jit=jit,
-                gate_policy=policy, gate_policy_decision=decision, gate_audits=audits)
+                gate_policy=policy, gate_policy_decision=decision, gate_audits=audits, gate_control_pool=pool)
 
 
 def render(outputs):

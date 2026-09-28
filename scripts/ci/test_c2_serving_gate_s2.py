@@ -16,7 +16,9 @@ import inspect
 import io
 import json
 import os
+import random
 import re
+import statistics
 import sys
 import tempfile
 import types
@@ -74,6 +76,19 @@ WARM_SKIPPED_LINE = '[PINDIAG] eager publication warm skipped reason=no-collecti
 SINGLE_LADDER, SHORT_LADDER = '{}'.format((2048,)), '{}'.format((256, 512, 1024, 2048))
 ENGINE_PEAK = 1000 * 10 ** 6       # serving_prefill_admission.engine_build_peak(): 800 MB resident + 200 MB transient
 QUAD_ESTIMATE = 450 * 2 ** 20      # quad_draft.QUAD_CAPTURE_BYTES_EST (0.450 GiB), W6d's quad estimate
+# G3's flag phases (c2_serving_gate.FLAG_PHASES): each round's lines as their producers write them.
+PHASE_END_FORMAT = '[PHASE] {} {} end {:.1f} ms'                                  # serving_worker_hook.phase
+VERIFY_SPLIT_FORMAT = ('[PACKED-PHASE] round=%d users=%d bind_ms=%.2f input_ms=%.2f trace_ms=%.2f '
+                       'sync_ms=%.2f readback_ms=%.2f')                             # packed_verifier.verify
+FENCES_FORMAT = ('[PACKED-FENCES] round={round} fence={fence} validated={validated} replay_ms={replay_ms} '
+                 'commit_sync_ms={commit_sync_ms} path={path} prestage_ms={prestage_ms} diff_ms={diff_ms} '
+                 'write_ms={write_ms}')                                             # serving_packed_step.FENCES_LINE
+WINDOW_MARKER = '[PACKED-PRESTAGE-WINDOW]'                                         # verify_prestage.WINDOW_MARKER
+WINDOW_FORMAT = '%s round=%d buffers=%d ms=%.2f live=%s'                           # verify_prestage.BlockPrestage.prestage
+# One four-live round as v61's flag-off arms logged it (medians, ms): F = 124.2 verify + 4 x 0.3 commits + 7.0 window.
+BASE_PHASES = dict(trace=119.6, sync=0.6, readback=0.8, diff=1.6, write=1.0, bookkeeping=0.6, commit=0.3, window=7.0)
+BASE_F = 132.4
+ROUND_MS = 165
 
 
 def mb(value):
@@ -190,7 +205,8 @@ BASE_TIME = datetime.datetime(2026, 9, 27, 1, 0, 0)
 
 
 def stamp(seconds):
-    return (BASE_TIME + datetime.timedelta(seconds=seconds)).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    # To the millisecond loguru prints, rounded: a clock summed from float round times never loses one to truncation.
+    return (BASE_TIME + datetime.timedelta(seconds=round(seconds, 3))).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
 
 def execute_line(seconds, live, finished=()):
@@ -207,12 +223,40 @@ def engine_id(user):
     return request_id(user) + '-0-abcd1234'
 
 
+def flag_phase_lines(number, users, values, window=True, drop=()):
+    """The producers' flag-phase lines of one packed round (block round `number`): `values` is BASE_PHASES with the
+    round's changes (bookkeeping is the verify's rest, commit each user's), `window` False for a round whose next
+    step is not packed (nothing is pre-staged), `drop` the lines left out ('verify', 'split', 'fences', 'commit',
+    'window')."""
+    ids = ','.join(engine_id(user) for user in range(users))
+    verify = sum(values[name] for name in ('trace', 'sync', 'readback', 'diff', 'write', 'bookkeeping'))
+    lines = []
+    if 'split' not in drop:
+        lines.append('INFO ' + VERIFY_SPLIT_FORMAT % (number, users, 0.0, values['diff'] + values['write'] + 0.1,
+                                                      values['trace'], values['sync'], values['readback']))
+    if 'verify' not in drop:
+        lines.append('INFO ' + PHASE_END_FORMAT.format('packed_verify', ids, verify))
+    if 'commit' not in drop:
+        lines += ['INFO ' + PHASE_END_FORMAT.format('packed_commit', engine_id(user), values['commit'])
+                  for user in range(users)]
+    if 'fences' not in drop:
+        lines.append('INFO ' + FENCES_FORMAT.format(round=number, fence='replay', validated=1, replay_ms='0.06',
+                                                    commit_sync_ms='0.01', path='diff', prestage_ms='6.00',
+                                                    diff_ms='%.2f' % values['diff'], write_ms='%.2f' % values['write']))
+    if window and 'window' not in drop:
+        lines.append('INFO ' + WINDOW_FORMAT % (WINDOW_MARKER, number + 1, 148, values['window'], users))
+    return lines
+
+
 def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.0, audit_ms=2.0, audit=True,
            mismatch=False, drop_audit=0, words_ok=None, cap=None, admission=True, packed=True, extra=(), families=None,
-           ladder=SINGLE_LADDER, sequential_rows=4, buckets=(2048,), warm=True):
+           ladder=SINGLE_LADDER, sequential_rows=4, buckets=(2048,), warm=True, phases=None):
     """A server log of an S2 arm: the C2-any lines, the S2 attach lines when `on`, and `rounds` decode steps -
     packed (four [PACKED] lines, a packed extent round line and an audit line each) or, `packed` False, one
-    [SEQ-PUBLISH] step line per user - on one timestamped clock, `round_ms` apart."""
+    [SEQ-PUBLISH] step line per user - on one timestamped clock, `round_ms` apart (a number, or per round a function
+    of its index). `phases`: None (no flag-phase lines), True (BASE_PHASES every round) or a function of the round's
+    index returning (changes to BASE_PHASES, lines to drop): the flag-phase lines of every packed round
+    (flag_phase_lines; the last round's next step is not packed, so it pre-stages nothing)."""
     lines = base.any_request_log(requests=users, ladder=ladder).splitlines()
     if on:
         if admission:
@@ -245,6 +289,10 @@ def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.
                     lines.append(audit_line(index + 1, users, words_ok=words_ok, rotated=index % users, ms=audit_ms))
                 if mismatch and index == 3:
                     lines.append(mismatch_line(4, 'word:2,cur_pos:2'))
+            if phases is not None:
+                changes, drop = ({}, ()) if phases is True else phases(index)
+                lines += flag_phase_lines(index + 1, users, dict(BASE_PHASES, **changes), window=index < rounds - 1,
+                                          drop=drop)
             position = [p + emitted for p in position]
         else:
             for user in range(users):
@@ -252,7 +300,8 @@ def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.
                              % (engine_id(user), sequential_rows))
                 lines.append('INFO [SEQ-PUBLISH] request=%s stages features=0.10' % engine_id(user))
             position = [p + 3 for p in position]
-        at += (round_ms + (audit_ms if on and audit and packed else 0.0)) / 1000.0
+        whole = round_ms(index) if callable(round_ms) else round_ms
+        at += (whole + (audit_ms if on and audit and packed else 0.0)) / 1000.0
     lines.append(execute_line(at, users))
     lines.append('INFO trigger received signal=SIGTERM')
     return '\n'.join(lines) + '\n'
@@ -810,14 +859,20 @@ class JobTests(unittest.TestCase):
             self.assertEqual(self.read(C2_GATE_PLAN=plan)['gate_plan'], plan)
         defaults = self.read()
         self.assertEqual([defaults[key] for key in ('gate_pairs', 'gate_families', 'gate_jit', 'gate_policy',
-                                                    'gate_policy_decision', 'gate_audits')], [''] * 6)
+                                                    'gate_policy_decision', 'gate_audits', 'gate_control_pool')],
+                         [''] * 7)
+        pooled = self.read(C2_GATE_PLAN='control', C2_GATE_CONTROL_POOL='scripts/ci/references/c2-serving/g3-first.json')
+        self.assertEqual(pooled['gate_control_pool'], 'scripts/ci/references/c2-serving/g3-first.json')
 
     def test_what_the_s2_keys_refuse(self):
         for values in (dict(C2_GATE_PAIRS='0'), dict(C2_GATE_PAIRS='5'), dict(C2_GATE_FAMILIES='4000'),
                        dict(C2_GATE_FAMILIES='16896'), dict(C2_GATE_FAMILIES='4352,4352'), dict(C2_GATE_JIT='maybe'),
                        dict(C2_GATE_POLICY='relaxed'), dict(C2_GATE_POLICY='dc-i'),
                        dict(C2_GATE_POLICY='dc-i', C2_GATE_POLICY_DECISION='a b'), dict(C2_GATE_AUDITS='none'),
-                       dict(C2_GATE_PLAN='control soak')):
+                       dict(C2_GATE_PLAN='control soak'), dict(C2_GATE_CONTROL_POOL='g3-first.json'),
+                       dict(C2_GATE_CONTROL_POOL='scripts/ci/references/c2-serving/../../x.json'),
+                       dict(C2_GATE_CONTROL_POOL='/tmp/control-phase-rounds.json'),
+                       dict(C2_GATE_CONTROL_POOL='scripts/ci/references/c2-serving/g3 first.json')):
             with self.subTest(values=values), self.assertRaises(job.JobError):
                 self.read(**values)
 
@@ -826,7 +881,7 @@ class JobTests(unittest.TestCase):
         step = text[text.index('- name: Run the gate'):text.index('- name: Replay')]
         for option, output in (('--pairs', 'gate_pairs'), ('--families', 'gate_families'), ('--jit', 'gate_jit'),
                                ('--policy', 'gate_policy'), ('--policy-decision', 'gate_policy_decision'),
-                               ('--audits', 'gate_audits')):
+                               ('--audits', 'gate_audits'), ('--control-pool', 'gate_control_pool')):
             name = output.upper()
             self.assertIn('%s: ${{ steps.job.outputs.%s }}' % (name, output), step)
             self.assertIn('${%s:+%s "$%s"}' % (name, option, name), step)
@@ -862,7 +917,7 @@ class Driver(object):
                     summary = json.load(handle)
             records = {}
             for name in os.listdir(results) if os.path.isdir(results) else []:
-                if name.endswith('-divergence-records.json'):
+                if name.endswith('-divergence-records.json') or name == driver.CONTROL_PHASE_RECORD:
                     with open(os.path.join(results, name), encoding='utf-8') as handle:
                         records[name] = json.load(handle)
         return code, summary, docker.calls, lines, records
@@ -870,24 +925,26 @@ class Driver(object):
 
 class ControlDriverTests(unittest.TestCase):
     def control(self, on_log=None, off_log=None, on_env=(), off_texts=None, pairs='2', cache=flat_cache,
-                on_logs=None, audit_log=None, audit_env=((AUDIT, '1'),)):
-        """The control plan with every flag-off arm on `off_log`, every flag-on timing arm on `on_log` (unaudited)
-        or on its own log in `on_logs` (arm name -> server log; its report is built from the same log), and the
-        audited arm on `audit_log`; `on_env` and `audit_env` are what reaches each report's harness."""
-        on_log = on_log or s2_log(audit=False)
-        off_log = off_log or s2_log(on=False, round_ms=172.0)
+                on_logs=None, audit_log=None, audit_env=((AUDIT, '1'),), off_logs=None, extra=()):
+        """The control plan with every flag-off arm on `off_log`, every flag-on timing arm on `on_log` (unaudited),
+        either on its own log in `off_logs` / `on_logs` (arm name -> server log; its report is built from the same
+        log), and the audited arm on `audit_log`; `on_env` and `audit_env` are what reaches each report's harness,
+        `extra` more gate arguments. The timing arms' logs carry the flag phases (BASE_PHASES) unless given."""
+        on_log = on_log or s2_log(audit=False, phases=True)
+        off_log = off_log or s2_log(on=False, round_ms=172.0, phases=True)
         audit_log = audit_log or s2_log()
         logs, factories = {}, {}
         for index in range(1, int(pairs) + 1):
             off_name, on_name = 'control-off-%d' % index, 'control-on-%d' % index
             mine = (on_logs or {}).get(on_name, on_log)
-            logs[off_name], logs[on_name] = off_log, mine
-            factories[off_name] = lambda n, t=off_texts: s2_arm_report(off_log, 'c2-gate', texts=t)
+            theirs = (off_logs or {}).get(off_name, off_log)
+            logs[off_name], logs[on_name] = theirs, mine
+            factories[off_name] = lambda n, text=theirs, t=off_texts: s2_arm_report(text, 'c2-gate', texts=t)
             factories[on_name] = lambda n, text=mine: s2_arm_report(text, 'c2-packed-gate', env=on_env)
         logs[driver.CONTROL_AUDIT_ARM] = audit_log
         factories[driver.CONTROL_AUDIT_ARM] = lambda n: s2_arm_report(audit_log, 'c2-packed-gate', env=audit_env)
-        return Driver(self).run(['--profile', 'c2-packed', '--plan', 'control', '--pairs', pairs], factories, logs,
-                                cache=cache)
+        return Driver(self).run(['--profile', 'c2-packed', '--plan', 'control', '--pairs', pairs] + list(extra),
+                                factories, logs, cache=cache)
 
     def test_an_abab_that_reproduces_v235_within_the_tolerance_passes(self):
         code, summary, calls, lines, _ = self.control()
@@ -905,31 +962,46 @@ class ControlDriverTests(unittest.TestCase):
         self.assertEqual([(p['pair'], p['on_ms'], p['off_ms'], p['ratio']) for p in result['pairs']],
                          [(1, 170.0, 172.0, 0.9884), (2, 170.0, 172.0, 0.9884)])
         self.assertEqual(result['audited'], dict(arm='control-audit', median_round_ms=172.0, median_audit_ms=2.0))
-        self.assertIn('pair 1: flag-off 172.0 ms, flag-on 170.0 ms (unaudited): 0.9884 x', result['lines'])
+        self.assertIn('pair 1: flag-off 172.0 ms, flag-on 170.0 ms (unaudited): 0.9884 x (net, at most 1.05)',
+                      result['lines'])
         self.assertEqual(result['arms']['control-audit']['verdict'], 'PASS')
         self.assertEqual(summary['policy'], 'strict')
         self.assertEqual(summary['s2_exit_blockers'], [])
+        # The primary: every round of both pairs paired, the same phases on both sides.
+        statistic = result['flag_phase']['statistic']
+        self.assertEqual((statistic['verdict'], statistic['rounds'], statistic['cost'], statistic['upper']),
+                         ('PASS', 24, 0.0, 0.0))
+        self.assertEqual((statistic['trimmed_low'], statistic['trimmed_high']), (2, 2))
+        self.assertEqual(os.path.basename(result['phase_record']), driver.CONTROL_PHASE_RECORD)
 
-    def test_a_slower_flag_on_round_fails(self):
-        code, summary, _, _, _ = self.control(on_log=s2_log(round_ms=180.0, audit=False))
+    def test_a_slower_flag_on_round_fails_the_net(self):
+        code, summary, _, _, _ = self.control(on_log=s2_log(round_ms=185.0, audit=False, phases=True))
         result = summary['results']['control']
         self.assertEqual((code, result['verdict']), (1, 'FAIL'))
-        self.assertIn('past 1.02', ' '.join(result['s2_problems']))
+        self.assertIn('the net', ' '.join(result['s2_problems']))
+        self.assertIn('past 1.05', ' '.join(result['s2_problems']))
+        self.assertEqual(result['flag_phase']['statistic']['verdict'], 'PASS', 'the flag phases are the same')
 
-    def test_the_tolerance_is_1_02_of_the_unaudited_round(self):
-        for round_ms, verdict in ((175.0, 'PASS'), (176.0, 'FAIL')):
+    def test_the_net_is_1_05_of_the_unaudited_round(self):
+        for round_ms, verdict in ((180.0, 'PASS'), (181.0, 'FAIL')):
             with self.subTest(round_ms=round_ms):
-                result = self.control(on_log=s2_log(round_ms=round_ms, audit=False), pairs='1')[1]['results']['control']
+                result = self.control(on_log=s2_log(round_ms=round_ms, audit=False, phases=True),
+                                      pairs='1')[1]['results']['control']
                 self.assertEqual(result['verdict'], verdict, result['lines'])
                 self.assertEqual(result['pairs'][0]['ratio'], round(round_ms / 172.0, 4))
 
     def test_the_audited_arm_is_never_timed(self):
-        # The audit lengthens its rounds past the ms its line reports; control-audit judges exactness only.
-        code, summary, _, _, _ = self.control(audit_log=s2_log(round_ms=200.0, audit_ms=9.0), pairs='1')
+        # The audit lengthens its rounds past the ms its line reports; control-audit judges exactness only - its flag
+        # phases, however slow, are never read.
+        slow = s2_log(round_ms=200.0, audit_ms=9.0, phases=lambda k: (dict(bookkeeping=40.0), ()))
+        code, summary, _, _, records = self.control(audit_log=slow, pairs='1')
         result = summary['results']['control']
         self.assertEqual((code, result['verdict']), (0, 'PASS'), result['lines'])
         self.assertEqual([p['ratio'] for p in result['pairs']], [0.9884])
         self.assertEqual(result['audited'], dict(arm='control-audit', median_round_ms=209.0, median_audit_ms=9.0))
+        statistic = result['flag_phase']['statistic']
+        self.assertEqual((statistic['cost'], statistic['rounds']), (0.0, 12))
+        self.assertEqual([pair['pair'] for pair in records[driver.CONTROL_PHASE_RECORD]['pairs']], [1])
 
     def test_a_timing_arm_that_ran_the_audit_fails(self):
         # Its round is not the flag's: the pair is refused, whichever way the audit got there.
@@ -943,7 +1015,8 @@ class ControlDriverTests(unittest.TestCase):
                               ' '.join(result['s2_problems']))
 
     def test_the_tolerance_must_hold_in_every_pair(self):
-        code, summary, _, _, _ = self.control(on_logs={'control-on-2': s2_log(round_ms=180.0, audit=False)})
+        code, summary, _, _, _ = self.control(on_logs={'control-on-2': s2_log(round_ms=185.0, audit=False,
+                                                                                 phases=True)})
         result = summary['results']['control']
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertEqual([p['pair'] for p in result['pairs']], [1, 2])
@@ -1039,6 +1112,276 @@ class ControlDriverTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertTrue(any('user 2: the capped arm is DIVERGED against the uncapped' in p and 'Q5' in p
                             for p in result['s2_problems']), result['s2_problems'])
+
+
+# G3's rule scenarios: a four-live round of ROUND_MS, BASE_F of it in the flag phases, of which the replay is device
+# time and the rest (HOST_IN_PHASES) host time, like the round outside the phases (HOST_OUTSIDE).
+HOST_IN_PHASES = BASE_F - BASE_PHASES['trace'] - BASE_PHASES['sync']
+HOST_OUTSIDE = ROUND_MS - BASE_F
+FEW_ROUNDS = (4, 11, 18, 25, 32)                  # 5 of 36
+
+
+def rule_log(on, rounds=36, offset=0.0, cost=None, outside=None, spikes=None, seed=0, drop=None, emitted=5):
+    """A timing arm: `rounds` four-live rounds with `offset` (a fraction: the arm's host slowdown - its round that
+    much longer, the host part of the flag phases taking its share), `cost(k)` ms inside the flag phases (the verify's
+    rest), `outside(k)` ms in the round outside them, `spikes` {k: ms} of host stalls inside the verify, a small fixed
+    jitter per round (`seed`), and `drop(k)` the round's flag-phase lines left out."""
+    share = offset * ROUND_MS * HOST_IN_PHASES / (HOST_IN_PHASES + HOST_OUTSIDE)
+
+    def inside(k):
+        return (cost(k) if cost else 0.0) + (spikes or {}).get(k, 0.0)
+
+    def phases(k):
+        jitter = (((k * 7 + seed) % 5) - 2) * 0.1
+        return (dict(bookkeeping=round(BASE_PHASES['bookkeeping'] + share + inside(k) + jitter, 1)),
+                drop(k) if drop else ())
+
+    def whole(k):
+        return ROUND_MS * (1 + offset) + inside(k) + (outside(k) if outside else 0.0) + (((k * 3 + seed) % 5) - 2)
+    return s2_log(on=on, audit=False, rounds=rounds, round_ms=whole, phases=phases, emitted=emitted)
+
+
+def rule_arms(off=None, on=None, **arms):
+    """The four timing arms of two pairs, each rule_log(**off) / rule_log(**on) with its own jitter, or as given."""
+    built = {}
+    for index in (1, 2):
+        built['control-off-%d' % index] = rule_log(False, seed=2 * index - 1, **(off or {}))
+        built['control-on-%d' % index] = rule_log(True, seed=2 * index, **(on or {}))
+    built.update(('control-%s' % name.replace('_', '-'), text) for name, text in arms.items())
+    return built
+
+
+def wide_cost(k):
+    """~1.8% of the round on average, spread +-8.75 ms (NOT_RESOLVED: c within 2%, its upper bound not)."""
+    return 3.0 + 0.5 * (((k * 13) % 36) - 17.5)
+
+
+class FlagPhaseRuleTests(unittest.TestCase):
+    """G3's pre-registered timing rule (c2_serving_gate's control): the flag phases paired round by round, the
+    trimmed-mean primary with its bootstrap bound, the untrimmed guard, the 1.05 net, the one pooled re-run."""
+
+    def rule(self, arms, extra=()):
+        """The control plan over `arms` (rule_arms); (code, result, records, lines)."""
+        off = dict((name, text) for name, text in arms.items() if '-off-' in name)
+        on = dict((name, text) for name, text in arms.items() if '-on-' in name)
+        code, summary, _, lines, records = ControlDriverTests.control(self, off_logs=off, on_logs=on, extra=extra)
+        return code, (summary or {}).get('results', {}).get('control'), records, lines
+
+    def statistic(self, result):
+        return result['flag_phase']['statistic']
+
+    # -- the phases, round by round --------------------------------------------------------------------------------
+    def test_each_phase_is_read_from_its_own_line(self):
+        values = dict(trace=119.5, sync=0.7, readback=0.9, diff=1.7, write=1.1, bookkeeping=2.0, commit=0.4, window=6.5)
+        rounds = driver.flag_phase_rounds(s2_log(on=False, rounds=3, phases=lambda k: (values, ())))
+        self.assertEqual(len(rounds), 3)
+        first, last = rounds[0], rounds[-1]
+        self.assertEqual(first['phases'], dict(replay=120.2, staging=2.8, readback=0.9, bookkeeping=2.0, commit=1.6,
+                                               window=6.5))
+        self.assertEqual((first['flag_ms'], first['round_ms'], first['missing']), (134.0, 170.0, []))
+        self.assertEqual(first['fingerprint'], [[0, 131072, 5], [1, 131072, 5], [2, 131072, 5], [3, 131072, 5]])
+        self.assertEqual(rounds[1]['fingerprint'][0], [0, 131077, 5])
+        # The last round's next step is not packed: nothing was pre-staged, and nothing is missing.
+        self.assertEqual((last['phases']['window'], last['flag_ms'], last['missing']), (0.0, 127.5, []))
+
+    def test_a_line_absent_or_repeated_leaves_its_round_unmeasured(self):
+        for drop, where in ((('fences',), 1), (('verify',), 1), (('split',), 0), (('commit',), 2), (('window',), 0)):
+            with self.subTest(drop=drop):
+                rounds = driver.flag_phase_rounds(s2_log(on=False, rounds=3, phases=lambda k: (
+                    {}, drop if k == where else ())))
+                self.assertIsNone(rounds[where]['flag_ms'])
+                self.assertTrue(rounds[where]['missing'])
+                self.assertEqual([r['missing'] for i, r in enumerate(rounds) if i != where], [[], []])
+        text = s2_log(on=False, rounds=3, phases=True)
+        window = [line for line in text.split('\n') if WINDOW_MARKER in line][0]
+        dropped = 'INFO %s round=2 dropped=epoch detail=-' % WINDOW_MARKER
+        for changed in (text.replace(window, dropped), text.replace(window, window + '\n' + window)):
+            self.assertTrue(driver.flag_phase_rounds(changed)[0]['missing'])
+        cut = text.split('\n')
+        last_step = max(i for i, line in enumerate(cut) if '[PHASE] execute total=' in line)
+        rounds = driver.flag_phase_rounds('\n'.join(cut[:last_step] + cut[last_step + 1:]))
+        self.assertEqual(rounds[-1]['missing'], ['its whole round (no timed decode step after it)'])
+
+    def test_the_pre_registered_constants(self):
+        self.assertEqual((driver.CONTROL_RULE, driver.CONTROL_COST_LIMIT, driver.CONTROL_TRIM_PERCENT,
+                          driver.CONTROL_BOUND_PERCENT, driver.CONTROL_BOOTSTRAP, driver.CONTROL_SEED,
+                          driver.CONTROL_NET_TOLERANCE),
+                         ('g3-flag-phase-2026-09-28', 0.02, 10, 95, 10000, 20260928, 1.05))
+
+    def test_the_trim_the_bootstrap_and_its_bound(self):
+        self.assertEqual([driver.trimmed_mean(list(range(n)))[1] for n in (9, 10, 36, 72, 144)], [0, 1, 3, 7, 14])
+        self.assertEqual(driver.trimmed_mean([100.0] + [1.0] * 8 + [-50.0]), (1.0, 1))
+        rounds = [(wide_cost(k), 165.0 + k % 3) for k in range(36)]
+        once, again = driver.flag_phase_cost(rounds, resamples=200), driver.flag_phase_cost(rounds, resamples=200)
+        self.assertEqual(once, again, 'a fixed seed: the same bound every time')
+        rng, draws = random.Random(driver.CONTROL_SEED), []
+        for _ in range(200):
+            sample = [rounds[int(rng.random() * 36)] for _ in range(36)]
+            draws.append(driver.trimmed_mean([d for d, _ in sample])[0] / statistics.median([w for _, w in sample]))
+        self.assertEqual(once['upper'], round(sorted(draws)[189], 6), 'the 95th percentile: draw 190 of 200')
+        self.assertEqual((once['trimmed_low'], once['trimmed_high'], len(once['trimmed_high_ms'])), (3, 3, 3))
+
+    # -- the scenarios the rule was approved against ---------------------------------------------------------------
+    def test_a_0_4_percent_flag_cost_with_3_percent_arm_offsets_and_host_spikes_passes(self):
+        flag = lambda k: 0.7                                                    # 0.42% of the round
+        early, late = {3: 40.0, 20: 90.0}, {9: 90.0, 27: 40.0}                   # host stalls in every arm
+        arms = rule_arms(off_1=rule_log(False, spikes=early, seed=1),
+                         on_1=rule_log(True, offset=0.03, cost=flag, spikes=late, seed=2),
+                         off_2=rule_log(False, offset=0.03, spikes=late, seed=3),
+                         on_2=rule_log(True, cost=flag, spikes=early, seed=4))
+        code, result, records, lines = self.rule(arms)
+        self.assertEqual((code, result['verdict']), (0, 'PASS'), result['lines'])
+        statistic = self.statistic(result)
+        self.assertEqual((statistic['verdict'], statistic['rounds'], statistic['trimmed_low']), ('PASS', 72, 7))
+        self.assertTrue(0.003 < statistic['cost'] < 0.006 and statistic['upper'] <= 0.02, statistic)
+        self.assertEqual([p['ratio'] for p in result['pairs']], [1.0333, 0.9735])
+        self.assertTrue(any('7 rounds trimmed from each tail' in line for line in result['lines']), result['lines'])
+        record = records[driver.CONTROL_PHASE_RECORD]
+        self.assertEqual((record['plan_verdict'], record['timing_verdict'], record['pooled']), ('PASS', 'PASS', False))
+        self.assertEqual([len(pair['rounds']) for pair in record['pairs']], [36, 36])
+
+    def test_a_3_percent_uniform_cost_inside_the_phases_fails(self):
+        code, result, _, _ = self.rule(rule_arms(on=dict(cost=lambda k: 5.0)))
+        self.assertEqual((code, result['verdict']), (1, 'FAIL'))
+        self.assertTrue(self.statistic(result)['cost'] > 0.02)
+        self.assertIn('the flag phases: c 3.0', ' '.join(result['s2_problems']))
+
+    def test_a_3_percent_cost_on_5_of_36_rounds_fails_on_the_untrimmed_mean(self):
+        # The trim's known hole: a cost in few rounds is trimmed away. On 5 rounds of every pair the trimmed c is
+        # 1.1% (its bound past 2%: NOT_RESOLVED alone); on 5 rounds of one pair it is ~0 (a PASS alone).
+        both = lambda k: 35.6 if k in FEW_ROUNDS else 0.0                       # 3% of every pair's rounds
+        one = lambda k: 71.3 if k in FEW_ROUNDS else 0.0                        # 3% of both pairs' rounds
+        for arms, trimmed_alone in ((rule_arms(on=dict(cost=both)), 'NOT_RESOLVED'),
+                                    (rule_arms(on_1=rule_log(True, cost=one, seed=2)), 'PASS')):
+            with self.subTest(trimmed_alone=trimmed_alone):
+                code, result, _, _ = self.rule(arms)
+                self.assertEqual((code, result['verdict']), (1, 'FAIL'))
+                statistic = self.statistic(result)
+                self.assertTrue(statistic['untrimmed'] > 0.02 and statistic['cost'] <= 0.02, statistic)
+                self.assertEqual('PASS' if statistic['upper'] <= 0.02 else 'NOT_RESOLVED', trimmed_alone)
+                self.assertIn('the untrimmed cost', ' '.join(result['s2_problems']))
+
+    def test_a_6_percent_cost_outside_the_phases_fails_by_the_net(self):
+        code, result, _, _ = self.rule(rule_arms(on=dict(outside=lambda k: 0.06 * ROUND_MS)))
+        self.assertEqual((code, result['verdict']), (1, 'FAIL'))
+        self.assertEqual(self.statistic(result)['verdict'], 'PASS', 'the flag phases never see it')
+        self.assertEqual([p['ratio'] for p in result['pairs']], [1.0606, 1.0606])
+        self.assertEqual(len([p for p in result['s2_problems'] if 'the net' in p and 'past 1.05' in p]), 2)
+
+    def test_host_stalls_on_the_flag_on_arms_alone_fail_the_untrimmed_guard(self):
+        # What calibration found (runs 36270917139, 36272682217, 36276533585): log-write stalls of 0.1-1.1 s inside
+        # ~10% of the verifies, in either arm. The trim drops them; the untrimmed mean does not - so stalls that happen
+        # to fall on the flag-on arms FAIL a flag that costs nothing. Pinned here as the rule's behaviour.
+        stalls = {2: 135.0, 8: 190.0, 14: 1100.0, 24: 90.0}
+        code, result, _, _ = self.rule(rule_arms(on=dict(spikes=stalls)))
+        statistic = self.statistic(result)
+        self.assertEqual((code, result['verdict']), (1, 'FAIL'))
+        self.assertTrue(statistic['cost'] < 0.02 < statistic['untrimmed'], statistic)
+
+    # -- what is not judged -------------------------------------------------------------------------------------
+    def test_mismatched_rounds_are_not_comparable(self):
+        code, result, records, _ = self.rule(rule_arms(on_2=rule_log(True, emitted=4, seed=4)))
+        self.assertEqual((code, result['verdict']), (1, 'NOT_COMPARABLE'), result['lines'])
+        self.assertTrue(any(line.startswith('pair 2: NOT_COMPARABLE - four-live packed round 0 is') for line in
+                            result['lines']), result['lines'])
+        self.assertEqual(records[driver.CONTROL_PHASE_RECORD]['plan_verdict'], 'NOT_COMPARABLE')
+        self.assertFalse(result['flag_phase']['decided'], 'pair 1 alone is not the paired set')
+        self.assertTrue(any('not decided (the paired set is not complete; it would read PASS)' in line
+                            for line in result['lines']), result['lines'])
+
+    def test_short_or_untimed_rounds_are_a_shortfall_never_a_pass(self):
+        cut = rule_log(True, seed=2).split('\n')
+        last_step = max(i for i, line in enumerate(cut) if '[PHASE] execute total=' in line)
+        for label, on_1 in (('short', rule_log(True, rounds=30, seed=2)),
+                            ('untimed', '\n'.join(cut[:last_step] + cut[last_step + 1:])),
+                            ('no rounds', s2_log(audit=False, packed=False))):
+            with self.subTest(label=label):
+                code, result, _, _ = self.rule(rule_arms(on_1=on_1))
+                self.assertIn(result['verdict'], ('NOT_EXERCISED', 'FAIL'), result['lines'])
+                self.assertNotEqual(code, 0)
+                self.assertTrue(any(s.startswith('pair 1: ') for s in result['shortfalls']), result['shortfalls'])
+        code, result, _, _ = self.rule(rule_arms(on_1=rule_log(True, rounds=30, seed=2)))
+        self.assertEqual(result['verdict'], 'NOT_EXERCISED')
+        self.assertIn('pair 1: the flag-off arm has 36 four-live packed rounds and the flag-on arm 30: only 30 pair',
+                      result['shortfalls'])
+
+    def test_a_phase_absent_from_a_log_is_a_shortfall_never_a_pass(self):
+        for label, drop in (('every [PACKED-FENCES] line', lambda k: ('fences',)),
+                            ('one due window pre-stage', lambda k: ('window',) if k == 7 else ())):
+            with self.subTest(label=label):
+                code, result, _, _ = self.rule(rule_arms(on_2=rule_log(True, seed=4, drop=drop)))
+                self.assertEqual((code, result['verdict']), (1, 'NOT_EXERCISED'), result['lines'])
+                self.assertTrue(any('not measured whole' in s for s in result['shortfalls']), result['shortfalls'])
+                self.assertEqual(result['flag_phase']['verdict'], 'NOT_EXERCISED')
+
+    def test_the_breakdowns_and_the_a_a_contrast_are_recorded_not_judged(self):
+        # Pair 2's arms both 3% slower on the host: the A/A read (off-2 - off-1) shows it, the pairs do not.
+        code, result, _, _ = self.rule(rule_arms(off_2=rule_log(False, offset=0.03, seed=3),
+                                                 on_2=rule_log(True, offset=0.03, seed=4)))
+        self.assertEqual((code, result['verdict']), (0, 'PASS'), result['lines'])
+        flag_phase = result['flag_phase']
+        aa, = flag_phase['aa']
+        self.assertEqual((aa['arms'], aa['rounds']), ('control-off-2 - control-off-1', 36))
+        self.assertTrue(aa['phases']['bookkeeping']['trimmed_mean_ms'] > 1.0, aa)
+        self.assertEqual(sorted(flag_phase['phases']), sorted(driver.FLAG_PHASES + ('flag_ms',)))
+        self.assertEqual([entry['pair'] for entry in flag_phase['pairs']], [1, 2])
+        self.assertTrue(any(line.startswith('A/A control-off-2 - control-off-1: 36 rounds') for line in result['lines']))
+
+    # -- NOT_RESOLVED and the one re-run ---------------------------------------------------------------------------
+    def pooled(self, first, second_arms, extra=()):
+        """The re-run of `first` (a phase record) on `second_arms`, pooled: (code, result, records, lines)."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, driver.CONTROL_PHASE_RECORD)
+            with open(path, 'w', encoding='utf-8') as handle:
+                json.dump(first, handle)
+            return self.rule(second_arms, extra=['--control-pool', path] + list(extra))
+
+    def test_not_resolved_asks_for_exactly_one_pooled_re_run(self):
+        code, result, records, _ = self.rule(rule_arms(on=dict(cost=wide_cost)))
+        statistic = self.statistic(result)
+        self.assertEqual((code, result['verdict']), (1, 'NOT_RESOLVED'), result['lines'])
+        self.assertTrue(statistic['cost'] <= 0.02 < statistic['upper'] and statistic['untrimmed'] <= 0.02, statistic)
+        self.assertTrue(any('exactly one re-run of this plan, decided on both runs pooled' in line
+                            for line in result['lines']), result['lines'])
+        self.assertFalse(result['flag_phase']['escalate'])
+        record = records[driver.CONTROL_PHASE_RECORD]
+        self.assertEqual((record['rule'], record['plan_verdict'], record['pooled']),
+                         (driver.CONTROL_RULE, 'NOT_RESOLVED', False))
+
+    def test_the_one_re_run_is_decided_on_both_runs_pooled(self):
+        first = self.rule(rule_arms(on=dict(cost=wide_cost)))[2][driver.CONTROL_PHASE_RECORD]
+        code, result, records, _ = self.pooled(first, rule_arms(on=dict(cost=lambda k: 0.7)))
+        self.assertEqual((code, result['verdict']), (0, 'PASS'), result['lines'])
+        self.assertEqual(self.statistic(result)['rounds'], 144)
+        self.assertTrue(records[driver.CONTROL_PHASE_RECORD]['pooled'])
+        code, result, records, _ = self.pooled(first, rule_arms(on=dict(cost=wide_cost)))
+        self.assertEqual((code, result['verdict']), (1, 'NOT_RESOLVED'), result['lines'])
+        self.assertTrue(result['flag_phase']['escalate'])
+        self.assertTrue(any('escalate to the user - no further re-run' in line for line in result['lines']))
+        # The pooled record can never be pooled again.
+        code, result, _, lines = self.pooled(records[driver.CONTROL_PHASE_RECORD], rule_arms())
+        self.assertEqual((code, result), (2, None))
+        self.assertTrue(any('the one re-run is spent' in line for line in lines), lines)
+
+    def test_what_the_re_run_refuses(self):
+        passed = self.rule(rule_arms())[2][driver.CONTROL_PHASE_RECORD]
+        unresolved = self.rule(rule_arms(on=dict(cost=wide_cost)))[2][driver.CONTROL_PHASE_RECORD]
+        for label, record, extra, why in (
+                ('a run that was not NOT_RESOLVED', passed, (), 'only an unresolved run is re-run'),
+                ('another rule', dict(unresolved, rule='g3-whole-round'), (), 'was judged under rule'),
+                ('another plan shape', unresolved, ('--pairs', '1'), 'carries 2 timed pairs, not this plan\'s 1')):
+            with self.subTest(label=label):
+                code, result, _, lines = self.pooled(record, rule_arms(), extra=extra)
+                self.assertEqual((code, result), (2, None))
+                self.assertTrue(any(why in line for line in lines), lines)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'first.json')
+            with open(path, 'w', encoding='utf-8') as handle:
+                json.dump(unresolved, handle)
+            code, summary, calls, lines, _ = Driver(self).run(['--profile', 'c2-packed', '--plan', 'forced-cap',
+                                                               '--control-pool', path], {}, {})
+        self.assertEqual((code, calls), (2, []))
+        self.assertTrue(any('run no control' in line for line in lines), lines)
 
 
 class BelowDriverTests(unittest.TestCase):
@@ -1615,11 +1958,11 @@ class HostCheckTests(unittest.TestCase):
         self.assertNotIn('kernel_cache', summary['arms']['bringup-concurrent'])
         self.assertNotIn('kernel_cache', summary)
         looked, summary = self.main_run(['--profile', 'c2-packed', '--plan', 'control', '--pairs', '1'], {
-            'control-off-1': lambda n: s2_arm_report(s2_log(on=False, round_ms=172.0), 'c2-gate'),
-            'control-on-1': lambda n: s2_arm_report(s2_log(audit=False), 'c2-packed-gate'),
+            'control-off-1': lambda n: s2_arm_report(s2_log(on=False, round_ms=172.0, phases=True), 'c2-gate'),
+            'control-on-1': lambda n: s2_arm_report(s2_log(audit=False, phases=True), 'c2-packed-gate'),
             'control-audit': lambda n: s2_arm_report(s2_log(), 'c2-packed-gate', env=((AUDIT, '1'),))},
-            {'control-off-1': s2_log(on=False, round_ms=172.0), 'control-on-1': s2_log(audit=False),
-             'control-audit': s2_log()})
+            {'control-off-1': s2_log(on=False, round_ms=172.0, phases=True),
+             'control-on-1': s2_log(audit=False, phases=True), 'control-audit': s2_log()})
         self.assertEqual(looked, ['zot/img:s2'])
         self.assertEqual(summary['arms']['control-on-1']['kernel_cache'], dict(before=100, after=100, added=0,
                                                                                 judged=True))
@@ -1676,6 +2019,38 @@ class ProducerContractTests(unittest.TestCase):
                          PHASE_EXECUTE_FORMAT)
         line = PHASE_EXECUTE_FORMAT.format(64, 0, 4, 60, sorted(['cmpl-b-0-x', 'cmpl-a-0-y']), [])
         self.assertEqual(gate.finished_ids(gate.PHASE_FINISHED.search(line).group(1)), ['cmpl-a-0-y', 'cmpl-b-0-x'])
+
+    def test_the_flag_phase_lines(self):
+        # G3's flag phases (c2_serving_gate.FLAG_PHASES): each producer's own format, and the gate reads what it renders.
+        import packed_verifier
+        import serving_packed_step
+        import serving_worker_hook
+        import verify_prestage
+        self.assertEqual(source_literal(serving_worker_hook.phase, '[PHASE] {} {} end'), PHASE_END_FORMAT)
+        verify = re.sub(r"'\s*\n\s*'", '', inspect.getsource(packed_verifier.PackedVerifierEngine.verify))
+        self.assertIn("'%s'" % VERIFY_SPLIT_FORMAT, verify)
+        self.assertEqual(serving_packed_step.FENCES_LINE, FENCES_FORMAT)
+        self.assertEqual((verify_prestage.WINDOW_MARKER, source_literal(verify_prestage.BlockPrestage.prestage,
+                                                                        '%s round=%d buffers=')),
+                         (WINDOW_MARKER, WINDOW_FORMAT))
+        fields = serving_packed_step.fences_fields(
+            dict(replay_fence='replay', replay_fence_ms=0.06, validated_this_round=True,
+                 prestage=dict(path='diff', prestage_ms=5.9, diff_ms=1.62, write_ms=0.48)),
+            types.SimpleNamespace(rounds=36, commit_block_ms=[0.0, 0.0, 0.0, 0.01]), [3, 2, 1, 0])
+        ids = ','.join(engine_id(user) for user in range(4))
+        stretch = [execute_line(0.0, 4)] + ['INFO [PACKED] request=%s segment=%d position=131072 prefix=1 emitted=1'
+                                            % (engine_id(user), user) for user in range(4)] + [
+            'INFO ' + VERIFY_SPLIT_FORMAT % (36, 4, 0.0, 2.23, 119.53, 0.62, 3.23),
+            'INFO ' + PHASE_END_FORMAT.format('packed_verify', ids, 126.1)] + [
+            'INFO ' + PHASE_END_FORMAT.format('packed_commit', engine_id(user), 0.3) for user in range(4)] + [
+            'INFO ' + serving_packed_step.FENCES_LINE.format(**fields),
+            'INFO ' + WINDOW_FORMAT % (verify_prestage.WINDOW_MARKER, 37, 144, 5.8, 4),
+            execute_line(0.165, 4)]
+        found, = driver.flag_phase_rounds('\n'.join(stretch))
+        self.assertEqual(found['missing'], [])
+        self.assertEqual(found['phases'], dict(replay=120.15, staging=2.1, readback=3.23, bookkeeping=0.62, commit=1.2,
+                                               window=5.8))
+        self.assertEqual((found['flag_ms'], found['round_ms']), (133.1, 165.0))
 
     def test_the_prefill_admission_decision_line(self):
         import serving_prefill_admission
