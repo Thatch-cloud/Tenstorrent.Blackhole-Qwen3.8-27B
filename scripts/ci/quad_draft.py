@@ -703,8 +703,7 @@ def read_quad_outputs(device, outputs):
     slice reads), and split with split_selection(block_width=64): four users' (features, candidates, scores)."""
     import torch
 
-    from dflash_packed_proposal import split_selection
-    from draft_shared_head import merge_chunk_candidates
+    from dflash_packed_proposal import merged_candidates, split_selection
 
     operations = device.operations
     halves = ([], [])
@@ -720,7 +719,8 @@ def read_quad_outputs(device, outputs):
                 rows = slice(32 * half, 32 * (half + 1))
                 halves[half].append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
                                          values=host_values[rows], indices=host_indices[rows]))
-    merged = [merge_chunk_candidates(list(part), block_rows=32) for part in halves]
+    # S2 v86: a refused half is reported per chip (dflash_packed_proposal.REJECTED_OUTPUTS_LINE) and raised unchanged.
+    merged = [merged_candidates(device, outputs, list(part), block_rows=32) for part in halves]
     candidates = torch.cat([merged[0][0], torch.zeros_like(merged[0][0][:, :1]), merged[1][0]], dim=1)
     unary = torch.cat([merged[0][1], torch.zeros_like(merged[0][1][:, :1]), merged[1][1]], dim=1)
     parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
@@ -833,7 +833,7 @@ class PreparedQuadDFlashProposal:
             self.last_built = False
             return bucket
         from dflash_packed_proposal import packed_identifiers
-        from dflash_proposal_trace import borrow_pooled_mask
+        from dflash_proposal_trace import borrow_pooled_mask, pool_outputs, traced_pass
         from gdn_multitoken_conv import addresses, release_owned
 
         operations, device = self.operations, self.devices[0]
@@ -865,7 +865,10 @@ class PreparedQuadDFlashProposal:
             self._update(bucket, (0,) * USERS)
             transient, retain = device.temporaries(self._protected(bucket))
             try:
-                self._execute(bucket, transient, retain)
+                warm = self._execute(bucket, transient, retain)
+                # S2 v86: the pool's output set for slots 0-3 (dflash_proposal_trace.POOLED_OUTPUTS_LINE), which
+                # every pass then ends by copying into; None without one, and the quad reads its own as before.
+                pooled = pool_outputs(device, self.pair_label(), warm, operations, log=log_line)
                 operations.synchronize_device(self.mesh)
             finally:
                 release_owned(operations, transient)
@@ -873,7 +876,7 @@ class PreparedQuadDFlashProposal:
             from attention_batch import capture_operation
 
             bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
-                lambda: self._execute(bucket, bucket.owned, retain))
+                lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain), pooled))
             operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
             note(self.pair_label(), self.quad.sdpa, self.quad.conv)
             import memory_ledger

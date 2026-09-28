@@ -84,6 +84,47 @@ def pooled_draft_mask_shapes(users, block_rows):
     return shapes
 
 
+# What a draft pass's head leaves per candidate chunk (draft_shared_head: top-16 values and indices) and the width
+# of its selector projection (dflash_device.execute_proposal): the pooled output shapes' last dimensions.
+TOP_CANDIDATES = 16
+SELECTOR_WIDTH = 256
+# A single-user pass pads its block to the 32-row pass before the selector projection (execute_proposal).
+PASS_ROWS = 32
+
+
+def pooled_draft_output_shapes(users, block_rows):
+    """S2 v86 (serving_buffer_pool's `draft_outputs=`, which serving_runtime passes at attach under
+    QWEN_FAST_EXTENT_REPLAY=1): {slot group: dict(chunks=, head=, projected=)} for every traced draft a pool of
+    `users` scheduler slots can build - each slot's single-user draft (its head at block_rows rows, the projection
+    at the 32-row pass), and, with QWEN_FAST_PACKED_PROPOSAL on, each fixed pair whose slots all exist (the 32-row
+    block) and the quad over slots 0-3 (64 rows) while QWEN_FAST_QUAD_DRAFT is on - so every trace copies its head
+    outputs into buffers allocated before any trace, which no other trace's replay can write (run 36416471352: a
+    fresh pair's outputs sat in an older single-user trace's holes, and its replay, later in the same round,
+    overwrote them before the read). The chunks are draft_shared_head.candidate_chunks()."""
+    from draft_shared_head import candidate_chunks
+
+    chunks = tuple(candidate_chunks())
+
+    def spec(head_rows, projected_rows):
+        return dict(chunks=chunks, head=(1, 1, head_rows, TOP_CANDIDATES),
+                    projected=(1, 1, projected_rows, SELECTOR_WIDTH))
+
+    shapes = {(slot,): spec(block_rows, max(block_rows, PASS_ROWS)) for slot in range(users)}
+    if os.environ.get('QWEN_FAST_PACKED_PROPOSAL') != '1':
+        return shapes
+    from dflash_packed_proposal import BLOCK_WIDTH, FOUR_AS_TWO_PAIRS
+
+    for group in FOUR_AS_TWO_PAIRS:
+        if max(group) < users:
+            shapes[tuple(group)] = spec(BLOCK_WIDTH, BLOCK_WIDTH)
+    if os.environ.get(QUAD_DRAFT_FLAG, '0') != '0':
+        import quad_draft
+
+        if max(quad_draft.SLOTS) < users and block_rows == quad_draft.BLOCK:
+            shapes[tuple(quad_draft.SLOTS)] = spec(quad_draft.ROWS, quad_draft.ROWS)
+    return shapes
+
+
 DRAM_RESERVE_FLAG = 'QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB'
 DRAM_RESERVE_DEFAULT_MB = 256
 

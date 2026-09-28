@@ -1050,7 +1050,15 @@ class DFlashDevice:
                 host_chunks.append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
                     values=operations.to_torch(values[chip]).float().reshape(self.block_rows, 16),
                     indices=operations.to_torch(indices[chip]).long().reshape(self.block_rows, 16)))
-        candidates, unary = merge_chunk_candidates(host_chunks, block_rows=self.block_rows)
+        try:
+            candidates, unary = merge_chunk_candidates(host_chunks, block_rows=self.block_rows)
+        except ValueError as failure:
+            # S2 v86 (run 36416471352): what the read held, per chip (dflash_packed_proposal.REJECTED_OUTPUTS_LINE),
+            # then the same error.
+            from dflash_packed_proposal import report_rejected_outputs
+
+            report_rejected_outputs(self, outputs, host_chunks, failure)
+            raise
         projected_parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
         if len(projected_parts) != 2 or not torch.equal(*projected_parts):
             # Runs 35478872085 and 35479238722 both died here on the third block of

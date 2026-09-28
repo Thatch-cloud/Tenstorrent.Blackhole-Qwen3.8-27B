@@ -358,6 +358,15 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             from dflash_packed_proposal_coordinator import pooled_draft_mask_shapes
 
             draft_masks = pooled_draft_mask_shapes(policy['scheduler_requests'], 16)
+        # S2 v86 (run 36416471352): every traced draft's head outputs - each slot's single-user draft, each fixed
+        # pair's and the quad's - copied at the end of its pass into a set allocated with the pool before any trace,
+        # so no other trace's replay can write what the round reads back (serving_buffer_pool's last section).
+        # Flag off, no keyword at all.
+        draft_outputs = {}
+        if extent_replay:
+            from dflash_packed_proposal_coordinator import pooled_draft_output_shapes
+
+            draft_outputs = pooled_draft_output_shapes(policy['scheduler_requests'], 16)
         pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'],
             helpers=helpers, page_width=page_width, bucket_rows=bucket_rows,
             feature_taps=len(TARGET_TAPS), rope=rope,
@@ -366,7 +375,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}),
                 # S2: the extent storage in place of the per-family tables; flag off, no keyword at all.
                 **({'extent_replay': True} if extent_replay else {}))),
-            **({'draft_masks': draft_masks} if draft_masks else {}))
+            **({'draft_masks': draft_masks} if draft_masks else {}),
+            **({'draft_outputs': draft_outputs} if draft_outputs else {}))
         scopes.callback(pool.close)
         if extent_replay:
             # The pool must hold the extent storage the S2 block keys on (design W2: without it the block

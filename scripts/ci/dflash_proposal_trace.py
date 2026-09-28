@@ -103,6 +103,113 @@ def borrow_pooled_mask(device, group, host_mask, operations, mesh, *, log=None):
     return held
 
 
+# S2 v86 (run 36416471352; serving_buffer_pool's last section, draft_outputs=): a traced draft pass - single-user,
+# pair or quad - leaves its head outputs (per candidate chunk the top-16 values and indices, and the selector
+# projection) in tensors its capture allocated, and the round reads them only after its one fence. A capture that
+# runs after another trace's can be given that trace's freed holes for them, and the older trace's replay, enqueued
+# later in the same round, writes over them first: v86's G5 churn read a fresh pair [0, 1]'s top-16 as invalid the
+# first round it replayed ahead of slot 2's older single-user trace. With a pool that holds an output set for the
+# draft's slots (allocated at attach, before any trace), the draft ends every pass by copying its outputs into it
+# (publish_outputs, recorded in the trace) and hands the pooled set to every reader, so no replay order matters.
+# The warm-up before the capture copies once too, which compiles the copies (a capture compiles nothing) and is
+# where a set that cannot take the outputs, or a copy the runtime refuses, is found: POOLED_OUTPUTS_REFUSED_LINE,
+# and the trace reads its own outputs as before. One POOLED_OUTPUTS_LINE per draft build that pools. No pool, or a
+# pool without output sets: nothing here runs.
+POOLED_OUTPUTS_LINE = '[PINDIAG] draft outputs pooled slots=[%s] head=%s projected=%s'
+POOLED_OUTPUTS_REFUSED_LINE = '[PINDIAG] draft outputs pooled refused slots=[%s]: %s'
+OUTPUT_TENSOR_KEYS = ('values', 'indices')
+
+
+def _shape_text(tensor):
+    return 'x'.join(str(size) for size in tuple(tensor.shape))
+
+
+def outputs_mismatch(outputs, held):
+    """Why the pooled set `held` cannot take a draft pass's head `outputs` - the candidate chunks differ, or one
+    tensor's shape, dtype or layout (ttnn.copy copies into a preallocated tensor of the same shape and layout, and
+    only a same-dtype copy is a plain copy) - or None when it can."""
+    mine = [(chunk['start'], chunk['stop']) for chunk in outputs.chunks]
+    theirs = [(chunk['start'], chunk['stop']) for chunk in held.chunks]
+    if mine != theirs:
+        return 'candidate chunks %s, the pool holds %s' % (mine, theirs)
+    pairs = [('%s%d' % (key, number), chunk[key], pooled[key])
+             for number, (chunk, pooled) in enumerate(zip(outputs.chunks, held.chunks))
+             for key in OUTPUT_TENSOR_KEYS]
+    pairs.append(('projected', outputs.projected, held.projected))
+    for name, source, destination in pairs:
+        if tuple(source.shape) != tuple(destination.shape):
+            return '%s shape %s, the pool holds %s' % (name, _shape_text(source), _shape_text(destination))
+        for attribute in ('dtype', 'layout'):
+            if getattr(source, attribute) != getattr(destination, attribute):
+                return '%s %s %s, the pool holds %s' % (name, attribute, getattr(source, attribute),
+                                                         getattr(destination, attribute))
+    return None
+
+
+def borrow_pooled_outputs(device, group, outputs, *, log=None):
+    """The pool's pre-trace head-output set for `group` (the draft's pool slots) when it can take `outputs` (the
+    warm-up's head outputs, whose shapes, dtypes and layouts the capture repeats), else None - the trace then reads
+    its own outputs, as before. Logs POOLED_OUTPUTS_REFUSED_LINE when a pool that pools outputs cannot serve."""
+    pool = getattr(getattr(device, 'pool_slot', None), 'pool', None)
+    lend = getattr(pool, 'draft_output', None)
+    if not callable(lend):
+        return None
+    log = _log_line if log is None else log
+    group = tuple(group)
+    label = ','.join(str(slot) for slot in group)
+    held = lend(group)
+    if held is None:
+        pooled = getattr(pool, 'draft_outputs', None)
+        if pooled:
+            log(POOLED_OUTPUTS_REFUSED_LINE % (label, 'the pool holds sets for %s' % sorted(
+                list(key) for key in pooled)))
+        return None
+    reason = outputs_mismatch(outputs, held)
+    if reason is not None:
+        log(POOLED_OUTPUTS_REFUSED_LINE % (label, reason))
+        return None
+    return held
+
+
+def publish_outputs(operations, outputs, held):
+    """A draft pass's head outputs copied into the pooled set `held`, and the pooled set returned (as a fresh
+    namespace over the pool's tensors) for every reader to read. The copy is ttnn.copy into a preallocated tensor,
+    the in-trace copy fused_commit.FusedCommit.project (the deltas) and mtp_hidden_rows (its destination) already
+    capture into persistent buffers."""
+    for chunk, pooled in zip(outputs.chunks, held.chunks):
+        for key in OUTPUT_TENSOR_KEYS:
+            operations.copy(chunk[key], pooled[key])
+    operations.copy(outputs.projected, held.projected)
+    return SimpleNamespace(projected=held.projected, chunks=[dict(chunk) for chunk in held.chunks])
+
+
+def pool_outputs(device, group, warm, operations, *, log=None):
+    """At a draft build, after its eager warm-up (`warm`: its head outputs) and before its capture: the pooled set
+    for `group` with the warm-up's outputs copied in once - which compiles the copies the capture records - or
+    None, and the trace reads its own outputs. A copy the runtime refuses is a refusal (logged), never the build's
+    failure."""
+    held = borrow_pooled_outputs(device, group, warm, log=log)
+    if held is None:
+        return None
+    log = _log_line if log is None else log
+    label = ','.join(str(slot) for slot in tuple(group))
+    try:
+        publish_outputs(operations, warm, held)
+    except Exception as failure:  # noqa: BLE001 - refused, logged; the trace keeps its own outputs
+        log(POOLED_OUTPUTS_REFUSED_LINE % (label, 'copy refused: %s: %s' % (type(failure).__name__,
+                                                                            str(failure)[:160])))
+        return None
+    log(POOLED_OUTPUTS_LINE % (label, _shape_text(held.chunks[0]['values']), _shape_text(held.projected)))
+    return held
+
+
+def traced_pass(operations, execute, pooled):
+    """What a draft capture records: its pass (`execute()`), then - when the build pooled its outputs - the copies
+    into the pooled set, whose namespace the capture returns as the bucket's outputs."""
+    outputs = execute()
+    return outputs if pooled is None else publish_outputs(operations, outputs, pooled)
+
+
 def pair_host_mask(context_a, context_b, block_rows):
     """A pair bucket's host mask at these contexts, validated as the bucket validates it, and whether the bucket
     folds (QWEN_FAST_PAIR_ROW_EXACT). serving_runtime asks it for the shape the pool holds for the pairs."""
@@ -174,17 +281,25 @@ class PreparedDFlashProposal:
                     bucket.inputs.extend(value for layer in bucket.cached_history for value in layer.values())
                 bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
                 self.buckets[context] = bucket
+            # S2 v86: the pool's output set for this slot (POOLED_OUTPUTS_LINE), borrowed at the first bucket's
+            # warm-up; every bucket's pass then ends by copying into it. None without one: today's outputs.
+            pooled, asked = None, False
             for bucket in self.buckets.values():
                 self.update(bucket, 0)
                 transient, retain = device.temporaries([*device.owned, *self.owned])
                 try:
-                    self.execute(bucket, transient, retain)
+                    warm = self.execute(bucket, transient, retain)
+                    if not asked:
+                        asked = True
+                        pooled = pool_outputs(device, (_slot_of(device),), warm, operations)
+                    elif pooled is not None:
+                        publish_outputs(operations, warm, pooled)
                     operations.synchronize_device(self.mesh)
                 finally:
                     release_owned(operations, transient)
                 bucket.owned, retain = device.temporaries([*device.owned, *self.owned])
                 bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
-                    lambda: self.execute(bucket, bucket.owned, retain))
+                    lambda: traced_pass(operations, lambda: self.execute(bucket, bucket.owned, retain), pooled))
                 operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
         except BaseException:
             self.close()
@@ -562,14 +677,16 @@ class PreparedPackedDFlashProposal:
             transient, retain = device.temporaries([device.history, device.spare_history,
                 self.device_b.history, self.device_b.spare_history, *self.owned, *lent])
             try:
-                self._execute(bucket, transient, retain)
+                warm = self._execute(bucket, transient, retain)
+                # S2 v86: the pool's output set for the pair's slots (POOLED_OUTPUTS_LINE); None without one.
+                pooled = pool_outputs(device, self.pair_label(), warm, operations)
                 operations.synchronize_device(self.mesh)
             finally:
                 release_owned(operations, transient)
             bucket.owned, retain = device.temporaries([device.history, device.spare_history,
                 self.device_b.history, self.device_b.spare_history, *self.owned, *lent])
             bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
-                lambda: self._execute(bucket, bucket.owned, retain))
+                lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain), pooled))
             operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
             if row_exact:
                 from pair_row_exact import note

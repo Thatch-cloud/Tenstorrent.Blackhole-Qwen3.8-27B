@@ -122,6 +122,22 @@ pair [2, 3] wrong on both chips right after the run's first sequential round, 20
 trace borrows it (`draft_mask(group, shape)`), copies its host mask in at the build, and never frees
 it; a later trace of the same group borrows it again. Not taken or returned: the coordinator holds at
 most one trace per group.
+
+AND THE DRAFTS' HEAD OUTPUTS (S2 v86, `draft_outputs=`, which serving_runtime passes only under
+QWEN_FAST_EXTENT_REPLAY=1). A traced draft pass - a slot's single-user draft
+(dflash_proposal_trace.PreparedDFlashProposal), a packed pair and the quad - leaves its head outputs
+(per candidate chunk the top-16 values and indices, and the selector projection) in tensors its capture
+allocated, and the round reads them back only after its one fence. A capture that runs after another
+trace's can be given that trace's freed holes for them, and the older trace's replay, enqueued later in
+the same round, then writes over them before the read: the G5 churn run 36416471352 read a freshly
+captured pair [0, 1]'s top-16 as non-finite or out of range the first round it replayed ahead of slot
+2's older single-user trace. One output set per slot group that drafts - (s,) for every slot's
+single-user draft, (0, 1) and (2, 3) for the pairs, (0, 1, 2, 3) for the quad - zeroed here, before any
+trace: per candidate chunk a BF16 values and a UINT16 indices buffer (the top-k's own dtypes) of the
+group's head shape, and one BF16 projection. Every trace of the group ends its pass by copying its
+outputs in (dflash_proposal_trace.publish_outputs) and every reader reads them there, so no replay
+order can reach them: no trace's capture ever had their addresses free. Lent for the pool's life
+(`draft_output(group)`) and never freed by a trace, like the masks.
 """
 
 from types import SimpleNamespace
@@ -199,6 +215,46 @@ def validate_draft_masks(draft_masks, users):
             raise ValueError('Draft masks need groups of two or more distinct increasing pool slots below %d and '
                              '4-D shapes: %r -> %r' % (users, group, shape))
     return masks
+
+
+DRAFT_OUTPUT_KEYS = ('chunks', 'head', 'projected')
+
+
+def validate_draft_outputs(draft_outputs, users):
+    """`draft_outputs` as {slot group: dict(chunks=((start, stop), ...), head=shape, projected=shape)}: each group
+    one or more distinct pool slots in increasing order, the chunks a non-empty run of integer ranges, each shape
+    four positive integers. None or empty: {} (no output is pooled)."""
+    if not draft_outputs:
+        return {}
+    try:
+        specs = {tuple(group): dict(spec) for group, spec in dict(draft_outputs).items()}
+    except (TypeError, ValueError):
+        raise ValueError('Draft outputs must map slot groups to output specs') from None
+    checked = {}
+    for group, spec in specs.items():
+        try:
+            chunks = tuple((start, stop) for start, stop in spec['chunks'])
+            head, projected = tuple(spec['head']), tuple(spec['projected'])
+        except (KeyError, TypeError, ValueError):
+            chunks = head = projected = None
+        if (chunks is None or set(spec) != set(DRAFT_OUTPUT_KEYS) or not group
+                or any(type(slot) is not int or not 0 <= slot < users for slot in group)
+                or list(group) != sorted(set(group)) or not chunks
+                or any(type(start) is not int or type(stop) is not int or not 0 <= start < stop
+                       for start, stop in chunks)
+                or any(len(shape) != 4 or any(type(size) is not int or size < 1 for size in shape)
+                       for shape in (head, projected))):
+            raise ValueError('Draft outputs need groups of one or more distinct increasing pool slots below %d, '
+                             'integer candidate chunks and 4-D head and projection shapes: %r -> %r'
+                             % (users, group, spec))
+        checked[group] = dict(chunks=chunks, head=head, projected=projected)
+    return checked
+
+
+def tile_bytes(shape, itemsize=2):
+    """A tiled tensor's padded payload: its last two dimensions rounded up to whole 32 x 32 tiles."""
+    *outer, rows, columns = shape
+    return tensor_bytes((*outer, -(-rows // 32) * 32, -(-columns // 32) * 32), itemsize)
 
 
 def overlaps(left, right):
@@ -467,7 +523,7 @@ class ServingBufferPool:
     def __init__(self, operations, mesh, *, users, helpers=None, page_width=None, bucket_rows=(),
                  feature_taps=0, rope=None, mtp_hidden=False, replay_group_rows=4, replay_capacities=None,
                  packed_shapes=None, packed_replicas=None, packed_replay_group_rows=None, extent_replay=False,
-                 draft_masks=None):
+                 draft_masks=None, draft_outputs=None):
         import torch
 
         if type(extent_replay) is not bool:
@@ -488,6 +544,7 @@ class ServingBufferPool:
             raise ValueError('Explicit scheduler request count within the %d native GDN slots required'
                              % NATIVE_GDN_SLOTS)
         draft_masks = validate_draft_masks(draft_masks, users)
+        draft_outputs = validate_draft_outputs(draft_outputs, users)
         bucket_rows = tuple(bucket_rows)
         if helpers is not None:
             # The packed block's per-user replay tables: by default every packed shape this
@@ -578,6 +635,7 @@ class ServingBufferPool:
         self.packed, self.packed_bytes = {}, 0
         self.extent = {}
         self.draft_masks, self.draft_mask_bytes = {}, 0
+        self.draft_outputs, self.draft_output_bytes = {}, 0
         self.closed = False
         try:
             protected = []
@@ -685,6 +743,16 @@ class ServingBufferPool:
             for group, shape in sorted(draft_masks.items()):
                 self.draft_masks[group] = allocate(shape)
             self.draft_mask_bytes = counted[0]
+            # The drafts' head outputs (the docstring's last section), after the masks so no other pooled buffer
+            # moves: per group, per candidate chunk the values and indices at the head shape, then the projection;
+            # replicated tiled zeros. Counted as tiled payload (the head shapes are part tiles).
+            for group, spec in sorted(draft_outputs.items()):
+                chunks = [dict(start=start, stop=stop, values=allocate(spec['head']),
+                               indices=allocate(spec['head'], dtype=operations.uint16, layout=operations.TILE_LAYOUT))
+                          for start, stop in spec['chunks']]
+                self.draft_outputs[group] = SimpleNamespace(projected=allocate(spec['projected']), chunks=chunks)
+                self.draft_output_bytes += (2 * len(chunks) * tile_bytes(spec['head'])
+                                            + tile_bytes(spec['projected']))
             operations.synchronize_device(mesh)
         except BaseException:
             self.close()
@@ -733,6 +801,16 @@ class ServingBufferPool:
         if held is None or tuple(held.shape) != tuple(shape):
             return None
         return held
+
+    def draft_output(self, group):
+        """The pre-trace head-output set this pool holds for a draft over `group` (its pool slots: one for a
+        single-user draft, two for a pair, four for the quad) - SimpleNamespace(projected=, chunks=[dict(start=,
+        stop=, values=, indices=)]), the shape a draft pass returns - or None, and the draft reads its own outputs
+        as before. Lent for the pool's life to whichever trace of the group asks: every trace of the group copies
+        its outputs in at the end of its pass (dflash_proposal_trace.publish_outputs) and never frees them."""
+        if self.closed:
+            return None
+        return self.draft_outputs.get(tuple(group))
 
     def acquire(self, *, owner='unnamed'):
         if self.closed:
@@ -794,6 +872,15 @@ class ServingBufferPool:
             report.update(draft_mask_bytes=self.draft_mask_bytes, draft_masks=[
                 dict(group=list(group), shape=list(tensor.shape), addresses=list(addresses(self.operations, tensor)))
                 for group, tensor in sorted(self.draft_masks.items())])
+        if self.draft_outputs:
+            # Only with draft_outputs: without them the attach line reads exactly as before.
+            report.update(draft_output_bytes=self.draft_output_bytes, draft_outputs=[
+                dict(group=list(group), chunks=len(held.chunks), head=list(held.chunks[0]['values'].shape),
+                     projected=list(held.projected.shape),
+                     addresses=[list(addresses(self.operations, tensor)) for tensor in
+                                (*(chunk[name] for chunk in held.chunks for name in ('values', 'indices')),
+                                 held.projected)])
+                for group, held in sorted(self.draft_outputs.items())])
         return report
 
     def close(self):
@@ -808,5 +895,6 @@ class ServingBufferPool:
         self.packed.clear()
         self.extent.clear()
         self.draft_masks.clear()
+        self.draft_outputs.clear()
         if lent:
             raise ValueError('Serving buffer pool closed with slots %r still lent' % lent)

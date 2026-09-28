@@ -11,7 +11,12 @@ tensors by their bytes - must be equal. Without git history the comparison skips
 test here runs anywhere.
 
 The fakes keep what a device tensor holds on each chip, so the audit's read-back and the
-refresh's copy are checked by value, not only by call."""
+refresh's copy are checked by value, not only by call.
+
+S2 v86 (run 36416471352) is here too: the G5 churn round whose older single-user replay overwrote
+a fresh pair's head outputs (V86SequenceTests), the pool's pre-trace output sets every traced
+draft copies into (PooledOutputTests) and the per-chip report a refused readback logs before its
+error (RejectedOutputsTests)."""
 
 import hashlib
 from itertools import count
@@ -37,6 +42,8 @@ from test_dflash_packed_proposal_coordinator import FakeSingleUserCapture, FakeT
 
 # experiment/t32-score-reuse before the variable-user M0/M1 changes.
 PINNED_COMMIT = '24887d15'
+# The S2 gates head the pooled draft outputs branched from (image s2-7f029fa's code).
+V86_PARENT = '486d8cb7'
 FLAGS = ('QWEN_FAST_PAIR_MASK_REFRESH', 'QWEN_FAST_PAIR_MASK_AUDIT', 'QWEN_FAST_PAIRS_PACKED_ONLY',
          'QWEN_FAST_PADDED_PROBE', 'QWEN_FAST_ROUND_B1', 'QWEN_FAST_ROUND_B1_AUDIT', 'QWEN_FAST_PACKED_AUDIT')
 # The gate's own parse of the audit line (lever_n_m3native_gate.PAIR_MASK_AUDIT_LINE).
@@ -785,6 +792,618 @@ class V73SequenceTests(unittest.TestCase):
         self.assertEqual([line for line in lines if line.startswith('[PINDIAG] draft mask pooled')],
                          ['[PINDIAG] draft mask pooled refused slots=[2,3] shape=1x1x32x2080: the pool holds '
                           '[([2, 3], [1, 1, 32, 4160])]'])
+
+
+class ReplayingHoleOps(HoleOps):
+    """HoleOps whose traces replay: what a captured operation registered (on_replay) - a draft head writing its
+    outputs, and every ttnn.copy the capture recorded - runs again at each execute_trace of that trace, in enqueue
+    order (one in-order command queue). A copy writes each chip's value into its destination."""
+
+    uint16 = 'u16'
+
+    def __init__(self):
+        super().__init__()
+        self.capturing, self.replays = None, {}
+        # every replay (trace, blocking) and every TracedSingle replay, in enqueue order
+        self.order = []
+
+    def begin_trace_capture(self, mesh, cq_id=0):
+        trace = super().begin_trace_capture(mesh, cq_id)
+        self.capturing = trace
+        self.replays[id(trace)] = []
+        return trace
+
+    def end_trace_capture(self, mesh, trace, cq_id=0):
+        super().end_trace_capture(mesh, trace, cq_id)
+        self.capturing = None
+
+    def on_replay(self, action):
+        if self.capturing is not None:
+            self.replays[id(self.capturing)].append(action)
+
+    def execute_trace(self, mesh, trace, cq_id=0, blocking=True):
+        super().execute_trace(mesh, trace, cq_id, blocking)
+        self.order.append((trace, blocking))
+        for action in self.replays.get(id(trace), ()):
+            action()
+
+    def copy(self, source, destination):
+        super().copy(source, destination)
+
+        def write():
+            if getattr(source, 'chips', None) is not None and getattr(destination, 'chips', None) is not None:
+                destination.chips = [chip.clone() for chip in source.chips]
+        write()
+        self.on_replay(write)
+
+    def fill_holes(self):
+        """Persistent allocations (an engine build) that take every hole there is."""
+        return [self.from_torch(torch.zeros(1, 1, 32, 16), device='mesh', dtype=self.bfloat16, layout=self.TILE_LAYOUT)
+                for _ in range(len(self.holes))]
+
+
+def head_outputs(ops, rows=32, projected_rows=32):
+    """What a draft pass's shared head leaves on device, allocated now (inside a capture: the trace's outputs): per
+    candidate chunk the top-16 values (BF16) and indices (UINT16) at `rows` rows, and the selector projection, plus
+    the write that fills them with a well-formed block (finite descending values, distinct in-range ids)."""
+    from draft_shared_head import candidate_chunks
+
+    chunks = []
+    for start, stop in candidate_chunks():
+        values = ops.from_torch(torch.zeros(1, 1, rows, 16), device='mesh', dtype=ops.bfloat16, layout=ops.TILE_LAYOUT)
+        indices = ops.from_torch(torch.zeros(1, 1, rows, 16, dtype=torch.int32), device='mesh', dtype=ops.uint16,
+                                 layout=ops.TILE_LAYOUT)
+        chunks.append(dict(start=start, stop=stop, values=values, indices=indices))
+    projected = ops.from_torch(torch.zeros(1, 1, projected_rows, 256), device='mesh', dtype=ops.bfloat16,
+                               layout=ops.TILE_LAYOUT)
+
+    def write():
+        for number, chunk in enumerate(chunks):
+            chunk['values'].write((torch.linspace(10.0, 1.0, 16).repeat(rows, 1) - number).reshape(1, 1, rows, 16))
+            chunk['indices'].write((torch.arange(16, dtype=torch.int32) * 7 + number).repeat(rows, 1)
+                                   .reshape(1, 1, rows, 16))
+        projected.write(torch.full((1, 1, projected_rows, 256), 0.5))
+
+    write()
+    return SimpleNamespace(projected=projected, chunks=chunks), write
+
+
+def output_tensors(outputs):
+    return [*(chunk[key] for chunk in outputs.chunks for key in ('values', 'indices')), outputs.projected]
+
+
+class TracedSingle:
+    """A request's single-user PreparedDFlashProposal reduced to what matters here: its capture allocates its outputs
+    and op-internal scratch and frees the scratch (holes it baked); every replay rewrites the baked addresses with
+    its scratch (a -inf pad, out-of-range ids) and its own outputs with a good block; finish() reads them through
+    merge_chunk_candidates."""
+
+    def __init__(self, ops, *, scratch=24):
+        from draft_shared_head import merge_chunk_candidates
+
+        self.ops, self.merge = ops, merge_chunk_candidates
+        made = [ops.from_torch(torch.zeros(1, 1, 32, 16), device='mesh', dtype=ops.bfloat16, layout=ops.TILE_LAYOUT)
+                for _ in range(scratch)]
+        self.outputs, self.write = head_outputs(ops, rows=16)
+        self.baked = [tensor.shards[0].address for tensor in made]
+        for tensor in made:
+            ops.deallocate(tensor)
+        self.pending, self.closed = None, False
+
+    def prepare_device(self, seed):
+        self.ops.order.append((self, False))
+        for address in self.baked:
+            tensor = self.ops.live.get(address)
+            if tensor is not None and tensor.chips is not None:
+                tensor.chips = [torch.full_like(chip, float('-inf')) if chip.is_floating_point()
+                                else torch.full_like(chip, 1 << 20) for chip in tensor.chips]
+        self.write()
+        self.pending = seed
+        return True
+
+    def has_pending(self, seed):
+        return self.pending == seed
+
+    def finish(self, count):
+        self.pending = None
+        self.merge([dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
+                         values=self.ops.to_torch(chunk['values'].shards[chip]).float().reshape(16, 16),
+                         indices=self.ops.to_torch(chunk['indices'].shards[chip]).long().reshape(16, 16))
+                    for chunk in self.outputs.chunks for chip in range(2)], block_rows=16)
+        return (1,) * count
+
+    def discard_pending(self):
+        self.pending = None
+
+    def close(self):
+        self.closed = True
+
+
+class V86SequenceTests(unittest.TestCase):
+    """Run 36416471352 (v86, G5 churn), on CPU: a fresh pair's head outputs overwritten, before its collect, by the
+    replay of an OLDER single-user trace that the coordinator enqueues after the pair in the same round.
+
+    v86, 11:47:44.98-11:48:00.97: slot 2 loses its partner (slot 3 departs) and its single-user capture is rebuilt
+    ('recapture slot=2'); its capture frees its op-internal intermediates - holes its trace baked, which every replay
+    of it rewrites. Nothing persistent is allocated after it. Slot 0 (the prompt-1536 user) reaches history_rows 2048,
+    so pair [0, 1] forms for the first time and is captured, all of it from freed fragments; its outputs (the head's
+    top-16 values and indices, the selector projection) are allocated then. PackedProposalCoordinator.prepare walks
+    FOUR_AS_TWO_PAIRS in order: pair (0, 1) is built and replayed, THEN slot 2's single (reason 'absent') is prepared
+    and replayed, then the one fence, then select_round -> collect -> read_device_outputs -> merge_chunk_candidates
+    raised 'Finite complete-block top16 values and in-range integer indices required'.
+
+    With the pool's pre-trace output sets (serving_buffer_pool draft_outputs=, at the shapes serving_runtime asks the
+    coordinator for under S2) the pair's pass ends by copying its outputs into its set, which no trace's capture ever
+    had free; the older single's replay still writes over the pair's own capture outputs, after the copy, and collect
+    reads the set. The replay order is unchanged. Without the sets the round fails as v86 did.
+
+    The pair is the real PreparedPackedDFlashProposal, the coordinator the real PackedProposalCoordinator
+    (QWEN_FAST_ROUND_B1: select_round/collect), the check the real draft_shared_head.merge_chunk_candidates."""
+
+    FLAGS = dict(QWEN_FAST_PACKED_PROPOSAL='1', QWEN_FAST_PAIR_ROW_EXACT='1', QWEN_FAST_FUSED_COMMIT='1',
+                 QWEN_FAST_FUSED_COMMIT_INPLACE='1', QWEN_FAST_FUSED_COMMIT_LIVE_BANKS='1',
+                 QWEN_FAST_PAIR_MASK_REFRESH='1', QWEN_FAST_ROUND_B1='1', QWEN_FAST_PACKED_AUDIT='1')
+    ERROR = 'Finite complete-block top16 values and in-range integer indices required'
+
+    def setUp(self):
+        import fused_commit
+        import pair_row_exact
+        import serving_buffer_pool
+
+        environment = clean_environment()
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.update(self.FLAGS)
+        for target, name, value in ((serving_buffer_pool, 'HISTORY_SHAPE', (1, 1, 32, 64)),
+                                    (serving_buffer_pool, 'KV_SHAPE', (1, 4, 32, 128)),
+                                    (fused_commit, '_LIVE_NOTED', []), (pair_row_exact, '_NOTED', []),
+                                    (dflash_proposal_trace, '_PAIR_MASK_REFRESH_NOTED', [])):
+            patcher = patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def drafter(ops, slot, position):
+        """A DFlashDevice on its pool slot: live banks on the pool's active side, its own single-user capture, and
+        (as a pair's device_a) an execute_proposal whose outputs the pair trace's replay rewrites."""
+        kv_history = SimpleNamespace(active=[dict(layer['active']) for layer in slot.kv], pending=None, owned=[],
+                                     borrowed=[value for layer in slot.kv for side in layer.values()
+                                               for value in side.values()])
+        device = SimpleNamespace(operations=ops, mesh='mesh', block_rows=16, native_proposal_attention=True,
+                                 kv_history=kv_history, layers=[object()] * len(slot.kv), position=position,
+                                 history_rows=min(position, 2048), history=None, spare_history=None, closed=False,
+                                 pending=None, progress=None, validated_native_proposal_masks=set(), pool_slot=slot,
+                                 predecessors='codebook', successors='codebook',
+                                 temporaries=lambda protected: ([], lambda value: value))
+
+        def execute_proposal(*args, **kwargs):
+            outputs, write = head_outputs(ops)
+            ops.on_replay(write)
+            return outputs
+
+        device.execute_proposal = execute_proposal
+        device.proposal_capture = TracedSingle(ops)
+        device.prepare_device = lambda seed: device.proposal_capture.prepare_device(seed)
+        return device
+
+    @staticmethod
+    def bridge(name, device, seed):
+        session = SimpleNamespace(request_id=name, seed=seed, pending=None, finished=False)
+        return SimpleNamespace(request=SimpleNamespace(session=session, runtime=SimpleNamespace(drafter=device),
+                                                       closed=False, cancelled=False), failed=False)
+
+    def run_v86(self, *, pooled, recapture_slot2_last=True):
+        """Slots 1 and 2 serve long prompts, slot 0's short prompt ramps (position 2046). Engine builds fill every
+        hole; then slot 2's single-user capture is rebuilt (the newest trace, its holes the only ones), a singles
+        round runs, slot 0 commits to 2048 and pair [0, 1] forms. Returns (ops, pool, devices, the log lines, the pair
+        trace, the ValueError the pair round raised or None)."""
+        from serving_buffer_pool import ServingBufferPool
+
+        ops = ReplayingHoleOps()
+        # The attach: the pool, before any trace - with the drafts' head-output sets when pooled. serving_runtime
+        # passes the keyword only when there are sets; without it the pool is the M0 one.
+        outputs = dict(draft_outputs=coordinator_module.pooled_draft_output_shapes(4, 16)) if pooled else {}
+        pool = ServingBufferPool(ops, 'mesh', users=4, draft_masks=coordinator_module.pooled_draft_mask_shapes(4, 16),
+                                 **outputs)
+        slots = [pool.acquire(owner='r%d' % index) for index in range(3)]
+        devices = [self.drafter(ops, slots[0], 2046), self.drafter(ops, slots[1], 120357),
+                   self.drafter(ops, slots[2], 110787)]
+        ops.fill_holes()
+        if recapture_slot2_last:
+            # 'recapture slot=2': slot 2's partner left; nothing allocates after it.
+            devices[2].proposal_capture = TracedSingle(ops)
+        bridges = [self.bridge('r%d' % index, device, 100 + index) for index, device in enumerate(devices)]
+        coordinator = coordinator_module.PackedProposalCoordinator()
+        lines, loguru = logged(coordinator_module)
+        failure = None
+        with loguru, patch('dflash_packed_proposal.select_packed_batched',
+                           side_effect=lambda parts, *rest: [(7,) for _ in parts]):
+            # 'singles round=638 slots=[0, 1, 2] reasons=['ramp', 'ramp', 'absent']'
+            coordinator.prepare(bridges)
+            for device in devices:
+                device.proposal_capture.finish(1)
+            # the ramp commit at position 2046, prefix 2: slot 0 reaches history_rows 2048
+            devices[0].position = devices[0].history_rows = 2048
+            try:
+                coordinator.prepare(bridges)
+            except ValueError as error:
+                failure = error
+        trace = coordinator.pairs[(0, 1)][2] if (0, 1) in coordinator.pairs else None
+        return ops, pool, devices, lines, trace, failure
+
+    def test_with_the_pools_output_sets_the_fresh_pair_survives_the_older_singles_replay(self):
+        # The regression test: the v86 round, pooled. Red before the fix (no draft_outputs anywhere), green with it.
+        ops, pool, devices, lines, trace, failure = self.run_v86(pooled=True)
+        self.assertIsNone(failure, 'v86: %s' % failure)
+        self.assertTrue(any('PACKED-SELECT' in line and 'pairs=[[0, 1]]' in line for line in lines), lines[-5:])
+        bucket = trace.buckets[(2048, 2048)]
+        held = pool.draft_outputs[(0, 1)]
+        self.assertEqual([id(tensor) for tensor in output_tensors(bucket.outputs)],
+                         [id(tensor) for tensor in output_tensors(held)], 'collect reads the pool set')
+        holes = set(devices[2].proposal_capture.baked)
+        self.assertFalse({tensor.shards[0].address for tensor in output_tensors(held)} & holes,
+                         'no trace capture ever had the set free')
+        # The mechanism still runs: the pair's own capture outputs sit in slot 2's holes and its replay, after the
+        # pair's, overwrote them - after the pair's copy, so nothing reads them.
+        own = [ops.live[address] for address in holes if address in ops.live]
+        clobbered = [tensor for tensor in own if tensor.chips is not None and tensor.chips[0].is_floating_point()
+                     and torch.isinf(tensor.chips[0]).all()]
+        self.assertTrue(clobbered, 'the older replay still writes its holes')
+        self.assertEqual(['[PINDIAG] draft outputs pooled slots=[0,1] head=1x1x32x16 projected=1x1x32x256'],
+                         [line for line in lines if line.startswith('[PINDIAG] draft outputs pooled')])
+        self.assertFalse([line for line in lines if 'draft outputs rejected' in line])
+
+    def test_the_replay_order_is_unchanged(self):
+        # The fix is the pooled sets, not a reorder: the pair still replays first and slot 2's older single after it.
+        for pooled in (False, True):
+            with self.subTest(pooled=pooled):
+                ops, pool, devices, lines, trace, failure = self.run_v86(pooled=pooled)
+                pair = trace.buckets[(2048, 2048)].trace
+                built = ops.order.index((pair, True))
+                self.assertEqual(ops.order[built + 1:], [(pair, False), (devices[2].proposal_capture, False)],
+                                 "the pair's round replay, then slot 2's older single, as v86 enqueued them")
+                self.assertEqual(failure is None, pooled, 'the same order fails only without the sets')
+
+    def test_without_them_the_older_single_overwrites_the_fresh_pairs_outputs_and_each_chip_is_reported(self):
+        # The diagnosis, on a pool without output sets (today's attach): the same round fails as v86 did, and the
+        # readback says what it held on each chip before raising the same error.
+        ops, pool, devices, lines, trace, failure = self.run_v86(pooled=False)
+        self.assertIsNotNone(trace, 'pair [0, 1] was built')
+        outputs = trace.buckets[(2048, 2048)].outputs
+        holes = set(devices[2].proposal_capture.baked)
+        self.assertTrue({chunk['values'].shards[0].address for chunk in outputs.chunks} & holes,
+                        "the fresh pair's head outputs were allocated in slot 2's single-user capture holes")
+        self.assertIsNotNone(failure, 'the pair round fails, as v86 did')
+        self.assertEqual(str(failure), self.ERROR)
+        rejected = [line for line in lines if line.startswith('[PINDIAG] draft outputs rejected')]
+        self.assertEqual(len(rejected), 2, 'one line per chip')
+        for chip, line in enumerate(rejected):
+            self.assertIn('device_slot=0 chip=%d ' % chip, line)
+            self.assertRegex(line, r' neg_inf=[1-9][0-9]* ')
+            self.assertIn('projected_finite=1 projected_equal=1', line)
+            self.assertIn('error=Finite_complete-block_top16', line)
+        self.assertFalse([line for line in lines if line.startswith('[PINDIAG] draft outputs pooled')])
+
+    def test_a_single_recaptured_before_the_pairs_slots_filled_holes_is_harmless(self):
+        # The control: no hole of a trace that replays after the pair is free when the pair captures (v79's churn,
+        # and every other pair capture in 60 gate logs) - the same round passes, pooled or not.
+        for pooled in (False, True):
+            with self.subTest(pooled=pooled):
+                ops, pool, devices, lines, trace, failure = self.run_v86(pooled=pooled, recapture_slot2_last=False)
+                self.assertIsNone(failure)
+                self.assertTrue(any('PACKED-SELECT' in line and 'pairs=[[0, 1]]' in line for line in lines))
+
+    def test_the_output_sets_are_the_ones_serving_runtime_asks_for(self):
+        from draft_shared_head import candidate_chunks
+
+        chunks = tuple(candidate_chunks())
+
+        def spec(head_rows, projected_rows):
+            return dict(chunks=chunks, head=(1, 1, head_rows, 16), projected=(1, 1, projected_rows, 256))
+
+        singles = {(slot,): spec(16, 32) for slot in range(4)}
+        self.assertEqual(coordinator_module.pooled_draft_output_shapes(4, 16),
+                         {**singles, (0, 1): spec(32, 32), (2, 3): spec(32, 32)})
+        self.assertEqual(coordinator_module.pooled_draft_output_shapes(3, 16),
+                         {**{(slot,): spec(16, 32) for slot in range(3)}, (0, 1): spec(32, 32)})
+        with patch.dict(os.environ, QWEN_FAST_QUAD_DRAFT='1'):
+            shapes = coordinator_module.pooled_draft_output_shapes(4, 16)
+            self.assertEqual(shapes[(0, 1, 2, 3)], spec(64, 64))
+            self.assertNotIn((0, 1, 2, 3), coordinator_module.pooled_draft_output_shapes(3, 16))
+        with patch.dict(os.environ, QWEN_FAST_PACKED_PROPOSAL='0', QWEN_FAST_QUAD_DRAFT='1'):
+            self.assertEqual(coordinator_module.pooled_draft_output_shapes(4, 16), singles,
+                             'no pair or quad forms: the singles only')
+        self.assertEqual(coordinator_module.pooled_draft_output_shapes(2, 8)[(1,)], spec(8, 32))
+
+
+def pooled_lines(lines):
+    return [line for line in lines if line.startswith('[PINDIAG] draft outputs')]
+
+
+class PooledOutputTests(unittest.TestCase):
+    """dflash_proposal_trace.borrow_pooled_outputs / pool_outputs / publish_outputs: a draft build over a pool that
+    holds an output set for its slots copies its warm-up's outputs in (compiling the copies), records the copies at
+    the end of its capture and hands the set to every reader; a set it cannot use is refused with the reason and the
+    trace reads its own outputs, as before."""
+
+    FLAGS = V86SequenceTests.FLAGS
+
+    def setUp(self):
+        V86SequenceTests.setUp(self)
+
+    def pool(self, ops, outputs=None):
+        from serving_buffer_pool import ServingBufferPool
+
+        outputs = coordinator_module.pooled_draft_output_shapes(4, 16) if outputs is None else outputs
+        return ServingBufferPool(ops, 'mesh', users=4, draft_outputs=outputs)
+
+    def pair(self, ops, pool, *, rows=32):
+        slots = [pool.acquire(owner='r%d' % index) for index in range(2)]
+        devices = [V86SequenceTests.drafter(ops, slot, 5000 + index) for index, slot in enumerate(slots)]
+        for device in devices:
+            device.history_rows = 2048
+
+            def execute_proposal(*args, rows=rows, **kwargs):
+                outputs, write = head_outputs(ops, rows=rows)
+                ops.on_replay(write)
+                return outputs
+            device.execute_proposal = execute_proposal
+        return dflash_proposal_trace.PreparedPackedDFlashProposal(*devices), slots
+
+    def one_round(self, trace):
+        with patch('dflash_packed_proposal.select_device_outputs', return_value=((1,), (2,))):
+            self.assertTrue(trace.prepare_device(11, 22))
+            trace.finish('a', 1)
+            trace.finish('b', 1)
+
+    def test_the_pair_copies_its_outputs_into_the_set_in_its_warm_up_and_at_the_end_of_its_capture(self):
+        ops = ReplayingHoleOps()
+        pool = self.pool(ops)
+        trace, _ = self.pair(ops, pool)
+        lines, loguru = logged(dflash_proposal_trace)
+        with loguru:
+            self.one_round(trace)
+        bucket = trace.buckets[(2048, 2048)]
+        held = pool.draft_outputs[(0, 1)]
+        self.assertEqual([id(tensor) for tensor in output_tensors(bucket.outputs)],
+                         [id(tensor) for tensor in output_tensors(held)])
+        self.assertIsNot(bucket.outputs, held, 'a fresh namespace: no reader holds the pool record itself')
+        targets = {ops.normalize(tensor) for tensor in output_tensors(held)}
+        begin = next(index for index, event in enumerate(ops.events) if event[0] == 'begin_trace_capture')
+        end = next(index for index, event in enumerate(ops.events) if event[0] == 'end_trace_capture')
+        copies = [index for index, event in enumerate(ops.events) if event[0] == 'copy' and event[2] in targets]
+        self.assertEqual(len([index for index in copies if index < begin]), 9, 'the warm-up: 4 x 2 chunks + 1')
+        self.assertEqual(len([index for index in copies if begin < index < end]), 9, 'recorded at the capture')
+        self.assertEqual(len(copies), 18, 'nothing outside the build copies: the replays run the recorded ones')
+        # every replay rewrote the set: it holds the head's block on both chips
+        for number, chunk in enumerate(held.chunks):
+            for chip in chunk['indices'].chips:
+                self.assertEqual(int(chip.max()), 105 + number)
+        self.assertEqual(pooled_lines(lines),
+                         ['[PINDIAG] draft outputs pooled slots=[0,1] head=1x1x32x16 projected=1x1x32x256'])
+        trace.close()
+        self.assertFalse([event for event in ops.events if event[0] == 'deallocate'
+                          and event[1] in targets], 'the pool set is never freed by a trace')
+        # the pair re-formed borrows the same set again
+        again = dflash_proposal_trace.PreparedPackedDFlashProposal(trace.device_a, trace.device_b)
+        with logged(dflash_proposal_trace)[1]:
+            self.one_round(again)
+        self.assertEqual([id(tensor) for tensor in output_tensors(again.buckets[(2048, 2048)].outputs)],
+                         [id(tensor) for tensor in output_tensors(held)])
+
+    def test_a_set_of_another_shape_is_refused_and_the_trace_reads_its_own_outputs(self):
+        ops = ReplayingHoleOps()
+        outputs = coordinator_module.pooled_draft_output_shapes(4, 16)
+        outputs[(0, 1)] = dict(outputs[(0, 1)], head=(1, 1, 16, 16))
+        pool = self.pool(ops, outputs)
+        trace, _ = self.pair(ops, pool)
+        lines, loguru = logged(dflash_proposal_trace)
+        with loguru:
+            self.one_round(trace)
+        bucket = trace.buckets[(2048, 2048)]
+        self.assertFalse({id(tensor) for tensor in output_tensors(bucket.outputs)}
+                         & {id(tensor) for tensor in output_tensors(pool.draft_outputs[(0, 1)])})
+        self.assertEqual(pooled_lines(lines), ['[PINDIAG] draft outputs pooled refused slots=[0,1]: values0 shape '
+                                               '1x1x32x16, the pool holds 1x1x16x16'])
+        targets = {ops.normalize(tensor) for tensor in output_tensors(pool.draft_outputs[(0, 1)])}
+        self.assertFalse([event for event in ops.events if event[0] == 'copy' and event[2] in targets])
+
+    def test_a_pool_without_a_set_for_the_group_or_a_refused_copy_is_a_logged_refusal_never_a_failed_build(self):
+        ops = ReplayingHoleOps()
+        outputs = coordinator_module.pooled_draft_output_shapes(4, 16)
+        del outputs[(0, 1)]
+        trace, _ = self.pair(ops, self.pool(ops, outputs))
+        lines, loguru = logged(dflash_proposal_trace)
+        with loguru:
+            self.one_round(trace)
+        self.assertEqual(pooled_lines(lines), ['[PINDIAG] draft outputs pooled refused slots=[0,1]: the pool holds '
+                                               'sets for [[0], [1], [2], [2, 3], [3]]'])
+        ops = ReplayingHoleOps()
+        pool = self.pool(ops)
+        trace, _ = self.pair(ops, pool)
+        held = {ops.normalize(tensor) for tensor in output_tensors(pool.draft_outputs[(0, 1)])}
+        original = ReplayingHoleOps.copy
+
+        def refusing(self, source, destination):
+            if ops.normalize(destination) in held:
+                raise RuntimeError('ttnn.copy only supports ... inputs')
+            return original(self, source, destination)
+
+        lines, loguru = logged(dflash_proposal_trace)
+        with loguru, patch.object(ReplayingHoleOps, 'copy', refusing):
+            self.one_round(trace)
+        self.assertEqual(pooled_lines(lines), ['[PINDIAG] draft outputs pooled refused slots=[0,1]: copy refused: '
+                                               'RuntimeError: ttnn.copy only supports ... inputs'])
+        self.assertFalse({id(tensor) for tensor in output_tensors(trace.buckets[(2048, 2048)].outputs)}
+                         & {id(tensor) for tensor in output_tensors(pool.draft_outputs[(0, 1)])})
+
+    def test_a_pool_without_output_sets_is_the_parents_pair_call_for_call(self):
+        # The M0 pool (masks, no output sets): the pair makes exactly the calls it made before the output sets.
+        from serving_buffer_pool import ServingBufferPool
+
+        parent = pinned_module('dflash_proposal_trace.py', 'dflash_proposal_trace_v86_parent', commit=V86_PARENT)
+        if parent is None:
+            self.skipTest('no git history for %s' % V86_PARENT)
+
+        def run(module):
+            ops = ReplayingHoleOps()
+            pool = ServingBufferPool(ops, 'mesh', users=4,
+                                     draft_masks=coordinator_module.pooled_draft_mask_shapes(4, 16))
+            slots = [pool.acquire(owner='r%d' % index) for index in range(2)]
+            devices = [V86SequenceTests.drafter(ops, slot, 5000 + index) for index, slot in enumerate(slots)]
+            for device in devices:
+                device.history_rows = 2048
+            trace = module.PreparedPackedDFlashProposal(*devices)
+            with logged(dflash_proposal_trace)[1]:
+                self.one_round(trace)
+                self.one_round(trace)
+            trace.close()
+            return ops.events
+
+        before = run(parent)
+        self.assertGreater(len(before), 100)
+        self.assertEqual(run(dflash_proposal_trace), before)
+
+    def single(self, ops, slot, *, pooled_select):
+        """A DFlashDevice at position 200 (one 256-row bucket) on `slot`, its head at the T16 16 rows; its
+        select_proposal records the outputs it is handed."""
+        kv_history = SimpleNamespace(active=[{'k': object(), 'v': object()} for _ in range(5)], pending=None,
+                                     owned=[], borrowed=[], position=200, history_rows=200)
+        device = SimpleNamespace(operations=ops, mesh='mesh', block_rows=16, position=200, history_rows=200,
+                                 kv_history=kv_history, owned=[], history=None, spare_history=None, progress=None,
+                                 live_query_qk=False, native_proposal_attention=False, pool_slot=slot,
+                                 temporaries=lambda protected: ([], lambda value: value))
+
+        def execute_proposal(*args, **kwargs):
+            outputs, write = head_outputs(ops, rows=16, projected_rows=32)
+            ops.on_replay(write)
+            device.own.append(outputs)
+            return outputs
+
+        device.own = []
+        device.execute_proposal = execute_proposal
+        device.select_proposal = lambda outputs, seed, count: pooled_select.append(outputs) or (3,) * count
+        return device
+
+    def test_the_single_user_draft_copies_into_its_slots_set_and_finish_reads_it(self):
+        from serving_buffer_pool import ServingBufferPool
+
+        ops = ReplayingHoleOps()
+        pool = ServingBufferPool(ops, 'mesh', users=4,
+                                 draft_outputs=coordinator_module.pooled_draft_output_shapes(4, 16))
+        slots = [pool.acquire(owner='r%d' % index) for index in range(3)]
+        selected = []
+        device = self.single(ops, slots[2], pooled_select=selected)
+        lines, loguru = logged(dflash_proposal_trace)
+        with loguru:
+            capture = dflash_proposal_trace.PreparedDFlashProposal(device, max_new_tokens=1)
+        self.assertEqual(list(capture.buckets), [256])
+        held = pool.draft_outputs[(2,)]
+        bucket = capture.buckets[256]
+        self.assertEqual([id(tensor) for tensor in output_tensors(bucket.outputs)],
+                         [id(tensor) for tensor in output_tensors(held)])
+        self.assertEqual(pooled_lines(lines),
+                         ['[PINDIAG] draft outputs pooled slots=[2] head=1x1x16x16 projected=1x1x32x256'])
+        # the capture's own outputs clobbered after its replay: finish still reads the good block
+        self.assertTrue(capture.prepare_device(5))
+        captured = device.own[-1]
+        for tensor in output_tensors(captured):
+            tensor.chips = [torch.full_like(chip, float('nan')) if chip.is_floating_point()
+                            else torch.full_like(chip, 1 << 20) for chip in tensor.chips]
+        self.assertEqual(capture.finish(2), (3, 3))
+        self.assertEqual([id(tensor) for tensor in output_tensors(selected[-1])],
+                         [id(tensor) for tensor in output_tensors(held)])
+        for tensor in output_tensors(held):
+            for chip in tensor.chips:
+                self.assertTrue(torch.isfinite(chip.float()).all())
+        capture.close()
+        targets = {ops.normalize(tensor) for tensor in output_tensors(held)}
+        self.assertFalse([event for event in ops.events if event[0] == 'deallocate' and event[1] in targets])
+
+
+class RejectedOutputsTests(unittest.TestCase):
+    """S2 v86: a readback whose merge refuses the head outputs logs, per chip, what it read - non-finite, -inf and NaN
+    counts, the index range and out-of-range count, whether the chips read equal, the projection's finiteness and
+    equality, and every output buffer's address - then raises the same ValueError."""
+
+    ERROR = V86SequenceTests.ERROR
+
+    def outputs(self, ops, rows=32):
+        outputs, _ = head_outputs(ops, rows=rows)
+        chips = outputs.chunks[0]['values'].chips
+        chips[0] = torch.full_like(chips[0], float('-inf'))
+        chips = outputs.chunks[2]['indices'].chips
+        chips[1] = chips[1].clone()
+        chips[1][..., 3, :] = 40000
+        return outputs
+
+    def check(self, lines, outputs, *, slot, rows):
+        self.assertEqual(len(lines), 2)
+        addresses = ['[%s]' % ','.join('0x%x' % tensor.shards[chip].address for tensor in output_tensors(outputs))
+                     for chip in range(2)]
+        self.assertEqual(lines[0], '[PINDIAG] draft outputs rejected device_slot=%s chip=0 nonfinite=%d neg_inf=%d '
+                                   'nan=0 index_min=0 index_max=108 index_out_of_range=0 chips_equal=values:3/4,'
+                                   'indices:3/4 projected_finite=1 projected_equal=1 addresses=%s '
+                                   'error=Finite_complete-block_top16_values_and_in-range_integer_indices_required'
+                         % (slot, rows * 16, rows * 16, addresses[0]))
+        self.assertEqual(lines[1], '[PINDIAG] draft outputs rejected device_slot=%s chip=1 nonfinite=0 neg_inf=0 '
+                                   'nan=0 index_min=0 index_max=40000 index_out_of_range=16 chips_equal=values:3/4,'
+                                   'indices:3/4 projected_finite=1 projected_equal=1 addresses=%s '
+                                   'error=Finite_complete-block_top16_values_and_in-range_integer_indices_required'
+                         % (slot, addresses[1]))
+
+    def test_the_pair_readback_reports_each_chip_then_raises_the_same_error(self):
+        import dflash_packed_proposal
+
+        for read in (lambda device, outputs: dflash_packed_proposal.read_device_outputs(device, outputs, 2, 16),
+                     lambda device, outputs: dflash_packed_proposal.select_device_outputs(device, outputs, (1, 2),
+                                                                                          (15, 15), 2, 16)):
+            ops = RecordingOps()
+            ops.uint16 = 'u16'
+            outputs = self.outputs(ops)
+            device = SimpleNamespace(operations=ops, pool_slot=SimpleNamespace(index=2), predecessors=None,
+                                     successors=None)
+            lines, loguru = logged(dflash_packed_proposal)
+            with loguru, self.assertRaises(ValueError) as raised:
+                read(device, outputs)
+            self.assertEqual(str(raised.exception), self.ERROR)
+            self.check(lines, outputs, slot=2, rows=32)
+
+    def test_the_single_users_selection_reports_each_chip_then_raises_the_same_error(self):
+        from dflash_device import DFlashDevice
+
+        ops = RecordingOps()
+        ops.uint16 = 'u16'
+        outputs = self.outputs(ops, rows=16)
+        device = SimpleNamespace(operations=ops, block_rows=16, pool_slot=SimpleNamespace(index=1))
+        lines, loguru = logged(dflash_proposal_trace)
+        with loguru, self.assertRaises(ValueError) as raised:
+            DFlashDevice.select_proposal(device, outputs, 5, 3)
+        self.assertEqual(str(raised.exception), self.ERROR)
+        self.check(lines, outputs, slot=1, rows=16)
+
+    def test_healthy_outputs_log_nothing_and_a_broken_diagnostic_never_replaces_the_error(self):
+        import dflash_packed_proposal
+
+        ops = RecordingOps()
+        ops.uint16 = 'u16'
+        good, _ = head_outputs(ops)
+        device = SimpleNamespace(operations=ops, pool_slot=None)
+        lines, loguru = logged(dflash_packed_proposal)
+        with loguru:
+            parts = dflash_packed_proposal.read_device_outputs(device, good, 2, 16)
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(lines, [])
+        bad = self.outputs(ops)
+        bad.projected = 'not a tensor'
+        with loguru, self.assertRaises(ValueError) as raised:
+            dflash_packed_proposal.read_device_outputs(device, bad, 2, 16)
+        self.assertEqual(str(raised.exception), self.ERROR)
+        self.assertEqual(len(lines), 2)
+        self.assertIn('device_slot=None chip=0 ', lines[0])
+        self.assertIn('projected_finite=unavailable:AttributeError projected_equal=unavailable:AttributeError',
+                      lines[0])
+        self.assertIn('addresses=unavailable:AttributeError', lines[0])
 
 
 class ShippingTests(unittest.TestCase):

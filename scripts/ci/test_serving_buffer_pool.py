@@ -89,7 +89,7 @@ class FakeOperations:
     """Two independent bump allocators, one per chip, so chip addresses never coincide."""
 
     bfloat16, TILE_LAYOUT, ROW_MAJOR_LAYOUT, DRAM_MEMORY_CONFIG = 'bf16', 'tile', 'row_major', 'dram'
-    uint32, int32 = 'uint32', 'int32'
+    uint32, int32, uint16 = 'uint32', 'int32', 'uint16'
     MathFidelity = SimpleNamespace(HiFi4='HiFi4')
 
     def __init__(self):
@@ -1000,6 +1000,105 @@ class DraftMaskTests(unittest.TestCase):
                 operations = FakeOperations()
                 with self.assertRaises(ValueError):
                     ServingBufferPool(operations, 'mesh', users=4, draft_masks=masks)
+                self.assertEqual(operations.live, [])
+
+
+class DraftOutputTests(unittest.TestCase):
+    """S2 v86 (run 36416471352): every traced draft's head-output set, one per slot group, allocated with the pool
+    before any trace (after the masks) and lent for its life to whichever trace of the group asks
+    (dflash_proposal_trace.borrow_pooled_outputs); the drafts copy their outputs in and every reader reads them
+    there."""
+
+    CHUNKS = ((0, 32768), (32768, 65536), (65536, 98304), (98304, 124160))
+
+    @classmethod
+    def spec(cls, head_rows, projected_rows):
+        return dict(chunks=cls.CHUNKS, head=(1, 1, head_rows, 16), projected=(1, 1, projected_rows, 256))
+
+    @classmethod
+    def outputs(cls):
+        """What serving_runtime passes for four slots with pairs and the quad (the coordinator's shapes)."""
+        singles = {(slot,): cls.spec(16, 32) for slot in range(4)}
+        return {**singles, (0, 1): cls.spec(32, 32), (2, 3): cls.spec(32, 32), (0, 1, 2, 3): cls.spec(64, 64)}
+
+    def test_they_come_after_the_masks_zeroed_independent_and_typed_as_the_head_leaves_them(self):
+        operations = FakeOperations()
+        masks = {(0, 1): (1, 1, 32, 2080)}
+        pool = ServingBufferPool(operations, 'mesh', users=4, draft_masks=masks, draft_outputs=self.outputs())
+        today = ServingBufferPool(FakeOperations(), 'mesh', users=4, draft_masks=masks)
+        self.assertEqual([value.shape for value in operations.live[:len(today.owned)]],
+                         [value.shape for value in today.owned], 'every other pooled buffer where it always was')
+        made = operations.live[len(today.owned):]
+        # per group in sorted order: per chunk values then indices, then the projection
+        groups = sorted(self.outputs())
+        self.assertEqual(len(made), len(groups) * (2 * 4 + 1))
+        self.assertEqual(sorted(pool.draft_outputs), groups)
+        for group in groups:
+            held, spec = pool.draft_outputs[group], self.outputs()[group]
+            self.assertEqual([(chunk['start'], chunk['stop']) for chunk in held.chunks], list(self.CHUNKS))
+            for chunk in held.chunks:
+                self.assertEqual((chunk['values'].shape, chunk['values'].dtype, chunk['values'].layout),
+                                 (spec['head'], 'bf16', 'tile'))
+                self.assertEqual((chunk['indices'].shape, chunk['indices'].dtype, chunk['indices'].layout),
+                                 (spec['head'], 'uint16', 'tile'), "the top-k's own index dtype")
+                self.assertEqual(chunk['indices'].mapper, ('replicate', 'mesh'))
+            self.assertEqual((held.projected.shape, held.projected.dtype), (spec['projected'], 'bf16'))
+        self.assertEqual(len({value.shards[0].address for value in operations.live}), len(operations.live))
+        # tiled payload: a single's (16, 16) head is one tile per buffer, the quad's (64, 16) two
+        tile = 32 * 32 * 2
+        self.assertEqual(pool.draft_output_bytes, 4 * (8 * tile + 8 * tile) + 2 * (8 * tile + 8 * tile)
+                         + (8 * 2 * tile + 16 * tile))
+        self.assertEqual(pool.draft_output_bytes, 256 * 1024)
+
+    def test_they_are_lent_by_group_for_the_pools_life(self):
+        pool = ServingBufferPool(FakeOperations(), 'mesh', users=4, draft_outputs=self.outputs())
+        self.assertIs(pool.draft_output((2, 3)), pool.draft_outputs[(2, 3)])
+        self.assertIs(pool.draft_output([0, 1, 2, 3]), pool.draft_outputs[(0, 1, 2, 3)])
+        self.assertIs(pool.draft_output((2,)), pool.draft_outputs[(2,)])
+        self.assertIsNone(pool.draft_output((1, 2)), 'no such group')
+        # lent without a loan: asked twice (a single recaptured, a pair re-formed) it is the same set
+        self.assertIs(pool.draft_output((0, 1)), pool.draft_output((0, 1)))
+        self.assertEqual(pool.draft_masks, {}, 'outputs without masks')
+
+    def test_describe_names_them_only_when_held_and_close_frees_them_with_the_pool(self):
+        operations = FakeOperations()
+        pool = ServingBufferPool(operations, 'mesh', users=4, draft_outputs=self.outputs())
+        report = pool.describe()
+        self.assertEqual(report['draft_output_bytes'], 256 * 1024)
+        self.assertEqual([(entry['group'], entry['chunks'], entry['head'], entry['projected'])
+                          for entry in report['draft_outputs']],
+                         [([0], 4, [1, 1, 16, 16], [1, 1, 32, 256]), ([0, 1], 4, [1, 1, 32, 16], [1, 1, 32, 256]),
+                          ([0, 1, 2, 3], 4, [1, 1, 64, 16], [1, 1, 64, 256]), ([1], 4, [1, 1, 16, 16], [1, 1, 32, 256]),
+                          ([2], 4, [1, 1, 16, 16], [1, 1, 32, 256]), ([2, 3], 4, [1, 1, 32, 16], [1, 1, 32, 256]),
+                          ([3], 4, [1, 1, 16, 16], [1, 1, 32, 256])])
+        self.assertEqual(len(report['draft_outputs'][0]['addresses']), 9)
+        self.assertNotIn('draft_outputs', ServingBufferPool(FakeOperations(), 'mesh', users=4).describe())
+        pool.close()
+        self.assertEqual(len(operations.deallocated), 4 * SLOT_TENSORS + 7 * 9)
+        self.assertEqual(pool.draft_outputs, {})
+        self.assertIsNone(pool.draft_output((0, 1)))
+
+    def test_none_or_empty_is_todays_pool(self):
+        for outputs in (None, {}):
+            with self.subTest(outputs=outputs):
+                operations = FakeOperations()
+                pool = ServingBufferPool(operations, 'mesh', users=4, draft_outputs=outputs)
+                self.assertEqual(len(operations.live), 4 * SLOT_TENSORS)
+                self.assertEqual((pool.draft_outputs, pool.draft_output_bytes), ({}, 0))
+
+    def test_groups_chunks_and_shapes_are_checked_before_anything_is_allocated(self):
+        good = self.spec(32, 32)
+        for outputs in ({(): good}, {(1, 0): good}, {(0, 0): good}, {(4,): good}, {('0',): good},
+                        {(0,): dict(good, head=(1, 32, 16))}, {(0,): dict(good, projected=(1, 1, 32, 0))},
+                        {(0,): dict(good, head=(1, 1, 32, 16.0))}, {(0,): dict(good, chunks=())},
+                        {(0,): dict(good, chunks=((5, 5),))}, {(0,): dict(good, chunks=((0, 1.0),))},
+                        {(0,): dict(good, chunks=(0, 1))}, {(0,): dict(good, extra=1)},
+                        {(0,): {key: value for key, value in good.items() if key != 'projected'}},
+                        {(0,): (1, 1, 32, 16)}, [(0,)]):
+            with self.subTest(outputs=outputs):
+                operations = FakeOperations()
+                with self.assertRaises(ValueError):
+                    ServingBufferPool(operations, 'mesh', users=4, draft_outputs=outputs)
                 self.assertEqual(operations.live, [])
 
 

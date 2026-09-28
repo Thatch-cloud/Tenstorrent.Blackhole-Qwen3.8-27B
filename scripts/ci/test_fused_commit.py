@@ -1740,11 +1740,24 @@ def without_draft_masks(lines):
     """serving_runtime.py less S2 M0's pooled draft masks (QWEN_FAST_EXTENT_REPLAY=1 only), which landed after the
     extent plumbing: the guarded read of the shapes and the pool keyword after the extent one. Each is cut exactly
     once and to its known last line, so nothing else is hidden."""
+    lines = without_draft_outputs(lines)
     lines = cut_once(lines, '# S2: one mask per packed draft (each fixed pair, and the quad), allocated with the pool '
                             'before any trace,', "draft_masks = pooled_draft_mask_shapes(policy['scheduler_requests'], 16)")
     return cut_once(lines, "**({'extent_replay': True} if extent_replay else {}))),",
                     "**({'draft_masks': draft_masks} if draft_masks else {}))",
                     [' ' * 16 + "**({'extent_replay': True} if extent_replay else {}))))"])
+
+
+def without_draft_outputs(lines):
+    """serving_runtime.py less S2 v86's pooled draft outputs (QWEN_FAST_EXTENT_REPLAY=1 only), which landed after the
+    pooled masks: the guarded read of the output shapes and the pool keyword after the masks' one. Each is cut
+    exactly once and to its known last line, so nothing else is hidden."""
+    lines = cut_once(lines, "# S2 v86 (run 36416471352): every traced draft's head outputs - each slot's single-user "
+                            'draft, each fixed',
+                     "draft_outputs = pooled_draft_output_shapes(policy['scheduler_requests'], 16)")
+    return cut_once(lines, "**({'draft_masks': draft_masks} if draft_masks else {}),",
+                    "**({'draft_outputs': draft_outputs} if draft_outputs else {}))",
+                    [' ' * 12 + "**({'draft_masks': draft_masks} if draft_masks else {}))"])
 
 
 class ShippingTests(unittest.TestCase):

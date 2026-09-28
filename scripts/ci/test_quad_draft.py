@@ -924,6 +924,32 @@ class ReadbackTests(unittest.TestCase):
             quad_draft.read_quad_outputs(SimpleNamespace(operations=HostOps()),
                                          SimpleNamespace(chunks=quad_chunks, projected=chips(wide, other)))
 
+    def test_a_refused_half_is_reported_per_chip_and_raises_the_same_error(self):
+        """S2 v86: the second half's merge refuses a -inf block on chip 1 (what another trace's replay leaves); each
+        chip's counts are logged (dflash_packed_proposal.REJECTED_OUTPUTS_LINE) and the merge's own error raised.
+        HostOps' shards have no address: that field says so and nothing else is lost."""
+        generator = torch.Generator().manual_seed(9)
+        chunks, projected = pair_outputs(generator)
+        quad_chunks = [dict(start=chunk['start'], stop=chunk['stop'],
+                            values=chips(*(torch.cat([value, value], dim=2) for value in chunk['values'])),
+                            indices=chips(*(torch.cat([value, value], dim=2) for value in chunk['indices'])))
+                       for chunk in chunks]
+        quad_chunks[1]['values'].chips[1][0, 0, 40:, :] = float('-inf')
+        wide = torch.cat([projected, projected], dim=2)
+        lines, loguru = logged()
+        with loguru, self.assertRaises(ValueError) as raised:
+            quad_draft.read_quad_outputs(SimpleNamespace(operations=HostOps(), pool_slot=SimpleNamespace(index=0)),
+                                         SimpleNamespace(chunks=quad_chunks, projected=chips(wide, wide.clone())))
+        self.assertEqual(str(raised.exception),
+                         'Finite complete-block top16 values and in-range integer indices required')
+        reports = [line for line in lines if line.startswith('[PINDIAG] draft outputs rejected')]
+        self.assertEqual(len(reports), 2, 'the refused half, one line per chip')
+        self.assertIn('device_slot=0 chip=0 nonfinite=0 neg_inf=0 nan=0 ', reports[0])
+        self.assertIn('device_slot=0 chip=1 nonfinite=%d neg_inf=%d nan=0 ' % (24 * 16, 24 * 16), reports[1])
+        # each chip holds its own vocabulary half: healthy chips never read equal
+        self.assertIn('chips_equal=values:0/4,indices:0/4 projected_finite=1 projected_equal=1 '
+                      'addresses=unavailable:AttributeError', reports[1])
+
 
 # ---------------------------------------------------------------------------------------------
 # The conv.
@@ -1273,6 +1299,51 @@ class TraceTests(unittest.TestCase):
         self.assertIn(addresses_of(held), devices[0].validated_native_proposal_masks)
         trace.close()
         self.assertFalse([event for event in ops.events if event[0] == 'deallocate' and event[1] == ops.normalize(held)])
+
+    def test_the_quad_copies_its_outputs_into_the_pools_set_for_slots_0_to_3(self):
+        """S2 v86: with the pool holding a head-output set for slots 0-3 (serving_buffer_pool draft_outputs=), the
+        quad's warm-up copies its outputs in, its capture records the same copies after the pass, and the bucket's
+        outputs - what collect(), the audit and finish() read - are the pool's tensors; a set of another shape is
+        refused with the reason and the quad reads its own."""
+        import dflash_packed_proposal_coordinator as coordinator
+        import serving_buffer_pool
+        from serving_buffer_pool import ServingBufferPool
+        from test_dflash_proposal_trace import head_outputs, output_tensors, RecordingOps
+
+        for rows, pooled in ((64, True), (32, False)):
+            with self.subTest(head_rows=rows), patch.object(serving_buffer_pool, 'HISTORY_SHAPE', (1, 1, 32, 64)), \
+                    patch.object(serving_buffer_pool, 'KV_SHAPE', (1, 4, 32, 128)):
+                ops = RecordingOps()
+                ops.uint16 = 'u16'
+                specs = coordinator.pooled_draft_output_shapes(4, 16)
+                specs[(0, 1, 2, 3)] = dict(specs[(0, 1)], head=(1, 1, rows, 16), projected=(1, 1, 64, 256))
+                pool = ServingBufferPool(ops, 'mesh', users=4, draft_outputs=specs)
+                devices = quad_devices(ops)
+                for index, device in enumerate(devices):
+                    device.pool_slot = SimpleNamespace(index=index, pool=pool)
+                devices[0].execute_proposal = Mock(side_effect=lambda *args, **kwargs: head_outputs(ops, 64, 64)[0])
+                trace = quad_draft.PreparedQuadDFlashProposal(devices)
+                lines, loguru = logged()
+                with loguru, patch('memory_ledger.record'):
+                    self.assertTrue(trace.prepare_device((11, 22, 33, 44)))
+                bucket = trace.buckets[(2048,) * 4]
+                held = pool.draft_outputs[(0, 1, 2, 3)]
+                ours = [id(tensor) for tensor in output_tensors(bucket.outputs)]
+                targets = {ops.normalize(tensor) for tensor in output_tensors(held)}
+                copies = [event for event in ops.events if event[0] == 'copy' and event[2] in targets]
+                reports = [line for line in lines if line.startswith('[PINDIAG] draft outputs')]
+                if pooled:
+                    self.assertEqual(ours, [id(tensor) for tensor in output_tensors(held)])
+                    self.assertEqual(len(copies), 18, 'the warm-up and the capture, 9 each')
+                    self.assertEqual(reports, ['[PINDIAG] draft outputs pooled slots=[0,1,2,3] head=1x1x64x16 '
+                                               'projected=1x1x64x256'])
+                else:
+                    self.assertFalse(set(ours) & {id(tensor) for tensor in output_tensors(held)})
+                    self.assertEqual(copies, [])
+                    self.assertEqual(reports, ['[PINDIAG] draft outputs pooled refused slots=[0,1,2,3]: values0 '
+                                               'shape 1x1x64x16, the pool holds 1x1x32x16'])
+                trace.close()
+                self.assertFalse([event for event in ops.events if event[0] == 'deallocate' and event[1] in targets])
 
     def test_prepare_collect_adopt_finish(self):
         ops, devices, trace = self.build()

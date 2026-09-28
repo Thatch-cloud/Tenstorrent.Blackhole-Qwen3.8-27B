@@ -443,14 +443,128 @@ def propose_packed(device, slots, seeds, counts, *, stage=None, row_exact=False)
         release_owned(operations, owned)
 
 
+# S2 v86 (run 36416471352): when a readback's merge refuses a draft's head outputs ('Finite complete-block top16
+# values and in-range integer indices required', or any other ValueError of merge_chunk_candidates), one line per
+# chip saying what the read held, then the same ValueError, unchanged: the values' non-finite, -inf and NaN counts,
+# the indices' minimum, maximum and out-of-range count, whether the two chips read equal (healthy outputs differ:
+# each chip holds its own vocabulary half), whether the replicated selector projection is finite on this chip and
+# equal on both, and the device addresses of every output buffer (values then indices per chunk, the projection).
+# A clobbered block (another trace's replay wrote the buffers) and a compute fault (a NaN softmax, everything
+# non-finite, the projection too) read differently here. Host work on the failure path only; it never raises.
+OUTPUT_KEYS = ('values', 'indices')
+REJECTED_OUTPUTS_LINE = ('[PINDIAG] draft outputs rejected device_slot=%s chip=%d nonfinite=%s neg_inf=%s nan=%s '
+                         'index_min=%s index_max=%s index_out_of_range=%s chips_equal=%s projected_finite=%s '
+                         'projected_equal=%s addresses=%s error=%s')
+
+
+def _count(value):
+    return int(value.sum())
+
+
+def rejected_output_lines(device, outputs, host_chunks, failure):
+    """REJECTED_OUTPUTS_LINE for each chip of a refused readback (`host_chunks`, as merge_chunk_candidates took them;
+    `outputs`, the device tensors they were read from). Each field that cannot be read says so; never raises."""
+    import torch
+
+    operations = device.operations
+    slot = getattr(getattr(device, 'pool_slot', None), 'index', None)
+    error = str(failure).replace(' ', '_')[:120]
+
+    def guarded(read):
+        try:
+            return read()
+        except Exception as problem:  # noqa: BLE001 - a diagnostic reports what it cannot read
+            return 'unavailable:%s' % type(problem).__name__
+
+    def chunks_of(chip):
+        return [chunk for chunk in host_chunks if chunk.get('chip') == chip]
+
+    def chips_equal():
+        pairs = {}
+        for chunk in host_chunks:
+            pairs.setdefault((chunk['start'], chunk['stop']), {})[chunk['chip']] = chunk
+        equal = {key: 0 for key in OUTPUT_KEYS}
+        for chips in pairs.values():
+            if set(chips) == {0, 1}:
+                for key in OUTPUT_KEYS:
+                    left, right = chips[0][key], chips[1][key]
+                    equal[key] += int(tuple(left.shape) == tuple(right.shape) and bool(torch.equal(left, right)))
+        return ','.join('%s:%d/%d' % (key, equal[key], len(pairs)) for key in OUTPUT_KEYS)
+
+    def projected():
+        parts = [operations.to_torch(value).float() for value in operations.get_device_tensors(outputs.projected)]
+        equal = int(len(parts) == 2 and tuple(parts[0].shape) == tuple(parts[1].shape)
+                    and bool(torch.equal(parts[0], parts[1])))
+        return [int(bool(torch.isfinite(part).all())) for part in parts], equal
+
+    def buffer_addresses(chip):
+        tensors = [chunk[key] for chunk in outputs.chunks for key in OUTPUT_KEYS] + [outputs.projected]
+        return '[%s]' % ','.join('0x%x' % operations.get_device_tensors(tensor)[chip].buffer_address()
+                                 for tensor in tensors)
+
+    equal_text = guarded(chips_equal)
+    projection = guarded(projected)
+    lines = []
+    for chip in range(2):
+        mine = chunks_of(chip)
+        values = guarded(lambda mine=mine: torch.cat([chunk['values'].float().reshape(-1) for chunk in mine]))
+        indices = guarded(lambda mine=mine: torch.cat([chunk['indices'].long().reshape(-1) for chunk in mine]))
+        numeric = not isinstance(values, str) and values.numel()
+        whole = not isinstance(indices, str) and indices.numel()
+        out_of_range = guarded(lambda mine=mine: sum(
+            _count((chunk['indices'].long() < 0) | (chunk['indices'].long() >= chunk['stop'] - chunk['start']))
+            for chunk in mine))
+        if isinstance(projection, str):
+            finite, projected_equal = projection, projection
+        else:
+            finite = projection[0][chip] if chip < len(projection[0]) else 'missing'
+            projected_equal = projection[1]
+        lines.append(REJECTED_OUTPUTS_LINE % (
+            slot, chip,
+            _count(~torch.isfinite(values)) if numeric else (values if isinstance(values, str) else 'empty'),
+            _count(values == float('-inf')) if numeric else '-',
+            _count(torch.isnan(values)) if numeric else '-',
+            int(indices.min()) if whole else (indices if isinstance(indices, str) else 'empty'),
+            int(indices.max()) if whole else '-',
+            out_of_range, equal_text, finite, projected_equal,
+            guarded(lambda chip=chip: buffer_addresses(chip)), error))
+    return lines
+
+
+def report_rejected_outputs(device, outputs, host_chunks, failure):
+    """Log rejected_output_lines; never raises (the caller re-raises the merge's own ValueError)."""
+    try:
+        lines = rejected_output_lines(device, outputs, host_chunks, failure)
+    except Exception as problem:  # noqa: BLE001 - the diagnostic must not replace the merge's error
+        lines = ['[PINDIAG] draft outputs rejected diagnostics unavailable: %s: %s' % (
+            type(problem).__name__, str(problem)[:120])]
+    for line in lines:
+        try:
+            _log_line(line)
+        except Exception:  # noqa: BLE001
+            pass
+    return lines
+
+
+def merged_candidates(device, outputs, host_chunks, block_rows=32):
+    """merge_chunk_candidates over a readback's host chunks; a refusal is reported per chip
+    (report_rejected_outputs) and the same ValueError raised again."""
+    from draft_shared_head import merge_chunk_candidates
+
+    try:
+        return merge_chunk_candidates(host_chunks, block_rows=block_rows)
+    except ValueError as failure:
+        report_rejected_outputs(device, outputs, host_chunks, failure)
+        raise
+
+
 def select_device_outputs(device, outputs, seeds, counts, users, block_rows):
     """Read the shared head back once and split it by user.
 
     The readback is the device's 32-row block: (32, 16) candidates per chip and chunk,
-    merged at block_rows=32, a (1, 32, 256) selector projection (BLOCK WIDTH above)."""
+    merged at block_rows=32, a (1, 32, 256) selector projection (BLOCK WIDTH above).
+    A refused merge is reported per chip (merged_candidates, S2 v86) and raised unchanged."""
     import torch
-
-    from draft_shared_head import merge_chunk_candidates
 
     operations = device.operations
     host_chunks = []
@@ -463,7 +577,7 @@ def select_device_outputs(device, outputs, seeds, counts, users, block_rows):
             host_chunks.append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
                 values=operations.to_torch(values[chip]).float().reshape(32, 16),
                 indices=operations.to_torch(indices[chip]).long().reshape(32, 16)))
-    candidates, unary = merge_chunk_candidates(host_chunks, block_rows=32)
+    candidates, unary = merged_candidates(device, outputs, host_chunks, block_rows=32)
     parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
     if len(parts) != 2 or not torch.equal(*parts):
         raise AssertionError('Replicated learned selector features differ')
@@ -482,8 +596,6 @@ def read_device_outputs(device, outputs, users, block_rows):
     select_device_outputs itself."""
     import torch
 
-    from draft_shared_head import merge_chunk_candidates
-
     operations = device.operations
     host_chunks = []
     for chunk in outputs.chunks:
@@ -495,7 +607,7 @@ def read_device_outputs(device, outputs, users, block_rows):
             host_chunks.append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
                 values=operations.to_torch(values[chip]).float().reshape(32, 16),
                 indices=operations.to_torch(indices[chip]).long().reshape(32, 16)))
-    candidates, unary = merge_chunk_candidates(host_chunks, block_rows=32)
+    candidates, unary = merged_candidates(device, outputs, host_chunks, block_rows=32)
     parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
     if len(parts) != 2 or not torch.equal(*parts):
         raise AssertionError('Replicated learned selector features differ')

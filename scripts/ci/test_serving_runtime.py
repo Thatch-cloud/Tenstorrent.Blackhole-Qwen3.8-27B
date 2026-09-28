@@ -220,6 +220,14 @@ class RuntimeAttachmentTests(unittest.TestCase):
                             # keys on, and told so explicitly; flag off, no keyword at all.
                             self.assertIs(options['extent_replay'], True)
                             expected.add('extent_replay')
+                            # S2 v86: every traced draft's head-output set (each slot's single, and the pairs and
+                            # the quad the flags build), pooled before any trace; never without the extent flag.
+                            from dflash_packed_proposal_coordinator import pooled_draft_output_shapes
+
+                            self.assertEqual(options['draft_outputs'], pooled_draft_output_shapes(users, 16))
+                            self.assertEqual([group for group in options['draft_outputs'] if len(group) == 1],
+                                             [(slot,) for slot in range(users)])
+                            expected.add('draft_outputs')
                             if env.get('QWEN_FAST_PACKED_PROPOSAL') == '1':
                                 # S2 M0: the packed drafts' masks, pooled before any trace, at the shapes the
                                 # coordinator names for the T16 block; never without the extent flag.
@@ -593,6 +601,29 @@ class RuntimeAttachmentTests(unittest.TestCase):
         # without the extent flag the pool is today's, packed proposals or not
         self.exercise(extra_env=drafts, **self.M3)
         self.assertNotIn('draft_masks', self.pool_options)
+
+    def test_the_extent_flag_pools_every_traced_drafts_head_outputs(self):
+        # S2 v86 (run 36416471352): each slot's single-user draft, each fixed pair and the quad copy their head
+        # outputs into sets allocated with the pool before any trace; exercise() asserts the keyword is the
+        # coordinator's shapes and nothing else is added.
+        chunks = ((0, 32768), (32768, 65536), (65536, 98304), (98304, 124160))
+
+        def spec(head_rows, projected_rows):
+            return dict(chunks=chunks, head=(1, 1, head_rows, 16), projected=(1, 1, projected_rows, 256))
+
+        singles = {(slot,): spec(16, 32) for slot in range(4)}
+        drafts = {'QWEN_FAST_PACKED_PROPOSAL': '1', 'QWEN_FAST_PAIR_ROW_EXACT': '1', 'QWEN_FAST_QUAD_DRAFT': '1'}
+        self.exercise(**self.EXTENT, extra_env=drafts, **self.M3)
+        self.assertEqual(self.pool_options['draft_outputs'],
+                         {**singles, (0, 1): spec(32, 32), (2, 3): spec(32, 32), (0, 1, 2, 3): spec(64, 64)})
+        self.exercise(**self.EXTENT, extra_env=dict(drafts, QWEN_FAST_QUAD_DRAFT='0'), **self.M3)
+        self.assertEqual(self.pool_options['draft_outputs'],
+                         {**singles, (0, 1): spec(32, 32), (2, 3): spec(32, 32)}, 'no quad')
+        self.exercise(**self.EXTENT, **self.M3)
+        self.assertEqual(self.pool_options['draft_outputs'], singles, 'packed proposals off: the singles only')
+        # without the extent flag the pool is today's
+        self.exercise(extra_env=drafts, **self.M3)
+        self.assertNotIn('draft_outputs', self.pool_options)
 
     def test_the_flag_unset_or_zero_passes_the_pool_no_extent_keyword(self):
         for extra_env in ({}, {'QWEN_FAST_EXTENT_REPLAY': '0'}):

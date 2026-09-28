@@ -99,6 +99,13 @@ scripts/ci/memory_ledger.py
 # their P8 selves call for call (test_dflash_proposal_trace, test_quad_draft).
 scripts/ci/dflash_proposal_trace.py
 scripts/ci/quad_draft.py
+# S2 v86 (run 36416471352): every traced draft (single, pair, quad) copies its head outputs into the pool's pre-trace
+# output set (serving_buffer_pool draft_outputs=, which serving_runtime asks the coordinator's
+# pooled_draft_output_shapes for under QWEN_FAST_EXTENT_REPLAY=1), and a readback whose merge refuses them reports
+# each chip first (REJECTED_OUTPUTS_LINE: merged_candidates and report_rejected_outputs, which quad_draft and
+# dflash_device import from it). It reaches the image at P8's commit otherwise, without either, and every quad
+# readback dies on the import. With no pool output sets it is its P8 self on every path that does not refuse.
+scripts/ci/dflash_packed_proposal.py
 # S2 W3: the packed fixture's extent branch (packed_extent: one extent reader per segment over the pool's
 # full-width tables and cur_pos words). P8 lays model_batch.py at its base commit, byte-identical to the
 # pre-S2 HEAD; without this line the C2 image ships that copy, which has no packed_extent keyword, and the
