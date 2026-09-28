@@ -2307,7 +2307,7 @@ def run_churn(plan, runner, profiles, arms):
     region = s2.get('trace_region') or {}
     facts = dict(releases=releases, replacements=replacements, quads_built=s2.get('quads_built'),
                  before=s2.get('before'), dram_hold=s2.get('dram_hold'), trace_region=region,
-                 request_buffers=s2.get('request_buffers'))
+                 request_buffers=s2.get('request_buffers'), draft_outputs=s2.get('draft_outputs'))
     result = dict(verdict='PASS', lines=[
         'departures %s (%s while a quad was formed, %s released it) over %d replacements; release lines %s (%s '
         'quads, %s pairs); trace region %s' % (
@@ -2315,8 +2315,21 @@ def run_churn(plan, runner, profiles, arms):
             (releases.get('quad_departures') or 0) - (releases.get('unreleased') or 0), replacements,
             releases.get('lines'), releases.get('quad'), releases.get('pairs'), trace_region_text(region)),
         full_seat_admissions_text((s2.get('dram_hold') or {}).get('fit_readings'), seats),
-        request_buffers_text(s2.get('request_buffers'))])
+        request_buffers_text(s2.get('request_buffers')), draft_outputs_text(s2.get('draft_outputs'))])
     return with_checks(result, problems, shortfalls, facts)
+
+
+def draft_outputs_text(record):
+    """S2 v86 (run 36416471352, the churn arm that died on a fresh pair's clobbered outputs): the drafts' pooled head
+    outputs as the harness read them (lever_n_m3native_gate.draft_outputs_report), as a line - per kind the builds
+    that pooled against the builds seen, the refusals and the rejected readbacks. Recorded here; the harness's own
+    problems judge them."""
+    if not record:
+        return 'draft outputs: not recorded'
+    pooled, built = record.get('pooled') or {}, record.get('built') or {}
+    return 'draft outputs pooled by %s; %s refused; %s rejected readbacks' % (
+        ', '.join('%d %s (%d built)' % (pooled.get(kind) or 0, kind, built.get(kind) or 0)
+                  for kind in ('single', 'pair', 'quad')), record.get('refused') or 0, record.get('rejected') or 0)
 
 
 def full_seat_admissions_text(fits, seats):

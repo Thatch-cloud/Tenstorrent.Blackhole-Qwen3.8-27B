@@ -2548,9 +2548,11 @@ def ledger_report(log_text, alive_index=None):
 #             line (W3, logged inside verify: the executed path, memory graft-mounted-is-not-graft-executed)
 #             for every packed round's [PACKED] lines; with the audit, no MISMATCH, every word and cur_pos
 #             read back, and an audit line for every packed extent round; never a packed round below 128;
+#             every kind of draft that built (single-user, pair, quad) pooled its head outputs at least once
+#             (S2 v86, draft_outputs_report);
 #   flag off: none of S2_MARKERS (this is not the profile's path);
 #   either:   no cap-refused (the block backstop, W3/W4) or replay-deadline line; a capture knob that the
-#             block logged taking.
+#             block logged taking; no refused draft-output set (S2 v86, DRAFT_OUTPUTS_REFUSED_MARKER).
 # Everything else - holds, refusals, narrowing, releases, before-points, trace-region readings, per-user
 # paths, cap events and boundary crossings - is recorded for c2_serving_gate's plan verdicts.
 EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
@@ -2603,6 +2605,24 @@ QUARANTINED_MARKER = '[PINDIAG] request quarantined:'            # D2: a Request
 # reaches the hook - so just ahead of that step's '[PHASE] execute ... finished=[ids]' line.
 RELEASED_LINE = re.compile(r'\[PACKED-PROPOSE\] released quad=([0-9]+) pairs=(\[[^\n]*\]|[0-9]+)')
 QUAD_BUILT_LINE = re.compile(r'\[QUAD-DRAFT\] round=[0-9]+ built=1 ')
+# S2 v86 (run 36416471352): every traced draft copies its head outputs into a set the pool allocated at attach, before
+# any trace, so no other trace's replay can overwrite them before the round reads them (the G5 churn death: a fresh
+# pair's outputs sat in an older single-user trace's holes). One DRAFT_OUTPUTS_POOLED_LINE per draft build that pools
+# (dflash_proposal_trace.POOLED_OUTPUTS_LINE: slots=[s] a slot's single-user draft, [a,b] a pair, [0,1,2,3] the quad).
+# A refusal leaves that draft reading the outputs its capture allocated - the unprotected path v86 died on - so every
+# refusal fails the arm: a build whose set cannot take its outputs, or whose copy the runtime refused
+# (dflash_proposal_trace.POOLED_OUTPUTS_REFUSED_LINE), and a pool that could make no set at attach
+# (serving_buffer_pool.DRAFT_OUTPUTS_REFUSED_LINE); both start with DRAFT_OUTPUTS_REFUSED_MARKER. With the flag on, a
+# kind of draft that built and never once pooled fails it too (the image carries no sets, or they are not wired): a
+# single-user draft built when a 'proposal buckets built' line names buckets, a pair or the quad when its pooled mask
+# line (dflash_proposal_trace.POOLED_MASK_LINE) is logged, the quad also on a built quad round. A readback whose merge
+# refused its outputs logs DRAFT_OUTPUTS_REJECTED_MARKER per chip (dflash_packed_proposal.REJECTED_OUTPUTS_LINE):
+# recorded, as what tells an overwritten block from a compute fault.
+DRAFT_OUTPUTS_POOLED_LINE = re.compile(r'\[PINDIAG\] draft outputs pooled slots=\[([0-9,]+)\] head=')
+DRAFT_OUTPUTS_REFUSED_MARKER = '[PINDIAG] draft outputs pooled refused'
+DRAFT_OUTPUTS_REJECTED_MARKER = '[PINDIAG] draft outputs rejected'
+DRAFT_MASK_POOLED_LINE = re.compile(r'\[PINDIAG\] draft mask pooled slots=\[([0-9,]+)\] shape=')
+DRAFT_KINDS = {1: 'single', 2: 'pair', 4: 'quad'}
 # A quad round is QUAD_ROUND_LINE (above: quad_draft.ROUND_LINE, logged every quad round).
 # serving_worker_hook (QWEN_FAST_PHASE_LOG=1, the image's): finished= is the step's sorted finished request ids.
 PHASE_FINISHED = re.compile(r'\[PHASE\] execute total=\S+ new=\S+ cached=\S+ spec=\S+ finished=\[([^\]\n]*)\]')
@@ -2930,6 +2950,33 @@ def before_points(log_text):
                 contiguous_point=contiguous, logged_floor_gb=min(logged) if logged else None)
 
 
+def draft_outputs_report(log_text):
+    """The drafts' pooled head outputs (S2 v86, the DRAFT_OUTPUTS_POOLED_LINE comment): per kind of draft (single,
+    pair, quad) the builds that pooled and the builds seen, the refusals and the rejected readbacks, each with its
+    first lines."""
+    def kinds(pattern):
+        counts = dict.fromkeys(DRAFT_KINDS.values(), 0)
+        for slots in pattern.findall(log_text):
+            kind = DRAFT_KINDS.get(len(slots.split(',')))
+            if kind is not None:
+                counts[kind] += 1
+        return counts
+
+    masks = kinds(DRAFT_MASK_POOLED_LINE)
+    singles = 0
+    for _, text in PROPOSAL_BUCKETS_BUILT_LINE.findall(log_text):
+        ladder = ladder_of(text)
+        singles += int(isinstance(ladder, list) and bool(ladder))
+    lines = log_text.splitlines()
+    # Whole lines, to a bound: a rejected line carries every output buffer's address on its chip.
+    refused = [line.strip()[:320] for line in lines if DRAFT_OUTPUTS_REFUSED_MARKER in line]
+    rejected = [line.strip()[:640] for line in lines if DRAFT_OUTPUTS_REJECTED_MARKER in line]
+    return dict(pooled=kinds(DRAFT_OUTPUTS_POOLED_LINE),
+                built=dict(single=singles, pair=masks['pair'],
+                           quad=max(masks['quad'], len(QUAD_BUILT_LINE.findall(log_text)))),
+                refused=len(refused), refused_lines=refused[:4], rejected=len(rejected), rejected_lines=rejected[:4])
+
+
 def trace_region(log_text):
     """The trace region's readings on W6d's before/after points (s2-design Q18, B9): how many, how many said
     'trace=unavailable' (this ttnn has no TRACE view), the most used and the smallest largest free block."""
@@ -3041,6 +3088,7 @@ def s2_report(environ, log_text, streams=None, prompt_lengths=None):
         before=before_points(log_text), request_buffers=request_buffers(log_text),
         trace_region=region, trace_region_lines=region['lines'],
         publication_warm=publication_warm_report(log_text),
+        draft_outputs=draft_outputs_report(log_text),
         other_audits=other)
     try:
         from acceptance_report import live_rate
@@ -3086,6 +3134,15 @@ def s2_report(environ, log_text, streams=None, prompt_lengths=None):
         if low:
             problems.append('%s=1: packed rounds below position %d (%s): the admission floor broke'
                             % (EXTENT_REPLAY_FLAG, S2_MIN_LIVE_START, '; '.join(low[:3])))
+        outputs = report['draft_outputs']
+        unpooled = [kind for kind in DRAFT_KINDS.values() if outputs['built'][kind] and not outputs['pooled'][kind]]
+        if unpooled:
+            problems.append('%s=1: %s but no "[PINDIAG] draft outputs pooled slots=" line for them: they read the '
+                            'outputs their captures allocated, which the replay of another trace can overwrite (S2 '
+                            'v86): the image carries no pooled output sets, they are not wired, or every such build '
+                            'failed before its capture' % (
+                                EXTENT_REPLAY_FLAG, ', '.join('%d %s draft builds' % (outputs['built'][kind], kind)
+                                                              for kind in unpooled)))
     else:
         leaked = sorted(marker for marker in S2_MARKERS if marker in log_text)
         if leaked:
@@ -3096,6 +3153,12 @@ def s2_report(environ, log_text, streams=None, prompt_lengths=None):
                         'the round)' % (report['cap_refused'], CAP_REFUSED_MARKER))
     if report['deadline']:
         problems.append('"%s": a replay overran its deadline and the engine exited' % DEADLINE_MARKER)
+    if report['draft_outputs']['refused']:
+        problems.append('%d "%s" lines (%s): those drafts read the outputs their captures allocated, which the '
+                        'replay of another trace can overwrite before the round reads them (S2 v86, run '
+                        '36416471352)' % (
+                            report['draft_outputs']['refused'], DRAFT_OUTPUTS_REFUSED_MARKER,
+                            '; '.join(report['draft_outputs']['refused_lines'][:2])))
     if capture is not None and capture not in report['capture_overrides']:
         problems.append('%s=%s but no "[PINDIAG] packed capture position override=%s" line: the knob never reached '
                         'the block' % (CAPTURE_POSITION_FLAG, capture, capture))

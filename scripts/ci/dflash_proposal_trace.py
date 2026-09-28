@@ -283,7 +283,7 @@ class PreparedDFlashProposal:
                 self.buckets[context] = bucket
             # S2 v86: the pool's output set for this slot (POOLED_OUTPUTS_LINE), borrowed at the first bucket's
             # warm-up; every bucket's pass then ends by copying into it. None without one: today's outputs.
-            pooled, asked = None, False
+            pooled_outputs, asked = None, False
             for bucket in self.buckets.values():
                 self.update(bucket, 0)
                 transient, retain = device.temporaries([*device.owned, *self.owned])
@@ -291,15 +291,16 @@ class PreparedDFlashProposal:
                     warm = self.execute(bucket, transient, retain)
                     if not asked:
                         asked = True
-                        pooled = pool_outputs(device, (_slot_of(device),), warm, operations)
-                    elif pooled is not None:
-                        publish_outputs(operations, warm, pooled)
+                        pooled_outputs = pool_outputs(device, (_slot_of(device),), warm, operations)
+                    elif pooled_outputs is not None:
+                        publish_outputs(operations, warm, pooled_outputs)
                     operations.synchronize_device(self.mesh)
                 finally:
                     release_owned(operations, transient)
                 bucket.owned, retain = device.temporaries([*device.owned, *self.owned])
                 bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
-                    lambda: traced_pass(operations, lambda: self.execute(bucket, bucket.owned, retain), pooled))
+                    lambda: traced_pass(operations, lambda: self.execute(bucket, bucket.owned, retain),
+                                        pooled_outputs))
                 operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
         except BaseException:
             self.close()
@@ -639,10 +640,10 @@ class PreparedPackedDFlashProposal:
             live_banks = _live_bank_history(self.device_a, self.device_b) if context_a == context_b == 2048 else None
             # S2: the pool's pre-trace mask for these slots, the host mask copied in (POOLED_MASK_LINE); None
             # without one, and the mask is uploaded below as before.
-            pooled = borrow_pooled_mask(device, self.pair_label(), host_mask, operations, self.mesh)
+            pooled_mask = borrow_pooled_mask(device, self.pair_label(), host_mask, operations, self.mesh)
             bucket = SimpleNamespace(context=(context_a, context_b), host_mask=host_mask,
                 identifiers=self._upload(packed_identifiers([0, 0], self.block_rows), identifiers=True),
-                mask=pooled if pooled is not None else self._upload(host_mask),
+                mask=pooled_mask if pooled_mask is not None else self._upload(host_mask),
                 rope=dict(q=tuple(self._upload(value) for value in tables['q']),
                           k=tuple(self._upload(value) for value in tables['k']),
                           live_k=tuple(self._upload(value) for value in live)),
@@ -655,10 +656,10 @@ class PreparedPackedDFlashProposal:
                 bucket.live_banks = True
             if row_exact:
                 bucket.row_exact = True
-            if pooled is not None:
+            if pooled_mask is not None:
                 # Borrowed, never in self.owned: protected from every temporary like the lent banks, and never
                 # released by a failed build or close().
-                bucket.lent_mask = (pooled,)
+                bucket.lent_mask = (pooled_mask,)
             bucket.inputs = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k'],
                 *(value for cache in bucket.cached_history for layer in cache for value in layer.values())]
             bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
@@ -679,14 +680,15 @@ class PreparedPackedDFlashProposal:
             try:
                 warm = self._execute(bucket, transient, retain)
                 # S2 v86: the pool's output set for the pair's slots (POOLED_OUTPUTS_LINE); None without one.
-                pooled = pool_outputs(device, self.pair_label(), warm, operations)
+                pooled_outputs = pool_outputs(device, self.pair_label(), warm, operations)
                 operations.synchronize_device(self.mesh)
             finally:
                 release_owned(operations, transient)
             bucket.owned, retain = device.temporaries([device.history, device.spare_history,
                 self.device_b.history, self.device_b.spare_history, *self.owned, *lent])
             bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
-                lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain), pooled))
+                lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain),
+                                    pooled_outputs))
             operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
             if row_exact:
                 from pair_row_exact import note

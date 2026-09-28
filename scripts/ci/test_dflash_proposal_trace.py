@@ -1382,6 +1382,22 @@ class RejectedOutputsTests(unittest.TestCase):
         self.assertEqual(str(raised.exception), self.ERROR)
         self.check(lines, outputs, slot=1, rows=16)
 
+    def test_an_unimportable_diagnostic_never_replaces_the_single_users_error(self):
+        # S2 v86 skeptic nit 2: the report's import sits on the failure path, so its own failure (a missing module,
+        # or anything the report raises) must leave the merge's ValueError to propagate, unchanged.
+        from dflash_device import DFlashDevice
+
+        ops = RecordingOps()
+        ops.uint16 = 'u16'
+        outputs = self.outputs(ops, rows=16)
+        device = SimpleNamespace(operations=ops, block_rows=16, pool_slot=SimpleNamespace(index=1))
+        for broken in (patch.dict(sys.modules, {'dflash_packed_proposal': None}),
+                       patch('dflash_packed_proposal.report_rejected_outputs', side_effect=RuntimeError('report'))):
+            with self.subTest(broken=broken), broken, self.assertRaises(ValueError) as raised:
+                DFlashDevice.select_proposal(device, outputs, 5, 3)
+            self.assertEqual(str(raised.exception), self.ERROR)
+            self.assertIsNone(raised.exception.__context__, 'raised as the merge raised it, no other error chained')
+
     def test_healthy_outputs_log_nothing_and_a_broken_diagnostic_never_replaces_the_error(self):
         import dflash_packed_proposal
 

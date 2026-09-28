@@ -30,6 +30,18 @@ def pindiag(template, *values):
     logger.info(template, *values)
 
 
+def report_rejected_readback(device, outputs, host_chunks, failure):
+    """S2 v86: dflash_packed_proposal.report_rejected_outputs for a single-user readback whose merge refused its
+    outputs. Never raises - not even when that module cannot be imported - so the caller re-raises the merge's own
+    ValueError, never an error of the diagnostic's."""
+    try:
+        from dflash_packed_proposal import report_rejected_outputs
+
+        report_rejected_outputs(device, outputs, host_chunks, failure)
+    except Exception:  # noqa: BLE001 - the diagnostic must not replace the merge's error
+        pass
+
+
 AUDIT_SWITCH = 'QWEN_FAST_PROPOSAL_AUDIT'
 # The log capture truncates around 250 characters and loguru's own prefix takes
 # some of them, so each audit message stays under this (the budget
@@ -1054,10 +1066,8 @@ class DFlashDevice:
             candidates, unary = merge_chunk_candidates(host_chunks, block_rows=self.block_rows)
         except ValueError as failure:
             # S2 v86 (run 36416471352): what the read held, per chip (dflash_packed_proposal.REJECTED_OUTPUTS_LINE),
-            # then the same error.
-            from dflash_packed_proposal import report_rejected_outputs
-
-            report_rejected_outputs(self, outputs, host_chunks, failure)
+            # then the same error - never another one in its place (report_rejected_readback).
+            report_rejected_readback(self, outputs, host_chunks, failure)
             raise
         projected_parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
         if len(projected_parts) != 2 or not torch.equal(*projected_parts):

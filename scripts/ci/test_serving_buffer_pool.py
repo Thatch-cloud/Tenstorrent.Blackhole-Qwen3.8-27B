@@ -14,8 +14,9 @@ import torch
 import dflash_device
 from dflash_device import DFlashDevice, PreparedDraftWeights, pindiag
 from pooled_attention_replay import bundle_batches, family_capacities
-from serving_buffer_pool import (DRAFT_LAYERS, GDN_LAYERS, HISTORY_SHAPE, KV_SHAPE, QUERY_SHAPE, PackedExtentStorage,
-                                 ServingBufferPool, bank_tensors, extent_bundle_batches, snapshot_tensors, tensor_bytes)
+from serving_buffer_pool import (DRAFT_LAYERS, DRAFT_OUTPUTS_REFUSED_LINE, GDN_LAYERS, HISTORY_SHAPE, KV_SHAPE,
+                                 QUERY_SHAPE, PackedExtentStorage, ServingBufferPool, bank_tensors,
+                                 extent_bundle_batches, snapshot_tensors, tensor_bytes)
 
 # A slot: the history pair plus, per draft layer, active and spare k and v.
 SLOT_TENSORS = 2 + 4 * DRAFT_LAYERS
@@ -1085,6 +1086,89 @@ class DraftOutputTests(unittest.TestCase):
                 pool = ServingBufferPool(operations, 'mesh', users=4, draft_outputs=outputs)
                 self.assertEqual(len(operations.live), 4 * SLOT_TENSORS)
                 self.assertEqual((pool.draft_outputs, pool.draft_output_bytes), ({}, 0))
+                self.assertEqual((pool.draft_outputs_refused, pool.draft_output_indices_from), (None, None))
+                self.assertFalse({'draft_outputs_refused', 'draft_output_indices_from'} & set(pool.describe()))
+
+    def test_the_indices_are_made_from_int32_host_zeros_and_describe_says_so(self):
+        pool = ServingBufferPool(FakeOperations(), 'mesh', users=4, draft_outputs=self.outputs())
+        self.assertEqual((pool.draft_output_indices_from, pool.draft_outputs_refused), ('int32', None))
+        self.assertEqual(pool.describe()['draft_output_indices_from'], 'int32')
+        self.assertNotIn('draft_outputs_refused', pool.describe())
+
+    def test_a_refused_int32_conversion_makes_every_index_buffer_from_int16_zeros(self):
+        # S2 v86 skeptic R1: no hardware run had made a UINT16 tiled buffer from host zeros before these sets.
+        class Int16Only(FakeOperations):
+            refused = 0
+
+            def from_torch(self, value, **options):
+                if options.get('dtype') == 'uint16' and value.dtype != torch.int16:
+                    self.refused += 1
+                    raise RuntimeError('Unsupported conversion to UINT16')
+                return FakeOperations.from_torch(self, value, **options)
+
+        operations = Int16Only()
+        with patch('serving_buffer_pool.pindiag') as log:
+            pool = ServingBufferPool(operations, 'mesh', users=4, draft_outputs=self.outputs())
+        log.assert_not_called()
+        self.assertEqual(operations.refused, 1, 'int32 asked once, then int16 for this buffer and every later one')
+        self.assertEqual(sorted(pool.draft_outputs), sorted(self.outputs()))
+        self.assertEqual((pool.draft_output_indices_from, pool.draft_outputs_refused, pool.draft_output_bytes),
+                         ('int16', None, 256 * 1024))
+        for held in pool.draft_outputs.values():
+            for chunk in held.chunks:
+                self.assertEqual((chunk['indices'].dtype, chunk['indices'].layout, chunk['indices'].mapper),
+                                 ('uint16', 'tile', ('replicate', 'mesh')))
+        self.assertEqual(len({value.shards[0].address for value in operations.live}), len(operations.live))
+
+    def test_sets_the_runtime_refuses_to_make_are_logged_and_the_attach_goes_on_without_any(self):
+        # S2 v86 skeptic R1: a protection, not a precondition - the pool is built, holds no output set, says why once,
+        # and every draft reads its own outputs (dflash_proposal_trace.borrow_pooled_outputs finds no set).
+        class NoUint16(FakeOperations):
+            def from_torch(self, value, **options):
+                if options.get('dtype') == 'uint16':
+                    raise RuntimeError('Unsupported data type UINT16\n  at the conversion, backtrace follows')
+                return FakeOperations.from_torch(self, value, **options)
+
+        operations = NoUint16()
+        masks = {(0, 1): (1, 1, 32, 2080)}
+        with patch('serving_buffer_pool.pindiag') as log:
+            pool = ServingBufferPool(operations, 'mesh', users=4, draft_masks=masks, draft_outputs=self.outputs())
+        reason = 'RuntimeError: Unsupported data type UINT16'
+        log.assert_called_once_with(DRAFT_OUTPUTS_REFUSED_LINE, [[0], [0, 1], [0, 1, 2, 3], [1], [2], [2, 3], [3]],
+                                    reason)
+        self.assertEqual((pool.draft_outputs, pool.draft_output_bytes, pool.draft_outputs_refused,
+                          pool.draft_output_indices_from), ({}, 0, reason, None))
+        self.assertIsNone(pool.draft_output((0, 1)))
+        self.assertEqual(len(pool.slots), 4)
+        self.assertIs(pool.draft_mask((0, 1), (1, 1, 32, 2080)), pool.draft_masks[(0, 1)], 'the masks as ever')
+        report = pool.describe()
+        self.assertEqual(report['draft_outputs_refused'], reason)
+        self.assertNotIn('draft_outputs', report)
+        # what the refused sets had made (the first group's values) is the pool's own, freed with it
+        made = len(operations.live)
+        self.assertEqual(made, 4 * SLOT_TENSORS + 1 + 1)
+        pool.close()
+        self.assertEqual(len(operations.deallocated), made)
+        # the line starts as the build's refusal does: the gate fails an arm on that one prefix
+        import dflash_proposal_trace
+        import lever_n_m3native_gate
+
+        for line in (DRAFT_OUTPUTS_REFUSED_LINE, dflash_proposal_trace.POOLED_OUTPUTS_REFUSED_LINE):
+            self.assertTrue(line.startswith(lever_n_m3native_gate.DRAFT_OUTPUTS_REFUSED_MARKER), line)
+
+    def test_an_attach_that_fails_otherwise_still_fails(self):
+        # Only the output sets are refused softly: a failure anywhere before them closes the pool and raises, as ever.
+        class NoMasks(FakeOperations):
+            def from_torch(self, value, **options):
+                if tuple(value.shape) == (1, 1, 32, 2080):
+                    raise RuntimeError('out of DRAM')
+                return FakeOperations.from_torch(self, value, **options)
+
+        operations = NoMasks()
+        with self.assertRaisesRegex(RuntimeError, 'out of DRAM'):
+            ServingBufferPool(operations, 'mesh', users=4, draft_masks={(0, 1): (1, 1, 32, 2080)},
+                              draft_outputs=self.outputs())
+        self.assertEqual(len(operations.deallocated), len(operations.live))
 
     def test_groups_chunks_and_shapes_are_checked_before_anything_is_allocated(self):
         good = self.spec(32, 32)

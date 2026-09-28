@@ -843,17 +843,18 @@ class PreparedQuadDFlashProposal:
             query, live = quad_rope([dict(position=CONTEXT, history_rows=CONTEXT)] * USERS)
             # S2: the pool's pre-trace mask for slots 0-3, the host mask copied in (dflash_proposal_trace
             # .POOLED_MASK_LINE); None without one, and the mask is uploaded below as before.
-            pooled = borrow_pooled_mask(device, self.pair_label(), host_mask, operations, self.mesh, log=log_line)
+            pooled_mask = borrow_pooled_mask(device, self.pair_label(), host_mask, operations, self.mesh,
+                                             log=log_line)
             bucket = SimpleNamespace(context=key, host_mask=host_mask,
                 identifiers=self._upload(packed_identifiers([0] * USERS, BLOCK, block_width=ROWS), identifiers=True),
-                mask=pooled if pooled is not None else self._upload(host_mask),
+                mask=pooled_mask if pooled_mask is not None else self._upload(host_mask),
                 rope=dict(q=tuple(self._upload(value) for value in query),
                           live_k=tuple(self._upload(value) for value in live)),
                 cached_history=self._live_banks(), trace=None, outputs=None, owned=[], tokens=None, consumed=set(),
                 parts=None)
-            if pooled is not None:
+            if pooled_mask is not None:
                 # Borrowed, never in self.owned: protected like the lent banks (_protected), never released.
-                bucket.lent_mask = (pooled,)
+                bucket.lent_mask = (pooled_mask,)
             bucket.inputs = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['live_k'],
                 *(value for cache in bucket.cached_history for layer in cache for value in layer.values())]
             bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
@@ -868,7 +869,7 @@ class PreparedQuadDFlashProposal:
                 warm = self._execute(bucket, transient, retain)
                 # S2 v86: the pool's output set for slots 0-3 (dflash_proposal_trace.POOLED_OUTPUTS_LINE), which
                 # every pass then ends by copying into; None without one, and the quad reads its own as before.
-                pooled = pool_outputs(device, self.pair_label(), warm, operations, log=log_line)
+                pooled_outputs = pool_outputs(device, self.pair_label(), warm, operations, log=log_line)
                 operations.synchronize_device(self.mesh)
             finally:
                 release_owned(operations, transient)
@@ -876,7 +877,8 @@ class PreparedQuadDFlashProposal:
             from attention_batch import capture_operation
 
             bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
-                lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain), pooled))
+                lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain),
+                                    pooled_outputs))
             operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
             note(self.pair_label(), self.quad.sdpa, self.quad.conv)
             import memory_ledger

@@ -64,6 +64,14 @@ W6_FIT_LINE = ('[PINDIAG] dram admission fit prompt={} largest_free={} need={} r
 W6_CARRIED_LINE = ('[PINDIAG] dram admission carried finished={} past the discarded prefill pass into the '
                    'decode-only step')
 W6_BUCKETS_BUILT = '[PINDIAG] proposal buckets built request='    # serving_request_factory.PROPOSAL_BUCKETS_BUILT
+# S2 v86 (run 36416471352): the drafts' pooled head outputs and the M0 pooled masks, as their producers write them.
+V86_POOLED_FORMAT = '[PINDIAG] draft outputs pooled slots=[%s] head=%s projected=%s'   # dflash_proposal_trace
+V86_REFUSED_FORMAT = '[PINDIAG] draft outputs pooled refused slots=[%s]: %s'          # dflash_proposal_trace
+V86_ATTACH_REFUSED_LINE = '[PINDIAG] draft outputs pooled refused at attach groups={}: {}'   # serving_buffer_pool
+V86_REJECTED_FORMAT = ('[PINDIAG] draft outputs rejected device_slot=%s chip=%d nonfinite=%s neg_inf=%s nan=%s '
+                       'index_min=%s index_max=%s index_out_of_range=%s chips_equal=%s projected_finite=%s '
+                       'projected_equal=%s addresses=%s error=%s')                    # dflash_packed_proposal
+M0_MASK_POOLED_FORMAT = '[PINDIAG] draft mask pooled slots=[%s] shape=%s'              # dflash_proposal_trace
 DECISION_LINE = '[PINDIAG] one fresh prefill per step: partials={} decodes={} gate_held={} allowed={} hidden={}'
 # memory_ledger (W6d): MemoryLedger._before's line, cut at LINE_BUDGET onto '[MEMLEDGER] ...' lines by .log.
 W6_BEFORE_FORMAT = ('[MEMLEDGER] before op=%s chip%d largest_free=%s free=%s estimate=%s margin=%s floor=%s '
@@ -163,6 +171,18 @@ def deferred_line(prompt, largest, need, request, finished, free=1087e6, short='
 def buckets_line(user, contexts=(2048,)):
     """W6a's executed-path line: the buckets read from the built capture (a tuple through loguru's {})."""
     return 'INFO ' + W6_BUCKETS_BUILT + '{} contexts={}'.format(request_id(user), tuple(contexts))
+
+
+def pooled_outputs_line(slots, rows=16, projected=32):
+    """S2 v86: a draft build's pooled head outputs (POOLED_OUTPUTS_LINE): a slot's single-user draft by default (its
+    16-row head, the 32-row projection), a pair at 32 and 32, the quad at 64 and 64."""
+    return 'INFO ' + V86_POOLED_FORMAT % (','.join(str(slot) for slot in slots), '1x1x%dx16' % rows,
+                                          '1x1x%dx256' % projected)
+
+
+def mask_pooled_line(slots, shape='1x1x32x2080'):
+    """S2 M0: a pair's (or the quad's) build borrowing the pool's pre-trace mask (POOLED_MASK_LINE)."""
+    return 'INFO ' + M0_MASK_POOLED_FORMAT % (','.join(str(slot) for slot in slots), shape)
 
 
 def ledger_lines(message):
@@ -297,8 +317,9 @@ def quicker_on_log(**changes):
 
 def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.0, audit_ms=2.0, audit=True,
            mismatch=False, drop_audit=0, words_ok=None, cap=None, admission=True, packed=True, extra=(), families=None,
-           ladder=SINGLE_LADDER, sequential_rows=4, buckets=(2048,), warm=True, phases=None):
-    """A server log of an S2 arm: the C2-any lines, the S2 attach lines when `on`, and `rounds` decode steps -
+           ladder=SINGLE_LADDER, sequential_rows=4, buckets=(2048,), warm=True, phases=None, pooled=True):
+    """A server log of an S2 arm: the C2-any lines, the S2 attach lines when `on` (with `pooled`, each user's
+    single-user draft pooling its head outputs at the build its buckets line reports), and `rounds` decode steps -
     packed (four [PACKED] lines, a packed extent round line and an audit line each) or, `packed` False, one
     [SEQ-PUBLISH] step line per user - on one timestamped clock, `round_ms` apart (a number, or per round a function
     of its index). `phases`: None (no flag-phase lines), True (BASE_PHASES every round) or a function of the round's
@@ -318,7 +339,10 @@ def s2_log(on=True, users=4, rounds=12, positions=None, emitted=5, round_ms=170.
         if warm:
             lines.append('INFO ' + WARM_LINE)
         if buckets is not None:
-            lines += [buckets_line(user, buckets) for user in range(users)]
+            for user in range(users):
+                if pooled and buckets:
+                    lines.append(pooled_outputs_line((user,)))
+                lines.append(buckets_line(user, buckets))
     lines += list(extra)
     at = 0.0
     position = list(positions or [131072] * users)
@@ -2005,6 +2029,8 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
         `holds` - the fifth user's W6b holds while every seat decodes (decodes=4, the seats: no failed fit)."""
         lines = [prefill_point(110000, 1500.0)] + engine_points()
         for index in range(quad_departures):
+            # the quad's build borrows its pooled mask and pools its outputs, then logs its round built=1
+            lines += [mask_pooled_line((0, 1, 2, 3), '1x1x64x2080'), pooled_outputs_line((0, 1, 2, 3), 64, 64)]
             lines.append(quad_line(10 * index + 1, built=1))
             lines.append(quad_line(10 * index + 2, built=0))
             if holds:
@@ -2024,6 +2050,11 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
         passed = self.churn(self.churn_log())
         self.assertEqual(passed['verdict'], 'PASS', passed['lines'])
         self.assertEqual(passed['facts']['replacements'], 8)
+        # S2 v86: the drafts' pooled outputs recorded and printed (the harness judges them: DraftOutputCheckTests)
+        self.assertEqual((passed['facts']['draft_outputs']['pooled'], passed['facts']['draft_outputs']['built']),
+                         (dict(single=4, pair=0, quad=8), dict(single=4, pair=0, quad=8)))
+        self.assertIn('draft outputs pooled by 4 single (4 built), 0 pair (0 built), 8 quad (8 built); 0 refused; '
+                      '0 rejected readbacks', passed['lines'])
         self.assertEqual((passed['facts']['releases']['quad_departures'], passed['facts']['releases']['departures']),
                          (8, 11))
         self.assertEqual(self.churn(self.churn_log(release=None))['verdict'], 'FAIL', 'no release line at all')
@@ -2287,6 +2318,80 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(driver.trace_region_text(None), 'not logged (Q18)')
 
 
+class DraftOutputCheckTests(unittest.TestCase):
+    """S2 v86 (run 36416471352): every traced draft copies its head outputs into the pool's pre-trace sets. A refused
+    set - a build's, or the pool's at attach - leaves that draft on the unprotected path v86 died on, so any refusal
+    fails the arm; with the flag on, so does a kind of draft that built and never pooled (an image without the sets,
+    or sets not wired). The pooled builds per kind and any rejected readback are recorded, and the churn verdict
+    prints them."""
+
+    BUILD_REFUSED = 'INFO ' + V86_REFUSED_FORMAT % ('0,1', 'copy refused: RuntimeError: no copy')
+    ATTACH_REFUSED = 'INFO ' + V86_ATTACH_REFUSED_LINE.format([[0], [0, 1]], 'RuntimeError: no uint16')
+
+    def s2(self, text, on=True):
+        return HarnessTests.s2(self, text, env=((AUDIT, '1'),), on=on)
+
+    def problems(self, text, on=True):
+        return [problem for problem in self.s2(text, on=on)['problems'] if 'draft outputs' in problem]
+
+    def test_a_log_whose_drafts_all_pooled_has_no_problem(self):
+        report = self.s2(s2_log())
+        self.assertEqual(report['problems'], [])
+        self.assertEqual(report['draft_outputs'], dict(pooled=dict(single=4, pair=0, quad=0),
+                                                       built=dict(single=4, pair=0, quad=0), refused=0,
+                                                       refused_lines=[], rejected=0, rejected_lines=[]))
+
+    def test_single_user_drafts_that_never_pooled_fail_the_arm(self):
+        problems = self.problems(s2_log(pooled=False))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertTrue(problems[0].startswith('%s=1: 4 single draft builds but no "[PINDIAG] draft outputs pooled '
+                                               'slots=" line for them' % EXTENT), problems)
+        # a capture that built no bucket (QWEN_FAST_EAGER_PROPOSAL=1) is no single-user draft
+        self.assertEqual(self.problems(s2_log(pooled=False, buckets=())), [])
+        # off the flag nothing is owed
+        self.assertEqual(self.problems(s2_log(on=False), on=False), [])
+
+    def test_a_pair_or_the_quad_that_built_without_pooling_fails_the_arm(self):
+        pairs = [mask_pooled_line((0, 1)), mask_pooled_line((2, 3))]
+        self.assertIn('2 pair draft builds', ' '.join(self.problems(s2_log(extra=pairs))))
+        self.assertEqual(self.problems(s2_log(extra=pairs + [pooled_outputs_line((0, 1), 32, 32)])), [])
+        quad = [quad_line(1, built=1), quad_line(2)]
+        self.assertIn('1 quad draft builds', ' '.join(self.problems(s2_log(extra=quad))))
+        self.assertIn('1 quad draft builds', ' '.join(self.problems(s2_log(extra=[mask_pooled_line((0, 1, 2, 3))]))))
+        self.assertEqual(self.problems(s2_log(extra=[pooled_outputs_line((0, 1, 2, 3), 64, 64)] + quad)), [])
+
+    def test_any_refusal_fails_the_arm_a_builds_or_the_pools_at_attach(self):
+        for lines in ([self.BUILD_REFUSED], [self.ATTACH_REFUSED], [self.BUILD_REFUSED, self.ATTACH_REFUSED]):
+            with self.subTest(lines=lines):
+                report = self.s2(s2_log(extra=lines))
+                self.assertEqual(report['draft_outputs']['refused'], len(lines))
+                self.assertEqual(report['draft_outputs']['refused_lines'], [line.strip() for line in lines])
+                self.assertEqual(self.problems(s2_log(extra=lines)), [
+                    '%d "%s" lines (%s): those drafts read the outputs their captures allocated, which the replay of '
+                    'another trace can overwrite before the round reads them (S2 v86, run 36416471352)' % (
+                        len(lines), gate.DRAFT_OUTPUTS_REFUSED_MARKER, '; '.join(line.strip() for line in lines))])
+        # a pool that made no set: its attach line, and no single pooled - both fail it
+        self.assertEqual(len(self.problems(s2_log(pooled=False, extra=[self.ATTACH_REFUSED]))), 2)
+        # a refusal fails an arm whatever its flag says
+        self.assertEqual(len(self.problems(s2_log(on=False, extra=[self.BUILD_REFUSED]), on=False)), 1)
+
+    def test_a_rejected_readback_is_recorded(self):
+        line = 'INFO ' + V86_REJECTED_FORMAT % (
+            2, 0, 512, 512, 0, 0, 108, 0, 'values:3/4,indices:3/4', 1, 1, '[0x1000]',
+            'Finite_complete-block_top16_values_and_in-range_integer_indices_required')
+        report = self.s2(s2_log(extra=[line, line.replace('chip=0', 'chip=1')]))
+        self.assertEqual(report['draft_outputs']['rejected'], 2)
+        self.assertEqual(report['draft_outputs']['rejected_lines'][0], line.strip())
+        self.assertEqual(self.problems(s2_log(extra=[line])), [], 'recorded: the engine death it raises fails the arm')
+
+    def test_the_line_the_churn_verdict_prints(self):
+        record = gate.draft_outputs_report(s2_log(extra=[mask_pooled_line((0, 1)), pooled_outputs_line((0, 1), 32, 32),
+                                                         self.BUILD_REFUSED]))
+        self.assertEqual(driver.draft_outputs_text(record), 'draft outputs pooled by 4 single (4 built), 1 pair (1 '
+                                                            'built), 0 quad (0 built); 1 refused; 0 rejected readbacks')
+        self.assertEqual(driver.draft_outputs_text(None), 'draft outputs: not recorded')
+
+
 class HostCheckTests(unittest.TestCase):
     def test_the_host_reads_s2_markers_itself_without_the_harness_record(self):
         leaked = driver.s2_log_check(s2_log(on=True), False, (), dict(qwen_configuration={}))
@@ -2377,6 +2482,27 @@ class ProducerContractTests(unittest.TestCase):
     the line needs a device), parsed here, and the fixtures' copies held equal. A producer whose work item is not
     merged into this checkout skips; merged, it is live (W3: packed_verifier, W6: serving_prefill_admission,
     memory_ledger.MemoryLedger.before, the coordinator's RELEASED_LINE, serving_request_factory's ladder)."""
+
+    def test_the_pooled_draft_output_lines(self):
+        # S2 v86: the producers' formats are the fixtures' copies, and the harness reads what they render.
+        import dflash_packed_proposal
+        import dflash_proposal_trace
+        import serving_buffer_pool
+        self.assertEqual((dflash_proposal_trace.POOLED_OUTPUTS_LINE, dflash_proposal_trace.POOLED_OUTPUTS_REFUSED_LINE,
+                          serving_buffer_pool.DRAFT_OUTPUTS_REFUSED_LINE, dflash_packed_proposal.REJECTED_OUTPUTS_LINE,
+                          dflash_proposal_trace.POOLED_MASK_LINE),
+                         (V86_POOLED_FORMAT, V86_REFUSED_FORMAT, V86_ATTACH_REFUSED_LINE, V86_REJECTED_FORMAT,
+                          M0_MASK_POOLED_FORMAT))
+        text = rendered([dflash_proposal_trace.POOLED_OUTPUTS_LINE % ('2', '1x1x16x16', '1x1x32x256'),
+                         dflash_proposal_trace.POOLED_OUTPUTS_LINE % ('2,3', '1x1x32x16', '1x1x32x256'),
+                         dflash_proposal_trace.POOLED_OUTPUTS_LINE % ('0,1,2,3', '1x1x64x16', '1x1x64x256'),
+                         dflash_proposal_trace.POOLED_MASK_LINE % ('2,3', '1x1x32x2080'),
+                         dflash_proposal_trace.POOLED_OUTPUTS_REFUSED_LINE % ('0,1', 'reason'),
+                         serving_buffer_pool.DRAFT_OUTPUTS_REFUSED_LINE.format([[0]], 'reason'),
+                         dflash_packed_proposal.REJECTED_OUTPUTS_LINE % ((1, 0) + ('x',) * 11)])
+        record = gate.draft_outputs_report(text)
+        self.assertEqual((record['pooled'], record['built']['pair'], record['refused'], record['rejected']),
+                         (dict(single=1, pair=1, quad=1), 1, 2, 1))
 
     def test_the_eager_publication_warm_lines(self):
         import publication_warm

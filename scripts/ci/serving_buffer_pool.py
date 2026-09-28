@@ -137,7 +137,12 @@ trace: per candidate chunk a BF16 values and a UINT16 indices buffer (the top-k'
 group's head shape, and one BF16 projection. Every trace of the group ends its pass by copying its
 outputs in (dflash_proposal_trace.publish_outputs) and every reader reads them there, so no replay
 order can reach them: no trace's capture ever had their addresses free. Lent for the pool's life
-(`draft_output(group)`) and never freed by a trace, like the masks.
+(`draft_output(group)`) and never freed by a trace, like the masks. The sets are a protection, not a
+precondition: if the runtime refuses to make one (the UINT16 indices come from host zeros, int32 as
+every other integer buffer here and int16 if that conversion is refused), the pool holds no sets,
+logs DRAFT_OUTPUTS_REFUSED_LINE, names the reason in describe(), and every draft reads its own outputs
+as before; the attach goes on. The gate fails an arm on that line (lever_n_m3native_gate
+DRAFT_OUTPUTS_REFUSED_MARKER), since such an arm serves the unprotected path.
 """
 
 from types import SimpleNamespace
@@ -218,6 +223,10 @@ def validate_draft_masks(draft_masks, users):
 
 
 DRAFT_OUTPUT_KEYS = ('chunks', 'head', 'projected')
+# The pool could not make the drafts' output sets (the docstring's last section): one line at attach, then every
+# draft reads its own outputs. It starts as dflash_proposal_trace.POOLED_OUTPUTS_REFUSED_LINE does, so one prefix
+# finds both.
+DRAFT_OUTPUTS_REFUSED_LINE = '[PINDIAG] draft outputs pooled refused at attach groups={}: {}'
 
 
 def validate_draft_outputs(draft_outputs, users):
@@ -636,6 +645,9 @@ class ServingBufferPool:
         self.extent = {}
         self.draft_masks, self.draft_mask_bytes = {}, 0
         self.draft_outputs, self.draft_output_bytes = {}, 0
+        # Why the pool holds no output sets although some were asked for (DRAFT_OUTPUTS_REFUSED_LINE), else None;
+        # and, when it holds them, the host dtype their UINT16 indices were made from.
+        self.draft_outputs_refused = self.draft_output_indices_from = None
         self.closed = False
         try:
             protected = []
@@ -746,13 +758,45 @@ class ServingBufferPool:
             # The drafts' head outputs (the docstring's last section), after the masks so no other pooled buffer
             # moves: per group, per candidate chunk the values and indices at the head shape, then the projection;
             # replicated tiled zeros. Counted as tiled payload (the head shapes are part tiles).
-            for group, spec in sorted(draft_outputs.items()):
-                chunks = [dict(start=start, stop=stop, values=allocate(spec['head']),
-                               indices=allocate(spec['head'], dtype=operations.uint16, layout=operations.TILE_LAYOUT))
-                          for start, stop in spec['chunks']]
-                self.draft_outputs[group] = SimpleNamespace(projected=allocate(spec['projected']), chunks=chunks)
-                self.draft_output_bytes += (2 * len(chunks) * tile_bytes(spec['head'])
-                                            + tile_bytes(spec['projected']))
+            index_hosts = [torch.int32, torch.int16]
+
+            def allocate_indices(shape):
+                """Replicated tiled UINT16 zeros (the top-k's index dtype): from int32 host zeros, as every other
+                integer buffer here, or from int16 ones once the runtime refuses that conversion - for this buffer
+                and every later one."""
+                while True:
+                    host = torch.zeros(shape, dtype=index_hosts[0])
+                    try:
+                        value = operations.from_torch(host, device=mesh, dtype=operations.uint16,
+                            layout=operations.TILE_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG,
+                            mesh_mapper=operations.ReplicateTensorToMesh(mesh))
+                    except Exception:  # noqa: BLE001 - the next host dtype, or the sets' refusal below
+                        if len(index_hosts) == 1:
+                            raise
+                        index_hosts.pop(0)
+                        continue
+                    return adopt(value, tensor_bytes(shape))
+
+            try:
+                for group, spec in sorted(draft_outputs.items()):
+                    chunks = [dict(start=start, stop=stop, values=allocate(spec['head']),
+                                   indices=allocate_indices(spec['head']))
+                              for start, stop in spec['chunks']]
+                    self.draft_outputs[group] = SimpleNamespace(projected=allocate(spec['projected']), chunks=chunks)
+                    self.draft_output_bytes += (2 * len(chunks) * tile_bytes(spec['head'])
+                                                + tile_bytes(spec['projected']))
+            except Exception as failure:  # noqa: BLE001 - a protection, not a precondition: refused, never the attach
+                # What was made stays in self.owned (freed at close, never lent); no draft is handed a set, so each
+                # reads its own outputs, as before this section existed.
+                self.draft_outputs.clear()
+                self.draft_output_bytes = 0
+                text = (str(failure).strip().splitlines() or [''])[0][:200]
+                self.draft_outputs_refused = '%s: %s' % (type(failure).__name__, text)
+                pindiag(DRAFT_OUTPUTS_REFUSED_LINE, sorted(list(group) for group in draft_outputs),
+                        self.draft_outputs_refused)
+            else:
+                if draft_outputs:
+                    self.draft_output_indices_from = str(index_hosts[0]).replace('torch.', '')
             operations.synchronize_device(mesh)
         except BaseException:
             self.close()
@@ -874,13 +918,16 @@ class ServingBufferPool:
                 for group, tensor in sorted(self.draft_masks.items())])
         if self.draft_outputs:
             # Only with draft_outputs: without them the attach line reads exactly as before.
-            report.update(draft_output_bytes=self.draft_output_bytes, draft_outputs=[
+            report.update(draft_output_bytes=self.draft_output_bytes,
+                          draft_output_indices_from=self.draft_output_indices_from, draft_outputs=[
                 dict(group=list(group), chunks=len(held.chunks), head=list(held.chunks[0]['values'].shape),
                      projected=list(held.projected.shape),
                      addresses=[list(addresses(self.operations, tensor)) for tensor in
                                 (*(chunk[name] for chunk in held.chunks for name in ('values', 'indices')),
                                  held.projected)])
                 for group, held in sorted(self.draft_outputs.items())])
+        if self.draft_outputs_refused:
+            report.update(draft_outputs_refused=self.draft_outputs_refused)
         return report
 
     def close(self):
