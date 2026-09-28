@@ -86,28 +86,37 @@ NOT_COMPARABLE (real_text_compare.S2_EXACT_CLAIMS); --policy dc-i (the user's de
            cost is not confined to the ms its line reports, so a round net of its audit's ms is not the flag's
            round. control-audit judges exactness and the audit (clean, every round), never time.
            TIMING, pre-registered 2026-09-28 (the whole round's 1.02 failed three times on host noise while the
-           flag's own work was ~0.4% of a round; control_timing):
-           - rounds: each timing arm's four-live packed rounds (flag_phase_rounds), matched across a pair's
-             arms by fingerprint - the sorted (segment, position, emitted) of the round's four [PACKED] lines -
-             round k with round k. Sequences that differ are NOT_COMPARABLE; one that stops early, a round
-             either arm did not time, or a flag phase absent from a round's stretch (FLAG_PHASES) is a
-             shortfall: the full paired set is required, and fewer is never a pass.
+           flag's own work was ~0.4% of a round; control_timing), CONTROL_RULE:
+           - pairs: exactly CONTROL_PAIRS (ABAB). A run of any other number is a shortfall, never a pass.
+           - rounds: each timing arm's four-live packed rounds (flag_phase_rounds), matched across the arms by
+             fingerprint - the sorted (segment, position, emitted) of the round's four [PACKED] lines - round k
+             with round k: within each pair, across the pairs, and against the first run when pooled. Sequences
+             that differ are NOT_COMPARABLE; one that stops early, a round either arm did not time, or a flag
+             phase absent from a round's stretch (FLAG_PHASES) is a shortfall: the full paired set is required,
+             and fewer is never a pass.
            - primary: F_k, the summed ms of the phases the extent flag touches - the verify trace replay (its
              device time and the replay deadline's arming), verify-time staging, the extent bookkeeping (the
-             rest of the verify), the predictions' readback, the commits and the window pre-stage, each read
-             from its own line (the comment above FLAG_PHASES) - and D_k = F_on,k - F_off,k per pair, pooled
-             over the pairs. c = the trimmed mean of D_k (CONTROL_TRIM_PERCENT dropped from each tail) / the
-             median flag-off whole round. PASS iff c's CONTROL_BOUND_PERCENT upper bound (a bootstrap over the
-             paired rounds, CONTROL_BOOTSTRAP resamples, seed CONTROL_SEED) is at most CONTROL_COST_LIMIT;
-             FAIL when c is past it; FAIL too when the UNTRIMMED mean of D_k is past it (a cost in few rounds,
-             which the trim would drop - stricter than the approved rule); otherwise NOT_RESOLVED: exactly one
-             re-run of the same plan (--control-pool, this run's CONTROL_PHASE_RECORD), decided on both runs
-             pooled, and then the user decides - a pooled record cannot be pooled again.
+             rest of the verify), the predictions' readback, the commits (with the round's deferred-commit
+             flush, which replays under the flag's deadline too) and the window pre-stage, each read from its
+             own line (the comment above FLAG_PHASES) - and D_k = F_on,k - F_off,k per pair, pooled over the
+             pairs. c = the trimmed mean of D_k (CONTROL_TRIM_PERCENT dropped from each tail) / the median
+             flag-off whole round; u = the untrimmed mean over the same median. Their CONTROL_BOUND_PERCENT upper
+             bounds (flag_phase_cost) add to a bootstrap over the paired rounds (CONTROL_BOOTSTRAP resamples,
+             seed CONTROL_SEED) the arms' own offsets, which no resampling of rounds can see: an arm's host
+             offset in F has a pre-registered sd floor CONTROL_ARM_SIGMA_MS, raised to what this run's A/A
+             reads (flag-off against flag-off, flag-on against flag-on) show. PASS iff both bounds are within
+             CONTROL_COST_LIMIT; FAIL when c is past it, or u is (a cost in few rounds, which the trim drops);
+             otherwise NOT_RESOLVED: exactly one re-run of the same plan - the same image, profile and arms
+             (--control-pool, this run's CONTROL_PHASE_RECORD), decided on both runs pooled, and then the user
+             decides. A pooled record cannot be pooled again, and every pooled record names the first run it
+             spent (its identity and the record's sha256): a second re-run of one first run shows as two.
+             Everything past the approved rule (the pairs, the arms' offsets, u's FAIL and u's bound, the flush,
+             the sequences across pairs and runs, the pool's binding) only makes a PASS harder.
            - net: each pair's flag-on median four-live round / flag-off at most CONTROL_NET_TOLERANCE, else
              FAIL. Its one known blind spot, accepted: a cost of ~2-5% wholly outside the flag phases is seen
              only by this net.
            Recorded, never judged: each pair's and phase's split, the net ratios, the trimmed rounds, and the A/A
-           contrast of each later flag-off arm against the first (a noise read).
+           contrasts themselves (a noise read; they judge only through the arms' offset).
   forced-cap  M4, Q5: c2-packed-gate with QWEN_FAST_GATE_FORCE_CAP=8 against without, at v235's shape: both
            IDENTICAL to v235 and to each other, and the capped arm's [PACKED] caps all at most 8.
   control-below  M5, G3b: per family F (--families, default 16640 and 4352) and pair, c2-gate against
@@ -158,7 +167,9 @@ what the one re-run pools); exits 0 only when every plan passed, 2 when refused 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
 import argparse
+import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -274,12 +285,24 @@ BELOW_MAX_TOKENS = 224           # F - 256 + 223 + 16 <= F: every ticket of a 22
 CONTROL_AUDIT_ARM = 'control-audit'   # G3's audited flag-on arm: exactness and the audit, never timed
 # G3's timing rule, pre-registered 2026-09-28 with the user's approval (the module docstring's control; the
 # commit that brought it states it in full). Every number here is part of the rule: none may move after a run.
-CONTROL_RULE = 'g3-flag-phase-2026-09-28'   # carried by the phase record; a pooled re-run must match it
+# Revision 2 (the same day, before any run was judged under the first coding): only stricter - the pairs, the arms'
+# offsets in both bounds, u's bound, the flush in the commit phase, the sequences across pairs and runs, the pool's
+# binding. A record of the first coding ('g3-flag-phase-2026-09-28') is never pooled.
+CONTROL_RULE = 'g3-flag-phase-2026-09-28-r2'   # carried by the phase record; a pooled re-run must match it
+CONTROL_PAIRS = 2                # ABAB: a run of any other number of pairs is a shortfall, never a pass
 CONTROL_COST_LIMIT = 0.02        # c, the flag-phase cost, as a fraction of the flag-off median four-live round
 CONTROL_TRIM_PERCENT = 10        # of the paired rounds' D_k, dropped from EACH tail: count * 10 // 100 rounds
-CONTROL_BOUND_PERCENT = 95       # c's one-sided upper bound: this percentile of the bootstrap's c
+CONTROL_BOUND_PERCENT = 95       # c's (and u's) one-sided upper bound: this percentile of the bootstrap's
+CONTROL_BOUND_Z = 1.6449         # ... and the standard normal's same percentile, for the arms' offsets
 CONTROL_BOOTSTRAP = 10000        # bootstrap resamples of the paired rounds (with replacement)
 CONTROL_SEED = 20260928          # the bootstrap's fixed seed (random.Random(int): the same draws on 3.7 and 3.11)
+# One arm's own host offset in F (sd, ms), which resampling rounds never sees: every round of an arm carries it, so a
+# pair's D carries two (on and off), and the pooled c 2 * sigma^2 / pairs of variance. The floor is the calibration at
+# c's own statistic: the trimmed mean of F's paired-round differences between two arms of one flag state, over the
+# four A/A reads of arms that ran as the timing arms now run (unaudited: the flag-off pairs of runs 36270917139,
+# 36272682217 and 36276533585, and the last's flag-on pair) - -1.33, +2.42, +9.05 and -2.64 ms, sigma = rms / sqrt 2
+# = 3.47 ms, rounded up. A run's own A/A reads raise it (flag_phase_sigma), never lower it.
+CONTROL_ARM_SIGMA_MS = 3.5
 CONTROL_NET_TOLERANCE = 1.05     # the net: each pair's flag-on / flag-off median four-live round (whole round)
 CONTROL_PHASE_RECORD = 'control-phase-rounds.json'   # <results>/..., what the one re-run pools (--control-pool)
 # The phases the extent flag touches, read per four-live round (flag_phase_rounds; the module docstring's control).
@@ -1153,8 +1176,9 @@ class Runner(object):
         # user's recorded decision).
         self.profiles, self.cache_entries, self.jit = profiles, cache_entries, jit
         self.policy, self.decision = policy, decision
-        # G3's one re-run (--control-pool): the first run's phase record, pooled into control's decision.
-        self.control_pool = self.control_pool_path = None
+        # G3's one re-run (--control-pool): the first run's phase record, pooled into control's decision, and the
+        # record file's sha256; this run's identity, which its own phase record carries (run_identity).
+        self.control_pool = self.control_pool_path = self.control_pool_sha256 = self.run_identity = None
         self.arms = {}
         self.infra = None
         # What an arm could not judge (a judged arm whose kernel cache could not be counted): run_plan turns a
@@ -1413,13 +1437,20 @@ def live4_of(report):
 #   bookkeeping  '[PHASE] packed_verify <requests> end V ms' less replay, staging and readback: the rest of the
 #                verify (the extent bookkeeping - the segments' starts, the extent round's line - the binding check,
 #                the stage call's own overhead, the idle commits and the phase line; serving_worker_hook.phase)
-#   commit       the four '[PHASE] packed_commit <request> end C ms' lines, summed
+#   commit       the four '[PHASE] packed_commit <request> end C ms' lines, summed (the commits' decisions, the
+#                extent's accept_limit cap among them), plus the round's deferred-commit flush: '[PACKED-GDN-AFTER-PAIRS]
+#                round=N commits=K site=S enqueue_ms=Q ...' Q (packed_verifier.flush_commits: the commit traces enqueued
+#                inside the flag's replay deadline, replay_deadline('flush'), which exists only under the flag). One
+#                per four-live round at site window or end (early_draft.IN_STEP_SITES) - in every four-live round of
+#                all 13 arms of runs 36270917139, 36272682217 and 36276533585, site=window; absent, repeated, at
+#                another site (R1's backstops, the next step's) or a 'dropped=' line, the round's commit is missing
 #   window       '[PACKED-PRESTAGE-WINDOW] round=N buffers=B ms=X' (verify_prestage's window pre-stage of the next
 #                round, inside this round's early draft). Due exactly when the next step serves a packed round (its
 #                stretch carries a [PACKED] line): absent then - or a 'dropped=' line, which carries no ms - it is
 #                missing; not due and absent, nothing was pre-staged and it is 0 (the last four-live round before a
 #                sequential step, in every arm of runs 36270917139, 36272682217 and 36276533585)
-# F_k = V + the commits + X: the four verify phases are the whole packed_verify phase, so no cost inside it escapes.
+# F_k = V + the commits + Q + X: the four verify phases are the whole packed_verify phase, so no cost inside it
+# escapes. Outside F, and too small to judge: the deadline watchdog's own wakeups and the admission checks.
 LOG_STAMP = re.compile(r'([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?) \|')
 STEP_FIELDS = re.compile(r'\[PHASE\] execute total=[0-9]+ new=([0-9]+) cached=([0-9]+)')
 PHASE_END_FIELDS = re.compile(r'\[PHASE\] (packed_verify|packed_commit) \S+ end (-?[0-9.]+) ms')
@@ -1428,10 +1459,14 @@ VERIFY_SPLIT_FIELDS = re.compile(r'\[PACKED-PHASE\] round=[0-9]+ users=[0-9]+ bi
 STAGING_FIELDS = re.compile(r'\[PACKED-FENCES\] round=[0-9]+ [^\n]*?(?<![A-Za-z_])diff_ms=(-?[0-9.]+) '
                             r'write_ms=(-?[0-9.]+)')
 WINDOW_FIELDS = re.compile(r'\[PACKED-PRESTAGE-WINDOW\] round=[0-9]+ buffers=[0-9]+ ms=(-?[0-9.]+)')
+FLUSH_FIELDS = re.compile(r'\[PACKED-GDN-AFTER-PAIRS\] round=[0-9]+ commits=[0-9]+ site=(\S+) enqueue_ms=(-?[0-9.]+) '
+                          r'segments=\S+( dropped=)?')
+FLUSH_SITES = ('window', 'end')   # early_draft.IN_STEP_SITES: inside the step that decided the commits
 PACKED_KEY_FIELDS = re.compile(r'\[PACKED\] request=\S+ segment=([0-9]+) position=([0-9]+) prefix=[0-9]+ '
                                r'emitted=([0-9]+)')
 FLAG_PHASE_LINES = (('verify', "'[PHASE] packed_verify ... end'", 1), ('split', '[PACKED-PHASE]', 1),
-                    ('staging', '[PACKED-FENCES]', 1), ('commit', "'[PHASE] packed_commit ... end'", 4))
+                    ('staging', '[PACKED-FENCES]', 1), ('commit', "'[PHASE] packed_commit ... end'", 4),
+                    ('flush', "'[PACKED-GDN-AFTER-PAIRS] ... site=window|end enqueue_ms=' (not dropped)", 1))
 WINDOW_LINE_NAME = '[PACKED-PRESTAGE-WINDOW] ... ms='
 
 
@@ -1454,7 +1489,7 @@ def flag_phase_rounds(log_text):
                 text = stamp.group(1)
                 at = datetime.strptime(text, '%Y-%m-%d %H:%M:%S.%f' if '.' in text else '%Y-%m-%d %H:%M:%S')
             current = dict(at=at, new=int(fields.group(1)), live=int(fields.group(2)), packed=[], verify=[], commit=[],
-                           split=[], staging=[], window=[])
+                           split=[], staging=[], window=[], flush=[])
             steps.append(current)
             continue
         if current is None:
@@ -1478,6 +1513,12 @@ def flag_phase_rounds(log_text):
         match = WINDOW_FIELDS.search(line)
         if match:
             current['window'].append(float(match.group(1)))
+            continue
+        match = FLUSH_FIELDS.search(line)
+        if match:
+            # A dropped flush or one at another site is present but not this round's measure: None (missing).
+            current['flush'].append(float(match.group(2)) if match.group(1) in FLUSH_SITES and not match.group(3)
+                                    else None)
     rounds = []
     for index, step in enumerate(steps):
         if step['new'] != 0 or step['live'] != 4 or len(step['packed']) != 4:
@@ -1488,7 +1529,8 @@ def flag_phase_rounds(log_text):
                 and following['at'] is not None):
             round_ms = (following['at'] - step['at']).total_seconds() * 1000.0
         missing = [] if round_ms is not None and round_ms > 0 else ['its whole round (no timed decode step after it)']
-        gaps = ['%s x%d' % (what, want) for key, what, want in FLAG_PHASE_LINES if len(step[key]) != want]
+        gaps = ['%s x%d' % (what, want) for key, what, want in FLAG_PHASE_LINES
+                if len(step[key]) != want or None in step[key]]
         # The window pre-stage is due when the next step serves a packed round (the comment above FLAG_PHASES).
         due = following is not None and bool(following['packed'])
         if len(step['window']) > 1 or (due and not step['window']):
@@ -1496,7 +1538,7 @@ def flag_phase_rounds(log_text):
         phases = flag_ms = None
         if not gaps:
             _bind, _input, trace, sync, readback = step['split'][0]
-            verify, commit, window = step['verify'][0], sum(step['commit']), sum(step['window'])
+            verify, commit, window = step['verify'][0], sum(step['commit']) + step['flush'][0], sum(step['window'])
             replay, staging = trace + sync, sum(step['staging'][0])
             phases = dict(replay=replay, staging=staging, readback=readback,
                           bookkeeping=verify - replay - staging - readback, commit=commit, window=window)
@@ -1547,39 +1589,70 @@ def trimmed_mean(values, percent=CONTROL_TRIM_PERCENT):
     return sum(kept) / len(kept), k
 
 
-def flag_phase_cost(rounds, limit=CONTROL_COST_LIMIT, seed=CONTROL_SEED, resamples=CONTROL_BOOTSTRAP):
-    """The primary over paired rounds [(D_k, flag-off whole round), ...] in ms (the module docstring's control):
-    c = the trimmed mean of D_k / the flag-off median round; its upper bound, the CONTROL_BOUND_PERCENT percentile of
-    c over `resamples` bootstrap resamples of the paired rounds (each D_k drawn with its own flag-off round, fixed
-    seed); the untrimmed mean over the same median; and the verdict: FAIL when c or the untrimmed cost is past
-    `limit`, PASS when the bound is within it, else NOT_RESOLVED."""
+def flag_phase_sigma(reads, floor=CONTROL_ARM_SIGMA_MS):
+    """(sigma, seen): one arm's own host offset in F (sd, ms) for flag_phase_cost's bounds - the pre-registered floor,
+    raised to what the A/A reads show - and that estimate (None without a read). Each read (the trimmed mean of F's
+    paired-round differences between two arms of one flag state, control_timing) carries two arms' offsets:
+    seen^2 = mean(read^2) / 2."""
+    reads = [value for value in reads if value is not None]
+    if not reads:
+        return floor, None
+    seen = math.sqrt(sum(value * value for value in reads) / (2.0 * len(reads)))
+    return max(floor, seen), seen
+
+
+def flag_phase_cost(rounds, pairs=CONTROL_PAIRS, arm_sigma_ms=CONTROL_ARM_SIGMA_MS, limit=CONTROL_COST_LIMIT,
+                    seed=CONTROL_SEED, resamples=CONTROL_BOOTSTRAP):
+    """The primary over paired rounds [(D_k, flag-off whole round), ...] in ms, from `pairs` pairs of arms (the module
+    docstring's control): c = the trimmed mean of D_k / the flag-off median round, u = the untrimmed mean over the same
+    median, and their upper bounds. Each bound joins two parts: the rounds' - the CONTROL_BOUND_PERCENT percentile of
+    c (or u) over `resamples` bootstrap resamples of the paired rounds (each D_k drawn with its own flag-off round,
+    fixed seed), less the estimate - and the arms' - CONTROL_BOUND_Z sds of the pooled arms' offsets, arm_sigma_ms *
+    sqrt(2 / pairs) over the same median, which resampling rounds cannot see: bound = estimate + sqrt(rounds^2 +
+    arms^2), never below the bootstrap's own percentile. Verdict: FAIL when c or u is past `limit`, PASS when both
+    bounds are within it, else NOT_RESOLVED."""
     deltas = [delta for delta, _ in rounds]
     median_off = statistics.median([off for _, off in rounds])
     trimmed, k = trimmed_mean(deltas)
     mean = sum(deltas) / len(deltas)
     rng = random.Random(seed)
-    count, draws = len(rounds), []
+    count, draws, untrimmed_draws = len(rounds), [], []
     for _ in range(resamples):
         sample = [rounds[int(rng.random() * count)] for _ in range(count)]
-        draws.append(trimmed_mean([delta for delta, _ in sample])[0] / statistics.median([off for _, off in sample]))
+        median = statistics.median([off for _, off in sample])
+        sample_deltas = [delta for delta, _ in sample]
+        draws.append(trimmed_mean(sample_deltas)[0] / median)
+        untrimmed_draws.append(sum(sample_deltas) / count / median)
     draws.sort()
+    untrimmed_draws.sort()
+    at = resamples * CONTROL_BOUND_PERCENT // 100 - 1
     cost, untrimmed = trimmed / median_off, mean / median_off
-    upper = draws[resamples * CONTROL_BOUND_PERCENT // 100 - 1]
+    round_upper, untrimmed_round_upper = draws[at], untrimmed_draws[at]
+    arms = CONTROL_BOUND_Z * arm_sigma_ms * math.sqrt(2.0 / pairs) / median_off
+    upper = cost + math.sqrt(max(round_upper - cost, 0.0) ** 2 + arms ** 2)
+    untrimmed_upper = untrimmed + math.sqrt(max(untrimmed_round_upper - untrimmed, 0.0) ** 2 + arms ** 2)
     ordered = sorted(deltas)
     if cost > limit:
         verdict, why = 'FAIL', 'c %.3f%% is past %.1f%%' % (100 * cost, 100 * limit)
     elif untrimmed > limit:
         verdict, why = 'FAIL', ('the untrimmed cost %.3f%% is past %.1f%% (a cost in few rounds, which the trim drops)'
                                 % (100 * untrimmed, 100 * limit))
-    elif upper <= limit:
-        verdict, why = 'PASS', 'c\'s %d%% upper bound %.3f%% is within %.1f%%' % (CONTROL_BOUND_PERCENT, 100 * upper,
-                                                                             100 * limit)
+    elif upper <= limit and untrimmed_upper <= limit:
+        verdict, why = 'PASS', ('c\'s %d%% upper bound %.3f%% and the untrimmed cost\'s %.3f%% are within %.1f%%'
+                                % (CONTROL_BOUND_PERCENT, 100 * upper, 100 * untrimmed_upper, 100 * limit))
     else:
-        verdict, why = 'NOT_RESOLVED', ('c %.3f%% is within %.1f%% but its %d%% upper bound %.3f%% is not' % (
-            100 * cost, 100 * limit, CONTROL_BOUND_PERCENT, 100 * upper))
-    return dict(verdict=verdict, why=why, rounds=count, median_off_round_ms=round(median_off, 3),
+        past = ['c\'s %.3f%%' % (100 * upper)] if upper > limit else []
+        past += ['the untrimmed cost\'s %.3f%%' % (100 * untrimmed_upper)] if untrimmed_upper > limit else []
+        verdict, why = 'NOT_RESOLVED', ('c %.3f%% and the untrimmed cost %.3f%% are within %.1f%% but %s %d%% upper '
+                                        'bound%s past it (the arms\' offsets %.3f%% of it: sigma %.2f ms, %d pairs)' % (
+                                            100 * cost, 100 * untrimmed, 100 * limit, ' and '.join(past),
+                                            CONTROL_BOUND_PERCENT, ' is' if len(past) == 1 else 's are', 100 * arms,
+                                            arm_sigma_ms, pairs))
+    return dict(verdict=verdict, why=why, rounds=count, pairs=pairs, median_off_round_ms=round(median_off, 3),
                 trimmed_mean_ms=round(trimmed, 4), mean_ms=round(mean, 4), cost=round(cost, 6),
-                untrimmed=round(untrimmed, 6), upper=round(upper, 6), trimmed_low=k, trimmed_high=k,
+                untrimmed=round(untrimmed, 6), upper=round(upper, 6), untrimmed_upper=round(untrimmed_upper, 6),
+                round_upper=round(round_upper, 6), untrimmed_round_upper=round(untrimmed_round_upper, 6),
+                arm_sigma_ms=round(arm_sigma_ms, 4), arm_term=round(arms, 6), trimmed_low=k, trimmed_high=k,
                 trimmed_low_ms=[round(value, 3) for value in ordered[:k]],
                 trimmed_high_ms=[round(value, 3) for value in ordered[count - k:]],
                 limit=limit, bound_percent=CONTROL_BOUND_PERCENT, trim_percent=CONTROL_TRIM_PERCENT,
@@ -1599,12 +1672,44 @@ def phase_contrast(paired):
     return out
 
 
-def read_control_pool(path, pairs):
-    """The first run's phase record (CONTROL_PHASE_RECORD) for the one re-run, or ValueError with why it cannot be
-    pooled: another rule, a record that is itself a pooled re-run (the one re-run is spent), a plan that was not
-    NOT_RESOLVED (only an unresolved run is re-run), or another number of pairs (not the same plan)."""
-    with open(path, encoding='utf-8') as handle:
-        record = json.load(handle)
+def sequence_difference(first, second, names):
+    """(mismatch, shortfall) between two four-live round sequences (fingerprint lists): where they differ (NOT_COMPARABLE:
+    not the same rounds), or that one stops early (a shortfall); (None, None) when they are the same."""
+    for index, (one, other) in enumerate(zip(first, second)):
+        if one != other:
+            return ('four-live packed round %d is %s in %s and %s in %s: not the same rounds' % (
+                index, one, names[0], other, names[1])), None
+    if len(first) != len(second):
+        return None, '%s has %d four-live packed rounds and %s %d' % (names[0], len(first), names[1], len(second))
+    return None, None
+
+
+def control_binding(image, profile, arms):
+    """What makes a re-run the same plan as its first run (read_control_pool): the image, --profile, and every control
+    arm as the gate launches it (name, harness arguments, profile, added environment)."""
+    return dict(image=image, profile=profile, arms=[[spec[0], list(spec[1]), getattr(spec, 'profile', None),
+                                                     [list(pair) for pair in getattr(spec, 'env', ())]]
+                                                    for spec in arms])
+
+
+def run_identity(environ=None):
+    """This gate run's identity for its phase record: the workflow run and attempt (when there is one), the start
+    time and a random nonce - what a pooled re-run names as the first run it spent."""
+    environ = os.environ if environ is None else environ
+    return dict(workflow_run=environ.get('GITHUB_RUN_ID'), attempt=environ.get('GITHUB_RUN_ATTEMPT'),
+                started=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                nonce=''.join('%02x' % value for value in bytearray(os.urandom(8))))
+
+
+def read_control_pool(path, binding=None):
+    """(record, sha256): the first run's phase record (CONTROL_PHASE_RECORD) for the one re-run and its file's digest,
+    or ValueError with why it cannot be pooled: another rule, a record that is itself a pooled re-run (the one re-run
+    is spent), a plan that was not NOT_RESOLVED (only an unresolved run is re-run), other than CONTROL_PAIRS pairs, a
+    record without its run's identity, or - `binding`, control_binding of this run - another image, profile or arms
+    (not the same plan)."""
+    with open(path, 'rb') as handle:
+        data = handle.read()
+    record = json.loads(data.decode('utf-8'))
     if record.get('rule') != CONTROL_RULE:
         raise ValueError('%s was judged under rule %r, not %r' % (path, record.get('rule'), CONTROL_RULE))
     if record.get('pooled'):
@@ -1612,9 +1717,18 @@ def read_control_pool(path, pairs):
     if record.get('plan_verdict') != 'NOT_RESOLVED':
         raise ValueError('%s: its control plan read %s, not NOT_RESOLVED - only an unresolved run is re-run'
                          % (path, record.get('plan_verdict')))
-    if len(record.get('pairs') or []) != pairs or not all(pair.get('rounds') for pair in record['pairs']):
-        raise ValueError('%s carries %d timed pairs, not this plan\'s %d' % (path, len(record.get('pairs') or []), pairs))
-    return record
+    if len(record.get('pairs') or []) != CONTROL_PAIRS or not all(pair.get('rounds') for pair in record['pairs']):
+        raise ValueError('%s carries %d timed pairs, not the rule\'s %d' % (path, len(record.get('pairs') or []),
+                                                                           CONTROL_PAIRS))
+    if not (record.get('run') or {}).get('nonce') or not record.get('sequence'):
+        raise ValueError('%s names no run identity or round sequence: it cannot be spent once and only once' % path)
+    if binding is not None:
+        theirs = record.get('binding') or {}
+        differs = [key for key in ('image', 'profile', 'arms') if theirs.get(key) != binding.get(key)]
+        if differs:
+            raise ValueError('%s is not this plan\'s first run: it differs in %s (first run: image %s, profile %s)' % (
+                path, ' and '.join(differs), theirs.get('image'), theirs.get('profile')))
+    return record, hashlib.sha256(data).hexdigest()
 
 
 def pooled_rounds(record):
@@ -1637,16 +1751,45 @@ def record_rounds(paired):
                  on_phases=entry['second']['phases']) for entry in paired]
 
 
-def control_timing(runner, arms, reports, pool=None, pool_path=None):
-    """G3's timing (the module docstring's control) over the control plan's pairs: per pair the refusal of an audited
-    timing arm and the net (live4_of's median four-live rounds, at most CONTROL_NET_TOLERANCE), the four-live rounds
-    of both arms matched by fingerprint (pair_phase_rounds), then the primary over every pair's paired rounds - and,
-    for the one re-run, the first run's (`pool`, its phase record) - pooled (flag_phase_cost). Recorded, not judged:
-    each pair's and phase's split, the net ratios, and the A/A contrast of each later flag-off arm against the first.
-    Returns dict(problems, shortfalls, verdicts, pairs, flag_phase, lines, record)."""
+def aa_reads(arm_rounds):
+    """The A/A contrasts: each later arm of a flag state against that state's first arm (flag-off against flag-off,
+    flag-on against flag-on), paired round by round as the pairs are. Each read's F trimmed mean (trimmed_ms) is one
+    draw of two arms' offsets (flag_phase_sigma); the rest is recorded."""
+    aa = []
+    for state in ('off', 'on'):
+        names = sorted((name for name in arm_rounds if name.startswith('control-%s-' % state)),
+                       key=lambda name: int(name.rsplit('-', 1)[1]))
+        for name in names[1:]:
+            paired, mismatch, short = pair_phase_rounds(arm_rounds[names[0]], arm_rounds[name], names=(names[0], name))
+            entry = dict(arms='%s - %s' % (name, names[0]), state=state)
+            if mismatch or not paired:
+                entry['not_compared'] = mismatch or '; '.join(short) or 'no paired round'
+            else:
+                median_off = statistics.median([one['first']['round_ms'] for one in paired])
+                contrast = phase_contrast(paired)
+                entry.update(rounds=len(paired), phases=contrast, trimmed_ms=contrast['flag_ms']['trimmed_mean_ms'],
+                             cost=round(contrast['flag_ms']['trimmed_mean_ms'] / median_off, 6))
+            aa.append(entry)
+    return aa
+
+
+def control_timing(runner, arms, reports, pool=None, pool_path=None, pool_sha256=None):
+    """G3's timing (the module docstring's control) over the control plan's pairs: the pairs' number (CONTROL_PAIRS),
+    per pair the refusal of an audited timing arm and the net (live4_of's median four-live rounds, at most
+    CONTROL_NET_TOLERANCE), the four-live rounds of both arms matched by fingerprint (pair_phase_rounds) and the same
+    sequence in every pair (and the first run's, pooled), then the primary over every pair's paired rounds - and, for
+    the one re-run, the first run's (`pool`, its phase record, `pool_sha256` its digest) - pooled (flag_phase_cost),
+    its bounds carrying the arms' offsets (flag_phase_sigma over the A/A reads, aa_reads). Recorded, not judged: each
+    pair's and phase's split, the net ratios, the A/A contrasts. Returns dict(problems, shortfalls, verdicts, pairs,
+    flag_phase, lines, record)."""
     problems, shortfalls, verdicts, lines, net = [], [], [], [], []
     timed, arm_rounds, record_pairs, per_pair = [], {}, [], []
-    for index in sorted(set(spec.extra['pair'] for spec in arms if 'pair' in spec.extra)):
+    indices = sorted(set(spec.extra['pair'] for spec in arms if 'pair' in spec.extra))
+    if len(indices) != CONTROL_PAIRS:
+        shortfalls.append('the rule times %d pairs (ABAB) and this run has %d: its paired set is not the rule\'s, '
+                          'never a pass' % (CONTROL_PAIRS, len(indices)))
+    sequence = None
+    for index in indices:
         off_name, on_name = 'control-off-%d' % index, 'control-on-%d' % index
         off_report, on_report = reports.get(off_name), reports.get(on_name)
         audit_lines = (s2_of(on_report).get('extent_audit') or {}).get('lines') or 0
@@ -1678,6 +1821,18 @@ def control_timing(runner, arms, reports, pool=None, pool_path=None):
             verdicts.append('NOT_COMPARABLE')
             lines.append('pair %d: NOT_COMPARABLE - %s' % (index, mismatch))
             continue
+        # Every pair serves the same rounds (all 12 timing arms of runs 36270917139, 36272682217 and 36276533585 did).
+        mine = [one['fingerprint'] for one in arm_rounds[off_name]]
+        if sequence is None:
+            sequence = dict(pair=index, arm=off_name, fingerprints=mine)
+        else:
+            mismatch, stops = sequence_difference(sequence['fingerprints'], mine, (sequence['arm'], off_name))
+            if mismatch:
+                verdicts.append('NOT_COMPARABLE')
+                lines.append('pair %d: NOT_COMPARABLE - not pair %d\'s rounds: %s' % (index, sequence['pair'], mismatch))
+                continue
+            if stops:
+                shortfalls.append('pair %d: not pair %d\'s rounds: %s' % (index, sequence['pair'], stops))
         shortfalls += ['pair %d: %s' % (index, text) for text in short]
         timed += paired
         record_pairs.append(dict(pair=index, rounds=record_rounds(paired)))
@@ -1690,16 +1845,36 @@ def control_timing(runner, arms, reports, pool=None, pool_path=None):
                 median_on_flag_ms=round(statistics.median([entry['second']['flag_ms'] for entry in paired]), 3),
                 mean_ms=round(sum(deltas) / len(deltas), 4), trimmed_mean_ms=round(trimmed_mean(deltas)[0], 4),
                 cost=round(trimmed_mean(deltas)[0] / median_off, 6)))
-    pooled = list(timed)
+    # A/A: each later arm of a flag state against its first - recorded, and judged only through the arms' offset.
+    aa = aa_reads(arm_rounds)
+    reads = [entry['trimmed_ms'] for entry in aa if 'trimmed_ms' in entry]
+    pooled, pool_pairs = list(timed), 0
     if pool is not None:
+        # The one re-run: the first run's rounds must be this run's (the same plan), and never this run's own.
+        mismatch, stops = sequence_difference(pool['sequence'], sequence['fingerprints'] if sequence else [],
+                                              ('the first run', 'this run'))
+        if mismatch:
+            verdicts.append('NOT_COMPARABLE')
+            lines.append('pooled: NOT_COMPARABLE - %s' % mismatch)
+        elif stops:
+            shortfalls.append('pooled: %s' % stops)
+        if record_pairs and [pair['rounds'] for pair in record_pairs] == [pair['rounds'] for pair in pool['pairs']]:
+            shortfalls.append('pooled: this run\'s paired rounds are the first run\'s own - a run is never pooled with '
+                              'itself')
         pooled += pooled_rounds(pool)
-    flag_phase = dict(rule=CONTROL_RULE, pairs=per_pair, net=net, pooled_with=pool_path,
-                      pooled_net=pool.get('net') if pool is not None else None)
+        pool_pairs = len(pool['pairs'])
+        reads += [entry.get('trimmed_ms') for entry in pool.get('aa') or [] if entry.get('trimmed_ms') is not None]
+    sigma, seen = flag_phase_sigma(reads)
+    spent = dict(path=pool_path, sha256=pool_sha256, run=pool.get('run')) if pool is not None else None
+    flag_phase = dict(rule=CONTROL_RULE, pairs=per_pair, net=net, pooled_with=spent,
+                      pooled_net=pool.get('net') if pool is not None else None,
+                      arm_sigma=dict(floor_ms=CONTROL_ARM_SIGMA_MS, seen_ms=None if seen is None else round(seen, 4),
+                                     used_ms=round(sigma, 4), reads_ms=reads))
     # PASS and NOT_RESOLVED need the full paired set of every pair; FAIL stands on whatever rounds were measured.
     complete = not shortfalls and 'NOT_COMPARABLE' not in verdicts
     if pooled:
         cost = flag_phase_cost([(entry['second']['flag_ms'] - entry['first']['flag_ms'], entry['first']['round_ms'])
-                                for entry in pooled])
+                                for entry in pooled], pairs=len(record_pairs) + pool_pairs, arm_sigma_ms=sigma)
         flag_phase.update(statistic=cost, phases=phase_contrast(pooled), decided=cost['verdict'] == 'FAIL' or complete)
         if cost['verdict'] == 'FAIL':
             problems.append('the flag phases: %s (%d paired four-live rounds)' % (cost['why'], cost['rounds']))
@@ -1709,24 +1884,15 @@ def control_timing(runner, arms, reports, pool=None, pool_path=None):
         shortfalls.append('no paired four-live round measured whole: the flag phases are not compared')
     flag_phase['verdict'] = (('FAIL' if problems else worst(verdicts) if verdicts else
                               'NOT_EXERCISED' if shortfalls else 'PASS'))
-    # A/A: each later flag-off arm against the first, the same way - a noise read, never judged.
-    aa = []
-    offs = sorted(name for name in arm_rounds if name.startswith('control-off-'))
-    for name in offs[1:]:
-        paired, mismatch, short = pair_phase_rounds(arm_rounds[offs[0]], arm_rounds[name], names=(offs[0], name))
-        entry = dict(arms='%s - %s' % (name, offs[0]))
-        if mismatch or not paired:
-            entry['not_compared'] = mismatch or '; '.join(short) or 'no paired round'
-        else:
-            median_off = statistics.median([one['first']['round_ms'] for one in paired])
-            contrast = phase_contrast(paired)
-            entry.update(rounds=len(paired), phases=contrast,
-                         cost=round(contrast['flag_ms']['trimmed_mean_ms'] / median_off, 6))
-        aa.append(entry)
     flag_phase['aa'] = aa
     lines += ['pair %(pair)d: flag-off %(off_ms)s ms, flag-on %(on_ms)s ms (unaudited): %(ratio)s x (net, at most '
               '%(limit).2f)' % dict(entry, limit=CONTROL_NET_TOLERANCE) for entry in net]
     if pool is not None:
+        first = pool.get('run') or {}
+        lines.append('pooled with %s (sha256 %s): the one re-run of the first run %s (workflow run %s attempt %s, '
+                     'started %s) - any other pooled record naming this first run is a second re-run, void under '
+                     '%s' % (pool_path, pool_sha256, first.get('nonce'), first.get('workflow_run'), first.get('attempt'),
+                             first.get('started'), CONTROL_RULE))
         lines += ['pooled with %s: pair %s net %s x (the first run)' % (pool_path, entry.get('pair'), entry.get('ratio'))
                   for entry in pool.get('net') or []]
     for entry in per_pair:
@@ -1735,15 +1901,19 @@ def control_timing(runner, arms, reports, pool=None, pool_path=None):
                      '(recorded)' % entry)
     statistic = flag_phase.get('statistic')
     if statistic:
-        lines.append('flag phases%s: %d paired four-live rounds, D trimmed mean %+.3f ms (%d rounds trimmed from each '
-                     'tail: low %s, high %s), untrimmed %+.3f ms, flag-off median round %.2f ms: c %.3f%%, %d%% upper '
-                     '%.3f%%, untrimmed %.3f%% (limit %.1f%%) - %s: %s' % (
+        lines.append('flag phases%s: %d paired four-live rounds of %d pairs, D trimmed mean %+.3f ms (%d rounds trimmed '
+                     'from each tail: low %s, high %s), untrimmed %+.3f ms, flag-off median round %.2f ms: c %.3f%%, '
+                     'untrimmed %.3f%%; %d%% upper bounds c %.3f%%, untrimmed %.3f%% (rounds alone %.3f%% and %.3f%%; '
+                     'the arms\' offsets %.3f%%: sigma %.2f ms - floor %.2f, A/A %s) (limit %.1f%%) - %s: %s' % (
                          ' (pooled with the first run)' if pool is not None else '', statistic['rounds'],
-                         statistic['trimmed_mean_ms'], statistic['trimmed_low'], statistic['trimmed_low_ms'],
-                         statistic['trimmed_high_ms'], statistic['mean_ms'], statistic['median_off_round_ms'],
-                         100 * statistic['cost'], CONTROL_BOUND_PERCENT, 100 * statistic['upper'],
-                         100 * statistic['untrimmed'], 100 * CONTROL_COST_LIMIT,
-                         statistic['verdict'] if flag_phase['decided'] else
+                         statistic['pairs'], statistic['trimmed_mean_ms'], statistic['trimmed_low'],
+                         statistic['trimmed_low_ms'], statistic['trimmed_high_ms'], statistic['mean_ms'],
+                         statistic['median_off_round_ms'], 100 * statistic['cost'], 100 * statistic['untrimmed'],
+                         CONTROL_BOUND_PERCENT, 100 * statistic['upper'], 100 * statistic['untrimmed_upper'],
+                         100 * statistic['round_upper'], 100 * statistic['untrimmed_round_upper'],
+                         100 * statistic['arm_term'], sigma, CONTROL_ARM_SIGMA_MS,
+                         'none' if seen is None else '%.2f ms over %d reads' % (seen, len(reads)),
+                         100 * CONTROL_COST_LIMIT, statistic['verdict'] if flag_phase['decided'] else
                          'not decided (the paired set is not complete; it would read %s)' % statistic['verdict'],
                          statistic['why']))
         for name in FLAG_PHASES:
@@ -1754,9 +1924,9 @@ def control_timing(runner, arms, reports, pool=None, pool_path=None):
         if 'not_compared' in entry:
             lines.append('A/A %s: not compared (%s) (a noise read, recorded)' % (entry['arms'], entry['not_compared']))
         else:
-            lines.append('A/A %s: %d rounds, F trimmed %+.3f ms (%.3f%% of the round), mean %+.3f ms (a noise read, '
-                         'recorded)' % (entry['arms'], entry['rounds'], entry['phases']['flag_ms']['trimmed_mean_ms'],
-                                        100 * entry['cost'], entry['phases']['flag_ms']['mean_ms']))
+            lines.append('A/A %s: %d rounds, F trimmed %+.3f ms (%.3f%% of the round), mean %+.3f ms (a noise read: '
+                         'the arms\' offset)' % (entry['arms'], entry['rounds'], entry['trimmed_ms'], 100 * entry['cost'],
+                                                 entry['phases']['flag_ms']['mean_ms']))
     if flag_phase['verdict'] == 'NOT_RESOLVED':
         lines.append('flag phases NOT_RESOLVED after the one re-run (pooled with %s): escalate to the user - no further '
                      're-run is pre-registered' % pool_path if pool is not None else
@@ -1764,8 +1934,12 @@ def control_timing(runner, arms, reports, pool=None, pool_path=None):
                      'decided on both runs pooled (--control-pool <this run\'s %s>); then the user decides'
                      % CONTROL_PHASE_RECORD)
         flag_phase['escalate'] = pool is not None
-    record = dict(rule=CONTROL_RULE, pooled=pool is not None, pooled_with=pool_path, timing_verdict=flag_phase['verdict'],
-                  net=net, pairs=record_pairs, statistic=statistic)
+    record = dict(rule=CONTROL_RULE, run=getattr(runner, 'run_identity', None),
+                  binding=control_binding(getattr(runner, 'image', None), getattr(runner, 'profile', None), arms),
+                  pooled=pool is not None, pooled_with=spent, timing_verdict=flag_phase['verdict'],
+                  sequence=sequence['fingerprints'] if sequence else None, net=net, pairs=record_pairs,
+                  aa=[dict(arms=entry['arms'], state=entry['state'], trimmed_ms=entry.get('trimmed_ms')) for entry in aa],
+                  arm_sigma=flag_phase['arm_sigma'], statistic=statistic)
     return dict(problems=problems, shortfalls=shortfalls, verdicts=verdicts, pairs=net, flag_phase=flag_phase,
                 lines=lines, record=record)
 
@@ -1995,7 +2169,8 @@ def run_reference_pairs(plan, runner, reference, arms):
         results[spec[0]] = verdict
     problems, shortfalls, pairs, audited, timing = [], [], [], None, None
     if plan == 'control':
-        timing = control_timing(runner, arms, reports, runner.control_pool, runner.control_pool_path)
+        timing = control_timing(runner, arms, reports, runner.control_pool, runner.control_pool_path,
+                                runner.control_pool_sha256)
         problems, shortfalls, pairs = list(timing['problems']), list(timing['shortfalls']), timing['pairs']
         audit_report = reports.get(CONTROL_AUDIT_ARM)
         if audit_report is not None and not s2_of(audit_report).get('audit'):
@@ -2358,8 +2533,8 @@ def build_parser():
                         help='extent (the extent audit on every S2 arm but control\'s timing arms) or all (also '
                              'prestage, pair-mask and fused-commit on the G4 arms)')
     parser.add_argument('--control-pool', default=None,
-                        help='control\'s one re-run: the NOT_RESOLVED first run\'s %s (relative to --checkout), '
-                             'pooled into this run\'s decision' % CONTROL_PHASE_RECORD)
+                        help='control\'s one re-run: the NOT_RESOLVED first run\'s %s (relative to --checkout) - the '
+                             'same image, profile and arms - pooled into this run\'s decision' % CONTROL_PHASE_RECORD)
     return parser
 
 
@@ -2416,20 +2591,9 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
     s2 = s2_options(options, log)
     if s2 is None:
         return 2
-    pool = None
-    if options.control_pool:
-        # G3's one re-run (the module docstring's control): refused up front unless it is the same plan's first run,
-        # NOT_RESOLVED, under this rule, and not itself a re-run.
-        if 'control' not in plans:
-            log('refused: --control-pool pools a control run, and the plans (%s) run no control' % ','.join(plans))
-            return 2
-        path = options.control_pool if os.path.isabs(options.control_pool) else os.path.join(options.checkout,
-                                                                                           options.control_pool)
-        try:
-            pool = read_control_pool(path, s2.get('pairs') or DEFAULT_PAIRS)
-        except (OSError, ValueError) as error:
-            log('refused: --control-pool: %s' % error)
-            return 2
+    if options.control_pool and 'control' not in plans:
+        log('refused: --control-pool pools a control run, and the plans (%s) run no control' % ','.join(plans))
+        return 2
     lengths = [c2_serving_job.positive_int('--lengths', part) for part in c2_serving_job.split_list(options.lengths)] \
         if options.lengths else None
     if options.profiles:
@@ -2448,6 +2612,18 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                                       s2=s2)
         except PlanError as error:
             log('refused: %s' % error)
+            return 2
+    pool = pool_sha256 = None
+    if options.control_pool:
+        # G3's one re-run (the module docstring's control): refused up front unless it is this plan's first run - the
+        # same image, profile and arms - NOT_RESOLVED under this rule, and not itself a re-run.
+        path = options.control_pool if os.path.isabs(options.control_pool) else os.path.join(options.checkout,
+                                                                                           options.control_pool)
+        try:
+            pool, pool_sha256 = read_control_pool(path, control_binding(options.image, options.profile,
+                                                                        arms_of['control']))
+        except (OSError, ValueError) as error:
+            log('refused: --control-pool: %s' % error)
             return 2
     worst_case = worst_case_seconds(plans, arms_of)
     if options.budget_seconds is not None and worst_case > options.budget_seconds:
@@ -2484,6 +2660,7 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     cache_entries=cache_entries, jit=options.jit, policy=options.policy,
                     decision=options.policy_decision)
     runner.control_pool, runner.control_pool_path = pool, options.control_pool if pool is not None else None
+    runner.control_pool_sha256, runner.run_identity = pool_sha256, run_identity()
     context, ceiling, room = profile_limits(profiles, options.profile)
     summary = dict(image=options.image, profile=options.profile, plans=plans, context=context,
                    output_ceiling=ceiling, largest_prompt=room, worst_case_seconds=worst_case,
@@ -2491,6 +2668,11 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
     if s2_run:
         summary.update(policy=options.policy, policy_decision=options.policy_decision, jit=options.jit,
                        kernel_cache=cache_dir, s2_exit_blockers=[])
+    if 'control' in plans:
+        # G3: this run's identity, and - the one re-run - the first run it spends (a second re-run shows as a second
+        # summary naming the same first run and digest).
+        summary.update(control_run=runner.run_identity, control_pool=dict(
+            path=options.control_pool, sha256=pool_sha256, first_run=pool.get('run')) if pool is not None else None)
     try:
         for plan in plans:
             summary['results'][plan] = run_plan(plan, runner, profiles, reference, lengths, options.max_tokens,

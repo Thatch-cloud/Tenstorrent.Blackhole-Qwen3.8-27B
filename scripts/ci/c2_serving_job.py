@@ -34,7 +34,8 @@ Keys (every one optional but C2_IMAGE_TAG):
   S2 (C2-packed-any, s2-design.md W11 and 6.3; C2_GATE_PLAN may name S2_GATE_PLANS too):
   C2_GATE_PAIRS       the A/B pairs control and control-below run (default, rendered empty: the gate's
                       two, ABAB), 1..MAX_PAIRS; control times its unaudited flag-on arms against the pairs'
-                      flag-off arms and adds one audited flag-on arm (control-audit) after them
+                      flag-off arms and adds one audited flag-on arm (control-audit) after them - its timing rule
+                      is pre-registered at two pairs, so any other number leaves control short, never a pass
   C2_GATE_FAMILIES    control-below's (G3b) families F, each a multiple of 256 in BELOW_FAMILY_RANGE
                       (default, rendered empty: the gate's 16640,4352)
   C2_GATE_JIT         whose kernel-cache growth fails an arm: auto (default: S2 arms and plans, never warm),
@@ -47,7 +48,8 @@ Keys (every one optional but C2_IMAGE_TAG):
                       all four either way
   C2_GATE_CONTROL_POOL  control's (G3) one re-run: a NOT_RESOLVED first run's control-phase-rounds.json,
                       committed under scripts/ci/references/c2-serving/ (CONTROL_POOL); the gate pools it into this
-                      run's decision and refuses one that is not that plan's unresolved first run
+                      run's decision and refuses one that is not that plan's unresolved first run (the same image,
+                      profile and arms)
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
