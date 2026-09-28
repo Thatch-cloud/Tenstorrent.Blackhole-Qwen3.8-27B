@@ -167,35 +167,56 @@ class TraceOperations(FakeOperations):
                                largest_contiguous_bytes_free_per_bank=(self.TRACE_TOTAL - allocated) // BANKS)
 
 
+def messages(lines):
+    """The ledger's messages, each continuation line ('[MEMLEDGER] ...', MemoryLedger.log's LINE_BUDGET cut) joined
+    back on."""
+    joined = []
+    for line in lines:
+        if line.startswith('[MEMLEDGER] ...'):
+            joined[-1] += line[len('[MEMLEDGER] ...'):]
+        else:
+            joined.append(line)
+    return joined
+
+
 class BeforePointTests(unittest.TestCase):
-    """S2 W6d: before and after points read the allocator either side of a heavy operation, report the margin
-    over its estimate, the running floor and the trace region, and never enter the phase chain."""
+    """S2 W6d: before and after points read the allocator either side of a heavy operation, report the S2 split's
+    margin (the free less the stranded bytes less the estimate) with its running floor, the contiguous term (the
+    largest block less the largest buffer) and the trace region, and never enter the phase chain."""
 
     def test_a_before_point_logs_the_margin_and_floor_per_chip_and_leaves_the_phase_chain_alone(self):
+        import serving_prefill_admission
+
+        stranded, buffer = serving_prefill_admission.STRANDED_BYTES, serving_prefill_admission.LARGEST_BUFFER_BYTES
+        self.assertEqual(memory_ledger.split_allowances(), (stranded, buffer))
         operations = FakeOperations()
         ledger, lines, reports = ledger_for(operations)
         ledger.phase('P0')
         operations.charge(4_000_000_000)
         chain = (list(ledger.readings), list(ledger.checks), dict(ledger.known))
         largest = (TOTAL - 4_000_000_000) // BANKS // 2 * BANKS
+        free = (TOTAL - 4_000_000_000) // BANKS * BANKS
+        margin = free - stranded - 86_000_000
         token = ledger.before('pair', estimate=86_000_000, point='slots=0,1')
         self.assertEqual((list(ledger.readings), list(ledger.checks), dict(ledger.known)), chain,
                          'no reading, check or known buffer is added')
         self.assertEqual(token['op'], 'pair')
-        self.assertEqual(ledger.floor, {0: largest - 86_000_000, 1: largest - 86_000_000})
-        before = [line for line in lines if line.startswith(memory_ledger.BEFORE_MARKER)]
-        self.assertEqual(len(before), 2, 'one line per chip')
+        self.assertEqual(ledger.floor, {0: margin, 1: margin})
+        self.assertEqual(ledger.contiguous_floor, {0: largest - buffer, 1: largest - buffer})
+        before = [line for line in messages(lines) if line.startswith(memory_ledger.BEFORE_MARKER)]
+        self.assertEqual(len(before), 2, 'one message per chip')
         self.assertEqual(before[0], '[MEMLEDGER] before op=pair point=slots=0,1 chip0 largest_free=%.1fMB free=%.3fGB '
-                         'estimate=86.0MB margin=%.1fMB floor=%.1fMB trace=unavailable'
-                         % (largest / 1e6, (TOTAL - 4_000_000_000) // BANKS * BANKS / 1e9,
-                            (largest - 86_000_000) / 1e6, (largest - 86_000_000) / 1e6))
+                         'estimate=86.0MB margin=%.1fMB floor=%.1fMB contiguous=%.1fMB trace=unavailable'
+                         % (largest / 1e6, free / 1e9, margin / 1e6, margin / 1e6, (largest - buffer) / 1e6))
         self.assertTrue(all(len(line) <= memory_ledger.LINE_BUDGET for line in lines))
         self.assertEqual(reports[-1]['stage'], 'memory_ledger_before')
-        self.assertEqual(reports[-1]['margins'], {'0': largest - 86_000_000, '1': largest - 86_000_000})
+        self.assertEqual(reports[-1]['margins'], {'0': margin, '1': margin})
+        self.assertEqual(reports[-1]['contiguous'], {'0': largest - buffer, '1': largest - buffer})
+        self.assertEqual((reports[-1]['stranded'], reports[-1]['largest_buffer']), (stranded, buffer))
         # A tighter operation lowers the floor; a looser one leaves it.
         ledger.before('quad', estimate=500_000_000)
         ledger.before('single', estimate=1)
-        self.assertEqual(ledger.floor[0], largest - 500_000_000)
+        self.assertEqual(ledger.floor[0], free - stranded - 500_000_000)
         self.assertEqual([op for op, _, _ in ledger.before_points], ['pair', 'quad', 'single'])
         # The next phase's delta spans from P0, as it would with no before point at all.
         report = ledger.phase('P1')
@@ -219,7 +240,7 @@ class BeforePointTests(unittest.TestCase):
         operations.trace_allocated[id(operations.devices[0])] = 120 * 2 ** 20
         ledger, lines, reports = ledger_for(operations)
         ledger.before('quad', estimate=450 * 2 ** 20)
-        before = [line for line in lines if line.startswith(memory_ledger.BEFORE_MARKER)]
+        before = [line for line in messages(lines) if line.startswith(memory_ledger.BEFORE_MARKER)]
         self.assertTrue(before[0].endswith('trace_used=%.1fMB trace_largest_free=%.1fMB'
                                            % (120 * 2 ** 20 / 1e6, (256 - 120) * 2 ** 20 / 1e6)), before[0])
         self.assertTrue(before[1].endswith('trace_used=0.0MB trace_largest_free=%.1fMB' % (256 * 2 ** 20 / 1e6)))
@@ -245,6 +266,27 @@ class BeforePointTests(unittest.TestCase):
         self.assertTrue(lines[-1].startswith('[MEMLEDGER] before op=engine dram unavailable'))
         self.assertEqual(broken.after(dict(op='engine', label='engine', point=None, request=None, chips=[]))['chips'],
                          dict(unavailable='RuntimeError: no view'))
+
+
+class ItemLargestBufferTests(unittest.TestCase):
+    """Each phase's item line names the largest single buffer the walk found for it (the S2 split's
+    LARGEST_BUFFER_BYTES, measured: serving_prefill_admission), and the JSON carries it per chip; read-only, from the
+    sizes the walk already takes."""
+
+    def test_the_item_line_and_report_name_the_largest_new_buffer(self):
+        operations = FakeOperations()
+        ledger, lines, reports = ledger_for(operations)
+        ledger.phase('P0')
+        small, large = operations.tensor((32, 1024)), operations.tensor((64, 5120))
+        known = operations.tensor((128, 5120))
+        ledger.phase('P1', earlier=known)
+        report = ledger.phase('P2', engine_request=dict(small=small, large=large, again=known))
+        self.assertEqual(report['known']['engine_request']['largest'], {0: 64 * 5120 * 2, 1: 64 * 5120 * 2},
+                         'a buffer an earlier phase walked is not new here')
+        item = [line for line in lines if 'phase=P2 item=engine_request' in line]
+        self.assertEqual(len(item), 1)
+        self.assertIn(' buffers=4 largest=%.1fMB unreadable=0' % (64 * 5120 * 2 / 1e6), item[0])
+        self.assertEqual(reports[-1]['known']['engine_request']['largest'], {'0': 64 * 5120 * 2, '1': 64 * 5120 * 2})
 
 
 class PhaseTests(unittest.TestCase):

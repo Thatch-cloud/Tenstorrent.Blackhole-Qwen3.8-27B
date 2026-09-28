@@ -81,6 +81,7 @@ DISABLED_MARKER = '[PINDIAG] quad draft disabled'
 ROUND_LINE = '[QUAD-DRAFT] round={round} built={built} ms={ms}'
 FALLBACK_LINE = '[QUAD-DRAFT] fallback round={round} reason={reason}'
 RELEASE_LINE = '[QUAD-DRAFT] released pairs={pairs} headroom={headroom}'
+RELEASE_SPLIT_LINE = RELEASE_LINE + ' free={free} short={short}'
 # %-templates: QWEN_FAST_PAIR_MASK_AUDIT's read-back of the quad's mask, and the shadow audit.
 MASK_AUDIT_LINE = '[QUAD-DRAFT] mask round=%s intact=%d mismatched=%d chip=%d'
 AUDIT_LINE = '[QUAD-AUDIT] round=%s equal=%d stage=%s users=%d checks=%d'
@@ -108,10 +109,13 @@ CONV_VARIANTS = {
 }
 # A fresh quad capture's DRAM per chip: placeholders ~0.2 MB plus the trace-retained intermediates, 0.3-0.45 GB
 # (est., plan section 3.9). The coordinator refuses a fresh build below this plus the packed reserve; the
-# quad_built ledger point measures the real figure.
+# quad_built ledger point measures the real figure (gate v79, run 36368363993: 427.3-428.3 MB). The headroom is
+# the largest free block, or under QWEN_FAST_EXTENT_REPLAY=1 the S2 admission's split (dflash_packed_proposal_
+# coordinator.capture_headroom): the free less the stranded bytes, and a block for the largest buffer and reserve.
 QUAD_CAPTURE_BYTES_EST = 450 * 2 ** 20
 # Plan section 3.9: below this free after the quad captures, the pair traces are released (rebuilt at the next
-# 3-live round, 81-143 ms measured) - never while the audit needs them.
+# 3-live round, 81-143 ms measured) - never while the audit needs them. The free read is capture_headroom's, as
+# for the build; under the S2 split the release line carries the free and the short terms (RELEASE_SPLIT_LINE).
 PAIR_RELEASE_BELOW_BYTES = 600 * 10 ** 6
 GIVE_UP_FAILURES = 2
 _NOTED = []
@@ -656,6 +660,17 @@ class QuadPass:
 # Host inputs and the readback.
 # ---------------------------------------------------------------------------------------------
 
+def quad_host_mask():
+    """The quad's host mask: the served single-user mask the pair fold uses (pair_row_exact.fold_mask at the one
+    geometry), validated. serving_runtime asks it for the shape the pool holds for slots 0-3."""
+    from dflash_t16_native_attention import validate_mask
+    from pair_row_exact import fold_mask
+
+    host_mask = fold_mask((CONTEXT, CONTEXT), BLOCK)
+    validate_mask(host_mask)
+    return host_mask
+
+
 def quad_users(devices, context=CONTEXT):
     return [dict(position=device.position, history_rows=context) for device in devices]
 
@@ -789,13 +804,14 @@ class PreparedQuadDFlashProposal:
 
     def _protected(self, bucket=None):
         """What no temporary of the pass or of an update may ever queue for release: every device's feature
-        history pair, the placeholders and the lent live banks."""
+        history pair, the placeholders, the lent live banks and the pool's mask when the bucket borrowed it."""
         protected = []
         for device in self.devices:
             protected.extend((device.history, device.spare_history))
         protected.extend(self.owned)
         if bucket is not None:
             protected.extend(value for cache in bucket.cached_history for layer in cache for value in layer.values())
+            protected.extend(getattr(bucket, 'lent_mask', ()))
         return protected
 
     def _live_banks(self):
@@ -817,23 +833,27 @@ class PreparedQuadDFlashProposal:
             self.last_built = False
             return bucket
         from dflash_packed_proposal import packed_identifiers
-        from dflash_t16_native_attention import validate_mask
+        from dflash_proposal_trace import borrow_pooled_mask
         from gdn_multitoken_conv import addresses, release_owned
-        from pair_row_exact import fold_mask
 
         operations, device = self.operations, self.devices[0]
         placeholder_mark = len(self.owned)
         try:
-            host_mask = fold_mask((CONTEXT, CONTEXT), BLOCK)
-            validate_mask(host_mask)
+            host_mask = quad_host_mask()
             query, live = quad_rope([dict(position=CONTEXT, history_rows=CONTEXT)] * USERS)
+            # S2: the pool's pre-trace mask for slots 0-3, the host mask copied in (dflash_proposal_trace
+            # .POOLED_MASK_LINE); None without one, and the mask is uploaded below as before.
+            pooled = borrow_pooled_mask(device, self.pair_label(), host_mask, operations, self.mesh, log=log_line)
             bucket = SimpleNamespace(context=key, host_mask=host_mask,
                 identifiers=self._upload(packed_identifiers([0] * USERS, BLOCK, block_width=ROWS), identifiers=True),
-                mask=self._upload(host_mask),
+                mask=pooled if pooled is not None else self._upload(host_mask),
                 rope=dict(q=tuple(self._upload(value) for value in query),
                           live_k=tuple(self._upload(value) for value in live)),
                 cached_history=self._live_banks(), trace=None, outputs=None, owned=[], tokens=None, consumed=set(),
                 parts=None)
+            if pooled is not None:
+                # Borrowed, never in self.owned: protected like the lent banks (_protected), never released.
+                bucket.lent_mask = (pooled,)
             bucket.inputs = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['live_k'],
                 *(value for cache in bucket.cached_history for layer in cache for value in layer.values())]
             bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
@@ -918,6 +938,7 @@ class PreparedQuadDFlashProposal:
         protected = self._protected()
         for device in devices:
             protected.extend((*device.kv_history.owned, *device.kv_history.borrowed))
+        protected.extend(getattr(bucket, 'lent_mask', ()))
         owned, retain = devices[0].temporaries(protected)
 
         def copy_cache():

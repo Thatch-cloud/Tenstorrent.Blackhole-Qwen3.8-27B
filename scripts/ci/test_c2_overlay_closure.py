@@ -50,12 +50,12 @@ C2_ANY_MODULES = ('serving_request_factory.py', 'serving_runtime.py', 'serving_l
 # What C2-packed-any (S2, the c2-packed profiles, QWEN_FAST_EXTENT_REPLAY=1) needs from the image on top of
 # C2-any: the extent readers and the pool that lends them their tables and cur_pos words (W1/W2), the attach's
 # admission and the evidence it pins (W7), the block's model_batch (W3), the proposal coordinator (W6c/W12)
-# and the memory ledger (W6d), and the extent block's attach-time eager publication warm (B6). Any one left at an
-# older layer ships half of S2, and the admission or a reader dies at attach (or, worse, an older copy serves
-# without the change and nothing says so).
+# and the memory ledger (W6d), the extent block's attach-time eager publication warm (B6), and the pair and quad
+# drafts that borrow the pool's pre-trace masks (M0). Any one left at an older layer ships half of S2, and the
+# admission or a reader dies at attach (or, worse, an older copy serves without the change and nothing says so).
 C2_PACKED_ANY_MODULES = ('extent_attention_replay.py', 'serving_buffer_pool.py', 'packed_any_admission.py',
                          'packed_any_evidence.json', 'model_batch.py', 'dflash_packed_proposal_coordinator.py',
-                         'memory_ledger.py', 'publication_warm.py')
+                         'memory_ledger.py', 'publication_warm.py', 'dflash_proposal_trace.py', 'quad_draft.py')
 
 FILE_NAME = re.compile(r'^[A-Za-z0-9_]+[.](?:py|json|cpp)$')
 

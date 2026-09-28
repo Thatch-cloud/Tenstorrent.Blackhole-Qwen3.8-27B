@@ -1117,6 +1117,10 @@ def quad_devices(ops, *, context=2048):
     return made
 
 
+def addresses_of(tensor):
+    return tuple(shard.buffer_address() for shard in tensor.shards)
+
+
 def live_banks(*devices):
     return [[{name: layer[name] for name in ('k', 'v')} for layer in device.kv_history.active] for device in devices]
 
@@ -1239,6 +1243,36 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(len(masks), 6)
         for chip in bucket.mask.chips:
             self.assertTrue(same_bits(chip, bucket.host_mask), 'the refresh healed it')
+
+    def test_the_quad_borrows_the_pools_pre_trace_mask(self):
+        """S2 M0: with the pool holding a mask for slots 0-3 (serving_buffer_pool draft_masks=), the quad copies its
+        host mask into it and never uploads or frees one of its own; without one, the build is today's."""
+        from test_dflash_proposal_trace import RecordingOps
+
+        ops = RecordingOps()
+        devices = quad_devices(ops)
+        held = ops.from_torch(torch.zeros(1, 1, 32, 2080, dtype=torch.bfloat16), device='mesh', dtype='bf16', layout='tile')
+        pool = SimpleNamespace(draft_masks={(0, 1, 2, 3): held},
+                               draft_mask=lambda group, shape: held if (tuple(group), tuple(shape)) == ((0, 1, 2, 3),
+                                                                                                     tuple(held.shape)) else None)
+        for index, device in enumerate(devices):
+            device.pool_slot = SimpleNamespace(index=index, pool=pool)
+        trace = quad_draft.PreparedQuadDFlashProposal(devices)
+        lines, loguru = logged()
+        with loguru, patch('memory_ledger.record') as ledger:
+            self.assertTrue(trace.prepare_device((11, 22, 33, 44)))
+        bucket = trace.buckets[(2048,) * 4]
+        self.assertIs(bucket.mask, held)
+        self.assertEqual(bucket.lent_mask, (held,))
+        self.assertTrue(same_bits(held.chips[0], bucket.host_mask) and same_bits(held.chips[1], bucket.host_mask))
+        uploads = [event[1][1] for event in ops.events if event[0] == 'from_torch' and event[2] is True]
+        self.assertEqual(uploads, [(1, 1, 32, 2080), (1, 64), (1, 1, 64, 128), (1, 1, 64, 128), (1, 1, 64, 128),
+                                   (1, 1, 64, 128)], "the test's own pool mask, then no mask of the quad's")
+        self.assertNotIn(held, ledger.call_args.kwargs['quad_placeholders'])
+        self.assertIn('[PINDIAG] draft mask pooled slots=[0,1,2,3] shape=1x1x32x2080', lines)
+        self.assertIn(addresses_of(held), devices[0].validated_native_proposal_masks)
+        trace.close()
+        self.assertFalse([event for event in ops.events if event[0] == 'deallocate' and event[1] == ops.normalize(held)])
 
     def test_prepare_collect_adopt_finish(self):
         ops, devices, trace = self.build()
@@ -1893,6 +1927,71 @@ class CoordinatorTests(unittest.TestCase):
         trace = FakeQuadTrace.instances[0]
         self.assertEqual([pairs is not None for _, pairs in trace.audits], [True, False])
 
+    def split(self, reading):
+        """QWEN_FAST_EXTENT_REPLAY=1 (the S2 profiles) with the allocator reading `reading` (dict(free=, largest_free=)
+        per call, in order) through capture_headroom's dram_reading."""
+        environment = patch.dict(os.environ, {'QWEN_FAST_EXTENT_REPLAY': '1'})
+        readings = patch('dflash_packed_proposal_coordinator.dram_reading', side_effect=list(reading))
+        return environment, readings
+
+    def test_under_the_s2_flag_a_quad_builds_on_the_split_where_the_old_rule_refused(self):
+        """Gate v79 (run 36368363993): the fourth engine, admitted beside a 1079.7 MB block, leaves 1.51 GB free.
+        If it lands in the holes the block stays; if it takes 683 MB of it, 396.4 MB is left. The old rule's 740.3 MB
+        block refuses that quad; the split builds it on 1.21 GB past the stranded bytes."""
+        mb = 10 ** 6
+        for largest in (1_079_700_000, 397 * mb):
+            with self.subTest(largest_free=largest):
+                del LOG[:]
+                FakeQuadTrace.instances = []
+                coordinator, bridges = self.coordinator(), quad_bridges(self.operations, self.mesh)
+                environment, readings = self.split([dict(free=1_514 * mb, largest_free=largest),
+                                                    dict(free=1_087 * mb, largest_free=largest)])
+                with environment, readings:
+                    _, lines = self.prepare(coordinator, bridges)
+                self.assertEqual(len(FakeQuadTrace.instances), 1, lines)
+                self.assertFalse([line for line in lines if 'fallback' in line])
+        del LOG[:]
+        FakeQuadTrace.instances = []
+        coordinator, bridges = self.coordinator(), quad_bridges(self.operations, self.mesh)
+        with patch('dflash_packed_proposal_coordinator.dram_headroom', return_value=397 * mb):
+            _, lines = self.prepare(coordinator, bridges)
+        self.assertEqual(FakeQuadTrace.instances, [], 'flag off: the contiguous-only rule refuses, as before')
+        self.assertEqual(lines[0], '[QUAD-DRAFT] fallback round=1 reason=dram_reserve:headroom=397000000')
+
+    def test_under_the_s2_flag_a_quad_short_of_free_falls_back_and_says_why(self):
+        mb = 10 ** 6
+        coordinator, bridges = self.coordinator(), quad_bridges(self.operations, self.mesh)
+        environment, _ = self.split([])
+        # The same reading for the quad and then the two pairs the round falls back to (each 654.7 MB: they fit).
+        readings = patch('dflash_packed_proposal_coordinator.dram_reading',
+                         return_value=dict(free=1_000 * mb, largest_free=900 * mb))
+        with environment, readings:
+            _, lines = self.prepare(coordinator, bridges)
+        self.assertEqual(FakeQuadTrace.instances, [])
+        self.assertEqual(len(self.Pair.instances), 2, 'the round falls back to the pairs')
+        self.assertEqual(lines[0], '[QUAD-DRAFT] fallback round=1 reason=dram_reserve:headroom=900000000:'
+                                   'free=1000000000:short=free')
+        self.assertFalse(coordinator.quad_disabled)
+
+    def test_under_the_s2_flag_the_pairs_are_released_when_the_split_is_short(self):
+        """v79's quad builds left 1.087 GB (787 MB past the stranded bytes: kept) and 0.845 GB (545 MB: released)."""
+        mb = 10 ** 6
+        for after, released in ((dict(free=1_087 * mb, largest_free=915_300_000), False),
+                                (dict(free=845 * mb, largest_free=673_200_000), True)):
+            with self.subTest(after=after):
+                del LOG[:]
+                FakeQuadTrace.instances, self.Pair.instances = [], []
+                coordinator, bridges = self.coordinator(), quad_bridges(self.operations, self.mesh)
+                self.prepare(coordinator, bridges[:2])
+                pair = self.Pair.instances[0]
+                environment, readings = self.split([None, after])
+                with environment, readings:
+                    _, lines = self.prepare(coordinator, bridges)
+                self.assertEqual(pair.closed, released)
+                self.assertEqual((0, 1) in coordinator.pairs, not released)
+                expected = ('[QUAD-DRAFT] released pairs=[[0, 1]] headroom=673200000 free=845000000 short=free')
+                self.assertEqual(expected in lines, released, lines)
+
     def test_under_the_release_line_the_pairs_are_released_after_the_build(self):
         coordinator, bridges = self.coordinator(), quad_bridges(self.operations, self.mesh)
         self.prepare(coordinator, bridges[:2])
@@ -2532,7 +2631,9 @@ class ShippingTests(unittest.TestCase):
                                            'draft_convolution_fused_compute.cpp', 'dflash_proposal_inputs.py',
                                            'draft_head_preparation.py', 'draft_convolution_fused_io.cpp',
                                            'draft_convolution_fused.py', 'draft_convolution.py', 'pair_row_exact.py',
-                                           'dflash_proposal_trace.py', 'fused_commit.py', 'serving_bundle.py']), '')
+                                           'fused_commit.py', 'serving_bundle.py']), '')
+        # dflash_proposal_trace.py left this list with S2 M0 (the pooled draft masks): it is in both P8 copy lists
+        # and docker/qwen-c2-overlay.txt, so an edit reaches the image.
 
     def test_the_serving_bundle_inventorys_eight_files_are_untouched(self):
         """Plan section 4.1: serving_bundle.package's critical staged-source inventory. model_batch.py

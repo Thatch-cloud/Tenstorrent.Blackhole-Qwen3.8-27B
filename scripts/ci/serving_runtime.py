@@ -350,6 +350,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # may differ from the per-request bucket slots' fixed four-row grouping above -
             # packed_verifier.py is the only reader of this value.
             from packed_verifier import replay_group_rows
+        # S2: one mask per packed draft (each fixed pair, and the quad), allocated with the pool before any trace,
+        # so the drafts need not upload theirs after the request traces exist (serving_buffer_pool's last
+        # section). Flag off, no keyword at all. The T16 block: the draft weights below are built at 16 rows.
+        draft_masks = {}
+        if extent_replay:
+            from dflash_packed_proposal_coordinator import pooled_draft_mask_shapes
+
+            draft_masks = pooled_draft_mask_shapes(policy['scheduler_requests'], 16)
         pool = ServingBufferPool(operations, model.mesh_device, users=policy['scheduler_requests'],
             helpers=helpers, page_width=page_width, bucket_rows=bucket_rows,
             feature_taps=len(TARGET_TAPS), rope=rope,
@@ -357,7 +365,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 packed_replay_group_rows=replay_group_rows(),
                 **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}),
                 # S2: the extent storage in place of the per-family tables; flag off, no keyword at all.
-                **({'extent_replay': True} if extent_replay else {}))))
+                **({'extent_replay': True} if extent_replay else {}))),
+            **({'draft_masks': draft_masks} if draft_masks else {}))
         scopes.callback(pool.close)
         if extent_replay:
             # The pool must hold the extent storage the S2 block keys on (design W2: without it the block

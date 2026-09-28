@@ -58,6 +58,32 @@ SINGLE_REASONS = ('ramp', 'unpackable', 'absent', 'split', 'dram_reserve', 'fail
 # regression that would capture a new bucket nearly every round of the ramp (and hold its DRAM).
 PAIR_BUCKET_CONTEXT = (PACKED_CONTEXT, PACKED_CONTEXT)
 
+
+def pooled_draft_mask_shapes(users, block_rows):
+    """S2 (serving_buffer_pool's `draft_masks=`, which serving_runtime passes at attach under
+    QWEN_FAST_EXTENT_REPLAY=1): {slot group: mask shape} for every packed draft a pool of `users` scheduler slots
+    can build - each fixed pair (dflash_packed_proposal.FOUR_AS_TWO_PAIRS) whose slots all exist, at the one
+    bucket a pair builds (PAIR_BUCKET_CONTEXT, QWEN_FAST_PAIR_ROW_EXACT deciding the fold as the bucket will),
+    and the quad over slots 0-3 while QWEN_FAST_QUAD_DRAFT is on - so each borrows a mask allocated before any
+    trace instead of uploading its own after them (M0). {} with QWEN_FAST_PACKED_PROPOSAL off: no pair forms."""
+    if os.environ.get('QWEN_FAST_PACKED_PROPOSAL') != '1':
+        return {}
+    from dflash_packed_proposal import FOUR_AS_TWO_PAIRS
+    from dflash_proposal_trace import pair_host_mask
+
+    shapes = {}
+    pair_shape = tuple(pair_host_mask(*PAIR_BUCKET_CONTEXT, block_rows)[0].shape)
+    for group in FOUR_AS_TWO_PAIRS:
+        if max(group) < users:
+            shapes[tuple(group)] = pair_shape
+    if os.environ.get(QUAD_DRAFT_FLAG, '0') != '0':
+        import quad_draft
+
+        if max(quad_draft.SLOTS) < users and block_rows == quad_draft.BLOCK:
+            shapes[tuple(quad_draft.SLOTS)] = tuple(quad_draft.quad_host_mask().shape)
+    return shapes
+
+
 DRAM_RESERVE_FLAG = 'QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB'
 DRAM_RESERVE_DEFAULT_MB = 256
 
@@ -203,6 +229,55 @@ def dram_headroom(device):
     if isinstance(statistics, dict):
         return None
     return min(chip['largest_free'] for chip in statistics)
+
+
+def dram_reading(device):
+    """S2: the smallest free and the smallest largest-contiguous-free DRAM block across this device's chips,
+    dict(free=, largest_free=), or None when the statistics are unavailable (dram_headroom's contract)."""
+    from serving_buffer_pool import dram_statistics
+
+    tensor = getattr(device, 'history', None)
+    if tensor is None:
+        return None
+    statistics = dram_statistics(device.operations, tensor)
+    if isinstance(statistics, dict):
+        return None
+    return dict(free=min(chip['free'] for chip in statistics),
+                largest_free=min(chip['largest_free'] for chip in statistics))
+
+
+def capture_headroom(device, estimate, reserve=True):
+    """(short, reading) for a fresh capture of `estimate` bytes, plus the packed reserve unless `reserve` is False
+    (the pair release's threshold is a headroom already): short is () when it fits or the statistics cannot be read
+    (reading None: a diagnostic, never a gate).
+
+    With QWEN_FAST_EXTENT_REPLAY unset this is the rule every profile before S2 runs, call for call and in the same
+    order (the reserve is read only once the headroom is): the largest free block (dram_headroom) against the need,
+    short ('largest_free',) below it, reading dict(largest_free=). Under it (the S2 profiles) it is the admission's
+    split (serving_prefill_admission.split_short; gate v79, run 36368363993, whose engines landed in the holes
+    departed users left): the free less the stranded bytes against the need, and the largest block against the
+    reserve plus the largest buffer; reading dict(free=, largest_free=). v79's quad builds read 1.515, 1.272 and
+    1.514 GB free beside 1322.8, 1079.7 and 1320.7 MB blocks. The old rule needs a 740.3 MB block for a quad
+    (450 MiB and the 256 MiB reserve), so a fourth user admitted beside a 1079.7 MB block could take only 339 MB of
+    it before its quad is refused. The split needs 740.3 MB of the free less the stranded 300 MB (about 1.21 GB
+    there) and a 396.4 MB block, so the quad keeps forming whether the new engine lands in the holes (five
+    replacement engines in v79, v70 and v71 did) or takes up to 683 MB of the block. For a pair (354.7 MB) the
+    split is no looser than the old rule: it adds the free term, and its block is 396.4 MB rather than 354.7."""
+    if not extent_memory_points():
+        headroom = dram_headroom(device)
+        if headroom is None:
+            return (), None
+        need = estimate + (dram_reserve_bytes() if reserve else 0)
+        return (() if headroom >= need else ('largest_free',)), dict(largest_free=headroom)
+    reading = dram_reading(device)
+    if reading is None:
+        return (), None
+    import serving_prefill_admission
+
+    packed_reserve = dram_reserve_bytes()
+    need = estimate + (packed_reserve if reserve else 0)
+    return serving_prefill_admission.split_short(reading['free'], reading['largest_free'], need,
+                                                 packed_reserve), reading
 
 
 def audit_enabled(environ=None):
@@ -605,9 +680,11 @@ class PackedProposalCoordinator:
                             # Only a FRESH capture allocates new placeholder buffers -
                             # replaying an already-built trace does not - so the
                             # reserve check only ever gates the first round a pair
-                            # forms, never every round after (run 35585107688).
-                            headroom = dram_headroom(device_a)
-                            if headroom is not None and headroom < estimated_pair_capture_bytes() + dram_reserve_bytes():
+                            # forms, never every round after (run 35585107688). Under
+                            # the S2 flag the check is the admission's split
+                            # (capture_headroom, gate v79).
+                            short, _ = capture_headroom(device_a, estimated_pair_capture_bytes())
+                            if short:
                                 headroom_ok = False
                                 single_reason = 'dram_reserve'
                                 if audit_enabled():
@@ -782,11 +859,12 @@ class PackedProposalCoordinator:
     def _prepare_quad(self, groups, by_slot, round_number, batched):
         """Q4: prepare the four users' one 64-row pass, or None for today's pairs. Engages only when the groups are
         exactly [(0, 1), (2, 3)], both pairs are packable, quad_draft.refusal finds nothing and it has not given up.
-        A fresh build needs quad_draft.QUAD_CAPTURE_BYTES_EST plus the packed reserve of free DRAM. A failure falls
-        the round back to the pairs (FALLBACK_LINE); GIVE_UP_FAILURES in a row disable it for the process. On
-        success each device wears a view of the quad, the first success releases every single-user capture still
-        held (R6; the pair traces are kept, unless the quad leaves under PAIR_RELEASE_BELOW_BYTES free and no
-        audit needs them), and the quad joins the round's batched selection."""
+        A fresh build needs quad_draft.QUAD_CAPTURE_BYTES_EST plus the packed reserve of free DRAM (capture_headroom:
+        in the largest block, or under the S2 flag the admission's split). A failure falls the round back to the
+        pairs (FALLBACK_LINE); GIVE_UP_FAILURES in a row disable it for the process. On success each device wears a
+        view of the quad, the first success releases every single-user capture still held (R6; the pair traces are
+        kept, unless the quad leaves under PAIR_RELEASE_BELOW_BYTES free - capture_headroom again - and no audit
+        needs them), and the quad joins the round's batched selection."""
         import quad_draft
         from serving_worker_hook import phase
 
@@ -808,10 +886,14 @@ class PackedProposalCoordinator:
         fresh = trace is None or not trace.buckets
         if fresh:
             # A fresh capture - a new quad, or the same four devices' quad whose last build failed (its _bucket
-            # released what that attempt built) - needs the headroom; replaying a built quad allocates nothing.
-            headroom = dram_headroom(devices[0])
-            if headroom is not None and headroom < quad_draft.QUAD_CAPTURE_BYTES_EST + dram_reserve_bytes():
-                audit_log(quad_draft.FALLBACK_LINE, round=round_number, reason='dram_reserve:headroom=%d' % headroom)
+            # released what that attempt built) - needs the headroom; replaying a built quad allocates nothing. Under
+            # the S2 flag the headroom is the admission's split (capture_headroom, gate v79).
+            short, reading = capture_headroom(devices[0], quad_draft.QUAD_CAPTURE_BYTES_EST)
+            if short:
+                reason = 'dram_reserve:headroom=%d' % reading['largest_free']
+                if 'free' in reading:
+                    reason += ':free=%d:short=%s' % (reading['free'], '+'.join(short))
+                audit_log(quad_draft.FALLBACK_LINE, round=round_number, reason=reason)
                 return None
         if trace is None:
             if self.quad is not None:
@@ -855,14 +937,20 @@ class PackedProposalCoordinator:
                 self.quad = (self.quad[0], trace, True)
             audited = quad_draft.audit_selected(self.quad_rounds)
             if trace.last_built and not audited:
-                headroom = dram_headroom(devices[0])
-                if headroom is not None and headroom < quad_draft.PAIR_RELEASE_BELOW_BYTES:
+                # Under the S2 flag the release reads the admission's split too (capture_headroom, gate v79): the
+                # pairs go when the free less the stranded bytes is below PAIR_RELEASE_BELOW_BYTES, or the largest
+                # block below the reserve plus the largest buffer.
+                short, reading = capture_headroom(devices[0], quad_draft.PAIR_RELEASE_BELOW_BYTES, reserve=False)
+                if short:
                     released = [list(group) for group in quad_draft.PAIRS if group in self.pairs]
                     for group in quad_draft.PAIRS:
                         if group in self.pairs:
                             self.pairs.pop(group)[2].close()
-                    if released:
-                        audit_log(quad_draft.RELEASE_LINE, pairs=released, headroom=headroom)
+                    if released and 'free' in reading:
+                        audit_log(quad_draft.RELEASE_SPLIT_LINE, pairs=released, headroom=reading['largest_free'],
+                                  free=reading['free'], short='+'.join(short))
+                    elif released:
+                        audit_log(quad_draft.RELEASE_LINE, pairs=released, headroom=reading['largest_free'])
             if audited:
                 # The quad's outputs as its replay left them, fenced and read before the pair replays
                 # (snapshot_audit): a pair replay that writes into them is then named, never compared.

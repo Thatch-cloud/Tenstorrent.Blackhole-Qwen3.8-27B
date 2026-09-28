@@ -15,6 +15,7 @@ refresh's copy are checked by value, not only by call."""
 
 import hashlib
 from itertools import count
+import heapq
 import os
 from pathlib import Path
 import re
@@ -268,7 +269,8 @@ class FlagOffIsTodayTests(unittest.TestCase):
                     coordinator.prepare(bridges[:3], **prepare)
                     bridges[3].request.session.finished = True
                     coordinator.prepare(bridges, **prepare)
-            return log, [re.sub(r'propose_ms=\S+', '', line) for line in lines]
+            # the whole timing list: propose_ms=['0.1', '0.0'] has a space, so \S+ left all but its first element
+            return log, [re.sub(r'propose_ms=\[[^\]]*\]', '', line) for line in lines]
 
         before = run(pinned)
         self.assertEqual(run(coordinator_module), before)
@@ -553,6 +555,236 @@ class HookPassesThePolicyTests(unittest.TestCase):
         flag = dict(QWEN_FAST_PAIRS_PACKED_ONLY='1')
         self.assertEqual(self.run_hook(flag), [(4, (), dict(packed_round=False))])
         self.assertEqual(self.run_hook(flag, proposal_rows=16), [(4, (), dict(packed_round=True))])
+
+
+class HoleOps(RecordingOps):
+    """RecordingOps over an allocator that reuses freed addresses, lowest first, plus request traces that bake the
+    addresses of the intermediates they free after capture: a replay writes each chip's own garbage over whatever
+    live tensor now sits at one - serving_buffer_pool's WHY, the M0 class, on a CPU."""
+
+    def __init__(self):
+        super().__init__()
+        self.fresh, self.holes, self.live = count(0x100000, 0x1000), [], {}
+
+    def from_torch(self, value, device=None, dtype=None, layout=None, memory_config=None, mesh_mapper=None):
+        if device is None:
+            return super().from_torch(value, device, dtype, layout, memory_config, mesh_mapper)
+        address = heapq.heappop(self.holes) if self.holes else next(self.fresh)
+        tensor = FakeTensor(value, dtype, layout, True, iter((address, address)))
+        self.live[address] = tensor
+        self.event('from_torch', value, True, dtype, layout, memory_config, mesh_mapper, tensor)
+        return tensor
+
+    def deallocate(self, tensor):
+        super().deallocate(tensor)
+        address = tensor.shards[0].address
+        if self.live.get(address) is tensor:
+            del self.live[address]
+            heapq.heappush(self.holes, address)
+
+    def full_like(self, tensor, value, *, optional_tensor):
+        optional_tensor.write(torch.full_like(optional_tensor.value, value))
+
+    def capture_request_trace(self, intermediates=4):
+        """A request engine's verify/commit capture: its intermediates allocated, baked, then freed."""
+        made = [self.from_torch(torch.zeros(1, 1, 32, 64, dtype=torch.bfloat16), device='mesh') for _ in range(intermediates)]
+        baked = [tensor.shards[0].address for tensor in made]
+        for tensor in made:
+            self.deallocate(tensor)
+        return baked
+
+    def replay_request_trace(self, baked):
+        """A sequential round's replay: the intermediates written at their baked addresses, different on each chip."""
+        for address in baked:
+            tensor = self.live.get(address)
+            if tensor is not None and tensor.chips is not None:
+                tensor.chips = [torch.full_like(chip, float(chip_index + 1)) for chip_index, chip in enumerate(tensor.chips)]
+
+
+class V73SequenceTests(unittest.TestCase):
+    """Run 36358821640 (v73), on CPU. Pair [2, 3] is re-formed after a detach: slot 3's request finishes, W6c
+    releases the pair's trace, a new request takes the slot and captures its engine's traces, and the pair is built
+    again over it. Then v73's rounds 594 and 595: a sequential round - the per-request traces of slots 1-3 replay,
+    and the sequential publish swaps each drafter's K/V banks, so the pair's next round normalises the live banks
+    ('live banks pair=[2, 3] normalised=20' after one swap, nothing after two) - and the pair's packed round, whose
+    audit reads the mask before the refresh's copy and again after it.
+
+    With the pool's pre-trace masks (serving_buffer_pool draft_masks=, at the shapes serving_runtime asks the
+    coordinator for under S2) the mask survives every replay. Uploaded by the pair as before, it sits in a hole a
+    live request trace baked, and the first read finds the whole mask clobbered on both chips, as v73 did."""
+
+    # v235's image flags on this path (docker/qwen-c2-v235-environment.json) and the gate's audit.
+    FLAGS = dict(QWEN_FAST_PACKED_PROPOSAL='1', QWEN_FAST_PAIR_ROW_EXACT='1', QWEN_FAST_FUSED_COMMIT='1',
+                 QWEN_FAST_FUSED_COMMIT_INPLACE='1', QWEN_FAST_FUSED_COMMIT_LIVE_BANKS='1',
+                 QWEN_FAST_PAIR_MASK_REFRESH='1', QWEN_FAST_PAIR_MASK_AUDIT='1')
+
+    def setUp(self):
+        import fused_commit
+        import pair_row_exact
+        import serving_buffer_pool
+
+        environment = clean_environment()
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.update(self.FLAGS)
+        for target, name, value in ((serving_buffer_pool, 'HISTORY_SHAPE', (1, 1, 32, 64)),
+                                    (serving_buffer_pool, 'KV_SHAPE', (1, 4, 32, 128)),
+                                    (fused_commit, '_LIVE_NOTED', []), (pair_row_exact, '_NOTED', []),
+                                    (dflash_proposal_trace, '_PAIR_MASK_REFRESH_NOTED', [])):
+            patcher = patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def device(ops, mesh, slot, position):
+        """A request's drafter on its pool slot, its live banks on the slot's active side."""
+        kv_history = SimpleNamespace(active=[dict(layer['active']) for layer in slot.kv], pending=None, owned=[],
+                                     borrowed=[value for layer in slot.kv for side in layer.values()
+                                               for value in side.values()])
+        return SimpleNamespace(operations=ops, mesh=mesh, block_rows=16, native_proposal_attention=True,
+                               kv_history=kv_history, position=position, history_rows=2048, history=None,
+                               spare_history=None, closed=False, pending=None, progress=None,
+                               validated_native_proposal_masks=set(), pool_slot=slot,
+                               temporaries=lambda protected: ([], lambda value: value),
+                               execute_proposal=Mock(return_value=SimpleNamespace(projected='projected', chunks=())))
+
+    @staticmethod
+    def swap_banks(device):
+        """The sequential publish's bank swap (draft_kv_history): the live banks move to the other pool side."""
+        slot = device.pool_slot
+        on_active = device.kv_history.active[0]['k'] is slot.kv[0]['active']['k']
+        device.kv_history.active = [dict(layer['spare' if on_active else 'active']) for layer in slot.kv]
+
+    def packed_round(self, trace, round_number, seeds):
+        trace.round_number = round_number
+        with patch('dflash_packed_proposal.select_device_outputs', return_value=((1,), (2,))):
+            self.assertTrue(trace.prepare_device(*seeds))
+            trace.finish('a', 1)
+            trace.finish('b', 1)
+
+    def run_v73(self, *, pooled):
+        """The sequence; returns (ops, pool, the re-formed pair's trace, the log lines, the addresses the live
+        request traces baked at the sequential rounds)."""
+        from serving_buffer_pool import ServingBufferPool
+
+        ops, mesh = HoleOps(), 'mesh'
+        # The attach: the pool, before any trace - with the packed drafts' masks when pooled.
+        draft_masks = coordinator_module.pooled_draft_mask_shapes(4, 16) if pooled else None
+        pool = ServingBufferPool(ops, mesh, users=4, draft_masks=draft_masks)
+        lines, loguru = logged(dflash_proposal_trace)
+        coordinator = coordinator_module.PackedProposalCoordinator()
+        with loguru:
+            slots = [pool.acquire(owner='r%d' % index) for index in range(4)]
+            # Four engines capture their per-request traces: the holes they leave are baked.
+            baked = {index: ops.capture_request_trace() for index in range(4)}
+            devices = {index: self.device(ops, mesh, slots[index], 130000 + index) for index in range(4)}
+            # Pair [2, 3] forms and serves packed rounds.
+            first = coordinator._trace_for((2, 3), devices[2], devices[3])
+            for round_number in (10, 11):
+                self.packed_round(first, round_number, (5, 6))
+            # Slot 3's request finishes: its device closes, W6c releases the pair's trace at detach, and the slot
+            # and the engine (whose traces never replay again) go back.
+            devices[3].closed = True
+            self.assertEqual(coordinator.release_closed(), dict(quad=0, pairs=[[2, 3]]))
+            self.assertTrue(first.closed)
+            del baked[3]
+            pool.release(slots[3])
+            # A new request takes slot 3 and builds its engine: new traces, new baked holes.
+            slots[3] = pool.acquire(owner='r4')
+            baked[3] = ops.capture_request_trace()
+            devices[3] = self.device(ops, mesh, slots[3], 127000)
+            # The pair re-forms over it.
+            trace = coordinator._trace_for((2, 3), devices[2], devices[3])
+            self.assertIsNot(trace, first)
+            for round_number in (580, 581):
+                self.packed_round(trace, round_number, (7, 8))
+            # v73's rounds 594 and 595: a sequential round, then the pair's packed round.
+            for round_number in (594, 595):
+                for index in (3, 2, 1):
+                    ops.replay_request_trace(baked[index])
+                for index in (1, 2, 3):
+                    self.swap_banks(devices[index])
+                self.packed_round(trace, round_number, (9, 10))
+        live = {address for index in (1, 2, 3) for address in baked[index]}
+        return ops, pool, trace, lines, live
+
+    @staticmethod
+    def reads(lines, pattern, rounds=(594, 595)):
+        return [match.groups() for match in map(pattern.search, lines)
+                if match is not None and match.group(1) in {str(value) for value in rounds}]
+
+    def test_uploaded_by_the_pair_the_mask_sits_in_a_replayed_hole_and_reads_clobbered(self):
+        # Today's path (a pool without masks), v73 reproduced: the whole mask on both chips, healed only by the
+        # refresh's copy.
+        ops, pool, trace, lines, live = self.run_v73(pooled=False)
+        bucket = trace.buckets[(2048, 2048)]
+        self.assertFalse(hasattr(bucket, 'lent_mask'))
+        self.assertIn(bucket.mask.shards[0].address, live, 'the mask was uploaded into a live trace\'s hole')
+        before = self.reads(lines, AUDIT_LINE)
+        self.assertEqual([(r, a, b, chip, intact) for r, a, b, intact, n, chip in before],
+                         [('594', '2', '3', '0', '0'), ('594', '2', '3', '1', '0'),
+                          ('595', '2', '3', '0', '0'), ('595', '2', '3', '1', '0')])
+        self.assertEqual({int(n) for *_, n, chip in before}, {bucket.host_mask.numel()}, 'every element')
+        self.assertEqual([line for line in lines if 'live banks pair=[2, 3] normalised' in line],
+                         ['[PACKED-PROPOSE] live banks pair=[2, 3] normalised=20'])
+        self.assertFalse([line for line in lines if line.startswith('[PINDIAG] draft mask pooled')])
+
+    def test_with_the_pools_pre_trace_mask_the_pair_mask_survives_the_sequential_rounds(self):
+        ops, pool, trace, lines, live = self.run_v73(pooled=True)
+        bucket = trace.buckets[(2048, 2048)]
+        held = pool.draft_masks[(2, 3)]
+        self.assertIs(bucket.mask, held, 'the re-formed pair borrows the pool mask again')
+        self.assertEqual(bucket.lent_mask, (held,))
+        self.assertNotIn(held.shards[0].address, live)
+        self.assertIs(ops.live.get(held.shards[0].address), held, 'never freed by the detach\'s close')
+        before = self.reads(lines, AUDIT_LINE)
+        self.assertEqual([(r, a, b, chip, intact, n) for r, a, b, intact, n, chip in before],
+                         [('594', '2', '3', '0', '1', '0'), ('594', '2', '3', '1', '1', '0'),
+                          ('595', '2', '3', '0', '1', '0'), ('595', '2', '3', '1', '1', '0')])
+        # every (pre-refresh) audit read of both pair traces found it intact: nothing to heal
+        every = [match.group(4) for match in map(AUDIT_LINE.search, lines) if match is not None]
+        self.assertEqual(len(every), 2 * (3 + 5), 'two chips x (3 first-pair + 5 re-formed) updates')
+        self.assertEqual(set(every), {'1'})
+        self.assertEqual([line for line in lines if line.startswith('[PINDIAG] draft mask pooled')],
+                         ['[PINDIAG] draft mask pooled slots=[2,3] shape=1x1x32x2080'] * 2)
+        self.assertEqual([line for line in lines if 'live banks pair=[2, 3] normalised' in line],
+                         ['[PACKED-PROPOSE] live banks pair=[2, 3] normalised=20'])
+        for chip in bucket.mask.chips:
+            self.assertTrue(torch.equal(chip.view(torch.int16), bucket.host_mask.view(torch.int16)))
+        trace.close()
+        self.assertIs(ops.live.get(held.shards[0].address), held, 'nor by the re-formed pair\'s close')
+
+    def test_the_pool_masks_are_the_ones_serving_runtime_asks_for(self):
+        self.assertEqual(coordinator_module.pooled_draft_mask_shapes(4, 16),
+                         {(0, 1): (1, 1, 32, 2080), (2, 3): (1, 1, 32, 2080)})
+        self.assertEqual(coordinator_module.pooled_draft_mask_shapes(2, 16), {(0, 1): (1, 1, 32, 2080)})
+        with patch.dict(os.environ, QWEN_FAST_PAIR_ROW_EXACT='0'):
+            self.assertEqual(coordinator_module.pooled_draft_mask_shapes(4, 16),
+                             {(0, 1): (1, 1, 32, 4160), (2, 3): (1, 1, 32, 4160)}, 'the unfolded pair mask')
+        with patch.dict(os.environ, QWEN_FAST_QUAD_DRAFT='1'):
+            shapes = coordinator_module.pooled_draft_mask_shapes(4, 16)
+            self.assertEqual(shapes[(0, 1, 2, 3)], (1, 1, 32, 2080))
+            self.assertNotIn((0, 1, 2, 3), coordinator_module.pooled_draft_mask_shapes(3, 16))
+        with patch.dict(os.environ, QWEN_FAST_PACKED_PROPOSAL='0'):
+            self.assertEqual(coordinator_module.pooled_draft_mask_shapes(4, 16), {}, 'no pair forms: nothing pooled')
+
+    def test_a_pool_mask_of_another_shape_is_refused_and_the_pair_uploads_its_own(self):
+        from serving_buffer_pool import ServingBufferPool
+
+        ops = HoleOps()
+        pool = ServingBufferPool(ops, 'mesh', users=4, draft_masks={(2, 3): (1, 1, 32, 4160)})
+        lines, loguru = logged(dflash_proposal_trace)
+        with loguru:
+            slots = [pool.acquire(owner='r%d' % index) for index in range(4)]
+            trace = dflash_proposal_trace.PreparedPackedDFlashProposal(self.device(ops, 'mesh', slots[2], 130000),
+                                                                       self.device(ops, 'mesh', slots[3], 130001))
+            self.packed_round(trace, 1, (1, 2))
+        bucket = trace.buckets[(2048, 2048)]
+        self.assertIsNot(bucket.mask, pool.draft_masks[(2, 3)])
+        self.assertIn(bucket.mask, trace.owned, 'uploaded and owned, as before')
+        self.assertEqual([line for line in lines if line.startswith('[PINDIAG] draft mask pooled')],
+                         ['[PINDIAG] draft mask pooled refused slots=[2,3] shape=1x1x32x2080: the pool holds '
+                          '[([2, 3], [1, 1, 32, 4160])]'])
 
 
 class ShippingTests(unittest.TestCase):

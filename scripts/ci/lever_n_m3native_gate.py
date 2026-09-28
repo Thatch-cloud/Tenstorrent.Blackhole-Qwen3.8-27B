@@ -2592,6 +2592,11 @@ DRAM_LIFTED_MARKER = '[PINDIAG] dram hold lifted '
 DRAM_UNAVAILABLE_MARKER = '[PINDIAG] dram hold unavailable '
 DRAM_DEFERRED_MARKER = '[PINDIAG] dram admission deferred '
 DRAM_CARRIED_MARKER = '[PINDIAG] dram admission carried '
+# serving_prefill_admission.DRAM_FIT_LINE (the split, gate v79's fix, run 36368363993): once per request admitted
+# without a hold, the decodes and the readings it fit on ('unread' where the predicate names none). Under churn (M11)
+# the heap no longer drains between cycles, so these readings are what show a fragmentation ratchet.
+DRAM_FIT_LINE = re.compile(r'\[PINDIAG\] dram admission fit prompt=(\S+) largest_free=(\S+) need=(\S+) '
+                           r'request=(\S+) decodes=([0-9]+) free=(\S+) trace_largest_free=(\S+)')
 QUARANTINED_MARKER = '[PINDIAG] request quarantined:'            # D2: a RequestRefused (W6b's backstop included)
 # W6c, dflash_packed_proposal_coordinator.RELEASED_LINE: 'quad=0|1 pairs=[[a, b], ...]', logged at every detach
 # once a coordinator exists (serving_worker_hook.release_dead_proposals), from serving_lifecycle before the step
@@ -2623,8 +2628,8 @@ LEDGER_BEFORE_UNREAD = re.compile(r'\[MEMLEDGER\] phase=\S+ point=before [^\n]*?
 LEDGER_OP_POINT = re.compile(r'\[MEMLEDGER\] (before|after) op=(\S+)(?: point=(\S+))? chip([0-9]+) ([^\n]*)')
 LEDGER_OP_UNREAD = re.compile(r'\[MEMLEDGER\] (before|after) op=(\S+)(?: point=(\S+))? '
                               r'(dram unavailable[^\n]*|error=[^\n]*)')
-LEDGER_SIZE = re.compile(r'(?<![a-z_])(largest_free|free|estimate|margin|floor|cost|trace_used|trace_largest_free)='
-                         r'(-?[0-9.]+)(MB|GB)')
+LEDGER_SIZE = re.compile(r'(?<![a-z_])(largest_free|free|estimate|margin|floor|contiguous|cost|trace_used|'
+                         r'trace_largest_free)=(-?[0-9.]+)(MB|GB)')
 # B6, publication_warm (called by the extent block at attach, after its last capture): the drafter's eager
 # publication published once at every shape serving can ask of it, so no refused fused commit or sequential step
 # compiles after attach. One warmed line - '<n> shapes in <ms> ms packed=.. sequential=.. merge_release=..
@@ -2640,6 +2645,22 @@ S2_MIN_LIVE_START = 128   # extent_attention_replay.MIN_LIVE_START: no packed ro
 # M8 and M11 calibrate them): the transient of a prompt of at least PREFILL_TRANSIENT_FROM tokens, 0 below. W6d's
 # points carry their own estimate (the engine build's peak, the capture's estimate).
 PREFILL_TRANSIENT_GB, PREFILL_TRANSIENT_FROM = 0.30, 2048
+# serving_prefill_admission.PREFILL_RESIDUE_BYTES: the least a prefill point's contiguous term keeps for the prefill
+# (a short prompt's residue), as the admission asks it.
+PREFILL_RESIDUE_GB = 0.10
+# The S2 admission's split (serving_prefill_admission.STRANDED_BYTES and LARGEST_BUFFER_BYTES; gate v79, GitHub run
+# 36368363993, whose replacement engines landed wholly in the holes departed users left): a before point is judged on
+# its free less STRANDED_GB less the operation's estimate (floor_gb) and on its largest free block less
+# LARGEST_BUFFER_GB (contiguous_floor_gb), both recomputed here from the free, largest_free and estimate every point
+# logs - so a log from before the split (whose margin= was the largest block less the estimate) reads the same way.
+# A prefill point's contiguous term also takes its prefill transient off the block, as the admission asks it
+# (serving_prefill_admission.admission_contiguous_need).
+STRANDED_GB, LARGEST_BUFFER_GB = 0.300, 0.128
+# memory_ledger.REQUEST_ITEMS: the ledger items allocated at request time, the only ones whose largest= (the largest
+# single buffer the walk newly found) bounds LARGEST_BUFFER_GB from below. A startup item's largest= is no bound
+# (gate v79's P0 model.embedding is one 1.271 GB buffer per chip).
+REQUEST_ITEMS = ('engine_request', 'model_after_prefill', 'quad_intermediates', 'quad_placeholders')
+LEDGER_ITEM = re.compile(r'\[MEMLEDGER\] phase=(\S+)(?: point=([^\n]*?))? item=(\S+) [^\n]*? largest=([0-9.]+)MB ')
 EXTENT_KEYS = 256
 
 
@@ -2740,18 +2761,26 @@ def refused_rounds_report(log_text):
 
 def dram_holds(log_text):
     """W6b's hold lines, each with its decodes (a seat was free when fewer than the seats decode), and the
-    released, lifted, unavailable, deferred and carried lines (the last two are no hold)."""
+    released, lifted, unavailable, deferred and carried lines (the last two are no hold); and the split's fit lines,
+    each admission's decodes and readings in GB (None where unread)."""
     lines = log_text.splitlines()
     decodes = [int(match.group(5)) for match in DRAM_HOLD_LINE.finditer(log_text)]
 
     def picked(marker):
         return [line.strip()[:240] for line in lines if marker in line]
 
+    def megabytes(text):
+        return float(text[:-2]) / 1000.0 if text.endswith('MB') else None
+
+    fits = [dict(decodes=int(match.group(5)), largest_free_gb=megabytes(match.group(2)),
+                 free_gb=megabytes(match.group(6)), trace_largest_free_gb=megabytes(match.group(7)))
+            for match in DRAM_FIT_LINE.finditer(log_text)]
     held, lifted, unavailable = picked(DRAM_HOLD_MARKER), picked(DRAM_LIFTED_MARKER), picked(DRAM_UNAVAILABLE_MARKER)
     return dict(holds=len(decodes), hold_decodes=decodes[:64], lines=held[:4],
                 released=len(picked(DRAM_RELEASED_MARKER)), lifted=len(lifted), lifted_lines=lifted[:2],
                 unavailable=len(unavailable), unavailable_lines=unavailable[:2],
-                deferred=len(picked(DRAM_DEFERRED_MARKER)), carried=len(picked(DRAM_CARRIED_MARKER)))
+                deferred=len(picked(DRAM_DEFERRED_MARKER)), carried=len(picked(DRAM_CARRIED_MARKER)),
+                fits=len(fits), fit_readings=fits[:64])
 
 
 def pair_count(text):
@@ -2842,24 +2871,32 @@ def ledger_sizes(text):
 def before_points(log_text):
     """Every 'before' ledger point - the prefill's phase point ('before prompt=', its estimate the prefill
     transient) and W6d's ahead of each engine build, pair and quad capture and single-user rebuild (its own
-    estimate and margin) - per chip: its largest free block, the operation's estimate and the margin = largest
-    free - estimate (W6d's own, a negative one included). floor_gb is the smallest margin (s2-design 3.3: G5
-    judges it); a point that read no DRAM ('dram unavailable', 'error=') is 'unread', never a pass."""
+    estimate) - per chip, judged on the S2 admission's split: its margin = free - STRANDED_GB - the operation's
+    estimate (a negative one included), and its contiguous term = largest free - LARGEST_BUFFER_GB, less the
+    prefill transient at a prefill point (the admission asks a long prompt's transient of the block too). floor_gb
+    is the smallest margin and contiguous_floor_gb the smallest contiguous term (s2-design 3.3: G5 judges both); a
+    point that read no DRAM ('dram unavailable', 'error=') is 'unread', never a pass. logged_floor_gb is the
+    smallest floor the ledger itself logged (the largest block less the estimate before the split)."""
     points, unread = [], []
+
+    def point(op, detail, chip, largest, free, estimate, logged, transient=0.0):
+        margin = None if free is None or estimate is None else free - STRANDED_GB - estimate
+        contiguous = None if largest is None else largest - LARGEST_BUFFER_GB - transient
+        return dict(op=op, detail=detail[:80], chip=chip,
+                    largest_free_gb=None if largest is None else round(largest, 4),
+                    free_gb=None if free is None else round(free, 4),
+                    estimate_gb=None if estimate is None else round(estimate, 4),
+                    margin_gb=None if margin is None else round(margin, 4),
+                    contiguous_gb=None if contiguous is None else round(contiguous, 4), logged_floor_gb=logged)
+
     for message in memledger_messages(log_text):
         match = LEDGER_OP_POINT.match(message)
         if match:
             if match.group(1) != 'before':
                 continue
             sizes = ledger_sizes(match.group(5))
-            largest, estimate, margin = sizes.get('largest_free'), sizes.get('estimate'), sizes.get('margin')
-            if margin is None and largest is not None and estimate is not None:
-                margin = largest - estimate
-            points.append(dict(op=match.group(2), detail=(match.group(3) or '')[:80], chip=int(match.group(4)),
-                               largest_free_gb=None if largest is None else round(largest, 4),
-                               estimate_gb=None if estimate is None else round(estimate, 4),
-                               margin_gb=None if margin is None else round(margin, 4),
-                               logged_floor_gb=sizes.get('floor')))
+            points.append(point(match.group(2), match.group(3) or '', int(match.group(4)), sizes.get('largest_free'),
+                                sizes.get('free'), sizes.get('estimate'), sizes.get('floor')))
             continue
         match = LEDGER_OP_UNREAD.match(message)
         if match:
@@ -2871,24 +2908,26 @@ def before_points(log_text):
             continue
         match = LEDGER_BEFORE.match(message)
         if match:
-            detail, largest = match.group(2).strip(), float(match.group(6)) / 1000.0
+            detail = match.group(2).strip()
             prompt = re.search(r'prompt=([0-9]+)', detail)
-            estimate = (PREFILL_TRANSIENT_GB if prompt and int(prompt.group(1)) >= PREFILL_TRANSIENT_FROM else 0.0) \
-                if match.group(1) == 'prefill' else None
-            points.append(dict(op=match.group(1), detail=detail[:80], chip=int(match.group(3)),
-                               largest_free_gb=round(largest, 4), estimate_gb=estimate,
-                               margin_gb=None if estimate is None else round(largest - estimate, 4),
-                               logged_floor_gb=None))
-    judged = [point for point in points if point['margin_gb'] is not None]
-    floor = min(judged, key=lambda point: point['margin_gb']) if judged else None
+            long_prompt = prompt is not None and int(prompt.group(1)) >= PREFILL_TRANSIENT_FROM
+            estimate = (PREFILL_TRANSIENT_GB if long_prompt else 0.0) if match.group(1) == 'prefill' else None
+            residue = max(estimate, PREFILL_RESIDUE_GB) if match.group(1) == 'prefill' else 0.0
+            points.append(point(match.group(1), detail, int(match.group(3)), float(match.group(6)) / 1000.0,
+                                float(match.group(5)), estimate, None, transient=residue))
+    judged = [item for item in points if item['margin_gb'] is not None]
+    floor = min(judged, key=lambda item: item['margin_gb']) if judged else None
+    blocks = [item for item in points if item['contiguous_gb'] is not None]
+    contiguous = min(blocks, key=lambda item: item['contiguous_gb']) if blocks else None
     by_op = {}
-    for point in points:
-        by_op[point['op']] = by_op.get(point['op'], 0) + 1
-    logged = [point['logged_floor_gb'] for point in points if point['logged_floor_gb'] is not None]
+    for item in points:
+        by_op[item['op']] = by_op.get(item['op'], 0) + 1
+    logged = [item['logged_floor_gb'] for item in points if item['logged_floor_gb'] is not None]
     return dict(points=len(points), judged=len(judged), by_op=by_op, ops=sorted(by_op),
-                unestimated=sorted(set(point['op'] for point in points if point['margin_gb'] is None)),
+                unestimated=sorted(set(item['op'] for item in points if item['margin_gb'] is None)),
                 unread=len(unread), unread_lines=unread[:4], floor_gb=floor['margin_gb'] if floor else None,
-                floor_point=floor, logged_floor_gb=min(logged) if logged else None)
+                floor_point=floor, contiguous_floor_gb=contiguous['contiguous_gb'] if contiguous else None,
+                contiguous_point=contiguous, logged_floor_gb=min(logged) if logged else None)
 
 
 def trace_region(log_text):
@@ -2912,6 +2951,24 @@ def trace_region(log_text):
             lines.append(message.strip()[:240])
     return dict(readings=len(used), unavailable=unavailable, max_used_gb=round(max(used), 4) if used else None,
                 min_largest_free_gb=round(min(largest), 4) if largest else None, lines=lines)
+
+
+def request_buffers(log_text):
+    """The largest single buffer of each REQUEST_ITEMS item line the ledger logged (largest=; startup items are left
+    out, being no bound), the largest of them, and those above LARGEST_BUFFER_GB: a lower bound on the S2 split's
+    largest buffer, never a measure of it (memory_ledger's docstring: the walk sees no transient peak). items is 0
+    when no request item line carries largest= (a ledger from before it, or the ledger off)."""
+    found = []
+    for message in memledger_messages(log_text):
+        match = LEDGER_ITEM.match(message)
+        if match is None or match.group(3) not in REQUEST_ITEMS:
+            continue
+        found.append(dict(phase=match.group(1), point=(match.group(2) or '')[:40], item=match.group(3),
+                          largest_gb=round(float(match.group(4)) / 1000.0, 4)))
+    largest = max(found, key=lambda entry: entry['largest_gb']) if found else None
+    over = [entry for entry in found if entry['largest_gb'] > LARGEST_BUFFER_GB]
+    return dict(items=len(found), limit_gb=LARGEST_BUFFER_GB, largest_gb=largest['largest_gb'] if largest else None,
+                largest_entry=largest, over=len(over), over_entries=over[:8])
 
 
 def user_paths(log_text, streams, prompt_lengths):
@@ -2981,7 +3038,7 @@ def s2_report(environ, log_text, streams=None, prompt_lengths=None):
         quads_built=len(QUAD_BUILT_LINE.findall(log_text)),
         ladders=[ladder_of(text) for text in PROPOSAL_LADDER.findall(log_text)][:32],
         buckets_built=[ladder_of(text) for _, text in PROPOSAL_BUCKETS_BUILT_LINE.findall(log_text)][:32],
-        before=before_points(log_text),
+        before=before_points(log_text), request_buffers=request_buffers(log_text),
         trace_region=region, trace_region_lines=region['lines'],
         publication_warm=publication_warm_report(log_text),
         other_audits=other)

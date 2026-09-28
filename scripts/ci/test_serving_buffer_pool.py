@@ -944,6 +944,65 @@ class PackedExtentStorageTests(unittest.TestCase):
             PackedExtentStorage(1, 16, [[1, 2]], [[3]])
 
 
+class DraftMaskTests(unittest.TestCase):
+    """S2 M0 (run 36358821640): the packed drafts' masks, one per slot group, allocated with the pool before any
+    trace and lent for its life to whichever trace of the group asks (dflash_proposal_trace.borrow_pooled_mask)."""
+
+    PAIR, QUAD = (1, 1, 32, 2080), (1, 1, 32, 2080)
+    MASKS = {(0, 1): PAIR, (2, 3): PAIR, (0, 1, 2, 3): QUAD}
+
+    def test_the_masks_come_last_zeroed_and_independent_and_are_lent_by_group_and_shape(self):
+        operations = FakeOperations()
+        pool = ServingBufferPool(operations, 'mesh', users=4, draft_masks=self.MASKS)
+        today = ServingBufferPool(FakeOperations(), 'mesh', users=4)
+        slot_tensors = 4 * SLOT_TENSORS
+        self.assertEqual([value.shape for value in operations.live[:slot_tensors]],
+                         [value.shape for value in today.owned], 'every other pooled buffer where it always was')
+        masks = operations.live[slot_tensors:]
+        self.assertEqual([value.shape for value in masks], [self.PAIR] * 3)
+        self.assertEqual([(value.dtype, value.layout) for value in masks], [('bf16', 'tile')] * 3)
+        self.assertEqual(sorted(pool.draft_masks), [(0, 1), (0, 1, 2, 3), (2, 3)])
+        self.assertEqual(pool.draft_mask_bytes, 3 * 2 * 32 * 2080)
+        self.assertIs(pool.draft_mask((2, 3), self.PAIR), pool.draft_masks[(2, 3)])
+        self.assertIs(pool.draft_mask([0, 1, 2, 3], list(self.QUAD)), pool.draft_masks[(0, 1, 2, 3)])
+        self.assertIsNone(pool.draft_mask((2, 3), (1, 1, 32, 4160)), 'another shape: the draft uploads its own')
+        self.assertIsNone(pool.draft_mask((1, 2), self.PAIR), 'no such group')
+        self.assertEqual(len({value.shards[0].address for value in operations.live}), len(operations.live))
+        # lent without a loan: asked twice (the pair re-formed after a detach) it is the same buffer
+        self.assertIs(pool.draft_mask((2, 3), self.PAIR), pool.draft_mask((2, 3), self.PAIR))
+
+    def test_describe_names_them_only_when_held_and_close_frees_them_with_the_pool(self):
+        operations = FakeOperations()
+        pool = ServingBufferPool(operations, 'mesh', users=4, draft_masks=self.MASKS)
+        report = pool.describe()
+        self.assertEqual(report['draft_mask_bytes'], 3 * 2 * 32 * 2080)
+        self.assertEqual([(entry['group'], entry['shape']) for entry in report['draft_masks']],
+                         [([0, 1], list(self.PAIR)), ([0, 1, 2, 3], list(self.QUAD)), ([2, 3], list(self.PAIR))])
+        self.assertNotIn('draft_masks', ServingBufferPool(FakeOperations(), 'mesh', users=4).describe())
+        pool.close()
+        self.assertEqual(len(operations.deallocated), 4 * SLOT_TENSORS + 3)
+        self.assertEqual(pool.draft_masks, {})
+        self.assertIsNone(pool.draft_mask((0, 1), self.PAIR))
+
+    def test_none_or_empty_is_todays_pool(self):
+        for masks in (None, {}):
+            with self.subTest(masks=masks):
+                operations = FakeOperations()
+                pool = ServingBufferPool(operations, 'mesh', users=4, draft_masks=masks)
+                self.assertEqual(len(operations.live), 4 * SLOT_TENSORS)
+                self.assertEqual((pool.draft_masks, pool.draft_mask_bytes), ({}, 0))
+
+    def test_groups_and_shapes_are_checked_before_anything_is_allocated(self):
+        for masks in ({(0,): self.PAIR}, {(1, 0): self.PAIR}, {(0, 0): self.PAIR}, {(3, 4): self.PAIR},
+                      {(0, 1): (1, 32, 2080)}, {(0, 1): (1, 1, 32, 0)}, {(0, 1): (1, 1, 32, 2080.0)},
+                      {('0', '1'): self.PAIR}, [(0, 1)]):
+            with self.subTest(masks=masks):
+                operations = FakeOperations()
+                with self.assertRaises(ValueError):
+                    ServingBufferPool(operations, 'mesh', users=4, draft_masks=masks)
+                self.assertEqual(operations.live, [])
+
+
 class DramStatisticsTests(unittest.TestCase):
     """The allocator's DRAM figures per chip for the [PINDIAG] dram lines, read through a
     pooled buffer: a diagnostic that never raises."""

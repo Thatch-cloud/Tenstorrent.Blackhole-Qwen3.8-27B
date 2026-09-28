@@ -220,6 +220,15 @@ class RuntimeAttachmentTests(unittest.TestCase):
                             # keys on, and told so explicitly; flag off, no keyword at all.
                             self.assertIs(options['extent_replay'], True)
                             expected.add('extent_replay')
+                            if env.get('QWEN_FAST_PACKED_PROPOSAL') == '1':
+                                # S2 M0: the packed drafts' masks, pooled before any trace, at the shapes the
+                                # coordinator names for the T16 block; never without the extent flag.
+                                from dflash_packed_proposal_coordinator import pooled_draft_mask_shapes
+
+                                self.assertTrue(options['draft_masks'])
+                                self.assertEqual(options['draft_masks'], pooled_draft_mask_shapes(users, 16))
+                                expected.add('draft_masks')
+                    self.pool_options = options
                     self.assertEqual(set(options), expected)
                     # The device geometry from_prefill asks for, prepared once inside the
                     # admitted runtime and before any request.
@@ -569,6 +578,21 @@ class RuntimeAttachmentTests(unittest.TestCase):
         # block reports extent=True, as PackedVerifierEngine does over such a pool; the attach completes.
         self.exercise(**self.EXTENT, **self.M3)
         self.exercise(**self.EXTENT, replay_group_rows=8, **self.M3)
+
+    def test_the_extent_flag_with_packed_proposals_pools_every_packed_drafts_mask(self):
+        # S2 M0 (run 36358821640): each fixed pair's mask and the quad's, allocated with the pool before any trace;
+        # exercise() asserts the keyword is the coordinator's shapes and nothing else is added.
+        drafts = {'QWEN_FAST_PACKED_PROPOSAL': '1', 'QWEN_FAST_PAIR_ROW_EXACT': '1', 'QWEN_FAST_QUAD_DRAFT': '1'}
+        self.exercise(**self.EXTENT, extra_env=drafts, **self.M3)
+        self.assertEqual(self.pool_options['draft_masks'], {(0, 1): (1, 1, 32, 2080), (2, 3): (1, 1, 32, 2080),
+                                                            (0, 1, 2, 3): (1, 1, 32, 2080)})
+        self.exercise(**self.EXTENT, extra_env=dict(drafts, QWEN_FAST_PAIR_ROW_EXACT='0', QWEN_FAST_QUAD_DRAFT='0'),
+                      **self.M3)
+        self.assertEqual(self.pool_options['draft_masks'], {(0, 1): (1, 1, 32, 4160), (2, 3): (1, 1, 32, 4160)},
+                         'unfolded pairs, no quad')
+        # without the extent flag the pool is today's, packed proposals or not
+        self.exercise(extra_env=drafts, **self.M3)
+        self.assertNotIn('draft_masks', self.pool_options)
 
     def test_the_flag_unset_or_zero_passes_the_pool_no_extent_keyword(self):
         for extra_env in ({}, {'QWEN_FAST_EXTENT_REPLAY': '0'}):

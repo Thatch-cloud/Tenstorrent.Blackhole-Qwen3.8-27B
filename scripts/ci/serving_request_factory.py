@@ -145,21 +145,30 @@ def register_dram_admission(pool, *, log=None):
 
     reserve = dram_reserve_bytes()
     unregister = admission.register_dram_predicate(admission.dram_predicate(pool, reserve))
-    largest, reason = admission.largest_free(pool)
+    reading, reason = admission.dram_reading(pool)
     (_log if log is None else log)(
         DRAM_REGISTERED + 'need = engine {} + build margin {} + prefill {} at >= {} prompt tokens + reserve {} bytes '
-        'per chip; largest_free now {}', admission.ENGINE_BUILD_BYTES, admission.ENGINE_BUILD_MARGIN_BYTES,
-        admission.PREFILL_TRANSIENT_BYTES, admission.PREFILL_TRANSIENT_FROM, reserve,
-        largest if largest is not None else 'unavailable (%s)' % reason)
+        'per chip, of the free less {} stranded; the largest free block >= the reserve + {} (the largest buffer), + '
+        'that prefill at admission; the trace region\'s >= {}; now {}', admission.ENGINE_BUILD_BYTES,
+        admission.ENGINE_BUILD_MARGIN_BYTES, admission.PREFILL_TRANSIENT_BYTES, admission.PREFILL_TRANSIENT_FROM,
+        reserve, admission.STRANDED_BYTES,
+        admission.LARGEST_BUFFER_BYTES, admission.TRACE_CONTIGUOUS_BYTES,
+        'unavailable (%s)' % reason if reading is None else
+        'free {} largest_free {} trace_largest_free {}'.format(reading['free'], reading['largest_free'],
+                                                               reading['trace_largest_free']))
     return unregister
 
 
 def dram_backstop(pool, *, request_id, reserve=None, log=None):
     """S2 W6b's post-prefill backstop: RequestRefused (quarantined under QWEN_FAST_ANY_REQUEST, so the
-    request ends FINISHED_ABORTED and the engine lives) when the smallest largest-free DRAM block over the
-    chips is below the engine build's peak plus the reserve. Returns that reading, or None when the pool
-    cannot be read: then it is a diagnostic, as the coordinator's headroom is (the attach refuses such a pool
-    under the flag, W7)."""
+    request ends FINISHED_ABORTED and the engine lives) when the pool's reading is short of a term of the
+    admission's split (serving_prefill_admission.split_short, gate v79's fix) for the engine build's peak plus
+    the reserve: the smallest chip's free less the stranded bytes, its largest free block against the reserve plus
+    the largest buffer, and its trace region's largest free block. The prefill has run, so its transient is in
+    neither term; the admission asked it of both (admission_contiguous_need), which leaves a long prompt 300 MB of
+    the block for what its prefill takes before this point. Returns the smallest largest free block, or
+    None when the pool cannot be read: then it is a diagnostic, as the coordinator's headroom is (the attach refuses
+    such a pool under the flag, W7)."""
     import serving_prefill_admission as admission
 
     if reserve is None:
@@ -167,15 +176,20 @@ def dram_backstop(pool, *, request_id, reserve=None, log=None):
 
         reserve = dram_reserve_bytes()
     need = admission.backstop_need(reserve)
-    largest, reason = admission.largest_free(pool)
+    reading, reason = admission.dram_reading(pool)
     log = _log if log is None else log
-    if largest is None:
+    if reading is None:
         log('[PINDIAG] dram backstop unavailable for request {}: {} (not refused)', request_id, reason)
         return None
-    if largest < need:
-        log(DRAM_BACKSTOP_REFUSED + '{}: largest_free={} need={} bytes per chip', request_id, largest, need)
-        raise RequestRefused('DRAM backstop: the largest free DRAM block (%d bytes on the smallest chip) is below '
-                             'the engine build peak plus the reserve (%d bytes)' % (largest, need))
+    largest, free, trace = reading['largest_free'], reading['free'], reading['trace_largest_free']
+    short = admission.split_short(free, largest, need, reserve, trace)
+    if short:
+        log(DRAM_BACKSTOP_REFUSED + '{}: largest_free={} free={} trace_largest_free={} need={} short={} bytes per chip',
+            request_id, largest, free, trace, need, '+'.join(short))
+        raise RequestRefused('DRAM backstop: short of %s on the smallest chip (free %d bytes less %d stranded, largest '
+                             'free block %d, trace region largest free block %s) for the engine build peak plus the '
+                             'reserve (%d bytes)' % ('+'.join(short), free, admission.STRANDED_BYTES, largest,
+                                                     trace, need))
     return largest
 
 
