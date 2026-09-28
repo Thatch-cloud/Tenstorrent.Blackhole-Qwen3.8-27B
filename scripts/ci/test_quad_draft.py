@@ -1927,6 +1927,71 @@ class CoordinatorTests(unittest.TestCase):
         trace = FakeQuadTrace.instances[0]
         self.assertEqual([pairs is not None for _, pairs in trace.audits], [True, False])
 
+    def split(self, reading):
+        """QWEN_FAST_EXTENT_REPLAY=1 (the S2 profiles) with the allocator reading `reading` (dict(free=, largest_free=)
+        per call, in order) through capture_headroom's dram_reading."""
+        environment = patch.dict(os.environ, {'QWEN_FAST_EXTENT_REPLAY': '1'})
+        readings = patch('dflash_packed_proposal_coordinator.dram_reading', side_effect=list(reading))
+        return environment, readings
+
+    def test_under_the_s2_flag_a_quad_builds_on_the_split_where_the_old_rule_refused(self):
+        """Gate v79 (run 36368363993): the fourth engine, admitted beside a 1079.7 MB block, leaves 1.51 GB free.
+        If it lands in the holes the block stays; if it takes 683 MB of it, 396.4 MB is left. The old rule's 740.3 MB
+        block refuses that quad; the split builds it on 1.21 GB past the stranded bytes."""
+        mb = 10 ** 6
+        for largest in (1_079_700_000, 397 * mb):
+            with self.subTest(largest_free=largest):
+                del LOG[:]
+                FakeQuadTrace.instances = []
+                coordinator, bridges = self.coordinator(), quad_bridges(self.operations, self.mesh)
+                environment, readings = self.split([dict(free=1_514 * mb, largest_free=largest),
+                                                    dict(free=1_087 * mb, largest_free=largest)])
+                with environment, readings:
+                    _, lines = self.prepare(coordinator, bridges)
+                self.assertEqual(len(FakeQuadTrace.instances), 1, lines)
+                self.assertFalse([line for line in lines if 'fallback' in line])
+        del LOG[:]
+        FakeQuadTrace.instances = []
+        coordinator, bridges = self.coordinator(), quad_bridges(self.operations, self.mesh)
+        with patch('dflash_packed_proposal_coordinator.dram_headroom', return_value=397 * mb):
+            _, lines = self.prepare(coordinator, bridges)
+        self.assertEqual(FakeQuadTrace.instances, [], 'flag off: the contiguous-only rule refuses, as before')
+        self.assertEqual(lines[0], '[QUAD-DRAFT] fallback round=1 reason=dram_reserve:headroom=397000000')
+
+    def test_under_the_s2_flag_a_quad_short_of_free_falls_back_and_says_why(self):
+        mb = 10 ** 6
+        coordinator, bridges = self.coordinator(), quad_bridges(self.operations, self.mesh)
+        environment, _ = self.split([])
+        # The same reading for the quad and then the two pairs the round falls back to (each 654.7 MB: they fit).
+        readings = patch('dflash_packed_proposal_coordinator.dram_reading',
+                         return_value=dict(free=1_000 * mb, largest_free=900 * mb))
+        with environment, readings:
+            _, lines = self.prepare(coordinator, bridges)
+        self.assertEqual(FakeQuadTrace.instances, [])
+        self.assertEqual(len(self.Pair.instances), 2, 'the round falls back to the pairs')
+        self.assertEqual(lines[0], '[QUAD-DRAFT] fallback round=1 reason=dram_reserve:headroom=900000000:'
+                                   'free=1000000000:short=free')
+        self.assertFalse(coordinator.quad_disabled)
+
+    def test_under_the_s2_flag_the_pairs_are_released_when_the_split_is_short(self):
+        """v79's quad builds left 1.087 GB (787 MB past the stranded bytes: kept) and 0.845 GB (545 MB: released)."""
+        mb = 10 ** 6
+        for after, released in ((dict(free=1_087 * mb, largest_free=915_300_000), False),
+                                (dict(free=845 * mb, largest_free=673_200_000), True)):
+            with self.subTest(after=after):
+                del LOG[:]
+                FakeQuadTrace.instances, self.Pair.instances = [], []
+                coordinator, bridges = self.coordinator(), quad_bridges(self.operations, self.mesh)
+                self.prepare(coordinator, bridges[:2])
+                pair = self.Pair.instances[0]
+                environment, readings = self.split([None, after])
+                with environment, readings:
+                    _, lines = self.prepare(coordinator, bridges)
+                self.assertEqual(pair.closed, released)
+                self.assertEqual((0, 1) in coordinator.pairs, not released)
+                expected = ('[QUAD-DRAFT] released pairs=[[0, 1]] headroom=673200000 free=845000000 short=free')
+                self.assertEqual(expected in lines, released, lines)
+
     def test_under_the_release_line_the_pairs_are_released_after_the_build(self):
         coordinator, bridges = self.coordinator(), quad_bridges(self.operations, self.mesh)
         self.prepare(coordinator, bridges[:2])

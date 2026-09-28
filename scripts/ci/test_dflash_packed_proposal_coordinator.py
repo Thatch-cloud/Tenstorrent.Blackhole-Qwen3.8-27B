@@ -727,6 +727,101 @@ class DramReserveTests(unittest.TestCase):
         self.assertEqual(len(FakeTrace.instances[0].prepared), 2, 'round two still replayed the existing trace')
 
 
+class SplitHeadroomTests(unittest.TestCase):
+    """capture_headroom: with QWEN_FAST_EXTENT_REPLAY unset, today's contiguous-only rule call for call; under it the
+    S2 admission's split (serving_prefill_admission.split_short; gate v79, GitHub run 36368363993): a fresh pair
+    needs its estimate plus the reserve of the free less the stranded bytes, and a block for the largest buffer and
+    the reserve."""
+
+    def setUp(self):
+        DramReserveTests.setUp(self)
+
+    def bridges(self, slots):
+        return DramReserveTests.bridges(self, slots)
+
+    def test_flag_off_is_the_largest_block_against_the_need_and_reads_no_free(self):
+        from dflash_packed_proposal_coordinator import capture_headroom, dram_reserve_bytes
+
+        need = 86 * 10 ** 6 + dram_reserve_bytes()
+        with extent_environment(False), \
+                unittest.mock.patch('dflash_packed_proposal_coordinator.dram_reading',
+                                    side_effect=AssertionError('the free is never read with the flag off')):
+            for headroom, short in ((need, ()), (need - 1, ('largest_free',)), (None, ())):
+                with self.subTest(headroom=headroom), \
+                        unittest.mock.patch('dflash_packed_proposal_coordinator.dram_headroom', return_value=headroom):
+                    self.assertEqual(capture_headroom(object(), 86 * 10 ** 6),
+                                     (short, None if headroom is None else dict(largest_free=headroom)))
+            with unittest.mock.patch('dflash_packed_proposal_coordinator.dram_headroom', return_value=None), \
+                    unittest.mock.patch.dict(os.environ, {'QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB': 'bad'}):
+                self.assertEqual(capture_headroom(object(), 1), ((), None),
+                                 'as before: the reserve is read only once there is a headroom to compare')
+
+    def test_under_the_flag_the_split_decides(self):
+        import serving_prefill_admission as admission
+        from dflash_packed_proposal_coordinator import capture_headroom, dram_reserve_bytes
+
+        reserve = dram_reserve_bytes()
+        estimate = 86 * 10 ** 6
+        edge = estimate + reserve + admission.STRANDED_BYTES
+        block = admission.contiguous_need(reserve)
+        cases = ((dict(free=edge, largest_free=block), ()),
+                 (dict(free=edge - 1, largest_free=edge - 1), ('free',)),
+                 (dict(free=10 ** 10, largest_free=block - 1), ('contiguous',)),
+                 (dict(free=10 ** 10, largest_free=400 * 10 ** 6), ()))
+        with extent_environment(True):
+            for reading, short in cases:
+                with self.subTest(reading=reading), \
+                        unittest.mock.patch('dflash_packed_proposal_coordinator.dram_reading', return_value=reading):
+                    self.assertEqual(capture_headroom(object(), estimate), (short, reading))
+            with unittest.mock.patch('dflash_packed_proposal_coordinator.dram_reading', return_value=None):
+                self.assertEqual(capture_headroom(object(), estimate), ((), None), 'unreadable: a diagnostic')
+            # The pair release's threshold is a headroom already: no reserve added to it.
+            with unittest.mock.patch('dflash_packed_proposal_coordinator.dram_reading',
+                                     return_value=dict(free=900 * 10 ** 6, largest_free=900 * 10 ** 6)):
+                self.assertEqual(capture_headroom(object(), 600 * 10 ** 6, reserve=False)[0], ())
+                self.assertEqual(capture_headroom(object(), 600 * 10 ** 6)[0], ('free',))
+
+    def test_the_reading_is_each_terms_smallest_chip(self):
+        from dflash_packed_proposal_coordinator import dram_reading
+
+        report = [dict(chip=0, free=3, largest_free=2), dict(chip=1, free=1, largest_free=5)]
+        with unittest.mock.patch('serving_buffer_pool.dram_statistics', return_value=report):
+            self.assertEqual(dram_reading(SimpleNamespace(history=object(), operations=None)),
+                             dict(free=1, largest_free=2))
+        with unittest.mock.patch('serving_buffer_pool.dram_statistics', return_value=dict(unavailable='x')):
+            self.assertIsNone(dram_reading(SimpleNamespace(history=object(), operations=None)))
+        self.assertIsNone(dram_reading(SimpleNamespace()), 'no history tensor to read the chips through')
+
+    def test_under_the_flag_a_pair_reads_the_split_and_the_flag_off_rule_is_unchanged(self):
+        """A fragmented heap (1.5 GB free beside a 400 MB block) captures: the block holds the largest buffer and the
+        reserve, and 1.2 GB past the stranded bytes holds the pair's 354.7 MB. With the flag off a 300 MB block is
+        refused as before. And the split refuses a heap whose 600 MB free is one block the old rule would have
+        taken: only 300 MB of it is past the stranded bytes."""
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+        fragmented = dict(free=1_500 * 10 ** 6, largest_free=400 * 10 ** 6)
+        with extent_environment(True), \
+                unittest.mock.patch('dflash_packed_proposal_coordinator.dram_reading', return_value=fragmented):
+            PackedProposalCoordinator().prepare(list(self.bridges([('a', 0), ('b', 1)]).values()))
+        self.assertEqual(len(FakeTrace.instances), 1, 'captured')
+        FakeTrace.instances = []
+        with extent_environment(False), \
+                unittest.mock.patch('dflash_packed_proposal_coordinator.dram_headroom', return_value=300 * 10 ** 6):
+            PackedProposalCoordinator().prepare(list(self.bridges([('a', 0), ('b', 1)]).values()))
+        self.assertEqual(FakeTrace.instances, [], 'flag off: the contiguous-only rule, as before')
+        short = dict(free=600 * 10 ** 6, largest_free=600 * 10 ** 6)
+        with extent_environment(True), \
+                unittest.mock.patch('dflash_packed_proposal_coordinator.dram_reading', return_value=short), \
+                unittest.mock.patch.dict(os.environ, {'QWEN_FAST_PACKED_AUDIT': '1'}), \
+                unittest.mock.patch('dflash_packed_proposal_coordinator.audit_log') as audit_log:
+            PackedProposalCoordinator().prepare(list(self.bridges([('a', 0), ('b', 1)]).values()))
+        self.assertEqual(FakeTrace.instances, [], '300 MB past the stranded bytes is short of 354.7 MB')
+        from dflash_packed_proposal_coordinator import PAIR_FALLBACK_LINE
+
+        self.assertEqual([call.kwargs for call in audit_log.call_args_list if call.args[0] == PAIR_FALLBACK_LINE],
+                         [dict(pair=[0, 1], fallback='dram_reserve')])
+
+
 EXTENT = {'QWEN_FAST_EXTENT_REPLAY': '1'}
 
 
@@ -1082,7 +1177,9 @@ class SinglesLineTests(unittest.TestCase):
         from dflash_packed_proposal_coordinator import PackedProposalCoordinator
 
         bridges = self.bridges([('a', 0), ('b', 1)])
-        with unittest.mock.patch('dflash_packed_proposal_coordinator.dram_headroom', return_value=0):
+        # Under the S2 flag the pair's headroom is the admission's split (capture_headroom): read on the free too.
+        with unittest.mock.patch('dflash_packed_proposal_coordinator.dram_reading',
+                                 return_value=dict(free=0, largest_free=0)):
             self.assertEqual(self.singles(list(bridges.values())), [(1, [0, 1], ['dram_reserve', 'dram_reserve'])])
         for fault, reason in (('fail', 'failure'), ('ready', 'declined')):
             coordinator = PackedProposalCoordinator()

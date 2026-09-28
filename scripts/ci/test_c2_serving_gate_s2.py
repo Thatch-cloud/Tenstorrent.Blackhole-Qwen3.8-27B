@@ -46,19 +46,25 @@ W3_AUDIT_FORMAT = ('%s round=%d segments=%d words_ok=%d cur_pos_ok=%d mask_ok=%d
 W3_MISMATCH_FORMAT = '%s round=%d at=%s'                                       # packed_verifier.audit_extent
 W3_AUDIT_MARKER, W3_MISMATCH_MARKER = '[EXTENT-AUDIT]', '[EXTENT-AUDIT] MISMATCH'
 # serving_prefill_admission (W6b): the hold's lines and the wrapper's decision line (once per distinct state).
-W6_HOLD_LINE = '[PINDIAG] dram hold prompt={} largest_free={} need={} request={} decodes={}'
-W6_RELEASED_HOLD_LINE = '[PINDIAG] dram hold released prompt={} largest_free={} need={} request={}'
-W6_LIFTED_LINE = ('[PINDIAG] dram hold lifted prompt={} largest_free={} need={} request={}: no decode is left to '
-                  'free DRAM, so the prompt is admitted and the bridge backstop decides')
+W6_HOLD_LINE = ('[PINDIAG] dram hold prompt={} largest_free={} need={} request={} decodes={} free={} '
+                'trace_largest_free={} short={}')
+W6_RELEASED_HOLD_LINE = ('[PINDIAG] dram hold released prompt={} largest_free={} need={} request={} free={} '
+                         'trace_largest_free={}')
+W6_LIFTED_LINE = ('[PINDIAG] dram hold lifted prompt={} largest_free={} need={} request={} free={} short={}: no '
+                  'decode is left to free DRAM, so the prompt is admitted and the bridge backstop decides')
 W6_UNAVAILABLE_LINE = '[PINDIAG] dram hold unavailable request={}: {} (not held)'
 W6_DEFERRED_LINE = ('[PINDIAG] dram admission deferred one step prompt={} largest_free={} need={} request={} '
-                    'finished={}: the reading still counts their engines, which this step detaches first')
+                    'finished={} free={} short={}: the reading still counts their engines, which this step detaches '
+                    'first')
+W6_FIT_LINE = ('[PINDIAG] dram admission fit prompt={} largest_free={} need={} request={} decodes={} free={} '
+               'trace_largest_free={}')
 W6_CARRIED_LINE = ('[PINDIAG] dram admission carried finished={} past the discarded prefill pass into the '
                    'decode-only step')
 W6_BUCKETS_BUILT = '[PINDIAG] proposal buckets built request='    # serving_request_factory.PROPOSAL_BUCKETS_BUILT
 DECISION_LINE = '[PINDIAG] one fresh prefill per step: partials={} decodes={} gate_held={} allowed={} hidden={}'
 # memory_ledger (W6d): MemoryLedger._before's line, cut at LINE_BUDGET onto '[MEMLEDGER] ...' lines by .log.
-W6_BEFORE_FORMAT = '[MEMLEDGER] before op=%s chip%d largest_free=%s free=%s estimate=%s margin=%s floor=%s %s'
+W6_BEFORE_FORMAT = ('[MEMLEDGER] before op=%s chip%d largest_free=%s free=%s estimate=%s margin=%s floor=%s '
+                    'contiguous=%s %s')
 W6_BEFORE_UNREAD_FORMAT = '[MEMLEDGER] before op=%s dram unavailable (%s)'
 LEDGER_LINE_BUDGET, LEDGER_CONTINUATION = 180, '[MEMLEDGER] ...'
 W6_RELEASED_LINE = '[PACKED-PROPOSE] released quad={quad} pairs={pairs}'     # dflash_packed_proposal_coordinator
@@ -74,6 +80,8 @@ WARM_SKIPPED_LINE = '[PINDIAG] eager publication warm skipped reason=no-collecti
 SINGLE_LADDER, SHORT_LADDER = '{}'.format((2048,)), '{}'.format((256, 512, 1024, 2048))
 ENGINE_PEAK = 1000 * 10 ** 6       # serving_prefill_admission.engine_build_peak(): 800 MB resident + 200 MB transient
 QUAD_ESTIMATE = 450 * 2 ** 20      # quad_draft.QUAD_CAPTURE_BYTES_EST (0.450 GiB), W6d's quad estimate
+# serving_prefill_admission's split (gate v79, run 36368363993): STRANDED_BYTES and LARGEST_BUFFER_BYTES.
+STRANDED, LARGEST_BUFFER = 300 * 10 ** 6, 128 * 10 ** 6
 
 
 def mb(value):
@@ -103,16 +111,30 @@ def mismatch_line(number, at='word:2'):
     return 'WARNING ' + W3_MISMATCH_FORMAT % (W3_MISMATCH_MARKER, number, at)
 
 
-def hold_line(prompt, largest, need, request, decodes):
-    return 'INFO ' + W6_HOLD_LINE.format(prompt, mb(largest), mb(need), request, decodes)
+def hold_line(prompt, largest, need, request, decodes, free=2319e6, trace=49e6, short='free'):
+    return 'INFO ' + W6_HOLD_LINE.format(prompt, mb(largest), mb(need), request, decodes, mb(free), mb(trace), short)
+
+
+def released_hold_line(prompt, largest, need, request, free=2319e6, trace=49e6):
+    return 'INFO ' + W6_RELEASED_HOLD_LINE.format(prompt, mb(largest), mb(need), request, mb(free), mb(trace))
+
+
+def fit_line(prompt, largest, need, request, decodes, free=2319e6, trace=49e6):
+    """The split's admission line: `trace` None renders 'unread' (a pool that cannot read the trace region)."""
+    return 'INFO ' + W6_FIT_LINE.format(prompt, mb(largest), mb(need), request, decodes, mb(free),
+                                        'unread' if trace is None else mb(trace))
+
+
+def lifted_line(prompt, largest, need, request, free=900e6, short='free'):
+    return 'INFO ' + W6_LIFTED_LINE.format(prompt, mb(largest), mb(need), request, mb(free), short)
 
 
 def decision_line(decodes, allowed=0, hidden=True, partials=0, held=False):
     return 'INFO ' + DECISION_LINE.format(partials, decodes, held, allowed, hidden)
 
 
-def deferred_line(prompt, largest, need, request, finished):
-    return 'INFO ' + W6_DEFERRED_LINE.format(prompt, mb(largest), mb(need), request, list(finished))
+def deferred_line(prompt, largest, need, request, finished, free=1087e6, short='free'):
+    return 'INFO ' + W6_DEFERRED_LINE.format(prompt, mb(largest), mb(need), request, list(finished), mb(free), short)
 
 
 def buckets_line(user, contexts=(2048,)):
@@ -133,29 +155,30 @@ def ledger_lines(message):
 
 def before_lines(op, largest, estimate, point=None, chips=(0, 1), free=3e9, trace=None):
     """W6d's before point, one line (or more) per chip: `largest` free bytes (one value, or one per chip), the
-    operation's estimate, the running floor as the margin itself; `trace` (used, largest free) bytes, or None for
-    'trace=unavailable'."""
+    `free`, the operation's estimate, the split's margin (free less the stranded bytes less the estimate) with the
+    running floor as the margin itself, and the contiguous term (largest less the largest buffer); `trace` (used,
+    largest free) bytes, or None for 'trace=unavailable'."""
     label = op if point is None else '%s point=%s' % (op, point)
     lines = []
     for index, chip in enumerate(chips):
         free_block = largest[index] if isinstance(largest, (list, tuple)) else largest
-        margin = free_block - estimate
+        margin = free - STRANDED - estimate
         text = 'trace=unavailable' if trace is None else 'trace_used=%s trace_largest_free=%s' % (mb(trace[0]),
                                                                                                  mb(trace[1]))
         lines += ledger_lines(W6_BEFORE_FORMAT % (label, chip, mb(free_block), gb(free), mb(estimate), mb(margin),
-                                                  mb(margin), text))
+                                                  mb(margin), mb(free_block - LARGEST_BUFFER), text))
     return lines
 
 
-def prefill_point(prompt, largest_mb, chip=0):
+def prefill_point(prompt, largest_mb, chip=0, free_gb=3.0):
     """The ledger's phase point ahead of a prefill (serving_runtime: record('prefill', point='before prompt=N'))."""
-    return ('INFO [MEMLEDGER] phase=prefill point=before prompt=%d chip%d allocated=1.000GB free=3.000GB '
-            'largest_free=%.1fMB total=34.000GB known=1.000GB residual=0.000GB' % (prompt, chip, largest_mb))
+    return ('INFO [MEMLEDGER] phase=prefill point=before prompt=%d chip%d allocated=1.000GB free=%.3fGB '
+            'largest_free=%.1fMB total=34.000GB known=1.000GB residual=0.000GB' % (prompt, chip, free_gb, largest_mb))
 
 
-def engine_points(users=4, largest=1500e6):
-    """W6d's before point ahead of each user's engine build, healthy unless `largest` says otherwise."""
-    return [line for user in range(users) for line in before_lines('engine', largest, ENGINE_PEAK,
+def engine_points(users=4, largest=1500e6, free=3e9):
+    """W6d's before point ahead of each user's engine build, healthy unless `largest` or `free` says otherwise."""
+    return [line for user in range(users) for line in before_lines('engine', largest, ENGINE_PEAK, free=free,
                                                                    point='req=%s' % engine_id(user)[-12:])]
 
 
@@ -643,10 +666,16 @@ class HarnessTests(unittest.TestCase):
         self.assertFalse(gate.refused_rounds_report(text.replace('2/2 FINISHED', '9/9 FINISHED'))['accounted'])
         before = gate.before_points(text)
         self.assertEqual((before['points'], before['ops']), (4, ['engine', 'prefill', 'quad']))
-        self.assertEqual(before['floor_gb'], 0.1, 'the engine build: 1.1 GB largest free less its 1.0 GB')
+        self.assertEqual(before['floor_gb'], 1.7, 'the engine build: 3.0 GB free less 0.3 stranded less its 1.0 GB')
+        self.assertEqual((before['contiguous_floor_gb'], before['contiguous_point']['op'],
+                          before['contiguous_point']['chip']), (0.272, 'prefill', 1),
+                         'the 400 MB block less the 128 MB largest buffer')
         single = [gate.before_points(line)['floor_point'] for line in text.split('\n') if 'MEMLEDGER' in line]
-        self.assertEqual([(point['op'], point['estimate_gb'], point['margin_gb']) for point in single],
-                         [('prefill', 0.3, 1.2), ('prefill', 0.0, 0.4), ('quad', 0.4719, 0.4281), ('engine', 1.0, 0.1)])
+        self.assertEqual([(point['op'], point['estimate_gb'], point['margin_gb'], point['contiguous_gb'])
+                          for point in single],
+                         [('prefill', 0.3, 2.4, 1.372), ('prefill', 0.0, 2.7, 0.272), ('quad', 0.4719, 2.2281, 0.772),
+                          ('engine', 1.0, 1.7, 0.972)])
+        self.assertEqual((gate.STRANDED_GB, gate.LARGEST_BUFFER_GB), (STRANDED / 1e9, LARGEST_BUFFER / 1e9))
 
 
 class PathTests(unittest.TestCase):
@@ -1179,7 +1208,15 @@ class ServingDriverTests(unittest.TestCase):
         self.assertEqual(held['verdict'], 'FAIL')
         self.assertIn('seat free (decodes [3] of 4 seats)', ' '.join(held['s2_problems']))
         self.assertEqual(self.short(ladder=SHORT_LADDER)['verdict'], 'FAIL')
-        self.assertEqual(self.short(extra=[prefill_point(120000, 400.0)])['verdict'], 'FAIL', 'prefill floor 0.1 GB')
+        # The split's floors (gate v79): a 400 MB block beside 3 GB free passes both; a 390 MB block cannot hold the
+        # largest buffer and the reserve; 0.8 GB free leaves 0.2 GB past the stranded bytes and the prefill's 0.3.
+        self.assertEqual(self.short(extra=[prefill_point(120000, 400.0)])['verdict'], 'PASS')
+        narrow = self.short(extra=[prefill_point(120000, 390.0)])
+        self.assertEqual(narrow['verdict'], 'FAIL', 'contiguous floor 0.262 GB')
+        self.assertIn('contiguous floor 0.262 GB', ' '.join(narrow['s2_problems']))
+        short_free = self.short(extra=[prefill_point(120000, 700.0, free_gb=0.8)])
+        self.assertEqual(short_free['verdict'], 'FAIL', 'prefill floor 0.2 GB')
+        self.assertIn('before-point floor 0.200 GB', ' '.join(short_free['s2_problems']))
 
     def test_short_reads_the_ladder_as_w6_logs_it(self):
         # W6a logs a tuple through loguru ('(2048,)'); a wrong ladder is named, an unlogged one fails.
@@ -1200,11 +1237,17 @@ class ServingDriverTests(unittest.TestCase):
         self.assertIn('0 "[PINDIAG] proposal buckets built" lines for 4 engines', ' '.join(unseen['shortfalls']))
 
     def test_short_judges_w6s_engine_margin_not_only_the_prefill_points(self):
-        # W6 logs margin=-700.0MB ahead of an engine build; the prefill points alone are healthy.
-        starved = self.short(points=engine_points(largest=300e6))
+        # W6 logs margin=-300.0MB ahead of an engine build (1.0 GB free less 0.3 stranded less 1.0); the prefill
+        # points alone are healthy.
+        starved = self.short(points=engine_points(free=1.0e9, largest=1.0e9))
         self.assertEqual(starved['verdict'], 'FAIL')
         self.assertIn('below 0.25 (engine req=', ' '.join(starved['s2_problems']))
-        self.assertIn('-0.700 GB', ' '.join(starved['s2_problems']))
+        self.assertIn('-0.300 GB', ' '.join(starved['s2_problems']))
+        # A 300 MB block cannot hold the largest buffer and the reserve, however much is free.
+        narrow = self.short(points=engine_points(largest=300e6))
+        self.assertEqual(narrow['verdict'], 'FAIL')
+        self.assertIn('contiguous floor 0.172 GB per chip (the largest free block less the largest buffer), below the '
+                      '0.268 GB reserve (engine req=', ' '.join(narrow['s2_problems']))
         unread = self.short(extra=['INFO ' + W6_BEFORE_UNREAD_FORMAT % ('quad point=slots=0,1,2,3', 'no statistics')])
         self.assertEqual(unread['verdict'], 'NOT_EXERCISED', 'a before-point that read no DRAM is never a pass')
         self.assertIn('read no DRAM', ' '.join(unread['shortfalls']))
@@ -1321,12 +1364,12 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
         deferred = self.memory([deferred_line(123136, 700e6, 1568.4e6, engine_id(3), [engine_id(0)]),
                                 decision_line(3), 'INFO ' + W6_CARRIED_LINE.format([engine_id(0)])])
         self.assertEqual(deferred['verdict'], 'PASS', deferred['lines'])
-        self.assertEqual(self.memory([W6_LIFTED_LINE.format(123136, mb(700e6), mb(1568.4e6), engine_id(3))])['verdict'],
+        self.assertEqual(self.memory([lifted_line(123136, 700e6, 1568.4e6, engine_id(3))])['verdict'],
                          'FAIL', 'a lifted hold: admitted though it did not fit')
         unavailable = self.memory(['INFO ' + W6_UNAVAILABLE_LINE.format(engine_id(3), 'no reading')])
         self.assertEqual(unavailable['verdict'], 'NOT_EXERCISED', 'a hold that read no DRAM is unjudged, never a pass')
         released = self.memory([hold_line(123136, 700e6, 1568.4e6, engine_id(3), 4), decision_line(4),
-                                'INFO ' + W6_RELEASED_HOLD_LINE.format(123136, mb(1700e6), mb(1568.4e6), engine_id(3))])
+                                released_hold_line(123136, 1700e6, 1568.4e6, engine_id(3))])
         self.assertEqual(released['verdict'], 'PASS', 'every seat decoding: the prompt waited for a seat, not DRAM')
 
     def churn(self, log_text):
@@ -1357,7 +1400,7 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
                 lines.append(released_line(quad, [(0, 1), (2, 3)]))
             lines.append(execute_line(100.0 + index, 4, finished=[engine_id(index)]))
             if holds:
-                lines.append('INFO ' + W6_RELEASED_HOLD_LINE.format(120000, mb(1900e6), mb(1568.4e6), engine_id(index + 4)))
+                lines.append(released_hold_line(120000, 1900e6, 1568.4e6, engine_id(index + 4)))
         for index in range(quad_departures, quad_departures + others):
             lines.append(released_line(0))
             lines.append(execute_line(200.0 + index, 3, finished=[engine_id(index)]))
@@ -1381,6 +1424,31 @@ class LifecycleMemoryChurnTests(unittest.TestCase):
         self.assertEqual(self.churn(self.churn_log(quad_departures=0, others=11))['verdict'], 'NOT_EXERCISED')
         self.assertEqual(self.churn(self.churn_log(quad_departures=4, others=1))['verdict'], 'NOT_EXERCISED',
                          'five departures for eight replacements: the seats did not churn')
+
+    def test_churn_judges_v79s_admission_on_the_split_floor(self):
+        """Gate v79 (run 36368363993) held a replacement at decodes=3 beside a 1079.7 MB block with 2.319 GB free. The
+        split admits it; its engine's before point then reads about 2.185 GB free (the prefill's 134 MB gone) beside
+        that block: 885 MB on the free term and 952 MB on the contiguous one, where the old floor (the block less the
+        engine's 1.0 GB) read 79.7 MB and failed. The no-hold-with-a-seat-free check is unchanged."""
+        admitted = before_lines('engine', 1079.7e6, ENGINE_PEAK, free=2.185e9, point='req=%s' % engine_id(9)[-12:])
+        passed = self.churn(self.churn_log(extra=admitted))
+        self.assertEqual(passed['verdict'], 'PASS', passed.get('s2_problems'))
+        before = passed['facts']['before']
+        self.assertEqual((before['floor_gb'], before['contiguous_floor_gb']), (0.885, 0.9517))
+        held = self.churn(self.churn_log(extra=admitted + [hold_line(120000, 1079.7e6, 1568.4e6, engine_id(9), 3)]))
+        self.assertEqual(held['verdict'], 'FAIL', 'a hold with a seat free still fails')
+        self.assertIn('decodes [3] of 4 seats', ' '.join(held['s2_problems']))
+        # Each admission's reading is recorded for M11 (not judged): v79's three blocks, and one unread region.
+        fits = [fit_line(120000, block, 1568.4e6, engine_id(9 + index), 3, trace=trace)
+                for index, (block, trace) in enumerate(((1079.7e6, 49e6), (1320.7e6, 51e6), (1321.8e6, None)))]
+        recorded = self.churn(self.churn_log(extra=admitted + fits + [fit_line(1536, 3000e6, 1268.4e6, 'x', 1)]))
+        self.assertEqual(recorded['verdict'], 'PASS', recorded.get('s2_problems'))
+        self.assertIn('admissions at decodes=3: 3, smallest largest block 1.0797 GB, smallest trace-region block '
+                      '0.0490 GB, smallest free 2.3190 GB', recorded['lines'])
+        self.assertIn('admissions at decodes=3: none logged', passed['lines'])
+        narrow = self.churn(self.churn_log(extra=before_lines('quad', 390e6, QUAD_ESTIMATE, free=1.5e9)))
+        self.assertEqual(narrow['verdict'], 'FAIL', 'a block that cannot hold the largest buffer and the reserve')
+        self.assertIn('contiguous floor 0.262 GB', ' '.join(narrow['s2_problems']))
 
     def test_churn_holds_while_every_seat_decodes_are_no_failure(self):
         # The review's M11 false FAIL: nine-plus users on four seats, the fifth prompt held at decodes=4.
@@ -1497,14 +1565,17 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(self.s2(log_text)['ladders'], [[2048]] * 4 + [[256, 512, 1024, 2048]] * 4)
 
     def test_w6s_before_points_negative_margins_unread_points_and_continuations(self):
-        # The review's probe: W6's own line, margin=-700.0MB ahead of an engine build, here long enough to continue.
-        lines = before_lines('engine', 300e6, ENGINE_PEAK, point='req=%s' % engine_id(0)[-12:], trace=(268.4e6, 12.5e6))
+        # The review's probe: W6's own line, margin=-300.0MB ahead of an engine build (1.0 GB free less 0.3 stranded
+        # less 1.0), here long enough to continue.
+        lines = before_lines('engine', 300e6, ENGINE_PEAK, point='req=%s' % engine_id(0)[-12:], free=1.0e9,
+                             trace=(268.4e6, 12.5e6))
         self.assertTrue(any(LEDGER_CONTINUATION in line for line in lines), 'past the ledger\'s line budget')
         lines += ['INFO ' + W6_BEFORE_UNREAD_FORMAT % ('quad point=slots=0,1,2,3', 'no statistics'),
                   'INFO [MEMLEDGER] phase=prefill point=before prompt=60 dram unavailable (no statistics)']
         before = gate.before_points('\n'.join(lines))
         self.assertEqual((before['points'], before['judged'], before['unread'], before['by_op']), (2, 2, 2, {'engine': 2}))
-        self.assertEqual((before['floor_gb'], before['logged_floor_gb']), (-0.7, -0.7))
+        self.assertEqual((before['floor_gb'], before['logged_floor_gb'], before['contiguous_floor_gb']),
+                         (-0.3, -0.3, 0.172))
         self.assertEqual((before['floor_point']['op'], before['floor_point']['detail']), ('engine', 'req=1-0-abcd1234'))
         region = gate.trace_region('\n'.join(lines))
         self.assertEqual((region['readings'], region['max_used_gb'], region['min_largest_free_gb']), (2, 0.2684, 0.0125))
@@ -1515,8 +1586,8 @@ class FormatTests(unittest.TestCase):
         text = '\n'.join([deferred_line(120000, 700e6, 1568.4e6, 'r5', ['r1']), decision_line(3),
                           'INFO ' + W6_CARRIED_LINE.format(['r1']), hold_line(120000, 700e6, 1568.4e6, 'r5', 3),
                           decision_line(2, held=True), decision_line(3, allowed=1, hidden=False),
-                          'INFO ' + W6_RELEASED_HOLD_LINE.format(120000, mb(1700e6), mb(1568.4e6), 'r5'),
-                          'INFO ' + W6_LIFTED_LINE.format(60, mb(700e6), mb(1256e6), 'r6'),
+                          released_hold_line(120000, 1700e6, 1568.4e6, 'r5'),
+                          lifted_line(60, 700e6, 1256e6, 'r6'),
                           'INFO ' + W6_UNAVAILABLE_LINE.format('r7', 'no reading')])
         hold = gate.dram_holds(text)
         self.assertEqual((hold['holds'], hold['hold_decodes']), (1, [3]),
@@ -1525,7 +1596,7 @@ class FormatTests(unittest.TestCase):
                          (1, 1, 1, 1, 1))
         self.assertEqual([line.split('] ', 1)[1][:25] for line in hold['lines']], ['dram hold prompt=120000 l'],
                          'released, lifted and unavailable lines are not hold lines')
-        healthy = dict(floor_gb=1.0, by_op=dict(engine=8))
+        healthy = dict(floor_gb=1.0, contiguous_floor_gb=1.0, by_op=dict(engine=8))
         problems, shortfalls = driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=hold, before=healthy,
                                                                            extent_replay=True)), 4)
         self.assertEqual(len(problems), 2, problems)
@@ -1537,6 +1608,29 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=waiting, before=healthy,
                                                                      extent_replay=True)), 4), ([], []),
                          'every seat decoding: the fifth prompt waits for a seat, and no fit failed')
+        # The split's floors: each judged, neither weakening the other or the hold and refusal checks.
+        narrow = dict(healthy, contiguous_floor_gb=0.2, contiguous_point=dict(op='quad', detail='', chip=0))
+        problems = driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=waiting, before=narrow,
+                                                               extent_replay=True)), 4)[0]
+        self.assertEqual(len(problems), 1)
+        self.assertIn('contiguous floor 0.200 GB', problems[0])
+        blind = dict(floor_gb=1.0, by_op=dict(engine=8))
+        problems = driver.memory_s2_checks('arm', dict(s2=dict(dram_hold=waiting, before=blind,
+                                                               extent_replay=True)), 4)[0]
+        self.assertEqual(problems, ['arm: no ledger before-point carries a largest free block: the contiguous floor '
+                                    'cannot be judged'])
+        self.assertAlmostEqual(driver.RESERVE_GB, 0.268435456)
+
+    def test_the_splits_fit_lines(self):
+        hold = gate.dram_holds('\n'.join([fit_line(120000, 1079.7e6, 1568.4e6, 'r9', 3),
+                                          fit_line(60, 900e6, 1268.4e6, 'r10', 1, trace=None)]))
+        self.assertEqual((hold['holds'], hold['fits']), (0, 2), 'a fit line is no hold')
+        self.assertEqual(hold['fit_readings'], [
+            dict(decodes=3, largest_free_gb=1.0797, free_gb=2.319, trace_largest_free_gb=0.049),
+            dict(decodes=1, largest_free_gb=0.9, free_gb=2.319, trace_largest_free_gb=None)])
+        self.assertEqual(driver.full_seat_admissions_text(hold['fit_readings'], 4),
+                         'admissions at decodes=3: 1, smallest largest block 1.0797 GB, smallest trace-region block '
+                         '0.0490 GB, smallest free 2.3190 GB')
 
     def test_w6c_releases_are_matched_to_departures_while_a_quad_was_formed(self):
         text = '\n'.join([
@@ -1686,14 +1780,17 @@ class ProducerContractTests(unittest.TestCase):
         import memory_ledger
         lines = []
         ledger = memory_ledger.MemoryLedger(None, None, log=lines.append, emit=lambda text: None)
-        ledger.reading = lambda: [dict(chip=chip, largest_free=largest, free=3 * 10 ** 9, allocated=30 * 10 ** 9,
-                                       total=34 * 10 ** 9, banks=8) for chip, largest in ((0, 1500 * 10 ** 6),
-                                                                                         (1, 400 * 10 ** 6))]
+        ledger.reading = lambda: [dict(chip=chip, largest_free=largest, free=free, allocated=30 * 10 ** 9,
+                                       total=34 * 10 ** 9, banks=8) for chip, largest, free in
+                                  ((0, 1500 * 10 ** 6, 3 * 10 ** 9), (1, 400 * 10 ** 6, 9 * 10 ** 8))]
         ledger.phase('prefill', point='before prompt=120000')
         before = gate.before_points(rendered(lines))
         self.assertEqual(before['points'], 2)
         point = before['floor_point']
-        self.assertEqual((point['op'], point['chip'], point['estimate_gb'], point['margin_gb']), ('prefill', 1, 0.3, 0.1))
+        self.assertEqual((point['op'], point['chip'], point['estimate_gb'], point['margin_gb']),
+                         ('prefill', 1, 0.3, 0.3), '0.9 GB free less 0.3 stranded less the prefill transient')
+        point = before['contiguous_point']
+        self.assertEqual((point['op'], point['chip'], point['contiguous_gb']), ('prefill', 1, 0.272))
 
     def test_w6d_before_points(self):
         memory_ledger = producer('memory_ledger', 'BEFORE_MARKER')
@@ -1717,8 +1814,11 @@ class ProducerContractTests(unittest.TestCase):
         text = rendered(lines)
         before = gate.before_points(text)
         self.assertEqual((before['points'], before['unread'], before['by_op']), (4, 1, dict(engine=2, quad=2)))
-        self.assertEqual(before['floor_gb'], -0.7, 'W6\'s own margin below zero, never passed over')
+        self.assertEqual(before['floor_gb'], -0.1, 'W6\'s own margin below zero (1.2 GB free less 0.3 and 1.0), never '
+                                                   'passed over')
         self.assertEqual(before['logged_floor_gb'], round(min(ledger.floor.values()) / 1e9, 4))
+        self.assertEqual(before['contiguous_floor_gb'], 0.172, 'the 300 MB block less the 128 MB largest buffer')
+        self.assertEqual(before['contiguous_floor_gb'], round(min(ledger.contiguous_floor.values()) / 1e9, 4))
         region = gate.trace_region(text)
         self.assertEqual((region['readings'], region['unavailable'], region['min_largest_free_gb']), (2, 2, 0.0125))
 
@@ -1733,6 +1833,12 @@ class ProducerContractTests(unittest.TestCase):
         if hasattr(admission, 'DRAM_DEFERRED_LINE'):
             self.assertEqual((admission.DRAM_DEFERRED_LINE, admission.DRAM_CARRIED_LINE),
                              (W6_DEFERRED_LINE, W6_CARRIED_LINE))
+        if hasattr(admission, 'DRAM_FIT_LINE'):
+            self.assertEqual(admission.DRAM_FIT_LINE, W6_FIT_LINE)
+            self.assertEqual((admission.STRANDED_BYTES, admission.LARGEST_BUFFER_BYTES), (STRANDED, LARGEST_BUFFER))
+            self.assertEqual((gate.STRANDED_GB, gate.LARGEST_BUFFER_GB), (STRANDED / 1e9, LARGEST_BUFFER / 1e9))
+            from dflash_packed_proposal_coordinator import dram_reserve_bytes
+            self.assertEqual(driver.RESERVE_GB, dram_reserve_bytes({}) / 1e9, 'the gate judges the profiles\' reserve')
         self.assertEqual(admission.engine_build_peak(), ENGINE_PEAK)
 
         class Queue(list):
@@ -1749,7 +1855,7 @@ class ProducerContractTests(unittest.TestCase):
                                           running=[types.SimpleNamespace(is_prefill_chunk=False)] * 4)
         holder = types.SimpleNamespace(admits=lambda prompt: (fits[0], dict(largest_free=700 * 10 ** 6 if not fits[0]
                                                                              else 1700 * 10 ** 6, need=1568400000)))
-        healthy = dict(floor_gb=1.0, by_op=dict(engine=8))
+        healthy = dict(floor_gb=1.0, contiguous_floor_gb=1.0, by_op=dict(engine=8))
 
         def judged():
             hold = gate.dram_holds(rendered(lines))

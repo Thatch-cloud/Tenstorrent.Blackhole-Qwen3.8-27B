@@ -50,15 +50,23 @@ first log line names where it went.
 S2 W6d, "BEFORE" POINTS (s2-design.md section 3.3): the phases above read the allocator only AFTER an
 allocation, so the peak inside an engine build, a pair or quad capture or a single-user rebuild is never
 observed. before(op, estimate=...) reads the allocator just ahead of such an operation and logs, per chip, the
-largest free block, the operation's estimated peak, the margin between them and the running floor of that
-margin over every before point so far (G5 judges floor >= the reserve); after(token) reads it again when the
-operation returns and logs what it cost. Both also read the trace region (BufferType.TRACE) when this ttnn
-exposes a view of it, else say it is unavailable (s2-design.md Q18). Neither enters the phase chain: the delta
-checks above, their readings and the known set are exactly what they are without them.
-    [MEMLEDGER] before op=<op>[ point=<p>] chip<n> largest_free= free= estimate= margin= floor= trace_used= ...
+largest free block, the free, the operation's estimated peak and the two terms of the S2 admission's split
+(serving_prefill_admission, gate v79 run 36368363993): the margin = the free less the stranded bytes less the
+estimate, with the running floor of that margin over every before point so far (G5 judges floor >= its FLOOR_GB),
+and contiguous = the largest free block less the largest single buffer (G5 judges it >= the reserve). The margin
+was the largest block less the estimate until v79 showed engines built wholly in the holes. after(token) reads it
+again when the operation returns and logs what it cost. Both also read the trace region (BufferType.TRACE) when
+this ttnn exposes a view of it, else say it is unavailable (s2-design.md Q18). Neither enters the phase chain: the
+delta checks above, their readings and the known set are exactly what they are without them.
+    [MEMLEDGER] before op=<op>[ point=<p>] chip<n> largest_free= free= estimate= margin= floor= contiguous=
+        trace_used= ...
     [MEMLEDGER] after op=<op>[ point=<p>] chip<n> cost= largest_free= trace_used= ...
 Their callers (serving_request_factory, dflash_packed_proposal_coordinator) call them only under
 QWEN_FAST_EXTENT_REPLAY=1.
+
+Each phase's item line also names the largest single buffer the walk found for that item (largest=, per chip in the
+JSON), read-only from the sizes it already takes: the measurement of the split's LARGEST_BUFFER_BYTES, an
+estimate until then (s2-design.md Q8/Q9). The trace a capture retains is not walked, so it is not in it.
 """
 
 import json
@@ -193,6 +201,15 @@ def after(token):
     return ledger.after(token)
 
 
+def split_allowances():
+    """(stranded, largest buffer) bytes per chip: the S2 admission's split (serving_prefill_admission.STRANDED_BYTES
+    and LARGEST_BUFFER_BYTES, its one set of defaults), which a before point's margin and contiguous term use. Read
+    only from a before point, whose callers run only under QWEN_FAST_EXTENT_REPLAY=1."""
+    import serving_prefill_admission
+
+    return serving_prefill_admission.STRANDED_BYTES, serving_prefill_admission.LARGEST_BUFFER_BYTES
+
+
 def trace_statistics(operations, tensor):
     """Each chip's trace-region allocator figures, as serving_buffer_pool.dram_statistics reads DRAM's, or
     dict(unavailable=why) when this ttnn has no TRACE buffer type or refuses its view (s2-design.md Q18)."""
@@ -246,6 +263,7 @@ class MemoryLedger:
         self.engines = 0
         self.before_points = []  # S2 W6d: (op, point, per-chip margin) of every before point
         self.floor = {}          # chip -> the smallest margin over every before point so far
+        self.contiguous_floor = {}   # chip -> the smallest contiguous term over every before point so far
 
     def log(self, message):
         """One message within LINE_BUDGET; anything longer continues on further lines."""
@@ -351,8 +369,9 @@ class MemoryLedger:
     def claim(self, category, root, phase):
         """Record every not-yet-known DRAM shard under `root`; returns, per chip, the new
         bytes, the new buffer count and the new buffers' pages summed (the rounding bound per
-        bank), and how many tensors could not be read."""
-        added, buffers, pages, unreadable = {}, {}, {}, 0
+        bank), how many tensors could not be read, and per chip the largest new buffer (the
+        S2 split's LARGEST_BUFFER_BYTES measured; the module docstring)."""
+        added, buffers, pages, unreadable, largest = {}, {}, {}, 0, {}
         for tensor in self.tensors(root):
             try:
                 device_storage = getattr(getattr(self.operations, 'StorageType', None), 'DEVICE', None)
@@ -371,11 +390,12 @@ class MemoryLedger:
                     size = self.shard_bytes(shard)
                     self.known[key] = (category, size, phase)
                     added[chip] = added.get(chip, 0) + size
+                    largest[chip] = max(largest.get(chip, 0), size)
                     buffers[chip] = buffers.get(chip, 0) + 1
                     pages[chip] = pages.get(chip, 0) + self.page_bytes(shard)
             except BaseException:
                 unreadable += 1
-        return added, buffers, pages, unreadable
+        return added, buffers, pages, unreadable, largest
 
     # --- phases -------------------------------------------------------------------------
 
@@ -410,17 +430,24 @@ class MemoryLedger:
             self.log('[MEMLEDGER] before op=%s dram unavailable (%s)' % (label, str(chips.get('unavailable'))[:100]))
             self.emit(json.dumps(report, default=str))
             return None
-        margins = {}
+        stranded, largest_buffer = split_allowances()
+        margins, contiguous = {}, {}
         for chip in chips:
             index = chip['chip']
-            margin = chip['largest_free'] - estimate
+            # The split's two terms (the module docstring): the free less the stranded bytes less the estimate, and
+            # the largest block less the largest single buffer.
+            margin = chip['free'] - stranded - estimate
             margins[index] = margin
+            contiguous[index] = chip['largest_free'] - largest_buffer
             self.floor[index] = min(self.floor.get(index, margin), margin)
-            self.log('[MEMLEDGER] before op=%s chip%d largest_free=%s free=%s estimate=%s margin=%s floor=%s %s'
-                     % (label, index, _mb(chip['largest_free']), _gb(chip['free']), _mb(estimate), _mb(margin),
-                        _mb(self.floor[index]), _trace_text(trace, index)))
+            self.contiguous_floor[index] = min(self.contiguous_floor.get(index, contiguous[index]), contiguous[index])
+            self.log('[MEMLEDGER] before op=%s chip%d largest_free=%s free=%s estimate=%s margin=%s floor=%s '
+                     'contiguous=%s %s' % (label, index, _mb(chip['largest_free']), _gb(chip['free']), _mb(estimate),
+                                           _mb(margin), _mb(self.floor[index]), _mb(contiguous[index]),
+                                           _trace_text(trace, index)))
         self.before_points.append((op, point, margins))
-        report.update(margins=margins, floor=dict(self.floor))
+        report.update(margins=margins, floor=dict(self.floor), stranded=stranded, largest_buffer=largest_buffer,
+                      contiguous=contiguous, contiguous_floor=dict(self.contiguous_floor))
         self.emit(json.dumps(report, default=str))
         return dict(op=op, label=label, point=point, request=request, chips=chips)
 
@@ -479,8 +506,9 @@ class MemoryLedger:
         chips = self.reading()
         categories = {}
         for category, root in walked.items():
-            added, buffers, pages, unreadable = self.claim(category, root, name)
-            categories[category] = dict(bytes=added, buffers=buffers, pages=pages, unreadable=unreadable)
+            added, buffers, pages, unreadable, largest = self.claim(category, root, name)
+            categories[category] = dict(bytes=added, buffers=buffers, pages=pages, unreadable=unreadable,
+                                        largest=largest)
         if isinstance(chips, dict):
             self.log('[MEMLEDGER] phase=%s dram unavailable (%s)' % (label, str(chips.get('unavailable'))[:100]))
             report = dict(stage='memory_ledger', phase=name, point=point, request=request, chips=chips,
@@ -509,9 +537,10 @@ class MemoryLedger:
                         _gb(chip['total']), _gb(known), _gb(residual)))
         for category, entry in sorted(categories.items()):
             if entry['bytes'] or entry['unreadable']:
-                self.log('[MEMLEDGER] phase=%s item=%s %s buffers=%s unreadable=%d'
+                self.log('[MEMLEDGER] phase=%s item=%s %s buffers=%s largest=%s unreadable=%d'
                          % (label, category, ' '.join('chip%d=%s' % (chip, _gb(size)) for chip, size in sorted(entry['bytes'].items())),
-                            sum(entry['buffers'].values()), entry['unreadable']))
+                            sum(entry['buffers'].values()), _mb(max(entry['largest'].values(), default=0)),
+                            entry['unreadable']))
         # The first reading has no neighbour: its whole allocation is residual, not a delta.
         status = 'first' if previous is None else ('matched' if all(item['matched'] for item in check_chips) else 'UNMATCHED')
         check = dict(phase=name, point=point, status=status, chips=check_chips)

@@ -454,6 +454,16 @@ class ServingBufferPool:
             return dict(unavailable='no pooled buffer to read the chips through')
         return dram_statistics(self.operations, self.owned[0])
 
+    def trace_statistics(self):
+        """The trace region's allocator figures per chip (memory_ledger.trace_statistics, a BufferType.TRACE
+        view), read through the pool's first buffer, or dict(unavailable=why). S2's DRAM admission reads the
+        region's largest free block (serving_prefill_admission.trace_largest_free): an engine's traces need one."""
+        if self.closed or not self.owned:
+            return dict(unavailable='no pooled buffer to read the chips through')
+        from memory_ledger import trace_statistics
+
+        return trace_statistics(self.operations, self.owned[0])
+
     def __init__(self, operations, mesh, *, users, helpers=None, page_width=None, bucket_rows=(),
                  feature_taps=0, rope=None, mtp_hidden=False, replay_group_rows=4, replay_capacities=None,
                  packed_shapes=None, packed_replicas=None, packed_replay_group_rows=None, extent_replay=False,

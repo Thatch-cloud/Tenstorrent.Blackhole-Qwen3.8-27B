@@ -43,6 +43,17 @@ class Pool(object):
         return [dict(chip=index, free=free, largest_free=largest) for index, (free, largest) in enumerate(self.chips)]
 
 
+class TracePool(Pool):
+    """A Pool whose trace region's largest free block reads `trace` bytes on every chip."""
+
+    def __init__(self, *chips, trace):
+        super().__init__(*chips)
+        self.trace = trace
+
+    def trace_statistics(self):
+        return [dict(chip=index, largest_free=self.trace) for index in range(len(self.chips))]
+
+
 class ExtentMemoryTests(unittest.TestCase):
     """S2 W6 in the request factory, under QWEN_FAST_EXTENT_REPLAY=1 only: one 2048 proposal bucket (W6a), the
     post-prefill DRAM backstop and the hold's registration (W6b), the engine build's ledger point (W6d)."""
@@ -182,20 +193,32 @@ class ExtentMemoryTests(unittest.TestCase):
         with self.environ(False):
             self.assertEqual(serving_request_factory._proposal_ladder(60, 4096), (256, 512, 1024, 2048))
 
-    def test_the_backstop_refuses_below_the_build_peak_and_the_reserve_on_the_smallest_largest_block(self):
-        import serving_prefill_admission
+    def test_the_backstop_refuses_on_the_admissions_split(self):
+        """The admission's split (serving_prefill_admission.split_short, gate v79 run 36368363993) for the build's
+        peak plus the reserve: the free less the stranded bytes, the smallest largest block against the reserve plus
+        the largest buffer, and the trace region. v79's 1079.7 MB block beside 2.319 GB free is below the 1268.4 MB
+        a contiguous-only backstop needed, so a request admitted there would have been refused after its prefill."""
+        import serving_prefill_admission as admission
 
         reserve = 256 * 2 ** 20
-        need = serving_prefill_admission.backstop_need(reserve)
+        need = admission.backstop_need(reserve)
+        block, edge = admission.contiguous_need(reserve), need + admission.STRANDED_BYTES
         log = Mock()
-        self.assertEqual(serving_request_factory.dram_backstop(Pool((9_000 * MB, need), (9_000 * MB, need + 1)),
-                                                               request_id='r', reserve=reserve, log=log), need)
-        for pool in (Pool((9_000 * MB, need - 1), (9_000 * MB, need)),
-                     Pool((40_000 * MB, 100 * MB), (40_000 * MB, 40_000 * MB))):
-            with self.subTest(chips=pool.chips), self.assertRaisesRegex(serving_request_factory.RequestRefused,
-                                                                        'DRAM backstop'):
+        self.assertEqual(serving_request_factory.dram_backstop(Pool((edge, block), (9_000 * MB, 9_000 * MB)),
+                                                               request_id='r', reserve=reserve, log=log), block)
+        v79 = TracePool((2_319 * MB, 1_079_700_000), (2_319 * MB, 1_079_700_000), trace=49 * MB)
+        self.assertEqual(serving_request_factory.dram_backstop(v79, request_id='r', reserve=reserve, log=log),
+                         1_079_700_000, "v79's cycle-2 hold state builds")
+        for pool, short in ((Pool((edge - 1, 9_000 * MB), (9_000 * MB, 9_000 * MB)), 'free'),
+                            (Pool((40_000 * MB, block - 1), (40_000 * MB, 40_000 * MB)), 'contiguous'),
+                            (TracePool((9_000 * MB, 9_000 * MB), trace=44 * MB - 1), 'trace')):
+            with self.subTest(short=short), self.assertRaisesRegex(serving_request_factory.RequestRefused,
+                                                                   'DRAM backstop: short of %s ' % short):
                 serving_request_factory.dram_backstop(pool, request_id='r', reserve=reserve, log=log)
-        self.assertTrue(log.call_args_list[-1].args[0].startswith(serving_request_factory.DRAM_BACKSTOP_REFUSED))
+            self.assertTrue(log.call_args_list[-1].args[0].startswith(serving_request_factory.DRAM_BACKSTOP_REFUSED))
+            self.assertEqual(log.call_args_list[-1].args[-1], short, 'the refused line names the short term')
+        refused = log.call_args_list[-1].args
+        self.assertEqual(refused[1:], ('r', 9_000 * MB, 9_000 * MB, 44 * MB - 1, need, 'trace'))
         self.assertIsNone(serving_request_factory.dram_backstop(object(), request_id='r', reserve=reserve, log=log),
                           'an unreadable pool is a diagnostic, not a refusal')
         self.assertEqual(log.call_args_list[-1].args[1:], ('r', 'pool without device statistics'))
@@ -236,15 +259,19 @@ class ExtentMemoryTests(unittest.TestCase):
         import serving_prefill_admission
 
         log = Mock()
-        pool = Pool((9_000 * MB, 1_500 * MB), (9_000 * MB, 2_000 * MB))
+        pool = Pool((1_800 * MB, 1_500 * MB), (9_000 * MB, 2_000 * MB))
         with self.environ(True):
             unregister = serving_request_factory.register_dram_admission(pool, log=log)
         holder = sys.modules[serving_prefill_admission.DRAM_KEY]
         reserve = 256 * 2 ** 20
-        self.assertEqual(holder.admits(60), (True, dict(largest_free=1_500 * MB, need=1_000 * MB + reserve)))
-        self.assertFalse(holder.admits(4096)[0], 'a long prompt needs 1.3 GB and the reserve')
+        self.assertEqual(holder.admits(60), (True, dict(largest_free=1_500 * MB, need=1_000 * MB + reserve,
+                                                        free=1_800 * MB, trace_largest_free=None, short=())))
+        self.assertEqual(holder.admits(4096)[1]['short'], ('free',),
+                         'a long prompt needs 1.3 GB and the reserve of the 1.5 GB past the stranded bytes')
         self.assertTrue(log.call_args.args[0].startswith(serving_request_factory.DRAM_REGISTERED))
-        self.assertEqual(log.call_args.args[1:], (800 * MB, 200 * MB, 300 * MB, 2048, reserve, 1_500 * MB))
+        self.assertEqual(log.call_args.args[1:], (800 * MB, 200 * MB, 300 * MB, 2048, reserve, 300 * MB, 128 * MB,
+                                                  44 * MB, 'free 1800000000 largest_free 1500000000 '
+                                                           'trace_largest_free None'))
         unregister()
         self.assertNotIn(serving_prefill_admission.DRAM_KEY, sys.modules)
 

@@ -19,8 +19,11 @@ _schedule_prefill_only and decode fallback run unmodified. The tests check four 
   vLLM is not installed: it runs in qwen-fast-vllm-cpu.yml.
 S2 W6b adds the DRAM admission hold (DramNeedTests, DramHoldTests, and one installed-vLLM test): a prompt the
 registered predicate refuses waits while the decodes run and is admitted once it fits; with no decode left it is
-admitted anyway; the need is read on the smallest largest free block; and with no predicate, a passing one, an
-unavailable reading or a raising predicate, every step is the one the rule above gives. DramTimingTests pin the
+admitted anyway; the need is read on the split (the free less the stranded bytes, the largest block for the largest
+buffer and the reserve, the trace region); and with no predicate, a passing one, an unavailable reading or a raising
+predicate, every step is the one the rule above gives. DramSplitTests hold gate v79's (run 36368363993) hold
+states to an admission, a genuinely short state and a fragmented one to a hold, and the lines to the split's
+readings. DramTimingTests pin the
 W6 review's fixes: nothing is asked with every seat decoding; a reading that still counts a finished request's
 engine defers one step without a hold line, and the finished id reaches the decode step the plugin falls back to
 (FinishingVllmScheduler models vLLM's hand-off of finished_req_ids); a blocked head is judged with the request
@@ -512,8 +515,24 @@ class Pool(object):
         return [dict(chip=index, free=free, largest_free=largest) for index, (free, largest) in enumerate(self.chips)]
 
 
+class TracePool(Pool):
+    """A Pool whose trace region reads `trace` bytes in its largest free block on every chip (serving_buffer_pool.
+    ServingBufferPool.trace_statistics), or dict(unavailable=...) when `trace` is None."""
+
+    def __init__(self, *chips, trace=None):
+        super().__init__(*chips)
+        self.trace = trace
+
+    def trace_statistics(self):
+        if self.trace is None:
+            return dict(unavailable='no TRACE view')
+        return [dict(chip=index, largest_free=self.trace) for index in range(len(self.chips))]
+
+
 MB = 10 ** 6
 RESERVE = 256 * 2 ** 20
+# The split's readings a predicate that names none logs: free=, trace_largest_free= and short=.
+UNREAD = ('unread', 'unread', 'unread')
 
 
 class DramNeedTests(DramFreeCase):
@@ -533,8 +552,20 @@ class DramNeedTests(DramFreeCase):
             with self.subTest(reserve=reserve), self.assertRaises(ValueError):
                 admission.backstop_need(reserve)
 
-    def test_the_reading_is_the_smallest_chips_largest_block_never_the_total_free(self):
+    def test_the_reading_is_the_smallest_chips_free_largest_block_and_trace_region(self):
         self.assertEqual(admission.largest_free(Pool((5_000 * MB, 700 * MB), (6_000 * MB, 900 * MB))), (700 * MB, None))
+        chips = ((5_000 * MB, 900 * MB), (4_000 * MB, 700 * MB))
+        self.assertEqual(admission.dram_reading(TracePool(*chips, trace=49 * MB)),
+                         (dict(free=4_000 * MB, largest_free=700 * MB, trace_largest_free=49 * MB, trace_unread=None),
+                          None), 'each term on its own smallest chip')
+        self.assertEqual(admission.dram_reading(Pool((5_000 * MB, 700 * MB))),
+                         (dict(free=5_000 * MB, largest_free=700 * MB, trace_largest_free=None,
+                               trace_unread='pool without trace statistics'), None))
+        self.assertEqual(admission.dram_reading(TracePool((5_000 * MB, 700 * MB)))[0]['trace_unread'], 'no TRACE view')
+        broken_trace = TracePool((5_000 * MB, 700 * MB))
+        broken_trace.trace_statistics = Mock(side_effect=RuntimeError('trace gone'))
+        self.assertEqual(admission.trace_largest_free(broken_trace), (None, 'RuntimeError: trace gone'))
+        self.assertEqual(admission.dram_reading(object()), (None, 'pool without device statistics'))
         self.assertEqual(admission.largest_free(object()), (None, 'pool without device statistics'))
         unavailable = SimpleNamespace(dram_statistics=lambda: dict(unavailable='no memory view'))
         self.assertEqual(admission.largest_free(unavailable), (None, 'no memory view'))
@@ -544,14 +575,19 @@ class DramNeedTests(DramFreeCase):
         self.assertIsNone(largest)
         self.assertTrue(reason.startswith('ValueError'), reason)
 
-    def test_the_predicate_refuses_only_a_reading_below_the_need(self):
+    def test_the_predicate_refuses_only_a_reading_short_of_a_term_of_the_split(self):
         short, long = admission.dram_need(60, 0), admission.dram_need(4096, 0)
-        admits = admission.dram_predicate(Pool((9_000 * MB, short), (9_000 * MB, short + MB)), 0)
-        self.assertEqual(admits(60), (True, dict(largest_free=short, need=short)))
-        self.assertEqual(admits(4096), (False, dict(largest_free=short, need=long)))
-        # Plenty free in total, but no block large enough: held. The need is never read on `free`.
-        fragmented = admission.dram_predicate(Pool((20_000 * MB, 100 * MB), (20_000 * MB, 20_000 * MB)), 0)
-        self.assertFalse(fragmented(60)[0])
+        stranded, block = admission.STRANDED_BYTES, admission.contiguous_need(0)
+        # The free less the stranded bytes covers a short prompt's need and not a long one's; the block holds the
+        # largest buffer.
+        admits = admission.dram_predicate(Pool((short + stranded, block), (9_000 * MB, 9_000 * MB)), 0)
+        self.assertEqual(admits(60), (True, dict(largest_free=block, need=short, free=short + stranded,
+                                                 trace_largest_free=None, short=())))
+        self.assertEqual(admits(4096), (False, dict(largest_free=block, need=long, free=short + stranded,
+                                                    trace_largest_free=None, short=('free',))))
+        # Plenty free in total, but no block for the largest buffer and the reserve: held.
+        fragmented = admission.dram_predicate(Pool((20_000 * MB, block - 1), (20_000 * MB, 20_000 * MB)), 0)
+        self.assertEqual(fragmented(60)[0:1] + (fragmented(60)[1]['short'],), (False, ('contiguous',)))
         self.assertEqual(admission.dram_predicate(object(), 0)(4096),
                          (True, dict(largest_free=None, need=long, unavailable='pool without device statistics')))
         with self.assertRaises(ValueError):
@@ -639,9 +675,10 @@ class DramHoldTests(DramFreeCase):
             self.assertEqual((new_ids(step), cached_ids(step)), (['B'], []))
             self.assertEqual(cached_ids(scheduler.schedule()), ['A', 'B'])
         self.assertEqual(asked, [4096] * 4, 'asked about B at every prefill attempt, about nothing else')
-        self.assertEqual(self.lines(log, admission.DRAM_HOLD_LINE), [(4096, '900.0MB', '1300.0MB', 'B', 1)],
+        self.assertEqual(self.lines(log, admission.DRAM_HOLD_LINE), [(4096, '900.0MB', '1300.0MB', 'B', 1) + UNREAD],
                          'one hold line for the held state')
-        self.assertEqual(self.lines(log, admission.DRAM_RELEASED_LINE), [(4096, '900.0MB', '1300.0MB', 'B')])
+        self.assertEqual(self.lines(log, admission.DRAM_RELEASED_LINE),
+                         [(4096, '900.0MB', '1300.0MB', 'B', 'unread', 'unread')])
         self.assertEqual(self.lines(log, admission.DRAM_LIFTED_LINE), [])
         self.assertIn(call('[PINDIAG] one fresh prefill per step: partials={} decodes={} gate_held={} allowed={} '
                            'hidden={}', 0, 1, False, 0, True), log.call_args_list, 'the held step logs its decision')
@@ -659,9 +696,10 @@ class DramHoldTests(DramFreeCase):
             fresh = patched_plugin(log)()
             fresh.add_request(DramRequest('C', 60))
             self.assertEqual(new_ids(fresh.schedule()), ['C'], 'an idle engine admits at once')
-        self.assertEqual(self.lines(log, admission.DRAM_HOLD_LINE), [(4096, '900.0MB', '1300.0MB', 'B', 1)])
+        self.assertEqual(self.lines(log, admission.DRAM_HOLD_LINE), [(4096, '900.0MB', '1300.0MB', 'B', 1) + UNREAD])
         self.assertEqual(self.lines(log, admission.DRAM_LIFTED_LINE),
-                         [(4096, '900.0MB', '1300.0MB', 'B'), (60, '900.0MB', '1300.0MB', 'C')])
+                         [(4096, '900.0MB', '1300.0MB', 'B', 'unread', 'unread'),
+                          (60, '900.0MB', '1300.0MB', 'C', 'unread', 'unread')])
         self.assertEqual(self.lines(log, admission.DRAM_RELEASED_LINE), [])
 
     def test_a_held_gate_and_running_partials_are_decided_before_the_predicate_is_asked(self):
@@ -686,10 +724,11 @@ class DramHoldTests(DramFreeCase):
             admits.assert_not_called()
 
     def test_the_hold_reads_the_pool_through_the_registered_predicate(self):
-        """End to end with the worker's own predicate: 1.0 GB in the largest block, no reserve - a short
-        prompt fits (need 1.0 GB), a long one does not (need 1.3 GB)."""
+        """End to end with the worker's own predicate: 1.5 GB free on the smallest chip, 1.2 GB of it past the
+        stranded bytes, beside a 1.0 GB block, no reserve - a short prompt fits (need 1.0 GB), a long one does not
+        (need 1.3 GB), and its hold line names the free term."""
         log = Mock()
-        pool = Pool((20_000 * MB, 1_000 * MB), (20_000 * MB, 5_000 * MB))
+        pool = Pool((1_500 * MB, 1_000 * MB), (20_000 * MB, 5_000 * MB))
         scheduler = self.started(log)
         with dram(admission.dram_predicate(pool, 0)):
             scheduler.add_request(DramRequest('B', 60))
@@ -697,7 +736,10 @@ class DramHoldTests(DramFreeCase):
             scheduler.add_request(DramRequest('C', 4096))
             step = scheduler.schedule()
             self.assertEqual((new_ids(step), cached_ids(step)), ([], ['A', 'B']))
-        self.assertEqual(self.lines(log, admission.DRAM_HOLD_LINE), [(4096, '1000.0MB', '1300.0MB', 'C', 2)])
+        self.assertEqual(self.lines(log, admission.DRAM_HOLD_LINE),
+                         [(4096, '1000.0MB', '1300.0MB', 'C', 2, '1500.0MB', 'unread', 'free')])
+        self.assertEqual(self.lines(log, admission.DRAM_FIT_LINE),
+                         [(60, '1000.0MB', '1000.0MB', 'B', 1, '1500.0MB', 'unread')], 'the reading B was admitted on')
 
     def scenario(self, admits, log):
         """test_running_decodes_are_never_dropped_or_starved's arrivals, step by step."""
@@ -828,7 +870,7 @@ class DramTimingTests(DramFreeCase):
             step = scheduler.schedule()
             self.assertEqual((new_ids(step), cached_ids(step)), ([], ['B', 'C', 'D']))
         self.assertEqual(asked, [4096])
-        self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [(4096, '1170.0MB', '1568.0MB', 'E', 3)])
+        self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [(4096, '1170.0MB', '1568.0MB', 'E', 3) + UNREAD])
 
     def test_a_replacement_behind_a_finish_is_deferred_one_step_and_the_decode_step_names_the_finish(self):
         """Defect 1(b), on the design's figures: four 120k users hold four engines (1.17 GB left), A finishes and E
@@ -853,7 +895,14 @@ class DramTimingTests(DramFreeCase):
             self.assertEqual((new_ids(admitted), admitted.finished_req_ids), (['E'], set()))
         need = '%.1fMB' % (admission.dram_need(110_000, RESERVE) / MB)
         self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [], 'a stale reading is not a hold')
-        self.assertEqual(logged(log, admission.DRAM_DEFERRED_LINE), [(110_000, '1170.0MB', need, 'E', ['A'])])
+        self.assertEqual(logged(log, admission.DRAM_DEFERRED_LINE),
+                         [(110_000, '1170.0MB', need, 'E', ['A'], '1170.0MB', 'free')])
+        fits = logged(log, admission.DRAM_FIT_LINE)
+        self.assertEqual([(line[3], line[4], line[5]) for line in fits],
+                         [('A', 0, '4370.0MB'), ('B', 1, '3570.0MB'), ('C', 2, '2770.0MB'), ('D', 3, '1970.0MB'),
+                          ('E', 3, '1970.0MB')], 'one line per request admitted without a hold, with its reading')
+        self.assertEqual(fits[-1], (110_000, '1970.0MB', need, 'E', 3, '1970.0MB', 'unread'),
+                         'the fresh reading E was admitted on: 1.97 GB free, 1.67 GB past the stranded bytes')
         self.assertEqual(logged(log, admission.DRAM_CARRIED_LINE), [(['A'],)])
         self.assertEqual(logged(log, admission.DRAM_RELEASED_LINE), [])
 
@@ -912,7 +961,7 @@ class DramTimingTests(DramFreeCase):
             unblocked = Blocking(skipped_waiting=Queue(), waiting=Queue([DramRequest('S', 60), DramRequest('L', 4096)]))
             self.assertFalse(admission.dram_hold(unblocked, 2, {}, log))
             self.assertEqual(asked, [4096, 60], 'an unblocked head is the only candidate')
-        self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [(4096, '1100.0MB', '1300.0MB', 'L', 2)])
+        self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [(4096, '1100.0MB', '1300.0MB', 'L', 2) + UNREAD])
 
     def test_a_released_request_that_is_refused_again_is_held_and_logged_again(self):
         """Defect 6, and the (request, decodes) key of defect 1: released means the reading fitted, not that the
@@ -930,8 +979,10 @@ class DramTimingTests(DramFreeCase):
             self.assertTrue(admission.dram_hold(scheduler, 2, state, log))
             self.assertTrue(admission.dram_hold(scheduler, 2, state, log))
         self.assertEqual(logged(log, admission.DRAM_HOLD_LINE),
-                         [(4096, '900.0MB', '1300.0MB', 'E', 1)] * 2 + [(4096, '900.0MB', '1300.0MB', 'E', 2)])
-        self.assertEqual(logged(log, admission.DRAM_RELEASED_LINE), [(4096, '900.0MB', '1300.0MB', 'E')])
+                         [(4096, '900.0MB', '1300.0MB', 'E', 1) + UNREAD] * 2
+                         + [(4096, '900.0MB', '1300.0MB', 'E', 2) + UNREAD])
+        self.assertEqual(logged(log, admission.DRAM_RELEASED_LINE),
+                         [(4096, '900.0MB', '1300.0MB', 'E', 'unread', 'unread')])
 
     def test_the_state_stays_bounded_however_many_requests_pass(self):
         """Defect 5: one line per distinct state, from state that does not grow with the traffic."""
@@ -948,6 +999,108 @@ class DramTimingTests(DramFreeCase):
         self.assertEqual(len(logged(log, admission.DRAM_LIFTED_LINE)), 200)
         self.assertEqual(sorted(state), ['dram_held', 'dram_noted'])
         self.assertEqual((state['dram_held'], state['dram_noted']), (None, ('lifted', 'L199')))
+
+
+class DramSplitTests(DramFreeCase):
+    """THE SPLIT (serving_prefill_admission's docstring): gate v79 (GitHub run 36368363993, gate/churn/server.log)
+    held a 120000-token replacement with three users decoding at 2.319 GB free per chip beside a largest block of
+    1079.7, 1320.7 or 1321.8 MB, against a 1568.4 MB need, and failed G5 with a seat free. Its engines were built in
+    the holes. Those states admit; a state short of free, one whose largest block cannot hold the largest buffer and
+    the reserve, and one whose trace region cannot hold an engine's traces all hold."""
+
+    V79_FREE = 2_319 * MB
+    V79_BLOCKS = (1_079_700_000, 1_320_700_000, 1_321_800_000)
+    V79_TRACE = 49 * MB      # the trace region's largest free block at those holds (before points 02:14:03, 02:17:29)
+
+    def test_the_split_terms_and_their_v79_values(self):
+        self.assertEqual((admission.STRANDED_BYTES, admission.LARGEST_BUFFER_BYTES, admission.TRACE_CONTIGUOUS_BYTES),
+                         (300 * MB, 128 * MB, 44 * MB))
+        self.assertEqual(admission.dram_need(120_000, RESERVE), 1_568_435_456, "v79's logged need=1568.4MB")
+        self.assertEqual(admission.contiguous_need(RESERVE), RESERVE + 128 * MB)
+        self.assertEqual(admission.SPLIT_TERMS, ('free', 'contiguous', 'trace'))
+        with self.assertRaises(ValueError):
+            admission.contiguous_need(-1)
+
+    def test_v79s_hold_states_admit(self):
+        need = admission.dram_need(120_000, RESERVE)
+        for block in self.V79_BLOCKS:
+            with self.subTest(largest_free=block):
+                pool = TracePool((self.V79_FREE, block), (self.V79_FREE, block), trace=self.V79_TRACE)
+                ok, detail = admission.dram_predicate(pool, RESERVE)(120_000)
+                self.assertEqual((ok, detail['short'], detail['need']), (True, (), need))
+                self.assertEqual(admission.split_short(self.V79_FREE, block, need, RESERVE, self.V79_TRACE), ())
+                # Through the hold itself, three decoding and a seat free: no hold, and the fit line records the
+                # reading.
+                log = Mock()
+                with dram(admission.dram_predicate(pool, RESERVE)):
+                    held = admission.dram_hold(SimpleNamespace(waiting=Queue([DramRequest('u4', 120_000)])), 3, {}, log)
+                self.assertFalse(held)
+                self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [])
+                self.assertEqual(logged(log, admission.DRAM_FIT_LINE),
+                                 [(120_000, '%.1fMB' % (block / MB), '1568.4MB', 'u4', 3, '2319.0MB', '49.0MB')])
+        # The margin v79's reading leaves on the free term: 2.319 GB less 300 MB stranded less the need.
+        self.assertEqual(self.V79_FREE - admission.STRANDED_BYTES - need, 450_564_544)
+
+    def test_a_state_genuinely_short_of_free_holds(self):
+        need = admission.dram_need(120_000, RESERVE)
+        edge = need + admission.STRANDED_BYTES
+        self.assertEqual(admission.split_short(edge, edge, need, RESERVE, self.V79_TRACE), (), 'exactly enough fits')
+        self.assertEqual(admission.split_short(edge - 1, edge - 1, need, RESERVE, self.V79_TRACE), ('free',),
+                         'one byte short holds, however contiguous the free is')
+        # v79's four-live states: engines built (1.515 GB free, 1322.8 MB block) and the quad built (0.845 GB,
+        # 673.2 MB): a fifth long prompt does not fit either.
+        for free, block in ((1_515 * MB, 1_322_800_000), (845 * MB, 673_200_000)):
+            with self.subTest(free=free):
+                ok, detail = admission.dram_predicate(TracePool((free, block), trace=self.V79_TRACE), RESERVE)(120_000)
+                self.assertEqual((ok, detail['short']), (False, ('free',)))
+        # The long prompt's prefill transient is what binds at 1.8 GB free; a short prompt fits the same state.
+        pool = TracePool((1_800 * MB, 1_000 * MB), trace=self.V79_TRACE)
+        self.assertEqual(admission.dram_predicate(pool, RESERVE)(120_000)[1]['short'], ('free',))
+        self.assertEqual(admission.dram_predicate(pool, RESERVE)(1_536)[1]['short'], ())
+
+    def test_plenty_of_free_but_no_block_for_the_largest_buffer_and_the_reserve_holds(self):
+        need, block = admission.dram_need(120_000, RESERVE), admission.contiguous_need(RESERVE)
+        self.assertEqual(block, 396_435_456)
+        self.assertEqual(admission.split_short(20_000 * MB, block, need, RESERVE, self.V79_TRACE), ())
+        self.assertEqual(admission.split_short(20_000 * MB, block - 1, need, RESERVE, self.V79_TRACE), ('contiguous',))
+        ok, detail = admission.dram_predicate(TracePool((20_000 * MB, 300 * MB), (20_000 * MB, 20_000 * MB),
+                                                        trace=self.V79_TRACE), RESERVE)(1_536)
+        self.assertEqual((ok, detail['short'], detail['largest_free']), (False, ('contiguous',), 300 * MB),
+                         'the smallest chip\'s block, even for a short prompt')
+        self.assertEqual(admission.split_short(1_000 * MB, 100 * MB, need, RESERVE, 10 * MB),
+                         ('free', 'contiguous', 'trace'), 'every short term named, in order')
+
+    def test_the_trace_region_term(self):
+        need = admission.dram_need(120_000, RESERVE)
+        args = (self.V79_FREE, self.V79_BLOCKS[0], need, RESERVE)
+        self.assertEqual(admission.split_short(*args, trace_largest=44 * MB), ())
+        self.assertEqual(admission.split_short(*args, trace_largest=44 * MB - 1), ('trace',))
+        self.assertEqual(admission.split_short(*args, trace_largest=None), (), 'an unread region holds nothing')
+        admits = admission.dram_predicate(TracePool((self.V79_FREE, self.V79_BLOCKS[0]), trace=None), RESERVE)
+        ok, detail = admits(120_000)
+        self.assertEqual((ok, detail['trace_largest_free']), (True, None))
+        ok, detail = admission.dram_predicate(TracePool((self.V79_FREE, self.V79_BLOCKS[0]), trace=40 * MB),
+                                              RESERVE)(120_000)
+        self.assertEqual((ok, detail['short']), (False, ('trace',)))
+
+    def test_a_split_hold_line_names_its_readings_and_what_it_is_short_of(self):
+        log = Mock()
+        pool = TracePool((1_700 * MB, 350 * MB), trace=40 * MB)
+        scheduler = SimpleNamespace(waiting=Queue([DramRequest('u9', 120_000)]))
+        with dram(admission.dram_predicate(pool, RESERVE)):
+            self.assertTrue(admission.dram_hold(scheduler, 3, {}, log))
+            self.assertTrue(admission.dram_hold(SimpleNamespace(waiting=Queue([DramRequest('u9', 120_000)]),
+                                                                finished_req_ids={'u1'}), 3, {}, log))
+            self.assertFalse(admission.dram_hold(scheduler, 0, {}, log))
+        self.assertEqual(logged(log, admission.DRAM_HOLD_LINE),
+                         [(120_000, '350.0MB', '1568.4MB', 'u9', 3, '1700.0MB', '40.0MB', 'free+contiguous+trace')])
+        self.assertEqual(logged(log, admission.DRAM_DEFERRED_LINE),
+                         [(120_000, '350.0MB', '1568.4MB', 'u9', ['u1'], '1700.0MB', 'free+contiguous+trace')])
+        self.assertEqual(logged(log, admission.DRAM_LIFTED_LINE),
+                         [(120_000, '350.0MB', '1568.4MB', 'u9', '1700.0MB', 'free+contiguous+trace')])
+        rendered = admission.DRAM_HOLD_LINE.format(*logged(log, admission.DRAM_HOLD_LINE)[0])
+        self.assertTrue(rendered.startswith(admission.DRAM_HOLD + '120000 largest_free=350.0MB need=1568.4MB '
+                                                                  'request=u9 decodes=3 free=1700.0MB'), rendered)
 
 
 class InstalledVllmAdmissionTests(GateFreeCase):
@@ -1048,7 +1201,8 @@ class InstalledVllmAdmissionTests(GateFreeCase):
                     self.assertEqual(admitted.num_scheduled_tokens, {'B': 1024})
                 self.assertEqual(asked, [1024, 1024])
                 self.assertEqual(scheduler.max_num_running_reqs, 4)
-                self.assertIn(call(admission.DRAM_HOLD_LINE, 1024, '900.0MB', '1300.0MB', 'B', 1), log.call_args_list)
+                self.assertIn(call(admission.DRAM_HOLD_LINE, 1024, '900.0MB', '1300.0MB', 'B', 1, *UNREAD),
+                              log.call_args_list)
 
     def test_a_deferred_admission_behind_a_finish_leaves_the_finish_in_the_decode_step(self):
         """S2 W6b on vLLM's own finished_req_ids: A and B decode, A finishes, and C waits on a reading that still

@@ -104,7 +104,7 @@ NOT_COMPARABLE (real_text_compare.S2_EXACT_CLAIMS); --policy dc-i (the user's de
            and fused-commit audits too (G4_ALL_AUDITS; --audits all adds them to the other G4 plans) and needs a
            packed round of two families, short the one-bucket ladder (2048,) - on every engine line and on the
            executed path's 'proposal buckets built' lines - no DRAM hold with a seat free, no lifted hold or
-           refusal and the before-point floor (FLOOR_GB), boundaries
+           refusal and the before-point floors (FLOOR_GB and RESERVE_GB, the S2 admission's split), boundaries
            (ignore_eos, 8192 out) cap events and BOUNDARY_MIN_CROSSINGS 256-key crossings per user, staggered
            (STAGGER_SECONDS apart) padded rounds at two or three live and a padded-probe arm.
   churn    M11, G5: CHURN_LENGTHS (12 users, 8 replacements) over four seats, each user's seat freed and
@@ -249,7 +249,14 @@ CONTROL_TOLERANCE = 1.02         # flag-on median four-live round against flag-o
 CONTROL_AUDIT_ARM = 'control-audit'   # G3's audited flag-on arm: exactness and the audit, never timed
 FORCE_CAP = 8
 GENERAL_RATE, TARGET_RATE = 13.0, 27.0   # tok/s per user at four live: general's (MEM goal-c2-serving.md:11), S2's aim
-FLOOR_GB = 0.25                  # before-point floor, GB per chip (s2-design 3.3, M8)
+# The before-point floors, GB per chip (s2-design 3.3, M8), on the S2 admission's split (serving_prefill_admission;
+# gate v79, GitHub run 36368363993, where replacement engines were built wholly in the holes departed users left):
+# every point's free less the stranded bytes less its operation's estimate at least FLOOR_GB, and its largest free
+# block less the largest single buffer at least RESERVE_GB, the coordinator's DRAM reserve (256 MiB,
+# dflash_packed_proposal_coordinator.DRAM_RESERVE_DEFAULT_MB), the one the profiles serve. v79's floor was the largest
+# block less the estimate: admitting at its 1079.7 MB block would have read 79.7 MB ahead of the engine build.
+FLOOR_GB = 0.25
+RESERVE_GB = 256 * 2 ** 20 / 1e9
 MIXED_LENGTHS = (1536, 20000, 60000, 120000)       # M7's first set; the second, 5000,40000,90000,123136, by --lengths
 SHORT_LENGTHS = (60, 255, 2047, 120000)
 BOUNDARY_LENGTHS = (8192, 30000, 70000, 110000)
@@ -1319,9 +1326,11 @@ def memory_s2_checks(label, report, seats=MEMORY_USERS):
     decodes); its first cut asked with every seat decoding too, where a hold changes nothing (the prompt could not
     be admitted anyway - churn has more users than seats), and such a line is no failure. A deferred step (a stale
     reading, harness.DRAM_DEFERRED_MARKER) is no hold. Also: no lifted hold (admitted with nothing left to wait
-    for) and no refused request; the before-point floor (W6d's margins, a negative one included, and the prefill
-    points) at least FLOOR_GB per chip. A hold or a before-point that read no DRAM, or no engine before-point
-    under the flag, leaves the floor unjudged: a shortfall, never a pass."""
+    for) and no refused request; the before-point floors of the S2 admission's split over W6d's points and the
+    prefill points (harness.before_points): the free less the stranded bytes less the estimate at least FLOOR_GB
+    per chip, a negative one included, and the largest free block less the largest single buffer at least
+    RESERVE_GB. A hold or a before-point that read no DRAM, or no engine before-point under the flag, leaves the
+    floors unjudged: a shortfall, never a pass."""
     s2 = s2_of(report)
     if not s2:
         return [], []
@@ -1345,9 +1354,20 @@ def memory_s2_checks(label, report, seats=MEMORY_USERS):
     if before.get('floor_gb') is None:
         problems.append('%s: no ledger before-point carries an estimate: the floor cannot be judged' % label)
     elif before['floor_gb'] < FLOOR_GB:
-        problems.append('%s: before-point floor %.3f GB per chip, below %.2f (%s %s chip%s)' % (
-            label, before['floor_gb'], FLOOR_GB, (before.get('floor_point') or {}).get('op'),
-            (before.get('floor_point') or {}).get('detail'), (before.get('floor_point') or {}).get('chip')))
+        problems.append('%s: before-point floor %.3f GB per chip (free less the stranded bytes less the estimate), '
+                        'below %.2f (%s %s chip%s)' % (
+                            label, before['floor_gb'], FLOOR_GB, (before.get('floor_point') or {}).get('op'),
+                            (before.get('floor_point') or {}).get('detail'),
+                            (before.get('floor_point') or {}).get('chip')))
+    if before.get('floor_gb') is not None and before.get('contiguous_floor_gb') is None:
+        problems.append('%s: no ledger before-point carries a largest free block: the contiguous floor cannot be '
+                        'judged' % label)
+    elif before.get('contiguous_floor_gb') is not None and before['contiguous_floor_gb'] < RESERVE_GB:
+        point = before.get('contiguous_point') or {}
+        problems.append('%s: before-point contiguous floor %.3f GB per chip (the largest free block less the largest '
+                        'buffer), below the %.3f GB reserve (%s %s chip%s)' % (
+                            label, before['contiguous_floor_gb'], RESERVE_GB, point.get('op'), point.get('detail'),
+                            point.get('chip')))
     if before.get('unread'):
         shortfalls.append('%s: %d ledger before-points read no DRAM (%s): the floor over them is unjudged' % (
             label, before['unread'], '; '.join(before.get('unread_lines') or [])))
@@ -1766,8 +1786,25 @@ def run_churn(plan, runner, profiles, arms):
         'quads, %s pairs); trace region %s' % (
             releases.get('departures'), releases.get('quad_departures'),
             (releases.get('quad_departures') or 0) - (releases.get('unreleased') or 0), replacements,
-            releases.get('lines'), releases.get('quad'), releases.get('pairs'), trace_region_text(region))])
+            releases.get('lines'), releases.get('quad'), releases.get('pairs'), trace_region_text(region)),
+        full_seat_admissions_text((s2.get('dram_hold') or {}).get('fit_readings'), seats)])
     return with_checks(result, problems, shortfalls, facts)
+
+
+def full_seat_admissions_text(fits, seats):
+    """The split's admissions with every other seat decoding (the replacements M11 churns, gate v79's holds), as a
+    line: how many, and the smallest largest DRAM block and trace-region block they were admitted beside, so a
+    fragmentation ratchet across the cycles shows (recorded, not judged)."""
+    full = [fit for fit in fits or [] if fit.get('decodes') == seats - 1]
+    if not full:
+        return 'admissions at decodes=%d: none logged' % (seats - 1)
+
+    def smallest(key):
+        values = [fit[key] for fit in full if fit.get(key) is not None]
+        return '%.4f GB' % min(values) if values else 'unread'
+
+    return 'admissions at decodes=%d: %d, smallest largest block %s, smallest trace-region block %s, smallest free %s' % (
+        seats - 1, len(full), smallest('largest_free_gb'), smallest('trace_largest_free_gb'), smallest('free_gb'))
 
 
 def run_permuted(plan, runner, arms):

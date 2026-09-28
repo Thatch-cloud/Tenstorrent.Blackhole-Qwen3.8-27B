@@ -82,14 +82,33 @@ Two timing facts of vLLM 0.25.1 and the plugin shape it:
   schedules (serving_vllm_packed.ordered_tickets refuses that set). So after a DRAM-held pass the plugin
   discards, the wrapper puts the ids back (carry_finished) for the decode-only pass to carry.
 The need is ONE set of defaults, here (dram_need): the engine build's resident cost and transient margin, the
-prefill transient of a prompt of PREFILL_TRANSIENT_FROM tokens or more, and the coordinator's DRAM reserve,
-against the SMALLEST largest free block over the chips (largest_free), never the total free. No predicate, an
-unreadable one, or a reading that is unavailable holds nothing: the rule above, call for call.
-    [PINDIAG] dram hold prompt=<n> largest_free=<MB> need=<MB> request=<id> decodes=<d>   once per (request, decodes)
+prefill transient of a prompt of PREFILL_TRANSIENT_FROM tokens or more, and the coordinator's DRAM reserve.
+THE SPLIT (G5 churn, gate v79, GitHub run 36368363993). The need used to be asked of the smallest largest free
+block alone, as if an engine were one buffer. An engine is some 1,400 buffers per chip (the ledger's
+engine_request item: 2,134 to 3,416 over the two chips), and v79 built replacement engines wholly in the holes
+departed users left, the largest block unchanged (its engine5, engine8 and engine9; v70 and v71 once each). At
+each of v79's holds with three decoding, 2.319 GB per chip was free - 1.48 times the 1568.4 MB need - beside a
+largest block of 1079.7, 1320.7 or 1321.8 MB: fragmented, not short, and the hold failed G5 with a seat free.
+So a reading now fits only when all three terms hold (split_short), each on the smallest chip:
+  free        the total free less STRANDED_BYTES (what no request can use) covers the need, whose 200 MB build
+              margin stays in it;
+  contiguous  the largest free block holds the reserve plus LARGEST_BUFFER_BYTES (contiguous_need): the one
+              buffer that must land in one block, with the reserve still free beside it;
+  trace       the trace region's largest free block holds TRACE_CONTIGUOUS_BYTES (an engine's traces), where the
+              pool can read the region; where it cannot, this term holds nothing.
+The bridge's backstop (serving_request_factory.dram_backstop) and the proposal coordinator's fresh pair and quad
+captures and its pair release (dflash_packed_proposal_coordinator.capture_headroom, under the same flag) apply
+the same terms. No predicate, an unreadable one, or a reading that is unavailable holds nothing: the rule above,
+call for call.
+    [PINDIAG] dram hold prompt=<n> largest_free=<MB> need=<MB> request=<id> decodes=<d> free=<MB>
+        trace_largest_free=<MB> short=<terms>                                         once per (request, decodes)
     [PINDIAG] dram hold released prompt=<n> ...                                        once, when it fits
     [PINDIAG] dram hold lifted prompt=<n> ...                                          no decode left to wait for
-    [PINDIAG] dram admission deferred one step prompt=<n> ... finished=[<ids>]         a stale reading, not a hold
+    [PINDIAG] dram admission deferred one step prompt=<n> ... finished=[<ids>] ...     a stale reading, not a hold
     [PINDIAG] dram admission carried finished=[<ids>] ...                              the ids put back
+    [PINDIAG] dram admission fit prompt=<n> ... decodes=<d> free=<MB> ...              once per request admitted
+                                                                                       without a hold: the reading
+                                                                                       it was admitted on (M11)
 Only lines that start with DRAM_HOLD are holds (what a gate counts). Each state logs once; the state kept to
 decide that is the held (request, decodes) and the last line noted, so it stays bounded whatever the traffic.
 """
@@ -112,21 +131,44 @@ LIVE = '[PINDIAG] one fresh prefill per step live in '
 # lines the hold logs (DRAM_HOLD is the prefix a gate counts).
 DRAM_KEY = '_qwen_dram_admission'
 DRAM_HOLD = '[PINDIAG] dram hold prompt='
-DRAM_HOLD_LINE = DRAM_HOLD + '{} largest_free={} need={} request={} decodes={}'
-DRAM_RELEASED_LINE = '[PINDIAG] dram hold released prompt={} largest_free={} need={} request={}'
-DRAM_LIFTED_LINE = ('[PINDIAG] dram hold lifted prompt={} largest_free={} need={} request={}: no decode is left to '
-                    'free DRAM, so the prompt is admitted and the bridge backstop decides')
+# The first five fields keep the order a gate parses (lever_n_m3native_gate.DRAM_HOLD_LINE); the split's readings
+# follow them (the module docstring).
+DRAM_HOLD_LINE = DRAM_HOLD + '{} largest_free={} need={} request={} decodes={} free={} trace_largest_free={} short={}'
+DRAM_RELEASED_LINE = ('[PINDIAG] dram hold released prompt={} largest_free={} need={} request={} free={} '
+                      'trace_largest_free={}')
+DRAM_LIFTED_LINE = ('[PINDIAG] dram hold lifted prompt={} largest_free={} need={} request={} free={} short={}: no '
+                    'decode is left to free DRAM, so the prompt is admitted and the bridge backstop decides')
 DRAM_UNAVAILABLE_LINE = '[PINDIAG] dram hold unavailable request={}: {} (not held)'
 DRAM_DEFERRED_LINE = ('[PINDIAG] dram admission deferred one step prompt={} largest_free={} need={} request={} '
-                      'finished={}: the reading still counts their engines, which this step detaches first')
+                      'finished={} free={} short={}: the reading still counts their engines, which this step '
+                      'detaches first')
 DRAM_CARRIED_LINE = ('[PINDIAG] dram admission carried finished={} past the discarded prefill pass into the '
                      'decode-only step')
+DRAM_FIT_LINE = ('[PINDIAG] dram admission fit prompt={} largest_free={} need={} request={} decodes={} free={} '
+                 'trace_largest_free={}')
 MEGABYTE = 10 ** 6
 # The need: one set of defaults, per chip (s2-design.md section 3.2 item 2). M8 and M11 calibrate them.
 ENGINE_BUILD_BYTES = 800 * MEGABYTE          # (m) an engine with one 2048 proposal bucket (v26, run 36218104858)
 ENGINE_BUILD_MARGIN_BYTES = 200 * MEGABYTE   # (e) the build's transient above what stays resident
 PREFILL_TRANSIENT_BYTES = 300 * MEGABYTE     # (e, UNVERIFIED Q8) the prefill of a long prompt beside the block
 PREFILL_TRANSIENT_FROM = 2048                # prompts shorter than this: no prefill transient (e)
+# THE SPLIT's terms (the module docstring; gate v79, GitHub run 36368363993, gate/churn/server.log), per chip.
+# (m) Free DRAM no request can use, left out of the free term. With no user live v79 read free 4.490 GB beside a
+# largest block of 4191.7 MB (298.3 MB apart; 4.489 GB and 4190.5 MB, 298.5 MB, at its end): the first prefill's
+# model_after_prefill (161 MB in 742 buffers) stays resident for the process among small holes. Rounded up.
+STRANDED_BYTES = 300 * MEGABYTE
+# (e, UNVERIFIED Q8/Q9) The largest single buffer an engine build, a long prefill or a proposal capture allocates:
+# never measured, so a conservative bound until the ledger's per-item largest= (memory_ledger) measures it. The
+# largest sized in source is 21.3 MB (a single-user capture's (1,1,2080,5120) bf16 history; the prepare_publication
+# transient is 20.97 MB). With the 256 MiB reserve the largest block must hold 396.4 MB (contiguous_need); v79's
+# smallest largest block at any hold or before point was 673.2 MB.
+LARGEST_BUFFER_BYTES = 128 * MEGABYTE
+# (m) The trace region's largest free block an engine build needs: each v79 engine's traces took 41.6 MB (its
+# ledger's trace_used, 39.6 to 81.2 MB across one build), and at the holds with three decoding the region's largest
+# free block read 49.0 MB (its before points at 02:14:03 and 02:17:29). 44 MB leaves 2.4 MB over the traces;
+# 48 MB would leave 1 MB of v79's reading, so a slightly worse layout would hold again.
+TRACE_CONTIGUOUS_BYTES = 44 * MEGABYTE
+SPLIT_TERMS = ('free', 'contiguous', 'trace')
 
 
 def _log(message, *values):
@@ -189,10 +231,34 @@ def backstop_need(reserve):
     return engine_build_peak() + _reserve(reserve)
 
 
+def contiguous_need(reserve):
+    """THE SPLIT's contiguous term: the largest free block must hold the largest single buffer and leave the
+    reserve beside it (396.4 MB at the 256 MiB default)."""
+    return _reserve(reserve) + LARGEST_BUFFER_BYTES
+
+
+def split_short(free, largest, need, reserve, trace_largest=None):
+    """The terms of THE SPLIT (the module docstring) a reading is short of, in SPLIT_TERMS order; () when it fits.
+
+    free and largest are the smallest chip's total free and largest free DRAM block; need what the operation needs
+    with the reserve in it (dram_need, backstop_need, or a capture's estimate plus the reserve); trace_largest the
+    smallest chip's largest free trace-region block, None where it cannot be read (that term then holds nothing).
+    Gate v79 (run 36368363993) held 2.319 GB free beside a 1079.7 MB largest block against a 1568.4 MB need: free
+    less STRANDED_BYTES is 2019 MB, the block holds the 396.4 MB contiguous need, so it fits."""
+    short = []
+    if free - STRANDED_BYTES < need:
+        short.append('free')
+    if largest < contiguous_need(reserve):
+        short.append('contiguous')
+    if trace_largest is not None and trace_largest < TRACE_CONTIGUOUS_BYTES:
+        short.append('trace')
+    return tuple(short)
+
+
 def largest_free(pool):
     """(the smallest largest-free-DRAM-block over the chips, None), read through the pool's allocator
     statistics (serving_buffer_pool.ServingBufferPool.dram_statistics), or (None, why) when they cannot be read.
-    Never the total free: a buffer needs one contiguous block."""
+    THE SPLIT reads it beside the total free (dram_reading)."""
     statistics = getattr(pool, 'dram_statistics', None)
     if not callable(statistics):
         return None, 'pool without device statistics'
@@ -205,18 +271,56 @@ def largest_free(pool):
         return None, '%s: %s' % (type(failure).__name__, str(failure)[:120])
 
 
+def trace_largest_free(pool):
+    """(the smallest largest free trace-region block over the chips, None), read through the pool's
+    trace_statistics (serving_buffer_pool.ServingBufferPool.trace_statistics, a BufferType.TRACE view), or
+    (None, why) when the pool or this ttnn cannot read the region."""
+    statistics = getattr(pool, 'trace_statistics', None)
+    if not callable(statistics):
+        return None, 'pool without trace statistics'
+    try:
+        report = statistics()
+        if isinstance(report, dict):
+            return None, str(report.get('unavailable', 'no statistics'))
+        return min(int(chip['largest_free']) for chip in report), None
+    except Exception as failure:
+        return None, '%s: %s' % (type(failure).__name__, str(failure)[:120])
+
+
+def dram_reading(pool):
+    """(reading, None), or (None, why) when the pool's DRAM statistics cannot be read: what THE SPLIT reads, the
+    smallest free and the smallest largest free block over the chips (free, largest_free), and the trace region's
+    smallest largest free block (trace_largest_free, None when unread, trace_unread saying why)."""
+    statistics = getattr(pool, 'dram_statistics', None)
+    if not callable(statistics):
+        return None, 'pool without device statistics'
+    try:
+        report = statistics()
+        if isinstance(report, dict):
+            return None, str(report.get('unavailable', 'no statistics'))
+        reading = dict(free=min(int(chip['free']) for chip in report),
+                       largest_free=min(int(chip['largest_free']) for chip in report))
+    except Exception as failure:
+        return None, '%s: %s' % (type(failure).__name__, str(failure)[:120])
+    reading['trace_largest_free'], reading['trace_unread'] = trace_largest_free(pool)
+    return reading, None
+
+
 def dram_predicate(pool, reserve):
     """The predicate the worker registers, admits(prompt_tokens) -> (ok, detail): ok is False only when the
-    pool's reading exists and its largest free block is below dram_need. An unavailable reading admits, and
-    detail['unavailable'] says why (the attach refuses a pool without statistics under the flag, W7)."""
+    pool's reading exists and is short of a term of THE SPLIT for dram_need (detail['short'] names them). An
+    unavailable reading admits, and detail['unavailable'] says why (the attach refuses a pool without statistics
+    under the flag, W7)."""
     _reserve(reserve)
 
     def admits(prompt_tokens):
         need = dram_need(prompt_tokens, reserve)
-        largest, reason = largest_free(pool)
-        if largest is None:
+        reading, reason = dram_reading(pool)
+        if reading is None:
             return True, dict(largest_free=None, need=need, unavailable=reason)
-        return largest >= need, dict(largest_free=largest, need=need)
+        short = split_short(reading['free'], reading['largest_free'], need, reserve, reading['trace_largest_free'])
+        return not short, dict(largest_free=reading['largest_free'], need=need, free=reading['free'],
+                               trace_largest_free=reading['trace_largest_free'], short=short)
 
     return admits
 
@@ -321,7 +425,14 @@ def finished_since_last_step(scheduler):
 
 
 def _megabytes(value):
-    return '%.1fMB' % (value / MEGABYTE)
+    return 'unread' if value is None else '%.1fMB' % (value / MEGABYTE)
+
+
+def _terms(short):
+    """THE SPLIT's short terms for a log line: 'free+contiguous', 'none', or 'unread' (a predicate that names none)."""
+    if short is None:
+        return 'unread'
+    return '+'.join(short) if short else 'none'
 
 
 def _note(state, log, key, template, *values):
@@ -350,8 +461,11 @@ def dram_hold(scheduler, decodes, state, log, modules=None):
     try:
         ok, detail = admits(prompt)
         largest, need, unavailable = detail['largest_free'], detail['need'], detail.get('unavailable')
+        # THE SPLIT's readings (dram_predicate); a predicate that names none logs them 'unread'.
+        free, trace, short = detail.get('free'), detail.get('trace_largest_free'), detail.get('short')
     except Exception as failure:
         ok, largest, need, unavailable = True, None, None, '%s: %s' % (type(failure).__name__, str(failure)[:120])
+        free = trace = short = None
     if largest is None:
         _note(state, log, ('unavailable', request_id), DRAM_UNAVAILABLE_LINE, request_id, unavailable or 'no reading')
         return False
@@ -359,23 +473,30 @@ def dram_hold(scheduler, decodes, state, log, modules=None):
     if ok:
         if held is not None and held[0] == request_id:
             state['dram_held'] = None
-            log(DRAM_RELEASED_LINE, prompt, _megabytes(largest), _megabytes(need), request_id)
+            log(DRAM_RELEASED_LINE, prompt, _megabytes(largest), _megabytes(need), request_id, _megabytes(free),
+                _megabytes(trace))
+        else:
+            # The reading a prompt was admitted on without a hold, once per request: under churn (M11) the heap and
+            # the trace region no longer drain between cycles, so each admission's reading is what shows a ratchet.
+            _note(state, log, ('fit', request_id), DRAM_FIT_LINE, prompt, _megabytes(largest), _megabytes(need),
+                  request_id, decodes, _megabytes(free), _megabytes(trace))
         return False
     finished = finished_since_last_step(scheduler)
     if finished:
         # Stale: this step's output names them, and the worker frees their engines before any prefill in it. Wait
         # one step for a reading without them; this is not a hold, so neither the hold line nor the held state.
         _note(state, log, ('deferred', request_id, finished), DRAM_DEFERRED_LINE, prompt, _megabytes(largest),
-              _megabytes(need), request_id, list(finished))
+              _megabytes(need), request_id, list(finished), _megabytes(free), _terms(short))
         return True
     if not decodes:
         state['dram_held'] = None
         _note(state, log, ('lifted', request_id), DRAM_LIFTED_LINE, prompt, _megabytes(largest), _megabytes(need),
-              request_id)
+              request_id, _megabytes(free), _terms(short))
         return False
     if held != (request_id, decodes):
         state['dram_held'] = (request_id, decodes)
-        log(DRAM_HOLD_LINE, prompt, _megabytes(largest), _megabytes(need), request_id, decodes)
+        log(DRAM_HOLD_LINE, prompt, _megabytes(largest), _megabytes(need), request_id, decodes, _megabytes(free),
+            _megabytes(trace), _terms(short))
     return True
 
 

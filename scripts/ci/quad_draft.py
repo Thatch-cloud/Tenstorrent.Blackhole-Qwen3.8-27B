@@ -81,6 +81,7 @@ DISABLED_MARKER = '[PINDIAG] quad draft disabled'
 ROUND_LINE = '[QUAD-DRAFT] round={round} built={built} ms={ms}'
 FALLBACK_LINE = '[QUAD-DRAFT] fallback round={round} reason={reason}'
 RELEASE_LINE = '[QUAD-DRAFT] released pairs={pairs} headroom={headroom}'
+RELEASE_SPLIT_LINE = RELEASE_LINE + ' free={free} short={short}'
 # %-templates: QWEN_FAST_PAIR_MASK_AUDIT's read-back of the quad's mask, and the shadow audit.
 MASK_AUDIT_LINE = '[QUAD-DRAFT] mask round=%s intact=%d mismatched=%d chip=%d'
 AUDIT_LINE = '[QUAD-AUDIT] round=%s equal=%d stage=%s users=%d checks=%d'
@@ -108,10 +109,13 @@ CONV_VARIANTS = {
 }
 # A fresh quad capture's DRAM per chip: placeholders ~0.2 MB plus the trace-retained intermediates, 0.3-0.45 GB
 # (est., plan section 3.9). The coordinator refuses a fresh build below this plus the packed reserve; the
-# quad_built ledger point measures the real figure.
+# quad_built ledger point measures the real figure (gate v79, run 36368363993: 427.3-428.3 MB). The headroom is
+# the largest free block, or under QWEN_FAST_EXTENT_REPLAY=1 the S2 admission's split (dflash_packed_proposal_
+# coordinator.capture_headroom): the free less the stranded bytes, and a block for the largest buffer and reserve.
 QUAD_CAPTURE_BYTES_EST = 450 * 2 ** 20
 # Plan section 3.9: below this free after the quad captures, the pair traces are released (rebuilt at the next
-# 3-live round, 81-143 ms measured) - never while the audit needs them.
+# 3-live round, 81-143 ms measured) - never while the audit needs them. The free read is capture_headroom's, as
+# for the build; under the S2 split the release line carries the free and the short terms (RELEASE_SPLIT_LINE).
 PAIR_RELEASE_BELOW_BYTES = 600 * 10 ** 6
 GIVE_UP_FAILURES = 2
 _NOTED = []
