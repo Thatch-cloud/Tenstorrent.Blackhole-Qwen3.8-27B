@@ -58,6 +58,32 @@ SINGLE_REASONS = ('ramp', 'unpackable', 'absent', 'split', 'dram_reserve', 'fail
 # regression that would capture a new bucket nearly every round of the ramp (and hold its DRAM).
 PAIR_BUCKET_CONTEXT = (PACKED_CONTEXT, PACKED_CONTEXT)
 
+
+def pooled_draft_mask_shapes(users, block_rows):
+    """S2 (serving_buffer_pool's `draft_masks=`, which serving_runtime passes at attach under
+    QWEN_FAST_EXTENT_REPLAY=1): {slot group: mask shape} for every packed draft a pool of `users` scheduler slots
+    can build - each fixed pair (dflash_packed_proposal.FOUR_AS_TWO_PAIRS) whose slots all exist, at the one
+    bucket a pair builds (PAIR_BUCKET_CONTEXT, QWEN_FAST_PAIR_ROW_EXACT deciding the fold as the bucket will),
+    and the quad over slots 0-3 while QWEN_FAST_QUAD_DRAFT is on - so each borrows a mask allocated before any
+    trace instead of uploading its own after them (M0). {} with QWEN_FAST_PACKED_PROPOSAL off: no pair forms."""
+    if os.environ.get('QWEN_FAST_PACKED_PROPOSAL') != '1':
+        return {}
+    from dflash_packed_proposal import FOUR_AS_TWO_PAIRS
+    from dflash_proposal_trace import pair_host_mask
+
+    shapes = {}
+    pair_shape = tuple(pair_host_mask(*PAIR_BUCKET_CONTEXT, block_rows)[0].shape)
+    for group in FOUR_AS_TWO_PAIRS:
+        if max(group) < users:
+            shapes[tuple(group)] = pair_shape
+    if os.environ.get(QUAD_DRAFT_FLAG, '0') != '0':
+        import quad_draft
+
+        if max(quad_draft.SLOTS) < users and block_rows == quad_draft.BLOCK:
+            shapes[tuple(quad_draft.SLOTS)] = tuple(quad_draft.quad_host_mask().shape)
+    return shapes
+
+
 DRAM_RESERVE_FLAG = 'QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB'
 DRAM_RESERVE_DEFAULT_MB = 256
 

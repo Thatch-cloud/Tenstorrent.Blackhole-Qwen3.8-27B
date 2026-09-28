@@ -108,6 +108,20 @@ exists for, so both are allocated here, zeroed, before any trace, and lent once 
 PackedExtentStorage (`packed_extent(users, rows)`). The per-family tables are not built at all:
 the family set collapses to C, and the per-request bucket slots must hold no replay width (they
 capture at 1, 2 and 4 rows beside the block), since their pinned readers would need the families.
+
+AND THE PACKED DRAFTS' MASKS (S2, `draft_masks=`, which serving_runtime passes only under
+QWEN_FAST_EXTENT_REPLAY=1 with packed proposals on). A packed pair (dflash_proposal_trace
+.PreparedPackedDFlashProposal) and the quad (quad_draft) upload their draft attention mask once, at
+their lazy bucket build, and every replay reads it from then on: the one input of theirs not
+rewritten before each replay. They build long after the request traces exist, so the mask landed in
+an earlier trace's freed holes, and that trace's replay - the per-request verify and commit traces
+replay only in sequential rounds - overwrote it (M0; run 36358821640 read the whole 133 KB mask of
+pair [2, 3] wrong on both chips right after the run's first sequential round, 2026-09-24's run
+35961180350 the same). One mask buffer per slot group that can pack - (0, 1) and (2, 3) for the pairs,
+(0, 1, 2, 3) for the quad - of the shape its bucket builds, zeroed here, before any trace. The group's
+trace borrows it (`draft_mask(group, shape)`), copies its host mask in at the build, and never frees
+it; a later trace of the same group borrows it again. Not taken or returned: the coordinator holds at
+most one trace per group.
 """
 
 from types import SimpleNamespace
@@ -167,6 +181,24 @@ def validate_packed_shapes(shapes):
         raise ValueError('Packed replay shapes must be distinct (users, rows_per_user) pairs of T8/T16/T32 users '
                          'filling one legal block width up to %d rows' % PACKED_BLOCK_ROWS)
     return shapes
+
+
+def validate_draft_masks(draft_masks, users):
+    """`draft_masks` as {slot group: shape}: each group two or more distinct pool slots in increasing order,
+    each shape four positive integers. None or empty: {} (no mask is pooled)."""
+    if not draft_masks:
+        return {}
+    try:
+        masks = {tuple(group): tuple(shape) for group, shape in dict(draft_masks).items()}
+    except (TypeError, ValueError):
+        raise ValueError('Draft masks must map slot groups to shapes') from None
+    for group, shape in masks.items():
+        if (len(group) < 2 or any(type(slot) is not int or not 0 <= slot < users for slot in group)
+                or list(group) != sorted(set(group)) or len(shape) != 4
+                or any(type(size) is not int or size < 1 for size in shape)):
+            raise ValueError('Draft masks need groups of two or more distinct increasing pool slots below %d and '
+                             '4-D shapes: %r -> %r' % (users, group, shape))
+    return masks
 
 
 def overlaps(left, right):
@@ -424,7 +456,8 @@ class ServingBufferPool:
 
     def __init__(self, operations, mesh, *, users, helpers=None, page_width=None, bucket_rows=(),
                  feature_taps=0, rope=None, mtp_hidden=False, replay_group_rows=4, replay_capacities=None,
-                 packed_shapes=None, packed_replicas=None, packed_replay_group_rows=None, extent_replay=False):
+                 packed_shapes=None, packed_replicas=None, packed_replay_group_rows=None, extent_replay=False,
+                 draft_masks=None):
         import torch
 
         if type(extent_replay) is not bool:
@@ -444,6 +477,7 @@ class ServingBufferPool:
         if type(users) is not int or not 1 <= users <= NATIVE_GDN_SLOTS:
             raise ValueError('Explicit scheduler request count within the %d native GDN slots required'
                              % NATIVE_GDN_SLOTS)
+        draft_masks = validate_draft_masks(draft_masks, users)
         bucket_rows = tuple(bucket_rows)
         if helpers is not None:
             # The packed block's per-user replay tables: by default every packed shape this
@@ -533,6 +567,7 @@ class ServingBufferPool:
         self.owned, self.slots = [], []
         self.packed, self.packed_bytes = {}, 0
         self.extent = {}
+        self.draft_masks, self.draft_mask_bytes = {}, 0
         self.closed = False
         try:
             protected = []
@@ -634,6 +669,12 @@ class ServingBufferPool:
                               for capacity in replay_capacities}
                     self.packed[(count, rows)].append(PackedReplayTables(count, rows, tables))
                     self.packed_bytes += counted[0]
+            # The packed drafts' masks (the docstring's last section), after everything above so no
+            # other pooled buffer moves: replicated tiled BF16 zeros, each group's own.
+            counted[0] = 0
+            for group, shape in sorted(draft_masks.items()):
+                self.draft_masks[group] = allocate(shape)
+            self.draft_mask_bytes = counted[0]
             operations.synchronize_device(mesh)
         except BaseException:
             self.close()
@@ -671,6 +712,17 @@ class ServingBufferPool:
             raise ValueError('The pool holds packed extent storage for shapes %r; %r was asked for'
                              % (sorted(self.extent), (users, rows)))
         return next((storage for storage in candidates if not storage.taken), candidates[-1])
+
+    def draft_mask(self, group, shape):
+        """The pre-trace mask buffer this pool holds for a packed draft over `group` (its pool slots), when it holds
+        one of `shape`; else None, and the draft uploads its own as before. Lent for the pool's life to whichever
+        trace of the group asks: the trace copies its mask in and never frees it."""
+        if self.closed:
+            return None
+        held = self.draft_masks.get(tuple(group))
+        if held is None or tuple(held.shape) != tuple(shape):
+            return None
+        return held
 
     def acquire(self, *, owner='unnamed'):
         if self.closed:
@@ -727,6 +779,11 @@ class ServingBufferPool:
                 # Only under extent_replay: flag off, the attach line reads exactly as before.
                 **({} if not self.extent_replay else dict(extent_replay=True, packed_extent=[
                     storage.describe(self.operations) for group in self.extent.values() for storage in group])))
+        if self.draft_masks:
+            # Only with draft_masks: without them the attach line reads exactly as before.
+            report.update(draft_mask_bytes=self.draft_mask_bytes, draft_masks=[
+                dict(group=list(group), shape=list(tensor.shape), addresses=list(addresses(self.operations, tensor)))
+                for group, tensor in sorted(self.draft_masks.items())])
         return report
 
     def close(self):
@@ -740,5 +797,6 @@ class ServingBufferPool:
         self.slots.clear()
         self.packed.clear()
         self.extent.clear()
+        self.draft_masks.clear()
         if lent:
             raise ValueError('Serving buffer pool closed with slots %r still lent' % lent)

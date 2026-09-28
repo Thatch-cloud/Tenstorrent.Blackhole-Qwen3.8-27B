@@ -1117,6 +1117,10 @@ def quad_devices(ops, *, context=2048):
     return made
 
 
+def addresses_of(tensor):
+    return tuple(shard.buffer_address() for shard in tensor.shards)
+
+
 def live_banks(*devices):
     return [[{name: layer[name] for name in ('k', 'v')} for layer in device.kv_history.active] for device in devices]
 
@@ -1239,6 +1243,36 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(len(masks), 6)
         for chip in bucket.mask.chips:
             self.assertTrue(same_bits(chip, bucket.host_mask), 'the refresh healed it')
+
+    def test_the_quad_borrows_the_pools_pre_trace_mask(self):
+        """S2 M0: with the pool holding a mask for slots 0-3 (serving_buffer_pool draft_masks=), the quad copies its
+        host mask into it and never uploads or frees one of its own; without one, the build is today's."""
+        from test_dflash_proposal_trace import RecordingOps
+
+        ops = RecordingOps()
+        devices = quad_devices(ops)
+        held = ops.from_torch(torch.zeros(1, 1, 32, 2080, dtype=torch.bfloat16), device='mesh', dtype='bf16', layout='tile')
+        pool = SimpleNamespace(draft_masks={(0, 1, 2, 3): held},
+                               draft_mask=lambda group, shape: held if (tuple(group), tuple(shape)) == ((0, 1, 2, 3),
+                                                                                                     tuple(held.shape)) else None)
+        for index, device in enumerate(devices):
+            device.pool_slot = SimpleNamespace(index=index, pool=pool)
+        trace = quad_draft.PreparedQuadDFlashProposal(devices)
+        lines, loguru = logged()
+        with loguru, patch('memory_ledger.record') as ledger:
+            self.assertTrue(trace.prepare_device((11, 22, 33, 44)))
+        bucket = trace.buckets[(2048,) * 4]
+        self.assertIs(bucket.mask, held)
+        self.assertEqual(bucket.lent_mask, (held,))
+        self.assertTrue(same_bits(held.chips[0], bucket.host_mask) and same_bits(held.chips[1], bucket.host_mask))
+        uploads = [event[1][1] for event in ops.events if event[0] == 'from_torch' and event[2] is True]
+        self.assertEqual(uploads, [(1, 1, 32, 2080), (1, 64), (1, 1, 64, 128), (1, 1, 64, 128), (1, 1, 64, 128),
+                                   (1, 1, 64, 128)], "the test's own pool mask, then no mask of the quad's")
+        self.assertNotIn(held, ledger.call_args.kwargs['quad_placeholders'])
+        self.assertIn('[PINDIAG] draft mask pooled slots=[0,1,2,3] shape=1x1x32x2080', lines)
+        self.assertIn(addresses_of(held), devices[0].validated_native_proposal_masks)
+        trace.close()
+        self.assertFalse([event for event in ops.events if event[0] == 'deallocate' and event[1] == ops.normalize(held)])
 
     def test_prepare_collect_adopt_finish(self):
         ops, devices, trace = self.build()
@@ -2532,7 +2566,9 @@ class ShippingTests(unittest.TestCase):
                                            'draft_convolution_fused_compute.cpp', 'dflash_proposal_inputs.py',
                                            'draft_head_preparation.py', 'draft_convolution_fused_io.cpp',
                                            'draft_convolution_fused.py', 'draft_convolution.py', 'pair_row_exact.py',
-                                           'dflash_proposal_trace.py', 'fused_commit.py', 'serving_bundle.py']), '')
+                                           'fused_commit.py', 'serving_bundle.py']), '')
+        # dflash_proposal_trace.py left this list with S2 M0 (the pooled draft masks): it is in both P8 copy lists
+        # and docker/qwen-c2-overlay.txt, so an edit reaches the image.
 
     def test_the_serving_bundle_inventorys_eight_files_are_untouched(self):
         """Plan section 4.1: serving_bundle.package's critical staged-source inventory. model_batch.py

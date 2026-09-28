@@ -69,6 +69,63 @@ def _live_bank_history(device_a, device_b):
     return live_bank_history(device_a, device_b)
 
 
+# S2 (serving_buffer_pool's last section, draft_masks=): a packed draft whose pool holds a mask buffer for its
+# slots, allocated at attach before any trace, borrows it instead of uploading its own mask at its lazy build -
+# after the request traces exist, where their sequential-round replays overwrote it (M0; run 36358821640, pair
+# [2, 3] from its first sequential round). The build copies the host mask in; the trace never frees it. One
+# POOLED_MASK_LINE per build that borrows, one POOLED_MASK_REFUSED_LINE per build a pool that pools masks cannot
+# serve (the draft then uploads its own, as before). No pool, or a pool without masks: nothing here runs.
+POOLED_MASK_LINE = '[PINDIAG] draft mask pooled slots=[%s] shape=%s'
+POOLED_MASK_REFUSED_LINE = '[PINDIAG] draft mask pooled refused slots=[%s] shape=%s: the pool holds %s'
+
+
+def borrow_pooled_mask(device, group, host_mask, operations, mesh, *, log=None):
+    """The pool's pre-trace mask buffer for `group` (the draft's pool slots) with `host_mask` copied in, or None
+    when device's pool holds none of host_mask's shape for it - the caller then uploads its own."""
+    pool = getattr(getattr(device, 'pool_slot', None), 'pool', None)
+    lend = getattr(pool, 'draft_mask', None)
+    if not callable(lend):
+        return None
+    log = _log_line if log is None else log
+    group, shape = tuple(group), tuple(host_mask.shape)
+    label = ','.join(str(slot) for slot in group)
+    held = lend(group, shape)
+    if held is None:
+        pooled = getattr(pool, 'draft_masks', None)
+        if pooled:
+            log(POOLED_MASK_REFUSED_LINE % (label, 'x'.join(map(str, shape)), sorted(
+                (list(key), list(value.shape)) for key, value in pooled.items())))
+        return None
+    payload = operations.from_torch(host_mask, dtype=held.dtype, layout=held.layout,
+                                    mesh_mapper=operations.ReplicateTensorToMesh(mesh))
+    operations.copy_host_to_device_tensor(payload, held)
+    log(POOLED_MASK_LINE % (label, 'x'.join(map(str, shape))))
+    return held
+
+
+def pair_host_mask(context_a, context_b, block_rows):
+    """A pair bucket's host mask at these contexts, validated as the bucket validates it, and whether the bucket
+    folds (QWEN_FAST_PAIR_ROW_EXACT). serving_runtime asks it for the shape the pool holds for the pairs."""
+    from dflash_batched_mask import batched_attention_mask
+    from dflash_t16_native_attention import validate_mask
+
+    # QWEN_FAST_PAIR_ROW_EXACT (pair_row_exact.py, default off): this bucket's draft SDPA is folded, one
+    # KV head per user segment, so row 1 attends exactly as it would alone, and its mask is the served
+    # single-user mask (1, 1, 32, 2080), validated by the single-user rule. Decided once per bucket, so the
+    # capture and every replay agree; the refresh and the audit copy and compare whichever host_mask the
+    # bucket keeps.
+    row_exact = _row_exact(context_a, context_b, block_rows)
+    if row_exact:
+        from pair_row_exact import fold_mask
+
+        host_mask = fold_mask((context_a, context_b), block_rows)
+        validate_mask(host_mask)
+    else:
+        host_mask = batched_attention_mask([context_a, context_b], block_rows)
+        validate_mask(host_mask, contexts=[context_a, context_b])
+    return host_mask, row_exact
+
+
 def _row_exact(context_a, context_b, block_rows):
     """QWEN_FAST_PAIR_ROW_EXACT (pair_row_exact.py, default off): whether a pair bucket at these contexts folds
     its draft SDPA. The flag is read first and pair_row_exact imported only when it is set; a value other than
@@ -429,9 +486,8 @@ class PreparedPackedDFlashProposal:
         if bucket is not None:
             return bucket
         import torch
-        from dflash_batched_mask import batched_attention_mask, packed_rope_tables, live_key_rope
+        from dflash_batched_mask import packed_rope_tables, live_key_rope
         from dflash_packed_proposal import packed_identifiers
-        from dflash_t16_native_attention import validate_mask
 
         operations, device = self.operations, self.device_a
         # Every self._upload() below appends into self.owned (the trace's own
@@ -453,20 +509,8 @@ class PreparedPackedDFlashProposal:
             # these same fixed tensors before every replay.
             placeholder_users = [dict(position=context_a, history_rows=context_a),
                                  dict(position=context_b, history_rows=context_b)]
-            # QWEN_FAST_PAIR_ROW_EXACT (pair_row_exact.py, default off): this bucket's draft SDPA is folded, one
-            # KV head per user segment, so row 1 attends exactly as it would alone, and its mask is the served
-            # single-user mask (1, 1, 32, 2080), validated by the single-user rule. Decided here, once per
-            # bucket, so the capture and every replay agree; the refresh and the audit copy and compare
-            # whichever host_mask the bucket keeps.
-            row_exact = _row_exact(context_a, context_b, self.block_rows)
-            if row_exact:
-                from pair_row_exact import fold_mask
-
-                host_mask = fold_mask((context_a, context_b), self.block_rows)
-                validate_mask(host_mask)
-            else:
-                host_mask = batched_attention_mask([context_a, context_b], self.block_rows)
-                validate_mask(host_mask, contexts=[context_a, context_b])
+            # QWEN_FAST_PAIR_ROW_EXACT: pair_host_mask decides, once per bucket, whether it folds.
+            host_mask, row_exact = pair_host_mask(context_a, context_b, self.block_rows)
             tables = packed_rope_tables(placeholder_users, self.block_rows)
             live = live_key_rope(placeholder_users, self.block_rows)
             # host_mask is kept (a host tensor, 266 KB at the packable geometry, 133 KB folded): the
@@ -478,9 +522,12 @@ class PreparedPackedDFlashProposal:
             # never swaps - instead of per-round copies into ~40 MB of its own placeholders. None
             # without the flag: the placeholders below, exactly as before.
             live_banks = _live_bank_history(self.device_a, self.device_b) if context_a == context_b == 2048 else None
+            # S2: the pool's pre-trace mask for these slots, the host mask copied in (POOLED_MASK_LINE); None
+            # without one, and the mask is uploaded below as before.
+            pooled = borrow_pooled_mask(device, self.pair_label(), host_mask, operations, self.mesh)
             bucket = SimpleNamespace(context=(context_a, context_b), host_mask=host_mask,
                 identifiers=self._upload(packed_identifiers([0, 0], self.block_rows), identifiers=True),
-                mask=self._upload(host_mask),
+                mask=pooled if pooled is not None else self._upload(host_mask),
                 rope=dict(q=tuple(self._upload(value) for value in tables['q']),
                           k=tuple(self._upload(value) for value in tables['k']),
                           live_k=tuple(self._upload(value) for value in live)),
@@ -493,6 +540,10 @@ class PreparedPackedDFlashProposal:
                 bucket.live_banks = True
             if row_exact:
                 bucket.row_exact = True
+            if pooled is not None:
+                # Borrowed, never in self.owned: protected from every temporary like the lent banks, and never
+                # released by a failed build or close().
+                bucket.lent_mask = (pooled,)
             bucket.inputs = [bucket.identifiers, bucket.mask, *bucket.rope['q'], *bucket.rope['k'], *bucket.rope['live_k'],
                 *(value for cache in bucket.cached_history for layer in cache for value in layer.values())]
             bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
@@ -507,6 +558,7 @@ class PreparedPackedDFlashProposal:
             # of the pass can ever queue one for release. Without the flag this list is today's.
             lent = [] if live_banks is None else [value for cache in live_banks for layer in cache
                                                   for value in layer.values()]
+            lent.extend(getattr(bucket, 'lent_mask', ()))
             transient, retain = device.temporaries([device.history, device.spare_history,
                 self.device_b.history, self.device_b.spare_history, *self.owned, *lent])
             try:
@@ -604,7 +656,7 @@ class PreparedPackedDFlashProposal:
         owned, retain = device_a.temporaries([device_a.history, device_a.spare_history,
             device_b.history, device_b.spare_history, *self.owned,
             *device_a.kv_history.owned, *device_a.kv_history.borrowed,
-            *device_b.kv_history.owned, *device_b.kv_history.borrowed])
+            *device_b.kv_history.owned, *device_b.kv_history.borrowed, *getattr(bucket, 'lent_mask', ())])
 
         live_banks = getattr(bucket, 'live_banks', False)
 

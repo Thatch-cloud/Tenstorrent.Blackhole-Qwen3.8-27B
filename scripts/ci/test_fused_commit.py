@@ -1722,6 +1722,7 @@ def without_extent_replay(lines):
     capture-position knob: its constant, extent_replay_requested, the read beside the knob's, the no-block
     refusal, the pool keyword and the check that every block took the flag. Each is cut exactly once and to
     its known last line, so nothing else is hidden."""
+    lines = without_draft_masks(lines)
     lines = cut_once(lines, "EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'", "EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'")
     lines = cut_once(lines, 'def extent_replay_requested(environ=None):', "return value == '1'")
     lines = cut_once(lines, "# S2 C2-packed-any (QWEN_FAST_EXTENT_REPLAY, default off; strictly '0' or '1', read here "
@@ -1733,6 +1734,17 @@ def without_extent_replay(lines):
                      [' ' * 16 + replicas + ')))'])
     return cut_once(lines, '# S2: every block must be the extent block under the flag, and none may be without it. The',
                     '% (EXTENT_REPLAY_FLAG, int(extent_replay), extents))')
+
+
+def without_draft_masks(lines):
+    """serving_runtime.py less S2 M0's pooled draft masks (QWEN_FAST_EXTENT_REPLAY=1 only), which landed after the
+    extent plumbing: the guarded read of the shapes and the pool keyword after the extent one. Each is cut exactly
+    once and to its known last line, so nothing else is hidden."""
+    lines = cut_once(lines, '# S2: one mask per packed draft (each fixed pair, and the quad), allocated with the pool '
+                            'before any trace,', "draft_masks = pooled_draft_mask_shapes(policy['scheduler_requests'], 16)")
+    return cut_once(lines, "**({'extent_replay': True} if extent_replay else {}))),",
+                    "**({'draft_masks': draft_masks} if draft_masks else {}))",
+                    [' ' * 16 + "**({'extent_replay': True} if extent_replay else {}))))"])
 
 
 class ShippingTests(unittest.TestCase):
