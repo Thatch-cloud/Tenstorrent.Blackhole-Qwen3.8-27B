@@ -6,7 +6,9 @@ refuses before any container, and the whole Runner against test_prefix_replay.Fa
 arm, built from the profile the arm's docker argv serves (the derived file when it mounts one), so
 the pool, the loop path, audit, dev mode and the store are what that profile would give; grants come
 from the real scheduler graft - with faults switched on to see each verdict. The workflow step, the
-job keys and the CPU allowlist are read from the files."""
+job keys and the CPU allowlist are read from the files. The fast path's sticky sessions run the same
+Runner on c2-packed-prefix against c2-packed (test_prefix_replay.sticky_profile: their context cut to
+40,960 so the fake's prompts stay small), the fake then built with the real graft in sticky mode."""
 
 import copy
 import json
@@ -49,6 +51,14 @@ def profiles():
     return document
 
 
+def sticky_profiles():
+    """profiles() with the fast path's twins: c2-packed-prefix (sticky sessions) and c2-packed, shrunk."""
+    document = profiles()
+    for name in ('c2-packed-prefix', 'c2-packed'):
+        document['profiles'][name] = fakes.sticky_profile(name)
+    return document
+
+
 SHA = dict(a='a' * 64, b='b' * 64)
 GOOD_ANCHOR = dict(files=dict(gate.STAGE_PINS), pins={'mlp.py': SHA['a']}, actual={'mlp.py': SHA['a']}, mismatched=[],
                    stage_pins=dict(gate.STAGE_PINS), stage_mismatched=[], marker_files=['model.py'],
@@ -60,8 +70,9 @@ class Harness(object):
     profile the arm's docker argv serves. faults: {kind or profile name or 'all': {fault: True,
     '_env': {KEY: value or None}, '_engine': FakeEngine subclass}}."""
 
-    def __init__(self, engine_class=None, **faults):
+    def __init__(self, engine_class=None, document=None, **faults):
         self.engine_class = engine_class or fakes.FakeEngine
+        self.document = document
         self.faults = faults
         self.engine = None
         self.engines = []
@@ -77,8 +88,13 @@ class Harness(object):
                 with open(path, encoding='utf-8') as handle:
                     document = json.load(handle)
             else:
-                document = profiles()
+                document = self.document or profiles()
             profile = copy.deepcopy(document['profiles'][name])
+            # The gate-only knobs an S2 arm adds with -e (c2_serving_gate.ARM_ENV_NAMES) reach the engine as its own.
+            for index, token in enumerate(arguments[:-1]):
+                if token == '-e' and arguments[index + 1].split('=', 1)[0] in c2_serving_gate.ARM_ENV_NAMES:
+                    key, value = arguments[index + 1].split('=', 1)
+                    profile['env'][key] = value
             options = {}
             for key in (name.split('+')[0], name.split('+')[-1] if '+' in name else None, 'all'):
                 options.update(self.faults.get(key) or {})
@@ -117,6 +133,15 @@ def run_plan(plan, results, anchor=GOOD_ANCHOR, baseline='general', engine_class
     harness = Harness(engine_class, **faults)
     runner = harness.runner(results)
     arms = gate.plan_arms(plan, 'general-prefix', baseline, profiles())
+    return gate.run_plan(plan, arms, runner, anchor), harness, runner
+
+
+def run_sticky(plan, results, anchor=GOOD_ANCHOR, engine_class=None, **faults):
+    """One plan on c2-packed-prefix against c2-packed, the fake built sticky from each arm's profile."""
+    document = sticky_profiles()
+    harness = Harness(engine_class, document=document, **faults)
+    runner = harness.runner(results)
+    arms = gate.plan_arms(plan, 'c2-packed-prefix', 'c2-packed', document)
     return gate.run_plan(plan, arms, runner, anchor), harness, runner
 
 
@@ -902,6 +927,185 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(info['log_window']), 2)
         with self.assertRaises(replay.OutOfTime):
             runner.restart(container, engine, follower, Driver(30))
+
+
+class StickyArmTests(unittest.TestCase):
+    """What the gate runs on the fast path's sticky-session profile (the module docstring's sticky section)."""
+
+    def arms(self, plan, profile='c2-packed-prefix', baseline='c2-packed'):
+        return gate.plan_arms(plan, profile, baseline, sticky_profiles())
+
+    def test_the_sticky_plans_arms(self):
+        exactness = self.arms('exactness')
+        self.assertEqual([(a['arm'], a['served']) for a in exactness],
+                         [('exactness-audit', 'c2-packed-prefix+audit'), ('exactness-eager', 'c2-packed-prefix'),
+                          ('exactness-shared', 'c2-packed-prefix+audit')])
+        audit, eager, shared = exactness
+        self.assertEqual((eager['full'], eager['path'], eager['sticky'], eager['s2'], eager['derived']),
+                         (True, 'eager', True, True, None))
+        self.assertEqual((eager['timeout'], audit['timeout'], shared['timeout']), (9000, 7200, 7200))
+        self.assertEqual((audit['full'], shared['full']), (False, False))
+        for arm in exactness:
+            self.assertEqual((arm['env'], arm['prompt_limit'], arm['strict']), (c2_serving_gate.AUDIT_ENV, 32768, True))
+            self.assertEqual(arm['served_env']['QWEN_FAST_STICKY_SESSIONS'], '1')
+        self.assertEqual(shared['derived']['profiles']['c2-packed-prefix+audit']['env']['QWEN_PREFIX_AUDIT'], '1')
+        self.assertEqual([a['arm'] for a in self.arms('lifecycle')], ['lifecycle-evict', 'lifecycle-store'])
+        reference, prefix = self.arms('bringup')
+        self.assertEqual((reference['served'], reference['s2'], reference['sticky'], reference['prompt_limit']),
+                         ('c2-packed', True, False, 32768))
+        self.assertEqual((prefix['served'], prefix['sticky']), ('c2-packed-prefix', True))
+        timing = self.arms('timing')
+        self.assertEqual([(a['served'], a['env']) for a in timing], [('c2-packed-prefix', ()), ('c2-packed', ())])
+
+    def test_what_does_not_apply_where(self):
+        document = sticky_profiles()
+        self.assertEqual([arm for arm, _ in gate.not_applicable('exactness', 'c2-packed-prefix', document)],
+                         ['exactness-traced'])
+        self.assertEqual([arm for arm, _ in gate.not_applicable('lifecycle', 'c2-packed-prefix', document)],
+                         ['lifecycle-tiny'])
+        self.assertEqual([arm for arm, _ in gate.not_applicable('exactness', 'general-prefix', document)],
+                         ['exactness-shared'])
+        self.assertEqual(gate.not_applicable('lifecycle', 'general-prefix', document), [])
+        self.assertEqual(gate.plan_arms('exactness-traced', 'c2-packed-prefix', 'c2-packed', document), [])
+        self.assertEqual(gate.plan_arms('exactness-shared', 'general-prefix', 'general', document), [])
+        # G1's arms carry none of the fast path's keys.
+        for arm in gate.plan_arms('exactness', 'general-prefix', 'general', document):
+            self.assertNotIn('sticky', arm)
+
+    def test_the_prompt_limit_is_the_contract_s_and_only_where_it_is_enforced(self):
+        document = sticky_profiles()
+        self.assertEqual(gate.prompt_limit(document, 'c2-packed-prefix'), 32768)
+        real = copy.deepcopy(marker_fixture.PROFILES)
+        self.assertEqual(gate.prompt_limit(real, 'c2-packed-prefix'), 123136)
+        self.assertIsNone(gate.prompt_limit(document, 'general-prefix'), 'request_contract false')
+
+    def test_main_refuses_a_plan_with_no_applicable_arm_and_lists_them_otherwise(self):
+        results = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, results, True)
+        path = os.path.join(results, 'profiles.json')
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump(sticky_profiles(), handle)
+
+        def main(*extra):
+            lines = []
+            code = gate.main(['--image', 'img', '--profiles', path, '--results', os.path.join(results, 'out'),
+                              '--profile', 'c2-packed-prefix', '--baseline', 'c2-packed'] + list(extra),
+                             devices=['/a', '/b'], log=lines.append)
+            return code, lines
+
+        for plan in ('exactness-traced', 'lifecycle-tiny'):
+            code, lines = main('--plan', plan, '--dry-run')
+            self.assertEqual(code, 2)
+            self.assertIn('has no arm that applies to profile c2-packed-prefix', lines[-1])
+        code, lines = main('--plan', 'bringup,exactness-eager,exactness-shared', '--dry-run')
+        self.assertEqual(code, 0, lines)
+        totals = json.loads(lines[0])
+        self.assertNotIn('not_applicable', totals, 'no requested plan lost an arm')
+        arms = [json.loads(line) for line in lines[1:]]
+        self.assertEqual([a['arm'] for a in arms], ['bringup-reference', 'bringup-prefix', 'exactness-eager',
+                                                    'exactness-shared'])
+        for arm in arms:
+            self.assertIn('QWEN_FAST_EXTENT_AUDIT=1', arm['docker'])
+        code, lines = main('--plan', 'exactness', '--dry-run', '--budget-seconds', '30000')
+        self.assertEqual(json.loads(lines[0])['not_applicable'], {'exactness': ['exactness-traced']})
+        code, lines = main('--plan', 'timing', '--dry-run')
+        self.assertTrue(all('QWEN_FAST_EXTENT_AUDIT=1' not in json.loads(line)['docker'] for line in lines[1:]))
+        code, lines = main('--plan', 'bringup,exactness-eager', '--budget-seconds', '22200', '--dry-run')
+        self.assertEqual(code, 0, 'H3a fits one step')
+        code, lines = main('--plan', 'exactness-audit,exactness-shared', '--budget-seconds', '22200', '--dry-run')
+        self.assertEqual(code, 0, 'H3b fits one step')
+        code, lines = main('--plan', 'exactness', '--budget-seconds', '22200', '--dry-run')
+        self.assertEqual(code, 2, 'the whole exactness plan does not')
+
+
+class StickyRunnerTests(unittest.TestCase):
+    """Whole sticky arms against the sticky fake: the chain shortened (CHAIN_HITS 4200..16500, one long rung and
+    the 32,768 limit), the four agents small."""
+
+    SHARED = ((5000, 9000, 14000), (4800, 7000, 10000), (4600, 6000, 8000), (4400, 5200, 6400))
+
+    def setUp(self):
+        self.results = tempfile.mkdtemp()
+        for name, value in (('CHAIN_HITS', (4200, 9000, 16500)), ('CHAIN_HITS_LONG', (24000,)),
+                            ('EVICT_LENGTHS', (12000, 24000)), ('SHARED_AGENT_TARGETS', self.SHARED),
+                            ('SHARED_AGENT_MAX_TOKENS', 64)):
+            patcher = mock.patch.object(replay, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = fakes.burst_aware(lambda: CURRENT['engine'])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        shutil.rmtree(self.results, ignore_errors=True)
+
+    def plan(self, plan, name=None, **kwargs):
+        return run_sticky(plan, os.path.join(self.results, name or plan), **kwargs)
+
+    def test_bringup_passes_with_c0_captures_and_the_s2_lines(self):
+        result, harness, _ = self.plan('bringup')
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        self.assertEqual([e.name for e in harness.engines], ['c2-packed', 'c2-packed-prefix'])
+        self.assertEqual([(e.sticky, e.s2, e.extent_audit) for e in harness.engines], [(False, True, True), (True, True, True)])
+        prefix = result['arms']['bringup-prefix']
+        self.assertTrue(any(line.startswith('sticky install: ') for line in prefix['lines']), prefix['lines'])
+        self.assertTrue(any(line.startswith('S2: ') for line in prefix['lines']))
+        self.assertEqual(result['cross_problems'], [])
+
+    def test_the_full_eager_arm_passes(self):
+        result, harness, _ = self.plan('exactness-eager')
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        eager = result['arms']['exactness-eager']
+        self.assertEqual(harness.engines[0].name, 'c2-packed-prefix')
+        self.assertTrue(any('boundary-4096: a small extension resumed at C0 = 2048' in line for line in eager['lines']),
+                        eager['lines'])
+        self.assertTrue(any(line.startswith('changed-suffix (L, Q)') for line in eager['lines']))
+        self.assertTrue(any(line.startswith('shared-system (L, Q, captured)') for line in eager['lines']))
+
+    def test_the_shared_arm_passes_and_fails_on_what_it_checks(self):
+        result, harness, _ = self.plan('exactness-shared')
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        shared = result['arms']['exactness-shared']
+        self.assertTrue(harness.engines[0].audit and harness.engines[0].extent_audit)
+        self.assertTrue(any(line.startswith('audit windows: ') for line in shared['lines']), shared['lines'])
+        for faults, text in ((dict(all=dict(corrupt_shared_window=True)), 'KV window 0'),
+                             (dict(all=dict(kv_shared=True)), 'verify t2 kv shared'),
+                             (dict(all=dict(batch_variant=True)), 'DIVERGED'),
+                             (dict(all=dict(unaudited_round=True)), 'went unaudited')):
+            with self.subTest(faults=faults):
+                result, _, _ = self.plan('exactness-shared', text.split()[0], **faults)
+                arm = result['arms']['exactness-shared']
+                self.assertEqual(arm['verdict'], 'FAIL')
+                self.assertTrue(any(text in problem for problem in arm['problems']), arm['problems'][:6])
+
+    def test_each_missing_sticky_marker_fails(self):
+        for fault, text in (('no_sticky_install', 'install sticky=1'), ('no_model_warm', 'model warm'),
+                            ('no_sticky_admit', 'no "[PINDIAG] sticky admit" line'),
+                            ('no_sticky_build', 'sticky engine built'), ('no_ceiling', 'planned captures')):
+            with self.subTest(fault=fault):
+                result, _, _ = self.plan('exactness-eager', fault, **{'c2-packed-prefix': {fault: True}})
+                arm = result['arms']['exactness-eager']
+                self.assertEqual(arm['verdict'], 'FAIL')
+                self.assertTrue(any(text in problem for problem in arm['problems']), arm['problems'][:6])
+
+    def test_a_row_that_compiles_fails_any_sticky_arm(self):
+        result, _, _ = self.plan('bringup', 'grow', **{'c2-packed-prefix': dict(grow_programs=True)})
+        self.assertEqual(result['arms']['bringup-prefix']['verdict'], 'FAIL')
+
+    def test_lifecycle_passes_without_the_same_step_rule(self):
+        result, _, _ = self.plan('lifecycle-evict')
+        evict = result['arms']['lifecycle-evict']
+        self.assertEqual(evict['verdict'], 'PASS', evict['lines'])
+        self.assertTrue(any('same-step rule: not asked of the fast path' in line for line in evict['lines']))
+
+    def test_timing_records_the_engine_build(self):
+        result, _, _ = self.plan('timing')
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        phase = result['arms']['timing-prefix']['phases']['agents-2']
+        self.assertEqual((phase['build_ms_p50'], phase['builds']), (3500.0, phase['served']))
+        self.assertTrue(any('engine build p50/p90 3500.0/3500.0 ms' in line
+                            for line in result['arms']['timing-prefix']['lines']))
+        self.assertNotIn('build_ms_p50', result['arms']['timing-baseline']['phases']['agents-2'])
 
 
 class MainTests(unittest.TestCase):

@@ -77,6 +77,43 @@ named as the arm - c2_serving_job.PREFIX_ARM_PLANS - that runs only it, judged e
              the CI pod count per phase (prefix_report). It records; it fails only on failed turns
              or missing markers.
 
+THE FAST PATH'S STICKY SESSIONS (phase 1 on the S2 lineage; --profile c2-packed-prefix --baseline c2-packed,
+the profiles with QWEN_FAST_STICKY_SESSIONS=1 beside QWEN_PREFIX_REUSE=1). The same plans, judged for what
+that path is (sticky design, harness items B1, B2 and B4):
+  - the oracle models vLLM's DFlash drop of a hit's last block, the trim's ceiling floor2048(P - 2048) and
+    the C0 = floor2048(P) - 2048 capture (prefix_judge docstring item 5): every Q, h and plan against it,
+    and a Q above the ceiling (a C1 grant) FAILs whatever the overlap;
+  - the fast path is batch invariant, so equality is STRICT: a concurrent hit must equal its solo cold
+    twin (prefix_replay.strict_pair), nothing is NOT_COMPARABLE by batching, and a preempted request is a
+    FAIL (the fast path has no preemption), never an excuse;
+  - the profiles are decode_only: exactness-traced is NOT_APPLICABLE (listed, never run) and
+    exactness-eager serves the profile itself with the traced arm's whole set - the chain run on through
+    72k..120k to the profile's prompt limit (123,136), the changed-suffix and early-divergence forks, the
+    boundaries (2047/2048/2049 and the sticky 4095/4096/4097) and the shared system block's siblings;
+    lifecycle-tiny is NOT_APPLICABLE (the profiles budget the KV pool for every seat's whole context and
+    the fast path has no preemption: a tiny pool is not a shape it serves); a NOT_APPLICABLE arm alone is
+    refused up front;
+  - exactness-shared (the sticky profiles only): four same-tenant agents sharing the full system block
+    continue concurrently in packed rounds, hits from ~5k to 120k, each hit against its solo cold twin,
+    with QWEN_PREFIX_AUDIT's per-window KV digests (derived): every window two requests share must hold
+    the same bytes, so the shared blocks a hit reads after other agents decoded beside them are what their
+    writer left (prefix_judge.window_findings); at least one packed round with two or more live users;
+  - every arm on an S2 profile (QWEN_FAST_EXTENT_REPLAY=1: the prefix arms and the c2-packed baseline) runs
+    with QWEN_FAST_EXTENT_AUDIT=1 but timing's, and is judged by the S2 gate's own reading of its log
+    (lever_n_m3native_gate.s2_report: the admission, engaged, F22 and publication-warm lines, every packed
+    round audited and clean, no cap refusal, deadline or unpooled draft) and the C2-any lines
+    (c2_serving_gate.any_request_check); no '[PINDIAG] verify t2 kv shared' line (KV_SHARED);
+  - a sticky arm also needs the scheduler graft's 'install sticky=1 lookahead=16 drop_last=True' line, the
+    model graft's warmup line ('[PINDIAG] prefix: model warm': the restore path and the mid-loop capture
+    declaration ran on the fast path's warmup), one '[PINDIAG] sticky admit' line per hit agreeing with its
+    row and none for a cold request, and an engine build line per served request whose frontier is its Q;
+    no [PREFIX] row of any sticky arm may compile a program (the fast path's zero-compile rule, F3);
+  - the lifecycle's same-step rule is not asked of a sticky arm (the fast path admits one fresh prefill
+    per step, so two arrivals never share one);
+  - prompts are held to the profile's prompt limit as well as its context (a request past the contract's
+    max_prompt_tokens is answered 400);
+  - timing records each turn's engine build (the TTFT split).
+
 PROMPT SIZING: every request's prompt plus its max_tokens fits the SERVED context - max_model_len
 from the container's /v1/models, else the arm's profile's max-model-len, never a constant (the arm's
 'context' event records both). The driver measures a conversation's next prompt with /tokenize (the
@@ -143,6 +180,13 @@ import prefix_report as report  # noqa: E402
 import qwen_prefix_model_patch as model_patch  # noqa: E402
 
 PLANS = c2_serving_job.PREFIX_PLANS + tuple(arm for arm, _ in c2_serving_job.PREFIX_ARM_PLANS)
+harness = gate.harness
+# The fast path's sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG) and its S2 extent flag.
+STICKY_FLAG = 'QWEN_FAST_STICKY_SESSIONS'
+STICKY_LOOKAHEAD = 16          # DFlash with 15 proposals (qwen_prefix_scheduler_patch.STICKY_LOOKAHEAD)
+# The arms a sticky (decode_only) profile runs longer than their G1 limits: the eager arm carries the whole
+# traced set to 123k, and the audit reads a pool twice general's per row.
+S2_TIMEOUTS = {'exactness-eager': 9000, 'exactness-audit': 7200}
 PORT = 8021
 CONTAINER_PREFIX = 'qwen-c2-prefix-'
 DERIVED_MOUNT = '/prefix-gate/profiles.json'
@@ -194,7 +238,8 @@ PLAN_ARMS = dict(
              ('bringup-prefix', 'bringup_prefix', 'prefix', None, 3600, True)),
     exactness=(('exactness-traced', 'exactness_traced', 'prefix', None, 9000, True),
                ('exactness-audit', 'exactness_audit', 'prefix', 'audit', 5400, True),
-               ('exactness-eager', 'exactness_eager', 'prefix', 'eager', 5400, True)),
+               ('exactness-eager', 'exactness_eager', 'prefix', 'eager', 5400, True),
+               ('exactness-shared', 'exactness_shared', 'prefix', 'audit', 7200, True)),
     lifecycle=(('lifecycle-evict', 'lifecycle_evict', 'prefix', 'dev', 9000, False),
                ('lifecycle-store', 'lifecycle_store', 'prefix', 'store', 3600, False),
                ('lifecycle-tiny', 'lifecycle_tiny', 'prefix', 'tiny', 4800, False)),
@@ -213,6 +258,55 @@ class PlanError(ValueError):
 def is_prefix_profile(profile):
     return (str((profile.get('env') or {}).get('QWEN_PREFIX_REUSE', '0')) == '1'
             and (profile.get('engine') or {}).get('enable-prefix-caching') is True)
+
+
+def is_sticky_profile(profile):
+    """A prefix profile of the fast path's sticky sessions (c2-packed-prefix and its gate twin)."""
+    return is_prefix_profile(profile) and str((profile.get('env') or {}).get(STICKY_FLAG, '0')) == '1'
+
+
+def is_s2_profile(profile):
+    """A profile that builds the S2 extent readers (QWEN_FAST_EXTENT_REPLAY=1: c2-packed and its twins)."""
+    return str((profile.get('env') or {}).get(gate.EXTENT_FLAG, '0')) == '1'
+
+
+def trace_mode(profile):
+    return ((((profile.get('engine') or {}).get('additional-config') or {}).get('tt') or {}).get('trace_mode'))
+
+
+def prompt_limit(document, name):
+    """The largest prompt the arm's profile admits at its API edge (c2_serving_gate.profile_limits: the
+    contract's prompt_room), or None where the profile's request contract is off (general and
+    general-prefix: request_contract false), which leaves the context alone to bound a prompt."""
+    profile = document['profiles'][name]
+    if profile.get('request_contract') is False:
+        return None
+    try:
+        return gate.profile_limits(document, name)[2]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def not_applicable(plan, profile, profiles):
+    """[(arm, why)] of a plan's arms that cannot mean anything on `profile` (the module docstring's sticky
+    section); plan_arms leaves them out, and the gate lists them."""
+    names = profiles['profiles']
+    if plan not in PLAN_ARMS or profile not in names:
+        return []
+    chosen = names[profile]
+    out = []
+    for arm in [entry[0] for entry in PLAN_ARMS[plan]]:
+        if arm == 'exactness-traced' and trace_mode(chosen) == 'decode_only':
+            out.append((arm, 'profile %s is decode_only: its prefill runs the eager loop only, so exactness-eager '
+                             'carries the whole set (the long chain to the prompt limit, the forks, the boundaries '
+                             'and the shared system block)' % profile))
+        elif arm == 'exactness-shared' and not is_sticky_profile(chosen):
+            out.append((arm, 'the shared-block concurrency arm judges packed rounds strictly (the fast path is batch '
+                             'invariant): it needs a sticky-session profile, and %s is not one' % profile))
+        elif arm == 'lifecycle-tiny' and is_sticky_profile(chosen):
+            out.append((arm, 'profile %s budgets the KV pool for every seat\'s whole context and the fast path has '
+                             'no preemption: a tiny pool is not a shape it serves' % profile))
+    return out
 
 
 def derive(profiles, base, kind):
@@ -243,12 +337,16 @@ def plan_arms(plan, profile, baseline, profiles):
         raise PlanError('profile %r is not a prefix-reuse profile: it needs env QWEN_PREFIX_REUSE=1 and engine '
                         'enable-prefix-caching true' % profile)
     arms = []
+    skipped = set(arm for arm, _ in not_applicable(plan, profile, profiles))
+    sticky_profile = is_sticky_profile(names[profile])
 
     def context_of(document, name):
         value = ((document['profiles'][name].get('engine') or {}).get('max-model-len'))
         return int(value) if value else None
 
     for arm, scenario, which, kind, timeout, strict in PLAN_ARMS[plan]:
+        if arm in skipped:
+            continue
         if which == 'baseline':
             if not baseline or baseline == 'none':
                 if plan == 'bringup':
@@ -261,13 +359,33 @@ def plan_arms(plan, profile, baseline, profiles):
                 raise PlanError('baseline profile %r turns prefix reuse on: it cannot be the no-reuse reference'
                                 % baseline)
             served, derived = baseline, None
+        elif kind == 'eager' and trace_mode(names[profile]) == 'decode_only':
+            # Already the eager loop: the profile itself serves, and the arm carries the traced arm's set.
+            served, derived = profile, None
         elif kind:
             served, derived = derive(profiles, profile, kind)
         else:
             served, derived = profile, None
-        context = context_of(derived, served) if derived else context_of(profiles, served)
-        arms.append(dict(arm=arm, scenario=scenario, served=served, derived=derived, timeout=timeout, strict=strict,
-                         prefix=which == 'prefix', kind=kind, context=context))
+        document = derived if derived else profiles
+        chosen = document['profiles'][served]
+        context = context_of(document, served)
+        entry = dict(arm=arm, scenario=scenario, served=served, derived=derived, timeout=timeout, strict=strict,
+                     prefix=which == 'prefix', kind=kind, context=context)
+        s2 = is_s2_profile(chosen)
+        sticky = which == 'prefix' and sticky_profile
+        if sticky_profile and scenario.startswith('bringup'):
+            # Both bring-up arms send the same turns: on the sticky profile the second is past 4096 tokens, so it
+            # captures C0 = 2048 and the third resumes there (a 4,200-token second turn may capture nothing).
+            entry['scenario_kwargs'] = dict(hits=replay.STICKY_BRINGUP_HITS)
+        if s2 or sticky:
+            # The fast path (the module docstring's sticky section): its loop path, strict pairs, the extent
+            # audit on every arm but timing, the profile's prompt limit, and the eager arm's whole set.
+            entry.update(path='eager' if trace_mode(chosen) == 'decode_only' else 'traced', s2=s2, sticky=sticky,
+                         env=gate.AUDIT_ENV if s2 and scenario != 'timing' else (),
+                         prompt_limit=prompt_limit(document, served), served_env=dict(chosen.get('env') or {}),
+                         full=scenario == 'exactness_eager' and trace_mode(names[profile]) == 'decode_only',
+                         timeout=max(timeout, S2_TIMEOUTS.get(arm, 0)) if sticky else timeout)
+        arms.append(entry)
     return arms
 
 
@@ -306,12 +424,13 @@ def write_salt_key(path, urandom=os.urandom):
 
 
 def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_path=None, digests=False,
-               salt_key_path=None, stats_now=False):
+               salt_key_path=None, stats_now=False, env=()):
     """`docker run -d` of one serving container: the S1 gate's agent shape (its --rm dropped: the
     reload drill stops and starts the same container), the API on 127.0.0.1:port, a derived
     profiles file when the arm has one, the row digests when asked, the arm's salt key when it has
-    one, and the platform's vLLM argv."""
-    arguments = [token for token in gate.agent_shape(image, name, served, devices, hub) if token != '--rm']
+    one, the gate-only knobs an S2 arm adds (`env`: the extent audit, c2_serving_gate.ARM_ENV_NAMES),
+    and the platform's vLLM argv."""
+    arguments = [token for token in gate.agent_shape(image, name, served, devices, hub, env) if token != '--rm']
     arguments[2:2] = ['-d']
     arguments += ['-p', '127.0.0.1:%d:8000' % port]
     if digests:
@@ -486,7 +605,7 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
     for record in records:
         if record.get('role') in ('seat', 'flood') or record.get('aborted'):
             continue
-        for severity, text in judge.reuse_problems(record, sequential=arm['strict']):
+        for severity, text in judge.reuse_problems(record, sequential=arm['strict'], sticky=bool(arm.get('sticky'))):
             if severity == 'FAIL':
                 problems.append(text)
             elif severity == 'LOST' and arm['strict']:
@@ -505,7 +624,7 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
             else:
                 notes.append('%s: vLLM found %d cached tokens (published for it: %d)' % (
                     record['tag'], raw, record['expected_raw_h']))
-    path = 'eager' if arm.get('kind') == 'eager' else 'traced'
+    path = arm.get('path') or ('eager' if arm.get('kind') == 'eager' else 'traced')
     if path == 'eager' and installs:
         warm = scanned.get('eager_warm') or []
         if not warm:
@@ -619,7 +738,8 @@ def exercised_exactness(arm, records, events):
     lines.append('chain hits (L, Q): %s' % reached)
     if not any(q for _, q in reached[1:] if q):
         missing.append('no chain turn after the first got Q > 0')
-    for target in replay.BOUNDARY_PROMPTS:
+    sticky = bool(arm.get('sticky'))
+    for target in replay.boundary_prompts(sticky):
         name = 'boundary-%d' % target
         turns = hits(records, name)
         event = events.get(name) or {}
@@ -636,16 +756,29 @@ def exercised_exactness(arm, records, events):
             continue
         second = turns[1]
         q, length = q_of(second), second.get('prompt_tokens') or 0
-        want = judge.floor_chunk(served)
+        # Sticky sessions: the oracle's Q (the drop, the ceiling and C0: 0 below a 4096-token first turn).
+        want = judge.floor_chunk(served) if not sticky else (second.get('expected') or {}).get('q', 0)
         lines.append('%s: turn 1 served L=%s, turn 2 L=%s Q=%s (want %s)' % (name, served, length, q, want))
         if q is not None and q != want:
             (problems if q > want else missing).append('%s: turn 2 restored Q=%s, the design gives %d' % (name, q, want))
         if want and q == want and judge.floor_chunk(length) == q:
             lines.append('%s: a tail-only hit (no full chunk after Q)' % name)
-    tail_only = [r for r in records if r.get('role') == 'hit' and q_of(r) and judge.floor_chunk(r.get('prompt_tokens') or 0) == q_of(r)]
-    if not tail_only:
-        missing.append('no tail-only hit (Q = floor2048(L)) ran')
-    if arm['arm'] == 'exactness-traced':
+        elif sticky and want and q == want:
+            lines.append('%s: a small extension resumed at C0 = %d (the tail is the drafter window and the rest of '
+                         'its chunk)' % (name, q))
+    if sticky:
+        # Q never reaches floor2048(L) here: the hit that resumes at the drafter window's own ceiling is the
+        # boundary case the trim's ceiling decides.
+        ceiling = [r for r in records if r.get('role') == 'hit' and q_of(r)
+                   and judge.resume_ceiling(r.get('prompt_tokens') or 0) == q_of(r)]
+        if not ceiling:
+            missing.append('no hit resumed at the drafter window\'s ceiling (Q = floor2048(L - 2048))')
+    else:
+        tail_only = [r for r in records if r.get('role') == 'hit' and q_of(r)
+                     and judge.floor_chunk(r.get('prompt_tokens') or 0) == q_of(r)]
+        if not tail_only:
+            missing.append('no tail-only hit (Q = floor2048(L)) ran')
+    if arm['arm'] == 'exactness-traced' or arm.get('full'):
         for case in ('changed-suffix', 'early-divergence'):
             found = hits(records, case)
             lines.append('%s (L, Q): %s' % (case, [(r.get('prompt_tokens'), q_of(r)) for r in found]))
@@ -655,10 +788,26 @@ def exercised_exactness(arm, records, events):
         if suffix and early and q_of(suffix[0]) and q_of(early[0]) is not None and q_of(early[0]) >= q_of(suffix[0]):
             missing.append('the early divergence restored Q=%s, not below the changed suffix\'s %s: it did not fall '
                            'back to an older checkpoint' % (q_of(early[0]), q_of(suffix[0])))
-        more_missing, more_problems, more_lines = shared_gap(records)
+        more_missing, more_problems, more_lines = (shared_siblings if sticky else shared_gap)(records)
         missing += more_missing
         problems += more_problems
         lines += more_lines
+    return missing, problems, lines
+
+
+def shared_siblings(records):
+    """The shared system block under sticky sessions: the tenant's first conversation already captures C0,
+    which lies inside the ~4.2k-token shared block when its own prompt is under 8k, so its siblings resume
+    from that checkpoint with no gap capture; at least one of them must restore Q > 0 (its Q against the
+    oracle is reuse_problems'). -> (not exercised, problems, lines)."""
+    missing, problems, lines = [], [], []
+    shared = hits(records, 'shared-system')
+    lines.append('shared-system (L, Q, captured): %s' % [(r.get('prompt_tokens'), q_of(r), captured_of(r))
+                                                        for r in shared])
+    if len(shared) < 3:
+        missing.append('shared-system: %d of 3 conversations ran' % len(shared))
+    elif not any(q_of(r) for r in shared[1:]):
+        missing.append('shared-system: no sibling conversation resumed from the shared system block (Q = 0 for all)')
     return missing, problems, lines
 
 
@@ -857,8 +1006,11 @@ def lifecycle_findings(arm, records, events, scanned, stats):
             if before.get('commit_mismatch'):
                 problems.append('%s grants refused at commit before the restart (start_pos != Q)'
                                 % before['commit_mismatch'])
-        missing += required_stats(before if before is not None else stats,
-                                  ('same_step_rejects',) + (('evicted_coupled',) if lost else ()))
+        counters = (() if arm.get('sticky') else ('same_step_rejects',)) + (('evicted_coupled',) if lost else ())
+        if arm.get('sticky'):
+            lines.append('same-step rule: not asked of the fast path (one fresh prefill per step: two arrivals never '
+                         'share a scheduler step)')
+        missing += required_stats(before if before is not None else stats, counters)
     elif arm['arm'] == 'lifecycle-store':
         after = hits(records, 'store-after')
         lines.append('after the store filled (L, Q, oracle Q): %s' % [(r.get('prompt_tokens'), q_of(r),
@@ -883,12 +1035,98 @@ def lifecycle_findings(arm, records, events, scanned, stats):
     return problems, missing, lines
 
 
-def judge_arm(arm, driver, scanned, stats, error):
+def s2_findings(arm, log_text, scanned, records):
+    """An arm on an S2 profile (the module docstring's sticky section): the S2 gate's reading of its log,
+    the C2-any lines, KV_SHARED, and on a sticky arm the install, warmup, admit and build lines and the
+    zero-compile rule. -> (problems, not exercised, lines, the S2 report)."""
+    problems, missing, lines = [], [], []
+    text = log_text or ''
+    environ = dict(arm.get('served_env') or {})
+    environ.update(dict(arm.get('env') or ()))
+    try:
+        report = harness.s2_report(environ, text)
+    except Exception as error:     # noqa: BLE001 - reported as the problem it is
+        report = dict(problems=['s2_report failed: %s: %s' % (type(error).__name__, str(error)[:300])])
+    problems += ['S2: %s' % problem for problem in report.get('problems') or ()]
+    any_request = str(environ.get(gate.ANY_REQUEST_FLAG, '0')) == '1'
+    problems += gate.any_request_check(log_text, any_request)[0]
+    rounds = report.get('rounds') or {}
+    audit = report.get('extent_audit') or {}
+    lines.append('S2: %s packed extent rounds (by live users %s), %s audit lines, %s mismatches' % (
+        rounds.get('count'), json.dumps(rounds.get('by_live') or {}, sort_keys=True), audit.get('lines'),
+        audit.get('mismatches')))
+    shared = scanned.get('kv_shared') or []
+    if shared:
+        problems.append('%d "%s" lines (%s): a packed round saw a K/V conflict, so it ran sequentially - the proposal '
+                        'guard read a shared or padded page as another user\'s (sticky design 2.4, A6)' % (
+                            len(shared), markers.KV_SHARED, shared[0].get('line')))
+    if not arm.get('sticky'):
+        return problems, missing, lines, report
+    installs = scanned.get('sticky_installs') or []
+    if not installs:
+        problems.append('no "[PINDIAG] prefix: install sticky=1" line: the scheduler graft does not serve the fast '
+                        'path\'s DFlash lookahead (an image without A4, or QWEN_FAST_STICKY_SESSIONS never reached it)')
+    else:
+        install = installs[-1]
+        if install.get('lookahead') != STICKY_LOOKAHEAD or str(install.get('drop_last')) != 'True':
+            problems.append('the sticky install line says lookahead=%s drop_last=%s, not %d and True: the oracle\'s C0 '
+                            'plan does not hold on this engine' % (install.get('lookahead'), install.get('drop_last'),
+                                                                   STICKY_LOOKAHEAD))
+        lines.append('sticky install: %s' % json.dumps(dict((k, v) for k, v in install.items()
+                                                           if k not in ('index', 'time')), sort_keys=True))
+    if not scanned.get('model_warm'):
+        problems.append('no "%s" line: the model graft\'s warmup (the restore path, the mid-loop capture '
+                        'declaration) did not run on the fast path\'s warmup, so the first resume would stop the '
+                        'engine and the first turn after boot plans no C0 capture' % markers.MODEL_WARM.strip())
+    served = [r for r in records if r.get('ok') and r.get('role') not in ('seat', 'flood')]
+    built = [r for r in served if (r.get('markers') or {}).get('sticky_builds')]
+    if served and not built:
+        problems.append('no "[PINDIAG] sticky engine built" line for any of %d served requests (A8): the TTFT split '
+                        'is not measured' % len(served))
+    for record in built:
+        build = record['markers']['sticky_builds'][0]
+        q = (record.get('markers') or {}).get('q')
+        if q is not None and build.get('frontier') != q:
+            problems.append('%s: its engine was built at frontier %s, its row restored Q=%s' % (
+                record['tag'], build.get('frontier'), q))
+    growth = row_growth_problems(scanned.get('rows') or [])
+    problems += growth
+    return problems, missing, lines, report
+
+
+def shared_findings(records, events, report):
+    """exactness-shared: the concurrent rounds ran and packed, a hit read the shared blocks, and every
+    window two requests share holds the same KV bytes. -> (problems, not exercised, lines)."""
+    problems, missing, lines = [], [], []
+    rounds = [events[name] for name in sorted(events) if name.startswith('shared-round-')]
+    lines.append('shared rounds: %s' % [(value.get('lengths'), value.get('ok')) for value in rounds])
+    if not rounds:
+        missing.append('no concurrent round of the four agents ran')
+    elif not all(value.get('ok') for value in rounds):
+        problems.append('a request of a concurrent round failed')
+    by_live = (report.get('rounds') or {}).get('by_live') or {}
+    if not any(int(live) >= 2 and count for live, count in by_live.items()):
+        missing.append('no packed extent round with two or more live users (by live: %s): the agents never decoded '
+                       'together' % json.dumps(by_live, sort_keys=True))
+    concurrent = [r for r in records if r.get('role') == 'hit' and r.get('case') == 'shared-agents'
+                  and r.get('continuation') and q_of(r)]
+    if not concurrent:
+        missing.append('no concurrent hit restored Q > 0')
+    window_problems, window_lines, restored = judge.window_findings(records)
+    problems += window_problems
+    lines += window_lines
+    if not restored:
+        missing.append('no audited hit read a shared or retained window it did not write (no window with new=0 was '
+                       'compared): the shared blocks are not checked across the decode')
+    return problems, missing, lines
+
+
+def judge_arm(arm, driver, scanned, stats, error, log_text=None):
     """One arm's verdict dict (the plan's cross-arm checks come after, in judge_plan)."""
     records = driver.records
     index = by_tag(records)
     for pair in driver.pairs:
-        judge.settle(pair, index)
+        judge.settle(pair, index, strict=bool(arm.get('s2')))
     problems, notes, missing = generic_problems(arm, scanned, records, error, arm['served'],
                                                 SMALL_STORE_GIB if arm.get('kind') == 'store' else judge.DEFAULT_STORE_GIB,
                                                 quiet_windows(driver.events))
@@ -907,8 +1145,23 @@ def judge_arm(arm, driver, scanned, stats, error):
         if bringup and stats is not None and stats.get('unsalted_denied'):
             problems.append('the registry denied %s unsalted requests a hit: an unsalted request published blocks'
                             % stats['unsalted_denied'])
-    if arm['scenario'].startswith('exactness'):
-        problems += row_growth_problems(scanned.get('rows') or [])
+    report = {}
+    if arm.get('s2') or arm.get('sticky'):
+        more_problems, more_missing, more_lines, report = s2_findings(arm, log_text, scanned, records)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    if arm['scenario'] == 'exactness_shared':
+        more_problems, more_missing, more_lines = shared_findings(records, driver.events, report)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+        audit_fail, audit_missing = audit_findings(records, driver.pairs)
+        problems += audit_fail
+        missing += audit_missing
+    elif arm['scenario'].startswith('exactness'):
+        if not arm.get('sticky'):
+            problems += row_growth_problems(scanned.get('rows') or [])
         more_missing, more_problems, more_lines = exercised_exactness(arm, records, driver.events)
         missing += more_missing
         problems += more_problems
@@ -917,6 +1170,10 @@ def judge_arm(arm, driver, scanned, stats, error):
             audit_fail, audit_missing = audit_findings(records, driver.pairs)
             problems += audit_fail
             missing += audit_missing
+            if arm.get('sticky'):
+                window_problems, window_lines, _ = judge.window_findings(records)
+                problems += window_problems
+                lines += window_lines
     elif arm['scenario'].startswith('lifecycle'):
         more_problems, more_missing, more_lines = lifecycle_findings(arm, records, driver.events, scanned, stats)
         problems += more_problems
@@ -956,10 +1213,11 @@ def judge_arm(arm, driver, scanned, stats, error):
                 dram_readings=(scanned.get('dram_readings') or [])[:16], kv_tokens=scanned.get('kv_tokens'))
 
 
-def bringup_cross(reference, prefix, anchor):
+def bringup_cross(reference, prefix, anchor, sticky=False):
     """The bring-up's cross-arm checks: the prefix arm's unsalted turns AND its fresh-salt capture
     turns against the baseline's reference turns byte for byte, each capture turn's row showing
-    captured=[floor2048(L)], the anchor probe. -> (problems, not exercised, lines)."""
+    captured=[floor2048(L)] (sticky sessions: [floor2048(L) - 2048] when that is positive, else nothing),
+    the anchor probe. -> (problems, not exercised, lines)."""
     problems, missing, lines = [], [], []
     refs = [r for r in reference.records if r.get('role') == 'reference']
     unsalted = [r for r in prefix.records if r.get('role') == 'unsalted']
@@ -977,7 +1235,7 @@ def bringup_cross(reference, prefix, anchor):
                 problems.append('turn %s %s is not byte-identical to the baseline (%s): %s' % (
                     other.get('turn'), label, result['verdict'], result.get('detail')))
         length = capture.get('prompt_tokens') or 0
-        want = [judge.floor_chunk(length)] if length >= judge.CHUNK else []
+        want = judge.fresh_plan(length, sticky)
         if capture.get('ok') and captured_of(capture) != want:
             problems.append('turn %s under a fresh salt (L=%s) captured %s, not %s: the capture path the salted '
                             'traffic takes was not exercised' % (capture.get('turn'), length, captured_of(capture), want))
@@ -1111,7 +1369,7 @@ class Runner(object):
             salt_key = write_salt_key(salt_key_path)
         arguments = server_run(self.image, name, arm['served'], self.devices, self.port, self.hub, derived_path,
                                digests=wants_digests(arm), salt_key_path=salt_key_path,
-                               stats_now=bool(arm.get('prefix')))
+                               stats_now=bool(arm.get('prefix')), env=arm.get('env') or ())
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         started = self.clock()
@@ -1126,7 +1384,8 @@ class Runner(object):
         # the evictions it does not model are what the arm looks for (a LOST hit).
         driver = replay.Driver(client, arm['arm'], self.get_corpus(), follower, container, seed=self.seed,
                                deadline=deadline, clock=self.clock, sleep=self.sleep, say=self.log,
-                               strict=arm['strict'], salt_key=salt_key)
+                               strict=arm['strict'], salt_key=salt_key, sticky=bool(arm.get('sticky')),
+                               batch_invariant=bool(arm.get('s2')), prompt_limit=arm.get('prompt_limit'))
         error, stats, metrics, output = None, None, {}, ''
         try:
             code, output = self.docker(arguments, 300)
@@ -1145,6 +1404,9 @@ class Runner(object):
                 kwargs['restart'] = lambda: self.restart(container, client, follower, driver)
             if arm['scenario'] == 'timing':
                 kwargs.update(agents=self.agents, turns=self.turns)
+            if arm.get('full'):
+                kwargs['full'] = True
+            kwargs.update(arm.get('scenario_kwargs') or {})
             replay.SCENARIOS[arm['scenario']](driver, **kwargs)
         except Exception as failure:   # noqa: BLE001 - any failure ends the arm, recorded and judged
             error = '%s: %s' % (type(failure).__name__, failure)
@@ -1175,7 +1437,7 @@ class Runner(object):
         scanned = markers.scan(lines)
         stats = stats if stats is not None else scanned.get('stats')
         judge.resolve(driver.records, scanned)
-        result = judge_arm(arm, driver, scanned, stats, error)
+        result = judge_arm(arm, driver, scanned, stats, error, log_text='\n'.join(lines))
         result.update(seconds=round(self.clock() - started, 1), metrics=dict(
             (key, value) for key, value in metrics.items() if key in (
                 'vllm:num_preemptions', 'vllm:prefix_cache_queries', 'vllm:prefix_cache_hits',
@@ -1247,7 +1509,10 @@ class Runner(object):
             json.dump(dict(events=driver.events, phases=driver.phases), handle, indent=1, default=str)
         summary = dict((key, scanned[key]) for key in ('installs', 'refused', 'capture_skipped', 'kill_switch', 'stats',
                                                         'launches', 'apc', 'chunking_off', 'chunk_replay', 'kv_tokens',
-                                                        'failures', 'eager_warm'))
+                                                        'failures', 'eager_warm', 'sticky_installs', 'model_warm',
+                                                        'kv_shared'))
+        summary.update(sticky_admits=len(scanned['sticky_admits']), sticky_builds=len(scanned['sticky_builds']),
+                       audit_windows=len(scanned['audit_windows']))
         summary.update(grants=len(scanned['grants']), rows=len(scanned['rows']), audits=len(scanned['audits']),
                        dram=scanned['dram'][:32], dram_readings=(scanned.get('dram_readings') or [])[:32])
         with open(os.path.join(arm_dir, 'arm.json'), 'w', encoding='utf-8') as handle:
@@ -1265,7 +1530,8 @@ def run_plan(plan, arms, runner, anchor=None):
     extra = {}
     if plan == 'bringup' and len(results) == 2 and all(driver is not None for driver, _ in results.values()):
         reference, prefix = results['bringup-reference'][0], results['bringup-prefix'][0]
-        problems, missing, cross = bringup_cross(reference, prefix, anchor or {})
+        problems, missing, cross = bringup_cross(reference, prefix, anchor or {},
+                                                 sticky=bool(prefix.oracle.sticky))
         dram_missing, dram_lines = dram_findings(results['bringup-prefix'][1])
         cross += dram_lines
         missing += dram_missing
@@ -1328,12 +1594,17 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
             profiles = json.load(handle)
     else:
         profiles = gate.image_profiles(options.image)
-    arms_of, ran = {}, {}
+    arms_of, ran, skipped = {}, {}, {}
     for plan in plans:
         try:
             arms_of[plan] = plan_arms(plan, options.profile, options.baseline, profiles)
         except PlanError as error:
             log('refused: %s' % error)
+            return 2
+        skipped[plan] = not_applicable(plan, options.profile, profiles)
+        if not arms_of[plan]:
+            log('refused: plan %s has no arm that applies to profile %s (%s)' % (
+                plan, options.profile, '; '.join('%s: %s' % pair for pair in skipped[plan])))
             return 2
         for arm in arms_of[plan]:
             if arm['arm'] in ran:
@@ -1348,7 +1619,12 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
         return 2
     os.makedirs(options.results, exist_ok=True)
     if options.dry_run:
-        log(json.dumps(dict(worst_case_seconds=worst_case, budget_seconds=options.budget_seconds)))
+        # One JSON line of totals (the arms the profile makes NOT_APPLICABLE among them), then one per arm.
+        totals = dict(worst_case_seconds=worst_case, budget_seconds=options.budget_seconds)
+        if any(skipped.values()):
+            totals['not_applicable'] = dict((plan, [arm for arm, _ in entries]) for plan, entries in skipped.items()
+                                            if entries)
+        log(json.dumps(totals))
         for plan in plans:
             for arm in arms_of[plan]:
                 log(json.dumps(dict(plan=plan, arm=arm['arm'], served=arm['served'], timeout=arm['timeout'],
@@ -1358,13 +1634,16 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                                       else None, digests=wants_digests(arm),
                                                       salt_key_path='<results>/%s/salt.key' % arm['arm']
                                                       if arm.get('prefix') else None,
-                                                      stats_now=bool(arm.get('prefix'))))))
+                                                      stats_now=bool(arm.get('prefix')), env=arm.get('env') or ()))))
         return 0
+    log_not_applicable(skipped, options.profile, log)
     runner = (runner_factory or Runner)(options.image, options.results, options.checkout,
                                         devices if devices is not None else gate.serving_pair(), options.hub,
                                         options.port, log=log, seed=options.seed, agents=agents, turns=options.turns)
     summary = dict(image=options.image, profile=options.profile, baseline=options.baseline, plans=plans,
-                   worst_case_seconds=worst_case, budget_seconds=options.budget_seconds, results={})
+                   worst_case_seconds=worst_case, budget_seconds=options.budget_seconds, results={},
+                   not_applicable=dict((plan, [dict(arm=arm, why=why) for arm, why in entries])
+                                       for plan, entries in skipped.items() if entries))
     try:
         if 'bringup' in plans and anchor is None:
             anchor = anchor_probe(options.image)
@@ -1380,6 +1659,12 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
     log('C2_PREFIX profile=%s plans=%s passed=%s%s' % (options.profile, ','.join(plans), summary['passed'],
                                                        ' infra=%s' % runner.infra if runner.infra else ''))
     return 0 if summary['passed'] else 1
+
+
+def log_not_applicable(skipped, profile, log):
+    for plan in sorted(skipped):
+        for arm, why in skipped[plan]:
+            log('[PREFIX-GATE] %s: arm %s NOT_APPLICABLE on %s - %s' % (plan, arm, profile, why))
 
 
 def _terminate(signum, frame):

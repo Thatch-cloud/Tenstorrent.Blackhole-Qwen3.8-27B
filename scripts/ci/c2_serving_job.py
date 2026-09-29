@@ -47,10 +47,18 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_GATE_AUDITS      extent (default: QWEN_FAST_EXTENT_AUDIT on every S2 arm but control's timing arms) or
                       all (also the prestage, pair-mask and fused-commit audits on the G4 arms); mixed (M7) runs
                       all four either way
+  C2_GATE_SALT        a cache_salt for every gate stream (sticky sessions, harness item B3; default, rendered
+                      empty: none sent, the payload exactly as before): fresh (each stream its own salt, minted
+                      under a key the gate mounts, so every request takes the prefix route's capture path and
+                      publishes, and none can hit) or none (said explicitly: every request unsalted, which a
+                      prefix profile serves with reuse off). Only on a prefix profile (the gate refuses it on
+                      any other before a container starts); warm on c2-packed-prefix then warms the prefix twins
   C2_PREFIX_PLAN      PREFIX_PLANS for the prefix action (c2_prefix_gate.py), in order (default: bringup);
                       each exactness and lifecycle arm is a plan too (PREFIX_ARM_PLANS): exactness-eager
                       re-runs that arm alone. Never beside its own plan, and no plan twice (one arm, one
-                      results directory)
+                      results directory). exactness-shared (the four-agent shared-block arm) applies to the
+                      sticky-session profiles only; on them exactness-traced and lifecycle-tiny are
+                      NOT_APPLICABLE, and a plan with no applicable arm is refused by the gate
   C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
                       the baseline arm)
@@ -79,6 +87,8 @@ BELOW_FAMILY_RANGE = (4096, 16640)   # capacities the pinned (flag-off) mask adm
 JIT_MODES = ('auto', 'judge', 'record')
 POLICIES = ('strict', 'dc-i')
 AUDIT_SETS = ('extent', 'all')
+# C2_GATE_SALT (sticky sessions B3): what cache_salt the gate's streams carry; unset sends none, as before.
+SALT_MODES = ('none', 'fresh')
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
 PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing')
@@ -86,8 +96,9 @@ PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing')
 # only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
 # G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.
 PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exactness'),
-                    ('exactness-eager', 'exactness'), ('lifecycle-evict', 'lifecycle'),
-                    ('lifecycle-store', 'lifecycle'), ('lifecycle-tiny', 'lifecycle'))
+                    ('exactness-eager', 'exactness'), ('exactness-shared', 'exactness'),
+                    ('lifecycle-evict', 'lifecycle'), ('lifecycle-store', 'lifecycle'),
+                    ('lifecycle-tiny', 'lifecycle'))
 PREFIX_PROFILE = 'general-prefix'
 PREFIX_BASELINE = 'general'
 PREFIX_AGENTS = (1, 4, 5, 6)
@@ -289,8 +300,11 @@ def read_s2_gate(values):
     audits = values.get('C2_GATE_AUDITS', '')
     if audits and audits not in AUDIT_SETS:
         raise JobError('C2_GATE_AUDITS must be one of %s, got %r' % (', '.join(AUDIT_SETS), audits))
+    salt = values.get('C2_GATE_SALT', '')
+    if salt and salt not in SALT_MODES:
+        raise JobError('C2_GATE_SALT must be one of %s, got %r' % (', '.join(SALT_MODES), salt))
     return dict(gate_pairs=pairs, gate_families=','.join(str(family) for family in families), gate_jit=jit,
-                gate_policy=policy, gate_policy_decision=decision, gate_audits=audits)
+                gate_policy=policy, gate_policy_decision=decision, gate_audits=audits, gate_salt=salt)
 
 
 def read_prefix(values, profiles, running):
