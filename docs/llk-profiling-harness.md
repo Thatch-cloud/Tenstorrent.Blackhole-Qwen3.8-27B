@@ -78,18 +78,33 @@ manifest says so.
 | `SDPA_DEC_RD` | K64j SDPA decode reader | file | – | K64j `K64J_READER_QWEN` |
 | `SDPA_COMMON` | SDPA compute helpers header | file | sums only | none |
 | `ATTN_PREP` | AttnPrep compute | file | – | repo copy; image unverified *(u)* |
-| `MM` | stock matmul compute | file | – | none |
+| `MM` | stock matmul compute (prefill only) | file | – | none |
 | `SDPA_PF` | SDPA prefill compute | file | – | none |
 | `CONV_GATES` | GdnConvGates compute | discover | – | path unpinned *(u)* |
 | `AGMM` | prefill gate/up all-gather matmul compute | discover | – | path unpinned *(u)* |
 
-Required for a decode zones arm to pass: `K5A` and `SDPA_DEC`, each on TRISC_0/1/2 of both chips.
+Required kernels, per phase: `K5A` and `SDPA_DEC` in decode, `SDPA_PF` in prefill; each on TRISC_0/1/2 of both
+chips. An arm with no required kernel would measure nothing, so the report refuses an empty list. The stock
+matmul is instrumented in prefill only: in decode it runs on most cores every round, and its markers would crowd
+the profiler buffer that the K5-A stage zones need.
 
 ### The report (llk_profile_report)
 
 Reads only `QWEN_LLK_*` rows and counter rows (timer id 9090) of `profile_log_device.csv`, streaming. Pairs
 START/END per execution key (chip, core, RISC, run host id, trace id, trace id counter); unmatched markers are
-counted as drops, never hidden. Wait sums belong to the envelope of the same key. Per kernel and thread:
+counted as drops, never hidden. Wait sums belong to the envelope of the same key.
+
+Each arm is read over one window. A decode arm reads complete trace replay sessions only (`traced`): a session
+with a dropped marker, or with fewer envelopes of any kernel than the fullest session of its trace on that chip,
+is left out and counted, and every required kernel needs at least two complete sessions per chip. The profiler
+buffer truncates (once it is full, every later marker is lost until the next read-back), so the sessions before
+an overflow are whole. A prefill arm reads the untraced rows, and any drop there makes it incomplete.
+
+A wait slot that a thread waits in (TRISC_0 `WAIT_IN`, TRISC_1 `WAIT_OUT`, TRISC_2 both) must have its sum row on
+every invocation of a kernel whose sums were on. A missing row is undetermined, never zero: the define may not
+have reached the worker, the zones may have compiled out, a zone-id collision may have renamed it, or the row may
+have been dropped. Reading it as zero would class the kernel as LLK-bound. Such a kernel is classified
+`undetermined`, and a zones arm with one is `NOT_EXERCISED`. Per kernel and thread:
 envelope statistics, WAIT_IN, WAIT_OUT, busy; per stage: instances, per-thread statistics, the unpack/math
 lockstep evidence, static reconfiguration counts times instances. Classification:
 `dataflow-in`, `dataflow-out`, `llk-pack`, `llk-unpack`, `llk-math`, `llk-math-sfpu`, `llk-unpack-or-math`
@@ -107,8 +122,36 @@ Ranked by the kernel's summed critical duration. A perturbation line compares wi
   `finally` (a SIGTERM included), and the workflow's `always()` step does it again before the upload and prunes
   any raw log the gate did not reach. Still: never cancel a job with `llk-*` plans while an arm runs.
 - **Output location.** `<arm>/llk-profile` is bind-mounted at tt-metal's default artifacts directory, so the
-  output is outside the checkout and out of the agent shape's 1 GB `/opt/tt-metal/generated` tmpfs whether or
-  not the image honours `TT_METAL_PROFILER_DIR` (set as well).
+  output is outside the checkout and out of the agent shape's 1 GB `/opt/tt-metal/generated` tmpfs. tracy's `-o`
+  is that same directory, and so is `TT_METAL_PROFILER_DIR`. tracy hands its `-o` to the child process (v138's
+  logs landed under `-o` with no `-e` set), so a different `-o` would make the arrival check fail every profiled
+  arm. `check_tracy` refuses any other `-o`. The arrival check accepts the directory, or one inside it, as tracy
+  writes it back.
+- **The profiler buffer overflows.** Each RISC's DRAM buffer holds about 20000 programs' guaranteed markers at
+  op-support 20000, and nothing leaves it until a read-back. v138 (the same 4 × 32768 shape, no zones, no drain)
+  logged about 1,100 "Profiler DRAM buffers were full, markers were dropped!" lines at its round-4 read-back: the
+  four prefills alone are about 19,600 programs per core *(e)*. So every profiled arm:
+  - drains the prefill (`QWEN_PREFILL_PROFILE_FLUSH=1`: a read-back every 16 layers), and a missing drain
+    marker makes the arm `NOT_EXERCISED`;
+  - reads back again after packed round 2 (`QWEN_FAST_PROFILE_DUMP_ROUND=2`), the only read-back that is
+    certain, because a clean close is not;
+  - carries no matmul zones in decode;
+  - has the markers between two drains budgeted before any container starts (`marker_budget`: at most 80% of
+    the buffer). The decode zones arm is at about 62% *(e)*, the counters arm at about 48% *(e)*, and the prefill
+    arms at about 1%.
+
+  The drain every 16 layers has not run at op-support 20000 on hardware. Its one earlier run (v131) segfaulted at
+  the first drain at op-support 200000, and 200000 alone segfaulted without it (v135). About 256 drains per four
+  prefills add minutes, not hours *(e)*.
+- **The raw log can fill the disk.** A decode arm's `profile_log_device.csv` is tens of GB *(e)*. Before a
+  profiled arm, the results disk must stay under 80% used with 48 GB (decode) or 10 GB (prefill) written; if not,
+  the arm is `NOT_EXERCISED` without a container. While it runs, a guard stops its container if the profile tree
+  passes 64 GB (decode) or 16 GB (prefill), or the disk passes 85% used. The raw log is pruned as soon as it has
+  been exported and hashed once.
+- **Every profiled arm compiles cold.** Its JIT cache is a per-container tmpfs, and the C2 cold-compile time has
+  never been measured. Each arm's docker limit is the gate's 1800 s readiness plus its stream timeout plus 300 s.
+  If one profiled arm's server is not ready in time, the later profiled arms are skipped rather than each
+  waiting out the same allowance. A server that crashes before readiness fails fast and skips nothing.
 - **Kernel cache.** Profiled arms set `TT_METAL_CACHE` to the agent shape's per-container 8 GB tmpfs: profiler
   and instrumented compiles never enter the image's shared cache that production reads. Whether a full cold JIT
   fits in 8 GB is *(u)*.
@@ -130,27 +173,39 @@ C2_GATE_PLAN=llk-decode-twin,llk-prefill-twin,llk-decode-zones,llk-prefill-zones
 
 | Arm | Shape | Adds | Docker limit | Estimate |
 |---|---|---|---|---|
-| `llk-decode-twin` | 4 × 32768 real text, 48 out | nothing (served bytes) | 20 min | 10-12 min *(e)* |
-| `llk-prefill-twin` | 1 × 32768, 1 out | nothing | 15 min | 6-8 min *(e)* |
-| `llk-decode-zones` | as the decode twin | profiler, sums, `QWEN_LLK_ZONES=stages`, file overlays, scratch cache | 40 min | 20-30 min *(e)* |
-| `llk-prefill-zones` | as the prefill twin | as above | 25 min | 10-15 min *(e)* |
-| `llk-decode-counters` | as the decode twin | profiler, counters FPU+PACK+UNPACK+L1_0+INSTRN (47), `QWEN_LLK_ZONES=tag` | 30 min | 15-20 min *(e)* |
-| `llk-prefill-counters` | as the prefill twin | as above | 20 min | 8-12 min *(e)* |
+| `llk-decode-twin` | 4 × 32768 real text, 48 out | nothing (served bytes) | 65 min | 10-12 min *(e)* |
+| `llk-prefill-twin` | 1 × 32768, 1 out | nothing | 50 min | 6-8 min *(e)* |
+| `llk-decode-zones` | as the decode twin | profiler, prefill drain, round-2 read-back, sums, `QWEN_LLK_ZONES=stages`, file overlays, scratch cache | 65 min | 30-45 min *(e)*, including a cold compile *(u)* |
+| `llk-prefill-zones` | as the prefill twin | as above | 50 min | 20-30 min *(e)* |
+| `llk-decode-counters` | as the decode twin | as the zones arm, but counters FPU+PACK+UNPACK+L1_0+INSTRN (47) and `QWEN_LLK_ZONES=tag` | 65 min | 25-40 min *(e)* |
+| `llk-prefill-counters` | as the prefill twin | as above | 50 min | 15-25 min *(e)* |
 
-Worst case with overheads: 2.7 h, inside the gate step's 380 minutes. Expected: 1.2-1.6 h *(e)*.
+Worst case, every arm to its limit plus overheads: 5.95 h, inside the gate step's 380 minutes. Expected:
+2-3 h *(e)*, most of it cold compiles, drains and the exports of the raw logs.
 
 Before the window, in the no-card build job: `C2_ACTIONS=status build llkcheck` runs the preflight, which makes
-every instrumented copy the arms will mount from the image's own bytes and instruments the image's K5-A build
-inside the image. An anchor that drifted, or a profiler capability the zones arms need, fails there.
+every instrumented copy the arms will mount from the image's own bytes, instruments the image's K5-A build
+inside the image, and checks every arm's marker budget. An anchor that drifted, a profiler capability the zones
+arms need, or a window past the budget fails there. The step is `continue-on-error`: it never keeps the image
+from its push, so read its outcome and `llk-preflight/llk-preflight.json` before the window, and drop J3 if it
+failed.
 
 Artefacts per profiled arm: `llk-manifest.json` (capabilities, every record, every mount with its sha256),
 `llk-export.csv.gz` (the filtered rows, with the full log's size and sha256), `llk-report.json`,
 `llk-pruned.json`, the argv and the server log. The raw device log leaves the results tree after export.
 
-Judged on: tokens identical to the twin (the copies are byte-reversible, so a difference is a finding), the
-required kernels' zones on every compute thread of both chips, no dropped markers, and (counters) at least one
-counter row; otherwise `NOT_EXERCISED` with the reason. `UNSUPPORTED` counters skip the other phase's counter
-arm without starting a container. No `llk-*` result is a timing result, and none blocks a placement.
+Judged on:
+- **Text.** Each stream's generated text (the harness report's `streams[i].text`) is identical to the twin's.
+  The copies are byte-reversible, so a difference is a finding (`FAIL`). A stream without text is a `FAIL`, and a
+  twin without text leaves the arm `NOT_EXERCISED`: absent values are never compared as equal.
+- **Coverage.** Every required kernel has zones on every compute thread of both chips; in decode, at least two
+  complete replay sessions per chip; on a zones arm, every wait sum; on a counters arm, counter rows on both
+  chips.
+- **Drops.** None in the analysed window.
+- **The drain.** The prefill drain's marker was seen.
+
+Otherwise the arm is `NOT_EXERCISED` with the reason. `UNSUPPORTED` counters skip the other phase's counter arm
+without starting a container. No `llk-*` result is a timing result, and none blocks a placement.
 
 ## Not done yet (before the image freeze)
 
@@ -159,5 +214,8 @@ arm without starting a container. No `llk-*` result is a timing result, and none
 - Confirm on the image (the preflight does this): tracy's options, sum-zone macros, counter readout, the marker
   budget, and the real paths of `CONV_GATES` and `AGMM`; re-pin `ATTN_PREP` against the image's bytes.
 - The K5-A clock-page arm (`llk-k5a-clock`, task L0-08) is designed, not built; the job parser refuses it by name.
-- The prefill profiler flush (`QWEN_PREFILL_PROFILE_FLUSH`) is off: a 32768-token prefill is estimated to stay
-  inside 20000 programs *(e)*; the flush segfaulted once at 131072 tokens.
+- The buffer model (`ROUND_PROGRAMS`, `LAYER_PROGRAMS`, the invocations per round) is estimated from v138's
+  per-op report *(e)*. The traced window is what tolerates it being wrong: an overflow after round 2 costs
+  sessions, not the arm.
+- Zone ids are 16-bit hashes of the zone name, file and line, and each wrapped wait call is its own site. A
+  collision is not detected; it shows up as a missing sum and so as `undetermined`, never as a zero wait.
