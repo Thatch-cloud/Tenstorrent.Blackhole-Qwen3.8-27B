@@ -218,6 +218,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # docs/experiment-execution.md, feature_prefix.py). Nothing earlier in this
     # attachment captures a trace, and the plugin's own warmup is replaced by
     # serving_startup.warmup, so this is the earliest point the fast path controls.
+    # (Under QWEN_PREFIX_REUSE=1 that warmup first runs the prefix-reuse model graft's
+    # warm, serving_startup.prefix_warm: a transient restore round trip through the
+    # model's persistent B=1 prefill scratch, and no trace.)
     # Registered first so it closes last, after the lifecycle has closed every
     # device that borrows from it.
     scopes = ExitStack()

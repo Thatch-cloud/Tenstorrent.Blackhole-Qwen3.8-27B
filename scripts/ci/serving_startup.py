@@ -155,6 +155,48 @@ def stop(worker):
         worker._qwen_fast_attachment = None
 
 
+# The prefix-reuse switch (serving_c2_contract.PREFIX_SWITCH; only a profile sets it: the
+# c2-packed-prefix profiles, beside QWEN_FAST_STICKY_SESSIONS=1).
+PREFIX_REUSE_FLAG = 'QWEN_PREFIX_REUSE'
+
+
+def prefix_warm(worker, environ=None):
+    """QWEN_PREFIX_REUSE=1 only: the prefix-reuse model graft's warm, which the fast path's
+    worker would otherwise never run. -> whether it ran.
+
+    The graft warms from the plugin's warmup_model_prefill (qwen_prefix_model_patch
+    VLLM_WARM_NEW), which only TTModelRunner.warmup_model calls - and the fast path's
+    compile_or_warm_up_model returns warmup() below before reaching it
+    (serving_plugin_patch.patch_worker). Without the warm the model has chosen no GDN restore
+    path, so the first granted resume asserts inside the prefix route and stops the engine with
+    every live user, and the registry is created without the mid-loop capture declaration, so the
+    first long request after boot plans no C0 checkpoint.
+
+    It runs the wrapper's _qwen_prefix_warm, as warmup_model_prefill's compile-only call does:
+    the restore path chosen and compiled (a transient round trip through the persistent B=1
+    prefill scratch, which it allocates if no prefill has yet) and the mid-loop captures declared
+    on the registry holder, before vLLM builds the scheduler. Called before start(), so before
+    the fast path allocates or captures anything. NOT the eager prefill warm
+    (_qwen_prefix_warm_eager): capture_prefill_trace_chunked rebinds every GDN layer to external
+    state and allocates chunk buffers, which would change the cold path the fast path serves.
+
+    A model without the graft, or a warm that chose no restore path (it skips, with a warning,
+    off the batched TP path), is refused here: serving it would stop the engine at its first hit."""
+    environ = os.environ if environ is None else environ
+    if environ.get(PREFIX_REUSE_FLAG) != '1':
+        return False
+    wrapper = worker.model_runner.model
+    warm = getattr(wrapper, '_qwen_prefix_warm', None)
+    if not callable(warm):
+        raise ValueError('%s=1 but the model (%s) has no _qwen_prefix_warm: the prefix-reuse model graft '
+                         '(qwen_prefix_model_patch) is not applied' % (PREFIX_REUSE_FLAG, type(wrapper).__name__))
+    warm()
+    if getattr(wrapper.model[0], '_qwen_prefix_restore_mode', None) is None:
+        raise ValueError('%s=1 but the model graft\'s warm chose no GDN restore path (skipped: not the batched '
+                         'TP path?): the first granted resume would stop the engine' % PREFIX_REUSE_FLAG)
+    return True
+
+
 def warmup(worker):
     if os.environ.get('QWEN_FAST_FAULTHANDLER') == '1':
         # A device hang leaves the worker blocked inside a ttnn call; dumping the
@@ -166,5 +208,8 @@ def warmup(worker):
     from vllm.v1.worker.worker_base import CompilationTimes
 
     started = time.perf_counter()
+    # The prefix-reuse model graft's warm first (QWEN_PREFIX_REUSE=1 only; a no-op otherwise):
+    # before start(), so before any fast-path allocation or trace.
+    prefix_warm(worker)
     start(worker)
     return CompilationTimes(language_model=time.perf_counter() - started, encoder=0.0)

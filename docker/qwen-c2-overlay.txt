@@ -165,6 +165,13 @@ scripts/ci/lever_n_model_patch.py
 # serving_packed_step, serving_c2_contract, qwen_c2_profiles.json, qwen_prefix_scheduler_patch (both
 # copies) and qwen_prefix_model_patch.
 scripts/ci/dflash_prefill_window.py
+# The fast path's worker warmup (serving_startup.warmup, which the P8 worker patch returns before the plugin's
+# own warmup) runs the prefix-reuse model graft's warm first under QWEN_PREFIX_REUSE=1: the GDN restore path
+# and the mid-loop capture declaration, which the plugin's warmup_model_prefill would otherwise be the only
+# caller of. P8 lays serving_startup at its base commit; without this line the image ships that copy, the warm
+# never runs, and the first granted resume stops the engine. Not a frozen-recipe pin (the same pin probe). Flag
+# off, warmup is its P8 self (test_sticky_sessions.FastPathWarmupTests).
+scripts/ci/serving_startup.py
 
 # Tests run inside the image at build time (every overlaid scripts/ci/test_*.py is).
 scripts/ci/test_serving_c2_contract.py

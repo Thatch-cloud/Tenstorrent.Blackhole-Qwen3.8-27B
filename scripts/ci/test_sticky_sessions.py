@@ -8,9 +8,13 @@ block). What is held here:
 
   flag off   serving_lifecycle, dflash_prefill_window, serving_packed_step.kv_guard and the scheduler
              graft make exactly the calls and decisions of their pre-sticky versions (the merge commit's,
-             loaded from git; skipped without history), the registry is never read, the runtime builds
-             the capture it always built, the policy refuses the prefix cache, and the contract refuses the
-             fast path beside prefix reuse;
+             loaded from git; without that history a skip locally, a failure in CI), the registry is never
+             read, the runtime builds the capture it always built, the policy refuses the prefix cache, and
+             the contract refuses the fast path beside prefix reuse;
+  warmup     the fast path's worker (the P8 patch's compile_or_warm_up_model, which returns before the
+             plugin's warmup) runs the G1 model graft's warm under QWEN_PREFIX_REUSE=1 before start(): the
+             restore path is chosen and the mid-loop captures declared, so the first resume runs and the
+             first long request after boot plans C0; a model without the graft or a skipped warm is refused;
   retain     turn N publishes KV up to floor2048(P) and checkpoints floor2048(P) - 2048;
   extend     turn N+1, extending turn N token for token, is granted Q = that checkpoint, admitted by the
              lifecycle at R == Q with a capture counting from R, and prefills only [Q, P');
@@ -88,6 +92,16 @@ def parent_module(relative, commit=PARENT):
     return module
 
 
+def no_history(case):
+    """A flag-off proof without the pre-sticky tree (PARENT, from git): a skip locally, a FAILURE in CI
+    (GITHUB_ACTIONS=true), so a rebase or squash that loses PARENT cannot turn the call-for-call equivalence
+    into green skips. Re-pin PARENT to the new pre-sticky commit then."""
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        case.fail('no git history for %s: the flag-off equivalence did not run (re-pin PARENT after a rebase or '
+                  'squash)' % PARENT)
+    case.skipTest('no git history for %s' % PARENT)
+
+
 @contextmanager
 def sticky_env(value):
     """QWEN_FAST_STICKY_SESSIONS exactly as given (None: unset), whatever the shell has set."""
@@ -138,6 +152,9 @@ def holder_with(registry):
 class LifecycleFixture(unittest.TestCase):
     def fixture(self, cls=serving_lifecycle.FastServingLifecycle, prompt=4096, computed=0, chunk=None,
                 records_route=True):
+        # The lifecycle parks its prefill gate (held while a prefill is pending) under a fixed sys.modules key;
+        # drop it after each test, or a later suite in the same process inherits a held gate.
+        self.addCleanup(sys.modules.pop, serving_lifecycle.PREFILL_GATE_KEY, None)
         worker, bridge, _, _ = worker_hook_tests.WorkerHookTests().fixture()
         worker.model_runner.execute_model.return_value = None
         worker.model_runner.sample_tokens.return_value = SimpleNamespace(req_ids=['request'], sampled_token_ids=[[10]])
@@ -336,7 +353,7 @@ class LifecycleParityTests(LifecycleFixture):
     def test_every_shape_matches_the_parent_call_for_call(self):
         parent = parent_module('serving_lifecycle.py')
         if parent is None:
-            self.skipTest('no git history for %s' % PARENT)
+            no_history(self)
         for index, shape in enumerate(self.SHAPES):
             for value in (None, '0'):
                 with self.subTest(shape=index, flag=value):
@@ -524,7 +541,7 @@ class CaptureParityTests(unittest.TestCase):
     def test_the_default_capture_matches_the_parent(self):
         parent = parent_module('dflash_prefill_window.py')
         if parent is None:
-            self.skipTest('no git history for %s' % PARENT)
+            no_history(self)
         for slots in ([0], [1, 1, 1], [2, 2, 0, 0], [0, 3]):
             for route in (True, False):
                 with self.subTest(slots=slots, route=route):
@@ -729,7 +746,7 @@ class ProfileTests(unittest.TestCase):
     def test_the_flag_off_contract_matches_the_parent_on_every_other_profile(self):
         parent = parent_module('serving_c2_contract.py')
         if parent is None:
-            self.skipTest('no git history for %s' % PARENT)
+            no_history(self)
         for name in sorted(load_profiles()['profiles']):
             if name.startswith('c2-packed-prefix'):
                 continue
@@ -1050,7 +1067,7 @@ class SchedulerParityTests(unittest.TestCase):
     def test_the_flag_off_graft_matches_the_parent(self):
         parent = parent_module('qwen_prefix_scheduler_patch.py')
         if parent is None:
-            self.skipTest('no git history for %s' % PARENT)
+            no_history(self)
         for value in (None, '0'):
             with self.subTest(flag=value), sticky_env(value):
                 self.assertEqual(self.scenario(graft), self.scenario(parent))
@@ -1058,7 +1075,7 @@ class SchedulerParityTests(unittest.TestCase):
     def test_the_flag_off_install_rules_match_the_parent(self):
         parent = parent_module('qwen_prefix_scheduler_patch.py')
         if parent is None:
-            self.skipTest('no git history for %s' % PARENT)
+            no_history(self)
         cases = [dflash_scheduler(), dflash_scheduler(lookahead=5), graft_fakes.FakeScheduler()]
         broken = graft_fakes.FakeScheduler()
         broken.scheduler_config.async_scheduling = True
@@ -1145,7 +1162,7 @@ class KvGuardTests(unittest.TestCase):
     def test_flag_off_the_guard_is_the_parent_guard(self):
         parent = parent_module('serving_packed_step.py')
         if parent is None:
-            self.skipTest('no git history for %s' % PARENT)
+            no_history(self)
         a, b, c, d = self.owners()
         e, f, g, h = self.owners(shared_first=False)
         cases = [([(a, 184), (b, 184), (c, 100), (d, 100)], FakeBlock([a, b, c, d])),
@@ -1170,13 +1187,8 @@ class WriterAuditTests(unittest.TestCase):
         private = list(range(500, 500 + (self.P - self.R + BLOCK - 1) // BLOCK))
         return shared, private
 
-    def test_the_prefill_route_writes_only_its_own_blocks_from_r(self):
-        shared, private = self.request_blocks()
-        row = shared + private
-        written = {row[position // BLOCK] for position in range(self.R, self.P)}
-        self.assertTrue(written <= set(private))
-        self.assertFalse(written & set(shared))
-        self.assertNotIn(0, written)
+    # The prefill route's own writes are held on the real staged route, not here:
+    # ToyExactnessTests.test_the_resumed_route_writes_only_its_own_blocks_from_r.
 
     def test_the_engine_table_is_this_request_s_allocation_and_its_pad_is_its_first_block(self):
         shared, private = self.request_blocks()
@@ -1224,7 +1236,7 @@ class ToyExactnessTests(unittest.TestCase):
 
         self.F, self.model_runtime = F, model_runtime
         self.engine = model_runtime.Engine(traced=False)
-        self.engine.warm()
+        self.warm()
         toy = self.engine.toy
         model = self.engine.model
 
@@ -1240,6 +1252,11 @@ class ToyExactnessTests(unittest.TestCase):
             return toy.logits(hidden.data[0, 0])
 
         model.prefill_masked_bucket = masked_bucket
+
+    def warm(self):
+        """The plugin's compile-only warmup_model_prefill call, where the model graft warms under
+        general-prefix (FastPathWarmToyExactnessTests warms the fast path's way instead)."""
+        self.engine.warm()
 
     def admit(self, req_id, tokens, q, h=None):
         """The scheduler graft's stage and commit under sticky sessions (its own plan, with the drop)."""
@@ -1301,6 +1318,30 @@ class ToyExactnessTests(unittest.TestCase):
         self.assertEqual(window.validate_prefill_chunks(12700, hit_capture.chunks, 6144),
                          window.validate_prefill_chunks(12700, twin.chunks))
 
+    def test_the_resumed_route_writes_only_its_own_blocks_from_r(self):
+        """docs/sticky-sessions-writer-audit.md, the prefill route's row, on the real staged route: a prefill
+        resumed at R writes KV into exactly its own blocks from R to its last - never a shared prefix block it
+        reads, never the page-table pad (block 0), never another request's block."""
+        F, engine = self.F, self.engine
+        base = F.prompt(12700, seed=94)
+        first = base[:9000]
+        self.admit('w', first, 0)
+        row_w = engine.pool.row(9000)
+        self.prefill('w', first, row_w, 0, 1, self.capture(9000))
+        self.admit('w1', base, 6144, h=8192 - BLOCK)
+        shared = row_w[0, :6144 // BLOCK].tolist()
+        row = engine.pool.row(12700, shared)
+        before = [cache.data.clone() for pair in engine.model._paged_kv_caches for cache in pair]
+        self.prefill('w1', base, row, 6144, 2, self.capture(12700, start=6144))
+        written = set()
+        for old, cache in zip(before, [cache for pair in engine.model._paged_kv_caches for cache in pair]):
+            changed = (old != cache.data).reshape(old.shape[0], -1).any(dim=1)
+            written |= set(torch.nonzero(changed).reshape(-1).tolist())
+        own = set(row[0, 6144 // BLOCK:-(-12700 // BLOCK)].tolist())
+        self.assertEqual(written, own)
+        self.assertFalse(written & set(row_w[0].tolist()))
+        self.assertNotIn(0, written)
+
     def test_the_route_still_refuses_under_a_capture_that_does_not_record_it(self):
         F, engine = self.F, self.engine
         tokens_ = F.prompt(5000, seed=92)
@@ -1317,6 +1358,134 @@ class ToyExactnessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'must start at this capture'):
             self.prefill('r', tokens_, engine.pool.row(9000), 0, 0, self.capture(9000, start=4096))
         self.assertEqual(engine.toy.segments, [])
+
+
+# ------------------------------------------------------------------------------------------------
+# The fast path's worker warmup runs the model graft's warm (serving_startup.prefix_warm)
+# ------------------------------------------------------------------------------------------------
+PREFIX_ON = {'QWEN_PREFIX_REUSE': '1'}
+
+
+def boot_fast_path_worker(engine, environ, wrapper=None):
+    """The fast path's boot on the G1 toy, through the P8 worker's own compile_or_warm_up_model
+    (serving_plugin_patch.patch_worker of the pinned plugin worker.py, compiled as the method it is): no
+    registry holder exists yet, serving_startup.warmup runs with start() recording what the model and the
+    holder hold when it is reached, and the scheduler graft's registry is then created as vLLM creates it,
+    after the worker's warmup (qwen_prefix_registry.shared_registry, which honours the holder's mid-loop
+    declaration). The plugin's TTModelRunner.warmup_model is a Mock: the fast path must never reach it."""
+    import serving_startup
+    import test_qwen_prefix_model_runtime as model_runtime
+    import test_qwen_prefix_runner_patch as runner_tests
+
+    method = runner_tests.compile_method(runner_tests.p8_worker().decode('utf-8'), 'TTWorker',
+                                         'compile_or_warm_up_model', {})
+    wrapper = engine.wrapper if wrapper is None else wrapper
+    seen = SimpleNamespace(started=[], registry=None, result=None, error=None)
+
+    def start(worker):
+        holder = sys.modules.get(prefix_registry.REGISTRY_KEY)
+        seen.started.append(dict(restore_mode=getattr(wrapper.model[0], '_qwen_prefix_restore_mode', None),
+                                 mid_loop=getattr(holder, 'mid_loop_capture', None)))
+
+    runner = SimpleNamespace(model=wrapper, warmup_model=Mock(name='TTModelRunner.warmup_model'))
+    worker = SimpleNamespace(vllm_config=policy_tests.FastPolicyTests().fixture(), model_runner=runner,
+                             enable_model_warmup=True)
+    worker_base = ModuleType('vllm.v1.worker.worker_base')
+    worker_base.CompilationTimes = lambda **times: SimpleNamespace(**times)
+    with patch.dict(sys.modules, {'vllm_tt_plugin.qwen_fast_policy': policy,
+                                  'vllm.v1.worker.worker_base': worker_base}), \
+            patch.object(serving_startup, 'start', side_effect=start), model_runtime.prefix_env(environ):
+        sys.modules.pop(prefix_registry.REGISTRY_KEY, None)
+        try:
+            seen.result = method(worker)
+        except ValueError as error:
+            seen.error = error
+        else:
+            seen.registry = prefix_registry.shared_registry()
+    seen.warmup_model = runner.warmup_model
+    return seen
+
+
+class FastPathWarmupTests(unittest.TestCase):
+    """The P8 worker's compile_or_warm_up_model returns serving_startup.warmup before the plugin's
+    TTModelRunner.warmup_model, the only caller of warmup_model_prefill, where the G1 model graft chooses its
+    GDN restore path and declares its mid-loop captures. Without them the first granted resume asserts inside
+    the route (the engine dies with every live user) and the first long request after boot plans no C0. So
+    under QWEN_PREFIX_REUSE=1 serving_startup.warmup runs the graft's warm itself, before start()."""
+
+    def setUp(self):
+        import test_qwen_prefix_model_runtime as model_runtime
+
+        self.engine = model_runtime.Engine(traced=False)
+
+    def test_the_worker_warms_the_graft_before_the_fast_path_starts(self):
+        seen = boot_fast_path_worker(self.engine, PREFIX_ON)
+        self.assertIsNone(seen.error)
+        self.assertEqual(len(seen.started), 1)
+        self.assertIn(seen.started[0]['restore_mode'], ('h2d', 'copy'), 'the restore path is chosen before start()')
+        self.assertIs(seen.started[0]['mid_loop'], True, 'the mid-loop captures are declared on the holder')
+        self.assertIs(seen.registry.mid_loop_capture, True, 'and reach the registry the scheduler graft creates')
+        self.assertIsNotNone(self.engine.model._qwen_prefix_state_spec)
+        seen.warmup_model.assert_not_called()
+        self.assertEqual(len(self.engine.log.lines('[PINDIAG] prefix: model warm restore_mode=')), 1)
+
+    def test_the_flag_off_boot_is_the_fast_path_s_own(self):
+        for environ in ({}, {'QWEN_PREFIX_REUSE': '0'}):
+            with self.subTest(environ=environ):
+                engine = type(self.engine)(traced=False)
+                seen = boot_fast_path_worker(engine, environ)
+                self.assertIsNone(seen.error)
+                self.assertEqual(seen.started, [dict(restore_mode=None, mid_loop=None)])
+                self.assertIsNone(getattr(engine.model, '_qwen_prefix_restore_mode', None))
+                self.assertIs(seen.registry.mid_loop_capture, False)
+                seen.warmup_model.assert_not_called()
+
+    def test_a_model_without_the_graft_is_refused_before_start(self):
+        stock = SimpleNamespace(model=[SimpleNamespace()])
+        seen = boot_fast_path_worker(self.engine, PREFIX_ON, wrapper=stock)
+        self.assertIn('has no _qwen_prefix_warm', str(seen.error))
+        self.assertEqual(seen.started, [])
+
+    def test_a_skipped_warm_is_refused_before_start(self):
+        self.engine.model.args.max_batch_size = 1
+        seen = boot_fast_path_worker(self.engine, PREFIX_ON)
+        self.assertIn('chose no GDN restore path', str(seen.error))
+        self.assertEqual(seen.started, [])
+        self.assertEqual(len(self.engine.log.lines('[PINDIAG] prefix: model warm skipped')), 1)
+
+    def first_plan(self, registry):
+        """The scheduler graft's grant for the first 9000-token request after boot, on the fast path's DFlash
+        scheduler shape. -> (plan, unplanned, the sticky oracle's plan)."""
+        import prefix_judge
+
+        with patch.dict(sys.modules, graft_fakes.fake_vllm_modules()), \
+                patch.dict(os.environ, {'QWEN_PREFIX_STATS_PATH': ''}):
+            scheduler = dflash_scheduler()
+            graft.install(scheduler, registry=registry, kill_switch_path=None, logger=lambda *values: None,
+                          stats=graft.StatsExport(path='', logger=lambda *values: None), environ=ON)
+            first = graft_fakes.Request('first', tokens(9000, 1))
+            scheduler.add(first)
+            scheduler.schedule()
+            grant = registry.grant_for('first')
+            expected = prefix_judge.Oracle(sticky=True).admit('salt', list(first.all_token_ids))['plan']
+        return grant.capture_positions(), list(grant.unplanned), expected
+
+    def test_the_first_long_request_after_boot_plans_c0(self):
+        self.assertEqual(self.first_plan(boot_fast_path_worker(self.engine, PREFIX_ON).registry),
+                         ([6144], [], [6144]))
+        # the control: booted without the warm, the same request plans nothing and C0 is unplanned
+        engine = type(self.engine)(traced=False)
+        self.assertEqual(self.first_plan(boot_fast_path_worker(engine, {}).registry), ([], [6144], [6144]))
+
+
+class FastPathWarmToyExactnessTests(ToyExactnessTests):
+    """ToyExactnessTests with the model warmed the fast path's way (boot_fast_path_worker) instead of by the
+    plugin's warmup_model_prefill: the resumed turn under the S2 capture still equals its cold twin."""
+
+    def warm(self):
+        seen = boot_fast_path_worker(self.engine, PREFIX_ON)
+        self.assertIsNone(seen.error)
+        self.engine.registry = seen.registry
 
 
 if __name__ == '__main__':
