@@ -47,6 +47,10 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_GATE_AUDITS      extent (default: QWEN_FAST_EXTENT_AUDIT on every S2 arm but control's timing arms) or
                       all (also the prestage, pair-mask and fused-commit audits on the G4 arms); mixed (M7) runs
                       all four either way
+  LLK profiling (docs/llk-profiling-harness.md; C2_GATE_PLAN may name LLK_GATE_PLANS, after every other plan):
+                      llk-decode-twin, llk-decode-zones, llk-decode-counters, llk-prefill-twin,
+                      llk-prefill-zones, llk-prefill-counters - attribution only, never judged for timing or
+                      against v235, never blocking a placement (llk_profile_plan says what each runs)
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -55,8 +59,9 @@ import os
 import re
 import sys
 
-ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'cardm', 'drift', 'build', 'smoke', 'gate', 'replay',
-           'push')
+# llkcheck (no card): llk_profile_plan preflight - every LLK instrumentation made from the image's own bytes.
+ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'cardm', 'drift', 'build', 'llkcheck', 'smoke', 'gate',
+           'replay', 'push')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
 # each runs. warm and warm-off are M1 (never judged for kernel-cache growth); control and forced-cap M3-M4 (G3);
@@ -64,7 +69,13 @@ GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # churn M11 (G5); permuted is built but required only under decision D-c(i).
 S2_GATE_PLANS = ('warm', 'warm-off', 'control', 'forced-cap', 'control-below', 'lifecycle-arrival', 'mixed', 'short',
                  'boundaries', 'staggered', 'churn', 'permuted')
-ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS
+# The LLK profiling pass (llk_profile_plan): an unprofiled twin, then zones, then counters, per phase. They profile
+# the device and use a scratch kernel cache, so they run after every judged plan of a job (read_job refuses any
+# other order); a plan the pass has designed but not built is refused by name.
+LLK_GATE_PLANS = ('llk-decode-twin', 'llk-decode-zones', 'llk-decode-counters', 'llk-prefill-twin', 'llk-prefill-zones',
+                  'llk-prefill-counters')
+LLK_NOT_BUILT = {'llk-k5a-clock': 'the K5-A clock-page adapter (LLK task L0-08) is not built'}
+ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS + LLK_GATE_PLANS
 MAX_PAIRS = 4
 BELOW_FAMILY_RANGE = (4096, 16640)   # capacities the pinned (flag-off) mask admits: attention_mask_replay.py:18,26
 JIT_MODES = ('auto', 'judge', 'record')
@@ -204,9 +215,13 @@ def read_job(values, profiles, root=ROOT):
     if platform_image and not PLATFORM_IMAGE.fullmatch(platform_image):
         raise JobError('C2_PLATFORM_IMAGE must match %s' % PLATFORM_IMAGE.pattern)
     plans = split_list(values.get('C2_GATE_PLAN', 'bringup')) or ['bringup']
+    for plan in plans:
+        if plan in LLK_NOT_BUILT:
+            raise JobError('C2_GATE_PLAN: %s is refused: %s' % (plan, LLK_NOT_BUILT[plan]))
     unknown = sorted(set(plans) - set(ALL_GATE_PLANS))
     if unknown:
         raise JobError('C2_GATE_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(ALL_GATE_PLANS)))
+    check_llk_order(plans)
     s2 = read_s2_gate(values)
     lengths_text = values.get('C2_GATE_LENGTHS', '')
     lengths = [positive_int('C2_GATE_LENGTHS', part) for part in split_list(lengths_text)]
@@ -229,6 +244,22 @@ def read_job(values, profiles, root=ROOT):
                    cardm_env=cardm_env)
     outputs.update(s2)
     return outputs
+
+
+def check_llk_order(plans):
+    """Refuse a plan list that runs an LLK plan before a judged one: the profiled arms reserve device DRAM, compile
+    into a scratch cache and may end the run as INFRA (a profiler segfault), so every judged plan goes first."""
+    seen_llk = None
+    for plan in plans:
+        if plan in LLK_GATE_PLANS:
+            seen_llk = seen_llk or plan
+        elif seen_llk:
+            raise JobError('C2_GATE_PLAN: %s runs after %s: the LLK plans go after every judged plan' % (plan, seen_llk))
+    if len(set(plans)) != len(plans):
+        duplicated = sorted(set(plan for plan in plans if plans.count(plan) > 1 and plan in LLK_GATE_PLANS))
+        if duplicated:
+            raise JobError('C2_GATE_PLAN names %s twice: one arm directory per LLK plan' % ', '.join(duplicated))
+    return plans
 
 
 def below_family(name, text):

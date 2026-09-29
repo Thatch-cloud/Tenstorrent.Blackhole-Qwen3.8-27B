@@ -337,6 +337,23 @@ jobs:
           tar -czf "$RUNNER_TEMP/c2ctx.tgz" -C "$ctx" .
           export C2_CHECKOUT="$PWD" C2_PROVENANCE_REPORT="$RUNNER_TEMP/c2-results/provenance.json"
           bash scripts/ci/build-c2-serving-image.sh "$RUNNER_TEMP/c2ctx.tgz" "$TAG" 2>&1 | tee "$RUNNER_TEMP/c2-results/build.log"
+      - name: LLK profiling preflight (no card)
+        if: contains(steps.job.outputs.actions, 'llkcheck')
+        working-directory: c2
+        timeout-minutes: 20
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Every instrumented kernel copy the llk-* gate arms will mount, and the K5-A build the override will
+          # instrument, made now from the image's own bytes in throwaway containers without devices
+          # (llk_profile_plan preflight): an anchor that drifted fails here, not in the M+A window.
+          # The image the build step made, found by its tag (no registry name needed here).
+          image=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 -E ":qwen38-c2-$TAG\$" || true)
+          test -n "$image" || { echo "no local image tagged qwen38-c2-$TAG" >&2; exit 1; }
+          python3 scripts/ci/llk_profile_plan.py preflight --image "$image" --checkout "$PWD" \
+            --out "$RUNNER_TEMP/c2-results/llk-preflight"
       - name: Smoke on cards M+A
         if: contains(steps.job.outputs.actions, 'smoke')
         working-directory: c2
@@ -473,6 +490,23 @@ jobs:
             grep -F '[PINDIAG] dram after' "$log" | tail -8 || true
           done
           exit "$status"
+      - name: Hand back the LLK profiler output
+        # The llk-* arms' profiler writes as the container's root. The gate hands each arm's tree back when the arm
+        # ends; this runs again however the gate step ended (cancelled or timed out included), before the upload,
+        # and prunes a raw device log the gate did not get to: a root-owned tree once broke the next checkout
+        # (EACCES). Still: never cancel a job with llk-* plans while an arm runs.
+        if: always() && contains(steps.job.outputs.actions, 'gate') && contains(steps.job.outputs.gate_plan, 'llk-')
+        working-directory: c2
+        timeout-minutes: 15
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Any local image with a shell does the hand-back; the gate's own is the one certainly present.
+          image=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 -E ":qwen38-c2-$TAG\$" || true)
+          test -n "$image" || { echo "no local image tagged qwen38-c2-$TAG: nothing ran, nothing to hand back"; exit 0; }
+          python3 scripts/ci/llk_profile_plan.py handback --results "$RUNNER_TEMP/c2-results/gate" --image "$image"
       - name: Replay the node agent's serving sequence
         if: contains(steps.job.outputs.actions, 'replay')
         working-directory: c2
