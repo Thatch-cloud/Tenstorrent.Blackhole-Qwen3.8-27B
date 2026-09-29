@@ -24,6 +24,9 @@ COPY scripts/ci/dflash_packed_proposal.py scripts/ci/dflash_packed_proposal_coor
 COPY scripts/ci/dflash_pipelined_publish.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_traced_publish.py /experiment-scripts/ci/
 COPY scripts/ci/profiled_block_stream_override.py /experiment-scripts/ci/
+# LLK profiling (llk_zone_override, imported by serving_runtime only under QWEN_LLK_ZONES, and its two helpers):
+# the C2 overlay carries them; named here too so a P8 rebuild from HEAD has what serving_runtime imports.
+COPY scripts/ci/llk_zone_override.py scripts/ci/llk_kernels.py scripts/ci/llk_zones.py /experiment-scripts/ci/
 COPY scripts/ci/serving_vllm_packed.py /experiment-scripts/ci/
 COPY scripts/ci/serving_vllm_contract.py /experiment-scripts/ci/
 COPY scripts/ci/model_batch.py /experiment-scripts/ci/
