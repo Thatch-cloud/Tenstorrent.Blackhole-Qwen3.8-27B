@@ -53,33 +53,39 @@ def line(chip, x, y, risc, timer, cycle, data, host, zone, phase, meta='', trace
         zone, phase, meta)
 
 
-def kernel_rows(kernel, chips=(0, 1), envelope=1000, waits=None, core=(1, 1), host=10, start=100, stages=()):
-    """A compute kernel's envelope on the three TRISCs of each chip, its sums (waits: {risc: (in, out)}) and
-    stage instances ((stage, [(start, end) per thread offset]))."""
+def kernel_rows(kernel, chips=(0, 1), envelope=1000, waits=None, core=(1, 1), host=10, start=100, stages=(),
+                sums=True, trace=3, replay=7, skip_sum=()):
+    """A compute kernel's envelope on the three TRISCs of each chip, its sums and stage instances ((stage,
+    [(start, end) per thread offset])). Each thread writes the sum rows of the slots it waits in (THREAD_SLOTS), as
+    the device does: the value from waits ({risc: (in, out)}), else 1 (the zone's own cycles); sums False writes
+    none, and skip_sum ({(chip, risc, slot)}) leaves single rows out."""
     text = []
     for chip in chips:
         for offset, risc in enumerate(report.COMPUTE_THREADS):
             begin = start + offset
-            text.append(line(chip, core[0], core[1], risc, 1, begin, 0, host, 'QWEN_LLK_' + kernel, 'ZONE_START'))
+
+            def row(timer, cycle, data, zone, phase):
+                return line(chip, core[0], core[1], risc, timer, cycle, data, host, zone, phase, trace=trace,
+                            replay=replay)
+            text.append(row(1, begin, 0, 'QWEN_LLK_' + kernel, 'ZONE_START'))
             for stage, intervals in stages:
                 for first, last in intervals[offset]:
-                    text.append(line(chip, core[0], core[1], risc, 2, first, 0, host, 'QWEN_LLK_%s_%s' % (kernel, stage),
-                                     'ZONE_START'))
-                    text.append(line(chip, core[0], core[1], risc, 2, last, 0, host, 'QWEN_LLK_%s_%s' % (kernel, stage),
-                                     'ZONE_END'))
-            text.append(line(chip, core[0], core[1], risc, 1, begin + envelope, 0, host, 'QWEN_LLK_' + kernel, 'ZONE_END'))
-            wait_in, wait_out = (waits or {}).get(risc, (0, 0))
-            if wait_in:
-                text.append(line(chip, core[0], core[1], risc, 3, begin + envelope, wait_in, host, zones.WAIT_IN, 'ZONE_TOTAL'))
-            if wait_out:
-                text.append(line(chip, core[0], core[1], risc, 4, begin + envelope, wait_out, host, zones.WAIT_OUT,
-                                 'ZONE_TOTAL'))
+                    text.append(row(2, first, 0, 'QWEN_LLK_%s_%s' % (kernel, stage), 'ZONE_START'))
+                    text.append(row(2, last, 0, 'QWEN_LLK_%s_%s' % (kernel, stage), 'ZONE_END'))
+            text.append(row(1, begin + envelope, 0, 'QWEN_LLK_' + kernel, 'ZONE_END'))
+            if not sums:
+                continue
+            given = (waits or {}).get(risc, (0, 0))
+            for slot, timer, zone, value in (('wait_in', 3, zones.WAIT_IN, given[0]),
+                                             ('wait_out', 4, zones.WAIT_OUT, given[1])):
+                if (slot in report.THREAD_SLOTS[risc] or value) and (chip, risc, slot) not in skip_sum:
+                    text.append(row(timer, begin + envelope, value or 1, zone, 'ZONE_TOTAL'))
     return text
 
 
-def counter_lines(values, chip=0, core=(1, 1), host=10, ref=1000):
+def counter_lines(values, chip=0, core=(1, 1), host=10, ref=1000, trace=3, replay=7):
     return [line(chip, core[0], core[1], 'BRISC', 9090, 5000 + index, value, host, '', 'TS_DATA_16B',
-                 '{"counter type":"%s";"ref cnt":%d;"value":%d}' % (kind, ref, value))
+                 '{"counter type":"%s";"ref cnt":%d;"value":%d}' % (kind, ref, value), trace=trace, replay=replay)
             for index, (kind, value) in enumerate(sorted(values.items()))]
 
 
@@ -90,13 +96,13 @@ def record(kernel, stages=(), sums=True):
     return dict(key=kernel, kernel=kernel, zones=zone_list, sync=dict(enabled=sums))
 
 
-def analyse_text(body, records, console='', twin=None, profiled=None):
+def analyse_text(body, records, console='', twin=None, profiled=None, window='all'):
     with tempfile.TemporaryDirectory() as directory:
         path = os.path.join(directory, 'profile_log_device.csv')
         with open(path, 'w', encoding='utf-8', newline='') as handle:
             handle.write(HEADER + ''.join(body))
         preamble, rows = report.read_rows(path)
-    return report.analyse(rows, records, console, twin, profiled, preamble)
+    return report.analyse(rows, records, console, twin, profiled, preamble, window=window)
 
 
 class FixtureTests(unittest.TestCase):
@@ -212,15 +218,136 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(self.classify({'TRISC_0': (100, 0)})['bound'], 'llk-balanced')
 
     def test_tag_level_without_counters_is_undetermined(self):
-        body = kernel_rows('X')
+        # Level tag compiles no sum zone, so the device writes no ZONE_TOTAL row (kernel_rows now writes the rows
+        # a stages-level thread emits unless told not to).
+        body = kernel_rows('X', sums=False)
         result = analyse_text(body, [record('X', sums=False)])
         self.assertEqual(result['kernels'][0]['bound'], 'undetermined')
         self.assertIsNone(result['kernels'][0]['threads']['TRISC_0']['wait_in'])
 
-    def test_sums_on_with_no_rows_means_zero_waits(self):
-        result = analyse_text(kernel_rows('X'), [record('X')])
-        self.assertEqual(result['kernels'][0]['threads']['TRISC_0']['wait_in'], 0)
-        self.assertEqual(result['kernels'][0]['bound'], 'llk-balanced')
+    def test_sums_on_with_no_rows_is_undetermined_never_zero(self):
+        """Sums asked for and no ZONE_TOTAL row arrived (the define never reached the worker, the zones compiled out,
+        a zone-id collision, or dropped rows): zero waits would read LLK-balanced."""
+        result = analyse_text(kernel_rows('X', sums=False), [record('X')])
+        kernel = result['kernels'][0]
+        self.assertIsNone(kernel['threads']['TRISC_0']['wait_in'])
+        self.assertEqual(kernel['threads']['TRISC_0']['sums_missing'], dict(wait_in=2))
+        self.assertIsNone(kernel['threads']['TRISC_0']['busy'])
+        self.assertEqual((kernel['bound'], kernel['llk_bound']), ('undetermined', False))
+        self.assertIn('wait sums missing: TRISC_0 wait_in (2 invocations)', kernel['reason'])
+        self.assertTrue(kernel['sums_missing'])
+        problems = report.coverage(result, ('X',), kind='zones')
+        self.assertTrue(any('X: wait sums missing' in problem for problem in problems), problems)
+        self.assertFalse(any('wait sums' in problem for problem in report.coverage(result, ('X',), kind='counters')))
+
+    def test_one_missing_row_makes_its_slot_undetermined(self):
+        body = kernel_rows('X', waits={'TRISC_2': (400, 0)}, skip_sum={(1, 'TRISC_2', 'wait_out')})
+        kernel = analyse_text(body, [record('X')])['kernels'][0]
+        self.assertIsNone(kernel['threads']['TRISC_2']['wait_out'])
+        self.assertEqual(kernel['threads']['TRISC_2']['wait_in'], 800)
+        self.assertEqual(kernel['threads']['TRISC_2']['sums_missing'], dict(wait_out=1))
+        self.assertEqual(kernel['bound'], 'undetermined')
+
+    def test_a_slot_the_thread_does_not_wait_in_reads_zero(self):
+        kernel = analyse_text(kernel_rows('X'), [record('X')])['kernels'][0]
+        self.assertEqual(kernel['threads']['TRISC_0']['wait_out'], 0)
+        self.assertEqual(kernel['threads']['TRISC_1']['wait_in'], 0)
+        self.assertIsNone(kernel['threads']['TRISC_0']['sums_missing'])
+        self.assertEqual(kernel['bound'], 'llk-balanced')
+
+    def test_a_mover_without_its_sums_is_undetermined(self):
+        rows = []
+        for chip in (0, 1):
+            rows.append(line(chip, 2, 2, 'NCRISC', 1, 100, 0, 10, 'QWEN_LLK_R', 'ZONE_START'))
+            rows.append(line(chip, 2, 2, 'NCRISC', 1, 900, 0, 10, 'QWEN_LLK_R', 'ZONE_END'))
+        mover = dict(record('R'), sync=dict(enabled=True, wait_in=2, wait_out=0))
+        kernel = analyse_text(rows, [mover])['kernels'][0]
+        self.assertEqual(kernel['bound'], 'undetermined')
+        self.assertEqual(kernel['threads']['NCRISC']['sums_missing'], dict(wait_in=2))
+        self.assertEqual(kernel['threads']['NCRISC']['wait_out'], 0)
+
+
+def sessions(kernels_, replays, chips=(0, 1), short=(), dropped=(), counters=False):
+    """Rows of trace 3, one session per replay counter: each kernel on its own core; short: (chip, replay, kernel)
+    left out; dropped: (chip, replay) whose first kernel on TRISC_0 lost its ZONE_END."""
+    body = []
+    for replay in replays:
+        for chip in chips:
+            for index, kernel in enumerate(kernels_):
+                if (chip, replay, kernel) in short:
+                    continue
+                rows = kernel_rows(kernel, chips=(chip,), core=(1 + index, 1), host=10 + index, replay=replay,
+                                   start=100 * replay)
+                if (chip, replay) in dropped and index == 0:
+                    rows = [row for row in rows if not (',TRISC_0,' in row and 'QWEN_LLK_%s,ZONE_END' % kernel in row)]
+                body += rows
+                if counters:
+                    body += counter_lines(dict(FPU_COUNTER=5), chip=chip, core=(1 + index, 1), host=10 + index,
+                                          replay=replay)
+    return body
+
+
+class WindowTests(unittest.TestCase):
+    def records(self):
+        return [record('A'), record('B')]
+
+    def test_the_traced_window_keeps_complete_sessions(self):
+        body = sessions(('A', 'B'), (7, 8, 9), short={(1, 9, 'B')})
+        body += kernel_rows('A', trace=None, replay=None, core=(5, 5), host=99)   # a prefill: not a replay
+        result = analyse_text(body, self.records(), window='traced')
+        chips = result['selection']['chips']
+        self.assertEqual(chips['0'], dict(sessions=3, dropped=0, short=0, used=3))
+        self.assertEqual(chips['1'], dict(sessions=3, dropped=0, short=1, used=2))
+        self.assertGreater(result['selection']['untraced_rows'], 0)
+        a = dict((kernel['kernel'], kernel) for kernel in result['kernels'])['A']
+        self.assertEqual(a['sessions_by_chip'], {'0': 3, '1': 2})
+        self.assertEqual(a['invocations'], 5)        # the untraced prefill invocation is not read
+        self.assertTrue(result['complete'])
+        self.assertEqual(report.coverage(result, ('A', 'B'), min_sessions=2), [])
+        self.assertEqual(report.coverage(result, ('A', 'B'), min_sessions=3),
+                         ['A: 2 complete traced sessions on chip 1, 3 needed',
+                          'B: 2 complete traced sessions on chip 1, 3 needed'])
+
+    def test_a_session_with_a_drop_is_left_out_and_the_rest_stay_complete(self):
+        body = sessions(('A', 'B'), (7, 8, 9), dropped={(0, 8)})
+        console = 'Metal | Profiler DRAM buffers were full, markers were dropped! device 0'
+        result = analyse_text(body, self.records(), console=console, window='traced')
+        self.assertEqual(result['selection']['chips']['0'], dict(sessions=3, dropped=1, short=0, used=2))
+        self.assertEqual(result['drops'], dict(unmatched_end=0, unmatched_start=0, console=True))
+        self.assertTrue(result['complete'])
+        # The same rows read whole: the drop and the console line make them incomplete.
+        whole = analyse_text(body, self.records(), console=console)
+        self.assertFalse(whole['complete'])
+        self.assertEqual(whole['drops']['unmatched_start'], 1)
+
+    def test_no_complete_session_is_not_complete(self):
+        body = sessions(('A',), (7,), dropped={(0, 7), (1, 7)})
+        result = analyse_text(body, [record('A')], window='traced')
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['kernels'], [])
+        self.assertIn('A: no QWEN_LLK_A zone in a complete traced session', report.coverage(result, ('A',))[0])
+
+    def test_the_untraced_window(self):
+        body = sessions(('A',), (7,)) + kernel_rows('A', trace=None, replay=None, core=(5, 5), host=99)
+        result = analyse_text(body, [record('A')], window='untraced')
+        self.assertEqual(result['kernels'][0]['invocations'], 2)
+        self.assertEqual(result['selection']['window'], 'untraced')
+        with self.assertRaisesRegex(report.ReportError, 'window must be one of'):
+            analyse_text(body, [record('A')], window='rounds')
+
+    def test_counter_coverage_needs_every_chip(self):
+        body = sessions(('A',), (7, 8), counters=True)
+        result = analyse_text(body, [record('A', sums=False)], window='traced')
+        self.assertEqual(result['kernels'][0]['counter_chips'], [0, 1])
+        self.assertEqual(report.coverage(result, ('A',), kind='counters'), [])
+        body = [row for row in body if not (row.startswith('1,') and ',9090,' in row)]
+        result = analyse_text(body, [record('A', sums=False)], window='traced')
+        self.assertEqual(report.coverage(result, ('A',), kind='counters'), ['A: no counter rows on chip 1'])
+
+    def test_nothing_required_is_a_problem(self):
+        result = analyse_text(kernel_rows('A'), [record('A')])
+        self.assertEqual(report.coverage(result, ()), ['no required kernel named: an arm with nothing to cover '
+                                                       'measures nothing'])
 
 
 class DropAndRefusalTests(unittest.TestCase):
@@ -281,6 +408,19 @@ class DropAndRefusalTests(unittest.TestCase):
 
 
 class ExportTests(unittest.TestCase):
+    def test_a_truncated_last_line_is_left_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = os.path.join(directory, 'profile_log_device.csv')
+            with open(FIXTURE, 'rb') as handle:
+                data = handle.read()
+            with open(source, 'wb') as handle:
+                handle.write(data + b'0,1,2,TRISC_0,20001,1000,0,1024,3,7,QWEN_LLK_K5A,ZONE_ST')
+            out = os.path.join(directory, 'e.csv.gz')
+            result = report.export_filtered(source, out)
+            self.assertTrue(result['source']['truncated_tail'])
+            self.assertEqual(result['export']['rows'], 87)
+            self.assertEqual(report.read_rows(out)[1], report.read_rows(FIXTURE)[1])
+
     def test_export_keeps_the_header_and_the_wanted_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             out = os.path.join(directory, 'llk-export.csv.gz')

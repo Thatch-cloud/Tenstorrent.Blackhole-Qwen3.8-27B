@@ -2,7 +2,8 @@
 and per thread, where the time went: LLK-bound or dataflow-bound, ranked. Attribution, never a throughput claim.
 
     python3 llk_profile_report.py report --csv <profile_log_device.csv[.gz]> --manifest <llk-manifest.json> \
-        [--console <server.log>] [--twin <twin m3native-gate.json>] [--profiled <m3native-gate.json>] --out <json>
+        [--console <server.log>] [--twin <twin m3native-gate.json>] [--profiled <m3native-gate.json>] \
+        [--window all|traced|untraced] --out <json>
     python3 llk_profile_report.py export --csv <profile_log_device.csv> --out <export.csv.gz>
 
 The CSV (tt-metal v0.77.0 impl/profiler/profiler.cpp writeCSVHeader / dumpDeviceResultsToCSV): line 1
@@ -17,12 +18,22 @@ counter). Zones pair START/END per key and name in time order; an END without a 
 is a DROP and is counted, never hidden. The wait sums (ZONE_TOTAL of QWEN_LLK_WAIT_IN / _OUT) belong to the
 envelope zone of the same key - the kernel that ran there - whatever file they were compiled in.
 
+Windows (the arm says which): 'all' reads every row; 'untraced' only rows without a trace id (a prefill);
+'traced' only complete trace replay sessions (chip, trace id, trace id counter): a session with a dropped
+marker, or with fewer envelopes of any kernel than the fullest session of its trace on that chip, is left out
+and counted. The profiler's DRAM buffer truncates: once a RISC's buffer is full every later marker is lost
+until the next read-back, so the sessions before the overflow are whole and the one it hit is short
+(v138: every core overflowed before the round-4 read-back, yet four complete verify replays came back).
+
 Per thread (llk_zones' sync table): busy = envelope - WAIT_IN - WAIT_OUT. TRISC_0's WAIT_IN is the unpacker
 starved by the reader; TRISC_2's WAIT_IN is the packer waiting on math (math->pack), its WAIT_OUT the writer's
 back-pressure; TRISC_1's WAIT_OUT is math waiting on the packer to free dest. Math waiting on unpack
 (unpack->math) is a hardware stall on srcA/srcB valid: it comes from the counter pass
 (WAITING_FOR_SRCA_VALID/SRCB_VALID over the reference count) or it is left undetermined; the stage lockstep
 (the unpack/math duration correlation the MLP diagnostic used) is shown beside it as evidence, not a verdict.
+A slot a thread waits in (THREAD_SLOTS) must have its sum row on every invocation of a kernel whose sums were
+on: a missing row is undetermined, never zero (the define never reached the worker, the zones compiled out, a
+zone-id collision renamed it, or the row was dropped), and a kernel with one is classified undetermined.
 
 Stdlib only, Python 3.7 syntax.
 """
@@ -50,6 +61,13 @@ THREAD_ROLE = dict(TRISC_0='unpack', TRISC_1='math', TRISC_2='pack', BRISC='data
                    NCRISC='data movement 1')
 DROP_LINE = 'markers were dropped'
 DEFAULT_MAX_BYTES = 64 * 2 ** 30
+WINDOWS = ('all', 'traced', 'untraced')
+MIN_SESSIONS = 2          # complete traced sessions per chip a required kernel needs ('traced' window)
+SUM_SLOTS = ('wait_in', 'wait_out')
+# The slots each compute thread waits in (llk_zones' sync table). The compute API compiles every sync call for one
+# TRISC only, but the sum zone around it runs on all three, so a thread emits every slot its kernel wraps; these
+# are the ones the classification reads. A data-movement thread waits in the slots its kernel's record wrapped.
+THREAD_SLOTS = dict(TRISC_0=('wait_in',), TRISC_1=('wait_out',), TRISC_2=('wait_in', 'wait_out'))
 # Classification thresholds (heuristic, stated in every report).
 DATAFLOW_FRACTION = 0.5
 LLK_WAIT_FRACTION = 0.3
@@ -59,8 +77,9 @@ RECONFIG_HEAVY = 4
 CAVEATS = (
     'Zone intervals on different threads overlap in time: per-thread fractions are not additive, and no stage '
     'time is a critical-path share.',
-    'A wait sum includes the synchronisation call\'s own few cycles; a thread with no sum row waited zero cycles '
-    '(tt-metal writes only non-zero sums).',
+    'A wait sum includes the synchronisation call\'s own few cycles. A slot a thread waits in with no sum row on '
+    'some invocation is undetermined, never zero; a slot the thread does not wait in reads zero when absent.',
+    'A traced window keeps only complete replay sessions; what it left out is counted under selection.',
     'Math waiting on unpack is a hardware stall that no software zone sees: it is taken from the counter pass, '
     'or reported undetermined.',
     'Counters are per kernel invocation (started and stopped around the compute kernel), not per stage.',
@@ -163,11 +182,13 @@ def read_rows(path, max_bytes=DEFAULT_MAX_BYTES):
 
 def export_filtered(path, out_path, max_bytes=DEFAULT_MAX_BYTES):
     """Write the two header lines and every QWEN_LLK_* and counter row of `path` to `out_path` (gzip), streaming;
-    {bytes, sha256} of the whole log and {rows, sha256} of the export."""
+    {bytes, sha256} of the whole log and {rows, sha256} of the export. A last line without its newline (a log the
+    disk guard stopped mid-write) is left out and flagged, never parsed half."""
     check_size(path, max_bytes)
     digest = hashlib.sha256()
     kept = 0
     size = 0
+    truncated = False
     with open(path, 'rb') as source, gzip.open(out_path, 'wb') as sink:
         for number, raw in enumerate(source):
             digest.update(raw)
@@ -177,13 +198,18 @@ def export_filtered(path, out_path, max_bytes=DEFAULT_MAX_BYTES):
                     raise ReportError('not a tt-metal device log: %s' % path)
                 sink.write(raw)
                 continue
+            if not raw.endswith(b'\n'):
+                truncated = True
+                continue
             if b'QWEN_LLK_' in raw or b',9090,' in raw:
                 sink.write(raw)
                 kept += 1
+    exported = hashlib.sha256()
     with open(out_path, 'rb') as handle:
-        exported = hashlib.sha256(handle.read()).hexdigest()
-    return dict(source=dict(path=os.path.basename(path), bytes=size, sha256=digest.hexdigest()),
-                export=dict(path=os.path.basename(out_path), rows=kept, sha256=exported))
+        for block in iter(lambda: handle.read(1 << 20), b''):
+            exported.update(block)
+    return dict(source=dict(path=os.path.basename(path), bytes=size, sha256=digest.hexdigest(), truncated_tail=truncated),
+                export=dict(path=os.path.basename(out_path), rows=kept, sha256=exported.hexdigest()))
 
 
 # ---- pairing ----
@@ -193,8 +219,9 @@ def execution(row):
 
 
 def pair(rows):
-    """(intervals, totals, counters, drops). intervals: [dict(key, zone, start, end)]; totals:
-    {(key, zone): cycles}; counters: [dict(key5, risc, type, value, ref)]."""
+    """(intervals, totals, counters, drops, dropped keys). intervals: [dict(key, zone, start, end)]; totals:
+    {(key, zone): cycles}; counters: [dict(key5, risc, type, value, ref)]; dropped keys: the execution keys with
+    an unmatched marker."""
     events = {}
     totals = {}
     counters = []
@@ -212,6 +239,7 @@ def pair(rows):
                               % (row['zone'], row['phase']))
     intervals = []
     drops = dict(unmatched_end=0, unmatched_start=0)
+    dropped = set()
     for (key, zone), marks in sorted(events.items(), key=lambda item: (str(item[0][0]), item[0][1])):
         stack = []
         for cycle, end in sorted(marks):
@@ -222,8 +250,56 @@ def pair(rows):
                 intervals.append(dict(key=key, zone=zone, start=start, end=cycle))
             else:
                 drops['unmatched_end'] += 1
+                dropped.add(key)
         drops['unmatched_start'] += len(stack)
-    return intervals, totals, counters, drops
+        if stack:
+            dropped.add(key)
+    return intervals, totals, counters, drops, dropped
+
+
+def session_of(key):
+    """The trace replay session of an execution key: (chip, trace id, trace id counter)."""
+    return (key[0], key[5], key[6])
+
+
+def select_window(rows, index, window):
+    """(rows kept, selection record) for one window (WINDOWS). 'traced' keeps the rows of complete replay
+    sessions only: no dropped marker in the session, and as many envelopes of every kernel as the fullest session
+    of its trace id on that chip (a session a buffer overflow cut short has fewer)."""
+    if window not in WINDOWS:
+        raise ReportError('window must be one of %s, got %r' % (', '.join(WINDOWS), window))
+    if window == 'all':
+        return rows, dict(window='all', rows=len(rows))
+    if window == 'untraced':
+        kept = [row for row in rows if row['trace'] is None]
+        return kept, dict(window='untraced', rows=len(kept), excluded_rows=len(rows) - len(kept))
+    traced = [row for row in rows if row['trace'] is not None]
+    intervals, _, _, _, dropped = pair(traced)
+    counts = {}
+    for item in intervals:
+        meta = index.get(item['zone'])
+        if meta is None or meta['kind'] != 'envelope':
+            continue
+        per = counts.setdefault(session_of(item['key']), {})
+        per[meta['kernel']] = per.get(meta['kernel'], 0) + 1
+    seen = set(session_of(execution(row)) for row in traced)
+    cut = set(session_of(key) for key in dropped)
+    reference = {}
+    for session, per in counts.items():
+        fullest = reference.setdefault(session[:2], {})
+        for kernel, count in per.items():
+            fullest[kernel] = max(fullest.get(kernel, 0), count)
+    used = set(session for session in seen if session not in cut and counts.get(session)
+               and counts[session] == reference.get(session[:2]))
+    chips = {}
+    for session in sorted(seen, key=str):
+        entry = chips.setdefault(str(session[0]), dict(sessions=0, dropped=0, short=0, used=0))
+        entry['sessions'] += 1
+        entry['dropped' if session in cut else 'used' if session in used else 'short'] += 1
+    kept = [row for row in traced if session_of(execution(row)) in used]
+    return kept, dict(window='traced', rows=len(kept), excluded_rows=len(rows) - len(kept),
+                      untraced_rows=len(rows) - len(traced), min_sessions=MIN_SESSIONS, chips=chips,
+                      reference=dict(('%s/%s' % group, fullest) for group, fullest in sorted(reference.items(), key=str)))
 
 
 def counter_row(row):
@@ -305,18 +381,27 @@ def counter_metrics(rows):
     return dict(rows=len(rows), ratios=ratios, derived=derived, l1_bank=sorted(banks)[0] if banks else None)
 
 
+def missing_sums(threads, riscs):
+    """'TRISC_0 wait_in (3 invocations)' per slot a thread waits in whose sum row some invocation lacks."""
+    return ['%s %s (%d invocations)' % (risc, slot, count) for risc in riscs
+            for slot, count in sorted(((threads.get(risc) or {}).get('sums_missing') or {}).items())]
+
+
 def classify(threads, counters, stages):
     """(bound, llk_bound, reason) for one kernel from its per-thread fractions (and counters)."""
     compute = [risc for risc in COMPUTE_THREADS if risc in threads]
     derived = (counters or {}).get('derived') or {}
     if not compute:
         movers = [threads[risc] for risc in MOVER_THREADS if risc in threads]
-        worst_in = max([t['wait_in_fraction'] or 0 for t in movers] or [0])
-        worst_out = max([t['wait_out_fraction'] or 0 for t in movers] or [0])
+        worst_in = max([t['wait_in_fraction'] for t in movers if t['wait_in_fraction'] is not None] or [0])
+        worst_out = max([t['wait_out_fraction'] for t in movers if t['wait_out_fraction'] is not None] or [0])
         if worst_in >= DATAFLOW_FRACTION:
             return 'dataflow-read', False, 'a data-movement thread waits on reads or its producer for %.0f%%' % (100 * worst_in)
         if worst_out >= DATAFLOW_FRACTION:
             return 'dataflow-write', False, 'a data-movement thread waits on writes or ring space for %.0f%%' % (100 * worst_out)
+        lacking = missing_sums(threads, MOVER_THREADS)
+        if lacking:
+            return 'undetermined', False, 'wait sums missing: %s' % ', '.join(lacking)
         return 'data-movement', False, 'a data-movement kernel: no LLK thread'
     unpack, maths, pack = (threads.get(risc) or {} for risc in COMPUTE_THREADS)
     starved = unpack.get('wait_in_fraction')
@@ -325,9 +410,12 @@ def classify(threads, counters, stages):
     math_on_pack = maths.get('wait_out_fraction')
     src_wait = derived.get('math_waiting_on_unpack')
     if None in (starved, backpressure, pack_on_math, math_on_pack):
+        lacking = missing_sums(threads, COMPUTE_THREADS)
+        why = ('wait sums missing: %s' % ', '.join(lacking)) if lacking else \
+            'no wait sums for every compute thread (level tag, or sums unsupported)'
         if src_wait is not None and src_wait >= SRC_WAIT_FRACTION:
-            return 'llk-unpack', True, 'no wait sums; the counters show math stalled on srcA/srcB valid %.0f%%' % (100 * src_wait)
-        return 'undetermined', False, 'no wait sums for every compute thread (level tag, sums unsupported or dropped)'
+            return 'llk-unpack', True, '%s; the counters show math stalled on srcA/srcB valid %.0f%%' % (why, 100 * src_wait)
+        return 'undetermined', False, why
     if starved >= DATAFLOW_FRACTION:
         return 'dataflow-in', False, 'unpack waits on the reader for %.0f%% of its envelope' % (100 * starved)
     if backpressure >= DATAFLOW_FRACTION:
@@ -364,10 +452,22 @@ def lockstep(instances):
                 lockstep=bool(r is not None and r >= LOCKSTEP_R and close))
 
 
-def analyse(rows, records, console='', twin=None, profiled=None, preamble=None):
-    """The report dict for paired rows of one arm."""
+def expected_slots(sync, risc):
+    """The sum slots `risc` must report on every invocation of a kernel whose record is `sync`: none when its sums
+    were off; a compute thread's THREAD_SLOTS (the waits can sit in included headers, so the kernel's own site count
+    does not decide); a data-movement thread's wrapped slots."""
+    if not sync.get('enabled'):
+        return ()
+    if risc in THREAD_SLOTS:
+        return THREAD_SLOTS[risc]
+    return tuple(slot for slot in SUM_SLOTS if sync.get(slot, 1))
+
+
+def analyse(rows, records, console='', twin=None, profiled=None, preamble=None, window='all'):
+    """The report dict for paired rows of one arm, over one window (WINDOWS)."""
     index = llk_kernels.zone_index(records)
-    intervals, totals, counters, drops = pair(rows)
+    rows, selection = select_window(rows, index, window)
+    intervals, totals, counters, drops, _ = pair(rows)
     drops['console'] = DROP_LINE in (console or '').lower()
     unknown = sorted(set(item['zone'] for item in intervals) - set(index))
     envelopes = {}
@@ -385,8 +485,7 @@ def analyse(rows, records, console='', twin=None, profiled=None, preamble=None):
     for kernel, keys in envelopes.items():
         for key in keys:
             owner[key] = kernel
-    sums_enabled = dict((record.get('key') or record.get('kernel'), bool((record.get('sync') or {}).get('enabled')))
-                        for record in records)
+    sync_of = dict((record.get('key') or record.get('kernel'), record.get('sync') or {}) for record in records)
     kernels = []
     unattributed = dict(sums=0, counters=0)
     per_kernel_totals = {}
@@ -410,24 +509,30 @@ def analyse(rows, records, console='', twin=None, profiled=None, preamble=None):
     for kernel in sorted(envelopes):
         keys = envelopes[kernel]
         waits = per_kernel_totals.get(kernel, {})
-        record_sums = sums_enabled.get(kernel, False) or bool(waits)
+        sync = sync_of.get(kernel) or {}
+        measured = bool(sync.get('enabled')) or bool(waits)
         threads = {}
         for risc in RISCS:
             mine = [(key, end - start) for key, (start, end) in keys.items() if key[3] == risc]
             if not mine:
                 continue
             envelope_total = sum(duration for _, duration in mine)
-            if record_sums:
-                wait_in = sum((waits.get(key) or {}).get('wait_in', 0) for key, _ in mine)
-                wait_out = sum((waits.get(key) or {}).get('wait_out', 0) for key, _ in mine)
-            else:
-                wait_in = wait_out = None
-            busy = None if wait_in is None else max(0, envelope_total - wait_in - wait_out)
+            values, lacking = dict(wait_in=None, wait_out=None), {}
+            if measured:
+                required = expected_slots(sync, risc)
+                for slot in SUM_SLOTS:
+                    absent = [key for key, _ in mine if slot not in (waits.get(key) or {})]
+                    if slot in required and absent:
+                        lacking[slot] = len(absent)
+                    else:
+                        values[slot] = sum((waits.get(key) or {}).get(slot, 0) for key, _ in mine)
+            wait_in, wait_out = values['wait_in'], values['wait_out']
+            busy = None if wait_in is None or wait_out is None else max(0, envelope_total - wait_in - wait_out)
             threads[risc] = dict(role=THREAD_ROLE[risc], envelope=summary([duration for _, duration in mine]),
                                  wait_in=wait_in, wait_out=wait_out, busy=busy,
                                  wait_in_fraction=fraction(wait_in, envelope_total),
                                  wait_out_fraction=fraction(wait_out, envelope_total),
-                                 busy_fraction=fraction(busy, envelope_total))
+                                 busy_fraction=fraction(busy, envelope_total), sums_missing=lacking or None)
         stages = []
         for (owner_kernel, stage, zone), items in sorted(stage_rows.items()):
             if owner_kernel != kernel:
@@ -463,6 +568,9 @@ def analyse(rows, records, console='', twin=None, profiled=None, preamble=None):
             base = key[:3] + key[4:]
             critical[base] = max(critical.get(base, 0), end - start)
         chips = sorted(set(key[0] for key in keys))
+        sessions = {}
+        for key in keys:
+            sessions.setdefault(str(key[0]), set()).add(session_of(key))
         attribution = dict(
             unpack_starved_by_reader=(threads.get('TRISC_0') or {}).get('wait_in_fraction'),
             math_blocked_by_pack=(threads.get('TRISC_1') or {}).get('wait_out_fraction'),
@@ -474,6 +582,10 @@ def analyse(rows, records, console='', twin=None, profiled=None, preamble=None):
         kernels.append(dict(kernel=kernel, chips=chips, cores=len(set(key[1:3] + (key[0],) for key in keys)),
                             invocations=len(critical), critical_cycles=sum(critical.values()),
                             threads=threads, stages=stages, attribution=attribution, counters=metrics,
+                            counter_chips=sorted(set(row['key5'][0] for row in counter_rows.get(kernel) or [])),
+                            sessions_by_chip=dict((chip, len(found)) for chip, found in sorted(sessions.items())),
+                            sums_expected=bool(sync.get('enabled')),
+                            sums_missing=bool(missing_sums(threads, RISCS)),
                             bound=bound, llk_bound=llk_bound, reason=reason,
                             reconfig_heavy_stages=[stage['name'] for stage in stages if stage['reconfig_heavy']]))
     whole = sum(kernel['critical_cycles'] for kernel in kernels) or 1
@@ -483,10 +595,15 @@ def analyse(rows, records, console='', twin=None, profiled=None, preamble=None):
     ranking = [dict(rank=rank + 1, kernel=kernel['kernel'], share_of_instrumented=kernel['share_of_instrumented'],
                     bound=kernel['bound'], llk_bound=kernel['llk_bound'], reason=kernel['reason'])
                for rank, kernel in enumerate(ranked)]
-    report = dict(schema=SCHEMA, device=preamble, kernels=ranked, ranking=ranking, drops=drops,
+    unmatched = bool(drops['unmatched_end'] or drops['unmatched_start'])
+    if window == 'traced':
+        # The console line says some read-back overflowed; the sessions it cut are already left out.
+        complete = not unmatched and any(entry['used'] for entry in selection['chips'].values())
+    else:
+        complete = not (unmatched or drops['console'])
+    report = dict(schema=SCHEMA, device=preamble, kernels=ranked, ranking=ranking, drops=drops, selection=selection,
                   unknown_zones=unknown, unattributed=unattributed, counters_seen=len(counters),
-                  caveats=list(CAVEATS), perturbation=perturbation(twin, profiled),
-                  complete=not (drops['unmatched_end'] or drops['unmatched_start'] or drops['console']))
+                  caveats=list(CAVEATS), perturbation=perturbation(twin, profiled), complete=complete)
     return report
 
 
@@ -511,25 +628,49 @@ def perturbation(twin, profiled):
     return result
 
 
-def coverage(report, required, chips=(0, 1)):
+def coverage(report, required, chips=(0, 1), kind=None, min_sessions=None):
     """What a required kernel lacks in a report: [problem]. A compute kernel needs its envelope on all three
-    TRISCs on every chip; the others on some thread of every chip."""
+    TRISCs on every chip; the others on some thread of every chip. In a traced window each needs min_sessions
+    complete sessions per chip; a zones arm (kind 'zones') needs every wait sum its compute threads wait in; a
+    counters arm (kind 'counters') needs counter rows attributed to it on every chip. No required kernel at all
+    is a problem too: an arm that measured nothing does not pass."""
     problems = []
     by_kernel = dict((kernel['kernel'], kernel) for kernel in report.get('kernels') or [])
+    selection = report.get('selection') or {}
+    traced = selection.get('window') == 'traced'
+    need = min_sessions or selection.get('min_sessions') or MIN_SESSIONS
+    if not required:
+        problems.append('no required kernel named: an arm with nothing to cover measures nothing')
     for key in required:
         kernel = by_kernel.get(key)
         if kernel is None:
-            problems.append('%s: no QWEN_LLK_%s zone at all (not executed, not instrumented, or its markers were '
-                            'dropped)' % (key, key))
+            problems.append('%s: no QWEN_LLK_%s zone %s(not executed, not instrumented, or its markers were '
+                            'dropped)' % (key, key, 'in a complete traced session ' if traced else 'at all '))
             continue
         missing_chips = sorted(set(chips) - set(kernel['chips']))
         if missing_chips:
             problems.append('%s: no zone on chip %s' % (key, ', '.join(str(chip) for chip in missing_chips)))
         entry = llk_kernels.BY_KEY.get(key) or {}
-        if entry.get('part', 'compute') == 'compute' and not entry.get('header'):
+        compute = entry.get('part', 'compute') == 'compute' and not entry.get('header')
+        if compute:
             missing = [risc for risc in COMPUTE_THREADS if risc not in kernel['threads']]
             if missing:
                 problems.append('%s: no envelope on %s' % (key, ', '.join(missing)))
+        if traced:
+            for chip in chips:
+                if chip in missing_chips:
+                    continue
+                found = (kernel.get('sessions_by_chip') or {}).get(str(chip), 0)
+                if found < need:
+                    problems.append('%s: %d complete traced sessions on chip %d, %d needed' % (key, found, chip, need))
+        if kind == 'zones' and kernel.get('sums_expected'):
+            lacking = missing_sums(kernel['threads'], COMPUTE_THREADS if compute else RISCS)
+            if lacking:
+                problems.append('%s: wait sums missing: %s' % (key, ', '.join(lacking)))
+        if kind == 'counters':
+            absent = sorted(set(chips) - set(kernel.get('counter_chips') or []))
+            if absent:
+                problems.append('%s: no counter rows on chip %s' % (key, ', '.join(str(chip) for chip in absent)))
     return problems
 
 
@@ -537,6 +678,9 @@ def render(report):
     """A short human summary, one line per ranked kernel."""
     lines = ['LLK profile: %d kernels, complete=%s, drops %s' % (len(report['kernels']), report['complete'],
                                                                  report['drops'])]
+    selection = report.get('selection') or {}
+    if selection.get('window') == 'traced':
+        lines.append('  traced window: %s' % json.dumps(selection.get('chips'), sort_keys=True))
     for rank in report['ranking']:
         lines.append('  #%(rank)d %(kernel)s %(share_of_instrumented).1f%% %(bound)s - %(reason)s' % dict(
             rank, share_of_instrumented=100 * rank['share_of_instrumented']))
@@ -556,6 +700,7 @@ def main(argv=None):
     report_parser.add_argument('--profiled', default=None)
     report_parser.add_argument('--out', required=True)
     report_parser.add_argument('--max-bytes', type=int, default=DEFAULT_MAX_BYTES)
+    report_parser.add_argument('--window', choices=WINDOWS, default='all')
     export_parser = commands.add_parser('export')
     export_parser.add_argument('--csv', required=True)
     export_parser.add_argument('--out', required=True)
@@ -582,7 +727,7 @@ def main(argv=None):
             else:
                 loaded.append(None)
         preamble, rows = read_rows(options.csv, options.max_bytes)
-        report = analyse(rows, records, console, loaded[0], loaded[1], preamble)
+        report = analyse(rows, records, console, loaded[0], loaded[1], preamble, window=options.window)
         with open(options.out, 'w', encoding='utf-8') as handle:
             json.dump(report, handle, indent=1, sort_keys=True)
         print(render(report))
