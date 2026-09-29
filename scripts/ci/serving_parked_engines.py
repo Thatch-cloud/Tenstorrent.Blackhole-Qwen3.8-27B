@@ -241,3 +241,149 @@ class ReplayLedger:
         self.operations.execute_trace = self.original
         verifier_engine.set_replay_count(self.previous)
         self.installed = False
+
+
+# -- the device side (design section 2.3 step 4, section 2.4) ----------------------------------------------
+
+def single_capture(device):
+    """The device's own single-user proposal capture, through a pair's _PackedCaptureView when one is
+    installed (dflash_packed_proposal_coordinator), or None when a pair or the quad released it."""
+    from dflash_packed_proposal_coordinator import _PackedCaptureView
+
+    capture = device.proposal_capture
+    return capture._original if isinstance(capture, _PackedCaptureView) else capture
+
+
+def build_single_capture(device):
+    """The single-user proposal capture a device's build makes under S2 - one 2048 bucket, whatever the
+    position (serving_request_factory.single_proposal_bucket) - for a device whose capture was released.
+    Unscoped, PreparedDFlashProposal(device, max_new_tokens=1) builds a 256-1024 bucket below 2048, which a
+    history that grows past it refuses ('Committed history exceeds prepared request contexts')."""
+    from dflash_proposal_trace import PreparedDFlashProposal
+    from serving_request_factory import single_proposal_bucket
+
+    with single_proposal_bucket():
+        return PreparedDFlashProposal(device, max_new_tokens=1)
+
+
+def project_window(device, taps, count, *, window):
+    """The constructor's history projection (DFlashDevice.__init__: project_features(features, history_rows)),
+    in calls of `window` rows each, or in one call when `window` is 0 or covers `count`. Each call has its own
+    temporaries scope, fence and release (project_features' retain=None path), so a window keeps about a
+    window's intermediates alive where one call keeps all of them until it returns (design section 2.3 4.3).
+    The same chunks: project_features projects independent 32-row chunks with fixed program configurations,
+    and every window starts on a chunk boundary of the whole call (project_rows keeps windows a multiple of
+    32), so only the last chunk of the last window can be partial, as in the whole call; the windows' outputs
+    are joined by one concat, a copy."""
+    from gdn_multitoken_conv import release_owned
+
+    if type(window) is not int or window < 0 or window % PROJECTION_CHUNK_ROWS or window > HISTORY_ROWS:
+        raise ValueError('A projection window of 0 or a multiple of %d up to %d rows is required, got %r'
+                         % (PROJECTION_CHUNK_ROWS, HISTORY_ROWS, window))
+    if window == 0 or window >= count:
+        return device.project_features(taps, count)
+    operations = device.operations
+    base = getattr(taps, 'row_offset', 0)
+    parts = []
+    try:
+        for start in range(0, count, window):
+            parts.append(device.project_features(taps, min(window, count - start), row_offset=base + start))
+        joined = operations.concat(parts, dim=2)
+    except BaseException:
+        release_owned(operations, parts)
+        raise
+    release_owned(operations, parts)
+    return joined
+
+
+def park_device(device):
+    """Stage E, the device's half of a park (design section 2.4): a fence first - discard_pending requires
+    one (dflash_proposal_trace.PreparedDFlashProposal.discard_pending) and today's close takes it from
+    engine.close - then the capture's pending proposal dropped. None when the device can park; else why,
+    and its owner closes it as today. Its pair and quad traces are the coordinator's to retire."""
+    device.operations.synchronize_device(device.mesh)
+    capture = single_capture(device)
+    if capture is not None:
+        capture.discard_pending()
+    if device.closed:
+        return 'device closed'
+    if device.pending is not None:
+        return 'a pending publication'
+    if device.kv_history is None or device.pool_slot is None:
+        return 'no pooled K/V cache'
+    if device.kv_history.pending is not None:
+        return 'a pending K/V publication'
+    try:
+        device.pool_slot.verify()
+    except AssertionError as failure:
+        return 'pool slot moved: %s' % str(failure)[:120]
+    return None
+
+
+def rebind_device(device, taps, *, position, window=None):
+    """Stage E: bind a parked DFlashDevice to a request prefilled to `position`, from its window's taps (the
+    prefill capture's outputs), as its constructor seeds a fresh one, without capturing anything (design
+    section 2.3 step 4):
+      1. a fence, then the capture's pending proposal dropped (discard_pending requires the fence);
+      2. the pool slot re-zeroed as a loan zeroes it (ServingBufferPool.rezero), its buckets kept taken;
+      3. the history projected (project_window: `window` rows per call, default project_rows()), padded
+         to 2048 rows and copied into the slot's history - the canonical orientation, history then spare;
+      4. a new DraftKVHistory seeded over the slot's banks (the old one, pooled, owns nothing);
+      5. the host state a fresh device has: position, history_rows, name, nothing pending, no calls or
+         published rows, no audit digest or convolution checks, history_stale cleared, and
+         rebind_generation advanced (the coordinator keys a pair or quad trace on it);
+      6. the capture unwrapped from a pair's view and pointed at the new cache, or - released by a pair or
+         the quad - rebuilt under the single bucket (build_single_capture).
+    Returns dict(ms=, single_rebuilt=, window=)."""
+    import time
+    from dflash_prefill_window import prefill_window
+    from draft_kv_history import DraftKVHistory
+    from gdn_multitoken_conv import addresses
+
+    operations = device.operations
+    window = project_rows() if window is None else window
+    slot = device.pool_slot
+    if device.closed or slot is None or device.kv_history is None or not device.cache_history:
+        raise ValueError('Only an open pooled device with a committed K/V cache can be rebound')
+    if device.kv_history.projection is not None:
+        raise ValueError('A parked device keeps no K/V projection capture')
+    rows = prefill_window(position)['rows']
+    started = time.perf_counter()
+    operations.synchronize_device(device.mesh)
+    capture = single_capture(device)
+    if capture is not None:
+        capture.discard_pending()
+    elif not getattr(device, '_packed_capture_released', False):
+        raise ValueError('A parked device keeps its single-user proposal capture')
+    if device.pending is not None or device.kv_history.pending is not None:
+        raise ValueError('A parked device has no publication pending')
+    slot.pool.rezero(slot)
+    projected = project_window(device, taps, rows, window=window)
+    padded = operations.pad(projected, [(0, 0), (0, 0), (0, HISTORY_ROWS - rows), (0, 0)], 0.0)
+    if addresses(operations, padded) != addresses(operations, projected):
+        operations.deallocate(projected)
+    operations.copy(padded, slot.history)
+    operations.deallocate(padded)
+    device.history, device.spare_history = slot.history, slot.spare_history
+    operations.synchronize_device(device.mesh)
+    device.kv_history = DraftKVHistory(operations, device.mesh, [layer[0] for layer in device.layers], device.history,
+        position=position, history_rows=rows, capture_projection=False, storage=slot.kv,
+        **(dict(query=slot.query) if getattr(slot, 'query', None) is not None else {}))
+    if device.progress is not None:
+        device.kv_history.audit(device.history)
+    device.position, device.history_rows = position, rows
+    device.name = 'DFlashDevice@%x position=%d' % (id(device), position)
+    device.pending = None
+    device.proposal_calls = device.published_rows = 0
+    device.audit_digest = None
+    device.convolution_checks = []
+    device.history_stale = False
+    device.rebind_generation = getattr(device, 'rebind_generation', 0) + 1
+    rebuilt = capture is None
+    if rebuilt:
+        device.proposal_capture = None
+        capture = build_single_capture(device)
+        device._packed_capture_released = False
+    device.proposal_capture = capture
+    capture.kv_history = device.kv_history
+    return dict(ms=(time.perf_counter() - started) * 1000, single_rebuilt=rebuilt, window=window)

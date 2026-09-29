@@ -850,8 +850,15 @@ class World:
         self.stack.callback(lambda: ops.deallocate(output))
         self.attached = set(ops.live)
 
-    def __exit__(self, *failure):
-        self.stack.close()
+    def __exit__(self, kind, failure, traceback):
+        if kind is None:
+            self.stack.close()
+            return False
+        # The body failed: its error is the one to report, not a teardown that found the world half-used.
+        try:
+            self.stack.close()
+        except Exception:
+            pass
         return False
 
     def replay_block(self):
