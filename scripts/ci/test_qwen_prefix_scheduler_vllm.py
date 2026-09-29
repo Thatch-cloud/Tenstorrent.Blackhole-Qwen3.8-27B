@@ -24,6 +24,13 @@ that many tokens.
 
 Skipped where vLLM is not importable (the 3.11 CPU suite). Runs in qwen-fast-vllm-cpu.yml and
 locally on the P0a python 3.10 environment with the vLLM 0.25.1 source on PYTHONPATH.
+
+StickyDflashOnRealVllmTests (the fast path's sticky sessions, harness item B5): the same staged graft on the
+fast path's scheduler shape - DFlash with 15 proposals (SpeculativeConfig as test_serving_scheduler builds it),
+which vLLM runs with a lookahead of 16 and, as SpeculativeConfig.use_eagle() includes dflash, a unitary
+coordinator that drops a hit's last block - installed with QWEN_FAST_STICKY_SESSIONS=1: a continuation's raw
+hit is C1 - 64, it resumes (commits) at exactly C0 = floor2048(P_N) - 2048, and prefix_judge.Oracle(sticky=True)
+predicts every h, Q and plan; without the switch the lookahead is still refused.
 """
 
 import collections
@@ -886,6 +893,101 @@ class GraftOnRealVllmTests(unittest.TestCase):
         drive.add('c', shared + tokens(2800, 'poison-c'))
         with self.assertRaisesRegex(ModelAssertion, 'not the cold state'):
             drive.run()
+
+
+class StickyEnv(Env):
+    """The fast path's scheduler shape: the general shape above plus DFlash with 15 proposals."""
+
+    def __init__(self):
+        super(StickyEnv, self).__init__()
+        from vllm.config import SpeculativeConfig
+
+        speculative = SpeculativeConfig(model='ngram', num_speculative_tokens=15)
+        speculative.method = 'dflash'
+        base = self.vllm_config
+        self.vllm_config = VllmConfig(
+            model_config=base.model_config, device_config=base.device_config, scheduler_config=base.scheduler_config,
+            cache_config=base.cache_config, parallel_config=base.parallel_config, speculative_config=speculative)
+        self.vllm_config.cache_config.num_gpu_blocks = DEFAULT_BLOCKS
+        register_all_kvcache_specs(self.vllm_config)
+        self.structured = StructuredOutputManager(self.vllm_config)
+
+    def make_sticky(self, environ=None, mid_loop=True):
+        scheduler = self.scheduler_cls(vllm_config=self.vllm_config, kv_cache_config=self.kv_cache_config,
+                                       structured_output_manager=self.structured, block_size=BLOCK,
+                                       hash_block_size=BLOCK, include_finished_set=False, log_stats=True)
+        scheduler.use_v2_model_runner = False
+        registry = self.graft.PrefixRegistry(budget_bytes=1 << 40)
+        registry.mid_loop_capture = mid_loop
+        state = self.graft.install(scheduler, registry=registry, logger=self.log,
+                                   stats=self.graft.StatsExport(path='', logger=self.log),
+                                   environ={'QWEN_FAST_STICKY_SESSIONS': '1'} if environ is None else environ)
+        return scheduler, state
+
+
+@unittest.skipIf(VLLM_ERROR is not None, 'vLLM is not importable here (%s)' % VLLM_ERROR)
+class StickyDflashOnRealVllmTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.env = StickyEnv()
+
+    def setUp(self):
+        self.env.logs[:] = []
+
+    def test_dflash_is_lookahead_16_and_the_graft_refuses_it_without_the_switch(self):
+        scheduler, state = self.env.make_sticky()
+        self.assertEqual(scheduler.num_lookahead_tokens, source_patch.STICKY_LOOKAHEAD)
+        self.assertTrue(state.sticky and state.drop_last, 'the unitary coordinator drops the EAGLE block')
+        self.assertTrue(any('install sticky=1 lookahead=16 drop_last=True' in line for line in self.env.logs),
+                        self.env.logs)
+        with self.assertRaisesRegex(self.env.graft.PrefixInstallError, 'speculative lookahead is on'):
+            self.env.make_sticky(environ={})
+
+    def test_a_continuation_resumes_at_c0_as_the_oracle_says(self):
+        import prefix_judge
+
+        scheduler, state = self.env.make_sticky()
+        drive = Drive(self.env, scheduler, state, 'sticky')
+        oracle = prefix_judge.Oracle(sticky=True)
+        first = drive.add('t0', tokens(10000, 'sticky-0'), 1)
+        drive.run()
+        expected0 = oracle.admit(SALT, list(first.prompt_token_ids))
+        grant0 = drive.grants['t0'][-1]
+        self.assertEqual((drive.row('t0').start, grant0.capture_positions()), (0, expected0['plan']))
+        self.assertEqual(expected0['plan'], [6144], 'C0, never floor2048(P) = 8192')
+        self.assertIsNotNone(state.registry.get(first.block_hashes[6144 // BLOCK - 1]))
+        prompt = list(first.prompt_token_ids) + list(first.output_token_ids) + tokens(1500, 'sticky-1')
+        drive.add('t1', prompt, 1)
+        drive.run()
+        expected1 = oracle.admit(SALT, prompt)
+        grant1 = drive.grants['t1'][-1]
+        row = drive.row('t1')
+        self.assertEqual((grant1.h, grant1.q, row.start), (8192 - BLOCK, 6144, 6144),
+                         'vLLM\'s hit is C1 - 64 (the dropped block); the commit is at start_pos == Q == C0')
+        self.assertEqual((expected1['h'], expected1['q'], expected1['plan']), (grant1.h, grant1.q,
+                                                                              grant1.capture_positions()))
+        self.assertEqual(drive.model.restored['t1'], 6144)
+        self.assertEqual(state.registry.stats['commit_mismatch'], 0)
+
+    def test_a_chained_conversation_matches_the_sticky_oracle_every_turn(self):
+        import prefix_judge
+
+        scheduler, state = self.env.make_sticky()
+        drive = Drive(self.env, scheduler, state, 'sticky-chain')
+        oracle = prefix_judge.Oracle(sticky=True)
+        prompt = tokens(3000, 'sticky-chain-0')
+        for turn in range(6):
+            request = drive.add('c%d' % turn, prompt, 64)
+            drive.run()
+            expected = oracle.admit(SALT, list(request.prompt_token_ids))
+            grant = drive.grants['c%d' % turn][-1] if drive.grants['c%d' % turn] else None
+            row = drive.row('c%d' % turn)
+            self.assertEqual(row.start, expected['q'], turn)
+            if grant is not None:
+                self.assertEqual((grant.h, grant.capture_positions()), (expected['h'], expected['plan']), turn)
+            self.assertLessEqual(row.start, prefix_judge.resume_ceiling(len(request.prompt_token_ids)))
+            prompt = list(request.prompt_token_ids) + list(request.output_token_ids) + tokens(2600, 'sticky-chain-%d' % turn)
+        self.assertEqual(state.registry.stats['token_mismatches'], 0)
 
 
 if __name__ == '__main__':

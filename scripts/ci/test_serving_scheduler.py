@@ -20,7 +20,7 @@ from serving_vllm_contract import admit_scheduler_output
 class RealSchedulerTests(unittest.TestCase):
     scheduler_type = Scheduler
 
-    def scheduler(self):
+    def scheduler(self, prefix_caching=False):
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         directory = temporary.name
@@ -33,7 +33,7 @@ class RealSchedulerTests(unittest.TestCase):
             scheduler_config=SchedulerConfig(max_num_seqs=1, max_num_batched_tokens=4352,
                 max_model_len=4352, is_encoder_decoder=False, enable_chunked_prefill=False,
                 async_scheduling=False, watermark=0.0),
-            cache_config=CacheConfig(block_size=64, enable_prefix_caching=False),
+            cache_config=CacheConfig(block_size=64, enable_prefix_caching=prefix_caching),
             parallel_config=ParallelConfig(), speculative_config=speculative)
         config.cache_config.num_gpu_blocks = 128
         cache = KVCacheConfig(num_blocks=128, kv_cache_tensors=[], kv_cache_groups=[
@@ -102,9 +102,30 @@ class RealSchedulerTests(unittest.TestCase):
         self.assertEqual(scheduler.schedule().finished_req_ids, {'replacement'})
 
 
+    def test_a_dflash_hit_drops_its_last_block_with_the_prefix_cache_on(self):
+        """Sticky sessions (harness item B5): with the prefix cache on, vLLM treats DFlash as EAGLE-like and drops
+        the last matched block of a hit, so a continuation of a 2048-token prompt finds 1984 tokens, not 2048 -
+        why the fast path's scheduler graft resumes one chunk lower (C0) than general-prefix (C1)."""
+        scheduler = self.scheduler(prefix_caching=True)
+        parameters = SamplingParams(temperature=0, max_tokens=1)
+        first = Request('first', [42] * 2048, parameters, None)
+        scheduler.add_request(first)
+        scheduled = scheduler.schedule()
+        self.assertEqual(scheduled.num_scheduled_tokens, {'first': 2048})
+        scheduler.update_from_output(scheduled, self.output('first', [100]))
+        self.assertNotIn('first', scheduler.requests)
+        scheduler.schedule()
+        second = Request('second', [42] * 2048 + [43] * 1024, SamplingParams(temperature=0, max_tokens=1), None)
+        scheduler.add_request(second)
+        scheduled = scheduler.schedule()
+        new, = scheduled.scheduled_new_reqs
+        self.assertEqual(new.num_computed_tokens, 2048 - 64)
+        self.assertEqual(scheduled.num_scheduled_tokens, {'second': 3072 - (2048 - 64)})
+
+
 class TTPluginSchedulerTests(RealSchedulerTests):
-    def scheduler(self):
+    def scheduler(self, prefix_caching=False):
         from vllm_tt_plugin.scheduler import TTScheduler
 
         self.scheduler_type = TTScheduler
-        return super().scheduler()
+        return super().scheduler(prefix_caching)
