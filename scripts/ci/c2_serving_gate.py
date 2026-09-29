@@ -158,7 +158,9 @@ prefix route's capture path and publishes, and none can hit. none: the harness s
 way, and on a prefix profile with no --salt, each arm's server log is read with prefix_markers
 (prefix_log_check): the scheduler graft's install line (and on a sticky profile its sticky install line and the
 model graft's warmup line), no row that restored Q > 0 and no sticky admit (no two streams share a salt), no
-stale grant, no row that compiled a program; under fresh every salted request's grant plans exactly
+stale grant, no row that compiled a program (on a sticky profile: no row that compiled a prefill shape an earlier
+row of its engine already ran - the fast path compiles each shape at its first request, prefix_judge.fast_path_growth);
+under fresh every salted request's grant plans exactly
 prefix_judge.fresh_plan (C0 = floor2048(L) - 2048 on a sticky profile) and its row captured what it planned (or a
 'capture skipped' line says why), no more 4096+-token requests ran unsalted than the arm's --alive-check (whose
 requests are never salted), the salt key was present, and at least one row captured (else NOT_EXERCISED); under
@@ -520,6 +522,8 @@ def prefix_log_check(log_text, salt, sticky, alive=0):
         if not scanned['model_warm']:
             problems.append('no "[PINDIAG] prefix: model warm" line: the model graft\'s warmup (the restore path, the '
                             'mid-loop capture declaration) did not run on the fast path\'s warmup')
+        for entry in scanned['model_warm_skipped']:
+            problems.append('the model graft\'s warm was skipped (%s): it chose no restore path' % entry['line'])
     restored = [row for row in rows if row.get('q')]
     if restored:
         problems.append('%d prefill rows restored Q > 0 (%s): no two streams of a gate arm share a salt, so none may '
@@ -530,11 +534,17 @@ def prefix_log_check(log_text, salt, sticky, alive=0):
     for entry in scanned['refused']:
         problems.append('a stale grant was refused at commit (%s start_pos=%s Q=%s)' % (
             entry['req'], entry['start_pos'], entry['q']))
-    for row in rows:
-        before, after = row.get('programs_before'), row.get('programs')
-        if isinstance(before, int) and isinstance(after, int) and after > before:
-            problems.append('the prefill row of %s (L=%s) compiled %d programs: a compile after the traces were parked '
-                            '(F3)' % (row.get('req'), row.get('l'), after - before))
+    compiled = []
+    if sticky:
+        # The fast path never warms its prefill: each shape's first request compiles, a repeated shape must not.
+        growth, compiled = prefix_judge.fast_path_growth(rows)
+        problems += growth
+    else:
+        for row in rows:
+            before, after = row.get('programs_before'), row.get('programs')
+            if isinstance(before, int) and isinstance(after, int) and after > before:
+                problems.append('the prefill row of %s (L=%s) compiled %d programs: a compile after the traces were '
+                                'parked (F3)' % (row.get('req'), row.get('l'), after - before))
     grants = dict((entry['req'], entry) for entry in scanned['grants'])
     skipped = set(entry['req'] for entry in scanned['capture_skipped'])
     planned, unsalted = 0, 0
@@ -569,7 +579,8 @@ def prefix_log_check(log_text, salt, sticky, alive=0):
         if not any(row.get('captured') for row in rows):
             missing.append('no prefill row captured a checkpoint: the salted capture path was not exercised')
     facts = dict(rows=len(rows), planned=planned, captured=sum(len(row.get('captured') or ()) for row in rows),
-                 unsalted_4096=unsalted, capture_ms=[row.get('capture_ms') for row in rows if row.get('captured')][:16])
+                 unsalted_4096=unsalted, capture_ms=[row.get('capture_ms') for row in rows if row.get('captured')][:16],
+                 first_shape_compiles=compiled)
     return problems, missing, facts
 
 

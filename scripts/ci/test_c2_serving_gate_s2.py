@@ -1039,7 +1039,7 @@ class Driver(object):
 def prefix_lines(rows, sticky=True, key_absent=False, grants=None):
     """The prefix route's lines of a salted arm: the contract's salt-key line, the scheduler graft's install lines
     (the sticky one on a sticky profile), the model graft's warmup, and per request (engine id, L, captured, Q,
-    planned or None for an unsalted request) its grant line and its [PREFIX] row."""
+    planned or None for an unsalted request[, (programs before, after)]) its grant line and its [PREFIX] row."""
     import test_prefix_markers as marker_fixture
     lines = ['INFO prefix: cache_salt kept only when it verifies against the salt key (%s)' % (
                  'ABSENT: every salt is dropped, no request can hit' if key_absent else 'present'),
@@ -1048,11 +1048,14 @@ def prefix_lines(rows, sticky=True, key_absent=False, grants=None):
         lines += ['INFO ' + marker_fixture.graft_line('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)',
                                                       16, True, 2048),
                   'INFO [PINDIAG] prefix: model warm restore_mode=h2d results={} gdn_layers=48 programs=554']
-    for req, length, captured, q, planned in rows:
+    for row in rows:
+        req, length, captured, q, planned = row[:5]
+        before, after = row[5] if len(row) > 5 else (554, 554)
         if planned is not None:
             lines.append('INFO ' + marker_fixture.grant_line(req, q, q, planned))
         lines.append('INFO [PREFIX] req=%s Q=%d L=%d path=eager restored_ms=- captured=[%s] dropped=[] ms=900.0 '
-                     'programs=554->554' % (req, q, length, ','.join('%d:stored:210ms' % pos for pos in captured)))
+                     'programs=%d->%d' % (req, q, length, ','.join('%d:stored:210ms' % pos for pos in captured),
+                                          before, after))
     return lines
 
 
@@ -1140,6 +1143,36 @@ class SaltTests(unittest.TestCase):
         lines = prefix_lines(good) + ["INFO [PINDIAG] sticky admit req='cmpl-a-0' Q=2048 P=60000 tail=57952"]
         problems, _, _ = driver.prefix_log_check('\n'.join(lines), 'fresh', True)
         self.assertTrue(any('sticky admit' in problem for problem in problems))
+
+    def test_each_prefill_shape_may_compile_at_its_first_request_only(self):
+        """The fast path never warms its prefill, so each shape's first row compiles (tail L mod 2048, a full
+        chunk or not); a row that compiles a shape its engine already ran fails, and a restart forgets the shapes.
+        Off a sticky profile every compiling row still fails."""
+        first = [('cmpl-a-0', 60000, [57344], 0, [57344], (554, 600)), ('cmpl-b-0', 4096, [2048], 0, [2048], (600, 630)),
+                 ('cmpl-c-0', 2047, [], 0, None, (630, 640))]
+        again = ('cmpl-d-0', 62048, [59392], 0, [59392])
+        problems, missing, facts = driver.prefix_log_check('\n'.join(prefix_lines(first + [again + ((640, 640),)])),
+                                                           'fresh', True)
+        self.assertEqual((problems, missing), ([], []))
+        self.assertIn('cmpl-a-0 (Q=0 L=60000, tail 608, a full chunk): 46', facts['first_shape_compiles'][0])
+        problems, _, _ = driver.prefix_log_check('\n'.join(prefix_lines(first + [again + ((640, 641),)])), 'fresh',
+                                                 True)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('cmpl-d-0 (Q=0 L=62048, tail 608, a full chunk) compiled 1 programs', problems[0])
+        restarted = driver.prefix_log_check('\n'.join(prefix_lines(first + [again + ((500, 546),)])), 'fresh', True)
+        self.assertEqual(restarted[:2], ([], []))
+        problems, _, _ = driver.prefix_log_check('\n'.join(prefix_lines(first, sticky=False)), 'fresh', False)
+        self.assertTrue(any('the prefill row of cmpl-a-0 (L=60000) compiled 46 programs' in problem
+                            for problem in problems), problems)
+
+    def test_a_skipped_model_warm_fails_a_sticky_arm(self):
+        rows = [('cmpl-a-0', 60000, [57344], 0, [57344])]
+        lines = [line.replace('prefix: model warm restore_mode=h2d results={} gdn_layers=48 programs=554',
+                              'prefix: model warm skipped - not the batched TP path (num_devices=2, max_batch_size=1); '
+                              'a resumed row will assert') for line in prefix_lines(rows)]
+        problems, _, _ = driver.prefix_log_check('\n'.join(lines), 'fresh', True)
+        self.assertTrue(any('no "[PINDIAG] prefix: model warm" line' in problem for problem in problems), problems)
+        self.assertTrue(any('warm was skipped' in problem for problem in problems), problems)
 
     def test_the_prefix_route_unsalted(self):
         rows = [('cmpl-a-0', 60000, [], 0, None), ('cmpl-b-0', 4096, [], 0, None)]

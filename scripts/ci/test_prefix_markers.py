@@ -292,7 +292,7 @@ class StickyLineTests(unittest.TestCase):
         self.assertIn('f"[PREFIX-AUDIT] req={row.req_id} Q={row.start} L={actual} window={w} "', text)
         self.assertIn('f"tokens=[{w * chunk},{min((w + 1) * chunk, actual)}) new={int(w * chunk >= row.start)} "', text)
         import qwen_prefix_model_patch as model_patch
-        self.assertTrue(model_patch.MARKER_WARM.startswith(pm.MODEL_WARM))
+        self.assertEqual(model_patch.MARKER_WARM, pm.MODEL_WARM)
         lines = ['INFO [PREFIX-AUDIT] req=chatcmpl-pfx-a-0003-hit-1a2b3c4d Q=4096 L=9000 window=1 tokens=[2048,4096) '
                  'new=0 kv=0123456789abcdef0123456789abcdef',
                  'INFO [PREFIX-AUDIT] req=chatcmpl-pfx-a-0003-hit-1a2b3c4d Q=4096 L=9000 kv_range=0:9000 kv_sha=aa '
@@ -305,6 +305,13 @@ class StickyLineTests(unittest.TestCase):
         self.assertEqual(len(scanned['audits']), 1, 'a window line is not an audit row')
         warm, = scanned['model_warm']
         self.assertEqual((warm['restore_mode'], warm['programs']), ('h2d', 554))
+        self.assertEqual(scanned['model_warm_skipped'], [])
+        # The skip line (qwen36_vllm's _qwen_prefix_warm off the batched TP path) is not a warm.
+        skipped = pm.scan(['WARNING [PINDIAG] prefix: model warm skipped - not the batched TP path (num_devices=2, '
+                           'max_batch_size=1); a resumed row will assert'])
+        self.assertEqual(skipped['model_warm'], [])
+        self.assertEqual(len(skipped['model_warm_skipped']), 1)
+        self.assertIn('"' + pm.MODEL_WARM_SKIPPED + ' - not the batched TP path "', source('qwen_prefix_model_patch.py'))
 
     def test_kv_shared_is_the_verify_trace_s_own_marker(self):
         import verify_trace_t2

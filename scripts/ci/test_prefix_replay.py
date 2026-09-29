@@ -340,7 +340,17 @@ class FakeEngine(object):
               # packed round, a hit that reads a shared window other than its writer left, a C1 grant (the ceiling
               # off in the graft), an unaudited packed round.
               'no_sticky_install', 'no_model_warm', 'no_sticky_admit', 'no_sticky_build', 'kv_shared',
-              'corrupt_shared_window', 'no_ceiling', 'unaudited_round')
+              'corrupt_shared_window', 'no_ceiling', 'unaudited_round',
+              # The fast path's prefill compiles (it never warms its prefill): each prefill shape's first row
+              # compiles, as S2's always has (compile_new_shapes: a restart forgets them with the program cache);
+              # a row repeating a shape compiles too (compile_repeated_shape, the defect); the model graft's warm
+              # skipped off the batched TP path (warm_skipped: its skip line in place of the warm line).
+              'compile_new_shapes', 'compile_repeated_shape', 'warm_skipped',
+              # A hit's engine build line naming another frontier than its Q (wrong_build_frontier), and audit
+              # window lines that never mark a window restored (no_restored_windows: every new=1).
+              'wrong_build_frontier', 'no_restored_windows',
+              # vLLM finds nothing cached for any request, so every continuation runs cold (lose_every_hit).
+              'lose_every_hit')
     piece = 3
     # The model graft's G2 reading (qwen_prefix_model_patch._qwen_prefix_dram), in serving_buffer_pool's text.
     DRAM_TEXT = ('chip0 allocated=25.90GB free=8.01GB largest_free=7877.5MB of 33.91GB; '
@@ -431,6 +441,11 @@ class FakeEngine(object):
         self.expected, self.expect_since = 0, None
         self.dead = None
         self.dram_logged = set()
+        # The prefill shapes this engine process has run (prefix_judge.prefill_shape); a restart forgets them,
+        # and under compile_new_shapes its program cache too.
+        self.shapes = set()
+        if 'compile_new_shapes' in self.faults:
+            self.programs = 500
         profile = self.profile
         self.say('(APIServer pid=1) [QWEN-C2] profile %s: vLLM argv %s' % (
             self.name, json.dumps(marker_fixture.launched_argv(profile))))
@@ -449,7 +464,11 @@ class FakeEngine(object):
         if self.sticky and 'no_sticky_install' not in self.faults:
             self.say('(EngineCore pid=9) ' + marker_fixture.graft_line(
                 'install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)', 16, True, judge.CHUNK))
-        if self.sticky and 'no_model_warm' not in self.faults:
+        if self.sticky and 'warm_skipped' in self.faults:
+            self.say('(EngineCore pid=9) WARNING | models.demos.blackhole.qwen36.tt.qwen36_vllm:_qwen_prefix_warm:960 - '
+                     '[PINDIAG] prefix: model warm skipped - not the batched TP path (num_devices=2, '
+                     'max_batch_size=1); a resumed row will assert')
+        elif self.sticky and 'no_model_warm' not in self.faults:
             self.say('(EngineCore pid=9) INFO | models.demos.blackhole.qwen36.tt.model:_qwen_prefix_warm:740 - '
                      '[PINDIAG] prefix: model warm restore_mode=h2d results={\'copy\': \'exact\', \'h2d\': \'exact\'} '
                      'gdn_layers=48 checkpoint_bytes=153944064 programs=554')
@@ -626,6 +645,8 @@ class FakeEngine(object):
                 break
             if self.prefix:
                 blocks, h = self.manager.get_computed_blocks(request)
+                if 'lose_every_hit' in self.faults:
+                    blocks, h = FakeBlocks(([],)), 0
                 trimmed, q = self.graft.trim(request, blocks, h)
                 hit = list(trimmed.blocks[0])
             else:
@@ -695,7 +716,8 @@ class FakeEngine(object):
                 self.diverged_once = True
         if self.sticky and 'no_sticky_build' not in self.faults:
             self.say('(EngineCore pid=9) INFO [PINDIAG] sticky engine built req=%s ms=3500.0 frontier=%d prompt=%d' % (
-                request.request_id[:48], q, len(request.prompt_token_ids)))
+                request.request_id[:48], 0 if 'wrong_build_frontier' in self.faults else q,
+                len(request.prompt_token_ids)))
         if self.sticky and first and q and 'no_sticky_admit' not in self.faults:
             self.say("(EngineCore pid=9) INFO [PINDIAG] sticky admit req='%s' Q=%d P=%d tail=%d" % (
                 request.request_id, q, len(request.prompt_token_ids), len(request.prompt_token_ids) - q))
@@ -708,6 +730,11 @@ class FakeEngine(object):
             self.programs += 1
             self.grew_capture = True
         ids = list(request.all_token_ids)
+        shape = judge.prefill_shape(dict(l=len(ids), q=q))
+        if ('compile_new_shapes' in self.faults and shape not in self.shapes) or (
+                'compile_repeated_shape' in self.faults and shape in self.shapes):
+            self.programs += 7
+        self.shapes.add(shape)
         slot = judge.token_sha(ids)[:16]
         if 'bad_slot_on_hit' in self.faults and q:
             slot = 'ff' + slot[2:]
@@ -729,7 +756,7 @@ class FakeEngine(object):
                     kv = 'ff' + kv[2:]
                 self.say('[PREFIX-AUDIT] req=%s Q=%d L=%d window=%d tokens=[%d,%d) new=%d kv=%s' % (
                     request.request_id, q, len(ids), window, window * judge.CHUNK, end,
-                    int(window * judge.CHUNK >= q), kv))
+                    int(window * judge.CHUNK >= q or 'no_restored_windows' in self.faults), kv))
             digest = judge.token_sha(ids)[:16]
             self.say('[PREFIX-AUDIT] req=%s Q=%d L=%d kv_range=0:%d kv_sha=%s slot_sha=%s' % (
                 request.request_id, q, len(ids), len(ids), digest, digest))

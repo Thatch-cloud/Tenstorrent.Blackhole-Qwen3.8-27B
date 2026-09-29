@@ -835,6 +835,13 @@ class StickyOracleTests(unittest.TestCase):
         self.assertFalse(pj.engine_id_matches(full, 'pfx-exactness-shared-0012-cold'), 'a label is not a prefix')
         self.assertFalse(pj.engine_id_matches(full[:48], 'pfx-exactness-shared-0012-cold'))
         self.assertFalse(pj.engine_id_matches('chatcmpl-pfx-a', 'pfx-a-0001-hit'), 'too short to be a cut')
+        # A 38-character tag: the 48-character cut ends exactly on the '-' before the input processor's suffix.
+        tag = 'pfx-exactness-shared-0012-hit-agent-01'
+        self.assertEqual(len(tag), 38)
+        cut = ('chatcmpl-%s-1a2b3c4d' % tag)[:48]
+        self.assertTrue(cut.endswith(tag + '-'))
+        self.assertTrue(pj.engine_id_matches(cut, tag))
+        self.assertFalse(pj.engine_id_matches(cut, tag[:-1] + '2'))
 
     def test_resolve_attaches_the_sticky_lines(self):
         lines = ["INFO [PINDIAG] sticky admit req='chatcmpl-pfx-a-0002-hit-1a2b3c4d' Q=6144 P=10000 tail=3856",
@@ -850,6 +857,58 @@ class StickyOracleTests(unittest.TestCase):
         self.assertEqual([b['frontier'] for b in markers['sticky_builds']], [6144])
         self.assertEqual([(w['window'], w['new'], w['kv']) for w in markers['audit_windows']], [(0, 0, 'aa')])
         self.assertEqual((other['markers']['sticky_admits'], other['markers']['sticky_builds']), ([], []))
+
+
+
+class FastPathGrowthTests(unittest.TestCase):
+    """prefix_judge.fast_path_growth: the fast path never warms its prefill, so a row may compile only as the first
+    of its prefill shape (tail L mod 2048, a full chunk from Q or not) in its engine process."""
+
+    @staticmethod
+    def row(index, tag, length, before, after, q=0):
+        return dict(index=index, tag=tag, l=length, q=q, programs_before=before, programs=after)
+
+    def test_the_shape_is_the_tail_and_whether_a_full_chunk_runs(self):
+        self.assertEqual(pj.prefill_shape(dict(l=60000, q=0)), (608, True))
+        self.assertEqual(pj.prefill_shape(dict(l=62048, q=6144)), (608, True))
+        self.assertEqual(pj.prefill_shape(dict(l=2047)), (2047, False))
+        self.assertEqual(pj.prefill_shape(dict(l=4095, q=2048)), (2047, False), 'only the tail runs from Q')
+        self.assertEqual(pj.prefill_shape(dict(l=8192, q=4096)), (0, True))
+        self.assertIsNone(pj.prefill_shape(dict(q=0)))
+
+    def test_each_shape_compiles_once(self):
+        rows = [self.row(0, 'a', 60000, 554, 600), self.row(1, 'b', 2047, 600, 610), self.row(2, 'c', 4096, 610, 640),
+                self.row(3, 'd', 62048, 640, 640, q=57344), self.row(4, 'e', 2047 + 4096, 640, 652)]
+        problems, notes = pj.fast_path_growth(rows)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(notes), 1)
+        for text in ('a (Q=0 L=60000, tail 608, a full chunk): 46', 'b (Q=0 L=2047, tail 2047): 10',
+                     'c (Q=0 L=4096, tail 0, a full chunk): 30', 'e (Q=0 L=6143, tail 2047, a full chunk): 12'):
+            self.assertIn(text, notes[0])
+        self.assertNotIn('d (', notes[0])
+
+    def test_a_repeated_shape_that_compiles_fails(self):
+        rows = [self.row(0, 'a', 60000, 554, 600), self.row(1, 'hit', 62048, 600, 601, q=57344),
+                self.row(2, 'b', 60000 - 2048, 601, 603)]
+        problems, notes = pj.fast_path_growth(rows)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn('hit (Q=57344 L=62048, tail 608, a full chunk) compiled 1 programs', problems[0])
+        self.assertIn('an earlier row of this engine ran the same prefill shape', problems[0])
+        self.assertIn('b (Q=0 L=57952', problems[1])
+
+    def test_a_restart_forgets_the_shapes(self):
+        rows = [self.row(0, 'a', 60000, 554, 600), self.row(1, 'a2', 60000, 500, 546), self.row(2, 'a3', 60000, 546, 546)]
+        self.assertEqual(pj.fast_path_growth(rows)[0], [])
+        rows[2] = self.row(2, 'a3', 60000, 546, 547)
+        self.assertEqual(len(pj.fast_path_growth(rows)[0]), 1)
+
+    def test_rows_without_both_counts_and_rows_in_log_order(self):
+        rows = [self.row(1, 'late', 60000, 600, 601), dict(index=0, tag='x', l=60000, q=0, programs=600),
+                self.row(0, 'early', 60000, 554, 600)]
+        problems, _ = pj.fast_path_growth(rows)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('late', problems[0])
+        self.assertEqual(pj.fast_path_growth([]), ([], []))
 
 
 if __name__ == '__main__':

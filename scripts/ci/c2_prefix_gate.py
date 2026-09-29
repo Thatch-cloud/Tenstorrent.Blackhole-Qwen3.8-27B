@@ -75,7 +75,8 @@ named as the arm - c2_serving_job.PREFIX_ARM_PLANS - that runs only it, judged e
              60k) at --agents 1,4,5,6, one phase each; TTFT and turn time p50/p90, hit rate from the
              [PREFIX] rows' L-Q (never vllm:prefix_cache_hits), trim loss, restore/capture ms, RSS and
              the CI pod count per phase (prefix_report). It records; it fails only on failed turns
-             or missing markers.
+             or missing markers, and timing-prefix is NOT_EXERCISED when no continuation restored
+             Q > 0 (every turn cold: its numbers would measure no reuse).
 
 THE FAST PATH'S STICKY SESSIONS (phase 1 on the S2 lineage; --profile c2-packed-prefix --baseline c2-packed,
 the profiles with QWEN_FAST_STICKY_SESSIONS=1 beside QWEN_PREFIX_REUSE=1). The same plans, judged for what
@@ -107,7 +108,10 @@ that path is (sticky design, harness items B1, B2 and B4):
     model graft's warmup line ('[PINDIAG] prefix: model warm': the restore path and the mid-loop capture
     declaration ran on the fast path's warmup), one '[PINDIAG] sticky admit' line per hit agreeing with its
     row and none for a cold request, and an engine build line per served request whose frontier is its Q;
-    no [PREFIX] row of any sticky arm may compile a program (the fast path's zero-compile rule, F3);
+    the fast path never warms its prefill (its worker runs the graft's restore warm only), so each prefill
+    shape's first request compiles, as S2's prefill always has: a sticky arm's [PREFIX] row may compile only
+    when no earlier row of its engine ran its shape (tail L mod 2048, a full chunk or not;
+    prefix_judge.fast_path_growth), and a hit after its cold twin compiles nothing (program_cache_problems);
   - the lifecycle's same-step rule is not asked of a sticky arm (the fast path admits one fresh prefill
     per step, so two arrivals never share one);
   - prompts are held to the profile's prompt limit as well as its context (a request past the contract's
@@ -1038,7 +1042,8 @@ def lifecycle_findings(arm, records, events, scanned, stats):
 def s2_findings(arm, log_text, scanned, records):
     """An arm on an S2 profile (the module docstring's sticky section): the S2 gate's reading of its log,
     the C2-any lines, KV_SHARED, and on a sticky arm the install, warmup, admit and build lines and the
-    zero-compile rule. -> (problems, not exercised, lines, the S2 report)."""
+    fast path's compile rule (prefix_judge.fast_path_growth). -> (problems, not exercised, lines, the S2
+    report)."""
     problems, missing, lines = [], [], []
     text = log_text or ''
     environ = dict(arm.get('served_env') or {})
@@ -1078,6 +1083,9 @@ def s2_findings(arm, log_text, scanned, records):
         problems.append('no "%s" line: the model graft\'s warmup (the restore path, the mid-loop capture '
                         'declaration) did not run on the fast path\'s warmup, so the first resume would stop the '
                         'engine and the first turn after boot plans no C0 capture' % markers.MODEL_WARM.strip())
+    for entry in scanned.get('model_warm_skipped') or ():
+        problems.append('the model graft\'s warm was skipped (%s): it chose no restore path, so a resumed row '
+                        'asserts' % entry.get('line'))
     served = [r for r in records if r.get('ok') and r.get('role') not in ('seat', 'flood')]
     built = [r for r in served if (r.get('markers') or {}).get('sticky_builds')]
     if served and not built:
@@ -1089,8 +1097,10 @@ def s2_findings(arm, log_text, scanned, records):
         if q is not None and build.get('frontier') != q:
             problems.append('%s: its engine was built at frontier %s, its row restored Q=%s' % (
                 record['tag'], build.get('frontier'), q))
-    growth = row_growth_problems(scanned.get('rows') or [])
+    # Not row_growth_problems' every-row rule: the fast path compiles each prefill shape at its first request.
+    growth, compiled = judge.fast_path_growth(scanned.get('rows') or [])
     problems += growth
+    lines += compiled
     return problems, missing, lines, report
 
 
@@ -1179,6 +1189,15 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
         problems += more_problems
         missing += more_missing
         lines += more_lines
+    elif arm['scenario'] == 'timing' and arm['prefix']:
+        # The timing arm is not strict (a lost hit is a note), so without this it could pass with every
+        # continuation cold and report TTFTs that measure no reuse at all.
+        continued = [r for r in records if r.get('continuation') and r.get('ok')]
+        restored = [r for r in continued if q_of(r)]
+        lines.append('continuations restored: %d of %d' % (len(restored), len(continued)))
+        if continued and not restored:
+            missing.append('no continuation restored Q > 0 (%d served, every one cold): the timing measures no reuse'
+                           % len(continued))
     diverged, unstable, not_comparable, rerun = pair_problems(driver.pairs)
     problems += diverged
     summary = judge.pair_summary(driver.pairs)

@@ -1080,6 +1080,7 @@ class StickyRunnerTests(unittest.TestCase):
 
     def test_each_missing_sticky_marker_fails(self):
         for fault, text in (('no_sticky_install', 'install sticky=1'), ('no_model_warm', 'model warm'),
+                            ('warm_skipped', 'warm was skipped'),
                             ('no_sticky_admit', 'no "[PINDIAG] sticky admit" line'),
                             ('no_sticky_build', 'sticky engine built'), ('no_ceiling', 'planned captures')):
             with self.subTest(fault=fault):
@@ -1092,11 +1093,58 @@ class StickyRunnerTests(unittest.TestCase):
         result, _, _ = self.plan('bringup', 'grow', **{'c2-packed-prefix': dict(grow_programs=True)})
         self.assertEqual(result['arms']['bringup-prefix']['verdict'], 'FAIL')
 
+    def test_a_hit_built_at_another_frontier_fails(self):
+        result, _, _ = self.plan('bringup', 'frontier', **{'c2-packed-prefix': dict(wrong_build_frontier=True)})
+        arm = result['arms']['bringup-prefix']
+        self.assertEqual(arm['verdict'], 'FAIL')
+        self.assertTrue(any('its engine was built at frontier 0, its row restored Q=' in problem
+                            for problem in arm['problems']), arm['problems'][:6])
+
+    def test_a_shared_arm_whose_hits_restored_no_window_is_not_exercised(self):
+        """exactness-shared compares the shared blocks across the decode only through windows a hit restored
+        (new=0): with none, its "unchanged across the decode" check compares nothing, so the arm cannot pass."""
+        result, _, _ = self.plan('exactness-shared', 'no-restored', all=dict(no_restored_windows=True))
+        arm = result['arms']['exactness-shared']
+        self.assertEqual(arm['verdict'], 'NOT_EXERCISED', arm.get('problems'))
+        self.assertTrue(any('no audited hit read a shared or retained window it did not write' in text
+                            for text in arm['not_exercised']), arm['not_exercised'])
+
+    def test_each_prefill_shape_may_compile_at_its_first_request_only(self):
+        """The fast path never warms its prefill (its worker runs the graft's restore warm only), so the first row
+        of each prefill shape compiles, as S2's always has: the sticky arms pass on that and record it, and a row
+        that compiles a shape its engine already ran fails (a restart: test_prefix_judge.FastPathGrowthTests)."""
+        for plan, arm in (('bringup', 'bringup-prefix'), ('exactness-eager', 'exactness-eager'),
+                          ('lifecycle-evict', 'lifecycle-evict')):
+            with self.subTest(plan=plan):
+                result, _, _ = self.plan(plan, 'shapes-' + plan, **{'c2-packed-prefix': dict(compile_new_shapes=True)})
+                verdict = result['arms'][arm]
+                self.assertEqual(verdict['verdict'], 'PASS', verdict.get('problems'))
+                self.assertTrue(any(line.startswith('first rows of a prefill shape compiled programs')
+                                    for line in verdict['lines']), verdict['lines'])
+        result, _, _ = self.plan('bringup', 'repeated', **{'c2-packed-prefix': dict(compile_repeated_shape=True)})
+        verdict = result['arms']['bringup-prefix']
+        self.assertEqual(verdict['verdict'], 'FAIL')
+        self.assertTrue(any('an earlier row of this engine ran the same prefill shape' in problem
+                            for problem in verdict['problems']), verdict['problems'][:6])
+
     def test_lifecycle_passes_without_the_same_step_rule(self):
         result, _, _ = self.plan('lifecycle-evict')
         evict = result['arms']['lifecycle-evict']
         self.assertEqual(evict['verdict'], 'PASS', evict['lines'])
         self.assertTrue(any('same-step rule: not asked of the fast path' in line for line in evict['lines']))
+
+    def test_timing_with_every_continuation_cold_is_not_exercised(self):
+        """The timing arms are not strict (a lost hit is a note), so a prefix timing arm on which no continuation
+        restored Q > 0 measured no reuse at all: NOT_EXERCISED, never PASS."""
+        result, _, _ = self.plan('timing', 'cold-timing', **{'c2-packed-prefix': dict(lose_every_hit=True)})
+        arm = result['arms']['timing-prefix']
+        self.assertEqual(arm['verdict'], 'NOT_EXERCISED', arm.get('problems'))
+        self.assertTrue(any('no continuation restored Q > 0' in text for text in arm['not_exercised']),
+                        arm['not_exercised'])
+        self.assertEqual(result['verdict'], 'NOT_EXERCISED')
+        result, _, _ = self.plan('timing')
+        self.assertTrue(any(line.startswith('continuations restored: ') and not line.startswith(
+            'continuations restored: 0 ') for line in result['arms']['timing-prefix']['lines']))
 
     def test_timing_records_the_engine_build(self):
         result, _, _ = self.plan('timing')

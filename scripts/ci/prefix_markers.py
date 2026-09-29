@@ -70,6 +70,8 @@ never guessed around):
         the restore path round-tripped and the mid-loop captures declared; read into model_warm (its fields).
         The fast path's sticky sessions require it: without it the first resume stops the engine and the
         first turn after boot plans no C0 capture.
+    [PINDIAG] prefix: model warm skipped - not the batched TP path (...); a resumed row will assert
+        the warm did NOT run (read into model_warm_skipped, never model_warm): a gate that needs the warm fails.
   audit mode, per window (QWEN_PREFIX_AUDIT=1, the rows' window lines):
     [PREFIX-AUDIT] req=<id> Q=<n> L=<n> window=<w> tokens=[<a>,<b>) new=<0|1> kv=<hex>
         read into audit_windows (tag, q, l, window, start, end, new, kv): the KV bytes of each 2048-token
@@ -109,7 +111,10 @@ INSTALL = '[PINDIAG] prefix: install '
 STICKY_INSTALL = 'sticky='
 STICKY_ADMIT = re.compile(r"\[PINDIAG\] sticky admit req=(?:'([^']*)'|\"([^\"]*)\"|(\S+)) Q=(\d+) P=(\d+) tail=(\d+)")
 STICKY_BUILT = re.compile(r'\[PINDIAG\] sticky engine built req=(\S+) ms=([0-9.]+) frontier=(\d+) prompt=(\d+)')
-MODEL_WARM = '[PINDIAG] prefix: model warm '
+# qwen_prefix_model_patch.MARKER_WARM: the warm that chose a restore path. Its skip line (off the batched TP path,
+# 'model warm skipped - ... a resumed row will assert') is MODEL_WARM_SKIPPED, never a warm.
+MODEL_WARM = '[PINDIAG] prefix: model warm restore_mode='
+MODEL_WARM_SKIPPED = '[PINDIAG] prefix: model warm skipped'
 KV_SHARED = '[PINDIAG] verify t2 kv shared'    # verify_trace_t2.KV_SHARED
 AUDIT_WINDOW = re.compile(r'\[PREFIX-AUDIT\] req=(\S+) Q=(\d+) L=(\d+) window=(\d+) tokens=\[(\d+),(\d+)\) '
                           r'new=([01]) kv=(\S+)')
@@ -263,7 +268,7 @@ def scan(lines):
     out = dict(installs=[], grants=[], rows=[], audits=[], refused=[], capture_skipped=[], kill_switch=[],
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
                kv_tokens=None, failures=[], eager_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
-               model_warm=[], kv_shared=[], audit_windows=[])
+               model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
         where = dict(index=index, time=stamp)
@@ -282,9 +287,11 @@ def scan(lines):
             out['sticky_builds'].append(dict(where, req=match.group(1), ms=float(match.group(2)),
                                              frontier=int(match.group(3)), prompt=int(match.group(4))))
         if MODEL_WARM in line:
-            entry = fields(line.split(MODEL_WARM, 1)[1])
+            entry = fields('restore_mode=' + line.split(MODEL_WARM, 1)[1])
             entry.update(where)
             out['model_warm'].append(entry)
+        elif MODEL_WARM_SKIPPED in line:
+            out['model_warm_skipped'].append(dict(where, line=line.strip()[:300]))
         if KV_SHARED in line:
             out['kv_shared'].append(dict(where, line=line.strip()[:300]))
         match = AUDIT_WINDOW.search(line)

@@ -71,6 +71,8 @@ from collections import Counter, OrderedDict
 
 CHUNK = 2048
 BLOCK = 64
+# How many rows a finding names before it counts the rest (c2_prefix_gate.MAX_LISTED).
+MAX_LISTED = 16
 # One checkpoint, both chips: 48 layers x (fp32 rec [1,24,128,128] + bf16 carry [1,3,5120]) (design 2.0.3).
 CHECKPOINT_NBYTES = 2 * 48 * (24 * 128 * 128 * 4 + 3 * 5120 * 2)
 DEFAULT_STORE_GIB = 8.0
@@ -531,9 +533,10 @@ def engine_id_matches(engine_id, tag):
     full = 'chatcmpl-' + tag
     if text == full:
         return True
-    if text.startswith(full + '-'):
+    if text.startswith(full + '-') and len(text) > len(full) + 1:
         rest = text[len(full) + 1:]
-        return 0 < len(rest) <= 8 and rest.isalnum()
+        return len(rest) <= 8 and rest.isalnum()
+    # A cut id: a prefix of 'chatcmpl-<tag>-', the cut ending on that '-' included (a 38-character tag).
     return len(text) >= 40 and (full + '-').startswith(text)
 
 
@@ -701,6 +704,61 @@ def row_growth(row, previous):
     if previous is None or previous.get('programs') is None:
         return None, 'no programs_before= field and no row right before it'
     return row['programs'] - previous['programs'], 'since %s' % previous.get('tag')
+
+
+def prefill_shape(row):
+    """What decides which prefill programs a [PREFIX] row runs, once the model graft's warm has compiled the
+    restore path: its tail t = L mod 2048 (the masked bucket and whether it is full, the paged-fill width
+    ceil(t/64), and the fast path's draft-window split all follow from it; the model warms exactly those,
+    warmup_prefill_masked_buckets) and whether it runs a full 2048-token chunk from its Q (the chunk
+    program; which chunk it is does not matter - G1's warmed rows compiled nothing at any length). None
+    without an L."""
+    length, q = row.get('l'), row.get('q') or 0
+    if type(length) is not int:
+        return None
+    return length % CHUNK, length // CHUNK * CHUNK > q
+
+
+def fast_path_growth(rows):
+    """The no-compile rule where the model does not warm its prefill: the C2 fast path (sticky sessions on
+    c2-packed-prefix), whose worker warmup runs the graft's restore warm but never the plugin's prefill warmup.
+    Its first prefill of each shape compiles at request time, as S2's prefill always has, so only a row that
+    repeats a shape an earlier row of the same engine process already ran (prefill_shape) must compile
+    nothing; a hit and its cold twin are measured against each other by program_cache_problems. A row whose
+    programs_before is below the previous row's count starts a new process (a restart): what it had seen is
+    forgotten. Rows without both counts are not judged here. -> (problems, notes)."""
+    problems, compiled = [], []
+    seen, last = set(), None
+    for row in sorted(rows, key=lambda row: row.get('index', 0)):
+        before, after = row.get('programs_before'), row.get('programs')
+        if not isinstance(before, int) or not isinstance(after, int):
+            continue
+        if last is not None and before < last:
+            seen = set()
+        last = after
+        shape = prefill_shape(row)
+        grown = after - before
+        what = '%s (Q=%s L=%s, tail %s%s)' % (row.get('tag') or row.get('req'), row.get('q'), row.get('l'),
+                                              shape[0] if shape else '?',
+                                              ', a full chunk' if shape and shape[1] else '')
+        if grown > 0 and shape is not None and shape in seen:
+            problems.append('%s compiled %d programs inside its prefill row, though an earlier row of this engine '
+                            'ran the same prefill shape: a compile the first request of that shape should have '
+                            'made (F3)' % (what, grown))
+        elif grown > 0:
+            compiled.append('%s: %d' % (what, grown))
+        if shape is not None:
+            seen.add(shape)
+    if len(problems) > MAX_LISTED:
+        problems = problems[:MAX_LISTED] + ['%d more rows compiled a shape already run (server.log)'
+                                            % (len(problems) - MAX_LISTED)]
+    notes = []
+    if compiled:
+        notes.append('first rows of a prefill shape compiled programs (the fast path compiles each shape at its '
+                     'first request): %s%s' % ('; '.join(compiled[:MAX_LISTED]),
+                                               ' and %d more' % (len(compiled) - MAX_LISTED)
+                                               if len(compiled) > MAX_LISTED else ''))
+    return problems, notes
 
 
 def program_cache_problems(rows, pairs, first_capture=True, require_hit=True):
