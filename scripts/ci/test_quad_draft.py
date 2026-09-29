@@ -2668,13 +2668,19 @@ def model_batch_without_s2(text):
 
 def verifier_engine_without_stage_e(text):
     """verifier_engine.py less Stage E (serving_parked_engines; QWEN_FAST_PARKED_ENGINES, default off), which
-    landed after PARENT: R2's replay ledger (QWEN_FAST_PARKED_AUDIT) and its two call sites. Each is cut exactly
-    once and to its known last line, so nothing else is hidden."""
-    for hunk in ('            if _replay_count is not None:' + chr(10) + '                self.replay_mark = _replay_count()',
-                 '                if _replay_count is not None:' + chr(10) + '                    check_replay_mark(self)'):
-        if text.count(hunk + chr(10)) != 1:
+    landed after PARENT: R2's replay ledger (QWEN_FAST_PARKED_AUDIT) and its two call sites, reset_retained, the
+    parked phase's park_refusal, park and rebind, and 'parked' among the phases close() accepts. Each is cut
+    exactly once and to its known last line, so nothing else is hidden."""
+    for hunk, replacement in (
+            ('            if _replay_count is not None:' + chr(10) + '                self.replay_mark = _replay_count()'
+             + chr(10), ''),
+            ('                if _replay_count is not None:' + chr(10) + '                    check_replay_mark(self)'
+             + chr(10), ''),
+            ("if self.phase not in ('idle', 'preparing', 'failed', 'parked'):",
+             "if self.phase not in ('idle', 'preparing', 'failed'):")):
+        if text.count(hunk) != 1:
             raise AssertionError('%r is not in verifier_engine.py exactly once' % hunk)
-        text = text.replace(hunk + chr(10), '')
+        text = text.replace(hunk, replacement)
     lines = text.split(chr(10))
 
     def cut(first, last):
@@ -2687,7 +2693,9 @@ def verifier_engine_without_stage_e(text):
         return lines[:starts[0] - 1] + lines[ends[0] + 1:]
 
     lines = cut("# Stage E's R2 replay ledger (QWEN_FAST_PARKED_AUDIT=1, serving_parked_engines.ReplayLedger): a",
-                "'publication' % (count - mark, str(engine.session.request_id)[:48]))")
+                'retained.replay_fence, retained.replay_fence_ms = None, 0.0')
+    # park_refusal, park and rebind, up to rebind's closing bare raise (none of the three raises bare before it)
+    lines = cut('def park_refusal(self):', 'raise')
     return chr(10).join(lines)
 
 

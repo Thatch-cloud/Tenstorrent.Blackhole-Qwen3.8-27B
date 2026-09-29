@@ -174,11 +174,11 @@ scripts/ci/dflash_prefill_window.py
 scripts/ci/serving_startup.py
 
 # Stage E, parked per-slot engines (QWEN_FAST_PARKED_ENGINES; default off): serving_parked_engines is new, and
-# verifier_engine gains R2's replay-ledger hook (live only under QWEN_FAST_PARKED_AUDIT=1). P8 lays
-# verifier_engine at its base commit; without this line the image ships that copy, which has neither. The frozen
-# recipe does not pin it (the pin probe in docs/batch-spec-tasks-2026-09-19.md). Flag off, the engine is its P8
-# self call for call (test_parked_census). serving_buffer_pool and serving_runtime, which Stage E also changes,
-# are overlaid above.
+# verifier_engine gains the parked phase (park, rebind) and R2's replay-ledger hook (live only under
+# QWEN_FAST_PARKED_AUDIT=1). P8 lays verifier_engine at its base commit; without this line the image ships that
+# copy, which cannot park. The frozen recipe does not pin it (the pin probe in docs/batch-spec-tasks-2026-09-19.md).
+# Flag off, the engine is its P8 self call for call (test_parked_census's base-commit trail). serving_buffer_pool
+# and serving_runtime, which Stage E also changes, are overlaid above.
 scripts/ci/serving_parked_engines.py
 scripts/ci/verifier_engine.py
 

@@ -94,7 +94,7 @@ jobs:
           python -B -m unittest test_prefix_replay test_c2_prefix_gate
           python -B -m unittest test_prefix_p0a_probe
           python -B -m unittest test_sticky_sessions
-          python -B -m unittest test_parked_census
+          python -B -m unittest test_parked_census test_parked_engine_rebind
           python -B -m unittest test_lever_n_prefill_profile_report
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_bench -p 'test_*.py'
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_chain -p 'test_*.py'

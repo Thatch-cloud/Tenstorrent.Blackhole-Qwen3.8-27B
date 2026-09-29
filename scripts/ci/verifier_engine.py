@@ -46,6 +46,18 @@ def check_replay_mark(engine):
                              'publication' % (count - mark, str(engine.session.request_id)[:48]))
 
 
+def reset_retained(retained):
+    """Stage E: a retained GDN block's decision flags back to the values a fresh engine's hold after its
+    capture (gdn_records.RetainedGDNBlock.__init__; the capture appends records and decides nothing), so
+    the rebound engine's first verify and commit take a fresh engine's path. The records stay: they are
+    the trace's. replay_epoch is a counter and stays."""
+    retained.selected_prefix = None
+    retained.decisions = {}
+    retained.replay_ready = retained.poisoned = retained.fence_owed = False
+    retained.commit_serial = 0
+    retained.replay_fence, retained.replay_fence_ms = None, 0.0
+
+
 def note_prefill():
     """A prefill overwrote slot 0: no engine is resident until one restores or publishes."""
     global _resident
@@ -636,11 +648,100 @@ class VerifierEngine:
             self.phase = 'failed'
             raise
 
+    def park_refusal(self):
+        """Stage E (serving_parked_engines): why this engine cannot park, or None. A parked engine keeps its
+        captures for the process, so only an idle one with no ticket, sequential captures and sound retained
+        blocks may."""
+        if self.phase != 'idle':
+            return 'engine phase %s' % self.phase
+        if self.pending is not None or self.pending_key is not None:
+            return 'a pending ticket'
+        if getattr(self, 'replay_plan', None) is not None or getattr(self, 'target_attention_t16', False):
+            return 'captures that are not sequential'
+        for key, bucket in self.buckets.items():
+            retained = getattr(bucket.get('fixture'), 'retained', None)
+            if retained is not None and retained.poisoned:
+                return 'the retained block of bucket %r is poisoned' % (key,)
+        return None
+
+    def park(self):
+        """Stage E (QWEN_FAST_PARKED_ENGINES, serving_parked_engines): fence, then park this engine for its
+        next rebind - phase 'parked', no session, not resident - and return None; or return why it cannot
+        park (park_refusal), changing nothing, and its owner closes it as today. The fence is close()'s: a
+        parked engine's owner discards nothing before it. A block in flight is refused as close() refuses it."""
+        global _resident
+        if self.phase in ('parked', 'closed'):
+            raise ValueError('Only a live engine can park; this one is %s' % self.phase)
+        if self.phase not in ('idle', 'preparing', 'failed'):
+            raise ValueError('Finish or abort the pending verifier block before closing')
+        self.operations.synchronize_device(self.mesh)
+        reason = self.park_refusal()
+        if reason is not None:
+            return reason
+        self.phase, self.pending, self.pending_key = 'parked', None, None
+        self.session = None
+        if _resident is self:
+            _resident = None
+        return None
+
+    def rebind(self, session, pages):
+        """Stage E: bind this parked engine to a request at its prefilled frontier, as the constructor binds
+        a fresh one but capturing nothing (design section 2.3, step 6). The constructor's host checks run
+        first, in its order and with its messages, and a refusal leaves the engine parked with nothing
+        written. Then: every fixture's page tables rewritten in full with the request's table
+        (serving_parked_engines.write_page_tables, VerifierPageBinding.refresh's write), a stale packed
+        adoption dropped, every bucket's first verify back on the unreplayed path with its retained block's
+        flags reset (reset_retained), the initial snapshot saved from native slot 0 - which holds the
+        request's prefilled state, adopted before this - and the carry seeded from it (_resident = self).
+        The widths stay the captured (1, 2, 4): proposal_rows picks the widest the budget holds, which is
+        the ticket a fresh engine with fewer widths would verify."""
+        from serving_parked_engines import page_table_bindings, write_page_tables
+
+        if self.phase != 'parked':
+            raise ValueError('Only a parked engine can be rebound; this one is %s' % self.phase)
+        if session.phase != 'idle' or session.pending is not None or session.finished or len(self.helpers) != 48:
+            raise ValueError('An unfinished prefilled request and all native GDN helpers are required')
+        if len(pages.shape) != 2 or pages.shape[0] != 1:
+            raise ValueError('One request page table required')
+        if tuple(pages.shape) != tuple(self.pages.shape):
+            raise ValueError('The parked engine was captured over a %r page table; the request brings %r'
+                             % (tuple(self.pages.shape), tuple(pages.shape)))
+        widths = capture_widths(session.position, pages.shape[1] * 64, session.verifier_rows,
+                                session.max_new_tokens - len(session.emitted), self.capture_rows)
+        if not set(widths) <= set(self.widths):
+            raise ValueError('The request needs widths %r; the parked engine captured %r' % (widths, self.widths))
+        bindings = page_table_bindings(self)
+        started = time.perf_counter()
+        session.begin_preparation(session.request_id)
+        self.session, self.position = session, session.position
+        self.pages.copy_(pages)
+        self.phase = 'preparing'
+        note_prefill()
+        try:
+            write_page_tables(self.operations, self.mesh, bindings, self.pages)
+            for key in [key for key in self.buckets if isinstance(key, tuple) and key[:1] == ('packed',)]:
+                del self.buckets[key]
+            for bucket in self.buckets.values():
+                bucket['first'] = True
+                if bucket['fixture'].retained is not None:
+                    reset_retained(bucket['fixture'].retained)
+            for helper, snapshot in zip(self.helpers, self.initial, strict=True):
+                helper.save(snapshot)
+            self.validate_bindings()
+            self.save_carry()
+            self.rebind_ms = (time.perf_counter() - started) * 1000
+            session.finish_preparation(session.request_id)
+            self.phase = 'idle'
+        except BaseException:
+            self.phase = 'failed'
+            session.fail_preparation(session.request_id)
+            raise
+
     def close(self):
         global _resident
         if self.phase == 'closed':
             return
-        if self.phase not in ('idle', 'preparing', 'failed'):
+        if self.phase not in ('idle', 'preparing', 'failed', 'parked'):
             raise ValueError('Finish or abort the pending verifier block before closing')
         self.operations.synchronize_device(self.mesh)
         if getattr(self, 'mtp_row_reader', None) is not None:

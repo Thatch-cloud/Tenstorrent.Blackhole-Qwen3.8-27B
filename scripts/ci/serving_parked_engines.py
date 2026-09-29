@@ -136,6 +136,63 @@ def project_rows(environ=None):
     return rows
 
 
+def page_table_bindings(engine):
+    """{two-chip identity: (tensor, shape)} for every page table a sequential engine's fixtures read - each
+    bucket's pages and singleton page table - collected and checked as VerifierPageBinding collects its
+    bindings. Refused: any other page ownership (a replay reader's per-bundle tables, a grouped reader, a
+    reader or writer over tables of its own), which a parked engine never has."""
+    from gdn_multitoken_conv import addresses
+
+    operations, capacity = engine.operations, engine.pages.shape[1]
+    tensors = []
+    for bucket in engine.buckets.values():
+        fixture = bucket.get('fixture')
+        if fixture is None:
+            continue
+        if getattr(fixture, 'replay_reader', None) is not None or fixture.grouped_readers:
+            raise ValueError('A parked engine rewrites the page tables of sequential captures only')
+        if (any(value is not fixture.singleton_pages for reader in fixture.readers for value in reader.pages)
+                or any(value is not fixture.singleton_pages for writer in fixture.writers
+                       for value in getattr(writer, 'pages', ()))):
+            raise ValueError('Unexpected singleton attention page binding')
+        tensors.extend((fixture.pages, fixture.singleton_pages))
+    bindings = {}
+    for tensor in tensors:
+        shape = tuple(tensor.shape)
+        identity = tuple(addresses(operations, tensor))
+        if len(shape) != 2 or shape[0] < 1 or not 1 <= shape[1] <= capacity or len(identity) != 2:
+            raise ValueError('Bounded two-chip page metadata required')
+        if identity in bindings and bindings[identity][1] != shape:
+            raise ValueError('Aliased page metadata has conflicting geometry')
+        bindings[identity] = (tensor, shape)
+    if not bindings:
+        raise ValueError('Captured verifier page metadata required')
+    return bindings
+
+
+def write_page_tables(operations, mesh, bindings, host):
+    """VerifierPageBinding.refresh's device write (serving_page_binding.py), for a whole table: every bound
+    table's addresses and shape checked, each rewritten with the (1, width) host table's first columns
+    repeated per row, through copy_host_to_device_tensor, one fence, and the addresses checked again. The
+    same operations, in the same order, as refresh makes for the same host table
+    (test_parked_engine_rebind); kept here because serving_page_binding.py is not edited
+    (serving_parked_engines' docstring, SOURCE PINS)."""
+    from gdn_multitoken_conv import addresses
+
+    for identity, (tensor, shape) in bindings.items():
+        if tuple(addresses(operations, tensor)) != identity or tuple(tensor.shape) != shape:
+            raise ValueError('Captured page metadata addresses changed')
+    for tensor, shape in bindings.values():
+        values = host[:, :shape[1]].repeat(shape[0], 1).contiguous()
+        source = operations.from_torch(values, dtype=operations.int32, layout=operations.ROW_MAJOR_LAYOUT,
+                                       mesh_mapper=operations.ReplicateTensorToMesh(mesh))
+        operations.copy_host_to_device_tensor(source, tensor)
+    operations.synchronize_device(mesh)
+    for identity, (tensor, _) in bindings.items():
+        if tuple(addresses(operations, tensor)) != identity:
+            raise ValueError('Page upload replaced a captured device buffer')
+
+
 def refuse_deferred(environ=None):
     """Stage E2 is deferred: QWEN_FAST_PARKED_DRAFTS is refused, whatever its value."""
     environ = os.environ if environ is None else environ

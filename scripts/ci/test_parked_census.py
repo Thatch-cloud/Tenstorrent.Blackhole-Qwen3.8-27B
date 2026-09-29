@@ -992,6 +992,19 @@ class FlagOffParityTests(unittest.TestCase):
         self.assertGreater(len(before), 10000)
         self.assertEqual(self.trail({}), before)
 
+    def test_one_extra_fence_in_a_verify_changes_the_trail(self):
+        """The negative control: the trail sees a single added synchronize."""
+        base = base_module('verifier_engine')
+        before = self.trail({'verifier_engine': base})
+        mutated = base_module('verifier_engine')
+        original = mutated.VerifierEngine.verify
+
+        def verify(engine, ticket):
+            engine.operations.synchronize_device(engine.mesh)
+            return original(engine, ticket)
+        mutated.VerifierEngine.verify = verify
+        self.assertNotEqual(self.trail({'verifier_engine': mutated}), before)
+
 
 class CensusNegativeControlTests(unittest.TestCase):
     """The census fails where it should."""
