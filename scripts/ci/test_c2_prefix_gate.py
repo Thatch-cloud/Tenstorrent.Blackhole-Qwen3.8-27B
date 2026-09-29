@@ -1108,6 +1108,56 @@ class StickyRunnerTests(unittest.TestCase):
         self.assertNotIn('build_ms_p50', result['arms']['timing-baseline']['phases']['agents-2'])
 
 
+class RequiredTestsTests(unittest.TestCase):
+    """required_tests.py, the probe step's runner for tests that must RUN in the image: a skip, a failure, a
+    target that loads nothing or too few tests fails it."""
+
+    def verdict(self, targets, minimum=1):
+        import io as text_io
+        import types
+
+        import required_tests
+
+        module = types.ModuleType('required_tests_fixture')
+
+        class Ran(unittest.TestCase):
+            def test_a(self):
+                pass
+
+            def test_b(self):
+                pass
+
+        class Skipped(unittest.TestCase):
+            @unittest.skip('vLLM is not importable here')
+            def test_c(self):
+                pass
+
+        class Failed(unittest.TestCase):
+            def test_d(self):
+                self.fail('the graft moved')
+
+        class Empty(unittest.TestCase):
+            pass
+
+        for cls in (Ran, Skipped, Failed, Empty):
+            cls.__module__, cls.__qualname__ = module.__name__, cls.__name__
+            setattr(module, cls.__name__, cls)
+        with mock.patch.dict(sys.modules, {module.__name__: module}):
+            return required_tests.run(['required_tests_fixture.' + target for target in targets], minimum,
+                                      stream=text_io.StringIO())
+
+    def test_every_way_it_fails(self):
+        self.assertEqual(self.verdict(['Ran'], 2), (0, 'REQUIRED TESTS: PASS: 2 ran, none skipped'))
+        for targets, minimum, text in ((['Ran', 'Skipped'], 1, '1 skipped (required_tests_fixture.Skipped.test_c: '
+                                                                'vLLM is not importable here)'),
+                                       (['Failed'], 1, '1 failed, 0 errors'), (['Ran'], 3, '2 ran, at least 3 required'),
+                                       (['Missing'], 1, '0 failed, 1 errors'), (['Empty'], 1, 'Empty loads no test')):
+            with self.subTest(targets=targets):
+                code, line = self.verdict(targets, minimum)
+                self.assertEqual(code, 1)
+                self.assertIn(text, line)
+
+
 class MainTests(unittest.TestCase):
     def setUp(self):
         self.results = tempfile.mkdtemp()
@@ -1274,6 +1324,25 @@ class WorkflowTests(unittest.TestCase):
             if 'docker run' in line:
                 self.assertNotIn('--device', line)
         self.assertIn('exit "$status"', probe)
+
+    def test_the_probe_step_runs_the_sticky_graft_on_the_image_s_vllm_and_fails_on_a_skip(self):
+        text = self.text()
+        probe = text[text.index('- name: Prefix-reuse P0a probe'):text.index('- name: Smoke on cards M+A')]
+        command = probe[probe.index('--name "$name-sticky"'):probe.index('exit "$status"')]
+        for part in ('-e VLLM_PLUGINS= ', '-v "$PWD:/c2:ro" -w /c2/scripts/ci', '"$image" -B required_tests.py --min 6',
+                     'test_qwen_prefix_scheduler_vllm.StickyDflashOnRealVllmTests',
+                     'test_serving_scheduler.RealSchedulerTests.test_a_dflash_hit_drops_its_last_block_with_the_prefix_'
+                     'cache_on', 'test_serving_scheduler.TTPluginSchedulerTests.test_a_dflash_hit_drops_its_last_block_'
+                     'with_the_prefix_cache_on', '|| status=$?'):
+            self.assertIn(part, command)
+        self.assertNotIn('--device', command)
+        self.assertIn('"$name-sticky"', probe[probe.index('trap '):probe.index('status=0')])
+        # --min is every test the targets hold, and each target exists
+        import test_qwen_prefix_scheduler_vllm as sticky_vllm
+        names = [name for name in dir(sticky_vllm.StickyDflashOnRealVllmTests) if name.startswith('test_')]
+        self.assertEqual(len(names) + 2, 6)
+        with open(os.path.join(HERE, 'test_serving_scheduler.py'), encoding='utf-8') as handle:
+            self.assertIn('def test_a_dflash_hit_drops_its_last_block_with_the_prefix_cache_on(self):', handle.read())
 
     def test_the_job_file_names_the_prefix_action_above_the_replay_key(self):
         with open(JOB_FILE, encoding='utf-8') as handle:

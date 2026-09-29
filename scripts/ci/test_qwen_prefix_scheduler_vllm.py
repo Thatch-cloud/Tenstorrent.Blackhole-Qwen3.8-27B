@@ -30,7 +30,9 @@ fast path's scheduler shape - DFlash with 15 proposals (SpeculativeConfig as tes
 which vLLM runs with a lookahead of 16 and, as SpeculativeConfig.use_eagle() includes dflash, a unitary
 coordinator that drops a hit's last block - installed with QWEN_FAST_STICKY_SESSIONS=1: a continuation's raw
 hit is C1 - 64, it resumes (commits) at exactly C0 = floor2048(P_N) - 2048, and prefix_judge.Oracle(sticky=True)
-predicts every h, Q and plan; without the switch the lookahead is still refused.
+predicts every h, Q and plan; without the switch the lookahead is still refused; and the fast path's policy
+admits vLLM's own CacheConfig of that shape. The c2 serving workflow's probe step also runs this class inside the
+serving image, on its own vLLM, through required_tests.py (a skip fails there).
 """
 
 import collections
@@ -968,6 +970,20 @@ class StickyDflashOnRealVllmTests(unittest.TestCase):
                                                                               grant1.capture_positions()))
         self.assertEqual(drive.model.restored['t1'], 6144)
         self.assertEqual(state.registry.stats['commit_mismatch'], 0)
+
+    def test_the_fast_path_policy_admits_this_vllm_s_own_cache_config(self):
+        """serving_fast_policy.prefix_cache_admitted on vLLM's own CacheConfig of the c2-packed-prefix shape (64-token
+        blocks, the prefix cache on, vLLM's default block hash): admitted with both switches, refused with either
+        alone - so validate_fast_config lets the fast path boot beside the prefix cache only under sticky sessions."""
+        import serving_fast_policy as policy
+
+        cache = self.env.vllm_config.cache_config
+        self.assertEqual((cache.block_size, cache.enable_prefix_caching, cache.prefix_caching_hash_algo),
+                         (BLOCK, True, policy.PREFIX_HASH_ALGO))
+        both = {policy.STICKY_SESSIONS_FLAG: '1', policy.PREFIX_REUSE_FLAG: '1'}
+        self.assertTrue(policy.prefix_cache_admitted(cache, both))
+        for environ in ({policy.PREFIX_REUSE_FLAG: '1'}, {policy.STICKY_SESSIONS_FLAG: '1'}, {}):
+            self.assertFalse(policy.prefix_cache_admitted(cache, environ), environ)
 
     def test_a_chained_conversation_matches_the_sticky_oracle_every_turn(self):
         import prefix_judge

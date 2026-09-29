@@ -358,7 +358,7 @@ jobs:
       - name: Prefix-reuse P0a probe in the image (CPU only, no device)
         if: contains(steps.job.outputs.actions, 'probe')
         working-directory: c2
-        timeout-minutes: 40
+        timeout-minutes: 50
         shell: bash
         env:
           TAG: ${{ steps.job.outputs.tag }}
@@ -372,11 +372,17 @@ jobs:
           # request (scripts/ci/prefix_oracle_check.py): the hardware gates fail on any Q it did not
           # predict, so it must be the graft's rules. It drives the image's own overlaid graft when the
           # image has one (and fails if that differs from the checkout's), and fails on a GOLDEN change.
-          # Both always run; the step fails if either does.
+          # Then sticky sessions (the c2-packed-prefix profiles) on the same image: the staged scheduler graft on the
+          # fast path's scheduler shape (DFlash, 15 proposals, lookahead 16) with QWEN_FAST_STICKY_SESSIONS=1 resumes
+          # at C0 as prefix_judge.Oracle(sticky=True) predicts, this vLLM drops a DFlash hit's last block with the
+          # prefix cache on (its own Scheduler and the TT plugin's TTScheduler), and the fast path's policy admits
+          # its CacheConfig - the three things the sticky oracle rests on, checked before any card. Those tests
+          # skip where vLLM does not import, so required_tests.py fails on any skip.
+          # All three always run; the step fails if any does.
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
           docker image inspect "$image" --format "probe image $image {{.Id}}"
           name="qwen-prefix-p0a-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          trap 'docker rm -f "$name" "$name-oracle" >/dev/null 2>&1 || true' EXIT
+          trap 'docker rm -f "$name" "$name-oracle" "$name-sticky" >/dev/null 2>&1 || true' EXIT
           status=0
           timeout -k 20 1320 docker run --rm --name "$name" --network none --cpus 8 --memory 16g \
             -v /home/thatch/hf-cache/hub:/models:ro -v "$PWD:/c2:ro" \
@@ -386,6 +392,14 @@ jobs:
             -v /home/thatch/hf-cache/hub:/models:ro -v "$PWD:/c2:ro" \
             --entrypoint python3 "$image" /c2/scripts/ci/prefix_oracle_check.py 2>&1 \
             | tee "$RUNNER_TEMP/c2-results/prefix-oracle.log" || status=$?
+          timeout -k 20 600 docker run --rm --name "$name-sticky" --network none --cpus 8 --memory 16g \
+            -e VLLM_PLUGINS= -e VLLM_TARGET_DEVICE=empty -e VLLM_USE_V2_MODEL_RUNNER=0 -e HF_HUB_OFFLINE=1 \
+            -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=2 -e MKL_NUM_THREADS=2 \
+            -v "$PWD:/c2:ro" -w /c2/scripts/ci --entrypoint python3 "$image" -B required_tests.py --min 6 \
+            test_qwen_prefix_scheduler_vllm.StickyDflashOnRealVllmTests \
+            test_serving_scheduler.RealSchedulerTests.test_a_dflash_hit_drops_its_last_block_with_the_prefix_cache_on \
+            test_serving_scheduler.TTPluginSchedulerTests.test_a_dflash_hit_drops_its_last_block_with_the_prefix_cache_on \
+            2>&1 | tee "$RUNNER_TEMP/c2-results/prefix-sticky-vllm.log" || status=$?
           exit "$status"
       - name: Smoke on cards M+A
         if: contains(steps.job.outputs.actions, 'smoke')
