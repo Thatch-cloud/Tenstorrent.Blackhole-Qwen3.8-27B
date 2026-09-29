@@ -31,6 +31,8 @@ EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 # Sticky sessions (QWEN_FAST_STICKY_SESSIONS=1 only): one line per admitted request's engine build,
 # '<marker><request> ms=<build> frontier=<R, 0 cold> prompt=<P>'.
 STICKY_ENGINE_MARKER = '[PINDIAG] sticky engine built req='
+# Stage E (serving_parked_engines; default off): one engine per pool slot, parked at attach.
+PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
 
 
 def m3_shape(policy, environ=None):
@@ -501,6 +503,23 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # headroom the per-request engines have (run 35509307389 found 214 MB of it).
         pindiag('[PINDIAG] dram after attach: {}', dram_line(pool))
         memory_ledger.record('P7', point='after_attach')
+
+        # Stage E (QWEN_FAST_PARKED_ENGINES; default off, strictly '0' or '1'): one engine per pool slot, built
+        # here on a synthetic request and parked (serving_parked_engines.ParkedEngineSet) - after the block,
+        # which refuses to build once a slot is lent, and before the DRAM admission and the lifecycle. Registered
+        # after the block, so it closes before the block, the weights and the pool, which refuse to close while
+        # a slot or a weight is still lent. Off (unset or '0'), nothing is imported or built.
+        parked_engines = None
+        if os.environ.get(PARKED_ENGINES_FLAG, '0') != '0':
+            import serving_parked_engines
+
+            serving_parked_engines.parked_engines_enabled()   # strictly '1' from here: any other value is refused
+            parked_engines = serving_parked_engines.ParkedEngineSet(operations=operations, model=model,
+                sampler=sampler, helpers=helpers, pool=pool, weights=weights, fixtures=fixtures,
+                collectives=collectives, blocks=packed_blocks if packed_shapes else (),
+                capture_rows=capture_rows if trimmed else None)
+            scopes.callback(parked_engines.close)
+            parked_engines.build()
 
         # Sticky sessions (QWEN_FAST_STICKY_SESSIONS, read once at attach; default off). On, every
         # prefill capture wraps the prefix-reuse route (QWEN_PREFIX_REUSE=1 sends every prefill,

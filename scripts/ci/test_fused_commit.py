@@ -1565,8 +1565,8 @@ class ParentTests(unittest.TestCase):
         if result.returncode != 0:
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
-        after = without_any_request(without_sticky(
-            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))
+        after = without_any_request(without_sticky(without_parked(
+            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1634,6 +1634,31 @@ def without_sticky(lines):
                      "pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}', str(state.req_id)[:48],",
                      '(time.perf_counter() - began) * 1000.0, state.num_computed_tokens,',
                      'len(state.prompt_token_ids))'))
+
+
+def without_parked(lines):
+    """serving_runtime.py less Stage E (QWEN_FAST_PARKED_ENGINES, default off; serving_parked_engines), which
+    landed after this parent: the flag's constant and the parked-engine build after the P7 ledger point, with
+    the blank line before it. Each is cut exactly once and checked statement by statement, so nothing else is
+    hidden."""
+    lines = cut_code(lines, '# Stage E (serving_parked_engines; default off): one engine per pool slot, parked at attach.',
+                     "PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'", ("PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'",))
+    first = "# Stage E (QWEN_FAST_PARKED_ENGINES; default off, strictly '0' or '1'): one engine per pool slot, built"
+    starts = [index for index, value in enumerate(lines) if value.strip() == first]
+    if len(starts) != 1 or lines[starts[0] - 1].strip():
+        raise AssertionError('The parked-engine build is not in serving_runtime.py exactly once, after a blank line')
+    lines = lines[:starts[0] - 1] + lines[starts[0]:]
+    return cut_code(lines, first, 'parked_engines.build()', (
+        'parked_engines = None',
+        "if os.environ.get(PARKED_ENGINES_FLAG, '0') != '0':",
+        'import serving_parked_engines',
+        "serving_parked_engines.parked_engines_enabled()   # strictly '1' from here: any other value is refused",
+        'parked_engines = serving_parked_engines.ParkedEngineSet(operations=operations, model=model,',
+        'sampler=sampler, helpers=helpers, pool=pool, weights=weights, fixtures=fixtures,',
+        'collectives=collectives, blocks=packed_blocks if packed_shapes else (),',
+        'capture_rows=capture_rows if trimmed else None)',
+        'scopes.callback(parked_engines.close)',
+        'parked_engines.build()'))
 
 
 def without_any_request(lines):

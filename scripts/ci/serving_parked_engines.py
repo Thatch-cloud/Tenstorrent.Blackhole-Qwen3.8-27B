@@ -50,6 +50,7 @@ stay byte-identical (NEVER_EDITED).
 
 import os
 import re
+from types import SimpleNamespace
 
 
 FLAG = 'QWEN_FAST_PARKED_ENGINES'
@@ -387,3 +388,398 @@ def rebind_device(device, taps, *, position, window=None):
     device.proposal_capture = capture
     capture.kv_history = device.kv_history
     return dict(ms=(time.perf_counter() - started) * 1000, single_rebuilt=rebuilt, window=window)
+
+
+# -- the set (design sections 2.2, 2.4, 6.3, 6.4) ---------------------------------------------------------
+
+MEGABYTE = 10 ** 6
+# The parked admission's terms (design section 5.2; E5 pins them into the admission, G-E0 and G-E3 measure
+# them): R, the rebind's peak - estimated at 100 MB with the windowed projection and 350 MB with the whole
+# call - and S, a single-capture rebuild (227 MB measured), which applies when that slot's single is
+# released. With the prefill transient and the reserve they are what a parked arrival needs free.
+REBIND_PEAK_BYTES = 100 * MEGABYTE
+REBIND_WHOLE_PEAK_BYTES = 350 * MEGABYTE
+SINGLE_CAPTURE_BYTES = 227 * MEGABYTE
+SYNTHETIC_POSITION = 1
+SYNTHETIC_BUDGET = 16
+SYNTHETIC_TOKEN = SYNTHETIC_SEED = 0
+TARGET_TAPS = (5, 19, 33, 47, 61)
+TAP_COUNT = 5
+FEATURE_WIDTH = 5120
+BUILT_MARKER = '[PINDIAG] parked engines built '
+WARM_MARKER = '[PINDIAG] parked drafter warm '
+REBIND_MARKER = '[PINDIAG] parked rebind '
+UNPARKED_MARKER = '[PINDIAG] parked slot {} unparked: {}'
+REPARKED_MARKER = '[PINDIAG] parked slot {} re-parked ms={:.1f}'
+STOPPED_MARKER = '[PINDIAG] parked engines stopped at k={} of {}: short of {} (free={} largest_free={} need={})'
+
+
+def rebind_peak_bytes(window):
+    return REBIND_PEAK_BYTES if window else REBIND_WHOLE_PEAK_BYTES
+
+
+def parked_arrival_need(reserve, window, *, single_released=False):
+    """What a parked arrival needs free per chip, the reserve in it (design section 5.2): the prefill's
+    transient, the rebind's peak, a single-capture rebuild when that slot's single is released."""
+    import serving_prefill_admission as admission
+
+    return (admission.PREFILL_TRANSIENT_BYTES + rebind_peak_bytes(window)
+            + (SINGLE_CAPTURE_BYTES if single_released else 0) + reserve)
+
+
+def zero_taps(operations, mesh, rows):
+    """The synthetic request's five target taps: replicated-width zeros, sharded 2560 per chip as the
+    prefill capture's are (dflash_prefill_window.PrefillWindowCapture.outputs)."""
+    import torch
+
+    return tuple(operations.from_torch(torch.zeros((1, 1, rows, FEATURE_WIDTH), dtype=torch.bfloat16), device=mesh,
+                                       dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
+                                       memory_config=operations.DRAM_MEMORY_CONFIG,
+                                       mesh_mapper=operations.ShardTensorToMesh(mesh, dim=3))
+                 for _ in range(TAP_COUNT))
+
+
+def _log(template, *values):
+    from dflash_device import pindiag
+
+    pindiag(template, *values)
+
+
+class ParkedSlot:
+    """One pool slot of the set: its parked engine and device while it has them. `state` is 'parked' (idle,
+    rebindable), 'serving' (a request holds the rebound engine), 'unparked' (no parked engine: today's
+    per-request builds serve the slot until it is re-parked) or 'closed'."""
+
+    def __init__(self, index, slot):
+        self.index, self.slot = index, slot
+        self.device = self.engine = None
+        self.state = 'unparked'
+        self.rebinds = self.parks = 0
+
+
+class ParkedEngineSet:
+    """Stage E's parked engines, one per pool slot, built at attach after the packed block (design section
+    2.2) and closed before it (the attach registers it after the block).
+
+    build(): for each slot, while the DRAM split holds an engine build plus a parked arrival (dram_short):
+    the slot re-zeroed and native GDN slot 0 restored from its zeroed carry, so the synthetic warm's page-0
+    K/V writes are finite; then today's device, proposal and engine build on a synthetic request - P_cap = 1,
+    an all-page-0 table, zero taps, budget 16 - and a park. Slot 0 also warms the drafter at its steady
+    state: a rebind at 2048 (the 2048-row projection and K/V seed) and publish_prewarm.warm, which skips below
+    2048 and which no rebind runs. A slot the split cannot hold stays unparked, as does one whose park fails
+    later (unpark): today's per-request build serves it until repark_idle rebuilds it at an idle moment.
+
+    take() gives the next request the lowest free slot - the rule ServingBufferPool.acquire applies to
+    unlent slots - so the same arrivals get the same slots, and segments, with the flag on or off: the
+    slot's entry when it is parked, else None (today's build, whose acquire takes that same slot).
+    rebind_slot() binds a taken slot to its request; park() parks it again, or unparks it."""
+
+    def __init__(self, *, operations, model, sampler, helpers, pool, weights, fixtures, collectives, blocks,
+                 capture_rows, components=None, environ=None, log=None):
+        import verifier_engine
+
+        environ = os.environ if environ is None else environ
+        refuse_deferred(environ)
+        self.window = project_rows(environ)
+        self.audit = audit_enabled(environ)
+        if environ.get('QWEN_FAST_SHARED_CCL', '1') != '1' or environ.get('QWEN_FAST_EAGER_PROPOSAL') == '1':
+            raise ValueError('%s=1 keeps one device per slot for the process: it needs the shared collectives '
+                             '(QWEN_FAST_SHARED_CCL=1) and captured proposals (QWEN_FAST_EAGER_PROPOSAL unset)' % FLAG)
+        if capture_rows != 4:
+            raise ValueError('%s=1 parks engines with the sequential captures (1, 2, 4) beside the four-user '
+                             'block; this attach caps them at %r' % (FLAG, capture_rows))
+        blocks = tuple(blocks)
+        if not blocks or any(getattr(block, 'carries_in_place', False) is not True for block in blocks):
+            raise ValueError('%s=1 needs every packed block to read its carries in place (carries_in_place, '
+                             'QWEN_FAST_VERIFY_T1 #3 in every layer): a padded round writes an idle segment\'s '
+                             'carry and native slot 0 otherwise, and parked slots are always lent; blocks %r'
+                             % (FLAG, [getattr(block, 'carries_in_place', None) for block in blocks]))
+        if getattr(pool, 'helpers', None) is None or any(slot.lent for slot in pool.slots):
+            raise ValueError('The parked engines are built over a pool with verifier storage, before any request')
+        if verifier_engine._resident is not None:
+            raise ValueError('The parked engines are built before any request engine exists: one is resident')
+        if components is None:
+            from serving_request_factory import device_components
+
+            components = device_components()
+        self.operations, self.model, self.sampler, self.helpers = operations, model, sampler, helpers
+        self.pool, self.weights, self.fixtures, self.collectives = pool, weights, fixtures, collectives
+        self.capture_rows, self.components, self.environ = capture_rows, components, environ
+        self.log = _log if log is None else log
+        self.slots = [ParkedSlot(index, slot) for index, slot in enumerate(pool.slots)]
+        self.unparks = self.reparks = 0
+        self.attach_ms = None
+        self.ledger = ReplayLedger(operations).install() if self.audit else None
+        self.closed = False
+
+    # -- building ------------------------------------------------------------------------------------------
+    def reserve(self):
+        from dflash_packed_proposal_coordinator import dram_reserve_bytes
+
+        return dram_reserve_bytes(self.environ)
+
+    def dram_short(self):
+        """THE SPLIT's terms (serving_prefill_admission.split_short) the pool's reading is short of for one
+        more engine build beside a parked arrival at the longest prompt; None when it holds or cannot be read
+        (the S2 attach refuses a pool without statistics, W7)."""
+        import serving_prefill_admission as admission
+
+        reserve = self.reserve()
+        reading, reason = admission.dram_reading(self.pool)
+        if reading is None:
+            return None
+        need = admission.engine_build_peak() + parked_arrival_need(reserve, self.window)
+        short = admission.split_short(reading['free'], reading['largest_free'], need, reserve,
+                                      reading['trace_largest_free'],
+                                      contiguous=admission.admission_contiguous_need(admission.PREFILL_TRANSIENT_FROM,
+                                                                                     reserve))
+        return (short, reading, need) if short else None
+
+    def build(self):
+        """Park an engine on every slot the DRAM split holds, in slot order; returns how many."""
+        import time
+        import memory_ledger
+        import verifier_engine
+
+        started = time.perf_counter()
+        built = 0
+        for entry in self.slots:
+            stop = self.dram_short()
+            if stop is not None:
+                short, reading, need = stop
+                self.log(STOPPED_MARKER, entry.index, len(self.slots), '+'.join(short), reading['free'],
+                         reading['largest_free'], need)
+                break
+            self.build_slot(entry, warm=entry.index == 0)
+            built += 1
+        verifier_engine.note_prefill()
+        self.attach_ms = (time.perf_counter() - started) * 1000
+        self.log(BUILT_MARKER + 'k={} of {} attach_ms={:.1f} {}', built, len(self.slots), self.attach_ms,
+                 self.dram_text())
+        memory_ledger.record('P7p', point='parked k=%d' % built, parked_engines=self)
+        return built
+
+    def dram_text(self):
+        import serving_prefill_admission as admission
+
+        reading, reason = admission.dram_reading(self.pool)
+        if reading is None:
+            return 'dram unavailable (%s)' % reason
+        trace = self.pool.trace_statistics() if callable(getattr(self.pool, 'trace_statistics', None)) else {}
+        used = 'unavailable' if isinstance(trace, dict) else max(int(chip['allocated']) for chip in trace)
+        return 'trace_used=%s free=%d largest_free=%d' % (used, reading['free'], reading['largest_free'])
+
+    def build_slot(self, entry, *, warm):
+        """The synthetic build on one unlent slot, parked (the class docstring)."""
+        import torch
+        from serving_page_binding import validate_initial_capture_pages
+        from serving_request_factory import single_proposal_bucket
+
+        slot, operations, components = entry.slot, self.operations, self.components
+        if slot.lent or entry.state not in ('unparked',):
+            raise ValueError('Pool slot %d must be free to park an engine on it' % entry.index)
+        pages = torch.zeros((1, self.pool.page_width), dtype=torch.int32)
+        validate_initial_capture_pages(pages, (0,), position=SYNTHETIC_POSITION, output_budget=SYNTHETIC_BUDGET)
+        # Native slot 0 from the slot's zeroed carry: the synthetic warm forwards write page 0's K/V from it.
+        self.pool.rezero(slot)
+        for helper, snapshot in zip(self.helpers, slot.verifier.carry, strict=True):
+            helper.restore(snapshot)
+        _, layers, projection, selector = self.fixtures
+        device = engine = session = None
+        taps = zero_taps(operations, self.model.mesh_device, SYNTHETIC_POSITION)
+        try:
+            try:
+                device = components.device(operations, self.model, self.collectives, layers, projection, selector, taps,
+                    position=SYNTHETIC_POSITION, block_rows=16, proposal_capture=True, max_new_tokens=SYNTHETIC_BUDGET,
+                    fused_convolution=True, feature_start=0, cache_history=True, cache_projection_capture=False,
+                    live_query_qk=False, native_proposal_attention=True, defer_proposal_capture=True,
+                    buffer_pool=self.pool, shared_weights=self.weights)
+            finally:
+                for value in taps:
+                    operations.deallocate(value)
+            if device.pool_slot is not slot:
+                raise ValueError('The synthetic device for pool slot %d was lent slot %r'
+                                 % (entry.index, getattr(device.pool_slot, 'index', None)))
+            runtime = components.runtime(device, position=SYNTHETIC_POSITION)
+            session = components.session('parked-%d' % entry.index, (SYNTHETIC_TOKEN,), SYNTHETIC_SEED,
+                vocab_size=self.model.args.vocab_size, max_new_tokens=SYNTHETIC_BUDGET, eos_ids=(),
+                neural={'dflash2': runtime}, verifier_rows=16, lookup_enabled=False)
+
+            def prepare_proposal(built):
+                if device.proposal_capture is not None:
+                    raise ValueError('Proposal trace already captured before verifier allocation')
+                with single_proposal_bucket():
+                    device.proposal_capture = components.proposal(device, max_new_tokens=SYNTHETIC_BUDGET)
+
+            engine = components.engine(self.model, session, pages, self.helpers, sampler=self.sampler,
+                norm_batch=True, attention_replay=False, replay_group_rows=4, max_verify_rows=16,
+                native_sampling_rows=True, retain_feature_taps=TARGET_TAPS, commit_only_gdn=True,
+                target_attention_t16=False, before_capture=prepare_proposal, storage=slot.verifier,
+                capture_rows=self.capture_rows)
+            if warm:
+                self.warm_drafter(device, engine)
+            reason = engine.park() or park_device(device)
+            if reason is not None:
+                raise ValueError('The synthetic engine of pool slot %d cannot park: %s' % (entry.index, reason))
+            session.close(session.request_id)
+        except BaseException:
+            if engine is not None and engine.phase != 'closed':
+                if engine.phase in ('verifying', 'verified', 'committing'):
+                    engine.phase = 'failed'
+                engine.close()
+            if device is not None:
+                device.close()
+            raise
+        entry.device, entry.engine, entry.state = device, engine, 'parked'
+
+    def warm_drafter(self, device, engine):
+        """Slot 0's drafter at its steady state: a rebind at 2048 compiles the 2048-row projection and K/V
+        seed, and publish_prewarm (QWEN_FAST_PUBLISH_PREWARM=1) then finds history_rows == 2048 and warms the
+        publication programs - which no rebind runs, so the first request after a restart pays neither."""
+        import time
+
+        started = time.perf_counter()
+        taps = zero_taps(self.operations, self.model.mesh_device, HISTORY_ROWS)
+        try:
+            rebind_device(device, taps, position=HISTORY_ROWS, window=self.window)
+        finally:
+            for value in taps:
+                self.operations.deallocate(value)
+        warmed = ()
+        if self.environ.get('QWEN_FAST_PUBLISH_PREWARM') == '1':
+            import publish_prewarm
+
+            warmed = publish_prewarm.warm(device, engine)
+        self.log(WARM_MARKER + 'P={} ms={:.1f} window={} prewarm_pairs={}', HISTORY_ROWS,
+                 (time.perf_counter() - started) * 1000, self.window, len(warmed))
+
+    # -- serving -------------------------------------------------------------------------------------------
+    def take(self):
+        """The next request's slot (the class docstring): its entry, now 'serving', when it is parked; else
+        None, and today's per-request build takes it."""
+        if self.closed:
+            raise ValueError('The parked engines are closed')
+        for entry in self.slots:
+            if entry.state == 'parked':
+                entry.state = 'serving'
+                return entry
+            if entry.state == 'unparked' and not entry.slot.lent:
+                return None
+        return None
+
+    def rebind_slot(self, entry, taps, pages, *, position, make_session, request_id=None, budget=None):
+        """Bind a taken slot to its request (design section 2.3, steps 4-6): the device from the prefill's
+        taps, the drafter runtime over it, the session make_session(runtime) returns, and the engine over the
+        session and the request's page table. The caller has run the request's host checks and adopted its
+        prefill slot. A failure unparks the slot and propagates, as a failed build does."""
+        import time
+
+        if entry.state != 'serving' or entry not in self.slots:
+            raise ValueError('Only a slot this set gave out can be rebound')
+        started = time.perf_counter()
+        try:
+            if self.audit:
+                entry.slot.verify()
+            info = rebind_device(entry.device, taps, position=position, window=self.window)
+            runtime = self.components.runtime(entry.device, position=position)
+            session = make_session(runtime)
+            entry.engine.rebind(session, pages)
+        except BaseException as failure:
+            self.unpark(entry, 'rebind failed: %s: %s' % (type(failure).__name__, str(failure)[:120]))
+            raise
+        entry.rebinds += 1
+        self.log(REBIND_MARKER + 'req={} slot={} gen={} P={} budget={} ms={:.1f} single_rebuilt={} window={}',
+                 str(request_id if request_id is not None else session.request_id)[:48], entry.index,
+                 entry.device.rebind_generation, position, budget if budget is not None else session.max_new_tokens,
+                 (time.perf_counter() - started) * 1000, int(info['single_rebuilt']), info['window'])
+        return SimpleNamespace(device=entry.device, engine=entry.engine, runtime=runtime, session=session, **info)
+
+    def park(self, entry, *, reason=None):
+        """The request on a slot finished: park its engine (which fences first) and its device again; or,
+        when either cannot park or `reason` says the request left it unfit (a failed page binding), unpark the
+        slot. Returns None when parked, else why it was unparked."""
+        if entry.state != 'serving' or entry not in self.slots:
+            raise ValueError('Only a serving slot of this set can park')
+        if reason is None:
+            reason = entry.engine.park()
+        if reason is None:
+            reason = park_device(entry.device)
+        if reason is None:
+            entry.state = 'parked'
+            entry.parks += 1
+            return None
+        self.unpark(entry, reason)
+        return reason
+
+    def unpark(self, entry, reason):
+        """Close the slot's engine and device as today's request close does - which returns the slot and the
+        weights - and leave it to today's per-request builds until repark_idle."""
+        engine, device = entry.engine, entry.device
+        entry.engine = entry.device = None
+        entry.state = 'unparked'
+        self.unparks += 1
+        self.log(UNPARKED_MARKER, entry.index, reason)
+        try:
+            if engine is not None and engine.phase != 'closed':
+                if engine.phase in ('verifying', 'verified', 'committing'):
+                    engine.phase = 'failed'
+                engine.close()
+        finally:
+            if device is not None and not device.closed:
+                device.close()
+
+    def repark_idle(self):
+        """At an idle moment (the caller's: no decoder and no prefill in flight), rebuild every unparked slot
+        the pool has not lent, lowest first, while the DRAM split holds; an engine captured at a real position
+        is never parked. Returns the slots re-parked."""
+        import time
+        import verifier_engine
+
+        reparked = []
+        for entry in self.slots:
+            if entry.state != 'unparked' or entry.slot.lent:
+                continue
+            stop = self.dram_short()
+            if stop is not None:
+                short, reading, need = stop
+                self.log(STOPPED_MARKER, entry.index, len(self.slots), '+'.join(short), reading['free'],
+                         reading['largest_free'], need)
+                break
+            started = time.perf_counter()
+            self.build_slot(entry, warm=False)
+            self.reparks += 1
+            reparked.append(entry.index)
+            self.log(REPARKED_MARKER, entry.index, (time.perf_counter() - started) * 1000)
+        if reparked:
+            verifier_engine.note_prefill()
+        return reparked
+
+    def describe(self):
+        return dict(window=self.window, audit=self.audit, unparks=self.unparks, reparks=self.reparks,
+                    slots=[dict(index=entry.index, state=entry.state, rebinds=entry.rebinds, parks=entry.parks)
+                           for entry in self.slots])
+
+    def close(self):
+        """Every engine and device closed - parked, or left serving - which returns every slot and the weights.
+        The attach registers the set after the block, so it closes after the lifecycle and before the block,
+        the weights and the pool; the pool and the weights refuse to close while anything is still lent."""
+        if self.closed:
+            return
+        self.closed = True
+        failures = []
+        for entry in self.slots:
+            for owner in (entry.engine, entry.device):
+                if owner is None:
+                    continue
+                try:
+                    if owner is entry.engine and owner.phase in ('verifying', 'verified', 'committing'):
+                        owner.phase = 'failed'
+                    owner.close()
+                except BaseException as failure:
+                    failures.append(failure)
+            entry.engine = entry.device = None
+            entry.state = 'closed'
+        if self.ledger is not None:
+            self.ledger.uninstall()
+        if failures:
+            raise failures[0]
