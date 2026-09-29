@@ -33,6 +33,8 @@ import c2_serving_gate as driver  # noqa: E402
 import c2_serving_job as job  # noqa: E402
 import lever_n_m3native_gate as gate  # noqa: E402
 import real_text_compare as compare  # noqa: E402
+import prefix_judge as judge  # noqa: E402
+import serving_c2_contract as contract  # noqa: E402
 import test_c2_serving_gate as base  # noqa: E402
 
 V235 = base.V235
@@ -1032,6 +1034,154 @@ class Driver(object):
                     with open(os.path.join(results, name), encoding='utf-8') as handle:
                         records[name] = json.load(handle)
         return code, summary, docker.calls, lines, records
+
+
+def prefix_lines(rows, sticky=True, key_absent=False, grants=None):
+    """The prefix route's lines of a salted arm: the contract's salt-key line, the scheduler graft's install lines
+    (the sticky one on a sticky profile), the model graft's warmup, and per request (engine id, L, captured, Q,
+    planned or None for an unsalted request) its grant line and its [PREFIX] row."""
+    import test_prefix_markers as marker_fixture
+    lines = ['INFO prefix: cache_salt kept only when it verifies against the salt key (%s)' % (
+                 'ABSENT: every salt is dropped, no request can hit' if key_absent else 'present'),
+             'INFO ' + marker_fixture.install_line()]
+    if sticky:
+        lines += ['INFO ' + marker_fixture.graft_line('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)',
+                                                      16, True, 2048),
+                  'INFO [PINDIAG] prefix: model warm restore_mode=h2d results={} gdn_layers=48 programs=554']
+    for req, length, captured, q, planned in rows:
+        if planned is not None:
+            lines.append('INFO ' + marker_fixture.grant_line(req, q, q, planned))
+        lines.append('INFO [PREFIX] req=%s Q=%d L=%d path=eager restored_ms=- captured=[%s] dropped=[] ms=900.0 '
+                     'programs=554->554' % (req, q, length, ','.join('%d:stored:210ms' % pos for pos in captured)))
+    return lines
+
+
+class SaltTests(unittest.TestCase):
+    """C2_GATE_SALT (sticky sessions, harness item B3): the key, the harness arguments, the refusals, warm's
+    twins and the prefix route read from each salted arm's log."""
+
+    PREFIX = 'c2-packed-prefix'
+
+    def test_the_job_key_and_the_workflow(self):
+        read = lambda **values: job.read_job(dict(C2_IMAGE_TAG='s2-k64j', **values), base.CHECKOUT_PROFILES['profiles'].keys())
+        self.assertEqual(read()['gate_salt'], '')
+        self.assertEqual((read(C2_GATE_SALT='fresh')['gate_salt'], read(C2_GATE_SALT='none')['gate_salt']),
+                         ('fresh', 'none'))
+        with self.assertRaises(job.JobError):
+            read(C2_GATE_SALT='tenant')
+        text = base.WorkflowTests.text()
+        step = text[text.index('- name: Run the gate'):text.index('- name: Replay')]
+        self.assertIn('GATE_SALT: ${{ steps.job.outputs.gate_salt }}', step)
+        self.assertIn('${GATE_SALT:+--salt "$GATE_SALT"}', step)
+
+    def test_fresh_mounts_the_gates_key_and_tells_the_harness(self):
+        plain = driver.gate_run('img', 'n', self.PREFIX, ['/d/3'], '/c', '/r/arm', ['--users', '4'])
+        self.assertEqual(driver.gate_run('img', 'n', self.PREFIX, ['/d/3'], '/c', '/r/arm', ['--users', '4'], salt=None,
+                                         salt_key_path='/r/salt.key'), plain, 'unset: exactly as before')
+        fresh = driver.gate_run('img', 'n', self.PREFIX, ['/d/3'], '/c', '/r/arm', ['--users', '4'], salt='fresh',
+                                salt_key_path='/r/salt.key')
+        self.assertIn('type=bind,src=/r/salt.key,dst=%s,readonly' % driver.SALT_KEY_MOUNT, fresh)
+        self.assertIn('QWEN_PREFIX_SALT_KEY_FILE=%s' % driver.SALT_KEY_MOUNT, fresh)
+        self.assertEqual(fresh[-6:], ['--users', '4', '--cache-salt', 'fresh', '--cache-salt-key', driver.SALT_KEY_MOUNT])
+        self.assertLess(fresh.index('QWEN_PREFIX_SALT_KEY_FILE=%s' % driver.SALT_KEY_MOUNT), fresh.index('img'))
+        none = driver.gate_run('img', 'n', self.PREFIX, ['/d/3'], '/c', '/r/arm', ['--users', '4'], salt='none')
+        self.assertEqual(none, plain + ['--cache-salt', 'none'])
+        with self.assertRaises(driver.PlanError):
+            driver.gate_run('img', 'n', self.PREFIX, ['/d/3'], '/c', '/r/arm', [], salt='fresh')
+        self.assertEqual(driver.SALT_KEY_ENV, contract.SALT_KEY_ENV)
+        with tempfile.TemporaryDirectory() as directory:
+            key = driver.write_salt_key(os.path.join(directory, 'salt.key'))
+            with open(key, 'rb') as handle:
+                self.assertGreaterEqual(len(handle.read().strip()), contract.SALT_KEY_MIN_BYTES)
+
+    def test_warm_on_the_prefix_profile_warms_its_twins(self):
+        prefix = [(arm[0], arm.profile) for arm in driver.plan_arms('warm', self.PREFIX, PROFILES)]
+        plain = [(arm[0], arm.profile) for arm in driver.plan_arms('warm', 'c2-packed', PROFILES)]
+        self.assertEqual([profile for _, profile in prefix], [self.PREFIX] + ['c2-packed-prefix-gate'] * 3)
+        self.assertEqual([profile for _, profile in plain], ['c2-packed'] + ['c2-packed-gate'] * 3)
+        self.assertEqual(driver.warm_profiles(PROFILES, 'c2-packed'), ('c2-packed', 'c2-packed-gate'))
+        self.assertEqual(driver.warm_profiles(PROFILES, self.PREFIX), (self.PREFIX, 'c2-packed-prefix-gate'))
+
+    def test_a_salt_is_refused_where_it_does_nothing(self):
+        for argv in (['--profile', 'c2-packed', '--plan', 'churn'], ['--profile', self.PREFIX, '--plan', 'control'],
+                     ['--profile', self.PREFIX, '--plan', 'warm-off']):
+            with self.subTest(argv=argv):
+                code, _, calls, lines, _ = Driver(self).run(argv + ['--salt', 'fresh'], {}, {})
+                self.assertEqual((code, calls), (2, []))
+                self.assertIn('--salt needs every arm on a prefix-reuse profile', lines[-1])
+        self.assertIsNone(driver.salt_refusal(['churn', 'warm', 'lifecycle-arrival', 'short'], dict(
+            (plan, driver.plan_arms(plan, self.PREFIX, PROFILES)) for plan in ('churn', 'warm', 'lifecycle-arrival',
+                                                                               'short')), self.PREFIX, PROFILES))
+
+    def test_the_prefix_route_under_fresh_salts(self):
+        good = [('cmpl-a-0', 60000, [57344], 0, [57344]), ('cmpl-b-0', 4096, [2048], 0, [2048]),
+                ('cmpl-c-0', 2047, [], 0, None), ('cmpl-warm-0', 54, [], 0, None)]
+        problems, missing, facts = driver.prefix_log_check('\n'.join(prefix_lines(good)), 'fresh', True)
+        self.assertEqual((problems, missing), ([], []))
+        self.assertEqual((facts['planned'], facts['captured'], facts['unsalted_4096']), (2, 2, 0))
+        for rows, text in (([('cmpl-a-0', 60000, [], 57344, [])], 'restored Q > 0'),
+                           ([('cmpl-a-0', 60000, [59392], 0, [59392])], 'a fresh salt\'s plan is [57344]'),
+                           ([('cmpl-a-0', 60000, [], 0, [57344])], 'and no "capture skipped" line says why'),
+                           ([('cmpl-a-0', 60000, [], 0, None), ('cmpl-b-0', 9000, [], 0, None)],
+                            'ran with no grant, more than the arm\'s 1 unsalted alive'),
+                           ([('cmpl-a-0', 60000, [57344], 0, None)], 'with no grant')):
+            with self.subTest(text=text):
+                problems, _, _ = driver.prefix_log_check('\n'.join(prefix_lines(rows)), 'fresh', True, alive=1)
+                self.assertTrue(any(text in problem for problem in problems), problems)
+        problems, _, _ = driver.prefix_log_check('\n'.join(prefix_lines(good, key_absent=True)), 'fresh', True)
+        self.assertTrue(any('salt key ABSENT' in problem for problem in problems))
+        _, missing, _ = driver.prefix_log_check('\n'.join(prefix_lines([('cmpl-c-0', 2047, [], 0, None)])), 'fresh',
+                                                True)
+        self.assertTrue(any('salted capture path was not exercised' in text for text in missing))
+        lines = prefix_lines(good, sticky=False)
+        problems, _, _ = driver.prefix_log_check('\n'.join(lines), 'fresh', True)
+        self.assertTrue(any('install sticky=1' in problem for problem in problems))
+        self.assertTrue(any('model warm' in problem for problem in problems))
+        lines = prefix_lines(good) + ["INFO [PINDIAG] sticky admit req='cmpl-a-0' Q=2048 P=60000 tail=57952"]
+        problems, _, _ = driver.prefix_log_check('\n'.join(lines), 'fresh', True)
+        self.assertTrue(any('sticky admit' in problem for problem in problems))
+
+    def test_the_prefix_route_unsalted(self):
+        rows = [('cmpl-a-0', 60000, [], 0, None), ('cmpl-b-0', 4096, [], 0, None)]
+        for salt in ('none', None):
+            self.assertEqual(driver.prefix_log_check('\n'.join(prefix_lines(rows)), salt, True)[:2], ([], []))
+        problems, _, _ = driver.prefix_log_check('\n'.join(prefix_lines([('cmpl-a-0', 60000, [57344], 0, [57344])])),
+                                                 'none', True)
+        self.assertTrue(any('in an unsalted arm' in problem for problem in problems), problems)
+        self.assertEqual(driver.prefix_log_check(None, 'none', True)[0], ['no server.log: the prefix route cannot be checked'])
+
+    def test_a_salted_mixed_run_on_the_prefix_profile(self):
+        lengths = ServingDriverTests.LENGTHS
+        rows = [('cmpl-%d-0' % index, length, judge.fresh_plan(length, True), 0, judge.fresh_plan(length, True))
+                for index, length in enumerate(lengths)]
+        concurrent = s2_log(positions=lengths, families=[[1792, 20224, 60160, 120064]], extra=prefix_lines(rows))
+        solo = s2_log(packed=False, positions=lengths, extra=prefix_lines(rows))
+        env = driver.AUDIT_ENV + driver.G4_ALL_AUDITS
+        make = lambda log, sequential: lambda n: s2_arm_report(log, self.PREFIX, env=env, lengths=lengths, max_tokens=4096,
+                                                               finish='stop', completion=300, sequential=sequential,
+                                                               chunk=chunk_every(10))
+        reports = {'mixed-concurrent': make(concurrent, 0), 'mixed-solo': make(solo, 4)}
+        logs = {'mixed-concurrent': concurrent, 'mixed-solo': solo}
+        code, summary, calls, lines, _ = Driver(self).run(['--profile', self.PREFIX, '--plan', 'mixed', '--salt', 'fresh'],
+                                                          reports, logs)
+        result = summary['results']['mixed']
+        self.assertEqual((code, result['verdict']), (0, 'PASS'), result['lines'])
+        self.assertEqual(summary['salt'], 'fresh')
+        for call in calls:
+            self.assertEqual(call['arguments'][-4:], ['--cache-salt', 'fresh', '--cache-salt-key', driver.SALT_KEY_MOUNT])
+            mount = [a for a in call['arguments'] if a.endswith('dst=%s,readonly' % driver.SALT_KEY_MOUNT)]
+            self.assertEqual(len(mount), 1)
+            self.assertTrue(mount[0].startswith('type=bind,src=') and '%ssalt.key,' % os.sep in mount[0], mount)
+        logs['mixed-concurrent'] = s2_log(positions=lengths, families=[[1792, 20224, 60160, 120064]],
+                                          extra=prefix_lines([(r, l, c, 2048 if i == 3 else q, p)
+                                                              for i, (r, l, c, q, p) in enumerate(rows)]))
+        reports['mixed-concurrent'] = make(logs['mixed-concurrent'], 0)
+        for name in list(reports):
+            reports[name + '-rerun'], logs[name + '-rerun'] = reports[name], logs[name]
+        code, summary, _, _, _ = Driver(self).run(['--profile', self.PREFIX, '--plan', 'mixed', '--salt', 'fresh'],
+                                                  reports, logs)
+        self.assertEqual(summary['results']['mixed']['verdict'], 'FAIL')
+        self.assertIn('restored Q > 0', json.dumps(summary['results']['mixed']))
 
 
 class ControlDriverTests(unittest.TestCase):

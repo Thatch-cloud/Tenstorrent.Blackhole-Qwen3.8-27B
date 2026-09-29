@@ -121,11 +121,12 @@ C2_KNOWN_STALE = {
         '65536 replay numerics (5edded94..0d182ee5); imported by frozen_combined_gate and '
         'frozen_recipe_context. ' + _UNREVIEWED),
     'scripts/ci/longctx_cycle_bench.py': (
-        '2ba798095c5374ae96ca438bd56dfc797aa53e54',
+        '51b43893415b184e40b6b883fccb33cf2374a404',
         'mounted per arm at /bench/longctx_cycle_bench.py (lever_n_m3native_run_arm.sh, and c2_serving_gate.'
         'BENCH_SCRIPTS since s1/gates), not imported from the baked tree: its only importer is the harness, '
         'lever_n_m3native_gate, mounted beside it. Re-pinned at the S1 integration for the stream_once of s1/gates '
-        '(a cancel through the StreamWatch), and at S2 W11 for chunk_chars (detail streams only)'),
+        '(a cancel through the StreamWatch), at S2 W11 for chunk_chars (detail streams only), and at sticky '
+        'sessions B3 for cache_salt (salted gate streams only; unset, the payload is byte-identical)'),
     'scripts/ci/mlp_clock_samples.py': (
         'e3e5d6602c4296e7927ac5689a7139f357d96fc6',
         'clock evidence tooling; HEAD re-pins the drain regeneration (d08c1140). ' + _UNREVIEWED),

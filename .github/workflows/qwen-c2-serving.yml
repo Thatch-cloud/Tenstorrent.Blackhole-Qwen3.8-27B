@@ -28,6 +28,8 @@ name: Qwen C2 serving image
 #            real text against v235's texts), matrix (a prompt length per user, solo vs concurrent
 #            under the exactness policy), memory (G5's DRAM lines), lifecycle (drops, cancels,
 #            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile.
+#            C2_GATE_SALT fresh|none salts every stream on a prefix-reuse profile (c2-packed-prefix: the
+#            capture path under the S2 plans; the gate mounts its own salt key).
 #            The driver refuses plans that do not fit the step's and the job's time left; every gate
 #            container is removed however the step ends
 #   prefix - the prefix-reuse (general-prefix, G1) gates in the agent's container shape
@@ -37,8 +39,11 @@ name: Qwen C2 serving image
 #            2047/2048/2049 boundaries and tail-only hits, a changed suffix, an early divergence, a shared
 #            system block; audit and eager arms), lifecycle (arrivals, aborts, a KV flood, a small store,
 #            a tiny pool, reset_prefix_cache, the kill switch, an in-place restart), timing (busy agents in
-#            the metering shape, hit rate from the model's L-Q). Every prefix container is removed however
-#            the step ends, and the kill-switch file only if the gate wrote it
+#            the metering shape, hit rate from the model's L-Q). On c2-packed-prefix (the fast path's
+#            sticky sessions, baseline c2-packed) the same plans judge the DFlash drop and C0 plan, strict
+#            equality, the S2 lines, and exactness-shared (four agents on one system block in packed rounds).
+#            Every prefix container is removed however the step ends, and the kill-switch file only if the
+#            gate wrote it
 #   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py);
 #            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt)
 #   push   - push it to zot and print the digest
@@ -459,6 +464,7 @@ jobs:
           GATE_POLICY: ${{ steps.job.outputs.gate_policy }}
           GATE_POLICY_DECISION: ${{ steps.job.outputs.gate_policy_decision }}
           GATE_AUDITS: ${{ steps.job.outputs.gate_audits }}
+          GATE_SALT: ${{ steps.job.outputs.gate_salt }}
         run: |
           set -euo pipefail
           # The fast path has never completed a request inside the serving image: every C2 rate was
@@ -509,7 +515,8 @@ jobs:
             ${GATE_MEMORY_PROMPT:+--memory-prompt "$GATE_MEMORY_PROMPT"} --results "$results" \
             ${GATE_PAIRS:+--pairs "$GATE_PAIRS"} ${GATE_FAMILIES:+--families "$GATE_FAMILIES"} \
             ${GATE_JIT:+--jit "$GATE_JIT"} ${GATE_POLICY:+--policy "$GATE_POLICY"} \
-            ${GATE_POLICY_DECISION:+--policy-decision "$GATE_POLICY_DECISION"} ${GATE_AUDITS:+--audits "$GATE_AUDITS"} 2>&1 \
+            ${GATE_POLICY_DECISION:+--policy-decision "$GATE_POLICY_DECISION"} ${GATE_AUDITS:+--audits "$GATE_AUDITS"} \
+            ${GATE_SALT:+--salt "$GATE_SALT"} 2>&1 \
             | tee "$RUNNER_TEMP/c2-results/gate.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv): the contract's own line, per arm.
           for log in "$results"/*/server.log; do

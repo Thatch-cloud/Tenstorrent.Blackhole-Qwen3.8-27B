@@ -81,10 +81,21 @@ extent rounds and their families, the extent audit, cap-refused / deadline / idl
 records (P packed or S sequential per round, acceptance_report.path_records), the attach's eager publication
 warm (B6, publication_warm; its warmed line is required under the flag) and the four-live rate. Its
 problems join flag_markers['missing']. Every other arm's report is unchanged.
+
+CACHE SALTS (--cache-salt, the C2 serving gate's C2_GATE_SALT on a prefix-reuse profile: the fast path's sticky
+sessions, harness item B3; unset, every payload is exactly as before). fresh: each stream carries its own
+cache_salt, 'qps1.<tag>.<hmac>' minted under the key file --cache-salt-key names (the key the gate mounts and
+points the contract at, QWEN_PREFIX_SALT_KEY_FILE; serving_c2_contract.mint_salt, restated in mint_salt), so
+every request takes the prefix route's capture path and publishes, and no two share a prefix; none: said
+explicitly, no salt (a prefix profile then serves every request with reuse off). report['cache_salt'] records the
+mode and the tags (never the key). The --alive-check requests stay unsalted.
 """
 
 import argparse
 import ast
+import binascii
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -1981,6 +1992,28 @@ def retired_binder_rounds(text):
 
 
 PROMPT_SOURCES = ('synthetic', 'real-text')
+CACHE_SALT_MODES = ('none', 'fresh')
+# serving_c2_contract's verifiable salt (its SALT_VERSION, SALT_TAG and SALT_KEY_MIN_BYTES), restated for the harness,
+# which the container runs from /bench: test_lever_n_m3native_gate holds the two equal.
+SALT_VERSION = 'qps1'
+SALT_TAG = re.compile(r'\A[A-Za-z0-9_-]{8,128}\Z')
+SALT_KEY_MIN_BYTES = 32
+
+
+def mint_salt(key, tag):
+    """The cache_salt the contract verifies for `tag` under `key` (bytes): 'qps1.<tag>.<hmac-sha256>'."""
+    if not SALT_TAG.match(tag):
+        raise ValueError('a salt tag is 8-128 of [A-Za-z0-9_-], got %r' % (tag,))
+    return '%s.%s.%s' % (SALT_VERSION, tag, hmac.new(key, ('%s.%s' % (SALT_VERSION, tag)).encode('ascii'),
+                                                     hashlib.sha256).hexdigest())
+
+
+def stream_salts(key, streams, nonce=None):
+    """(tags, salts): one fresh salt per stream, a tag 'c2gate-<nonce>-u<index>' under a random nonce, so no two
+    arms or runs share one."""
+    nonce = nonce or binascii.hexlify(os.urandom(6)).decode('ascii')
+    tags = ['c2gate-%s-u%02d' % (nonce, index) for index in range(streams)]
+    return tags, [mint_salt(key, tag) for tag in tags]
 EOS_MODES = ('ignore', 'stop')
 REAL_TEXT_PROMPTS = 'real-text-prompts.json'
 
@@ -2055,6 +2088,12 @@ def build_parser():
                              'seat back (report[\'alive_after\'])')
     parser.add_argument('--alive-seconds', type=int, default=ALIVE_SECONDS,
                         help='--alive-check: how long all N may take to answer')
+    parser.add_argument('--cache-salt', choices=CACHE_SALT_MODES, default=None,
+                        help='fresh: each stream its own verifiable cache_salt, minted under --cache-salt-key; none: '
+                             'no salt, said explicitly. Unset: the payload exactly as before (the docstring\'s CACHE '
+                             'SALTS)')
+    parser.add_argument('--cache-salt-key', default=None,
+                        help='--cache-salt fresh: the salt key file the serving contract verifies against')
     return parser
 
 
@@ -2168,6 +2207,9 @@ def user_stream(options, index, kwargs, watch=None):
     kwargs = dict(kwargs)
     if watch is not None:
         kwargs['watch'] = watch
+    salts = getattr(options, 'salts', None) or ()
+    if index < len(salts):
+        kwargs['cache_salt'] = salts[index]
     if index in (events.get('ignore_eos') or ()):
         kwargs['ignore_eos'] = True
     return (events.get('max_tokens') or {}).get(index, options.max_tokens), kwargs
@@ -3217,6 +3259,22 @@ def parse_options(argv=None):
         parser.error('--drops, --user-max-tokens and --user-ignore-eos need detail streams (real text or --eos stop)')
     if options.alive_check < 0 or options.alive_seconds < 1:
         parser.error('--alive-check needs a count of at least 1 and --alive-seconds a positive limit')
+    options.salt_tags, options.salts = [], []
+    if options.cache_salt == 'fresh':
+        if not options.cache_salt_key:
+            parser.error('--cache-salt fresh needs --cache-salt-key: a salt the contract cannot verify is dropped, '
+                         'and the request would run unsalted')
+        try:
+            with open(options.cache_salt_key, 'rb') as handle:
+                key = handle.read().strip()
+        except OSError as error:
+            parser.error('--cache-salt-key %s: %s' % (options.cache_salt_key, error))
+        if len(key) < SALT_KEY_MIN_BYTES:
+            parser.error('--cache-salt-key %s holds %d bytes, fewer than the contract\'s %d' % (
+                options.cache_salt_key, len(key), SALT_KEY_MIN_BYTES))
+        options.salt_tags, options.salts = stream_salts(key, options.sequential_users or options.users)
+    elif options.cache_salt_key:
+        parser.error('--cache-salt-key needs --cache-salt fresh')
     log_drops = sorted(user for user, (kind, _) in options.events['drops'].items() if kind in LOG_DROP_KINDS)
     if log_drops:
         # The server log names a request's user before its first byte only by the prompt length its
@@ -3431,6 +3489,8 @@ def main():
     if platform:
         report.update(server_argv='platform', served_model_name=options.served_model_name,
                       expect_profile=options.expect_profile, snapshot=options.snapshot)
+    if getattr(options, 'cache_salt', None) is not None:
+        report['cache_salt'] = dict(mode=options.cache_salt, tags=list(options.salt_tags))
     process = handle = None
     streams = options.sequential_users or options.users
     prompts = None

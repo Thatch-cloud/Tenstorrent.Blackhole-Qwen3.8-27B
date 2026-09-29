@@ -147,6 +147,24 @@ before-point or DRAM hold that read no DRAM is unjudged (NOT_EXERCISED), never a
 an S2 arm gets a divergence record (t*, character, round, positions, E, paths), and any NOT_COMPARABLE or
 UNSTABLE one is listed in the summary's s2_exit_blockers with it (<results>/<plan>-divergence-records.json).
 
+SALTED ARMS (--salt fresh|none, C2_GATE_SALT; the fast path's sticky sessions, harness item B3). Every arm must
+then serve a prefix-reuse profile (QWEN_PREFIX_REUSE=1 and the prefix cache on: c2-packed-prefix and its gate
+twin), else the gate refuses before any container; warm on c2-packed-prefix serves the prefix twins
+(c2-packed-prefix for the solo arm, c2-packed-prefix-gate for the four-user ones) in place of c2-packed and
+c2-packed-gate. fresh: the gate writes a salt key (<results>/salt.key), mounts it read-only at SALT_KEY_MOUNT with
+QWEN_PREFIX_SALT_KEY_FILE pointing the contract at it (never the operator's key), and the harness gives every
+stream its own salt minted under it (lever_n_m3native_gate --cache-salt fresh): each request prefills through the
+prefix route's capture path and publishes, and none can hit. none: the harness says so and sends no salt. Either
+way, and on a prefix profile with no --salt, each arm's server log is read with prefix_markers
+(prefix_log_check): the scheduler graft's install line (and on a sticky profile its sticky install line and the
+model graft's warmup line), no row that restored Q > 0 and no sticky admit (no two streams share a salt), no
+stale grant, no row that compiled a program; under fresh every salted request's grant plans exactly
+prefix_judge.fresh_plan (C0 = floor2048(L) - 2048 on a sticky profile) and its row captured what it planned (or a
+'capture skipped' line says why), no more 4096+-token requests ran unsalted than the arm's --alive-check (whose
+requests are never salted), the salt key was present, and at least one row captured (else NOT_EXERCISED); under
+none no request got a grant or captured. Everything else - the S2 checks, the ledger, the floors - is judged as
+on c2-packed.
+
 SAFETY. Before each arm: no thatch-inference-* container may exist (a placement reloading onto M+A
 mid-gate), and a leftover gate container of the same name is removed; after each arm, however it
 ended (a SIGTERM from a cancelled or timed-out step included), its container is removed. An arm
@@ -163,6 +181,7 @@ front.
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
 import argparse
+import binascii
 import json
 import math
 import os
@@ -179,6 +198,8 @@ sys.path.insert(0, HERE)
 import c2_serving_job  # noqa: E402
 import lever_n_m3native_gate as harness  # noqa: E402  (stdlib only; real_text_compare imports it too)
 import real_text_compare  # noqa: E402
+import prefix_judge  # noqa: E402  (stdlib only)
+import prefix_markers  # noqa: E402  (stdlib only)
 import real_text_prompts  # noqa: E402
 import serving_c2_contract  # noqa: E402  (stdlib only at import: json, os, sys)
 
@@ -354,6 +375,13 @@ WARM_SHORTER_SECONDS = 2400      # the 4 x 16384 and 4 x 4096 warm arms
 KERNEL_CACHE_ENV = 'TT_METAL_CACHE'
 CACHE_MOUNTS = (('/experiment-cache/', '.qwen-c2'), ('/models/', ''))
 JIT_MODES = c2_serving_job.JIT_MODES
+# Salted arms (the module docstring's SALTED ARMS): the gate's own salt key, where the contract reads it.
+SALT_KEY_MOUNT = '/c2-gate/salt.key'
+SALT_KEY_ENV = serving_c2_contract.SALT_KEY_ENV
+SALT_KEY_FILE = 'salt.key'
+PREFIX_FLAG = 'QWEN_PREFIX_REUSE'
+STICKY_FLAG = 'QWEN_FAST_STICKY_SESSIONS'
+SALT_KEY_ABSENT = 'cache_salt kept only when it verifies against the salt key (ABSENT'
 
 
 class PlanError(ValueError):
@@ -397,15 +425,27 @@ def agent_shape(image, name, profile, devices, hub=HUB, env=()):
     return arguments
 
 
-def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HUB, env=()):
+def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HUB, env=(), salt=None,
+             salt_key_path=None):
     """The whole `docker run` of one arm: the agent's shape, the harness mounted read-only at /bench,
-    the arm's results directory, and the harness as the entrypoint."""
+    the arm's results directory, and the harness as the entrypoint. `salt` (the module docstring's SALTED
+    ARMS): fresh mounts the gate's salt key and points the contract at it, and both modes tell the harness."""
     arguments = agent_shape(image, name, profile, devices, hub, env)
     for script in BENCH_SCRIPTS:
         arguments += ['--mount', 'type=bind,src=%s,dst=/bench/%s,readonly' % (
             os.path.join(checkout, 'scripts', 'ci', script), script)]
     arguments += ['--mount', 'type=bind,src=%s,dst=%s' % (arm_dir, RESULTS_IN_CONTAINER)]
-    return arguments + ['--entrypoint', 'python3', image, '-B', '/bench/lever_n_m3native_gate.py'] + list(gate_args)
+    salted = []
+    if salt == 'fresh':
+        if not salt_key_path:
+            raise PlanError('--salt fresh needs the gate\'s salt key file')
+        arguments += ['--mount', 'type=bind,src=%s,dst=%s,readonly' % (salt_key_path, SALT_KEY_MOUNT),
+                      '-e', '%s=%s' % (SALT_KEY_ENV, SALT_KEY_MOUNT)]
+        salted = ['--cache-salt', 'fresh', '--cache-salt-key', SALT_KEY_MOUNT]
+    elif salt == 'none':
+        salted = ['--cache-salt', 'none']
+    return (arguments + ['--entrypoint', 'python3', image, '-B', '/bench/lever_n_m3native_gate.py'] + list(gate_args)
+            + salted)
 
 
 def profile_limits(profiles, name):
@@ -434,6 +474,103 @@ def any_request_profile(profiles, name):
 def s2_profile(profiles, name):
     """Whether the profile builds the S2 extent readers (QWEN_FAST_EXTENT_REPLAY=1: c2-packed, c2-packed-gate)."""
     return str((profiles['profiles'][name].get('env') or {}).get(EXTENT_FLAG, '0')) == '1'
+
+
+def prefix_profile(profiles, name):
+    """Whether the profile turns prefix reuse on (QWEN_PREFIX_REUSE=1 with the prefix cache: general-prefix,
+    c2-packed-prefix and its gate twin)."""
+    profile = profiles['profiles'][name]
+    return (str((profile.get('env') or {}).get(PREFIX_FLAG, '0')) == '1'
+            and (profile.get('engine') or {}).get('enable-prefix-caching') is True)
+
+
+def sticky_profile(profiles, name):
+    """Whether the profile turns the fast path's sticky sessions on (c2-packed-prefix and its gate twin)."""
+    return prefix_profile(profiles, name) and str(
+        (profiles['profiles'][name].get('env') or {}).get(STICKY_FLAG, '0')) == '1'
+
+
+def warm_profiles(profiles, profile):
+    """(traffic, gate) the warm plan serves: c2-packed and c2-packed-gate, or - with --profile a sticky prefix
+    profile that has a '-gate' twin (c2-packed-prefix) - that profile and its twin, so their capture path warms."""
+    twin = '%s-gate' % profile
+    if (profile in profiles['profiles'] and twin in profiles['profiles'] and sticky_profile(profiles, profile)
+            and sticky_profile(profiles, twin)):
+        return profile, twin
+    return S2_TRAFFIC_PROFILE, S2_GATE_PROFILE
+
+
+def arg_value(args, flag, default=None):
+    return args[args.index(flag) + 1] if flag in args and args.index(flag) + 1 < len(args) else default
+
+
+def prefix_log_check(log_text, salt, sticky, alive=0):
+    """What an arm served on a prefix-reuse profile shows of the prefix route (the module docstring's SALTED
+    ARMS): salt fresh or none (None reads as none). -> (problems, not exercised, facts)."""
+    if log_text is None:
+        return ['no server.log: the prefix route cannot be checked'], [], {}
+    scanned = prefix_markers.scan(log_text.splitlines())
+    rows, problems, missing = scanned['rows'], [], []
+    if not scanned['installs']:
+        problems.append('no "[PINDIAG] prefix: install" line: the scheduler graft never ran in this engine')
+    if sticky:
+        if not scanned['sticky_installs']:
+            problems.append('no "[PINDIAG] prefix: install sticky=1" line on a sticky profile: the scheduler graft does '
+                            'not serve the fast path\'s DFlash lookahead')
+        if not scanned['model_warm']:
+            problems.append('no "[PINDIAG] prefix: model warm" line: the model graft\'s warmup (the restore path, the '
+                            'mid-loop capture declaration) did not run on the fast path\'s warmup')
+    restored = [row for row in rows if row.get('q')]
+    if restored:
+        problems.append('%d prefill rows restored Q > 0 (%s): no two streams of a gate arm share a salt, so none may '
+                        'hit' % (len(restored), ', '.join('%s Q=%s L=%s' % (row.get('req'), row.get('q'), row.get('l'))
+                                                         for row in restored[:3])))
+    if scanned['sticky_admits']:
+        problems.append('%d "[PINDIAG] sticky admit" lines in an arm where nothing may resume' % len(scanned['sticky_admits']))
+    for entry in scanned['refused']:
+        problems.append('a stale grant was refused at commit (%s start_pos=%s Q=%s)' % (
+            entry['req'], entry['start_pos'], entry['q']))
+    for row in rows:
+        before, after = row.get('programs_before'), row.get('programs')
+        if isinstance(before, int) and isinstance(after, int) and after > before:
+            problems.append('the prefill row of %s (L=%s) compiled %d programs: a compile after the traces were parked '
+                            '(F3)' % (row.get('req'), row.get('l'), after - before))
+    grants = dict((entry['req'], entry) for entry in scanned['grants'])
+    skipped = set(entry['req'] for entry in scanned['capture_skipped'])
+    planned, unsalted = 0, 0
+    for row in rows:
+        grant = grants.get(row.get('req'))
+        want = prefix_judge.fresh_plan(row.get('l') or 0, sticky)
+        captured = sorted(row.get('captured') or ())
+        if grant is None:
+            if captured:
+                problems.append('%s (L=%s) captured %s with no grant' % (row.get('req'), row.get('l'), captured))
+            elif want:
+                unsalted += 1
+            continue
+        if salt != 'fresh':
+            problems.append('%s (L=%s) got a grant (%s) in an unsalted arm: fail-closed tenancy broken' % (
+                row.get('req'), row.get('l'), grant.get('plan')))
+            continue
+        planned += 1
+        if sorted(grant.get('plan') or ()) != want:
+            problems.append('%s (L=%s) was planned captures %s, a fresh salt\'s plan is %s' % (
+                row.get('req'), row.get('l'), grant.get('plan'), want))
+        if captured != sorted(grant.get('plan') or ()) and row.get('req') not in skipped:
+            problems.append('%s (L=%s) captured %s of its plan %s and no "capture skipped" line says why' % (
+                row.get('req'), row.get('l'), captured, grant.get('plan')))
+    if salt == 'fresh':
+        if SALT_KEY_ABSENT in log_text:
+            problems.append('the contract logged its salt key ABSENT: every salt was dropped and every request ran '
+                            'unsalted (the key mount or %s did not reach it)' % SALT_KEY_ENV)
+        if unsalted > alive:
+            problems.append('%d requests of 4096+ tokens ran with no grant, more than the arm\'s %d unsalted alive '
+                            'requests: their salts were not verified' % (unsalted, alive))
+        if not any(row.get('captured') for row in rows):
+            missing.append('no prefill row captured a checkpoint: the salted capture path was not exercised')
+    facts = dict(rows=len(rows), planned=planned, captured=sum(len(row.get('captured') or ()) for row in rows),
+                 unsalted_4096=unsalted, capture_ms=[row.get('capture_ms') for row in rows if row.get('captured')][:16])
+    return problems, missing, facts
 
 
 class Arm(tuple):
@@ -670,22 +807,23 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
                                     family=family))
         return arms
     if plan in WARM_PLANS:
-        gate = S2_GATE_PROFILE if plan == 'warm' else S2_OFF_PROFILE
+        # warm on a sticky prefix profile warms its twins (warm_profiles): the prefix route's capture path.
+        traffic, gate = warm_profiles(profiles, profile) if plan == 'warm' else (S2_TRAFFIC_PROFILE, S2_OFF_PROFILE)
         need_profile(profiles, gate, plan == 'warm', plan)
         arms = []
         if plan == 'warm':
-            need_profile(profiles, S2_TRAFFIC_PROFILE, True, plan)
+            need_profile(profiles, traffic, True, plan)
             warm = list(lengths or WARM_LENGTHS)
             short = [index for index, length in enumerate(warm) if length < 2048]
-            common, text, _ = sized_arm_args(S2_TRAFFIC_PROFILE, profiles, plan, warm, WARM_SHORT_TOKENS if short
+            common, text, _ = sized_arm_args(traffic, profiles, plan, warm, WARM_SHORT_TOKENS if short
                                              else WARM_TOKENS)
             args = common + ['--prompt-lengths', text, '--max-tokens', str(WARM_TOKENS), '--users', '1',
                              '--sequential-users', str(len(warm))]
             if short:
                 args += ['--user-max-tokens', ','.join('%d:%d' % (index, WARM_SHORT_TOKENS) for index in short),
                          '--user-ignore-eos', ','.join(str(index) for index in short)]
-            arms.append(Arm('warm-solo', args, ARM_SECONDS['warm'], profile=S2_TRAFFIC_PROFILE,
-                            env=s2_env(profiles, S2_TRAFFIC_PROFILE), judged=False, role='solo'))
+            arms.append(Arm('warm-solo', args, ARM_SECONDS['warm'], profile=traffic,
+                            env=s2_env(profiles, traffic), judged=False, role='solo'))
         arms.append(Arm('%s-4x%d' % (plan, BRINGUP_PROMPT), v235_args(profiles, gate, plan), ARM_SECONDS['warm-off'],
                         profile=gate, env=s2_env(profiles, gate), judged=False, role='four'))
         for prompt in (BELOW_FAMILIES[0] - 256, BELOW_FAMILIES[1] - 256):
@@ -1178,7 +1316,7 @@ class Runner(object):
 
     def __init__(self, image, profile, results, checkout, devices, hub=HUB, execute=None, log=print,
                  containers=None, corpus=None, any_request=False, profiles=None, cache_entries=None, jit='auto',
-                 policy='strict', decision=None):
+                 policy='strict', decision=None, salt=None, salt_key_path=None):
         self.image, self.profile, self.results, self.checkout = image, profile, results, checkout
         self.devices, self.hub, self.log = devices, hub, log
         self.execute = execute or self._execute
@@ -1190,6 +1328,8 @@ class Runner(object):
         # user's recorded decision).
         self.profiles, self.cache_entries, self.jit = profiles, cache_entries, jit
         self.policy, self.decision = policy, decision
+        # Salted arms (the module docstring's SALTED ARMS): the mode and the gate's key file.
+        self.salt, self.salt_key_path = salt, salt_key_path
         self.arms = {}
         self.infra = None
         # What an arm could not judge (a judged arm whose kernel cache could not be counted): run_plan turns a
@@ -1204,6 +1344,10 @@ class Runner(object):
     def s2_for(self, profile):
         return bool(self.profiles is not None and profile in self.profiles['profiles']
                     and s2_profile(self.profiles, profile))
+
+    def prefix_for(self, profile):
+        return bool(self.profiles is not None and profile in self.profiles['profiles']
+                    and prefix_profile(self.profiles, profile))
 
     def seats_for(self, profile):
         """The profile's seats (max-num-seqs), MEMORY_USERS when the profiles are not known."""
@@ -1264,7 +1408,7 @@ class Runner(object):
             return None
         name = CONTAINER_PREFIX + arm
         arguments = gate_run(self.image, name, profile, self.devices, self.checkout, arm_dir, gate_args, self.hub,
-                             env=env)
+                             env=env, salt=self.salt, salt_key_path=self.salt_key_path)
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         self.log('[C2-GATE] arm %s: %s%s%s' % (arm, ' '.join(gate_args),
@@ -1295,6 +1439,15 @@ class Runner(object):
                                      'entries is unshown (s2-design B6)' % (
                                          arm, 'no counter: the image\'s cache is not on the hub'
                                          if self.cache_entries is None else 'a count failed'))
+            if self.prefix_for(profile):
+                # The prefix route under the arm's salts (the module docstring's SALTED ARMS).
+                prefix_problems, prefix_missing, facts = prefix_log_check(
+                    log_text, self.salt, sticky_profile(self.profiles, profile),
+                    alive=int(arg_value(list(gate_args), '--alive-check', 0) or 0))
+                problems += ['prefix: %s' % text for text in prefix_problems]
+                self.unjudged.extend('%s: %s' % (arm, text) for text in prefix_missing)
+                report['c2_gate_prefix'] = dict(salt=self.salt, problems=prefix_problems, not_exercised=prefix_missing,
+                                                facts=facts)
             if log_text is not None and (measure or self.s2_for(profile) or env):
                 report['c2_gate_live4'] = host_live_rate(log_text)
             if cache['before'] is not None or self.s2_for(profile) or env:
@@ -2545,7 +2698,28 @@ def build_parser():
     parser.add_argument('--audits', choices=c2_serving_job.AUDIT_SETS, default='extent',
                         help='extent (the extent audit on every S2 arm but control\'s timing arms) or all (also '
                              'prestage, pair-mask and fused-commit on the G4 arms)')
+    parser.add_argument('--salt', choices=c2_serving_job.SALT_MODES, default=None,
+                        help='fresh or none: every arm on a prefix-reuse profile, each stream salted under the gate\'s '
+                             'own key (fresh) or explicitly unsalted (the module docstring\'s SALTED ARMS)')
     return parser
+
+
+def salt_refusal(plans, arms_of, profile, profiles):
+    """Why --salt cannot run these plans (an arm whose profile has no prefix reuse), or None."""
+    for plan in plans:
+        for spec in arms_of[plan]:
+            served = getattr(spec, 'profile', None) or profile
+            if served not in profiles['profiles'] or not prefix_profile(profiles, served):
+                return ('--salt needs every arm on a prefix-reuse profile (QWEN_PREFIX_REUSE=1 and the prefix cache '
+                        'on): plan %s arm %s serves %s, where a salt does nothing' % (plan, spec[0], served))
+    return None
+
+
+def write_salt_key(path, urandom=os.urandom):
+    """A fresh 64-character key the contract reads (stripped, at least 32 bytes), for this run's arms only."""
+    with open(path, 'wb') as handle:
+        handle.write(binascii.hexlify(urandom(32)) + b'\n')
+    return path
 
 
 def s2_options(options, log):
@@ -2621,6 +2795,11 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
         except PlanError as error:
             log('refused: %s' % error)
             return 2
+    if options.salt is not None:
+        refusal = salt_refusal(plans, arms_of, options.profile, profiles)
+        if refusal:
+            log('refused: %s' % refusal)
+            return 2
     worst_case = worst_case_seconds(plans, arms_of)
     if options.budget_seconds is not None and worst_case > options.budget_seconds:
         log('refused: plans %s may take %d s (every arm to its limit, every re-run), past the %d s this step and job '
@@ -2629,6 +2808,11 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
     with open(options.reference, encoding='utf-8') as handle:
         reference = json.load(handle)
     os.makedirs(options.results, exist_ok=True)
+    salt_key_path = None
+    if options.salt == 'fresh':
+        salt_key_path = os.path.join(os.path.abspath(options.results), SALT_KEY_FILE)
+        if not options.dry_run:
+            write_salt_key(salt_key_path)
     if options.dry_run:
         log(json.dumps(dict(worst_case_seconds=worst_case, budget_seconds=options.budget_seconds)))
         for plan in plans:
@@ -2637,7 +2821,7 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                 log(json.dumps(dict(arm=arm, timeout=timeout, docker=gate_run(
                     options.image, CONTAINER_PREFIX + arm, getattr(spec, 'profile', None) or options.profile,
                     devices or ['<M>', '<A>'], options.checkout, os.path.join(options.results, arm), args, options.hub,
-                    env=getattr(spec, 'env', ())))))
+                    env=getattr(spec, 'env', ()), salt=options.salt, salt_key_path=salt_key_path))))
         return 0
     cache_dir = None
     s2_run = any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, options.profile)
@@ -2654,7 +2838,7 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     devices if devices is not None else serving_pair(), options.hub, execute, log, containers, corpus,
                     any_request=any_request_profile(profiles, options.profile), profiles=profiles,
                     cache_entries=cache_entries, jit=options.jit, policy=options.policy,
-                    decision=options.policy_decision)
+                    decision=options.policy_decision, salt=options.salt, salt_key_path=salt_key_path)
     context, ceiling, room = profile_limits(profiles, options.profile)
     summary = dict(image=options.image, profile=options.profile, plans=plans, context=context,
                    output_ceiling=ceiling, largest_prompt=room, worst_case_seconds=worst_case,
@@ -2662,6 +2846,8 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
     if s2_run:
         summary.update(policy=options.policy, policy_decision=options.policy_decision, jit=options.jit,
                        kernel_cache=cache_dir, s2_exit_blockers=[])
+    if options.salt is not None:
+        summary['salt'] = options.salt
     if 'control' in plans:
         # G3's rule, stated plainly where a reader of the summary looks first: what is judged, and that the flag-phase
         # cost is informational by the user's decision.
