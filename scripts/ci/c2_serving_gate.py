@@ -168,6 +168,7 @@ import math
 import os
 import random
 import re
+import shutil
 import signal
 import statistics
 import subprocess
@@ -1215,6 +1216,10 @@ class Runner(object):
         self.llk_reader = llk_profile_plan.read_image if execute is None else llk_profile_plan.empty_reader
         self.llk_handback = llk_profile_plan.docker_handback if execute is None else (lambda image, path: 0)
         self.llk_unsupported = {}
+        # The results disk and the stop the disk guard uses (a fake executor: an empty disk, no stop).
+        self.llk_disk_usage = shutil.disk_usage if execute is None else (lambda path: (1 << 50, 0, 1 << 50))
+        self.llk_stop = llk_profile_plan.docker_stop if execute is None else (lambda name: 0)
+        self.llk_guard_seconds = llk_profile_plan.GUARD_SECONDS
 
     def any_request_for(self, profile):
         if self.profiles is not None and profile in self.profiles['profiles']:
@@ -1293,9 +1298,18 @@ class Runner(object):
         cache_before = self.count_cache()
         started = time.time()
         handed = None
+        guard = None
+        if llk is not None and llk.get('kind') != 'twin' and not llk.get('skip'):
+            # A profiled arm's raw device log is tens of GB: stopped before it can fill the rig's disk.
+            guard = llk_profile_plan.DiskGuard(os.path.join(arm_dir, llk_profile_plan.PROFILE_SUBDIR),
+                                               llk_profile_plan.PROFILE_CAP[llk['phase']],
+                                               lambda: self.llk_stop(name), usage=self.llk_disk_usage,
+                                               interval=self.llk_guard_seconds, log=self.log).start()
         try:
             status = self.execute(arguments, os.path.join(arm_dir, 'gate-stdout.log'), timeout, name)
         finally:
+            if guard is not None:
+                guard.finish()
             if llk is not None:
                 # However the arm ended (a SIGTERM included): the profiler's root-owned tree goes back to this user
                 # before anything else, or the runner's next checkout dies on EACCES.
@@ -1363,6 +1377,7 @@ class Runner(object):
             except Exception as error:   # the analysis is attribution: it never takes the gate down
                 summary = dict(kind=llk['kind'], level=llk.get('level'), problem='analysis failed: %r' % (error,))
             summary['handback'] = handed
+            summary['disk_guard'] = guard.tripped if guard is not None else None
             self.arms[arm].update(llk=summary, llk_env=[list(pair) for pair in llk.get('env') or ()])
         if profile != self.profile or env or cache['before'] is not None:
             # S2 arms (and any counted cache): what served and what the kernel cache did.
@@ -1404,13 +1419,21 @@ def run_arm(runner, plan, spec, suffix='', llk=None):
 
 def run_llk_plan(plan, runner, arms):
     """One llk-* plan (llk_profile_plan): its arm prepared from the image's own kernel sources, run, analysed
-    and judged. Attribution only; a kind the image cannot run is NOT_EXERCISED without starting a container, and
-    once the counters read UNSUPPORTED the other phase's counter arm is skipped too."""
+    and judged. Attribution only. Without starting a container, NOT_EXERCISED: a kind the image cannot run (once
+    the counters read UNSUPPORTED the other phase's counter arm is skipped too), a window past the marker budget,
+    a results disk that cannot take the raw log, and every profiled arm after one whose server never came up
+    (each compiles cold: the next would wait out the same allowance)."""
     spec, = arms
     llk = spec.extra['llk']
-    skipped = runner.llk_unsupported.get(llk['kind'])
+    profiled = llk['kind'] != 'twin'
+    skipped = runner.llk_unsupported.get(llk['kind']) or (profiled and runner.llk_unsupported.get('profiled'))
     if skipped:
         return dict(verdict='NOT_EXERCISED', reason='skipped: %s' % skipped, lines=[])
+    if profiled:
+        full = llk_profile_plan.disk_problem(runner.results, llk_profile_plan.DISK_NEED[llk['phase']],
+                                             runner.llk_disk_usage)
+        if full:
+            return dict(verdict='NOT_EXERCISED', reason=full, lines=[])
     arm_dir = os.path.join(runner.results, spec[0])
     os.makedirs(arm_dir, exist_ok=True)
     os.chmod(arm_dir, 0o777)
@@ -1419,7 +1442,7 @@ def run_llk_plan(plan, runner, arms):
     except Exception as error:
         return dict(verdict='NOT_EXERCISED', reason='the arm could not be prepared from the image: %s' % error, lines=[])
     if prepared.get('skip'):
-        if llk['kind'] == 'counters':
+        if llk['kind'] == 'counters' and prepared.get('skip_scope') == 'image':
             runner.llk_unsupported['counters'] = prepared['skip']
         return dict(verdict='NOT_EXERCISED', reason=prepared['skip'], lines=[])
     report = run_arm(runner, plan, spec, llk=prepared)
@@ -1427,6 +1450,8 @@ def run_llk_plan(plan, runner, arms):
                                       llk_profile_plan.twin_report_of(runner.results, plan))
     if llk['kind'] == 'counters' and 'UNSUPPORTED' in (result.get('reason') or ''):
         runner.llk_unsupported['counters'] = result['reason']
+    if profiled and llk_profile_plan.never_ready(report):
+        runner.llk_unsupported['profiled'] = llk_profile_plan.never_ready(report)
     return result
 
 
@@ -2661,7 +2686,7 @@ def write_records(results, plan, result):
 
 
 def main(argv=None, execute=None, devices=None, log=print, containers=None, corpus=None, cache_entries=None,
-         llk_reader=None, llk_handback=None):
+         llk_reader=None, llk_handback=None, llk_disk_usage=None):
     options = build_parser().parse_args(argv)
     plans = c2_serving_job.split_list(options.plan)
     unknown = sorted(set(plans) - set(c2_serving_job.ALL_GATE_PLANS))
@@ -2730,6 +2755,8 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
         runner.llk_reader = llk_reader
     if llk_handback is not None:
         runner.llk_handback = llk_handback
+    if llk_disk_usage is not None:
+        runner.llk_disk_usage = llk_disk_usage
     context, ceiling, room = profile_limits(profiles, options.profile)
     summary = dict(image=options.image, profile=options.profile, plans=plans, context=context,
                    output_ceiling=ceiling, largest_prompt=room, worst_case_seconds=worst_case,

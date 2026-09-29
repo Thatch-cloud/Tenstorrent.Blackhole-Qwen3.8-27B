@@ -24,16 +24,36 @@ PLANS, one arm each, run after every judged plan of the job (c2_serving_job refu
   llk-prefill-counters as llk-decode-counters for that prefill.
 Every profiled arm: op-support count 20000 (200000 segfaulted the dispatch thread, v129/v131/v135; anything
 else is refused), the profiler's output in <arm>/llk-profile bind-mounted at tt-metal's default artifacts
-directory (outside the checkout and out of the 1 GB /opt/tt-metal/generated tmpfs), the JIT cache in the
-agent shape's per-container 8 GB tmpfs (TT_METAL_CACHE=/root/.cache/tt-metal-cache: instrumented and
-profiler-define compiles never touch the image's shared kernel cache), and NOT tracy's
---disable-device-data-dump-to-files: the qualified m3native recipe passes it, and in v0.77.0 it suppresses
-profile_log_device.csv (DeviceProfiler::writeDeviceResultsToFiles), the only file that carries the zones.
+directory (outside the checkout and out of the 1 GB /opt/tt-metal/generated tmpfs) and named twice, as tracy's
+-o and as TT_METAL_PROFILER_DIR (tracy hands its -o to the child that way, so the two must agree or the arrival
+check fails), the JIT cache in the agent shape's per-container 8 GB tmpfs (TT_METAL_CACHE=
+/root/.cache/tt-metal-cache: instrumented and profiler-define compiles never touch the image's shared kernel
+cache, and every profiled arm compiles cold), and NOT tracy's --disable-device-data-dump-to-files: the
+qualified m3native recipe passes it, and in v0.77.0 it suppresses profile_log_device.csv
+(DeviceProfiler::writeDeviceResultsToFiles), the only file that carries the zones.
 
-Verdicts: PASS, FAIL (a harness failure, or a profiled arm whose tokens differ from its twin's - the copies
-are byte-reversible, so that would be a real finding), NOT_EXERCISED (a required kernel without zones on
-every compute thread of both chips, dropped markers, no counter rows = UNSUPPORTED, or a capability the image
-lacks), INFRA (the gate's own).
+The profiler's buffer (marker_budget): each RISC's DRAM buffer holds OP_SUPPORT programs' guaranteed markers and
+nothing is read back until a drain; once full, every later marker is lost. v138 (the same 4 x 32768 shape, no
+zones, no prefill drain) filled every core before its round-4 read-back: the four prefills alone are ~19,600
+programs per core. So every profiled arm drains the prefill (QWEN_PREFILL_PROFILE_FLUSH: a read-back every 16
+layers, positive-controlled by its marker), a decode arm reads back again after packed round DUMP_ROUND, the
+decode arms carry no matmul zones, and the budget of the window between two drains is checked before any
+container starts. A decode arm is read over complete trace replay sessions only (llk_profile_report 'traced'),
+so an overflow later in the run - the close's read-back, which is not guaranteed anyway - costs sessions, not
+the arm.
+
+The disk (disk_problem, DiskGuard): the raw device log of a decode arm is tens of GB (e). Before a profiled arm
+the results disk must stay under DISK_MAX_USED with the arm's DISK_NEED written; during it a guard stops the
+container if the profile tree passes its PROFILE_CAP or the disk passes DISK_STOP_USED. The raw log leaves the
+results tree as soon as it is exported.
+
+Verdicts: PASS, FAIL (a harness failure, a stream without text, or a profiled arm whose text differs from its
+twin's - the copies are byte-reversible, so that would be a real finding), NOT_EXERCISED (no twin text to compare
+with, a required kernel without zones on every compute thread of both chips or without MIN_SESSIONS complete
+sessions, a wait sum missing on a zones arm, a counters arm without counter rows for a required kernel on both
+chips, dropped markers in the analysed window, the prefill drain not engaged, the marker budget or the disk
+refusing the arm, the disk guard stopping it, an earlier profiled arm that never became ready, no counter rows at
+all = UNSUPPORTED, or a capability the image lacks), INFRA (the gate's own).
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -42,9 +62,12 @@ import base64
 import hashlib
 import json
 import os
+import posixpath
 import re
+import shutil
 import subprocess
 import sys
+import threading
 
 import c2_serving_job
 import llk_kernels
@@ -59,25 +82,67 @@ PLAN_SHAPES = {
 }
 TWIN = dict(decode='llk-decode-twin', prefill='llk-prefill-twin')
 SHAPES = dict(decode=dict(users=4, prompt=32768, max_tokens=48), prefill=dict(users=1, prompt=32768, max_tokens=1))
-REQUIRED = dict(decode=('K5A', 'SDPA_DEC'), prefill=())
+# The registry's required kernels per phase: K5A and SDPA_DEC in decode, SDPA_PF in prefill.
+REQUIRED = dict((phase, tuple(entry['key'] for entry in llk_kernels.KERNELS
+                              if entry.get('required') and llk_kernels.in_phase(entry, phase)))
+                for phase in llk_kernels.PHASES)
 LEVEL = dict(twin=None, zones='stages', counters='tag')
-# Docker limits (seconds); the estimates they bound are in docs/llk-profiling-harness.md.
-ARM_SECONDS = {'llk-decode-twin': 1200, 'llk-decode-zones': 2400, 'llk-decode-counters': 1800,
-               'llk-prefill-twin': 900, 'llk-prefill-zones': 1500, 'llk-prefill-counters': 1200}
-STREAM_SECONDS = dict(decode=1800, prefill=1200)
+# Which rows each phase is read over (llk_profile_report windows): decode's packed rounds are trace replays.
+WINDOW = dict(decode='traced', prefill='untraced')
+MIN_SESSIONS = llk_profile_report.MIN_SESSIONS
+# Docker limits (seconds): the harness's readiness allowance (every profiled arm compiles cold into its tmpfs; the
+# C2 cold compile is unmeasured, so the gate's own 1800 s holds) plus the stream timeout plus the close (the last
+# read-back, the report). Each limit is at least readiness + stream, so a slow arm ends in the harness's own report.
+READINESS_SECONDS = 1800
+STREAM_SECONDS = dict(decode=1800, prefill=900)
+CLOSE_SECONDS = 300
+ARM_SECONDS = dict((plan, READINESS_SECONDS + STREAM_SECONDS[phase] + CLOSE_SECONDS)
+                   for plan, (phase, _) in PLAN_SHAPES.items())
 OP_SUPPORT = 20000
 OP_SUPPORT_LIMIT = 20000
 COUNTER_GROUPS = ('fpu', 'pack', 'unpack', 'l1_0', 'instrn')   # TT_METAL_PROFILE_PERF_COUNTERS 1+2+4+8+32 = 47
 COUNTER_MASK = 47
 PROFILE_DIR = '/opt/tt-metal/generated/profiler'
 SCRATCH_CACHE = '/root/.cache/tt-metal-cache'
+FLUSH_FLAG = 'QWEN_PREFILL_PROFILE_FLUSH'
+DUMP_ROUND = 2
 PROFILER_ENV = (('TT_METAL_DEVICE_PROFILER', '1'), ('TT_METAL_PROFILER_TRACE_TRACKING', '1'),
                 ('TT_METAL_PROFILER_MID_RUN_DUMP', '1'), ('TTNN_OP_PROFILER', '1'),
-                ('TT_METAL_PROFILER_DIR', PROFILE_DIR), ('QWEN_FAST_PROFILE_DUMP_ROUND', '4'),
-                ('QWEN_FAST_PROFILED_BLOCK_STREAM', '1'))
+                ('TT_METAL_PROFILER_DIR', PROFILE_DIR), ('QWEN_FAST_PROFILE_DUMP_ROUND', str(DUMP_ROUND)),
+                (FLUSH_FLAG, '1'), ('QWEN_FAST_PROFILED_BLOCK_STREAM', '1'))
 ARM_ENV_NAMES = frozenset([name for name, _ in PROFILER_ENV] + ['QWEN_LLK_ZONES', 'TT_METAL_CACHE'])
 # What the harness's qwen_configuration records (QWEN*_ and TT_ names): the rest cannot be shown to arrive.
 CONFIGURATION_PREFIX = re.compile(r'(?:QWEN[0-9]*_|TT_)')
+# Path-valued names, compared normalised (tracy writes its -o back as TT_METAL_PROFILER_DIR).
+PATH_ENV = frozenset(['TT_METAL_PROFILER_DIR', 'TT_METAL_CACHE'])
+
+# ---- the profiler buffer model (marker_budget); (e) = estimate, from v138 (run of 2026-09-23, 4 x 32768) ----
+# Per RISC the DRAM buffer is bufferEndIndex = 240000 uint32 at op-support 20000 (v138 server.log): 12 uint32, six
+# two-word markers, per program - its id and the guaranteed markers. A zone costs two optional markers per
+# execution and a used sum slot one per program, taken from the same buffer.
+GUARANTEED_MARKERS = 6
+CAPACITY_MARKERS = OP_SUPPORT * GUARANTEED_MARKERS
+BUDGET_FRACTION = 0.8
+# (e) programs one worker core runs: a packed round is 3605 verify + 2 x 528 draft ops per chip (one verify replay
+# per round: 34 rounds, 20 verify sessions recorded), and a core in every op runs them all; a prefill layer is
+# 30326 untraced ops per chip over 4 users x 16 chunks x 64 layers, 7.4 per layer.
+ROUND_PROGRAMS = 4661
+LAYER_PROGRAMS = 8
+FLUSH_LAYERS = 16
+# (e) invocations per packed round (decode) or per prefill layer on one core: 48 GDN and 16 attention layers.
+INVOCATIONS = dict(decode=dict(K5A=48, K5A_RD=48, K5A_WR=48, SDPA_DEC=16, SDPA_DEC_RD=16, ATTN_PREP=16,
+                               CONV_GATES=48),
+                   prefill=dict(SDPA_PF=0.25, MM=6, AGMM=1))
+
+# ---- the disk (disk_problem, DiskGuard) ----
+GB = 2 ** 30
+# (e) a profiled arm's raw device log: a full per-core buffer is ~150M rows over both chips; v138's untraced
+# (prefill) work alone is ~141M rows, a packed round ~17M, at ~150 bytes a row: decode ~40 GB, prefill ~6 GB.
+DISK_NEED = dict(decode=48 * GB, prefill=10 * GB)
+PROFILE_CAP = dict(decode=64 * GB, prefill=16 * GB)
+DISK_MAX_USED = 0.80        # with the arm's DISK_NEED written (the rig's no-build-above-80% rule)
+DISK_STOP_USED = 0.85       # the guard stops the container past this (the rig has hit DiskPressure before)
+GUARD_SECONDS = 20
 # What no served profile may carry: every profiler and LLK variable.
 PROFILE_REFUSED = re.compile(r'(?:QWEN_LLK_|TT_METAL_DEVICE_PROFILER|TT_METAL_PROFILE|TT_METAL_PROFILER_|TTNN_OP_PROFILER)')
 REFUSED_TRACY = ('--disable-device-data-dump-to-files', '--device-trace-profiler', '--profile-dispatch-cores')
@@ -106,8 +171,10 @@ def tracy_args(kind, sums=True):
     """The tracy wrapper's options for a profiled arm (None for a twin)."""
     if kind == 'twin':
         return None
+    # -o is the bind mount itself, as v138's recipe ran it (-o at its mount point, the logs under <-o>/.logs), and
+    # the same path as the arm's TT_METAL_PROFILER_DIR: tracy passes its -o to the child through that variable.
     args = ['-p', '--check-exit-code', '--disable-device-data-push-to-tracy', '--dump-device-data-mid-run',
-            '--op-support-count', str(OP_SUPPORT), '-o', PROFILE_DIR + '/tracy']
+            '--op-support-count', str(OP_SUPPORT), '-o', PROFILE_DIR]
     if kind == 'zones' and sums:
         args.append('--enable-sum-profiling')
     if kind == 'counters':
@@ -129,9 +196,9 @@ def check_tracy(args):
         raise LlkPlanError('op-support count %s refused: at most %d (200000 segfaulted the dispatch thread)'
                            % (count, OP_SUPPORT_LIMIT))
     output = args[args.index('-o') + 1] if '-o' in args else None
-    if output is None or not output.startswith(PROFILE_DIR):
-        raise LlkPlanError('tracy output must go under %s (the arm\'s bind-mounted llk-profile), got %r'
-                           % (PROFILE_DIR, output))
+    if output is None or posixpath.normpath(output) != PROFILE_DIR:
+        raise LlkPlanError('tracy output must be %s (the arm\'s bind-mounted llk-profile, and its '
+                           'TT_METAL_PROFILER_DIR), got %r' % (PROFILE_DIR, output))
     return args
 
 
@@ -165,7 +232,7 @@ def plan_arms(plan, profile, profiles, gate):
     context, ceiling, room = gate.profile_limits(profiles, profile)
     gate.check_lengths(profile, [shape['prompt']], room, '%s prompt' % plan)
     gate.check_budget(profile, shape['max_tokens'], ceiling, '%s --max-tokens' % plan)
-    args = gate.common_args(profile, context, STREAM_SECONDS[phase]) + [
+    args = gate.common_args(profile, context, STREAM_SECONDS[phase], readiness=READINESS_SECONDS) + [
         '--users', str(shape['users']), '--prompt-tokens', str(shape['prompt']),
         '--max-tokens', str(shape['max_tokens']), '--stagger', str(gate.STAGGER)]
     level = LEVEL[kind]
@@ -197,6 +264,141 @@ def docker_additions(prepared):
     if prepared.get('tracy'):
         entry = ['-B', '-m', 'tracy'] + list(check_tracy(list(prepared['tracy'])))
     return env, list(prepared.get('mounts') or []), entry
+
+
+# ---- the profiler buffer budget ----
+
+def static_markers(entry, level, sums):
+    """Optional markers per RISC per program of a generated entry (its records exist only in the worker)."""
+    stages = level == 'stages'
+    regions = [(stage, multiplicity) for stage, _, _, multiplicity in entry.get('stages') or ()] if stages else []
+    return llk_zones.marker_count(regions, envelope=True, sums=bool(stages and sums))
+
+
+def mover(entry):
+    return entry.get('part') in ('reader', 'writer')
+
+
+def marker_budget(phase, level, sums, records=()):
+    """The markers one RISC writes between two drains, against its DRAM buffer (CAPACITY_MARKERS). The window: a
+    decode arm's DUMP_ROUND packed rounds after the last prefill drain, plus that drain's leftover (FLUSH_LAYERS
+    prefill layers); a prefill arm's FLUSH_LAYERS layers. Each kernel counts its optional markers per program (its
+    record's, or static_markers for the generated K5-A) times its INVOCATIONS in the window; compute and
+    data-movement kernels fill different RISCs, so the fuller class counts. An estimate (e): ok is the lint's
+    answer, and the traced window is what tolerates it being wrong."""
+    if phase == 'decode':
+        programs = DUMP_ROUND * ROUND_PROGRAMS + FLUSH_LAYERS * LAYER_PROGRAMS
+        scale = DUMP_ROUND
+    else:
+        programs = FLUSH_LAYERS * LAYER_PROGRAMS
+        scale = FLUSH_LAYERS
+    markers = {}
+    for entry in llk_kernels.KERNELS:
+        if entry['route'] == 'generated' and llk_kernels.in_phase(entry, phase):
+            markers[entry['key']] = (entry, static_markers(entry, level, sums))
+    for record in records or ():
+        entry = llk_kernels.BY_KEY.get(record.get('kernel'))
+        if entry is None or 'refused' in record or not record.get('markers') or entry.get('header'):
+            continue   # a header's sums share the including kernel's slots
+        markers[record.get('key') or entry['key']] = (entry, record['markers']['per_risc_per_program'])
+    kernels, classes = {}, dict(compute=0, mover=0)
+    for key, (entry, per_program) in sorted(markers.items()):
+        invocations = scale * INVOCATIONS[phase].get(entry['key'], 0)
+        kernels[key] = dict(markers_per_program=per_program, invocations=invocations)
+        classes['mover' if mover(entry) else 'compute'] += int(round(per_program * invocations))
+    estimate = programs * GUARANTEED_MARKERS + max(classes.values())
+    share = round(estimate / float(CAPACITY_MARKERS), 3)
+    return dict(phase=phase, level=level, sums=bool(sums), window_programs=programs, capacity=CAPACITY_MARKERS,
+                optional=classes, estimate=estimate, fraction=share, limit=BUDGET_FRACTION,
+                ok=share <= BUDGET_FRACTION, kernels=kernels)
+
+
+def budget_problem(budget):
+    if budget['ok']:
+        return None
+    return ('marker budget: ~%d markers per RISC between two drains, %.0f%% of the %d the profiler buffer holds '
+            '(limit %.0f%%): the arm would overflow and lose its window' % (
+                budget['estimate'], 100 * budget['fraction'], budget['capacity'], 100 * budget['limit']))
+
+
+# ---- the disk ----
+
+def disk_problem(path, need, usage=shutil.disk_usage):
+    """Why the results disk cannot take a profiled arm's raw device log (need bytes), or None."""
+    total, used, free = usage(path)
+    after = (used + need) / float(total)
+    if need > free or after > DISK_MAX_USED:
+        return ('disk: %.0f GB free of %.0f GB (%.0f%% used); the arm may write %.0f GB, leaving the disk %.0f%% '
+                'used (at most %.0f%%): free space first' % (free / float(GB), total / float(GB),
+                                                             100.0 * used / total, need / float(GB), 100 * after,
+                                                             100 * DISK_MAX_USED))
+    return None
+
+
+def tree_bytes(path):
+    total = 0
+    for directory, _, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(directory, name))
+            except OSError:
+                continue
+    return total
+
+
+def docker_stop(name, timeout=120):
+    return subprocess.run(['docker', 'stop', '-t', '30', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          timeout=timeout).returncode
+
+
+class DiskGuard(object):
+    """While a profiled arm runs: stop its container (stop()) once its profile tree passes `cap` bytes or the disk
+    passes DISK_STOP_USED. tripped holds why, or None."""
+
+    def __init__(self, path, cap, stop, usage=shutil.disk_usage, size=tree_bytes, interval=GUARD_SECONDS, log=print):
+        self.path, self.cap, self.stop, self.usage, self.size = path, cap, stop, usage, size
+        self.interval, self.log = interval, log
+        self.tripped = None
+        self._done = threading.Event()
+        self._thread = None
+
+    def check(self):
+        written = self.size(self.path)
+        if written > self.cap:
+            return 'the profile tree reached %.1f GB (cap %.0f GB)' % (written / float(GB), self.cap / float(GB))
+        total, used, _ = self.usage(self.path)
+        if used / float(total) > DISK_STOP_USED:
+            return 'the disk reached %.1f%% used (the guard stops at %.0f%%)' % (100.0 * used / total,
+                                                                                100 * DISK_STOP_USED)
+        return None
+
+    def _run(self):
+        while not self._done.wait(self.interval):
+            try:
+                reason = self.check()
+            except Exception as error:   # the guard never takes the arm down by itself failing
+                self.log('[C2-GATE] disk guard check failed: %r' % (error,))
+                continue
+            if reason:
+                self.tripped = reason
+                self.log('[C2-GATE] disk guard: %s; stopping the arm' % reason)
+                try:
+                    self.stop()
+                except Exception as error:
+                    self.log('[C2-GATE] disk guard: the stop failed: %r' % (error,))
+                return
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name='llk-disk-guard')
+        self._thread.daemon = True
+        self._thread.start()
+        return self
+
+    def finish(self):
+        self._done.set()
+        if self._thread is not None:
+            self._thread.join(self.interval + 5)
+        return self.tripped
 
 
 # ---- reading the image ----
@@ -336,7 +538,7 @@ def prepare_arm(image, arm_dir, llk, reader, log=print):
     if reason:
         manifest['skipped'] = reason
         write_json(os.path.join(arm_dir, MANIFEST), manifest)
-        return dict(prepared, skip=reason, manifest=manifest)
+        return dict(prepared, skip=reason, skip_scope='image', manifest=manifest)
     sums = bool(caps.get('sum_zones')) and llk['kind'] == 'zones'
     if llk['kind'] == 'zones' and not sums:
         prepared['tracy'] = tracy_args('zones', sums=False)
@@ -361,6 +563,12 @@ def prepare_arm(image, arm_dir, llk, reader, log=print):
             handle.write(llk_zones.encode(text))
         mounts += ['--mount', 'type=bind,src=%s,dst=%s,readonly' % (host, destination)]
         manifest['mounts'].append(dict(path=path, destination=destination, sha256=record['instrumented_sha256']))
+    manifest['budget'] = marker_budget(llk['phase'], llk['level'], sums, manifest['files'])
+    refused = budget_problem(manifest['budget'])
+    if refused:
+        manifest['skipped'] = refused
+        write_json(os.path.join(arm_dir, MANIFEST), manifest)
+        return dict(prepared, skip=refused, skip_scope='arm', manifest=manifest)
     write_json(os.path.join(arm_dir, MANIFEST), manifest)
     prepared.update(mounts=mounts, manifest=manifest, sums=sums)
     return prepared
@@ -410,10 +618,12 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def prune(profile, keep_bytes=None):
+def prune(profile, keep_bytes=None, known=None):
     """Every file above keep_bytes (KEEP_BYTES) out of the results tree (the raw log is gigabytes), each recorded
-    with its size and sha256 first."""
+    with its size and sha256 first; `known` ({relative path: (bytes, sha256)}) is what the export already hashed,
+    so a tens-of-GB log is not read a second time."""
     keep_bytes = KEEP_BYTES if keep_bytes is None else keep_bytes
+    known = known or {}
     pruned = []
     for directory, _, names in os.walk(profile):
         for name in names:
@@ -423,7 +633,10 @@ def prune(profile, keep_bytes=None):
             except OSError:
                 continue
             if size > keep_bytes:
-                pruned.append(dict(path=os.path.relpath(path, profile), bytes=size, sha256=file_sha256(path)))
+                relative = os.path.relpath(path, profile)
+                hashed = known.get(relative)
+                digest = hashed[1] if hashed and hashed[0] == size else file_sha256(path)
+                pruned.append(dict(path=relative, bytes=size, sha256=digest))
                 os.remove(path)
     return pruned
 
@@ -455,6 +668,9 @@ def finish_arm(image, arm_dir, prepared, console='', twin=None, profiled=None, l
     logs = device_logs(profile)
     summary['device_logs'] = [os.path.relpath(path, arm_dir) for path in logs]
     records = [record for record in manifest.get('files', []) + manifest['generated'] if record.get('zones')]
+    known = {}
+    if len(logs) > 1:
+        summary['note'] = 'more than one profile_log_device.csv; the first was analysed'
     if not logs:
         summary['problem'] = 'no profile_log_device.csv under %s' % PROFILE_SUBDIR
     elif not records:
@@ -463,32 +679,54 @@ def finish_arm(image, arm_dir, prepared, console='', twin=None, profiled=None, l
         try:
             exported = llk_profile_report.export_filtered(logs[0], os.path.join(arm_dir, EXPORT))
             summary['export'] = exported
+            known[os.path.relpath(logs[0], profile)] = (exported['source']['bytes'], exported['source']['sha256'])
             if os.path.getsize(os.path.join(arm_dir, EXPORT)) > EXPORT_LIMIT_BYTES:
                 raise llk_profile_report.ReportError('the filtered export is past %d bytes' % EXPORT_LIMIT_BYTES)
             preamble, rows = llk_profile_report.read_rows(os.path.join(arm_dir, EXPORT))
-            report = llk_profile_report.analyse(rows, records, console, twin, profiled, preamble)
+            report = llk_profile_report.analyse(rows, records, console, twin, profiled, preamble,
+                                                window=WINDOW[prepared['phase']])
             report['source'] = exported
             write_json(os.path.join(arm_dir, REPORT), report)
             summary['report'] = REPORT
             summary['complete'] = report['complete']
             summary['drops'] = report['drops']
+            summary['selection'] = report['selection']
             summary['counters_seen'] = report['counters_seen']
-            summary['coverage'] = llk_profile_report.coverage(report, REQUIRED[prepared['phase']])
+            summary['coverage'] = llk_profile_report.coverage(report, REQUIRED[prepared['phase']],
+                                                              kind=prepared['kind'], min_sessions=MIN_SESSIONS)
             summary['kernels'] = [kernel['kernel'] for kernel in report['kernels']]
             summary['ranking'] = report['ranking']
             for line in llk_profile_report.render(report).splitlines():
                 log('[C2-GATE] %s: %s' % (prepared['plan'], line))
         except (llk_profile_report.ReportError, llk_zones.ZoneError, OSError, ValueError) as error:
             summary['problem'] = 'analysis refused: %s' % error
-    summary['pruned'] = prune(profile)
+    summary['pruned'] = prune(profile, known=known)
     write_json(os.path.join(arm_dir, PRUNED), summary['pruned'])
     return summary
 
 
 # ---- verdicts ----
 
-def tokens(report):
-    return [(stream or {}).get('text_sha256') for stream in (report or {}).get('streams') or []]
+def stream_texts(report):
+    """Each stream's generated text (the harness report's streams[i]['text']), None where a stream has none."""
+    return [(stream or {}).get('text') for stream in (report or {}).get('streams') or []]
+
+
+def text_digest(text):
+    return hashlib.sha256(llk_zones.encode(text)).hexdigest() if isinstance(text, str) else None
+
+
+def text_problems(report, whose):
+    """A stream without text cannot be compared: refused, never compared as equal Nones. No text is a missing or
+    non-string 'text', or an empty one from a stream that reports no completion token; an empty text after one
+    or more tokens (a prefill arm's single token can detokenise to nothing) is a value and is compared."""
+    problems = []
+    for index, stream in enumerate((report or {}).get('streams') or []):
+        stream = stream or {}
+        text = stream.get('text')
+        if not isinstance(text, str) or not (text or stream.get('completion_tokens') or stream.get('tokens')):
+            problems.append('%s stream %d carries no text' % (whose, index))
+    return problems
 
 
 def arrival_problems(report, env):
@@ -500,8 +738,17 @@ def arrival_problems(report, env):
             continue
         if configuration is None:
             problems.append('the report records no configuration: -e %s=%s is unshown' % (name, value))
-        elif configuration.get(name) != value:
-            problems.append('-e %s=%s never reached the container (it carries %r)' % (name, value, configuration.get(name)))
+            continue
+        carried = configuration.get(name)
+        if name in PATH_ENV and isinstance(carried, str) and carried:
+            # The same directory, or one inside it (tracy may hand the child a folder under its -o): either way
+            # the output stays in the arm's mount.
+            carried_path, value_path = posixpath.normpath(carried), posixpath.normpath(value)
+            same = carried_path == value_path or carried_path.startswith(value_path + '/')
+        else:
+            same = carried == value
+        if not same:
+            problems.append('-e %s=%s never reached the container (it carries %r)' % (name, value, carried))
     return problems
 
 
@@ -510,6 +757,9 @@ def verdict(plan, report, arm, twin_report):
     phase, kind = PLAN_SHAPES[plan]
     llk = (arm or {}).get('llk') or {}
     lines = []
+    if llk.get('disk_guard'):
+        return dict(verdict='NOT_EXERCISED', reason='the disk guard stopped the arm: %s' % llk['disk_guard'],
+                    lines=lines, llk=llk)
     if report is None:
         return dict(verdict='FAIL', reason='no harness report (exit %s)' % (arm or {}).get('exit'), lines=lines, llk=llk)
     problems = []
@@ -520,34 +770,57 @@ def verdict(plan, report, arm, twin_report):
     if len(streams) != SHAPES[phase]['users']:
         problems.append('%d streams, asked %d' % (len(streams), SHAPES[phase]['users']))
     problems += arrival_problems(report, (arm or {}).get('llk_env') or ())
+    problems += text_problems(report, 'this arm\'s')
+    digests = [text_digest(text) for text in stream_texts(report)]
     if kind == 'twin':
-        lines.append('tokens %s' % ','.join(str(token)[:12] for token in tokens(report)))
+        lines.append('tokens %s' % ','.join(str(digest)[:12] for digest in digests))
         return dict(verdict='FAIL' if problems else 'PASS', reason='; '.join(problems) or None, lines=lines,
-                    tokens=tokens(report), packed_phase=report.get('packed_phase'))
+                    tokens=digests, packed_phase=report.get('packed_phase'))
+    shortfalls = []
     if twin_report is None:
-        lines.append('no %s report: tokens not compared' % TWIN[phase])
-    elif tokens(twin_report) != tokens(report):
+        shortfalls.append('tokens not compared: no %s report' % TWIN[phase])
+    elif text_problems(twin_report, TWIN[phase]):
+        shortfalls.append('tokens not compared: %s' % '; '.join(text_problems(twin_report, TWIN[phase])))
+    elif not problems and stream_texts(twin_report) != stream_texts(report):
         problems.append('tokens differ from %s: %s against %s (the instrumented copies are byte-reversible, so this '
-                        'is a finding)' % (TWIN[phase], tokens(report), tokens(twin_report)))
+                        'is a finding)' % (TWIN[phase], [str(digest)[:12] for digest in digests],
+                                           [str(text_digest(text))[:12] for text in stream_texts(twin_report)]))
     if problems:
         return dict(verdict='FAIL', reason='; '.join(problems), lines=lines, llk=llk)
-    shortfalls = []
     if llk.get('problem'):
         shortfalls.append(llk['problem'])
-    if kind == 'zones':
-        shortfalls += llk.get('coverage') or []
-        if llk.get('drops') and (llk['drops'].get('unmatched_start') or llk['drops'].get('unmatched_end')
-                                 or llk['drops'].get('console')):
-            shortfalls.append('dropped markers: %s' % llk['drops'])
+    shortfalls += llk.get('coverage') or []
+    if llk.get('complete') is False:
+        shortfalls.append('dropped markers in the analysed window: %s' % llk.get('drops'))
     if kind == 'counters' and not llk.get('counters_seen'):
         shortfalls.append('UNSUPPORTED: no counter rows (event %d) in the device log' % llk_profile_report.COUNTER_ID)
+    missing = [str(marker) for marker in (report.get('flag_markers') or {}).get('missing') or []]
+    shortfalls += ['the prefill profiler drain was not seen: %s' % marker for marker in missing
+                   if marker.startswith(FLUSH_FLAG)]
     for rank in llk.get('ranking') or []:
         lines.append('#%(rank)d %(kernel)s %(bound)s: %(reason)s' % rank)
     # The judged arms' own S2 checks are notes here: a profiling arm is attribution, not an S2 exit gate.
     lines += ['note: %s' % problem for problem in report.get('c2_gate_problems') or []]
+    lines += ['note: flag marker missing: %s' % marker for marker in missing if not marker.startswith(FLUSH_FLAG)]
     if shortfalls:
         return dict(verdict='NOT_EXERCISED', reason='; '.join(shortfalls), lines=lines, llk=llk)
     return dict(verdict='PASS', reason=None, lines=lines, llk=llk)
+
+
+READINESS_TIMEOUT = 'readiness exceeded'   # lever_n_m3native_gate.start_server's TimeoutError
+
+
+def never_ready(report):
+    """Why a profiled arm's server never came up in time (its cold compile outlasted the readiness allowance), or
+    None. Only the harness's readiness timeout counts: a server that crashed before readiness failed fast, so the
+    next profiled arm (another kernel set, another level) still runs."""
+    if report is None or report.get('ready') is not False:
+        return None
+    fatal = str(report.get('fatal') or '')
+    if READINESS_TIMEOUT not in fatal:
+        return None
+    return 'a profiled arm\'s server never became ready within %d s (%s): every profiled arm compiles cold' % (
+        READINESS_SECONDS, fatal)
 
 
 def twin_report_of(results, plan):
@@ -600,19 +873,24 @@ def preflight(image, checkout, out_dir, reader=read_image, generated=generated_p
     """Everything the llk-* arms will do to the image's sources, done now with no card: every file kernel of
     both phases instrumented at both levels from the image's bytes, the image's K5-A build instrumented in the
     image, and the profiler capabilities read. Returns {phases, generated, problems}; a problem is a required
-    kernel that cannot be instrumented or a capability the zones arms need."""
+    kernel that cannot be instrumented, a capability the zones arms need, or a window past the marker budget."""
     result = dict(schema='qwen-llk-preflight/1', phases={}, generated=None, problems=[])
     for phase in llk_kernels.PHASES:
         paths, patterns = llk_kernels.file_requests(phase)
         reading = reader(image, paths, patterns, PROBES)
         caps = capabilities(reading)
         entry = dict(capabilities=caps, unsupported=dict((kind, unsupported(kind, caps)) for kind in ('zones', 'counters')),
-                     levels={})
+                     levels={}, budgets={})
         for level in llk_zones.LEVELS:
+            sums = bool(caps.get('sum_zones')) and level == 'stages'
             planned = llk_kernels.plan_files(phase, reading['files'], reading['globs'], level,
                                              sums_supported=bool(caps.get('sum_zones')),
                                              budget=caps.get('optional_markers') or llk_zones.MARKER_BUDGET)
             entry['levels'][level] = [record for _, _, record in planned]
+            entry['budgets'][level] = marker_budget(phase, level, sums, entry['levels'][level])
+            refused = budget_problem(entry['budgets'][level])
+            if refused:
+                result['problems'].append('%s at level %s: %s' % (phase, level, refused))
             for key in REQUIRED[phase]:
                 if llk_kernels.BY_KEY[key]['route'] != 'file':
                     continue

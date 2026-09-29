@@ -55,7 +55,21 @@ class RegistryTests(unittest.TestCase):
         self.assertIn('K64J_READER_QWEN=%s' % kernels.BY_KEY['SDPA_DEC_RD']['sha256'], build_script)
 
     def test_required_kernels(self):
-        self.assertEqual(sorted(entry['key'] for entry in kernels.KERNELS if entry.get('required')), ['K5A', 'SDPA_DEC'])
+        """Every phase requires a kernel, so no arm passes having measured nothing: K5-A and the K64j SDPA decode in
+        decode, the SDPA prefill compute in prefill (the only prefill kernel whose path the repo pins)."""
+        self.assertEqual(sorted(entry['key'] for entry in kernels.KERNELS if entry.get('required')),
+                         ['K5A', 'SDPA_DEC', 'SDPA_PF'])
+        for phase in kernels.PHASES:
+            with self.subTest(phase=phase):
+                self.assertTrue([entry for entry in kernels.KERNELS
+                                 if entry.get('required') and kernels.in_phase(entry, phase)])
+
+    def test_the_stock_matmul_is_prefill_only(self):
+        """In decode the stock matmul runs on most cores every round; its markers would crowd the profiler buffer
+        the K5-A stage zones need (llk_profile_plan.marker_budget)."""
+        self.assertEqual(kernels.BY_KEY['MM']['phase'], 'prefill')
+        self.assertNotIn(kernels.BY_KEY['MM']['path'], kernels.file_requests('decode')[0])
+        self.assertIn(kernels.BY_KEY['MM']['path'], kernels.file_requests('prefill')[0])
 
 
 class DestinationTests(unittest.TestCase):
@@ -162,7 +176,7 @@ class PlanFilesTests(unittest.TestCase):
         by_key = dict((record.get('key') or record['kernel'], (path, text, record)) for path, text, record in planned)
         self.assertIsNotNone(by_key['SDPA_DEC'][1])
         self.assertIsNotNone(by_key['CONV_GATES_CONV_GATES'][1])
-        self.assertIn('not in the image', by_key['MM'][2]['refused'])
+        self.assertNotIn('MM', by_key)                     # prefill only
         self.assertIn('not in the image', by_key['SDPA_COMMON'][2]['refused'])
         self.assertEqual(by_key['ATTN_PREP'][2]['pin_match'], True)
 
