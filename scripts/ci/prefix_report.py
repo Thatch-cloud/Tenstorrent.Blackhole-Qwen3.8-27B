@@ -11,7 +11,10 @@ Per phase (a number of busy agents) it records:
   - the trim loss h - Q from the scheduler's grant lines, and the registry's orphan count when its
     stats are exported;
   - restore and capture milliseconds from the [PREFIX] rows, host RSS from docker stats, turns per
-    hour, and the CI pod count the driver sampled (SKILL: CI shares the host).
+    hour, and the CI pod count the driver sampled (SKILL: CI shares the host);
+  - on the fast path's sticky sessions, the per-request engine build from its '[PINDIAG] sticky engine
+    built' line (the cost phase 1 still pays on every turn, hit or not), p50/p90 over every served turn
+    and over the hits: TTFT less it is the queue, the tail prefill and the restore.
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -64,6 +67,12 @@ def phase_summary(records, seconds=None, rss_gb=None, pods=None):
         restore_ms_p50=_round(percentile(restores, 0.5)), restore_ms_p90=_round(percentile(restores, 0.9)),
         capture_ms_p50=_round(percentile(captures, 0.5)), capture_ms_p90=_round(percentile(captures, 0.9)),
         seconds=_round(seconds, 1), rss_gb_max=_round(rss_gb, 2), ci_pods=pods)
+    builds = [(r, entry['ms']) for r in served for entry in ((r.get('markers') or {}).get('sticky_builds') or ())[:1]]
+    if builds:
+        hit_builds = [ms for r, ms in builds if (r.get('markers') or {}).get('q')]
+        out.update(build_ms_p50=_round(percentile([ms for _, ms in builds], 0.5), 1),
+                   build_ms_p90=_round(percentile([ms for _, ms in builds], 0.9), 1),
+                   build_ms_hit_p50=_round(percentile(hit_builds, 0.5), 1), builds=len(builds))
     if seconds:
         out['turns_per_hour'] = _round(len(served) * 3600.0 / seconds, 1)
     return out
@@ -78,7 +87,9 @@ def render_phase(name, summary):
                 s['ttft_continuation_p90'], s['turn_p50'], s['turn_p90'], s['hit_rate'], s['hit_rate_continuation'],
                 s['hit_turns'], s['continuation_turns'], s['trim_loss_tokens'], s['grants'], s['restore_ms_p50'],
                 s['restore_ms_p90'], s['capture_ms_p50'], s['capture_ms_p90'], s.get('turns_per_hour'),
-                s['rss_gb_max'], s['ci_pods']))
+                s['rss_gb_max'], s['ci_pods'])
+            + ('; engine build p50/p90 %s/%s ms over %s turns (hits p50 %s ms)' % (
+                s['build_ms_p50'], s['build_ms_p90'], s['builds'], s['build_ms_hit_p50']) if s.get('builds') else ''))
 
 
 def compare_phases(prefix, baseline):

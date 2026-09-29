@@ -40,7 +40,17 @@ traced/eager, Lifecycle, Timing):
     (allocation failure after a grant, preemption), reset_prefix_cache (vLLM dev mode), the runtime
     kill switch file, an in-place engine restart; the timing driver runs busy agents in the metering
     shape and records TTFT and turn time per turn;
-  - no request waits past the arm's deadline: each one's socket timeout is the time left.
+  - no request waits past the arm's deadline: each one's socket timeout is the time left;
+  - on the C2 fast path's sticky sessions (Driver(sticky=True, batch_invariant=True, prompt_limit=...),
+    c2_prefix_gate sets them from the arm's profile): the oracle models the DFlash drop, the drafter
+    window's ceiling and the C0 capture (prefix_judge docstring item 5); a concurrent hit is compared
+    with its solo cold twin STRICTLY - a divergence sends a second solo cold run and nothing else, and
+    the two cold runs agreeing makes it DIVERGED (the fast path is batch invariant: no batch-matched
+    control, no solo anchor); prompts are also held to the profile's prompt limit (the contract's
+    max_prompt_tokens, which answers 400 above it); the full exactness chain runs on to that limit
+    (CHAIN_HITS_LONG), the boundary cases add the sticky ones (STICKY_BOUNDARY_PROMPTS: previous prompts
+    of 4095/4096/4097, whose C0 is 0/2048/2048), and exactness_shared runs four same-tenant agents in
+    packed rounds (scenario_exactness_shared).
 
 Scenarios are functions of a Driver; everything the network, docker and the clock do goes through
 objects the CPU tests replace (test_prefix_replay).
@@ -83,6 +93,24 @@ CHAIN_HITS = (4200, 9000, 16500, 24500, 33000, 42500, 51000, 60000)
 CHAIN_HITS_SHORT = (4200, 9000, 16500)
 VARIANT_AFTER_TURN = 3           # the changed-suffix and early-divergence variants fork after this turn
 BOUNDARY_PROMPTS = (2047, 2048, 2049)
+# Sticky sessions: the fast path's chain runs on past the general profile's 60k to its prompt limit (the
+# last target is the limit itself, fitted), and its boundaries are where C0 = floor2048(P) - 2048 first
+# becomes a checkpoint: a previous prompt of 4095 tokens captures nothing, 4096 and 4097 capture 2048.
+CHAIN_HITS_LONG = (72000, 84000, 96000, 108000, 120000)
+# The bring-up's second and third turns on a sticky profile: a second turn past 4096 tokens captures C0 = 2048,
+# which the third resumes (CHAIN_HITS_SHORT's 4,200 may land under 4096 and capture nothing).
+STICKY_BRINGUP_HITS = (6000, 12000)
+# The same for the exactness chain: its second turn at 6000 captures C0 = 2048, so the third turn hits and the early
+# divergence (inside the third turn's input) has an older checkpoint to fall back to.
+STICKY_CHAIN_SECOND = 6000
+STICKY_BOUNDARY_PROMPTS = (4095, 4096, 4097)
+# exactness-shared (scenario_exactness_shared): four agents of one tenant, each at its own length so a packed
+# round mixes families; per round the cold twins run first, alone, then the four hits at once.
+SHARED_AGENT_TARGETS = ((6000, 20000, 45000, 80000, 120000),
+                        (5600, 12000, 25000, 40000, 60000),
+                        (5200, 8000, 14000, 22000, 30000),
+                        (4800, 6200, 8000, 12000, 16000))
+SHARED_AGENT_MAX_TOKENS = 512
 BOUNDARY_FIRST_MAX_TOKENS = 256  # so turn 2 stays inside the next chunk: a tail-only hit
 BOUNDARY_FOLLOWUP_TOKENS = 120
 SHARED_CONVERSATIONS = 3
@@ -583,16 +611,21 @@ class Driver(object):
 
     def __init__(self, client, arm, corpus, log=None, container=None, seed=0, max_tokens=DEFAULT_MAX_TOKENS,
                  deadline=None, clock=time.time, sleep=time.sleep, say=print, pods=ci_pods, strict=True,
-                 store_capacity=None, salt_key=None, context_tokens=None):
+                 store_capacity=None, salt_key=None, context_tokens=None, sticky=False, batch_invariant=False,
+                 prompt_limit=None):
         self.client, self.arm, self.corpus, self.log, self.container = client, arm, corpus, log, container
         self.salt_key = salt_key
         self.context_tokens = context_tokens
+        # The C2 fast path's sticky sessions (the module docstring): the oracle's model, strict concurrent
+        # pairs, and the profile's prompt limit (None: the context alone bounds a prompt).
+        self.sticky, self.batch_invariant = bool(sticky), bool(batch_invariant)
+        self.prompt_limit = int(prompt_limit) if prompt_limit else None
         self.measured = {}
         self.fitted = []
         self.seed, self.max_tokens, self.deadline = seed, max_tokens, deadline
         self.clock, self.sleep, self.say, self.pods = clock, sleep, say, pods
         self.strict = strict
-        self.oracle = judge.Oracle(store_capacity)
+        self.oracle = judge.Oracle(store_capacity, sticky=self.sticky)
         self.records, self.pairs, self.events, self.phases = [], [], {}, {}
         self.history = {}
         self.lock = threading.Lock()
@@ -674,7 +707,8 @@ class Driver(object):
         with self.lock:
             tokens = self.measured.get(body_key(body))
         if tokens is None:
-            if token_bound(body) + max_tokens <= context:
+            bound = token_bound(body)
+            if bound + max_tokens <= context and (self.prompt_limit is None or bound <= self.prompt_limit):
                 return None
             try:
                 tokens = self.measure(body)
@@ -682,6 +716,8 @@ class Driver(object):
                 return None
         if tokens + max_tokens > context:
             return 'prompt %d tokens + max_tokens %d > max_model_len %d' % (tokens, max_tokens, context)
+        if self.prompt_limit is not None and tokens > self.prompt_limit:
+            return 'prompt %d tokens > the profile\'s prompt limit %d' % (tokens, self.prompt_limit)
         return None
 
     def fit(self, conv, max_tokens=None):
@@ -691,6 +727,8 @@ class Driver(object):
         token_bound alone shows it fits); PromptTooLong when the history alone is past the context."""
         max_tokens = int(max_tokens or self.max_tokens)
         limit = self.context() - max_tokens - FIT_MARGIN_TOKENS
+        if self.prompt_limit is not None:
+            limit = min(limit, self.prompt_limit)
         body = conv.body()
         if token_bound(body) <= limit:
             return None
@@ -769,9 +807,12 @@ class Driver(object):
             with self.lock:
                 owner = salt if role != 'unsalted' else None
                 if counters:
-                    capped = (max(0, len(prompt_ids) - 1) // judge.BLOCK) * judge.BLOCK
-                    record['expected_raw_h'] = min(self.oracle.published_tokens(owner, prompt_ids), capped)
+                    record['expected_raw_h'] = self.oracle.expected_raw_hit(owner, prompt_ids)
                 record['expected'] = self.oracle.admit(owner, prompt_ids)
+        if prompt_ids is not None:
+            # Which prompt each 2048-token window belongs to: the audit's window digests are compared across
+            # requests whose tokens agree up to the window's end (prefix_judge.window_findings).
+            record['chunk_digests'] = judge.prefix_digests(prompt_ids, judge.CHUNK)
         if admit and salt and role not in judge.FRESH_ROLES:
             with self.lock:
                 self.history.setdefault(salt, []).append((tag, body))
@@ -913,10 +954,18 @@ def fitted_conversation(driver, name, target, system='compact'):
     return conv, tokens
 
 
-def boundary_cases(driver, prompts=BOUNDARY_PROMPTS):
-    """Previous-prompt lengths 2047, 2048 and 2049, and the tail-only hit their second turns are.
-    The event records what /tokenize fitted and what the chat endpoint then served: the gate
-    judges only a case served at its target length."""
+def boundary_prompts(sticky=False):
+    """The boundary cases' previous-prompt lengths: 2047/2048/2049, and under sticky sessions 4095/4096/4097."""
+    return BOUNDARY_PROMPTS + (STICKY_BOUNDARY_PROMPTS if sticky else ())
+
+
+def boundary_cases(driver, prompts=None):
+    """Previous-prompt lengths 2047, 2048 and 2049 (and, under sticky sessions, 4095, 4096 and 4097), and
+    the tail-only hit their second turns are (under sticky sessions: a small extension resumed at C0, or a
+    cold turn where C0 is 0). The event records what /tokenize fitted and what the chat endpoint then
+    served: the gate judges only a case served at its target length."""
+    if prompts is None:
+        prompts = boundary_prompts(getattr(driver, 'sticky', False))
     for target in prompts:
         name = 'boundary-%d' % target
         try:
@@ -943,12 +992,15 @@ def shared_system(driver, count=SHARED_CONVERSATIONS):
         driver.pair(conv, 'shared-system', continuation=False)
 
 
-def bringup_turns(driver, capture, turns=3):
+def bringup_turns(driver, capture, turns=3, hits=None):
     """The bring-up conversation's three unsalted turns, each followed (capture=True) by the same
     messages under a fresh salt: a first request that captures at floor2048(L) and publishes, which
-    must equal the baseline too. The unsalted turns read vLLM's prefix-cache counters around them."""
+    must equal the baseline too. The unsalted turns read vLLM's prefix-cache counters around them.
+    hits: the later turns' targets (default CHAIN_HITS_SHORT's first; the gate gives a sticky profile's
+    bring-up STICKY_BRINGUP_HITS, on both arms)."""
     conv = driver.conversation('bringup', first_tokens=corpus_module.first_attachment('compact', CHAIN_FIRST))
-    targets = corpus_module.chain_targets(CHAIN_FIRST, CHAIN_HITS_SHORT[:turns - 1])
+    hits = CHAIN_HITS_SHORT[:turns - 1] if hits is None else tuple(hits)[:turns - 1]
+    targets = corpus_module.chain_targets(CHAIN_FIRST, hits)
     role = 'unsalted' if capture else 'reference'
     record = None
     for index, target in enumerate(targets):
@@ -965,26 +1017,48 @@ def bringup_turns(driver, capture, turns=3):
     return targets
 
 
-def scenario_bringup_reference(driver, turns=3):
+def scenario_bringup_reference(driver, turns=3, hits=None):
     """On the baseline profile (general): the bring-up conversation, unsalted, as the reference the
     prefix profile's unsalted and capturing turns must equal byte for byte."""
-    bringup_turns(driver, capture=False, turns=turns)
+    bringup_turns(driver, capture=False, turns=turns, hits=hits)
 
 
-def scenario_bringup_prefix(driver, turns=3):
+def scenario_bringup_prefix(driver, turns=3, hits=None):
     """On the prefix profile: the bring-up turns unsalted (fail-closed tenancy: no grant, no publish -
     reuse off inside a reuse engine) and under fresh salts (the capture path), then a salted chain as
     cold/hit pairs: the first hit, whose program cache must not grow (F3)."""
-    targets = bringup_turns(driver, capture=True, turns=turns)
+    targets = bringup_turns(driver, capture=True, turns=turns, hits=hits)
     salted = driver.conversation('bringup-salted', first_tokens=corpus_module.first_attachment('compact', CHAIN_FIRST))
     run_chain(driver, salted, targets, 'bringup-salted')
 
 
-def scenario_exactness(driver, variant='traced'):
+def chain_hits(driver, full):
+    """The exactness chain's hit targets: the long chain (4k..60k) or the short one (4k..16k); under sticky
+    sessions the second turn is STICKY_CHAIN_SECOND (a first turn of 2.6k captures nothing, so the first hit
+    comes a turn later), and the long chain runs on through CHAIN_HITS_LONG to the profile's prompt limit (or
+    the context less an answer), whose last target is that limit itself."""
+    hits = CHAIN_HITS if full else CHAIN_HITS_SHORT
+    if getattr(driver, 'sticky', False):
+        hits = (STICKY_CHAIN_SECOND,) + tuple(target for target in hits if target > STICKY_CHAIN_SECOND)
+    if not full:
+        return hits
+    if getattr(driver, 'sticky', False):
+        cap = driver.context() - driver.max_tokens - FIT_MARGIN_TOKENS
+        if driver.prompt_limit is not None:
+            cap = min(cap, driver.prompt_limit)
+        longer = tuple(target for target in CHAIN_HITS_LONG if hits[-1] < target < cap)
+        hits = hits + longer + ((cap,) if cap > max(hits + longer) else ())
+    return hits
+
+
+def scenario_exactness(driver, variant='traced', full=None):
     """Traced: the long chain (4k..60k) with its changed-suffix and early-divergence variants, the
-    boundary cases and the shared system block. Eager and audit: the short chain and the boundaries."""
-    full = variant == 'traced'
-    targets = corpus_module.chain_targets(CHAIN_FIRST, CHAIN_HITS if full else CHAIN_HITS_SHORT)
+    boundary cases and the shared system block. Eager and audit: the short chain and the boundaries.
+    full (default: traced only) runs the traced arm's whole set on another arm: the fast path's profiles
+    are decode_only, so their eager arm is the only full one (c2_prefix_gate); under sticky sessions the
+    chain runs on to the prompt limit (chain_hits)."""
+    full = variant == 'traced' if full is None else bool(full)
+    targets = corpus_module.chain_targets(CHAIN_FIRST, chain_hits(driver, full))
     conv = driver.conversation('chain', first_tokens=corpus_module.first_attachment('compact', targets[0]))
 
     def variants(state, turn):
@@ -1019,17 +1093,48 @@ def _burst(driver, jobs):
     return _join(_spawn(jobs))
 
 
+def strict_pair(driver, case, cold, hit, body, conv, max_tokens, extra):
+    """A concurrent hit on a batch-invariant path (the C2 fast path): it must equal its solo cold twin. A
+    first divergence sends one more solo cold run: the two cold runs agreeing makes the hit DIVERGED (a
+    FAIL), disagreeing UNSTABLE - no batch-matched control and no solo anchor (prefix_judge docstring
+    item 5). -> the pair entry (appended to driver.pairs)."""
+    result = judge.pair_verdict(cold, hit)
+    second = None
+    if result['verdict'] == 'RERUN':
+        driver.say('[PREFIX-GATE] %s: %s diverged from its solo cold run %s (%s) - a second solo cold run' % (
+            driver.arm, hit['tag'], cold['tag'], result['first'].get('detail')))
+        second = driver.send(body, 'cold', driver.fresh_salt(), case + ':rerun', conv, max_tokens, extra=extra,
+                             continuation=hit.get('continuation'))
+        result = judge.pair_verdict(cold, hit, second)
+    entry = dict(case=case, conv=getattr(conv, 'name', None), turn=getattr(conv, 'turn', None), cold=cold['tag'],
+                 hit=hit['tag'], kind='concurrent', rerun=None, primes=[],
+                 cold2=second['tag'] if second is not None else None, batch=None, verdict=result['verdict'],
+                 basis='solo' if result['verdict'] == 'IDENTICAL' else None,
+                 detail=result.get('reason') or result['first'].get('detail'), prompt_tokens=hit.get('prompt_tokens'))
+    with driver.lock:
+        driver.pairs.append(entry)
+    driver.say('[PREFIX-GATE] %s pair %s %s turn %s L=%s (concurrent, strict): %s%s' % (
+        driver.arm, case, entry['conv'], entry['turn'], entry['prompt_tokens'], entry['verdict'],
+        ' (%s)' % entry['detail'] if entry['detail'] else ''))
+    return entry
+
+
 def concurrent_pairs(driver, pending, case):
     """Hits that ran concurrently, each against a cold twin (a fresh salt) run alone. When any
     diverged: a second solo cold run of each divergent one, and the batch-matched cold control -
     every message set again at once under fresh salts, in the burst's order, the same co-runners -
     judged by the batching rule (prefix_judge.concurrent_verdict). A family left with a pair that is
     NOT_COMPARABLE, or DIVERGED (settle may yet excuse a preempted one), gets its solo anchor
-    (solo_anchor). pending: [(hit record, body, conv, max_tokens, extra)]."""
+    (solo_anchor). On a batch-invariant path (driver.batch_invariant) each hit is a strict pair
+    instead (strict_pair). pending: [(hit record, body, conv, max_tokens, extra)]."""
     colds = []
     for record, body, conv, max_tokens, extra in pending:
         colds.append(driver.send(body, 'cold', driver.fresh_salt(), case, conv, max_tokens, extra=extra,
                                  continuation=record.get('continuation')))
+    if getattr(driver, 'batch_invariant', False):
+        for (record, body, conv, max_tokens, extra), cold in zip(pending, colds):
+            strict_pair(driver, case, cold, record, body, conv, max_tokens, extra)
+        return
     first = [judge.compare(cold, record) for cold, (record, _, _, _, _) in zip(colds, pending)]
     diverged = [index for index, result in enumerate(first) if result['verdict'] == 'DIVERGED']
     seconds, batch = {}, [None] * len(pending)
@@ -1336,7 +1441,7 @@ def lifecycle_reload(driver, restart):
     driver.answer(conv, hit)
     info = restart()
     seconds, window = (info.get('seconds'), info.get('log_window')) if isinstance(info, dict) else (info, None)
-    driver.oracle = judge.Oracle(driver.oracle.capacity)
+    driver.oracle = judge.Oracle(driver.oracle.capacity, sticky=driver.oracle.sticky)
     driver.event('reload', seconds=seconds, log_window=window)
     conv.extend(800)
     hit = driver.pair(conv, 'after-reload')
@@ -1491,6 +1596,59 @@ def token_chars(tokens):
     return corpus_module.token_chars(tokens)
 
 
+# -- the shared-block concurrency arm (sticky sessions) ---------------------------------------------
+
+def scenario_exactness_shared(driver, targets=None, max_tokens=None):
+    """Four agents of ONE tenant (one salt) share the full system block - the same first KV page, which the
+    fast path's page tables also pad with - and continue concurrently in packed rounds, each at its own
+    length (so a round mixes 256-key families), hits from about 5k to 120k tokens (sticky design B2).
+    Round 0: each agent's first turn as a sequential cold/hit pair, one agent after another (the later ones
+    reuse the system block the first published). Every later round: each agent's next input (the model's own
+    answer, then a tool result or follow-up sized to its next target); the cold twins first, each ALONE under
+    a fresh salt; then the four hits AT ONCE under the tenant's salt; each hit against its solo cold twin
+    strictly (strict_pair: the fast path is batch invariant). The cold runs go first so that their pages
+    come from the least recently freed blocks and every agent's own published prefix, freed last, is still
+    cached for its hit. With the audit on (the arm's profile), every row's per-window KV digests are
+    compared across rows that share those tokens (prefix_judge.window_findings): the shared blocks a hit
+    reads after other agents decoded beside them must be the bytes their first writer left. targets and
+    max_tokens default to SHARED_AGENT_TARGETS and SHARED_AGENT_MAX_TOKENS, read when it runs."""
+    targets = SHARED_AGENT_TARGETS if targets is None else targets
+    max_tokens = SHARED_AGENT_MAX_TOKENS if max_tokens is None else max_tokens
+    tenant = driver.salt('agents')
+    agents = []
+    for index, series in enumerate(targets):
+        conv = driver.conversation('agent-%d' % index, system='full',
+                                   first_tokens=corpus_module.first_attachment('full', series[0]))
+        conv.salt = tenant
+        hit = driver.pair(conv, 'shared-agents', max_tokens, continuation=False)
+        driver.answer(conv, hit)
+        agents.append(dict(conv=conv, series=series, last=hit))
+    rounds = max(len(series) for series in targets)
+    for turn in range(1, rounds):
+        live = [agent for agent in agents if turn < len(agent['series']) and agent['last'].get('ok')]
+        if not live:
+            break
+        items = []
+        for agent in live:
+            conv, last = agent['conv'], agent['last']
+            conv.extend(corpus_module.growth_input(agent['series'][turn], last['prompt_tokens'],
+                                                   last.get('completion_tokens') or 0))
+            driver.fit(conv, max_tokens)
+            items.append((agent, conv, conv.body()))
+        colds = [driver.send(body, 'cold', driver.fresh_salt(), 'shared-agents', conv, max_tokens, continuation=True)
+                 for _, conv, body in items]
+        hits = _burst(driver, [lambda conv=conv, body=body: driver.send(
+            body, 'hit', conv.salt, 'shared-agents', conv, max_tokens, continuation=True) for _, conv, body in items])
+        driver.event('shared-round-%d' % turn, agents=[agent['conv'].name for agent, _, _ in items],
+                     lengths=[hit.get('prompt_tokens') for hit in hits], tags=[hit['tag'] for hit in hits],
+                     ok=all(hit.get('ok') for hit in hits))
+        for (agent, conv, body), cold, hit in zip(items, colds, hits):
+            strict_pair(driver, 'shared-agents', cold, hit, body, conv, max_tokens, None)
+            agent['last'] = hit
+            if hit.get('ok'):
+                driver.answer(conv, hit)
+
+
 # -- timing --------------------------------------------------------------------------------------
 
 def agent_loop(driver, phase, index, turns, max_tokens, gap_mean_s, stop):
@@ -1560,7 +1718,8 @@ def scenario_timing(driver, agents=TIMING_AGENTS, turns=TIMING_TURNS, max_tokens
 SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=scenario_bringup_prefix,
                  exactness_traced=lambda driver, **_: scenario_exactness(driver, 'traced'),
                  exactness_audit=lambda driver, **_: scenario_exactness(driver, 'audit'),
-                 exactness_eager=lambda driver, **_: scenario_exactness(driver, 'eager'),
+                 exactness_eager=lambda driver, full=None, **_: scenario_exactness(driver, 'eager', full=full),
+                 exactness_shared=lambda driver, **_: scenario_exactness_shared(driver),
                  lifecycle_evict=scenario_lifecycle_evict, lifecycle_store=scenario_lifecycle_store,
                  lifecycle_tiny=scenario_lifecycle_tiny, timing=scenario_timing)
 

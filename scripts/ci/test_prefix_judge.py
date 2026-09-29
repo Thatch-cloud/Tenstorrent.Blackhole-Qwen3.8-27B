@@ -8,7 +8,9 @@ agreeing cold runs make any hit divergence a FAIL), the batching rule for concur
 batch-matched control, pair_summary's tolerance, G1 v48's own concurrent pairs replayed from its
 records), the preemption allowance by admissions, a resumed request's rows, restores against grants, captures
 against plans, the program cache across every hit and the first capture, the digests, and vLLM's
-raw hit read from its counters."""
+raw hit read from its counters. And the fast path's sticky sessions (item 5): the DFlash drop, the
+drafter window's ceiling, the C0 plan, the sticky marker checks, strict settling, the audit's window
+digests across requests, and a cut engine id."""
 
 import os
 import sys
@@ -708,6 +710,146 @@ class WorstTests(unittest.TestCase):
         self.assertEqual(pj.worst(['PASS', 'INFRA', 'FAIL']), 'FAIL')
         self.assertEqual(pj.worst(['PASS']), 'PASS')
         self.assertEqual(pj.worst([]), 'FAIL')
+
+
+class StickyOracleTests(unittest.TestCase):
+    """The oracle under sticky sessions (prefix_judge docstring item 5), worked by hand: a 10,000-token first
+    turn publishes [0, 8192) and captures C0 = 6144, never 8192."""
+
+    def test_the_drop_the_ceiling_and_the_c0_plan(self):
+        first = seq(1000, 10000)
+        g1, sticky = pj.Oracle(), pj.Oracle(sticky=True)
+        self.assertEqual(g1.admit('s', first), dict(h=0, q=0, plan=[8192], published=8192))
+        self.assertEqual(sticky.admit('s', first), dict(h=0, q=0, plan=[6144], published=8192))
+        # A continuation: vLLM's hit is 128 blocks, less the dropped one (8128); the trim lands on C0, and the turn
+        # captures its own C0' = floor2048(11500) - 2048 = 8192 (the gap boundary floor2048(h) is Q itself).
+        second = first + seq(50000, 1500)
+        self.assertEqual(g1.admit('s', second)['q'], 8192)
+        self.assertEqual(sticky.admit('s', second), dict(h=8128, q=6144, plan=[8192], published=10240))
+        third = second + seq(90000, 5000)
+        self.assertEqual(sticky.admit('s', third), dict(h=10176, q=8192, plan=[14336], published=16384))
+        fourth = third + seq(120000, 3000)
+        self.assertEqual(sticky.admit('s', fourth)['q'], 14336)
+        # A small extension (the prompt boundary unchanged) resumes at C0 and plans nothing: its own C0 is its Q.
+        small = pj.Oracle(sticky=True)
+        small.admit('s', first)
+        self.assertEqual(small.admit('s', first + seq(7, 100)), dict(h=8128, q=6144, plan=[], published=8192))
+
+    def test_a_shorter_fork_resumes_under_the_drafter_window(self):
+        """The ceiling floor2048(P - 2048): a fork of 20,000 tokens of a longer cached conversation never
+        resumes inside its own last 2048 tokens."""
+        for sticky, want in ((False, 18432), (True, 16384)):
+            oracle = pj.Oracle(sticky=sticky)
+            long_ = seq(1, 40000)
+            for length in (16500, 18500, 20500, 40000):
+                oracle.admit('s', long_[:length])
+            with self.subTest(sticky=sticky):
+                self.assertEqual(oracle.admit('s', long_[:20000])['q'], want)
+                self.assertLessEqual(want, 20000 - 2048 if sticky else 20000)
+
+    def test_small_prompts_capture_nothing_and_their_next_turn_is_cold(self):
+        oracle = pj.Oracle(sticky=True)
+        for first, next_q in ((4095, 0), (4096, 2048), (4097, 2048), (2049, 0)):
+            tokens = seq(first * 10, first)
+            oracle = pj.Oracle(sticky=True)
+            self.assertEqual(oracle.admit('s', tokens)['plan'], pj.fresh_plan(first, sticky=True))
+            with self.subTest(first=first):
+                self.assertEqual(oracle.admit('s', tokens + seq(7, 380))['q'], next_q)
+        self.assertEqual((pj.fresh_plan(4095, True), pj.fresh_plan(4096, True), pj.fresh_plan(4096)), ([], [2048], [4096]))
+        self.assertEqual((pj.resume_ceiling(4095), pj.resume_ceiling(4096), pj.resume_ceiling(123136)), (0, 2048, 120832))
+        self.assertEqual((pj.capture_boundary(10000), pj.capture_boundary(10000, sticky=True)), (8192, 6144))
+
+    def test_vllm_s_own_hit_is_a_block_short(self):
+        tokens = seq(1, 5000)
+        for sticky, raw in ((False, 4096), (True, 4032)):
+            oracle = pj.Oracle(sticky=sticky)
+            oracle.admit('s', tokens)
+            self.assertEqual(oracle.expected_raw_hit('s', tokens + [7] * 100), raw)
+            self.assertEqual(oracle.expected_raw_hit('other', tokens), 0)
+            self.assertEqual(oracle.expected_raw_hit(None, tokens), 0)
+
+    def test_the_sticky_marker_checks(self):
+        def hit(q, admits=(), rows=None, prompt=10000):
+            record = resolved('h', q=q, l=prompt, prompt_tokens=prompt, grant=dict(h=q + 64, q=q, plan=[]) if q else None,
+                              expected=dict(h=q + 64, q=q, plan=[]))
+            record['markers']['sticky_admits'] = list(admits)
+            if rows is not None:
+                record['markers']['rows'] = rows
+            return [text for severity, text in pj.reuse_problems(record, sequential=False, sticky=True)
+                    if severity == 'FAIL']
+
+        good = dict(q=6144, p=10000, tail=3856)
+        self.assertEqual(hit(6144, [good]), [])
+        self.assertTrue(any('no "[PINDIAG] sticky admit"' in t for t in hit(6144)))
+        self.assertTrue(any('P=9000' in t for t in hit(6144, [dict(good, p=9000, tail=2856)])))
+        self.assertTrue(any('2 sticky admit lines' in t for t in hit(6144, [good, good])))
+        self.assertTrue(any('whose row restored nothing' in t for t in hit(0, [dict(q=2048, p=10000, tail=7952)])))
+        # A C1 grant: Q above floor2048(P - 2048).
+        self.assertTrue(any('drafter window' in t for t in hit(8192, [dict(q=8192, p=10000, tail=1808)])))
+        # A second row: the fast path has no preemption.
+        rows = [dict(q=6144, l=10000, captured=[]), dict(q=6144, l=10200, captured=[])]
+        self.assertTrue(any('serves no preemption' in t for t in hit(6144, [good], rows=rows)))
+        # Off, none of it applies.
+        record = resolved('h', q=8192, l=10000, prompt_tokens=10000, grant=dict(h=8256, q=8192, plan=[]),
+                          expected=dict(h=8256, q=8192, plan=[]))
+        self.assertEqual(pj.reuse_problems(record), [])
+
+    def test_strict_settling_excuses_no_preemption(self):
+        index = {'h': dict(markers=dict(admissions=2)), 'c': dict(markers=dict(admissions=1))}
+        for strict, verdict in ((False, 'NOT_COMPARABLE'), (True, 'DIVERGED')):
+            entry = pj.settle(dict(hit='h', cold='c', verdict='DIVERGED', detail='x'), index, strict=strict)
+            self.assertEqual(entry['verdict'], verdict)
+            self.assertIn('preempted and resumed: h (2 admissions)', entry['detail'])
+
+    def test_audit_windows_are_compared_across_requests_that_share_tokens(self):
+        prompt = seq(5, 5000)
+        prefixes = pj.prefix_digests(prompt, pj.CHUNK)
+
+        def request(tag, windows, digests=prefixes, ok=True):
+            return dict(tag=tag, ok=ok, chunk_digests=digests,
+                        markers=dict(audit_windows=[dict(window=w, start=w * 2048, end=min((w + 1) * 2048, 5000),
+                                                         new=new, kv=kv) for w, new, kv in windows]))
+
+        cold = request('cold', [(0, 1, 'a'), (1, 1, 'b'), (2, 1, 'c')])
+        hit = request('hit', [(0, 0, 'a'), (1, 0, 'b'), (2, 1, 'c')])
+        problems, lines, restored = pj.window_findings([cold, hit])
+        self.assertEqual((problems, restored), ([], 2))
+        self.assertIn('2 shared windows compared', lines[0])
+        bad = request('hit', [(0, 0, 'ff'), (1, 0, 'b')])
+        problems, _, _ = pj.window_findings([cold, bad])
+        self.assertEqual(len(problems), 1)
+        self.assertIn('KV window 0 [0, 2048) differs', problems[0])
+        self.assertIn('hit ff (restored)', problems[0])
+        other = request('other', [(0, 1, 'zz'), (1, 1, 'yy')], digests=pj.prefix_digests(seq(9, 5000), pj.CHUNK))
+        self.assertEqual(pj.window_findings([cold, other])[0], [], 'other tokens, other bytes')
+        self.assertEqual(pj.window_findings([cold])[2], 0)
+
+    def test_a_cut_engine_id_still_names_its_request(self):
+        tag = 'pfx-exactness-shared-0012-cold-batch'
+        full = 'chatcmpl-%s-1a2b3c4d' % tag
+        self.assertTrue(pj.engine_id_matches(full, tag))
+        self.assertTrue(pj.engine_id_matches(full[:48], tag))
+        self.assertTrue(pj.engine_id_matches(('chatcmpl-pfx-lifecycle-evict-with-a-long-name-0003-hit-1a2b3c4d')[:48],
+                                             'pfx-lifecycle-evict-with-a-long-name-0003-hit'))
+        self.assertFalse(pj.engine_id_matches(full, 'pfx-exactness-shared-0001-cold-batch'))
+        self.assertFalse(pj.engine_id_matches(full, 'pfx-exactness-shared-0012-cold'), 'a label is not a prefix')
+        self.assertFalse(pj.engine_id_matches(full[:48], 'pfx-exactness-shared-0012-cold'))
+        self.assertFalse(pj.engine_id_matches('chatcmpl-pfx-a', 'pfx-a-0001-hit'), 'too short to be a cut')
+
+    def test_resolve_attaches_the_sticky_lines(self):
+        lines = ["INFO [PINDIAG] sticky admit req='chatcmpl-pfx-a-0002-hit-1a2b3c4d' Q=6144 P=10000 tail=3856",
+                 'INFO [PINDIAG] sticky engine built req=chatcmpl-pfx-a-0002-hit-1a2b3c4d ms=3500.0 frontier=6144 '
+                 'prompt=10000',
+                 'INFO [PREFIX-AUDIT] req=chatcmpl-pfx-a-0002-hit-1a2b3c4d Q=6144 L=10000 window=0 tokens=[0,2048) '
+                 'new=0 kv=aa']
+        record = dict(tag='pfx-a-0002-hit', prompt_tokens=10000)
+        other = dict(tag='pfx-a-0001-cold', prompt_tokens=10000)
+        pj.resolve([record, other], pm.scan(lines))
+        markers = record['markers']
+        self.assertEqual([(a['q'], a['p'], a['tail']) for a in markers['sticky_admits']], [(6144, 10000, 3856)])
+        self.assertEqual([b['frontier'] for b in markers['sticky_builds']], [6144])
+        self.assertEqual([(w['window'], w['new'], w['kv']) for w in markers['audit_windows']], [(0, 0, 'aa')])
+        self.assertEqual((other['markers']['sticky_admits'], other['markers']['sticky_builds']), ([], []))
 
 
 if __name__ == '__main__':

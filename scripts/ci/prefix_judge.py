@@ -48,7 +48,19 @@
    than one admission; basis 'preemption', a batching effect: the pool was shared): the resumed
    prefill re-reads its own output, not a cold equivalent.
 4. MARKERS: every request's [PREFIX] rows, grants and audit digests, matched by the harness's
-   X-Request-Id tag (prefix_markers.request_tag), else by the request's log window and prompt length.
+   X-Request-Id tag (prefix_markers.request_tag), else by the request's log window and prompt length;
+   on the fast path's sticky sessions also its sticky admit line, its engine build line and its audit
+   window digests.
+5. STICKY SESSIONS (the C2 fast path's phase 1, QWEN_FAST_STICKY_SESSIONS=1; Oracle(sticky=True)). The
+   fast path decodes with DFlash, which vLLM counts as EAGLE-like: its unitary coordinator drops the
+   last matched block of every hit (vLLM 0.25.1 single_type_kv_cache_manager.py FullAttentionManager.
+   find_longest_cache_hit, after the num_tokens - 1 cap), so h is one block short; the trim never
+   resumes above floor2048(P - 2048) (the drafter window [P - 2048, P) is the prefill's own chunks);
+   a request captures C0 = floor2048(P) - 2048 in place of floor2048(P) (the next turn's hit stops a
+   block short of what this one publishes, so its trim lands one chunk lower), and the gap boundary as
+   before. The fast path is batch invariant and has no preemption, so a concurrent hit is judged
+   against its solo cold twin strictly (no batch-matched control) and a preempted request is a fault,
+   never an excuse.
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -95,11 +107,32 @@ def token_sha(tokens):
     return hashlib.sha256(array('q', list(tokens or ())).tobytes()).hexdigest()
 
 
-class Oracle(object):
-    """The expected hit, trim and captures of each admitted request, in admission order."""
+def resume_ceiling(prompt_tokens):
+    """The highest Q sticky sessions grant a prompt of `prompt_tokens`: floor2048(P - 2048), so the fast
+    path's drafter window [P - 2048, P) is this prefill's own chunks."""
+    return floor_chunk(max(0, int(prompt_tokens) - CHUNK))
 
-    def __init__(self, capacity=None):
+
+def capture_boundary(prompt_tokens, sticky=False):
+    """The prompt's own capture candidate: floor2048(P), or under sticky sessions C0 = floor2048(P) - 2048."""
+    boundary = floor_chunk(prompt_tokens)
+    return boundary - CHUNK if sticky else boundary
+
+
+def fresh_plan(prompt_tokens, sticky=False):
+    """What a request with no hit (a fresh salt) captures: its prompt's capture candidate when positive."""
+    position = capture_boundary(prompt_tokens, sticky)
+    return [position] if position > 0 else []
+
+
+class Oracle(object):
+    """The expected hit, trim and captures of each admitted request, in admission order. sticky: the
+    fast path's sticky sessions (module docstring item 5): the DFlash drop, the drafter-window ceiling
+    and the C0 capture."""
+
+    def __init__(self, capacity=None, sticky=False):
         self.capacity = store_entries() if capacity is None else int(capacity)
+        self.sticky = bool(sticky)
         self.published = {}
         self.checkpoints = OrderedDict()
         self.killed = False
@@ -114,16 +147,21 @@ class Oracle(object):
         blocks = 0
         while blocks < min(usable, len(digests)) and digests[blocks] in published:
             blocks += 1
+        if self.sticky and blocks:
+            blocks -= 1     # vLLM's EAGLE drop: DFlash's hit loses its last matched block
         h = blocks * BLOCK
         q = 0
-        for k in range(h // CHUNK, 0, -1):
+        top = h // CHUNK
+        if self.sticky:
+            top = min(top, resume_ceiling(len(tokens)) // CHUNK)
+        for k in range(top, 0, -1):
             key = (salt, digests[k * CHUNK // BLOCK - 1])
             if key in self.checkpoints:
                 q = k * CHUNK
                 self.checkpoints.move_to_end(key)
                 break
         plan = set()
-        boundary = floor_chunk(len(tokens))
+        boundary = capture_boundary(len(tokens), self.sticky)
         if boundary > q:
             plan.add(boundary)
         if floor_chunk(h) - q >= CHUNK:
@@ -143,6 +181,16 @@ class Oracle(object):
         while blocks < len(digests) and digests[blocks] in published:
             blocks += 1
         return blocks * BLOCK
+
+    def expected_raw_hit(self, salt, tokens):
+        """vLLM's own hit for `tokens` (what vllm:prefix_cache_hits counts, before the graft's trim): what
+        this salt published, capped at num_tokens - 1, less the dropped block under sticky sessions."""
+        tokens = list(tokens)
+        capped = (max(0, len(tokens) - 1) // BLOCK) * BLOCK
+        raw = min(self.published_tokens(salt, tokens), capped)
+        if self.sticky and raw:
+            raw -= BLOCK
+        return raw
 
     def _put(self, key):
         if self.capacity <= 0:
@@ -311,10 +359,11 @@ def admissions(record):
     return ((record or {}).get('markers') or {}).get('admissions') or 0
 
 
-def settle(pair, index):
+def settle(pair, index, strict=False):
     """A pair's final verdict once markers are resolved (index: tag -> record): a DIVERGED pair whose
     hit, cold run, second cold run or batch control vLLM preempted and resumed (admissions > 1) is
-    NOT_COMPARABLE, and any pair that is not IDENTICAL names its preempted requests.
+    NOT_COMPARABLE, and any pair that is not IDENTICAL names its preempted requests. strict (the fast
+    path, which has no preemption): nothing is excused, the preempted requests are only named.
     -> the pair (updated in place)."""
     if pair.get('verdict') in ('IDENTICAL', None):
         return pair
@@ -324,7 +373,7 @@ def settle(pair, index):
         if count > 1:
             resumed.append('%s (%d admissions)' % (tag, count))
     if resumed:
-        if pair['verdict'] == 'DIVERGED':
+        if pair['verdict'] == 'DIVERGED' and not strict:
             pair['verdict'] = 'NOT_COMPARABLE'
             pair['basis'] = 'preemption'
         pair['detail'] = ('%s; preempted and resumed: %s - a resumed prefill re-reads its own output, not a cold '
@@ -424,9 +473,16 @@ def resolve(records, scanned):
     admissions count is the number of rows (a preempted request is re-admitted and prints again);
     `grant` is the first admission's (the grants logged before the second row). Sets
     record['markers'] and returns the records."""
-    grants, rows, audits, skipped = {}, {}, {}, {}
+    grants, rows, audits, skipped, admits, windows = {}, {}, {}, {}, {}, {}
     for entry in scanned.get('grants') or ():
         grants.setdefault(entry['tag'], []).append(entry)
+    for entry in scanned.get('sticky_admits') or ():
+        if entry.get('tag'):
+            admits.setdefault(entry['tag'], []).append(entry)
+    for entry in scanned.get('audit_windows') or ():
+        if entry.get('tag'):
+            windows.setdefault(entry['tag'], []).append(entry)
+    builds = list(scanned.get('sticky_builds') or ())
     untagged = []
     for entry in scanned.get('rows') or ():
         if entry.get('tag'):
@@ -442,7 +498,9 @@ def resolve(records, scanned):
     for record in records:
         tag = record.get('tag')
         found = dict(grants=list(grants.get(tag) or ()), rows=list(rows.get(tag) or ()),
-                     audit=(audits.get(tag) or [None])[0], skipped=list(skipped.get(tag) or ()), matched='tag')
+                     audit=(audits.get(tag) or [None])[0], skipped=list(skipped.get(tag) or ()), matched='tag',
+                     sticky_admits=list(admits.get(tag) or ()), audit_windows=list(windows.get(tag) or ()),
+                     sticky_builds=[entry for entry in builds if engine_id_matches(entry.get('req'), tag)])
         if not found['rows'] and untagged and record.get('log_window'):
             start, end = record['log_window']
             window = [entry for entry in untagged if start <= entry['index'] <= end
@@ -460,6 +518,23 @@ def resolve(records, scanned):
         found['grant'] = first_grant(found['grants'], found['rows'])
         record['markers'] = found
     return records
+
+
+def engine_id_matches(engine_id, tag):
+    """Whether an engine request id a line printed - whole, or cut to its first 48 characters (the fast
+    path's engine lines print str(req_id)[:48]) - is the request the harness tagged `tag`: the API server's
+    'chatcmpl-<tag>' plus the input processor's '-<8 characters>' (prefix_markers.request_tag). Tags carry a
+    unique counter ahead of their label, so a cut id names one request."""
+    if not engine_id or not tag:
+        return False
+    text = str(engine_id)
+    full = 'chatcmpl-' + tag
+    if text == full:
+        return True
+    if text.startswith(full + '-'):
+        rest = text[len(full) + 1:]
+        return 0 < len(rest) <= 8 and rest.isalnum()
+    return len(text) >= 40 and (full + '-').startswith(text)
 
 
 def first_grant(grants, rows):
@@ -488,14 +563,18 @@ def observed_q(record):
 FRESH_ROLES = ('cold', 'capture', 'cold-batch')
 
 
-def reuse_problems(record, sequential=True):
+def reuse_problems(record, sequential=True, sticky=False):
     """What one request's markers say against the oracle's expectation (record['expected']) and the
     request's own role. -> list of (severity, text): FAIL for a missing or inconsistent row, a grant
     to an unsalted or fresh-salt request, a restore without a grant, a capture nobody planned, or
     (sequential) a Q, h or capture plan other than the oracle's - a grant the design forbids, a
     block published past the cap; LOST for a hit the oracle expected and the engine did not give;
     NOTE for an off-oracle reading where requests overlapped (the oracle is then only an estimate
-    of admission order) and for each re-admission of a preempted request."""
+    of admission order) and for each re-admission of a preempted request. sticky (the fast path's
+    sticky sessions, module docstring item 5), whatever the overlap: FAIL for a Q above the drafter
+    window's ceiling floor2048(L - 2048), a re-admission (the fast path has no preemption), and a hit
+    whose sticky admit line is missing or disagrees with its row (Q, P, tail = P - Q), or an admit
+    line for a request that resumed nothing."""
     markers = record.get('markers') or {}
     expected = record.get('expected') or {}
     role, tag = record.get('role'), record.get('tag')
@@ -512,6 +591,10 @@ def reuse_problems(record, sequential=True):
         out.append(('FAIL', '%s: [PREFIX] L=%s on its first admission but the prompt is %s tokens' % (
             tag, markers['l'], prompt)))
     for later in rows[1:]:
+        if sticky:
+            out.append(('FAIL', '%s: a second [PREFIX] row (L=%s Q=%s): the fast path serves no preemption, so no '
+                                'request may be re-admitted' % (tag, later.get('l'), later.get('q'))))
+            continue
         # A preempted request resumes by re-prefilling its prompt and the output so far.
         output = record.get('completion_tokens')
         ceiling = (prompt or 0) + output if output is not None else float('inf')
@@ -525,6 +608,8 @@ def reuse_problems(record, sequential=True):
             out.append(('FAIL', '%s: Q=%d is not a %d-token boundary' % (tag, row['q'], CHUNK)))
         if row.get('q') and row.get('l') is not None and row['q'] >= row['l']:
             out.append(('FAIL', '%s: Q=%d is not below L=%s' % (tag, row['q'], row['l'])))
+    if sticky:
+        out += sticky_problems(record, rows)
     granted = sorted(entry['q'] for entry in markers.get('grants') or () if entry.get('q'))
     restored = sorted(row['q'] for row in rows if row.get('q'))
     if Counter(granted) != Counter(restored):
@@ -571,6 +656,37 @@ def reuse_problems(record, sequential=True):
         if planned != sorted(expected['plan']):
             out.append((above, '%s: the scheduler planned captures %s where the oracle plans %s' % (
                 tag, planned, sorted(expected['plan']))))
+    return out
+
+
+def sticky_problems(record, rows):
+    """reuse_problems' sticky-session checks of one request's first admission. -> [(severity, text)]."""
+    markers = record.get('markers') or {}
+    tag = record.get('tag')
+    prompt = record.get('prompt_tokens')
+    out = []
+    first = rows[0] if rows else None
+    q = (first or {}).get('q')
+    if q and prompt is not None and q > resume_ceiling(prompt):
+        out.append(('FAIL', '%s: Q=%d is above floor2048(L - 2048) = %d: a resume inside the fast path\'s drafter '
+                            'window (a C1 grant the sticky trim forbids)' % (tag, q, resume_ceiling(prompt))))
+    admits = markers.get('sticky_admits') or []
+    if q:
+        matching = [entry for entry in admits if entry.get('q') == q]
+        if not matching:
+            out.append(('FAIL', '%s: restored Q=%d but no "[PINDIAG] sticky admit" line with Q=%d (%s): the fast '
+                                'path\'s lifecycle did not take the resume it prefilled' % (
+                                    tag, q, q, [entry.get('q') for entry in admits] or 'none')))
+        else:
+            admit = matching[0]
+            if prompt is not None and (admit.get('p') != prompt or admit.get('tail') != prompt - q):
+                out.append(('FAIL', '%s: its sticky admit line says P=%s tail=%s, the request is P=%s Q=%d (tail %d)' % (
+                    tag, admit.get('p'), admit.get('tail'), prompt, q, prompt - q)))
+        if len(admits) > 1:
+            out.append(('FAIL', '%s: %d sticky admit lines for one request' % (tag, len(admits))))
+    elif admits:
+        out.append(('FAIL', '%s: a sticky admit line (Q=%s) for a request whose row restored nothing' % (
+            tag, admits[0].get('q'))))
     return out
 
 
@@ -664,6 +780,42 @@ def digest_problems(cold, hit):
             out.append(('FAIL', 'the %s differs between %s and %s (%s %s vs %s)' % (
                 what, cold.get('tag'), hit.get('tag'), name, a[name], b[name])))
     return out
+
+
+def window_findings(records):
+    """The audit's per-window KV digests (QWEN_PREFIX_AUDIT=1: one '[PREFIX-AUDIT] ... window=w' line per
+    2048-token window of each prefill row) across every audited request of an arm: any two rows whose
+    prompts share their tokens up to a window's end must hold the same KV bytes in that window - a hit's
+    restored windows (new=0: the shared or retained blocks, read after other requests decoded beside
+    them) against the cold run or earlier hit that wrote them. Only full windows are compared; a row's
+    prompt is identified per window by record['chunk_digests'] (prefix_digests at CHUNK). -> (problems,
+    lines: how many windows were compared, and how many of them a hit read without writing, and that
+    count alone)."""
+    groups = {}
+    for record in records:
+        if not record.get('ok') and not record.get('aborted'):
+            continue
+        prefixes = record.get('chunk_digests') or []
+        for window in (record.get('markers') or {}).get('audit_windows') or ():
+            index, start, end = window.get('window'), window.get('start'), window.get('end')
+            if index is None or start is None or end is None or end - start != CHUNK or index >= len(prefixes):
+                continue
+            key = (index, prefixes[index])
+            groups.setdefault(key, []).append((record.get('tag'), window.get('kv'), window.get('new')))
+    problems, compared, restored = [], 0, 0
+    for (index, _), entries in sorted(groups.items()):
+        if len(entries) < 2:
+            continue
+        compared += 1
+        restored += 1 if any(new == 0 for _, _, new in entries) else 0
+        digests = set(kv for _, kv, _ in entries)
+        if len(digests) > 1:
+            problems.append('KV window %d [%d, %d) differs between requests with the same tokens there: %s' % (
+                index, index * CHUNK, (index + 1) * CHUNK,
+                ', '.join('%s %s%s' % (tag, kv, ' (restored)' if new == 0 else '') for tag, kv, new in entries[:6])))
+    lines = ['audit windows: %d shared windows compared, %d of them read by a hit without writing them' % (
+        compared, restored)]
+    return problems[:16], lines, restored
 
 
 def audit_problems(cold, hit):

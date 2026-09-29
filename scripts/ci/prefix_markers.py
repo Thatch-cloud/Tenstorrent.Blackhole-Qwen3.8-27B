@@ -65,6 +65,26 @@ never guessed around):
     compares a hit's digests with its cold twin's over the same range, so kv_range should be 0:L
     on every row (a hit's [0,Q) is the shared blocks, L2; its [Q,L) the resumed chunks and tail).
 
+  model graft, the warmup (qwen_prefix_model_patch MARKER_WARM, once per engine, before vLLM builds the scheduler):
+    [PINDIAG] prefix: model warm restore_mode=<h2d|copy> results={...} gdn_layers=<n> ... programs=<n>
+        the restore path round-tripped and the mid-loop captures declared; read into model_warm (its fields).
+        The fast path's sticky sessions require it: without it the first resume stops the engine and the
+        first turn after boot plans no C0 capture.
+  audit mode, per window (QWEN_PREFIX_AUDIT=1, the rows' window lines):
+    [PREFIX-AUDIT] req=<id> Q=<n> L=<n> window=<w> tokens=[<a>,<b>) new=<0|1> kv=<hex>
+        read into audit_windows (tag, q, l, window, start, end, new, kv): the KV bytes of each 2048-token
+        window; new=0 marks a window a hit restored rather than wrote (prefix_judge.window_findings).
+  the fast path's sticky sessions (QWEN_FAST_STICKY_SESSIONS=1):
+    [PINDIAG] prefix: install sticky=1 lookahead=<n> drop_last=<bool> ceiling=floor2048(P-2048)
+        the scheduler graft's second install line; read into sticky_installs, never installs.
+    [PINDIAG] sticky admit req='<engine request id>' Q=<n> P=<n> tail=<n>
+        serving_lifecycle, once per request admitted at a granted boundary; read into sticky_admits.
+    [PINDIAG] sticky engine built req=<engine request id, first 48 characters> ms=<f> frontier=<R, 0 cold>
+        prompt=<P>   serving_runtime.STICKY_ENGINE_MARKER, once per admitted request's engine build; read
+        into sticky_builds (the TTFT split: the tail prefill, then this build).
+    [PINDIAG] verify t2 kv shared ...   verify_trace_t2.KV_SHARED, a packed round's K/V conflict (the proposal
+        guard's or the stage's); read into kv_shared, which a fast-path prefix arm needs empty.
+
 Other lines read: the serving contract's '[QWEN-C2] profile <name>: vLLM argv [...]' (the launched
 argv, memory read-the-launched-argv), the TT platform's 'Automatic prefix caching is enabled' and
 'Chunked prefill is not supported ... disabling it', the model's '[TP chunk-replay]' (the traced
@@ -85,6 +105,14 @@ REQUIRED_STATS = ('pins', 'commit_mismatch', 'dropped_attempts', 'dropped_hits',
                   'evicted_coupled', 'evicted_lru', 'unsalted_denied')
 DOCKER_TIME = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) ')
 INSTALL = '[PINDIAG] prefix: install '
+# The scheduler graft's sticky-session install line begins 'install sticky=' (qwen_prefix_scheduler_patch).
+STICKY_INSTALL = 'sticky='
+STICKY_ADMIT = re.compile(r"\[PINDIAG\] sticky admit req=(?:'([^']*)'|\"([^\"]*)\"|(\S+)) Q=(\d+) P=(\d+) tail=(\d+)")
+STICKY_BUILT = re.compile(r'\[PINDIAG\] sticky engine built req=(\S+) ms=([0-9.]+) frontier=(\d+) prompt=(\d+)')
+MODEL_WARM = '[PINDIAG] prefix: model warm '
+KV_SHARED = '[PINDIAG] verify t2 kv shared'    # verify_trace_t2.KV_SHARED
+AUDIT_WINDOW = re.compile(r'\[PREFIX-AUDIT\] req=(\S+) Q=(\d+) L=(\d+) window=(\d+) tokens=\[(\d+),(\d+)\) '
+                          r'new=([01]) kv=(\S+)')
 GRANT = re.compile(r'\[PINDIAG\] prefix: grant req=(\S+) h=(\d+) Q=(\d+)(?: drain=(\d+))? plan=\[([0-9, ]*)\]')
 COMMIT_REFUSED = re.compile(r'\[PINDIAG\] prefix: commit refused req=(\S+) start_pos=(\d+) Q=(\d+)')
 CAPTURE_SKIPPED = re.compile(r'\[PINDIAG\] prefix: capture skipped req=(\S+) pos=(\S+): (.*)$')
@@ -234,14 +262,37 @@ def scan(lines):
     entry keeps its line index and timestamp so the driver can window it against a request."""
     out = dict(installs=[], grants=[], rows=[], audits=[], refused=[], capture_skipped=[], kill_switch=[],
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
-               kv_tokens=None, failures=[], eager_warm=[])
+               kv_tokens=None, failures=[], eager_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
+               model_warm=[], kv_shared=[], audit_windows=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
         where = dict(index=index, time=stamp)
         if INSTALL in line:
-            entry = fields(line.split(INSTALL, 1)[1])
+            body = line.split(INSTALL, 1)[1]
+            entry = fields(body)
             entry.update(where)
-            out['installs'].append(entry)
+            out['sticky_installs' if body.startswith(STICKY_INSTALL) else 'installs'].append(entry)
+        match = STICKY_ADMIT.search(line)
+        if match:
+            req = match.group(1) or match.group(2) or match.group(3)
+            out['sticky_admits'].append(dict(where, req=req, tag=request_tag(req), q=int(match.group(4)),
+                                             p=int(match.group(5)), tail=int(match.group(6))))
+        match = STICKY_BUILT.search(line)
+        if match:
+            out['sticky_builds'].append(dict(where, req=match.group(1), ms=float(match.group(2)),
+                                             frontier=int(match.group(3)), prompt=int(match.group(4))))
+        if MODEL_WARM in line:
+            entry = fields(line.split(MODEL_WARM, 1)[1])
+            entry.update(where)
+            out['model_warm'].append(entry)
+        if KV_SHARED in line:
+            out['kv_shared'].append(dict(where, line=line.strip()[:300]))
+        match = AUDIT_WINDOW.search(line)
+        if match:
+            out['audit_windows'].append(dict(where, req=match.group(1), tag=request_tag(match.group(1)),
+                                             q=int(match.group(2)), l=int(match.group(3)), window=int(match.group(4)),
+                                             start=int(match.group(5)), end=int(match.group(6)),
+                                             new=int(match.group(7)), kv=match.group(8)))
         match = GRANT.search(line)
         if match:
             plan = [int(part) for part in match.group(5).replace(' ', '').split(',') if part]

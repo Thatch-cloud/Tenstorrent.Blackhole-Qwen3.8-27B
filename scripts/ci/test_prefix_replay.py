@@ -25,7 +25,16 @@ miniature whose GRANTS COME FROM THE REAL SCHEDULER GRAFT, not from the harness'
     waiting gauge) are served on metrics();
   - greedy answers depend only on the prompt, unless a batching fault makes a token decoded beside
     others move (the general path's batched decode is not batch-invariant: G1 v48); faults are
-    switches (see FakeEngine.FAULTS), `piece` the tokenizer's density (a subclass sets it).
+    switches (see FakeEngine.FAULTS), `piece` the tokenizer's density (a subclass sets it);
+  - a profile with the fast path's sticky sessions (QWEN_FAST_STICKY_SESSIONS=1, c2-packed-prefix) gets
+    the real graft built with sticky=True over a coordinator that flags the EAGLE group, and the
+    manager drops a hit's last block as vLLM does for DFlash: grants, ceilings and C0 plans are the
+    graft's own; it logs the sticky install line, the model graft's warmup line, a sticky admit line
+    per hit and an engine build line per admission; an S2 profile (QWEN_FAST_EXTENT_REPLAY=1) logs the
+    C2-any and S2 attach lines and, whenever two or more requests decode in one step, a packed round
+    ([PACKED] lines, the extent round line, and with QWEN_FAST_EXTENT_AUDIT=1 its audit line); with
+    QWEN_PREFIX_AUDIT=1 every row also prints one window line per 2048 tokens, its digest a function of
+    the tokens up to the window's end (as the KV bytes are).
 
 test_c2_prefix_gate reuses it."""
 
@@ -73,6 +82,30 @@ def words(text, piece=3):
     """About one token per 3.2 characters, as Qwen3.8's tokenizer on this text: each whitespace-
     separated word in 3-character pieces (`piece` 2: text denser than the harness's estimate)."""
     return [word(w[i:i + piece]) for w in (text or '').split() for i in range(0, len(w), piece)]
+
+
+# The C2-any and S2 attach lines an S2 engine logs (test_c2_serving_gate.any_request_log and
+# test_c2_serving_gate_s2.s2_log's), the first four for any C2-any profile.
+S2_BOOT_LINES = ('[PINDIAG] request quarantine installed on vllm_tt_plugin.scheduler.TTScheduler',
+                 '[PINDIAG] request quarantine consumer live in TTScheduler',
+                 '[PINDIAG] one fresh prefill per step installed on vllm_tt_plugin.scheduler.TTScheduler',
+                 '[PINDIAG] one fresh prefill per step live in TTScheduler',
+                 '[PINDIAG] packed-any admission admitted runtime=152951c1 evidence=ok',
+                 '[QWEN-SDPA] runtime-extent entries=2',
+                 '[PINDIAG] extent replay engaged segments=4 flags=[0x27] mask=narrow capacity=131328',
+                 '[PINDIAG] eager publication warmed: 71 shapes in 1830.4 ms packed=0,16,32,48:1-16 '
+                 'sequential=1:1,2:1-2,4:1-4 merge_release=1 fused_steady_state=1 program_cache=554->554')
+
+
+def sticky_profile(name='c2-packed-prefix', context=40960):
+    """The checkout's fast-path profile (c2-packed-prefix, or c2-packed), its context cut to `context` so the
+    fake's prompts stay small: the prompt limit is then context less min_answer_tokens (32,768), the pool
+    four contexts."""
+    profile = copy.deepcopy(marker_fixture.PROFILES['profiles'][name])
+    profile['engine']['max-model-len'] = context
+    profile['engine']['max-num-batched-tokens'] = context
+    profile['env']['QWEN_FAST_MAX_POSITION'] = str(context)
+    return profile
 
 
 def served_profile(name='general-prefix'):
@@ -265,6 +298,7 @@ class FakeManager(object):
         self.block_pool, self.coordinator = pool, coordinator
         self.empty_kv_cache_blocks = FakeBlocks(([],))
         self.hits = self.queries = 0
+        self.drop_last = False
 
     def create_kv_cache_blocks(self, groups):
         return FakeBlocks(groups)
@@ -277,6 +311,8 @@ class FakeManager(object):
             if block is None:
                 break
             found.append(block)
+        if self.drop_last and found:
+            found.pop()     # vLLM's EAGLE drop (DFlash): FullAttentionManager.find_longest_cache_hit
         if not request.num_preemptions:
             self.queries += request.num_tokens
             self.hits += len(found) * BLOCK
@@ -299,7 +335,12 @@ class FakeEngine(object):
               # the same way in any burst (batch_variant), or by the burst itself, which no control reproduces
               # (batch_unmatched); a hit restored in a burst diverges, reuse off it does not
               # (diverge_concurrent_hits).
-              'batch_variant', 'batch_unmatched', 'diverge_concurrent_hits')
+              'batch_variant', 'batch_unmatched', 'diverge_concurrent_hits',
+              # Sticky sessions and the S2 lines (the module docstring): one missing marker each, a K/V conflict in a
+              # packed round, a hit that reads a shared window other than its writer left, a C1 grant (the ceiling
+              # off in the graft), an unaudited packed round.
+              'no_sticky_install', 'no_model_warm', 'no_sticky_admit', 'no_sticky_build', 'kv_shared',
+              'corrupt_shared_window', 'no_ceiling', 'unaudited_round')
     piece = 3
     # The model graft's G2 reading (qwen_prefix_model_patch._qwen_prefix_dram), in serving_buffer_pool's text.
     DRAM_TEXT = ('chip0 allocated=25.90GB free=8.01GB largest_free=7877.5MB of 33.91GB; '
@@ -315,6 +356,11 @@ class FakeEngine(object):
         env, engine = self.profile.get('env') or {}, self.profile.get('engine') or {}
         tt = (engine.get('additional-config') or {}).get('tt') or {}
         self.prefix = str(env.get('QWEN_PREFIX_REUSE')) == '1' and engine.get('enable-prefix-caching') is True
+        self.sticky = self.prefix and str(env.get('QWEN_FAST_STICKY_SESSIONS')) == '1'
+        self.s2 = str(env.get('QWEN_FAST_EXTENT_REPLAY')) == '1'
+        self.any_request = str(env.get('QWEN_FAST_ANY_REQUEST')) == '1'
+        self.extent_audit = str(env.get('QWEN_FAST_EXTENT_AUDIT')) == '1'
+        self.rounds = 0
         self.path = path or ('eager' if tt.get('trace_mode') == 'decode_only' else 'traced')
         self.audit = str(env.get('QWEN_PREFIX_AUDIT')) == '1'
         self.dev_mode = str(env.get('VLLM_SERVER_DEV_MODE')) == '1'
@@ -361,11 +407,19 @@ class FakeEngine(object):
         self.single = SimpleNamespace(num_cached_block={}, req_to_blocks={})
         self.coordinator = FakeCoordinator(self.pool, self.single)
         self.manager = FakeManager(self.pool, self.coordinator)
+        if self.sticky:
+            # DFlash is EAGLE-like to vLLM: the coordinator flags group 0 and a hit loses its last block.
+            self.coordinator.eagle_group_ids = {0}
+            self.manager.drop_last = True
         self.registry = graft.PrefixRegistry(environ=dict(QWEN_PREFIX_STORE_GIB=str(self.store_gib)))
         # The served model graft declares its mid-loop captures at warmup (qwen_prefix_model_patch).
         self.registry.enable_mid_loop_capture()
         self.graft = graft.SchedulerGraft(SimpleNamespace(kv_cache_manager=self.manager), self.registry,
-                                          graft.KillSwitch(self.kill_path, 0.0, time.monotonic), self.graft_say)
+                                          graft.KillSwitch(self.kill_path, 0.0, time.monotonic), self.graft_say,
+                                          sticky=self.sticky)
+        if self.sticky and 'no_ceiling' in self.faults:
+            # The trim without its ceiling (G1's), the drop and the C0 plan kept: a C1 grant is possible.
+            self.graft.sticky = False
         self.graft.original.update(get_computed_blocks=self.manager.get_computed_blocks,
                                    cache_blocks=self.coordinator.cache_blocks,
                                    _maybe_evict_cached_block=self.pool._maybe_evict_cached_block)
@@ -392,6 +446,19 @@ class FakeEngine(object):
         if self.prefix:
             line = marker_fixture.install_line().replace('store_gib=8.0', 'store_gib=%.1f' % self.store_gib)
             self.say('(EngineCore pid=9) ' + line)
+        if self.sticky and 'no_sticky_install' not in self.faults:
+            self.say('(EngineCore pid=9) ' + marker_fixture.graft_line(
+                'install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)', 16, True, judge.CHUNK))
+        if self.sticky and 'no_model_warm' not in self.faults:
+            self.say('(EngineCore pid=9) INFO | models.demos.blackhole.qwen36.tt.model:_qwen_prefix_warm:740 - '
+                     '[PINDIAG] prefix: model warm restore_mode=h2d results={\'copy\': \'exact\', \'h2d\': \'exact\'} '
+                     'gdn_layers=48 checkpoint_bytes=153944064 programs=554')
+        if self.any_request or self.s2:
+            for line in S2_BOOT_LINES[:4]:
+                self.say('(EngineCore pid=9) INFO ' + line)
+        if self.s2:
+            for line in S2_BOOT_LINES[4:]:
+                self.say('(EngineCore pid=9) INFO ' + line)
 
     # -- tokens ----------------------------------------------------------------------------------
     def render_message(self, message):
@@ -626,6 +693,12 @@ class FakeEngine(object):
                 or ('diverge_concurrent_hits' in self.faults and q and request.burst))
             if 'diverge_once' in self.faults and q:
                 self.diverged_once = True
+        if self.sticky and 'no_sticky_build' not in self.faults:
+            self.say('(EngineCore pid=9) INFO [PINDIAG] sticky engine built req=%s ms=3500.0 frontier=%d prompt=%d' % (
+                request.request_id[:48], q, len(request.prompt_token_ids)))
+        if self.sticky and first and q and 'no_sticky_admit' not in self.faults:
+            self.say("(EngineCore pid=9) INFO [PINDIAG] sticky admit req='%s' Q=%d P=%d tail=%d" % (
+                request.request_id, q, len(request.prompt_token_ids), len(request.prompt_token_ids) - q))
         if not self.prefix:
             return
         before = self.programs
@@ -649,6 +722,14 @@ class FakeEngine(object):
         if captured:
             self.dram(pm.DRAM_FIRST_CAPTURE)
         if self.audit:
+            for window in range(-(-len(ids) // judge.CHUNK)):
+                end = min((window + 1) * judge.CHUNK, len(ids))
+                kv = judge.token_sha(ids[:end])[:16]
+                if 'corrupt_shared_window' in self.faults and q and window == 0:
+                    kv = 'ff' + kv[2:]
+                self.say('[PREFIX-AUDIT] req=%s Q=%d L=%d window=%d tokens=[%d,%d) new=%d kv=%s' % (
+                    request.request_id, q, len(ids), window, window * judge.CHUNK, end,
+                    int(window * judge.CHUNK >= q), kv))
             digest = judge.token_sha(ids)[:16]
             self.say('[PREFIX-AUDIT] req=%s Q=%d L=%d kv_range=0:%d kv_sha=%s slot_sha=%s' % (
                 request.request_id, q, len(ids), len(ids), digest, digest))
@@ -660,6 +741,8 @@ class FakeEngine(object):
         token per PACE_S of real time instead, so a waiting request can be seen and aborted behind it
         as on hardware. -> whether any token was emitted."""
         now, emitted = time.time(), False
+        if self.s2 and len(self.running) >= 2:
+            self.packed_round()
         for request in list(self.running):
             if request not in self.running:
                 continue
@@ -675,6 +758,22 @@ class FakeEngine(object):
                 if not self.emit(request):
                     break
         return emitted
+
+    def packed_round(self):
+        """The S2 lines of one packed round of every running request (its position, its 256-key family)."""
+        self.rounds += 1
+        live = list(self.running)
+        for segment, request in enumerate(live):
+            self.say('INFO [PACKED] request=%s segment=%d position=%d prefix=1 emitted=1 predictions=[1]' % (
+                request.request_id, segment, request.num_tokens))
+        self.say('INFO [PINDIAG] packed extent round round=%d live=%d families=[%s]' % (
+            self.rounds, len(live), ','.join('%d:%d' % (segment, (request.num_tokens // 256 + 1) * 256)
+                                             for segment, request in enumerate(live))))
+        if self.extent_audit and not ('unaudited_round' in self.faults and self.rounds == 2):
+            self.say('INFO [EXTENT-AUDIT] round=%d segments=%d words_ok=%d cur_pos_ok=%d mask_ok=1 tables_ok=1 '
+                     'rotated=0 ms=2.0' % (self.rounds, len(live), len(live), len(live)))
+        if 'kv_shared' in self.faults and self.rounds == 1:
+            self.say('WARNING [PINDIAG] verify t2 kv shared site=proposal_rows rows 0 and 1 share page 0 row 0')
 
     def emit(self, request):
         """One output token for a running request (a block for it first, preempting the last running
@@ -861,6 +960,20 @@ def corpus():
 def driver_for(engine, arm='arm', strict=True):
     return replay.Driver(engine, arm, CORPUS, log=FakeLog(engine), container=FakeContainer(engine), seed=1,
                          sleep=lambda seconds: None, say=lambda text: None, pods=lambda: 3, strict=strict)
+
+
+def sticky_engine(context=40960, **env):
+    """A fake c2-packed-prefix engine (sticky_profile), with extra profile environment (the audits)."""
+    profile = sticky_profile(context=context)
+    profile['env'].update(env)
+    return FakeEngine(profile=profile, name='c2-packed-prefix')
+
+
+def sticky_driver(engine, arm='arm', prompt_limit=32768):
+    """A driver as c2_prefix_gate builds one for a sticky arm: the sticky oracle, strict pairs, the prompt limit."""
+    return replay.Driver(engine, arm, CORPUS, log=FakeLog(engine), container=FakeContainer(engine), seed=1,
+                         sleep=lambda seconds: None, say=lambda text: None, pods=lambda: 3, strict=True, sticky=True,
+                         batch_invariant=True, prompt_limit=prompt_limit)
 
 
 CORPUS = corpus()
@@ -1709,6 +1822,126 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(len(salts), 2, 'one tenant salt per agent')
         continued = [r for r in driver.records if r['continuation']]
         self.assertTrue(continued)
+
+
+class StickyScenarioTests(unittest.TestCase):
+    """The fast path's sticky sessions against the REAL graft built sticky (FakeEngine on c2-packed-prefix,
+    its context cut to 40,960 so its prompt limit is 32,768): the oracle's drop, ceiling and C0 plan agree
+    with the graft request by request, pairs are strict, and the shared-agents arm packs and audits."""
+
+    def setUp(self):
+        self.engine = None
+        patcher = burst_aware(lambda: self.engine)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name, value in (('CHAIN_HITS', (4200, 9000, 16500)), ('CHAIN_HITS_LONG', (24000,))):
+            patcher = mock.patch.object(replay, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def problems(self, records):
+        return [text for r in records for severity, text in judge.reuse_problems(r, sticky=True) if severity != 'NOTE']
+
+    def test_the_full_eager_set_runs_to_the_prompt_limit_and_the_oracle_is_the_graft(self):
+        self.engine = engine = sticky_engine()
+        self.assertTrue((engine.sticky, engine.s2, engine.path) == (True, True, 'eager'))
+        self.assertTrue(engine.graft.sticky and engine.graft.drop_last, 'the real graft, built sticky over the drop')
+        driver = sticky_driver(engine, 'exactness-eager')
+        self.assertEqual(replay.chain_hits(driver, True), (6000, 9000, 16500, 24000, 32768))
+        self.assertEqual(replay.chain_hits(driver, False), (6000, 9000, 16500))
+        self.assertEqual(replay.chain_hits(driver_for(FakeEngine()), True), replay.CHAIN_HITS, 'G1 unchanged')
+        replay.scenario_exactness(driver, 'eager', full=True)
+        cases = set(pair['case'] for pair in driver.pairs)
+        self.assertEqual(cases, {'chain', 'changed-suffix', 'early-divergence', 'boundary-2047', 'boundary-2048',
+                                 'boundary-2049', 'boundary-4095', 'boundary-4096', 'boundary-4097', 'shared-system'})
+        self.assertTrue(all(pair['verdict'] == 'IDENTICAL' for pair in driver.pairs), driver.pairs)
+        records = resolved(driver, engine)
+        self.assertEqual(self.problems(records), [], 'the sticky oracle agrees with the sticky graft on every request')
+        by_tag = dict((r['tag'], r) for r in records)
+        chain = [by_tag[p['hit']] for p in driver.pairs if p['case'] == 'chain']
+        self.assertEqual(len(chain), 6)
+        self.assertGreater(chain[-1]['prompt_tokens'], 30000)
+        self.assertLessEqual(chain[-1]['prompt_tokens'], 32768, 'held to the prompt limit')
+        for record in chain[1:]:
+            q, length = record['markers']['q'], record['prompt_tokens']
+            self.assertLessEqual(q, judge.resume_ceiling(length))
+            if q:
+                admit, = record['markers']['sticky_admits']
+                self.assertEqual((admit['q'], admit['p'], admit['tail']), (q, length, length - q))
+        self.assertTrue(all(r['markers']['q'] for r in chain[2:]), [r['markers']['q'] for r in chain])
+        early = [by_tag[p['hit']] for p in driver.pairs if p['case'] == 'early-divergence']
+        suffix = [by_tag[p['hit']] for p in driver.pairs if p['case'] == 'changed-suffix']
+        self.assertTrue(0 < early[0]['markers']['q'] < suffix[0]['markers']['q'], 'the early fork fell back')
+        for name, want in (('boundary-4095', 0), ('boundary-4096', 2048), ('boundary-4097', 2048), ('boundary-2048', 0)):
+            second = [by_tag[p['hit']] for p in driver.pairs if p['case'] == name][1]
+            self.assertEqual((name, second['markers']['q']), (name, want))
+        for record in records:
+            if record.get('ok'):
+                build, = record['markers']['sticky_builds']
+                self.assertEqual(build['frontier'], record['markers']['q'] or 0)
+        shared = [by_tag[p['hit']] for p in driver.pairs if p['case'] == 'shared-system']
+        self.assertTrue(any(r['markers']['q'] for r in shared[1:]), 'a sibling resumed from the shared block')
+
+    def test_the_prompt_limit_bounds_fit_and_send(self):
+        self.engine = engine = sticky_engine()
+        driver = sticky_driver(engine, prompt_limit=3000)
+        conv = driver.conversation('limit', first_tokens=6000)
+        tokens = driver.fit(conv, 64)
+        self.assertLessEqual(tokens, 3000)
+        self.assertTrue(driver.fitted)
+        record = driver.send(driver.conversation('over', first_tokens=6000).body(), 'hit', 's', 'over', max_tokens=64)
+        self.assertIn('prompt limit 3000', record['refused'])
+
+    def test_a_concurrent_hit_is_strict_on_the_fast_path(self):
+        for invariant, verdict, batch in ((True, 'DIVERGED', 0), (False, 'IDENTICAL', 2)):
+            with self.subTest(batch_invariant=invariant):
+                self.engine = engine = sticky_engine(**{'QWEN_FAST_EXTENT_AUDIT': '1'})
+                engine.faults.add('batch_variant')
+                driver = sticky_driver(engine, 'strict')
+                driver.batch_invariant = invariant
+                convs = [driver.conversation('c%d' % index, first_tokens=5000) for index in range(2)]
+                pending = []
+                for conv in convs:
+                    first = driver.send(conv.body(), 'hit', conv.salt, 'setup', conv, 64)
+                    driver.answer(conv, first)
+                    conv.extend(3000)
+                bodies = [conv.body() for conv in convs]
+                hits = replay._burst(driver, [lambda conv=conv, body=body: driver.send(
+                    body, 'hit', conv.salt, 'strict', conv, 64, continuation=True) for conv, body in zip(convs, bodies)])
+                pending = [(hit, body, conv, 64, None) for hit, body, conv in zip(hits, bodies, convs)]
+                replay.concurrent_pairs(driver, pending, 'strict')
+                entries = [pair for pair in driver.pairs if pair['case'] == 'strict']
+                self.assertEqual([pair['verdict'] for pair in entries], [verdict] * 2)
+                self.assertEqual(len([r for r in driver.records if r['role'] == 'cold-batch']), batch)
+                if invariant:
+                    self.assertTrue(all(pair['cold2'] and pair['kind'] == 'concurrent' for pair in entries))
+                    self.assertIn('packed extent round', '\n'.join(engine.lines))
+
+    def test_the_shared_agents_pack_and_their_shared_windows_hold(self):
+        small = ((5000, 9000, 14000), (4800, 7000, 10000), (4600, 6000, 8000), (4400, 5200, 6400))
+        for fault, clean in ((None, True), ('corrupt_shared_window', False)):
+            with self.subTest(fault=fault), mock.patch.object(replay, 'SHARED_AGENT_TARGETS', small), \
+                    mock.patch.object(replay, 'SHARED_AGENT_MAX_TOKENS', 64):
+                self.engine = engine = sticky_engine(QWEN_PREFIX_AUDIT='1', QWEN_FAST_EXTENT_AUDIT='1')
+                if fault:
+                    engine.faults.add(fault)
+                driver = sticky_driver(engine, 'exactness-shared')
+                replay.SCENARIOS['exactness_shared'](driver)
+                kinds = [pair['kind'] for pair in driver.pairs]
+                self.assertEqual(kinds, ['sequential'] * 4 + ['concurrent'] * 8)
+                self.assertTrue(all(pair['verdict'] == 'IDENTICAL' for pair in driver.pairs), driver.pairs)
+                self.assertEqual(sorted(name for name in driver.events if name.startswith('shared-round-')),
+                                 ['shared-round-1', 'shared-round-2'])
+                records = resolved(driver, engine)
+                self.assertEqual(self.problems(records), [])
+                concurrent = [r for r in records if r['role'] == 'hit' and r['continuation']]
+                self.assertEqual(len(concurrent), 8)
+                self.assertTrue(all(r['markers']['q'] for r in concurrent), [r['markers']['q'] for r in concurrent])
+                problems, lines, restored = judge.window_findings(records)
+                self.assertGreater(restored, 0)
+                self.assertEqual(problems == [], clean, problems)
+                live = [line for line in engine.lines if 'packed extent round' in line and 'live=4' in line]
+                self.assertTrue(live, 'the four agents decoded in one packed round')
 
 
 if __name__ == '__main__':

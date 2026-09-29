@@ -251,5 +251,67 @@ class PrometheusTests(unittest.TestCase):
         self.assertEqual(pm.parse_prometheus(None), {})
 
 
+def source(name):
+    with open(os.path.join(HERE, name), encoding='utf-8') as handle:
+        return handle.read()
+
+
+class StickyLineTests(unittest.TestCase):
+    """The fast path's sticky-session lines, as their producers print them."""
+
+    def test_the_sticky_install_line_is_not_an_install(self):
+        lines = [install_line(), graft_line('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)',
+                                            16, True, 2048)]
+        self.assertIn("self.log('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)'",
+                      source('qwen_prefix_scheduler_patch.py'), 'the graft prints this line, as the test does')
+        scanned = pm.scan(lines)
+        self.assertEqual(len(scanned['installs']), 1)
+        self.assertEqual(scanned['installs'][0]['scheduler'], 'vllm_tt_plugin.scheduler.TTScheduler')
+        sticky, = scanned['sticky_installs']
+        self.assertEqual((sticky['sticky'], sticky['lookahead'], sticky['drop_last']), (1, 16, 'True'))
+
+    def test_the_lifecycle_s_admit_and_the_runtime_s_build_lines(self):
+        self.assertIn('logger.info(f"[PINDIAG] sticky admit req={new.req_id!r} Q={resume} "', source('serving_lifecycle.py'))
+        self.assertIn('f"P={len(new.prompt_token_ids)} tail={chunk}")', source('serving_lifecycle.py'))
+        self.assertIn("STICKY_ENGINE_MARKER = '[PINDIAG] sticky engine built req='", source('serving_runtime.py'))
+        self.assertIn("pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}'", source('serving_runtime.py'))
+        req = 'chatcmpl-pfx-exactness-eager-0012-hit-1a2b3c4d'
+        lines = ['(EngineCore pid=9) INFO 09-29 [serving_lifecycle.py:495] [PINDIAG] sticky admit req=%r Q=%d P=%d '
+                 'tail=%d' % (req, 38912, 45800, 45800 - 38912),
+                 '(EngineCore pid=9) INFO [PINDIAG] sticky engine built req=%s ms=%.1f frontier=%d prompt=%d' % (
+                     req[:48], 3712.4, 38912, 45800)]
+        scanned = pm.scan(lines)
+        admit, = scanned['sticky_admits']
+        self.assertEqual((admit['tag'], admit['q'], admit['p'], admit['tail']),
+                         ('pfx-exactness-eager-0012-hit', 38912, 45800, 6888))
+        build, = scanned['sticky_builds']
+        self.assertEqual((build['req'], build['ms'], build['frontier'], build['prompt']), (req[:48], 3712.4, 38912, 45800))
+
+    def test_the_audit_window_line_and_the_model_warm_line(self):
+        text = source('qwen_prefix_model_patch.py')
+        self.assertIn('f"[PREFIX-AUDIT] req={row.req_id} Q={row.start} L={actual} window={w} "', text)
+        self.assertIn('f"tokens=[{w * chunk},{min((w + 1) * chunk, actual)}) new={int(w * chunk >= row.start)} "', text)
+        import qwen_prefix_model_patch as model_patch
+        self.assertTrue(model_patch.MARKER_WARM.startswith(pm.MODEL_WARM))
+        lines = ['INFO [PREFIX-AUDIT] req=chatcmpl-pfx-a-0003-hit-1a2b3c4d Q=4096 L=9000 window=1 tokens=[2048,4096) '
+                 'new=0 kv=0123456789abcdef0123456789abcdef',
+                 'INFO [PREFIX-AUDIT] req=chatcmpl-pfx-a-0003-hit-1a2b3c4d Q=4096 L=9000 kv_range=0:9000 kv_sha=aa '
+                 'slot_sha=bb',
+                 'INFO %sh2d results={} gdn_layers=48 checkpoint_bytes=153944064 programs=554' % model_patch.MARKER_WARM]
+        scanned = pm.scan(lines)
+        window, = scanned['audit_windows']
+        self.assertEqual((window['tag'], window['window'], window['start'], window['end'], window['new'], window['kv']),
+                         ('pfx-a-0003-hit', 1, 2048, 4096, 0, '0123456789abcdef0123456789abcdef'))
+        self.assertEqual(len(scanned['audits']), 1, 'a window line is not an audit row')
+        warm, = scanned['model_warm']
+        self.assertEqual((warm['restore_mode'], warm['programs']), ('h2d', 554))
+
+    def test_kv_shared_is_the_verify_trace_s_own_marker(self):
+        import verify_trace_t2
+        self.assertEqual(pm.KV_SHARED, verify_trace_t2.KV_SHARED)
+        scanned = pm.scan(['WARNING %s site=proposal_rows rows 0,1 page 7 row 0' % verify_trace_t2.KV_SHARED, 'other'])
+        self.assertEqual(len(scanned['kv_shared']), 1)
+
+
 if __name__ == '__main__':
     unittest.main()
