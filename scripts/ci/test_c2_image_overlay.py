@@ -1236,8 +1236,10 @@ class ProvenanceTests(unittest.TestCase):
         gated = sorted(str(key) for key, gate in docker.gates.items() if gate)
         # ...and general-tp4-bench, the four-card benchmark engine, gate only until G5 at TP4 measures its pool.
         # ...and general-tp4-mmrs, the arm that turns the fused prefill out-projection on for the first time at four devices.
-        self.assertEqual(gated, ["('boot', 'general-prefix-eager')", "('boot', 'general-tp4-bench')",
-                                 "('boot', 'general-tp4-mmrs')", "('environment', 'general-prefix-eager')",
+        # ...and c2-packed-tp4-gate, the first four-card S2 runs, gate only until packed_any_evidence_tp4.json records them.
+        self.assertEqual(gated, ["('boot', 'c2-packed-tp4-gate')", "('boot', 'general-prefix-eager')",
+                                 "('boot', 'general-tp4-bench')", "('boot', 'general-tp4-mmrs')",
+                                 "('environment', 'c2-packed-tp4-gate')", "('environment', 'general-prefix-eager')",
                                  "('environment', 'general-tp4-bench')", "('environment', 'general-tp4-mmrs')"])
         runs = []
         real = provenance.Docker()
