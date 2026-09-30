@@ -116,4 +116,41 @@ record('alive_after_refusal', alive)
 record('stream_dropped', lambda: stream([{'role': 'user', 'content': coding}], 1500, drop_after=20))
 time.sleep(5)
 record('alive_after_drop', alive)
+
+
+def agreement():
+    # Opt-in (named in the tests list): greedy answers to real repository text, with per-token log-probabilities, saved
+    # for tp_agreement.py compare against another tensor-parallel configuration (AGREEMENT_OUT, else agreement.json).
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import tp_agreement
+    out = tp_agreement.collect(BASE, MODEL, (os.environ.get('AGREEMENT_ROOT') or '.'), os.environ.get('AGREEMENT_LABEL', 'run'))
+    with open(os.environ.get('AGREEMENT_OUT', 'agreement.json'), 'w') as handle:
+        json.dump(out, handle)
+    return dict(prompts=[dict(name=p['name'], tokens=len(p['tokens']), logprobs=p['logprobs_available'],
+                              finish=p['finish'], error=p.get('error')) for p in out['prompts']])
+
+
+if ONLY and 'agreement' in ONLY:
+    record('agreement', agreement)
+
+
+def bench():
+    # Opt-in (named in the tests list): tp_decode_bench.py's shapes (BENCH_SHAPES, else its default ladder) against
+    # this server, saved as BENCH_OUT (else bench.json) for the pair-versus-TP4 comparison.
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import tp_decode_bench
+    shapes = [tp_decode_bench.parse_shape(part) for part in
+              (os.environ.get('BENCH_SHAPES') or ','.join(tp_decode_bench.DEFAULT_SHAPES)).split(',') if part]
+    out = tp_decode_bench.bench(BASE, MODEL, (os.environ.get('AGREEMENT_ROOT') or '.'),
+                                os.environ.get('AGREEMENT_LABEL', 'run'), shapes)
+    with open(os.environ.get('BENCH_OUT', 'bench.json'), 'w') as handle:
+        json.dump(out, handle)
+    return dict(shapes=[dict(name=s['name'], median=s.get('median_decode_tok_s'), error=s.get('error'))
+                        for s in out['shapes']])
+
+
+if ONLY and 'bench' in ONLY:
+    record('bench', bench)
 print('SMOKE_JSON ' + json.dumps(results))
