@@ -87,7 +87,8 @@ def problem(groups, packed_windows, operations):
         return 'the T2 packed windows are not engaged'
     if len(groups) < 2:
         return 'fewer than two users'
-    if any(tuple(piece.shape[:2]) != (1, USER_ROWS) for piece, initial, history in groups):
+    # ttnn.Shape takes an int index only (no slice): index the two leading dimensions one by one.
+    if any((piece.shape[0], piece.shape[1]) != (1, USER_ROWS) for piece, initial, history in groups):
         return 'a user is not a 16-row segment'
     if len(packed_windows) != len(groups) or any(len(user) != SLOTS for user in packed_windows):
         return 'the packed windows are not four per user'
