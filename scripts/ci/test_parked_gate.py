@@ -425,6 +425,14 @@ class JudgeRunTests(unittest.TestCase):
         table = dict((arm[0], (lambda spec: synthetic(spec, text_of=lambda user: 'ref %d' % user))) for arm in arms)
         result, _, _ = self.run_plan('parked-corner', table)
         self.assertEqual(result['verdict'], 'NOT_EXERCISED', 'no quad departure and no drop fired in the synthetic')
+        def corner(single, kept=0):
+            return lambda spec: synthetic(spec, text_of=lambda user: 'ref %d' % user, parked_record=dict(
+                on=True, facts=dict(rebinds_with_single=single, single_kept=kept)))
+        for single, kept in ((0, 0), (1, 0), (0, 1)):
+            table['corner-p'] = corner(single, kept)
+            result, _, _ = self.run_plan('parked-corner', table)
+            self.assertEqual(any('S term of the parked need was not exercised' in line for line in result['lines']),
+                             (single, kept) == (0, 0), (single, kept))
         table['corner-p'] = lambda spec: synthetic(spec, text_of=lambda user: 'ref %d' % user, extra=dict(fatal='oom'))
         result, _, _ = self.run_plan('parked-corner', table)
         self.assertEqual(result['verdict'], 'FAIL')

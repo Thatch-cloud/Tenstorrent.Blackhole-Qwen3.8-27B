@@ -1884,6 +1884,7 @@ def parked_facts_brief(facts):
                 slots=sorted(set(entry['slot'] for entry in facts['rebinds'])),
                 peak_held_max=max(peaks) if peaks else None, peaks=len(peaks), digests=len(facts['digests']),
                 digests_unequal=len([entry for entry in facts['digests'] if not entry['equal']]), unparked=facts['unparked'],
+                rebinds_with_single=len([entry for entry in facts['rebinds'] if entry['single_rebuilt']]),
                 reparked=len(facts['reparked']), single_rebuilt=rebuilt[:8], single_rebuilt_count=len(rebuilt),
                 single_kept=len(facts['single_kept']), released=len(facts['released']),
                 rebind_ops=len(facts['rebind_ops']))
@@ -3104,6 +3105,11 @@ def run_parked_corner(plan, runner, profiles, arms):
         if not releases.get('quad_departures'):
             shortfalls.append('%s: no request left while a quad was formed: the corner (a quad retiring as a seat '
                               'frees) was not exercised' % name)
+        if name == 'corner-p':
+            brief = parked_facts_of(report)
+            if not brief.get('rebinds_with_single') and not brief.get('single_kept'):
+                shortfalls.append('%s: no arrival rebuilt the released single of its slot at its rebind (single_rebuilt=1) and '
+                                  'none was kept released: the S term of the parked need was not exercised' % name)
         events = (report.get('lifecycle') or {}).get('events') or {}
         if not any(entry.get('fired') for entry in events.values()):
             shortfalls.append('%s: the drop %s never fired: no seat freed for the arrival' % (name, CORNER_DROP))

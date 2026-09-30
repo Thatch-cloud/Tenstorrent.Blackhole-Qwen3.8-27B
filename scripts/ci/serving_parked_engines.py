@@ -38,6 +38,14 @@ VerifierEngine, DFlashDevice, DraftKVHistory, PreparedDFlashProposal and Serving
 fake, today's per-request churn and the parked cycles alike, and fails on any violation, on any
 live tensor it cannot place with an owner, and on any persistent allocation after attach.
 
+DELIBERATELY NOT BUILT (design section 5.4, item 4, the last step of the release order). Unparking an idle parked engine
+to return its DRAM under pressure is not implemented: a slot unparks only when its rebind or park fails (unpark) and
+re-parks at an idle moment (repark_idle, DRAM split permitting). The parked engines' memory (about 3 GB per chip) is held
+for the process, which is a shipping decision the operator still has to make; the admission carries the parked terms
+(serving_prefill_admission.parked_need) so a request that would not fit waits at the hold or is refused, never OOMs.
+QWEN_FAST_PARKED_AUDIT digests state per chip within what is replicated (audit_rebound_state), not chip against chip for
+every tensor: how a GDN state tensor is sharded is not assumed.
+
 SOURCE PINS. The frozen recipe's pin probe (docs/batch-spec-tasks-2026-09-19.md, run 35495461481)
 measured verifier_engine.py, dflash_device.py and serving_buffer_pool.py unpinned, and every module
 the C2 overlay already carries is unpinned by construction (c2_overlay.pin_breaks refuses a pinned
