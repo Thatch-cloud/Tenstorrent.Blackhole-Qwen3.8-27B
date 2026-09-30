@@ -277,6 +277,15 @@ def common_args(addresses, valid_len, T, static_canon=False):
     return list(addresses) + [T if valid_len is None else int(valid_len), canon]
 
 
+# The meshes the op runs on: one chip, the p150a pair, and the four-card (1, 4) ring. The op is data-parallel per
+# chip (one program per mesh coordinate over that chip's own [T, C] shard: nothing crosses chips), so the mesh
+# only sets how many programs run; the per-chip exactness argument above holds at any of them. At (1, 4) a chip
+# holds C = 2560 (qkv_dim / 4) with kd = 512, both tile multiples with 2 kd < C. The (1, 4) bytes are held to the
+# FIR on hardware by QWEN_FAST_GDN_PREFILL_CONV_AUDIT (gdn/tp.py audits the first N chunks); a 2-D mesh stays
+# refused (the model never opens one).
+SUPPORTED_MESHES = ((1, 1), (1, 2), (1, 4))
+
+
 def mesh_coordinates(shape):
     rows, cols = shape
     return [(index // cols, index % cols) for index in range(rows * cols)]
@@ -312,8 +321,8 @@ def unsupported(operations, mesh, qkv, carry, taps, valid_len, key_dim_tp, *, fl
         mesh_shape = tuple(mesh.shape)
     except (AttributeError, TypeError):
         return 'no mesh shape'
-    if mesh_shape not in ((1, 1), (1, 2)):
-        return 'mesh %s is not [1, 1] or [1, 2]' % (mesh_shape,)
+    if mesh_shape not in SUPPORTED_MESHES:
+        return 'mesh %s is not one of %s' % (mesh_shape, ', '.join(str(list(shape)) for shape in SUPPORTED_MESHES))
     if not _bf16_tile(operations, qkv) or not _interleaved(operations, qkv):
         return 'qkv not bf16 TILE interleaved'
     if len(taps) != KERNEL_SIZE:

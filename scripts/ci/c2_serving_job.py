@@ -12,8 +12,19 @@ integer, and a card-M harness, argument or environment the cardm step must not r
 Keys (every one optional but C2_IMAGE_TAG):
   C2_ACTIONS          ACTIONS, run in the workflow's order (default: status)
   C2_IMAGE_TAG        the image is zot.thatch.local:5000/tt-vllm:qwen38-c2-<tag>
+  C2_FABRIC           the fabric config the fabric action opens the (1, 4) mesh under: FABRIC_1D (the default, what
+                      the TT plugin sets) or FABRIC_1D_RING; needs C2_CARDS=quad when set
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
-  C2_SMOKE_TESTS      comma-separated c2_serving_smoke.py tests, empty for all
+  C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
+                      Blackhole board present, the four-card (1, 4) mesh the TP4 profiles open). quad takes
+                      status, platform, unserve, reset (all four together), fabric (the four-card fabric probe),
+                      build, drift, probe, smoke, gate, prefix and push - not cardm, replay or priority, which
+                      are pair-shaped - and only profiles that name mesh_device P150x4 (general-tp4 ...);
+                      pair takes only profiles that name none. Anything else is refused here, before a card opens.
+  C2_SMOKE_TESTS      comma-separated c2_serving_smoke.py tests, empty for all (agreement and bench are opt-in: only
+                      when named - tp_agreement.py collect and tp_decode_bench.py, results in agreement-<profile>.json
+                      and bench-<profile>.json)
+  C2_BENCH_SHAPES     the bench test's shapes, comma-separated STREAMSxPROMPT (default: tp_decode_bench's ladder)
   C2_PLATFORM_IMAGE   the thatch-serving-tt image the replay runs
   C2_GATE_PLAN        GATE_PLANS, comma- or space-separated, run in order (default: bringup)
   C2_GATE_LENGTHS     the matrix's prompt lengths, one per user (default, rendered empty: the S1 G4
@@ -78,8 +89,18 @@ import os
 import re
 import sys
 
-ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
+ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'fabric', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
            'prefix', 'replay', 'push')
+CARD_SETS = ('pair', 'quad')
+# What a four-card job may run: the pair-shaped steps (a single-card harness on card M, the M+A smoke and replay, the
+# CPU-priority measurement of the M+A container) do not apply to it, and fabric applies to nothing else.
+QUAD_ACTIONS = ('status', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
+                'push')
+TP4_MESH_DEVICE = 'P150x4'
+# The mesh_device values of a pair profile: none (the image's P300 under upstream's four-channel p150_x2) and P300
+# (general-2link: the same pair under the two-channel descriptor this cabling needs).
+PAIR_MESH_DEVICES = (None, 'P300')
+FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
 # each runs. warm and warm-off are M1 (never judged for kernel-cache growth); control and forced-cap M3-M4 (G3);
@@ -171,6 +192,64 @@ def profile_names(path=PROFILES):
         return sorted(json.load(handle)['profiles'])
 
 
+def profile_meshes(path=PROFILES):
+    """{profile: its mesh_device, or None}: what a profile opens (serving_c2_contract.mesh_of reads the same key)."""
+    with open(path, encoding='utf-8') as handle:
+        return dict((name, body.get('mesh_device')) for name, body in json.load(handle)['profiles'].items())
+
+
+def refuse_fabric_with_serving(actions):
+    """The fabric probe closes the mesh it opened, and a second open in one job is what the ethernet-core teardown
+    wedge punishes: it runs in a job of its own, never beside a step that serves or gates."""
+    beside = sorted(set(actions) & set(('smoke', 'gate', 'prefix')))
+    if 'fabric' in actions and beside:
+        raise JobError('C2_ACTIONS has fabric with %s: the probe closes the mesh and a second open in one job wedges '
+                       'the ethernet cores; run the probe in its own job, reset first' % ', '.join(beside))
+
+
+def read_cards(values, actions, profile_of, named):
+    """C2_CARDS, refused when an action or a profile of the job does not fit the card set. `named`: the profiles the
+    job's steps serve, (key, name) pairs; profile_of maps a profile to its mesh_device."""
+    cards = values.get('C2_CARDS') or 'pair'
+    if cards not in CARD_SETS:
+        raise JobError('C2_CARDS must be one of %s, got %r' % (', '.join(CARD_SETS), cards))
+    if cards == 'pair' and 'fabric' in actions:
+        raise JobError('C2_ACTIONS has fabric: the four-card fabric probe needs C2_CARDS=quad')
+    refuse_fabric_with_serving(actions)
+    if cards == 'quad':
+        wrong = sorted(set(actions) - set(QUAD_ACTIONS))
+        if wrong:
+            raise JobError('C2_CARDS=quad: %s are pair-shaped steps (M+A, card M); quad takes %s' % (
+                ', '.join(wrong), ' '.join(QUAD_ACTIONS)))
+    if values.get('C2_FABRIC') and cards != 'quad':
+        raise JobError('C2_FABRIC needs C2_CARDS=quad')
+    for key, name in named:
+        if not name or name == 'none' or name not in profile_of:
+            continue
+        if (profile_of[name] != TP4_MESH_DEVICE) if cards == 'quad' else (profile_of[name] not in PAIR_MESH_DEVICES):
+            raise JobError('%s %s opens %s, but C2_CARDS=%s gives %s' % (
+                key, name, 'the four-card (1, 4) mesh' if profile_of[name] == TP4_MESH_DEVICE else 'the (1, 2) pair', cards,
+                'all four cards' if cards == 'quad' else 'cards M and A'))
+    return cards
+
+
+BENCH_SHAPES = re.compile(r'[0-9]+x[0-9]+(?:,[0-9]+x[0-9]+)*')
+
+
+def bench_shapes(values):
+    shapes = values.get('C2_BENCH_SHAPES', '')
+    if shapes and not BENCH_SHAPES.fullmatch(shapes):
+        raise JobError('C2_BENCH_SHAPES is STREAMSxPROMPT shapes, comma-separated (4x4096,1x131072), got %r' % shapes)
+    return shapes
+
+
+def fabric_config(values):
+    fabric = values.get('C2_FABRIC') or FABRIC_CONFIGS[0]
+    if fabric not in FABRIC_CONFIGS:
+        raise JobError('C2_FABRIC must be one of %s, got %r' % (', '.join(FABRIC_CONFIGS), fabric))
+    return fabric
+
+
 def positive_int(name, text):
     try:
         value = int(text)
@@ -236,8 +315,8 @@ def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY):
     return harness, ' '.join(args), ' '.join(pairs)
 
 
-def read_job(values, profiles, root=ROOT):
-    """The workflow outputs for a parsed job file, or JobError."""
+def read_job(values, profiles, root=ROOT, meshes=None):
+    """The workflow outputs for a parsed job file, or JobError. `meshes`: profile_meshes() (the checkout's when not given)."""
     actions = split_list(values.get('C2_ACTIONS', 'status')) or ['status']
     unknown = sorted(set(actions) - set(ACTIONS))
     if unknown:
@@ -274,9 +353,16 @@ def read_job(values, profiles, root=ROOT):
     replay_served_model = values.get('C2_REPLAY_SERVED_MODEL', '')
     if replay_served_model and not MODEL_ID.fullmatch(replay_served_model):
         raise JobError('C2_REPLAY_SERVED_MODEL must match %s, got %r' % (MODEL_ID.pattern, replay_served_model))
-    cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
     prefix = read_prefix(values, profiles, 'prefix' in actions)
-    outputs = dict(actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
+    if meshes is None:
+        meshes = profile_meshes()
+    named = [('C2_PROFILE', profile if set(actions) & set(('smoke', 'gate')) else ''),
+             ('C2_REPLAY_PROFILE', replay_profile if 'replay' in actions else '')]
+    if 'prefix' in actions:
+        named += [('C2_PREFIX_PROFILE', prefix['prefix_profile']), ('C2_PREFIX_BASELINE', prefix['prefix_baseline'])]
+    cards = read_cards(values, actions, meshes, named)
+    cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
+    outputs = dict(cards=cards, fabric=fabric_config(values), bench_shapes=bench_shapes(values), actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,

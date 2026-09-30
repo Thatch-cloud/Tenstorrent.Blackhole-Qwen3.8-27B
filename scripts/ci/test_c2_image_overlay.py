@@ -59,6 +59,11 @@ _UNREVIEWED = ('UNREVIEWED whether serving reaches the changed code; blob-pinned
 # path, never by basename, and never inherited from P8's KNOWN_STALE (whose UNREVIEWED entries
 # are basename-keyed and unpinned).
 C2_KNOWN_STALE = {
+    'scripts/ci/ccl_link_patch.py': (
+        'e84f430e79dbefe9a33728258554bf93f88d1dc6',
+        'host-side graft tool: qwen-ccl-link-gate.yml runs it on the runner to patch a copy of tt_ccl.py for that '
+        'gate; the serving image neither imports nor runs it, so the image keeps the bundle copy. HEAD adds the '
+        'four-card ring count (smallest consecutive edge in mesh order); a two-device mesh counts as before'),
     'scripts/ci/lever_n_m1_run_arm.sh': (
         '804b9382408287bb9a8d1421be6f628024468b79',
         'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
@@ -1234,7 +1239,11 @@ class ProvenanceTests(unittest.TestCase):
         problems, docker = self.verify()
         self.assertEqual(problems, [])
         gated = sorted(str(key) for key, gate in docker.gates.items() if gate)
-        self.assertEqual(gated, ["('boot', 'general-prefix-eager')", "('environment', 'general-prefix-eager')"])
+        # ...and general-tp4-bench, the four-card benchmark engine, gate only until G5 at TP4 measures its pool.
+        # ...and general-tp4-mmrs, the arm that turns the fused prefill out-projection on for the first time at four devices.
+        self.assertEqual(gated, ["('boot', 'general-prefix-eager')", "('boot', 'general-tp4-bench')",
+                                 "('boot', 'general-tp4-mmrs')", "('environment', 'general-prefix-eager')",
+                                 "('environment', 'general-tp4-bench')", "('environment', 'general-tp4-mmrs')"])
         runs = []
         real = provenance.Docker()
         real.run = lambda arguments, timeout=None: runs.append(list(arguments)) or (0, 'C2ENV {}\n', '')
@@ -1741,3 +1750,26 @@ class ProvenanceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OverlayDirectoriesExistTests(unittest.TestCase):
+    """The installer refuses a destination whose directory the image lacks (image tp4-1's build died on
+    /opt/qwen-c2/mesh). Every directory under /opt/qwen-c2 that the manifest writes into must be made by the
+    Dockerfile before the install runs; the fast-path trees (/experiment-scripts, the plugin) come from the base."""
+
+    def test_every_opt_qwen_c2_destination_directory_is_made_before_the_install(self):
+        manifest = (ROOT / 'docker' / 'qwen-c2-overlay.txt').read_text(encoding='utf-8')
+        dockerfile = (ROOT / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
+        install_at = dockerfile.index('c2_overlay.py install')
+        needed = set()
+        for line in manifest.splitlines():
+            words = line.split('#', 1)[0].split()
+            for destination in words[1:]:
+                parent = str(PurePosixPath(destination).parent)
+                if parent.startswith('/opt/qwen-c2/') and parent != '/opt/qwen-c2':
+                    needed.add(parent)
+        self.assertIn('/opt/qwen-c2/mesh', needed)
+        for parent in sorted(needed):
+            made = dockerfile.find('install -d -m 0755 ' + parent)
+            self.assertNotEqual(made, -1, '%s is written by the overlay but never made' % parent)
+            self.assertLess(made, install_at, '%s is made after the overlay install' % parent)

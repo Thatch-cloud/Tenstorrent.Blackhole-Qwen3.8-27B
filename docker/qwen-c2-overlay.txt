@@ -187,6 +187,16 @@ scripts/ci/verifier_engine.py
 # serving_request_factory, serving_worker_hook, serving_lifecycle, dflash_packed_proposal_coordinator and
 # serving_prefill_admission, which E4 and E5 also change, are overlaid above.
 scripts/ci/serving_fast_request.py
+# Four cards, one (1, 4) mesh (the TP4 profiles: general-tp4 and its variants). The contract imports tp4_mesh at
+# boot under a profile that names mesh_device P150x4 (the ring check it installs on the TT plugin's
+# open_mesh_device); the profiles' descriptor is the checked-in 2x2 two-channel textproto, laid where they name
+# it. New files: no older layer holds either, so without these lines a TP4 profile's boot dies on the import or
+# its fabric init on the missing descriptor. No TP2 profile reads either.
+scripts/ci/tp4_mesh.py
+scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto  /opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto
+# The pair at the two links this cabling trains (profile general-2link, the TP2 reference and baseline for TP4):
+# upstream's p150_x2 declares four and STRICT_INIT refuses the open.
+scripts/ci/qwen_p150x2_2link_mesh_graph_descriptor.textproto  /opt/qwen-c2/mesh/qwen_p150x2_2link_mesh_graph_descriptor.textproto
 
 # Tests run inside the image at build time (every overlaid scripts/ci/test_*.py is).
 scripts/ci/test_serving_c2_contract.py

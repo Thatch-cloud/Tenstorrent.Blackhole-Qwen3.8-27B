@@ -38,7 +38,9 @@ PROFILES = HERE / 'qwen_c2_profiles.json'
 DOCKERFILE = ROOT / 'docker' / 'qwen-c2-serving.Dockerfile'
 MANIFEST = ROOT / 'docker' / 'qwen-c2-overlay.txt'
 CPU_WORKFLOW = ROOT / '.github' / 'workflows' / 'qwen-integration-cpu.yml'
-PREFIX_PROFILES = ('general-prefix', 'general-prefix-eager')
+PREFIX_PROFILES = ('general-prefix', 'general-prefix-eager', 'general-prefix-tp4', 'general-prefix-tp4-131k')
+# Gate-only profiles that are not prefix profiles: the TP4 benchmark engine (J3, G5 at TP4).
+GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
 # ...and Stage E's parked-engine twins of those two (the same environment plus QWEN_FAST_PARKED_ENGINES=1).
 STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-prefix-parked',
@@ -244,7 +246,7 @@ class ProfileTests(unittest.TestCase):
         self.assertTrue(eager['description'].startswith('GATE ONLY'))
         self.assertIs(eager['gate_only'], True)
         self.assertEqual(sorted(name for name, profile in profiles()['profiles'].items() if profile.get('gate_only')),
-                         ['general-prefix-eager'])
+                         sorted(('general-prefix-eager',) + GATE_ONLY_OTHERS))
 
     def test_the_prefix_profiles_launch_with_prefix_caching_and_chunking_on(self):
         for name in PREFIX_PROFILES:
@@ -269,7 +271,8 @@ class ProfileTests(unittest.TestCase):
                 self.assertEqual(contract.prefix_reuse_problems(profile), [])
                 self.assertIn('--no-enable-prefix-caching', contract.engine_arguments(profile, '/snap'))
                 self.assertNotIn('--prefix-caching-hash-algo', contract.engine_arguments(profile, '/snap'))
-                self.assertNotIn('gate_only', profile)
+                if name not in GATE_ONLY_OTHERS:
+                    self.assertNotIn('gate_only', profile)
         self.assertEqual(profiles()['default'], 'general-prefix', 'general-prefix is the default from the G1 release')
 
     def test_the_prefix_profiles_pass_the_guard_and_the_scheduler_graft_s_install_rules(self):
@@ -496,15 +499,19 @@ class GuardTests(unittest.TestCase):
         for name in sorted(set(profiles()['profiles']) - set(PREFIX_PROFILES) - set(STICKY_PROFILES)):
             with self.subTest(profile=name):
                 profile, environ, logged, hooks, launched = boot_api_server(
-                    name, platform_argv=['--kv-transfer-config', '{}'])
+                    name, {contract.GATE_SWITCH: '1'} if name in GATE_ONLY_OTHERS else None,
+                    platform_argv=['--kv-transfer-config', '{}'])
                 self.assertEqual(profile['name'], name)
                 # only the request contract's hook, where the profile has one - as before G1 - and S1's
-                # parser M hook where the profile asks for it (c2, c2-gate): neither is a prefix hook
+                # parser M hook where the profile asks for it (c2, c2-gate): neither is a prefix hook. A
+                # four-card profile adds the ring check on the TT plugin's worker (contract item 8).
                 expected = [contract.INPUT_PROCESSOR] if profile.get('request_contract', True) else []
                 if contract.parser_rechunk(profile):
                     import c2_parser_rechunk
 
                     expected.append(c2_parser_rechunk.MODULE)
+                if contract.ring_mesh(profile):
+                    expected.append(contract.PLUGIN_WORKER)
                 self.assertEqual(sorted(hook.name for hook in hooks), sorted(expected))
                 self.assertFalse(any(line.startswith(('prefix:', 'metrics')) or 'prefix reuse' in line or 'salt' in line
                                      for line in logged), logged)
