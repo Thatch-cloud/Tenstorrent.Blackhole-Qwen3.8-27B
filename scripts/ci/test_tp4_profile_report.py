@@ -325,8 +325,27 @@ class ValidityTests(unittest.TestCase):
         self.assertEqual(result['validity']['drops'], 1)
 
 
+class StructureTests(unittest.TestCase):
+    def test_a_trace_that_is_not_64_layers_is_no_packed_verify(self):
+        result = analyse(build(layers=60, sessions=('1', '2')))
+        self.assertFalse(result['validity']['ok'])
+        self.assertTrue(any('verify-64' in p for p in result['validity']['problems']))
+
+    def test_a_three_user_block_is_a_problem(self):
+        result = analyse(build(users=3, sessions=('1', '2')))
+        self.assertTrue(any('SDPA launches per attention layer' in p for p in result['validity']['problems']))
+
+    def test_the_lone_trace_is_the_widest_with_a_full_sample(self):
+        data = build(sessions=('1', '2'))
+        for session in map(str, range(1, 10)):
+            data.add('7', session, dict((d, replay_ops(users=1, layers=64, device=d)) for d in range(4)))
+        data.add('8', '1', dict((d, replay_ops(users=1, device=d, sdpa_ns=lambda u: 900000)) for d in range(4)))
+        result = analyse(data)
+        self.assertEqual(result['verify_lone']['trace'], '7')
+
+
 class LaneProjectionTests(unittest.TestCase):
-    def test_the_16_row_lane_takes_per_user_categories_from_the_lone_step_and_interpolates_the_rest(self):
+    def test_the_16_row_lane_takes_chain_and_per_user_terms_from_the_block_and_interpolates_the_rest(self):
         data = build(sessions=('1', '2'))
         # the lone 4-row step: one user, every row-scaled term at a fifth of the block's
         for session in ('1', '2'):
@@ -335,7 +354,9 @@ class LaneProjectionTests(unittest.TestCase):
         self.assertEqual(result['verify_lone']['trace'], '9')
         lane = result['lane_16_row']
         packed, lone = result['verify_packed']['categories'], result['verify_lone']['categories']
-        self.assertAlmostEqual(lane['categories']['attn.sdpa'], lone['attn.sdpa']['ms'][0], places=3)
+        self.assertAlmostEqual(lane['categories']['gdn.recurrence'], packed['gdn.recurrence']['ms'][0], places=3)
+        for name in ('attn.sdpa', 'gdn.conv_gates'):
+            self.assertAlmostEqual(lane['categories'][name], packed[name]['ms'][0] / 4.0, places=3)
         expect = lone['mm.mlp']['ms'][0] + (packed['mm.mlp']['ms'][0] - lone['mm.mlp']['ms'][0]) * 12.0 / 60.0
         self.assertAlmostEqual(lane['categories']['mm.mlp'], expect, places=3)
         gap = result['verify_lone']['gap_ms'][0] + (result['verify_packed']['gap_ms'][0]
