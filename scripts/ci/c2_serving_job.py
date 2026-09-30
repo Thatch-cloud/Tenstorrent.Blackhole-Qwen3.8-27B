@@ -57,6 +57,8 @@ Keys (every one optional but C2_IMAGE_TAG):
                       sized from the G-E0 warm arm's P7p reading so the arrival sits at the parked need's boundary
                       (c2_serving_gate.ballast_advice prints the figure). Needed by that plan, refused without it
                       and refused beside a job that runs no parked-ballast
+  (C2_GATE_PLAN may also name QUICKWIN_GATE_PLANS: quickwin-ledger and quickwin-warm, the phase-1 quick wins' byte
+                      comparisons, on any S2 profile; they take no extra key)
   C2_PREFIX_PLAN      PREFIX_PLANS for the prefix action (c2_prefix_gate.py), in order (default: bringup);
                       each exactness and lifecycle arm is a plan too (PREFIX_ARM_PLANS): exactness-eager
                       re-runs that arm alone. Never beside its own plan, and no plan twice (one arm, one
@@ -91,7 +93,11 @@ S2_GATE_PLANS = ('warm', 'warm-off', 'control', 'forced-cap', 'control-below', '
 # G-E3 (i), parked-corner G-E3 (ii), parked-ballast G-E3 (iii).
 PARKED_GATE_PLANS = ('parked-exact', 'parked-drafter', 'parked-lifecycle', 'parked-churn', 'parked-corner',
                      'parked-ballast')
-ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS + PARKED_GATE_PLANS
+# Phase-1 quick wins (docs/engine-warm-skip.md), each usable without Stage E and run on the sticky or an S2 profile:
+# quickwin-ledger holds QWEN_FAST_MEMORY_LEDGER_OFF=1 against the ledger on, quickwin-warm QWEN_FAST_ENGINE_WARM_SKIP=1
+# against the warm forwards run, each solo and four concurrent, real text, strict exactness.
+QUICKWIN_GATE_PLANS = ('quickwin-ledger', 'quickwin-warm')
+ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS + PARKED_GATE_PLANS + QUICKWIN_GATE_PLANS
 MAX_PAIRS = 4
 MAX_BALLAST_MB = 4096   # per chip: a ballast past the whole idle free (about 4.4 GB) could only kill the attach
 BELOW_FAMILY_RANGE = (4096, 16640)   # capacities the pinned (flag-off) mask admits: attention_mask_replay.py:18,26

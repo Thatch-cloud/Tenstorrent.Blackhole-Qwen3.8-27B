@@ -172,6 +172,18 @@ throughout (QWEN_FAST_PARKED_ENGINES is an exactness claim, real_text_compare.S2
            decoders: no out-of-memory. On the warm plan a parked profile also runs G-E0: the attach at 131,072
            (4 of 4), the P7p reading, the rebind's measured peak (QWEN_FAST_PARKED_AUDIT) and the single rebuild's
            footprint, recorded, with the ballast advice.
+QUICKWIN PLANS (the phase-1 quick wins, docs/engine-warm-skip.md; each usable without Stage E). Run on any S2 profile
+(--profile c2-packed, c2-packed-prefix, or the parked profile): four arms each, real text, the flag off (the reference) and
+on, solo and four concurrent, judged by the strict policy: every user of an on arm IDENTICAL to the off arm's.
+  quickwin-ledger  QWEN_FAST_MEMORY_LEDGER_OFF=1 against the image's ledger on. The off arms must carry '[MEMLEDGER]'
+           lines (else the comparison switched off nothing: NOT_EXERCISED), the on arms none. Its arms use no
+           --drops, which time a drop on the ledger's prefill lines.
+  quickwin-warm  QWEN_FAST_ENGINE_WARM_SKIP=1 against the warm forwards run. The solo chain (QUICKWIN_LENGTHS with
+           QUICKWIN_BUDGETS: aligned and unaligned prompts, answer budgets that build one-bucket and three-bucket
+           engines, ignore_eos throughout) makes a process build engines of both shapes in turn. The on arms must log
+           '[PINDIAG] engine warm forwards' lines whose first build warmed and of which a later one skipped (else
+           NOT_EXERCISED), the off arms none. The on arms' kernel-cache growth is judged (a skip that left a program
+           uncompiled would compile inside a capture).
 On an S2 profile the four S1 plans add their S2 checks too (memory: no hold or refusal and the floor).
 Every arm of an S2 plan or on an S2 profile (--jit auto) must leave the kernel cache as it found it: a judged
 arm that compiled is a problem (M1 warms it first), and a judged arm whose cache could not be counted leaves
@@ -238,6 +250,7 @@ import parked_judge  # noqa: E402  (stdlib and real_text_compare only)
 import parked_markers  # noqa: E402  (stdlib only)
 import prefix_judge  # noqa: E402  (stdlib only)
 import prefix_markers  # noqa: E402  (stdlib only)
+import quickwin_markers  # noqa: E402  (stdlib only)
 import real_text_prompts  # noqa: E402
 import serving_c2_contract  # noqa: E402  (stdlib only at import: json, os, sys)
 
@@ -330,11 +343,14 @@ PADDED_PROBE_ENV = (('QWEN_FAST_PADDED_PROBE', '1'),)
 ARM_ENV_NAMES = frozenset(harness.S2_GATE_KNOBS + ('QWEN_FAST_PADDED_PROBE',) + tuple(name for name, _ in G4_ALL_AUDITS)
                           # Stage E (the parked plans): the audit, the two controls, the fault, the ballast, the shard check
                           + ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT',
-                             'QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_SHARD_CHECK'))
+                             'QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_SHARD_CHECK')
+                          # the phase-1 quick wins (the quickwin plans): the two flags the arms hold on against off
+                          + ('QWEN_FAST_MEMORY_LEDGER_OFF', 'QWEN_FAST_ENGINE_WARM_SKIP'))
 S2_OFF_PROFILE, S2_GATE_PROFILE, S2_TRAFFIC_PROFILE = 'c2-gate', 'c2-packed-gate', 'c2-packed'
 EXACT_PROFILE = 'exact'
 S2_PLANS = c2_serving_job.S2_GATE_PLANS
 PARKED_PLANS = c2_serving_job.PARKED_GATE_PLANS
+QUICKWIN_PLANS = c2_serving_job.QUICKWIN_GATE_PLANS
 WARM_PLANS = ('warm', 'warm-off')
 DEFAULT_PAIRS = 2
 BELOW_FAMILIES = (16640, 4352)
@@ -420,6 +436,16 @@ ARM_SECONDS.update({'parked-exact': 3600, 'parked-drafter': 3000, 'parked-lifecy
 STREAM_SECONDS.update({'parked-exact': 3600, 'parked-drafter': 1800, 'parked-lifecycle': 1800, 'parked-churn': 1800,
                        'parked-corner': 3600, 'parked-ballast': 1800})
 PARKED_FIRST_SECONDS = 1500      # G-E1 (f): one request after an attach
+# The phase-1 quick-win plans (the module docstring's QUICKWIN PLANS): a solo chain and four concurrent users, each with
+# the flag off and on. The chain's lengths mix page-aligned and unaligned prompts and its budgets (2 gives a one-bucket
+# engine, 256 a three-bucket one) vary the warm's bucket set; ignore_eos on every user so a budget is a length.
+ARM_SECONDS.update({'quickwin-ledger': 3600, 'quickwin-warm': 3600})
+STREAM_SECONDS.update({'quickwin-ledger': 3600, 'quickwin-warm': 3600})
+QUICKWIN_LENGTHS = (4096, 2049, 32768, 8192, 60000, 4096, 123136, 63)
+QUICKWIN_BUDGETS = (2, 64, 256, 2, 128, 256, 64, 32)
+QUICKWIN_LIVE_LENGTHS = (4096, 8192, 16384, 32768)
+QUICKWIN_LIVE_TOKENS = 256
+QUICKWIN_FLAGS = dict(ledger=('QWEN_FAST_MEMORY_LEDGER_OFF', '1'), warm=('QWEN_FAST_ENGINE_WARM_SKIP', '1'))
 PARKED_FIRST_PROMPT, PARKED_FIRST_TOKENS = 4096, 64
 PARKED_CHURN_ARMS, PARKED_CHURN_USERS, PARKED_CHURN_LONGEST = 4, 50, 100000   # 4 x 50 = 200 admissions
 # A window of the corpus per user: 50 users still read at least 123k tokens each, 200 would not (real_text_prompts).
@@ -723,6 +749,8 @@ def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.D
         return s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2 or {})
     if plan in PARKED_PLANS:
         return parked_plan_arms(plan, profile, profiles, lengths, notes, s2 or {})
+    if plan in QUICKWIN_PLANS:
+        return quickwin_plan_arms(plan, profile, profiles, lengths, notes)
     arms = base_plan_arms(plan, profile, profiles, lengths, max_tokens, memory_prompt, notes)
     if profile in profiles['profiles'] and s2_profile(profiles, profile):
         env = s2_env(profiles, profile, (s2 or {}).get('audits'), g4=plan == 'matrix')
@@ -1152,6 +1180,34 @@ def parked_plan_arms(plan, profile, profiles, lengths, notes, s2):
             seconds, profile=parked, env=on_env + knob, role='live', parked=dict(on=True, ballast=True)))
         return arms
     raise ValueError('unknown parked plan %r' % plan)
+
+
+def quickwin_plan_arms(plan, profile, profiles, lengths, notes):
+    """plan_arms for QUICKWIN_PLANS (the module docstring's QUICKWIN PLANS): --profile served four times, the flag off and
+    on, solo (the chain) and four concurrent. `lengths` replaces the chain's. The off arms are the reference."""
+    notes = notes if notes is not None else []
+    if profile not in profiles['profiles'] or not s2_profile(profiles, profile):
+        raise PlanError('%s serves --profile %s, which must have %s=1 (an S2 profile: c2-packed, c2-packed-prefix or its '
+                        'parked twin)' % (plan, profile, EXTENT_FLAG))
+    kind = plan.split('-', 1)[1]
+    knob = (QUICKWIN_FLAGS[kind],)
+    chain = list(lengths or QUICKWIN_LENGTHS)
+    budgets = [QUICKWIN_BUDGETS[index % len(QUICKWIN_BUDGETS)] for index in range(len(chain))]
+    seconds, seats = ARM_SECONDS[plan], str(profile_seats(profiles, profile))
+    env = s2_env(profiles, profile)
+    solo = parked_script_args(profiles, profile, plan, chain, budgets)
+    live = parked_script_args(profiles, profile, plan, list(QUICKWIN_LIVE_LENGTHS),
+                              [QUICKWIN_LIVE_TOKENS] * len(QUICKWIN_LIVE_LENGTHS), concurrent=True,
+                              extra=['--alive-check', seats])
+    if lengths is not None:
+        notes.append('%s: the chain runs the lengths asked for, %s' % (plan, chain))
+    arms = []
+    for label, args in (('solo', solo), ('live', live)):
+        for state, added in (('off', ()), ('on', knob)):
+            quick = dict(kind=kind, on=state == 'on')
+            arms.append(Arm('%s-%s-%s' % (plan, state, label), args, seconds, profile=profile, env=env + added,
+                            judged=state == 'on', role='%s-%s' % (state, label), quick=quick))
+    return arms
 
 
 def parked_judge_negatives():
@@ -1622,7 +1678,8 @@ class Runner(object):
         plan's or an S2 profile's (M1 warms exactly those); judge takes every other arm too (M2), record none."""
         if plan in WARM_PLANS or not judged or self.jit == 'record':
             return False
-        return self.jit == 'judge' or plan in S2_PLANS or plan in PARKED_PLANS or self.s2_for(profile)
+        return (self.jit == 'judge' or plan in S2_PLANS or plan in PARKED_PLANS or plan in QUICKWIN_PLANS
+                or self.s2_for(profile))
 
     def relaxation(self, profile):
         """The relaxation a verdict on `profile` applies: dc-i only on an S2 profile, only with the decision."""
@@ -1651,11 +1708,12 @@ class Runner(object):
         finally:
             remove_container(name)
 
-    def run(self, arm, gate_args, timeout, profile=None, env=(), judged=False, measure=False, parked=None):
+    def run(self, arm, gate_args, timeout, profile=None, env=(), judged=False, measure=False, parked=None, quick=None):
         """One arm on --profile, or (an S2 arm) on `profile` with `env` added; `judged`: its kernel-cache
         growth is a problem (judges()); `measure`: the host reads its four-live rounds from the whole server
         log (report['c2_gate_live4']: both arms of a G3 pair read the same way). `parked` (a parked plan's arms, and the warm
-        plan's on a parked profile): what the arm's server log must show of the parked engines (parked_arm_check)."""
+        plan's on a parked profile): what the arm's server log must show of the parked engines (parked_arm_check).
+        `quick` (a quickwin plan's arms): what it must show of the phase-1 quick-win flags (quick_arm_check)."""
         profile = profile or self.profile
         arm_dir = os.path.join(self.results, arm)
         os.makedirs(arm_dir, exist_ok=True)
@@ -1716,6 +1774,11 @@ class Runner(object):
                 problems += ['parked: %s' % item for item in parked_problems]
                 self.unjudged.extend('%s: %s' % (arm, item) for item in parked_missing)
                 report['c2_gate_parked'] = record
+            if quick is not None:
+                quick_problems, quick_missing, record = quick_arm_check(log_text, quick)
+                problems += ['quickwin: %s' % item for item in quick_problems]
+                self.unjudged.extend('%s: %s' % (arm, item) for item in quick_missing)
+                report['c2_gate_quickwin'] = record
             if log_text is not None and (measure or self.s2_for(profile) or env):
                 report['c2_gate_live4'] = host_live_rate(log_text)
             if cache['before'] is not None or self.s2_for(profile) or env:
@@ -1790,6 +1853,21 @@ def parked_arm_check(arm, log_text, expect):
     return problems, missing, record
 
 
+def quick_arm_check(log_text, expect):
+    """(problems, not exercised, record) of one quickwin arm's server log against what it expects (`expect`: kind 'ledger' or
+    'warm', on): the ledger plan's on arm carries no ledger line and its off arm some; the warm plan's on arm the warm-forward
+    lines (quickwin_markers.problems) and its off arm none."""
+    on, kind = bool(expect.get('on')), expect.get('kind')
+    if log_text is None:
+        return ['no server.log: the quick-win markers cannot be checked'], [], dict(on=on, kind=kind)
+    facts = quickwin_markers.scan(log_text.splitlines())
+    problems, missing = quickwin_markers.problems(
+        facts, ledger_off=kind == 'ledger' and on, ledger_reference=kind == 'ledger' and not on,
+        warm_skip=kind == 'warm' and on)
+    return problems, missing, dict(on=on, kind=kind, ledger_lines=facts['ledger'], warm=facts['warm'][:16],
+                                   warm_lines=facts['warm_lines'], problems=problems, not_exercised=missing)
+
+
 def parked_facts_brief(facts):
     """parked_markers.scan's facts as the gate report keeps them: every attach fact whole, the per-request ones counted."""
     peaks = [entry['held'] for entry in facts['peaks']]
@@ -1853,8 +1931,9 @@ def run_arm(runner, plan, spec, suffix=''):
     profile = spec_profile(runner, spec)
     return runner.run(name + suffix, args, timeout, profile=getattr(spec, 'profile', None), env=getattr(spec, 'env', ()),
                       judged=runner.judges(plan, profile, getattr(spec, 'judged', True)),
-                      measure=plan in S2_PLANS or plan in PARKED_PLANS,
-                      parked=(getattr(spec, 'extra', None) or {}).get('parked'))
+                      measure=plan in S2_PLANS or plan in PARKED_PLANS or plan in QUICKWIN_PLANS,
+                      parked=(getattr(spec, 'extra', None) or {}).get('parked'),
+                      quick=(getattr(spec, 'extra', None) or {}).get('quick'))
 
 
 def s2_of(report):
@@ -3008,6 +3087,26 @@ def run_parked_corner(plan, runner, profiles, arms):
     return parked_result(lines, problems, shortfalls, facts)
 
 
+def run_quickwin_plan(plan, runner, profiles, arms):
+    """quickwin-ledger and quickwin-warm: every user of each on arm identical to the off arm's, solo and four concurrent
+    (the strict policy: the warm skip is an exactness claim and the ledger switch arithmetic-neutral, real_text_compare),
+    with the arms' logs read for what the flag promises (quick_arm_check)."""
+    reports, problems = run_parked_arms(plan, runner, arms)
+    shortfalls, lines, facts = [], [], {}
+    for label in ('solo', 'live'):
+        off, on = reports.get('%s-off-%s' % (plan, label)), reports.get('%s-on-%s' % (plan, label))
+        verdicts = compare_arms('%s-on-%s against %s-off-%s' % (plan, label, plan, label), off, on, problems)
+        lines.append('%s: users %s' % (label, verdicts))
+        facts[label] = dict(users=verdicts)
+    for spec in arms:
+        record = (reports.get(spec[0]) or {}).get('c2_gate_quickwin') or {}
+        facts[spec[0]] = record
+        lines.append('%s: flag %s; ledger lines %s; warm forwards %s' % (
+            spec[0], 'on' if record.get('on') else 'off', record.get('ledger_lines'),
+            [(entry['run'], entry['skipped']) for entry in record.get('warm') or []][:8] or 'none logged'))
+    return parked_result(lines, problems, shortfalls, facts)
+
+
 def run_parked_ballast(plan, runner, profiles, arms):
     """G-E3 (iii): the ballast arms. No out-of-memory: both arms complete, every stream as asked, the ballast line seen.
     A hold beside the three decoders is recorded (its fit against the design's 5.3), never failed."""
@@ -3177,7 +3276,8 @@ def counts_cache(plans, profiles, profile, jit):
     """Whether a run counts the kernel cache before and after every arm: an S2 plan or profile, or an explicit --jit
     judge or record. S1 plans on an S1 profile under --jit auto read nothing more than before W11 (no docker image
     inspect, no find) and their reports and summary gain no kernel-cache keys."""
-    return (any(plan in S2_PLANS or plan in PARKED_PLANS for plan in plans) or s2_profile(profiles, profile)
+    return (any(plan in S2_PLANS or plan in PARKED_PLANS or plan in QUICKWIN_PLANS for plan in plans)
+            or s2_profile(profiles, profile)
             or jit != 'auto')
 
 
@@ -3203,6 +3303,8 @@ def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2
         result = run_s2_plan(plan, runner, profiles, reference, arms)
     elif plan in PARKED_PLANS:
         result = run_parked_plan(plan, runner, profiles, arms)
+    elif plan in QUICKWIN_PLANS:
+        result = run_quickwin_plan(plan, runner, profiles, arms)
     elif plan == 'bringup':
         warning = bringup_warning(profiles, runner.profile)
         if warning:
@@ -3449,7 +3551,8 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     env=getattr(spec, 'env', ()), salt=options.salt, salt_key_path=salt_key_path))))
         return 0
     cache_dir = None
-    s2_run = any(plan in S2_PLANS or plan in PARKED_PLANS for plan in plans) or s2_profile(profiles, options.profile)
+    s2_run = (any(plan in S2_PLANS or plan in PARKED_PLANS or plan in QUICKWIN_PLANS for plan in plans)
+              or s2_profile(profiles, options.profile))
     if cache_entries is None and execute is None and counts_cache(plans, profiles, options.profile, options.jit):
         # The kernel cache the image's arms read and write (B6), counted before and after every arm - only on a run
         # that judges or records it: S1 plans on an S1 profile (--jit auto) read nothing more than before W11.
