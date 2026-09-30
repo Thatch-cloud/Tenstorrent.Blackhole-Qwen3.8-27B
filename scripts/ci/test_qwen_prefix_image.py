@@ -40,7 +40,7 @@ MANIFEST = ROOT / 'docker' / 'qwen-c2-overlay.txt'
 CPU_WORKFLOW = ROOT / '.github' / 'workflows' / 'qwen-integration-cpu.yml'
 PREFIX_PROFILES = ('general-prefix', 'general-prefix-eager', 'general-prefix-tp4', 'general-prefix-tp4-131k')
 # Gate-only profiles that are not prefix profiles: the TP4 benchmark engine (J3, G5 at TP4).
-GATE_ONLY_OTHERS = ('general-tp4-bench',)
+GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
 STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate')
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')
