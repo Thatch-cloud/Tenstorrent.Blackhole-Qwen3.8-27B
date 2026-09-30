@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from attention_batch import capture_operation
 from dflash_proposal_inputs import proposal_contexts, proposal_inputs
 from gdn_multitoken_conv import addresses, release_owned
+import tp_shapes
 
 
 # Variable-user packed rounds, M0 (the pair-mask audit and refresh). A packed pair's bucket
@@ -274,7 +275,7 @@ class PreparedDFlashProposal:
                     mask=upload(host['mask']), rope={name: tuple(upload(value) for value in host['rope'][name]) for name in ('q', 'k')},
                     trace=None, outputs=None, owned=[])
                 bucket.cached_history = None if self.kv_history is None else [{name: upload(
-                    torch.zeros((1, 4, context, 128), dtype=torch.bfloat16)) for name in ('k', 'v')}
+                    torch.zeros((1, tp_shapes.active().draft_kv_heads, context, 128), dtype=torch.bfloat16)) for name in ('k', 'v')}
                     for layer in self.kv_history.active]
                 bucket.inputs = [bucket.identifiers, bucket.history, bucket.mask, *bucket.rope['q'], *bucket.rope['k']]
                 if bucket.cached_history is not None:
@@ -375,7 +376,7 @@ class PreparedDFlashProposal:
             if self.kv_history is not None:
                 for active, destination in zip(self.kv_history.active, bucket.cached_history, strict=True):
                     for name in ('k', 'v'):
-                        value = retain(operations.slice(active[name], (0, 0, 0, 0), (1, 4, bucket.context, 128)))
+                        value = retain(operations.slice(active[name], (0, 0, 0, 0), (1, tp_shapes.active().draft_kv_heads, bucket.context, 128)))
                         operations.copy(value, destination[name])
         if defer_finish:
             try:
@@ -648,7 +649,7 @@ class PreparedPackedDFlashProposal:
                           k=tuple(self._upload(value) for value in tables['k']),
                           live_k=tuple(self._upload(value) for value in live)),
                 cached_history=live_banks if live_banks is not None else [
-                    [{name: self._upload(torch.zeros((1, 4, context, 128), dtype=torch.bfloat16))
+                    [{name: self._upload(torch.zeros((1, tp_shapes.active().draft_kv_heads, context, 128), dtype=torch.bfloat16))
                       for name in ('k', 'v')} for _ in self.device_a.kv_history.active]
                     for context in (context_a, context_b)],
                 trace=None, outputs=None, owned=[], tokens=None, consumed=set())
@@ -791,7 +792,7 @@ class PreparedPackedDFlashProposal:
                         # F4 with the device's live bank on the pool's spare side (the ramp left an
                         # odd swap count, before its first in-place commit): the live rows go into
                         # the pool's active bank - the device's free spare - which the pair reads.
-                        value = retain(operations.slice(active[name], (0, 0, 0, 0), (1, 4, context, 128)))
+                        value = retain(operations.slice(active[name], (0, 0, 0, 0), (1, tp_shapes.active().draft_kv_heads, context, 128)))
                         operations.copy(value, destination[name])
                         normalised += 1
             if live_banks and normalised:

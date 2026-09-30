@@ -3,7 +3,7 @@
 K64j at one KV head serves 0x23 (no slice), so the modes are tail and share exactly, CB1 must hold a G8B2 0x23 combo,
 the reader whose sha256 CB2b records is extent_attention_replay_tp.py, and CB2b's chip view is 1of4. The record is
 packed_any_evidence_tp4.json at its own pin - a SKELETON until the card windows record the sections, so the attach is
-refused except in a gate run of a gate-only profile (QWEN_C2_GATE=1), where each missing piece is logged as UNQUALIFIED.
+refused except in a gate run of a gate-only profile (QWEN_C2_GATE=1 and the profile's own QWEN_C2_GATE_PROFILE=1), where each missing piece is logged as UNQUALIFIED.
 The pair's admission is untouched (test_packed_any_admission, unchanged)."""
 
 import copy
@@ -25,7 +25,7 @@ import test_packed_any_admission as pair_tests  # noqa: E402
 M3 = pair_tests.M3
 FOUR = {'QWEN_FAST_TP': '4', 'QWEN_FAST_SDPA_MODES': 'tail,share'}
 GOOD_ENV = dict(pair_tests.GOOD_ENV, **FOUR)
-GATE = dict(GOOD_ENV, QWEN_C2_GATE='1')
+GATE = dict(GOOD_ENV, QWEN_C2_GATE='1', QWEN_C2_GATE_PROFILE='1')
 
 
 def sha(data):
@@ -196,6 +196,8 @@ class AdmitTests(unittest.TestCase):
         self.assertFalse(admission.unqualified_allowed(pair_gate))
         self.assertTrue(admission.unqualified_allowed(GATE))
         self.assertFalse(admission.unqualified_allowed(GOOD_ENV))
+        # a traffic profile run as a gate (the workflow sets QWEN_C2_GATE=1 for every gate boot) is not a gate-only profile
+        self.assertFalse(admission.unqualified_allowed(dict(GOOD_ENV, QWEN_C2_GATE='1')))
 
 
 class GuardTests(unittest.TestCase):
@@ -207,7 +209,7 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(admission.AdmissionRefused):
             admission.tp_guard(dict(FOUR))
         lines = Lines()
-        problems = admission.tp_guard(dict(FOUR, QWEN_C2_GATE='1'), log=lines)
+        problems = admission.tp_guard(dict(FOUR, QWEN_C2_GATE='1', QWEN_C2_GATE_PROFILE='1'), log=lines)
         self.assertEqual(len(problems), 4)
         self.assertEqual(len(lines), 4)
         with mock.patch.object(admission, 'check_evidence', return_value=qualifying()):
@@ -224,7 +226,7 @@ class GuardTests(unittest.TestCase):
                 with self.assertRaises(admission.AdmissionRefused):
                     factory.attach_source_check(Path('/four'), qualify=good, log=lambda *a: None)
                 self.assertNotIn(str(Path('/four')), factory._ATTACH_QUALIFICATION)
-            with mock.patch.dict(os.environ, dict(FOUR, QWEN_C2_GATE='1'), clear=True):
+            with mock.patch.dict(os.environ, dict(FOUR, QWEN_C2_GATE='1', QWEN_C2_GATE_PROFILE='1'), clear=True):
                 factory.attach_source_check(Path('/four'), qualify=good, log=Lines())
 
 

@@ -130,6 +130,9 @@ CB1_FLAG = '0x27'
 CB1_FLAG_TP4 = '0x23'
 # A gate-only profile boots only with this set (serving_c2_contract.GATE_SWITCH).
 GATE_ENV = 'QWEN_C2_GATE'
+# Set by the gate-only four-card profile's own env and by no traffic profile: QWEN_C2_GATE=1 is the workflow's switch for EVERY
+# gate boot, so on its own it cannot tell a gate-only profile from a traffic profile run as a gate.
+GATE_PROFILE_ENV = 'QWEN_C2_GATE_PROFILE'
 SECTIONS = ('CB1', 'CB2a', 'CB2b')
 SEEDS = (0, 1, 2, 3, 4)
 K1_EXTENTS = (2304, 16896, 33024, 65792, 98560, 131328)       # K1's six families (probe_k64j_card_b.EXTENTS)
@@ -535,9 +538,10 @@ UNQUALIFIED_MARKER = '[PINDIAG] packed-any admission UNQUALIFIED (gate only, fou
 
 def unqualified_allowed(environ=None):
     """Whether missing four-card evidence may be waved through: only at four cards, only in a gate run of a
-    gate-only profile (the contract never boots one for traffic)."""
+    gate-only profile (the contract never boots one for traffic; the profile itself sets QWEN_C2_GATE_PROFILE=1)."""
     environ = os.environ if environ is None else environ
-    return width(environ) != tp_shapes.PAIR and gate_only(environ)
+    return (width(environ) != tp_shapes.PAIR and gate_only(environ)
+            and environ.get(GATE_PROFILE_ENV) == '1')
 
 
 def _log_unqualified(log, problems):

@@ -223,6 +223,8 @@
   "draft_shared_head.py": "5cfb00e1bb76c362ccba164a19a8254f758ae005cee1fd59566e3aa710c036fb",
   "extent_attention_replay.py": "5633fc3a21a400360542913fb47559db999117e2e3b6e8d540c770d45720cd31",
   "feature_collective.py": "32e254feed0d7ea959b6c5d90f3e04c02a658272ca30d1610be9e7ee39a305b8",
+  "frozen_gdn_norm_prefetch.py": "e837989077f723c33ba77fe2ee708fb8f0afede4d4dcddc47bfc6e6c8b4c8352",
+  "fusion_trace.py": "9a7f06d83f919cefec2c81ffcaaccf4d71f2fe318b51a21a6a1c4eca9fd99490",
   "gdn_conv_prefix_copy.cpp": "a694b75598c606135e514997c3d3731d46522c4865bff9171b4c5bff258b4361",
   "gdn_conv_prefix_copy.py": "9ac3e1af4dac3508f0ed65727dbc1386e10c30cd14fab361d2f10f1155ae7316",
   "gdn_multitoken.py": "6436703e10ac46485a95b6c371edcbc1cd5fbb98d6973d29c2ec6ceeea14c4b4",

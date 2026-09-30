@@ -99,6 +99,7 @@ DRAFT_LAYERS = 5
 HISTORY_SHAPE = (1, 1, HISTORY_ROWS, FEATURE_WIDTH)
 KV_SHAPE = (1, 4, HISTORY_ROWS, 128)
 QUERY_SHAPE = (1, 1, 32, 2048)
+# The two above are the pair's; kv_shape() / query_shape() give the served width's (four cards: 2 KV heads, 1024 wide).
 # The scratch frontier: the steady state (DraftKVHistory keeps history_rows == min(position, 2048)).
 # The value only fills the RoPE tables' rows; no program is shaped by it.
 POSITION = HISTORY_ROWS
@@ -215,11 +216,25 @@ class Scratch:
                 self.operations.deallocate(value)
 
 
+def kv_shape():
+    import tp_shapes
+    return (1, tp_shapes.active().draft_kv_heads, HISTORY_ROWS, 128)
+
+
+def query_shape():
+    import tp_shapes
+    return (1, 1, 32, tp_shapes.active().draft_query)
+
+
 def scratch_cache(operations, mesh, parameters, active, spare, query):
     """A DraftKVHistory at the steady state over scratch banks (one active and one spare bank serve every
     layer and head: a publication writes only the spare, and each slide only needs the three it is given
     to be distinct), without its constructor's projection of a real history."""
-    from draft_kv_history import DraftKVHistory
+    import tp_shapes
+    if tp_shapes.chip_count() == tp_shapes.PAIR:
+        from draft_kv_history import DraftKVHistory
+    else:
+        from draft_kv_history_tp import DraftKVHistory
 
     cache = object.__new__(DraftKVHistory)
     cache.__dict__.update(operations=operations, mesh=mesh, parameters=tuple(parameters), position=POSITION,
@@ -298,8 +313,8 @@ def warm(block, *, operations, mesh, pool, shared_weights, collectives, log=None
     before = program_cache(mesh)
     scratch = Scratch(operations, mesh)
     try:
-        query = scratch.zeros(QUERY_SHAPE)
-        active, spare = scratch.zeros(KV_SHAPE), scratch.zeros(KV_SHAPE)
+        query = scratch.zeros(query_shape())
+        active, spare = scratch.zeros(kv_shape()), scratch.zeros(kv_shape())
         history, spare_history = scratch.zeros(HISTORY_SHAPE), scratch.zeros(HISTORY_SHAPE)
         parameters = tuple(layer[0] for layer in shared_weights.layers)
         cache = scratch_cache(operations, mesh, parameters, active, spare, query)

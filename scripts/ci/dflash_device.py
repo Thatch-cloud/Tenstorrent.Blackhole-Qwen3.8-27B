@@ -13,11 +13,25 @@ from draft_operation_audit import audit_operations
 from draft_selector import select_active_candidates
 from draft_shared_head import shared_head_candidates, merge_chunk_candidates
 from feature_collective import gather_add_projection
-from feature_projection_tp import concatenate_local_features, projection_shards
+import feature_projection
+import feature_projection_tp
 from gdn_multitoken_conv import addresses, release_owned
 from mesh_link_policy import fast_ccl_topology, projection_links
 import tp_shapes
 from dflash_prefill_window import prefill_window
+
+
+def _projection_module():
+    # the pair runs the pinned feature_projection; only four cards run the sibling
+    return feature_projection if tp_shapes.chip_count() == tp_shapes.PAIR else feature_projection_tp
+
+
+def projection_shards(*args, **kwargs):
+    return _projection_module().projection_shards(*args, **kwargs)
+
+
+def concatenate_local_features(*args, **kwargs):
+    return _projection_module().concatenate_local_features(*args, **kwargs)
 
 
 def pindiag(template, *values):
