@@ -58,6 +58,8 @@ TRACE_MS_FIELD = re.compile(r'\btrace_ms=([0-9.]+)')
 
 # Categories that scale with the users in the block (one launch or one piece per user) and those shared by the block.
 PER_USER = ('attn.sdpa', 'gdn.conv_gates', 'attn.glue', 'gdn.glue')
+CHAIN_BOUND = ('gdn.recurrence',)   # one chain per (user, head) core, all users in parallel: a 16-token chain is the block's
+EXPECTED_LAYERS = dict(layers=64, gdn=48, attn=16, users=4, sdpa_per_attn=4, conv_per_gdn=4)
 GROUPS = collections.OrderedDict([
     ('weight matmuls', ('mm.',)), ('gdn.recurrence', ('gdn.recurrence',)), ('gdn.glue', ('gdn.glue',)),
     ('gdn.conv_gates', ('gdn.conv_gates',)), ('attn.sdpa', ('attn.sdpa',)), ('attn.glue', ('attn.glue',)),
@@ -619,17 +621,23 @@ def round_timeline(analysis, every, trace_id, devices, rounds):
 
 
 def project_16_row(single, packed):
-    """The lone user's 16-row verify (a T16 draft block) composed from the lone 4-row step and the 64-row block: shared
-    categories are interpolated between 4 and 64 rows, per-user categories are one user's (the lone step's own)."""
+    """The lone user's 16-row verify (a T16 draft block) composed from the 64-row block and the lone 4-row step. The block
+    is exactly `users` 16-row segments run side by side, so what is one segment's own (SDPA, conv-gates, per-user glue)
+    is the block's divided by the users, and the GDN recurrence, one chain per (user, head) core with every user in
+    parallel, is the block's as it is (a 16-token chain). Only the weight- and collective-bound categories, which scale
+    with the rows, are interpolated between 4 and 64 rows."""
     if not single or not packed:
         return None
+    users = len(packed.get('sdpa_us_by_user') or {}) or 4
     s, b = single['categories'], packed['categories']
     table = collections.OrderedDict()
     for name in sorted(set(s) | set(b)):
         s_ms = s.get(name, {'ms': [0.0]})['ms'][0]
         b_ms = b.get(name, {'ms': [0.0]})['ms'][0]
-        if name in PER_USER:
-            table[name] = round(s_ms, 3)
+        if name in CHAIN_BOUND:
+            table[name] = round(b_ms, 3)
+        elif name in PER_USER:
+            table[name] = round(b_ms / float(users), 3)
         else:
             table[name] = round(s_ms + (b_ms - s_ms) * (16.0 - 4.0) / (64.0 - 4.0), 3)
     gap = single['gap_ms'][0] + (packed['gap_ms'][0] - single['gap_ms'][0]) * (16.0 - 4.0) / (64.0 - 4.0)
@@ -637,7 +645,9 @@ def project_16_row(single, packed):
     groups = collections.OrderedDict((g, 0.0) for g in GROUPS)
     for name, ms in table.items():
         groups[group_of(name)] += ms
-    return dict(rows=16, method='per-user categories from the 4-row lone step; shared categories interpolated 4 -> 64 rows',
+    return dict(rows=16, method='chain-bound categories (the GDN recurrence) as the block; per-user categories the '
+                                'block divided by its users; weight- and collective-bound categories interpolated '
+                                '4 -> 64 rows',
                 total_ms=round(total, 2), categories=table,
                 groups=collections.OrderedDict((k, round(v, 3)) for k, v in groups.items()),
                 projection_ms=PROJECTION_TP4_1U_16ROW_MS)
@@ -671,6 +681,25 @@ def texts_of(gate_json):
     return [(stream or {}).get('text') for stream in (gate_json or {}).get('streams') or []]
 
 
+def structure_problems(label, analysis, users):
+    """What an op-name drift or a bundled SDPA would break silently: the layer count, the GDN / attention split, and the SDPA
+    and conv-gates launches per layer must be the model's (64 layers, 48 GDN, 16 attention, one launch per user)."""
+    if not analysis:
+        return []
+    out = []
+    conv = analysis.get('conv_gates_per_gdn_layer')
+    sdpa = len(analysis.get('sdpa_us_by_user') or {})
+    for what, got, want in (('layers', analysis['layers'], EXPECTED_LAYERS['layers']),
+                            ('GDN layers', analysis['gdn_layers'], EXPECTED_LAYERS['gdn']),
+                            ('attention layers', analysis['attn_layers'], EXPECTED_LAYERS['attn']),
+                            ('SDPA launches per attention layer', sdpa, users),
+                            ('conv-gates launches per GDN layer', conv, users)):
+        if got != want:
+            out.append('%s: %s %s, expected %s (an op-name drift or a bundled launch would mis-segment the trace)' % (
+                label, what, got, want))
+    return out
+
+
 # ---- the whole analysis ----
 
 def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_json=None, twin_log=None, twin_json=None,
@@ -698,7 +727,9 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
     packed = [t for t, k in signatures.items() if k == 'verify-packed']
     single = [t for t, k in signatures.items() if k == 'verify-single']
     pick = lambda ids: max(ids, key=lambda t: (len(traces[t]['complete']), traces[t]['ops'])) if ids else None
-    packed_id = pick(packed)
+    detail_of = dict((r['trace'], r.get('detail') or {}) for r in listing)
+    four_user = [t for t in packed if detail_of[t].get('users') == EXPECTED_LAYERS['users']]
+    packed_id = pick(four_user or packed)
     # The lone lane's widths (1, 2, 4 rows) are told apart by their kernel sums (a wider verify takes longer).
     single_sorted = sorted(single, key=lambda t: next(r['kernel_sum_ms'] for r in listing if r['trace'] == t))
     labels = dict((t, w) for t, w in zip(single_sorted, ('w1', 'w2', 'w4'))) if len(single_sorted) == 3 else {}
@@ -706,7 +737,9 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
         if row['trace'] in labels:
             row['label'] = 'verify-%s' % labels[row['trace']]
     lone_complete = [t for t in single_sorted if traces[t]['complete']]
-    lone_id = lone_complete[-1] if lone_complete else None
+    # the lone step: the widest replay with a full sample (a sequential fallback round leaves one session of another width)
+    lone_id = max(lone_complete, key=lambda t: (len(traces[t]['complete']) >= MIN_SESSIONS, len(single_sorted) and
+                                                single_sorted.index(t))) if lone_complete else None
     result = dict(traces=listing, chips=devices_all)
     packed_analysis = single_analysis = None
     if packed_id and traces[packed_id]['complete']:
@@ -739,6 +772,8 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
             notes.append('the session id = round assumption is doubtful (median device-span error %.0f%% against the '
                          'host trace_ms): per-round attachments (live count, contexts) may be off' %
                          (100 * packed_analysis['round_map']['median_error']))
+    problems += structure_problems('verify-64', packed_analysis, users=EXPECTED_LAYERS['users'])
+    problems += structure_problems('lone step', single_analysis, users=1)
     if single_analysis:
         single_analysis['trace'] = lone_id
         single_analysis['groups'] = grouped(single_analysis)
@@ -774,7 +809,7 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
         a, b = texts_of(gate_json), texts_of(twin_json)
         result['texts_identical'] = (a == b) if a and b else None
         if result['texts_identical'] is False:
-            problems.append('ops-trace texts differ from ops-twin texts: profiling changed the arithmetic (a finding)')
+            problems.append('ops-trace texts differ from ops-twin texts: the profiled and the unprofiled arms diverged (profiling shifts the scheduling; the arithmetic divergence at 32k and above is unresolved, so check it before blaming the profiler)')
     result['perturbation'] = perturbation(gate_json, twin_json, twin, log, packed_analysis)
     if result['perturbation'].get('flagged'):
         notes.append('profiling perturbed the round: profiled trace_ms is %.1f%% of the twin\'s' %

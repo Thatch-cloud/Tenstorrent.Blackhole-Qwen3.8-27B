@@ -12,7 +12,7 @@ checkout died with EACCES) - even when the gate step was cancelled.
 PLANS, one arm each, run after every judged plan of the job (c2_serving_job refuses any other order), the twin first:
   ops-twin   the four-card TIMED profile (c2-packed-tp4-speed: the verify's T1/T2 audits off, the drafter's K/V slide on),
              served bytes, no profiler: four real-text users at 4,096 / 8,192 / 16,384 / 24,576 tokens (24k, not 32k: the
-             exactness divergence at 32k and above is unresolved), user 0 asked for 192 tokens and users 1-3 for 64, all
+             exactness divergence at 32k and above is unresolved), user 0 asked for 256 tokens and users 1-3 for 128 (enough 4-live rounds at ~6 accepted tokens each), all
              with ignore_eos. The unperturbed round times and the texts the profiled arm is compared with.
   ops-trace  the same, profiled with v138's tracy recipe (the qualified op-level recipe): tracy -p, trace tracking, the
              CPP post-process only (--disable-device-data-dump-to-files: no raw profile_log_device.csv, which is tens
@@ -23,7 +23,7 @@ One container per arm yields 4-live rounds, then 3- and 2-live padded rounds as 
 1/2/4-row sequential engines (a lone user has no 16-row step on this profile: tp4_profile_report composes it).
 
 Verdicts: PASS, FAIL (a harness failure, a stream without text, garbage, or ops-trace texts differing from ops-twin's -
-profiling must not change arithmetic, so that is a finding), NOT_EXERCISED (the disk guard stopped the arm, or no twin to
+a difference is reported as a FAIL to look at: profiling shifts scheduling, and the exactness divergence at 32k and above is unresolved), NOT_EXERCISED (the disk guard stopped the arm, or no twin to
 compare with), INFRA (the gate's own). A report that finds too few complete sessions says so in the plan's lines and
 does not fail the plan: the product is data.
 
@@ -50,8 +50,8 @@ PLAN_KINDS = {TWIN: 'twin', TRACE: 'ops'}
 # The shapes are fixed here, not in the job file, so a job cannot drift from what the analysis expects.
 USERS = 4
 LENGTHS = (4096, 8192, 16384, 24576)
-MAX_TOKENS = 64
-USER_MAX_TOKENS = ((0, 192),)
+MAX_TOKENS = 128
+USER_MAX_TOKENS = ((0, 256),)
 # Docker limits (seconds): readiness (a profiled arm compiles every profiler-define kernel cold into its tmpfs) plus the
 # stream timeout plus the close (the last read-back, tracy's post-process).
 READINESS_SECONDS = 1800
@@ -195,7 +195,7 @@ def planned(arm_dir, ops):
 
 
 def prepare_arm(arm_dir, ops):
-    """The arm's profile directory, writable by the container's root (it has no CAP_DAC_OVERRIDE), and the additions
+    """The arm's profile directory, writable whatever user the container runs as (a harmless precaution), and the additions
     gate_run makes."""
     prepared = planned(arm_dir, ops)
     if ops['kind'] != 'twin':
@@ -491,7 +491,7 @@ def verdict(plan, report, arm, twin_report, log_text=None, analysis=None):
     elif text_problems(twin_report, TWIN):
         shortfalls.append('texts not compared: %s' % '; '.join(text_problems(twin_report, TWIN)))
     elif not problems and stream_texts(twin_report) != stream_texts(report):
-        problems.append('texts differ from %s: profiling changed the arithmetic (a real finding)' % TWIN)
+        problems.append('texts differ from %s: the texts diverged (profiling shifts scheduling; the exactness divergence at 32k and above is unresolved, so compare against a twin-vs-twin first)' % TWIN)
     if problems:
         return dict(verdict='FAIL', reason='; '.join(problems), lines=lines, ops=ops)
     if ops.get('problem'):

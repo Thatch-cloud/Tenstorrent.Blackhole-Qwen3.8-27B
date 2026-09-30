@@ -57,8 +57,8 @@ class PlanTests(unittest.TestCase):
             args = list(arm[1])
             self.assertEqual(args[args.index('--prompt-lengths') + 1], '4096,8192,16384,24576')
             self.assertEqual(args[args.index('--users') + 1], '4')
-            self.assertEqual(args[args.index('--max-tokens') + 1], '64')
-            self.assertEqual(args[args.index('--user-max-tokens') + 1], '0:192')
+            self.assertEqual(args[args.index('--max-tokens') + 1], '128')
+            self.assertEqual(args[args.index('--user-max-tokens') + 1], '0:256')
             self.assertEqual(args[args.index('--user-ignore-eos') + 1], '0,1,2,3')
             self.assertIn('--prompt-source', args)
             self.assertEqual(args[args.index('--prompt-source') + 1], 'real-text')
@@ -293,7 +293,7 @@ class VerdictTests(unittest.TestCase):
         result = ops.verdict('ops-trace', report(), self.arm(), report(texts=['alpha', 'beta', 'gamma', 'other']),
                              log_text=self.log())
         self.assertEqual(result['verdict'], 'FAIL')
-        self.assertIn('profiling changed the arithmetic', result['reason'])
+        self.assertIn('the texts diverged', result['reason'])
 
     def test_no_twin_is_not_exercised(self):
         result = ops.verdict('ops-trace', report(), self.arm(), None, log_text=self.log())

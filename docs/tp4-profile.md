@@ -35,7 +35,7 @@ prefill (24k = 12 chunks x 64 layers x 7.4, about 5.7k programs) fits one window
 left root-owned logs so the next checkout died with EACCES. The gate hands each arm's profile tree back when the arm ends, and the
 workflow's `always()` step "Hand back the TP4 op-profile output" does it again however the gate step ended, keeps the CPP report
 (compressed) if the gate did not get to it, and prunes what is left above 8 MB. A disk guard stops the profiled arm past 4 GB of
-profile tree or 85% disk. A segfault in `read_core_data_from_completion_queue` is infrastructure: do not raise op-support.
+profile tree or 85% disk. A segfault in `read_core_data_from_completion_queue` is an infrastructure fault in cause, but the plan reports it as FAIL (the harness records it as fatal): read the log, and do not raise op-support.
 
 **Stop rules.** STOP on an attach refusal, a hang, garbage text, or ops-trace texts differing from ops-twin (profiling must not
 change arithmetic; the plan FAILs). Everything else is soft: a report that finds fewer than 8 complete 4-live verify sessions on all
