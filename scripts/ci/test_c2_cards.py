@@ -79,6 +79,15 @@ class JobTests(unittest.TestCase):
         with self.assertRaisesRegex(job.JobError, 'C2_FABRIC must be one of'):
             read(C2_CARDS='quad', C2_FABRIC='FABRIC_2D')
 
+    def test_the_fabric_probe_choice_is_the_reduction_order_spike_or_the_fabric_probe(self):
+        quad = dict(C2_CARDS='quad', C2_ACTIONS='reset fabric', C2_PROFILE='general-tp4')
+        self.assertEqual(read(**quad)['fabric_probe'], 'fabric')
+        self.assertEqual(read(C2_FABRIC_PROBE='rs-tile', **quad)['fabric_probe'], 'rs-tile')
+        with self.assertRaisesRegex(job.JobError, 'C2_FABRIC_PROBE must be one of'):
+            read(C2_FABRIC_PROBE='ring', **quad)
+        with self.assertRaisesRegex(job.JobError, 'no fabric'):
+            read(C2_CARDS='quad', C2_ACTIONS='status', C2_FABRIC_PROBE='rs-tile')
+
     def test_the_fabric_probe_runs_alone(self):
         # the probe closes its mesh, and a second open in one job is what the ethernet-core teardown wedge punishes
         for beside in ('smoke', 'gate', 'prefix'):
@@ -243,7 +252,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('/experiment-cache', probe)
         self.assertIn('-v "$PWD:/c2:ro"', probe)
         self.assertNotIn('blackhole-', probe)
-        for script in ('tp4_fabric_probe.py', 'tp4_mesh.py'):
+        # C2_FABRIC_PROBE picks the script and the report; both are this checkout's, mounted read-only
+        self.assertIn('PROBE: ${{ steps.job.outputs.fabric_probe }}', probe)
+        self.assertIn('fabric) script=tp4_fabric_probe.py; report=fabric-probe.json', probe)
+        self.assertIn('rs-tile) script=tp4_rs_tile_spike.py; report=rs-tile-spike.json', probe)
+        self.assertIn('-B "/c2/scripts/ci/$script"', probe)
+        self.assertIn('TP4_RS_TILE', probe)
+        for script in ('tp4_fabric_probe.py', 'tp4_rs_tile_spike.py', 'tp4_mesh.py'):
             self.assertTrue(os.path.isfile(os.path.join(HERE, script)), script)
         self.assertLess(int(re.search(r'timeout-minutes: ([0-9]+)', probe).group(1)) * 60, 600 * 60)
 

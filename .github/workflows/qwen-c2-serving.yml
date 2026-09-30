@@ -7,7 +7,9 @@ name: Qwen C2 serving image
 #   reset  - (see its steps) cards M and A together, or with C2_CARDS=quad all four cards together with the heal
 #   fabric - C2_CARDS=quad only: the four-card fabric probe (scripts/ci/tp4_fabric_probe.py) inside the image on
 #            every Blackhole board present, the (1, 4) mesh the TP4 profiles open: the ring, the links each edge
-#            trained and the model's own all-gather / reduce-scatter timed at 1 and 2 links; fabric-probe.json
+#            trained and the model's own all-gather / reduce-scatter timed at 1 and 2 links; fabric-probe.json.
+#            C2_FABRIC_PROBE=rs-tile runs scripts/ci/tp4_rs_tile_spike.py instead (the model's own all-reduce on a
+#            64-row block against its one-tile calls, bit for bit, then the tile-split wrapper): rs-tile-spike.json
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
 #            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
 #            the same refusals as the gate (anything holding M or A, a platform serving container); never card
@@ -307,6 +309,7 @@ jobs:
         env:
           TAG: ${{ steps.job.outputs.tag }}
           FABRIC: ${{ steps.job.outputs.fabric }}
+          PROBE: ${{ steps.job.outputs.fabric_probe }}
         run: |
           set -euo pipefail
           # The (1, 4) mesh under the ring descriptor, opened once (one fabric config, one open: a second open in a
@@ -315,6 +318,13 @@ jobs:
           # probe, tp4_mesh.py and the descriptor come from this checkout (mounted read-only), so a probe needs
           # only an image, not a build of this commit. Put reset before it after any failed run.
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          # C2_FABRIC_PROBE: the fabric probe (the default) or the reduction-order spike; both open the mesh once, from
+          # this checkout, under the same descriptor and contract-off environment.
+          case "${PROBE:-fabric}" in
+            fabric) script=tp4_fabric_probe.py; report=fabric-probe.json ;;
+            rs-tile) script=tp4_rs_tile_spike.py; report=rs-tile-spike.json ;;
+            *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
+          esac
           results="$RUNNER_TEMP/c2-results/fabric"
           mkdir -p "$results"
           docker image inspect "$image" > /dev/null
@@ -341,10 +351,10 @@ jobs:
             -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
             -e TT_METAL_CACHE=/root/.cache/tt-metal-cache -e TT_CACHE_PATH=/tmp/tt-weights \
             -e TT_MESH_GRAPH_DESC_PATH=/c2/scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto \
-            --entrypoint python3 "$image" -B /c2/scripts/ci/tp4_fabric_probe.py --fabric "$FABRIC" \
-            --output /probe-results/fabric-probe.json 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?
+            --entrypoint python3 "$image" -B "/c2/scripts/ci/$script" --fabric "$FABRIC" \
+            --output "/probe-results/$report" 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?
           sudo -n chown -R "$(id -u):$(id -g)" "$results" 2>/dev/null || true
-          grep -F 'FABRIC_PROBE' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -30 || true
+          grep -E 'FABRIC_PROBE|TP4_RS_TILE' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
           exit "$status"
       - name: Run a qualification harness on card M
         if: contains(steps.job.outputs.actions, 'cardm')
