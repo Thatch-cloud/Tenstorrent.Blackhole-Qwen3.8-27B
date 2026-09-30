@@ -1703,7 +1703,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-time-gate": {
-      "description": "GATE ONLY (the four-card lanes window, never for traffic): c2-packed-tp4-gate's engine (4 seats x 131,328, min_answer_tokens 256), mesh, ring descriptor, four-card flags and gate behaviour; UNQUALIFIED on hardware (packed_any_evidence_tp4.json records no section, so the attach runs only as a gate run, and logs each missing piece). The differences: the verify T1 and T2 audits are OFF (QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0; the gate driver adds no extent audit to a timing arm), so this is a TIMING arm: the tokens committed per round on real coding text (tau) and the padded and full packed-round times P(2), P(3), P(4), and a lone user on today's 1/2/4-row engines, the baseline the one-user lane is measured against. Exactness is c2-packed-tp4-gate's. Not for traffic. UNVERIFIED on hardware.",
+      "description": "GATE ONLY (the four-card lanes window, never for traffic): c2-packed-tp4-gate's engine (4 seats x 131,328, min_answer_tokens 256), mesh, ring descriptor, four-card flags and gate behaviour; UNQUALIFIED on hardware (packed_any_evidence_tp4.json records no section, so the attach runs only as a gate run, and logs each missing piece). The differences: the verify T1 and T2 audits are OFF (QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0; the gate driver adds no extent audit to a timing arm), so this is a TIMING arm: the tokens committed per round on real coding text (tau) and the padded and full packed-round times P(2), P(3), P(4), and a lone user on today's 1/2/4-row engines, the baseline the one-user lane is measured against. Exactness is c2-packed-tp4-gate's. Not for traffic. UNVERIFIED on hardware. tp4/next: carries QWEN_FAST_TP_KV_SLIDE=1 like the c2-packed-tp4-gate it is built on and held against (the lanes plans' reference arm runs c2-packed-tp4-gate, and real_text_compare calls two arms with different arithmetic flags NOT_COMPARABLE); the lanes window's first runs were without the slide.",
       "eos_ids": [
         248046,
         248044
@@ -1737,7 +1737,8 @@
         "QWEN_FAST_TRACED_PUBLISH": "0",
         "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
         "QWEN_GDN_DIRECT_WINDOW": "0",
-        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0"
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_TP_KV_SLIDE": "1"
       },
       "engine": {
         "model": "@SNAPSHOT@",
@@ -1784,7 +1785,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-solo-gate": {
-      "description": "GATE ONLY (the four-card lanes window, never for traffic): c2-packed-tp4-gate's engine (4 seats x 131,328, min_answer_tokens 256), mesh, ring descriptor, four-card flags and gate behaviour; UNQUALIFIED on hardware (packed_any_evidence_tp4.json records no section, so the attach runs only as a gate run, and logs each missing piece). The difference: QWEN_FAST_SOLO_LANE=1 builds D0, the one-user 16-row extent block beside the 64-row block over pool slot 0 (serving_solo_lane), which a lone slot-0 user's rounds then run on, instead of the per-request 1/2/4-row engines; every audit of c2-packed-tp4-gate is on. A correctness arm, never a timed one: a lone user's text must equal its per-request-engine text and its packed text. Not for traffic. UNVERIFIED on hardware.",
+      "description": "GATE ONLY (the four-card lanes window, never for traffic): c2-packed-tp4-gate's engine (4 seats x 131,328, min_answer_tokens 256), mesh, ring descriptor, four-card flags and gate behaviour; UNQUALIFIED on hardware (packed_any_evidence_tp4.json records no section, so the attach runs only as a gate run, and logs each missing piece). The difference: QWEN_FAST_SOLO_LANE=1 builds D0, the one-user 16-row extent block beside the 64-row block over pool slot 0 (serving_solo_lane), which a lone slot-0 user's rounds then run on, instead of the per-request 1/2/4-row engines; every audit of c2-packed-tp4-gate is on. A correctness arm, never a timed one: a lone user's text must equal its per-request-engine text and its packed text. Not for traffic. UNVERIFIED on hardware. tp4/next: carries QWEN_FAST_TP_KV_SLIDE=1 like the c2-packed-tp4-gate it is built on and held against (the lanes plans' reference arm runs c2-packed-tp4-gate, and real_text_compare calls two arms with different arithmetic flags NOT_COMPARABLE); the lanes window's first runs were without the slide.",
       "eos_ids": [
         248046,
         248044
@@ -1819,7 +1820,8 @@
         "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
         "QWEN_GDN_DIRECT_WINDOW": "0",
         "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
-        "QWEN_FAST_SOLO_LANE": "1"
+        "QWEN_FAST_SOLO_LANE": "1",
+        "QWEN_FAST_TP_KV_SLIDE": "1"
       },
       "engine": {
         "model": "@SNAPSHOT@",
@@ -1866,7 +1868,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-solo-time-gate": {
-      "description": "GATE ONLY (the four-card lanes window, never for traffic): c2-packed-tp4-gate's engine (4 seats x 131,328, min_answer_tokens 256), mesh, ring descriptor, four-card flags and gate behaviour; UNQUALIFIED on hardware (packed_any_evidence_tp4.json records no section, so the attach runs only as a gate run, and logs each missing piece). The differences: QWEN_FAST_SOLO_LANE=1 (D0, the one-user 16-row block over pool slot 0) and the verify audits OFF, so this is D0's TIMING arm: a lone user's tokens per round and tokens per second on real coding text against c2-packed-tp4-time-gate's per-request engines. Not for traffic. UNVERIFIED on hardware.",
+      "description": "GATE ONLY (the four-card lanes window, never for traffic): c2-packed-tp4-gate's engine (4 seats x 131,328, min_answer_tokens 256), mesh, ring descriptor, four-card flags and gate behaviour; UNQUALIFIED on hardware (packed_any_evidence_tp4.json records no section, so the attach runs only as a gate run, and logs each missing piece). The differences: QWEN_FAST_SOLO_LANE=1 (D0, the one-user 16-row block over pool slot 0) and the verify audits OFF, so this is D0's TIMING arm: a lone user's tokens per round and tokens per second on real coding text against c2-packed-tp4-time-gate's per-request engines. Not for traffic. UNVERIFIED on hardware. tp4/next: carries QWEN_FAST_TP_KV_SLIDE=1 like the c2-packed-tp4-gate it is built on and held against (the lanes plans' reference arm runs c2-packed-tp4-gate, and real_text_compare calls two arms with different arithmetic flags NOT_COMPARABLE); the lanes window's first runs were without the slide.",
       "eos_ids": [
         248046,
         248044
@@ -1901,7 +1903,8 @@
         "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
         "QWEN_GDN_DIRECT_WINDOW": "0",
         "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
-        "QWEN_FAST_SOLO_LANE": "1"
+        "QWEN_FAST_SOLO_LANE": "1",
+        "QWEN_FAST_TP_KV_SLIDE": "1"
       },
       "engine": {
         "model": "@SNAPSHOT@",
@@ -1948,7 +1951,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-lanes-gate": {
-      "description": "GATE ONLY (the four-card lanes window, never for traffic): c2-packed-tp4-gate's engine (4 seats x 131,328, min_answer_tokens 256), mesh, ring descriptor, four-card flags and gate behaviour; UNQUALIFIED on hardware (packed_any_evidence_tp4.json records no section, so the attach runs only as a gate run, and logs each missing piece). The differences: QWEN_FAST_SOLO_LANE=1 and QWEN_FAST_LANE=1 - one fast lane beside standard lanes (serving_fast_lane: slot 0 reserved for the one fast request, a lane-gate scheduler that hides the requests a round does not serve, the fast request in every packed round and in solo rounds between them, at a tunable ratio) - with every audit on. A correctness arm, never a timed one: every lane's text must equal that user's solo text whatever frame the scheduler runs. Not for traffic. UNVERIFIED on hardware.",
+      "description": "GATE ONLY (the four-card lanes window, never for traffic): c2-packed-tp4-gate's engine (4 seats x 131,328, min_answer_tokens 256), mesh, ring descriptor, four-card flags and gate behaviour; UNQUALIFIED on hardware (packed_any_evidence_tp4.json records no section, so the attach runs only as a gate run, and logs each missing piece). The differences: QWEN_FAST_SOLO_LANE=1 and QWEN_FAST_LANE=1 - one fast lane beside standard lanes (serving_fast_lane: slot 0 reserved for the one fast request, a lane-gate scheduler that hides the requests a round does not serve, the fast request in every packed round and in solo rounds between them, at a tunable ratio) - with every audit on. A correctness arm, never a timed one: every lane's text must equal that user's solo text whatever frame the scheduler runs. Not for traffic. UNVERIFIED on hardware. tp4/next: carries QWEN_FAST_TP_KV_SLIDE=1 like the c2-packed-tp4-gate it is built on and held against (the lanes plans' reference arm runs c2-packed-tp4-gate, and real_text_compare calls two arms with different arithmetic flags NOT_COMPARABLE); the lanes window's first runs were without the slide.",
       "eos_ids": [
         248046,
         248044
@@ -1984,7 +1987,8 @@
         "QWEN_GDN_DIRECT_WINDOW": "0",
         "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
         "QWEN_FAST_SOLO_LANE": "1",
-        "QWEN_FAST_LANE": "1"
+        "QWEN_FAST_LANE": "1",
+        "QWEN_FAST_TP_KV_SLIDE": "1"
       },
       "engine": {
         "model": "@SNAPSHOT@",
@@ -2031,7 +2035,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-lanes-time-gate": {
-      "description": "GATE ONLY (the four-card lanes window, never for traffic): c2-packed-tp4-gate's engine (4 seats x 131,328, min_answer_tokens 256), mesh, ring descriptor, four-card flags and gate behaviour; UNQUALIFIED on hardware (packed_any_evidence_tp4.json records no section, so the attach runs only as a gate run, and logs each missing piece). The differences: QWEN_FAST_SOLO_LANE=1 and QWEN_FAST_LANE=1 with the verify audits OFF, so this is the lanes TIMING arm: the fast lane's and every standard lane's steady decode rate with one fast and one to three standard users live, at the ratio an arm sets (QWEN_FAST_LANE_RATIO, per arm) or the controller's. Not for traffic. UNVERIFIED on hardware.",
+      "description": "GATE ONLY (the four-card lanes window, never for traffic): c2-packed-tp4-gate's engine (4 seats x 131,328, min_answer_tokens 256), mesh, ring descriptor, four-card flags and gate behaviour; UNQUALIFIED on hardware (packed_any_evidence_tp4.json records no section, so the attach runs only as a gate run, and logs each missing piece). The differences: QWEN_FAST_SOLO_LANE=1 and QWEN_FAST_LANE=1 with the verify audits OFF, so this is the lanes TIMING arm: the fast lane's and every standard lane's steady decode rate with one fast and one to three standard users live, at the ratio an arm sets (QWEN_FAST_LANE_RATIO, per arm) or the controller's. Not for traffic. UNVERIFIED on hardware. tp4/next: carries QWEN_FAST_TP_KV_SLIDE=1 like the c2-packed-tp4-gate it is built on and held against (the lanes plans' reference arm runs c2-packed-tp4-gate, and real_text_compare calls two arms with different arithmetic flags NOT_COMPARABLE); the lanes window's first runs were without the slide.",
       "eos_ids": [
         248046,
         248044
@@ -2067,7 +2071,8 @@
         "QWEN_GDN_DIRECT_WINDOW": "0",
         "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
         "QWEN_FAST_SOLO_LANE": "1",
-        "QWEN_FAST_LANE": "1"
+        "QWEN_FAST_LANE": "1",
+        "QWEN_FAST_TP_KV_SLIDE": "1"
       },
       "engine": {
         "model": "@SNAPSHOT@",

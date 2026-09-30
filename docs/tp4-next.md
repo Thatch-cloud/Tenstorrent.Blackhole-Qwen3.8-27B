@@ -19,7 +19,9 @@ against the audited arm's tokens, and for the S3a matrix against the solo engine
 The lone-user lanes (`QWEN_FAST_SOLO_LANE`, `QWEN_FAST_LANE`) are not on the best profiles. `serving_solo_lane.UNSUPPORTED_FLAGS` lists
 `QWEN_FAST_FUSED_COMMIT`: the fused commit builds a per-block object over the M3 block's buffers and the solo block cannot take it, so the
 attach refuses the combination. The five lanes profiles (`c2-packed-tp4-time-gate`, `-solo-gate`, `-solo-time-gate`, `-lanes-gate`,
-`-lanes-time-gate`) stay on their own gate base, without the K/V slide they were qualified on. A lanes arm on the best config needs the
+`-lanes-time-gate`) stay on their own gate base and now carry `QWEN_FAST_TP_KV_SLIDE=1` like it: the lanes plans' reference arm runs
+`c2-packed-tp4-gate`, which has the slide since tp4/speed, and `real_text_compare` calls arms that differ in an arithmetic flag
+NOT_COMPARABLE (the lanes exactness gate failed on exactly that in CI). The lanes window's first card runs were without the slide. A lanes arm on the best config needs the
 fused commit taught the solo block, or a best variant without it (speed, quad, levers, lanes); neither is built here.
 
 ## Merge notes
