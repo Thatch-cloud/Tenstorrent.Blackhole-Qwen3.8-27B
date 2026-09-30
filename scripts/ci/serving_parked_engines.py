@@ -497,6 +497,7 @@ STOPPED_MARKER = '[PINDIAG] parked engines stopped at k={} of {}: short of {} (f
 # kept released because the rebuild would leave the split short for the longest parked arrival.
 SINGLE_REBUILT_MARKER = ('[PINDIAG] parked slot {} single rebuilt at {} ms={:.1f} trace_delta={} dram_delta={} '
                          '(bytes per chip, n/a when unread)')
+IDLE_FAILED_MARKER = '[PINDIAG] parked slot {} idle {} failed, left as it was: {}'
 SINGLE_KEPT_MARKER = '[PINDIAG] parked slot {} single kept released at {}: short of {} (free={} largest_free={} need={})'
 # QWEN_FAST_GATE_DRAM_BALLAST (GATE ONLY, G-E3's ballast arm): bytes per chip held unread from the end of the parked
 # build to close, so the admissions run at the boundary of the parked need (design section 9).
@@ -1033,7 +1034,16 @@ class ParkedEngineSet:
         pool has not lent re-parked (repark_idle). Returns dict(singles=[slots rebuilt], reparked=[slots])."""
         if self.closed:
             return dict(singles=[], reparked=[])
-        singles = [entry.index for entry in self.slots if self.rebuild_single(entry, 'idle')]
+        singles = []
+        for entry in self.slots:
+            try:
+                if self.rebuild_single(entry, 'idle'):
+                    singles.append(entry.index)
+            except Exception as failure:
+                # Optional recovery work: a failed capture at an idle moment must not take an idle, healthy server
+                # down. The single stays released (the slot's next rebind rebuilds it, S in its arrival terms).
+                entry.device.proposal_capture = None
+                self.log(IDLE_FAILED_MARKER, entry.index, 'single rebuild', '%s: %s' % (type(failure).__name__, failure))
         return dict(singles=singles, reparked=self.repark_idle())
 
     def unpark(self, entry, reason):
@@ -1071,7 +1081,13 @@ class ParkedEngineSet:
                          reading['largest_free'], need)
                 break
             started = time.perf_counter()
-            self.build_slot(entry, warm=False)
+            try:
+                self.build_slot(entry, warm=False)
+            except Exception as failure:
+                # build_slot closed what it built: the slot stays unparked, on per-request builds, and is tried again
+                # at the next idle moment; the rest of this pass is skipped, as after a DRAM stop.
+                self.log(IDLE_FAILED_MARKER, entry.index, 're-park', '%s: %s' % (type(failure).__name__, failure))
+                break
             self.reparks += 1
             reparked.append(entry.index)
             self.log(REPARKED_MARKER, entry.index, (time.perf_counter() - started) * 1000)

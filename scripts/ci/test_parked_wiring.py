@@ -486,6 +486,24 @@ class AfterParkTests(unittest.TestCase):
             self.assertIsNone(parked.release_parked(coordinator, SimpleNamespace()))
             self.assertIsNone(parked.release_parked(coordinator, None))
 
+    def test_a_failed_capture_at_the_idle_moment_leaves_the_slot_as_it_was_and_the_server_up(self):
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+        with World(environment=PARKED) as world:
+            engines = make_set(world)
+            engines.build()
+            PackedProposalCoordinator()._release_single_user(engines.slots[1].device)
+            engines.unpark(engines.slots[3], 'test')
+            with patch.object(parked, 'build_single_capture', Mock(side_effect=RuntimeError('no room'))),                     patch.object(engines, 'build_slot', Mock(side_effect=RuntimeError('no room either'))):
+                self.assertEqual(engines.idle(), dict(singles=[], reparked=[]))
+            self.assertTrue(engines.single_released(engines.slots[1]), 'the single stays released')
+            self.assertEqual(engines.slots[3].state, 'unparked', 'the slot stays on per-request builds')
+            self.assertTrue(any(line.startswith('[PINDIAG] parked slot 1 idle single rebuild failed')
+                                for line in world.lines))
+            self.assertTrue(any(line.startswith('[PINDIAG] parked slot 3 idle re-park failed') for line in world.lines))
+            self.assertEqual(engines.idle(), dict(singles=[1], reparked=[3]), 'tried again at the next idle moment')
+            self.assertEqual(world.ops.violations, [])
+
     def test_the_idle_moment_rebuilds_released_singles_and_reparks(self):
         from dflash_packed_proposal_coordinator import PackedProposalCoordinator
 
