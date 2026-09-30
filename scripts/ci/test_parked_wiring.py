@@ -251,6 +251,19 @@ class ParkedFactoryTests(unittest.TestCase):
             self.assertEqual(entry.engine.phase, 'parked')
             self.assertEqual(world.ops.violations, [])
 
+    def test_a_rebound_session_honours_eos_only_without_ignore_eos(self):
+        """D4 (B4 5b) on the parked path: under ignore_eos the session keeps only the budget, else it stops at the EOS."""
+        from test_parked_census import sampling
+
+        for ignore, expected in ((True, ()), (False, (99,))):
+            with self.subTest(ignore_eos=ignore), World(environment=PARKED) as world:
+                engines = make_set(world)
+                engines.build()
+                request = admit(world, engines, 'request', 300, 24, sampling=sampling(24, ignore_eos=ignore))
+                self.assertEqual(tuple(request.session.eos_ids), expected)
+                run_to_end(request)
+                request.close('request')
+
     def test_host_refusals_are_todays_and_leave_the_parked_engine_untouched(self):
         from serving_request_factory import RequestRefused
         from test_parked_census import sampling
@@ -605,6 +618,61 @@ class GenerationTests(unittest.TestCase):
                 result = coordinator.release_closed()
                 self.assertEqual(result, dict(quad=0, pairs=[[2, 3]] if on else []))
                 self.assertEqual(sorted(coordinator.pairs), [(0, 1)] if on else [(0, 1), (2, 3)])
+
+    def quad_of(self, bridges):
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+        coordinator = PackedProposalCoordinator()
+        devices = [bridge.request.runtime.drafter for bridge in bridges]
+        quad = SimpleNamespace(close=Mock(), buckets={1: 1})
+        coordinator.quad = (tuple(devices), quad, True)
+        coordinator._note_generations('quad', devices)
+        return coordinator, devices, quad
+
+    def test_a_rebound_member_retires_the_quad_only_under_the_flag(self):
+        """E4's quad backstop, at both places the coordinator retires a quad (_retire_quad in the next draft round and
+        release_closed at a detach): the generation is the only guard when release_parked fails, since a parked device
+        is neither closed nor a different object."""
+        for on in (False, True):
+            for place in ('retire', 'release_closed'):
+                with self.subTest(flag=on, place=place), flag_environment(on):
+                    coordinator, devices, quad = self.quad_of(self.bridges((0, 1, 2, 3)))
+                    self.assertEqual(coordinator.generations.get('quad'), (0, 0, 0, 0) if on else None)
+                    devices[3].rebind_generation = 2
+                    if place == 'retire':
+                        coordinator._retire_quad(dict((slot, dict(device=device)) for slot, device in enumerate(devices)))
+                    else:
+                        self.assertEqual(coordinator.release_closed()['quad'], 1 if on else 0)
+                    self.assertEqual(coordinator.quad is None, on)
+                    self.assertEqual(quad.close.call_count, 1 if on else 0)
+                    self.assertNotIn('quad', coordinator.generations)
+
+    def test_a_built_quad_notes_the_generations_it_was_captured_at(self):
+        import quad_draft
+        from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+        class Quad:
+            def __init__(self, devices):
+                self.buckets, self.last_built = {}, False
+
+            def prepare_device(self, seeds):
+                return False
+
+            def discard_pending(self):
+                pass
+
+        for on in (False, True):
+            with self.subTest(flag=on), flag_environment(on),                     patch.object(quad_draft, 'PreparedQuadDFlashProposal', Quad),                     patch.object(quad_draft, 'refusal', Mock(return_value=None)),                     patch('dflash_packed_proposal_coordinator.capture_headroom', Mock(return_value=([], {}))),                     patch('dflash_packed_proposal_coordinator.packable', Mock(return_value=True)):
+                bridges = self.bridges((0, 1, 2, 3))
+                devices = [bridge.request.runtime.drafter for bridge in bridges]
+                for index, device in enumerate(devices):
+                    device.rebind_generation = index + 1
+                by_slot = dict((slot, dict(device=device, seed=slot, bridge=bridges[slot]))
+                               for slot, device in zip(quad_draft.SLOTS, devices))
+                coordinator = PackedProposalCoordinator()
+                coordinator._prepare_quad([list(group) for group in quad_draft.PAIRS], by_slot, 1, True)
+                self.assertIsNotNone(coordinator.quad)
+                self.assertEqual(coordinator.generations.get('quad'), (1, 2, 3, 4) if on else None)
 
     def test_release_parked_retires_every_trace_of_the_device_and_nothing_else(self):
         from dflash_packed_proposal_coordinator import PARKED_RELEASED_LINE, PackedProposalCoordinator
