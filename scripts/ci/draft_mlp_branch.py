@@ -27,8 +27,9 @@ def gate_up_columns_of(parameters):
     """Per-core output columns of the gate / up matmuls: ceil(shard tiles / 80 cores) from the prepared shards (4 at the
     pair, 2 at four cards); without shards (a fixture) the width's own value."""
     shards = parameters.get('shards')
-    if shards:
-        return math.ceil((shards[0][0].shape[1] // 32) / 80)
+    shape = getattr(shards[0][0], 'shape', None) if shards else None
+    if shape:
+        return math.ceil((shape[1] // 32) / 80)
     return 4 if tp_shapes.chip_count() == tp_shapes.PAIR else 2
 
 

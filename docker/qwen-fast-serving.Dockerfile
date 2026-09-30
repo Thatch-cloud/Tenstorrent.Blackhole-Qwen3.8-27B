@@ -106,6 +106,9 @@ COPY scripts/ci/publish_prewarm.py /experiment-scripts/ci/
 # S2 B6 (publication_warm): packed_verifier imports it at an extent block's attach (QWEN_FAST_EXTENT_REPLAY=1, never
 # set in this image), so it travels beside it.
 COPY scripts/ci/publication_warm.py /experiment-scripts/ci/
+# S2T-07 (the drafter at four cards): these carry the per-chip counts from tp_shapes (unchanged at the pair) and the four-card
+# twins dflash_device / serving_request_factory select at QWEN_FAST_TP=4, so they travel beside their importers.
+COPY scripts/ci/draft_head_layout.py scripts/ci/draft_kv_projection.py scripts/ci/draft_mlp.py scripts/ci/mtp_hidden_rows.py scripts/ci/serving_page_binding.py scripts/ci/verifier_inputs.py scripts/ci/feature_projection_tp.py scripts/ci/draft_kv_history_tp.py scripts/ci/verifier_engine_tp.py /experiment-scripts/ci/
 ENV PYTHONPATH=/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN if [ ! -e /optimisation ]; then ln -s /experiment-optimisation /optimisation; fi \

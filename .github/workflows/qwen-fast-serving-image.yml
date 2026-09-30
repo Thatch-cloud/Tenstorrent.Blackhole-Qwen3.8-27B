@@ -106,6 +106,9 @@ jobs:
           for name in publication_warm.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in draft_head_layout.py draft_kv_projection.py draft_mlp.py mtp_hidden_rows.py serving_page_binding.py verifier_inputs.py feature_projection_tp.py draft_kv_history_tp.py verifier_engine_tp.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
       - name: Build and CPU-test canary without devices or weights
         run: |
           image="qwen-fast-serving:ci-${GITHUB_SHA}"
