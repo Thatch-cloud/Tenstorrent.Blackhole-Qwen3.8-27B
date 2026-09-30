@@ -35,7 +35,7 @@ ROUND_LINE = re.compile(r'\[LANE-ROUND\] round=(\d+) kind=(\S+) block=(\S+) memb
                         r'committed=(\S*) switch=([01]) ratio=(\S+)')
 FRAME_LINE = re.compile(r'\[LANE-FRAME\] frame=(\d+) k=(\S+) F_ms=(\S+) P_ms=(\S+) sigma_ms=(\S+) tau_fast=(\S+) '
                         r'tau_std_min=(\S+) fast_rate=(\S+) std_rate_min=(\S+) floor=(\S+) reason=(\S+) ratio=(\S+)')
-ENGAGED_LINE = re.compile(r'\[LANE\] engaged\b')
+ENGAGED_LINE = re.compile(r'\[LANE\] engaged\b[^\n]*')
 DESYNC_LINE = re.compile(r'\[LANE-DESYNC\][^\n]*')
 REFUSED_LINE = re.compile(r'\[LANE\] refused:[^\n]*')
 SCHED_LINE = re.compile(r'\[LANE-SCHED\][^\n]*')
@@ -65,7 +65,9 @@ def parse(log_text):
                    sigma_ms=number(m.group(5)), tau_fast=number(m.group(6)), tau_std_min=number(m.group(7)),
                    fast_rate=number(m.group(8)), std_rate_min=number(m.group(9)), reason=m.group(11), ratio=m.group(12))
               for m in FRAME_LINE.finditer(log_text)]
-    return dict(admits=admits, rounds=rounds, frames=frames, engaged=bool(ENGAGED_LINE.search(log_text)),
+    engaged = ENGAGED_LINE.search(log_text)
+    return dict(admits=admits, rounds=rounds, frames=frames, engaged=bool(engaged),
+                engaged_line=engaged.group(0)[:300] if engaged else None,
                 desync=[m.group(0)[:300] for m in DESYNC_LINE.finditer(log_text)],
                 refused=[m.group(0)[:300] for m in REFUSED_LINE.finditer(log_text)],
                 sched=len(SCHED_LINE.findall(log_text)))
@@ -218,7 +220,8 @@ def lanes_report(log_text, streams=None, *, fast_users=(), expect_lanes=True, fa
     per-request-engine baseline, D0 alone): only the client's own rates are read."""
     parsed = parse(log_text)
     problems = []
-    report = dict(fast_bar=fast_bar, standard_bar=standard_bar, engaged=parsed['engaged'], admits=parsed['admits'],
+    report = dict(fast_bar=fast_bar, standard_bar=standard_bar, engaged=parsed['engaged'], engaged_line=parsed['engaged_line'],
+                  admits=parsed['admits'],
                   rounds=len(parsed['rounds']), frames=len(parsed['frames']), sched_lines=parsed['sched'],
                   fast_users=list(fast_users))
     report['client'] = client_windows(streams, fast_users)
