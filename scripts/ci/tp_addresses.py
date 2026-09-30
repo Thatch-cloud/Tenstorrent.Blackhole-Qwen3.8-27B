@@ -156,6 +156,13 @@ def install(environ=None):
                 namespace[original_name] = twin
                 _REBOUND.append((namespace, original_name, original))
                 rebound += 1
+    # The model's tt_all_reduce, wrapped to run a wide verify block one 32-row tile at a time (tile_collective_tp): the
+    # four-way ring reduction's order depends on the tile's place in the block, the sequential engine's does not.
+    import tile_collective_tp
+
+    for namespace, name, old in tile_collective_tp.install():
+        _REBOUND.append((namespace, name, old))
+        rebound += 1
     return rebound
 
 

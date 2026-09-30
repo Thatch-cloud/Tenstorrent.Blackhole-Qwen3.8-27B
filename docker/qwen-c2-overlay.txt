@@ -287,6 +287,8 @@ scripts/ci/draft_kv_projection_tp.py
 scripts/ci/draft_mlp_tp.py
 scripts/ci/draft_shared_head_tp.py
 scripts/ci/feature_collective_tp.py
+# The model's tt_all_reduce split per 32-row tile for the wide verify block (tp_addresses.install() binds it at QWEN_FAST_TP=4 only).
+scripts/ci/tile_collective_tp.py
 scripts/ci/pair_row_exact_tp.py
 scripts/ci/attention_head_fold_tp.py
 scripts/ci/gdn_conv_prefix_copy_tp.py
