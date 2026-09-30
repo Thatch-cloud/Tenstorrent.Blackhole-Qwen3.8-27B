@@ -195,6 +195,13 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         import serving_solo_lane
 
         solo_lane = serving_solo_lane.solo_lane_admission(m3_shape(policy), log=pindiag)
+    # QWEN_FAST_LANE (default off; strictly '0' or '1'): one fast lane beside standard lanes, gate only. It rides on the solo
+    # lane (a solo round IS the fast user's extra round), so the solo admission above must have passed. Off, not even the import.
+    lane_config = None
+    if os.environ.get('QWEN_FAST_LANE', '0') != '0':
+        import serving_fast_lane
+
+        lane_config = serving_fast_lane.lane_admission(solo_lane, seats=policy['scheduler_requests'], log=pindiag)
     # QWEN_FAST_PACKED_CAPTURE_POSITION (S2 G3b, gate only, default unset): parsed here, before
     # anything is built; each block refuses a position its capacity cannot capture at.
     capture_position = packed_capture_position()
@@ -538,6 +545,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # build is timed (STICKY_ENGINE_MARKER). Off, the factories below build exactly what they
         # always did.
         sticky = sticky_sessions_enabled()
+        lanes = None
+        if lane_config is not None:
+            lanes = serving_fast_lane.LaneRuntime(lane_config, log=pindiag)
 
         def capture_factory(position, start=0):
             owner.validate()
@@ -568,9 +578,24 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                     collectives=collectives, buffer_pool=pool, shared_weights=weights,
                     **(dict(capture_rows=capture_rows) if trimmed else {}))
 
+            # QWEN_FAST_LANE: the lane the request is granted decides which pool slots its engine may borrow (the fast request
+            # slot 0 alone, standard requests the others), so the carry the solo block is bound to is the fast request's.
+            # Admission is the worker's: a second fast request is downgraded to standard here, never queued or refused.
+            grant = None
+            if lanes is not None:
+                grant = lanes.admit(state.req_id, state.sampling_params, slot0_free=not pool.slots[0].lent)
             if sticky:
                 began = time.perf_counter()
-            request = create_request() if experiment is None else experiment.create(create_request)
+            try:
+                if grant is None:
+                    request = create_request() if experiment is None else experiment.create(create_request)
+                else:
+                    with pool.slot_order(grant.slot_order):
+                        request = create_request() if experiment is None else experiment.create(create_request)
+            except BaseException:
+                if lanes is not None:
+                    lanes.release(state.req_id)
+                raise
             if sticky:
                 # Sticky sessions: the engine build per request, so a gate can split a hit's TTFT into
                 # its tail prefill and the build phase 1 still pays (STICKY_ENGINE_MARKER).
@@ -585,6 +610,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 binding = VerifierPageBinding(request.engine, blocks, physical_pages=owner.physical_pages)
                 return FastRunnerBridge(runner, request, binding, validate_storage=owner.validate)
             except BaseException:
+                if lanes is not None:
+                    lanes.release(state.req_id)
                 request.close(state.req_id)
                 raise
 
@@ -595,7 +622,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             scopes.callback(register_dram_admission(pool))
         lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,
             capture_factory=capture_factory, bridge_factory=bridge_factory, eos_ids=eos_ids,
-            cancelled=cancelled, packed_step=packed_step)
+            cancelled=cancelled, packed_step=packed_step,
+            **({'lanes': lanes} if lanes is not None else {}))
     except BaseException as failure:
         # Closing the scopes can itself raise (the block-stream scope checks at exit
         # that every layer ran the fused candidate, which nothing has at attach), and

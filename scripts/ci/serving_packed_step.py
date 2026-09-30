@@ -440,6 +440,7 @@ class PackedStep:
             raise ValueError('The solo block is a separate one-user 16-row packed block')
         self.solo = solo
         self.last_solo = None
+        self.route = None
         # QWEN_FAST_GATE_FORCE_CAP (gate only): refused here, at attach, if malformed; logged once when set.
         cap = forced_cap()
         if cap is not None:
@@ -447,13 +448,38 @@ class PackedStep:
 
     def __call__(self, entries, *, cancelled):
         if self.solo is not None:
-            from serving_solo_lane import solo_serves
+            return self.route_round(entries, cancelled)
+        return self.run_blocks(entries, cancelled)
 
-            solo_round = solo_serves(self.solo, entries)
-            self.note_switch(solo_round)
+    def route_round(self, entries, cancelled):
+        """A step with the solo block: the round runs on it when its one entry is a 16-row slot-0 ticket, else on M3 (or the
+        sequential step, as ever). `route` records where it went - 'solo', 'packed' or 'sequential', by which block's round
+        counter moved - for the lane telemetry (serving_worker_hook reads it after the step)."""
+        from serving_solo_lane import solo_serves
+
+        counts = [getattr(block, 'rounds', 0) for block in self.blocks], getattr(self.solo, 'rounds', 0)
+        solo_round = solo_serves(self.solo, entries)
+        self.note_switch(solo_round)
+        self.route = None
+        try:
             if solo_round:
                 note_solo_route(self.solo, entries)
                 return packed_device_step(entries, cancelled=cancelled, block=self.solo)
+            return self.run_blocks(entries, cancelled)
+        finally:
+            after = [getattr(block, 'rounds', 0) for block in self.blocks], getattr(self.solo, 'rounds', 0)
+            self.route = ('solo' if after[1] != counts[1] else 'packed' if after[0] != counts[0] else 'sequential')
+
+    def solo_rows(self, request):
+        """The ticket width the solo block would serve this ONE request at (16), or None: not its slot, no token budget left,
+        or a frontier the extent block does not admit. None without a solo block."""
+        if self.solo is None:
+            return None
+        from serving_solo_lane import solo_proposal_rows
+
+        return solo_proposal_rows(self.solo, [request])
+
+    def run_blocks(self, entries, cancelled):
         if len(self.blocks) == 1:
             return packed_device_step(entries, cancelled=cancelled, block=self.blocks[0])
         return packed_device_rounds(entries, cancelled=cancelled, blocks=self.blocks)

@@ -145,6 +145,7 @@ as before; the attach goes on. The gate fails an arm on that line (lever_n_m3nat
 DRAFT_OUTPUTS_REFUSED_MARKER), since such an arm serves the unprotected path.
 """
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 from attention_head_fold import parallel_groups
@@ -867,13 +868,36 @@ class ServingBufferPool:
             return None
         return self.draft_outputs.get(tuple(group))
 
+    @contextmanager
+    def slot_order(self, order):
+        """The slots the next acquire() may lend, in preference order (the fast lane, QWEN_FAST_LANE: slot 0 is the fast request's
+        alone, the others are the standard requests'). Fails closed: when none of them is free the acquire raises, it never falls
+        back to a slot outside the order. Not reentrant; without it (the default) acquire lends the lowest free slot, as ever."""
+        order = tuple(order)
+        if (not order or len(set(order)) != len(order)
+                or any(type(index) is not int or not 0 <= index < len(self.slots) for index in order)):
+            raise ValueError('A slot order names distinct pooled slots')
+        if getattr(self, '_slot_order', None) is not None:
+            raise ValueError('A slot order is already in force')
+        self._slot_order = order
+        try:
+            yield order
+        finally:
+            self._slot_order = None
+
     def acquire(self, *, owner='unnamed'):
         if self.closed:
             raise ValueError('Closed serving buffer pool cannot lend a slot')
-        slot = next((candidate for candidate in self.slots if not candidate.lent), None)
+        order = getattr(self, '_slot_order', None)
+        if order is None:
+            slot = next((candidate for candidate in self.slots if not candidate.lent), None)
+        else:
+            slot = next((self.slots[index] for index in order if not self.slots[index].lent), None)
         if slot is None:
             raise ValueError('All %d pooled draft history slots are already lent; a %dth request '
-                             'cannot be admitted' % (self.users, self.users + 1))
+                             'cannot be admitted' % (self.users, self.users + 1)
+                             if order is None else
+                             'None of the pooled draft history slots %r is free: the request cannot be admitted' % (order,))
         slot.verify()
         # Zeroed on every loan, so a returned slot cannot carry one request's history
         # into the next, and the spare reads exactly as the zeros_like it replaces.
