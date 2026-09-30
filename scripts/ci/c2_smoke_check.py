@@ -17,7 +17,14 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     the quad's marker exactly once, at least one round the quad served, no fallback and no disable line. Off: no quad line, and
     at least one round two packed pairs served (a comparison arm that never batched compares nothing). A
     [DRAFT-SINGLES-AUDIT] line with equal=0 or a [QUAD-AUDIT] line with equal=0 fails; a profile with
-    QWEN_FAST_DRAFT_SINGLES_AUDIT set and no audit line fails.
+    QWEN_FAST_DRAFT_SINGLES_AUDIT set and no audit line fails;
+  - the fused commit (QWEN_FAST_FUSED_COMMIT=1, the round-fence plan's H1b; at four cards fused_commit_tp), by the gate's own H1b
+    rules (lever_n_m3native_gate.h1b_report: a refused build, an engaged line that disagrees with the flags, no fused publication,
+    a refusal reason but `ramp` and `parity`, a discard after an in-place slide, an audit count that is not the fused count, an audit
+    mismatch) and, here, that the engaged line is there once with the trace count the flags imply (users x (1 + 16 prefixes) in
+    place, users otherwise), every audit line checked the items the width implies (10 banks x chips, twice in place: 80 at four
+    cards), and - in a smoke that ran `concurrent4_steady` - that a round of four fused publications happened and, under
+    QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, that the live-bank marker was logged. A profile with the flag off must log no fused line.
 
   python c2_smoke_check.py --smoke-log smoke.log --container-log container.log --profile P [--profiles qwen_c2_profiles.json]
 """
@@ -35,6 +42,13 @@ MISMATCH = re.compile(r'audit mismatch', re.IGNORECASE)
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
+FUSED_FLAG = 'QWEN_FAST_FUSED_COMMIT'
+FUSED_INPLACE_FLAG = 'QWEN_FAST_FUSED_COMMIT_INPLACE'
+FUSED_LIVE_BANKS_FLAG = 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS'
+FUSED_AUDIT_FLAG = 'QWEN_FAST_FUSED_COMMIT_AUDIT'
+FUSED_PREFIXES = 16          # one slide trace per (segment, accepted prefix 1..rows_per_user) in place
+FUSED_LINES = ('[PINDIAG] fused commit engaged', '[PINDIAG] fused commit refused', '[PACKED-FUSED] round=',
+               '[PACKED-FUSED-AUDIT] round=')
 STEADY_TEST = 'concurrent4_steady'
 # One line per packed round the coordinator selected (dflash_packed_proposal_coordinator.SELECT_LINE, QWEN_FAST_PACKED_AUDIT):
 # the quad's one group of four slots, or two packed pairs.
@@ -191,6 +205,61 @@ def draft_problems(facts, env, steady):
     return problems
 
 
+def fused_facts(env, container_text):
+    """lever_n_m3native_gate.h1b_summary of the container log (the gate's own reading of the H1b lines), or None when the profile has
+    no fused-commit flag on and the log holds none of its lines."""
+    import lever_n_m3native_gate as gate
+
+    if env.get(FUSED_FLAG) != '1' and not any(line in container_text for line in FUSED_LINES):
+        return None
+    return gate.h1b_summary(container_text)
+
+
+def fused_problems(env, container_text, steady, facts=None):
+    """The problems the profile's fused-commit settings leave: see the module docstring."""
+    import lever_n_m3native_gate as gate
+
+    problems = []
+    if env.get(FUSED_FLAG) != '1':
+        if any(line in container_text for line in FUSED_LINES):
+            problems.append('%s is not set and the log holds fused-commit lines: the fused commit ran on a profile without it'
+                            % FUSED_FLAG)
+        return problems
+    report = gate.h1b_report(env, container_text)
+    problems += report['problems']
+    facts = report if facts is None else facts
+    engaged_lines = container_text.count(gate.FUSED_ENGAGED_MARKER)
+    if engaged_lines != 1:
+        problems.append('the fused commit\'s engaged line (%s) appears %d times, not once' % (gate.FUSED_ENGAGED_MARKER,
+                                                                                            engaged_lines))
+    engaged = facts.get('engaged')
+    inplace = env.get(FUSED_INPLACE_FLAG) == '1'
+    if engaged is not None:
+        wanted = engaged['users'] * (1 + FUSED_PREFIXES) if inplace else engaged['users']
+        if engaged['traces'] != wanted:
+            problems.append('the fused commit captured %d traces, not %d (%d users, %s)' % (
+                engaged['traces'], wanted, engaged['users'], 'a T_proj and %d slides each' % FUSED_PREFIXES if inplace
+                else 'a T_proj each'))
+    if env.get(FUSED_AUDIT_FLAG) == '1':
+        chips = int(env.get('QWEN_FAST_TP') or 2)
+        expected = 10 * chips * (2 if inplace else 1)    # ten deltas a chip, and in place ten banks a chip
+        wrong = sorted({int(match.group(5)) for match in gate.FUSED_AUDIT_LINE.finditer(container_text)
+                        if int(match.group(5)) != expected})
+        if wrong:
+            problems.append('audit lines checked %s items, not %d (10 K/V pieces x %d chips%s)' % (
+                wrong, expected, chips, ', deltas and banks' if inplace else ''))
+        if not facts.get('audits'):
+            problems.append('%s is set and no [PACKED-FUSED-AUDIT] line was logged' % FUSED_AUDIT_FLAG)
+    if steady:
+        if not facts.get('four_fused_rounds'):
+            problems.append('no round had all four users on the fused path (%d fused publications, %d today; reasons %s)' % (
+                facts.get('fused', 0), facts.get('today', 0), facts.get('today_reasons')))
+        if env.get(FUSED_LIVE_BANKS_FLAG) == '1' and not facts.get('live_banks'):
+            problems.append('%s is set and the live-bank marker (%s) was never logged' % (FUSED_LIVE_BANKS_FLAG,
+                                                                                            gate.FUSED_LIVE_BANKS_MARKER))
+    return problems
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions."""
@@ -205,6 +274,10 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None):
         facts['draft'] = drafts
         steady = STEADY_TEST in (smoke or {}) and 'error' not in smoke[STEADY_TEST]
         problems += draft_problems(drafts, env, steady)
+        fused = fused_facts(env, container_text)
+        if fused is not None:
+            facts['fused'] = fused
+        problems += fused_problems(env, container_text, steady, fused)
     if slide:
         if median is None:
             problems.append('no [PACKED-PUBLISH] round with a commit: the ramp commit time is unread (QWEN_FAST_PACKED_AUDIT?)')

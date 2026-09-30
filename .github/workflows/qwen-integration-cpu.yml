@@ -80,6 +80,7 @@ jobs:
           python -B -m unittest test_verify_prestage test_round_fences
           python -B -m unittest test_fused_commit
           python -B -m unittest test_fused_commit_tp4
+          python -B -m unittest test_c2_smoke_check_fcommit
           python -B -m unittest test_publication_warm
           python -B -m unittest test_early_draft
           python -B -m unittest test_pair_row_exact
