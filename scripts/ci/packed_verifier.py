@@ -456,6 +456,42 @@ def dump_device_profiler_after_round(operations, mesh, rounds, environ=None):
     return True
 
 
+PROFILE_DUMP_EVERY = 'QWEN_FAST_PROFILE_DUMP_EVERY'
+# One process-wide count of verify replays of ANY kind (a packed round, a sequential step): the TP4 op profile's
+# read-back cadence (docs/tp4-profile.md). The device profiler's per-core buffer holds op-support (20000) programs and
+# nothing is read back until a drain, so a read-back every Nth replay keeps every window inside it.
+_replays_seen = 0
+
+
+def dump_device_profiler_every(operations, mesh, environ=None):
+    """Under the TP4 op-profile arm only (QWEN_FAST_PROFILE_DUMP_EVERY=N): count this verify replay and, on every Nth,
+    read the device profiler buffers back (ttnn.ReadDeviceProfiler). Called once per verify replay of any kind, right
+    after it (packed_verifier's round, verifier_engine_tp's sequential step), so the count is one process-wide
+    sequence. Returns True when a read-back was issued; inert (and counting nothing) when unset."""
+    import os
+
+    global _replays_seen
+    value = (os.environ if environ is None else environ).get(PROFILE_DUMP_EVERY, '')
+    if not value:
+        return False
+    try:
+        every = int(value)
+    except ValueError:
+        raise ValueError('%s must be a positive replay count; got %r' % (PROFILE_DUMP_EVERY, value))
+    if every < 1:
+        raise ValueError('%s must be a positive replay count; got %r' % (PROFILE_DUMP_EVERY, value))
+    _replays_seen += 1
+    if _replays_seen % every:
+        return False
+    reader = getattr(operations, 'ReadDeviceProfiler', None)
+    if reader is None:
+        diagnostic('[PINDIAG] %s=%d but the runtime has no ReadDeviceProfiler; no device dump' % (PROFILE_DUMP_EVERY, every))
+        return False
+    reader(mesh)
+    diagnostic('[PINDIAG] device profiler read back after replay %d (%s=%d)' % (_replays_seen, PROFILE_DUMP_EVERY, every))
+    return True
+
+
 REPLAY_GROUP_ROWS_FLAG = 'QWEN_FAST_REPLAY_GROUP_ROWS'
 
 
@@ -1718,6 +1754,7 @@ class PackedVerifierEngine:
                 # the synchronize=last fence (commit_user: the one that empties the pending set).
                 self.commit_user(segment, 0)
             dump_device_profiler_after_round(self.operations, self.mesh, self.rounds)
+            dump_device_profiler_every(self.operations, self.mesh)
             metrics = dict(segments=segments, staged_buffers=staged,
                 binding_validation_ms=(started - binding_started) * 1000,
                 input_ms=(staged_at - started) * 1000, verify_readback_ms=(finished - staged_at) * 1000,
