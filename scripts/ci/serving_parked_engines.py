@@ -52,6 +52,8 @@ import os
 import re
 from types import SimpleNamespace
 
+from serving_fast_policy import ENGINE_WARM_MARKER, engine_warm_skip_enabled
+
 
 FLAG = 'QWEN_FAST_PARKED_ENGINES'
 PROJECT_ROWS_FLAG = 'QWEN_FAST_PARKED_PROJECT_ROWS'
@@ -775,11 +777,19 @@ class ParkedEngineSet:
                 with single_proposal_bucket():
                     device.proposal_capture = components.proposal(device, max_new_tokens=SYNTHETIC_BUDGET)
 
+            # QWEN_FAST_ENGINE_WARM_SKIP (phase-1 quick win 2, usable without parked engines): the four attach builds
+            # share every bucket's programs, so the last three skip their warm forwards, and a single rebuild does too.
+            # Their K/V rows are page 0's [1, 5), which the first build's warm wrote with the same values from the same
+            # zeroed slot. Unset, the engine is called exactly as before.
+            skip_warm = engine_warm_skip_enabled(self.environ)
             engine = components.engine(self.model, session, pages, self.helpers, sampler=self.sampler,
                 norm_batch=True, attention_replay=False, replay_group_rows=4, max_verify_rows=16,
                 native_sampling_rows=True, retain_feature_taps=TARGET_TAPS, commit_only_gdn=True,
                 target_attention_t16=False, before_capture=prepare_proposal, storage=slot.verifier,
-                capture_rows=self.capture_rows)
+                capture_rows=self.capture_rows, **(dict(skip_compiled_warm=True) if skip_warm else {}))
+            if skip_warm:
+                self.log(ENGINE_WARM_MARKER + 'run={} skipped={} slot={}', getattr(engine, 'warms_run', None),
+                         getattr(engine, 'warms_skipped', None), entry.index)
             if warm:
                 self.warm_drafter(device, engine)
             reason = engine.park() or park_device(device)

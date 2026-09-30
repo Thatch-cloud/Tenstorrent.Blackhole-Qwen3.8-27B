@@ -6,7 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from serving_fast_request import FastRequest
-from serving_fast_policy import OUTPUT_BUDGET, any_request_enabled, validate_request_sampling
+from serving_fast_policy import (ENGINE_WARM_MARKER, OUTPUT_BUDGET, any_request_enabled, engine_warm_skip_enabled,
+                                 validate_request_sampling)
 from serving_page_binding import validate_initial_capture_pages
 
 
@@ -610,13 +611,20 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         # capture_rows: the serving runtime's cap on this engine's captures beside a packed
         # block (packed_shapes.sequential_capture_rows); only when it caps, so a runtime
         # without one calls the engine exactly as before.
+        # QWEN_FAST_ENGINE_WARM_SKIP (phase-1 quick win 2; default off): only when set does the engine hear of it, so
+        # an unset flag calls the engine exactly as before.
+        skip_warm = engine_warm_skip_enabled()
         engine = components.engine(model, session, pages, helpers, sampler=sampler,
             norm_batch=True, attention_replay=not sequential, replay_group_rows=4, max_verify_rows=16,
             native_sampling_rows=True, retain_feature_taps=TARGET_TAPS,
             commit_only_gdn=True, target_attention_t16=not sequential, before_capture=prepare_proposal,
             **(dict(storage=verifier_storage) if verifier_storage is not None else {}),
-            **(dict(capture_rows=capture_rows) if capture_rows is not None else {}))
+            **(dict(capture_rows=capture_rows) if capture_rows is not None else {}),
+            **(dict(skip_compiled_warm=True) if skip_warm else {}))
         owned.callback(engine.close)
+        if skip_warm:
+            _log(ENGINE_WARM_MARKER + 'run={} skipped={} request={}', getattr(engine, 'warms_run', None),
+                 getattr(engine, 'warms_skipped', None), state.req_id)
         if extent_memory:
             # S2 W6a, the executed path: before_capture (prepare_proposal) has built the capture inside the engine
             # build, so its buckets are read from the capture itself - the line M8 checks for (2048,).

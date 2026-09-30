@@ -26,6 +26,21 @@ _resident = None
 _replay_count = None
 
 
+# Phase-1 quick win 2 (default off; serving_fast_policy.ENGINE_WARM_SKIP_FLAG): the engine's warm-up eager forwards
+# run once per distinct bucket shape in a process. A warm forward exists to compile the bucket's programs before its
+# trace is captured, and to nothing else that a request reads (docs/engine-warm-skip.md: what each one writes and what
+# overwrites it before any read). _warmed holds the keys (warm_key) of the buckets this process has warmed to
+# completion; an engine built with skip_compiled_warm=True skips the warm of a bucket whose key is in it. Built
+# without the parameter (the default, and every caller while the flag is off) an engine warms every bucket and
+# records nothing in it.
+_warmed = set()
+
+
+def reset_warmed():
+    """Forget every warmed key (tests, and a process that clears its program cache)."""
+    _warmed.clear()
+
+
 def set_replay_count(counter):
     """Install (a zero-argument callable) or remove (None) the replay ledger; returns the previous one."""
     global _replay_count
@@ -157,7 +172,7 @@ class VerifierEngine:
                  attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
                  native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=(),
                  commit_only_gdn=False, before_capture=None, target_attention_t16=False, storage=None,
-                 capture_rows=None):
+                 capture_rows=None, skip_compiled_warm=False):
         import ttnn
 
         if before_capture is not None and not callable(before_capture):
@@ -171,6 +186,10 @@ class VerifierEngine:
         if storage is not None and not callable(getattr(storage, 'take', None)):
             raise ValueError('Pooled verifier storage must lend width buckets')
         self.storage, self.borrowed = storage, []
+        if type(skip_compiled_warm) is not bool:
+            raise ValueError('Explicit boolean warm-skip selection required')
+        self.skip_compiled_warm = skip_compiled_warm
+        self.warms_run = self.warms_skipped = 0
 
         if type(commit_only_gdn) is not bool:
             raise ValueError('Explicit commit-only GDN policy required')
@@ -320,6 +339,14 @@ class VerifierEngine:
                 before_capture(self)
             for bucket in self.buckets.values():
                 rows = bucket['rows']
+                warmed = self.warm_key(bucket) if self.skip_compiled_warm else None
+                if warmed is not None and warmed in _warmed:
+                    # Compiled by an earlier build in this process. Nothing here is skipped that a request reads: the
+                    # capture loop below restores slot 0 from `initial` before every capture, the warm's K/V rows
+                    # [position, position + rows) and its checkpoints are rewritten by the verify replay before any
+                    # read, and an unwarmed bucket (a key not yet in _warmed) still warms below.
+                    self.warms_skipped += 1
+                    continue
                 self.restore_initial()
                 warm = self.fixture(rows, bucket['checkpoints'], retain=self.commit_only_gdn and rows > 1,
                     position=bucket['capture_position'])
@@ -332,6 +359,9 @@ class VerifierEngine:
                     if result is not None:
                         release_owned(ttnn, [value for value in result if value is not None])
                     warm.close()
+                self.warms_run += 1
+                if warmed is not None:
+                    _warmed.add(warmed)
             if self.mtp_row_reader is not None:
                 self.mtp_row_reader.prepare()
             for bucket in self.buckets.values():
@@ -363,6 +393,18 @@ class VerifierEngine:
             session.fail_preparation(session.request_id)
             self.close()
             raise
+
+    def warm_key(self, bucket):
+        """What the programs a bucket's warm forward compiles depend on: the bucket's rows and GDN retention, the page
+        table's width (the paged attention's shape), the engine's options, the model and mesh, and - only when a replay
+        plan keys the buckets by position - the capture position. The position of an ordinary bucket is a device input
+        of the traced forward (stage_inputs writes it per verify), not a program parameter: a trace captured at one
+        position replays at any other."""
+        return (id(self.model), id(self.mesh), bucket['rows'], bool(self.commit_only_gdn and bucket['rows'] > 1),
+                tuple(self.pages.shape), self.norm_batch, self.attention_replay, self.attention_mask_once,
+                self.replay_group_rows, self.short_context, self.native_sampling_rows, self.sampler is not None,
+                self.target_attention_t16, self.retain_feature_taps, self.retain_mtp_hidden,
+                bucket['capture_position'] if self.replay_plan is not None else None)
 
     def borrow(self, value):
         """Record lent storage so close() frees none of it; a snapshot set is a list of lists."""

@@ -1342,7 +1342,8 @@ def required_flag_markers(environ, users, prompt_tokens=None):
     required.update(quad_draft_markers(environ, users))
     if on(PUBLISH_PREWARM_FLAG):
         required[PUBLISH_PREWARM_FLAG] = [PUBLISH_PREWARM_MARKER]
-    if on('QWEN_FAST_MEMORY_LEDGER'):
+    if on('QWEN_FAST_MEMORY_LEDGER') and not on('QWEN_FAST_MEMORY_LEDGER_OFF'):
+        # QWEN_FAST_MEMORY_LEDGER_OFF=1 (phase-1 quick win 1) wins over the image's flag: the ledger writes nothing then.
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
         required['QWEN_PREFILL_PROFILE_FLUSH'] = [PREFILL_FLUSH_MARKER]

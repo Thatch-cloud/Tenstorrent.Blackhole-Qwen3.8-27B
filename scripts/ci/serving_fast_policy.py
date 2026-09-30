@@ -115,6 +115,41 @@ def prefix_cache_admitted(cache, environ=None):
             and getattr(cache, 'prefix_caching_hash_algo', None) == PREFIX_HASH_ALGO)
 
 
+# Phase-1 quick wins (each default off, each usable without Stage E, each judged by its own byte comparison):
+# - QWEN_FAST_MEMORY_LEDGER_OFF=1 turns memory_ledger off whatever QWEN_FAST_MEMORY_LEDGER says (the image ENV sets
+#   that to 1, for the gates); a production profile sets this instead;
+# - QWEN_FAST_ENGINE_WARM_SKIP=1 skips the per-request engine build's warm-up eager forwards for every bucket whose
+#   programs an earlier build in the process compiled (verifier_engine.VerifierEngine skip_compiled_warm).
+# Anything but unset, '0' or '1' is a configuration error, never a silent off.
+MEMORY_LEDGER_OFF_FLAG = 'QWEN_FAST_MEMORY_LEDGER_OFF'
+ENGINE_WARM_SKIP_FLAG = 'QWEN_FAST_ENGINE_WARM_SKIP'
+QUICK_WIN_FLAGS = (MEMORY_LEDGER_OFF_FLAG, ENGINE_WARM_SKIP_FLAG)
+# The line an engine build logs under ENGINE_WARM_SKIP_FLAG (and only then): how many warm-up forwards it ran and skipped.
+ENGINE_WARM_MARKER = '[PINDIAG] engine warm forwards '
+
+
+def quick_win_enabled(flag, environ=None):
+    """Whether the quick-win flag `flag` is '1'; anything but unset, '0' or '1' raises."""
+    if flag not in QUICK_WIN_FLAGS:
+        raise ValueError('%r is not a phase-1 quick-win flag (%s)' % (flag, ', '.join(QUICK_WIN_FLAGS)))
+    environ = os.environ if environ is None else environ
+    value = environ.get(flag, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (flag, value))
+    return value == '1'
+
+
+def engine_warm_skip_enabled(environ=None):
+    """Whether QWEN_FAST_ENGINE_WARM_SKIP=1. Read per call."""
+    return quick_win_enabled(ENGINE_WARM_SKIP_FLAG, environ)
+
+
+def quick_win_problems(environ):
+    """Every quick-win flag whose value is neither '0' nor '1', [] when none."""
+    return ['%s must be 0 or 1, got %r' % (flag, environ[flag]) for flag in QUICK_WIN_FLAGS
+            if flag in environ and environ[flag] not in ('0', '1')]
+
+
 # Stage E, parked per-slot engines (default off; the c2-packed-prefix-parked profiles set it). One engine per
 # pool slot is built at attach on a synthetic request and REBOUND to each request instead of built per request
 # (serving_parked_engines). On, and only on the S2 shape the parked engines were designed for:
@@ -287,6 +322,9 @@ def validate_fast_config(config):
     parked = parked_engine_problems(os.environ, _seqs)
     if parked:
         raise ValueError('Parked engines (QWEN_FAST_PARKED_ENGINES): %s' % '; '.join(parked))
+    quick = quick_win_problems(os.environ)
+    if quick:
+        raise ValueError('Phase-1 quick wins: %s' % '; '.join(quick))
     return dict(scheduler_requests=_seqs, native_gdn_slots=NATIVE_GDN_SLOTS, verifier_rows=16,
         physical_devices=2, context_tokens=model_len - OUTPUT_BUDGET,
         output_budget=OUTPUT_BUDGET, max_model_len=model_len,
