@@ -709,6 +709,336 @@
       "parser_rechunk": true,
       "gate_only": true
     },
+    "c2-packed-tp4-speed-quad": {
+      "description": "GATE ONLY (the batched-draft window, flag on): c2-packed-tp4-speed with the four-card batched draft (tp4/draft): four users past the 2,048-row draft window draft together, as one 64-row pass at 8 query / 2 KV heads per chip (QWEN_FAST_QUAD_DRAFT=1: tp_addresses puts quad_draft_tp in quad_draft's place, the pass copies each user's ACTIVE K/V bank into its own placeholders every round, and the live-banks flag stays 0 because the four-card fused commit is not ported), or as two packed pair passes (QWEN_FAST_QUAD_DRAFT=0: the pair fold at 8 / 2 heads, which has never run on a card), or singly while a user is in the ramp. The timed arm: the verify's T1 and T2 audits are off, there is no draft audit, the tokens are held against the audited arm's. Every other flag and the engine are the base profile's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-pairs": {
+      "description": "GATE ONLY (the batched-draft window, flag off): c2-packed-tp4-speed with the four-card batched draft (tp4/draft): four users past the 2,048-row draft window draft together, as one 64-row pass at 8 query / 2 KV heads per chip (QWEN_FAST_QUAD_DRAFT=1: tp_addresses puts quad_draft_tp in quad_draft's place, the pass copies each user's ACTIVE K/V bank into its own placeholders every round, and the live-banks flag stays 0 because the four-card fused commit is not ported), or as two packed pair passes (QWEN_FAST_QUAD_DRAFT=0: the pair fold at 8 / 2 heads, which has never run on a card), or singly while a user is in the ramp. The timed arm: the verify's T1 and T2 audits are off, there is no draft audit, the tokens are held against the audited arm's. It is c2-packed-tp4-speed stated as the -quad profile's pair: the two differ in QWEN_FAST_QUAD_DRAFT alone. Every other flag and the engine are the base profile's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-gate-quad": {
+      "description": "GATE ONLY (the batched-draft window, flag on, audited): c2-packed-tp4-gate with the four-card batched draft (tp4/draft): four users past the 2,048-row draft window draft together, as one 64-row pass at 8 query / 2 KV heads per chip (QWEN_FAST_QUAD_DRAFT=1: tp_addresses puts quad_draft_tp in quad_draft's place, the pass copies each user's ACTIVE K/V bank into its own placeholders every round, and the live-banks flag stays 0 because the four-card fused commit is not ported), or as two packed pair passes (QWEN_FAST_QUAD_DRAFT=0: the pair fold at 8 / 2 heads, which has never run on a card), or singly while a user is in the ramp. The audited arm: every audit c2-packed-tp4-gate carries, and QWEN_FAST_DRAFT_SINGLES_AUDIT=all replays every batched user's own single-user draft in the same round and compares features, candidates, scores and tokens bit for bit (draft_singles_audit.py). Not for timing. Every other flag and the engine are the base profile's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_DRAFT_SINGLES_AUDIT": "all"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-gate-pairs": {
+      "description": "GATE ONLY (the batched-draft window, flag off, audited): c2-packed-tp4-gate with the four-card batched draft (tp4/draft): four users past the 2,048-row draft window draft together, as one 64-row pass at 8 query / 2 KV heads per chip (QWEN_FAST_QUAD_DRAFT=1: tp_addresses puts quad_draft_tp in quad_draft's place, the pass copies each user's ACTIVE K/V bank into its own placeholders every round, and the live-banks flag stays 0 because the four-card fused commit is not ported), or as two packed pair passes (QWEN_FAST_QUAD_DRAFT=0: the pair fold at 8 / 2 heads, which has never run on a card), or singly while a user is in the ramp. The audited arm: every audit c2-packed-tp4-gate carries, and QWEN_FAST_DRAFT_SINGLES_AUDIT=all replays every batched user's own single-user draft in the same round and compares features, candidates, scores and tokens bit for bit (draft_singles_audit.py). Not for timing. Every other flag and the engine are the base profile's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_DRAFT_SINGLES_AUDIT": "all"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
     "c2-packed-tp4-gate-ring": {
       "description": "GATE ONLY (an optional arm of the S2 window): c2-packed-tp4-gate under the ring fabric (FABRIC_1D_RING) with the fast path's own collectives at Ring (QWEN_FAST_CCL_TOPOLOGY=ring; its default at four cards is Linear). Every other flag, every audit and the engine are c2-packed-tp4-gate's. The ring changes how the gathers move data, not what they add, so the text is expected to equal c2-packed-tp4-gate's on the same prompts; the arm exists to time the collectives in place and to decide QWEN_FAST_CCL_TOPOLOGY's four-card default. A correctness arm, never a timed one (the audits are on). Not for traffic. UNVERIFIED on hardware. The drafter's K/V publication is the four-card slide (QWEN_FAST_TP_KV_SLIDE=1, draft_kv_slide_tp: the pair's kernel over 2 KV heads on 8 workers per chip) instead of the six-op eager chain, which built new programs every round while a prompt under 2,048 tokens filled its window; the eager chain stays behind the flag as the reference. UNVERIFIED on hardware.",
       "eos_ids": [

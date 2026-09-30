@@ -1358,7 +1358,7 @@ class ShippingTests(unittest.TestCase):
 
     CHANGED = ('dflash_packed_proposal.py', 'dflash_packed_proposal_coordinator.py', 'dflash_proposal_trace.py',
                'dflash_batched_mask.py', 'dflash_device.py', 'draft_kv_history.py', 'dflash_traced_publish.py',
-               'serving_packed_step.py', 'quad_draft.py',
+               'serving_packed_step.py', 'quad_draft.py', 'quad_draft_tp.py',
                # QWEN_FAST_SEQ_PUBLISH_LOG: under the flag its sequential step sets the B1 split sink too.
                'serving_sequential_step.py')
     # Carries B1 code but is not an image module: the arm bind-mounts the checkout's gate.
@@ -1443,6 +1443,12 @@ class ShippingTests(unittest.TestCase):
                 with self.subTest(module=name):
                     self.assertIn("REQUIRED_FLAGS = ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PAIR_ROW_EXACT', "
                                   "'QWEN_FAST_ROUND_B1',", source)
+                continue
+            if name == 'quad_draft_tp.py':
+                # The four-card twin: the same rule, its own REQUIRED_FLAGS (no live-banks flag), refused unless all are 1.
+                with self.subTest(module=name):
+                    self.assertIn("REQUIRED_FLAGS = ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PAIR_ROW_EXACT', "
+                                  "'QWEN_FAST_ROUND_B1')", source)
                 continue
             with self.subTest(module=name):
                 self.assertTrue("os.environ.get('QWEN_FAST_ROUND_B1') == '1'" in source or 'round_b1_enabled()' in source

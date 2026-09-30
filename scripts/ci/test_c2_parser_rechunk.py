@@ -880,6 +880,9 @@ class ProfileGatingTests(unittest.TestCase):
                                  # the speed window's arms (tp4/speed)
                                  'c2-packed-tp4-gate-noslide': True, 'c2-packed-tp4-speed': True,
                                  'c2-packed-tp4-speed-noslide': True,
+                                 # the batched-draft window's arms (tp4/draft)
+                                 'c2-packed-tp4-speed-quad': True, 'c2-packed-tp4-speed-pairs': True,
+                                 'c2-packed-tp4-gate-quad': True, 'c2-packed-tp4-gate-pairs': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
                                  'general-prefix-eager': None,
                                  # the four-card (TP4) G1 family decodes one token per step, as general does
@@ -893,7 +896,9 @@ class ProfileGatingTests(unittest.TestCase):
                              name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate', 'c2-packed-prefix',
                                       'c2-packed-prefix-gate', 'c2-packed-tp4', 'c2-packed-tp4-gate',
                                       'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
-                                      'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide'), name)
+                                      'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
+                                      'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs',
+                                      'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-pairs'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 

@@ -57,6 +57,16 @@ SPEED_PROFILES = {
 }
 
 
+# The batched-draft window's profiles (tp4/draft): each is its speed or gate base plus exactly these env differences.
+QUAD, SINGLES = 'QWEN_FAST_QUAD_DRAFT', 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
+DRAFT_PROFILES = {
+    'c2-packed-tp4-speed-quad': ('c2-packed-tp4-speed', {QUAD: '1'}),
+    'c2-packed-tp4-speed-pairs': ('c2-packed-tp4-speed', {QUAD: '0'}),
+    'c2-packed-tp4-gate-quad': ('c2-packed-tp4-gate', {QUAD: '1', SINGLES: 'all'}),
+    'c2-packed-tp4-gate-pairs': ('c2-packed-tp4-gate', {QUAD: '0', SINGLES: 'all'}),
+}
+
+
 def profiles():
     return json.loads(PROFILES.read_text(encoding='utf-8'))['profiles']
 
@@ -218,6 +228,66 @@ class SpeedProfileTests(unittest.TestCase):
     def test_the_admission_accepts_each_speed_profile_over_the_image_environment(self):
         image = image_env()
         for name in SPEED_PROFILES:
+            environ = dict(image, **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
+
+
+class DraftProfileTests(unittest.TestCase):
+    def test_each_draft_profile_is_its_base_with_only_its_documented_difference(self):
+        found = profiles()
+        for name, (base_name, difference) in DRAFT_PROFILES.items():
+            mine, base = found[name], found[base_name]
+            with self.subTest(profile=name):
+                self.assertEqual(mine['env'], dict(base['env'], **difference))
+                self.assertEqual(mine['engine'], base['engine'])
+                for key in set(mine) | set(base):
+                    if key not in ('description', 'env'):
+                        self.assertEqual(mine.get(key), base.get(key), key)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                self.assertIs(mine['gate_only'], True)
+                self.assertEqual(mine['env']['QWEN_C2_GATE_PROFILE'], '1')
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+                self.assertEqual(mine['env']['QWEN_FAST_FUSED_COMMIT_LIVE_BANKS'], '0',
+                                 'the four-card quad copies the active banks: the live-banks flag stays off')
+
+    def test_the_flag_pair_differs_in_the_quad_flag_alone(self):
+        found = profiles()
+        for on, off in (('c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs'),
+                        ('c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-pairs')):
+            left, right = found[on]['env'], found[off]['env']
+            self.assertEqual({key for key in set(left) | set(right) if left.get(key) != right.get(key)}, {QUAD}, on)
+            self.assertEqual((left[QUAD], right[QUAD]), ('1', '0'))
+        self.assertEqual(found['c2-packed-tp4-speed-pairs']['env'], found['c2-packed-tp4-speed']['env'],
+                         'the -pairs profile is the speed profile, stated as the pair of -quad')
+
+    def test_the_quad_is_the_only_profile_family_with_the_flag_on_and_the_pairs_flags_are_the_images(self):
+        found = profiles()
+        on = sorted(name for name, profile in found.items() if profile['env'].get(QUAD) == '1'
+                    and profile['env'].get('QWEN_FAST_TP') == '4')
+        self.assertEqual(on, ['c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-quad'])
+        image = image_env()
+        for name in ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PAIR_ROW_EXACT', 'QWEN_FAST_ROUND_B1', 'QWEN_FAST_PACKED_AUDIT'):
+            self.assertEqual(image[name], '1', 'the batched draft needs the image\'s own %s' % name)
+        for name in DRAFT_PROFILES:
+            self.assertNotIn('QWEN_FAST_PACKED_PROPOSAL', found[name]['env'], 'the image sets it; a profile never turns it off')
+        for name in PAIR_DIGESTS:
+            self.assertNotIn(SINGLES, found[name]['env'])
+        self.assertNotIn(SINGLES, image, 'off in the image: only the audited draft profiles ask for it')
+
+    def test_the_audit_is_on_the_audited_profiles_only_and_the_timed_ones_have_no_audit(self):
+        found = profiles()
+        for name, audited in (('c2-packed-tp4-gate-quad', True), ('c2-packed-tp4-gate-pairs', True),
+                              ('c2-packed-tp4-speed-quad', False), ('c2-packed-tp4-speed-pairs', False)):
+            env = found[name]['env']
+            self.assertEqual(env.get(SINGLES), 'all' if audited else None, name)
+            for key in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
+                self.assertEqual(env[key], '1' if audited else '0', (name, key))
+
+    def test_the_admission_accepts_each_draft_profile_over_the_image_environment(self):
+        image = image_env()
+        for name in DRAFT_PROFILES:
             environ = dict(image, **profiles()[name]['env'])
             with self.subTest(profile=name):
                 self.assertEqual(admission.width(environ), 4)

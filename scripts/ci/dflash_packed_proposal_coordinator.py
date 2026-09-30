@@ -168,6 +168,18 @@ def unpair_groups(groups, round_number):
 # every round is today's.
 QUAD_DRAFT_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 
+# QWEN_FAST_DRAFT_SINGLES_AUDIT (draft_singles_audit.py; default off): every batched group of a round - a packed pair or the
+# quad - against its members' own single-user drafts, prepared with the same seeds in the same round and compared bit for bit
+# after the fence. Read at each round; unset or empty and nothing here imports it, every round is today's. Under the flag the
+# single-user captures are kept (_release_single_user releases nothing): the audit replays them.
+SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
+
+
+def _singles_audit_on():
+    """Unset, empty and '0' are off (the repo's usual off value); anything else is on and validated by draft_singles_audit."""
+    return os.environ.get(SINGLES_AUDIT_FLAG, '') not in ('', '0')
+
+
 # One packed pair's own placeholder buffers at the only packable geometry (steady
 # state, 2048-row context, T16 block_rows=16): identifiers (1,32) uint32 (~128 B,
 # negligible), mask (1,1,32,4160) bf16 (~266 KB), rope.q (2x(1,1,32,128) bf16,
@@ -503,6 +515,8 @@ class PackedProposalCoordinator:
         self.quad_failures = 0
         self.quad_disabled = False
         self.quad_rounds = 0
+        # QWEN_FAST_DRAFT_SINGLES_AUDIT: the rounds that ran a batched group (the audit's own count).
+        self.singles_audit_candidates = 0
 
     def close(self):
         for _, _, trace, _ in self.pairs.values():
@@ -569,7 +583,11 @@ class PackedProposalCoordinator:
         view's _original) reads None afterwards; a device whose capture is None for
         any OTHER reason (QWEN_FAST_EAGER_PROPOSAL, or one this coordinator never
         touched at all) must never be treated as needing a rebuild. Idempotent: a
-        device whose capture is already released is left alone."""
+        device whose capture is already released is left alone.
+
+        Under QWEN_FAST_DRAFT_SINGLES_AUDIT nothing is released: the audit replays every member's own single-user capture."""
+        if _singles_audit_on():
+            return
         capture = device.proposal_capture
         if isinstance(capture, _PackedCaptureView):
             if capture._original is not None:
@@ -685,6 +703,8 @@ class PackedProposalCoordinator:
         batched = [] if os.environ.get('QWEN_FAST_ROUND_B1') == '1' else None
         # QWEN_FAST_QUAD_DRAFT: this round's quad (_prepare_quad), None in every round it does not serve.
         quad = None
+        # QWEN_FAST_DRAFT_SINGLES_AUDIT: this round's audit (draft_singles_audit.Round), None in every round it does not run.
+        singles_audit = None
 
         def prepare_single(entry, reason):
             singles.append((entry['slot'], reason))
@@ -823,21 +843,40 @@ class PackedProposalCoordinator:
                     if callable(discard):
                         discard()
             raise
+        singles_module = None
+        if batched and _singles_audit_on():
+            # QWEN_FAST_DRAFT_SINGLES_AUDIT: every member of every batched group also drafts on its own single-user capture,
+            # with the seed the batched pass got, enqueued behind it and before the round's one fence.
+            import draft_singles_audit as singles_module
+
+            self.singles_audit_candidates += 1
+            if singles_module.selected(self.singles_audit_candidates):
+                singles_audit = singles_module.start(batched, by_slot, round_number, self._ensure_single_user)
         if fence is not None and while_waiting is not None:
             run_while_waiting(while_waiting)
         if fence is not None:
             fence[0].synchronize_device(fence[1])
             if while_waiting is not None:
                 note_fenced(while_waiting)
-        if batched:
-            if after_reads is not None and reads_covered(batched, prepared):
-                # Round-fence plan H2: the deferred GDN commits go in after the pairs' readback.
-                select_round(batched, prepared, round_number, after_collect=after_reads)
-            else:
-                select_round(batched, prepared, round_number)
+        if singles_audit is not None:
+            # After the fence and before anything else is enqueued: the raw reads of the batched traces and the singles.
+            singles_module.read(singles_audit)
+        try:
+            if batched:
+                if after_reads is not None and reads_covered(batched, prepared):
+                    # Round-fence plan H2: the deferred GDN commits go in after the pairs' readback.
+                    select_round(batched, prepared, round_number, after_collect=after_reads)
+                else:
+                    select_round(batched, prepared, round_number)
+        except BaseException:
+            if singles_audit is not None:
+                singles_audit.close()
+            raise
         if quad is not None:
             # QWEN_FAST_QUAD_DRAFT_AUDIT: the pair traces replayed beside the quad, compared after the selection.
             quad['trace'].run_audit(round_number)
+        if singles_audit is not None:
+            singles_module.finish(singles_audit)
         if audit_enabled() and pair_labels:
             audit_log(AUDIT_LINE, round=round_number, pairs=pair_labels,
                       propose_ms=['%.1f' % value for value in pair_ms])

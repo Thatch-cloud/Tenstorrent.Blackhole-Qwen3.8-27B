@@ -128,6 +128,33 @@ def concurrent():
 
 
 record('concurrent4', concurrent)
+
+
+def concurrent4_steady():
+    # Opt-in (named in the tests list). Four users, every one past the 2,048-row draft window from its first round (a prompt of
+    # about 3,500 tokens each: four different 14,000-character stretches of the same real code), so the fixed slot pairs (0, 1)
+    # and (2, 3) can pack and, with QWEN_FAST_QUAD_DRAFT=1, the four-user quad can draft. The mixed concurrent4 above holds two
+    # short prompts in the ramp, which keep both pairs drafting singly for their whole answer: it can never show a batched draft.
+    span = 14000
+    starts = [(index * span) % max(len(source) - span, 1) for index in range(4)]
+    prompts = ['Explain what this code does, then rewrite it with complete type annotations:\n\n' + source[start:start + span]
+               for start in starts]
+    out = [None] * 4
+
+    def run(index):
+        try:
+            out[index] = stream([{'role': 'user', 'content': prompts[index]}], 800)
+        except Exception as error:
+            out[index] = dict(error=repr(error)[:300])
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(4)]
+    [thread.start() for thread in threads]
+    [thread.join() for thread in threads]
+    return dict(users=out)
+
+
+if ONLY and 'concurrent4_steady' in ONLY:
+    record('concurrent4_steady', concurrent4_steady)
 record('tool_call', lambda: post('/v1/chat/completions', dict(model=MODEL, max_tokens=400, tool_choice='auto',
        messages=[{'role': 'user', 'content': 'What is the weather in Wellington? Use the tool.'}],
        tools=[{'type': 'function', 'function': {'name': 'get_weather', 'description': 'Current weather for a city',

@@ -100,6 +100,9 @@ COPY scripts/ci/pair_row_exact.py /experiment-scripts/ci/
 # quad_conv_io.cpp (the card-B probed 64-row conv I/O kernel, sha256-pinned in quad_draft.CONV_KERNEL_SHA256),
 # so both travel here.
 COPY scripts/ci/quad_draft.py scripts/ci/quad_conv_io.cpp /experiment-scripts/ci/
+# The four-card twin of the quad (quad_draft_tp: tp_addresses.install() puts it in quad_draft's place at QWEN_FAST_TP=4 only,
+# MODULE_TWINS) and the singles audit (QWEN_FAST_DRAFT_SINGLES_AUDIT, imported by the coordinator when the flag is set).
+COPY scripts/ci/quad_draft_tp.py scripts/ci/draft_singles_audit.py /experiment-scripts/ci/
 # Publish prewarm (QWEN_FAST_PUBLISH_PREWARM, default off): serving_request_factory imports publish_prewarm when the
 # flag is set, so it must reach the image beside it.
 COPY scripts/ci/publish_prewarm.py /experiment-scripts/ci/
