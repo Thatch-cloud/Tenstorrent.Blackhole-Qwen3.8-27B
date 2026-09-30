@@ -98,8 +98,9 @@ def fake_module(name, **attributes):
 class Attach:
     """One attach_combined_runtime call under a profile, on fakes; `seen` records what the scopes did."""
 
-    def __init__(self, name, *, seam=True, shape=(1, 4), tp='4'):
+    def __init__(self, name, *, seam=True, shape=(1, 4), tp='4', extra_env=()):
         self.name, self.seam, self.shape = name, seam, tuple(shape)
+        self.extra_env = dict(extra_env)
         self.seen = dict(links_inside=None, links_before=None, links_after=None, pool=None, engines=[])
 
     def model(self):
@@ -175,6 +176,7 @@ class Attach:
         register = contextmanager(lambda *args, **kwargs: (yield dict(constructions=0, calls=0, restored=True)))
         real_audit = mesh_link_policy.audit_descriptor
         environ = environment(self.name)
+        environ.update(self.extra_env)
         with ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, environ, clear=True))
             stack.enter_context(patch.dict(sys.modules, {
@@ -243,6 +245,17 @@ class AttachTests(unittest.TestCase):
                     self.assertEqual(len(seen['engines']), 1, 'one 64-row block over four seats')
                 self.assertEqual(seen['links_after'], seen['links_before'])
                 self.assertTrue(seen['lifecycle'])
+
+    def test_the_timed_profile_attaches_with_the_op_profiler_environment(self):
+        """The ops-trace arm (ops_profile_plan.PROFILER_ENV) adds the profiler variables to the timed profile: the attach must
+        not refuse them (the block stream, which refuses TT_METAL_DEVICE_PROFILER, is off at four cards)."""
+        import ops_profile_plan
+        with Attach('c2-packed-tp4-speed', extra_env=ops_profile_plan.PROFILER_ENV).run() as seen:
+            self.assertEqual(seen['links_after_attach'], 2)
+            self.assertEqual(seen['pool']['extent_replay'], True)
+            self.assertEqual(os.environ['QWEN_FAST_PROFILE_DUMP_EVERY'], '2')
+            self.assertEqual(os.environ['TT_METAL_DEVICE_PROFILER'], '1')
+            self.assertEqual(os.environ['QWEN_MLP_BLOCK_STREAM_EXPERIMENT'], '0')
 
     def test_the_seam_is_what_makes_the_attach_possible(self):
         """The class of bug the review found: the pair's scopes refuse a (1, 4) mesh, and nothing on CPU said so."""

@@ -32,6 +32,9 @@ name: Qwen C2 serving image
 #            real text against v235's texts), matrix (a prompt length per user, solo vs concurrent
 #            under the exactness policy), memory (G5's DRAM lines), lifecycle (drops, cancels,
 #            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile.
+#            C2_GATE_PLAN ops-twin and ops-trace are the TP4 op-level device profile (docs/tp4-profile.md): after
+#            every other plan, the twin first, on the four-card timed profile (c2-packed-tp4-speed); the CPP report
+#            (compressed) and its analysis are written to gate/ops/ in the artifact.
 #            C2_GATE_SALT fresh|none salts every stream on a prefix-reuse profile (c2-packed-prefix: the
 #            capture path under the S2 plans; the gate mounts its own salt key).
 #            The driver refuses plans that do not fit the step's and the job's time left; every gate
@@ -682,6 +685,27 @@ jobs:
             grep -F '[PINDIAG] dram after' "$log" | tail -8 || true
           done
           exit "$status"
+      - name: Hand back the TP4 op-profile output
+        # The ops-trace arm's tracy writes its profile tree as the container's root. The gate hands the tree back when the
+        # arm ends; this runs again however the gate step ended (cancelled or timed out included), before the upload, keeps
+        # the CPP report (compressed) if the gate did not get to it and prunes what is left above 8 MB: a root-owned tree
+        # once broke the next checkout (EACCES). Still: never cancel a job with ops-* plans while an arm runs.
+        if: always() && contains(steps.job.outputs.actions, 'gate') && contains(steps.job.outputs.gate_plan, 'ops-')
+        working-directory: c2
+        # One hand-back of at most 300 s per profiled arm, the compression and the pruning, with margin.
+        timeout-minutes: 30
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # A gate container a killed step left running would keep writing as root under the tree being handed back.
+          docker ps -a --format '{{.Names}}' | grep '^qwen-c2-gate-ops-' | xargs -r docker rm -f || true
+          # The gate's own image does the hand-back (it has a shell).
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          docker image inspect "$image" > /dev/null 2>&1 || image=""
+          test -n "$image" || { echo "no local image tagged qwen38-c2-$TAG: nothing ran, nothing to hand back"; exit 0; }
+          python3 scripts/ci/ops_profile_plan.py handback --results "$RUNNER_TEMP/c2-results/gate" --image "$image"
       - name: Prefix-reuse gates in the agent's container shape
         if: contains(steps.job.outputs.actions, 'prefix')
         working-directory: c2

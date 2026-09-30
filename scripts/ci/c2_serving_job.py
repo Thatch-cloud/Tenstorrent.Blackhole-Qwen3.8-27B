@@ -58,6 +58,9 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_GATE_AUDITS      extent (default: QWEN_FAST_EXTENT_AUDIT on every S2 arm but control's timing arms) or
                       all (also the prestage, pair-mask and fused-commit audits on the G4 arms); mixed (M7) runs
                       all four either way
+  TP4 op profile (docs/tp4-profile.md; C2_GATE_PLAN may name OPS_GATE_PLANS, after every other plan, the twin first):
+                      ops-twin, ops-trace - four-card timed profile only (C2_CARDS=quad, QWEN_FAST_TP=4, both verify
+                      audits off), attribution only; ops_profile_plan says what each runs and what it writes to ops/
   C2_GATE_SALT        a cache_salt for every gate stream (sticky sessions, harness item B3; default, rendered
                       empty: none sent, the payload exactly as before): fresh (each stream its own salt, minted
                       under a key the gate mounts, so every request takes the prefix route's capture path and
@@ -102,7 +105,11 @@ GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # churn M11 (G5); permuted is built but required only under decision D-c(i).
 S2_GATE_PLANS = ('warm', 'warm-off', 'control', 'forced-cap', 'control-below', 'lifecycle-arrival', 'mixed', 'short',
                  'boundaries', 'staggered', 'churn', 'permuted')
-ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS
+# The TP4 op-level device profile (ops_profile_plan; docs/tp4-profile.md): an unprofiled twin, then tracy at op-support
+# 20000 on the four-card timed profile. They profile the device and use a scratch kernel cache, so they run after every
+# judged plan of a job, the twin first (check_ops_order).
+OPS_GATE_PLANS = ('ops-twin', 'ops-trace')
+ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS + OPS_GATE_PLANS
 MAX_PAIRS = 4
 BELOW_FAMILY_RANGE = (4096, 16640)   # capacities the pinned (flag-off) mask admits: attention_mask_replay.py:18,26
 JIT_MODES = ('auto', 'judge', 'record')
@@ -317,6 +324,7 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     unknown = sorted(set(plans) - set(ALL_GATE_PLANS))
     if unknown:
         raise JobError('C2_GATE_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(ALL_GATE_PLANS)))
+    check_ops_order(plans)
     s2 = read_s2_gate(values)
     lengths_text = values.get('C2_GATE_LENGTHS', '')
     lengths = [positive_int('C2_GATE_LENGTHS', part) for part in split_list(lengths_text)]
@@ -348,6 +356,24 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     outputs.update(s2)
     outputs.update(prefix)
     return outputs
+
+
+def check_ops_order(plans):
+    """Refuse a plan list that runs an ops plan before a judged one (the profiled arm reserves device DRAM, compiles into
+    a scratch cache and may end as INFRA), that runs ops-trace without ops-twin before it (the twin is the text
+    reference), or that names one twice (one arm directory per ops plan)."""
+    seen = None
+    for plan in plans:
+        if plan in OPS_GATE_PLANS:
+            seen = seen or plan
+        elif seen:
+            raise JobError('C2_GATE_PLAN: %s runs after %s: the ops plans go after every judged plan' % (plan, seen))
+    named = [plan for plan in plans if plan in OPS_GATE_PLANS]
+    if len(set(named)) != len(named):
+        raise JobError('C2_GATE_PLAN names an ops plan twice: one arm directory per ops plan')
+    if 'ops-trace' in named and named[0] != 'ops-twin':
+        raise JobError('C2_GATE_PLAN: ops-trace needs ops-twin before it (its texts are held against the twin texts)')
+    return plans
 
 
 def below_family(name, text):

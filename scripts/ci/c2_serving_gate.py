@@ -189,6 +189,7 @@ import math
 import os
 import random
 import re
+import shutil
 import signal
 import statistics
 import subprocess
@@ -199,6 +200,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import c2_serving_job  # noqa: E402
 import lever_n_m3native_gate as harness  # noqa: E402  (stdlib only; real_text_compare imports it too)
+import ops_profile_plan  # noqa: E402  (stdlib only: the TP4 op-profile plans, docs/tp4-profile.md)
 import real_text_compare  # noqa: E402
 import prefix_judge  # noqa: E402  (stdlib only)
 import prefix_markers  # noqa: E402  (stdlib only)
@@ -404,13 +406,14 @@ AGENT_ENV = ('HF_HOME=/models', 'HF_HUB_CACHE=/models', 'MESH_DEVICE=P300', 'QWE
              'DO_NOT_TRACK=1', 'VLLM_NO_USAGE_STATS=1', 'PYTHONDONTWRITEBYTECODE=1')
 
 
-def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False):
+def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False, ops_env=()):
     """`docker run` of the node agent's container, up to the image: read-only root, the agent's tmpfs
     set, 8 CPUs, 80g, 4g shm, the two cards in the order given, hugepages, SYS_NICE, the hub at
     /models, the environment the platform adds (AGENT_ENV), and QWEN_C2_SERVING=1 with the profile.
     `env` (an S2 arm's gate-only knobs, ARM_ENV_NAMES) follows as more -e pairs; empty, the argv is
     exactly the agent's. `gate_only` (the profile's own gate_only: true) adds QWEN_C2_GATE=1, the switch the contract
-    demands to boot a gate-only profile; a profile that is not gate only gets the agent's argv byte for byte."""
+    demands to boot a gate-only profile; a profile that is not gate only gets the agent's argv byte for byte.
+    `ops_env` (an ops-trace arm's profiler variables, ops_profile_plan.ARM_ENV_NAMES) follows the same way."""
     arguments = ['docker', 'run', '--rm', '--name', name, '--read-only']
     for tmpfs in AGENT_TMPFS:
         arguments += ['--tmpfs', tmpfs]
@@ -427,19 +430,29 @@ def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False)
             raise PlanError('%s is not an environment an arm may add (%s): a profile\'s keys are the profile\'s'
                             % (name_, ', '.join(sorted(ARM_ENV_NAMES))))
         arguments += ['-e', '%s=%s' % (name_, value)]
+    try:
+        ops_profile_plan.check_env(ops_env)
+    except ops_profile_plan.OpsPlanError as error:
+        raise PlanError(str(error))
+    for name_, value in ops_env:
+        arguments += ['-e', '%s=%s' % (name_, value)]
     return arguments
 
 
 def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HUB, env=(), salt=None,
-             salt_key_path=None, gate_only=False):
+             salt_key_path=None, gate_only=False, ops=None):
     """The whole `docker run` of one arm: the agent's shape, the harness mounted read-only at /bench,
     the arm's results directory, and the harness as the entrypoint. `salt` (the module docstring's SALTED
-    ARMS): fresh mounts the gate's salt key and points the contract at it, and both modes tell the harness."""
-    arguments = agent_shape(image, name, profile, devices, hub, env, gate_only)
+    ARMS): fresh mounts the gate's salt key and points the contract at it, and both modes tell the harness.
+    `ops` (an ops-* arm prepared by ops_profile_plan) adds its profiler variables, its profile mount and, for the profiled
+    arm, the tracy wrapper around the harness; None, the argv is unchanged."""
+    ops_env, ops_mounts, entry = ops_profile_plan.docker_additions(ops) if ops else ((), [], None)
+    arguments = agent_shape(image, name, profile, devices, hub, env, gate_only, ops_env=ops_env)
     for script in BENCH_SCRIPTS:
         arguments += ['--mount', 'type=bind,src=%s,dst=/bench/%s,readonly' % (
             os.path.join(checkout, 'scripts', 'ci', script), script)]
     arguments += ['--mount', 'type=bind,src=%s,dst=%s' % (arm_dir, RESULTS_IN_CONTAINER)]
+    arguments += ops_mounts
     salted = []
     if salt == 'fresh':
         if not salt_key_path:
@@ -449,8 +462,8 @@ def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HU
         salted = ['--cache-salt', 'fresh', '--cache-salt-key', SALT_KEY_MOUNT]
     elif salt == 'none':
         salted = ['--cache-salt', 'none']
-    return (arguments + ['--entrypoint', 'python3', image, '-B', '/bench/lever_n_m3native_gate.py'] + list(gate_args)
-            + salted)
+    return (arguments + ['--entrypoint', 'python3', image] + (entry or ['-B']) + ['/bench/lever_n_m3native_gate.py']
+            + list(gate_args) + salted)
 
 
 def is_gate_only(profiles, name):
@@ -649,6 +662,8 @@ def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.D
     whose rungs past the profile's largest admitted prompt are lowered to it (noted in `notes`). An S2
     plan's arms, and the S1 plans' on an S2 profile, are Arms (s2: pairs, families, audits); on any
     other profile the S1 plans' arms are exactly what they were."""
+    if plan in ops_profile_plan.PLANS:
+        return ops_profile_plan.plan_arms(plan, profile, profiles, sys.modules[__name__])
     if plan in S2_PLANS:
         return s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2 or {})
     arms = base_plan_arms(plan, profile, profiles, lengths, max_tokens, memory_prompt, notes)
@@ -1336,6 +1351,12 @@ class Runner(object):
     def __init__(self, image, profile, results, checkout, devices, hub=HUB, execute=None, log=print,
                  containers=None, corpus=None, any_request=False, profiles=None, cache_entries=None, jit='auto',
                  policy='strict', decision=None, salt=None, salt_key_path=None):
+        # The ops-* arms (ops_profile_plan): how the profile tree is handed back, and the disk under it; injectable so
+        # the CPU tests run no docker.
+        self.ops_handback = ops_profile_plan.docker_handback if execute is None else (lambda image, path: 0)
+        self.ops_disk_usage = shutil.disk_usage if execute is None else (lambda path: (1 << 50, 0, 1 << 50))
+        self.ops_stop = ops_profile_plan.docker_stop if execute is None else (lambda name: 0)
+        self.ops_guard_seconds = ops_profile_plan.GUARD_SECONDS
         self.image, self.profile, self.results, self.checkout = image, profile, results, checkout
         self.devices, self.hub, self.log = devices, hub, log
         self.execute = execute or self._execute
@@ -1408,10 +1429,11 @@ class Runner(object):
         finally:
             remove_container(name)
 
-    def run(self, arm, gate_args, timeout, profile=None, env=(), judged=False, measure=False):
+    def run(self, arm, gate_args, timeout, profile=None, env=(), judged=False, measure=False, ops=None):
         """One arm on --profile, or (an S2 arm) on `profile` with `env` added; `judged`: its kernel-cache
         growth is a problem (judges()); `measure`: the host reads its four-live rounds from the whole server
-        log (report['c2_gate_live4']: both arms of a G3 pair read the same way)."""
+        log (report['c2_gate_live4']: both arms of a G3 pair read the same way). `ops`: an ops-* arm prepared by
+        ops_profile_plan (its profiler variables, its profile mount, the tracy wrapper)."""
         profile = profile or self.profile
         arm_dir = os.path.join(self.results, arm)
         os.makedirs(arm_dir, exist_ok=True)
@@ -1428,15 +1450,26 @@ class Runner(object):
         name = CONTAINER_PREFIX + arm
         arguments = gate_run(self.image, name, profile, self.devices, self.checkout, arm_dir, gate_args, self.hub,
                              env=env, salt=self.salt, salt_key_path=self.salt_key_path,
-                             gate_only=is_gate_only(self.profiles, profile))
+                             gate_only=is_gate_only(self.profiles, profile), ops=ops)
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         self.log('[C2-GATE] arm %s: %s%s%s' % (arm, ' '.join(gate_args),
                                                 ' [profile %s]' % profile if profile != self.profile else '',
                                                 ''.join(' [-e %s=%s]' % pair for pair in env)))
         cache_before = self.count_cache()
+        guard = None
+        if ops is not None and ops['kind'] != 'twin':
+            guard = ops_profile_plan.DiskGuard(os.path.join(arm_dir, ops_profile_plan.PROFILE_SUBDIR),
+                                               ops_profile_plan.PROFILE_CAP, lambda: self.ops_stop(name),
+                                               usage=self.ops_disk_usage, interval=self.ops_guard_seconds,
+                                               log=self.log).start()
         started = time.time()
-        status = self.execute(arguments, os.path.join(arm_dir, 'gate-stdout.log'), timeout, name)
+        try:
+            status = self.execute(arguments, os.path.join(arm_dir, 'gate-stdout.log'), timeout, name)
+        finally:
+            # However the arm ended: the profile tree back to this user (root wrote it), the guard stopped.
+            tripped = guard.finish() if guard is not None else None
+            handed = ops_profile_plan.handback_arm(self.image, arm_dir, ops, self.ops_handback) if ops is not None else None
         seconds = round(time.time() - started, 1)
         cache_after = self.count_cache()
         cache = dict(before=cache_before, after=cache_after, judged=judged,
@@ -1501,6 +1534,9 @@ class Runner(object):
         self.arms[arm] = dict(exit=status, seconds=seconds, launched=line, gate_passed=(report or {}).get('gate_passed'),
                               fatal=(report or {}).get('fatal'), infra=infra,
                               any_request_engines=engines[:ANY_REQUEST_LINES_KEPT], quarantine_consumers=consumers)
+        if ops is not None:
+            self.arms[arm].update(ops=dict(kind=ops['kind'], disk_guard=tripped, handback=handed),
+                                  ops_env=[list(pair) for pair in ops.get('env') or ()])
         if profile != self.profile or env or cache['before'] is not None:
             # S2 arms (and any counted cache): what served and what the kernel cache did.
             self.arms[arm].update(profile=profile, env=['%s=%s' % pair for pair in env], kernel_cache=cache)
@@ -1528,13 +1564,14 @@ def spec_profile(runner, spec):
     return getattr(spec, 'profile', None) or runner.profile
 
 
-def run_arm(runner, plan, spec, suffix=''):
+def run_arm(runner, plan, spec, suffix='', ops=None):
     """Run one arm - a plain (name, args, timeout) or an Arm - with its profile, environment and kernel-cache
-    judgement (Runner.judges); `suffix` names a re-run ('-rerun')."""
+    judgement (Runner.judges); `suffix` names a re-run ('-rerun'); `ops` an ops-* arm prepared by ops_profile_plan."""
     name, args, timeout = spec
     profile = spec_profile(runner, spec)
     return runner.run(name + suffix, args, timeout, profile=getattr(spec, 'profile', None), env=getattr(spec, 'env', ()),
-                      judged=runner.judges(plan, profile, getattr(spec, 'judged', True)), measure=plan in S2_PLANS)
+                      judged=runner.judges(plan, profile, getattr(spec, 'judged', True)), measure=plan in S2_PLANS,
+                      ops=ops)
 
 
 def s2_of(report):
@@ -2595,6 +2632,35 @@ def with_unjudged(result, unjudged):
     return result
 
 
+def run_ops_plan(plan, runner, arms):
+    """One ops-* plan (ops_profile_plan): its arm's profile directory made, the arm run, and - after the profiled arm -
+    the CPP report compressed and analysed into <results>/ops/. Attribution: never judged for timing."""
+    spec, = arms
+    ops = spec.extra['ops']
+    arm_dir = os.path.join(runner.results, spec[0])
+    profiled = ops['kind'] != 'twin'
+    if profiled:
+        full = ops_profile_plan.disk_problem(runner.results, ops_profile_plan.PROFILE_CAP, runner.ops_disk_usage)
+        if full:
+            return dict(verdict='NOT_EXERCISED', reason=full, lines=[])
+    prepared = ops_profile_plan.prepare_arm(arm_dir, ops)
+    report = run_arm(runner, plan, spec, ops=prepared)
+    analysis = None
+    if profiled and report is not None:
+        twin_dir = os.path.join(runner.results, ops_profile_plan.TWIN)
+        summary = ops_profile_plan.finish_arm(arm_dir, runner.results,
+                                              twin_arm_dir=twin_dir if os.path.isdir(twin_dir) else None, log=runner.log)
+        runner.arms[spec[0]].setdefault('ops', {}).update(summary)
+        analysis = summary.get('validity')
+    log_path = os.path.join(arm_dir, 'server.log')
+    log_text = None
+    if os.path.isfile(log_path):
+        with open(log_path, errors='replace') as handle:
+            log_text = handle.read()
+    return ops_profile_plan.verdict(plan, report, runner.arms.get(spec[0]), ops_profile_plan.twin_report_of(runner.results, plan),
+                                    log_text=log_text, analysis=analysis)
+
+
 def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2_serving_job.DEFAULT_MAX_TOKENS,
              memory_prompt=None, s2=None):
     notes = []
@@ -2602,7 +2668,9 @@ def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2
     arms = plan_arms(plan, runner.profile, profiles, lengths, max_tokens, memory_prompt, notes, s2)
     for note in notes:
         runner.log('[C2-GATE] note: %s' % note)
-    if plan in S2_PLANS:
+    if plan in ops_profile_plan.PLANS:
+        result = run_ops_plan(plan, runner, arms)
+    elif plan in S2_PLANS:
         result = run_s2_plan(plan, runner, profiles, reference, arms)
     elif plan == 'bringup':
         warning = bringup_warning(profiles, runner.profile)
@@ -2906,7 +2974,9 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                                 ['<card %d>' % n for n in range(QUAD_BOARDS)]),
                     options.checkout, os.path.join(options.results, arm), args, options.hub,
                     env=getattr(spec, 'env', ()), salt=options.salt, salt_key_path=salt_key_path,
-                    gate_only=is_gate_only(profiles, getattr(spec, 'profile', None) or options.profile)))))
+                    gate_only=is_gate_only(profiles, getattr(spec, 'profile', None) or options.profile),
+                    ops=ops_profile_plan.planned(os.path.join(options.results, arm), spec.extra['ops'])
+                    if getattr(spec, 'extra', {}).get('ops') else None))))
         return 0
     cache_dir = None
     s2_run = any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, options.profile)
