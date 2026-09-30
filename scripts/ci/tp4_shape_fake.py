@@ -5,7 +5,7 @@ TEST SUPPORT ONLY: no served module imports it and it is not in the image copy l
 do not care about widths, which is exactly why they could not see a pair literal left on the four-card path. This fake holds
 only shapes, dtypes, layouts and per-chip addresses, and every operation refuses what the device would refuse: a slice past
 an extent, a copy between different shapes, a matmul whose inner widths differ, a concat whose other dimensions differ, a
-gather over the wrong chip count, a tensor used after it was freed, a tensor freed twice.
+tensor used after it was freed, a tensor freed twice.
 
 Nothing here computes a value; the drafter's arithmetic is a card's job (HW-B). What it proves is that every tensor the
 served code builds, slices, copies and gathers at QWEN_FAST_TP=4 has the shape the next operation takes."""

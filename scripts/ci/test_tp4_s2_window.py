@@ -71,7 +71,8 @@ class OrderTests(unittest.TestCase):
             values, outputs = parsed(name)
             actions = outputs['actions'].split()
             if name.startswith('S0'):
-                self.assertEqual(set(actions) & set(DEVICE_STEPS + ('reset',)), set(), name)
+                self.assertEqual(set(actions) & set(DEVICE_STEPS), set(), name)
+                self.assertEqual(actions, ['status', 'reset', 'build'], 'M1: every one-card job follows a fresh all-four reset')
                 self.assertEqual(outputs['cards'], 'quad', 'the four-card set is what the status step reads')
             if outputs['cards'] == 'quad' and set(actions) & set(DEVICE_STEPS):
                 seen_quad_run = True
@@ -153,6 +154,32 @@ class TemplateTests(unittest.TestCase):
             # the workflow's gate step gives the plans 380 min less 10; both arms to their limits and one re-run must fit
             worst = 2 * sum(arm[2] + gate.ARM_OVERHEAD_SECONDS for arm in arms)
             self.assertLessEqual(worst, 380 * 60 - 600, name)
+
+    def test_a_gate_only_profile_is_booted_with_the_gate_switch_in_the_dry_run_argv_of_every_gate_job(self):
+        # B1: the contract refuses a gate_only profile without QWEN_C2_GATE=1, and only the smoke set it: the gate's argv must too.
+        for name in GATE_JOBS:
+            values, outputs = parsed(name)
+            lines = []
+            code = gate.main(['--image', 'img', '--profile', outputs['profile'], '--plan', 'matrix', '--cards', 'quad',
+                              '--dry-run', '--results', os.path.join(HERE, 'no-results'), '--profiles',
+                              os.path.join(HERE, 'qwen_c2_profiles.json'), '--lengths', outputs['gate_lengths'],
+                              '--max-tokens', outputs['gate_max_tokens'], '--jit', outputs['gate_jit'] or 'auto'],
+                             log=lines.append)
+            self.assertEqual(code, 0, name)
+            arms = [json.loads(line)['docker'] for line in lines[1:]]
+            self.assertTrue(arms, name)
+            wanted = PROFILES['profiles'][outputs['profile']].get('gate_only') is True
+            for argv in arms:
+                self.assertEqual('QWEN_C2_GATE=1' in argv, wanted, name)
+                if wanted:
+                    self.assertEqual(argv[argv.index('QWEN_C2_GATE=1') - 1], '-e', name)
+        self.assertTrue(PROFILES['profiles']['c2-packed-tp4-gate']['gate_only'])
+
+    def test_a_profile_that_is_not_gate_only_gets_the_agents_argv_unchanged(self):
+        plain = gate.agent_shape('img', 'n', 'general-tp4', ['/d'])
+        self.assertNotIn('QWEN_C2_GATE=1', plain)
+        self.assertEqual(plain, gate.agent_shape('img', 'n', 'general-tp4', ['/d'], gate_only=False))
+        self.assertIn('QWEN_C2_GATE=1', gate.agent_shape('img', 'n', 'c2-packed-tp4-gate', ['/d'], gate_only=True))
 
     def test_the_smoke_jobs_name_tests_the_smoke_knows_and_the_bench_fits_the_profile(self):
         with open(os.path.join(HERE, 'c2_serving_smoke.py'), encoding='utf-8') as handle:

@@ -404,12 +404,13 @@ AGENT_ENV = ('HF_HOME=/models', 'HF_HUB_CACHE=/models', 'MESH_DEVICE=P300', 'QWE
              'DO_NOT_TRACK=1', 'VLLM_NO_USAGE_STATS=1', 'PYTHONDONTWRITEBYTECODE=1')
 
 
-def agent_shape(image, name, profile, devices, hub=HUB, env=()):
+def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False):
     """`docker run` of the node agent's container, up to the image: read-only root, the agent's tmpfs
     set, 8 CPUs, 80g, 4g shm, the two cards in the order given, hugepages, SYS_NICE, the hub at
     /models, the environment the platform adds (AGENT_ENV), and QWEN_C2_SERVING=1 with the profile.
     `env` (an S2 arm's gate-only knobs, ARM_ENV_NAMES) follows as more -e pairs; empty, the argv is
-    exactly the agent's."""
+    exactly the agent's. `gate_only` (the profile's own gate_only: true) adds QWEN_C2_GATE=1, the switch the contract
+    demands to boot a gate-only profile; a profile that is not gate only gets the agent's argv byte for byte."""
     arguments = ['docker', 'run', '--rm', '--name', name, '--read-only']
     for tmpfs in AGENT_TMPFS:
         arguments += ['--tmpfs', tmpfs]
@@ -419,6 +420,8 @@ def agent_shape(image, name, profile, devices, hub=HUB, env=()):
     arguments += ['-v', '/dev/hugepages-1G:/dev/hugepages-1G', '--cap-add', 'SYS_NICE', '-v', '%s:/models' % hub]
     for variable in AGENT_ENV + ('QWEN_C2_SERVING=1', 'QWEN_C2_PROFILE=%s' % profile):
         arguments += ['-e', variable]
+    if gate_only:
+        arguments += ['-e', 'QWEN_C2_GATE=1']
     for name_, value in env:
         if name_ not in ARM_ENV_NAMES:
             raise PlanError('%s is not an environment an arm may add (%s): a profile\'s keys are the profile\'s'
@@ -428,11 +431,11 @@ def agent_shape(image, name, profile, devices, hub=HUB, env=()):
 
 
 def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HUB, env=(), salt=None,
-             salt_key_path=None):
+             salt_key_path=None, gate_only=False):
     """The whole `docker run` of one arm: the agent's shape, the harness mounted read-only at /bench,
     the arm's results directory, and the harness as the entrypoint. `salt` (the module docstring's SALTED
     ARMS): fresh mounts the gate's salt key and points the contract at it, and both modes tell the harness."""
-    arguments = agent_shape(image, name, profile, devices, hub, env)
+    arguments = agent_shape(image, name, profile, devices, hub, env, gate_only)
     for script in BENCH_SCRIPTS:
         arguments += ['--mount', 'type=bind,src=%s,dst=/bench/%s,readonly' % (
             os.path.join(checkout, 'scripts', 'ci', script), script)]
@@ -448,6 +451,11 @@ def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HU
         salted = ['--cache-salt', 'none']
     return (arguments + ['--entrypoint', 'python3', image, '-B', '/bench/lever_n_m3native_gate.py'] + list(gate_args)
             + salted)
+
+
+def is_gate_only(profiles, name):
+    """True for a profile with gate_only: true: its container boots only with QWEN_C2_GATE=1."""
+    return ((profiles or {}).get('profiles', {}).get(name) or {}).get('gate_only') is True
 
 
 def profile_limits(profiles, name):
@@ -1419,7 +1427,8 @@ class Runner(object):
             return None
         name = CONTAINER_PREFIX + arm
         arguments = gate_run(self.image, name, profile, self.devices, self.checkout, arm_dir, gate_args, self.hub,
-                             env=env, salt=self.salt, salt_key_path=self.salt_key_path)
+                             env=env, salt=self.salt, salt_key_path=self.salt_key_path,
+                             gate_only=is_gate_only(self.profiles, profile))
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         self.log('[C2-GATE] arm %s: %s%s%s' % (arm, ' '.join(gate_args),
@@ -2896,7 +2905,8 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     devices or (['<M>', '<A>'] if options.cards == 'pair' else
                                 ['<card %d>' % n for n in range(QUAD_BOARDS)]),
                     options.checkout, os.path.join(options.results, arm), args, options.hub,
-                    env=getattr(spec, 'env', ()), salt=options.salt, salt_key_path=salt_key_path))))
+                    env=getattr(spec, 'env', ()), salt=options.salt, salt_key_path=salt_key_path,
+                    gate_only=is_gate_only(profiles, getattr(spec, 'profile', None) or options.profile)))))
         return 0
     cache_dir = None
     s2_run = any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, options.profile)

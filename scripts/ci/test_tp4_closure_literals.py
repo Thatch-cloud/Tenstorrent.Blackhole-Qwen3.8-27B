@@ -149,6 +149,28 @@ def reach(names, known):
     return seen
 
 
+# The NOT_SERVED modules the four-card attach really loads (test_tp4_attach_profile enters them inert): the experiment scopes
+# and hash gates the attach constructs with their flags off.
+ATTACH_ENTERS_INERT = frozenset('''
+draft_kv_slide draft_kv_slide_scope fused_t16_scope gdn_direct_window_gate gdn_direct_window_scope gdn_norm_scatter
+gdn_shared_qk_pipeline gdn_shared_qk_scope mlp_down_grid_gate mlp_down_grid_scope mlp_register_epilogue_gate
+mlp_weight_pipeline_report
+'''.split())
+
+
+def top_level_reach(names, known):
+    """Every module reachable from `names` by module-level imports only (what importing them loads)."""
+    seen, todo = set(), list(names)
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        top, _ = imports_of(name, known)
+        todo += sorted(top - seen)
+    return seen
+
+
 def closure():
     """(modules scanned, {unclassified lazy module: [(importer, function)]}, {pruned module: [importers]})."""
     known = module_names()
@@ -215,6 +237,50 @@ def heads_context(parent):
     return False
 
 
+def sequences_of(node):
+    """The int-or-None rows a shape can be written as: the elements of a tuple or list, and every four consecutive
+    positional arguments of a call (`reshape(1, 4, n, 128)`), each as a tuple of ints (None where not a literal int)."""
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return [literal_ints(node)]
+    args = [argument for argument in node.args]
+    if any(isinstance(argument, ast.Starred) for argument in args):
+        return []
+    values = tuple(argument.value if isinstance(argument, ast.Constant) and type(argument.value) is int else None
+                   for argument in args)
+    if len(values) < 4:
+        return [values]
+    return [values[start:start + 4] for start in range(len(values) - 3)]
+
+
+# A pair width that is an ordinary number elsewhere counts only inside a shape: a tuple, list or call of two or more entries. 3072 is the pair's target attention output (12 query heads x 256) and the GDN z width; 8256 the padded qkvzab row.
+# (160 and 8192 are not here: 160 x 32 is the hidden size's norm reshape and 8192 a context length, at any width.)
+SHAPE_INTS = {3072: 'the pair target attention output / GDN z width', 8256: 'the pair padded qkvzab row'}
+
+
+def sequence_hits(node):
+    """[description]: the pair's shapes in one tuple, list or call: four-wide rows (1, 4, N, 128) K/V banks, (1, 16, N, 128)
+    drafter queries, (1, 1, N, 2048/2560) pair-wide queries, (1, 2, N, 256) and (1, 12, N, 256) the target attention's two
+    KV and twelve query heads per chip, 2052 rows with the pair KV heads; and SHAPE_INTS inside any row of two or more entries."""
+    found = []
+    for shape in sequences_of(node):
+        if len(shape) == 4:
+            if shape[:2] == (1, 4) and shape[3] == 128:
+                found.append('(1, 4, N, 128): four KV heads per chip')
+            elif shape[:2] == (1, 16) and shape[3] == 128:
+                found.append('(1, 16, N, 128): sixteen drafter query heads per chip')
+            elif shape[:2] == (1, 1) and shape[3] in (2048, 2560) and shape[2] in (32, 2052, None):
+                found.append('(1, 1, N, %d): the pair-wide query or tap' % shape[3])
+            elif shape[:2] == (1, 4) and 2052 in shape:
+                found.append('2052 rows with the pair KV heads')
+            elif shape[:2] == (1, 2) and shape[3] == 256:
+                found.append('(1, 2, N, 256): the target attention two KV heads per chip')
+            elif shape[:2] == (1, 12) and shape[3] == 256:
+                found.append('(1, 12, N, 256): the target attention twelve query heads per chip')
+        if len(shape) >= 2:
+            found += ['%d (%s)' % (value, SHAPE_INTS[value]) for value in shape if value in SHAPE_INTS]
+    return list(dict.fromkeys(found))
+
+
 def hits_in(source):
     """[(line, qualified function or class, description)]: every pair-only literal in `source`, code only (docstrings and
     comments are not read)."""
@@ -234,16 +300,9 @@ def hits_in(source):
             where, line = '.'.join(stack), getattr(child, 'lineno', 0)
             if isinstance(child, ast.Constant) and type(child.value) is int and child.value in PAIR_INTS:
                 found.append((line, where, '%d (%s)' % (child.value, PAIR_INTS[child.value])))
-            elif isinstance(child, ast.Tuple) and len(child.elts) == 4:
-                shape = literal_ints(child)
-                if shape[:2] == (1, 4) and shape[3] == 128:
-                    found.append((line, where, '(1, 4, N, 128): four KV heads per chip'))
-                elif shape[:2] == (1, 16) and shape[3] == 128:
-                    found.append((line, where, '(1, 16, N, 128): sixteen drafter query heads per chip'))
-                elif shape[:2] == (1, 1) and shape[3] in (2048, 2560) and shape[2] in (32, 2052, None):
-                    found.append((line, where, '(1, 1, N, %d): the pair-wide query or tap' % shape[3]))
-                elif shape[:2] == (1, 4) and 2052 in shape:
-                    found.append((line, where, '2052 rows with the pair KV heads'))
+            elif isinstance(child, (ast.Tuple, ast.List, ast.Call)) and sequence_hits(child):
+                for description in sequence_hits(child):
+                    found.append((line, where, description))
             elif (isinstance(child, ast.Compare) and len(child.ops) == 1 and isinstance(child.ops[0], (ast.Eq, ast.NotEq))
                   and isinstance(child.comparators[0], ast.Constant) and child.comparators[0].value == 2
                   and any(hint in ast.unparse(child.left) for hint in CHIP_HINTS)):
@@ -279,47 +338,79 @@ def scan(seen):
     return {name: hits_in((HERE / (name + '.py')).read_text(encoding='utf-8')) for name in sorted(seen)}
 
 
-# Hits that stay. Key: (module, the top-level function or class carrying the literal, or '*' for the module), value: why
-# the four-card profiles cannot reach it - or reach it without the pair's number mattering. Twin-replaced functions
-# (tp_addresses.TWINS) need no entry.
+# Hits that stay. Key: (module, the function, or Class.method, that carries the literal - or '<module>'), value: why the
+# four-card profiles cannot reach it - or reach it without the pair's number mattering. A key covers that function and what
+# is nested in it, nothing else: a new literal in another method of the same class (an inherited one a _tp twin does not
+# override) is a new hit and fails. Twin-replaced functions (tp_addresses.TWINS) need no entry.
 ALLOWED = {
-    ('attention_replay_audit', '*'): 'built only under attention_audit=True, which only the measurement harnesses pass',
+    ('attention_replay_audit', 'AttentionReplayAudit.check'): 'built only under attention_audit=True, which only the '
+                                                             'measurement harnesses pass',
     ('dflash_t16_native_attention', 'numerical_difference'): 'called by the probe script only',
     ('proposal_native_attention', 'numerical_difference'): 'called by the probe script only',
     ('dflash_t16_native_attention_gate', 'qualify'): "checks the pair's recorded simulator report (two chips of the report); "
                                                      "runs inert at the four-card attach (test_tp4_attach_profile)",
-    ('live_qk_gate', '*'): "the pair's recorded qualification report matrix (two chips of the report), not device shapes",
+    ('live_qk_gate', 'qualify_correctness'): "the pair's recorded qualification report matrix (two chips of the report), "
+                                              "not device shapes",
     ('target_t16_attention_gate', 'validate'): "checks the pair's recorded qualification report (two chips of the report)",
     ('target_t16_attention_8k_gate', 'validate'): "checks the pair's recorded qualification report (two chips of the report)",
     ('dflash_traced_publish', '_fused_kv_history_prepare'): 'installed only under QWEN_FAST_TRACED_PUBLISH=1, which both '
                                                           'four-card profiles set to 0 (install_publish_options reads it '
                                                           'each round)',
-    ('draft_kv_history', '*'): "the pair's class: dflash_device and publication_warm build draft_kv_history_tp at four "
-                               "cards, which overrides __init__, prepare and audit (held below)",
-    ('feature_projection', '*'): 'dflash_device selects feature_projection_tp at four cards (held below)',
+    ('draft_kv_history', '<module>'): "the pair's bank constants; the four-card class reads tp_shapes (held below)",
+    ('draft_kv_history', 'DraftKVHistory.__init__'): "the pair's class: dflash_device and publication_warm build "
+                                                     "draft_kv_history_tp at four cards, which overrides this (held below)",
+    ('draft_kv_history', 'DraftKVHistory.prepare'): 'overridden by draft_kv_history_tp (held below)',
+    ('draft_kv_history', 'DraftKVHistory.audit'): 'overridden by draft_kv_history_tp (held below)',
+    ('feature_projection', 'projection_shards'): 'dflash_device selects feature_projection_tp at four cards (held below)',
+    ('feature_projection', 'concatenate_local_features'): 'dflash_device selects feature_projection_tp at four cards '
+                                                          '(held below)',
     ('full_dflash_request', 'measure_dflash_request'): 'a measurement function; serving_startup uses load_dflash_fixtures only',
     ('full_dflash_request', 'summarize_dflash_requests'): 'a measurement report',
-    ('fused_t16_admission', '*'): 'qualify_target_weights runs inside FusedT16Arm, which QWEN_FAST_SINGLE_GATEUP=1 (both '
-                                  'profiles) does not build (dflash_combined_request.combined_runtime)',
-    ('packed_weight_check', '*'): 'called by fused_t16_admission.qualify_target_weights, which is not built (above)',
-    ('gdn_user_batch', '*'): "the pair's launch: gdn_seq_block.batch resolves to gdn_user_batch_tp at four cards (WidthBatch)",
-    ('gdn_vsplit', '*'): "the pair's value-split norm batch: reached only through gdn_batched_conv's run_batched_projected, "
-                         "whose four-card twin refuses use_norm_batch",
+    ('fused_t16_admission', 'qualify_target_weights'): 'runs inside FusedT16Arm, which QWEN_FAST_SINGLE_GATEUP=1 (both '
+                                                       'profiles) does not build (dflash_combined_request.combined_runtime)',
+    ('packed_weight_check', 'comparison_geometry'): 'called by fused_t16_admission.qualify_target_weights, which is not built '
+                                                    '(above)',
+    ('packed_weight_check', 'compare_packed_weights'): 'called by fused_t16_admission.qualify_target_weights (above)',
+    ('packed_weight_check', 'read_comparison'): 'called by fused_t16_admission.qualify_target_weights (above)',
+    ('gdn_user_batch', '<module>'): "the pair's launch constants: gdn_seq_block.batch resolves to gdn_user_batch_tp at four "
+                                    "cards (WidthBatch, held below)",
+    ('gdn_user_batch', 'validate_users'): "the pair's launch (as above)",
+    ('gdn_user_batch', 'execute'): "the pair's launch (as above)",
+    ('gdn_vsplit', 'state_page'): "the pair's value-split norm batch: reached only through gdn_batched_conv's "
+                                  "run_batched_projected, whose four-card twin refuses use_norm_batch (held below)",
+    ('gdn_vsplit', 'bridge_page'): 'the value-split norm batch (as above)',
+    ('gdn_vsplit', 'output_element'): 'the value-split norm batch (as above)',
+    ('gdn_vsplit', 'stage_spec'): 'the value-split norm batch (as above)',
+    ('gdn_vsplit', 'build_program'): 'the value-split norm batch (as above)',
+    ('gdn_vsplit', 'execute'): 'the value-split norm batch (as above)',
     ('publication_warm', '<module>'): "the pair's constants; the warm reads kv_shape() and query_shape() (held below)",
     ('serving_buffer_pool', '<module>'): "the pair's constants; the pool reads kv_shape() and query_shape() (held below)",
     ('tp_shapes', '<module>'): 'the geometry table itself: the model constants every width is derived from',
-    ('verifier_engine', 'VerifierEngine'): "the pair's sequential engine: verifier_engine_tp.VerifierEngine overrides verify "
-                                           "(the chip-count readback) and serving_request_factory builds it at four cards "
-                                           "(held below)",
+    ('verifier_engine', 'VerifierEngine.verify'): "the pair's sequential engine: verifier_engine_tp.VerifierEngine overrides "
+                                                  "verify (the chip-count readback) and serving_request_factory builds it at "
+                                                  "four cards (held below)",
     ('verify_trace_t1', '<module>'): "the model's full vocabulary (248,320), the same at any width; the shard width is "
                                      "tp_shapes.vocab_shard",
 }
 
 
+def qualified(where):
+    return where or '<module>'
+
+
+def allowed_key(module, where):
+    """The ALLOWED key that covers a hit at `where` (the function or Class.method carrying it, and what is nested in it), or
+    None."""
+    where = qualified(where)
+    for key_module, key in ALLOWED:
+        if key_module == module and (where == key or where.startswith(key + '.')):
+            return (key_module, key)
+    return None
+
+
 def accounted(module, where, twins, whole):
     top = where.split('.')[0] if where else '<module>'
-    return (module in whole or top in twins.get(module, ())
-            or (module, top) in ALLOWED or (module, '*') in ALLOWED)
+    return module in whole or top in twins.get(module, ()) or allowed_key(module, where) is not None
 
 
 PAIR_CONSTANTS = ('KV_SHAPE', 'QUERY_SHAPE')
@@ -370,11 +461,9 @@ class ClosureTests(unittest.TestCase):
         used = set()
         for module, found in self.hits.items():
             for line, where, description in found:
-                top = where.split('.')[0] if where else '<module>'
-                if (module, top) in ALLOWED:
-                    used.add((module, top))
-                if (module, '*') in ALLOWED:
-                    used.add((module, '*'))
+                key = allowed_key(module, where)
+                if key is not None:
+                    used.add(key)
         self.assertEqual(sorted(set(ALLOWED) - used), [], 'ALLOWED entries that match no literal any more')
         self.assertEqual(sorted(set(NOT_SERVED) - set(self.pruned)), [],
                          'NOT_SERVED entries no served module imports any more')
@@ -404,9 +493,15 @@ class ClosureTests(unittest.TestCase):
         self.assertTrue(report['ok'], 'test_tp4_attach_profile fails, so its import set means nothing')
         known = module_names()
         loaded = {name for name in report['modules'] if name in known and not name.startswith('test_')}
-        behind = reach(sorted(self.pruned), known)
         loaded -= {'tp_test_support'}
-        self.assertEqual(sorted(loaded - self.seen - behind), [],
+        extra = loaded - self.seen
+        # What the attach loads outside the closure is a NOT_SERVED module it enters inert (each named in ATTACH_ENTERS_INERT,
+        # exactly) and what those import at module level - not everything any NOT_SERVED module could ever reach.
+        self.assertEqual(sorted(extra & set(NOT_SERVED)), sorted(ATTACH_ENTERS_INERT),
+                         'the NOT_SERVED modules the four-card attach loads changed: update ATTACH_ENTERS_INERT (and check '
+                         'each is entered inert)')
+        behind = top_level_reach(sorted(ATTACH_ENTERS_INERT), known)
+        self.assertEqual(sorted(extra - behind), [],
                          'the four-card attach imports modules the static closure does not reach: extend ROOTS / SERVED, or '
                          'NOT_SERVED with the reason')
 
@@ -495,6 +590,31 @@ class ScannerTests(unittest.TestCase):
         for source, expected in cases.items():
             with self.subTest(source=source):
                 self.assertTrue(any(expected in kind for kind in self.kinds(source)), (source, self.kinds(source)))
+
+    def test_list_shapes_call_arguments_and_the_target_attention_widths_are_found(self):
+        cases = {
+            'x = [1, 4, n, 128]': '(1, 4, N, 128)',
+            'y = t.reshape(1, 4, n, 128)': '(1, 4, N, 128)',
+            'y = t.reshape(x, 1, 16, n, 128)': '(1, 16, N, 128)',
+            'z = t.reshape(1, 1, 32, 2560)': '(1, 1, N, 2560)',
+            'k = (1, 2, n, 256)': '(1, 2, N, 256)',
+            'q = [1, 12, n, 256]': '(1, 12, N, 256)',
+            'o = (1, rows, 3072)': '3072',
+            'o = t.reshape(rows, 3072)': '3072',
+            'p = (rows, 8256)': '8256',
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertTrue(any(expected in kind for kind in self.kinds(source)), (source, self.kinds(source)))
+        self.assertEqual(hits_in('n = 3072' + chr(10) + 'shape = (1, 8, 2048, 128)' + chr(10)), [])
+
+    def test_an_allowed_entry_covers_its_own_method_and_not_a_sibling_method_of_the_class(self):
+        self.assertIsNotNone(allowed_key('draft_kv_history', 'DraftKVHistory.prepare'))
+        self.assertIsNotNone(allowed_key('draft_kv_history', 'DraftKVHistory.prepare.inner'))
+        self.assertIsNone(allowed_key('draft_kv_history', 'DraftKVHistory.upload'))
+        self.assertIsNone(allowed_key('draft_kv_history', 'DraftKVHistory.commit'))
+        self.assertIsNone(allowed_key('verifier_engine', 'VerifierEngine.other'))
+        self.assertFalse([key for key in ALLOWED if key[1] == '*'], 'no whole-module entries')
 
     def test_prose_and_unrelated_numbers_are_not_found(self):
         source = ('"""(1, 4, 2048, 128) and 8240 in a module docstring."""\n'
