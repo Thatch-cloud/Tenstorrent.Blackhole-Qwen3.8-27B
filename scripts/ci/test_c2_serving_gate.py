@@ -291,10 +291,11 @@ class PlanTests(unittest.TestCase):
                           'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad',
                           'c2-packed-tp4-gate-noslide',
                           'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-quad',
-                          'c2-packed-tp4-gate-ring', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fcommit',
+                          'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-vglue', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fcommit',
                           'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad',
                           'c2-packed-tp4-speed-noslide',
-                          'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad'])
+                          'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad',
+                          'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a'])
         # The four-card S2 profiles serve their pair twins' edge (their engine block is the twin's).
         for four, twin in (('c2-packed-tp4', 'c2-packed'), ('c2-packed-tp4-gate', 'c2-packed-gate')):
             self.assertEqual(driver.profile_limits(CHECKOUT_PROFILES, four), driver.profile_limits(CHECKOUT_PROFILES, twin))

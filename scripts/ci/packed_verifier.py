@@ -186,6 +186,7 @@ from verifier_pack import GDN_LAYERS, build_pack, participant
 import gdn_seq_block
 import verify_prestage
 import tp_shapes
+import tp4_vglue
 import verify_trace_t1
 import verify_trace_t2
 
@@ -205,6 +206,43 @@ def diagnostic(text):
             logger.info('{}', text)
     except BaseException:
         pass
+
+
+def audit_shard_values(operations, output, block_rows, chip_values):
+    """QWEN_FAST_TP4_SHARD_VALUES under QWEN_FAST_TP4_VGLUE_AUDIT: each chip's gathered maxima against the ttnn.max taken beside
+    them in the same trace (verify_trace_t1.shard_values), every row. Nothing to compare when the lever is off; when it is on under
+    the audit and its gather fell back (no reference was recorded) that is a failure, V4a was not audited."""
+    reference = verify_trace_t1.VALUE_REFERENCES.get(id(output[2]))
+    if reference is None:
+        if tp4_vglue.audit_enabled() and tp4_vglue.enabled(tp4_vglue.SHARD_VALUES):
+            # the lever is on and audited but the gather fell back: V4a was not exercised, so the gate must not pass it
+            message = '%s site=sampler no reference: the gather fell back, V4a was not audited' % tp4_vglue.AUDIT_MISMATCH
+            diagnostic(message)
+            raise AssertionError(message)
+        return
+    for chip, (part, gathered) in enumerate(zip(operations.get_device_tensors(reference), chip_values)):
+        rows = verify_trace_t1.compare_values(gathered, operations.to_torch(part).reshape(-1)[:block_rows])
+        if rows:
+            message = '%s site=sampler chip=%d rows=%s' % (tp4_vglue.AUDIT_MISMATCH, chip, rows[:8])
+            diagnostic(message)
+            raise AssertionError(message)
+    diagnostic('%s site=sampler shard_values exact=True rows=%d' % (tp4_vglue.AUDIT_MARKER, block_rows))
+
+
+def release_vglue_audit(operations, fixture, values=None):
+    """QWEN_FAST_TP4_VGLUE_AUDIT: free what the audit holds outside `owned` - each retained record's held tensors (tp4_vglue) and
+    the sampler's ttnn.max reference for the trace output `values` - before the fixture that owns the records closes."""
+    if not tp4_vglue.audit_enabled():
+        return
+    held = []
+    retained = getattr(fixture, 'retained', None)
+    if retained is not None:
+        held += [value for state, result, checkpoint in retained.records for value in tp4_vglue.audit_held_of(result)]
+    reference = verify_trace_t1.VALUE_REFERENCES.pop(id(values), None) if values is not None else None
+    if reference is not None:
+        held.append(reference)
+    if held:
+        release_owned(operations, held)
 
 
 class PackedFeatureTaps(tuple):
@@ -894,7 +932,10 @@ class PackedVerifierEngine:
                 operations.synchronize_device(self.mesh)
             finally:
                 if result is not None:
+                    release_vglue_audit(operations, warm, result[2] if len(result) > 2 else None)
                     release_owned(operations, [value for value in result if value is not None])
+                else:
+                    release_vglue_audit(operations, warm)
                 warm.close()
             self.stage = 'verify trace capture'
             self.fixture = self.build_fixture(placeholders)
@@ -906,11 +947,13 @@ class PackedVerifierEngine:
                 verify_trace_t1.take()  # count only what the captured forward engages
             if self.verify_t2:
                 verify_trace_t2.take()
+            tp4_vglue.take()
             self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
             if self.verify_t1:
                 self.note_verify_t1(verify_trace_t1.take())
             if self.verify_t2:
                 self.note_verify_t2(verify_trace_t2.take())
+            self.note_vglue(tp4_vglue.take())
             retained = self.fixture.retained
             if len(retained.records) != GDN_LAYERS:
                 raise ValueError('The captured packed block must retain every GDN layer')
@@ -1260,6 +1303,7 @@ class PackedVerifierEngine:
         if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
             raise AssertionError('Missing packed prediction rows')
         host = verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
+        audit_shard_values(self.operations, self.output, self.block_rows, chip_values)
         if self.shard_audit:
             reference = self.operations.to_torch(self.operations.get_device_tensors(self.output[3])[0])
             verify_trace_t1.audit_round(host, reference.reshape(-1)[:self.block_rows].tolist())
@@ -1278,6 +1322,15 @@ class PackedVerifierEngine:
         diagnostic(verify_trace_t1.engaged_line('packed_verify', **fields))
         if self.shard_problem is not None:
             diagnostic('%s: %s' % (verify_trace_t1.KEPT_SAMPLER, self.shard_problem))
+
+    def note_vglue(self, counts):
+        """tp4_vglue.ENGAGED once per captured verify trace, when any lever is on: what the captured forward engaged
+        (attention layers folded, sampler value gathers) and what fell back."""
+        levers = tp4_vglue.engaged_levers()
+        if not levers:
+            return
+        diagnostic(tp4_vglue.marker('packed_verify', levers=','.join(name.replace('QWEN_FAST_TP4_', '').lower() for name in levers),
+                                    **{name: counts[name] for name in sorted(counts)}))
 
     def note_verify_t2(self, counts):
         """verify_trace_t2.MARKER once per captured verify trace: what the captured forward
@@ -1566,6 +1619,9 @@ class PackedVerifierEngine:
                 # against the served launch's on the same inputs, every audited layer.
                 gdn_seq_block.audit_round(self.operations, self.fixture.retained.records, self.seq_block_audit,
                                           self.rounds + 1)
+            if tp4_vglue.audit_enabled():
+                # QWEN_FAST_TP4_VGLUE_AUDIT: each engaged GDN lever's output against the served path's, held beside it.
+                tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
             if extent_users is not None:
@@ -1890,10 +1946,12 @@ class PackedVerifierEngine:
                        % (self.stage, abandoned))
         if self.feature_capture is not None:
             self.feature_capture.close()
+        shard_values = self.output[2] if self.output is not None and len(self.output) > 2 else None
         if self.output is not None:
             release_owned(operations, [value for value in self.output if value is not None])
             self.output = None
         if self.fixture is not None:
+            release_vglue_audit(operations, self.fixture, shard_values)
             self.fixture.close()
             self.fixture = None
         # The readers' page tables are the pool's: handed back, never freed here.

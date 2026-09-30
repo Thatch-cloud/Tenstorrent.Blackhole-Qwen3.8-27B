@@ -217,6 +217,8 @@ def sample_shards(operations, logits, rows):
     dtype, layout = getattr(logits, 'dtype', None), getattr(logits, 'layout', None)
     if dtype != operations.bfloat16 or layout != operations.TILE_LAYOUT:
         raise ValueError('Per-shard argmax needs bf16 TILE logits; got %r %r' % (dtype, layout))
+    import tp4_vglue
+
     dram = operations.DRAM_MEMORY_CONFIG
     row_major = operations.to_layout(logits, operations.ROW_MAJOR_LAYOUT, memory_config=dram)
     ids = values = None
@@ -224,7 +226,10 @@ def sample_shards(operations, logits, rows):
         # This build's ttnn.argmax has no use_multicore keyword (G0 TypeError, 2026-09-23); a last-dim
         # reduction over ROW_MAJOR input is multi-core by default.
         ids = operations.argmax(row_major, dim=3, keepdim=True, memory_config=dram)
-        values = operations.max(logits, dim=3, keepdim=True, memory_config=dram)
+        if tp4_vglue.enabled(tp4_vglue.SHARD_VALUES):
+            values = shard_values(operations, row_major, logits, ids, dram)
+        else:
+            values = operations.max(logits, dim=3, keepdim=True, memory_config=dram)
         return ids, values
     except BaseException:
         if ids is not None:
@@ -233,6 +238,49 @@ def sample_shards(operations, logits, rows):
     finally:
         if row_major is not logits:
             operations.deallocate(row_major)
+
+
+# QWEN_FAST_TP4_SHARD_VALUES (tp4/vglue V4a): the shard's max value is the logit at the shard's own argmax id, one
+# gather on the row-major logits already in DRAM, instead of ttnn.max on the tiled logits, which reduces over W on two
+# cores (0.79 ms per replay). The argmax id is the first index holding the maximum, so logits[id] carries the
+# maximum's bits: identical except that -0 and +0 may swap (combine_shards compares them equal) and a row holding NaN,
+# where the max is NaN and logits[id] is whatever the argmax chose. The audit (QWEN_FAST_TP4_VGLUE_AUDIT=1) computes
+# ttnn.max beside it and compares every row.
+VALUE_REFERENCES = {}
+_VALUES_LOGGED = []
+
+
+def shard_values(operations, row_major, logits, ids, dram):
+    """The (1, 1, rows, 1) bf16 shard maxima by gather at `ids`; falls back to ttnn.max (logged) if this build's gather
+    refuses the row-major logits, so a refusal costs the lever and never the round."""
+    import tp4_vglue
+
+    try:
+        values = operations.gather(row_major, dim=3, index=ids, memory_config=dram)
+    except (TypeError, ValueError, RuntimeError) as error:
+        log_line('%s site=sampler reason=%s: %s' % (tp4_vglue.FALLBACK, type(error).__name__, str(error).splitlines()[0][:160]))
+        tp4_vglue.note('shard_values_fallback')
+        return operations.max(logits, dim=3, keepdim=True, memory_config=dram)
+    tp4_vglue.note('shard_values')
+    if not _VALUES_LOGGED:
+        _VALUES_LOGGED.append(True)
+        log_line(tp4_vglue.marker('sampler', shard_values=1))
+    if tp4_vglue.audit_enabled():
+        VALUE_REFERENCES[id(values)] = operations.max(logits, dim=3, keepdim=True, memory_config=dram)
+    return values
+
+
+def compare_values(gathered, reference):
+    """The audit's rule for the gathered maxima against ttnn.max's, per row: equal as numbers (-0 == +0), or both NaN.
+    Returns the rows that differ."""
+    import torch
+
+    left = torch.as_tensor(gathered).reshape(-1).to(torch.float32)
+    right = torch.as_tensor(reference).reshape(-1).to(torch.float32)
+    if left.numel() != right.numel():
+        raise AssertionError('The value audit compares %d gathered rows with %d maxima' % (left.numel(), right.numel()))
+    same = (left == right) | (torch.isnan(left) & torch.isnan(right))
+    return [row for row, ok in enumerate(same.tolist()) if not ok]
 
 
 def combine_shards(chip_ids, chip_values, shard_width=None):

@@ -23,6 +23,7 @@ from contextlib import ExitStack, contextmanager
 import os
 from pathlib import Path
 
+import attention_block_fold_tp
 import attention_mask_replay
 from attention_fold_dma_tp import device_layout_dma
 from extent_attention_replay import (BF16_NEG_INF, ENGAGED_MARKER, EXTENT_BUNDLE_ENTRIES, EXTENT_GROUP_ROWS, F22_MARKER,
@@ -30,6 +31,7 @@ from extent_attention_replay import (BF16_NEG_INF, ENGAGED_MARKER, EXTENT_BUNDLE
                                      admits, check_start, extent, extent_values)
 import pooled_attention_replay as pooled
 from pooled_attention_replay import apply_sdpa_modes, sdpa_modes, validate_segments
+import tp4_vglue
 import tp_kernels
 import tp_shapes
 from tp_addresses import addresses, release_owned
@@ -541,6 +543,12 @@ class PackedExtentReplayReader:
         if tuple(query.shape) != (1, self.rows, head_rows(), 256):
             raise ValueError('Packed extent query geometry changed')
         operations = self.operations
+        if tp4_vglue.enabled(tp4_vglue.ATTN_FOLD):
+            chunks = self.fold_chunks()
+            reason = attention_block_fold_tp.problem(query, chunks, kwargs['memory_config'], self.operations)
+            if reason is None:
+                return self.call_block_folded(query, keys, values, chunks, **kwargs)
+            self.note_fold_fallback(reason)
         rows, outputs = [], []
         try:
             for reader, (first, last) in zip(self.readers, self.segments, strict=True):
@@ -558,6 +566,59 @@ class PackedExtentReplayReader:
         finally:
             for value in (*outputs, *rows):
                 operations.deallocate(value)
+
+    def fold_chunks(self):
+        """QWEN_FAST_TP4_ATTN_FOLD: the block's SDPA bundles in dispatch order (attention_block_fold_tp.Chunk)."""
+        return attention_block_fold_tp.chunks_of(
+            self.segments, [[bundle for bundle, pages, mask, config in reader.metadata] for reader in self.readers])
+
+    fold_fallbacks = set()
+
+    def note_fold_fallback(self, reason):
+        if reason not in self.fold_fallbacks:
+            self.fold_fallbacks.add(reason)
+            tp4_vglue.log_line('%s site=attention reason=%s' % (tp4_vglue.FALLBACK, reason))
+        tp4_vglue.note('attn_fold_fallback')
+
+    def call_block_folded(self, query, keys, values, chunks, *, page_table_tensor=None, cur_pos_tensor=None, **kwargs):
+        """__call__ with the per-segment query slices, fold DMAs, stacking concats, result slices, inverse folds and
+        concats replaced by attention_block_fold_tp's two launches (QWEN_FAST_TP4_ATTN_FOLD). Each segment reader keeps
+        its bookkeeping exactly as ExtentSegmentReader.__call__ does it (validate, mask refresh or shared-mask budget,
+        calls, failed), and every SDPA call is the served one: the same stacked query bytes, keys, values, page table,
+        cur_pos word, mask, scale, program config and output memory config."""
+        operations = self.operations
+        scale, memory_config = kwargs['scale'], kwargs['memory_config']
+        owned, results = [], []
+        protected = {addresses(operations, value) for value in (query, keys, values)}
+        try:
+            for reader in self.readers:
+                reader.validate(reader.start)
+                if reader.mask_scope is None:
+                    reader.refresh()
+                elif reader.calls >= reader.mask_scope:
+                    raise AssertionError('Shared-mask forward exceeded its attention call budget')
+            stacked = attention_block_fold_tp.fold_in(self.mesh, query, chunks, owned)
+            entries = [(entry, positions) for reader in self.readers
+                       for entry, positions in zip(reader.metadata, reader.cur_pos, strict=True)]
+            for stack, ((bundle, pages, mask, config), positions) in zip(stacked, entries, strict=True):
+                result = operations.transformer.paged_scaled_dot_product_attention_decode(stack, keys, values,
+                    page_table_tensor=pages, cur_pos_tensor=positions, is_causal=False, attn_mask=mask, scale=scale,
+                    program_config=config, memory_config=memory_config)
+                owned.append(result)
+                results.append(result)
+            output = attention_block_fold_tp.fold_out(self.mesh, results, chunks, memory_config, owned)
+            protected.add(addresses(operations, output))
+            for reader in self.readers:
+                reader.calls += 1
+            self.calls += 1
+            tp4_vglue.note('attn_fold')
+            return output
+        except BaseException:
+            for reader in self.readers:
+                reader.failed = True
+            raise
+        finally:
+            release_owned(operations, [value for value in owned if addresses(operations, value) not in protected])
 
     def close(self):
         if getattr(self, 'closed', True):

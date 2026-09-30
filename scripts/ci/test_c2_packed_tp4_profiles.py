@@ -392,5 +392,78 @@ class FusedCommitProfileTests(unittest.TestCase):
                 self.assertEqual(admission.check_environment(environ, M3), [])
 
 
+# The verify-glue window's profiles (tp4/vglue): each is its speed or gate base plus exactly these env differences.
+C1A, V4A, V2, V1, V3A = ('QWEN_FAST_TP4_COMMIT_LANES', 'QWEN_FAST_TP4_SHARD_VALUES', 'QWEN_FAST_TP4_GDN_GLUE',
+                         'QWEN_FAST_TP4_GDN_BLOCK_CONV', 'QWEN_FAST_TP4_ATTN_FOLD')
+VGLUE_AUDIT = 'QWEN_FAST_TP4_VGLUE_AUDIT'
+ALL_LEVERS = {C1A: '1', V4A: '1', V2: '1', V1: '1', V3A: '1'}
+VGLUE_PROFILES = {
+    'c2-packed-tp4-speed-vglue': ('c2-packed-tp4-speed', dict(ALL_LEVERS)),
+    'c2-packed-tp4-gate-vglue': ('c2-packed-tp4-gate', dict(ALL_LEVERS, **{VGLUE_AUDIT: '1'})),
+    'c2-packed-tp4-speed-vglue-c1a': ('c2-packed-tp4-speed', {C1A: '1'}),
+    'c2-packed-tp4-speed-vglue-v4a': ('c2-packed-tp4-speed', {V4A: '1'}),
+    'c2-packed-tp4-speed-vglue-v2': ('c2-packed-tp4-speed', {V2: '1'}),
+    'c2-packed-tp4-speed-vglue-v1': ('c2-packed-tp4-speed', {V2: '1', V1: '1'}),
+    'c2-packed-tp4-speed-vglue-v3a': ('c2-packed-tp4-speed', {V3A: '1'}),
+}
+
+
+class VglueProfileTests(unittest.TestCase):
+    def test_each_vglue_profile_is_its_base_with_only_its_documented_difference(self):
+        found = profiles()
+        for name, (base_name, difference) in VGLUE_PROFILES.items():
+            mine, base = found[name], found[base_name]
+            with self.subTest(profile=name):
+                self.assertEqual(mine['env'], dict(base['env'], **difference))
+                self.assertEqual(mine['engine'], base['engine'])
+                for key in set(mine) | set(base):
+                    if key not in ('description', 'env'):
+                        self.assertEqual(mine.get(key), base.get(key), key)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                self.assertIs(mine['gate_only'], True)
+                self.assertEqual(mine['env']['QWEN_C2_GATE_PROFILE'], '1')
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+
+    def test_the_block_conv_lever_always_comes_with_the_glue_lever(self):
+        for name, profile in profiles().items():
+            env = profile['env']
+            if env.get(V1) == '1':
+                self.assertEqual(env.get(V2), '1', name)
+
+    def test_the_audit_is_on_the_audited_profile_only_and_the_timed_ones_have_no_audit(self):
+        found = profiles()
+        for name in VGLUE_PROFILES:
+            env = found[name]['env']
+            self.assertEqual(env.get(VGLUE_AUDIT), '1' if name == 'c2-packed-tp4-gate-vglue' else None, name)
+            for key in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
+                self.assertEqual(env[key], '1' if name == 'c2-packed-tp4-gate-vglue' else '0', (name, key))
+
+    def test_the_levers_are_four_card_profiles_only_and_the_image_leaves_them_unset(self):
+        found = profiles()
+        image = image_env()
+        flags = (C1A, V4A, V2, V1, V3A, VGLUE_AUDIT)
+        for name, profile in found.items():
+            if name in VGLUE_PROFILES:
+                self.assertEqual(profile['env']['QWEN_FAST_TP'], '4', name)
+                continue
+            for flag in flags:
+                self.assertNotIn(flag, profile['env'], (name, flag))
+        for flag in flags:
+            self.assertNotIn(flag, image, 'the image leaves every lever off: a profile asks for it')
+
+    def test_the_admission_accepts_each_vglue_profile_over_the_image_environment(self):
+        image = image_env()
+        for name in VGLUE_PROFILES:
+            environ = dict(image, **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
+
+    def test_the_levers_need_the_verify_cuts_the_image_turns_on(self):
+        image = image_env()
+        for name in ('QWEN_FAST_VERIFY_T1', 'QWEN_FAST_VERIFY_T2', 'QWEN_FAST_GDN_USER_BATCH', 'QWEN_FAST_GDN_SEQ_BLOCK'):
+            self.assertEqual(image.get(name), '1', 'the glue levers ride the verify trace these select: %s' % name)
+
+
 if __name__ == '__main__':
     unittest.main()

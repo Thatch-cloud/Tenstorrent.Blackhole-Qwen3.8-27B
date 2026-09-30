@@ -58,6 +58,9 @@ TWINS = (
     ('draft_attention', 'validate_attention', 'draft_attention_tp', 'validate_attention'),
     ('draft_attention', 'draft_sdpa', 'draft_attention_tp', 'draft_sdpa'),
     ('gdn_records', 'retain_checkpoint_histories', 'gdn_records_tp', 'retain_checkpoint_histories'),
+    # The packed block's split and merge as one DMA launch each (tp4/vglue, QWEN_FAST_TP4_GDN_GLUE): the twin subclasses the pinned
+    # class and delegates to it with the flag off. model_batch imports the class lazily, so it gets the twin.
+    ('gdn_device_loop_state', 'DeviceLoopState', 'gdn_device_loop_state_tp', 'DeviceLoopState'),
     ('gdn_commit_dma', 'validate_shapes', 'gdn_commit_dma_tp', 'validate_shapes'),
     ('gdn_commit_dma', 'prepare', 'gdn_commit_dma_tp', 'prepare'),
     ('gdn_commit_dma', 'publish', 'gdn_commit_dma_tp', 'publish'),

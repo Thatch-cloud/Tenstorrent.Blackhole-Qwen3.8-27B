@@ -8,6 +8,7 @@ own SMOKE_JSON line and the container log and exits non-zero on:
   - garbage text: a coding or concurrent stream whose kept text is empty, mostly non-printable, or a repetition of a few
     characters;
   - an audit mismatch line in the container log ('audit mismatch': the verify t1 audit, round b1, the extent audit);
+  - a '[PINDIAG] tp4 vglue fell back' line: a verify-glue lever declined and its served path ran, so its timing is not the lever's;
   - a ramp commit above --max-ramp-kv-ms (default 50) when the served profile has the drafter's K/V slide on
     (QWEN_FAST_TP_KV_SLIDE=1): the MEDIAN, over the [PACKED-PUBLISH] rounds with a commit, of each round's largest
     prepare_history entry. The median, so the attach's few compile-bearing rounds do not fail it; the eager chain's ~310 ms
@@ -53,6 +54,7 @@ from pathlib import Path
 CORE = ('warmup', 'warm_lifecycle', 'coding', 'concurrent4', 'concurrent4_steady', 'long_real_text', 'steady_resend')
 PUBLISH = re.compile(r'\[PACKED-PUBLISH\] round=\d+ stages=\{.*?prepare_history: \[([0-9.,\s]*)\]')
 MISMATCH = re.compile(r'audit mismatch', re.IGNORECASE)
+VGLUE_FELL_BACK = '[PINDIAG] tp4 vglue fell back'
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
@@ -360,6 +362,8 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None):
     problems = smoke_problems(smoke)
     mismatches = [line.strip()[:200] for line in container_text.splitlines() if MISMATCH.search(line)]
     problems += ['audit mismatch in the container log: %s' % line for line in mismatches[:4]]
+    fell = [line.strip()[:200] for line in container_text.splitlines() if VGLUE_FELL_BACK in line]
+    problems += ['a vglue lever fell back (its served path ran, it saved nothing): %s' % line for line in fell[:4]]
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':
