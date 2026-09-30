@@ -1,0 +1,12 @@
+# The order of the four-card speed window, one template per line: <template name without .env> <stop|soft>.
+# stop: the window halts at the first failure of this job. soft: a failure is logged and the window goes on (its product is data).
+# Early-failure order: no card first (K0), then the audited attach with the new flag on (K1: the cheapest run that puts the slide
+# kernel on two KV heads on a card), then the timed arm (K2), its A/B (K3), then exactness: slide on, slide off (byte equal to it),
+# and the TP4 G1 reference.
+K0-build stop
+K1-smoke-gate-slide-on stop
+K2-smoke-speed stop
+K3-smoke-speed-noslide soft
+E1-matrix-slide-on stop
+E2-matrix-slide-off stop
+E3-g1-tp4-reference soft

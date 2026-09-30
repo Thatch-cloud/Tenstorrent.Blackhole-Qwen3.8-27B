@@ -103,7 +103,7 @@ jobs:
           python -B -m unittest test_serving_c2_contract
           python -B -m unittest test_tp4_mesh test_mesh_link_policy test_sampling_link_policy test_projection_link_policy test_model_link_policy
           python -B -m unittest test_tp4_model_widths test_tp4_fabric_probe test_tp_agreement test_tp_decode_bench test_c2_cards test_card_set
-          python -B -m unittest test_tp_shapes test_tp2_pins test_tp_addresses test_tp4_shard_merges test_gdn_user_batch_tp test_gdn_tp_twins test_extent_attention_replay_tp test_attention_tp_twins test_tp4_verify_configs test_packed_any_admission_tp4 test_c2_packed_tp4_profiles test_gdn_tp4_card_test test_draft_tp4 test_draft_kv_slide_tp
+          python -B -m unittest test_tp_shapes test_tp2_pins test_tp_addresses test_tp4_shard_merges test_gdn_user_batch_tp test_gdn_tp_twins test_extent_attention_replay_tp test_attention_tp_twins test_tp4_verify_configs test_packed_any_admission_tp4 test_c2_packed_tp4_profiles test_gdn_tp4_card_test test_draft_tp4 test_draft_kv_slide_tp test_tp4_speed_window
           python -B -m unittest test_tp4_attach_profile test_tp4_served_literals test_tp4_s2_window test_tp4_serving_shapes test_tp4_closure_literals
           python -B -m unittest test_gdn_direct_window_hardware_sources test_gdn_direct_window_t32_scope test_dflash_t32_combined_stage test_fused_t16_admission test_frozen_gdn_norm_gate test_frozen_target_replay
           python -B -m unittest test_attention_batch test_attention_fold_dma test_attention_head_fold test_attention_mask_replay test_attention_parallel

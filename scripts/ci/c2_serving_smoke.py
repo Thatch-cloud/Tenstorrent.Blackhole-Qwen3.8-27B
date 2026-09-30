@@ -83,6 +83,28 @@ coding = ('Here is a shell script:\n\n```bash\n' + open(sys.argv[5] if len(sys.a
 
 record('warmup', lambda: post('/v1/chat/completions', dict(model=MODEL, max_tokens=1,
        messages=[{'role': 'user', 'content': 'warmup'}]))[0])
+
+
+def warm_lifecycle():
+    # The startup warmup (max_tokens 1) ends at its first token and builds no fast-path engine, so the first real request after
+    # attach pays every per-request build: on the first four-card run (v140) an 8k prompt had TTFT 19.5 s, the same prompt
+    # later 3.9 s. This drives one short answer at each prefill size (~170, ~500, ~1,000 and ~2,500 tokens: the 256/512/1024
+    # buckets and the 2048 chunk with its tail) twice: the first pass is the cold cost per size, the second the warm one, and
+    # everything after it is measured warm. Named explicitly in C2_SMOKE_TESTS ahead of coding / concurrent4.
+    sizes = (600, 1800, 3600, 9000)
+    passes = {}
+    for label in ('cold', 'warm'):
+        rows = []
+        for size in sizes:
+            prompt = 'Summarise this code in one sentence.\n\n' + source[:size]
+            answer = stream([{'role': 'user', 'content': prompt}], 8)
+            rows.append(dict(chars=size, prompt_tokens=answer.get('prompt_tokens'), ttft=answer.get('ttft'),
+                             tokens=answer.get('tokens'), finish=answer.get('finish')))
+        passes[label] = rows
+    return dict(passes)
+
+
+record('warm_lifecycle', warm_lifecycle)
 record('coding', lambda: stream([{'role': 'user', 'content': coding}], 1500))
 record('long_real_text', lambda: stream([{'role': 'user', 'content': 'Summarise what this module provides, '
        'section by section:\n\n' + source[:90000]}], 1200))
