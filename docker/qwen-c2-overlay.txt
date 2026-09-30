@@ -298,5 +298,6 @@ scripts/ci/gdn_commit_lanes_tp.cpp
 scripts/ci/gdn_rows_dma_tp.py
 scripts/ci/gdn_rows_dma_tp.cpp
 scripts/ci/gdn_device_loop_state_tp.py
+scripts/ci/gdn_block_conv_tp.py
 scripts/ci/attention_block_fold_tp.py
 scripts/ci/attention_block_fold_tp.cpp

@@ -20,10 +20,12 @@ it, outside `owned`, for tp4_vglue.audit_round to compare after the replay (the 
 layer uses).
 """
 
+import gdn_block_conv_tp
 import gdn_device_loop_state as pinned
 import gdn_rows_dma_tp as rows_dma
 import tp4_vglue
-from gdn_multitoken_conv import release_owned
+import verify_trace_t2
+from tp_addresses import release_owned
 from gdn_state_copy import batch_enabled, copy_compact, copy_compact_batch
 from gdn_user_batch_conv import run_user_batched_projected
 from verify_trace_t1 import cut as verify_t1_cut, note as verify_t1_note
@@ -153,11 +155,32 @@ class DeviceLoopState(_pinned_class()):
         return results
 
     def run_users(self, projected, pieces, pending):
-        """The per-user convolution and gates, then the one recurrence launch: the pinned call."""
+        """The per-user convolution and gates, then the one recurrence launch: the pinned call, plus (QWEN_FAST_TP4_GDN_BLOCK_CONV)
+        the block stage that makes the four users' conv, beta, g and z with one conv_gates launch."""
         layer, operations = self.gdn, self.operations
-        return run_user_batched_projected(layer.mesh, pending, list(layer.tw['conv_taps']),
+        taps = list(layer.tw['conv_taps'])
+        options, staged = {}, []
+        if tp4_vglue.enabled(tp4_vglue.GDN_BLOCK_CONV):
+            if verify_trace_t2.cut('windows'):
+                def block_stage(groups, windows):
+                    found = gdn_block_conv_tp.stage(
+                        layer.mesh, projected, groups, windows, taps, layer.tw['dt_bias'], layer.tw['neg_exp_A'], operations,
+                        note_fallback=lambda reason: self.note_glue_fallback('block_conv', reason))
+                    if found is not None:
+                        staged.append(found)
+                        tp4_vglue.note('gdn_block_conv')
+                    return found
+
+                options['block_stage'] = block_stage
+            else:
+                self.note_glue_fallback('block_conv', 'the T2 packed windows cut is off (QWEN_FAST_VERIFY_T2)')
+        results = run_user_batched_projected(layer.mesh, pending, taps,
             layer.tw['dt_bias'], layer.tw['neg_exp_A'], layer.tw['norm_w'], self.kernels, operations,
-            prefix_zero_reuse=self.prefix_zero_reuse)
+            prefix_zero_reuse=self.prefix_zero_reuse, **options)
+        if staged and staged[0].entries:
+            for result, entries in zip(results, staged[0].entries):
+                result['vglue_block_audit'] = entries
+        return results
 
     def hold_served_pieces(self, projected, spans, pieces):
         """QWEN_FAST_TP4_VGLUE_AUDIT: DRAM copies of each launch piece and of the served piece (a Slice, resident, as

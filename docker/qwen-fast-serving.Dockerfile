@@ -79,7 +79,7 @@ COPY scripts/ci/verify_trace_t1.py /experiment-scripts/ci/
 # packed windows kernel is the SIBLING .cpp of its driver, so the pair travels together.
 COPY scripts/ci/verify_trace_t2.py scripts/ci/gdn_conv_windows_packed.py scripts/ci/gdn_conv_windows_packed.cpp scripts/ci/packed_ordered_cache.py /experiment-scripts/ci/
 # TP4 verify-glue levers (tp4/vglue; QWEN_FAST_TP4_*, default off): tp4_vglue.RUNTIME_FILES, the one table.
-COPY scripts/ci/tp4_vglue.py scripts/ci/gdn_commit_lanes_tp.cpp scripts/ci/gdn_rows_dma_tp.py scripts/ci/gdn_rows_dma_tp.cpp scripts/ci/gdn_device_loop_state_tp.py scripts/ci/attention_block_fold_tp.py scripts/ci/attention_block_fold_tp.cpp /experiment-scripts/ci/
+COPY scripts/ci/tp4_vglue.py scripts/ci/gdn_commit_lanes_tp.cpp scripts/ci/gdn_rows_dma_tp.py scripts/ci/gdn_rows_dma_tp.cpp scripts/ci/gdn_device_loop_state_tp.py scripts/ci/gdn_block_conv_tp.py scripts/ci/attention_block_fold_tp.py scripts/ci/attention_block_fold_tp.cpp /experiment-scripts/ci/
 # Variable-user packed rounds M1 (QWEN_FAST_PADDED_PROBE, default off): packed_verifier imports
 # padded_probe when the flag is set. M0 changes only modules already listed above.
 COPY scripts/ci/padded_probe.py /experiment-scripts/ci/

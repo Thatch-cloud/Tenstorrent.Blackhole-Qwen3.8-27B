@@ -365,5 +365,54 @@ class ShardValuesTests(unittest.TestCase):
                 t1.sample_shards(torch_operations([]), T(shard_logits(8, 124160, 0), 'logits'), 8)
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# the image: every runtime file of every lever ships, and its tests run in CI
+
+class ShipmentTests(unittest.TestCase):
+    def read(self, path):
+        return (REPO / path).read_text(encoding='utf-8')
+
+    def test_every_runtime_file_exists_and_is_in_all_three_copy_lists(self):
+        dockerfile = self.read('docker/qwen-fast-serving.Dockerfile')
+        workflow = self.read('.github/workflows/qwen-fast-serving-image.yml')
+        overlay = self.read('docker/qwen-c2-overlay.txt').splitlines()
+        for name in tp4_vglue.RUNTIME_FILES:
+            with self.subTest(name=name):
+                self.assertTrue((HERE / name).is_file())
+                self.assertIn('scripts/ci/%s ' % name, dockerfile)
+                self.assertRegex(workflow, r'for name in [^\n]*\b%s\b' % re.escape(name))
+                self.assertIn('scripts/ci/%s' % name, overlay)
+
+    def test_the_modules_that_import_the_flags_are_shipped_beside_them(self):
+        importing = [path.name for path in HERE.glob('*.py') if not path.name.startswith('test_')
+                     and re.search(r'^\s*(import|from) tp4_vglue\b', path.read_text(encoding='utf-8'), re.M)]
+        self.assertGreater(len(importing), 6)
+        for name in importing:
+            if name == 'tp4_vglue.py':
+                continue
+            self.assertTrue((HERE / name).is_file())
+
+    def test_the_cpu_suite_names_every_vglue_test_module(self):
+        workflow = self.read('.github/workflows/qwen-integration-cpu.yml')
+        for module in ('test_tp4_vglue', 'test_tp4_vglue_attention', 'test_tp4_vglue_gdn', 'test_tp4_vglue_twin',
+                       'test_tp4_vglue_block'):
+            self.assertRegex(workflow, r'unittest [^\n]*\b%s\b' % module)
+            self.assertTrue((HERE / (module + '.py')).is_file())
+
+    def test_pinned_tp2_sources_are_untouched(self):
+        import subprocess
+
+        base = subprocess.run(['git', '-C', str(REPO), 'merge-base', 'HEAD', 'origin/tp4/stack'], capture_output=True)
+        if base.returncode:
+            self.skipTest('origin/tp4/stack is not reachable from this checkout')
+        changed = subprocess.run(['git', '-C', str(REPO), 'diff', '--name-only', base.stdout.decode().strip(), 'HEAD',
+                                  '--', 'scripts/ci'], capture_output=True).stdout.decode().split()
+        guarded = {'scripts/ci/gdn_device_loop_state.py', 'scripts/ci/gdn_user_batch.py', 'scripts/ci/gdn_records.py',
+                   'scripts/ci/gdn_multitoken.py', 'scripts/ci/gdn_multitoken_conv.py', 'scripts/ci/gdn_commit_dma.py',
+                   'scripts/ci/gdn_commit_dma.cpp', 'scripts/ci/attention_fold_dma.py', 'scripts/ci/attention_fold_dma.cpp',
+                   'scripts/ci/gdn_batched_conv.py', 'scripts/ci/gdn_conv_windows.py', 'scripts/ci/gdn_conv_windows.cpp'}
+        self.assertEqual(sorted(guarded & set(changed)), [])
+
+
 if __name__ == '__main__':
     unittest.main()
