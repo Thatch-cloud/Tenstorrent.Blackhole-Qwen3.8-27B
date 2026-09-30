@@ -36,7 +36,7 @@ PAIR_DIGESTS = {
     'c2-packed-prefix-gate': '3fac0901d8a7ccbf0b74332ad7b9dd5558622803315859cf9458f086ac65e5c1',
 }
 FOUR_ENV = {'QWEN_FAST_TP': '4', 'QWEN_FAST_SDPA_MODES': 'tail,share', 'QWEN_PROJECTION_LINKS': '2',
-            'QWEN_GDN_PREFILL_MMRS': '0', 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT': '4'}
+            'QWEN_GDN_PREFILL_MMRS': '0', 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT': '4', 'QWEN_FAST_TP_KV_SLIDE': '1'}
 # The nine image flags the four-card profiles turn off: their code carries the pair's chip or head literals in text-patched,
 # kernel or two-chip form (quad_draft, fused_commit, the draft K/V slide and the traced publish's K/V fusion, the MLP block
 # stream, the GDN direct-window and shared-QK experiments) that the four-card port has not reached.
@@ -46,6 +46,15 @@ OFF_ENV = {'QWEN_FAST_QUAD_DRAFT': '0', 'QWEN_FAST_FUSED_COMMIT': '0', 'QWEN_FAS
            'QWEN_GDN_SHARED_QK_EXPERIMENT': '0'}
 # QWEN_C2_GATE_PROFILE is the admission waiver's marker: only the gate-only profile's own env carries it.
 AUDIT_ENV = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1', 'QWEN_C2_GATE_PROFILE': '1'}
+
+
+SPEED = 'QWEN_FAST_TP_KV_SLIDE'
+# The speed window's profiles (tp4/speed): each is c2-packed-tp4-gate plus exactly these env differences and a description.
+SPEED_PROFILES = {
+    'c2-packed-tp4-gate-noslide': {SPEED: '0'},
+    'c2-packed-tp4-speed': {'QWEN_FAST_VERIFY_T1_AUDIT': '0', 'QWEN_FAST_VERIFY_T2_AUDIT': '0'},
+    'c2-packed-tp4-speed-noslide': {'QWEN_FAST_VERIFY_T1_AUDIT': '0', 'QWEN_FAST_VERIFY_T2_AUDIT': '0', SPEED: '0'},
+}
 
 
 def profiles():
@@ -163,6 +172,56 @@ class FourCardProfileTests(unittest.TestCase):
             self.assertEqual(env['QWEN_PROJECTION_LINKS'], '2', 'two trained links per edge (the image names the pair\'s 4)')
             self.assertEqual(env['QWEN_FAST_SDPA_MODES'], 'tail,share')
             self.assertEqual(env['QWEN_GDN_PREFILL_MMRS'], '0')
+
+
+class SpeedProfileTests(unittest.TestCase):
+    def test_the_slide_flag_is_the_four_card_profiles_and_no_pairs(self):
+        found = profiles()
+        for name in ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16'):
+            self.assertEqual(found[name]['env'][SPEED], '1', name)
+        for name in PAIR_DIGESTS:
+            self.assertNotIn(SPEED, found[name]['env'], name)
+        self.assertNotIn(SPEED, image_env(), 'the image leaves it unset: the eager chain is the default')
+
+    def test_each_speed_profile_is_the_gate_with_only_its_documented_difference(self):
+        found = profiles()
+        gate = found['c2-packed-tp4-gate']
+        for name, difference in SPEED_PROFILES.items():
+            mine = found[name]
+            with self.subTest(profile=name):
+                self.assertEqual(mine['env'], dict(gate['env'], **difference))
+                self.assertEqual(mine['engine'], gate['engine'])
+                for key in set(mine) | set(gate):
+                    if key not in ('description', 'env'):
+                        self.assertEqual(mine.get(key), gate.get(key), key)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                self.assertIs(mine['gate_only'], True)
+                self.assertEqual(mine['env']['QWEN_C2_GATE_PROFILE'], '1', 'the admission waiver: no evidence section is filled yet')
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+
+    def test_the_timed_arms_have_both_verify_audits_off_and_the_audited_arms_on(self):
+        found = profiles()
+        for name, audited in (('c2-packed-tp4-gate', True), ('c2-packed-tp4-gate-noslide', True),
+                              ('c2-packed-tp4-speed', False), ('c2-packed-tp4-speed-noslide', False)):
+            env = found[name]['env']
+            for key in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
+                self.assertEqual(env[key], '1' if audited else '0', (name, key))
+
+    def test_the_speed_pair_differs_only_in_the_slide(self):
+        found = profiles()
+        on, off = found['c2-packed-tp4-speed']['env'], found['c2-packed-tp4-speed-noslide']['env']
+        self.assertEqual({key for key in on if on[key] != off.get(key)}, {SPEED})
+        self.assertEqual((on[SPEED], off[SPEED]), ('1', '0'))
+        on, off = found['c2-packed-tp4-gate']['env'], found['c2-packed-tp4-gate-noslide']['env']
+        self.assertEqual({key for key in on if on[key] != off.get(key)}, {SPEED})
+
+    def test_the_admission_accepts_each_speed_profile_over_the_image_environment(self):
+        image = image_env()
+        for name in SPEED_PROFILES:
+            environ = dict(image, **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
 
 
 if __name__ == '__main__':

@@ -303,7 +303,7 @@
       "parser_rechunk": true
     },
     "c2-packed-tp4": {
-      "description": "C2-packed-any at TP4 (plan S2-TP4), traffic profile: the c2-packed stack on all four cards as one (1, 4) mesh (mesh_device P150x4, QWEN_FAST_TP=4): the four-card ring descriptor at two links (tp4_mesh: 2x2), FABRIC_1D with the model's own Ring collectives, the fast path's own collectives at Linear until the fabric probe says otherwise (QWEN_FAST_CCL_TOPOLOGY, mesh_link_policy), QWEN_PROJECTION_LINKS=2 (two trained links per edge), the K64j extent program at ONE KV head per chip (QWEN_FAST_SDPA_MODES=tail,share: 0x23; the q-slice needs a second KV head) at G8B2, the packed GDN launch at 12 value heads on 48 cores, and no on-device sampler: the fast path verifies with its own shard argmax over 62,080 columns per chip (248,320 / 4). The image's other flags are the pair's (QWEN_FAST_TP is what makes the fast path read four-card widths, and serving_startup refuses a width the opened mesh does not have), except nine switched OFF because their code carries the pair's chip or head literals in text-patched, kernel or two-chip form that this port has not reached: the quad draft, the fused commit and its in-place / live-bank variants, the draft K/V slide, the traced publish's K/V fusion, the MLP block stream, the GDN direct-window and shared-QK experiments. The attach's own pair-only scopes are the four-card twins (attach_scopes_tp, rebound by tp_addresses at startup): the sampler's gather links at the ring's audited two, and the direct-window and K/V-publication scopes stand down (they patch nothing and refuse a profile that switches them on). The bring-up switches are general-tp4's: the fused prefill matmul + reduce-scatter off, the exact prefill conv audited beside the FIR for the first four chunks. NOT QUALIFIED: packed_any_evidence_tp4.json records no section, so the attach is refused by packed_any_admission except in a gate run (QWEN_C2_GATE=1), which logs each missing piece as UNQUALIFIED; the K64j extent program at one KV head, the GDN kernels at 12 heads, the drafter at 8 / 2 heads and the four-card collectives have not run on hardware. Engine and limits are c2-packed's (prompts up to 123,136 with at least 8,192 tokens of answer room, output ceiling 16,384, parser M), no audits. Until the four-card record qualifies the attach is refused and nothing serves; it is not placed until G7 at TP4 passes.",
+      "description": "C2-packed-any at TP4 (plan S2-TP4), traffic profile: the c2-packed stack on all four cards as one (1, 4) mesh (mesh_device P150x4, QWEN_FAST_TP=4): the four-card ring descriptor at two links (tp4_mesh: 2x2), FABRIC_1D with the model's own Ring collectives, the fast path's own collectives at Linear until the fabric probe says otherwise (QWEN_FAST_CCL_TOPOLOGY, mesh_link_policy), QWEN_PROJECTION_LINKS=2 (two trained links per edge), the K64j extent program at ONE KV head per chip (QWEN_FAST_SDPA_MODES=tail,share: 0x23; the q-slice needs a second KV head) at G8B2, the packed GDN launch at 12 value heads on 48 cores, and no on-device sampler: the fast path verifies with its own shard argmax over 62,080 columns per chip (248,320 / 4). The image's other flags are the pair's (QWEN_FAST_TP is what makes the fast path read four-card widths, and serving_startup refuses a width the opened mesh does not have), except nine switched OFF because their code carries the pair's chip or head literals in text-patched, kernel or two-chip form that this port has not reached: the quad draft, the fused commit and its in-place / live-bank variants, the draft K/V slide, the traced publish's K/V fusion, the MLP block stream, the GDN direct-window and shared-QK experiments. The attach's own pair-only scopes are the four-card twins (attach_scopes_tp, rebound by tp_addresses at startup): the sampler's gather links at the ring's audited two, and the direct-window and K/V-publication scopes stand down (they patch nothing and refuse a profile that switches them on). The bring-up switches are general-tp4's: the fused prefill matmul + reduce-scatter off, the exact prefill conv audited beside the FIR for the first four chunks. NOT QUALIFIED: packed_any_evidence_tp4.json records no section, so the attach is refused by packed_any_admission except in a gate run (QWEN_C2_GATE=1), which logs each missing piece as UNQUALIFIED; the K64j extent program at one KV head, the GDN kernels at 12 heads, the drafter at 8 / 2 heads and the four-card collectives have not run on hardware. Engine and limits are c2-packed's (prompts up to 123,136 with at least 8,192 tokens of answer room, output ceiling 16,384, parser M), no audits. Until the four-card record qualifies the attach is refused and nothing serves; it is not placed until G7 at TP4 passes. The drafter's K/V publication is the four-card slide (QWEN_FAST_TP_KV_SLIDE=1, draft_kv_slide_tp: the pair's kernel over 2 KV heads on 8 workers per chip) instead of the six-op eager chain, which built new programs every round while a prompt under 2,048 tokens filled its window; the eager chain stays behind the flag as the reference. UNVERIFIED on hardware.",
       "eos_ids": [
         248046,
         248044
@@ -326,6 +326,7 @@
         "QWEN_PROJECTION_LINKS": "2",
         "QWEN_GDN_PREFILL_MMRS": "0",
         "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
         "QWEN_FAST_QUAD_DRAFT": "0",
         "QWEN_FAST_FUSED_COMMIT": "0",
         "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
@@ -381,7 +382,7 @@
       "parser_rechunk": true
     },
     "c2-packed-tp4-gate": {
-      "description": "GATE ONLY (the first four-card S2 runs): the c2-packed stack on all four cards as one (1, 4) mesh (mesh_device P150x4, QWEN_FAST_TP=4): the four-card ring descriptor at two links (tp4_mesh: 2x2), FABRIC_1D with the model's own Ring collectives, the fast path's own collectives at Linear until the fabric probe says otherwise (QWEN_FAST_CCL_TOPOLOGY, mesh_link_policy), QWEN_PROJECTION_LINKS=2 (two trained links per edge), the K64j extent program at ONE KV head per chip (QWEN_FAST_SDPA_MODES=tail,share: 0x23; the q-slice needs a second KV head) at G8B2, the packed GDN launch at 12 value heads on 48 cores, and no on-device sampler: the fast path verifies with its own shard argmax over 62,080 columns per chip (248,320 / 4). The image's other flags are the pair's (QWEN_FAST_TP is what makes the fast path read four-card widths, and serving_startup refuses a width the opened mesh does not have), except nine switched OFF because their code carries the pair's chip or head literals in text-patched, kernel or two-chip form that this port has not reached: the quad draft, the fused commit and its in-place / live-bank variants, the draft K/V slide, the traced publish's K/V fusion, the MLP block stream, the GDN direct-window and shared-QK experiments. The attach's own pair-only scopes are the four-card twins (attach_scopes_tp, rebound by tp_addresses at startup): the sampler's gather links at the ring's audited two, and the direct-window and K/V-publication scopes stand down (they patch nothing and refuse a profile that switches them on). The bring-up switches are general-tp4's: the fused prefill matmul + reduce-scatter off, the exact prefill conv audited beside the FIR for the first four chunks. NOT QUALIFIED: packed_any_evidence_tp4.json records no section, so the attach is refused by packed_any_admission except in a gate run (QWEN_C2_GATE=1), which logs each missing piece as UNQUALIFIED; the K64j extent program at one KV head, the GDN kernels at 12 heads, the drafter at 8 / 2 heads and the four-card collectives have not run on hardware. Engine, limits and gate behaviour are c2-packed-gate's (4 x 131,072, min_answer_tokens 256), with every audit on (verify T1 shard argmax against the pinned sampler, T2 windows; the proposal audit is off, it audits only eager proposals; the gate driver adds the extent audit): a correctness arm, never a timed one. Not for traffic: a 131072-token prompt leaves 256 tokens of answer.",
+      "description": "GATE ONLY (the first four-card S2 runs): the c2-packed stack on all four cards as one (1, 4) mesh (mesh_device P150x4, QWEN_FAST_TP=4): the four-card ring descriptor at two links (tp4_mesh: 2x2), FABRIC_1D with the model's own Ring collectives, the fast path's own collectives at Linear until the fabric probe says otherwise (QWEN_FAST_CCL_TOPOLOGY, mesh_link_policy), QWEN_PROJECTION_LINKS=2 (two trained links per edge), the K64j extent program at ONE KV head per chip (QWEN_FAST_SDPA_MODES=tail,share: 0x23; the q-slice needs a second KV head) at G8B2, the packed GDN launch at 12 value heads on 48 cores, and no on-device sampler: the fast path verifies with its own shard argmax over 62,080 columns per chip (248,320 / 4). The image's other flags are the pair's (QWEN_FAST_TP is what makes the fast path read four-card widths, and serving_startup refuses a width the opened mesh does not have), except nine switched OFF because their code carries the pair's chip or head literals in text-patched, kernel or two-chip form that this port has not reached: the quad draft, the fused commit and its in-place / live-bank variants, the draft K/V slide, the traced publish's K/V fusion, the MLP block stream, the GDN direct-window and shared-QK experiments. The attach's own pair-only scopes are the four-card twins (attach_scopes_tp, rebound by tp_addresses at startup): the sampler's gather links at the ring's audited two, and the direct-window and K/V-publication scopes stand down (they patch nothing and refuse a profile that switches them on). The bring-up switches are general-tp4's: the fused prefill matmul + reduce-scatter off, the exact prefill conv audited beside the FIR for the first four chunks. NOT QUALIFIED: packed_any_evidence_tp4.json records no section, so the attach is refused by packed_any_admission except in a gate run (QWEN_C2_GATE=1), which logs each missing piece as UNQUALIFIED; the K64j extent program at one KV head, the GDN kernels at 12 heads, the drafter at 8 / 2 heads and the four-card collectives have not run on hardware. Engine, limits and gate behaviour are c2-packed-gate's (4 x 131,072, min_answer_tokens 256), with every audit on (verify T1 shard argmax against the pinned sampler, T2 windows; the proposal audit is off, it audits only eager proposals; the gate driver adds the extent audit): a correctness arm, never a timed one. Not for traffic: a 131072-token prompt leaves 256 tokens of answer. The drafter's K/V publication is the four-card slide (QWEN_FAST_TP_KV_SLIDE=1, draft_kv_slide_tp: the pair's kernel over 2 KV heads on 8 workers per chip) instead of the six-op eager chain, which built new programs every round while a prompt under 2,048 tokens filled its window; the eager chain stays behind the flag as the reference. UNVERIFIED on hardware.",
       "eos_ids": [
         248046,
         248044
@@ -404,6 +405,7 @@
         "QWEN_PROJECTION_LINKS": "2",
         "QWEN_GDN_PREFILL_MMRS": "0",
         "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
         "QWEN_FAST_VERIFY_T1_AUDIT": "1",
         "QWEN_FAST_VERIFY_T2_AUDIT": "1",
         "QWEN_C2_GATE_PROFILE": "1",
@@ -461,8 +463,8 @@
       "parser_rechunk": true,
       "gate_only": true
     },
-    "c2-packed-tp4-gate-ring": {
-      "description": "GATE ONLY (an optional arm of the S2 window): c2-packed-tp4-gate under the ring fabric (FABRIC_1D_RING) with the fast path's own collectives at Ring (QWEN_FAST_CCL_TOPOLOGY=ring; its default at four cards is Linear). Every other flag, every audit and the engine are c2-packed-tp4-gate's. The ring changes how the gathers move data, not what they add, so the text is expected to equal c2-packed-tp4-gate's on the same prompts; the arm exists to time the collectives in place and to decide QWEN_FAST_CCL_TOPOLOGY's four-card default. A correctness arm, never a timed one (the audits are on). Not for traffic. UNVERIFIED on hardware.",
+    "c2-packed-tp4-gate-noslide": {
+      "description": "GATE ONLY (the speed window's A/B arm): c2-packed-tp4-gate with the drafter's K/V slide off (QWEN_FAST_TP_KV_SLIDE=0), so the publication is the six-op eager chain the S2 window's v140 ran. Every audit stays on, exactly as in the gate; the arm gives the byte-for-byte reference the slide's tokens are compared with and the ramp-commit time the slide removes. Every other flag and the engine are c2-packed-tp4-gate's. Not for traffic. UNVERIFIED on hardware.",
       "eos_ids": [
         248046,
         248044
@@ -485,6 +487,253 @@
         "QWEN_PROJECTION_LINKS": "2",
         "QWEN_GDN_PREFILL_MMRS": "0",
         "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed": {
+      "description": "GATE ONLY (the speed window's timed arm): c2-packed-tp4-gate with the verify's T1 shard-argmax and T2 window audits off (QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0), the drafter's K/V slide on. The audits cost about 31 ms of a packed round's readback (256 blocking reads per round for T2, one more for T1) and add work inside the verify trace, so c2-packed-tp4-gate cannot be timed; this arm is what the round time is read from, as the pair's timed arms ran with the audits off. The tokens are held against c2-packed-tp4-gate's on the same prompts (the audited arm). Every other flag and the engine are c2-packed-tp4-gate's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-noslide": {
+      "description": "GATE ONLY (the speed window's timed A/B arm): c2-packed-tp4-speed with the drafter's K/V slide off (QWEN_FAST_TP_KV_SLIDE=0): audits off, the six-op eager chain. Timed against c2-packed-tp4-speed, the difference is the slide's saving on the same prompts; the tokens must be identical to it. Every other flag and the engine are c2-packed-tp4-gate's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-gate-ring": {
+      "description": "GATE ONLY (an optional arm of the S2 window): c2-packed-tp4-gate under the ring fabric (FABRIC_1D_RING) with the fast path's own collectives at Ring (QWEN_FAST_CCL_TOPOLOGY=ring; its default at four cards is Linear). Every other flag, every audit and the engine are c2-packed-tp4-gate's. The ring changes how the gathers move data, not what they add, so the text is expected to equal c2-packed-tp4-gate's on the same prompts; the arm exists to time the collectives in place and to decide QWEN_FAST_CCL_TOPOLOGY's four-card default. A correctness arm, never a timed one (the audits are on). Not for traffic. UNVERIFIED on hardware. The drafter's K/V publication is the four-card slide (QWEN_FAST_TP_KV_SLIDE=1, draft_kv_slide_tp: the pair's kernel over 2 KV heads on 8 workers per chip) instead of the six-op eager chain, which built new programs every round while a prompt under 2,048 tokens filled its window; the eager chain stays behind the flag as the reference. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
         "QWEN_FAST_VERIFY_T1_AUDIT": "1",
         "QWEN_FAST_VERIFY_T2_AUDIT": "1",
         "QWEN_C2_GATE_PROFILE": "1",
@@ -544,7 +793,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-gate-bf16": {
-      "description": "GATE ONLY (an optional arm of the S2 window, the 200 tok/s plan's W-1): c2-packed-tp4-gate with the draft projections in bfloat16 (QWEN_FAST_DRAFT_BF8=0; the image's default is bfloat8_b). The drafter's weights then cost twice the DRAM bytes per round and the acceptance is expected to rise; the arm reads the tokens committed per round against c2-packed-tp4-gate's on the same prompts. Every other flag, every audit and the engine are c2-packed-tp4-gate's. A correctness arm, never a timed one. Not for traffic. UNVERIFIED on hardware.",
+      "description": "GATE ONLY (an optional arm of the S2 window, the 200 tok/s plan's W-1): c2-packed-tp4-gate with the draft projections in bfloat16 (QWEN_FAST_DRAFT_BF8=0; the image's default is bfloat8_b). The drafter's weights then cost twice the DRAM bytes per round and the acceptance is expected to rise; the arm reads the tokens committed per round against c2-packed-tp4-gate's on the same prompts. Every other flag, every audit and the engine are c2-packed-tp4-gate's. A correctness arm, never a timed one. Not for traffic. UNVERIFIED on hardware. The drafter's K/V publication is the four-card slide (QWEN_FAST_TP_KV_SLIDE=1, draft_kv_slide_tp: the pair's kernel over 2 KV heads on 8 workers per chip) instead of the six-op eager chain, which built new programs every round while a prompt under 2,048 tokens filled its window; the eager chain stays behind the flag as the reference. UNVERIFIED on hardware.",
       "eos_ids": [
         248046,
         248044
@@ -567,6 +816,7 @@
         "QWEN_PROJECTION_LINKS": "2",
         "QWEN_GDN_PREFILL_MMRS": "0",
         "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
         "QWEN_FAST_VERIFY_T1_AUDIT": "1",
         "QWEN_FAST_VERIFY_T2_AUDIT": "1",
         "QWEN_C2_GATE_PROFILE": "1",

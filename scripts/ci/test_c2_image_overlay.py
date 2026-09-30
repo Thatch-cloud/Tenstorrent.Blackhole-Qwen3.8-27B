@@ -1244,12 +1244,17 @@ class ProvenanceTests(unittest.TestCase):
         # ...and c2-packed-tp4-gate, the first four-card S2 runs, gate only until packed_any_evidence_tp4.json records them.
         # ...and the S2 window's three arms: c2-packed-tp4-gate under the ring fabric and with the bfloat16 drafter, and
         # general-tp4-ring-mmrs, the G1 defaults check.
+        # ...and the speed window's arms (tp4/speed): the gate with the K/V slide off, and the timed pair with the verify audits off.
         self.assertEqual(gated, ["('boot', 'c2-packed-tp4-gate')", "('boot', 'c2-packed-tp4-gate-bf16')",
-                                 "('boot', 'c2-packed-tp4-gate-ring')", "('boot', 'general-prefix-eager')",
+                                 "('boot', 'c2-packed-tp4-gate-noslide')",
+                                 "('boot', 'c2-packed-tp4-gate-ring')", "('boot', 'c2-packed-tp4-speed')",
+                                 "('boot', 'c2-packed-tp4-speed-noslide')", "('boot', 'general-prefix-eager')",
                                  "('boot', 'general-tp4-bench')", "('boot', 'general-tp4-mmrs')",
                                  "('boot', 'general-tp4-ring-mmrs')",
                                  "('environment', 'c2-packed-tp4-gate')", "('environment', 'c2-packed-tp4-gate-bf16')",
-                                 "('environment', 'c2-packed-tp4-gate-ring')", "('environment', 'general-prefix-eager')",
+                                 "('environment', 'c2-packed-tp4-gate-noslide')",
+                                 "('environment', 'c2-packed-tp4-gate-ring')", "('environment', 'c2-packed-tp4-speed')",
+                                 "('environment', 'c2-packed-tp4-speed-noslide')", "('environment', 'general-prefix-eager')",
                                  "('environment', 'general-tp4-bench')", "('environment', 'general-tp4-mmrs')",
                                  "('environment', 'general-tp4-ring-mmrs')"])
         runs = []
