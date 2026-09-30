@@ -104,6 +104,9 @@ TWINS = (
 # that IS the original module object are pointed at the twin.
 MODULE_TWINS = (
     ('extent_attention_replay', 'extent_attention_replay_tp'),
+    # The four-user draft pass (QWEN_FAST_QUAD_DRAFT, off in the four-card profiles that do not name it): the coordinator imports
+    # quad_draft lazily, so at four cards it gets the twin; the pair keeps the pinned module and its evidence.
+    ('quad_draft', 'quad_draft_tp'),
 )
 
 # What install() changed: (namespace, name, the pinned object), so a test can put the pair's functions back.

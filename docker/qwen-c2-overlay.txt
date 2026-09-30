@@ -104,6 +104,11 @@ scripts/ci/memory_ledger.py
 # their P8 selves call for call (test_dflash_proposal_trace, test_quad_draft).
 scripts/ci/dflash_proposal_trace.py
 scripts/ci/quad_draft.py
+# TP4 batched draft (tp4/draft): the four-card twin of quad_draft, which tp_addresses.install() puts in its place at
+# QWEN_FAST_TP=4 only (MODULE_TWINS), and the singles audit the coordinator imports under QWEN_FAST_DRAFT_SINGLES_AUDIT. Both
+# reach the image at P8's commit otherwise, without them, and the four-card quad dies at its first round on the import.
+scripts/ci/quad_draft_tp.py
+scripts/ci/draft_singles_audit.py
 # S2 v86 (run 36416471352): every traced draft (single, pair, quad) copies its head outputs into the pool's pre-trace
 # output set (serving_buffer_pool draft_outputs=, which serving_runtime asks the coordinator's
 # pooled_draft_output_shapes for under QWEN_FAST_EXTENT_REPLAY=1), and a readback whose merge refuses them reports
