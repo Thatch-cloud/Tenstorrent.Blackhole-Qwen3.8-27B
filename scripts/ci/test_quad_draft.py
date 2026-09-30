@@ -2666,6 +2666,31 @@ def model_batch_without_s2(text):
     return chr(10).join(lines)
 
 
+def verifier_engine_without_stage_e(text):
+    """verifier_engine.py less Stage E (serving_parked_engines; QWEN_FAST_PARKED_ENGINES, default off), which
+    landed after PARENT: R2's replay ledger (QWEN_FAST_PARKED_AUDIT) and its two call sites. Each is cut exactly
+    once and to its known last line, so nothing else is hidden."""
+    for hunk in ('            if _replay_count is not None:' + chr(10) + '                self.replay_mark = _replay_count()',
+                 '                if _replay_count is not None:' + chr(10) + '                    check_replay_mark(self)'):
+        if text.count(hunk + chr(10)) != 1:
+            raise AssertionError('%r is not in verifier_engine.py exactly once' % hunk)
+        text = text.replace(hunk + chr(10), '')
+    lines = text.split(chr(10))
+
+    def cut(first, last):
+        starts = [index for index, value in enumerate(lines) if value.strip() == first]
+        if len(starts) != 1 or lines[starts[0] - 1].strip():
+            raise AssertionError('%r is not in verifier_engine.py exactly once, after a blank line' % first)
+        ends = [index for index in range(starts[0], len(lines)) if lines[index].strip() == last]
+        if not ends:
+            raise AssertionError('%r has no %r after it' % (first, last))
+        return lines[:starts[0] - 1] + lines[ends[0] + 1:]
+
+    lines = cut("# Stage E's R2 replay ledger (QWEN_FAST_PARKED_AUDIT=1, serving_parked_engines.ReplayLedger): a",
+                "'publication' % (count - mark, str(engine.session.request_id)[:48]))")
+    return chr(10).join(lines)
+
+
 class ShippingTests(unittest.TestCase):
     def test_the_module_and_its_kernel_reach_the_image_through_both_copy_lists(self):
         from test_serving_image_copy_closure import context_modules, dockerfile_modules, dockerfile_text
@@ -2708,10 +2733,22 @@ class ShippingTests(unittest.TestCase):
 
     def test_the_serving_bundle_inventorys_eight_files_are_untouched(self):
         """Plan section 4.1: serving_bundle.package's critical staged-source inventory. model_batch.py
-        is compared less S2 W3's extent fixture branch, which landed after PARENT (model_batch_without_s2)."""
-        self.assertEqual(self.git_changed(['verifier_engine.py', 'dflash_combined_request.py',
+        is compared less S2 W3's extent fixture branch, which landed after PARENT (model_batch_without_s2), and
+        verifier_engine.py less Stage E (verifier_engine_without_stage_e)."""
+        self.assertEqual(self.git_changed(['dflash_combined_request.py',
                                            'draft_kv_slide.cpp', 'draft_kv_slide_gate.py', 'frozen_combined_runtime.py',
                                            'target_t16_attention_gate.py', 'dflash_t16_native_scope.py']), '')
+        # verifier_engine.py less Stage E, which landed after PARENT (verifier_engine_without_stage_e). The bundle
+        # inventory hashes the staged tree only when a new bundle is cut (serving_bundle.package); the image lays
+        # verifier_engine over the bundle through the P8 lists and the C2 overlay.
+        if self.git_changed(['verifier_engine.py']):
+            result = subprocess.run(['git', 'show', '%s:scripts/ci/verifier_engine.py' % PARENT], capture_output=True,
+                                    cwd=str(HERE), timeout=60)
+            if result.returncode != 0:
+                self.skipTest('no git history for %s' % PARENT)
+            parent = result.stdout.decode('utf-8').replace(chr(13) + chr(10), chr(10))
+            today = (HERE / 'verifier_engine.py').read_text(encoding='utf-8').replace(chr(13) + chr(10), chr(10))
+            self.assertEqual(verifier_engine_without_stage_e(today), parent)
         if self.git_changed(['model_batch.py']):
             result = subprocess.run(['git', 'show', '%s:scripts/ci/model_batch.py' % PARENT], capture_output=True,
                                     cwd=str(HERE), timeout=60)

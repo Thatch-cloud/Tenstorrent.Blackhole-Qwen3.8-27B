@@ -18,6 +18,33 @@ from verifier_inputs import stage_inputs
 # it between them, so each user's second block ran on the other user's recurrence.
 _resident = None
 
+# Stage E's R2 replay ledger (QWEN_FAST_PARKED_AUDIT=1, serving_parked_engines.ReplayLedger): a
+# zero-argument callable giving the process's trace-replay count, or None. With it, verify notes the
+# count right after its own replay and publish asserts that no other trace replayed before its commit
+# trace reads what that verify wrote (check_replay_mark). None - the default, and the only value
+# without the audit - runs neither check.
+_replay_count = None
+
+
+def set_replay_count(counter):
+    """Install (a zero-argument callable) or remove (None) the replay ledger; returns the previous one."""
+    global _replay_count
+    if counter is not None and not callable(counter):
+        raise ValueError('The replay ledger must be a zero-argument callable or None')
+    previous, _replay_count = _replay_count, counter
+    return previous
+
+
+def check_replay_mark(engine):
+    """R2: no trace replayed between this engine's verify and now. Clears the mark."""
+    mark, engine.replay_mark = getattr(engine, 'replay_mark', None), None
+    if mark is None or _replay_count is None:
+        return
+    count = _replay_count()
+    if count != mark:
+        raise AssertionError('R2: %d other trace replay(s) ran between the verify of request %s and its '
+                             'publication' % (count - mark, str(engine.session.request_id)[:48]))
+
 
 def note_prefill():
     """A prefill overwrote slot 0: no engine is resident until one restores or publishes."""
@@ -494,6 +521,8 @@ class VerifierEngine:
                 self.operations.synchronize_device(self.mesh)
             else:
                 bucket['fixture'].retained.replay(operation)
+            if _replay_count is not None:
+                self.replay_mark = _replay_count()
             if getattr(self, 'attention_audit', False) and bucket['fixture'].replay_reader is not None:
                 bucket['fixture'].replay_reader.audit.check(ticket.position, ticket.tokens)
             replay_finished = time.perf_counter()
@@ -588,6 +617,8 @@ class VerifierEngine:
                 _resident = None
                 del self.buckets[self.pending_key]
             else:
+                if _replay_count is not None:
+                    check_replay_mark(self)
                 if bucket['fixture'].retained is not None:
                     bucket['fixture'].retained.commit(prefix, dma=True, synchronize=True,
                         publication=lambda selected: self.operations.execute_trace(self.mesh, bucket['commits'][selected], cq_id=0, blocking=True))
