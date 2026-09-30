@@ -9,8 +9,18 @@ QWEN_FAST_TP=4 only.
 
 from pathlib import Path
 
+import logging
+
+import tp4_vglue
 import tp_kernels
 import tp_shapes
+
+LOG = logging.getLogger(__name__)
+# QWEN_FAST_TP4_COMMIT_LANES: eight tiles in flight per barrier (gdn_commit_lanes_tp.cpp), scratch = 8 lanes x 4096.
+LANES_KERNEL = 'gdn_commit_lanes_tp.cpp'
+LANES_CB_BYTES = 32768
+SERVED_CB_BYTES = 4096
+_LOGGED = set()
 
 
 def validate_shapes(layers, prefix):
@@ -48,7 +58,8 @@ def prepare(mesh, layers, prefix):
         raise ValueError('Two independent workers per layer required')
     coordinates = [ttnn.CoreCoord(worker % grid.x, worker // grid.x) for worker in range(workers)]
     cores = ttnn.CoreRangeSet([ttnn.CoreRange(core, core) for core in coordinates])
-    buffer = ttnn.CBDescriptor(total_size=4096, core_ranges=cores,
+    lanes = tp4_vglue.enabled(tp4_vglue.COMMIT_LANES)
+    buffer = ttnn.CBDescriptor(total_size=LANES_CB_BYTES if lanes else SERVED_CB_BYTES, core_ranges=cores,
         format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=0, data_format=ttnn.bfloat16,
             page_size=2048, tile=ttnn.TileDescriptor(ttnn.Tile([32, 32])))])
     program = ttnn.MeshProgramDescriptor()
@@ -64,7 +75,8 @@ def prepare(mesh, layers, prefix):
         for first in (1, 6, 11, 16):
             if any(reference[first + slot] != reference[first] for slot in range(4)):
                 raise ValueError('Four identical convolution accessor layouts required')
-        kernel = ttnn.KernelDescriptor(kernel_source=tp_kernels.source(Path(__file__).with_name('gdn_commit_dma.cpp')),
+        kernel = ttnn.KernelDescriptor(kernel_source=(str(Path(__file__).with_name(LANES_KERNEL)) if lanes
+                                        else tp_kernels.source(Path(__file__).with_name('gdn_commit_dma.cpp'))),
             core_ranges=cores, defines=tp_kernels.defines(),
             compile_time_args=[argument for index in (0, 1, 5, 6, 10, 11, 15, 16) for argument in reference[index]],
             config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,
@@ -76,6 +88,10 @@ def prepare(mesh, layers, prefix):
         kernel.runtime_args = runtime
         coordinate = ttnn.MeshCoordinate(0, chip)
         program[ttnn.MeshCoordinateRange(coordinate, coordinate)] = ttnn.ProgramDescriptor(kernels=[kernel], cbs=[buffer])
+
+    if lanes and 'commit' not in _LOGGED:
+        _LOGGED.add('commit')
+        LOG.info(tp4_vglue.marker('commit', lanes=len(layers) * 2, chips=chips))
 
     def execute():
         ttnn.generic_op(tensors, program)
