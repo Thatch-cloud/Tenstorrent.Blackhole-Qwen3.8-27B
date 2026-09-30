@@ -101,3 +101,19 @@ def log_line(message):
             logger.info('{}', message)
     except BaseException:
         pass
+
+
+_COUNTS = {}
+
+
+def note(name, count=1):
+    """Count what a captured forward engaged (per GDN layer, per attention layer); packed_verifier reads it with take()
+    after the capture and logs the ENGAGED line."""
+    _COUNTS[name] = _COUNTS.get(name, 0) + count
+
+
+def take():
+    """The counts since the last take, then zero."""
+    counts = dict(_COUNTS)
+    _COUNTS.clear()
+    return counts

@@ -260,6 +260,7 @@ def shard_values(operations, row_major, logits, ids, dram):
     except (TypeError, ValueError, RuntimeError) as error:
         log_line('%s site=sampler reason=%s: %s' % (tp4_vglue.FALLBACK, type(error).__name__, str(error).splitlines()[0][:160]))
         return operations.max(logits, dim=3, keepdim=True, memory_config=dram)
+    tp4_vglue.note('shard_values')
     if not _VALUES_LOGGED:
         _VALUES_LOGGED.append(True)
         log_line(tp4_vglue.marker('sampler', shard_values=1))

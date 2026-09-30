@@ -907,11 +907,13 @@ class PackedVerifierEngine:
                 verify_trace_t1.take()  # count only what the captured forward engages
             if self.verify_t2:
                 verify_trace_t2.take()
+            tp4_vglue.take()
             self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
             if self.verify_t1:
                 self.note_verify_t1(verify_trace_t1.take())
             if self.verify_t2:
                 self.note_verify_t2(verify_trace_t2.take())
+            self.note_vglue(tp4_vglue.take())
             retained = self.fixture.retained
             if len(retained.records) != GDN_LAYERS:
                 raise ValueError('The captured packed block must retain every GDN layer')
@@ -1295,6 +1297,15 @@ class PackedVerifierEngine:
         diagnostic(verify_trace_t1.engaged_line('packed_verify', **fields))
         if self.shard_problem is not None:
             diagnostic('%s: %s' % (verify_trace_t1.KEPT_SAMPLER, self.shard_problem))
+
+    def note_vglue(self, counts):
+        """tp4_vglue.ENGAGED once per captured verify trace, when any lever is on: what the captured forward engaged
+        (attention layers folded, sampler value gathers) and what fell back."""
+        levers = tp4_vglue.engaged_levers()
+        if not levers:
+            return
+        diagnostic(tp4_vglue.marker('packed_verify', levers=','.join(name.replace('QWEN_FAST_TP4_', '').lower() for name in levers),
+                                    **{name: counts[name] for name in sorted(counts)}))
 
     def note_verify_t2(self, counts):
         """verify_trace_t2.MARKER once per captured verify trace: what the captured forward
