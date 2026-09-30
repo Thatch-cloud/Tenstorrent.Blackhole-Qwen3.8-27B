@@ -11,6 +11,7 @@ import unittest
 import c2_serving_gate as driver
 import c2_serving_job as job
 import ops_profile_plan as ops
+import test_tp4_attach_profile as attach
 import test_tp4_profile_report as synthetic
 from test_c2_serving_gate import CHECKOUT_PROFILES, FakeDocker, V235
 
@@ -76,6 +77,9 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(env[name], '1')
         self.assertEqual(env['TT_METAL_PROFILER_DIR'], ops.PROFILE_DIR)
         self.assertNotIn('QWEN_PREFILL_PROFILE_FLUSH', env)          # never run at op-support 20000
+
+    def test_the_attach_test_carries_the_same_profiler_environment(self):
+        self.assertEqual(attach.OPS_PROFILER_ENV, ops.PROFILER_ENV)
 
     def test_the_tracy_recipe_is_v138s(self):
         self.assertEqual(ops.tracy_args(), ['-p', '--check-exit-code', '--disable-device-data-dump-to-files',
