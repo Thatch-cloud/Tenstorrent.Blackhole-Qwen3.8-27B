@@ -164,7 +164,7 @@ throughout (QWEN_FAST_PARKED_ENGINES is an exactness claim, real_text_compare.S2
   parked-churn    G-E3 (i): four arms of PARKED_CHURN_USERS users on four seats, random lengths and budgets
            (parked_judge.churn_script, 200 admissions), QWEN_FAST_PARKED_AUDIT=1: no engine death, no hold with a seat
            free, no refusal, the floors (rebind before-points included), zero unparks, the idle allocation back to the
-           attach's within IDLE_RETURN_GB, the trace region's use within TRACE_SPREAD_GB.
+           attach's (each arm against the plan's median, within IDLE_RETURN_GB plus its idle single rebuilds), the trace region's use within TRACE_SPREAD_GB.
   parked-corner   G-E3 (ii): four users decoding with a quad formed, one leaves, and a 123,136-token arrival takes its
            seat, on the twin and the parked profile: recorded against the design's 5.3; only an engine death or a
            text that differs fails it.
@@ -3042,6 +3042,7 @@ def run_parked_churn(plan, runner, profiles, arms):
     """G-E3 (i): each arm's floors, holds and refusals (memory_s2_checks over the rebind before-points), its alive check,
     its idle return to the attach's allocation, the trace region's spread and its rebinds."""
     problems, shortfalls, lines, facts = [], [], [], {}
+    drifts, rebuilt = {}, {}
     for spec in arms:
         report = run_arm(runner, plan, spec)
         if report is None:
@@ -3054,9 +3055,8 @@ def run_parked_churn(plan, runner, profiles, arms):
         shortfalls += unjudged
         if not report.get('alive'):
             problems.append('%s: the engine did not answer every seat after the streams' % spec[0])
-        more, unread = parked_judge.idle_return(ledger_drift(report))
-        problems += ['%s: %s' % (spec[0], item) for item in more]
-        shortfalls += ['%s: %s' % (spec[0], item) for item in unread]
+        drifts[spec[0]] = ledger_drift(report)
+        rebuilt[spec[0]] = parked_facts_of(report).get('single_rebuilt_count') or 0
         region = s2_of(report).get('trace_region') or {}
         more, unread = parked_judge.trace_spread(region)
         problems += ['%s: %s' % (spec[0], item) for item in more]
@@ -3071,6 +3071,9 @@ def run_parked_churn(plan, runner, profiles, arms):
             len(parked_facts_of(report).get('unparked') or []), ledger_drift(report), trace_region_text(region),
             releases.get('quad_departures')))
         lines.append(full_seat_admissions_text((s2_of(report).get('dram_hold') or {}).get('fit_readings'), seats))
+    more, unread = parked_judge.idle_return_across(drifts, rebuilt)
+    problems += more
+    shortfalls += unread
     return parked_result(lines, problems, shortfalls, facts)
 
 

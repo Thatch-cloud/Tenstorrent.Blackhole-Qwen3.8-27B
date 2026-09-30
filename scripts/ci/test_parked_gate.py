@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import c2_serving_gate as gate  # noqa: E402
 import c2_serving_job as job  # noqa: E402
 import parked_judge  # noqa: E402
+import parked_judge as judge  # noqa: E402
 import parked_markers as markers  # noqa: E402
 import serving_parked_engines as parked  # noqa: E402
 from test_parked_judge import encoded  # noqa: E402
@@ -381,16 +382,29 @@ class JudgeRunTests(unittest.TestCase):
         arms = arms_of('parked-churn')
         record = lambda spec: dict(facts=dict(rebinds=gate.asked(spec[1])['streams'], unparked=[]), on=True)
 
-        def table(drift):
-            return dict((arm[0], (lambda spec: synthetic(spec, parked_record=record(spec), extra=dict(
-                ledger=dict(idle_drift_gb=drift))))) for arm in arms)
+        def table(drift, odd=None):
+            return dict((arm[0], (lambda spec, arm=arm: synthetic(spec, parked_record=record(spec), extra=dict(
+                ledger=dict(idle_drift_gb=odd if odd is not None and arm[0] == arms[0][0] else drift))))) for arm in arms)
         # (the floors themselves are memory_s2_checks', held by the S2 gate's tests)
         with patch.object(gate, 'memory_s2_checks', lambda *args, **kwargs: ([], [])):
             result, _, _ = self.run_plan('parked-churn', table({'0': 0.004, '1': 0.0}))
             self.assertNotEqual(result['verdict'], 'FAIL', result.get('s2_problems'))
-            result, _, _ = self.run_plan('parked-churn', table({'0': 0.05, '1': 0.0}))
-        self.assertEqual(result['verdict'], 'FAIL')
-        self.assertTrue(any('differs from the attach' in text for text in result['s2_problems']))
+            # the first prefill leaves a step behind the first reading: every arm at -0.12 GB is no leak
+            result, _, _ = self.run_plan('parked-churn', table({'0': -0.12, '1': -0.12}))
+            self.assertNotEqual(result['verdict'], 'FAIL', result.get('s2_problems'))
+            # one arm off the others by more than 16 MB is one
+            result, _, _ = self.run_plan('parked-churn', table({'0': -0.12, '1': -0.12}, odd={'0': -0.05, '1': -0.12}))
+            self.assertEqual(result['verdict'], 'FAIL')
+            self.assertTrue(any('from the plan' in text for text in result['s2_problems']), result['s2_problems'])
+            # and a drift no step explains fails whichever arms share it
+            result, _, _ = self.run_plan('parked-churn', table({'0': 0.6, '1': 0.6}))
+            self.assertEqual(result['verdict'], 'FAIL')
+
+    def test_idle_rebuilds_widen_an_arms_band_by_the_single_they_made(self):
+        drifts = {'a': {'0': -0.12}, 'b': {'0': -0.12}, 'c': {'0': -0.12 + 0.227}}
+        self.assertEqual(len(judge.idle_return_across(drifts)[0]), 1)
+        self.assertEqual(judge.idle_return_across(drifts, {'c': 1}), ([], []))
+        self.assertEqual(len(judge.idle_return_across({'a': None})[1]), 1)
 
     def test_parked_corner_and_ballast_fail_only_on_a_death_or_a_refusal(self):
         arms = arms_of('parked-corner')

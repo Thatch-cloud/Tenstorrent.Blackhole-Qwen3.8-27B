@@ -35,6 +35,9 @@ PROPOSALS = 15
 ACCEPTANCE_TOLERANCE = 0.02
 # G-E3 (i): the idle allocation after a drain returns to the attach's within 16 MB per chip.
 IDLE_RETURN_GB = 0.016
+# The most the idle allocation may sit from the attach's in any arm: the first prefill's step (-0.12 GB, v70) and one
+# idle single rebuild (0.227 GB) with a margin; only an arm inside the median band is checked against it.
+IDLE_STEP_LIMIT_GB = 0.5
 # The trace region's use may move by the pair, quad and single traces the region's headroom carries (design 2.1: 62 MB).
 TRACE_SPREAD_GB = 0.062
 TOKEN_POLICY_OK = 'IDENTICAL'
@@ -225,6 +228,41 @@ def idle_return(drift, limit=IDLE_RETURN_GB):
         return ['idle allocation after the drain differs from the attach\'s by %s GB per chip (limit %s)' % (
             grown, limit)], []
     return [], []
+
+
+def idle_return_across(drifts, rebuilt=None, limit=IDLE_RETURN_GB):
+    """(problems, shortfalls) of the arms' idle drifts ({arm: {chip: GB}}) against one another. The ledger's idle drift is
+    taken from the first reading before any prefill, and the first prefill leaves a step behind it (the process keeps
+    its model_after_prefill buffers: about -0.12 GB in the v70 lifecycle timeline), so the drift is not zero even when
+    nothing leaks. Every arm of a script pays the same step: each arm is held to the plan's median drift per chip, within
+    `limit` plus the idle single rebuilds the arm made (`rebuilt` {arm: count}, MEASURED_SINGLE_CAPTURE_BYTES each, the
+    one growth allowed). A leak that grows with the requests moves every arm off the attach's reading by more than
+    the step: it is a second check, IDLE_STEP_LIMIT_GB, that the step itself is no larger than the ledger ever showed."""
+    import serving_prefill_admission as admission
+
+    problems, shortfalls = [], []
+    known = dict((arm, drift) for arm, drift in sorted(drifts.items()) if drift is not None)
+    for arm in sorted(drifts):
+        if drifts[arm] is None:
+            shortfalls.append('%s: the ledger idle readings are missing: the return to the baseline is unjudged' % arm)
+    if not known:
+        return problems, shortfalls
+    for chip in sorted(set(chip for drift in known.values() for chip in drift)):
+        values = sorted(drift[chip] for drift in known.values() if chip in drift)
+        median = values[len(values) // 2]
+        for arm, drift in sorted(known.items()):
+            if chip not in drift:
+                continue
+            allowed = limit + (rebuilt or {}).get(arm, 0) * admission.MEASURED_SINGLE_CAPTURE_BYTES / 1e9
+            if abs(drift[chip] - median) > allowed:
+                problems.append('%s: chip %s idle allocation after the drain is %+.3f GB from the attach\'s, %+.3f GB '
+                                'from the plan\'s median (limit %.3f)' % (arm, chip, drift[chip], drift[chip] - median,
+                                                                            allowed))
+            elif abs(drift[chip]) > IDLE_STEP_LIMIT_GB:
+                problems.append('%s: chip %s idle allocation after the drain is %+.3f GB from the attach\'s, past the '
+                                '%.3f GB the first prefill\'s step and the idle rebuilds explain' % (
+                                    arm, chip, drift[chip], IDLE_STEP_LIMIT_GB))
+    return problems, shortfalls
 
 
 def trace_spread(region, limit=TRACE_SPREAD_GB):
