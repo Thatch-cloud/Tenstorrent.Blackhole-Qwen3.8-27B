@@ -8,6 +8,7 @@ from attention_batch import OrderedCacheWriter, SerialAttentionReader, SerialCac
 from gdn_prefix import decode_projected, gated_decode, prepare_token_rows, validate_reused_input
 from packed_cache_writer import TILE_ROWS, SegmentedOrderedCacheWriter, tile as cache_tile, tile_rows
 import gdn_seq_block
+import tp4_vglue
 import verify_trace_t2
 
 
@@ -790,6 +791,11 @@ class ModelBatch:
                         held = gdn_seq_block.audit_held_of(result)
                         if held:
                             release_owned(operations, held)
+                    # QWEN_FAST_TP4_VGLUE_AUDIT's tensors (tp4_vglue), likewise held outside `owned`.
+                    if tp4_vglue.audit_enabled():
+                        held = tp4_vglue.audit_held_of(result)
+                        if held:
+                            release_owned(operations, held)
                 self.gdn_calls += 1
                 self.norm_batch_calls += int(result.get('norm_batch', False))
                 self.user_batched_calls += int(result.get('user_batched', False))
@@ -947,6 +953,13 @@ class ModelBatch:
             if getattr(self, 'seq_block_audit', ()):
                 held = [value for state, result, checkpoint in self.retained.records
                         for value in gdn_seq_block.audit_held_of(result)]
+                if held:
+                    from gdn_multitoken_conv import release_owned
+                    release_owned(self.operations, held)
+            # QWEN_FAST_TP4_VGLUE_AUDIT: likewise (tp4_vglue.audit_held_of).
+            if tp4_vglue.audit_enabled():
+                held = [value for state, result, checkpoint in self.retained.records
+                        for value in tp4_vglue.audit_held_of(result)]
                 if held:
                     from gdn_multitoken_conv import release_owned
                     release_owned(self.operations, held)

@@ -117,3 +117,73 @@ def take():
     counts = dict(_COUNTS)
     _COUNTS.clear()
     return counts
+
+
+# --- the in-trace audit (QWEN_FAST_TP4_VGLUE_AUDIT, gate arms only) -------------------------------------------------------
+# Each engaged lever builds what the served path would have produced beside its own launch and holds both (as DRAM copies,
+# outside `owned`) on the layer's result dictionary as {label, mine, served[, placement]}; the entries live under the keys
+# below, on a user's result (per-user tensors) or on the block's combined result. packed_verifier compares them after the
+# replay, on every chip, as int16 bit patterns (-0 and +0 differ), and ModelBatch frees them with the retained records.
+
+AUDIT_KEYS = ('vglue_audit', 'vglue_merge_audit', 'vglue_block_audit')
+
+
+def audit_entries(result):
+    pieces = result.get('segment_results') or (result,)
+    seen, entries = set(), []
+    for holder in (*pieces, result):
+        for key in AUDIT_KEYS:
+            for entry in holder.get(key) or ():
+                if id(entry) not in seen:
+                    seen.add(id(entry))
+                    entries.append(entry)
+    return entries
+
+
+def audit_held_of(result):
+    """Every tensor the audit holds for a GDN layer result, outside `owned` (freed with the retained record)."""
+    return [entry[name] for entry in audit_entries(result) for name in ('mine', 'served') if entry.get(name) is not None]
+
+
+def compare_entry(operations, entry):
+    """One entry on every chip: shape and int16 bits (logical rows), and the recorded placements when the entry has both.
+    Returns a list of mismatch descriptions."""
+    import torch
+
+    mismatches = []
+    placement = entry.get('placement')
+    if placement is not None and placement[0] != placement[1]:
+        mismatches.append('%s: placement %r against served %r' % (entry['label'], placement[0], placement[1]))
+    for chip, (left, right) in enumerate(zip(operations.get_device_tensors(entry['mine']),
+                                             operations.get_device_tensors(entry['served']))):
+        a = operations.to_torch(left).contiguous().view(torch.int16)
+        b = operations.to_torch(right).contiguous().view(torch.int16)
+        if a.shape != b.shape:
+            mismatches.append('%s chip %d: shape %r against %r' % (entry['label'], chip, tuple(a.shape), tuple(b.shape)))
+        elif not torch.equal(a, b):
+            mismatches.append('%s chip %d: %d of %d elements differ' % (entry['label'], chip, int((a != b).sum()), a.numel()))
+    return mismatches
+
+
+def audit_round(operations, records, round_number):
+    """Compare the layers verify_trace_t2.audit_layers names for this round (every layer on round 1, then two per round in
+    rotation). Logs AUDIT_MARKER '<n> exact=True layers=<L> entries=<k>' or AUDIT_MISMATCH and raises."""
+    import verify_trace_t2
+
+    layers = verify_trace_t2.audit_layers(round_number, len(records) or verify_trace_t2.GDN_LAYERS)
+    compared, mismatches = 0, []
+    for layer in layers:
+        for entry in audit_entries(records[layer][1]):
+            compared += 1
+            mismatches.extend('layer %d %s' % (layer, text) for text in compare_entry(operations, entry))
+    label = verify_trace_t2.layers_label(layers)
+    if mismatches:
+        message = '%s round=%d layers=%s %s' % (AUDIT_MISMATCH, round_number, label, '; '.join(mismatches[:4]))
+        log_line(message)
+        raise AssertionError(message)
+    _AUDIT['rounds'] += 1
+    log_line('%s %d exact=True layers=%s entries=%d' % (AUDIT_MARKER, _AUDIT['rounds'], label, compared))
+    return compared
+
+
+_AUDIT = dict(rounds=0)

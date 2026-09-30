@@ -1,0 +1,241 @@
+"""gdn_device_loop_state.DeviceLoopState with the packed block's split and merge as one DMA launch each (tp4/vglue V2).
+
+gdn_device_loop_state.py is held unedited by the K5 evidence (test_gdn_seq_block.py), and the two places that cost a GDN
+layer 4.9 ms per replay at four users are inside it: `_recurrence_user_batched` cuts the (1, 64, W) block projection into one
+piece per user (a tile Slice for users 0 and 2, an untilize / slice / tilize round trip for users 1 and 3) and
+`_finish_packed` joins the four gated outputs (four untilizes, a concat, a tilize). The pinned `_decode_packed` calls both
+through `self`, so this twin subclasses the pinned class and overrides those two methods; tp_addresses.install() binds it
+in place of the pinned class at QWEN_FAST_TP=4 only (model_batch imports DeviceLoopState lazily).
+
+QWEN_FAST_TP4_GDN_GLUE unset or 0: every method is the pinned one (nothing here runs). QWEN_FAST_TP4_GDN_GLUE=1: the block's
+pieces come from one gdn_rows_dma_tp launch and the merged output from another; the state moves, the launch that follows and
+the result dictionaries are the pinned ones. A block or a placement the launches are not written for takes the pinned path,
+logged as FALLBACK and counted (nothing is guessed).
+
+QWEN_FAST_TP4_GDN_BLOCK_CONV=1 (needs the glue flag) additionally runs the layer's convolution and gates as one block launch
+(gdn_block_conv_tp) instead of one per user.
+
+QWEN_FAST_TP4_VGLUE_AUDIT=1 (gate arms only): beside each launch this builds what the served path would have produced and holds
+it, outside `owned`, for tp4_vglue.audit_round to compare after the replay (the served path is never the one whose outputs the
+layer uses).
+"""
+
+import gdn_device_loop_state as pinned
+import gdn_rows_dma_tp as rows_dma
+import tp4_vglue
+from gdn_multitoken_conv import release_owned
+from gdn_state_copy import batch_enabled, copy_compact, copy_compact_batch
+from gdn_user_batch_conv import run_user_batched_projected
+from verify_trace_t1 import cut as verify_t1_cut, note as verify_t1_note
+
+USERS = 4
+PIECE_ROWS = rows_dma.USER_ROWS
+
+
+def _pinned_class():
+    """The pinned class, whichever way this module was imported (tp_addresses.install rebinds the pinned module's own name to
+    this class, so a module first imported after install must not take itself for its base)."""
+    base = pinned.DeviceLoopState
+    if getattr(base, '__module__', None) == __name__:
+        base = base.__mro__[1]
+    return base
+
+
+class DeviceLoopState(_pinned_class()):
+    def glue_problem(self, projected, spans):
+        """Why the split and merge launches cannot serve this block (None when they can)."""
+        operations = self.operations
+        shape = tuple(projected.shape)
+        users = len(spans)
+        if users < 2 or [tuple(span) for span in spans] != [(user * PIECE_ROWS, (user + 1) * PIECE_ROWS) for user in range(users)]:
+            return 'spans %r are not contiguous 16-row users from row 0' % (list(spans),)
+        if len(shape) != 3 or shape[0] != 1 or shape[1] != users * PIECE_ROWS:
+            return 'block projection %r is not (1, %d, W)' % (shape, users * PIECE_ROWS)
+        reason = rows_dma.problem([projected], operations)
+        return reason
+
+    def note_glue_fallback(self, site, reason):
+        line = '%s site=%s reason=%s' % (tp4_vglue.FALLBACK, site, reason)
+        if line not in self.glue_fallbacks:
+            self.glue_fallbacks.add(line)
+            tp4_vglue.log_line(line)
+        tp4_vglue.note('gdn_%s_fallback' % site)
+
+    glue_fallbacks = set()
+
+    def split_pieces(self, projected, spans, owned):
+        """The per-user pieces of the block projection from one launch: (1, 16, W) TILE, L1 interleaved (the placement
+        resident_piece leaves every piece in), rows 0-15 the user's rows (canonical for users 1 and 3, as the served round trip
+        leaves them) and rows 16-31 zero. Owned exactly as the served pieces are."""
+        operations, mesh = self.operations, self.gdn.mesh
+        width = projected.shape[-1]
+        pieces = []
+        try:
+            for user in range(len(spans)):
+                pieces.append(operations.empty((1, PIECE_ROWS, width), dtype=operations.bfloat16,
+                                               layout=operations.TILE_LAYOUT, device=mesh,
+                                               memory_config=operations.L1_MEMORY_CONFIG))
+            rows_dma.launch(mesh, [projected], pieces, rows_dma.split_pieces(len(spans), width))
+        except BaseException:
+            for piece in pieces:
+                operations.deallocate(piece)
+            raise
+        owned.extend(pieces)
+        return pieces
+
+    def served_pieces(self, projected, spans, owned):
+        """The pinned path's pieces (a Slice each, resident in L1): what the audit compares the launch's with."""
+        operations = self.operations
+        return [pinned.resident_piece(operations,
+                                      operations.slice(projected, (0, start, 0), (1, stop, projected.shape[-1])), owned)
+                for start, stop in spans]
+
+    def _recurrence_user_batched(self, projected, spans, slots, entries, owned):
+        if not tp4_vglue.enabled(tp4_vglue.GDN_GLUE):
+            return super()._recurrence_user_batched(projected, spans, slots, entries, owned)
+        reason = self.glue_problem(projected, spans)
+        if reason is not None:
+            self.note_glue_fallback('split', reason)
+            return super()._recurrence_user_batched(projected, spans, slots, entries, owned)
+        try:
+            return self._recurrence_glued(projected, spans, slots, entries, owned)
+        except rows_dma.Unsupported as error:
+            # Raised before any launch of ours ran and before any state move, so the pinned path starts clean.
+            self.note_glue_fallback('split', str(error))
+            return super()._recurrence_user_batched(projected, spans, slots, entries, owned)
+
+    def _recurrence_glued(self, projected, spans, slots, entries, owned):
+        """pinned._recurrence_user_batched with the per-user slices replaced by one split launch. The state moves, their
+        order, the T1 notes and the launch are the pinned body's, statement for statement."""
+        operations, layer = self.operations, self.gdn
+        last = len(spans) - 1
+        pieces = self.split_pieces(projected, spans, owned)
+        audit = None
+        if tp4_vglue.audit_enabled():
+            audit = self.hold_served_pieces(projected, spans, pieces)
+        direct = verify_t1_cut('direct_carry')
+        direct_last = direct and verify_t1_cut('last_carry')
+        pending, batched = [], [] if batch_enabled() else None
+        for index, ((start, stop), slot) in enumerate(zip(spans, slots)):
+            entry = entries[index]
+            source = entry
+            if index == last:
+                if direct_last:
+                    source = slot
+                else:
+                    self.active.restore(slot)
+                    self.active.save(entry)
+            elif direct:
+                source = slot
+            elif batched is not None:
+                batched.append((slot, entry))
+            else:
+                copy_compact(slot, entry)
+            pending.append((pieces[index], source[0], source[1:]))
+        if batched:
+            copy_compact_batch(batched)
+        if direct:
+            verify_t1_note('direct_carry')
+        if direct_last:
+            verify_t1_note('last_carry')
+        results = self.run_users(projected, pieces, pending)
+        if len(results) != len(spans):
+            raise AssertionError('Batched GDN returned a result per packed user')
+        for result, (start, stop) in zip(results, spans):
+            if not result.get('user_batched', False) or not result.get('deferred_conv_publication', False):
+                raise AssertionError('User-batched GDN did not engage as selected')
+            if result.get('norm_batch', True) or result['states'].shape[0] != stop - start:
+                raise AssertionError('User-batched GDN did not return this user own prefix geometry')
+        tp4_vglue.note('gdn_glue')
+        if audit:
+            for result, entries_ in zip(results, audit):
+                result['vglue_audit'] = entries_
+        return results
+
+    def run_users(self, projected, pieces, pending):
+        """The per-user convolution and gates, then the one recurrence launch: the pinned call."""
+        layer, operations = self.gdn, self.operations
+        return run_user_batched_projected(layer.mesh, pending, list(layer.tw['conv_taps']),
+            layer.tw['dt_bias'], layer.tw['neg_exp_A'], layer.tw['norm_w'], self.kernels, operations,
+            prefix_zero_reuse=self.prefix_zero_reuse)
+
+    def hold_served_pieces(self, projected, spans, pieces):
+        """QWEN_FAST_TP4_VGLUE_AUDIT: DRAM copies of each launch piece and of the served piece (a Slice, resident, as
+        served), per user, held outside `owned` (freed with the retained record). The pieces themselves are freed inside the
+        trace once the layer is done, so what is compared after the replay is the copy."""
+        operations = self.operations
+        held, scratch, entries = [], [], []
+        try:
+            served = self.served_pieces(projected, spans, scratch)
+            for user, (mine, theirs) in enumerate(zip(pieces, served)):
+                copies = [operations.clone(value, memory_config=operations.DRAM_MEMORY_CONFIG) for value in (mine, theirs)]
+                held.extend(copies)
+                entries.append([dict(label='piece user %d' % user, mine=copies[0], served=copies[1])])
+        except BaseException:
+            release_owned(operations, held)
+            raise
+        finally:
+            release_owned(operations, scratch)
+        return entries
+
+    def _finish_packed(self, spans, results, outputs, owned):
+        if not tp4_vglue.enabled(tp4_vglue.GDN_GLUE) or len(outputs) < 2:
+            return super()._finish_packed(spans, results, outputs, owned)
+        reason = self.merge_problem(outputs)
+        if reason is not None:
+            self.note_glue_fallback('merge', reason)
+            return super()._finish_packed(spans, results, outputs, owned)
+        operations = self.operations
+        try:
+            merged = self.merge_outputs(outputs)
+        except rows_dma.Unsupported as error:
+            self.note_glue_fallback('merge', str(error))
+            return super()._finish_packed(spans, results, outputs, owned)
+        owned.append(merged)
+        audit = self.hold_served_merge(outputs, merged) if tp4_vglue.audit_enabled() else None
+        combined = super()._finish_packed(spans, results, [merged], owned)
+        if audit:
+            combined['vglue_merge_audit'] = audit
+        tp4_vglue.note('gdn_merge')
+        return combined
+
+    def merge_problem(self, outputs):
+        shapes = {tuple(output.shape) for output in outputs}
+        if len(shapes) != 1 or next(iter(shapes))[:2] != (1, PIECE_ROWS):
+            return 'outputs %r are not equal (1, 16, N) tensors' % (sorted(shapes),)
+        return rows_dma.problem(outputs, self.operations)
+
+    def merge_outputs(self, outputs):
+        """The (1, 16 * users, N) block from one launch, in the placement of the users' outputs (what the served concat's
+        result lands in), every user canonical as the served untilize / concat / tilize leaves it."""
+        operations = self.operations
+        width = outputs[0].shape[-1]
+        merged = operations.empty((1, PIECE_ROWS * len(outputs), width), dtype=operations.bfloat16,
+                                  layout=operations.TILE_LAYOUT, device=self.gdn.mesh,
+                                  memory_config=outputs[0].memory_config())
+        try:
+            rows_dma.launch(self.gdn.mesh, list(outputs), [merged], rows_dma.merge_outputs(len(outputs), width))
+        except BaseException:
+            operations.deallocate(merged)
+            raise
+        return merged
+
+    def hold_served_merge(self, outputs, merged):
+        """The served join (concat) of the same outputs and a copy of the launch's block, both in DRAM and held outside
+        `owned`: the pair the audit compares, with the two placements the layer would have seen (the launch's block is what the
+        layer consumes and is freed after the output projection, so what is compared after the replay is the copy; the served
+        L1 concat is freed at once so the audit does not hold L1 across the trace)."""
+        operations = self.operations
+        dram = operations.DRAM_MEMORY_CONFIG
+        served = operations.concat(list(outputs), dim=1)
+        held = []
+        try:
+            placement = (merged.memory_config(), served.memory_config())
+            held.append(operations.clone(merged, memory_config=dram))
+            held.append(operations.clone(served, memory_config=dram))
+        except BaseException:
+            release_owned(operations, held)
+            raise
+        finally:
+            operations.deallocate(served)
+        return [dict(label='merged output', mine=held[0], served=held[1], placement=placement)]

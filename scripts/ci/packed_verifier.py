@@ -1594,6 +1594,9 @@ class PackedVerifierEngine:
                 # against the served launch's on the same inputs, every audited layer.
                 gdn_seq_block.audit_round(self.operations, self.fixture.retained.records, self.seq_block_audit,
                                           self.rounds + 1)
+            if tp4_vglue.audit_enabled():
+                # QWEN_FAST_TP4_VGLUE_AUDIT: each engaged GDN lever's output against the served path's, held beside it.
+                tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
             if extent_users is not None:
