@@ -2666,6 +2666,63 @@ def model_batch_without_s2(text):
     return chr(10).join(lines)
 
 
+def verifier_engine_without_stage_e(text):
+    """verifier_engine.py less Stage E (serving_parked_engines; QWEN_FAST_PARKED_ENGINES, default off), which
+    landed after PARENT: R2's replay ledger (QWEN_FAST_PARKED_AUDIT) and its two call sites, reset_retained, the
+    parked phase's park_refusal, park and rebind, and 'parked' among the phases close() accepts. Each is cut
+    exactly once and to its known last line, so nothing else is hidden."""
+    for hunk, replacement in (
+            ('            if _replay_count is not None:' + chr(10) + '                self.replay_mark = _replay_count()'
+             + chr(10), ''),
+            ('                if _replay_count is not None:' + chr(10) + '                    check_replay_mark(self)'
+             + chr(10), ''),
+            ("if self.phase not in ('idle', 'preparing', 'failed', 'parked'):",
+             "if self.phase not in ('idle', 'preparing', 'failed'):")):
+        if text.count(hunk) != 1:
+            raise AssertionError('%r is not in verifier_engine.py exactly once' % hunk)
+        text = text.replace(hunk, replacement)
+    lines = text.split(chr(10))
+
+    def cut(first, last, blanks=0):
+        starts = [index for index, value in enumerate(lines) if value.strip() == first]
+        if len(starts) != 1 or lines[starts[0] - 1].strip():
+            raise AssertionError('%r is not in verifier_engine.py exactly once, after a blank line' % first)
+        ends = [index for index in range(starts[0], len(lines)) if lines[index].strip() == last]
+        if not ends:
+            raise AssertionError('%r has no %r after it' % (first, last))
+        return lines[:starts[0] - 1] + lines[ends[0] + 1 + blanks:]
+
+    lines = cut("# Stage E's R2 replay ledger (QWEN_FAST_PARKED_AUDIT=1, serving_parked_engines.ReplayLedger): a",
+                'retained.replay_fence, retained.replay_fence_ms = None, 0.0')
+    # park_refusal, park and rebind, up to rebind's closing bare raise (none of the three raises bare before it)
+    lines = cut('def park_refusal(self):', 'raise')
+    # Phase-1 quick win 2 (the engine warm skip, default off), which also landed after PARENT: its process-wide key set,
+    # the constructor's parameter and two attributes, the warm loop's skip and its two bookkeeping lines, and warm_key.
+    lines = cut("# Phase-1 quick win 2 (default off; serving_fast_policy.ENGINE_WARM_SKIP_FLAG): the engine's warm-up eager forwards",
+                '_warmed.clear()', blanks=1)
+    text = chr(10).join(lines)
+    for hunk, replacement in (
+            ('capture_rows=None, skip_compiled_warm=False):', 'capture_rows=None):'),
+            ('        if type(skip_compiled_warm) is not bool:' + chr(10)
+             + "            raise ValueError('Explicit boolean warm-skip selection required')" + chr(10)
+             + '        self.skip_compiled_warm = skip_compiled_warm' + chr(10)
+             + '        self.warms_run = self.warms_skipped = 0' + chr(10), ''),
+            ('                self.warms_run += 1' + chr(10) + '                if warmed is not None:' + chr(10)
+             + '                    _warmed.add(warmed)' + chr(10), '')):
+        if text.count(hunk) != 1:
+            raise AssertionError('%r is not in verifier_engine.py exactly once' % hunk)
+        text = text.replace(hunk, replacement)
+    lines = text.split(chr(10))
+    starts = [index for index, value in enumerate(lines) if value.strip() == 'warmed = self.warm_key(bucket) if self.skip_compiled_warm else None']
+    if len(starts) != 1:
+        raise AssertionError('the warm skip is not in verifier_engine.py exactly once')
+    ends = [index for index in range(starts[0], len(lines)) if lines[index].strip() == 'continue']
+    lines = lines[:starts[0]] + lines[ends[0] + 1:]
+    lines = cut('def warm_key(self, bucket):',
+                "bucket['capture_position'] if self.replay_plan is not None else None)")
+    return chr(10).join(lines)
+
+
 class ShippingTests(unittest.TestCase):
     def test_the_module_and_its_kernel_reach_the_image_through_both_copy_lists(self):
         from test_serving_image_copy_closure import context_modules, dockerfile_modules, dockerfile_text
@@ -2708,10 +2765,22 @@ class ShippingTests(unittest.TestCase):
 
     def test_the_serving_bundle_inventorys_eight_files_are_untouched(self):
         """Plan section 4.1: serving_bundle.package's critical staged-source inventory. model_batch.py
-        is compared less S2 W3's extent fixture branch, which landed after PARENT (model_batch_without_s2)."""
-        self.assertEqual(self.git_changed(['verifier_engine.py', 'dflash_combined_request.py',
+        is compared less S2 W3's extent fixture branch, which landed after PARENT (model_batch_without_s2), and
+        verifier_engine.py less Stage E (verifier_engine_without_stage_e)."""
+        self.assertEqual(self.git_changed(['dflash_combined_request.py',
                                            'draft_kv_slide.cpp', 'draft_kv_slide_gate.py', 'frozen_combined_runtime.py',
                                            'target_t16_attention_gate.py', 'dflash_t16_native_scope.py']), '')
+        # verifier_engine.py less Stage E, which landed after PARENT (verifier_engine_without_stage_e). The bundle
+        # inventory hashes the staged tree only when a new bundle is cut (serving_bundle.package); the image lays
+        # verifier_engine over the bundle through the P8 lists and the C2 overlay.
+        if self.git_changed(['verifier_engine.py']):
+            result = subprocess.run(['git', 'show', '%s:scripts/ci/verifier_engine.py' % PARENT], capture_output=True,
+                                    cwd=str(HERE), timeout=60)
+            if result.returncode != 0:
+                self.skipTest('no git history for %s' % PARENT)
+            parent = result.stdout.decode('utf-8').replace(chr(13) + chr(10), chr(10))
+            today = (HERE / 'verifier_engine.py').read_text(encoding='utf-8').replace(chr(13) + chr(10), chr(10))
+            self.assertEqual(verifier_engine_without_stage_e(today), parent)
         if self.git_changed(['model_batch.py']):
             result = subprocess.run(['git', 'show', '%s:scripts/ci/model_batch.py' % PARENT], capture_output=True,
                                     cwd=str(HERE), timeout=60)

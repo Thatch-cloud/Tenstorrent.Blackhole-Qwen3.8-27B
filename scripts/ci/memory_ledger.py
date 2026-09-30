@@ -79,6 +79,13 @@ import os
 import types
 
 FLAG = 'QWEN_FAST_MEMORY_LEDGER'
+# Phase-1 quick win 1 (default off): QWEN_FAST_MEMORY_LEDGER_OFF=1 turns the ledger off whatever FLAG says. The serving
+# image sets FLAG=1 in its ENV (a gate reads the ledger's lines out of every arm), so a production profile cannot simply
+# leave FLAG unset; it sets this instead, and a gate arm that wants the readings leaves it unset. Every hook returns at
+# its first line when begin() built no ledger, so with this on the serving path makes no allocator reading, walks no
+# tensor and writes no report: nothing the ledger does feeds an admission, a placement or a trace (its readings are
+# logged, never returned to a caller that acts on them).
+OFF_FLAG = 'QWEN_FAST_MEMORY_LEDGER_OFF'
 RESIDUAL_LIMIT = 1.5e9
 RESIDUAL_PHASE = 'P7'
 # Bank rounding is bounded per buffer by one of ITS OWN pages per bank (see the module
@@ -109,7 +116,8 @@ _active = None
 
 
 def enabled(environ=None):
-    return (os.environ if environ is None else environ).get(FLAG) == '1'
+    environ = os.environ if environ is None else environ
+    return environ.get(FLAG) == '1' and environ.get(OFF_FLAG) != '1'
 
 
 def log_line(message):

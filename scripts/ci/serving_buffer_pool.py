@@ -877,6 +877,20 @@ class ServingBufferPool:
                 slot.index, owner, slot.addresses[:2], 4 * len(slot.kv), slot.addresses[2])
         return slot
 
+    def rezero(self, slot):
+        """Stage E (QWEN_FAST_PARKED_ENGINES, serving_parked_engines): acquire's zeroing of one of this pool's
+        slots - every tensor in slot.zeroed through full_like, in the same order - without its loan and
+        without verifier.reset(): a parked engine keeps its buckets taken, and whoever holds the slot keeps
+        it. A parked slot is re-zeroed at every rebind, as acquire zeroes a slot on every loan; an unlent one
+        before the attach's synthetic build restores native slot 0 from its carry."""
+        if self.closed:
+            raise ValueError('Closed serving buffer pool cannot zero a slot')
+        if slot.pool is not self or not any(slot is candidate for candidate in self.slots):
+            raise ValueError('Only a slot of this pool may be zeroed by it')
+        slot.verify()
+        for value in slot.zeroed:
+            self.operations.full_like(value, 0.0, optional_tensor=value)
+
     def release(self, slot):
         if self.closed:
             raise ValueError('Closed serving buffer pool cannot take a slot back')

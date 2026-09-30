@@ -31,6 +31,8 @@ EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 # Sticky sessions (QWEN_FAST_STICKY_SESSIONS=1 only): one line per admitted request's engine build,
 # '<marker><request> ms=<build> frontier=<R, 0 cold> prompt=<P>'.
 STICKY_ENGINE_MARKER = '[PINDIAG] sticky engine built req='
+# Stage E (serving_parked_engines; default off): one engine per pool slot, parked at attach.
+PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
 
 
 def m3_shape(policy, environ=None):
@@ -502,6 +504,23 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         pindiag('[PINDIAG] dram after attach: {}', dram_line(pool))
         memory_ledger.record('P7', point='after_attach')
 
+        # Stage E (QWEN_FAST_PARKED_ENGINES; default off, strictly '0' or '1'): one engine per pool slot, built
+        # here on a synthetic request and parked (serving_parked_engines.ParkedEngineSet) - after the block,
+        # which refuses to build once a slot is lent, and before the DRAM admission and the lifecycle. Registered
+        # after the block, so it closes before the block, the weights and the pool, which refuse to close while
+        # a slot or a weight is still lent. Off (unset or '0'), nothing is imported or built.
+        parked_engines = None
+        if os.environ.get(PARKED_ENGINES_FLAG, '0') != '0':
+            import serving_parked_engines
+
+            serving_parked_engines.parked_engines_enabled()   # strictly '1' from here: any other value is refused
+            parked_engines = serving_parked_engines.ParkedEngineSet(operations=operations, model=model,
+                sampler=sampler, helpers=helpers, pool=pool, weights=weights, fixtures=fixtures,
+                collectives=collectives, blocks=packed_blocks if packed_shapes else (),
+                capture_rows=capture_rows if trimmed else None)
+            scopes.callback(parked_engines.close)
+            parked_engines.build()
+
         # Sticky sessions (QWEN_FAST_STICKY_SESSIONS, read once at attach; default off). On, every
         # prefill capture wraps the prefix-reuse route (QWEN_PREFIX_REUSE=1 sends every prefill,
         # cold or resumed, through it), a granted hit's capture counts from its R, and each engine
@@ -536,12 +555,16 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 return from_prefill(operations, model, sampler, pages, helpers,
                     state=state, capture=capture, fixtures=fixtures, eos_ids=eos_ids,
                     collectives=collectives, buffer_pool=pool, shared_weights=weights,
-                    **(dict(capture_rows=capture_rows) if trimmed else {}))
+                    **(dict(capture_rows=capture_rows) if trimmed else {}),
+                    **(dict(parked=parked_engines) if parked_engines is not None else {}))
 
             if sticky:
                 began = time.perf_counter()
             request = create_request() if experiment is None else experiment.create(create_request)
-            if sticky:
+            # Stage E: a request rebound onto a parked engine logged the rebind's own marker in place of the sticky
+            # build time, and its engine's ledger walk ran at attach (P7p); both below are for built engines only.
+            rebound = parked_engines is not None and getattr(request, 'parked_slot', None) is not None
+            if sticky and not rebound:
                 # Sticky sessions: the engine build per request, so a gate can split a hit's TTFT into
                 # its tail prefill and the build phase 1 still pays (STICKY_ENGINE_MARKER).
                 pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}', str(state.req_id)[:48],
@@ -550,11 +573,15 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # The allocator after this request's engine and its captures: one line per
             # admitted request, so the log shows what each costs and what is left.
             pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))
-            memory_ledger.engine_admitted(str(state.req_id), engine_request=request)
+            if not rebound:
+                memory_ledger.engine_admitted(str(state.req_id), engine_request=request)
             try:
                 binding = VerifierPageBinding(request.engine, blocks, physical_pages=owner.physical_pages)
                 return FastRunnerBridge(runner, request, binding, validate_storage=owner.validate)
             except BaseException:
+                if rebound:
+                    # Stage E: a failed binding leaves the slot unfit to park; its close unparks it.
+                    request.parked_slot.unfit = 'page binding failed'
                 request.close(state.req_id)
                 raise
 
@@ -562,10 +589,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # as before): the scheduler-side DRAM admission hold's predicate (serving_prefill_admission), read through
         # this pool, is parked before the lifecycle serves a request; the scope removes it before the pool closes.
         if extent_replay_enabled():
-            scopes.callback(register_dram_admission(pool))
+            scopes.callback(register_dram_admission(pool, **({} if parked_engines is None else
+                                                             dict(parked=parked_engines))))
         lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,
             capture_factory=capture_factory, bridge_factory=bridge_factory, eos_ids=eos_ids,
-            cancelled=cancelled, packed_step=packed_step)
+            cancelled=cancelled, packed_step=packed_step,
+            **({} if parked_engines is None else dict(idle=parked_engines.idle)))
     except BaseException as failure:
         # Closing the scopes can itself raise (the block-stream scope checks at exit
         # that every layer ran the fused candidate, which nothing has at attach), and

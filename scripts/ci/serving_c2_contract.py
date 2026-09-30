@@ -79,6 +79,15 @@ PREFIX_SWITCH = 'QWEN_PREFIX_REUSE'
 STICKY_SWITCH = 'QWEN_FAST_STICKY_SESSIONS'
 # The one speculative shape sticky sessions serve (the fast path's policy, serving_fast_policy).
 STICKY_SPECULATION = dict(method='dflash', num_speculative_tokens=15)
+# Stage E, parked per-slot engines (serving_fast_policy.PARKED_ENGINES_FLAG; default off). Only a profile sets the
+# switch, and only on the S2 shape it needs (parked_problems). The gate-only knobs are the gate's alone: no profile
+# carries them, and outside a -gate profile the boot refuses them.
+PARKED_SWITCH = 'QWEN_FAST_PARKED_ENGINES'
+PARKED_PREFIX = 'QWEN_FAST_PARKED_'
+PARKED_NAMES = ('QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_PROJECT_ROWS', 'QWEN_FAST_PARKED_AUDIT',
+                'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT')
+PARKED_GATE_ONLY = ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT',
+                    'QWEN_FAST_GATE_DRAM_BALLAST')
 # vLLM's default (config/cache.py:95), pinned in the prefix profiles: the block-hash chain is what makes
 # a cached block's content its prompt's, and the exactness argument leans on it (design L2).
 PREFIX_HASH_ALGO = 'sha256'
@@ -286,6 +295,9 @@ def apply_environment(profile, environ=None):
     # The same for the fast path's side of it (sticky sessions).
     if STICKY_SWITCH not in profile['env']:
         environ.pop(STICKY_SWITCH, None)
+    # ...and Stage E's parked engines: an inherited value must not turn them on under a profile that never asked.
+    if PARKED_SWITCH not in profile['env']:
+        environ.pop(PARKED_SWITCH, None)
     return environ
 
 
@@ -316,6 +328,47 @@ def sticky_problems(profile):
     if not (engine.get('additional-config') or {}).get('qwen_fast_t16'):
         problems.append('%s=1 is the fast path\'s switch, but the profile does not run the fast path (qwen_fast_t16)'
                         % STICKY_SWITCH)
+    return problems
+
+
+def parked_engines(profile):
+    """Whether the profile turns Stage E's parked engines on (the c2-packed-prefix-parked profiles)."""
+    return str(profile.get('env', {}).get(PARKED_SWITCH, '')) == '1'
+
+
+def gate_profile(profile):
+    """Whether the profile is a gate's: its name ends in -gate, or it is gate_only."""
+    return str(profile.get('name', '')).endswith('-gate') or profile.get('gate_only') is True
+
+
+def parked_problems(profile, environ=None):
+    """Every way the parked engines are set without what they need, [] when none: the switch is the fast path's
+    (qwen_fast_t16) and needs the S2 shape beside it - C2-any, the extent readers, four scheduler requests. The
+    gate-only knobs are refused in a profile's own env, and in the process environment outside a -gate profile.
+    Any other QWEN_FAST_PARKED_ name is refused (QWEN_FAST_PARKED_DRAFTS, Stage E2, is deferred)."""
+    environ = {} if environ is None else environ
+    env, engine = profile.get('env', {}), profile.get('engine', {})
+    problems = ['%s is not a parked-engines setting' % name
+                for name in sorted(env) if name.startswith(PARKED_PREFIX) and name not in PARKED_NAMES]
+    value = env.get(PARKED_SWITCH)
+    if value is not None and str(value) not in ('0', '1'):
+        problems.append('%s=%r is neither 1 nor 0' % (PARKED_SWITCH, value))
+    problems += ['%s is a gate knob: no profile sets it' % name for name in PARKED_GATE_ONLY if name in env]
+    if not gate_profile(profile):
+        problems += ['%s is set outside a gate profile: it exists for a gate and must never reach traffic' % name
+                     for name in PARKED_GATE_ONLY if name in environ]
+    if not parked_engines(profile):
+        return problems
+    if not (engine.get('additional-config') or {}).get('qwen_fast_t16'):
+        problems.append('%s=1 is a fast path switch, but the profile does not run the fast path (qwen_fast_t16)'
+                        % PARKED_SWITCH)
+    for name in ('QWEN_FAST_ANY_REQUEST', 'QWEN_FAST_EXTENT_REPLAY'):
+        if str(env.get(name)) != '1':
+            problems.append('%s=1 needs %s=1 in the profile (the S2 shape the parked engines serve)'
+                            % (PARKED_SWITCH, name))
+    if engine.get('max-num-seqs') != 4:
+        problems.append('%s=1 needs max-num-seqs 4 (one parked engine per packed-block user), not %r'
+                        % (PARKED_SWITCH, engine.get('max-num-seqs')))
     return problems
 
 
@@ -799,6 +852,9 @@ def boot(environ=None, orig_argv=None):
     problems = prefix_reuse_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve prefix reuse exactly: %s' % (profile['name'], '; '.join(problems)))
+    problems = parked_problems(profile, environ)
+    if problems:
+        raise ValueError('profile %s cannot serve parked engines: %s' % (profile['name'], '; '.join(problems)))
     problems = mesh_problems(profile)
     if problems:
         raise ValueError('profile %s cannot open its mesh: %s' % (profile['name'], '; '.join(problems)))

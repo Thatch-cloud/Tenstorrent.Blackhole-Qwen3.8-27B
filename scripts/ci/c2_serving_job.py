@@ -64,6 +64,12 @@ Keys (every one optional but C2_IMAGE_TAG):
                       publishes, and none can hit) or none (said explicitly: every request unsalted, which a
                       prefix profile serves with reuse off). Only on a prefix profile (the gate refuses it on
                       any other before a container starts); warm on c2-packed-prefix then warms the prefix twins
+  C2_GATE_BALLAST_MB  parked-ballast's (G-E3 iii) ballast, MB per chip (QWEN_FAST_GATE_DRAM_BALLAST, gate only):
+                      sized from the G-E0 warm arm's P7p reading so the arrival sits at the parked need's boundary
+                      (c2_serving_gate.ballast_advice prints the figure). Needed by that plan, refused without it
+                      and refused beside a job that runs no parked-ballast
+  (C2_GATE_PLAN may also name QUICKWIN_GATE_PLANS: quickwin-ledger and quickwin-warm, the phase-1 quick wins' byte
+                      comparisons, on any S2 profile; they take no extra key)
   C2_PREFIX_PLAN      PREFIX_PLANS for the prefix action (c2_prefix_gate.py), in order (default: bringup);
                       each exactness and lifecycle arm is a plan too (PREFIX_ARM_PLANS): exactness-eager
                       re-runs that arm alone. Never beside its own plan, and no plan twice (one arm, one
@@ -102,8 +108,19 @@ GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # churn M11 (G5); permuted is built but required only under decision D-c(i).
 S2_GATE_PLANS = ('warm', 'warm-off', 'control', 'forced-cap', 'control-below', 'lifecycle-arrival', 'mixed', 'short',
                  'boundaries', 'staggered', 'churn', 'permuted')
-ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS
+# Stage E, parked per-slot engines (QWEN_FAST_PARKED_ENGINES): run on a parked gate profile (c2-packed-prefix-parked-gate; its
+# flag-off twin, the profile less '-parked', is the reference); c2_serving_gate.py says what each runs. parked-exact is
+# G-E1 (a) and (f), parked-drafter G-E1 (b) and (g) with both negative controls, parked-lifecycle G-E2, parked-churn
+# G-E3 (i), parked-corner G-E3 (ii), parked-ballast G-E3 (iii).
+PARKED_GATE_PLANS = ('parked-exact', 'parked-drafter', 'parked-lifecycle', 'parked-churn', 'parked-corner',
+                     'parked-ballast')
+# Phase-1 quick wins (docs/engine-warm-skip.md), each usable without Stage E and run on the sticky or an S2 profile:
+# quickwin-ledger holds QWEN_FAST_MEMORY_LEDGER_OFF=1 against the ledger on, quickwin-warm QWEN_FAST_ENGINE_WARM_SKIP=1
+# against the warm forwards run, each solo and four concurrent, real text, strict exactness.
+QUICKWIN_GATE_PLANS = ('quickwin-ledger', 'quickwin-warm')
+ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS + PARKED_GATE_PLANS + QUICKWIN_GATE_PLANS
 MAX_PAIRS = 4
+MAX_BALLAST_MB = 4096   # per chip: a ballast past the whole idle free (about 4.4 GB) could only kill the attach
 BELOW_FAMILY_RANGE = (4096, 16640)   # capacities the pinned (flag-off) mask admits: attention_mask_replay.py:18,26
 JIT_MODES = ('auto', 'judge', 'record')
 POLICIES = ('strict', 'dc-i')
@@ -318,6 +335,12 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     if unknown:
         raise JobError('C2_GATE_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(ALL_GATE_PLANS)))
     s2 = read_s2_gate(values)
+    ballast_plan = 'parked-ballast' in plans
+    if ballast_plan and 'gate' in actions and not s2['gate_ballast_mb']:
+        raise JobError('C2_GATE_PLAN parked-ballast needs C2_GATE_BALLAST_MB: the ballast is sized from the G-E0 '
+                       'warm arm P7p reading (the gate ballast_advice line)')
+    if s2['gate_ballast_mb'] and not (ballast_plan and 'gate' in actions):
+        raise JobError('C2_GATE_BALLAST_MB belongs to parked-ballast: it does nothing in a job that runs no gate plan of that name')
     lengths_text = values.get('C2_GATE_LENGTHS', '')
     lengths = [positive_int('C2_GATE_LENGTHS', part) for part in split_list(lengths_text)]
     max_tokens = positive_int('C2_GATE_MAX_TOKENS', values['C2_GATE_MAX_TOKENS']) \
@@ -389,8 +412,14 @@ def read_s2_gate(values):
     salt = values.get('C2_GATE_SALT', '')
     if salt and salt not in SALT_MODES:
         raise JobError('C2_GATE_SALT must be one of %s, got %r' % (', '.join(SALT_MODES), salt))
+    ballast = values.get('C2_GATE_BALLAST_MB', '')
+    if ballast:
+        ballast = str(positive_int('C2_GATE_BALLAST_MB', ballast))
+        if int(ballast) > MAX_BALLAST_MB:
+            raise JobError('C2_GATE_BALLAST_MB: at most %d MB per chip, got %s' % (MAX_BALLAST_MB, ballast))
     return dict(gate_pairs=pairs, gate_families=','.join(str(family) for family in families), gate_jit=jit,
-                gate_policy=policy, gate_policy_decision=decision, gate_audits=audits, gate_salt=salt)
+                gate_policy=policy, gate_policy_decision=decision, gate_audits=audits, gate_salt=salt,
+                gate_ballast_mb=ballast)
 
 
 def read_prefix(values, profiles, running):

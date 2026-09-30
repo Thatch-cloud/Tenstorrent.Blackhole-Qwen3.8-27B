@@ -32,8 +32,33 @@ class RuntimeAttachmentTests(unittest.TestCase):
     def exercise(self, fail=False, packed=False, users=1, attach_fail=False, probe=None, four_as_two=None,
                  replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None,
                  capture_position=None, block_extent=None, refused_in_attach=None, refused_after_blocks=None,
-                 admission=None, pool_refused=None, blocks_refused=None, real_admission=(), pool_extra=None):
+                 admission=None, pool_refused=None, blocks_refused=None, real_admission=(), pool_extra=None,
+                 parked=None):
         events = []
+        # Stage E (QWEN_FAST_PARKED_ENGINES): `parked`, a dict, sets the flag and stands a recording fake in for
+        # serving_parked_engines.ParkedEngineSet ('parked_build' at its build, 'parked_close' at its close; the
+        # constructor's keywords in self.parked_calls). None leaves both alone.
+        self.parked_calls = []
+        # E4/E5: the fake set's idle (the lifecycle's idle moment), arrival_terms and arrival_rebind_bytes (the DRAM
+        # registration's parked terms), one fake per attach in self.parked_sets.
+        self.parked_sets = []
+
+        def build_parked(**options):
+            self.parked_calls.append(options)
+            built = SimpleNamespace(build=lambda: events.append('parked_build'),
+                                    close=lambda: events.append('parked_close'), idle=Mock(),
+                                    arrival_terms=Mock(return_value=None), arrival_rebind_bytes=Mock(return_value=100))
+            self.parked_sets.append(built)
+            return built
+
+        # (The policy's own parked checks - serving_fast_policy.parked_engine_problems, held by test_parked_policy - read
+        # the whole S2 environment, which this harness does not build; the attach logic is what is under test here.)
+        parked_patch = (patch('serving_parked_engines.ParkedEngineSet', side_effect=build_parked)
+                        if parked is not None else nullcontext())
+        policy_patch = (patch('serving_fast_policy.parked_engine_problems', return_value=[])
+                        if parked is not None else nullcontext())
+        parked_built = ['parked_build'] if parked is not None else []
+        parked_closed = ['parked_close'] if parked is not None else []
         # S2 (QWEN_FAST_EXTENT_REPLAY): the flag in the final environment is what the pool must be told and
         # what every fake block reports as its `extent`, as PackedVerifierEngine does over that pool;
         # `block_extent` makes the blocks report something else ('missing': no attribute at all).
@@ -137,6 +162,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
             env['QWEN_FAST_REPLAY_GROUP_ROWS'] = str(replay_group_rows)
         if admission is not None:
             env['QWEN_FAST_EXTENT_REPLAY'] = '1'
+        if parked is not None:
+            env['QWEN_FAST_PARKED_ENGINES'] = '1'
         env.update(extra_env or {})
         extent = env.get('QWEN_FAST_EXTENT_REPLAY') == '1'
         if block_extent != 'missing':
@@ -154,6 +181,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 patch.object(serving_runtime, 'PreparedDraftWeights', side_effect=build_weights) as prepared, \
                 patch.object(serving_runtime, 'pindiag', side_effect=diag) as diagnostic, \
                 patch('packed_verifier.PackedVerifierEngine', side_effect=build_block) as packed_engine, \
+                parked_patch, policy_patch, \
                 patch('sampling_link_policy.sampler_links', side_effect=lambda *args: nullcontext()) as links, \
                 patch.object(serving_runtime, 'FastServingLifecycle', return_value=lifecycle,
                              side_effect=RuntimeError('attach failed') if attach_fail else None) as install, \
@@ -356,13 +384,13 @@ class RuntimeAttachmentTests(unittest.TestCase):
                                               'weights_close', 'runtime_exit', 'pool_close'])
                 elif attach_fail:
                     self.assertEqual(events, [*admitted, 'pool_build', *pool_checked, 'runtime_enter', 'weights_build',
-                                              *block_built, *blocks_checked, ('diag', self.ATTACH_FAILED),
-                                              *block_closed, 'weights_close', 'runtime_exit',
+                                              *block_built, *blocks_checked, *parked_built, ('diag', self.ATTACH_FAILED),
+                                              *parked_closed, *block_closed, 'weights_close', 'runtime_exit',
                                               'pool_close'])
                 else:
                     self.assertEqual(events, [*admitted, 'pool_build', *pool_checked, 'runtime_enter', 'weights_build',
-                                              *block_built, *blocks_checked, 'request', 'lifecycle_close',
-                                              *block_closed, 'weights_close', 'runtime_exit',
+                                              *block_built, *blocks_checked, *parked_built, 'request', 'lifecycle_close',
+                                              *parked_closed, *block_closed, 'weights_close', 'runtime_exit',
                                               'pool_close'])
 
     def test_combined_recipe_lives_until_request_traces_are_closed(self):
