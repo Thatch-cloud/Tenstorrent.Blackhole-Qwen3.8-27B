@@ -461,9 +461,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                                                        if capture_position is not None else {}),
                                                     # Round-fence plan H1b (QWEN_FAST_FUSED_COMMIT, default
                                                     # off): the block's T_proj traces use the one shared
-                                                    # TT_CCL every request's device uses.
+                                                    # TT_CCL every request's device uses. S2 B6's eager
+                                                    # publication warm (QWEN_FAST_EXTENT_REPLAY) needs it
+                                                    # too, or it is skipped: four cards run fused commit off.
                                                     **({'collectives': collectives}
-                                                       if os.environ.get('QWEN_FAST_FUSED_COMMIT') == '1' else {}))
+                                                       if os.environ.get('QWEN_FAST_FUSED_COMMIT') == '1'
+                                                       or os.environ.get('QWEN_FAST_EXTENT_REPLAY') == '1' else {}))
                 scopes.callback(packed_block.close)
                 packed_blocks.append(packed_block)
                 memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)
