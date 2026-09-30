@@ -103,6 +103,11 @@ COPY scripts/ci/quad_draft.py scripts/ci/quad_conv_io.cpp /experiment-scripts/ci
 # The four-card twin of the quad (quad_draft_tp: tp_addresses.install() puts it in quad_draft's place at QWEN_FAST_TP=4 only,
 # MODULE_TWINS) and the singles audit (QWEN_FAST_DRAFT_SINGLES_AUDIT, imported by the coordinator when the flag is set).
 COPY scripts/ci/quad_draft_tp.py scripts/ci/draft_singles_audit.py /experiment-scripts/ci/
+# The four-card twin of the fused commit (fused_commit_tp: tp_addresses.install() puts it in fused_commit's place at QWEN_FAST_TP=4
+# only, MODULE_TWINS; packed_verifier, serving_packed_step, verify_prestage and dflash_proposal_trace import fused_commit lazily, so
+# they reach it). It borrows the pair's fused_commit (listed above) for every name it does not redefine and drives the bundle's
+# slide kernel through draft_kv_slide_tp.
+COPY scripts/ci/fused_commit_tp.py /experiment-scripts/ci/
 # Publish prewarm (QWEN_FAST_PUBLISH_PREWARM, default off): serving_request_factory imports publish_prewarm when the
 # flag is set, so it must reach the image beside it.
 COPY scripts/ci/publish_prewarm.py /experiment-scripts/ci/
