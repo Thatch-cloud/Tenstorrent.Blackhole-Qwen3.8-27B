@@ -131,7 +131,39 @@ def validate_prefill_chunks(position, chunks, start=0):
     return pieces
 
 
+_PROGRAM_COUNTER = None
+_WINDOW_PROGRAMS = [0]
+
+
+def set_program_counter(counter):
+    """Four cards: a callable returning the mesh's program-cache entry count (or None to stop counting). The tripwire in
+    serving_runtime.prefill_tripwire installs it so each prefill's line can say how many programs its window snapshot compiled."""
+    global _PROGRAM_COUNTER
+    _PROGRAM_COUNTER = counter
+
+
+def window_programs(reset=False):
+    """Program-cache entries the window snapshots compiled since the last reset."""
+    value = _WINDOW_PROGRAMS[0]
+    if reset:
+        _WINDOW_PROGRAMS[0] = 0
+    return value
+
+
 def snapshot_prefill_tail(operations, value, position, *, checks=None, chunk_start=0, valid_rows=None):
+    counter = _PROGRAM_COUNTER
+    programs_before = counter() if counter is not None else None
+    try:
+        return _snapshot_prefill_tail(operations, value, position, checks=checks, chunk_start=chunk_start,
+                                      valid_rows=valid_rows)
+    finally:
+        if programs_before is not None:
+            after = counter()
+            if after is not None:
+                _WINDOW_PROGRAMS[0] += max(0, after - programs_before)
+
+
+def _snapshot_prefill_tail(operations, value, position, *, checks=None, chunk_start=0, valid_rows=None):
     valid_rows = position if valid_rows is None else valid_rows
     window = chunk_window(position, chunk_start, valid_rows)
     if (not window['rows'] or len(value.shape) != 4 or tuple(value.shape)[:2] != (1, 1) or value.shape[2] < valid_rows
