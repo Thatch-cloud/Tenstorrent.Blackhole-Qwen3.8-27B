@@ -18,8 +18,8 @@ departed user 0) still takes the per-request engines - the block binds its segme
 Why the arithmetic is the same as M3's (design LN-0, exactness E1/E2): the image serves the M3 block on native w1/w3
 (QWEN_FAST_SINGLE_GATEUP=1: no w_gate_up, no FusedT16Arm), and a 16-row verify then runs the same native MLP path at
 M = 16 as M3 does at M = 64. Whether every matmul row is byte-identical at M = 16 and M = 64 is a card question
-(in0_block_w and the K split pinned equal): the gate's `solo` plan runs the lone user against its packed-2 and packed-4
-rows and its per-request-engine reference, audited, and until it passes the lane is unqualified.
+(in0_block_w and the K split pinned equal): the gate's lanes-exact plan runs every user alone on this block (arm d0-solo) and
+alone on the per-request engines (arm ref-solo), every audit on, and until the texts are equal the lane is unqualified.
 
 GATE ONLY, the way the four-card extent path is (packed_any_admission.unqualified_allowed): the flag is refused
 outside a gate run of a gate-only four-card profile, and an admitted attach logs every missing piece as UNQUALIFIED.

@@ -71,7 +71,7 @@ TIMING_MAX_TOKENS_131K = 2048
 CONTEXTS = dict(k4=4096, k32=32768, k120=120000)
 
 # docker limits per arm (an engine build up to 30 minutes, then the streams) and the streams' inactivity limit
-ARM_SECONDS = {EXACT: 3600, ROUND: 3600, LANES: 3600, LANES_MORE: 3600}
+ARM_SECONDS = {EXACT: 3300, ROUND: 3600, LANES: 3600, LANES_MORE: 3600}
 STREAM_SECONDS = {EXACT: 1800, ROUND: 1800, LANES: 1800, LANES_MORE: 2400}
 MIN_ALTERNATION_ROUNDS = 20    # solo rounds AND packed rounds an exactness arm must have run under the lanes
 MIN_LIVE_ROUNDS = 24           # a ladder phase's rounds before its median is read
