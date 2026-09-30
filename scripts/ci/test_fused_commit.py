@@ -1565,8 +1565,8 @@ class ParentTests(unittest.TestCase):
         if result.returncode != 0:
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
-        after = without_any_request(without_sticky(
-            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))
+        after = without_prefill_scratch(without_any_request(without_sticky(
+            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1639,6 +1639,17 @@ def without_sticky(lines):
                      "pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}', str(state.req_id)[:48],",
                      '(time.perf_counter() - began) * 1000.0, state.num_computed_tokens,',
                      'len(state.prompt_token_ids))'))
+
+
+def without_prefill_scratch(lines):
+    """serving_runtime.py less the four-card prefill-scratch hunk (tp4/stack-fix), which landed after this parent: the helper
+    function and its one call. Asserted to be exactly that, found once each."""
+    starts = [i for i, value in enumerate(lines) if value.startswith('def prefill_scratch_before_traces(')]
+    ends = [i for i, value in enumerate(lines) if value.startswith(('def ', '@')) and starts and i > starts[0]][:1]
+    calls = [i for i, value in enumerate(lines) if value.strip() == 'prefill_scratch_before_traces(model)']
+    if len(starts) != 1 or len(ends) != 1 or len(calls) != 1 or ends[0] < starts[0]:
+        raise AssertionError('The prefill-scratch hunk is not in serving_runtime.py exactly once')
+    return lines[:starts[0]] + lines[ends[0]:calls[0]] + lines[calls[0] + 1:]
 
 
 def without_any_request(lines):
