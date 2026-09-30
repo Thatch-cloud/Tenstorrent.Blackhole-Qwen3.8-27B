@@ -58,7 +58,9 @@ commit. Nothing else changes: the tests that read the checked-in file follow its
 FOUR CARDS (QWEN_FAST_TP=4, the c2-packed-tp4 profiles). The same admission with the four-card numbers and its own
 record. K64j at one KV head serves 0x23 (tail | share | extent; the slice needs a second KV head), so the modes are exactly
 tail and share and CB1 must hold a G8B2 0x23 combo; the reader is extent_attention_replay_tp.py, whose sha256 CB2b records;
-CB2b's harness presents one chip as chip 1of4; the record is packed_any_evidence_tp4.json at its own pin. Until that record
+CB2b's harness presents one chip as chip 1of4; CB1 and CB2a must say kv_heads 1 (and CB1 hold no q-slice combo), CB2b's reader
+must have served 0x23, so the pair's two-head sections copied in never qualify four cards (_one_head_problems); the record is
+packed_any_evidence_tp4.json at its own pin. Until that record
 holds a qualifying pass, `admit` refuses - except for a GATE-ONLY profile (QWEN_C2_GATE=1: the contract boots gate_only
 profiles only for a gate and never for traffic), where the evidence problems are logged one per line as UNQUALIFIED and the
 attach proceeds, so the first four-card rounds can run at all. Every other condition (the shape, the modes, the K64j binary
@@ -128,6 +130,13 @@ EVIDENCE_TP4 = HERE / 'packed_any_evidence_tp4.json'
 EVIDENCE_TP4_SHA256 = 'c55da96d49f0aac73adaf26f500d8b4d07c29c1c7a6316ae1ffb5cc4db7de283'
 CB1_FLAG = '0x27'
 CB1_FLAG_TP4 = '0x23'
+# Four cards: the evidence must be the ONE-KV-HEAD runs. K64j is the same binary at both widths and 0x23 is a legal flag set at
+# two KV heads too, so without these the pair's CB1 (card B, two heads, G8B2 0x21/0x23/0x27/0x2F) and CB2a (K2 at two heads)
+# copied into the four-card record would qualify four cards on the pair's shape. The recorder
+# (record_packed_any_evidence_tp4.py) writes kv_heads=1 only from a report that says so, and the reader's served flags.
+KV_HEADS_TP4 = 1
+SLICE_FLAGS = ('0x27', '0x2f')              # the q-slice needs a second KV head: never in a one-head record
+CB2B_SERVED_FLAGS_TP4 = '0x23'
 # A gate-only profile boots only with this set (serving_c2_contract.GATE_SWITCH).
 GATE_ENV = 'QWEN_C2_GATE'
 # Set by the gate-only four-card profile's own env and by no traffic profile: QWEN_C2_GATE=1 is the workflow's switch for EVERY
@@ -469,10 +478,32 @@ def _cb2b_problems(cb2b, sources, problems, chips=CB2B_CHIPS, source_names=QUALI
                                                                          str(sources.get(name))[:16]))
 
 
+def _one_head_problems(sections, problems):
+    """Four cards only: CB1 and CB2a ran at one KV head per chip (kv_heads 1, no q-slice combo) and CB2b's reader served
+    0x23. A section that is not a PASS is already refused by _passed."""
+    passed = {name: section for name, section in sections.items()
+              if name in SECTIONS and isinstance(section, dict) and section.get('status') == 'PASS'}
+    for name in ('CB1', 'CB2a'):
+        heads = passed[name].get('kv_heads') if name in passed else KV_HEADS_TP4
+        if type(heads) is not int or heads != KV_HEADS_TP4:
+            problems.append('%s: kv_heads %r, not %d: a two-head (pair) run is not four-card evidence'
+                            % (name, heads, KV_HEADS_TP4))
+    if 'CB1' in passed:
+        held = sorted({str(flag).lower() for combo in passed['CB1'].get('combos') or [] if isinstance(combo, dict)
+                       for flag in combo.get('flags') or []} & set(SLICE_FLAGS))
+        if held:
+            problems.append('CB1: combos hold %s: the q-slice needs a second KV head, so this is not a one-head run'
+                            % ','.join(held))
+    if 'CB2b' in passed:
+        served = passed['CB2b'].get('served') if isinstance(passed['CB2b'].get('served'), dict) else {}
+        if served.get('flags') != CB2B_SERVED_FLAGS_TP4:
+            problems.append('CB2b: the reader served %s, not %s (one KV head)' % (served.get('flags'), CB2B_SERVED_FLAGS_TP4))
+
+
 def evidence_problems(evidence, sources_root=HERE, tp=None):
     """Every reason the evidence does not qualify the extent path for these bytes; [] when it does. `tp` is the
     width the record is for (default: the width this process serves at); four cards read the reader twin's sha256,
-    a G8B2 0x23 CB1 combo and CB2b's 1of4 chip view."""
+    a G8B2 0x23 CB1 combo, CB2b's 1of4 chip view, and one KV head in CB1, CB2a and CB2b (_one_head_problems)."""
     tp = width() if tp is None else tp
     problems = []
     if not isinstance(evidence, dict) or evidence.get('schema') != EVIDENCE_SCHEMA:
@@ -503,6 +534,8 @@ def evidence_problems(evidence, sources_root=HERE, tp=None):
     if _passed(sections.get('CB2b'), 'CB2b', problems):
         _cb2b_problems(sections['CB2b'], sources, problems,
                        CB2B_CHIPS if tp == tp_shapes.PAIR else CB2B_CHIPS_TP4, qualified_sources(tp))
+    if tp != tp_shapes.PAIR:
+        _one_head_problems(sections, problems)
     return problems
 
 

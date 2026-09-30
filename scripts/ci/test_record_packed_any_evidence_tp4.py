@@ -90,7 +90,7 @@ def cb2b_report():
                   served=dict(flags='0x23', reference_flags='0x3', rows=8, batch=2),
                   decision=dict(verdict='PASS', reasons=[], decisive=len(rows), decisive_differing=0, scope='full', scope_short=[]),
                   binary=dict(sha256=admission.K64J_TTNNCPP_SHA256, k64j=True, stage=4),
-                  modules=dict(sha256=shas))
+                  kernels=dict(root='/k', found=dict(admission.K64J_KERNELS)), modules=dict(sha256=shas))
     report['verdict_line'] = ('K64J_READER verdict=PASS scope=full r1=42/42 r1_reader=672/672 staging=1932/1932 r2=684/684 '
                               'r2_trace=168/168 r4=264/264 live=12/12 families=%d chips=1of4 phantom=2895 extent_sha256=%s'
                               % (len(families), reader))
@@ -279,6 +279,8 @@ class RefusesTests(unittest.TestCase):
         def mutate(report):
             report['kernels']['found']['compute/sdpa_flash_decode_qwen.cpp'] = 'c' * 64
         self.refused('cb2a', mutate, 'compute/sdpa_flash_decode_qwen.cpp')
+        self.refused('cb2b', mutate, 'compute/sdpa_flash_decode_qwen.cpp')
+        self.refused('cb2b', lambda report: report.pop('kernels'), 'dataflow/reader_decode_qwen.cpp')
 
     def test_a_cb1_without_the_g8b2_0x23_combo_or_a_seed_or_an_extent_is_refused(self):
         self.refused('cb1', lambda report: report.update(combos=['G8B2:0x21', 'G4B3:0x23']), 'no G8B2 0x23 combo')

@@ -323,7 +323,9 @@ def build_cb2b(report, digest, path, run, tag, commit, image, watcher=None, root
     words = line_words(line)
     decision = report.get('decision') or {}
     common_problems('CB2b', report, words, problems)
-    binary_problems('CB2b', report, problems, kernels=False)
+    # The reader harness checks the mounted kernels with the card harness's own check (k64j_card_b.check_kernels): the
+    # reader's evidence is K64j's only if its kernels were the four the admission names, as CB1's and CB2a's are.
+    binary_problems('CB2b', report, problems)
     if decision.get('scope') != admission.CB2B_SCOPE or words.get('scope') != admission.CB2B_SCOPE:
         problems.append('CB2b: scope %s (line %s), not full: %s' % (decision.get('scope'), words.get('scope'),
                                                                    decision.get('scope_short')))

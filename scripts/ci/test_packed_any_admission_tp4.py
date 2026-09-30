@@ -37,15 +37,19 @@ def skeleton():
 
 
 def qualifying():
-    """The four-card record filled in as the card windows would: the pair's sections re-recorded at four cards."""
+    """The four-card record filled in as the recorder writes it from one-KV-head runs: the pair's section shapes with
+    kv_heads 1, the one-head combos (no q-slice), CB2b through the 1of4 view with the reader serving 0x23."""
     evidence = skeleton()
     pair = pair_tests.checked_in()
     reader = 'extent_attention_replay_tp.py'
     evidence['sources'] = {reader: sha((HERE / reader).read_bytes())}
-    evidence['sections']['CB1'] = copy.deepcopy(pair['sections']['CB1'])
-    evidence['sections']['CB2a'] = copy.deepcopy(pair['sections']['CB2a'])
+    cb1 = copy.deepcopy(pair['sections']['CB1'])
+    cb1.update(kv_heads=1, card='M', combos=[{'geometry': 'G4B3', 'flags': ['0x21', '0x23']},
+                                             {'geometry': 'G8B2', 'flags': ['0x21', '0x23']}])
+    evidence['sections']['CB1'] = cb1
+    evidence['sections']['CB2a'] = dict(copy.deepcopy(pair['sections']['CB2a']), kv_heads=1)
     cb2b = pair_tests.cb2b_pass(evidence)
-    cb2b['chips'] = '1of4'
+    cb2b.update(chips='1of4', served=dict(flags='0x23', rows=8, batch=2, segments=4))
     evidence['sections']['CB2b'] = cb2b
     return evidence
 
@@ -118,6 +122,32 @@ class RecordTests(unittest.TestCase):
             mutate(evidence)
             with self.subTest(name):
                 self.assertNotEqual(admission.evidence_problems(evidence, HERE, tp=4), [], name)
+
+    def test_the_pairs_two_head_sections_copied_in_never_qualify_four_cards(self):
+        # K64j is one binary at both widths and 0x23 is legal at two KV heads, so only the head count tells the pair's
+        # CB1 (card B, G8B2 0x21/0x23/0x27/0x2F) and CB2a (K2 at two heads) from the one-head runs four cards need.
+        pair = pair_tests.checked_in()['sections']
+        cases = {
+            'the pair CB1 verbatim': lambda e: e['sections'].update(CB1=copy.deepcopy(pair['CB1'])),
+            'the pair CB2a verbatim': lambda e: e['sections'].update(CB2a=copy.deepcopy(pair['CB2a'])),
+            'CB1 at two heads': lambda e: e['sections']['CB1'].update(kv_heads=2),
+            'CB1 without kv_heads': lambda e: e['sections']['CB1'].pop('kv_heads'),
+            'CB2a kv_heads as text': lambda e: e['sections']['CB2a'].update(kv_heads='1'),
+            'CB1 holding a q-slice combo': lambda e: e['sections']['CB1']['combos'][1]['flags'].append('0x27'),
+            'CB2b served with the slice': lambda e: e['sections']['CB2b'].update(served=dict(flags='0x27')),
+            'CB2b without its served flags': lambda e: e['sections']['CB2b'].pop('served'),
+        }
+        for name, mutate in cases.items():
+            evidence = qualifying()
+            mutate(evidence)
+            with self.subTest(name):
+                problems = admission.evidence_problems(evidence, HERE, tp=4)
+                self.assertNotEqual(problems, [], name)
+        self.assertEqual(admission.evidence_problems(qualifying(), HERE, tp=4), [])
+
+    def test_the_one_head_rule_is_four_cards_only(self):
+        # the pair's own record keeps qualifying the pair: no kv_heads word, the 0x27 combos and served flags are its own
+        self.assertEqual(admission.evidence_problems(pair_tests.passing(), HERE, tp=2), [])
 
     def test_the_pairs_record_does_not_qualify_four_cards_and_the_reverse(self):
         self.assertNotEqual(admission.evidence_problems(pair_tests.checked_in(), HERE, tp=4), [])
