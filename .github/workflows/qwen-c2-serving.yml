@@ -337,6 +337,7 @@ jobs:
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
             -v "$PWD:/c2:ro" -v "$results:/probe-results" \
             -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
+            -e TT_METAL_CACHE=/root/.cache/tt-metal-cache -e TT_CACHE_PATH=/tmp/tt-weights \
             -e TT_MESH_GRAPH_DESC_PATH=/c2/scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto \
             --entrypoint python3 "$image" -B /c2/scripts/ci/tp4_fabric_probe.py --fabric "$FABRIC" \
             --output /probe-results/fabric-probe.json 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?

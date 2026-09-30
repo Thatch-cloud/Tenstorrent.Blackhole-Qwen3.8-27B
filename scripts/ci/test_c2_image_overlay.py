@@ -1747,3 +1747,26 @@ class ProvenanceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OverlayDirectoriesExistTests(unittest.TestCase):
+    """The installer refuses a destination whose directory the image lacks (image tp4-1's build died on
+    /opt/qwen-c2/mesh). Every directory under /opt/qwen-c2 that the manifest writes into must be made by the
+    Dockerfile before the install runs; the fast-path trees (/experiment-scripts, the plugin) come from the base."""
+
+    def test_every_opt_qwen_c2_destination_directory_is_made_before_the_install(self):
+        manifest = (ROOT / 'docker' / 'qwen-c2-overlay.txt').read_text(encoding='utf-8')
+        dockerfile = (ROOT / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
+        install_at = dockerfile.index('c2_overlay.py install')
+        needed = set()
+        for line in manifest.splitlines():
+            words = line.split('#', 1)[0].split()
+            for destination in words[1:]:
+                parent = str(PurePosixPath(destination).parent)
+                if parent.startswith('/opt/qwen-c2/') and parent != '/opt/qwen-c2':
+                    needed.add(parent)
+        self.assertIn('/opt/qwen-c2/mesh', needed)
+        for parent in sorted(needed):
+            made = dockerfile.find('install -d -m 0755 ' + parent)
+            self.assertNotEqual(made, -1, '%s is written by the overlay but never made' % parent)
+            self.assertLess(made, install_at, '%s is made after the overlay install' % parent)

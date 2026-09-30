@@ -233,6 +233,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('-e QWEN_C2_SERVING=0', probe)
         self.assertLess(probe.index('-e QWEN_C2_SERVING=0'), probe.index('--entrypoint python3'))
         self.assertLess(probe.index('-e TT_MESH_GRAPH_DESC_PATH='), probe.index('--entrypoint python3'))
+        # the image's TT_METAL_CACHE and TT_CACHE_PATH sit under /experiment-cache, a link to /models/.qwen-c2 that
+        # dangles when /models is not mounted: the fabric router JIT then fails with "cannot create directories:
+        # File exists" (run 36669205193). The probe compiles into its own tmpfs instead.
+        self.assertIn('-e TT_METAL_CACHE=/root/.cache/tt-metal-cache', probe)
+        self.assertIn('--tmpfs /root/.cache/tt-metal-cache:', probe)
+        self.assertNotIn('/experiment-cache', probe)
         self.assertIn('-v "$PWD:/c2:ro"', probe)
         self.assertNotIn('blackhole-', probe)
         for script in ('tp4_fabric_probe.py', 'tp4_mesh.py'):
