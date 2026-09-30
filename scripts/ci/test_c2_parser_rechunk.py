@@ -892,6 +892,10 @@ class ProfileGatingTests(unittest.TestCase):
                                  'c2-packed-tp4-speed-fcommit-quad': True,
                                  # the verify-glue window's arms (tp4/vglue)
                                  'c2-packed-tp4-gate-vglue': True, 'c2-packed-tp4-speed-vglue': True, 'c2-packed-tp4-speed-vglue-c1a': True, 'c2-packed-tp4-speed-vglue-v1': True, 'c2-packed-tp4-speed-vglue-v2': True, 'c2-packed-tp4-speed-vglue-v3a': True, 'c2-packed-tp4-speed-vglue-v4a': True,
+                                 # the lanes window's five gate arms (c2-packed-tp4-gate's engine and parser)
+                                 'c2-packed-tp4-time-gate': True, 'c2-packed-tp4-solo-gate': True,
+                                 'c2-packed-tp4-solo-time-gate': True, 'c2-packed-tp4-lanes-gate': True,
+                                 'c2-packed-tp4-lanes-time-gate': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
                                  'general-prefix-eager': None,
                                  # the four-card (TP4) G1 family decodes one token per step, as general does
@@ -909,7 +913,9 @@ class ProfileGatingTests(unittest.TestCase):
                                       'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs',
                                       'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-pairs',
                                       'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad',
-                                      'c2-packed-tp4-gate-vglue', 'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a'), name)
+                                      'c2-packed-tp4-gate-vglue', 'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a',
+                                      'c2-packed-tp4-time-gate', 'c2-packed-tp4-solo-gate', 'c2-packed-tp4-solo-time-gate',
+                                      'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 

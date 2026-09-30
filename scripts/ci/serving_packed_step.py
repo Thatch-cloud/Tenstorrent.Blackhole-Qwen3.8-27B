@@ -75,7 +75,7 @@ from types import SimpleNamespace
 from attention_mask_replay import validate_ticket
 from serving_fast_request import CommittedOutput
 from serving_sequential_step import describe as describe_sequential, sequential_packed_step
-from serving_worker_hook import phase
+from serving_worker_hook import note_fixture_writer, phase
 import memory_ledger
 import verifier_engine
 
@@ -371,6 +371,48 @@ def unservable(entries):
     return refused
 
 
+_SOLO_NOTED = set()
+
+
+def note_solo_route(solo, entries):
+    """D0: one line per (request, position family) the solo block takes a round for - the routing a gate reads
+    (serving_solo_lane.ROUTE_MARKER). Bounded: the first round of each request, then one per 4096 positions."""
+    try:
+        from serving_solo_lane import ROUTE_MARKER, SOLO_SLOT
+
+        entry = entries[0]
+        key = (str(entry['request_id'])[:48], entry['ticket'].position // 4096)
+        if key in _SOLO_NOTED:
+            return
+        _SOLO_NOTED.add(key)
+        padded_log('%s=%d slot=%d request=%s position=%d rows=%d block=solo' % (
+            ROUTE_MARKER, getattr(solo, 'rounds', 0) + 1, SOLO_SLOT, key[0], entry['ticket'].position,
+            len(entry['ticket'].tokens)))
+    except Exception:
+        pass
+
+
+def note_solo_skipped(solo, requests, rows):
+    """D0: why a lone live request is NOT on the solo block (logged once per reason): its engine borrowed another slot
+    than the block's, or its frontier is outside what the extent block admits. Nothing for two or more live requests
+    (M3's rounds) or none. Never raises."""
+    try:
+        from serving_solo_lane import SKIP_MARKER, SOLO_SLOT
+
+        live = [request for request in requests if not request.session.finished]
+        if rows is not None or len(live) != 1:
+            return
+        request = live[0]
+        try:
+            solo.segment_of(request.engine)
+            reason = 'position %d outside the extent block or under 16 tokens of budget' % request.session.position
+        except ValueError:
+            reason = 'the request borrowed a pool slot other than %d' % SOLO_SLOT
+        padded_log('%s request=%s: %s' % (SKIP_MARKER, str(request.session.request_id)[:48], reason), once=True)
+    except Exception:
+        pass
+
+
 class PackedStep:
     """The packed device step bound to its block (or blocks - QWEN_FAST_FOUR_AS_TWO's pair
     of 32-row blocks for four users): the step itself, and the per-round ticket-width policy
@@ -382,25 +424,93 @@ class PackedStep:
     `packed_device_rounds` instead; `self.block` is then None, since no one block owns the
     round."""
 
-    def __init__(self, blocks):
+    def __init__(self, blocks, *, solo=None):
         if blocks is None:
             raise ValueError('A packed verify block is required')
         self.blocks = tuple(blocks) if isinstance(blocks, (list, tuple)) else (blocks,)
         if not self.blocks:
             raise ValueError('At least one packed verify block is required')
         self.block = self.blocks[0] if len(self.blocks) == 1 else None
+        # D0 (QWEN_FAST_SOLO_LANE, serving_solo_lane; default off): the one-user 16-row block a lone slot-0 user's
+        # rounds run on. It is NOT one of `blocks`: proposal_rows and group_by_block match a request to the first
+        # block whose carry it borrowed, and the solo block shares slot 0's carry with M3's segment 0, so it is
+        # consulted by name - after the blocks for the coming round's width, before them for the step. None, every
+        # path below is what it was.
+        if solo is not None and (solo in self.blocks or solo.shape.users != 1 or solo.shape.rows_per_user != 16):
+            raise ValueError('The solo block is a separate one-user 16-row packed block')
+        self.solo = solo
+        self.last_solo = None
+        self.route = None
         # QWEN_FAST_GATE_FORCE_CAP (gate only): refused here, at attach, if malformed; logged once when set.
         cap = forced_cap()
         if cap is not None:
             audit_log(FORCE_CAP_MARKER + '{cap} (gate only)', cap=cap)
 
     def __call__(self, entries, *, cancelled):
+        if self.solo is not None:
+            return self.route_round(entries, cancelled)
+        return self.run_blocks(entries, cancelled)
+
+    def route_round(self, entries, cancelled):
+        """A step with the solo block: the round runs on it when its one entry is a 16-row slot-0 ticket, else on M3 (or the
+        sequential step, as ever). `route` records where it went - 'solo', 'packed' or 'sequential', by which block's round
+        counter moved - for the lane telemetry (serving_worker_hook reads it after the step)."""
+        from serving_solo_lane import solo_serves
+
+        counts = [getattr(block, 'rounds', 0) for block in self.blocks], getattr(self.solo, 'rounds', 0)
+        solo_round = solo_serves(self.solo, entries)
+        self.note_switch(solo_round)
+        self.route = None
+        try:
+            if solo_round:
+                note_solo_route(self.solo, entries)
+                return packed_device_step(entries, cancelled=cancelled, block=self.solo)
+            return self.run_blocks(entries, cancelled)
+        finally:
+            after = [getattr(block, 'rounds', 0) for block in self.blocks], getattr(self.solo, 'rounds', 0)
+            self.route = ('solo' if after[1] != counts[1] else 'packed' if after[0] != counts[0] else 'sequential')
+
+    def solo_rows(self, request):
+        """The ticket width the solo block would serve this ONE request at (16), or None: not its slot, no token budget left,
+        or a frontier the extent block does not admit. None without a solo block."""
+        if self.solo is None:
+            return None
+        from serving_solo_lane import solo_proposal_rows
+
+        return solo_proposal_rows(self.solo, [request])
+
+    def run_blocks(self, entries, cancelled):
         if len(self.blocks) == 1:
             return packed_device_step(entries, cancelled=cancelled, block=self.blocks[0])
         return packed_device_rounds(entries, cancelled=cancelled, blocks=self.blocks)
 
+    def note_switch(self, solo_round):
+        """D0: a round on the other packed block than the last one's. Both blocks read and write slot 0's carry and
+        the model's native GDN slot, and each pre-stages its own next verify (verify_prestage): the switch bumps the
+        fixture write epoch, exactly as any other writer to what a pre-staged verify relies on does
+        (serving_worker_hook.note_fixture_writer), so the next verify restages in full. Host only; a step with no solo
+        block never gets here."""
+        previous, self.last_solo = self.last_solo, bool(solo_round)
+        if previous is not None and previous != self.last_solo:
+            note_fixture_writer('lane-switch')
+
+    def announce_round(self, solo_round):
+        """The coming round's block, known when the lanes plan it (the drafts, before their fence window): the epoch bump of a
+        switch belongs HERE, before that window pre-stages the coming verify, not at the step after it - a bump at the step
+        throws away the pre-stage the window just made, and every round after a switch restages in full. The step's own
+        note_switch then finds the block already noted and does not bump again. Over-bumping is the safe direction: a plan
+        that does not hold bumps again when the next plan differs, and the step's check still catches the rest."""
+        if self.solo is not None:
+            self.note_switch(solo_round)
+
     def proposal_rows(self, requests):
-        return proposal_rows(self.blocks, requests)
+        rows = proposal_rows(self.blocks, requests)
+        if rows is None and self.solo is not None:
+            from serving_solo_lane import solo_proposal_rows
+
+            rows = solo_proposal_rows(self.solo, requests)
+            note_solo_skipped(self.solo, requests, rows)
+        return rows
 
     def while_waiting(self, requests):
         """Round-fence plan H1a: the drafts' fence-window callable for this step's one block
@@ -410,6 +520,11 @@ class PackedStep:
         block round for. None with several blocks (QWEN_FAST_FOUR_AS_TWO) or a block built with
         none of the flags - the hook then passes nothing."""
         block = self.block
+        if self.solo is not None:
+            from serving_solo_lane import solo_proposal_rows
+
+            if solo_proposal_rows(self.solo, requests) is not None:
+                block = self.solo    # a solo round's window is the solo block's own: its pre-stage, its round fence
         if block is None or (getattr(block, 'prestaged', None) is None and not getattr(block, 'round_fences', False)
                              and getattr(block, 'fused', None) is None):
             return None
@@ -417,13 +532,18 @@ class PackedStep:
 
         return WhileWaiting(block, requests)
 
+    def all_blocks(self):
+        """Every block a round may run on: the packed blocks, then the solo block (D0) when there is one. A block armed
+        for deferred commits that does not run the round is disarmed by the flush (PackedVerifierEngine.flush_commits)."""
+        return self.blocks if self.solo is None else self.blocks + (self.solo,)
+
     def arm_deferred_commits(self):
         """Round-fence plan H2 (early_draft.py, QWEN_FAST_GDN_AFTER_PAIRS): ask every block to defer its
         coming round's GDN commit traces (packed_verifier.PackedVerifierEngine.arm_deferred_commits) -
         asked only by early_draft.EarlyDraft.execute, which flushes them inside the same execute_model.
         True when a block will defer; a block built without the flag never does."""
         armed = False
-        for block in self.blocks:
+        for block in self.all_blocks():
             arm = getattr(block, 'arm_deferred_commits', None)
             if callable(arm) and arm():
                 armed = True
@@ -433,7 +553,7 @@ class PackedStep:
         """Round-fence plan H2: enqueue every block's deferred GDN commit traces (flush_commits; a no-op
         for a block holding none). Returns how many were enqueued."""
         count = 0
-        for block in self.blocks:
+        for block in self.all_blocks():
             flush = getattr(block, 'flush_commits', None)
             if callable(flush):
                 count += flush(site) or 0

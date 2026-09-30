@@ -107,7 +107,12 @@ GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # churn M11 (G5); permuted is built but required only under decision D-c(i).
 S2_GATE_PLANS = ('warm', 'warm-off', 'control', 'forced-cap', 'control-below', 'lifecycle-arrival', 'mixed', 'short',
                  'boundaries', 'staggered', 'churn', 'permuted')
-ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS
+# The lanes window (c2_lanes_plans): D0 and one fast lane beside standard lanes on the four cards. lanes-exact: every lane's text equals
+# that user's text alone on the per-request engines, every audit on; round-timing: the packed-round times at 4, 3, 2 and 1 live users
+# and D0 against the per-request engines for a lone user; lanes-timing (and -more): the ratio swept on one boot with one fast user
+# beside 3, 2 and 1 standard users, both bars read.
+LANES_GATE_PLANS = ('lanes-exact', 'round-timing', 'lanes-timing', 'lanes-timing-more')
+ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS + LANES_GATE_PLANS
 MAX_PAIRS = 4
 BELOW_FAMILY_RANGE = (4096, 16640)   # capacities the pinned (flag-off) mask admits: attention_mask_replay.py:18,26
 JIT_MODES = ('auto', 'judge', 'record')

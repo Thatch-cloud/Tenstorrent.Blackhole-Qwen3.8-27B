@@ -229,6 +229,49 @@ class PreparePublicationTests(unittest.TestCase):
         self.assertGreater(operations.pad.call_count, 0, 'the general path still pads')
 
 
+class FullExtentTapTests(unittest.TestCase):
+    """D0's one-user block has 16-row taps, so a full accept (prefix == 16) slices the WHOLE tap: like ttnn.slice, the slice
+    of a full-extent range hands back the input itself. Under merge_release the publication's own retain scope must not
+    take that alias for a temporary and release the block's persistent tap (hardware run 36730340150, round 38: the next
+    commit's feature identity check found the tap gone, 'All 4 chips required')."""
+
+    def full_extent_operations(self):
+        operations = fake_operations()
+
+        def slice_like_ttnn(value, start, stop, *unused, **unused_keywords):
+            if tuple(start) == (0, 0, 0, 0) and tuple(stop) == tuple(getattr(value, "shape", ())):
+                return value
+            return SimpleNamespace(shape=(1, 1, 5120, 5120))
+        operations.slice = unittest.mock.Mock(side_effect=slice_like_ttnn)
+        return operations
+
+    def released_taps(self, taps, *, merge_release, round_b1=False):
+        operations = self.full_extent_operations()
+        device = build_device(operations)
+        if round_b1:
+            from dflash_device import DFlashDevice
+
+            device.prepare_publication = types.MethodType(DFlashDevice._prepare_publication_round_b1, device)
+        environ = {'QWEN_FAST_ROUND_B1': '1'} if round_b1 else {}
+        with unittest.mock.patch('dflash_device.addresses', side_effect=lambda operations, value: (id(value),)),                 unittest.mock.patch('dflash_device.release_owned') as release,                 unittest.mock.patch('dflash_device.concatenate_local_features', side_effect=lambda operations, parts: object()),                 unittest.mock.patch('dflash_device.gather_add_projection',
+                    side_effect=lambda operations, mesh, collectives, partial, **k: object()),                 unittest.mock.patch.dict('os.environ', environ):
+            device.prepare_publication(taps, 16, position=100, merge_release=merge_release)
+        released = [value for call in release.call_args_list for value in call.args[1]]
+        return [tap for tap in taps if any(value is tap for value in released)]
+
+    def test_merge_release_never_releases_a_full_extent_tap(self):
+        taps = [SimpleNamespace(shape=(1, 1, 16, 2560), dtype='bf16') for _ in range(5)]
+        self.assertEqual(self.released_taps(taps, merge_release=True), [])
+
+    def test_the_round_b1_publication_never_releases_a_full_extent_tap(self):
+        taps = [SimpleNamespace(shape=(1, 1, 16, 2560), dtype='bf16') for _ in range(5)]
+        self.assertEqual(self.released_taps(taps, merge_release=True, round_b1=True), [])
+
+    def test_the_default_scope_never_released_it_either(self):
+        taps = [SimpleNamespace(shape=(1, 1, 16, 2560), dtype='bf16') for _ in range(5)]
+        self.assertEqual(self.released_taps(taps, merge_release=False), [])
+
+
 class PreparePublicationFusedCorrectnessTests(unittest.TestCase):
     """Real-tensor check for the algebraic identity prepare_publication's own
     fused-branch comment proves: with a committed cache (kv_history not exercised

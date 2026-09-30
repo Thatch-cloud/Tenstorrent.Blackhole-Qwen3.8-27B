@@ -44,7 +44,7 @@ def response_socket(response):
 
 
 def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *, ignore_eos=True, detail=False,
-                model='qwen-longctx', watch=None, cache_salt=None):
+                model='qwen-longctx', watch=None, cache_salt=None, lane=None):
     """One streaming completion; record the gap between successive tokens.
 
     The defaults send exactly the payload every existing caller always sent (ignore_eos=True,
@@ -68,7 +68,11 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *,
     stream_timeout throughout: a cancel is the watch's doing, never a timeout's.
 
     `cache_salt` (None by default, which sends exactly the payload above) is the request's vLLM cache_salt:
-    the C2 serving gate's salted arms on a prefix-reuse profile (lever_n_m3native_gate --cache-salt)."""
+    the C2 serving gate's salted arms on a prefix-reuse profile (lever_n_m3native_gate --cache-salt).
+
+    `lane` (None by default, which sends exactly the payload above) is the request's lane mark, 'fast' or 'standard': vLLM's
+    `vllm_xargs` carries it to SamplingParams.extra_args['qwen_lane'], which the C2 lane runtime (QWEN_FAST_LANE) reads at
+    admission (lever_n_m3native_gate --user-lane)."""
     stream_options = dict(include_usage=True)
     if detail:
         stream_options['continuous_usage_stats'] = True
@@ -79,6 +83,8 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *,
                 ignore_eos=ignore_eos)
     if cache_salt is not None:
         body['cache_salt'] = cache_salt
+    if lane is not None:
+        body['vllm_xargs'] = {'qwen_lane': lane}
     payload = json.dumps(body).encode()
     request = Request('http://127.0.0.1:%d/v1/completions' % port, data=payload,
                       headers={'Content-Type': 'application/json'})

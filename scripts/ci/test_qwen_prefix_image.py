@@ -51,7 +51,10 @@ GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate
                     'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad',
                     'c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad',
                     # the verify-glue window's arms (tp4/vglue)
-                    'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-gate-vglue')
+                    'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-gate-vglue',
+                    # the lanes window's five gate arms
+                    'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate', 'c2-packed-tp4-solo-gate',
+                    'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-time-gate')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
 STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate')
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')

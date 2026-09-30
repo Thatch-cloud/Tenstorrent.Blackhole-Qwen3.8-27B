@@ -85,6 +85,17 @@ scripts/ci/serving_worker_hook.py
 scripts/ci/serving_lifecycle.py
 scripts/ci/serving_packed_step.py
 
+# D0, the one-user lane (QWEN_FAST_SOLO_LANE, gate only; the lanes window): serving_runtime builds the one-user block beside M3
+# when the flag is on and serving_packed_step routes a lone slot-0 round to it (both lazy-import serving_solo_lane), over the
+# shape packed_shapes.solo_shape names. Flag off, none of the three is read: this is what each was call for call.
+scripts/ci/packed_shapes.py
+scripts/ci/serving_solo_lane.py
+
+# The fast lane (QWEN_FAST_LANE, gate only; the lanes window): serving_runtime builds the lane runtime when the flag is on, the lifecycle
+# installs the lane gate on the scheduler class, the worker hook plans each round. Flag off, neither module is imported.
+scripts/ci/serving_fast_lane.py
+scripts/ci/serving_fast_lane_scheduler.py
+
 # S2 (C2-packed-any, design W1/W2): the extent readers, and the pool that lends them a full-width table
 # and a cur_pos per bundle. serving_buffer_pool reaches the image at P8's commit otherwise, without
 # PackedExtentStorage; its flag-off paths are byte-for-byte the P8 ones (test_serving_buffer_pool).

@@ -63,6 +63,8 @@ class FastServingLifecycle:
     quarantine = None
     admission = None
     refused = None
+    lanes = None            # QWEN_FAST_LANE's runtime (per instance in __init__); a lifecycle built without __init__ has none
+    lane_gate = None
     max_model_len = None
     # Sticky sessions (QWEN_FAST_STICKY_SESSIONS, set per instance in __init__), defaulted on the
     # class for the same reason: off, a new request with num_computed_tokens != 0 is refused as
@@ -93,7 +95,7 @@ class FastServingLifecycle:
                 pass
 
     def __init__(self, worker, *, config, capture_factory, bridge_factory, eos_ids, cancelled,
-                 packed_step=None):
+                 packed_step=None, lanes=None):
         validate_fast_config(config)
         runner = worker.model_runner
         if (not worker.is_driver_worker or runner._pending_samples
@@ -144,6 +146,12 @@ class FastServingLifecycle:
         self.sticky = sticky_sessions_enabled()
         self.max_model_len = getattr(getattr(config, 'model_config', None), 'max_model_len', None)
         self.quarantine = None
+        # QWEN_FAST_LANE (serving_fast_lane.LaneRuntime; default off, None): one fast lane beside standard lanes. On, the
+        # requests' lane marks are validated at admission (a bad mark is this request's own contract, quarantined like a bad
+        # sampling parameter), the lane gate is installed on the scheduler class the engine runs (a step that schedules a request
+        # the round did not plan is refused by name in the hook), and every hook is built with the runtime.
+        self.lanes = lanes
+        self.lane_gate = None
         # The qualified name of the scheduler class that admits one fresh prompt per step, or None.
         self.admission = None
         # The admission refusal of the request in the prefill phase, served at its sampler.
@@ -151,6 +159,10 @@ class FastServingLifecycle:
         if self.any_request:
             self.quarantine = self._install_quarantine(config)
             self.admission = self._install_admission(config)
+        if self.lanes is not None:
+            if self.quarantine is None or self.packed_step is None:
+                raise ValueError('The fast lane needs the C2-any request quarantine and a packed step')
+            self.lane_gate = self._install_lane_gate(config)
         self.original_execute, self.original_sample = worker.execute_model, worker.sample_tokens
         self.saved = []
         for name, value in (('_qwen_fast_lifecycle', self),
@@ -204,6 +216,16 @@ class FastServingLifecycle:
             except BaseException:
                 pass
             return None
+
+    @staticmethod
+    def _install_lane_gate(config):
+        """The lane gate (serving_fast_lane_scheduler.install) on the scheduler class this config names. Unlike the quarantine
+        and the admission cap it is NOT optional: without it a solo round would schedule every standard user too and the
+        round would be refused, so a class that cannot take it fails the attach instead of serving half the feature (memory:
+        a mounted graft is not an executed graft)."""
+        import serving_fast_lane_scheduler
+
+        return serving_fast_lane_scheduler.install(config)
 
     def _quarantinable(self, failure):
         """Whether `failure` ends only this request: a host-side refusal with a live consumer."""
@@ -351,6 +373,8 @@ class FastServingLifecycle:
                 # One finishing request must not tear down the hook the others are
                 # still decoding on.
                 self.decoding_ids.remove(request_id)
+                if self.lanes is not None:
+                    self.lanes.release(request_id)      # the fast lane frees the round its request is named finished
                 if self.hook is not None and len(self.hook.bridges) > 1:
                     self.hook.detach(request_id)
                     if self.decoding_id == request_id:
@@ -471,10 +495,15 @@ class FastServingLifecycle:
             try:
                 validate_request_sampling(new.sampling_params, prompt_tokens=len(new.prompt_token_ids),
                                           eos_ids=self.eos_ids)
+                if self.lanes is not None:
+                    import serving_fast_lane
+
+                    serving_fast_lane.request_lane(new.sampling_params)
             except ValueError as refusal:
                 # D2 (C2-any): this request's contract, not the engine's. It still prefills -
                 # the runner has to account the step it was scheduled in - and is ended at its
-                # first token instead of being bridged (_sample).
+                # first token instead of being bridged (_sample). A lane mark the contract does
+                # not admit (serving_fast_lane.LaneRefused) is the same kind of refusal.
                 if self.quarantine is None:
                     raise
                 refused = 'sampling contract: %s' % refusal
@@ -693,7 +722,8 @@ class FastServingLifecycle:
             try:
                 if self.hook is None:
                     self.hook = FastWorkerHook(self.worker, bridge, cancelled=self.cancelled,
-                                               packed_step=self.packed_step)
+                                               packed_step=self.packed_step,
+                                               **({'lanes': self.lanes} if self.lanes is not None else {}))
                 else:
                     # A hook used to BE the binding of one request to the worker,
                     # which is why a second arrival could not decode. It now holds a
@@ -723,6 +753,8 @@ class FastServingLifecycle:
         if self.closed:
             return
         self._release_request()
+        if self.lanes is not None:
+            self.lanes.publish(None)
         for name, existed, value in reversed(self.saved):
             if existed:
                 setattr(self.worker, name, value)
