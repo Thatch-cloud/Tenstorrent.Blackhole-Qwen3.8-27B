@@ -35,6 +35,10 @@ out before the container is removed. Exit 0 only if every step passed.
 
 Usage: c2_platform_replay.py --source thatch-inference-Qwen-Qwen3.8-27B|<inspect.json> --image <ref> --results <dir>
        [--profile NAME] [--seed N] [--model CHECKPOINT] [--served-model NAME] [--env NAME=value ...]
+       [--device PATH ...] [--expect-profile NAME]
+Four cards: pass one --device per card (default: cards M and A) and --expect-profile NAME, which fails the replay
+unless the copy's log shows the contract launched NAME (and, for a P150x4 profile, the ring check said OK). Any --env
+REPLACES the default (THATCH_SERVING_SESSION_CAP=0), so a four-card replay passes that one too.
 To replay an image without the alias (a rollback candidate), pass --served-model Qwen/Qwen3.8-27B.
 """
 import argparse
@@ -53,6 +57,8 @@ import urllib.request
 CARD_M = 'blackhole-CEF5729692C19E6D'
 CARD_A = 'blackhole-3707293C249A5E67'
 CHECKPOINT = 'Qwen/Qwen3.8-27B'
+PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qwen_c2_profiles.json')
+TP4_MESH_DEVICE = 'P150x4'
 SERVED_MODEL = 'Qwen/Qwen3.8-27B:tt'   # what TT advertises; agents opt in to TT by naming it
 ARRIVAL_WINDOW_S = 30.0
 LONG_ANSWER_TOKENS = 3000
@@ -433,6 +439,37 @@ def served_name(port, checkpoint, expected):
     return dict(ok=ok, status=status, served=served, advertised=advertised, expected=expected)
 
 
+def profile_mesh(name, path=PROFILES):
+    """The mesh_device a profile of qwen_c2_profiles.json names, or None (the pair's image default)."""
+    with open(path, encoding='utf-8') as handle:
+        return json.load(handle)['profiles'][name].get('mesh_device')
+
+
+def expect_profile_verdict(log_text, name, mesh=None):
+    """Whether the serving contract launched profile `name` (the read-the-launched-argv line) and, when the profile
+    opens the four-card mesh, the ring check on the open said OK (DEGRADED and BROKEN fail: a replay that serves on
+    a bad ring proves nothing about the route). A replay that passed on another profile, or on a ring it never
+    checked, is the silent wrong-configuration pass this step exists to refuse."""
+    lines = (log_text or '').splitlines()
+    argv = [line for line in lines if ('[QWEN-C2] profile %s: vLLM argv' % name) in line]
+    ring = [line for line in lines if '[QWEN-TP4]' in line and ' ring ' in line]
+    problems = []
+    if not argv:
+        launched = sorted(set(line.split('profile ', 1)[1].split(':', 1)[0] for line in lines
+                              if '[QWEN-C2] profile ' in line and 'vLLM argv' in line))
+        problems.append('no "[QWEN-C2] profile %s: vLLM argv" line (the contract launched: %s)' % (
+            name, ', '.join(launched) or 'nothing'))
+    if mesh == TP4_MESH_DEVICE and not any('[QWEN-TP4] ring OK' in line for line in ring):
+        problems.append('no "[QWEN-TP4] ring OK" line (ring lines: %s)' % (' | '.join(ring)[:300] or 'none'))
+    return dict(ok=not problems, expect=name, mesh=mesh, problems=problems, argv_line=(argv[:1] or [''])[0][:300],
+                ring_lines=ring[:4])
+
+
+def expect_profile(container, name, mesh=None):
+    logs = run(['docker', 'logs', container], check=False)
+    return expect_profile_verdict((logs.stdout or '') + chr(10) + (logs.stderr or ''), name, mesh)
+
+
 def wait_http(port, container, seconds):
     deadline = time.time() + seconds
     while time.time() < deadline:
@@ -502,7 +539,12 @@ def main():
     parser.add_argument('--profile', default=None, help='QWEN_C2_PROFILE for the copy (default: the source\'s)')
     parser.add_argument('--seed', type=int, default=None, help='the arrivals\' seed (default: the clock)')
     parser.add_argument('--env', action='append', default=None, metavar='NAME=value',
-                        help='extra container env, repeatable (default: %s)' % ' '.join(DEFAULT_ENV))
+                        help='extra container env, repeatable; any --env REPLACES the default (%s)' % ' '.join(DEFAULT_ENV))
+    parser.add_argument('--device', action='append', default=None, metavar='PATH',
+                        help='a card device to mount, repeatable (default: cards M and A)')
+    parser.add_argument('--expect-profile', default=None, metavar='NAME',
+                        help='fail unless the copy log shows the contract launched this profile (and, for a '
+                             'P150x4 profile, [QWEN-TP4] ring OK)')
     options = parser.parse_args()
     name, port, model, served = options.name, options.port, options.model, options.served_model
     seed = options.seed if options.seed is not None else int(time.time())
@@ -537,8 +579,8 @@ def main():
     extra_env = tuple(options.env) if options.env is not None else DEFAULT_ENV
     if any('=' not in variable for variable in extra_env):
         parser.error('--env takes NAME=value')
-    arguments = run_arguments(info, options.image, name, port, options.profile, image_env=inherited or (),
-                              extra_env=extra_env)
+    arguments = run_arguments(info, options.image, name, port, options.profile, devices=options.device or None,
+                              image_env=inherited or (), extra_env=extra_env)
     with open(os.path.join(options.results, 'docker-run.json'), 'w') as handle:
         json.dump(arguments, handle, indent=1)
     passed = False
@@ -548,7 +590,11 @@ def main():
         problem = wait_http(port, name, 600)
         if record('start', dict(ok=problem is None, problem=problem, http_s=round(time.time() - started, 1))):
             if record('load', load(name, model)):
-                ok = record('served_name', served_name(port, model, served))
+                ok = True
+                if options.expect_profile:
+                    ok = record('expect_profile', expect_profile(
+                        name, options.expect_profile, profile_mesh(options.expect_profile)))
+                ok = record('served_name', served_name(port, model, served)) and ok
                 ok = record('warmup', chat(port, model, 'warmup', 1)) and ok
                 ok = record('coding', chat(port, served, 'Write a Python function that merges two sorted lists, '
                                                          'with doctests. Code only.', 600)) and ok

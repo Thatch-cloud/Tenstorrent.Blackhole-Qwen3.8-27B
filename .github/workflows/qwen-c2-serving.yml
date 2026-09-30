@@ -55,7 +55,10 @@ name: Qwen C2 serving image
 #            Every prefix container is removed however the step ends, and the kill-switch file only if the
 #            gate wrote it
 #   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py);
-#            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt)
+#            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt).
+#            The copy serves C2_REPLAY_PROFILE, or the image default when empty, and the step fails unless the
+#            copy's log shows that profile launched (--expect-profile). Under C2_CARDS=quad it mounts every card
+#            and passes the node agent's P150x4 environment (the profile's contract overrides it)
 #   push   - push it to zot and print the digest
 # (status, platform, unserve, priority and reset are described at their steps.) The job file is
 # parsed by scripts/ci/c2_serving_job.py, which refuses anything these steps must not act on.
@@ -64,7 +67,7 @@ name: Qwen C2 serving image
 # containers, with the general-tp4 profiles). It is one job, one runner and one concurrency group either way: the
 # four-card job holds every card the pair job does, so the group needs no second name and no run of any other
 # hardware workflow can overlap it. scripts/ci/c2_serving_job.py refuses a quad job that asks for a pair-shaped
-# step (cardm, replay, priority) or a profile that does not open the (1, 4) mesh, and the reverse.
+# step (cardm, priority) or a profile that does not open the (1, 4) mesh, and the reverse.
 # The smoke opens M+A, so it shares the two-card concurrency group and refuses if anything
 # holds either card or a platform serving container exists.
 on:
@@ -872,25 +875,54 @@ jobs:
       - name: Replay the node agent's serving sequence
         if: contains(steps.job.outputs.actions, 'replay')
         working-directory: c2
-        timeout-minutes: 80
+        timeout-minutes: 100
         shell: bash
         env:
           IMAGE: ${{ steps.job.outputs.platform_image }}
           REPLAY_PROFILE: ${{ steps.job.outputs.replay_profile }}
           REPLAY_SERVED_MODEL: ${{ steps.job.outputs.replay_served_model }}
+          EXPECT: ${{ steps.job.outputs.replay_expect_profile }}
+          CARDS: ${{ steps.job.outputs.cards }}
         run: |
           set -euo pipefail
           test -n "$IMAGE"
-          if docker ps --format '{{.Names}}' | grep -q '^thatch-inference-'; then
-            echo "a platform serving container is running; refusing to open M+A under it" >&2; exit 1
-          fi
-          # The agent's container is gone once the pair is taken for development (unserve): then the
+          test -n "$EXPECT"
+          mkdir -p "$RUNNER_TEMP/c2-results"
+          # The agent's container is gone once the cards are taken for development (unserve): then the
           # tracked record of it (replay v11's copy) is the source.
           source=thatch-inference-Qwen-Qwen3.8-27B
           docker inspect "$source" > /dev/null 2>&1 || source=scripts/ci/references/c2-serving/agent-container-36104200953.json
-          python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" \
-            ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
-            --results "$RUNNER_TEMP/c2-results/replay"
+          if [ "$CARDS" = quad ]; then
+            # Every Blackhole board, as the node agent mounts them for THATCH_TT_MESH_SHAPE=P150x4: the agent's own
+            # P150x4 values below (the serving contract overrides all of them from the profile, which
+            # --expect-profile then checks in the copy's log), and the session cap off as in the pair replay (any
+            # --env replaces the default, so it is passed again).
+            if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+              echo "a platform serving container exists; refusing to open the cards under it" >&2; exit 1
+            fi
+            . scripts/ci/card_set.sh
+            card_set_nodes 60
+            if ! card_set_unheld "$RUNNER_TEMP/c2-results/replay-holders.txt"; then
+              echo 'a card of the set is held; refusing the replay' >&2; cat "$RUNNER_TEMP/c2-results/replay-holders.txt" >&2; exit 1
+            fi
+            devices=()
+            for node in $(card_set_devices); do devices+=(--device "$node"); done
+            python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" \
+              ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
+              "${devices[@]}" \
+              --env THATCH_SERVING_SESSION_CAP=0 --env MESH_DEVICE=P150x4 \
+              --env TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150x4_mesh_graph_descriptor.textproto \
+              --expect-profile "$EXPECT" \
+              --results "$RUNNER_TEMP/c2-results/replay"
+          else
+            if docker ps --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+              echo "a platform serving container is running; refusing to open M+A under it" >&2; exit 1
+            fi
+            python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" \
+              ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
+              --expect-profile "$EXPECT" \
+              --results "$RUNNER_TEMP/c2-results/replay"
+          fi
       - name: Push
         if: contains(steps.job.outputs.actions, 'push')
         shell: bash

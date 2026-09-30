@@ -18,7 +18,7 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
                       Blackhole board present, the four-card (1, 4) mesh the TP4 profiles open). quad takes
                       status, platform, unserve, reset (all four together), fabric (the four-card fabric probe),
-                      build, drift, probe, smoke, gate, prefix and push - not cardm, replay or priority, which
+                      build, drift, probe, smoke, gate, prefix, replay and push - not cardm or priority, which
                       are pair-shaped - and only profiles that name mesh_device P150x4 (general-tp4 ...);
                       pair takes only profiles that name none. Anything else is refused here, before a card opens.
   C2_SMOKE_TESTS      comma-separated c2_serving_smoke.py tests, empty for all (agreement and bench are opt-in: only
@@ -97,10 +97,11 @@ import sys
 ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'fabric', 'cardm', 'drift', 'build', 'llkcheck', 'probe',
            'smoke', 'gate', 'prefix', 'replay', 'push')
 CARD_SETS = ('pair', 'quad')
-# What a four-card job may run: the pair-shaped steps (a single-card harness on card M, the M+A smoke and replay, the
-# CPU-priority measurement of the M+A container) do not apply to it, and fabric applies to nothing else.
+# What a four-card job may run: the pair-shaped steps (a single-card harness on card M, the CPU-priority measurement of
+# the M+A container) do not apply to it, and fabric applies to nothing else. replay runs the node agent's sequence on
+# all four cards (the image default is a P150x4 profile, so an empty C2_REPLAY_PROFILE is a four-card replay).
 QUAD_ACTIONS = ('status', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
-                'push')
+                'replay', 'push')
 TP4_MESH_DEVICE = 'P150x4'
 # The mesh_device values of a pair profile: none (the image's P300 under upstream's four-channel p150_x2) and P300
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
@@ -207,6 +208,12 @@ def profile_meshes(path=PROFILES):
     """{profile: its mesh_device, or None}: what a profile opens (serving_c2_contract.mesh_of reads the same key)."""
     with open(path, encoding='utf-8') as handle:
         return dict((name, body.get('mesh_device')) for name, body in json.load(handle)['profiles'].items())
+
+
+def profile_default(path=PROFILES):
+    """The profile the image serves when the platform names none (qwen_c2_profiles.json's "default")."""
+    with open(path, encoding='utf-8') as handle:
+        return json.load(handle)['default']
 
 
 def refuse_fabric_with_serving(actions):
@@ -371,8 +378,11 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     prefix = read_prefix(values, profiles, 'prefix' in actions)
     if meshes is None:
         meshes = profile_meshes()
+    # The replay serves the image default when C2_REPLAY_PROFILE is empty (the node agent forwards no profile), so
+    # that default must fit the card set too: a pair replay of a four-card default would open P150x4 on two cards.
+    replay_effective = (replay_profile or profile_default()) if 'replay' in actions else ''
     named = [('C2_PROFILE', profile if set(actions) & set(('smoke', 'gate')) else ''),
-             ('C2_REPLAY_PROFILE', replay_profile if 'replay' in actions else '')]
+             ('C2_REPLAY_PROFILE' if replay_profile else 'C2_REPLAY_PROFILE (the image default)', replay_effective)]
     if 'prefix' in actions:
         named += [('C2_PREFIX_PROFILE', prefix['prefix_profile']), ('C2_PREFIX_BASELINE', prefix['prefix_baseline'])]
     cards = read_cards(values, actions, meshes, named)
@@ -381,6 +391,7 @@ def read_job(values, profiles, root=ROOT, meshes=None):
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,
+                   replay_expect_profile=replay_effective,
                    replay_served_model=replay_served_model, cardm_harness=cardm_harness, cardm_args=cardm_args,
                    cardm_env=cardm_env)
     outputs.update(s2)

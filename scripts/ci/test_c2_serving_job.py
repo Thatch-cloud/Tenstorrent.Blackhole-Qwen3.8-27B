@@ -138,7 +138,8 @@ class FileTests(unittest.TestCase):
         self.assertIn('REPLAY_SERVED_MODEL: ${{ steps.job.outputs.replay_served_model }}', step)
         invocation = step[step.index('python3 scripts/ci/c2_platform_replay.py'):]
         self.assertIn('${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"}', invocation)
-        self.assertEqual(invocation.count('--served-model'), 1, 'never unconditionally')
+        self.assertEqual(invocation.count('--served-model'), 2, 'once per card-set branch, never unconditionally')
+        self.assertEqual(invocation.count('${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"}'), 2)
         with open(replay.__file__, encoding='utf-8') as handle:
             parser_text = handle.read()
         self.assertIn("parser.add_argument('--served-model', default=SERVED_MODEL", parser_text)

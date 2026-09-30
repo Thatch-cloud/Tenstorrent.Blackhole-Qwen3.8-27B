@@ -63,9 +63,54 @@ class JobTests(unittest.TestCase):
             read(C2_ACTIONS='prefix', C2_PREFIX_PROFILE='general-prefix-tp4', C2_PREFIX_BASELINE='general-tp4')
 
     def test_quad_refuses_the_pair_shaped_steps(self):
-        for action in ('cardm', 'replay', 'priority'):
+        for action in ('cardm', 'priority'):
             with self.assertRaisesRegex(job.JobError, 'pair-shaped'):
                 read(C2_CARDS='quad', C2_ACTIONS=action)
+
+    def test_quad_replay_takes_the_four_card_default_or_a_named_tp4_profile(self):
+        # The node agent forwards no profile, so an empty C2_REPLAY_PROFILE replays the image default.
+        default = job.profile_default()
+        self.assertEqual(default, 'general-prefix-tp4')
+        empty = read(C2_CARDS='quad', C2_ACTIONS='replay')
+        self.assertEqual((empty['replay_profile'], empty['replay_expect_profile']), ('', default))
+        named = read(C2_CARDS='quad', C2_ACTIONS='status replay', C2_REPLAY_PROFILE='general-tp4')
+        self.assertEqual((named['replay_profile'], named['replay_expect_profile']), ('general-tp4', 'general-tp4'))
+        with self.assertRaisesRegex(job.JobError, r'C2_REPLAY_PROFILE general opens the \(1, 2\) pair, but C2_CARDS=quad'):
+            read(C2_CARDS='quad', C2_ACTIONS='replay', C2_REPLAY_PROFILE='general')
+        with self.assertRaisesRegex(job.JobError, 'general-prefix opens the'):
+            read(C2_CARDS='quad', C2_ACTIONS='replay', C2_REPLAY_PROFILE='general-prefix')
+
+    def test_a_pair_replay_of_the_four_card_default_is_refused(self):
+        # An empty profile on a pair job would open the TP4 default (P150x4) on two cards.
+        with self.assertRaisesRegex(job.JobError, r'C2_REPLAY_PROFILE \(the image default\) general-prefix-tp4 opens the '
+                                                  r'four-card \(1, 4\) mesh, but C2_CARDS=pair'):
+            read(C2_ACTIONS='replay')
+        self.assertEqual(read(C2_ACTIONS='replay', C2_REPLAY_PROFILE='general-prefix')['replay_expect_profile'],
+                         'general-prefix')
+        self.assertEqual(read(C2_ACTIONS='status')['replay_expect_profile'], '', 'no replay, nothing expected')
+
+    def test_the_quad_replay_step_holds_the_cards_and_passes_the_agents_p150x4_values(self):
+        with open(WORKFLOW, encoding='utf-8') as handle:
+            text = handle.read()
+        ELSE = '          else' + chr(10)
+        step = text[text.index("- name: Replay the node agent's serving sequence"):text.index('- name: Push')]
+        quad = step[step.index('if [ "$CARDS" = quad ]'):step.index(ELSE)]
+        self.assertNotIn('blackhole-', quad, 'the cards are resolved by card_set.sh, never named')
+        self.assertLess(quad.index('card_set_unheld'), quad.index('c2_platform_replay.py'))
+        self.assertIn("grep -q '^thatch-inference-'", quad)
+        self.assertIn('docker ps -a', quad, 'an exited agent container refuses too')
+        self.assertIn('for node in $(card_set_devices); do devices+=(--device "$node"); done', quad)
+        self.assertIn('"${devices[@]}"', quad)
+        for value in ('--env THATCH_SERVING_SESSION_CAP=0', '--env MESH_DEVICE=P150x4',
+                      '--env TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/'
+                      'p150x4_mesh_graph_descriptor.textproto'):
+            self.assertIn(value, quad)
+        pair = step[step.index(ELSE):]
+        self.assertNotIn('--device', pair)
+        for branch in (quad, pair):
+            self.assertIn('--expect-profile "$EXPECT"', branch)
+        self.assertIn('EXPECT: ${{ steps.job.outputs.replay_expect_profile }}', step)
+        self.assertIn('timeout-minutes: 100', step)
 
     def test_fabric_needs_quad(self):
         with self.assertRaisesRegex(job.JobError, 'fabric probe needs C2_CARDS=quad'):
