@@ -7,6 +7,7 @@ chip count from tp_shapes (the pair's message is unchanged: 'Two chip-local outp
 inherited. serving_request_factory.device_components builds this class at four cards and the pair's at the pair.
 """
 
+import os
 import time
 
 from verifier_engine import VerifierEngine as PairVerifierEngine
@@ -59,6 +60,11 @@ class VerifierEngine(PairVerifierEngine):
                 raise AssertionError('Missing target prediction rows')
             bucket['first'] = False
             self.phase = 'verified'
+            if os.environ.get('QWEN_FAST_PROFILE_DUMP_EVERY'):
+                # The TP4 op profile's read-back cadence (packed_verifier.dump_device_profiler_every): a sequential
+                # step is a verify replay too. Imported here so an unprofiled run never touches the module.
+                from packed_verifier import dump_device_profiler_every
+                dump_device_profiler_every(self.operations, self.mesh)
             return predictions, dict(input_ms=(staged - started) * 1000,
                 verify_readback_ms=(finished - staged) * 1000,
                 binding_validation_ms=(carry_started - binding_started) * 1000,

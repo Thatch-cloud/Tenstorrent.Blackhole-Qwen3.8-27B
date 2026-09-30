@@ -1397,5 +1397,57 @@ class ProfileDumpRoundTests(unittest.TestCase):
             self.dump(self.operations, self.mesh, 1, environ={'QWEN_FAST_PROFILE_DUMP_ROUND': 'five'})
 
 
+class ProfileDumpEveryTests(unittest.TestCase):
+    """QWEN_FAST_PROFILE_DUMP_EVERY=N reads the device profiler back after every Nth verify replay of any kind."""
+
+    def setUp(self):
+        import packed_verifier
+        self.module = packed_verifier
+        self.dump = packed_verifier.dump_device_profiler_every
+        packed_verifier._replays_seen = 0
+        self.addCleanup(setattr, packed_verifier, '_replays_seen', 0)
+        self.reads = []
+        self.operations = SimpleNamespace(ReadDeviceProfiler=lambda mesh: self.reads.append(mesh))
+        self.mesh = object()
+
+    def test_inert_when_unset_and_counts_nothing(self):
+        for _ in range(4):
+            self.assertFalse(self.dump(self.operations, self.mesh, environ={}))
+        self.assertEqual(self.reads, [])
+        self.assertEqual(self.module._replays_seen, 0)
+
+    def test_fires_on_replays_2_4_6(self):
+        env = {'QWEN_FAST_PROFILE_DUMP_EVERY': '2'}
+        fired = [self.dump(self.operations, self.mesh, environ=env) for _ in range(6)]
+        self.assertEqual(fired, [False, True, False, True, False, True])
+        self.assertEqual(len(self.reads), 3)
+
+    def test_one_sequence_across_packed_and_sequential_callers(self):
+        # packed_verifier's round and verifier_engine_tp's sequential step share the module's one counter.
+        env = {'QWEN_FAST_PROFILE_DUMP_EVERY': '3'}
+        fired = [self.dump(self.operations, self.mesh, environ=env) for _ in range(9)]
+        self.assertEqual([index + 1 for index, hit in enumerate(fired) if hit], [3, 6, 9])
+
+    def test_a_runtime_without_the_reader_is_reported_not_crashed(self):
+        self.assertFalse(self.dump(SimpleNamespace(), self.mesh, environ={'QWEN_FAST_PROFILE_DUMP_EVERY': '1'}))
+
+    def test_a_non_positive_or_non_integer_count_is_refused(self):
+        for bad in ('two', '0', '-1', '1.5'):
+            with self.assertRaises(ValueError, msg=bad):
+                self.dump(self.operations, self.mesh, environ={'QWEN_FAST_PROFILE_DUMP_EVERY': bad})
+        self.assertEqual(self.reads, [])
+
+    def test_both_verify_paths_call_it(self):
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent
+        packed = (root / 'packed_verifier.py').read_text(encoding='utf-8')
+        self.assertIn('dump_device_profiler_every(self.operations, self.mesh)', packed)
+        sequential = (root / 'verifier_engine_tp.py').read_text(encoding='utf-8')
+        self.assertIn('dump_device_profiler_every(self.operations, self.mesh)', sequential)
+        # After the trace replayed and the result was read (a round's or a step's profiler window ends there).
+        self.assertLess(sequential.index("bucket['first'] = False"),
+                        sequential.index('dump_device_profiler_every(self.operations, self.mesh)'))
+
+
 if __name__ == '__main__':
     unittest.main()
