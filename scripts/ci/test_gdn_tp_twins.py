@@ -34,6 +34,13 @@ import tp_shapes
 from tp_test_support import four_cards
 
 HERE = Path(__file__).parent
+# The pinned function objects, taken when this module is imported (before any test can install the startup seam, which
+# rebinds the pinned modules' own names to the twins): the pair-parity tests compare a twin with THESE, never with whatever
+# the module attribute holds at the time (a leaked install once made the first class here compare a twin with itself).
+PINNED = SimpleNamespace(
+    validate_shapes=gdn_commit_dma.validate_shapes, prepare=gdn_commit_dma.prepare, publish=gdn_commit_dma.publish,
+    validate_projected=pinned_conv.validate_projected, restore_prefix=pinned_conv.restore_prefix,
+    retain=gdn_records.retain_checkpoint_histories, execute=gdn_multitoken.execute)
 Core = namedtuple('Core', 'x y')
 PAIR_ENV = dict(os.environ)
 PAIR_ENV.pop('QWEN_FAST_TP', None)
@@ -279,11 +286,11 @@ class CommitDmaTests(unittest.TestCase):
                 layers = [[tuple(tensor.shape) for tensor in layer] for layer in commit_layers(3, rows, 2)]
                 for prefix in range(rows + 1):
                     self.assertEqual(gdn_commit_dma_tp.validate_shapes(layers, prefix),
-                                     gdn_commit_dma.validate_shapes(layers, prefix))
+                                     PINNED.validate_shapes(layers, prefix))
             bad = [[tuple(tensor.shape) for tensor in commit_layers(1, 8, 2)[0]]]
             for layers, prefix in (([], 0), (bad * 49, 0), (bad, -1), (bad, 9), (bad, True)):
                 with self.assertRaises(ValueError) as theirs:
-                    gdn_commit_dma.validate_shapes(layers, prefix)
+                    PINNED.validate_shapes(layers, prefix)
                 with self.assertRaises(ValueError) as ours:
                     gdn_commit_dma_tp.validate_shapes(layers, prefix)
                 self.assertEqual(str(ours.exception), str(theirs.exception))
@@ -314,7 +321,7 @@ class CommitDmaTests(unittest.TestCase):
             return captured[0][1]
 
         with pair():
-            theirs, ours = recorded(gdn_commit_dma), recorded(gdn_commit_dma_tp)
+            theirs, ours = recorded(SimpleNamespace(prepare=PINNED.prepare)), recorded(gdn_commit_dma_tp)
         self.assertEqual(sorted(theirs), sorted(ours))
         for key in theirs:
             left, right = theirs[key].kernels[0], ours[key].kernels[0]
@@ -361,7 +368,7 @@ class ProjectedTests(unittest.TestCase):
             for shape, channels, count in cases:
                 states = self.states(channels, count)
                 try:
-                    expected = ('value', pinned_conv.validate_projected(shape, states))
+                    expected = ('value', PINNED.validate_projected(shape, states))
                 except ValueError as error:
                     expected = ('error', str(error))
                 try:
@@ -419,13 +426,13 @@ class RestoreAndRetainTests(unittest.TestCase):
     def test_the_restore_twin_does_what_the_pinned_one_does_at_the_pair(self):
         with pair():
             outcomes = []
-            for restore in (pinned_conv.restore_prefix, gdn_multitoken_conv_tp.restore_prefix):
+            for restore in (PINNED.restore_prefix, gdn_multitoken_conv_tp.restore_prefix):
                 ops = RecordingOperations()
                 result, entry, destinations = self.restore_case(2, 24, 5120)
                 restore(ops, result, entry, destinations, 3)
                 outcomes.append((ops.copies, ops.freed, [tuple(made.shape) for made in ops.sliced]))
             self.assertEqual(outcomes[0], outcomes[1])
-            for restore in (pinned_conv.restore_prefix, gdn_multitoken_conv_tp.restore_prefix):
+            for restore in (PINNED.restore_prefix, gdn_multitoken_conv_tp.restore_prefix):
                 ops = RecordingOperations()
                 result, entry, destinations = self.restore_case(2, 24, 5120)
                 restore(ops, result, entry, destinations, 0)
@@ -459,7 +466,7 @@ class RestoreAndRetainTests(unittest.TestCase):
     def test_the_retain_twin_agrees_with_the_pinned_one_and_counts_four_chips(self):
         with pair():
             outcomes = []
-            for retain in (gdn_records.retain_checkpoint_histories, gdn_records_tp.retain_checkpoint_histories):
+            for retain in (PINNED.retain, gdn_records_tp.retain_checkpoint_histories):
                 ops = RecordingOperations()
                 result, output = self.record_result(2, owned_extra=2)
                 retain(ops, result, output)
@@ -593,7 +600,7 @@ class MultitokenTests(unittest.TestCase):
     def test_at_the_pair_the_twin_builds_the_pinned_program(self):
         with pair():
             for fused in (True, False):
-                theirs = self.run_execute(gdn_multitoken.execute, 2, 8, 24, 5120, 3072, fused)
+                theirs = self.run_execute(PINNED.execute, 2, 8, 24, 5120, 3072, fused)
                 ours = self.run_execute(gdn_multitoken_tp.execute, 2, 8, 24, 5120, 3072, fused)
                 self.assertEqual(self.signature(theirs), self.signature(ours), 'fused=%s' % fused)
                 self.assertEqual(len(ours), 2)
