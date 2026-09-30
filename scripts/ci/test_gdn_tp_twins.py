@@ -22,7 +22,9 @@ import gdn_commit_dma_tp
 import gdn_conv_prefix_copy
 import gdn_conv_windows
 import gdn_multitoken_conv as pinned_conv
+import gdn_multitoken
 import gdn_multitoken_conv_tp
+import gdn_multitoken_tp
 import gdn_records
 import gdn_records_tp
 import gdn_state_copy
@@ -541,6 +543,114 @@ class PackedBlockAtFourCardsTests(unittest.TestCase):
         for result in results:
             self.assertEqual(result['packed_users'], 4)
             self.assertEqual(tuple(result['output'].shape), (1, 16, 1536))
+
+
+def multitoken_ttnn(record, chips):
+    """The FakeTTNN above plus what gdn_multitoken.execute uses: source-code kernel descriptors, compute config,
+    float32, row-major layout."""
+    fake = fake_ttnn(record, chips)
+
+    class Kernel(SimpleNamespace):
+        class SourceType:
+            SOURCE_CODE = 'source'
+
+    fake.KernelDescriptor = lambda **keywords: _kernel(Kernel, keywords)
+    fake.KernelDescriptor.SourceType = Kernel.SourceType
+    fake.ComputeConfigDescriptor = lambda **keywords: ('compute', tuple(sorted(keywords.items())))
+    fake.MathFidelity = SimpleNamespace(HiFi4='hifi4')
+    fake.float32, fake.ROW_MAJOR_LAYOUT = 'fp32', 'row'
+    fake.DataMovementProcessor = SimpleNamespace(RISCV_0='riscv0', RISCV_1='riscv1')
+    fake.NOC = SimpleNamespace(RISCV_0_default=0, RISCV_1_default=1)
+    return fake
+
+
+def _kernel(cls, keywords):
+    return cls(**keywords)
+
+
+class MultitokenTests(unittest.TestCase):
+    KERNELS = {'reader': 'reader-source', 'writer': 'writer-source', 'compute': 'compute-source'}
+
+    def run_execute(self, function, chips, rows, heads, channels, z_columns, fused=True):
+        record = []
+        found = tp_shapes.active()
+        qkv = FakeTensor((1, rows, channels), 100, chips)
+        beta = FakeTensor((1, rows, heads), 200, chips)
+        gate = FakeTensor((1, rows, heads), 300, chips)
+        initial = FakeTensor((1, heads, 128, 128), 400, chips)
+        extra = dict(z=FakeTensor((1, rows, z_columns), 500, chips), norm_w=FakeTensor((1, 1, 128), 600, chips)) if fused else {}
+        mesh = SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))
+        with patch.dict(sys.modules, {'ttnn': multitoken_ttnn(record, chips)}),                 patch.object(gdn_multitoken, 'validate_handoff_runtime'):
+            function(mesh, qkv, beta, gate, initial, self.KERNELS, **extra)
+        return record[0][1]
+
+    def signature(self, program):
+        result = {}
+        for key, value in program.items():
+            result[key] = [(kernel.compile_time_args, {x: dict(column) for x, column in kernel.runtime_args.items()})
+                           for kernel in value.kernels]
+        return result
+
+    def test_at_the_pair_the_twin_builds_the_pinned_program(self):
+        with pair():
+            for fused in (True, False):
+                theirs = self.run_execute(gdn_multitoken.execute, 2, 8, 24, 5120, 3072, fused)
+                ours = self.run_execute(gdn_multitoken_tp.execute, 2, 8, 24, 5120, 3072, fused)
+                self.assertEqual(self.signature(theirs), self.signature(ours), 'fused=%s' % fused)
+                self.assertEqual(len(ours), 2)
+
+    def test_four_cards_carry_their_head_count_pages_and_tile_offsets(self):
+        with four():
+            program = self.run_execute(gdn_multitoken_tp.execute, 4, 8, 12, 2560, 1536)
+        self.assertEqual(sorted(program), [((0, chip), (0, chip)) for chip in range(4)])
+        for chip in range(4):
+            reader, writer, compute = program[((0, chip), (0, chip))].kernels
+            # [Kt, Vt, 1, eps, scale, H, 1, Ct, 0, KOT, VOT, 3, 1, 1, WTZ, 0]
+            self.assertEqual([reader.compile_time_args[index] for index in (5, 7, 9, 10, 13, 14)],
+                             [12, 80, 16, 32, 1, 48])
+            self.assertEqual(writer.compile_time_args[:6], [4, 4, 1, 1, 12, 8])
+            self.assertEqual(len(reader.runtime_args), 2)   # 12 heads: a column of ten and one of two
+            self.assertEqual(sum(len(column) for column in reader.runtime_args.values()), 12)
+
+    def test_a_pair_sized_input_is_refused_at_four_cards_and_the_reverse(self):
+        with four():
+            with self.assertRaises(ValueError):
+                self.run_execute(gdn_multitoken_tp.execute, 4, 8, 24, 5120, 3072)
+            with self.assertRaisesRegex(ValueError, 'All 4 chips required'):
+                self.run_execute(gdn_multitoken_tp.execute, 2, 8, 12, 2560, 1536)
+        with pair():
+            with self.assertRaises(ValueError):
+                self.run_execute(gdn_multitoken_tp.execute, 2, 8, 12, 2560, 1536)
+
+    def test_run_projected_reaches_the_four_card_execute_with_the_four_card_columns(self):
+        calls = []
+        operations = RecordingOperations()
+        operations.transformer = SimpleNamespace(gdn_decode_conv_gates=lambda *arguments, **keywords: (
+            calls.append((keywords['channels'], keywords['a_col'], keywords['b_col'])) or [
+                Tensor('c', (1, 1, 2560), 4, 800), Tensor('b', (1, 1, 12), 4, 810), Tensor('g', (1, 1, 12), 4, 820)]))
+        counter = itertools.count(1000, 16)
+        operations.clone = lambda value, memory_config=None: Tensor('clone', value.shape, 4, next(counter))
+        operations.concat = lambda values, dim, memory_config=None: Tensor('cat', (1, len(values), values[0].shape[-1]), 4, next(counter))
+        operations.to_memory_config = lambda value, memory: value
+        operations.slice = lambda value, start, end, memory_config=None: Tensor(
+            'slice', tuple(b - a for a, b in zip(start, end)), 4, next(counter))
+        operations.DRAM_MEMORY_CONFIG, operations.L1_MEMORY_CONFIG = 'dram', 'l1'
+        launched = []
+        projected = Tensor('projected', (1, 2, 4128), 4, 100)
+        states = [Tensor('state%d' % index, (1, 1, 2560), 4, 200 + 10 * index) for index in range(4)]
+        taps = [Tensor('tap%d' % index, (1, 1, 2560), 4, 300 + 10 * index) for index in range(4)]
+        with four():
+            tp_addresses.install()
+            self.addCleanup(tp_addresses.uninstall)
+            with patch.object(gdn_multitoken_conv_tp, 'execute', side_effect=lambda *a, **k: (
+                    launched.append(k['z'].shape) or (Tensor('out', (1, 2, 1536), 4, 1), Tensor('st', (2, 12, 128, 128), 4, 2)))):
+                result = gdn_multitoken_conv_tp.run_projected(
+                    'mesh', projected, Tensor('initial', (1, 12, 128, 128), 4, 400), states, taps,
+                    Tensor('dt', (1, 1, 12), 4, 500), Tensor('neg', (1, 1, 12), 4, 510), Tensor('norm', (1, 1, 128), 4, 520),
+                    'kernels', operations)
+        self.assertEqual(calls, [(2560, 4096, 4108)] * 2)
+        self.assertEqual(launched, [(1, 2, 1536)])
+        self.assertEqual(result['materialized_conv_prefixes'], (1, 2))
 
 
 if __name__ == '__main__':

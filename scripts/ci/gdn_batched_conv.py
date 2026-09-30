@@ -32,6 +32,9 @@ def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, 
     found = tp_shapes.active()
     rows = validate_projected(tuple(projected.shape), conv_states)
     use_norm_batch = norm_batch_enabled(rows, norm_batch)
+    if use_norm_batch and tp_shapes.chip_count() != tp_shapes.PAIR:
+        # gdn_vsplit's 96 recurrence / 24 norm-gate workers and 384 state pages are the pair's (S2T-05b, not ported)
+        raise ValueError('The value-split norm batch is written for the (1, 2) pair')
     selected = convolution_checkpoints(rows, conv_checkpoints)
     if rows == 1:
         return run_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_A, norm_w, kernels,

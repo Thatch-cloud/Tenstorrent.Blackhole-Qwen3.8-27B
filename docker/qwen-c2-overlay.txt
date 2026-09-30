@@ -197,6 +197,7 @@ scripts/ci/tp_kernels.py
 scripts/ci/gdn_multitoken_conv_tp.py
 scripts/ci/gdn_records_tp.py
 scripts/ci/gdn_commit_dma_tp.py
+scripts/ci/gdn_multitoken_tp.py
 scripts/ci/gdn_commit_dma_tp.cpp
 scripts/ci/gdn_conv_prefix_copy_tp.cpp
 scripts/ci/gdn_conv_windows_tp.cpp
