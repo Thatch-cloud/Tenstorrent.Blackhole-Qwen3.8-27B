@@ -28,6 +28,9 @@ name: Qwen C2 serving image
 #            real text against v235's texts), matrix (a prompt length per user, solo vs concurrent
 #            under the exactness policy), memory (G5's DRAM lines), lifecycle (drops, cancels,
 #            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile.
+#            C2_GATE_PLAN parked-exact, parked-drafter, parked-lifecycle, parked-churn, parked-corner and
+#            parked-ballast (C2_GATE_BALLAST_MB) are Stage E's (parked per-slot engines): run them on
+#            c2-packed-prefix-parked, against its flag-off twin c2-packed-prefix on the same image.
 #            C2_GATE_SALT fresh|none salts every stream on a prefix-reuse profile (c2-packed-prefix: the
 #            capture path under the S2 plans; the gate mounts its own salt key).
 #            The driver refuses plans that do not fit the step's and the job's time left; every gate
@@ -479,6 +482,7 @@ jobs:
           GATE_POLICY_DECISION: ${{ steps.job.outputs.gate_policy_decision }}
           GATE_AUDITS: ${{ steps.job.outputs.gate_audits }}
           GATE_SALT: ${{ steps.job.outputs.gate_salt }}
+          GATE_BALLAST_MB: ${{ steps.job.outputs.gate_ballast_mb }}
         run: |
           set -euo pipefail
           # The fast path has never completed a request inside the serving image: every C2 rate was
@@ -530,7 +534,7 @@ jobs:
             ${GATE_PAIRS:+--pairs "$GATE_PAIRS"} ${GATE_FAMILIES:+--families "$GATE_FAMILIES"} \
             ${GATE_JIT:+--jit "$GATE_JIT"} ${GATE_POLICY:+--policy "$GATE_POLICY"} \
             ${GATE_POLICY_DECISION:+--policy-decision "$GATE_POLICY_DECISION"} ${GATE_AUDITS:+--audits "$GATE_AUDITS"} \
-            ${GATE_SALT:+--salt "$GATE_SALT"} 2>&1 \
+            ${GATE_SALT:+--salt "$GATE_SALT"} ${GATE_BALLAST_MB:+--ballast-mb "$GATE_BALLAST_MB"} 2>&1 \
             | tee "$RUNNER_TEMP/c2-results/gate.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv): the contract's own line, per arm.
           for log in "$results"/*/server.log; do

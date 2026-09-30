@@ -17,7 +17,7 @@ never guessed around. Stdlib only, Python 3.7 syntax: the gate reads this on the
     [PINDIAG] parked rebind peak slot=<k> P=<n> free_before=<b> free_at_peak=<b> held=<b> (QWEN_FAST_PARKED_AUDIT)
     [PINDIAG] parked slot <k> unparked: <reason>
     [PINDIAG] parked slot <k> re-parked ms=<f>
-    [PINDIAG] parked slot <k> single rebuilt at <park|idle> ms=<f>
+    [PINDIAG] parked slot <k> single rebuilt at <park|idle> ms=<f> trace_delta=<bytes|n/a> dram_delta=<bytes|n/a>
     [PINDIAG] parked slot <k> single kept released at <park|idle>: short of <terms> (free=.. largest_free=.. need=..)
     [PACKED-PROPOSE] released parked slot=<k> quad=<0|1> pairs=[...]    (dflash_packed_proposal_coordinator)
   the publish prewarm (publish_prewarm), required beside the parked warm:
@@ -60,7 +60,8 @@ PEAK_LINE = re.compile(r'\[PINDIAG\] parked rebind peak slot=([0-9]+) P=([0-9]+)
                        r'free_at_peak=([0-9]+) held=([0-9]+)')
 UNPARKED_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) unparked: (.*)$')
 REPARKED_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) re-parked ms=([0-9.]+)')
-REBUILT_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) single rebuilt at (\S+) ms=([0-9.]+)')
+REBUILT_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) single rebuilt at (\S+) ms=([0-9.]+)'
+                          r'(?: trace_delta=(\S+) dram_delta=(\S+))?')
 KEPT_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) single kept released at (\S+): short of (\S+) '
                        r'\(free=([0-9]+) largest_free=([0-9]+) need=([0-9]+)\)')
 RELEASED_LINE = re.compile(r'\[PACKED-PROPOSE\] released parked slot=(\S+) quad=([01]) pairs=(\[[^\]\n]*\])')
@@ -136,8 +137,10 @@ def scan(lines):
                 found = True
             match = REBUILT_LINE.search(line)
             if match:
-                facts['single_rebuilt'].append(dict(slot=int(match.group(1)), moment=match.group(2),
-                                                    ms=float(match.group(3))))
+                facts['single_rebuilt'].append(dict(
+                    slot=int(match.group(1)), moment=match.group(2), ms=float(match.group(3)),
+                    trace_delta=None if match.group(4) in (None, 'n/a') else int(match.group(4)),
+                    dram_delta=None if match.group(5) in (None, 'n/a') else int(match.group(5))))
                 found = True
             match = KEPT_LINE.search(line)
             if match:

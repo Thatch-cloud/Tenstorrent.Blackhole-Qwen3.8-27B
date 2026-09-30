@@ -95,7 +95,7 @@ class FormatConstantTests(unittest.TestCase):
     def test_stop_single_rebuilt_kept_and_release_lines(self):
         lines = [
             parked.STOPPED_MARKER.format(2, 4, 'free+largest', 1500000000, 900000000, 1200000000),
-            parked.SINGLE_REBUILT_MARKER.format(1, 'park', 88.5),
+            parked.SINGLE_REBUILT_MARKER.format(1, 'park', 88.5, 4194304, 227000000),
             parked.SINGLE_KEPT_MARKER.format(3, 'idle', 'free', 700000000, 600000000, 900000000),
             parked.UNPARKED_MARKER.format(2, 'pool slot moved: x=1'),
             parked.REPARKED_MARKER.format(2, 1234.5),
@@ -106,7 +106,8 @@ class FormatConstantTests(unittest.TestCase):
         facts = markers.scan('2026-01-01 00:00:00 | INFO | %s' % line for line in lines)
         self.assertEqual(facts['stopped'], [dict(k=2, slots=4, short='free+largest', free=1500000000,
                                                  largest_free=900000000, need=1200000000)])
-        self.assertEqual(facts['single_rebuilt'], [dict(slot=1, moment='park', ms=88.5)])
+        self.assertEqual(facts['single_rebuilt'], [dict(slot=1, moment='park', ms=88.5, trace_delta=4194304,
+                                                        dram_delta=227000000)])
         self.assertEqual(facts['single_kept'], [dict(slot=3, moment='idle', short='free', need=900000000)])
         self.assertEqual(facts['unparked'], [dict(slot=2, reason='pool slot moved: x=1')])
         self.assertEqual(facts['reparked'], [dict(slot=2, ms=1234.5)])

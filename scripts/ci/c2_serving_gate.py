@@ -138,6 +138,40 @@ NOT_COMPARABLE (real_text_compare.S2_EXACT_CLAIMS); --policy dc-i (the user's de
            quad was formed a released quad (W6c: the release line just ahead of that step's [PHASE] line).
   permuted  built, required only under D-c(i): two concurrent arms, the second admitted in reverse order;
            at least two SAME_PATH users (else NOT_EXERCISED), and no same-path user may differ.
+PARKED PLANS (Stage E, parked per-slot engines, QWEN_FAST_PARKED_ENGINES; the design's G-E0..G-E3). Run on a parked
+profile (--profile c2-packed-prefix-parked); the arms' flag-off reference is its twin, the profile less '-parked'
+(c2-packed-prefix), on the same image and the same prompts. Every parked arm's server log is read with parked_markers
+(4 of 4 engines built, the drafter warmed at 2048 with a publish prewarm that counted a pair, no unpark unless the arm
+injects one), every flag-off arm's must show none of it, and the judgements are parked_judge's. The strict policy holds
+throughout (QWEN_FAST_PARKED_ENGINES is an exactness claim, real_text_compare.S2_EXACT_CLAIMS).
+  parked-exact    G-E1 (a) and (f): one solo chain on slot 0 over parked_judge.RUNGS (123,136 first; the design's rungs
+           below 45 tokens cannot be sent as real text) with the budgets parked_judge.CHAIN_BUDGETS and ignore_eos on
+           the even rungs, sent descending on the flag-off twin (the reference) and on the parked profile in three
+           orders (descending, ascending, shuffled: --start-order, the same prompts): every user IDENTICAL to the
+           reference and the accepted-prefix sequences equal (G-E1 (g), solo); and the first request after an attach
+           (three attaches) IDENTICAL to the reference's.
+  parked-drafter  G-E1 (b), (g) and the negative controls, on parked_judge.DRAFTER_LENGTHS (eight users, four seats):
+           solo and concurrent arms on the twin and on the parked profile (QWEN_FAST_SHARD_CHECK=1 on the concurrent
+           ones), then the parked profile under QWEN_FAST_PARKED_NEGATIVE=carry and =drafter. Parked solo equals twin
+           solo in text and in drafting; parked concurrent equals parked solo in text; concurrent acceptance within
+           parked_judge.ACCEPTANCE_TOLERANCE; no pair fallback, no "Committed history exceeds", no quad disable, no
+           KV_SHARED. The carry control must change tokens; the drafter control must keep them and FAIL the
+           equivalence judge.
+  parked-lifecycle  G-E2: the lifecycle plan's event arms and solo reference on the parked profile (every row of the
+           design's 6.2 that the harness can time), and an arm that injects one park-time fault
+           (QWEN_FAST_PARKED_FAULT=park): the slot unparks once, the rest serve, the texts equal the solo arm's.
+  parked-churn    G-E3 (i): four arms of PARKED_CHURN_USERS users on four seats, random lengths and budgets
+           (parked_judge.churn_script, 200 admissions), QWEN_FAST_PARKED_AUDIT=1: no engine death, no hold with a seat
+           free, no refusal, the floors (rebind before-points included), zero unparks, the idle allocation back to the
+           attach's within IDLE_RETURN_GB, the trace region's use within TRACE_SPREAD_GB.
+  parked-corner   G-E3 (ii): four users decoding with a quad formed, one leaves, and a 123,136-token arrival takes its
+           seat, on the twin and the parked profile: recorded against the design's 5.3; only an engine death or a
+           text that differs fails it.
+  parked-ballast  G-E3 (iii): parked profile with QWEN_FAST_GATE_DRAM_BALLAST (--ballast-mb, sized from the G-E0 warm
+           arm's P7p reading: ballast_advice) - the 123,136-token arrival on an idle server, and beside three
+           decoders: no out-of-memory. On the warm plan a parked profile also runs G-E0: the attach at 131,072
+           (4 of 4), the P7p reading, the rebind's measured peak (QWEN_FAST_PARKED_AUDIT) and the single rebuild's
+           footprint, recorded, with the ballast advice.
 On an S2 profile the four S1 plans add their S2 checks too (memory: no hold or refusal and the floor).
 Every arm of an S2 plan or on an S2 profile (--jit auto) must leave the kernel cache as it found it: a judged
 arm that compiled is a problem (M1 warms it first), and a judged arm whose cache could not be counted leaves
@@ -200,6 +234,8 @@ sys.path.insert(0, HERE)
 import c2_serving_job  # noqa: E402
 import lever_n_m3native_gate as harness  # noqa: E402  (stdlib only; real_text_compare imports it too)
 import real_text_compare  # noqa: E402
+import parked_judge  # noqa: E402  (stdlib and real_text_compare only)
+import parked_markers  # noqa: E402  (stdlib only)
 import prefix_judge  # noqa: E402  (stdlib only)
 import prefix_markers  # noqa: E402  (stdlib only)
 import real_text_prompts  # noqa: E402
@@ -291,10 +327,14 @@ G4_ALL_AUDITS = (('QWEN_FAST_PRESTAGE_AUDIT', '1'), ('QWEN_FAST_PAIR_MASK_AUDIT'
 ALL_AUDIT_PLANS = ('mixed',)
 PADDED_PROBE_ENV = (('QWEN_FAST_PADDED_PROBE', '1'),)
 # What an arm may add with -e: the gate-only knobs, the padded probe and the G4 audits - never a profile key.
-ARM_ENV_NAMES = frozenset(harness.S2_GATE_KNOBS + ('QWEN_FAST_PADDED_PROBE',) + tuple(name for name, _ in G4_ALL_AUDITS))
+ARM_ENV_NAMES = frozenset(harness.S2_GATE_KNOBS + ('QWEN_FAST_PADDED_PROBE',) + tuple(name for name, _ in G4_ALL_AUDITS)
+                          # Stage E (the parked plans): the audit, the two controls, the fault, the ballast, the shard check
+                          + ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT',
+                             'QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_SHARD_CHECK'))
 S2_OFF_PROFILE, S2_GATE_PROFILE, S2_TRAFFIC_PROFILE = 'c2-gate', 'c2-packed-gate', 'c2-packed'
 EXACT_PROFILE = 'exact'
 S2_PLANS = c2_serving_job.S2_GATE_PLANS
+PARKED_PLANS = c2_serving_job.PARKED_GATE_PLANS
 WARM_PLANS = ('warm', 'warm-off')
 DEFAULT_PAIRS = 2
 BELOW_FAMILIES = (16640, 4352)
@@ -372,6 +412,23 @@ STREAM_SECONDS.update({'warm': 1800, 'warm-off': 900, 'control': 900, 'forced-ca
                        'lifecycle-arrival': 1800, 'mixed': 3600, 'short': 3600, 'boundaries': 3600,
                        'staggered': 3600, 'churn': 7200, 'permuted': 3600})
 WARM_SHORTER_SECONDS = 2400      # the 4 x 16384 and 4 x 4096 warm arms
+# Stage E's parked plans (the module docstring's PARKED PLANS). Every arm limit is what the plan's worst case is summed
+# from (worst_case_seconds), so they are the arms' own ceilings, not the plan's estimates: the chain arms take about 25
+# minutes, the first-request arms about 12.
+ARM_SECONDS.update({'parked-exact': 3600, 'parked-drafter': 3000, 'parked-lifecycle': 2700, 'parked-churn': 3600,
+                    'parked-corner': 3600, 'parked-ballast': 2400})
+STREAM_SECONDS.update({'parked-exact': 3600, 'parked-drafter': 1800, 'parked-lifecycle': 1800, 'parked-churn': 1800,
+                       'parked-corner': 3600, 'parked-ballast': 1800})
+PARKED_FIRST_SECONDS = 1500      # G-E1 (f): one request after an attach
+PARKED_FIRST_PROMPT, PARKED_FIRST_TOKENS = 4096, 64
+PARKED_CHURN_ARMS, PARKED_CHURN_USERS, PARKED_CHURN_LONGEST = 4, 50, 100000   # 4 x 50 = 200 admissions
+# A window of the corpus per user: 50 users still read at least 123k tokens each, 200 would not (real_text_prompts).
+CORNER_LENGTHS = (4096, 8192, 16384, 32768, 123136)     # G-E3 (ii): four decoders, then the arrival
+CORNER_MAX_TOKENS, CORNER_ARRIVAL_TOKENS = 2048, 256
+CORNER_DROP = '0:400'            # user 0 leaves after 400 chunks: every other decoder past 2048 of history, a quad formed
+BALLAST_DECODER_LENGTHS = (20000, 20000, 20000, 123136)   # G-E3 (iii): three decoders, then the arrival
+PARKED_AUDIT_ENV = (('QWEN_FAST_PARKED_AUDIT', '1'),)
+SHARD_CHECK_ENV = (('QWEN_FAST_SHARD_CHECK', '1'),)
 # The kernel cache (B6): the image's TT_METAL_CACHE, under /experiment-cache (a link to /models/.qwen-c2, the
 # hub's .qwen-c2 on the host: Dockerfile) or /models (the hub).
 KERNEL_CACHE_ENV = 'TT_METAL_CACHE'
@@ -490,6 +547,27 @@ def sticky_profile(profiles, name):
     """Whether the profile turns the fast path's sticky sessions on (c2-packed-prefix and its gate twin)."""
     return prefix_profile(profiles, name) and str(
         (profiles['profiles'][name].get('env') or {}).get(STICKY_FLAG, '0')) == '1'
+
+
+def parked_profile(profiles, name):
+    """Whether the profile turns Stage E's parked engines on (QWEN_FAST_PARKED_ENGINES=1: c2-packed-prefix-parked and its
+    gate twin)."""
+    return name in profiles['profiles'] and str(
+        (profiles['profiles'][name].get('env') or {}).get('QWEN_FAST_PARKED_ENGINES', '0')) == '1'
+
+
+def parked_pair(profiles, profile, plan):
+    """(the parked profile, its flag-off twin) a parked plan serves: --profile, and the profile less '-parked'.
+    PlanError when --profile is not a parked profile, or its twin is missing, parked itself, or lacks the extent flag."""
+    if not parked_profile(profiles, profile):
+        raise PlanError('%s is a parked-engines plan: run it on c2-packed-prefix-parked (a profile with '
+                        'QWEN_FAST_PARKED_ENGINES=1), not %s' % (plan, profile))
+    twin = profile.replace('-parked', '', 1)
+    if twin == profile or twin not in profiles['profiles'] or parked_profile(profiles, twin) \
+            or not s2_profile(profiles, twin):
+        raise PlanError('%s: profile %s has no flag-off twin %s (the profile less -parked, with %s=1 and without the '
+                        'parked flag) to hold it against' % (plan, profile, twin, EXTENT_FLAG))
+    return profile, twin
 
 
 def warm_profiles(profiles, profile):
@@ -643,6 +721,8 @@ def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.D
     other profile the S1 plans' arms are exactly what they were."""
     if plan in S2_PLANS:
         return s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2 or {})
+    if plan in PARKED_PLANS:
+        return parked_plan_arms(plan, profile, profiles, lengths, notes, s2 or {})
     arms = base_plan_arms(plan, profile, profiles, lengths, max_tokens, memory_prompt, notes)
     if profile in profiles['profiles'] and s2_profile(profiles, profile):
         env = s2_env(profiles, profile, (s2 or {}).get('audits'), g4=plan == 'matrix')
@@ -824,7 +904,11 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
         arms = []
         if plan == 'warm':
             need_profile(profiles, traffic, True, plan)
-            warm = list(lengths or WARM_LENGTHS)
+            parked_warm = parked_profile(profiles, traffic)
+            # G-E0: on a parked profile the solo chain also runs every G-E1 rung once (the kernel cache is warm for
+            # G-E1's judgement), and every arm reads the parked attach (4 of 4 at 131,072, P7p, R, the single).
+            warm = list(lengths or (sorted(set(WARM_LENGTHS) | set(parked_judge.RUNGS)) if parked_warm
+                                    else WARM_LENGTHS))
             short = [index for index, length in enumerate(warm) if length < 2048]
             common, text, _ = sized_arm_args(traffic, profiles, plan, warm, WARM_SHORT_TOKENS if short
                                              else WARM_TOKENS)
@@ -834,13 +918,16 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
                 args += ['--user-max-tokens', ','.join('%d:%d' % (index, WARM_SHORT_TOKENS) for index in short),
                          '--user-ignore-eos', ','.join(str(index) for index in short)]
             arms.append(Arm('warm-solo', args, ARM_SECONDS['warm'], profile=traffic,
-                            env=s2_env(profiles, traffic), judged=False, role='solo'))
+                            env=s2_env(profiles, traffic) + (PARKED_AUDIT_ENV if parked_warm else ()), judged=False,
+                            role='solo', parked=dict(on=True) if parked_warm else None))
+        gate_parked = plan == 'warm' and parked_profile(profiles, gate)
         arms.append(Arm('%s-4x%d' % (plan, BRINGUP_PROMPT), v235_args(profiles, gate, plan), ARM_SECONDS['warm-off'],
-                        profile=gate, env=s2_env(profiles, gate), judged=False, role='four'))
+                        profile=gate, env=s2_env(profiles, gate) + (PARKED_AUDIT_ENV if gate_parked else ()),
+                        judged=False, role='four', parked=dict(on=True) if gate_parked else None))
         for prompt in (BELOW_FAMILIES[0] - 256, BELOW_FAMILIES[1] - 256):
             arms.append(Arm('%s-4x%d' % (plan, prompt), four_user_args(profiles, gate, plan, prompt), WARM_SHORTER_SECONDS,
                             profile=gate, env=((harness.CAPTURE_POSITION_FLAG, str(prompt)),) + s2_env(profiles, gate),
-                            judged=False, role='four'))
+                            judged=False, role='four', parked=dict(on=True) if gate_parked else None))
         if plan == 'warm-off':
             # M2 judges exact's bring-up for zero new cache entries, and exact's environment is neither c2-gate's nor
             # an S2 profile's: its programs are warmed here, at the shape M2 serves.
@@ -906,6 +993,170 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
         arms.append(Arm('staggered-probe', base + ['--users', users, '--stagger', str(stagger)], seconds,
                         env=env + PADDED_PROBE_ENV, rerun=False, role='probe'))
     return arms
+
+
+def user_list(values):
+    return ','.join(str(value) for value in values)
+
+
+def parked_chain_args(profiles, profile, plan, lengths, order):
+    """The G-E1 solo chain's harness arguments on `profile` in `order` (parked_judge.chain): one server, the requests
+    one after another, each user's own budget and ignore_eos, and --start-order for the two other orders."""
+    rungs, budgets, ignore, permutation = parked_judge.chain(order)
+    if lengths:
+        rungs = list(lengths)
+        budgets = [parked_judge.CHAIN_BUDGETS[index % len(parked_judge.CHAIN_BUDGETS)] for index in range(len(rungs))]
+        ignore = [index for index in range(len(rungs)) if index % 2 == 0]
+        if order == 'descending':
+            permutation = None
+        elif order == 'ascending':
+            permutation = list(reversed(range(len(rungs))))
+        else:
+            permutation = list(range(0, len(rungs), 2)) + list(range(1, len(rungs), 2))
+    common, text_, _ = sized_arm_args(profile, profiles, plan, rungs, max(budgets))
+    args = common + ['--prompt-lengths', text_, '--max-tokens', str(max(budgets)), '--users', '1',
+                     '--sequential-users', str(len(rungs)),
+                     '--user-max-tokens', ','.join('%d:%d' % item for item in enumerate(budgets)),
+                     '--user-ignore-eos', user_list(ignore)]
+    if permutation:
+        args += ['--start-order', user_list(permutation)]
+    return args
+
+
+def parked_script_args(profiles, profile, plan, lengths, budgets, ignore_all=True, concurrent=False, extra=()):
+    """A per-user-length script's harness arguments: solo (--sequential-users) or concurrent (staggered, alive check)."""
+    common, text_, _ = sized_arm_args(profile, profiles, plan, lengths, max(budgets))
+    args = common + ['--prompt-lengths', text_, '--max-tokens', str(max(budgets)),
+                     '--user-max-tokens', ','.join('%d:%d' % item for item in enumerate(budgets))]
+    if ignore_all:
+        args += ['--user-ignore-eos', user_list(range(len(lengths)))]
+    if concurrent:
+        args += ['--users', str(len(lengths)), '--stagger', str(STAGGER)]
+    else:
+        args += ['--users', '1', '--sequential-users', str(len(lengths))]
+    return args + list(extra)
+
+
+def parked_plan_arms(plan, profile, profiles, lengths, notes, s2):
+    """plan_arms for PARKED_PLANS (the module docstring's PARKED PLANS): the parked profile's arms beside the flag-off
+    twin's on the same prompts. `lengths` replaces parked-exact's rungs."""
+    notes = notes if notes is not None else []
+    parked, twin = parked_pair(profiles, profile, plan)
+    seconds = ARM_SECONDS[plan]
+    off_env, on_env = s2_env(profiles, twin), s2_env(profiles, parked)
+    seats = str(profile_seats(profiles, parked))
+    context, ceiling, room = profile_limits(profiles, parked)
+    off = dict(parked=dict(on=False))
+    if plan == 'parked-exact':
+        if lengths is None:
+            notes.append('parked-exact: the design\'s rungs 1, 2, 15, 16 and 17 are not sent: a real-text prompt below '
+                         '%d tokens has no room for its template (real_text_prompts.COMPACT_MIN_TARGET); the CPU '
+                         'tests hold those host checks' % real_text_prompts.COMPACT_MIN_TARGET)
+        arms = [Arm('exact-f-desc', parked_chain_args(profiles, twin, plan, lengths, 'descending'), seconds,
+                    profile=twin, env=off_env, judged=True, role='ref', **off)]
+        for name, order in (('exact-p-desc', 'descending'), ('exact-p-asc', 'ascending'), ('exact-p-shuf', 'shuffled')):
+            arms.append(Arm(name, parked_chain_args(profiles, parked, plan, lengths, order), seconds, profile=parked,
+                            env=on_env + PARKED_AUDIT_ENV, role='p', order=order, parked=dict(on=True)))
+        first = four_user_args(profiles, twin, plan, PARKED_FIRST_PROMPT, PARKED_FIRST_TOKENS)
+        single = first[:first.index('--users') + 1] + ['1'] + first[first.index('--users') + 2:]
+        for name, served, env, role in (('exact-first-f', twin, off_env, 'first-ref'),
+                                        ('exact-first-a', parked, on_env + PARKED_AUDIT_ENV, 'first'),
+                                        ('exact-first-b', parked, on_env + PARKED_AUDIT_ENV, 'first')):
+            args = list(single)
+            args[args.index('--expect-profile') + 1] = served
+            arms.append(Arm(name, args, PARKED_FIRST_SECONDS, profile=served, env=env, role=role,
+                            parked=dict(on=served == parked)))
+        return arms
+    if plan == 'parked-drafter':
+        chosen = list(lengths or parked_judge.DRAFTER_LENGTHS)
+        budgets = [parked_judge.DRAFTER_BUDGET] * len(chosen)
+        arms = []
+
+        def script(served, concurrent):
+            return parked_script_args(profiles, served, plan, chosen, budgets, concurrent=concurrent)
+        arms.append(Arm('drafter-f-solo', script(twin, False), ARM_SECONDS[plan], profile=twin, env=off_env,
+                        role='f-solo', **off))
+        arms.append(Arm('drafter-p-solo', script(parked, False), ARM_SECONDS[plan], profile=parked,
+                        env=on_env + PARKED_AUDIT_ENV, role='p-solo', parked=dict(on=True, zero_counts=True)))
+        arms.append(Arm('drafter-f-live', script(twin, True), ARM_SECONDS[plan], profile=twin,
+                        env=off_env + SHARD_CHECK_ENV, role='f-live', **off))
+        arms.append(Arm('drafter-p-live', script(parked, True), ARM_SECONDS[plan], profile=parked,
+                        env=on_env + PARKED_AUDIT_ENV + SHARD_CHECK_ENV, role='p-live',
+                        parked=dict(on=True, zero_counts=True)))
+        for kind in parked_judge_negatives():
+            arms.append(Arm('drafter-neg-%s' % kind, script(parked, False), ARM_SECONDS[plan], profile=parked,
+                            env=on_env + (('QWEN_FAST_PARKED_NEGATIVE', kind),), role='neg-%s' % kind, kind=kind,
+                            parked=dict(on=True, negative=kind)))
+        return arms
+    if plan == 'parked-lifecycle':
+        check_lengths(parked, LIFECYCLE_LENGTHS, room, 'parked-lifecycle prompt lengths')
+        check_budget(parked, LIFECYCLE_MAX_TOKENS, ceiling, 'parked-lifecycle --max-tokens')
+        base = common_args(parked, context, STREAM_SECONDS[plan]) + [
+            '--prompt-lengths', user_list(LIFECYCLE_LENGTHS), '--max-tokens', str(LIFECYCLE_MAX_TOKENS)]
+        users = str(len(LIFECYCLE_LENGTHS))
+        arms = [Arm('parked-%s' % arm, base + ['--users', users, '--stagger', str(STAGGER), '--alive-check', seats]
+                    + events, seconds, profile=parked, env=on_env + PARKED_AUDIT_ENV, rerun=True, role='event',
+                    parked=dict(on=True)) for arm, events in LIFECYCLE_EVENTS]
+        solo = base + ['--users', '1', '--sequential-users', users, '--alive-check', '1']
+        arms.append(Arm('parked-lifecycle-solo', solo, seconds, profile=parked, env=on_env + PARKED_AUDIT_ENV,
+                        rerun=True, role='solo', parked=dict(on=True)))
+        arms.append(Arm('parked-lifecycle-fault', solo, seconds, profile=parked,
+                        env=on_env + PARKED_AUDIT_ENV + (('QWEN_FAST_PARKED_FAULT', 'park'),), rerun=False,
+                        role='fault', parked=dict(on=True, fault=True, allow_unparks=True)))
+        return arms
+    if plan == 'parked-churn':
+        arms = []
+        for index in range(PARKED_CHURN_ARMS):
+            churn_lengths, churn_budgets = parked_judge.churn_script(index, PARKED_CHURN_USERS, PARKED_CHURN_LONGEST)
+            common, text_, _ = sized_arm_args(parked, profiles, plan, churn_lengths, max(churn_budgets))
+            args = common + ['--prompt-lengths', text_, '--max-tokens', str(max(churn_budgets)),
+                             '--users', str(len(churn_lengths)),
+                             '--user-max-tokens', ','.join('%d:%d' % item for item in enumerate(churn_budgets)),
+                             '--user-ignore-eos', user_list(range(len(churn_lengths))),
+                             '--stagger', str(STAGGER), '--alive-check', seats]
+            arms.append(Arm('parked-churn-%d' % (index + 1), args, seconds, profile=parked,
+                            env=on_env + PARKED_AUDIT_ENV, role='churn', parked=dict(on=True)))
+        return arms
+    if plan == 'parked-corner':
+        budgets = [CORNER_MAX_TOKENS] * 4 + [CORNER_ARRIVAL_TOKENS]
+        extra = ['--drops', CORNER_DROP]
+        arms = []
+        for name, served, env, flags in (('corner-f', twin, off_env, off), ('corner-p', parked, on_env,
+                                                                        dict(parked=dict(on=True)))):
+            common, text_, _ = sized_arm_args(served, profiles, plan, list(CORNER_LENGTHS), max(budgets))
+            args = common + ['--prompt-lengths', text_, '--max-tokens', str(CORNER_MAX_TOKENS), '--users',
+                             str(len(CORNER_LENGTHS)), '--user-max-tokens',
+                             ','.join('%d:%d' % item for item in enumerate(budgets)), '--user-ignore-eos', '0,1,2,3',
+                             '--stagger', str(STAGGER), '--alive-check', seats] + extra
+            arms.append(Arm(name, args, seconds, profile=served, env=env, role='ref' if served == twin else 'p',
+                            **flags))
+        return arms
+    if plan == 'parked-ballast':
+        megabytes = s2.get('ballast_mb')
+        if not megabytes:
+            raise PlanError('parked-ballast needs --ballast-mb (C2_GATE_BALLAST_MB): the ballast in MB per chip, sized '
+                            'from the G-E0 warm arm\'s P7p reading (ballast_advice)')
+        knob = (('QWEN_FAST_GATE_DRAM_BALLAST', str(int(megabytes) * 2 ** 20)),)
+        arms = []
+        common, text_, _ = sized_arm_args(parked, profiles, plan, [123136], 64)
+        arms.append(Arm('ballast-arrival', common + ['--prompt-lengths', text_, '--max-tokens', '64', '--users', '1'],
+                        seconds, profile=parked, env=on_env + knob, role='arrival',
+                        parked=dict(on=True, ballast=True)))
+        lengths_ = list(BALLAST_DECODER_LENGTHS)
+        budgets = [CORNER_MAX_TOKENS] * 3 + [CORNER_ARRIVAL_TOKENS]
+        common, text_, _ = sized_arm_args(parked, profiles, plan, lengths_, max(budgets))
+        arms.append(Arm('ballast-live', common + [
+            '--prompt-lengths', text_, '--max-tokens', str(CORNER_MAX_TOKENS), '--users', str(len(lengths_)),
+            '--user-max-tokens', ','.join('%d:%d' % item for item in enumerate(budgets)),
+            '--user-ignore-eos', '0,1,2', '--stagger', str(STAGGER), '--alive-check', seats],
+            seconds, profile=parked, env=on_env + knob, role='live', parked=dict(on=True, ballast=True)))
+        return arms
+    raise ValueError('unknown parked plan %r' % plan)
+
+
+def parked_judge_negatives():
+    """The negative controls' names, in the order their arms run (serving_parked_engines.NEGATIVES)."""
+    return ('carry', 'drafter')
 
 
 def worst_case_seconds(plans, arms_of):
@@ -1371,7 +1622,7 @@ class Runner(object):
         plan's or an S2 profile's (M1 warms exactly those); judge takes every other arm too (M2), record none."""
         if plan in WARM_PLANS or not judged or self.jit == 'record':
             return False
-        return self.jit == 'judge' or plan in S2_PLANS or self.s2_for(profile)
+        return self.jit == 'judge' or plan in S2_PLANS or plan in PARKED_PLANS or self.s2_for(profile)
 
     def relaxation(self, profile):
         """The relaxation a verdict on `profile` applies: dc-i only on an S2 profile, only with the decision."""
@@ -1400,10 +1651,11 @@ class Runner(object):
         finally:
             remove_container(name)
 
-    def run(self, arm, gate_args, timeout, profile=None, env=(), judged=False, measure=False):
+    def run(self, arm, gate_args, timeout, profile=None, env=(), judged=False, measure=False, parked=None):
         """One arm on --profile, or (an S2 arm) on `profile` with `env` added; `judged`: its kernel-cache
         growth is a problem (judges()); `measure`: the host reads its four-live rounds from the whole server
-        log (report['c2_gate_live4']: both arms of a G3 pair read the same way)."""
+        log (report['c2_gate_live4']: both arms of a G3 pair read the same way). `parked` (a parked plan's arms, and the warm
+        plan's on a parked profile): what the arm's server log must show of the parked engines (parked_arm_check)."""
         profile = profile or self.profile
         arm_dir = os.path.join(self.results, arm)
         os.makedirs(arm_dir, exist_ok=True)
@@ -1459,6 +1711,11 @@ class Runner(object):
                 self.unjudged.extend('%s: %s' % (arm, text) for text in prefix_missing)
                 report['c2_gate_prefix'] = dict(salt=self.salt, problems=prefix_problems, not_exercised=prefix_missing,
                                                 facts=facts)
+            if parked is not None:
+                parked_problems, parked_missing, record = parked_arm_check(arm, log_text, parked)
+                problems += ['parked: %s' % item for item in parked_problems]
+                self.unjudged.extend('%s: %s' % (arm, item) for item in parked_missing)
+                report['c2_gate_parked'] = record
             if log_text is not None and (measure or self.s2_for(profile) or env):
                 report['c2_gate_live4'] = host_live_rate(log_text)
             if cache['before'] is not None or self.s2_for(profile) or env:
@@ -1501,6 +1758,76 @@ class Runner(object):
         return report
 
 
+def parked_arm_check(arm, log_text, expect):
+    """(problems, not exercised, record) of one arm's server log against what the arm expects of the parked engines
+    (`expect`: on, allow_unparks, fault, negative, ballast, zero_counts): parked_markers.problems for the flag-on arm
+    (4 of 4, the 2048 warm with its prewarm, no unpark), none of it for the flag-off one, the gate-only controls
+    printing exactly what the arm set, the ballast line when the arm holds a ballast, and - where asked - none of
+    parked_judge.LOG_COUNTS. The record keeps the facts the plans judge and print."""
+    if log_text is None:
+        return ['no server.log: the parked markers cannot be checked'], [], dict(on=bool(expect.get('on')))
+    facts = parked_markers.scan(log_text.splitlines())
+    on = bool(expect.get('on'))
+    problems, missing = parked_markers.problems(facts, on, allow_unparks=bool(expect.get('allow_unparks')))
+    if on:
+        seen = [(entry['kind'], entry['value']) for entry in facts['negative']]
+        wanted = []
+        if expect.get('negative'):
+            wanted = [('mode', expect['negative'])]
+        elif expect.get('fault'):
+            wanted = [('fault', 'park')]
+        if seen != wanted:
+            problems.append('the gate-only controls the server printed are %s, the arm set %s' % (seen or 'none',
+                                                                                                 wanted or 'none'))
+        if expect.get('ballast') and not facts['ballast']:
+            problems.append('no "%s" line: the ballast never reached the attach' % parked_markers.BALLAST.strip())
+        if not expect.get('ballast') and facts['ballast']:
+            problems.append('a ballast line in an arm that asked for none')
+    counts = parked_judge.log_counts(log_text)
+    if on and expect.get('zero_counts'):
+        problems += parked_judge.count_problems(counts, arm)
+    record = dict(on=on, counts=counts, problems=problems, not_exercised=missing, facts=parked_facts_brief(facts))
+    return problems, missing, record
+
+
+def parked_facts_brief(facts):
+    """parked_markers.scan's facts as the gate report keeps them: every attach fact whole, the per-request ones counted."""
+    peaks = [entry['held'] for entry in facts['peaks']]
+    rebuilt = facts['single_rebuilt']
+    return dict(built=facts['built'], stopped=facts['stopped'], warm=facts['warm'], ballast=facts['ballast'],
+                negative=facts['negative'], prewarm=facts['prewarm'], p7p=facts['p7p'][:8],
+                rebinds=len(facts['rebinds']), rebind_ms=[entry['ms'] for entry in facts['rebinds']][:64],
+                slots=sorted(set(entry['slot'] for entry in facts['rebinds'])),
+                peak_held_max=max(peaks) if peaks else None, peaks=len(peaks), unparked=facts['unparked'],
+                reparked=len(facts['reparked']), single_rebuilt=rebuilt[:8], single_rebuilt_count=len(rebuilt),
+                single_kept=len(facts['single_kept']), released=len(facts['released']),
+                rebind_ops=len(facts['rebind_ops']))
+
+
+def parked_of(report):
+    """An arm's parked record (Runner.run's report['c2_gate_parked']) - its facts and counts - or {}."""
+    return ((report or {}).get('c2_gate_parked') or {})
+
+
+def parked_facts_of(report):
+    return parked_of(report).get('facts') or {}
+
+
+def arm_report(runner, name):
+    """The report an arm wrote (its m3native-gate.json), for a plan that needs an arm the runner did not hand back."""
+    try:
+        with open(os.path.join(runner.results, name, 'm3native-gate.json')) as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def parked_result(lines, problems, shortfalls, facts=None, verdicts=()):
+    """A parked plan's result: its lines, then with_checks (FAIL on a problem, NOT_EXERCISED where it would pass)."""
+    result = dict(verdict=worst(list(verdicts) + ['PASS']), lines=list(lines))
+    return with_checks(result, problems, shortfalls, facts)
+
+
 def bringup_warning(profiles, profile):
     """Why v235's shape may be refused at this profile's edge, or None. The contract caps a prompt at
     context less the output ceiling, or less min_answer_tokens (profile_limits): c2 admits at most
@@ -1525,7 +1852,9 @@ def run_arm(runner, plan, spec, suffix=''):
     name, args, timeout = spec
     profile = spec_profile(runner, spec)
     return runner.run(name + suffix, args, timeout, profile=getattr(spec, 'profile', None), env=getattr(spec, 'env', ()),
-                      judged=runner.judges(plan, profile, getattr(spec, 'judged', True)), measure=plan in S2_PLANS)
+                      judged=runner.judges(plan, profile, getattr(spec, 'judged', True)),
+                      measure=plan in S2_PLANS or plan in PARKED_PLANS,
+                      parked=(getattr(spec, 'extra', None) or {}).get('parked'))
 
 
 def s2_of(report):
@@ -1551,7 +1880,7 @@ def s2_g4_problems(label, report):
     return problems
 
 
-def memory_s2_checks(label, report, seats=MEMORY_USERS):
+def memory_s2_checks(label, report, seats=MEMORY_USERS, required_op='engine'):
     """(problems, shortfalls) of G5 on an S2 profile (s2-design B4, B8; M8, M11). A DRAM hold is a failed fit only
     with a seat free: its decodes below `seats`. W6b now asks only then and logs a hold line per (request,
     decodes); its first cut asked with every seat decoding too, where a hold changes nothing (the prompt could not
@@ -1609,9 +1938,9 @@ def memory_s2_checks(label, report, seats=MEMORY_USERS):
     if before.get('unread'):
         shortfalls.append('%s: %d ledger before-points read no DRAM (%s): the floor over them is unjudged' % (
             label, before['unread'], '; '.join(before.get('unread_lines') or [])))
-    if s2.get('extent_replay') and not (before.get('by_op') or {}).get('engine'):
-        shortfalls.append('%s: no "[MEMLEDGER] before op=engine" point (W6d): the floor was judged without the '
-                          'engine builds' % label)
+    if s2.get('extent_replay') and not (before.get('by_op') or {}).get(required_op):
+        shortfalls.append('%s: no "[MEMLEDGER] before op=%s" point (W6d): the floor was judged without the '
+                          '%s' % (label, required_op, 'engine builds' if required_op == 'engine' else 'rebinds'))
     return problems, shortfalls
 
 
@@ -2415,16 +2744,292 @@ def run_below(plan, runner, arms):
 
 
 def run_warm(plan, runner, arms):
-    """M1: every arm must complete as asked; the kernel cache's growth is recorded, never judged."""
+    """M1: every arm must complete as asked; the kernel cache's growth is recorded, never judged. On a parked profile
+    (G-E0) every arm also shows the parked attach (4 of 4, the 2048 warm and its prewarm: Runner.run's parked check),
+    and the result records the attach, the P7p reading, R's measured lower bound, the single's footprint and the
+    ballast advice (parked_g_e0)."""
     results = {}
+    parked_reports = {}
     for spec in arms:
         report = run_arm(runner, plan, spec)
         problems = arm_problems(spec[0], report, asked(spec[1])) if report is not None else ['%s: no gate report' % spec[0]]
         results[spec[0]] = dict(verdict='FAIL' if problems else 'PASS', problems=problems,
                                 kernel_cache=(runner.arms.get(spec[0]) or {}).get('kernel_cache'))
-    return dict(verdict=worst([one['verdict'] for one in results.values()]), arms=results,
-                lines=['%s: problem: %s' % (arm, p) for arm, one in results.items() for p in one['problems']] +
-                ['%s %s kernel cache %s' % (arm, one['verdict'], one['kernel_cache']) for arm, one in results.items()])
+        if report is not None and parked_of(report).get('on'):
+            parked_reports[spec[0]] = report
+    lines = (['%s: problem: %s' % (arm, p) for arm, one in results.items() for p in one['problems']] +
+             ['%s %s kernel cache %s' % (arm, one['verdict'], one['kernel_cache']) for arm, one in results.items()])
+    result = dict(verdict=worst([one['verdict'] for one in results.values()]), arms=results, lines=lines)
+    if parked_reports:
+        problems, shortfalls, facts, more = parked_g_e0(parked_reports)
+        result['lines'] = lines + more
+        result = with_checks(result, problems, shortfalls, facts)
+    return result
+
+
+def parked_g_e0(reports):
+    """G-E0 (design section 9) over the parked warm arms' reports: (problems, shortfalls, facts, lines). The attach
+    built 4 of 4 at every arm (Runner.run's parked check judges it), the gate twin's at 131,072; P7p is recorded per
+    chip; R is the rebind's measured lower bound (the audit's peak reading, and the ledger's op=rebind bracket) with
+    the design's estimate beside it; the single's trace and DRAM footprints come from its rebuild lines; the ballast
+    advice sizes parked-ballast's job key."""
+    import serving_prefill_admission as admission
+
+    problems, shortfalls, lines, facts = [], [], [], {}
+    for name, report in sorted(reports.items()):
+        brief = parked_facts_of(report)
+        built = (brief.get('built') or [{}])[-1]
+        p7p = brief.get('p7p') or []
+        facts[name] = dict(attach_ms=built.get('attach_ms'), k=built.get('k'), free=built.get('free'),
+                           largest_free=built.get('largest_free'), trace_used=built.get('trace_used'),
+                           p7p=p7p, peak_held_max=brief.get('peak_held_max'), rebinds=brief.get('rebinds'),
+                           single=brief.get('single_rebuilt'))
+        lines.append('%s: parked attach k=%s attach_ms=%s free=%s largest_free=%s trace_used=%s; P7p %s; R measured '
+                     '(caller-held, lower bound) %s B over %s rebinds, design estimate %d B; single rebuilt %d times %s' % (
+                         name, built.get('k'), built.get('attach_ms'), built.get('free'), built.get('largest_free'),
+                         built.get('trace_used'),
+                         '; '.join('chip%d free %.3f GB largest %.1f MB' % (entry['chip'], entry['free_gb'],
+                                                                             entry['largest_free_mb'])
+                                   for entry in p7p[:2]) or 'not read', brief.get('peak_held_max'), brief.get('peaks'),
+                         admission.PARKED_REBIND_BYTES, brief.get('single_rebuilt_count') or 0,
+                         [(entry['trace_delta'], entry['dram_delta']) for entry in brief.get('single_rebuilt') or []]))
+        if not p7p:
+            shortfalls.append('%s: no "[MEMLEDGER] phase=P7p" line (QWEN_FAST_MEMORY_LEDGER=1): the parked baseline is '
+                              'unrecorded' % name)
+        if brief.get('peak_held_max') is None:
+            shortfalls.append('%s: no "%s" line (QWEN_FAST_PARKED_AUDIT=1): R is unmeasured' % (name, parked_markers.PEAK.strip()))
+    gate = [name for name in reports if '4x%d' % BRINGUP_PROMPT in name]
+    frees = [entry['free_gb'] for name in gate for entry in facts[name]['p7p']]
+    if frees:
+        advice = parked_judge.ballast_advice(int(min(frees) * 1e9))
+        facts['ballast_advice_bytes'] = advice
+        lines.append('ballast advice: C2_GATE_BALLAST_MB=%d (the smallest P7p free reading %.3f GB per chip less the '
+                     'prefill transient, R and the stranded bytes)' % (advice // 2 ** 20, min(frees)))
+    return problems, shortfalls, facts, lines
+
+
+def run_parked_plan(plan, runner, profiles, arms):
+    """The parked plans (the module docstring's PARKED PLANS)."""
+    return dict(zip(PARKED_PLANS, (run_parked_exact, run_parked_drafter, run_parked_lifecycle, run_parked_churn,
+                                   run_parked_corner, run_parked_ballast)))[plan](plan, runner, profiles, arms)
+
+
+def run_parked_arms(plan, runner, arms):
+    """Every arm in order: {name: report}, and the problems each arm's own judgement adds (arm_problems against what it
+    asked, and the S2 arms' audit and idle-commit checks)."""
+    reports, problems = {}, []
+    for spec in arms:
+        report = reports[spec[0]] = run_arm(runner, plan, spec)
+        if report is None:
+            problems.append('%s: the arm left no gate report' % spec[0])
+            continue
+        problems += arm_problems(spec[0], report, asked(spec[1])) + s2_g4_problems(spec[0], report)
+    return reports, problems
+
+
+def compare_arms(label, reference, other, problems):
+    """Every user of `other` against `reference` under the strict policy; the verdicts (or None, a report missing)."""
+    if reference is None or other is None:
+        return None
+    verdicts, differences = parked_judge.token_verdicts(reference, other)
+    problems += ['%s: %s' % (label, item) for item in differences]
+    return verdicts
+
+
+def parked_rebind_problems(name, report, streams, problems, shortfalls):
+    """A parked arm rebinds once per request that reached the engine: its rebind lines equal its streams (a request the
+    lifecycle ended before its engine has none)."""
+    brief = parked_facts_of(report)
+    if brief.get('rebinds') is None:
+        return
+    if brief['rebinds'] != streams:
+        shortfalls.append('%s: %d rebind lines for %d streams' % (name, brief['rebinds'], streams))
+
+
+def run_parked_exact(plan, runner, profiles, arms):
+    """G-E1 (a), (f) and (g)'s solo half."""
+    reports, problems = run_parked_arms(plan, runner, arms)
+    shortfalls, lines, facts = [], [], {}
+    reference = reports.get('exact-f-desc')
+    users = asked(next(spec for spec in arms if spec[0] == 'exact-f-desc')[1])['streams']
+    for spec in arms:
+        if spec.role == 'p':
+            verdicts = compare_arms('%s against exact-f-desc' % spec[0], reference, reports.get(spec[0]), problems)
+            lines.append('%s: users %s' % (spec[0], verdicts))
+            facts[spec[0]] = dict(users=verdicts)
+            if reference is not None and reports.get(spec[0]) is not None:
+                more, unseen, detail = parked_judge.equivalence(reference, reports[spec[0]], users=users)
+                problems += ['%s: %s' % (spec[0], item) for item in more]
+                shortfalls += ['%s: %s' % (spec[0], item) for item in unseen]
+                facts[spec[0]]['drafting_identical'] = detail['solo']['identical']
+            parked_rebind_problems(spec[0], reports.get(spec[0]), users, problems, shortfalls)
+    first_ref = reports.get('exact-first-f')
+    for spec in arms:
+        if spec.role == 'first':
+            verdicts = compare_arms('%s against exact-first-f' % spec[0], first_ref, reports.get(spec[0]), problems)
+            lines.append('%s: the first request after an attach: %s' % (spec[0], verdicts))
+            facts[spec[0]] = dict(users=verdicts)
+    return parked_result(lines, problems, shortfalls, facts)
+
+
+def run_parked_drafter(plan, runner, profiles, arms):
+    """G-E1 (b), (g) and both negative controls."""
+    reports, problems = run_parked_arms(plan, runner, arms)
+    shortfalls, lines, facts = [], [], {}
+    f_solo, p_solo = reports.get('drafter-f-solo'), reports.get('drafter-p-solo')
+    f_live, p_live = reports.get('drafter-f-live'), reports.get('drafter-p-live')
+    users = asked(next(spec for spec in arms if spec[0] == 'drafter-f-solo')[1])['streams']
+    verdicts = compare_arms('drafter-p-solo against drafter-f-solo', f_solo, p_solo, problems)
+    lines.append('parked solo against flag-off solo: users %s' % verdicts)
+    verdicts = compare_arms('drafter-p-live against drafter-p-solo', p_solo, p_live, problems)
+    lines.append('parked concurrent against parked solo: users %s' % verdicts)
+    if None not in (f_solo, p_solo):
+        more, unseen, detail = parked_judge.equivalence(f_solo, p_solo, f_live, p_live, users=users)
+        problems += more
+        shortfalls += unseen
+        facts['equivalence'] = detail
+        live = detail.get('live')
+        lines.append('drafting: solo sequences identical %s; concurrent acceptance %s' % (
+            detail['solo']['identical'], 'unmeasured' if live is None else '%(other)s against %(reference)s '
+                                                                            '(%(delta)+.4f)' % live))
+    for spec in arms:
+        if spec.role in ('neg-carry', 'neg-drafter'):
+            report = reports.get(spec[0])
+            if report is None or f_solo is None:
+                continue
+            more, detail = parked_judge.negative_verdict(spec.extra['kind'], f_solo, report)
+            problems += ['%s: %s' % (spec[0], item) for item in more]
+            facts[spec[0]] = detail
+            lines.append('%s: users %s%s' % (spec[0], detail['users'], ' - the control did its job' if not more
+                                             else ' - the control did NOT do its job'))
+    return parked_result(lines, problems, shortfalls, facts)
+
+
+def run_parked_lifecycle(plan, runner, profiles, arms):
+    """G-E2: the lifecycle plan's event arms and solo on the parked profile (run_lifecycle), and the injected park-time
+    fault: one unpark with its reason, the slot served by today's builds, its texts equal to the solo arm's."""
+    events_and_solo, fault = arms[:-1], arms[-1]
+    base = run_lifecycle(plan, runner, events_and_solo)
+    report = run_arm(runner, plan, fault)
+    solo = arm_report(runner, 'parked-lifecycle-solo')
+    problems, shortfalls, lines, facts = [], [], [], {}
+    if report is None:
+        problems.append('%s: the arm left no gate report' % fault[0])
+    else:
+        problems += arm_problems(fault[0], report, asked(fault[1])) + s2_g4_problems(fault[0], report)
+        brief = parked_facts_of(report)
+        unparked = brief.get('unparked') or []
+        if len(unparked) != 1 or unparked[0].get('reason') != 'injected park fault (gate only)':
+            problems.append('%s: the injected fault should leave exactly one unpark with its reason, the log shows %s'
+                            % (fault[0], unparked))
+        if not brief.get('reparked'):
+            shortfalls.append('%s: the slot was never re-parked at an idle moment (the lifecycle\'s idle callback fires '
+                              'only on a step that schedules nothing): the rest of the arm ran on per-request builds'
+                              % fault[0])
+        facts['fault'] = dict(unparked=unparked, reparked=brief.get('reparked'), rebinds=brief.get('rebinds'))
+        if solo is not None:
+            verdicts = compare_arms('%s against parked-lifecycle-solo' % fault[0], solo, report, problems)
+            lines.append('%s: users %s; unparks %d, re-parks %s, rebinds %s' % (fault[0], verdicts, len(unparked),
+                                                                               brief.get('reparked'), brief.get('rebinds')))
+        else:
+            shortfalls.append('parked-lifecycle-solo left no report to hold the fault arm\'s texts against')
+    result = dict(base)
+    result['verdict'] = worst([base['verdict'], 'PASS'])
+    return with_checks(result, problems, shortfalls, facts)
+
+
+def run_parked_churn(plan, runner, profiles, arms):
+    """G-E3 (i): each arm's floors, holds and refusals (memory_s2_checks over the rebind before-points), its alive check,
+    its idle return to the attach's allocation, the trace region's spread and its rebinds."""
+    problems, shortfalls, lines, facts = [], [], [], {}
+    for spec in arms:
+        report = run_arm(runner, plan, spec)
+        if report is None:
+            problems.append('%s: the arm left no gate report' % spec[0])
+            continue
+        want = asked(spec[1])
+        seats = profile_seats(profiles, spec_profile(runner, spec))
+        memory, unjudged = memory_s2_checks(spec[0], report, seats, required_op='rebind')
+        problems += arm_problems(spec[0], report, want) + s2_g4_problems(spec[0], report) + memory
+        shortfalls += unjudged
+        if not report.get('alive'):
+            problems.append('%s: the engine did not answer every seat after the streams' % spec[0])
+        more, unread = parked_judge.idle_return(ledger_drift(report))
+        problems += ['%s: %s' % (spec[0], item) for item in more]
+        shortfalls += ['%s: %s' % (spec[0], item) for item in unread]
+        region = s2_of(report).get('trace_region') or {}
+        more, unread = parked_judge.trace_spread(region)
+        problems += ['%s: %s' % (spec[0], item) for item in more]
+        shortfalls += ['%s: %s' % (spec[0], item) for item in unread]
+        parked_rebind_problems(spec[0], report, want['streams'], problems, shortfalls)
+        releases = s2_of(report).get('releases') or {}
+        facts[spec[0]] = dict(before=s2_of(report).get('before'), dram_hold=s2_of(report).get('dram_hold'),
+                              trace_region=region, releases=releases, ledger_drift=ledger_drift(report),
+                              rebinds=parked_facts_of(report).get('rebinds'))
+        lines.append('%s: %d users; rebinds %s; unparks %d; ledger drift %s; trace region %s; quad departures %s' % (
+            spec[0], want['streams'], parked_facts_of(report).get('rebinds'),
+            len(parked_facts_of(report).get('unparked') or []), ledger_drift(report), trace_region_text(region),
+            releases.get('quad_departures')))
+        lines.append(full_seat_admissions_text((s2_of(report).get('dram_hold') or {}).get('fit_readings'), seats))
+    return parked_result(lines, problems, shortfalls, facts)
+
+
+def run_parked_corner(plan, runner, profiles, arms):
+    """G-E3 (ii): the worst corner on the twin and the parked profile. Recorded against the design's 5.3 (the hold or the
+    fit, the floors); only an engine death, a failed arm or a differing text fails it."""
+    reports, problems = run_parked_arms(plan, runner, arms)
+    shortfalls, lines, facts = [], [], {}
+    for name in ('corner-f', 'corner-p'):
+        report = reports.get(name)
+        if report is None:
+            continue
+        s2 = s2_of(report)
+        hold = s2.get('dram_hold') or {}
+        releases = s2.get('releases') or {}
+        facts[name] = dict(dram_hold=hold, before=s2.get('before'), releases=releases,
+                           lifecycle=(report.get('lifecycle') or {}).get('events'))
+        lines.append('%s: DRAM holds %s (decodes %s), lifted %s, refused %s; floor %s GB; quad departures %s, released '
+                     'quad lines %s' % (name, hold.get('holds'), hold.get('hold_decodes'), hold.get('lifted'),
+                                         s2.get('quarantined'), (s2.get('before') or {}).get('floor_gb'),
+                                         releases.get('quad_departures'), releases.get('quad')))
+        if not releases.get('quad_departures'):
+            shortfalls.append('%s: no request left while a quad was formed: the corner (a quad retiring as a seat '
+                              'frees) was not exercised' % name)
+        events = (report.get('lifecycle') or {}).get('events') or {}
+        if not any(entry.get('fired') for entry in events.values()):
+            shortfalls.append('%s: the drop %s never fired: no seat freed for the arrival' % (name, CORNER_DROP))
+    if reports.get('corner-f') is not None and reports.get('corner-p') is not None:
+        compared = real_text_compare.lifecycle_pass(reports['corner-p'], reports['corner-f'])
+        verdicts = [user['verdict'] for user in compared['users']]
+        problems += ['corner-p user %s is %s against the flag-off arm at character %s' % (
+            user['user'], user['verdict'], user.get('first_divergence')) for user in compared['users']
+            if user['verdict'] != 'IDENTICAL']
+        lines.append('corner-p against corner-f: users %s' % verdicts)
+    return parked_result(lines, problems, shortfalls, facts)
+
+
+def run_parked_ballast(plan, runner, profiles, arms):
+    """G-E3 (iii): the ballast arms. No out-of-memory: both arms complete, every stream as asked, the ballast line seen.
+    A hold beside the three decoders is recorded (its fit against the design's 5.3), never failed."""
+    reports, problems = run_parked_arms(plan, runner, arms)
+    shortfalls, lines, facts = [], [], {}
+    for spec in arms:
+        report = reports.get(spec[0])
+        if report is None:
+            continue
+        s2 = s2_of(report)
+        hold = s2.get('dram_hold') or {}
+        ballast = (parked_facts_of(report).get('ballast') or [{}])[0]
+        facts[spec[0]] = dict(dram_hold=hold, ballast=ballast, p7p=parked_facts_of(report).get('p7p'),
+                              before=s2.get('before'))
+        lines.append('%s: ballast %s B in %s buffers; DRAM holds %s (decodes %s), lifted %s, refused %s; floor %s GB' % (
+            spec[0], ballast.get('bytes'), ballast.get('buffers'), hold.get('holds'), hold.get('hold_decodes'),
+            hold.get('lifted'), s2.get('quarantined'), (s2.get('before') or {}).get('floor_gb')))
+        if s2.get('quarantined'):
+            problems.append('%s: %d requests refused: the parked need did not cover the arrival' % (
+                spec[0], s2['quarantined']))
+    return parked_result(lines, problems, shortfalls, facts)
+
 
 
 def trace_region_text(region):
@@ -2572,7 +3177,8 @@ def counts_cache(plans, profiles, profile, jit):
     """Whether a run counts the kernel cache before and after every arm: an S2 plan or profile, or an explicit --jit
     judge or record. S1 plans on an S1 profile under --jit auto read nothing more than before W11 (no docker image
     inspect, no find) and their reports and summary gain no kernel-cache keys."""
-    return any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, profile) or jit != 'auto'
+    return (any(plan in S2_PLANS or plan in PARKED_PLANS for plan in plans) or s2_profile(profiles, profile)
+            or jit != 'auto')
 
 
 def with_unjudged(result, unjudged):
@@ -2595,6 +3201,8 @@ def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2
         runner.log('[C2-GATE] note: %s' % note)
     if plan in S2_PLANS:
         result = run_s2_plan(plan, runner, profiles, reference, arms)
+    elif plan in PARKED_PLANS:
+        result = run_parked_plan(plan, runner, profiles, arms)
     elif plan == 'bringup':
         warning = bringup_warning(profiles, runner.profile)
         if warning:
@@ -2709,6 +3317,9 @@ def build_parser():
     parser.add_argument('--audits', choices=c2_serving_job.AUDIT_SETS, default='extent',
                         help='extent (the extent audit on every S2 arm but control\'s timing arms) or all (also '
                              'prestage, pair-mask and fused-commit on the G4 arms)')
+    parser.add_argument('--ballast-mb', type=int, default=None,
+                        help='parked-ballast: the ballast (QWEN_FAST_GATE_DRAM_BALLAST) in MB per chip, sized from the '
+                             'G-E0 warm arm P7p reading (the warm plan prints the advice)')
     parser.add_argument('--salt', choices=c2_serving_job.SALT_MODES, default=None,
                         help='fresh or none: every arm on a prefix-reuse profile, each stream salted under the gate\'s '
                              'own key (fresh) or explicitly unsalted (the module docstring\'s SALTED ARMS)')
@@ -2746,7 +3357,10 @@ def s2_options(options, log):
     if options.policy == 'dc-i' and not (options.policy_decision or '').strip():
         log('refused: --policy dc-i needs --policy-decision: only the user\'s D-c decision relaxes the strict policy')
         return None
-    return dict(pairs=options.pairs, families=families, audits=options.audits)
+    if options.ballast_mb is not None and not 1 <= options.ballast_mb <= c2_serving_job.MAX_BALLAST_MB:
+        log('refused: --ballast-mb must be 1..%d, got %d' % (c2_serving_job.MAX_BALLAST_MB, options.ballast_mb))
+        return None
+    return dict(pairs=options.pairs, families=families, audits=options.audits, ballast_mb=options.ballast_mb)
 
 
 def write_phase_record(results, result):
@@ -2835,7 +3449,7 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     env=getattr(spec, 'env', ()), salt=options.salt, salt_key_path=salt_key_path))))
         return 0
     cache_dir = None
-    s2_run = any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, options.profile)
+    s2_run = any(plan in S2_PLANS or plan in PARKED_PLANS for plan in plans) or s2_profile(profiles, options.profile)
     if cache_entries is None and execute is None and counts_cache(plans, profiles, options.profile, options.jit):
         # The kernel cache the image's arms read and write (B6), counted before and after every arm - only on a run
         # that judges or records it: S1 plans on an S1 profile (--jit auto) read nothing more than before W11.

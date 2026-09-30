@@ -368,6 +368,24 @@ def peak_reading(pool):
     return None if reading is None else reading['free']
 
 
+def footprint(pool):
+    """(trace-region bytes in use, smallest free DRAM bytes) over the chips, each None when it cannot be read: what
+    a single rebuild's footprint is the difference of (SINGLE_REBUILT_MARKER; G-E0 records the single's trace)."""
+    import serving_prefill_admission as admission
+
+    reading, _ = admission.dram_reading(pool)
+    free = None if reading is None else reading['free']
+    used = None
+    statistics = getattr(pool, 'trace_statistics', None)
+    try:
+        chips = statistics() if callable(statistics) else None
+        if isinstance(chips, (list, tuple)) and chips:
+            used = max(int(chip['allocated']) for chip in chips)
+    except Exception:
+        used = None
+    return used, free
+
+
 def rebind_device(device, taps, *, position, window=None, negative=None, audit=False):
     """Stage E: bind a parked DFlashDevice to a request prefilled to `position`, from its window's taps (the
     prefill capture's outputs), as its constructor seeds a fresh one, without capturing anything (design
@@ -471,7 +489,8 @@ REPARKED_MARKER = '[PINDIAG] parked slot {} re-parked ms={:.1f}'
 STOPPED_MARKER = '[PINDIAG] parked engines stopped at k={} of {}: short of {} (free={} largest_free={} need={})'
 # A released single-user proposal capture rebuilt when its slot parks (after a detach, or at an idle moment), or
 # kept released because the rebuild would leave the split short for the longest parked arrival.
-SINGLE_REBUILT_MARKER = '[PINDIAG] parked slot {} single rebuilt at {} ms={:.1f}'
+SINGLE_REBUILT_MARKER = ('[PINDIAG] parked slot {} single rebuilt at {} ms={:.1f} trace_delta={} dram_delta={} '
+                         '(bytes per chip, n/a when unread)')
 SINGLE_KEPT_MARKER = '[PINDIAG] parked slot {} single kept released at {}: short of {} (free={} largest_free={} need={})'
 # QWEN_FAST_GATE_DRAM_BALLAST (GATE ONLY, G-E3's ballast arm): bytes per chip held unread from the end of the parked
 # build to close, so the admissions run at the boundary of the parked need (design section 9).
@@ -978,6 +997,7 @@ class ParkedEngineSet:
 
         started = time.perf_counter()
         device = entry.device
+        used_before, free_before = footprint(self.pool)
         # The ledger reads the rebuild either side (a no-op unless QWEN_FAST_MEMORY_LEDGER=1), at the measured S.
         token = memory_ledger.before('single', estimate=single_capture_bytes(), point='slot=%d at=%s' % (entry.index,
                                                                                                          moment))
@@ -987,7 +1007,10 @@ class ParkedEngineSet:
             device._packed_capture_released = False
         finally:
             memory_ledger.after(token)
-        self.log(SINGLE_REBUILT_MARKER, entry.index, moment, (time.perf_counter() - started) * 1000)
+        used_after, free_after = footprint(self.pool)
+        self.log(SINGLE_REBUILT_MARKER, entry.index, moment, (time.perf_counter() - started) * 1000,
+                 'n/a' if None in (used_before, used_after) else used_after - used_before,
+                 'n/a' if None in (free_before, free_after) else free_before - free_after)
         return True
 
     def idle(self):
