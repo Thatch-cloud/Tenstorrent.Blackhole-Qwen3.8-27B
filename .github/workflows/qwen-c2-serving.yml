@@ -118,7 +118,8 @@ jobs:
           echo "=== tt-smi reset options"; smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
           "$smi" --version 2>&1 | head -2; "$smi" --help 2>&1 | grep -i -E -A1 "reinit|--reset|-r " | head -12
           echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
-          echo "=== agent"; journalctl --user -u thatch-node-agent --since -3h --no-pager 2>&1 | grep -v -i heartbeat | tail -15
+          # pipefail survives set +e: a journal of heartbeats only (grep -v selects nothing) must not fail the step (run 36710266877).
+          echo "=== agent"; journalctl --user -u thatch-node-agent --since -3h --no-pager 2>&1 | grep -v -i heartbeat | tail -15 || true
       - name: Status of the four-card set
         if: contains(steps.job.outputs.actions, 'status') && steps.job.outputs.cards == 'quad'
         working-directory: c2
@@ -183,7 +184,8 @@ jobs:
             python3 -c 'import sys; sys.stdout.write(open(sys.argv[1], errors="replace").read().replace(chr(92) + "n", chr(10)))' "$d/$f" \
               | grep -v -E '^\[[0-9a-f]+:[0-9]+\] \[ *[0-9]+\]' | tail -80
           done
-          echo "=== agent"; journalctl --user -u thatch-node-agent --since -30min --no-pager 2>&1 | grep -v -i heartbeat | tail -40
+          # pipefail survives set +e: a journal of heartbeats only (grep -v selects nothing) must not fail the step (run 36710266877).
+          echo "=== agent"; journalctl --user -u thatch-node-agent --since -30min --no-pager 2>&1 | grep -v -i heartbeat | tail -40 || true
       - name: Take the platform serving container down
         if: contains(steps.job.outputs.actions, 'unserve')
         shell: bash
