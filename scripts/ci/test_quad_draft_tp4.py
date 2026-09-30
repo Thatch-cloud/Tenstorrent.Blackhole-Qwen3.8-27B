@@ -19,8 +19,12 @@ the hardware half, scripts/ci/references/tp4-draft-jobs):
     four singles' rows (every user's features, candidates and scores), a refused block reported per chip;
   - the trace: the bucket owns FOUR users' placeholder banks (1, 2, 2048, 128), copies each user's ACTIVE bank into them every
     round (so a swap of the four-card slide is followed), and its host inputs are the two pairs' uploads row block for row block;
-  - the coordinator at four cards: it reaches the twin, refuses what the four-card quad cannot serve (the live-banks flag, a
-    (1, 2) mesh, a missing flag) with the reason, and the S2 pooled shapes carry the quad's slots;
+    under QWEN_FAST_FUSED_COMMIT_LIVE_BANKS (with the four-card fused commit and its in-place slides) it binds the pool's ACTIVE banks
+    instead, owns no placeholders, copies nothing while every device's live bank is the pool's active one, and copies only a device on
+    the spare side into the pool's active bank (the pair's own normalisation, logged the same way);
+  - the coordinator at four cards: it reaches the twin, refuses what the four-card quad cannot serve (the live-banks flag without the
+    fused commit and its in-place slides, a (1, 2) mesh, a missing flag) with the reason, serves the live-banks flag with them, and
+    the S2 pooled shapes carry the quad's slots;
   - shipping: both copy lists and the overlay carry the twin and the audit, and the CPU suite runs this file.
 
     py -3.11 -B -m unittest test_quad_draft_tp4      (from scripts/ci)
@@ -45,6 +49,7 @@ import torch  # noqa: E402
 import draft_singles_audit  # noqa: E402
 import pair_row_exact  # noqa: E402
 import pair_row_exact_tp  # noqa: E402
+import fused_commit as pinned_fused  # noqa: E402  (the pair's; at four cards sys.modules holds the twin)
 import quad_draft as pinned  # noqa: E402
 import quad_draft_tp as twin  # noqa: E402
 import tp_addresses  # noqa: E402
@@ -67,7 +72,7 @@ TWIN_OWN = {'heads', 'missing_requirements', 'note', 'validate_quad', 'quad_fold
             'quad_unfold_output', 'fold_attention', 'pairs_attention', 'quad_head_map', 'split_projected_heads',
             'project_key_value', 'concatenate_query_heads', 'quad_fused_convolution', 'halves_convolution',
             'head_candidates', 'QuadPass', 'read_quad_outputs', 'select_quad_outputs', 'PreparedQuadDFlashProposal',
-            'refusal', '_tiled_dram'}
+            'refusal', '_tiled_dram', 'live_banks_requested', 'live_banks_missing'}
 
 
 def clean_environment(**flags):
@@ -158,6 +163,28 @@ class WidthTests(unittest.TestCase):
                                  '[PINDIAG] quad draft engaged slots=[0,1,2,3] heads=16/4x2 rows=64 sdpa=pairs conv=halves',
                                  '[PINDIAG] quad draft engaged slots=[0,1,2,3] heads=64/16 rows=64 sdpa=fold conv=110'])
         self.assertRegex(lines[0], base.quad_draft.MARKER.replace('[', r'\[').replace(']', r'\]'))
+
+    def test_the_live_banks_flag_needs_the_fused_commit_and_its_in_place_slides(self):
+        live = 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS'
+        both = dict(QWEN_FAST_FUSED_COMMIT='1', QWEN_FAST_FUSED_COMMIT_INPLACE='1')
+        self.assertEqual(twin.live_banks_missing({}), [])
+        self.assertEqual(twin.live_banks_missing({live: '0'}), [])
+        self.assertEqual(twin.live_banks_missing({live: 'true'}), [], 'only 1 requests it')
+        self.assertEqual(twin.live_banks_missing({live: '1'}), ['QWEN_FAST_FUSED_COMMIT', 'QWEN_FAST_FUSED_COMMIT_INPLACE'])
+        self.assertEqual(twin.live_banks_missing(dict({live: '1'}, QWEN_FAST_FUSED_COMMIT='1')),
+                         ['QWEN_FAST_FUSED_COMMIT_INPLACE'])
+        self.assertEqual(twin.live_banks_missing(dict({live: '1'}, QWEN_FAST_FUSED_COMMIT_INPLACE='1')),
+                         ['QWEN_FAST_FUSED_COMMIT'])
+        self.assertEqual(twin.live_banks_missing(dict(both, **{live: '1'})), [])
+        self.assertTrue(twin.live_banks_requested({live: '1'}))
+        self.assertFalse(twin.live_banks_requested({live: '0'}))
+        # the twin's notion is the pinned fused commit's own (live_bank_history returns banks only under it)
+        import fused_commit
+
+        for environ in (dict(both, **{live: '1'}), dict({live: '1'}, QWEN_FAST_FUSED_COMMIT='1'), dict(both)):
+            with self.subTest(environ=environ):
+                self.assertEqual(not twin.live_banks_missing(environ) and twin.live_banks_requested(environ),
+                                 fused_commit.live_banks_enabled(environ))
 
     def test_the_four_card_requirements_are_three_flags_and_no_live_banks(self):
         self.assertEqual(twin.REQUIRED_FLAGS, ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PAIR_ROW_EXACT', 'QWEN_FAST_ROUND_B1'))
@@ -1171,6 +1198,99 @@ class TraceTests(unittest.TestCase):
         self.assertEqual([ops.normalize(layer[name]) for cache in bucket.cached_history for layer in cache
                           for name in ('k', 'v')], placeholders)
 
+    # -- live banks -------------------------------------------------------------------------------
+    LIVE = dict(QWEN_FAST_FUSED_COMMIT='1', QWEN_FAST_FUSED_COMMIT_INPLACE='1', QWEN_FAST_FUSED_COMMIT_LIVE_BANKS='1')
+
+    def live_build(self):
+        """Four devices whose pooled slots hold the banks their draft caches are live on (the fused commit's steady state: the
+        cache's active bank IS the pool's active one)."""
+        ops = RecordingOps4()
+        devices = quad_devices4(ops)
+        for device in devices:
+            device.pool_slot.kv = [dict(active=layer, spare={name: FakeTensor4(torch.zeros(1), 'bf16', 'tile', True, ops.addresses)
+                                                             for name in ('k', 'v')}) for layer in device.kv_history.active]
+        return ops, devices, twin.PreparedQuadDFlashProposal(devices)
+
+    def pool_active(self, devices):
+        return [layer['active'][name] for device in devices for layer in device.pool_slot.kv for name in ('k', 'v')]
+
+    def test_live_banks_bind_the_pools_active_banks_own_no_placeholders_and_copy_nothing_when_aligned(self):
+        with patch.dict(os.environ, self.LIVE), patch.object(pinned_fused, '_LIVE_NOTED', []):
+            ops, devices, trace = self.live_build()
+            lines, loguru = base.logged()
+            with loguru, patch('memory_ledger.record') as ledger:
+                self.assertTrue(trace.prepare_device((11, 22, 33, 44)))
+                before = len(ops.events)
+                self.assertTrue(trace.prepare_device((55, 66, 77, 88)))
+                round_events = ops.events[before:]
+        bucket = trace.buckets[(2048,) * 4]
+        self.assertTrue(bucket.live_banks)
+        held = [layer[name] for cache in bucket.cached_history for layer in cache for name in ('k', 'v')]
+        pool = self.pool_active(devices)
+        self.assertEqual(len(held), 40)
+        self.assertTrue(all(mine is theirs for mine, theirs in zip(held, pool)), "the pool's active banks, user-major then layer")
+        uploads = [event for event in ops.events if event[0] == 'from_torch' and event[2] is True]
+        self.assertEqual(len(uploads), 6, 'ids, mask and four rope tables: no placeholder is uploaded')
+        self.assertEqual(len(ledger.call_args.kwargs['quad_placeholders']), 6)
+        self.assertEqual(len(trace.owned), 6)
+        self.assertEqual([event[0] for event in round_events if event[0] in ('slice', 'copy')], [], 'aligned: nothing is copied')
+        self.assertEqual([line for line in lines if line.startswith(pinned_fused.LIVE_BANKS_MARKER)],
+                         ['[PINDIAG] pair live banks engaged pair=[0, 1, 2, 3] context=(2048, 2048, 2048, 2048)'])
+        self.assertFalse([line for line in lines if line.startswith(pinned_fused.LIVE_BANKS_NORMALISED)])
+        self.assertEqual(bucket.inputs[-40:], pool)
+
+    def test_a_device_on_the_spare_side_is_copied_into_the_pools_active_bank_and_only_that_device(self):
+        with patch.dict(os.environ, self.LIVE), patch.object(pinned_fused, '_LIVE_NOTED', []):
+            ops, devices, trace = self.live_build()
+            with base.logged()[1], patch('memory_ledger.record'):
+                trace.prepare_device((1, 2, 3, 4))
+            # device 2 reached the steady state holding the pool's spare (an odd number of ramp swaps): its live banks are the spare
+            devices[2].kv_history.active = [layer['spare'] for layer in devices[2].pool_slot.kv]
+            lines, loguru = base.logged()
+            before = len(ops.events)
+            with loguru:
+                trace.prepare_device((5, 6, 7, 8))
+            events = ops.events[before:]
+        slices = [event for event in events if event[0] == 'slice']
+        copies = [event for event in events if event[0] == 'copy']
+        self.assertEqual(len(slices), 10)
+        self.assertEqual(len(copies), 10)
+        self.assertEqual({(event[2], event[3]) for event in slices}, {((0, 0, 0, 0), (1, 2, 2048, 128))})
+        spare = [ops.normalize(layer['spare'][name]) for layer in devices[2].pool_slot.kv for name in ('k', 'v')]
+        active = [ops.normalize(layer['active'][name]) for layer in devices[2].pool_slot.kv for name in ('k', 'v')]
+        self.assertEqual([event[1] for event in slices], spare, 'read from the device\'s own live (spare-side) banks')
+        self.assertEqual([event[2] for event in copies], active, 'into the pool\'s active banks')
+        self.assertEqual([line for line in lines if line.startswith(pinned_fused.LIVE_BANKS_NORMALISED)],
+                         ['[PACKED-PROPOSE] live banks pair=[0, 1, 2, 3] normalised=10'])
+
+    def test_a_failed_live_build_frees_only_the_quads_own_buffers_and_close_never_frees_a_pool_bank(self):
+        with patch.dict(os.environ, self.LIVE), patch.object(pinned_fused, '_LIVE_NOTED', []):
+            ops, devices, trace = self.live_build()
+            devices[0].execute_proposal.side_effect = RuntimeError('capture failed')
+            with base.logged()[1], self.assertRaises(RuntimeError):
+                trace.prepare_device((1, 2, 3, 4))
+            freed = [event for event in ops.events if event[0] == 'deallocate']
+            self.assertEqual(len(freed), 6, 'ids, mask and the four rope tables')
+            pool = {ops.normalize(value) for value in self.pool_active(devices)}
+            self.assertFalse(pool & {event[1] for event in freed})
+            devices[0].execute_proposal.side_effect = None
+            ops2, devices2, trace2 = self.live_build()
+            with base.logged()[1], patch('memory_ledger.record'):
+                trace2.prepare_device((1, 2, 3, 4))
+            trace2.close()
+            freed = [event for event in ops2.events if event[0] == 'deallocate']
+            self.assertEqual(len(freed), 6)
+            self.assertFalse({ops2.normalize(value) for value in self.pool_active(devices2)} & {event[1] for event in freed})
+
+    def test_live_banks_without_the_flags_they_need_never_bind_and_the_bucket_says_so(self):
+        """The engage-time refusal keeps this from happening in the served process; a bucket built anyway (a test, a future caller)
+        refuses to bind banks the fused commit does not hold in place."""
+        with patch.dict(os.environ, {'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS': '1'}):
+            ops, devices, trace = self.live_build()
+            with base.logged()[1], patch('memory_ledger.record'), self.assertRaises(ValueError):
+                trace.prepare_device((1, 2, 3, 4))
+        self.assertEqual(trace.buckets, {})
+
     def test_every_rounds_host_inputs_are_the_two_pairs_uploads(self):
         """Rows [32p, 32p + 32) of the quad's ids, rope.q and live_k are pair p's, and the mask is the pair fold's, bit
         for bit, under the pair's own QWEN_FAST_ROUND_B1 build at four cards."""
@@ -1368,9 +1488,17 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(self.refuse(environ={}), 'the four-card quad serves QWEN_FAST_TP=4 only')
         self.assertEqual(self.refuse(environ=dict(FOUR_FLAGS, QWEN_FAST_PACKED_PROPOSAL='0', QWEN_FAST_ROUND_B1='0')),
                          'requires QWEN_FAST_PACKED_PROPOSAL=1,QWEN_FAST_ROUND_B1=1')
-        self.assertIn('needs the four-card fused commit', self.refuse(
-            environ=dict(FOUR_FLAGS, QWEN_FAST_FUSED_COMMIT_LIVE_BANKS='1')))
+        live = dict(FOUR_FLAGS, QWEN_FAST_FUSED_COMMIT_LIVE_BANKS='1')
+        self.assertEqual(self.refuse(environ=live), 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1 needs QWEN_FAST_FUSED_COMMIT=1,'
+                                                    'QWEN_FAST_FUSED_COMMIT_INPLACE=1 (the live bank must never move)')
+        self.assertEqual(self.refuse(environ=dict(live, QWEN_FAST_FUSED_COMMIT='1')),
+                         'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1 needs QWEN_FAST_FUSED_COMMIT_INPLACE=1 (the live bank must never move)')
+        self.assertEqual(self.refuse(environ=dict(live, QWEN_FAST_FUSED_COMMIT_INPLACE='1')),
+                         'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1 needs QWEN_FAST_FUSED_COMMIT=1 (the live bank must never move)')
+        self.assertIsNone(self.refuse(environ=dict(live, QWEN_FAST_FUSED_COMMIT='1', QWEN_FAST_FUSED_COMMIT_INPLACE='1')))
         self.assertIsNone(self.refuse(environ=dict(FOUR_FLAGS, QWEN_FAST_FUSED_COMMIT_LIVE_BANKS='0')))
+        self.assertIsNone(self.refuse(environ=dict(FOUR_FLAGS, QWEN_FAST_FUSED_COMMIT='1', QWEN_FAST_FUSED_COMMIT_INPLACE='1')),
+                          'the fused commit without live banks serves the placeholder quad')
         self.assertEqual(self.refuse(batched=None), 'requires the batched selection (QWEN_FAST_ROUND_B1=1)')
         self.assertEqual(self.refuse(refusal_devices(chips=2)), 'the four devices are not on the (1, 4) mesh')
         self.assertEqual(self.refuse(refusal_devices(block_rows=8)), 'the four devices are not T16')
@@ -1442,17 +1570,26 @@ class CoordinatorTests(unittest.TestCase):
         self.assertFalse([line for line in lines if 'fallback' in line or 'disabled' in line])
         self.assertEqual(coordinator.quad_rounds, 1)
 
-    def test_the_live_banks_flag_the_image_sets_disables_it_once_with_the_reason_and_the_pairs_run(self):
+    def test_the_live_banks_flag_without_the_fused_commit_disables_it_once_with_the_reason_and_the_pairs_run(self):
         os.environ['QWEN_FAST_FUSED_COMMIT_LIVE_BANKS'] = '1'
         coordinator, bridges = self.coordinator(), base.quad_bridges(self.operations, self.mesh)
         _, lines = self.prepare(coordinator, bridges)
         _, more = self.prepare(coordinator, bridges)
         disabled = [line for line in lines + more if line.startswith(pinned.DISABLED_MARKER)]
         self.assertEqual(disabled, ['[PINDIAG] quad draft disabled round=1 failures=0 reason='
-                                    'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1_needs_the_four-card_fused_commit,_which_is_not_'
-                                    'ported:_the_quad_copies_the_active_banks'])
+                                    'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1_needs_QWEN_FAST_FUSED_COMMIT=1,'
+                                    'QWEN_FAST_FUSED_COMMIT_INPLACE=1_(the_live_bank_must_never_move)'])
         self.assertEqual(base.FakeQuadTrace.instances, [])
         self.assertEqual(len(self.Pair.instances), 2)
+
+    def test_the_live_banks_flag_with_the_fused_commit_and_in_place_slides_runs_the_quad(self):
+        for name in ('QWEN_FAST_FUSED_COMMIT', 'QWEN_FAST_FUSED_COMMIT_INPLACE', 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS'):
+            os.environ[name] = '1'
+        coordinator, bridges = self.coordinator(), base.quad_bridges(self.operations, self.mesh)
+        prepared, lines = self.prepare(coordinator, bridges)
+        self.assertEqual(len(base.FakeQuadTrace.instances), 1)
+        self.assertEqual(self.Pair.instances, [])
+        self.assertFalse([line for line in lines if 'disabled' in line or 'fallback' in line], lines)
 
     def test_a_pair_mesh_is_refused_and_a_missing_requirement_is_named(self):
         bridges = base.quad_bridges(self.operations, SimpleNamespace(shape=[1, 2]))

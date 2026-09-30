@@ -17,12 +17,16 @@ chips each is call for call the pinned one (test_quad_draft_tp4 holds that):
     convolution is replicated at full width on every chip, so quad_conv_io.cpp, sha-pinned, and its page math are unchanged);
   - the readback: tp chips x two 32,768-column vocabulary chunks (62,080 per chip) x values and indices, and the replicated
     selector features read from every chip;
-  - the K/V banks: the quad does NOT read the pool's live banks (the four-card fused commit that makes them in-place is not
-    ported, and the four-card K/V slide swaps the active bank on every commit). Its bucket owns four users' placeholder
-    banks, (1, 2, 2048, 128) per layer and k / v, and copies each user's active bank into them every round: what the pair
-    does without QWEN_FAST_FUSED_COMMIT_LIVE_BANKS (dflash_proposal_trace.PreparedPackedDFlashProposal._update). The copy
-    reads whichever bank is active, so it is swap-parity agnostic;
-  - the engage-time refusal: the flags the four-card path can serve (no live-banks requirement) and the (1, 4) mesh.
+  - the K/V banks, in two modes. Without QWEN_FAST_FUSED_COMMIT_LIVE_BANKS its bucket owns four users' placeholder banks,
+    (1, 2, 2048, 128) per layer and k / v, and copies each user's active bank into them every round: what the pair does without
+    the flag (dflash_proposal_trace.PreparedPackedDFlashProposal._update); the copy reads whichever bank is active, so it is
+    swap-parity agnostic. With the flag - accepted only beside QWEN_FAST_FUSED_COMMIT=1 and _INPLACE=1, the four-card fused
+    commit (fused_commit_tp), whose in-place slides never move a live bank - the bucket binds the pool's ACTIVE banks
+    (fused_commit.live_bank_history per pair, width free) and a round copies only where a device's live bank sits on the pool's
+    spare side (an odd swap count before its first in-place commit), into the pool's active bank, logging the pair's
+    `[PACKED-PROPOSE] live banks ... normalised=N`. That is 40 fewer bank copies a round and no placeholders (40 MiB a chip);
+  - the engage-time refusal: the flags the four-card path can serve (the live-banks flag only with the fused commit and its
+    in-place slides) and the (1, 4) mesh.
 
 WHAT DOES NOT CHANGE. The K/V plan (twelve pieces, each user's pad from its own pair's rows), the host inputs and RoPE, the
 seams, the coordinator's contract (has_pending / finish / collect / adopt), the shadow audit against the two pair traces
@@ -55,10 +59,11 @@ from quad_draft import (HIDDEN, PAIRS, conv_kernel_path, conv_pages, core_ranges
 CONTEXT, BLOCK, SPAN = _pinned.CONTEXT, _pinned.BLOCK, _pinned.SPAN
 USERS, ROWS, HEAD_DIM = _pinned.USERS, _pinned.ROWS, _pinned.HEAD_DIM
 
-# What the four-card quad serves. The live-banks flag is not required (the four-card fused commit is not ported) and, set,
-# is refused: an F4-bound quad would read banks the four-card slide swaps.
+# What the four-card quad serves. The live-banks flag is not required; set, it is accepted only with the four-card fused commit and its
+# in-place slides (an F4-bound quad reads banks that must never move: the eager four-card slide swaps them every commit).
 REQUIRED_FLAGS = ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PAIR_ROW_EXACT', 'QWEN_FAST_ROUND_B1')
 LIVE_BANKS_FLAG = 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS'
+LIVE_BANKS_NEEDS = ('QWEN_FAST_FUSED_COMMIT', 'QWEN_FAST_FUSED_COMMIT_INPLACE')
 TP4 = 4
 GROUP_USERS = 2                   # users per half: the pair fold's two
 
@@ -84,6 +89,19 @@ def heads():
     found = tp_shapes.active()
     query, key = found.draft_heads, found.draft_kv_heads
     return query, key, query // key, USERS * query, USERS * key
+
+
+def live_banks_requested(environ=None):
+    """QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1 (refusal() holds the flags it needs)."""
+    return (os.environ if environ is None else environ).get(LIVE_BANKS_FLAG) == '1'
+
+
+def live_banks_missing(environ=None):
+    """The flags the live-banks mode needs that are not 1 (in LIVE_BANKS_NEEDS order); empty when it is off."""
+    environ = os.environ if environ is None else environ
+    if not live_banks_requested(environ):
+        return []
+    return [name for name in LIVE_BANKS_NEEDS if environ.get(name) != '1']
 
 
 def missing_requirements(environ=None):
@@ -467,7 +485,8 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
 
     def _placeholder_banks(self):
         """cached_history: per user (device order) and layer, a k / v pair of zeros, (1, kv, 2048, 128) - the pair's own
-        placeholders without live banks. _update copies each user's active bank into them every round."""
+        placeholders without live banks. _update copies each user's active bank into them every round. (With live banks the
+        bucket binds the pool's active banks instead, the pinned _live_banks.)"""
         import torch
 
         kv = tp_shapes.active().draft_kv_heads
@@ -486,6 +505,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
         quad_host_mask, quad_rope = _pinned.quad_host_mask, _pinned.quad_rope
         operations, device = self.operations, self.devices[0]
         placeholder_mark = len(self.owned)
+        bind_live = live_banks_requested()
         try:
             host_mask = quad_host_mask()
             query, live = quad_rope([dict(position=CONTEXT, history_rows=CONTEXT)] * USERS)
@@ -498,8 +518,8 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
                 mask=pooled_mask if pooled_mask is not None else self._upload(host_mask),
                 rope=dict(q=tuple(self._upload(value) for value in query),
                           live_k=tuple(self._upload(value) for value in live)),
-                cached_history=self._placeholder_banks(), trace=None, outputs=None, owned=[], tokens=None,
-                consumed=set(), parts=None)
+                cached_history=self._live_banks() if bind_live else self._placeholder_banks(), trace=None, outputs=None,
+                owned=[], tokens=None, consumed=set(), parts=None, live_banks=bind_live)
             if pooled_mask is not None:
                 # Borrowed, never in self.owned: protected like the lent banks (_protected), never released.
                 bucket.lent_mask = (pooled_mask,)
@@ -508,6 +528,10 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             bucket.addresses = [addresses(operations, value) for value in bucket.inputs]
             device.validated_native_proposal_masks.add(addresses(operations, bucket.mask))
             self.buckets[key] = bucket
+            if bind_live:
+                from fused_commit import note_live_banks
+
+                note_live_banks(self.pair_label(), bucket.context)
             self._update(bucket, (0,) * USERS)
             transient, retain = device.temporaries(self._protected(bucket))
             try:
@@ -586,14 +610,27 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
         owned, retain = devices[0].temporaries(protected)
         kv = tp_shapes.active().draft_kv_heads
 
+        live = getattr(bucket, 'live_banks', False)
+
         def copy_cache():
-            # Every user's active bank (whichever side of the four-card slide's swap it is on) into the quad's own
-            # placeholder for that user, layer and k / v: the pair's copy_cache without live banks.
+            # Without live banks: every user's active bank (whichever side of the four-card slide's swap it is on) into the
+            # quad's own placeholder for that user, layer and k / v: the pair's copy_cache without live banks. With them: the
+            # pinned copy_cache, at this width - a bank that IS the pool's active one is read in place, and only a device whose
+            # live bank sits on the pool's spare side (an odd swap count before its first in-place commit) is copied into the
+            # pool's active bank, which the quad reads (the pair's own normalisation, dflash_proposal_trace._update).
+            normalised = 0
             for device, cache in zip(devices, bucket.cached_history, strict=True):
                 for active, destination in zip(device.kv_history.active, cache, strict=True):
                     for name in ('k', 'v'):
+                        if live and active[name] is destination[name]:
+                            continue
                         value = retain(operations.slice(active[name], (0, 0, 0, 0), (1, kv, CONTEXT, HEAD_DIM)))
                         operations.copy(value, destination[name])
+                        normalised += 1
+            if live and normalised:
+                from fused_commit import LIVE_BANKS_NORMALISED, log_line as fused_log
+
+                fused_log('%s pair=%s normalised=%d' % (LIVE_BANKS_NORMALISED, self.pair_label(), normalised))
         if defer_finish:
             try:
                 copy_cache()
@@ -678,8 +715,9 @@ def refusal(devices, batched, environ=None):
     missing = missing_requirements(environ)
     if missing:
         return 'requires ' + ','.join('%s=1' % name for name in missing)
-    if environ.get(LIVE_BANKS_FLAG) == '1':
-        return '%s=1 needs the four-card fused commit, which is not ported: the quad copies the active banks' % LIVE_BANKS_FLAG
+    needs = live_banks_missing(environ)
+    if needs:
+        return '%s=1 needs %s (the live bank must never move)' % (LIVE_BANKS_FLAG, ','.join('%s=1' % name for name in needs))
     if batched is None:
         return 'requires the batched selection (QWEN_FAST_ROUND_B1=1)'
     first = devices[0]
