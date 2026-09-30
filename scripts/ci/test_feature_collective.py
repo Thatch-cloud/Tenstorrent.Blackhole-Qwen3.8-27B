@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+import feature_collective_tp as tp_collective
 from feature_collective import reduce_projection, gather_add_projection
 
 
@@ -90,7 +91,9 @@ class FeatureCollectiveTests(unittest.TestCase):
 
 
 class FourCardTests(unittest.TestCase):
-    """QWEN_FAST_TP=4: a (1, 4) mesh, four per-chip partials summed in fixed chip order, and the same call shape."""
+    """QWEN_FAST_TP=4: a (1, 4) mesh, four per-chip partials summed in fixed chip order, and the same call shape. The
+    pair's feature_collective is pinned and pair-only; the four-card functions are feature_collective_tp's, which
+    tp_addresses.install() rebinds the pair's names to (test_tp2_pins, test_tp_addresses)."""
 
     def setUp(self):
         patcher = patch.dict(os.environ, {'QWEN_FAST_TP': '4'})
@@ -112,8 +115,8 @@ class FourCardTests(unittest.TestCase):
         sums = [object(), object(), object()]
         operations.slice = Mock(side_effect=slices)
         operations.add = Mock(side_effect=sums)
-        with patch('feature_collective.projection_links', return_value=2):
-            output = gather_add_projection(operations, mesh, collectives, value)
+        with patch('feature_collective_tp.projection_links', return_value=2):
+            output = tp_collective.gather_add_projection(operations, mesh, collectives, value)
         self.assertIs(output, sums[2])
         self.assertEqual([call.args for call in operations.add.call_args_list],
                          [(slices[0], slices[1]), (sums[0], slices[2]), (sums[1], slices[3])])
@@ -134,8 +137,8 @@ class FourCardTests(unittest.TestCase):
         operations.slice = Mock(side_effect=slices)
         operations.add = Mock(side_effect=sums)
         owned = []
-        with patch('feature_collective.projection_links', return_value=2):
-            gather_add_projection(operations, mesh, collectives, value, retain_temporaries=owned.append)
+        with patch('feature_collective_tp.projection_links', return_value=2):
+            tp_collective.gather_add_projection(operations, mesh, collectives, value, retain_temporaries=owned.append)
         self.assertEqual(owned, [gathered, *slices, sums[0], sums[1]])
         operations.deallocate.assert_not_called()
         operations.synchronize_device.assert_not_called()
@@ -146,9 +149,9 @@ class FourCardTests(unittest.TestCase):
         first = object()
         operations.slice = Mock(side_effect=slices)
         operations.add = Mock(side_effect=[first, RuntimeError('add failed')])
-        with patch('feature_collective.projection_links', return_value=2):
+        with patch('feature_collective_tp.projection_links', return_value=2):
             with self.assertRaises(RuntimeError):
-                gather_add_projection(operations, mesh, collectives, value)
+                tp_collective.gather_add_projection(operations, mesh, collectives, value)
         released = [call.args[0] for call in operations.deallocate.call_args_list]
         self.assertEqual(sorted(map(id, released)), sorted(map(id, [gathered, *slices, first])))
 
@@ -156,30 +159,30 @@ class FourCardTests(unittest.TestCase):
         operations, mesh, collectives, value, gathered = self.fixture()
         operations.slice = Mock(side_effect=[object() for _ in range(4)])
         operations.add = Mock(return_value=object())
-        with patch('feature_collective.projection_links', return_value=2),                 patch.dict(os.environ, {'QWEN_FAST_CCL_TOPOLOGY': 'ring'}):
-            gather_add_projection(operations, mesh, collectives, value)
+        with patch('feature_collective_tp.projection_links', return_value=2),                 patch.dict(os.environ, {'QWEN_FAST_CCL_TOPOLOGY': 'ring'}):
+            tp_collective.gather_add_projection(operations, mesh, collectives, value)
         self.assertEqual(operations.experimental.all_gather_async.call_args.kwargs['topology'], 'ring')
 
     def test_the_reduce_scatter_path_takes_a_four_card_mesh(self):
         operations, mesh, collectives, value, gathered = self.fixture()
         value.shape = (1, 1, 1, 5120)
-        with patch('feature_collective.projection_links', return_value=2):
-            self.assertIs(reduce_projection(operations, mesh, collectives, value), gathered)
+        with patch('feature_collective_tp.projection_links', return_value=2):
+            self.assertIs(tp_collective.reduce_projection(operations, mesh, collectives, value), gathered)
         self.assertEqual(operations.experimental.reduce_scatter_minimal_async.call_args.kwargs['topology'], 'linear')
 
     def test_the_wrong_mesh_for_the_width_is_refused_before_dispatch(self):
         operations, mesh, collectives, value, gathered = self.fixture()
         for shape in ([1, 2], [2, 2], [4, 1]):
             mesh.shape = shape
-            with patch('feature_collective.projection_links', return_value=2):
+            with patch('feature_collective_tp.projection_links', return_value=2):
                 with self.assertRaises(ValueError) as failure:
-                    gather_add_projection(operations, mesh, collectives, value)
+                    tp_collective.gather_add_projection(operations, mesh, collectives, value)
             self.assertIn('TP4', str(failure.exception))
         operations.experimental.all_gather_async.assert_not_called()
-        with patch.dict(os.environ, {'QWEN_FAST_TP': '2'}), patch('feature_collective.projection_links', return_value=1):
+        with patch.dict(os.environ, {'QWEN_FAST_TP': '2'}), patch('feature_collective_tp.projection_links', return_value=1):
             mesh.shape = [1, 4]
             with self.assertRaises(ValueError) as failure:
-                gather_add_projection(operations, mesh, collectives, value)
+                tp_collective.gather_add_projection(operations, mesh, collectives, value)
         self.assertIn('TP2', str(failure.exception))
 
     def test_quad_draft_takes_the_same_four_card_sum_at_sixty_four_rows(self):

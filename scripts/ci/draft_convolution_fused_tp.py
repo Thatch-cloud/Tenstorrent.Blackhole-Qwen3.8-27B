@@ -1,62 +1,27 @@
-"""Single-dispatch grouped causal convolution with explicit BF16 rounding boundaries."""
+"""draft_convolution_fused at any served width.
+
+The pair's module is pinned (recorded evidence hashes its bytes; test_tp2_pins) and stays as it was;
+tp_addresses rebinds the names below to these at four cards only. Each is the pair's function with its literal chip and
+head counts read from tp_shapes; at two chips it would be call for call the pinned one."""
 
 from pathlib import Path
-
 from draft_convolution import validate_boundaries, validate_shapes
-
-
-def seam_mask(boundaries, rows):
-    """Bitmask of rows that begin a segment, as the IO kernel reads it.
-
-    Row 0 always begins one. For a single sequence that is the only bit, which is
-    exactly the `row &&` guard the kernel carried before, so an unpacked call is
-    unchanged. Rows are at most 32, so a uint32 holds every seam.
-    """
-    spans = validate_boundaries(boundaries, rows) or ((0, rows),)
-    mask = 0
-    for start, _ in spans:
-        mask |= 1 << start
-    return mask
-
-
-def checked_convolution(operations, mesh, hidden, dynamic, base, *, fp32_intermediates=False,
-                        retain_temporaries=None, audit=False, checks=None, context=None, boundaries=None):
-    if fp32_intermediates is not True or not callable(retain_temporaries) or type(audit) is not bool:
-        raise ValueError('Fused request convolution requires exact FP32 arithmetic and an explicit lifetime owner')
-    if audit and (not isinstance(checks, list) or not isinstance(context, dict)):
-        raise ValueError('Audited convolution requires an owned check log and call context')
-    output = fused_convolution(operations, mesh, hidden, dynamic, base, boundaries=boundaries)
-    retain_temporaries(output)
-    if audit:
-        import torch
-        from draft_convolution import grouped_causal_convolution
-
-        control = grouped_causal_convolution(operations, mesh, hidden, dynamic, base,
-            fp32_intermediates=True, boundaries=boundaries)
-        try:
-            for chip, (candidate, reference) in enumerate(zip(operations.get_device_tensors(output),
-                    operations.get_device_tensors(control), strict=True)):
-                exact = torch.equal(operations.to_torch(candidate).view(torch.int16),
-                    operations.to_torch(reference).view(torch.int16))
-                checks.append(dict(**context, chip=chip, rows=hidden.shape[2], exact=exact))
-                if not exact:
-                    raise AssertionError('Fused learned convolution differs from the composed BF16-rounding path')
-        finally:
-            operations.deallocate(control)
-    return output
+from draft_convolution_fused import seam_mask
+import tp_shapes
 
 
 def fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries=None):
     rows = validate_shapes(hidden, dynamic, base)
     seams = seam_mask(boundaries, rows)
     tensors = [hidden, *dynamic, *base]
-    if list(mesh.shape) != [1, 2] or any(value.dtype != operations.bfloat16
+    chips = tp_shapes.chip_count()
+    if list(mesh.shape) != [1, chips] or any(value.dtype != operations.bfloat16
             or value.layout != operations.TILE_LAYOUT or value.memory_config() != operations.DRAM_MEMORY_CONFIG
             for value in tensors):
         raise ValueError('Two-chip interleaved DRAM BF16 convolution operands required')
     parts = [operations.get_device_tensors(value) for value in tensors]
-    if any(len(shards) != 2 for shards in parts):
-        raise ValueError('Both operand shards required')
+    if any(len(shards) != chips for shards in parts):
+        raise ValueError('%s operand shards required' % tp_shapes.all_chips())
     output = operations.empty(tuple(hidden.shape), dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
         device=mesh, memory_config=operations.DRAM_MEMORY_CONFIG)
     tensors.append(output)
@@ -71,7 +36,7 @@ def fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries=Non
             math_fidelity=operations.MathFidelity.HiFi4, fp32_dest_acc_en=True, math_approx_mode=False))
     program = operations.MeshProgramDescriptor()
     try:
-        for chip in range(2):
+        for chip in range(chips):
             local = [shards[chip] for shards in parts]
             if local[-1].buffer_address() in {value.buffer_address() for value in local[:-1]}:
                 raise ValueError('Convolution output must not alias borrowed inputs')

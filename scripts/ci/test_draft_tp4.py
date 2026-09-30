@@ -33,16 +33,20 @@ import draft_mlp
 import feature_projection
 import feature_projection_tp
 import pair_row_exact
+import pair_row_exact_tp
 import serving_buffer_pool
 import tp_addresses
 import tp_shapes
+from tp_test_support import four_cards
 from test_pair_row_exact import Device, TorchOps, keep
 
 HERE = Path(__file__).resolve().parent
+# the pinned function objects, before any test installs the seam that rebinds the module's name to the twin
+PINNED_VALIDATE_ATTENTION = draft_attention.validate_attention
 
 
 def four():
-    return patch.dict(os.environ, {'QWEN_FAST_TP': '4'})
+    return four_cards()
 
 
 def pair():
@@ -135,7 +139,7 @@ class AttentionTests(unittest.TestCase):
                     draft_attention_tp.validate_attention(ATTENTION_OPS, *self.operands(heads, kv))
             # the frozen module's own check (the composed path's) still refuses the four-card heads
             with self.assertRaises(ValueError):
-                draft_attention.validate_attention(ATTENTION_OPS, *self.operands(8, 2))
+                PINNED_VALIDATE_ATTENTION(ATTENTION_OPS, *self.operands(8, 2))
 
     def test_draft_sdpa_is_the_same_call_with_the_width_s_heads(self):
         calls = []
@@ -170,7 +174,7 @@ class AttentionTests(unittest.TestCase):
         before = (dflash_t16_native_attention.draft_sdpa, proposal_native_attention.validate_attention,
                   draft_attention.draft_sdpa)
         self.addCleanup(tp_addresses.uninstall)
-        with four():
+        with patch.dict(os.environ, {'QWEN_FAST_TP': '4'}):
             tp_addresses.install()
         self.assertIs(dflash_t16_native_attention.draft_sdpa, draft_attention_tp.draft_sdpa)
         self.assertIs(proposal_native_attention.validate_attention, draft_attention_tp.validate_attention)
@@ -350,9 +354,9 @@ class PairRowExactAtFourCardsTests(unittest.TestCase):
     def test_the_pairs_constants_and_the_width_s_heads(self):
         self.assertEqual((pair_row_exact.QUERY_HEADS, pair_row_exact.KEY_HEADS), (16, 4))
         with pair():
-            self.assertEqual(pair_row_exact.heads(), (16, 4, 4, 32, 8))
+            self.assertEqual(pair_row_exact_tp.heads(), (16, 4, 4, 32, 8))
         with four():
-            self.assertEqual(pair_row_exact.heads(), (8, 2, 4, 16, 4))
+            self.assertEqual(pair_row_exact_tp.heads(), (8, 2, 4, 16, 4))
 
     def test_the_fold_index_map_at_eight_query_heads(self):
         with four():

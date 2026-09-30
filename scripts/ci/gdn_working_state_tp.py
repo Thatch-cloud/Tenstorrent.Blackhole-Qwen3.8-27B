@@ -1,8 +1,12 @@
-"""Isolated B1 working state; native B8 buffers remain stable and owned by the layer."""
+"""gdn_working_state at any served width.
+
+The pair's module is pinned (recorded evidence hashes its bytes; test_tp2_pins) and stays as it was;
+tp_addresses rebinds the names below to these at four cards only. Each is the pair's function with its literal chip and
+head counts read from tp_shapes; at two chips it would be call for call the pinned one."""
 
 from types import FunctionType, MethodType
-
 from gdn_prefix import decode_projected, gated_decode
+import tp_shapes
 
 
 class WorkingState:
@@ -41,8 +45,8 @@ class WorkingState:
         result = []
         for tensor in tensors:
             shards = self.operations.get_device_tensors(tensor)
-            if len(shards) != 2:
-                raise ValueError("Both chips required")
+            if len(shards) != tp_shapes.chip_count():
+                raise ValueError("%s chips required" % tp_shapes.all_chips())
             result.append(tuple(shard.buffer_address() for shard in shards))
         return result
 

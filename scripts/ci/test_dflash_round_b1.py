@@ -1368,9 +1368,7 @@ class ShippingTests(unittest.TestCase):
     # test_publication_warm).
     NAMED = ('publish_prewarm.py', 'publication_warm.py')
     # Ship from the frozen bundle, in neither copy list: an edit to one never reaches the rig.
-    # (feature_collective.py left this list with the S2 TP4 port: it is in both P8 copy lists and
-    # docker/qwen-c2-overlay.txt now, so an edit reaches the image.)
-    FROZEN = ('draft_selector.py', 'draft_kv_projection.py', 'draft_head_layout.py',
+    FROZEN = ('draft_selector.py', 'draft_kv_projection.py', 'draft_head_layout.py', 'feature_collective.py',
               'draft_kv_slide.py')
     # draft_kv_slide_gate's own pins.
     SLIDE_PINNED = ('draft_kv_slide.py', 'draft_kv_slide.cpp')

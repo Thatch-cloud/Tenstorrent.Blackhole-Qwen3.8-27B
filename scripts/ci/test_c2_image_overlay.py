@@ -94,6 +94,11 @@ C2_KNOWN_STALE = {
     'scripts/ci/run-wait-zone-hardware.sh': (
         'e3af3246ed2e19a317eda6e6806ff718bc5c3935',
         'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),
+    'scripts/ci/feature_collective.py': (
+        '70e1936e608eb450539f8c88d04a59d8de740b0b',
+        'serving imports it (dflash_device, draft_attention_branch, draft_mlp_branch). HEAD adds only the '
+        'observe= keyword of gather_add_projection, which P8\'s draft branches pass only under '
+        'QWEN_FAST_PROPOSAL_AUDIT=1 - unset in every C2 profile - so the bundle copy serves as it served v235'),
     'scripts/ci/frozen_combined_adapters.py': (
         '567685ab1d5ff8ab1cffca2913622116b93fadd4',
         'recipe staging tool, imported only by frozen_recipe_context; HEAD adds 65536 staging (4c297e73), '

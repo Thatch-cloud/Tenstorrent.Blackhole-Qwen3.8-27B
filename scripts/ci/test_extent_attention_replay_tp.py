@@ -274,7 +274,7 @@ class ProgramTests(unittest.TestCase):
             positions, mask = self.tensors(4)
             program = quad.prepare_narrow(MESH, positions, mask, rows=8, batches=2, offset=8)
         view = program_view(program)
-        self.assertEqual(sorted(view), [((0, chip), (0, chip)) for chip in range(4)])
+        self.assertEqual(sorted(view), [('mesh_range', (0, chip), (0, chip)) for chip in range(4)])
         self.assertEqual(len(view), 4)
         for chip, key in enumerate(sorted(view)):
             (kernel_source, cores, compile_args, config, runtime), buffers = view[key][0], view[key][-1]

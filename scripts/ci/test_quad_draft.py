@@ -2697,13 +2697,12 @@ class ShippingTests(unittest.TestCase):
 
     def test_the_bundle_only_helpers_and_the_served_kernels_are_untouched(self):
         """Plan section 4.3: in neither copy list, so never edited; the served conv kernels stay as served."""
-        self.assertEqual(self.git_changed(['draft_selector.py',
+        self.assertEqual(self.git_changed(['draft_shared_head.py', 'feature_collective.py', 'draft_head_layout.py',
+                                           'draft_kv_projection.py', 'draft_selector.py', 'draft_mlp.py',
                                            'draft_convolution_fused_compute.cpp', 'dflash_proposal_inputs.py',
                                            'draft_head_preparation.py', 'draft_convolution_fused_io.cpp',
+                                           'draft_convolution_fused.py', 'draft_convolution.py', 'pair_row_exact.py',
                                            'fused_commit.py', 'serving_bundle.py']), '')
-        # draft_head_layout, draft_kv_projection, draft_mlp, draft_convolution(_fused) and pair_row_exact left this list
-        # with S2T-07 (the drafter's four-card widths): each is in both P8 copy lists, so an edit reaches the image, and
-        # the pair's behaviour is held by the flag-off parent tests below.
         # dflash_proposal_trace.py left this list with S2 M0 (the pooled draft masks): it is in both P8 copy lists
         # and docker/qwen-c2-overlay.txt, so an edit reaches the image.
 

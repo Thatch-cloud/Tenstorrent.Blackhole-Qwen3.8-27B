@@ -1,29 +1,19 @@
-"""Host layout oracle for token-to-query-head folding; not a serving adapter.
-
-The head layout is the width this process serves at (tp_shapes): 12 query heads on 2 KV heads per chip at the pair, 6 on
-1 at four cards. At the pair every function is what it was."""
-
-import tp_shapes
+"""Host layout oracle for token-to-query-head folding; not a serving adapter."""
 
 
-def fold_query(query, kv_heads=None):
-    found = tp_shapes.active()
-    heads = found.attn_fold_rows
-    kv_heads = found.attn_kv_heads if kv_heads is None else kv_heads
-    if query.ndim != 4 or query.shape[0] != 1 or query.shape[2:] != (heads, 256):
-        raise ValueError('Expected native TP%d query shape [1,T,%d,256]' % (found.tp, heads))
-    if not 1 <= query.shape[1] <= 32 or kv_heads != found.attn_kv_heads:
-        raise ValueError('Bounded Qwen TP%d geometry required' % found.tp)
+def fold_query(query, kv_heads=2):
+    if query.ndim != 4 or query.shape[0] != 1 or query.shape[2:] != (12, 256):
+        raise ValueError('Expected native TP2 query shape [1,T,12,256]')
+    if not 1 <= query.shape[1] <= 32 or kv_heads != 2:
+        raise ValueError('Bounded Qwen TP2 geometry required')
     rows = query.shape[1]
-    return query.reshape(rows, kv_heads, 6, 256).permute(1, 0, 2, 3).reshape(1, 1, rows * heads, 256).contiguous()
+    return query.reshape(rows, kv_heads, 6, 256).permute(1, 0, 2, 3).reshape(1, 1, rows * 12, 256).contiguous()
 
 
 def unfold_output(output, rows):
-    found = tp_shapes.active()
-    heads = found.attn_fold_rows
-    if type(rows) is not int or not 1 <= rows <= 32 or tuple(output.shape) != (1, 1, rows * heads, 256):
-        raise ValueError('Expected folded native TP%d output' % found.tp)
-    return output.reshape(found.attn_kv_heads, rows, 6, 256).permute(1, 0, 2, 3).reshape(1, rows, heads, 256).contiguous()
+    if type(rows) is not int or not 1 <= rows <= 32 or tuple(output.shape) != (1, 1, rows * 12, 256):
+        raise ValueError('Expected folded native TP2 output')
+    return output.reshape(2, rows, 6, 256).permute(1, 0, 2, 3).reshape(1, rows, 12, 256).contiguous()
 
 
 def causal_mask(rows, start, capacity):
@@ -33,11 +23,10 @@ def causal_mask(rows, start, capacity):
         raise ValueError('Supported token count required')
     if any(type(value) is not int for value in (start, capacity)) or start < 0 or start + rows > capacity:
         raise ValueError('Valid positions within cache required')
-    found = tp_shapes.active()
-    positions = torch.arange(start, start + rows).reshape(1, rows, 1).expand(found.attn_kv_heads, rows, 6).reshape(-1)
-    mask = torch.zeros(rows * found.attn_fold_rows, capacity, dtype=torch.bfloat16)
+    positions = torch.arange(start, start + rows).reshape(1, rows, 1).expand(2, rows, 6).reshape(-1)
+    mask = torch.zeros(rows * 12, capacity, dtype=torch.bfloat16)
     mask.masked_fill_(torch.arange(capacity).unsqueeze(0) > positions.unsqueeze(1), float('-inf'))
-    return mask.reshape(1, 1, rows * found.attn_fold_rows, capacity)
+    return mask.reshape(1, 1, rows * 12, capacity)
 
 
 def chunk_groups(start, rows, *, max_chunk_tiles=8, max_group_rows=4):
@@ -80,12 +69,10 @@ def device_layout(operations, tensor, rows, owned, *, inverse=False, offset=0):
     if type(offset) is not int or offset < 0 or (inverse and offset):
         raise ValueError('Valid input-row offset required')
     shape = tuple(tensor.shape)
-    found = tp_shapes.active()
-    heads = found.attn_fold_rows
     if inverse:
-        valid = shape == (1, 1, rows * heads, 256)
+        valid = shape == (1, 1, rows * 12, 256)
     else:
-        valid = len(shape) == 4 and shape[0] == 1 and shape[2:] == (heads, 256) and offset + rows <= shape[1]
+        valid = len(shape) == 4 and shape[0] == 1 and shape[2:] == (12, 256) and offset + rows <= shape[1]
     if not valid or tensor.dtype != operations.bfloat16 or tensor.layout != operations.TILE_LAYOUT:
         raise ValueError('Native BF16 tiled attention geometry required')
 
@@ -93,10 +80,10 @@ def device_layout(operations, tensor, rows, owned, *, inverse=False, offset=0):
         owned.append(value)
         return value
 
-    selected = tensor if inverse else keep(operations.slice(tensor, (0, offset, 0, 0), (1, offset + rows, heads, 256),
+    selected = tensor if inverse else keep(operations.slice(tensor, (0, offset, 0, 0), (1, offset + rows, 12, 256),
         memory_config=operations.DRAM_MEMORY_CONFIG))
     linear = keep(operations.to_layout(selected, operations.ROW_MAJOR_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG))
-    shaped = keep(operations.reshape(linear, (found.attn_kv_heads, rows, 6, 256) if inverse else (rows, found.attn_kv_heads, 6, 256)))
+    shaped = keep(operations.reshape(linear, (2, rows, 6, 256) if inverse else (rows, 2, 6, 256)))
     transposed = keep(operations.permute(shaped, (1, 0, 2, 3), memory_config=operations.DRAM_MEMORY_CONFIG))
-    final = keep(operations.reshape(transposed, (1, rows, heads, 256) if inverse else (1, 1, rows * heads, 256)))
+    final = keep(operations.reshape(transposed, (1, rows, 12, 256) if inverse else (1, 1, rows * 12, 256)))
     return keep(operations.to_layout(final, operations.TILE_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG))

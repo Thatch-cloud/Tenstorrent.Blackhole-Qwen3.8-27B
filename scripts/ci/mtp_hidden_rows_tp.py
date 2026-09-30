@@ -1,7 +1,12 @@
-"""Prepared native slice traces into one fixed MTP hidden-row buffer."""
+"""mtp_hidden_rows at any served width.
+
+The pair's module is pinned (recorded evidence hashes its bytes; test_tp2_pins) and stays as it was;
+tp_addresses rebinds the names below to these at four cards only. Each is the pair's function with its literal chip and
+head counts read from tp_shapes; at two chips it would be call for call the pinned one."""
 
 from attention_batch import capture_operation
 from gdn_multitoken_conv import addresses
+import tp_shapes
 
 
 class MTPHiddenRows:
@@ -18,7 +23,7 @@ class MTPHiddenRows:
                     or source.memory_config() != operations.DRAM_MEMORY_CONFIG):
                 raise ValueError('Pinned replicated verifier hidden rows required')
             identity = tuple(addresses(operations, source))
-            if len(identity) != 2 or any(any(left == right for left, right in zip(identity, existing))
+            if len(identity) != tp_shapes.chip_count() or any(any(left == right for left, right in zip(identity, existing))
                                          for existing in self.sources):
                 raise ValueError('Unique two-chip source allocations required')
             self.sources[identity] = source
@@ -28,7 +33,7 @@ class MTPHiddenRows:
             device=mesh, dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
             memory_config=operations.DRAM_MEMORY_CONFIG, mesh_mapper=operations.ReplicateTensorToMesh(mesh))
         self.destination_ids = tuple(addresses(operations, self.destination))
-        if len(self.destination_ids) != 2 or any(any(left == right for left, right in zip(identity, self.destination_ids))
+        if len(self.destination_ids) != tp_shapes.chip_count() or any(any(left == right for left, right in zip(identity, self.destination_ids))
                                                for identity in self.sources):
             operations.deallocate(self.destination)
             raise ValueError('Row destination must not alias source on either chip')

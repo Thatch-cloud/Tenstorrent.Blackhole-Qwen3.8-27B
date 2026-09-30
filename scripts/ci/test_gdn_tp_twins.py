@@ -31,6 +31,7 @@ import gdn_state_copy
 import tp_addresses
 import tp_kernels
 import tp_shapes
+from tp_test_support import four_cards
 
 HERE = Path(__file__).parent
 Core = namedtuple('Core', 'x y')
@@ -39,7 +40,7 @@ PAIR_ENV.pop('QWEN_FAST_TP', None)
 
 
 def four():
-    return patch.dict(os.environ, {'QWEN_FAST_TP': '4'})
+    return four_cards()
 
 
 def pair():
@@ -247,11 +248,9 @@ class ConvLaunchTests(unittest.TestCase):
             record = self.window_launch(2, 8256)
         for kernel in kernels_of(record[0][1]).values():
             self.assertEqual(kernel.kernel_source, str(HERE / 'gdn_conv_windows.cpp'))
-            self.assertEqual(kernel.defines, [])
+            self.assertEqual(getattr(kernel, 'defines', []), [])
         with four():
-            # the builder reads validate_projected from the pinned module at call time: the startup seam rebinds it
-            tp_addresses.install()
-            self.addCleanup(tp_addresses.uninstall)
+            # four() installs the startup seam: the pair's build_windows and validate_projected are the twins here
             record = self.window_launch(4, 4128)
         program = record[0][1]
         self.assertEqual(len(program), 4)

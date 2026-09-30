@@ -1,60 +1,12 @@
-"""DFlash2 kernel-two, group-16 causal convolution arithmetic diagnostic."""
+"""draft_convolution at any served width.
 
+The pair's module is pinned (recorded evidence hashes its bytes; test_tp2_pins) and stays as it was;
+tp_addresses rebinds the names below to these at four cards only. Each is the pair's function with its literal chip and
+head counts read from tp_shapes; at two chips it would be call for call the pinned one."""
+
+from draft_convolution import validate_boundaries, validate_shapes
 from gdn_multitoken_conv import addresses, release_owned
-
-
-def validate_shapes(hidden, dynamic, base):
-    shape = tuple(hidden.shape)
-    if len(shape) != 4 or shape[:2] != (1, 1) or shape[2] not in (1, 8, 32) or shape[3] != 5120:
-        raise ValueError('Explicit one, eight or 32 row hidden block required')
-    if (len(dynamic) != 2 or len(base) != 2
-            or any(tuple(value.shape) != (1, 1, shape[2], 320) for value in dynamic)
-            or any(tuple(value.shape) != (1, 1, 1, 5120) for value in base)):
-        raise ValueError('Two group-16 dynamic kernels and two full-width base kernels required')
-    return shape[2]
-
-
-def convolution_reference(hidden, dynamic, base, *, boundaries=None):
-    import torch
-
-    rows = validate_shapes(hidden, dynamic, base)
-    boundaries = validate_boundaries(boundaries, rows)
-    if any(value.dtype != torch.bfloat16 or not torch.isfinite(value).all() for value in (hidden, *dynamic, *base)):
-        raise ValueError('Finite BF16 operands required')
-    output = torch.zeros_like(hidden)
-    for offset in range(2):
-        if offset == 0:
-            values = hidden
-        else:
-            parts = []
-            for start, stop in (boundaries or ((0, rows),)):
-                parts.append(torch.zeros_like(hidden[..., :1, :]))
-                if stop - start > 1:
-                    parts.append(hidden[..., start:stop - 1, :])
-            values = torch.cat(parts, dim=2)
-        output = output + base[offset] * values
-        output = output + dynamic[offset].repeat_interleave(16, dim=-1) * values
-    return output
-
-
-def validate_boundaries(boundaries, rows):
-    """Segment spans of a packed block, or None for one continuous sequence.
-
-    The convolution is causal over the ROW axis: row r reads row r-1. Packed, the
-    rows of the block belong to different users, so without segment spans user B's
-    first row would convolve against user A's last draft. Only that one row per
-    segment is wrong, and it is the anchor, so it corrupts the whole block below it.
-    """
-    if boundaries is None:
-        return None
-    spans = tuple(tuple(span) for span in boundaries)
-    if (not spans or any(len(span) != 2 for span in spans) or spans[0][0] != 0
-            or spans[-1][1] != rows
-            or any(type(value) is not int for span in spans for value in span)
-            or any(start >= stop for start, stop in spans)
-            or any(spans[index][1] != spans[index + 1][0] for index in range(len(spans) - 1))):
-        raise ValueError('Ordered contiguous packed segment spans covering the block required')
-    return spans
+import tp_shapes
 
 
 def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_intermediates=False, inspect=None,
@@ -62,7 +14,7 @@ def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_
     rows = validate_shapes(hidden, dynamic, base)
     boundaries = validate_boundaries(boundaries, rows)
     borrowed = (hidden, *dynamic, *base)
-    if list(mesh.shape) != [1, 2] or any(value.dtype != operations.bfloat16 for value in borrowed):
+    if list(mesh.shape) != [1, tp_shapes.chip_count()] or any(value.dtype != operations.bfloat16 for value in borrowed):
         raise ValueError('TP2 BF16 operands required')
     protected = {addresses(operations, value) for value in borrowed}
     temporaries = []

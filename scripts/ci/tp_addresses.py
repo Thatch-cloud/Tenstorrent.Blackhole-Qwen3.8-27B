@@ -61,6 +61,42 @@ TWINS = (
     ('gdn_commit_dma', 'validate_shapes', 'gdn_commit_dma_tp', 'validate_shapes'),
     ('gdn_commit_dma', 'prepare', 'gdn_commit_dma_tp', 'prepare'),
     ('gdn_commit_dma', 'publish', 'gdn_commit_dma_tp', 'publish'),
+    # The two sources the direct-window attach hashes (gdn_direct_window_hardware_sources.BATCH_SHA256 and the
+    # simulator report's file list) stay the pair's bytes; their four-card widths live in these twins.
+    ('gdn_batched_conv', 'run_batched_projected', 'gdn_batched_conv_tp', 'run_batched_projected'),
+    ('gdn_conv_windows', 'build_windows', 'gdn_conv_windows_tp', 'build_windows'),
+    # The drafter and GDN helpers recorded evidence hashes (dspark / fused-commit / quad-draft reports, test_tp2_pins):
+    # their pair bytes stay and these twins carry the four-card widths.
+    ('draft_convolution', 'grouped_causal_convolution', 'draft_convolution_tp', 'grouped_causal_convolution'),
+    ('draft_convolution_fused', 'fused_convolution', 'draft_convolution_fused_tp', 'fused_convolution'),
+    ('draft_head_layout', 'split_projected_heads', 'draft_head_layout_tp', 'split_projected_heads'),
+    ('draft_head_layout', 'concatenate_query_heads', 'draft_head_layout_tp', 'concatenate_query_heads'),
+    ('draft_kv_projection', 'project_key_value', 'draft_kv_projection_tp', 'project_key_value'),
+    ('draft_mlp', 'split_mlp_weights', 'draft_mlp_tp', 'split_mlp_weights'),
+    ('draft_shared_head', 'candidate_chunks', 'draft_shared_head_tp', 'candidate_chunks'),
+    ('draft_shared_head', 'shared_head_candidates', 'draft_shared_head_tp', 'shared_head_candidates'),
+    ('draft_shared_head', 'local_head_candidates', 'draft_shared_head_tp', 'local_head_candidates'),
+    ('draft_shared_head', 'merge_chunk_candidates', 'draft_shared_head_tp', 'merge_chunk_candidates'),
+    ('feature_collective', 'reduce_projection', 'feature_collective_tp', 'reduce_projection'),
+    ('feature_collective', 'gather_add_projection', 'feature_collective_tp', 'gather_add_projection'),
+    ('pair_row_exact', 'note', 'pair_row_exact_tp', 'note'),
+    ('pair_row_exact', 'validate_fold', 'pair_row_exact_tp', 'validate_fold'),
+    ('pair_row_exact', 'fold_query', 'pair_row_exact_tp', 'fold_query'),
+    ('pair_row_exact', 'fold_keys', 'pair_row_exact_tp', 'fold_keys'),
+    ('pair_row_exact', 'unfold_output', 'pair_row_exact_tp', 'unfold_output'),
+    ('attention_head_fold', 'fold_query', 'attention_head_fold_tp', 'fold_query'),
+    ('attention_head_fold', 'unfold_output', 'attention_head_fold_tp', 'unfold_output'),
+    ('attention_head_fold', 'causal_mask', 'attention_head_fold_tp', 'causal_mask'),
+    ('attention_head_fold', 'device_layout', 'attention_head_fold_tp', 'device_layout'),
+    ('gdn_conv_prefix_copy', 'validate_prefix', 'gdn_conv_prefix_copy_tp', 'validate_prefix'),
+    ('gdn_conv_prefix_copy', 'copy_prefix', 'gdn_conv_prefix_copy_tp', 'copy_prefix'),
+    ('gdn_working_state', 'WorkingState', 'gdn_working_state_tp', 'WorkingState'),
+    ('mtp_hidden_rows', 'MTPHiddenRows', 'mtp_hidden_rows_tp', 'MTPHiddenRows'),
+    # The attach's pair-only scopes: the sampler's gather links at the ring's proven count, and the direct-window and
+    # K/V-publication experiments, which are off at four cards (attach_scopes_tp).
+    ('sampling_link_policy', 'sampler_links', 'attach_scopes_tp', 'sampler_links'),
+    ('gdn_direct_window_scope', 'scoped_direct_windows', 'attach_scopes_tp', 'scoped_direct_windows'),
+    ('draft_kv_slide_scope', 'scoped_publication', 'attach_scopes_tp', 'scoped_publication'),
 )
 
 # (module, twin module): whole modules whose lazy `import name` sites must reach the four-card twin. The pinned original
@@ -93,6 +129,19 @@ def install(environ=None):
         if old is not new:
             swaps.append((name, old, new))
     rebound = 0
+    # The name sweep runs first, over every loaded module including the pinned originals the module twins are about to
+    # replace in sys.modules: once an original is orphaned the sweep can no longer reach it, and it would keep the pair's
+    # helpers (the two-chip addresses) for whoever still holds it.
+    if swaps:
+        for module in list(sys.modules.values()):
+            namespace = getattr(module, '__dict__', None)
+            if not isinstance(namespace, dict):
+                continue
+            for name, old, new in swaps:
+                if name in namespace and namespace[name] is old:
+                    namespace[name] = new
+                    _REBOUND.append((namespace, name, old))
+                    rebound += 1
     for original_name, twin_name in MODULE_TWINS:
         original = importlib.import_module(original_name)
         twin = importlib.import_module(twin_name)
@@ -103,20 +152,9 @@ def install(environ=None):
         rebound += 1
         for module in list(sys.modules.values()):
             namespace = getattr(module, '__dict__', None)
-            if isinstance(namespace, dict) and namespace.get(original_name) is original:
+            if isinstance(namespace, dict) and original_name in namespace and namespace[original_name] is original:
                 namespace[original_name] = twin
                 _REBOUND.append((namespace, original_name, original))
-                rebound += 1
-    if not swaps:
-        return rebound
-    for module in list(sys.modules.values()):
-        namespace = getattr(module, '__dict__', None)
-        if not isinstance(namespace, dict):
-            continue
-        for name, old, new in swaps:
-            if namespace.get(name) is old:
-                namespace[name] = new
-                _REBOUND.append((namespace, name, old))
                 rebound += 1
     return rebound
 

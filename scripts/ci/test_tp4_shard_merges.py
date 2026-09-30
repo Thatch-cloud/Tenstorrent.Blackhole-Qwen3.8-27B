@@ -30,21 +30,11 @@ class Four(unittest.TestCase):
         patcher = patch.dict(os.environ, {'QWEN_FAST_TP': '4'})
         patcher.start()
         self.addCleanup(patcher.stop)
-        # the readbacks below call gdn_multitoken_conv.addresses through their own imports, as a four-card worker
-        # does after serving_startup installs the seam; undone so no other test sees the four-chip helpers
-        holders = [module for module in list(sys.modules.values()) if getattr(module, '__dict__', None) is not None
-                   and (module.__dict__.get('addresses') is PINNED.addresses
-                        or module.__dict__.get('release_owned') is PINNED.release_owned)]
-        original = (PINNED.addresses, PINNED.release_owned)
+        # the readbacks below call the pinned helpers through their own imports, as a four-card worker does after
+        # serving_startup installs the seam; uninstall() puts EVERY rebound name back (the twins, the module alias), so
+        # no other test sees a four-card helper and the pair-parity tests compare the pinned functions themselves
         tp_addresses.install(os.environ)
-
-        def restore():
-            for module in holders:
-                for name, function in zip(('addresses', 'release_owned'), original):
-                    if module.__dict__.get(name) in (tp_addresses.addresses, tp_addresses.release_owned):
-                        module.__dict__[name] = function
-
-        self.addCleanup(restore)
+        self.addCleanup(tp_addresses.uninstall)
 
 
 class ChipCountTests(unittest.TestCase):

@@ -1,21 +1,15 @@
-"""Parallel causal convolution windows using the unmodified native BF16 kernel."""
+"""gdn_batched_conv.run_batched_projected at any served width.
 
+The pair's module is pinned (gdn_direct_window_hardware_sources.BATCH_SHA256) and stays as it was; tp_addresses
+rebinds its run_batched_projected to this one at four cards. Call for call the pair's body with the projected row's
+widths (qkv, the a and b columns) from tp_shapes.
+"""
+
+from gdn_batched_conv import history_windows, norm_batch_enabled
 from gdn_multitoken import execute
 from gdn_multitoken_conv import addresses, convolution_checkpoints, release_owned, run_projected, validate_projected
 from gdn_prefix import independent_row
-
-
-def history_windows(rows):
-    if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32):
-        raise ValueError('Supported single-sequence token width required')
-    return tuple((slot, slot + rows) for slot in range(4))
-
-
-def norm_batch_enabled(rows, requested):
-    history_windows(rows)
-    if type(requested) is not bool:
-        raise ValueError('Explicit bool norm-batch option required')
-    return requested and rows >= 8
+import tp_shapes
 
 
 def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_A, norm_w, kernels,
@@ -28,13 +22,17 @@ def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, 
         raise ValueError('Prefix zero reuse requires explicit bool and packed checkpoints')
     if operations is None:
         import ttnn as operations
+    found = tp_shapes.active()
     rows = validate_projected(tuple(projected.shape), conv_states)
     use_norm_batch = norm_batch_enabled(rows, norm_batch)
+    if use_norm_batch and tp_shapes.chip_count() != tp_shapes.PAIR:
+        # gdn_vsplit's 96 recurrence / 24 norm-gate workers and 384 state pages are the pair's (S2T-05b, not ported)
+        raise ValueError('The value-split norm batch is written for the (1, 2) pair')
     selected = convolution_checkpoints(rows, conv_checkpoints)
     if rows == 1:
         return run_projected(mesh, projected, initial, conv_states, taps, dt_bias, neg_exp_A, norm_w, kernels,
                              operations, conv_checkpoints=conv_checkpoints)
-    if len(taps) != 4 or any(tuple(tap.shape) != (1, 1, 5120) for tap in taps):
+    if len(taps) != 4 or any(tuple(tap.shape) != (1, 1, found.gdn_qkv) for tap in taps):
         raise ValueError('Four channel-wise convolution taps required')
     owned = []
     original_addresses = [addresses(operations, state) for state in conv_states]
@@ -62,26 +60,26 @@ def run_batched_projected(mesh, projected, initial, conv_states, taps, dt_bias, 
             owned.extend(windows)
         else:
             source = layout(projected, operations.ROW_MAJOR_LAYOUT)
-            projected_qkv = sliced(source, (0, 0, 0), (1, rows, 5120))
+            projected_qkv = sliced(source, (0, 0, 0), (1, rows, found.gdn_qkv))
             history = own(operations.concat([*[layout(state, operations.ROW_MAJOR_LAYOUT) for state in conv_states],
                                              projected_qkv], dim=1, memory_config=operations.DRAM_MEMORY_CONFIG))
             windows = []
             for start, end in history_windows(rows):
-                window = layout(sliced(history, (0, start, 0), (1, end, 5120)), operations.TILE_LAYOUT)
+                window = layout(sliced(history, (0, start, 0), (1, end, found.gdn_qkv)), operations.TILE_LAYOUT)
                 independent_row(operations, history, window)
                 windows.append(window)
         packed = operations.transformer.gdn_decode_conv_gates(projected, windows, taps, projected, projected,
             dt_bias, neg_exp_A, batch=rows, memory_config=operations.DRAM_MEMORY_CONFIG,
-            channels=5120, a_col=8192, b_col=8216)
+            channels=found.gdn_qkv, a_col=found.gdn_a_col, b_col=found.gdn_b_col)
         owned.extend(packed)
         prefixes = [None] * rows
         if not packed_checkpoints:
             shifted = [layout(window, operations.ROW_MAJOR_LAYOUT) for window in windows]
             for token in range(rows):
                 if token + 1 in selected:
-                    prefixes[token] = [layout(sliced(window, (0, token, 0), (1, token + 1, 5120)), operations.TILE_LAYOUT)
+                    prefixes[token] = [layout(sliced(window, (0, token, 0), (1, token + 1, found.gdn_qkv)), operations.TILE_LAYOUT)
                                        for window in shifted]
-        z = sliced(projected, (0, 0, 5120), (1, rows, 8192))
+        z = sliced(projected, (0, 0, found.gdn_qkv), (1, rows, found.gdn_a_col))
         weights = operations.to_memory_config(norm_w, operations.DRAM_MEMORY_CONFIG)
         if addresses(operations, weights) != addresses(operations, norm_w):
             own(weights)

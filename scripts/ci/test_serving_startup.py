@@ -215,7 +215,8 @@ class StartLedgerTests(unittest.TestCase):
             (root / 'generation_config.json').write_text('{"eos_token_id": 7}')
             paths = dict(directory=root, runtime_root=root, fixtures=root, target_snapshot=root)
             modules = {'ttnn': SimpleNamespace(name='ttnn'),
-                       'sampling_link_policy': SimpleNamespace(DESCRIPTOR='descriptor', SOURCES={}),
+                       'sampling_link_policy': SimpleNamespace(DESCRIPTOR='descriptor', SOURCES={},
+                                                       sampler_links=lambda *arguments: None),
                        'full_dflash_request': SimpleNamespace(load_dflash_fixtures=lambda path: 'fixtures'),
                        'mlp_block_stream_pool': SimpleNamespace(owned_streams=owned_streams)}
             with patch.dict(os.environ, dict(clean, TT_MESH_GRAPH_DESC_PATH=str(root / 'descriptor'), **environ),

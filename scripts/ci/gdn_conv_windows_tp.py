@@ -1,6 +1,14 @@
-"""One arithmetic-free DMA launch builds all four causal convolution windows."""
+"""gdn_conv_windows.build_windows at any served width: one arithmetic-free DMA launch builds all four causal windows.
+
+The pair's module is sha256-pinned (gdn_direct_window_report, the frozen combined evidence) and stays as it was;
+tp_addresses rebinds its build_windows to this one at four cards. The launch is call for call the pair's, with the
+qkv width, the chip count and the kernel source (the `_tp` sibling with page counts from defines) from tp_shapes.
+"""
 
 from pathlib import Path
+
+import tp_kernels
+import tp_shapes
 
 
 def build_windows(mesh, projected, history):
@@ -18,24 +26,26 @@ def build_windows(mesh, projected, history):
     outputs = []
     try:
         for slot in range(4):
-            outputs.append(ttnn.empty((1, rows, 5120), device=mesh, dtype=ttnn.bfloat16,
+            outputs.append(ttnn.empty((1, rows, tp_shapes.active().gdn_qkv), device=mesh, dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG))
         tensors = inputs + outputs
         shards = [ttnn.get_device_tensors(value) for value in tensors]
-        if any(len(parts) != 2 for parts in shards):
-            raise ValueError('Both chips required')
+        chips = tp_shapes.chip_count()
+        if any(len(parts) != chips for parts in shards):
+            raise ValueError('%s chips required' % tp_shapes.all_chips())
         cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(7, 5))])
         buffer = ttnn.CBDescriptor(total_size=6 * 2048, core_ranges=cores,
             format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=0, data_format=ttnn.bfloat16,
                 page_size=2048, tile=ttnn.TileDescriptor(ttnn.Tile([32, 32])))])
         program = ttnn.MeshProgramDescriptor()
-        for chip in range(2):
+        for chip in range(chips):
             local = [parts[chip] for parts in shards]
             addresses = [value.buffer_address() for value in local]
             if len(set(addresses)) != len(addresses):
                 raise ValueError('Immutable input and mutable windows must not alias')
-            descriptor = ttnn.KernelDescriptor(kernel_source=str(Path(__file__).with_suffix('.cpp')),
+            descriptor = ttnn.KernelDescriptor(kernel_source=tp_kernels.source(Path(__file__).with_name('gdn_conv_windows.cpp')),
                 core_ranges=cores,
+                defines=tp_kernels.defines(),
                 compile_time_args=[argument for value in local for argument in ttnn.TensorAccessorArgs(value).get_compile_time_args()],
                 config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,
                                                          noc=ttnn.NOC.RISCV_0_default))

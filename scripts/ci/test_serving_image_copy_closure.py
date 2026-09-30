@@ -231,6 +231,7 @@ KNOWN_STALE = {
                          'for that gate, never inside the serving container (the four-card ring count changed at HEAD)',
     'longctx_cycle_bench.py': 'mounted per arm at /bench/longctx_cycle_bench.py '
                               '(lever_n_m3native_run_arm.sh), not imported from the baked tree',
+    'feature_collective.py': UNREVIEWED,
     'frozen_combined_adapters.py': UNREVIEWED,
     'frozen_combined_gate.py': UNREVIEWED,
     'frozen_combined_runtime.py': UNREVIEWED,

@@ -1,13 +1,18 @@
-"""Learned BF16 K/V row projection for an opt-in historical draft cache."""
+"""draft_kv_projection at any served width.
+
+The pair's module is pinned (recorded evidence hashes its bytes; test_tp2_pins) and stays as it was;
+tp_addresses rebinds the names below to these at four cards only. Each is the pair's function with its literal chip and
+head counts read from tp_shapes; at two chips it would be call for call the pinned one."""
 
 from draft_head_layout import split_projected_heads
+import tp_shapes
 
 
 def project_key_value(operations, inputs, query, cosine_sine, retain, *, parameters):
     rows = inputs.shape[2] if len(inputs.shape) == 4 else 0
     if (parameters.get('operations') is not operations or parameters.get('native_head_layout') is not True
             or rows not in range(32, 2081, 32) or tuple(inputs.shape) != (1, 1, rows, 5120)
-            or tuple(query.shape) != (1, 1, 32, 2048) or len(cosine_sine) != 2
+            or tuple(query.shape) != (1, 1, 32, tp_shapes.active().draft_query) or len(cosine_sine) != 2
             or any(tuple(table.shape) != (1, 1, rows, 128) for table in cosine_sine)
             or any(value.dtype != operations.bfloat16 or value.layout != operations.TILE_LAYOUT
                 or value.memory_config() != operations.DRAM_MEMORY_CONFIG for value in (inputs, query, *cosine_sine))):
