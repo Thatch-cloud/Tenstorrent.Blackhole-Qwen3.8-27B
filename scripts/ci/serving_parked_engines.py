@@ -360,7 +360,15 @@ def park_device(device):
     return None
 
 
-def rebind_device(device, taps, *, position, window=None, negative=None):
+def peak_reading(pool):
+    """The smallest free DRAM over the chips (serving_prefill_admission.dram_reading), or None when it cannot be read."""
+    import serving_prefill_admission as admission
+
+    reading, _ = admission.dram_reading(pool)
+    return None if reading is None else reading['free']
+
+
+def rebind_device(device, taps, *, position, window=None, negative=None, audit=False):
     """Stage E: bind a parked DFlashDevice to a request prefilled to `position`, from its window's taps (the
     prefill capture's outputs), as its constructor seeds a fresh one, without capturing anything (design
     section 2.3 step 4):
@@ -375,7 +383,9 @@ def rebind_device(device, taps, *, position, window=None, negative=None):
       6. the capture unwrapped from a pair's view and pointed at the new cache, or - released by a pair or
          the quad - rebuilt under the single bucket (build_single_capture).
     `negative` == 'drafter' (the gate's negative control, NEGATIVE_FLAG) skips steps 2 and 4: the banks keep the
-    previous request's K/V and the old DraftKVHistory stays.
+    previous request's K/V and the old DraftKVHistory stays. `audit` (QWEN_FAST_PARKED_AUDIT=1) logs PEAK_MARKER: the
+    DRAM the caller holds while the projection's outputs (the window and its padded copy) and the taps are all
+    alive - a measured lower bound of R, the rebind's peak, whose window intermediates free inside their call.
     Returns dict(ms=, single_rebuilt=, window=)."""
     import time
     from dflash_prefill_window import prefill_window
@@ -399,10 +409,16 @@ def rebind_device(device, taps, *, position, window=None, negative=None):
         raise ValueError('A parked device keeps its single-user proposal capture')
     if device.pending is not None or device.kv_history.pending is not None:
         raise ValueError('A parked device has no publication pending')
+    before = peak_reading(slot.pool) if audit else None
     if negative != 'drafter':
         slot.pool.rezero(slot)
     projected = project_window(device, taps, rows, window=window)
     padded = operations.pad(projected, [(0, 0), (0, 0), (0, HISTORY_ROWS - rows), (0, 0)], 0.0)
+    if audit:
+        peak = peak_reading(slot.pool)
+        if before is not None and peak is not None:
+            _log(PEAK_MARKER + 'slot={} P={} free_before={} free_at_peak={} held={}', slot.index, position, before,
+                 peak, before - peak)
     if addresses(operations, padded) != addresses(operations, projected):
         operations.deallocate(projected)
     operations.copy(padded, slot.history)
@@ -449,6 +465,7 @@ FEATURE_WIDTH = 5120
 BUILT_MARKER = '[PINDIAG] parked engines built '
 WARM_MARKER = '[PINDIAG] parked drafter warm '
 REBIND_MARKER = '[PINDIAG] parked rebind '
+PEAK_MARKER = '[PINDIAG] parked rebind peak '
 UNPARKED_MARKER = '[PINDIAG] parked slot {} unparked: {}'
 REPARKED_MARKER = '[PINDIAG] parked slot {} re-parked ms={:.1f}'
 STOPPED_MARKER = '[PINDIAG] parked engines stopped at k={} of {}: short of {} (free={} largest_free={} need={})'
@@ -769,7 +786,8 @@ class ParkedEngineSet:
         started = time.perf_counter()
         taps = zero_taps(self.operations, self.model.mesh_device, HISTORY_ROWS)
         try:
-            rebind_device(device, taps, position=HISTORY_ROWS, window=self.window)
+            rebind_device(device, taps, position=HISTORY_ROWS, window=self.window,
+                          **(dict(audit=True) if self.audit else {}))
         finally:
             for value in taps:
                 self.operations.deallocate(value)
@@ -841,7 +859,8 @@ class ParkedEngineSet:
             if self.audit:
                 entry.slot.verify()
             info = rebind_device(entry.device, taps, position=position, window=self.window,
-                                 **(dict(negative=self.negative) if self.negative else {}))
+                                 **(dict(negative=self.negative) if self.negative else {}),
+                                 **(dict(audit=True) if self.audit else {}))
             runtime = self.components.runtime(entry.device, position=position)
             session = make_session(runtime)
             if self.negative == 'carry':
