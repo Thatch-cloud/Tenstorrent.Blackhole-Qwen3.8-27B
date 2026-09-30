@@ -582,6 +582,11 @@ class StageTests(unittest.TestCase):
         self.image = self.tmp / 'image'
         self.targets = stage_tree(self.image, (('t/a.py', 'ANCHOR_A = 1\n'), ('t/b.py', 'B = 2\n')))
         self.record = str(self.tmp / 'record.json')
+        # apply() writes its record inside the image when given a root (the build's /opt/qwen-c2/prefix-stage.json),
+        # so an image-absolute path, read back through the image root. A host temp path would be mapped into the
+        # image too on Linux, where it is absolute.
+        self.image_record = '/prefix-stage.json'
+        self.image_record_file = str(self.image / 'prefix-stage.json')
         self.logs = []
 
     def tearDown(self):
@@ -593,7 +598,7 @@ class StageTests(unittest.TestCase):
 
     def apply(self, stages, targets=None):
         with mock.patch.object(stage, 'log', self.logs.append):
-            return stage.apply(str(self.modules), self.record, root=str(self.image), targets=targets or self.targets,
+            return stage.apply(str(self.modules), self.image_record, root=str(self.image), targets=targets or self.targets,
                                stages=stages, check_resolution=False)
 
     def read(self, name):
@@ -619,7 +624,7 @@ class StageTests(unittest.TestCase):
                  sha256=hashlib.sha256((self.modules / 'fake_prefix_helper.py').read_bytes()).hexdigest()),
             dict(module='fake_prefix_stage', path=str(self.modules) + '/fake_prefix_stage.py', sha256=module_sha)])
         self.assertEqual(result['warnings'], [])
-        with open(self.record, encoding='utf-8') as handle:
+        with open(self.image_record_file, encoding='utf-8') as handle:
             self.assertEqual(json.load(handle), json.loads(json.dumps(result)))
 
     def test_no_stages_checks_the_anchors_and_records_the_originals(self):
@@ -647,12 +652,12 @@ class StageTests(unittest.TestCase):
 
     def test_resolution_is_fatal_only_with_stages(self):
         with mock.patch.object(stage, 'log', self.logs.append):
-            result = stage.apply(str(self.modules), self.record, root=str(self.image), targets=self.targets, stages=(),
+            result = stage.apply(str(self.modules), self.image_record, root=str(self.image), targets=self.targets, stages=(),
                                  find_spec=lambda name: None, check_resolution=True)
             self.assertEqual(len(result['warnings']), 2)
             self.assertEqual(result['resolved']['plugin'], None)
             with self.assertRaisesRegex(stage.StageError, 'nothing runs'):
-                stage.apply(str(self.modules), self.record, root=str(self.image), targets=self.targets,
+                stage.apply(str(self.modules), self.image_record, root=str(self.image), targets=self.targets,
                             stages=(('t/a.py', 'fake_prefix_stage', 'patch_a'), ('t/b.py', 'fake_prefix_stage', 'patch_b')),
                             find_spec=lambda name: None, check_resolution=True)
 
@@ -661,7 +666,7 @@ class StageTests(unittest.TestCase):
         with self.assertRaisesRegex(stage.StageError, 'the anchors .nothing was written.: t/b.py'):
             self.apply((('t/a.py', 'fake_prefix_stage', 'patch_a'), ('t/b.py', 'fake_prefix_stage', 'patch_b')))
         self.assertEqual(self.read('t/a.py'), 'ANCHOR_A = 1\n')
-        self.assertFalse(os.path.exists(self.record))
+        self.assertFalse(os.path.exists(self.image_record_file))
 
     def test_a_stage_that_misses_or_breaks_refuses_and_writes_nothing(self):
         for function, words in (('patch_nothing', 'left t/b.py unchanged'), ('patch_broken', 'uncompilable'),
