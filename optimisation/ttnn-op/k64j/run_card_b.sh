@@ -548,7 +548,11 @@ if [ "$MAIN" = extent_reader ]; then
   echo "### code under test: $ci; pinned sources: the image's $SERVED_CI"
   if [ "${TP4_WIDTH:-2}" = 4 ]; then
     # The four-card profiles' modes (c2-packed-tp4: tail,share; the slice needs a second KV head), and the width.
-    XE=(-e QWEN_FAST_SDPA_MODES=tail,share -e QWEN_FAST_TP=4)
+    # QWEN_C2_SERVING=0: IMAGE is the served S2 image, whose ENV turns on the C2 boot hook in every python process;
+    # the hook applies the default serving profile's mesh (TT_MESH_GRAPH_DESC_PATH = the four-card ring descriptor), and
+    # this ONE-card open then fails in tt-metal's topology mapper (run 36786351340). The harness reads the image's served
+    # sources by path and needs none of the hook's serving setup.
+    XE=(-e QWEN_FAST_SDPA_MODES=tail,share -e QWEN_FAST_TP=4 -e QWEN_C2_SERVING=0)
   else
     XE=(-e QWEN_FAST_SDPA_MODES=tail,share,slice)
   fi
