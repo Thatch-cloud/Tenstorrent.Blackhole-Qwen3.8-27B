@@ -51,6 +51,10 @@ def validate_request(report, console, *, family='dflash2'):
             raise ValueError('Complete exact target-feature publication checks required')
     else:
         raise ValueError('Explicit supported verifier profile family required')
+    return request, validate_records(request, console)
+
+
+def validate_records(request, console):
     profile = request.get('verifier_profile', {})
     records = profile.get('records', [])
     if len(records) != len(request['blocks']) or len(records) < 3 or not profile.get('host_calls'):
@@ -73,7 +77,7 @@ def validate_request(report, console, *, family='dflash2'):
         counts[trace] += 1
     if {int(key): value for key, value in profile.get('trace_counts', {}).items()} != dict(counts):
         raise ValueError('Complete trace invocation counts required')
-    return request, records
+    return records
 
 
 def intervals(rows):

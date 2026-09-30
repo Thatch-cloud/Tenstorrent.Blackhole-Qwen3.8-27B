@@ -1,0 +1,9 @@
+{
+  "self_attn.q_proj.weight": "361ace678704220f0ed138d2aa6878924187a92ef59d9b2dd4b0a6fd0d1e1e6c",
+  "self_attn.k_proj.weight": "1cd094769e75979dc687ed06302087c27ca2b095cf3cd4415db0f0e43905bf18",
+  "self_attn.v_proj.weight": "33d1cebe54648ff48180b228011f48c270a8b0810b3be75a10207c5271c14e3a",
+  "self_attn.o_proj.weight": "649f2f11c50d691bbb3842da5a541af9fba29ccdd21648163af1a7b40e99a23d",
+  "mlp.gate_proj.weight": "797d9797e0a806c34eadc6417b26cd9288766d5564c14a0be728f7fbf71a75e1",
+  "mlp.up_proj.weight": "dcba1c4b0fe1421a59d4a508dc8900bb3eb05a079d3d9bf93d0b9ccd203719fe",
+  "mlp.down_proj.weight": "0de80d82c1f075013cb5b0b4d67a1b487fddb9a44fe37e2cb422d9b5d3c7312b"
+}

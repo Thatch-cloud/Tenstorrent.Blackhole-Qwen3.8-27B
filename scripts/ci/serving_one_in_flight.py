@@ -1,0 +1,193 @@
+"""One fresh prompt per prefill step, as a scheduler subclass.
+
+Probe 35436384975 measured TTScheduler batching SIMULTANEOUS prefills into one
+step, `new=['A','B']`. The fast prefill path takes one capture and executes one
+prompt, so that step cannot be served at all - and run 35436193682 failed on
+exactly it, at `len(scheduled_new_reqs) != 1`.
+
+Probe 35440389384 then measured `SchedulerConfig.scheduler_cls` existing and
+defaulting to None, so this is a SUBCLASS rather than a textual patch of the
+pinned plugin.
+
+How the cap works, from the plugin's own source (probe 35440459594):
+
+    def _schedule_prefill_only(self) -> SchedulerOutput:
+        pure_decodes = [r for r in self.running if not r.is_prefill_chunk]
+        partial_prefills = [r for r in self.running if r.is_prefill_chunk]
+        saved_max = self.max_num_running_reqs
+        self.running = cast(list[Request], partial_prefills)
+        self.max_num_running_reqs = max(0, saved_max - len(pure_decodes))
+        ...
+
+The base waiting loop admits until `len(self.running)` reaches
+`max_num_running_reqs`, and TTScheduler has already set `running` to the partial
+prefills. So capping the effective value at `len(partial_prefills) + 1` leaves
+room for exactly one fresh prompt.
+
+It is set BEFORE delegating and compensated for the subtraction the plugin is
+about to do, rather than by copying the method body. Copying it would silently
+diverge the moment the pinned plugin changed, and the whole point of using
+scheduler_cls is to leave that source alone.
+"""
+
+
+def one_in_flight_scheduler(base=None):
+    """Build the subclass against whichever scheduler the plugin provides."""
+    if base is None:
+        from vllm_tt_plugin.scheduler import TTScheduler as base
+
+    class OneInFlightScheduler(base):
+        """Admits at most one fresh prompt per prefill step."""
+
+        def _schedule_prefill_only(self):
+            saved = self.max_num_running_reqs
+            decodes = sum(1 for request in self.running if not request.is_prefill_chunk)
+            partials = len(self.running) - decodes
+            hidden = {}
+            try:
+                # Clause one: nothing new joins a partial. The contract
+                # (docs/lever-n-plugin-contract-2026-09-19.md line 123) puts this here
+                # and says to hide the queues rather than cap capacity. Run
+                # 35689293766 is why it says that - the cap below computes headroom
+                # zero and the waiting loop admitted a second prompt regardless.
+                if partials:
+                    for name in ('waiting', 'skipped_waiting'):
+                        queue = getattr(self, name, None)
+                        if queue is None:
+                            continue
+                        hidden[name] = queue
+                        # Same type, so a deque stays a deque and a list a list; the
+                        # base scheduler's popleft/append must keep working.
+                        setattr(self, name, type(queue)())
+                # Clause two: with no partial, waiting is visible and the base
+                # scheduler would admit up to max_num_running_reqs fresh prompts. The
+                # fast path serves exactly one. The plugin subtracts `decodes` from
+                # whatever it reads here, so add it back.
+                self.max_num_running_reqs = min(saved, allowed_prefills(partials) + decodes)
+                _log_policy(partials, decodes, bool(hidden))
+                return super()._schedule_prefill_only()
+            finally:
+                for name, queue in hidden.items():
+                    setattr(self, name, queue)
+                self.max_num_running_reqs = saved
+
+    return OneInFlightScheduler
+
+
+_LOGGED = set()
+
+
+def _log_policy(partials, decodes, hid):
+    """Say what the policy DID, once per distinct state.
+
+    install() logs that scheduler_cls was set, which proves a string was written and
+    nothing else: run 35689293766 printed that marker and still admitted a second
+    prompt. This fires from inside the scheduling call, so its absence means the class
+    never ran and its presence carries the numbers it decided on.
+    """
+    state = (partials, decodes, hid)
+    if state in _LOGGED:
+        return
+    _LOGGED.add(state)
+    try:
+        from loguru import logger
+        logger.info('[PINDIAG] one-in-flight policy: partials={} decodes={} '
+                    'waiting_hidden={} allowed={}',
+                    partials, decodes, hid, allowed_prefills(partials))
+    except BaseException:
+        pass
+
+
+def allowed_prefills(partials):
+    """How many requests a prefill step may carry, given the partials already running.
+
+    RESOLVED from the pinned plugin source, captured by probe_plugin_scheduler_sources
+    (cpu-probe run 35665853903, scheduler.py sha256 a1bd6257d3a14c90, lines 154-173):
+
+        pure_decodes    = [r for r in self.running if not r.is_prefill_chunk]
+        partial_prefills = [r for r in self.running if r.is_prefill_chunk]
+        saved_max = self.max_num_running_reqs
+        self.running = cast(list[Request], partial_prefills)
+        self.max_num_running_reqs = max(0, saved_max - len(pure_decodes))
+        result = super().schedule()
+
+    `self.running` is REPLACED by just the partials, so the base scheduler's running
+    loop advances those and its waiting loop admits new prompts up to
+    max_num_running_reqs - len(self.running). This class writes saved_max, so the
+    plugin's value becomes `allowed` and the waiting headroom is:
+
+        allowed - partials
+
+    Hence: no partial in flight, allowed 1, headroom 1 - the one fresh prompt the fast
+    path can serve. A partial in flight, allowed == partials, headroom ZERO - the
+    continuations advance and nothing new joins them.
+
+    That last case is the point. The GDN prefill scratch and host RoPE table are
+    single-occupancy, so a fresh prompt admitted between two continuations either
+    re-zeroes the scratch on its own start == 0 or advances it with foreign tokens, and
+    the suspended prompt resumes on somebody else's recurrence. The model-side guard
+    cannot catch it - a start == 0 legitimately resets its cursor, which
+    test_lever_n_model_patch pins - so this is the only place it can be stopped.
+    """
+    if type(partials) is not int or partials < 0:
+        raise ValueError('Non-negative integer partial count required')
+    return partials if partials else 1
+
+
+def waiting_headroom(max_num_running_reqs, decodes, partials):
+    """Fresh prompts the base scheduler's waiting loop may admit, after both caps.
+
+    The whole point of the change, expressed so it can be checked without a scheduler:
+    this must be 1 with no partial in flight and 0 with one.
+    """
+    return max(0, effective_capacity(max_num_running_reqs, decodes, partials) - partials)
+
+
+def effective_capacity(max_num_running_reqs, decodes, partials):
+    """What the plugin computes for the waiting loop, once capped.
+
+    Kept separate so the arithmetic can be checked without a scheduler: the plugin
+    computes max(0, self.max_num_running_reqs - decodes) after this class has
+    already written a capped value into that attribute.
+    """
+    if any(type(value) is not int or value < 0
+           for value in (max_num_running_reqs, decodes, partials)):
+        raise ValueError('Non-negative integer scheduler capacities required')
+    capped = min(max_num_running_reqs, allowed_prefills(partials) + decodes)
+    return max(0, capped - decodes)
+
+
+SCHEDULER_PATH = 'serving_one_in_flight.OneInFlightScheduler'
+
+
+def __getattr__(name):
+    # Built on first access rather than at import, so the plugin is only imported
+    # when vLLM actually resolves the scheduler. Config validation runs in places
+    # the plugin is not importable, and it has no business importing it.
+    if name == 'OneInFlightScheduler':
+        return one_in_flight_scheduler()
+    raise AttributeError(name)
+
+
+def install(vllm_config, scheduler=None):
+    """Point the fast path's config at the one-in-flight scheduler.
+
+    Only when the fast path is requested: this is part of that path's contract,
+    not a change to how the plugin schedules by default.
+
+    A dotted path rather than a class, so nothing imports the plugin until vLLM
+    resolves it.
+    """
+    scheduler_config = vllm_config.scheduler_config
+    if getattr(scheduler_config, 'scheduler_cls', None) not in (None, ''):
+        raise ValueError('A scheduler class is already selected for this config')
+    scheduler_config.scheduler_cls = SCHEDULER_PATH if scheduler is None else scheduler
+    try:
+        from loguru import logger
+        # loguru formats with {}, not %. A marker logged with % prints the literal
+        # and proves nothing, which has happened before in this work.
+        logger.info('[PINDIAG] one-in-flight scheduler installed: {}',
+                    scheduler_config.scheduler_cls)
+    except BaseException:
+        pass
+    return scheduler_config.scheduler_cls

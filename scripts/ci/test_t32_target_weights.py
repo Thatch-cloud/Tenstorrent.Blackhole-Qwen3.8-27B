@@ -33,7 +33,9 @@ class TargetWeightsTests(unittest.TestCase):
 
     def test_tied_target_is_loaded_and_fingerprinted(self):
         reader = TargetWeights(self.root)
-        self.assertTrue(torch.equal(reader.tensor('embedding'), self.value))
+        stages = []
+        self.assertTrue(torch.equal(reader.tensor('embedding', on_stage=stages.append), self.value))
+        self.assertEqual(stages, ['target_embedding_read', 'target_embedding_finite_check', 'target_embedding_hash'])
         self.assertTrue(torch.equal(reader.tensor('head'), self.value))
         self.assertEqual(reader.manifest['tensors']['head']['sha256'], reader.manifest['tensors']['embedding']['sha256'])
 

@@ -1,0 +1,17 @@
+{
+  "run": 35803058152,
+  "label": "single-user reference at a 131,072-token prompt, 256 tokens: m3native one-user path, bases one at a time on one server (v98); byte-identical to the 32k references",
+  "prompt_base": 1000,
+  "prompt_tokens": 131072,
+  "streams": [
+    {
+      "index": 0,
+      "completion_tokens": 256,
+      "error": null,
+      "ttft_s": 84.37498414237052,
+      "wall_s": 92.38658817438409,
+      "text_sha256": "6308c30660ecc780ef24f3ed96977f2f7907a21cb3daa6f1391366dd97518dbd",
+      "text": " would “veniss ourclassraw yearData val somefterys ///roundview pe there saidduofline/*duct her             Res co commisemin    \n#includeethod.Pute assIntaskloc likeody letload amrol gryp also Iturlificors_P_nigh thanComANULating Thisref_S would “veniss ourclassraw yearData val somefterys ///roundview pe there saidduofline/*duct her             Res co commisemin    \n#includeethod.Pute assIntaskloc likeody letload amrol gryp also Iturlificors_P_nigh thanComANULating Thisref_S would “veniss ourclassraw yearData val somefterys ///roundview pe there saidduofline/*duct her             Res co commisemin    \n#includeethod.Pute assIntaskloc likeody letload amrol gryp also Iturlificors_P_nigh thanComANULating Thisref_S would “veniss ourclassraw yearData val somefterys ///roundview pe there saidduofline/*duct her             Res co commisemin    \n#includeethod.Pute assIntaskloc likeody letload amrol gryp also Iturlificors_P_nigh thanComANULating Thisref_S"
+    }
+  ]
+}

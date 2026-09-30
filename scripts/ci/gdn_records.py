@@ -1,19 +1,32 @@
 """Retain GDN histories for one decision per explicitly synchronized trace epoch."""
 
+import os
+
 from gdn_multitoken_conv import addresses, release_owned, restore_prefix
 
 
-def retain_checkpoint_histories(operations, result, output):
-    histories = [result['states'], *result.get('packed_conv_states', [])]
-    if not result.get('packed_checkpoints') or len(histories) != 5:
+def block_histories(result):
+    """The histories a decision needs: five per sequence, or five per packed user.
+
+    A packed result is the first segment's result plus `segment_results`; only the
+    per-segment ones carry every user's own prefixes, so those are what is retained.
+    """
+    pieces = result.get('segment_results') or (result,)
+    histories = [value for piece in pieces for value in [piece['states'], *piece.get('packed_conv_states', [])]]
+    if any(not piece.get('packed_checkpoints') for piece in pieces) or len(histories) != 5 * len(pieces):
         raise ValueError('Packed recurrent and four convolution histories required')
+    return histories
+
+
+def retain_checkpoint_histories(operations, result, output):
+    histories = block_histories(result)
     bindings = [addresses(operations, value) for value in [*histories, output]]
     if any(len({binding[chip] for binding in bindings}) != len(bindings) for chip in range(2)):
         raise ValueError('Histories and caller-owned output must be independent on both chips')
     protected = set(bindings)
     owned = {addresses(operations, value): value for value in result['owned']}
     history_addresses = {addresses(operations, value) for value in histories}
-    if len(history_addresses) != 5 or not history_addresses.issubset(owned):
+    if len(history_addresses) != len(histories) or not history_addresses.issubset(owned):
         raise ValueError('Every independent history must have retained ownership')
     for binding in owned:
         if binding not in protected and any(any(current == saved for current, saved in zip(binding, keep, strict=True))
@@ -23,24 +36,74 @@ def retain_checkpoint_histories(operations, result, output):
     result['owned'] = [value for binding, value in owned.items() if binding in history_addresses]
 
 
+def validate_packed_record(state, result, carries, rows):
+    """A packed layer record: one history set and one block-start entry per user, and
+    each user's carry, which is where that user's accepted prefix is committed."""
+    segments = tuple(tuple(span) for span in result['segments'])
+    pieces = result.get('segment_results') or ()
+    entries = getattr(state, 'segment_entries', None) or ()
+    if (not segments or segments[0][0] != 0 or segments[-1][1] != rows
+            or len(pieces) != len(segments) or len(entries) != len(segments) or len(carries or ()) != len(segments)
+            or any(not piece.get('packed_checkpoints') or piece['states'].shape[0] != stop - start
+                   for piece, (start, stop) in zip(pieces, segments))
+            or any(len(entry) != 5 or len(carry) != 5 for entry, carry in zip(entries, carries))):
+        raise ValueError("Every layer must retain each packed user's own prefixes, block-start entry and carried state")
+    return segments
+
+
+# 64 is the M3 packed block: four 16-row segments, decided one user at a time through
+# commit_user, whose layers are that user's 16-row histories. An UNPACKED 64-row block
+# can be retained but not committed: gdn_commit_dma.validate_shapes and
+# gdn_multitoken_conv.restore_prefix both stop at 32 rows, so commit() fails closed.
+BLOCK_ROWS = (2, 4, 8, 16, 32, 64)
+
+
 class RetainedGDNBlock:
     def __init__(self, rows, operations):
-        if type(rows) is not int or rows not in (2, 4, 8, 16, 32):
+        if type(rows) is not int or rows not in BLOCK_ROWS:
             raise ValueError('Multirow packed-history block required')
         self.rows, self.operations = rows, operations
         self.records = []
+        # Packed: the users' spans, and this epoch's per-user decisions as they arrive.
+        self.segments = None
+        self.decisions = {}
+        # QWEN_FAST_FAST_COMMIT=1: read once at construction, like every other packed
+        # engine flag (packed_verifier.PackedVerifierEngine.pipelined_commits). See
+        # commit_user for what it skips.
+        self.fast_commit = os.environ.get('QWEN_FAST_FAST_COMMIT') == '1'
+        self.poisoned = False
         self.selected_prefix = None
         self.replay_ready = False
         self.replay_epoch = 0
         self.closed = False
+        # QWEN_FAST_ROUND_FENCES (round-fence plan H1a, verify_prestage.py): off unless the packed
+        # verifier that owns this block turns it on (use_round_fences) - a sequential engine's
+        # block never is. `fence_owed`: every user has decided and the round's last commit left
+        # its fence (F8) to the drafts' fence F9 (note_round_fence) or to the next replay.
+        # `commit_serial` counts decisions, so a fence arms only the commits issued before it.
+        # `replay_fence` says how the last replay was armed ('f9' or 'replay'), and
+        # `replay_fence_ms` what a fence at replay cost.
+        self.round_fences = False
+        self.fence_owed = False
+        self.commit_serial = 0
+        self.replay_fence = None
+        self.replay_fence_ms = 0.0
 
     def append(self, state, result, checkpoint):
+        """Record one layer. Unpacked, `checkpoint` is where the block's one decision is
+        committed; packed, it is one carry per user, where that user's decision is."""
         if self.closed or self.selected_prefix is not None or len(self.records) >= 48:
             raise ValueError('Cannot append to a closed, committed or complete block')
-        if not result.get('packed_checkpoints') or result['states'].shape[0] != self.rows:
+        segments = None
+        if result.get('segments') is not None:
+            segments = validate_packed_record(state, result, checkpoint, self.rows)
+        elif not result.get('packed_checkpoints') or result['states'].shape[0] != self.rows:
             raise ValueError('Every layer must retain all packed prefixes')
+        if self.records and segments != self.segments:
+            raise ValueError('Every layer must pack the same users')
         if any(previous.gdn is state.gdn for previous, unused, saved in self.records):
             raise ValueError('Duplicate GDN layer record')
+        self.segments = segments
         self.records.append((state, result, checkpoint))
 
     def validate_bindings(self):
@@ -58,6 +121,8 @@ class RetainedGDNBlock:
     def commit(self, prefix, *, dma=False, publication=None, synchronize=False):
         if self.closed or self.selected_prefix is not None or len(self.records) != 48:
             raise ValueError('Exactly one decision on a complete live block required')
+        if self.segments is not None:
+            raise ValueError('A packed block is committed one user at a time')
         if type(prefix) is not int or not 0 <= prefix <= self.rows:
             raise ValueError('Commit prefix outside verified rows')
         if publication is not None and (not dma or not callable(publication)):
@@ -82,7 +147,147 @@ class RetainedGDNBlock:
             self.operations.synchronize_device(mesh)
             self.replay_ready = True
 
+    def validate_segment(self, segment):
+        if self.segments is None:
+            raise ValueError('Per-user commit applies to a packed block')
+        if type(segment) is not int or not 0 <= segment < len(self.segments):
+            raise ValueError('Packed user index outside the block')
+        return self.segments[segment]
+
+    def segment_layers(self, segment):
+        """One packed user's commit layers in record order, the twenty tensors per layer
+        that `gdn_commit_dma.prepare` takes: `[*entry, states, *conv histories, rec_state,
+        *conv_states, *carry]`. The destination is that user's CARRY, so the accepted
+        prefix lands where the next block's decode restores this user from; native slot
+        zero is written as a side effect and means nothing after a packed step."""
+        self.validate_segment(segment)
+        return [[*state.segment_entries[segment], piece['states'], *piece['packed_conv_states'],
+                 state.gdn.rec_state, *state.gdn.conv_states, *carries[segment]]
+                for state, result, carries in self.records for piece in (result['segment_results'][segment],)]
+
+    def use_round_fences(self):
+        """QWEN_FAST_ROUND_FENCES (round-fence plan H1a), for the packed verifier's own block:
+        replay() drops the fence after its blocking trace and the second validate (F3), and a
+        `synchronize=True` commit_user leaves its fence to note_round_fence or the next replay
+        (F8). A replay still needs every user decided and a fence after the last decision, and
+        a poisoned block still refuses."""
+        self.round_fences = True
+
+    def commit_user(self, segment, prefix, *, dma=False, publication=None, synchronize=False,
+                    validated_this_round=False):
+        """Commit ONE packed user's accepted prefix into that user's own carry.
+
+        Every user decides once per block, in any order. The block is ready to replay
+        once every user has decided and a `synchronize=True` decision has fenced the
+        outstanding publications, so synchronize on the last user's commit.
+
+        Prefix zero is a no-op on the carry: the decode restored this user from it and
+        never advanced it, and the entry the DMA would copy back is that same state.
+
+        Under round fences (use_round_fences) the `synchronize=True` decision does not fence:
+        it owes the fence, which note_round_fence (the drafts' F9) or the next replay pays,
+        and `validated_this_round` (this round's replay validated every binding) skips the
+        first decision's validate.
+        """
+        if self.closed or self.poisoned or len(self.records) != 48:
+            raise ValueError('Exactly one decision per user on a complete live block required')
+        start, stop = self.validate_segment(segment)
+        if type(prefix) is not int or not 0 <= prefix <= stop - start:
+            raise ValueError("Commit prefix outside the user's verified rows")
+        if segment in self.decisions:
+            raise ValueError('Each packed user decides once per block')
+        if publication is not None and (not dma or not callable(publication)):
+            raise ValueError('A bound publication callback requires the DMA path')
+        # validate_bindings checks the SAME 48 x 5 native buffer addresses (state.gdn.
+        # rec_state and conv_states) that packed_verifier.PackedVerifierEngine.
+        # validate_bindings already checked once, this round, at the top of verify() -
+        # nothing between verify() and any of this round's commit_user calls (each one
+        # DMAs into a distinct user's CARRY, never a native buffer's identity) can move
+        # them. Called on every one of a round's commit_user calls (once per packed
+        # user) it is a genuine but redundant re-check: measured at ~8 ms per user (four
+        # users x 48 layers x 5 get_device_tensors host round trips each), it dominates
+        # the packed_commit phase's host wall time. Under QWEN_FAST_FAST_COMMIT=1, keep
+        # the check on this round's FIRST commit_user call only (`self.decisions` is
+        # still empty there) - still catches a binding actually broken before any commit
+        # of the round - and skip the three repeats that only re-confirm what verify()
+        # already established. Default (fast_commit False) behaviour is unchanged: every
+        # commit_user call validates, exactly as before.
+        # QWEN_FAST_ROUND_FENCES: the round's first decision re-checks what this round's replay
+        # validated right before its trace; nothing between the two moves a native buffer.
+        skip_first = self.round_fences and validated_this_round and not self.decisions
+        if (not self.fast_commit or not self.decisions) and not skip_first:
+            self.validate_bindings()
+        mesh = self.bound_mesh() if dma or synchronize else None
+        self.decisions[segment] = prefix
+        self.commit_serial += 1
+        if len(self.decisions) == len(self.segments):
+            self.selected_prefix = tuple(self.decisions[index] for index in range(len(self.segments)))
+        self.replay_ready = False
+        self.fence_owed = False
+        try:
+            if prefix == 0:
+                pass
+            elif publication is not None:
+                publication(prefix)
+            elif dma:
+                from gdn_commit_dma import publish
+                publish(mesh, self.segment_layers(segment), prefix)
+            else:
+                for state, result, carries in self.records:
+                    restore_prefix(self.operations, result['segment_results'][segment],
+                                   state.segment_entries[segment], carries[segment], prefix)
+        except BaseException:
+            # A half-written carry cannot be retried as a fresh decision and must not
+            # be replayed over by a later user's fence.
+            self.poisoned = True
+            raise
+        if synchronize:
+            if self.round_fences:
+                # F8: owed, never skipped - and only once every user has decided.
+                self.fence_owed = self.selected_prefix is not None
+            else:
+                self.operations.synchronize_device(mesh)
+                self.replay_ready = self.selected_prefix is not None
+
+    def note_round_fence(self, token):
+        """Round fences: a fence the caller has just completed on this block's queue (the drafts'
+        F9) pays the owed one - but only if no decision came after `token` (commit_serial read
+        before that fence), and never for a poisoned, closed or undecided block. True when armed."""
+        if (self.round_fences and self.fence_owed and token == self.commit_serial and not self.closed
+                and not self.poisoned and self.selected_prefix is not None and len(self.records) == 48):
+            self.fence_owed = False
+            self.replay_ready = True
+            self.replay_fence, self.replay_fence_ms = 'f9', 0.0
+            return True
+        return False
+
+    def note_deferred_publications(self):
+        """Round-fence plan H2 (QWEN_FAST_GDN_AFTER_PAIRS; packed_verifier.PackedVerifierEngine.
+        flush_commits): publications decided earlier this round were only now enqueued - after the
+        drafts' fence F9, which may already have armed the replay on the decisions' commit_serial. The
+        fence is owed again (the next replay pays it, fence_at_replay), and the serial moves so that no
+        token taken before this can arm it. Round fences only."""
+        if not self.round_fences:
+            raise ValueError('Deferred publications need the round fences')
+        self.commit_serial += 1
+        self.replay_ready = False
+        self.fence_owed = self.selected_prefix is not None
+
+    def fence_at_replay(self):
+        """Round fences, no F9 since the last decision: the owed fence, paid here, once."""
+        if (self.fence_owed and not self.closed and not self.poisoned and self.selected_prefix is not None
+                and len(self.records) == 48):
+            import time
+
+            started = time.perf_counter()
+            self.operations.synchronize_device(self.bound_mesh())
+            self.fence_owed = False
+            self.replay_ready = True
+            self.replay_fence, self.replay_fence_ms = 'replay', (time.perf_counter() - started) * 1000
+
     def replay(self, operation):
+        if self.round_fences and not self.replay_ready:
+            self.fence_at_replay()
         if self.closed or not self.replay_ready or self.selected_prefix is None or len(self.records) != 48:
             raise ValueError('A successfully synchronized commit is required before replay')
         if not callable(operation):
@@ -92,14 +297,20 @@ class RetainedGDNBlock:
         mesh = self.bound_mesh()
         if operation() is not None:
             raise RuntimeError('Replay operation must return None after enqueueing the bound trace')
-        self.operations.synchronize_device(mesh)
-        self.validate_bindings()
+        if not self.round_fences:
+            self.operations.synchronize_device(mesh)
+            self.validate_bindings()
+        # Round fences (F3): the operation is the packed verifier's BLOCKING trace, so the host
+        # already waited for it, and nothing between it and here can move a native binding.
         self.selected_prefix = None
+        self.decisions = {}
         self.replay_epoch += 1
 
     def close(self):
         if not self.closed:
             release_owned(self.operations, [value for state, result, checkpoint in self.records for value in result['owned']])
             self.records.clear()
+            self.decisions = {}
             self.replay_ready = False
+            self.fence_owed = False
             self.closed = True

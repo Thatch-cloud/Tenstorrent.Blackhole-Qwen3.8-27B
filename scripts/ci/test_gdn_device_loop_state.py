@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from gdn_device_loop_state import DeviceLoopState
+from test_gdn_packed_segments import PackedFixture
 
 
 class DeviceLoopStateTests(unittest.TestCase):
@@ -194,3 +195,114 @@ class DeviceLoopStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adapter.decode(SimpleNamespace(shape=(1, 4, 5120)), [], 2)
         active.save.assert_not_called()
+
+
+class PackedLaunchReductionTests(PackedFixture):
+    """T32: overlay-only reduction of GDN launches in the four-user packed decode round.
+
+    Every packed segment but the last moved its carried state into its own entry by
+    round-tripping through the native 8-slot active buffer: `active.restore(slot)`
+    (one launch, compact source -> native row 0) then, inside `_recurrence`,
+    `active.save(entry)` (one launch, native row 0 -> compact destination). Both `slot`
+    and `entry` are compact-shaped, and the native buffer never needed to hold that
+    value for any reason - nothing reads it between the two calls - so the pair is
+    replaced with a single `copy_compact(slot, entry)` launch (compact -> compact,
+    directly) for every segment except the last.
+
+    The LAST segment keeps the real `active.restore` + `active.save` round trip,
+    because `_decode_packed` documents that the native buffer must end a packed round
+    holding the LAST segment's user (an unpacked decode on the same layer afterwards
+    would otherwise inherit an arbitrary one). That is the one invariant this overlay
+    must not break, so N segments cost N+1 launches here, not N: three single-launch
+    segments plus one two-launch segment for four users, saving 3 launches per packed
+    round per GDN layer rather than 4 - see gdn_device_loop_state.py's `_decode_packed`
+    for why the last segment cannot be reduced further without losing that invariant.
+    """
+
+    spans = ((0, 16), (16, 32), (32, 48), (48, 64))
+    slots = [['%s%d' % (name, index) for index in range(5)] for name in 'ABCD']
+    checkpoints = [['ck%s' % name] for name in 'ABCD']
+
+    def propagating(self, active, calls):
+        """Rewire active.restore/active.save and copy_compact to actually move the
+        marker values they are given (mirroring the real no-arithmetic device copy),
+        so the test can check entries and the native buffer end up holding the right
+        values - not just that the right calls were made in the right order."""
+        native = [None] * 5
+
+        def restore(source):
+            calls.append(('restore', source[0]))
+            native[:] = list(source)
+
+        def save(destination):
+            calls.append(('save', destination[0]))
+            destination[:] = list(native)
+
+        def copy_compact(source, destination):
+            calls.append(('copy_compact', source[0], destination[0]))
+            destination[:] = list(source)
+
+        active.restore.side_effect = restore
+        active.save.side_effect = save
+        return native, copy_compact
+
+    def test_four_segment_packed_decode_reduces_launches_and_keeps_every_value(self):
+        state, operations, layer, active, calls = self.build(commit_only=True, users=4)
+        native, copy_compact = self.propagating(active, calls)
+        packed = SimpleNamespace(shape=(1, 64, 5120), name='packed', memory_config=lambda: 'l1')
+        with patch('gdn_device_loop_state.run_batched_projected', side_effect=self.recurrence(calls)), \
+                patch('gdn_device_loop_state.copy_compact', side_effect=copy_compact), \
+                patch('gdn_device_loop_state.release_owned'), \
+                patch('gdn_device_loop_state.norm_batch_enabled', return_value=False):
+            state.decode(packed, self.checkpoints, [0] * 4, segments=self.spans, slots=self.slots, deferred=True)
+
+        # Launch sequence per segment, in order: one copy_compact launch each for the
+        # first three segments (A, B, C), then a restore+save pair (two launches) for
+        # the last (D) - never the old two-launch restore+save pair for every segment.
+        launches = [entry for entry in calls if entry[0] in ('restore', 'save', 'copy_compact')]
+        self.assertEqual(launches, [
+            ('copy_compact', 'A0', 'E0.0'),
+            ('copy_compact', 'B0', 'E1.0'),
+            ('copy_compact', 'C0', 'E2.0'),
+            ('restore', 'D0'), ('save', 'E3.0'),
+        ])
+        self.assertEqual(len(launches), 5, 'three single-launch segments plus one '
+                         'two-launch segment: 5 launches, not the original 8 (2 per segment)')
+
+        # Every entry ends up holding exactly its own segment's slot values, bit for
+        # bit - copy_compact and the restore/save pair are both bit-exact, no-arithmetic
+        # moves (gdn_state_copy.py), so the mechanism differs but the values must not.
+        for slot, entry in zip(self.slots, state.segment_entries):
+            self.assertEqual(list(entry), slot)
+
+        # The native buffer is documented to end a packed round holding the LAST
+        # segment's user - D - and nothing else, since the first three segments never
+        # touch it at all under the reduction.
+        self.assertEqual(native, self.slots[-1])
+
+    def test_single_user_branch_is_unaffected_by_the_packed_launch_reduction(self):
+        """`_recurrence`'s new `slot` parameter defaults to None, and the single-user
+        (spans-is-None) call site in `decode` never passes one, so this path is exactly
+        what it was: entry is populated by reading the native buffer's current row 0
+        through `active.save`, never by a `copy_compact` sourced from a packed segment's
+        slot - there is no such slot on this path at all."""
+        state, operations, layer, active, calls = self.build()
+        native, copy_compact = self.propagating(active, calls)
+        native[:] = ['native-rec', 'native-c0', 'native-c1', 'native-c2', 'native-c3']
+        packed = SimpleNamespace(shape=(1, 32, 5120), name='packed', memory_config=lambda: 'l1')
+        with patch('gdn_device_loop_state.run_batched_projected', side_effect=self.recurrence(calls)), \
+                patch('gdn_device_loop_state.restore_prefix'), \
+                patch('gdn_device_loop_state.copy_compact', side_effect=copy_compact), \
+                patch('gdn_device_loop_state.release_owned'), \
+                patch('gdn_device_loop_state.norm_batch_enabled', return_value=False):
+            state.decode(packed, ['ck'], 12)
+
+        # The very first device touch of the native buffer is a save reading its
+        # current row 0 into entry - a copy_compact sourced from a slot never happens,
+        # because there is no packed segment here for one to come from. (The logged
+        # tag is entry's own pre-call marker id, 'E0.0' - the same convention every
+        # other fixture call here uses.)
+        first_native_touch = next(entry for entry in calls if entry[0] in ('save', 'copy_compact'))
+        self.assertEqual(first_native_touch, ('save', 'E0.0'))
+        self.assertEqual(list(state.entry), ['native-rec', 'native-c0', 'native-c1', 'native-c2', 'native-c3'],
+                         "entry took the native buffer's row 0 as it stood, unchanged from before this overlay")

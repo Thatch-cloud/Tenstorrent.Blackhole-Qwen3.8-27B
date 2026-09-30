@@ -76,6 +76,36 @@ class DSparkRequestExperimentTests(unittest.TestCase):
         self.assertEqual(result['committed_tokens'], 4)
         self.assertFalse(result['proposal_trace'] or result['held_out_coding_quality'] or result['serving_qualified'])
 
+    def cached_requests(self):
+        requests = self.requests()
+        for request in requests:
+            request['dspark'] = dict(prefix_cache=[
+                dict(cache_hit=False, prefix_tokens=0, suffix_tokens=4096,
+                    checkpoint_boundary=dict(position=2048, captured=True, complete=True, restored=True)),
+                dict(cache_hit=True, prefix_tokens=2048, suffix_tokens=2048,
+                    native_route=dict(calls=1, completed=True, restored=True, prefix_tokens=2048))])
+        return requests
+
+    def test_cached_pp_is_separate_from_cold_pp_and_keeps_full_cycle_tg(self):
+        requests = self.cached_requests()
+        with self.assertRaisesRegex(ValueError, 'cold PP'):
+            summarize(requests)
+        result = summarize(requests, prefix_cached=True)
+        self.assertIsNone(result['pp'])
+        self.assertEqual(result['effective_cached_pp'], 4096)
+        self.assertEqual(result['suffix_request_pp'], 2048)
+        self.assertEqual(result['committed_tg'], 10)
+
+    def test_incomplete_cached_accounting_or_scope_rejected(self):
+        for field, value in (('suffix_tokens', 1), ('prefix_tokens', True), ('cache_hit', False),
+                ('native_route', dict(calls=1, completed=True, restored=False, prefix_tokens=2048))):
+            requests = self.cached_requests()
+            requests[1]['dspark']['prefix_cache'][1][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                summarize(requests, prefix_cached=True)
+        with self.assertRaises(ValueError):
+            summarize(self.requests(), prefix_cached=True)
+
     def test_missing_audit_changed_tokens_failed_state_and_nonfinite_times_reject(self):
         for field, value in (('instrumented_timing', True), ('exact', False), ('state_exact', False),
                 ('inactive_exact', False), ('emitted', [3, 4, 6]), ('prompt_tokens', [9, 2]),

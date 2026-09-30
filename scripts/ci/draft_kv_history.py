@@ -1,5 +1,6 @@
 """Double-buffered projected draft history with explicit accepted-prefix publication."""
 
+import os
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -8,8 +9,125 @@ from draft_kv_projection import project_key_value
 from gdn_multitoken_conv import addresses, release_owned
 
 
+KV_SHAPE = (1, 4, 2048, 128)
+QUERY_SHAPE = (1, 1, 32, 2048)
+
+
+def validate_query(operations, query):
+    """The pre-trace zero query input lent by the serving pool, or None to upload one here.
+
+    The projection only reads it (draft_kv_projection.project_key_value, through
+    draft_head_layout.split_projected_heads), but it is read at every proposal and every
+    publication for the request's whole life - so, uploaded here after an earlier
+    request's traces exist, it is one more buffer their replays can overwrite.
+    """
+    if query is None:
+        return None
+    if tuple(getattr(query, 'shape', ())) != QUERY_SHAPE or getattr(query, 'dtype', None) != operations.bfloat16:
+        raise ValueError('A replicated zero BF16 (1, 1, 32, 2048) query is required')
+    return query
+
+
+def validate_storage(operations, storage, layers):
+    """Pre-trace K/V banks lent by the serving pool - per learned layer an active and a
+    spare bank of k and v, handed over zeroed - or None to allocate the banks here.
+
+    Allocated here, the banks are the buffers run 35481466425 found overwritten by the
+    other request's verify replay while that request's pooled history survived: they
+    were allocated after the replaying trace existed, into the holes it had baked
+    (serving_buffer_pool.py). Lent from the pool they predate every request trace.
+    """
+    if storage is None:
+        return None
+    banks = tuple(storage)
+    if (len(banks) != layers or any(not isinstance(bank, dict) or set(bank) != {'active', 'spare'}
+            or any(not isinstance(bank[side], dict) or set(bank[side]) != {'k', 'v'}
+                   or any(tuple(value.shape) != KV_SHAPE or value.dtype != operations.bfloat16
+                          for value in bank[side].values())
+                   for side in ('active', 'spare')) for bank in banks)):
+        raise ValueError('One active and one spare replicated BF16 (1, 4, 2048, 128) K/V bank per learned layer required')
+    identities = [addresses(operations, value) for value in bank_tensors(banks)]
+    if any(any(left == right for left, right in zip(identity, other, strict=True))
+           for index, identity in enumerate(identities) for other in identities[:index]):
+        raise ValueError('Lent K/V banks must own independent chip storage')
+    return banks
+
+
+def bank_tensors(banks):
+    return [bank[side][head] for bank in banks for side in ('active', 'spare') for head in ('k', 'v')]
+
+
+@contextmanager
+def indexed_temporaries(cache, protected):
+    """DraftKVHistory.temporaries under QWEN_FAST_ROUND_B1 (C2): the same scope - the
+    same values kept, refused and queued, released in the same order at the same point -
+    with set lookups instead of list scans, and the lent banks' and query's addresses
+    computed once per borrowed set and kept with the tensors (a lent tensor stays at one
+    address while it is lent).
+
+    The scan it replaces keeps a value whose identity is protected, raises when any one
+    chip's address matches the same chip of any protected identity, and otherwise queues
+    the value; on exit it releases the queued values whose identity is not protected and
+    not one of the cache's own owned tensors, recomputed from cache.owned THEN (the
+    constructor adds to it inside a scope). addresses() gives one address per chip, so
+    "some chip matches" is "that chip's address is in that chip's set".
+
+    QWEN_FAST_ROUND_B1_AUDIT re-reads the cached borrowed addresses on every reuse, makes
+    every retain() decision again by the list scan and every release list again by the
+    list filter, and compares (dflash_packed_proposal.ROUND_B1_AUDIT_FLAG)."""
+    audit = os.environ.get('QWEN_FAST_ROUND_B1_AUDIT') == '1'
+    operations = cache.operations
+    owned = []
+    projection_owned = cache.projection.owned if cache.projection is not None else []
+    identities = [addresses(operations, value) for value in [*cache.owned, *projection_owned]]
+    borrowed = tuple(cache.borrowed)
+    cached = getattr(cache, '_round_b1_borrowed', None)
+    if (cached is None or len(cached[0]) != len(borrowed)
+            or any(mine is not theirs for mine, theirs in zip(cached[0], borrowed))):
+        cached = (borrowed, [addresses(operations, value) for value in borrowed])
+        cache._round_b1_borrowed = cached
+    elif audit and borrowed:
+        from dflash_packed_proposal import audit_borrowed
+
+        audit_borrowed([addresses(operations, value) for value in borrowed], cached[1])
+    identities.extend(cached[1])
+    identities.extend(addresses(operations, value) for value in protected)
+    exact = set(identities)
+    chips = [set() for _ in range(max((len(identity) for identity in identities), default=0))]
+    for identity in identities:
+        for chip, address in enumerate(identity):
+            chips[chip].add(address)
+
+    def retain(value):
+        identity = addresses(operations, value)
+        if identity not in exact:
+            if any(address in known for address, known in zip(identity, chips)):
+                raise ValueError('Draft cache temporary partially aliases borrowed storage')
+            owned.append(value)
+        return value
+    if audit:
+        from dflash_packed_proposal import audit_release, audited_retain
+
+        scoped = audited_retain(retain, owned, lambda value: addresses(operations, value), identities)
+    else:
+        scoped = retain
+    try:
+        yield scoped
+    finally:
+        persistent = set(exact)
+        persistent.update(addresses(operations, value) for value in cache.owned)
+        released = [value for value in owned if addresses(operations, value) not in persistent]
+        if audit:
+            listed = [*identities, *(addresses(operations, value) for value in cache.owned)]
+            expected = [value for value in owned if addresses(operations, value) not in listed]
+        release_owned(operations, released)
+        if audit:
+            audit_release(expected, released)
+
+
 class DraftKVHistory:
-    def __init__(self, operations, mesh, parameters, features, *, position, history_rows, capture_projection=False):
+    def __init__(self, operations, mesh, parameters, features, *, position, history_rows, capture_projection=False,
+                 storage=None, query=None):
         import torch
 
         parameters = tuple(parameters)
@@ -17,28 +135,48 @@ class DraftKVHistory:
                 or type(history_rows) is not int or history_rows != min(position, 2048)
                 or not 1 <= len(parameters) <= 5 or type(capture_projection) is not bool):
             raise ValueError('Bounded absolute draft frontier and explicit learned layers required')
+        banks = validate_storage(operations, storage, len(parameters))
+        query = validate_query(operations, query)
         self.operations, self.mesh, self.parameters = operations, mesh, parameters
         self.position, self.history_rows = position, history_rows
         self.owned, self.active, self.spare = [], [], []
+        # Lent banks and query: read and written here, protected from every temporary
+        # like the owned tensors are, never freed here.
+        self.borrowed = [] if banks is None else bank_tensors(banks)
+        if query is not None:
+            self.borrowed.append(query)
         self.checks = []
         self.projection = None
         self.pending, self.closed = None, False
         try:
-            self.query = self.upload(torch.zeros((1, 1, 32, 2048), dtype=torch.bfloat16))
-            self.owned.append(self.query)
+            if query is None:
+                self.query = self.upload(torch.zeros(QUERY_SHAPE, dtype=torch.bfloat16))
+                self.owned.append(self.query)
+            else:
+                # Lent zeroed (serving_buffer_pool.py), exactly as the upload it replaces.
+                self.query = query
             with self.temporaries([features]) as retain:
                 inputs, tables = self.project_inputs(features, history_rows, position - history_rows, retain)
-                for parameter in parameters:
+                for layer, parameter in enumerate(parameters):
                     result = project_key_value(operations, inputs, self.query, tables, retain, parameters=parameter)
                     active, spare = {}, {}
                     for name in ('k', 'v'):
                         valid = retain(operations.slice(result[name], (0, 0, 0, 0), (1, 4, history_rows, 128)))
-                        active[name] = retain(operations.pad(valid, [(0, 0), (0, 0), (0, 2048 - history_rows), (0, 0)], 0.0))
-                        self.owned.append(active[name])
-                        spare[name] = operations.zeros_like(active[name])
-                        self.owned.append(spare[name])
+                        if banks is None:
+                            active[name] = retain(operations.pad(valid, [(0, 0), (0, 0), (0, 2048 - history_rows), (0, 0)], 0.0))
+                            self.owned.append(active[name])
+                            spare[name] = operations.zeros_like(active[name])
+                            self.owned.append(spare[name])
+                            continue
+                        # Into the lent active bank; the padded source goes with the scope.
+                        operations.copy(retain(operations.pad(valid, [(0, 0), (0, 0), (0, 2048 - history_rows), (0, 0)], 0.0)),
+                                        banks[layer]['active'][name])
+                        active[name], spare[name] = banks[layer]['active'][name], banks[layer]['spare'][name]
                     self.active.append(active)
                     self.spare.append(spare)
+                if banks is not None:
+                    # Before the scope frees the padded sources the copies read from.
+                    operations.synchronize_device(mesh)
             operations.synchronize_device(mesh)
             if capture_projection:
                 from draft_kv_projection_trace import PreparedDraftKVProjection
@@ -56,9 +194,14 @@ class DraftKVHistory:
 
     @contextmanager
     def temporaries(self, protected):
+        if os.environ.get('QWEN_FAST_ROUND_B1') == '1':
+            with indexed_temporaries(self, protected) as retain:
+                yield retain
+            return
         owned = []
         projection_owned = self.projection.owned if self.projection is not None else []
-        identities = [addresses(self.operations, value) for value in [*self.owned, *projection_owned, *protected]]
+        identities = [addresses(self.operations, value)
+                      for value in [*self.owned, *projection_owned, *self.borrowed, *protected]]
         def retain(value):
             identity = addresses(self.operations, value)
             if identity not in identities:
@@ -163,4 +306,5 @@ class DraftKVHistory:
         self.owned.clear()
         self.active.clear()
         self.spare.clear()
+        self.borrowed.clear()
         self.closed = True

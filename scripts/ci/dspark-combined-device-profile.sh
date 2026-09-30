@@ -18,5 +18,14 @@ python3 -m tracy -p --check-exit-code --disable-device-data-dump-to-files \
     --disable-device-data-push-to-tracy --dump-device-data-mid-run --op-support-count 20000 -o "$output" \
     "$@" 2>&1 | tee "$output/console.log"
 preserve_metadata
-test -s "$output/metadata/tracy_ops_data.csv"
+# tracy_ops_data.csv is the "dump device data to files" output, which this very
+# command disables, so requiring it contradicted the flags and failed four runs
+# (35181419754, 35185029352, 35185295419, 35185624322) that had in fact produced a
+# complete profile. The C++ post-processed report is the one carrying kernel
+# attribution and is what those runs delivered; require that, and record the other.
 test -s "$output/metadata/cpp_device_perf_report.csv"
+if [ -s "$output/metadata/tracy_ops_data.csv" ]; then
+  echo "tracy_ops_data.csv present"
+else
+  echo "tracy_ops_data.csv absent, expected with --disable-device-data-dump-to-files"
+fi

@@ -51,11 +51,15 @@ class TargetWeights:
                 or any(identity(path) != self.shard_identities[name] for name, path in self.files.items())):
             raise ValueError('Target checkpoint changed during proposal loading')
 
-    def tensor(self, role):
+    def tensor(self, role, *, on_stage=None):
         import torch
 
         if role not in self.names:
             raise ValueError('Only target embedding and head may be loaded')
+        if on_stage is not None and not callable(on_stage):
+            raise ValueError('Callable loading observer required')
+        observe = on_stage if on_stage is not None else lambda stage: None
+        observe('target_' + role + '_read')
         self.check_unchanged()
         name = self.names[role]
         with self.files[name].open('rb') as stream:
@@ -79,9 +83,11 @@ class TargetWeights:
             if stream.readinto(storage) != size:
                 raise ValueError('Truncated target matrix')
         self.check_unchanged()
+        observe('target_' + role + '_finite_check')
         value = torch.frombuffer(storage, dtype=torch.bfloat16).reshape(VOCABULARY, HIDDEN_WIDTH)
         if not torch.isfinite(value).all():
             raise ValueError('Finite target matrix required')
+        observe('target_' + role + '_hash')
         self.manifest['tensors'][role] = dict(name=name, shard=self.files[name].name,
             shape=list(value.shape), sha256=hashlib.sha256(storage).hexdigest())
         return value

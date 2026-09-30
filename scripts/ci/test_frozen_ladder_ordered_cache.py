@@ -16,11 +16,17 @@ class LadderOrderedCacheTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_shapes(*args[:3], (rows, count + 1), context=context)
 
-    def test_default_guard_stays_unchanged_and_scope_restores_on_failure(self):
+    def test_default_guard_admits_only_the_reviewed_width_and_scope_restores_on_failure(self):
+        """ordered_cache's default guard admits page width 2,052 (a 131,328 window) since the
+        131k work - reviewed against the kernels and qualified on hardware by the independent
+        writer probe (docs/four-streams-131k-feasibility-2026-09-23.md). It still refuses its
+        neighbours, and this scope must still hand back the guard it replaced, even when the
+        body raises."""
         original = ordered_cache.validate_shapes
         args = ((2060, 2, 64, 256), (1, 16, 32, 256), (16,), (16, 2052))
+        self.assertEqual(original(*args), 16)
         with self.assertRaises(ValueError):
-            original(*args)
+            original((2060, 2, 64, 256), (1, 16, 32, 256), (16,), (16, 2056))
         with self.assertRaisesRegex(RuntimeError, 'fixture'):
             with page_geometry(131072) as evidence:
                 self.assertEqual(ordered_cache.validate_shapes(*args), 16)

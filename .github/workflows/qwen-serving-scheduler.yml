@@ -1,0 +1,42 @@
+name: Qwen real scheduler CPU image check
+on:
+  push:
+    tags: ['experiment/serving-scheduler-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  scheduler:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: serving-scheduler-check
+          persist-credentials: false
+      - name: Test scheduler in existing image without devices or weights
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p serving-scheduler-check/experiment-results
+          set -o pipefail
+          timeout -k 5 90 docker run --rm --network none --cpus 2 --memory 4g \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/test_serving_scheduler.py:/canary-tests/test_serving_scheduler.py:ro" \
+            -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/test_serving_vllm_installed.py:/canary-tests/test_serving_vllm_installed.py:ro" \
+            -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/serving_fast_policy.py:/canary-tests/serving_fast_policy.py:ro" \
+            -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/serving_canary_runner.py:/canary-tests/serving_canary_runner.py:ro" \
+            -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/serving_dflash_registry.py:/canary-tests/serving_dflash_registry.py:ro" \
+            -v "$GITHUB_WORKSPACE/serving-scheduler-check/scripts/ci/test_serving_dflash_registry_installed.py:/canary-tests/test_serving_dflash_registry_installed.py:ro" \
+            -e PYTHONPATH=/canary-tests:/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal \
+            -e VLLM_PLUGINS= -e VLLM_USE_V2_MODEL_RUNNER=0 -e HF_HUB_OFFLINE=1 \
+            -e OMP_NUM_THREADS=2 -e MKL_NUM_THREADS=2 \
+            --entrypoint python3 \
+            sha256:6d517e1f202d72d9ba0482d551cb126a3f4e7b92d21c5ab53fd34e7f2084534d \
+            -B -m unittest -v test_serving_scheduler test_serving_vllm_installed test_serving_dflash_registry_installed 2>&1 | tee serving-scheduler-check/experiment-results/scheduler.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-serving-scheduler-${{ github.run_id }}
+          path: serving-scheduler-check/experiment-results/

@@ -77,8 +77,10 @@ class FusedConvolutionTests(unittest.TestCase):
                 self.assertEqual(compute['compile_time_args'], [2])
                 self.assertEqual(compute['config'], dict(math_fidelity='hifi4', fp32_dest_acc_en=True, math_approx_mode=False))
                 for worker in range(80):
+                    # the ninth argument is the packed seam bitmask; one sequence sets
+                    # only bit 0, which is the row-zero guard the kernel always had
                     self.assertEqual(reader['runtime_args'][worker % 8][worker // 8],
-                        [value.shards[chip].buffer_address() for value in [*values, output]] + [rows, worker])
+                        [value.shards[chip].buffer_address() for value in [*values, output]] + [rows, worker, 1])
             operations.deallocate.assert_not_called()
 
     def test_invalid_geometry_dtype_layout_or_placement_precedes_allocation(self):

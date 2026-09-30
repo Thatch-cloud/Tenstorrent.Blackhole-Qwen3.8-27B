@@ -1,0 +1,53 @@
+name: Qwen spec batch sources
+on:
+  push:
+    tags: ['experiment/spec-batch-src-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  extract:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: sb
+          persist-credentials: false
+      - name: Extract the fast-path batch and verify-row machinery
+        working-directory: sb
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results/source
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          name="qwen-spec-batch-src-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          echo '=== locate the fast-path modules ==='
+          docker run --rm --entrypoint bash "$image" -lc '
+            for n in capture_plan serving_lifecycle dflash_device dflash_combined_request serving_fast_policy bridge_factory; do
+              find / -path /proc -prune -o -name "${n}*.py" -print 2>/dev/null | head -3
+            done' > experiment-results/module-paths.txt 2>&1 || true
+          cat experiment-results/module-paths.txt
+          while read -r path; do
+            case "$path" in
+              */*.py) docker cp "$name:$path" "experiment-results/source/$(basename $path)" 2>/dev/null || true;;
+            esac
+          done < experiment-results/module-paths.txt
+          ls -l experiment-results/source/ || true
+          echo '=== verify-row and batch caps ==='
+          grep -rnE "verify_rows|max_rows|32|batch|rows" experiment-results/source/capture_plan*.py 2>/dev/null             | head -40 > experiment-results/capture-caps.txt || true
+          cat experiment-results/capture-caps.txt || true
+          echo '=== where 32 is asserted ==='
+          grep -rnE "== *32|<= *32|rows|verify" experiment-results/source/*.py 2>/dev/null             | head -30 > experiment-results/row-caps.txt || true
+          cat experiment-results/row-caps.txt || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-spec-batch-src-${{ github.run_id }}
+          path: sb/experiment-results/

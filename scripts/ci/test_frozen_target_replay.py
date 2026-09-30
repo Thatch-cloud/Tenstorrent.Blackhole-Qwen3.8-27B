@@ -32,6 +32,135 @@ class TargetReplayTests(unittest.TestCase):
         self.assertIn('zip(allocation_host, gold[0], strict=True)', changed)
         self.assertNotIn('warm = reader(', changed)
 
+    def test_bar_is_bit_exact_and_ulp_stats_are_the_diagnosis(self):
+        """Run 35663000515 showed T16 and B1 agree EXACTLY at k_chunk_size 256, the
+        value B1 itself picks, at all four start positions. The one-ulp disagreement run
+        35662960713 measured came entirely from the 65536-only override to 128. Exactness
+        is free, so the bar stays bit-exact; MAX_ULP only classifies a failure when one
+        happens, and the stats print on every comparison so an exact run says max_ulp 0.0."""
+        changed = adapt_target_probe(self.original)
+        self.assertIn('MAX_ULP = 4.0', changed)
+        self.assertIn("stage='t16-b1-ulp'", changed)
+        for field in ('max_ulp=worst', 'mean_ulp=float(error.mean())', 'budget_ulp=MAX_ULP',
+                      'nonfinite=nonfinite', 'rows_over_budget=int(rows.numel())'):
+            self.assertIn(field, changed)
+        # The failure condition is inequality and non-finites - not the budget.
+        self.assertIn('if nonfinite or differing:', changed)
+        self.assertNotIn('worst > MAX_ULP', changed)
+        self.assertIn('MAX_ULP is NOT the pass condition', changed)
+        self.assertNotIn('if not torch.equal(actual, expected)]', changed)
+        # Shape and dtype stay exact - the budget is for values only.
+        self.assertIn('if actual.shape != expected.shape or actual.dtype != expected.dtype:', changed)
+        # The reference-reuse check compares INPUTS and must stay bit-exact.
+        self.assertIn('torch.equal(ticket_query, queries[0])', changed)
+        compile(changed, 'target-probe', 'exec')
+
+    def _run_comparison(self, actual, expected, start=65536):
+        """Execute the emitted comparison block itself against real tensors."""
+        import json
+        import torch
+        opening = '                failures = []'
+        changed = adapt_target_probe(self.original)
+        body = opening + changed.split(opening, 1)[1].split('                if failures:', 1)[0]
+        self.assertEqual(body.count(', strict=True'), 1)
+        body = body.replace(', strict=True', '')   # 3.10 only; lengths equal by construction
+        block = '\n'.join(line[16:] if line.startswith(' ' * 16) else line for line in body.split('\n'))
+        printed = []
+        namespace = dict(allocation_host=actual, gold=[expected], torch=torch, start=start,
+            MAX_ULP=4.0, json=json, print=lambda value, flush=False: printed.append(value))
+        exec(compile(block, 'comparison-block', 'exec'), namespace)
+        return namespace['failures'], [json.loads(line) for line in printed]
+
+    def test_bit_identical_tensors_pass_with_zero_ulp(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.full((4, 8), 0.005, dtype=torch.bfloat16)]
+        failures, reports = self._run_comparison([expected[0].clone()], expected)
+        self.assertEqual(failures, [])
+        self.assertEqual(reports[0]['max_ulp'], 0.0)
+        self.assertEqual(reports[0]['differing'], 0)
+
+    def test_one_ulp_of_rounding_now_fails_but_is_diagnosed(self):
+        """The k_chunk=128 case. It FAILS, because exactness is achievable at 256 and a
+        tolerance would accept a regression for nothing - but the report still says it was
+        one ulp with no rows over the structural threshold, which is what tells you at a
+        glance that it is merge order and not a wrong row."""
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.full((4, 8), 0.005, dtype=torch.bfloat16)]
+        actual = expected[0].to(torch.float32)
+        actual += 2.0 ** -15                      # exactly one ulp at this magnitude
+        failures, reports = self._run_comparison([actual.to(torch.bfloat16)], expected)
+        self.assertEqual(failures, [0])
+        self.assertGreater(reports[0]['max_ulp'], 0.0)
+        self.assertLessEqual(reports[0]['max_ulp'], 4.0)
+        self.assertEqual(reports[0]['rows_over_budget'], 0)
+        self.assertEqual(reports[0]['nonfinite'], 0)
+
+    def test_near_zero_references_do_not_inflate_the_ulp_report(self):
+        """Run 35665484092 reported max_ulp 91393 for a worst difference of 3.05e-05,
+        because the per-element denominator collapsed on near-zero entries. The ulp is
+        now taken at the reference TENSOR scale, so the number stays interpretable when
+        most of the tensor is zero - which is the normal shape of attention output."""
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.zeros(4, 8, dtype=torch.bfloat16)]
+        expected[0][0][0] = 0.0028                  # one large entry, the rest zero
+        actual = expected[0].to(torch.float32)
+        actual[1][1] = 3.0517578125e-05             # a one-ulp-of-scale difference on a zero
+        failures, reports = self._run_comparison([actual.to(torch.bfloat16)], expected)
+        self.assertEqual(failures, [0])             # still fails: the bar is exactness
+        report = reports[0]
+        # 0.0028 rounds to this exactly in bfloat16; ulp at that scale is scale * 2**-7,
+        # so the 3.05e-05 difference is about 1.4 ulp - the interpretable number.
+        self.assertAlmostEqual(report['scale'], 0.0028076171875, places=9)
+        self.assertAlmostEqual(report['max_ulp'], 1.39, places=1)
+        self.assertLess(report['max_ulp'], 10.0)    # ~1.4, not 91393
+        self.assertEqual(report['rows_over_budget'], 0)
+
+    def test_a_structurally_wrong_row_still_fails(self):
+        """Both kinds of failure are caught, and the report tells them apart: a wrong row
+        puts rows_over_budget above zero, where merge-order rounding leaves it at zero."""
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.full((4, 8), 0.005, dtype=torch.bfloat16)]
+        actual = expected[0].clone()
+        actual[2] = 0.05                          # one row an order of magnitude out
+        failures, reports = self._run_comparison([actual], expected)
+        self.assertEqual(failures, [0])
+        self.assertGreater(reports[0]['max_ulp'], 4.0)
+        self.assertEqual(reports[0]['rows_over_budget'], 1)
+        self.assertEqual(reports[0]['first_rows'], [2])
+
+    def test_non_finite_output_fails_even_within_budget(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.full((4, 8), 0.005, dtype=torch.bfloat16)]
+        actual = expected[0].clone()
+        actual[1][3] = float('nan')
+        failures, reports = self._run_comparison([actual], expected)
+        self.assertEqual(failures, [0])
+        self.assertEqual(reports[0]['nonfinite'], 1)
+
+    def test_shape_mismatch_is_refused_outright(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest('torch not installed on this host')
+        expected = [torch.full((4, 8), 0.005, dtype=torch.bfloat16)]
+        with self.assertRaises(AssertionError):
+            self._run_comparison([torch.full((4, 9), 0.005, dtype=torch.bfloat16)], expected)
+
     def test_source_drift_and_reapplication_rejected(self):
         with self.assertRaises(ValueError):
             adapt_target_probe(self.original.replace('for capacity in (8448,):', 'for capacity in (4352,):'))

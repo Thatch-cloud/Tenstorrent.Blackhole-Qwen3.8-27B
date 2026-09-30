@@ -22,6 +22,16 @@ class CommitDmaTests(unittest.TestCase):
                 for count in (1, 2, 48):
                     self.assertEqual(validate_shapes([self.fixture(rows)] * count, prefix), rows)
 
+    def test_sixty_four_row_histories_are_refused_because_the_kernel_reads_one_tile_row(self):
+        """gdn_commit_dma.cpp addresses the convolution history row inside tile row zero
+        (offset from token / 16 and token % 16 over pages 0..159), so a history taller
+        than 32 rows would silently read the wrong row. M3 never needs it: each packed
+        user commits its own 16-row histories (gdn_records.RetainedGDNBlock.segment_layers)."""
+        for prefix in (0, 1, 33, 64):
+            with self.assertRaises(ValueError):
+                validate_shapes([self.fixture(64)] * 48, prefix)
+        self.assertEqual(validate_shapes([self.fixture(16)] * 48, 16), 16)
+
     def test_rejects_invalid_or_mixed_layers_and_prefixes(self):
         for layers, prefix in (([], 0), ([self.fixture()] * 49, 0), ([self.fixture()], True),
                                ([self.fixture()], -1), ([self.fixture()], 17),

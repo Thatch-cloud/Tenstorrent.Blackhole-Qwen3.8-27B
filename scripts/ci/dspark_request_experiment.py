@@ -69,12 +69,39 @@ def request_preflight(directory, *, prepared_proposals=False):
     return dict(request_prerequisites=prerequisites, sources=sources, simulator_metadata_only_sources=metadata_only)
 
 
-def summarize(requests):
+def summarize(requests, *, prefix_cached=False):
+    if type(prefix_cached) is not bool:
+        raise ValueError('Explicit cached-prefill summary selection required')
     if (len(requests) != 3 or [value.get('instrumented_timing') for value in requests] != [True, False, False]
             or any(value.get('exact') is not True or value.get('state_exact') is not True
                 or value.get('inactive_exact') is not True for value in requests)):
         raise ValueError('One feature-audited and two exact timed full requests required')
     first = requests[0]
+    cached_prefixes = []
+    for request in requests:
+        records = request.get('dspark', {}).get('prefix_cache')
+        if not prefix_cached:
+            if records is not None:
+                raise ValueError('Cached-prefill requests cannot be summarized as cold PP')
+            continue
+        if not isinstance(records, list) or len(records) != 2:
+            raise ValueError('Cold-control and cached-candidate records required')
+        cold, hit = records
+        prefix = hit.get('prefix_tokens')
+        boundary, route = cold.get('checkpoint_boundary', {}), hit.get('native_route', {})
+        if (cold.get('cache_hit') is not False or hit.get('cache_hit') is not True
+                or cold.get('prefix_tokens') != 0 or cold.get('suffix_tokens') != request['length']
+                or type(prefix) is not int or not 0 < prefix < request['length'] or prefix % 2048
+                or hit.get('suffix_tokens') != request['length'] - prefix
+                or boundary.get('position') != prefix
+                or any(boundary.get(key) is not True for key in ('captured', 'complete', 'restored'))
+                or any(route.get(key) is not True for key in ('completed', 'restored'))
+                or type(route.get('calls')) is not int or route['calls'] != 1
+                or route.get('prefix_tokens') != prefix):
+            raise ValueError('Complete exact cached-prefix accounting and restored scopes required')
+        cached_prefixes.append(prefix)
+    if cached_prefixes and len(set(cached_prefixes)) != 1:
+        raise ValueError('One matched prefix reuse policy across audit and timed requests required')
     policies = [(value.get('dspark', {}).get('proposal_trace', False), value.get('commit_only_gdn', False))
         for value in requests]
     if any(any(type(flag) is not bool for flag in policy) or policy != policies[0] for policy in policies):
@@ -95,7 +122,7 @@ def summarize(requests):
         raise ValueError('Positive committed-token, complete decode-cycle and prefill measurements required')
     proposed = sum(value['proposed'] for value in timed)
     accepted = sum(value['accepted'] for value in timed)
-    return dict(pp=1000 * sum(value['length'] for value in timed) / prefill_ms, ctx=first['length'],
+    result = dict(pp=1000 * sum(value['length'] for value in timed) / prefill_ms, ctx=first['length'],
         committed_tg=1000 * tokens / milliseconds, streams=1, verifier_rows=16, draft_queries=15,
         committed_tokens=tokens, proposed=proposed, accepted=accepted,
         acceptance=accepted / proposed if proposed else None,
@@ -104,6 +131,12 @@ def summarize(requests):
         mean_verifier_setup_ms=sum(value['engine_setup_ms'] for value in timed) / 2,
         proposal_trace=policies[0][0], commit_only_gdn=policies[0][1],
         held_out_coding_quality=False, serving_qualified=False)
+    if prefix_cached:
+        result.update(pp=None, prefix_cached=True, cached_prefix_tokens=cached_prefixes[0],
+            effective_cached_pp=1000 * sum(value['length'] for value in timed) / prefill_ms,
+            suffix_request_pp=1000 * sum(value['length'] - cached_prefixes[0] for value in timed) / prefill_ms,
+            cached_prefill_measurement='Complete candidate prefill including restore and native setup; not cold PP')
+    return result
 
 
 def warm_native_control(generator, kv_cache, report, progress, *, num_blocks=1024):
@@ -144,12 +177,27 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
         native_attention_variants=False, profile_verifier=False, norm_scatter_variants=False,
         target_attention_variants=False, combined_variants=False, mlp_down=False, mlp_equal_footprint=False,
         profile_drafter=False, score_layout=False, banked_proposal=False, native_slot_gdn=False, fused_t16_mlp=False,
-        history_profile=False, captured_publication=False, max_new_tokens=None):
+        history_profile=False, captured_publication=False, max_new_tokens=None, t32_attention_evidence=None, t32_timed=False):
     from dspark_request_limit import request_limit
     output_limit = request_limit(max_new_tokens,
         short_default=target_attention_variants or combined_variants or profile_drafter or profile_verifier)
     import torch
     from full_dspark_request import measure_dspark_request
+    t32_audit = t32_attention_evidence is not None
+    if type(t32_timed) is not bool or (t32_timed and not t32_audit):
+        raise ValueError('T32 timing requires its explicit combined hardware route')
+    if t32_audit:
+        from t32_score_hardware import require_active
+        from target_t32_attention_gate import qualify_request
+
+        require_active(model.mesh_device)
+        if any((variants, native_attention_variants, profile_verifier, norm_scatter_variants,
+                target_attention_variants, combined_variants, mlp_down, mlp_equal_footprint,
+                profile_drafter, score_layout, banked_proposal, native_slot_gdn, fused_t16_mlp,
+                history_profile, captured_publication)):
+            raise ValueError('T32 combined audit cannot mix T16 experiment routes')
+        report['t32_attention_component'] = qualify_request(t32_attention_evidence,
+            position=len(prompt), remaining=output_limit - 1, hardware_mask_compatibility=True)
     request_64k = len(prompt) == 65536
     if request_64k:
         from dspark_64k_scope import require_scope
@@ -344,6 +392,8 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     if combined_profile and (not captured_publication or profile_verifier or profile_drafter or history_profile):
         raise ValueError('Combined attribution requires the isolated publication runtime')
     schedule = SCHEDULE if variants or native_attention_variants or norm_scatter_variants or target_attention_variants or combined_variants else tuple(('eager', audit) for audit in (True, False, False))
+    if t32_audit:
+        schedule = tuple(('eager', audit) for audit in ((True, False, False) if t32_timed else (True,)))
     if combined_profile:
         schedule = (('publication', True),)
     if profile_verifier or profile_drafter:
@@ -354,7 +404,7 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
     control_warmed = False
     with sampler_links(sampler.tt_sampling, 4):
         for ordinal, (arm, audit) in enumerate(schedule):
-            if (request_64k or not audit) and not control_warmed:
+            if (t32_audit or request_64k or not audit) and not control_warmed:
                 warm_native_control(generator, kv_cache, report, progress,
                     num_blocks=1040 if request_64k else 1024)
                 control_warmed = True
@@ -372,7 +422,10 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 result = measure_dspark_request(operations, model, sampler, prompt, pages, helpers, collectives=collectives,
                     parameters=parameters, layer_weights=layer_weights, predecessor=predecessor, successor=successor, rotary=rotary,
                     prefill=prefill, decode=decode, live_digest=live_digest, kv_digest=kv_digest, inactive_digest=inactive_digest,
-                    eos_ids=eos, audit_features=audit, max_new_tokens=output_limit, **POLICIES[arm],
+                    eos_ids=eos, audit_features=audit, max_new_tokens=output_limit,
+                    **(dict(t32=True, proposal_trace=True, commit_only_gdn=True, native_attention=True,
+                        fused_t32_mlp=True, target_attention_t32=True,
+                        target_attention_t32_evidence=t32_attention_evidence) if t32_audit else POLICIES[arm]),
                     **(dict(profile_verifier=True) if profile_verifier else {}),
                     **(dict(combined_profile=True) if combined_profile else {}),
                     **(dict(history_profile=True) if history_profile else {}),
@@ -382,6 +435,12 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
                 if native:
                     result['native_attention_kernel'] = kernel_audit
             result['host_health'] = host_summary(host_before, host_snapshot())
+            if t32_audit:
+                from t32_timing import authorize, validate_timed
+                if audit:
+                    authorize(result)
+                else:
+                    validate_timed(result)
             if draft_observer is not None:
                 result['draft_profile'] = draft_observer.summary()
             if mlp_down:
@@ -397,6 +456,20 @@ def run_loaded_requests(operations, generator, model, collectives, tokenizer, pa
             result['arm'] = arm
             report['request_checks'].append(result)
             progress(f'full_request_{ordinal}_complete')
+    if t32_audit:
+        if len(report['request_checks']) != (3 if t32_timed else 1) or any(report['request_checks'][0].get(key) is not True
+                for key in ('exact', 'state_exact', 'inactive_exact', 'instrumented_timing')):
+            raise ValueError('Complete exact audited T32 hardware request required')
+        report.update(instrumented_timing=True, correctness_only=True, ctx_tokens=len(prompt),
+            drafter_history_rows=len(prompt), proposal_rows=31, pp=None, committed_tg=None,
+            scope='Combined fused T32 hardware correctness screen; not throughput or serving qualification')
+        if t32_timed:
+            summary = summarize(report['request_checks'])
+            summary.update(verifier_rows=32, draft_queries=31)
+            report.update(request_summary=summary, instrumented_timing=False, correctness_only=False,
+                pp=summary['pp'], committed_tg=summary['committed_tg'],
+                scope='Combined fused T32 full-cycle timings after fresh exact audit; not serving or held-out quality qualification')
+        return
     if profile_verifier or profile_drafter or combined_profile:
         report.update(instrumented_timing=True, correctness_only=True,
             combined_runtime_profile=combined_profile,

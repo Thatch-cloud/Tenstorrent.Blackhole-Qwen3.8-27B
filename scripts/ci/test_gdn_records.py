@@ -1,3 +1,4 @@
+import os
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -5,20 +6,57 @@ from unittest.mock import Mock, patch
 from gdn_records import RetainedGDNBlock
 
 
+def operations():
+    return SimpleNamespace(get_device_tensors=lambda value: [SimpleNamespace(buffer_address=lambda: id(value))] * 2,
+                           synchronize_device=Mock())
+
+
+def unpacked_record(mesh, rows):
+    live = [object() for slot in range(5)]
+    state = SimpleNamespace(gdn=SimpleNamespace(B=8, _stable_state=True, rec_state=live[0], conv_states=live[1:], mesh=mesh),
+        native_addresses=[(id(value), id(value)) for value in live], entry=[object()] * 5,
+        active=SimpleNamespace(restore=Mock()))
+    result = dict(packed_checkpoints=True, states=SimpleNamespace(shape=(rows, 24, 128, 128)), owned=[object()])
+    return state, result, [object() for slot in range(5)]
+
+
+def unpacked_block(count=48, rows=4):
+    block = RetainedGDNBlock(rows, operations())
+    mesh = object()
+    for index in range(count):
+        block.append(*unpacked_record(mesh, rows))
+    return block
+
+
+def packed_record(mesh, segments=((0, 16), (16, 32))):
+    """One layer of a deferred packed decode as ModelBatch records it: per user, a
+    history set, a block-start entry and the carry that user's decision is committed to."""
+    live = [object() for slot in range(5)]
+    pieces = tuple(dict(packed_checkpoints=True, states=SimpleNamespace(shape=(stop - start, 24, 128, 128)),
+                        packed_conv_states=[object() for slot in range(4)], owned=[]) for start, stop in segments)
+    state = SimpleNamespace(gdn=SimpleNamespace(B=8, _stable_state=True, rec_state=live[0], conv_states=live[1:], mesh=mesh),
+        native_addresses=[(id(value), id(value)) for value in live], entry=[],
+        segment_entries=tuple([object() for slot in range(5)] for span in segments), segment_results=pieces,
+        active=SimpleNamespace(restore=Mock()))
+    result = dict(pieces[0], segments=segments, segment_results=pieces, owned=[object()])
+    carries = tuple([object() for slot in range(5)] for span in segments)
+    return state, result, carries
+
+
+def packed_block(count=48, segments=((0, 16), (16, 32))):
+    block = RetainedGDNBlock(segments[-1][1], operations())
+    mesh = object()
+    for index in range(count):
+        block.append(*packed_record(mesh, segments))
+    return block
+
+
+M3_SEGMENTS = ((0, 16), (16, 32), (32, 48), (48, 64))
+
+
 class RecordTests(unittest.TestCase):
     def fixture(self, count=48, rows=4):
-        operations = SimpleNamespace(get_device_tensors=lambda value: [SimpleNamespace(buffer_address=lambda: id(value))] * 2,
-                                     synchronize_device=Mock())
-        block = RetainedGDNBlock(rows, operations)
-        mesh = object()
-        for index in range(count):
-            live = [object() for slot in range(5)]
-            state = SimpleNamespace(gdn=SimpleNamespace(B=8, _stable_state=True, rec_state=live[0], conv_states=live[1:], mesh=mesh),
-                native_addresses=[(id(value), id(value)) for value in live], entry=[object()] * 5,
-                active=SimpleNamespace(restore=Mock()))
-            result = dict(packed_checkpoints=True, states=SimpleNamespace(shape=(rows, 24, 128, 128)), owned=[object()])
-            block.append(state, result, [object() for slot in range(5)])
-        return block
+        return unpacked_block(count, rows)
 
     def test_t32_retains_every_prefix_and_replays_after_commit(self):
         block = self.fixture(rows=32)
@@ -163,3 +201,306 @@ class RecordTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 block.commit(2, dma=invalid != 'mode', publication=publication)
             publication.assert_not_called()
+
+
+class PackedRecordTests(unittest.TestCase):
+    """A packed block is decided one user at a time, each into its own carry.
+
+    The decode restored every user from its carry and never advanced it, so the
+    commit writes the accepted prefix there from that user's entry and histories,
+    and a prefix of zero has nothing to write. The block replays once every user
+    has decided and the last decision was fenced.
+    """
+
+    def test_commit_user_publishes_that_users_layers_into_its_own_carry(self):
+        block = packed_block()
+        with patch('gdn_commit_dma.publish') as publish, patch('gdn_records.restore_prefix') as restore:
+            block.commit_user(1, 9, dma=True)
+        publish.assert_called_once()
+        mesh, layers, prefix = publish.call_args.args
+        self.assertIs(mesh, block.records[0][0].gdn.mesh)
+        self.assertEqual((len(layers), prefix), (48, 9))
+        for (state, result, carries), layer in zip(block.records, layers, strict=True):
+            piece = result['segment_results'][1]
+            self.assertEqual(layer, [*state.segment_entries[1], piece['states'], *piece['packed_conv_states'],
+                                     state.gdn.rec_state, *state.gdn.conv_states, *carries[1]])
+            state.active.restore.assert_not_called()
+        restore.assert_not_called()
+        self.assertEqual(block.decisions, {1: 9})
+        self.assertIsNone(block.selected_prefix, 'the block has not decided until every user has')
+
+    def test_the_eager_fallback_restores_that_users_prefix_into_its_carry(self):
+        block = packed_block()
+        with patch('gdn_records.restore_prefix') as restore:
+            block.commit_user(0, 5)
+        self.assertEqual(restore.call_count, 48)
+        for (state, result, carries), call in zip(block.records, restore.call_args_list, strict=True):
+            self.assertEqual(call.args, (block.operations, result['segment_results'][0],
+                                         state.segment_entries[0], carries[0], 5))
+
+    def test_prefix_zero_leaves_the_carry_alone_but_counts_as_the_decision(self):
+        block = packed_block()
+        publication = Mock()
+        with patch('gdn_commit_dma.publish') as publish, patch('gdn_records.restore_prefix') as restore:
+            block.commit_user(0, 0, dma=True, publication=publication)
+            block.commit_user(1, 0)
+        publish.assert_not_called()
+        publication.assert_not_called()
+        restore.assert_not_called()
+        self.assertEqual(block.selected_prefix, (0, 0))
+        for segment in (0, 1):
+            with self.assertRaises(ValueError):
+                block.commit_user(segment, 0)
+
+    def test_replay_needs_every_user_decided_and_the_last_decision_fenced(self):
+        block = packed_block()
+        first, second = Mock(), Mock()
+        with self.assertRaises(ValueError):
+            block.replay(lambda: None)
+        # fencing an early decision does not arm the replay: the other user has not decided
+        block.commit_user(1, 9, dma=True, publication=second, synchronize=True)
+        second.assert_called_once_with(9)
+        self.assertFalse(block.replay_ready)
+        with self.assertRaises(ValueError):
+            block.replay(lambda: None)
+        # and a complete decision that was not fenced is not ready either
+        block.commit_user(0, 12, dma=True, publication=first)
+        self.assertEqual(block.selected_prefix, (12, 9))
+        self.assertFalse(block.replay_ready)
+        with self.assertRaises(ValueError):
+            block.replay(lambda: None)
+        block = packed_block()
+        block.commit_user(0, 12, dma=True, publication=first)
+        block.commit_user(1, 0, synchronize=True)
+        self.assertTrue(block.replay_ready)
+        operation = Mock(return_value=None)
+        block.replay(operation)
+        operation.assert_called_once_with()
+        self.assertEqual((block.replay_epoch, block.selected_prefix, block.decisions), (1, None, {}))
+        with self.assertRaises(ValueError):
+            block.replay(operation)
+        # the next epoch decides afresh, in any order
+        block.commit_user(1, 3, dma=True, publication=second)
+        block.commit_user(0, 0, synchronize=True)
+        self.assertEqual((block.selected_prefix, block.replay_ready), ((0, 3), True))
+        self.assertEqual(block.operations.synchronize_device.call_count, 3)
+
+    def test_a_failed_publication_poisons_the_block(self):
+        block = packed_block()
+        with patch('gdn_commit_dma.publish', side_effect=RuntimeError('device')):
+            with self.assertRaises(RuntimeError):
+                block.commit_user(0, 5, dma=True)
+        for segment, prefix in ((0, 5), (1, 0)):
+            with self.assertRaises(ValueError):
+                block.commit_user(segment, prefix, synchronize=True)
+        self.assertFalse(block.replay_ready)
+        with self.assertRaises(ValueError):
+            block.replay(lambda: None)
+        self.assertEqual(block.operations.synchronize_device.call_count, 0)
+
+    def test_decisions_are_bounded_to_the_users_own_rows_and_users(self):
+        block = packed_block()
+        for segment, prefix in ((2, 0), (-1, 0), (True, 0), (0, 17), (0, -1), (1, True)):
+            with self.assertRaises(ValueError):
+                block.commit_user(segment, prefix)
+        with self.assertRaises(ValueError):
+            block.commit_user(0, 5, publication=Mock())
+        self.assertEqual(block.decisions, {})
+
+    def test_single_and_per_user_decisions_do_not_cross(self):
+        with self.assertRaises(ValueError):
+            packed_block().commit(2)
+        single = unpacked_block(rows=32)
+        with self.assertRaises(ValueError):
+            single.commit_user(0, 2)
+        with self.assertRaises(ValueError):
+            single.segment_layers(0)
+
+    def test_segment_layers_are_per_user_in_record_order(self):
+        block = packed_block()
+        for segment in (0, 1):
+            self.assertEqual([len(layer) for layer in block.segment_layers(segment)], [20] * 48)
+        own = {id(value) for segment in (0, 1) for layer in block.segment_layers(segment)
+               for value in layer[:10] + layer[15:]}
+        self.assertEqual(len(own), 2 * 48 * 15, 'entry, histories and carry are each user\'s own')
+        for segment in (2, -1, None):
+            with self.assertRaises(ValueError):
+                block.segment_layers(segment)
+
+    def test_four_t16_users_fill_the_sixty_four_row_block_and_each_commits_its_own_rows(self):
+        """M3: the block is 64 rows, every user's histories and commit stay 16 rows."""
+        block = packed_block(segments=M3_SEGMENTS)
+        self.assertEqual((block.rows, block.segments), (64, M3_SEGMENTS))
+        for segment in range(4):
+            layers = block.segment_layers(segment)
+            self.assertEqual([len(layer) for layer in layers], [20] * 48)
+            self.assertEqual({layer[5].shape[0] for layer in layers}, {16}, 'a 16-row history per user')
+        own = {id(value) for segment in range(4) for layer in block.segment_layers(segment)
+               for value in layer[:10] + layer[15:]}
+        self.assertEqual(len(own), 4 * 48 * 15, 'entry, histories and carry are each user\'s own')
+        publications = [Mock() for segment in range(4)]
+        with patch('gdn_commit_dma.publish') as publish, patch('gdn_records.restore_prefix') as restore:
+            block.commit_user(2, 16, dma=True, publication=publications[2])
+            block.commit_user(0, 0, dma=True, publication=publications[0])
+            block.commit_user(3, 7, dma=True)
+            self.assertFalse(block.replay_ready)
+            block.commit_user(1, 1, dma=True, publication=publications[1], synchronize=True)
+        publications[2].assert_called_once_with(16)
+        publications[0].assert_not_called()
+        publications[1].assert_called_once_with(1)
+        publish.assert_called_once()
+        self.assertEqual(publish.call_args.args[1:], (block.segment_layers(3), 7))
+        restore.assert_not_called()
+        self.assertEqual((block.selected_prefix, block.replay_ready), ((0, 1, 16, 7), True))
+        block.replay(lambda: None)
+        self.assertEqual((block.replay_epoch, block.decisions, block.selected_prefix), (1, {}, None))
+        for segment, prefix in ((4, 0), (0, 17), (3, 65)):
+            with self.assertRaises(ValueError):
+                block.commit_user(segment, prefix)
+
+    def test_a_sixty_four_row_block_takes_only_records_that_cover_it(self):
+        mesh = object()
+        block = packed_block(count=0, segments=M3_SEGMENTS)
+        for segments in (((0, 16), (16, 32), (32, 48)), ((0, 16), (16, 32)), ((0, 32), (32, 64), (64, 96))):
+            with self.subTest(segments=segments), self.assertRaises(ValueError):
+                block.append(*packed_record(mesh, segments))
+        self.assertEqual(block.records, [])
+        block.append(*packed_record(mesh, M3_SEGMENTS))
+        # every layer packs the same four users, and a single-sequence 64-row layer never mixes in
+        with self.assertRaises(ValueError):
+            block.append(*packed_record(mesh, ((0, 32), (32, 64))))
+        with self.assertRaises(ValueError):
+            block.append(*unpacked_record(mesh, 64))
+        self.assertEqual((len(block.records), block.segments), (1, M3_SEGMENTS))
+        two_t32 = packed_block(count=1, segments=((0, 32), (32, 64)))
+        self.assertEqual(two_t32.segments, ((0, 32), (32, 64)))
+        for rows in (48, 128, 1, True, 64.0):
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                RetainedGDNBlock(rows, operations())
+
+    def test_an_unpacked_sixty_four_row_block_is_retained_but_fails_closed_at_commit(self):
+        """Nothing publishes a 64-row single-sequence prefix: restore_prefix and the commit
+        DMA both stop at 32 rows, and the block has no other write path."""
+        block = unpacked_block(rows=64)
+        self.assertEqual(len(block.records), 48)
+        with self.assertRaises(ValueError):
+            block.commit(3)
+        for state, result, checkpoint in block.records:
+            state.active.restore.assert_not_called()
+        with self.assertRaises(ValueError):
+            block.commit(3)
+
+    def test_packed_records_carry_each_users_prefixes_entry_and_carry(self):
+        mesh = object()
+        block = packed_block(count=0)
+        state, result, carries = packed_record(mesh)
+        pieces = result['segment_results']
+        broken = [
+            (state, dict(result, segment_results=pieces[:1]), carries),
+            (SimpleNamespace(**dict(vars(state), segment_entries=state.segment_entries[:1])), result, carries),
+            (SimpleNamespace(**dict(vars(state), segment_entries=None)), result, carries),
+            (state, result, carries[:1]),
+            (state, dict(result, segments=((0, 16), (16, 24))), carries),
+            (state, dict(result, segment_results=(dict(pieces[0], packed_checkpoints=False), pieces[1])), carries),
+            (state, dict(result, segment_results=(dict(pieces[0], states=SimpleNamespace(shape=(32, 24, 128, 128))),
+                                                  pieces[1])), carries),
+        ]
+        for record in broken:
+            with self.assertRaises(ValueError):
+                block.append(*record)
+        self.assertEqual(block.records, [])
+        block.append(state, result, carries)
+        self.assertEqual(block.segments, ((0, 16), (16, 32)))
+        # every layer packs the same users, and packed and single-sequence layers never mix
+        with self.assertRaises(ValueError):
+            block.append(*packed_record(mesh, segments=((0, 8), (8, 32))))
+        with self.assertRaises(ValueError):
+            block.append(*unpacked_record(mesh, 32))
+        single = unpacked_block(count=1, rows=32)
+        with self.assertRaises(ValueError):
+            single.append(*packed_record(mesh))
+        self.assertEqual((len(block.records), len(single.records)), (1, 1))
+
+
+def counting_operations():
+    """operations(), plus a running tally of get_device_tensors calls - the host round
+    trip validate_bindings makes once per native buffer it checks (gdn_multitoken_conv.
+    addresses)."""
+    ops = operations()
+    calls = []
+    original = ops.get_device_tensors
+    ops.get_device_tensors = lambda value, calls=calls, original=original: (calls.append(value), original(value))[1]
+    return ops, calls
+
+
+class FastCommitTests(unittest.TestCase):
+    """QWEN_FAST_FAST_COMMIT=1 (task: attribute and cut the packed_commit phase's host
+    cost): RetainedGDNBlock.commit_user's own validate_bindings call re-checks, on EVERY
+    one of a round's per-user commits, the same 48 x 5 native buffer addresses
+    packed_verifier.PackedVerifierEngine.validate_bindings already checked once at the
+    top of that round's verify() - four redundant passes of 240 get_device_tensors calls
+    each, for a four-user M3 block. Skipping the redundant three keeps the check on the
+    round's first commit (still catching a binding actually broken before any commit)
+    and removes the other three."""
+
+    def block(self):
+        ops, calls = counting_operations()
+        block = RetainedGDNBlock(M3_SEGMENTS[-1][1], ops)
+        mesh = object()
+        for index in range(48):
+            block.append(*packed_record(mesh, M3_SEGMENTS))
+        return block, calls
+
+    def commit_all_four(self, block):
+        """Every user's commit, in order, the last one fenced - exactly the shape
+        packed_verifier.PackedVerifierEngine.commit_user drives a round in."""
+        publications = [Mock() for segment in range(4)]
+        with patch('gdn_commit_dma.publish'), patch('gdn_records.restore_prefix'):
+            for segment in range(4):
+                block.commit_user(segment, 1, dma=True, publication=publications[segment], synchronize=segment == 3)
+
+    def test_default_mode_validates_every_one_of_the_rounds_four_commits(self):
+        block, calls = self.block()
+        self.assertFalse(block.fast_commit)
+        self.commit_all_four(block)
+        self.assertEqual(len(calls), 4 * 48 * 5)
+
+    def test_fast_commit_validates_only_the_rounds_first_commit(self):
+        with patch.dict('os.environ', {'QWEN_FAST_FAST_COMMIT': '1'}):
+            block, calls = self.block()
+        self.assertTrue(block.fast_commit)
+        self.commit_all_four(block)
+        self.assertEqual(len(calls), 1 * 48 * 5)
+
+    def test_fast_commit_is_off_unless_the_flag_is_exactly_one(self):
+        for value in ('0', 'true', '', 'yes'):
+            with patch.dict('os.environ', {'QWEN_FAST_FAST_COMMIT': value}):
+                block, calls = self.block()
+            self.assertFalse(block.fast_commit, value)
+
+    def test_fast_commit_still_catches_a_binding_broken_before_the_rounds_first_commit(self):
+        with patch.dict('os.environ', {'QWEN_FAST_FAST_COMMIT': '1'}):
+            block, calls = self.block()
+        block.records[-1][0].gdn.B = 1
+        with self.assertRaisesRegex(ValueError, 'Native layer binding changed'):
+            block.commit_user(0, 1, dma=True, publication=Mock())
+        self.assertEqual(block.decisions, {}, 'a validation failure decides nothing')
+
+    def test_fast_commit_revalidates_the_first_commit_of_every_new_round(self):
+        """The skip is per ROUND (self.decisions, reset by replay()), not per block
+        lifetime: the next round's first commit validates again even though this block
+        already ran a full round under the flag. replay() makes its own two
+        validate_bindings calls regardless of fast_commit - untouched by this change -
+        so the round's own contribution is measured as a DELTA around it, not an
+        absolute total."""
+        with patch.dict('os.environ', {'QWEN_FAST_FAST_COMMIT': '1'}):
+            block, calls = self.block()
+        self.commit_all_four(block)
+        self.assertEqual(len(calls), 1 * 48 * 5, 'only the rounds first commit validated')
+        after_first_round = len(calls)
+        block.replay(lambda: None)
+        after_replay = len(calls)
+        self.commit_all_four(block)
+        self.assertEqual(len(calls) - after_replay, 1 * 48 * 5,
+                         'the new rounds first commit validated again, not the whole round')
+        self.assertGreater(after_replay, after_first_round, 'replay makes its own validate_bindings calls')

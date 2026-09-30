@@ -10,6 +10,26 @@ from frozen_context_geometry import CONTEXTS, geometry
 
 
 REVISION = '8c102b20df22329106955b4006bf4d650bb94e40'
+# Contexts the offline --combined-runtime candidate may be staged at. 32768 is the
+# retained, evidence-qualified recipe (frozen_combined_gate.REPORTS); 65536 stages the
+# geometry-derived tree but frozen_combined_gate.qualify() refuses it until its own
+# evidence lands (see docs/t16-recipe-rung-65k.md). Adding a rung here only unblocks
+# staging the tree; it never grants qualification.
+COMBINED_RUNTIME_CONTEXTS = (32768, 65536)
+
+
+def combined_runtime_directory(checkout, context):
+    """Where a --combined-runtime staged tree is written for a given context.
+
+    32768 keeps the historical unsuffixed path (checkout/scripts/ci) byte-for-byte,
+    so existing lanes (qwen-frozen-combined.yml, the non-combined-runtime callers of
+    this module) are untouched. Any other staged context gets its own directory so
+    both trees can coexist under one checkout/image without the 32768 default ever
+    changing path or content.
+    """
+    if type(context) is not int or context not in COMBINED_RUNTIME_CONTEXTS:
+        raise ValueError('Explicit staged combined-runtime context required')
+    return checkout / 'scripts/ci' if context == 32768 else checkout / f'scripts/ci-{context}'
 
 
 def replace_once(source, before, after):
@@ -68,8 +88,11 @@ def adapt_probe_sources(sources, context):
     return result
 
 
+PROBE_SECONDS_CHOICES = (510, 1020, 3000)
+
+
 def adapt_cache_launcher(sources, probe_seconds=510):
-    if type(probe_seconds) is not int or probe_seconds not in (510, 1020):
+    if type(probe_seconds) is not int or probe_seconds not in PROBE_SECONDS_CHOICES:
         raise ValueError('Explicit supported probe budget required')
     result = dict(sources)
     result['run-simulator.sh'] = replace_once(result['run-simulator.sh'],
@@ -156,7 +179,7 @@ def main():
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--context', type=int, choices=CONTEXTS, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
-    parser.add_argument('--probe-seconds', type=int, choices=(510, 1020), default=510)
+    parser.add_argument('--probe-seconds', type=int, choices=PROBE_SECONDS_CHOICES, default=510)
     parser.add_argument('--scalar-reciprocal', action='store_true',
         help='Explicit changed-math diagnostic candidate, not the unchanged winning recipe')
     parser.add_argument('--eager-only', action='store_true',
@@ -193,9 +216,9 @@ def main():
         parser.error('Buffer comparison requires uninstrumented combined runtime')
     if options.verifier_profile and not options.combined_runtime:
         parser.error('Verifier profiling requires the admitted combined runtime')
-    if options.combined_runtime and (options.context != 32768 or not options.scalar_reciprocal
-            or not options.target_replay or options.eager_only):
-        parser.error('Combined candidate requires 32768, scalar reciprocal and target replay, not eager-only')
+    if options.combined_runtime and (options.context not in COMBINED_RUNTIME_CONTEXTS
+            or not options.scalar_reciprocal or not options.target_replay or options.eager_only):
+        parser.error('Combined candidate requires 32768 or 65536, scalar reciprocal and target replay, not eager-only')
     checkout = options.checkout.resolve(strict=True)
 
     def git(*arguments):
@@ -206,8 +229,16 @@ def main():
     if git('status', '--porcelain', '--untracked-files=no').strip() or options.manifest.exists():
         raise ValueError('Clean tracked checkout and fresh manifest required')
     from frozen_runtime_context import FILES, adapt_runtime_sources
+    # dspark_fp32_build.py is fetched here (not copied verbatim from the working tree
+    # like frozen_sim_build_cache.py) because frozen_wide_chunk_normalization.py's
+    # hardware patch must apply to the SAME pinned-revision structure that
+    # frozen_wide_chunk_scratch.factory_scope() already assumes (no separate
+    # restore_factory_source function; validate_manifest() inlines that reversal) -
+    # the working tree's own copy of this file has diverged from that structure and
+    # would silently break factory_scope()'s self-detecting reversal if staged as-is.
     names = tuple(dict.fromkeys(('dspark_attention_chunk_trial.py', 'dspark-native-8k-attention-probe.py',
-        'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'run-simulator.sh', 'simulator-suite.sh') + FILES))
+        'dspark_stats_pack.py', 'dspark_fp32_intermediates.py', 'dspark_fp32_build.py',
+        'run-simulator.sh', 'simulator-suite.sh') + FILES))
     if options.target_replay:
         names += ('target-t16-attention-8k-probe.py', 'attention_mask_replay.py')
     if options.combined_runtime:
@@ -243,7 +274,7 @@ def main():
         adapted = adapt_eager_only(adapted)
     if options.combined_runtime:
         from frozen_combined_adapters import adapt_combined_sources
-        adapted = adapt_combined_sources(adapted)
+        adapted = adapt_combined_sources(adapted, context=options.context)
         for name in ('frozen_combined_runtime.py', 'frozen_combined_gate.py', 'frozen_target_replay.py',
                 'frozen_combined_history.py', 'frozen_reciprocal_isolation.py'):
             adapted[name] = Path(__file__).with_name(name).read_text()
@@ -305,19 +336,49 @@ def main():
             adapted[prefix + 'fused_1d_weights.cpp'] = sources['fused_1d_weights.cpp']
             for name in ('frozen_mlp_input_scope.py', 'frozen_mlp_input_gate.py'):
                 adapted[name] = Path(__file__).with_name(name).read_text()
+    # The fused MLP input reader and its simulator evidence ride with the
+    # orchestrator: run 35485758177 showed the reader exiting with its final
+    # multicast in flight, and the fix has to reach every lane's tree without
+    # moving REVISION. The reader, the admission module and the target-mode
+    # simulator report (with its exit status) are one unit: fused_t16_admission
+    # hashes the report, and the report records the reader's hash.
     for name in ('frozen_context_geometry.py', 'frozen_sim_build_cache.py', 'frozen_binary_cache.py',
-            'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py'):
+            'frozen_sim_phase.py', 'frozen_sim_assets.py', 'frozen_probe_evidence.py',
+            'fused_1d_input.cpp', 'fused_t16_admission.py',
+            'fused-t16-target-simulator.json', 'fused-t16-target-simulator.exit-status'):
         adapted[name] = Path(__file__).with_name(name).read_text()
+    # Must run after the verbatim-copy loop above (it overwrites
+    # frozen_sim_build_cache.py unconditionally) and is a pure no-op for
+    # every context other than 65536 - see frozen_wide_chunk_normalization.py.
+    from frozen_wide_chunk_normalization import adapt_wide_chunk_normalization
+    adapted = adapt_wide_chunk_normalization(adapted, options.context)
+    # attention_replay.py is not otherwise staged at all (see
+    # frozen_wide_chunk_replay.py's module docstring); also a no-op for
+    # every context other than 65536.
+    from frozen_wide_chunk_replay import adapt_replay_k_chunk
+    adapted = adapt_replay_k_chunk(adapted, options.context, checkout)
     for name, source in adapted.items():
         if name.endswith('.py'):
             compile(source, name, 'exec')
+    staged_directory = (combined_runtime_directory(checkout, options.context)
+        if options.combined_runtime else checkout / 'scripts/ci')
     for name, source in adapted.items():
-        destination = checkout / 'scripts/ci' / name
+        destination = staged_directory / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(source.encode('utf-8'))
     checksum = lambda source: hashlib.sha256(source.encode()).hexdigest()
+    # None for every context other than 65536 (adapt_wide_chunk_normalization's
+    # own no-op guard); keeps the manifest's reported padded_keys/key_chunk
+    # honest for 65536, where the staged files no longer use the standard
+    # 256-key formula geometry(options.context) alone would report.
+    from frozen_wide_chunk_normalization import manifest_geometry_override
+    reported_geometry = dict(geometry(options.context))
+    override = manifest_geometry_override(options.context)
+    if override is not None:
+        reported_geometry.update(override)
     options.manifest.write_text(json.dumps(dict(revision=REVISION,
-        geometry=geometry(options.context), before={name: checksum(source) for name, source in sources.items()},
+        geometry=reported_geometry, staged_directory=staged_directory.relative_to(checkout).as_posix(),
+        before={name: checksum(source) for name, source in sources.items()},
         after={name: checksum(source) for name, source in adapted.items()},
         scope='Shared probe/runtime geometry adaptation; no numerical or runtime admission',
         reciprocal_variant='scalar-fp32' if options.scalar_reciprocal else 'native',

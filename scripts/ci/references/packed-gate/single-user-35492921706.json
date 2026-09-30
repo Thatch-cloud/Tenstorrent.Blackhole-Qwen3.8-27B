@@ -1,0 +1,16 @@
+{
+  "run": 35492921706,
+  "label": "single-user",
+  "streams": [
+    {
+      "index": 0,
+      "completion_tokens": 64,
+      "chunks": 10,
+      "error": null,
+      "ttft_s": 14.523460465017706,
+      "wall_s": 15.87387429131195,
+      "text_sha256": "66a5d0c2a531af8bf65fc2cacbd1c952a413ee42bb7051ded6555b41384ea217",
+      "text": " would \u201cveniss ourclassraw yearData val somefterys ///roundview pe there saidduofline/*duct her             Res co commisemin    \n#includeethod.Pute assIntaskloc likeody letload amrol gryp also Iturlificors_P_nigh thanComANULating Thisref_S"
+    }
+  ]
+}

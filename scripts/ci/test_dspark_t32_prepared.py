@@ -1,4 +1,5 @@
 from contextlib import ExitStack
+import os
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -18,6 +19,89 @@ class FakeTensor:
 
 
 class PreparedProposalTests(unittest.TestCase):
+    def test_native_score_audit_checks_both_replicas_and_restores_candidate(self):
+        import t32_proposal_score_audit as audit
+
+        candidate = Mock()
+        self.device.proposal_markov = candidate
+        proposal = prepared.PreparedDSparkProposal(self.device, 10)
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', 'QWEN_HARDWARE_TESTS': '0',
+                'QWEN_CARDS_ALLOCATED': '0'}), patch.object(audit, 'execute', side_effect=self.execute):
+            result = audit.compare(proposal)
+            self.assertEqual(result['tensors'], 6)
+            self.assertTrue(result['exact'])
+            self.assertIs(self.device.proposal_markov, candidate)
+            proposal.outputs['tokens'].value.add_(1)
+            with self.assertRaisesRegex(AssertionError, 'differs'):
+                audit.compare(proposal)
+            self.assertIs(self.device.proposal_markov, candidate)
+            self.assertTrue(self.scopes[-1].release.called)
+        proposal.close()
+
+    def test_native_score_audit_restores_backend_on_reference_failure(self):
+        import t32_proposal_score_audit as audit
+
+        candidate = Mock()
+        self.device.proposal_markov = candidate
+        proposal = prepared.PreparedDSparkProposal(self.device, 10)
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', 'QWEN_HARDWARE_TESTS': '0',
+                'QWEN_CARDS_ALLOCATED': '0'}), \
+                patch.object(audit, 'execute', side_effect=RuntimeError('reference failed')), \
+                self.assertRaisesRegex(RuntimeError, 'reference failed'):
+            audit.compare(proposal)
+        self.assertIs(self.device.proposal_markov, candidate)
+        self.assertTrue(self.scopes[-1].release.called)
+        proposal.close()
+
+    def test_score_policy_is_instance_scoped_and_default_remains_native(self):
+        mesh = object()
+
+        def initialize(device, **options):
+            device.mesh = mesh
+
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', 'QWEN_HARDWARE_TESTS': '0',
+                'QWEN_CARDS_ALLOCATED': '0'}), \
+                patch('t32_attention_admission.require_active', return_value={}), \
+                patch.object(prepared.DSparkDevice, '__init__', initialize):
+            candidate = prepared.TracedDSparkDevice(fused_score_layout=True)
+            control = prepared.TracedDSparkDevice()
+        from dspark_t32_score_layout import execute as fused
+
+        self.assertIs(candidate.proposal_markov.func, fused)
+        self.assertEqual(candidate.proposal_markov.keywords, {'mesh': mesh})
+        self.assertIs(control.proposal_markov, prepared.markov)
+
+    def test_score_policy_rejects_hardware_before_allocating(self):
+        with patch.object(prepared.DSparkDevice, '__init__') as initialize:
+            for policy in (1, 'fused', None):
+                with self.assertRaisesRegex(ValueError, 'boolean'):
+                    prepared.TracedDSparkDevice(fused_score_layout=policy)
+            for flag in ('QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED'):
+                with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', flag: '1'}), \
+                        self.assertRaisesRegex(ValueError, 'simulator-only'):
+                    prepared.TracedDSparkDevice(fused_score_layout=True)
+            initialize.assert_not_called()
+
+    def test_execute_uses_instance_backend_and_retains_failure_allocations(self):
+        self.device.collectives = object()
+        self.device.parameters = {'norm.weight': object()}
+        allocated = object()
+        retained = []
+
+        def feedback(*args):
+            args[-1].append(allocated)
+            raise RuntimeError('feedback failed')
+
+        self.device.proposal_markov = Mock(side_effect=feedback)
+        with patch.object(prepared, 'noise_embeddings'), patch.object(prepared, 'norm'), \
+                patch.object(prepared, 'shared_head_logits', return_value='logits'), \
+                patch.object(prepared, 'markov') as native, \
+                self.assertRaisesRegex(RuntimeError, 'feedback failed'):
+            EXECUTE(self.device, {'identifiers': object(), 'anchor': 10}, (), retained.append)
+        native.assert_not_called()
+        self.device.proposal_markov.assert_called_once()
+        self.assertEqual(retained, [allocated])
+
     def test_deferred_capture_does_not_allocate_inputs_after_trace(self):
         proposal = prepared.PreparedDSparkProposal(self.device, 10, defer_capture=True)
         self.capture.assert_not_called()

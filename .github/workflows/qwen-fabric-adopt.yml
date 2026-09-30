@@ -1,0 +1,76 @@
+name: Qwen fabric packet adopt
+on:
+  push:
+    tags: ['experiment/fabric-adopt-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  locate:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: fa
+          persist-credentials: false
+      - name: Find every place the serving stack brings the fabric up
+        working-directory: fa
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results/source
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          name="qwen-fabric-adopt-locate-$GITHUB_RUN_ID"
+          trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          timeout -k 30 480 docker run --rm --name "$name" --network none \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 512 \
+            --cpus 4 --memory 8g --tmpfs /tmp:rw,size=256m \
+            --entrypoint bash "$image" -lc '
+              echo "=== tt-metal version ==="
+              cat /opt/tt-metal/version.txt 2>/dev/null || true
+              git -C /opt/tt-metal rev-parse HEAD 2>/dev/null || true
+              git -C /opt/tt-metal describe --tags 2>/dev/null || true
+              python3 -c "import ttnn, os; print(\"ttnn:\", getattr(ttnn, \"__version__\", \"n/a\"))" 2>/dev/null || true
+              echo "=== set_fabric_config call sites (python) ==="
+              grep -rn "set_fabric_config" /opt/tt-metal/models /opt/qwen-fast-plugin \
+                /opt/tt-metal/ttnn/ttnn 2>/dev/null | grep -v "\.pyc" | head -30
+              echo "=== FabricConfig references in the serving stack ==="
+              grep -rn "FabricConfig\|fabric_config" /opt/qwen-fast-plugin 2>/dev/null \
+                | grep -v "\.pyc" | head -30
+              echo "=== get_num_links, the issue 55125 site ==="
+              grep -rn "get_num_links\|link_dict" /opt/tt-metal/models/common 2>/dev/null \
+                | grep -v "\.pyc" | head -20
+            ' > experiment-results/locate.txt 2>&1 || true
+          cat experiment-results/locate.txt
+      - name: Extract the files both changes need
+        working-directory: fa
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          name="qwen-fabric-adopt-extract-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          docker cp "$name:/opt/qwen-fast-plugin/src/vllm_tt_plugin/worker.py"             experiment-results/source/worker.py 2>/dev/null || true
+          echo '=== qwen36/tt directory ==='
+          docker cp "$name:/opt/tt-metal/models/demos/blackhole/qwen36/tt"             experiment-results/qwen36tt 2>/dev/null || true
+          ls -l experiment-results/qwen36tt/ > experiment-results/qwen36-listing.txt 2>&1 || true
+          cat experiment-results/qwen36-listing.txt || true
+          echo '=== which file owns the GDN prefill scan ==='
+          grep -rln "chunk_gdn\|ChunkGdn\|gdn_scan\|gdn_prep" experiment-results/qwen36tt/             2>/dev/null > experiment-results/gdn-files.txt || true
+          cat experiment-results/gdn-files.txt || true
+          echo '=== the slice/ternary sites near the GDN prefill ==='
+          grep -rnE "ttnn\.(slice|where|addcmul|to_layout|tilize|untilize)"             experiment-results/qwen36tt/ 2>/dev/null | head -40             > experiment-results/gdn-layout-sites.txt || true
+          cat experiment-results/gdn-layout-sites.txt || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-fabric-adopt-locate-${{ github.run_id }}
+          path: fa/experiment-results/

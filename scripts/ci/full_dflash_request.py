@@ -95,12 +95,20 @@ def summarize_dflash_requests(requests, *, audit_only=False):
                 or entry['dflash'].get('validated_live_masks') != len(entry['dflash']['proposal_contexts'])):
             raise ValueError('Every captured live-query bucket requires a validated mask')
         if native_proposal_attention and (entry['dflash'].get('native_proposal_attention') is not True
-                or entry['dflash'].get('proposal_capture') is not True or entry['dflash'].get('block_rows') != 8
+                or entry['dflash'].get('proposal_capture') is not True or entry['dflash'].get('block_rows') not in (8, 16, 32)
                 or not entry['dflash'].get('proposal_contexts')
                 or type(entry['dflash'].get('validated_native_proposal_masks')) is not int
                 or entry['dflash']['validated_native_proposal_masks'] != len(entry['dflash']['proposal_contexts'])
                 or entry['dflash'].get('attention') != 'Native BF16 proposal-only attention; not an exact replacement'):
             raise ValueError('Every native proposal bucket requires its own validated mask and explicit approximate policy')
+        if native_proposal_attention and entry['dflash'].get('block_rows') == 16:
+            from dflash_t16_native_scope import validate_record
+
+            validate_record(entry.get('dflash_t16_native_admission'))
+        if native_proposal_attention and entry['dflash'].get('block_rows') == 32:
+            from dflash_t32_native_scope import validate_record
+
+            validate_record(entry.get('dflash_t32_native_admission'))
         count = entry['committed_decode_tokens']
         if (type(count) is not int or count <= 0 or count != len(entry['emitted']) - 1
                 or sum(block['committed'] for block in entry['blocks']) != count
@@ -295,14 +303,20 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
                           prefill, decode, live_digest, kv_digest, inactive_digest, eos_ids,
                           audit_features=False, max_new_tokens=513, block_rows=8, proposal_capture=False,
                           commit_only_gdn=False, fused_convolution=False, cache_history=False, cache_projection_capture=False,
-                          profile_verifier=False, live_query_qk=False, native_proposal_attention=False):
+                          profile_verifier=False, live_query_qk=False, native_proposal_attention=False,
+                          target_attention_t16=False, target_combined_t32=False):
     import torch
     from full_request import measure_request
     from models.tt_transformers.tt.ccl import TT_CCL
 
     if (type(audit_features) is not bool or type(proposal_capture) is not bool or type(commit_only_gdn) is not bool
             or type(fused_convolution) is not bool or (fused_convolution and not proposal_capture)
-            or type(cache_history) is not bool or (cache_history and (not proposal_capture or block_rows != 8))
+            or type(target_combined_t32) is not bool
+            or (target_combined_t32 and (block_rows != 32 or target_attention_t16 or not native_proposal_attention
+                or not proposal_capture or not cache_history or not commit_only_gdn or not fused_convolution
+                or profile_verifier or live_query_qk or cache_projection_capture))
+            or type(cache_history) is not bool or (cache_history and (not proposal_capture
+                or (block_rows not in (8, 16) and not target_combined_t32)))
             or type(cache_projection_capture) is not bool or (cache_projection_capture and not cache_history)
             or type(live_query_qk) is not bool or (live_query_qk and (not cache_history or cache_projection_capture))
             or type(native_proposal_attention) is not bool or (native_proposal_attention and
@@ -312,8 +326,21 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
                 or not proposal_capture or not fused_convolution or not cache_history or cache_projection_capture
                 or block_rows != 8 or len(prompt) != 4096 or live_query_qk))
             or type(max_new_tokens) is not int or not 1 <= max_new_tokens <= 65536 - len(prompt) - 32
-            or type(block_rows) is not int or block_rows not in (8, 32)):
+            or type(block_rows) is not int or block_rows not in (8, 16, 32)
+            or type(target_attention_t16) is not bool
+            or (block_rows == 16) != target_attention_t16
+            or (target_attention_t16 and (not proposal_capture or not cache_history or not commit_only_gdn
+                or not fused_convolution or profile_verifier or live_query_qk
+                or cache_projection_capture))):
         raise ValueError('Explicit feature-audit policy and bounded prompt required')
+    if native_proposal_attention and target_attention_t16:
+        from dflash_t16_native_scope import require_active
+
+        require_active()
+    if target_combined_t32:
+        from dflash_t32_native_scope import require_active
+
+        require_active()
     window = prefill_window(len(prompt))
     manifests, layers, projection, selector = fixtures
     capture = device = runtime = None
@@ -384,12 +411,20 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             capture.outputs(), position=len(prompt), progress=status if audit_features else None, block_rows=block_rows,
             proposal_capture=proposal_capture, max_new_tokens=max_new_tokens, fused_convolution=fused_convolution,
             feature_start=window['start'], cache_history=cache_history, cache_projection_capture=cache_projection_capture,
-            live_query_qk=live_query_qk, native_proposal_attention=native_proposal_attention)
+            live_query_qk=live_query_qk, native_proposal_attention=native_proposal_attention,
+            **(dict(defer_proposal_capture=True) if target_attention_t16 or target_combined_t32 else {}))
         capture.close()
         runtime = DFlashRequestRuntime(device, position=len(prompt),
             validate_features=validate_features if audit_features else None)
         faulthandler.dump_traceback_later(180, exit=True)
         return runtime
+
+    def prepare_proposal_trace(engine):
+        from dflash_proposal_trace import PreparedDFlashProposal
+        if device is None or device.proposal_capture is not None:
+            raise ValueError('DFlash2 proposal capture requires allocated verifier state and a fresh device')
+        status('capture_proposal_after_verifier_allocation')
+        device.proposal_capture = PreparedDFlashProposal(device, max_new_tokens=max_new_tokens)
 
     observer = None
     try:
@@ -403,6 +438,10 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
             norm_batch=True, lookup_max_rows=block_rows, native_sampling_rows=True,
             commit_only_gdn=commit_only_gdn, audit_commit_only_gdn=commit_only_gdn and audit_features,
             feature_factory=factory, progress=lambda block: status('committed-block', **block),
+            **(dict(target_attention_t16=True, attention_replay=True, family_routing=True)
+               if target_attention_t16 else {}),
+            **(dict(attention_replay=True, family_routing=True) if target_combined_t32 else {}),
+            **(dict(verifier_before_capture=prepare_proposal_trace) if target_attention_t16 or target_combined_t32 else {}),
             **(dict(verifier_observer=observer) if observer is not None else {}))
         if observer is not None:
             result['verifier_profile'] = observer.summary()
@@ -411,6 +450,10 @@ def measure_dflash_request(operations, model, sampler, prompt, pages, helpers, *
         result['cache_projection_capture'] = cache_projection_capture
         result['live_query_qk'] = live_query_qk
         result['native_proposal_attention'] = native_proposal_attention
+        if native_proposal_attention and target_attention_t16:
+            result['dflash_t16_native_admission'] = dict(require_active())
+        if target_combined_t32:
+            result['dflash_t32_native_admission'] = dict(require_active())
         result['dflash'] = dict(checkpoints=manifests, target_taps=list(TARGET_TAPS),
             prefill_window=window, prefill_checks=prefill_checks, prefill_chunks=prefill_chunks,
             prefill_assembly_checks=prefill_assembly_checks,

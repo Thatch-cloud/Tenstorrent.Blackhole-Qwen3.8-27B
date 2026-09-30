@@ -1,5 +1,6 @@
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
+import os
 import sys
 from types import SimpleNamespace
 import unittest
@@ -13,6 +14,136 @@ from dspark_prefill import FeatureChunk
 
 
 class FullDSparkRequestTests(unittest.TestCase):
+    def t32_fusion_request(self, hits, *, hardware=False, timed=False, **extra_options):
+        self.drafter.max_drafts = 31
+        self.drafter.propose.return_value = tuple(range(31))
+        events = []
+
+        @contextmanager
+        def install():
+            events.append('install')
+            try:
+                yield
+            finally:
+                events.append('restore')
+
+        arm = SimpleNamespace(install=install, audit=dict(rows=32, hits=hits,
+            restored=True, native_bindings_unchanged=True))
+        collective = SimpleNamespace(tt_all_reduce=Mock())
+        self.drafter.prepare_trace.side_effect = lambda *args, **kwargs: events.append('capture')
+        self.drafter.close.side_effect = lambda: events.append('close')
+        constructor_path = ('t32_score_hardware.HardwareTracedDSparkDevice' if hardware
+            else 'dspark_t32_prepared.TracedDSparkDevice')
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '0' if hardware else '1',
+                'QWEN_HARDWARE_TESTS': '1' if hardware else '0',
+                'QWEN_CARDS_ALLOCATED': '1' if hardware else '0',
+                'QWEN_T32_FUSED_SCORE_HARDWARE': '1' if hardware else '0'}), \
+                patch('t32_score_hardware.require_active', return_value=SimpleNamespace(timing_reference={} if timed else None)), \
+                patch.dict(sys.modules, {'models.tt_transformers.tt.ccl': collective}), \
+                patch('t32_attention_admission.require_active', return_value={}), \
+                patch('target_t32_attention_gate.qualify_request', return_value={'component_fixture': True}), \
+                patch(constructor_path, return_value=self.drafter), \
+                patch('fused_t16_scope.FusedT32Arm', return_value=arm) as candidate, \
+                patch('fused_t16_scope.FusedT16Arm') as control:
+            try:
+                result = self.measure(audit=not timed, proposal_trace=True, commit_only_gdn=True,
+                    native_attention=True, t32=True, fused_t32_mlp=True, **extra_options)
+            finally:
+                self.assertEqual(events, ['install', 'capture', 'restore', 'close'])
+                candidate.assert_called_once()
+                control.assert_not_called()
+        return result
+
+    def test_t32_hardware_routes_combined_audit_without_claiming_performance(self):
+        result = self.t32_fusion_request([1] * 64, hardware=True,
+            target_attention_t32=True, target_attention_t32_evidence='fixture.json')
+        lifecycle = result['dspark']['t32_lifecycle']
+        self.assertTrue(lifecycle['hardware_audit_experiment'])
+        self.assertFalse(lifecycle['hardware_qualified'])
+        self.assertFalse(lifecycle['performance_qualified'])
+        self.assertIsNone(result['committed_tokens_per_second'])
+
+    def test_t32_hardware_timing_requires_fresh_scope_reference(self):
+        result = self.t32_fusion_request([1] * 64, hardware=True, timed=True,
+            target_attention_t32=True, target_attention_t32_evidence='fixture.json')
+        self.assertFalse(result['instrumented_timing'])
+        self.assertEqual(result['committed_tokens_per_second'], 123.0)
+
+    def test_t32_hardware_flag_cannot_replace_owned_scope(self):
+        with patch.dict(os.environ, {'QWEN_T32_FUSED_SCORE_HARDWARE': '1'}):
+            with self.assertRaisesRegex(ValueError, 'Active owned'):
+                self.measure(t32=True, audit=True, proposal_trace=True, commit_only_gdn=True,
+                    native_attention=True, fused_t32_mlp=True,
+                    target_attention_t32=True, target_attention_t32_evidence='fixture.json')
+        self.base_prefill.assert_not_called()
+
+    def test_t32_hardware_rejects_timing_and_partial_target_routes(self):
+        with patch.dict(os.environ, {'QWEN_T32_FUSED_SCORE_HARDWARE': '1'}), \
+                patch('t32_score_hardware.require_active', return_value={}):
+            for extra in (dict(audit=False, fused_t32_mlp=True, target_attention_t32=True,
+                    target_attention_t32_evidence='fixture.json'), dict(audit=True)):
+                with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, 'T32'):
+                    self.measure(t32=True, proposal_trace=True, commit_only_gdn=True,
+                        native_attention=True, **extra)
+        self.base_prefill.assert_not_called()
+
+    def test_t32_fusion_installs_before_capture_and_reports_executed_layers(self):
+        result = self.t32_fusion_request([1] * 64)
+        self.assertNotIn('fused_t16_mlp', result)
+        self.assertEqual(result['fused_t32_mlp']['hits'], [1] * 64)
+        self.assertEqual(result['dspark']['t32_lifecycle']['target_mlp'], 'fused-t32')
+        self.assertIsNone(result['committed_tokens_per_second'])
+
+    def test_t32_fusion_rejects_an_unexecuted_target_layer(self):
+        with self.assertRaisesRegex(AssertionError, 'Every target layer'):
+            self.t32_fusion_request([1] * 63 + [0])
+
+    def test_t32_fusion_cannot_enable_on_t16(self):
+        with self.assertRaisesRegex(ValueError, 'T32 MLP'):
+            self.measure(fused_t32_mlp=True)
+        self.base_prefill.assert_not_called()
+
+    def test_t32_target_attention_routes_replay_without_the_t16_flag(self):
+        result = self.t32_fusion_request([1] * 64,
+            target_attention_t32=True, target_attention_t32_evidence='fixture.json')
+        self.assertEqual(result['dspark']['t32_lifecycle']['target_attention'], 'replay-t32')
+        self.assertEqual(result['dspark']['t32_lifecycle']['attention_component'], {'component_fixture': True})
+
+    def test_t32_target_attention_rejects_missing_or_unused_evidence(self):
+        for options in (dict(target_attention_t32=True), dict(target_attention_t32_evidence='unused.json')):
+            with self.assertRaisesRegex(ValueError, 'T32 target attention'):
+                self.measure(**options)
+        self.base_prefill.assert_not_called()
+
+    def test_t32_lifecycle_routes_31_proposals_and_32_verifier_rows(self):
+        self.drafter.max_drafts = 31
+        self.drafter.propose.return_value = tuple(range(31))
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', 'QWEN_HARDWARE_TESTS': '0',
+                'QWEN_CARDS_ALLOCATED': '0'}), \
+                patch('t32_attention_admission.require_active', return_value={}), \
+                patch('dspark_t32_prepared.TracedDSparkDevice', return_value=self.drafter) as constructor:
+            result = self.measure(audit=True, proposal_trace=True, commit_only_gdn=True,
+                native_attention=True, t32=True)
+        self.assertEqual(constructor.call_args.kwargs['proposals'], 31)
+        self.assertTrue(constructor.call_args.kwargs['fused_score_layout'])
+        self.drafter.propose.assert_called_once_with(17, 31)
+        self.traced_device.assert_not_called()
+        self.assertEqual(result['dspark']['verifier_rows'], 32)
+        self.assertEqual(result['dspark']['proposals'], 31)
+        self.assertIsNone(result['committed_tokens_per_second'])
+        self.assertFalse(result['dspark']['t32_lifecycle']['performance_qualified'])
+        self.drafter.close.assert_called_once()
+
+    def test_t32_rejects_timing_and_t16_recipe_options_before_prefill(self):
+        with patch.dict(os.environ, {'QWEN_SIM_ONLY': '1', 'QWEN_HARDWARE_TESTS': '0',
+                'QWEN_CARDS_ALLOCATED': '0'}):
+            for options in (dict(t32=1), dict(t32=True),
+                    dict(t32=True, audit=True, proposal_trace=True, commit_only_gdn=True,
+                        native_attention=True, target_attention_t16=True)):
+                with self.subTest(options=options), self.assertRaisesRegex(ValueError, 'T32'):
+                    self.measure(**options)
+        self.base_prefill.assert_not_called()
+
     def test_combined_profile_rejects_partial_runtime_before_prefill(self):
         for options in (dict(combined_profile=True), dict(combined_profile=1),
                 dict(combined_profile=True, proposal_trace=True, commit_only_gdn=True, captured_publication=True)):
@@ -110,7 +241,11 @@ class FullDSparkRequestTests(unittest.TestCase):
                 self.drafter.propose.assert_not_called()
                 options['verifier_before_capture'](SimpleNamespace(initial=[]))
             self.assertEqual(options['feature_drafter_name'], 'dspark')
-            self.assertEqual(options['lookup_max_rows'], 16)
+            self.assertEqual(options['lookup_max_rows'], 32 if experiment_options.get('t32') else 16)
+            if experiment_options.get('target_attention_t32'):
+                self.assertTrue(options['attention_replay'])
+                self.assertTrue(options['family_routing'])
+                self.assertNotIn('target_attention_t16', options)
             self.assertTrue(options['norm_batch'] and options['native_sampling_rows'])
             self.assertIs(options['commit_only_gdn'], commit_only_gdn)
             self.assertIs(options['audit_commit_only_gdn'], audit and commit_only_gdn)
@@ -128,7 +263,7 @@ class FullDSparkRequestTests(unittest.TestCase):
             return dict(blocks=[dict(committed=2, rows=3)], committed_decode_tokens=2, committed_tokens_per_second=123.0)
 
         with patch('full_request.measure_request', side_effect=native_request):
-            return request.measure_dspark_request(self.operations, object(), object(), list(range(32)), object(), [],
+            return request.measure_dspark_request(self.operations, SimpleNamespace(mesh_device=object()), object(), list(range(32)), object(), [],
                 collectives=object(), parameters={}, layer_weights=[], predecessor=object(), successor=object(), rotary=object(),
                 prefill=self.base_prefill, decode=self.base_decode, live_digest=Mock(), kv_digest=Mock(), inactive_digest=Mock(),
                 eos_ids=(99,), audit_features=audit, max_new_tokens=65,
@@ -263,6 +398,35 @@ class FullDSparkRequestTests(unittest.TestCase):
         self.history_audit.assert_not_called()
         self.drafter.close.assert_called_once()
         self.assertTrue(all(capture.close.called for capture in self.captures))
+
+    def test_cached_prefill_keeps_existing_feature_audits_and_scope_lifetimes(self):
+        closed = []
+        @contextmanager
+        def cached(tokens, prefill, ordinal):
+            capture = self.capture(self.operations, None, len(tokens))
+            try:
+                yield prefill(tokens), capture, dict(cache_hit=ordinal == 1)
+            finally:
+                closed.append(ordinal)
+                capture.close()
+        result = self.measure(audit=True, cached_prefill_factory=cached)
+        self.assertEqual(closed, [0, 1])
+        self.assertEqual(result['dspark']['prefix_cache'], [dict(cache_hit=False), dict(cache_hit=True)])
+        self.assertEqual(len(result['dspark']['feature_checks']), 10)
+        self.assertEqual(len(result['dspark']['prefill_hashes']), 10)
+        self.assertIsNone(result['committed_tokens_per_second'])
+
+    def test_cached_prefill_rejects_warm_reference_and_unwinds_failure(self):
+        closed = []
+        @contextmanager
+        def invalid(tokens, prefill, ordinal):
+            try:
+                yield 17, self.capture(self.operations, None, len(tokens)), dict(cache_hit=True)
+            finally:
+                closed.append(ordinal)
+        with self.assertRaisesRegex(ValueError, 'Cold native control'):
+            self.measure(cached_prefill_factory=invalid)
+        self.assertEqual(closed, [0])
 
     def test_instrumented_request_checks_all_taps_both_chips_and_cannot_claim_tg(self):
         result = self.measure(audit=True)

@@ -165,6 +165,13 @@ class PrefixTests(unittest.TestCase):
             decode_projected(layer, packed, tokens, Mock(), operations)
         self.assertIs(layer._project_qkvzab_raw, projection)
 
+    def test_row_widths_reach_the_sixty_four_row_m3_block_and_nothing_between(self):
+        for rows in (1, 2, 4, 8, 16, 32, 64):
+            self.assertEqual(validate_rows((1, rows, 5120)), rows)
+        for shape in ((1, 48, 5120), (1, 128, 5120), (2, 64, 5120), (1, 64, 2560), (1, 64), (64, 5120)):
+            with self.subTest(shape=shape), self.assertRaises(ValueError):
+                validate_rows(shape)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

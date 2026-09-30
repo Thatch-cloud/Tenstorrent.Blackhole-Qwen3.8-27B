@@ -40,4 +40,12 @@ void kernel_main() {
             cb_pop_front(0, 8);
         }
     }
+    // Drain before exit: worker 0's last act is a multicast of the received
+    // signal and the receivers' last acts are semaphore increments, and a
+    // kernel that exits with either in flight hands the next program on the
+    // core a stale NoC counter and, for the receivers, a late write into
+    // whatever now occupies their circular buffer. Each barrier is a no-op for
+    // the other role, so one exit sequence serves both.
+    noc_async_write_barrier();
+    noc_async_atomic_barrier();
 }

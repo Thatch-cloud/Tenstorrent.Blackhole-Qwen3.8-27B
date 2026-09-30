@@ -1,0 +1,48 @@
+name: Qwen model source extract
+on:
+  push:
+    tags: ['experiment/source-extract-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-source-extract
+  cancel-in-progress: false
+jobs:
+  extract:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: extract
+          persist-credentials: false
+      - name: Copy the prefill sources out of the serving image
+        working-directory: extract
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p experiment-results
+          # No devices: this only reads files out of the image filesystem.
+          image=sha256:bd878710e15c574e53451976122a9ebb0d5f146fdd37eeb92a9138f773be33fa
+          root=/opt/tt-metal/models/demos/blackhole/qwen36/tt
+          name="qwen-extract-$GITHUB_RUN_ID"
+          docker create --name "$name" --entrypoint /bin/true "$image" >/dev/null
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          for file in qwen36_vllm.py model.py; do
+            docker cp "$name:$root/$file" "experiment-results/$file" 2>/dev/null \
+              || echo "MISSING $file"
+          done
+          ls -la experiment-results/
+          for file in qwen36_vllm.py model.py; do
+            if [ -f "experiment-results/$file" ]; then
+              printf '=== %s : %s lines ===\n' "$file" "$(wc -l < experiment-results/$file)"
+              grep -nE '^\s*(def|class) ' "experiment-results/$file" | head -60
+            fi
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-source-extract-${{ github.run_id }}
+          path: extract/experiment-results/

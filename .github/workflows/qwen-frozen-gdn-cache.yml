@@ -1,7 +1,7 @@
 name: Qwen shared-QK GDN input-cache simulation
 on:
   push:
-    tags: ['experiment/frozen-gdn-input-cache-sim-v1', 'experiment/frozen-gdn-norm-prefetch-sim-v1']
+    tags: ['experiment/frozen-gdn-input-cache-sim-v1', 'experiment/frozen-gdn-norm-prefetch-sim-v1', 'experiment/shared-qk-norm-scatter-sim-v1']
 permissions:
   contents: read
 concurrency:
@@ -30,6 +30,7 @@ jobs:
             --manifest gdn-cache-candidate/experiment-results/frozen-geometry.json
           candidate=()
           if [[ "$GITHUB_REF" = refs/tags/experiment/frozen-gdn-norm-prefetch-sim-v1 ]]; then candidate=(--norm-prefetch); fi
+          if [[ "$GITHUB_REF" = refs/tags/experiment/shared-qk-norm-scatter-sim-v1 ]]; then candidate=(--norm-scatter); fi
           python3 -B gdn-cache-orchestrator/scripts/ci/frozen_gdn_cache_stage.py \
             --checkout gdn-cache-candidate "${candidate[@]}" > gdn-cache-candidate/experiment-results/cache-candidate.json
           git -C gdn-cache-candidate diff --check

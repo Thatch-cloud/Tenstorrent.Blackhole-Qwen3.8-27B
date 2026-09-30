@@ -27,6 +27,11 @@ direct_fp32_stage=0
 normalization_direct_stage=0
 center_tile_fill=0
 splitk_attention=0
+block_stream=0
+if [ "${QWEN_SIM_CASE:-stack}" = mlp-block-stream ]; then
+    block_stream=1
+    export QWEN_SIM_CASE=history-concat
+fi
 if [ "${QWEN_SIM_CASE:-stack}" = dspark-splitk ]; then
     splitk_attention=1
     export QWEN_SIM_CASE=dspark-center-tile-fill
@@ -63,8 +68,12 @@ if [ "${QWEN_SIM_CASE:-stack}" = dspark-score-bitwise ]; then
     score_bitwise=1
     export QWEN_SIM_CASE=dspark-ladder-attention
 fi
-case "${QWEN_SIM_CASE:-stack}" in t32-markov|t32-markov-learned|t32-attention|t32-draft-attention|t32-commit|t32-combined|t32-publication|t32-context-attention|ladder-cache|draft-tail|history-append|dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) printf 'Unsupported QWEN_SIM_CASE: %s\n' "${QWEN_SIM_CASE:-stack}" >&2; exit 2 ;; esac
+case "${QWEN_SIM_CASE:-stack}" in dflash-t16-native-attention|t32-markov-fused|t32-markov|t32-markov-learned|t32-attention|t32-draft-attention|t32-commit|t32-combined|t32-publication|t32-context-attention|history-concat|ladder-cache|draft-tail|history-append|dspark-ladder-attention|markov-sparse-dot|markov-cache-control|stack|shortlist|fusion-t16|fusion-t16-target|gdn-output-l1|gdn-output-grid|gdn-copy-pairs|gdn-outer-add|gdn-shared-qk|gdn-shared-recurrence|target-t16-attention-8k|dspark-native-8k-attention) ;; *) printf 'Unsupported QWEN_SIM_CASE: %s\n' "${QWEN_SIM_CASE:-stack}" >&2; exit 2 ;; esac
 mkdir -p experiment-results
+case "${QWEN_T32_FUSED_SCORE:-0}" in 0|1) ;; *) exit 2 ;; esac
+case "${QWEN_T32_LOAD_DIAGNOSTIC:-0}" in 0|1) ;; *) exit 2 ;; esac
+if [ "${QWEN_T32_LOAD_DIAGNOSTIC:-0}" = 1 ]; then test "${QWEN_T32_FUSED_SCORE:-0}" = 1; fi
+if [ "${QWEN_T32_FUSED_SCORE:-0}" = 1 ]; then test "${QWEN_SIM_CASE:-stack}" = t32-combined; fi
 results=$(cd experiment-results && pwd -P)
 assets=$(mktemp -d "$RUNNER_TEMP/qwen-simulator.XXXXXX")
 image=sha256:f1e9b1a64b4f7aa04cd3d3b36fefed4d47320bfdd0f4d108d2ca85a932cf9465
@@ -101,12 +110,18 @@ printf 'preflight_complete\n' | tee "$results/preflight-stage.txt"
 cache=/home/thatch/.cache/qwen-experiments
 revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 kinds='attention convolution mlp stack selector'
-if [[ "${QWEN_SIM_CASE:-stack}" = history-append || "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = ladder-cache ]]; then kinds=''; fi
+if [ "${QWEN_SIM_CASE:-stack}" = dflash-t16-native-attention ]; then kinds=''; fi
+if [[ "${QWEN_SIM_CASE:-stack}" = history-concat || "${QWEN_SIM_CASE:-stack}" = history-append || "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = ladder-cache ]]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = markov-cache-control ]]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = fusion-t16* ]]; then kinds=mlp; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then kinds=''; fi
 if [[ "${QWEN_SIM_CASE:-stack}" = t32-* ]]; then kinds=''; fi
 mounts=()
+if [ "${QWEN_SIM_CASE:-stack}" = dflash-t16-native-attention ]; then
+    native_cache=qwen-experiments-f1e9b1a64b4f
+    test "$(docker volume inspect --format '{{index .Labels "thatch.qwen.experiment-cache"}}' "$native_cache")" = true
+    mounts+=(--mount "type=volume,src=$native_cache,dst=/combined-native-cache,readonly")
+fi
 if [[ "${QWEN_SIM_CASE:-stack}" = t32-markov-learned || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication ]]; then
     checkpoint="$cache/dspark-b9a5dbdf03bc999c6c73c426b19c2d9041cea393/model.safetensors"
     test -f "$checkpoint"
@@ -191,7 +206,10 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     --mount "type=bind,src=$results,dst=/experiment/results" \
     "${mounts[@]}" \
     -e OMP_NUM_THREADS=1 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_SIM_ONLY=1 \
+    -e "QWEN_T32_FUSED_SCORE=${QWEN_T32_FUSED_SCORE:-0}" \
+    -e "QWEN_T32_LOAD_DIAGNOSTIC=${QWEN_T32_LOAD_DIAGNOSTIC:-0}" \
     -e "QWEN_SIM_CASE=${QWEN_SIM_CASE:-stack}" \
+    -e "QWEN_MLP_BLOCK_STREAM=$block_stream" \
     -e "QWEN_SIM_CONTEXT=${QWEN_SIM_CONTEXT:-2048}" \
     -e "QWEN_SCORE_BITWISE=$score_bitwise" \
     -e "QWEN_TARGET_T16_64K=$target_64k" \
@@ -210,10 +228,13 @@ container=$(docker create --network none --cap-drop ALL --security-opt no-new-pr
     -e "QWEN_CCL_LAZY_BUILD=${QWEN_CCL_LAZY_BUILD:-0}" \
     --entrypoint /bin/bash "$image" /experiment-scripts/ci/simulator-suite.sh)
 docker cp scripts "$container:/experiment-scripts"
+if [ "${QWEN_SIM_CASE:-stack}" = dflash-t16-native-attention ]; then
+    docker cp optimisation/sim "$container:/simulator-support"
+fi
 if [ "${QWEN_SIM_CASE:-stack}" = t32-commit ]; then
     docker cp optimisation "$container:/optimisation"
 fi
-if [[ "${QWEN_SIM_CASE:-stack}" = t32-*attention || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication || "${QWEN_SIM_CASE:-stack}" = ladder-cache || "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then
+if [[ "${QWEN_SIM_CASE:-stack}" = history-concat || "${QWEN_SIM_CASE:-stack}" = t32-*attention || "${QWEN_SIM_CASE:-stack}" = t32-combined || "${QWEN_SIM_CASE:-stack}" = t32-publication || "${QWEN_SIM_CASE:-stack}" = ladder-cache || "${QWEN_SIM_CASE:-stack}" = draft-tail || "${QWEN_SIM_CASE:-stack}" = fusion-t16* || "${QWEN_SIM_CASE:-stack}" = markov-sparse-dot || "${QWEN_SIM_CASE:-stack}" = gdn-output-* || "${QWEN_SIM_CASE:-stack}" = gdn-copy-pairs || "${QWEN_SIM_CASE:-stack}" = gdn-outer-add || "${QWEN_SIM_CASE:-stack}" = dspark-ladder-attention || "${QWEN_SIM_CASE:-stack}" = dspark-native-8k-attention || "${QWEN_SIM_CASE:-stack}" = target-t16-attention-8k || "${QWEN_SIM_CASE:-stack}" = gdn-shared-recurrence || "${QWEN_SIM_CASE:-stack}" = gdn-shared-qk ]]; then
     docker cp optimisation/sim "$container:/simulator-support"
 fi
 if [ "${QWEN_CCL_LAZY_BUILD:-0}" = 1 ]; then

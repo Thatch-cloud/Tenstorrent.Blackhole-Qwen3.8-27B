@@ -1,5 +1,184 @@
 # Combined-runtime trace attribution
 
+## Split the 48-core generic group
+
+Reinspection of the same hash-validated CSV for run 35185624322, four steady
+T16 replays per chip, separates the 112 generic/48-core calls by immediate
+neighbors. Median summed kernel durations:
+
+| Previous -> generic/48 -> next | Calls/replay | Card 0 ms | Card 1 ms |
+| --- | ---: | ---: | ---: |
+| LayerNorm/32 -> generic -> sharded-to-interleaved/32 | 48 | 0.869 | 0.866 |
+| Matmul/43 -> generic -> GDN conv gates/81 | 48 | 3.493 | 3.492 |
+| Generic/16 -> generic -> generic/16 | 16 | 0.247 | 0.247 |
+
+The middle sequence is consistent with the convolution-window builder in
+`gdn_batched_conv.py`, not a profiler source label. Its cost is **3.49 ms**,
+not the full group's 4.61 ms. Removing window materialization requires preserving
+all speculative convolution prefixes: the same windows currently provide
+rollback/publication state. Faster window writes already failed the combined
+promotion screen; structural fusion is a different experiment, not permission to
+drop those checkpoints. Even eliminating 3.49 ms cannot by itself close the
+roughly 36 ms whole-cycle gap to 200 TG.
+
+## Separate the 32-core projections
+
+`winning_projection_attribution.py` reuses the hash-pinned combined request and
+device CSV; no hardware rerun is needed. It requires every operation in four
+steady T16 replays on each chip, all 128 relevant matmuls, recognized ordered
+neighbors and the matching frozen `fused_t16_scope.py` source hash. Two host
+tests reject missing calls, unknown neighbors, overlapping intervals and NaNs.
+
+| Source-consistent sequence | Calls/replay | Card 0 ms | Card 1 ms |
+| --- | ---: | ---: | ---: |
+| Fused MLP -> down projection -> reduce-scatter | 64 | 7.804 | 7.805 |
+| GDN norm gate -> output projection -> reduce-scatter | 48 | 2.233 | 2.234 |
+| Attention output slice -> output projection -> reduce-scatter | 16 | 0.749 | 0.751 |
+
+These are medians of summed kernel intervals, including waits, not source-line
+labels from the profiler or throughput gains. Identities are inferred from
+operation order, layer counts and reviewed source. The MLP-down sequence matches
+the exact retained forward source (`f34bd6f26a8a40574dae1f3525b635c87c41a882ad117be45cd40a187ede0ce8`).
+The current development file also supports T32 and does not have that hash;
+the analyzer therefore requires the frozen staged source explicitly rather than
+silently treating the current checkout as the measured runtime.
+
+The 10.786-ms matmul group is **not** entirely GDN output or MLP down. MLP down
+is its largest component: about 121.9 microseconds per call in this instrumented
+trace. Combined with the separately measured 11.396-ms fused gate/up group, it
+makes MLP a higher-impact next target than another tiny GDN reader reorder.
+This is not a claim that all 19.2 ms can be removed.
+
+Source review confirms the current gate/up uses BF4 weights and LoFi already;
+simply suggesting those flags is not a new optimization. Prior streamed MLP and
+small-tile-with-conversion candidates failed and must not be retried unchanged.
+An MLP-down candidate must retain its compressed weights and numerical policy,
+charge layout/collective costs, and qualify in the complete winning runtime.
+
+Reproduce using the matching frozen stage (not the development scope file):
+
+```powershell
+$env:PYTHONPATH='scripts/ci'
+python -B scripts/ci/winning_projection_attribution.py D:/qwen-evidence/35185624322/combined-verifier-profile D:/qwen-qk-double-buffer-combined-stage-20260918/scripts/ci/fused_t16_scope.py
+```
+
+## Exclusive-interval re-analysis
+
+`winning_interval_attribution.py` revalidates the retained request and CSV hashes,
+then sweeps timestamped intervals for all operations in four steady T16 replays
+on each chip. Three host tests cover same-group overlap, cross-group overlap,
+gaps and invalid timestamps. The retained artifact analysis completes locally
+in seconds without another hardware run or global Tracy capture.
+
+In these recorded replays, different operation/core groups have **0 ms observed
+overlap** on both chips. This is an observation of an instrumented trace, not
+proof that independent operations exist or that concurrent scheduling is safe.
+
+| Chip 0 observed exclusive group time | ms/replay |
+| --- | ---: |
+| Generic / 99 cores | 11.396 |
+| Matmul / 32 cores | 10.786 |
+| Generic / 96 cores | 9.534 |
+| Matmul / 43 cores | 5.738 |
+| All-gather / 10 cores | 1.701 |
+| Reduce-scatter / 10 cores | 1.434 |
+| Argmax / 110 cores | 0.659 |
+
+This reinforces prioritizing the large target computation groups over another
+sampling or link-count tweak. Generic-group identities still require source
+confirmation. Exclusive intervals include waits; they are not active compute
+time, a dependency critical path or predicted TG savings. The recent combined
+HiFi2 experiment did not improve drafting or the approximately 66.5-ms verifier.
+Keep its HiFi4 control and use these retained measurements to select the next
+target-kernel change, rather than rerunning a rejected reader/precision recipe.
+
+## Winning-recipe refresh: recovered device attribution
+
+Run **35185624322** completed the audited 4K request and closed both devices
+cleanly. CI failed afterward because the host Tracy export was missing, not
+because inference failed. The retained device CSV is usable independently.
+`winning_device_attribution.py` pins the request/device hashes, verifies request
+correctness and source stability, and checks replay markers/counts on both chips.
+Four steady T16 replays per chip pass those checks.
+
+| Median T16 device timing | Chip 0 | Chip 1 |
+| --- | ---: | ---: |
+| Kernel envelope | 66.158 ms | 66.155 ms |
+| Kernel interval union | 64.916 ms | 64.899 ms |
+| Uncovered intervals | 1.243 ms | 1.256 ms |
+
+Chip 0's largest groups are the 99-core generic group (11.396 ms), 32-core
+matmuls (10.786 ms), and 96-core generic group (9.534 ms). Their geometry is
+consistent with fused MLP, down/output projections and GDN recurrence,
+respectively; generic labels do not prove kernel identity. Group sums can
+overlap. This is attribution, not a new TG result or proof of internal stalls.
+No hardware rerun is needed just to recover this evidence. The 131K/262K
+combined context ladder takes priority over further short-context profiling.
+
+### Per-RISC check of the retained winning trace
+
+`winning_risc_attribution.py` reuses the exact request/device hash validation,
+excludes first replays, and requires every operation in every selected steady
+T16 replay. Missing RISC measurements stay missing, not zero. Chip 0 medians:
+
+| Operation/core group | BRISC ms | NCRISC ms | TRISC0 ms | TRISC1 ms | TRISC2 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Generic / 99 | 11.395 | 10.839 | 11.276 | 11.371 | 11.372 |
+| Matmul / 32 | 10.785 | 10.271 | 10.724 | 10.715 | 10.731 |
+| Generic / 96 | 9.534 | 9.217 | 9.484 | 9.477 | 9.484 |
+| Matmul / 43 | 5.738 | 5.508 | 5.698 | 5.698 | 5.715 |
+
+Reader/writer and compute envelopes are nearly coextensive in the dominant
+groups. **This does not distinguish memory stalls from compute saturation**:
+RISC durations include waits. It does not justify increasing cores or replacing
+SFPU math blindly. The next targeted diagnostic needs internal reader/compute
+sections or circular-buffer wait measurements in the winning verifier, retaining
+the full combined request as the correctness and performance acceptance test.
+No new hardware run or throughput result was needed for this re-analysis.
+
+## Earlier admission attempts
+
+Attempt three passed disk admission (0.53% full I/O stall), entered the audited
+request after about 148 seconds and completed five speculative blocks before
+the nine-minute launcher timeout. It did not finish correctness validation or
+profiler export; it supplies no accepted throughput or complete attribution.
+
+The next profiling-only revision caps output at 64 tokens, while explicitly
+retaining 4096 prompt rows and the winning 4352-row draft history allocation.
+The full-request token/state/feature audits and minimum replay-count checks
+remain enabled. This reduces diagnostic work, not the performance target;
+unprofiled throughput acceptance still requires the normal combined workload.
+Five host tests and adaptation against the staged frozen recipe pass locally.
+
+Run **35181419754**, revision `09cbc1e`, staged the unchanged winning T16
+recipe successfully but stopped before weight loading with exit **75**.
+Four 15-second host I/O observations measured full-stall fractions of **15.38%,
+3.16%, 2.55%, and 4.25%**, above the existing 1% admission limit. This was not a
+kernel failure or a throughput measurement. Do not rerun unchanged until host
+contention has subsided; do not stop unrelated jobs to make the gate pass.
+
+The prepared profile runs one complete audited 4K request with shared-Q/K,
+norm prefetch, incremental history, draft-tail assembly, target T16 fusion and
+captured publication. It changes host instrumentation, not device kernels.
+The launcher is capped at nine minutes and the whole job at twelve minutes.
+PP/TG remain null because instrumentation perturbs execution.
+
+The retained winning 4K run **35167726511** measures 118.2196 committed TG:
+67.249 ms verification/readback per block, including 65.803 ms in the blocking
+trace call and only 0.433 ms in output readback. A blocking host call includes
+device execution; it is not proof of host overhead. The historical profiles
+below suggest internal kernel work is important, but are not a substitute for
+attributing this exact recipe. Keep synchronization and correctness checks
+until dependency-safe alternatives have their own evidence.
+
+Next: collect both-chip trace attribution, rank current operation costs, then
+qualify the selected change in simulation before an uninstrumented combined
+control/candidate comparison. Do not convert summed or overlapping profiler
+durations into projected committed TG.
+
+Retained admission artifact SHA256:
+`04f65acdaf3ba110a244048dc2f1dadedc9206827a9f63c9ab51a27b5d2c8f08`.
+
 ## Current 32K shared-Q/K profile
 
 Run **35076649250**, revision `b93f337`, passes in **9m42s**. This profiles

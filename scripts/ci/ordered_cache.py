@@ -44,13 +44,41 @@ def load_kernels(root):
     return sources
 
 
+# Page-table widths admitted above the original 1,024-entry envelope. 2,052 is a
+# 131,328-token window at 64-token pages. The kernels have no 1,024 limit - the page
+# table is read by one noc.async_read into a CB sized from the tensor - but they do no
+# bounds check either (max_blocks_per_seq is never read), so a width is admitted only
+# once it has been reviewed, one at a time. 4,096 needs its own hardware check;
+# 4,100 and 4,104 exceed the model's 262,144 max_position_embeddings and are never
+# valid. Review: workflow wf_8cc3f3d3-0a4 against kernels hash-confirmed at tt-metal
+# 9f9cd4fd. NOT numerically qualified at 2,052 on hardware yet.
+WIDE_PAGE_WIDTHS = frozenset({2052})
+DEFAULT_MAX_PAGES = 1024
+
+
+def page_width_admitted(width):
+    """Up to the original 1,024 envelope, or exactly one of the reviewed wide widths."""
+    if type(width) is not int or width < 1:
+        return False
+    if width <= DEFAULT_MAX_PAGES:
+        return True
+    # Wide widths must keep CB 3's page a 16-byte multiple; tt-metal checks only
+    # total % page, so an odd wide width would be untested territory.
+    return width in WIDE_PAGE_WIDTHS and width % 4 == 0
+
+
 def validate_shapes(cache, packed, positions, pages):
     rows = packed[1] if len(packed) == 4 else 0
     if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32) or tuple(packed) != (1, rows, 32, 256):
         raise ValueError('Native prepared T=1/2/4/8/16/32 KV tiles required')
     if len(cache) != 4 or cache[0] < 1 or tuple(cache[1:]) != (2, 64, 256):
         raise ValueError('Expected two-head 64-row BF8 paged cache')
-    if tuple(positions) != (rows,) or len(pages) != 2 or pages[0] != rows or not 1 <= pages[1] <= min(1024, cache[0]):
+    # The KERNEL never bounds-checks the page table, so correctness past this point also
+    # needs every decode position < pages[1] * 64 and every entry < cache[0]. Those are
+    # device-side values; the geometry guarantees them when max_model_len <= width * 64
+    # (131,328 = 2,052 * 64) and the block table is built by vLLM from the same cache.
+    if (tuple(positions) != (rows,) or len(pages) != 2 or pages[0] != rows
+            or not page_width_admitted(pages[1]) or pages[1] > cache[0]):
         raise ValueError('Paired position vector and page-table rows required')
     return rows
 

@@ -1,0 +1,126 @@
+"""What request profile does THIS image's T16 gate actually demand?
+
+Runs 35472072127 and 35472250194 both failed at 'Qualified 32K T16 replay with
+four-row groups and native sampling required' - at ONE user, and with
+QWEN_FROZEN_COMBINED_RUNTIME unset. So the frozen adapters were applied when the
+image was built, not chosen at run time, and the gate in this image is fixed.
+
+Meanwhile serving_runtime.bridge_factory builds a fixed (1, 68) page table, which
+is 68 x 64 = 4352 tokens. If the gate demands 32768 those two can never agree, and
+no amount of two-user work matters until one of them moves.
+
+Reports the facts rather than another hardware slot's worth of guessing:
+
+  - what request_context() returns in this image
+  - the source of the gate the verifier engine imports
+  - which positions that source will accept
+  - the page-table width serving_runtime builds
+
+CPU only: no device, no weights.
+"""
+
+import inspect
+import io
+import os
+import re
+import sys
+
+
+NEXT_DEF = chr(10) + 'def '
+
+
+def show(label, value):
+    print('%-40s %s' % (label, value))
+
+
+def main():
+    show('QWEN_FROZEN_COMBINED_RUNTIME', os.environ.get('QWEN_FROZEN_COMBINED_RUNTIME'))
+    show('QWEN_DSPARK_REQUEST_CONTEXT', os.environ.get('QWEN_DSPARK_REQUEST_CONTEXT'))
+    try:
+        from dspark_context_selection import request_context
+        show('request_context()', request_context())
+    except BaseException as error:
+        show('request_context()', 'failed: %s' % error)
+
+    # Read the IMAGE's copies by PATH, not by import. The probe lane mounts the
+    # repo at /probe and puts it FIRST on PYTHONPATH, so importing measures the
+    # repo's files and says nothing about what the server actually runs.
+    source = ''
+    for name in ('target_t16_attention_gate.py', 'dspark_context_selection.py'):
+        path = '/experiment-scripts/ci/' + name
+        try:
+            text = io.open(path, encoding='utf-8').read()
+        except BaseException as error:
+            show('image %s' % name, 'unreadable: %s' % error)
+            continue
+        show('image %s' % name, '%d bytes, frozen-adapted=%s'
+             % (len(text), 'frozen_combined_runtime' in text))
+        if name.startswith('target_t16'):
+            source = text
+            start = text.find('def validate_request_option')
+            print('----- image target_t16_attention_gate.validate_request_option -----')
+            print(text[start:text.find(NEXT_DEF, start + 1)])
+        else:
+            start = text.find('def request_context')
+            print('----- image request_context -----')
+            print(text[start:text.find(NEXT_DEF, start + 1)])
+
+    # The engine is NOT copied into the image from this repo - the bundle's copy is
+    # what runs - so read that one and show exactly what it hands the gate.
+    try:
+        engine = io.open('/experiment-scripts/ci/verifier_engine.py', encoding='utf-8').read()
+        start = engine.find('validate_request_option(')
+        print('----- image verifier_engine gate call -----')
+        print(engine[max(0, start - 200):start + 420])
+        for name in ('short_context', 'norm_batch', 'native_sampling_rows',
+                     'replay_group_rows', 'attention_replay', 'max_verify_rows'):
+            hits = [line.strip() for line in engine.splitlines()
+                    if name in line and ('self.%s' % name in line or 'def __init__' in line
+                                         or '%s=' % name in line)]
+            show('image engine %s' % name, hits[:2])
+    except BaseException as error:
+        show('image verifier_engine.py', 'unreadable: %s' % error)
+
+    # The one that actually raised, read from the IMAGE. The repo's copy already
+    # proved a poor guide once: verifier_engine here is the bundle's, not this repo's.
+    try:
+        frozen = io.open('/experiment-scripts/ci/frozen_combined_runtime.py', encoding='utf-8').read()
+        start = frozen.find('def validate_target_option')
+        print('----- image frozen_combined_runtime.validate_target_option -----')
+        print(frozen[start:frozen.find(NEXT_DEF, start + 1)])
+    except BaseException as error:
+        show('image frozen_combined_runtime.py', 'unreadable: %s' % error)
+
+    positions = sorted(set(int(value) for value in re.findall(r'position != (\d+)', source or '')))
+    show('positions this gate accepts', positions)
+
+    try:
+        import serving_runtime
+        runtime_source = inspect.getsource(serving_runtime)
+        widths = sorted(set(int(value) for value in re.findall(r'torch\.full\(\(1, (\d+)\)', runtime_source)))
+        show('page table widths built', widths)
+        show('tokens those cover', [width * 64 for width in widths])
+    except BaseException as error:
+        show('serving_runtime', 'unavailable: %s' % error)
+
+    print()
+    print('VERDICT')
+    if not positions:
+        print('  The gate in this image names no fixed position, so the profile is not')
+        print('  the blocker and the failure is something else.')
+        return 0
+    covered = [width * 64 for width in widths] if 'widths' in dir() else []
+    if covered and all(position > max(covered) for position in positions):
+        print('  The gate demands position %s and the page table covers at most %d'
+              % (positions, max(covered)))
+        print('  tokens. They cannot both be satisfied, so this image cannot decode at')
+        print('  ANY context and no two-user work will change that. The image must be')
+        print('  rebuilt without the frozen adapters, or the page table widened.')
+    else:
+        print('  Gate positions %s against page coverage %s: a consistent request exists.'
+              % (positions, covered))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -88,11 +88,45 @@ class GreedySession:
         if self.phase != 'pending' or ticket is not self.pending:
             raise ValueError('The current live block ticket is required')
 
-    def commit(self, request_id, ticket, predictions, publish):
+    def narrow(self, request_id, ticket, rows):
+        """The live ticket cut to its first `rows` tokens, in place of it: the same position, seed
+        and leading proposals, a new epoch. A round drafted at the packed block's width that the
+        block will not serve (a partner finished or aborted after the drafts; its padded checks
+        failed) has tickets no capture of the request's own engine holds, and the session cannot
+        re-propose while one is pending; the survivor is served sequentially at a width its engine
+        captures instead (S2 D1, serving_packed_step.narrow_round). Nothing was verified or
+        published for the old ticket, so cutting it is host-only: the dropped proposals are simply
+        never offered, as a rejected draft is never emitted. The drafter's cached proposal is not
+        touched; a publication at a prefix within the shorter ticket resets it
+        (DFlashRequestRuntime.publish). Refused, with nothing changed, unless `rows` is a verifier
+        bucket no wider than the ticket."""
+        self.check_ticket(request_id, ticket)
+        if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32) or rows > len(ticket.tokens):
+            raise ValueError('A verifier bucket no wider than the live ticket is required')
+        self.epoch += 1
+        narrowed = BlockTicket(request_id, self.epoch, ticket.position, tuple(ticket.tokens[:rows]),
+                               ticket.source if rows > 1 else 'target',
+                               min(ticket.match_length, rows - 1) if rows > 1 else 0)
+        self.pending, self.phase = narrowed, 'pending'
+        return narrowed
+
+    def commit(self, request_id, ticket, predictions, publish, *, max_rows=None):
+        """Decide and publish the live ticket from the target's predictions. `max_rows` (S2's
+        boundary cap, design 2.4; None: every row) keeps only the ticket's first max_rows rows:
+        the decision reads tokens[1:max_rows] against predictions[:max_rows], so at most max_rows
+        rows commit and the rows past them are handled like rejected drafts (the verify's K/V past
+        the frontier is overwritten later, and the GDN state commits at the prefix). The packed
+        step passes the block's accept_limit: the extent path's rows at or past their family end
+        read all of it and never their own key, so their predictions are never used."""
         self.check_ticket(request_id, ticket)
         if not callable(publish):
             raise ValueError('Synchronized state publication callback required')
-        decision = select_prefix(ticket.tokens[1:], predictions, vocab_size=self.vocab_size, eos_ids=self.eos_ids,
+        proposals, targets = ticket.tokens[1:], predictions
+        if max_rows is not None:
+            if type(max_rows) is not int or not 1 <= max_rows <= len(ticket.tokens):
+                raise ValueError('A commit cap of 1 to %d rows is required, got %r' % (len(ticket.tokens), max_rows))
+            proposals, targets = ticket.tokens[1:max_rows], tuple(predictions)[:max_rows]
+        decision = select_prefix(proposals, targets, vocab_size=self.vocab_size, eos_ids=self.eos_ids,
                                  max_proposals=self.verifier_rows - 1)
         self.phase = 'committing'
         try:

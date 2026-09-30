@@ -1,0 +1,645 @@
+name: Qwen C2 serving image
+# Build, smoke and publish the C2 serving base (docker/qwen-c2-serving.Dockerfile) on the rig,
+# driven by .github/c2-serving-job.env at the tagged commit. The rig's LAN is not always
+# reachable; its runners reach GitHub outbound, so this is the way in from offsite.
+# Actions (C2_ACTIONS, space-separated, run in this order):
+#   status - what the rig holds: the last manual build log, C2 images, card M's and card A's holders, the agent
+#   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
+#            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
+#            the same refusals as the gate (anything holding M or A, a platform serving container); never card
+#            A or card B, and never a reset (put reset before it after a hang); results in cardm/
+#   build  - build tt-vllm:qwen38-c2-$C2_IMAGE_TAG unless present (waits for a build in flight);
+#            the overlay is docker/qwen-c2-overlay.txt, and the tag lands only after G1 provenance
+#            (binaries and op directories, overlay sha256s and revision, boot argv and exact's v235
+#            environment, the layer model, the frozen-recipe pins; provenance.json in the results)
+#            passes. Before a first build, `c2_image_provenance.py --base-drift` on the P8 base shows
+#            what G1 would fail on, read-only.
+#   drift  - read-only, no cards: G1's strings, layer and frozen-pin checks on the P8 base
+#            (c2_image_provenance.py --base-drift), base-drift.log/.json in the results; reports,
+#            never fails the job - the build's G1 enforces
+#   probe  - the prefix-reuse P0a probe (scripts/ci/prefix_p0a_probe.py) inside
+#            tt-vllm:qwen38-c2-$C2_IMAGE_TAG, on the CPU: no --device, no network, the model
+#            snapshot read-only; opens no card. Then the prefix gates' oracle against the same
+#            real scheduler graft (scripts/ci/prefix_oracle_check.py)
+#   smoke  - run it on cards M+A shaped like the node agent's container, then the API smoke
+#            (scripts/ci/c2_serving_smoke.py); the container is always removed
+#   gate   - the m3native gate harness inside the image, in the agent's container shape, serving
+#            the contract's argv (scripts/ci/c2_serving_gate.py): C2_GATE_PLAN bringup (4 x 131072
+#            real text against v235's texts), matrix (a prompt length per user, solo vs concurrent
+#            under the exactness policy), memory (G5's DRAM lines), lifecycle (drops, cancels,
+#            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile.
+#            C2_GATE_SALT fresh|none salts every stream on a prefix-reuse profile (c2-packed-prefix: the
+#            capture path under the S2 plans; the gate mounts its own salt key).
+#            The driver refuses plans that do not fit the step's and the job's time left; every gate
+#            container is removed however the step ends
+#   prefix - the prefix-reuse (general-prefix, G1) gates in the agent's container shape
+#            (scripts/ci/c2_prefix_gate.py): C2_PREFIX_PLAN bringup (grants disabled == the baseline
+#            byte for byte, the first hit compiles nothing, the install and platform lines, the anchor
+#            probe), exactness (a real-text agent chain 2.6k -> 60k, every turn cold vs hit in full, the
+#            2047/2048/2049 boundaries and tail-only hits, a changed suffix, an early divergence, a shared
+#            system block; audit and eager arms), lifecycle (arrivals, aborts, a KV flood, a small store,
+#            a tiny pool, reset_prefix_cache, the kill switch, an in-place restart), timing (busy agents in
+#            the metering shape, hit rate from the model's L-Q). On c2-packed-prefix (the fast path's
+#            sticky sessions, baseline c2-packed) the same plans judge the DFlash drop and C0 plan, strict
+#            equality, the S2 lines, and exactness-shared (four agents on one system block in packed rounds).
+#            Every prefix container is removed however the step ends, and the kill-switch file only if the
+#            gate wrote it
+#   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py);
+#            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt)
+#   push   - push it to zot and print the digest
+# (status, platform, unserve, priority and reset are described at their steps.) The job file is
+# parsed by scripts/ci/c2_serving_job.py, which refuses anything these steps must not act on.
+# The smoke opens M+A, so it shares the two-card concurrency group and refuses if anything
+# holds either card or a platform serving container exists.
+on:
+  push:
+    tags: ['experiment/c2-serving-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  c2-serving:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 600
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: c2
+          persist-credentials: false
+          fetch-depth: 0  # the build's closure tests read the bundle and P8 base commits
+      - name: Read the job file
+        id: job
+        working-directory: c2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          python3 scripts/ci/c2_serving_job.py .github/c2-serving-job.env >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+          # When the job began: the gate step budgets its plans against what the job's timeout leaves.
+          echo "C2_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/c2-results"
+      - name: Status
+        if: contains(steps.job.outputs.actions, 'status')
+        working-directory: c2
+        shell: bash
+        run: |
+          set +e
+          echo "=== manual build log"; tail -40 /home/thatch/c2-build.log 2>&1
+          echo "=== build in flight"; pgrep -af build-c2-serving-image || echo none
+          echo "=== images"; docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}} {{.Size}}' | grep -E 'qwen38-c2|thatch-serving-tt' | head
+          echo "=== persistent cache"; sudo -n du -sh /home/thatch/hf-cache/hub/.qwen-c2 /home/thatch/hf-cache/hub/.qwen-c2.partial 2>&1
+          # Card M and card A only, resolved by board id as the reset step resolves them (scripts/ci/serving_pair.sh):
+          # card B is reserved for another project, so its link, its node and its holders are never listed here.
+          echo "=== cards M and A"
+          . scripts/ci/serving_pair.sh
+          for card in $QUAL_SERVING_CARDS; do ls -l "$QUAL_BYID_ROOT/$card" 2>&1; done
+          if serving_pair_nodes; then sudo -n fuser -v "${SERVING_PAIR_NODES[@]}" 2>&1 || echo "no holders"; fi
+          # Whether this tt-smi can reset M and A without re-detecting every board afterwards (card B is reserved):
+          # the reset step passes --no_reinit only once this listing shows the flag.
+          echo "=== tt-smi reset options"; smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          "$smi" --version 2>&1 | head -2; "$smi" --help 2>&1 | grep -i -E -A1 "reinit|--reset|-r " | head -12
+          echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
+          echo "=== agent"; journalctl --user -u thatch-node-agent --since -3h --no-pager 2>&1 | grep -v -i heartbeat | tail -15
+      - name: Platform serving container (read-only)
+        if: contains(steps.job.outputs.actions, 'platform')
+        shell: bash
+        run: |
+          set +e
+          results="$RUNNER_TEMP/c2-results"
+          for c in $(docker ps -a --format '{{.Names}}' | grep '^thatch-inference-'); do
+            echo "=== $c"
+            docker inspect -f '{{.State.Status}} started={{.State.StartedAt}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} image={{.Image}}' "$c"
+            docker inspect -f '{{json .Config.Env}}' "$c" | tr ',' '\n' | grep -E 'QWEN_C2|THATCH_VLLM_KWARGS|MESH|TT_MESH|THATCH_MODEL_ENGINE|QWEN36' | cut -c1-300
+            port=$(docker port "$c" 8000/tcp | head -1 | sed 's/.*://')
+            echo "published port: $port"
+            curl -sS -m 10 "http://127.0.0.1:$port/healthz"; echo
+            curl -sS -m 10 "http://127.0.0.1:$port/v1/models" | head -c 600; echo
+            curl -sS -m 120 "http://127.0.0.1:$port/v1/chat/completions" -H 'content-type: application/json' \
+              -d '{"model":"Qwen/Qwen3.8-27B","max_tokens":24,"messages":[{"role":"user","content":"Say hello."}]}' | head -c 1200; echo
+            docker stats --no-stream "$c"
+          done
+          d=/home/thatch/.local/state/thatch/serving-diagnostics
+          echo "=== diagnostics $d"; ls -lat "$d" 2>&1 | head -12
+          for f in $(ls -t "$d" 2>/dev/null | head -4); do
+            echo "--- $f"; cp "$d/$f" "$results/" 2>/dev/null || sudo -n cp "$d/$f" "$results/"
+            python3 -c 'import sys; sys.stdout.write(open(sys.argv[1], errors="replace").read().replace(chr(92) + "n", chr(10)))' "$d/$f" \
+              | grep -v -E '^\[[0-9a-f]+:[0-9]+\] \[ *[0-9]+\]' | tail -80
+          done
+          echo "=== agent"; journalctl --user -u thatch-node-agent --since -30min --no-pager 2>&1 | grep -v -i heartbeat | tail -40
+      - name: Take the platform serving container down
+        if: contains(steps.job.outputs.actions, 'unserve')
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Frees cards M+A for development: a graceful stop (the image's engine skips tt-metal's
+          # teardown, so the pair reopens cleanly), then removal. The placement itself is removed
+          # through the admin API; until then the platform may try to load it again.
+          for c in $(docker ps -a --format '{{.Names}}' | grep '^thatch-inference-'); do
+            echo "stopping $c ($(docker inspect -f '{{.State.Status}} {{.Config.Image}}' "$c"))"
+            docker stop -t 60 "$c"
+            docker rm "$c"
+          done
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
+          echo "holders of M ($m) and A ($a):"; sudo -n fuser -v "$m" "$a" 2>&1 || echo "none"
+      - name: CPU priority for the serving container
+        if: contains(steps.job.outputs.actions, 'priority')
+        working-directory: c2
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Measures the live serving container's decode before and after: system.slice's CPUWeight
+          # raised to kubepods.slice's (persistent systemd drop-in), and ci-docker-fence taught to
+          # give every thatch-inference-* container weight 10000 on cores 0-15,32-47 as it starts.
+          results="$RUNNER_TEMP/c2-results"
+          c=$(docker ps --format '{{.Names}}' | grep '^thatch-inference-' | head -1)
+          test -n "$c" || { echo "no serving container running" >&2; exit 1; }
+          port=$(docker port "$c" 8000/tcp | head -1 | sed 's/.*://')
+          id=$(docker inspect -f '{{.Id}}' "$c")
+          scope=/sys/fs/cgroup/system.slice/docker-$id.scope
+          show() {
+            echo "--- $1: loadavg $(cut -d' ' -f1-3 /proc/loadavg)"
+            for f in /sys/fs/cgroup/kubepods.slice/cpu.weight /sys/fs/cgroup/system.slice/cpu.weight "$scope/cpu.weight" \
+                     "$scope/cpuset.cpus" "$scope/cpu.max"; do printf '%s = %s\n' "$f" "$(cat "$f" 2>/dev/null)"; done
+            grep -E 'nr_throttled|throttled_usec' "$scope/cpu.stat" | tr '\n' ' '; echo
+            echo "busy ARC runner pods: $(sudo -n k3s kubectl -n arc-runners get pods --no-headers 2>/dev/null | grep -c Running)"
+          }
+          measure() {
+            python3 scripts/ci/c2_decode_probe.py "http://127.0.0.1:$port" "$1" 3 | tee -a "$results/priority.log"
+          }
+          show before | tee "$results/priority.log"
+          measure before
+          echo "=== fence script before"; sudo -n cat /usr/local/bin/ci-docker-fence.sh | head -40
+          sudo -n systemctl set-property system.slice CPUWeight=2500
+          sudo -n install -m 0755 scripts/ci/rig/ci-docker-fence.sh /usr/local/bin/ci-docker-fence.sh
+          sudo -n systemctl restart ci-docker-fence.service
+          sleep 5
+          sudo -n systemctl status ci-docker-fence.service --no-pager | tail -6
+          show after | tee -a "$results/priority.log"
+          measure after
+      - name: Reset cards M and A
+        if: contains(steps.job.outputs.actions, 'reset')
+        working-directory: c2
+        timeout-minutes: 14
+        shell: bash
+        run: |
+          set -euo pipefail
+          # As the m3native gate does before every run, for its llrt.cpp:594 ethernet-core wedge:
+          # card M and card A together by board id (scripts/ci/serving_pair.sh), never card B, then
+          # the self-heal for a link that did not train or a missing by-id link. No firmware is
+          # written. Refuses while any process other than tt-smi holds either card.
+          results="$RUNNER_TEMP/c2-results"
+          prefix=()
+          if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          . scripts/ci/serving_pair.sh
+          serving_pair_resolve 60
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            "${prefix[@]}" fuser -v "${SERVING_PAIR_NODES[@]}" > "$results/holders.txt" 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s "$results/holders.txt" ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' "$results/holders.txt" | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then echo 'M or A is held; refusing to reset' >&2; cat "$results/holders.txt" >&2; exit 1; fi
+          echo "resetting card M and card A: ${SERVING_PAIR_NODES[*]} (PCI ${SERVING_PAIR_PCI[*]})"
+          status=0
+          timeout -k 20 420 "${prefix[@]}" "$smi" -r "${SERVING_PAIR_NODES[@]}" > "$results/reset.log" 2>&1 || status=$?
+          tail -15 "$results/reset.log"
+          heal=0
+          serving_pair_heal 60 720 2>&1 | tee -a "$results/reset.log" || heal=$?
+          echo "reset_exit=$status heal_exit=$heal"
+          serving_pair_resolve 120
+          test "$status" = 0 && test "$heal" = 0
+      - name: Run a qualification harness on card M
+        if: contains(steps.job.outputs.actions, 'cardm')
+        working-directory: c2
+        timeout-minutes: 100
+        shell: bash
+        env:
+          HARNESS: ${{ steps.job.outputs.cardm_harness }}
+          HARNESS_ARGS: ${{ steps.job.outputs.cardm_args }}
+          HARNESS_ENV: ${{ steps.job.outputs.cardm_env }}
+        run: |
+          set -euo pipefail
+          # Card B is reserved for another project, so a single-card harness (e.g. the K64j CB2a sections of
+          # optimisation/ttnn-op/k64j/run_card_b.sh) runs here on card M, in the pair's concurrency group. Card M
+          # only: QUAL_CARD is card M's board id and ALLOW_SERVING_CARD=1 lifts the harness's serving-pair
+          # refusal, both set here after the job's environment (c2_serving_job.py refuses either, RESULTS,
+          # CARD_B_ARGS and any QUAL_* in C2_CARDM_ENV, and accepts only a harness that selects its board by the
+          # canonical qual_card.sh block, which refuses card B outright). The harness maps card M's node alone,
+          # refuses while a host process holds card M or card A or a container can reach either (--privileged,
+          # a device cgroup rule or Tenstorrent device request, /dev or /dev/tenstorrent bound, either node
+          # mapped; a container given only card B's node is not in the way and not looked at further), and
+          # never resets: after a hang it prints the pair's reset, which is the reset action's, never this step's.
+          test -n "$HARNESS"
+          results="/tmp/c2-cardm-results/$GITHUB_RUN_ID"
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to open card M under it" >&2; exit 1
+          fi
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
+          echo "card M $m, card A $a"
+          # The gate step's holder check (test_c2_serving_job pins it to the gate's text): nothing but the
+          # telemetry exporter's tt-smi may hold M or A.
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            sudo -n fuser -v "$m" "$a" > "$RUNNER_TEMP/c2-results/cardm-holders.txt" 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s "$RUNNER_TEMP/c2-results/cardm-holders.txt" ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' "$RUNNER_TEMP/c2-results/cardm-holders.txt" | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then echo 'M or A is held; refusing the card-M run' >&2; cat "$RUNNER_TEMP/c2-results/cardm-holders.txt" >&2; exit 1; fi
+          # What runs before the harness, so the next step removes only a container this one started.
+          docker ps -q | sort > "$RUNNER_TEMP/cardm-containers-before.txt"
+          mkdir -p "$results"
+          chmod 0777 "$results"
+          read -r -a extra <<< "$HARNESS_ENV"
+          echo "card M run: $HARNESS | args: $HARNESS_ARGS | env: ${HARNESS_ENV:-none} | results: $results"
+          env ${extra[@]+"${extra[@]}"} QUAL_CARD=blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 RESULTS="$results" \
+            CARD_B_ARGS="$HARNESS_ARGS" bash "$HARNESS" 2>&1 | tee "$results/harness-console.log"
+      - name: Collect the card-M results
+        if: always() && contains(steps.job.outputs.actions, 'cardm')
+        shell: bash
+        run: |
+          set +e -uo pipefail   # best effort throughout: the runner's bash -e must not stop the collection
+          # A container the card-M step started that still maps card M's node (the harness's EXIT trap removes its
+          # own; a step killed at its timeout may not get there) is removed. Nothing else: a platform serving
+          # container, a container that was there before, and one on card A or card B are never touched.
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          if [ -f "$RUNNER_TEMP/cardm-containers-before.txt" ]; then
+            for id in $(docker ps -q | sort | comm -13 "$RUNNER_TEMP/cardm-containers-before.txt" -); do
+              name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null)
+              case $name in /thatch-inference-*) continue ;; esac
+              for path in $(docker inspect -f '{{range .HostConfig.Devices}}{{println .PathOnHost}}{{end}}' "$id" 2>/dev/null); do
+                if [ -n "$m" ] && [ "$(readlink -f "$path")" = "$m" ]; then
+                  echo "removing $id $name: it maps card M ($m)"
+                  docker rm -f "$id" > /dev/null 2>&1 || true
+                  break
+                fi
+              done
+            done
+          fi
+          # The harness's files (root-owned: its container wrote them) into the uploaded results, all but the
+          # kernel caches (kcache-*); then the run's directory goes.
+          results="/tmp/c2-cardm-results/$GITHUB_RUN_ID"
+          out="$RUNNER_TEMP/c2-results/cardm"
+          if [ -d "$results" ]; then
+            mkdir -p "$out"
+            for f in "$results"/*; do
+              [ -e "$f" ] || continue
+              case ${f##*/} in kcache-*) continue ;; esac
+              sudo -n cp -a "$f" "$out/" 2>/dev/null || cp -a "$f" "$out/" || true
+            done
+            sudo -n chown -R "$(id -u):$(id -g)" "$out" 2>/dev/null || true
+            sudo -n rm -rf "$results" 2>/dev/null || rm -rf "$results" || true
+          fi
+          ls -la "$out" 2>/dev/null | head -40
+          # The verdict line of either K64j harness: k64j_card_b.py's K64J_CARD, extent_reader_card_b.py's K64J_READER.
+          grep -h -E '^K64J_(CARD|READER) ' "$out"/*.log 2>/dev/null | tail -2 || true
+      - name: G1 base drift
+        if: contains(steps.job.outputs.actions, 'drift')
+        working-directory: c2
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Read-only: what the first build's G1 would fail on, measured on the P8 base (no build, no tag,
+          # no cards). Exit 1 means problems were found; it is reported, not raised.
+          ctx="$RUNNER_TEMP/c2drift"
+          rm -rf "$ctx"
+          python3 -B scripts/ci/c2_overlay.py stage --repo . --out "$ctx"
+          status=0
+          python3 -B "$ctx/c2_image_provenance.py" --base-drift --context "$ctx" --graft /home/thatch/opgraft-K64j \
+            --report "$RUNNER_TEMP/c2-results/base-drift.json" > "$RUNNER_TEMP/c2-results/base-drift.log" 2>&1 || status=$?
+          tail -60 "$RUNNER_TEMP/c2-results/base-drift.log"
+          rm -rf "$ctx"
+          echo "base drift exit $status (1: the first build's G1 would fail on the WOULD FAIL lines)"
+      - name: Build
+        if: contains(steps.job.outputs.actions, 'build')
+        working-directory: c2
+        timeout-minutes: 75
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          for i in $(seq 1 60); do
+            pgrep -f build-c2-serving-image >/dev/null || break
+            echo "a build is in flight ($i): waiting"; tail -2 /home/thatch/c2-build.log || true; sleep 60
+          done
+          if docker image inspect "$image" >/dev/null 2>&1; then
+            echo "$image present: $(docker image inspect "$image" --format '{{.Id}}')"
+            exit 0
+          fi
+          # The overlay is docker/qwen-c2-overlay.txt, the one list; the build tags the image only
+          # after G1 provenance (c2_image_provenance.py) passes. A tag present above skipped it:
+          # images built before the manifest (v6-teardown and older) were never checked.
+          # G1 closure, from git: no file the image carries may ship older than this commit unless
+          # C2_KNOWN_STALE says why. The CPU suite runs these on pull requests only; images come from
+          # tags. They run in the P8 base (python 3.10, the image's; git), not on the host's python.
+          base=$(sed -n 's/^ARG BASE=//p' docker/qwen-c2-serving.Dockerfile)
+          docker run --rm --network none --user "$(id -u):$(id -g)" -e HOME=/tmp -e VLLM_PLUGINS= \
+            -v "$PWD:/src:ro" -w /src/scripts/ci --entrypoint python3 "$base" \
+            -B -m unittest test_serving_image_copy_closure test_c2_image_overlay
+          ctx="$RUNNER_TEMP/c2ctx"
+          rm -rf "$ctx"
+          python3 -B scripts/ci/c2_overlay.py stage --repo . --out "$ctx"
+          tar -czf "$RUNNER_TEMP/c2ctx.tgz" -C "$ctx" .
+          export C2_CHECKOUT="$PWD" C2_PROVENANCE_REPORT="$RUNNER_TEMP/c2-results/provenance.json"
+          bash scripts/ci/build-c2-serving-image.sh "$RUNNER_TEMP/c2ctx.tgz" "$TAG" 2>&1 | tee "$RUNNER_TEMP/c2-results/build.log"
+      - name: Prefix-reuse P0a probe in the image (CPU only, no device)
+        if: contains(steps.job.outputs.actions, 'probe')
+        working-directory: c2
+        timeout-minutes: 50
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Design section 2.1, P0a: the general-prefix engine config through the image's own vLLM
+          # 0.25.1 and TT plugin, then G1's prefix scheduler graft (scripts/ci/qwen_prefix_scheduler_patch.py
+          # over qwen_prefix_registry.py) driven on the real TTScheduler. The checkout is mounted read-only at /c2; no --device, so
+          # it opens no card. Prints PASS/FAIL per check and exits 1 on any FAIL.
+          # Then the prefix gates' oracle (prefix_judge.Oracle) against the same real graft, request by
+          # request (scripts/ci/prefix_oracle_check.py): the hardware gates fail on any Q it did not
+          # predict, so it must be the graft's rules. It drives the image's own overlaid graft when the
+          # image has one (and fails if that differs from the checkout's), and fails on a GOLDEN change.
+          # Then sticky sessions (the c2-packed-prefix profiles) on the same image: the staged scheduler graft on the
+          # fast path's scheduler shape (DFlash, 15 proposals, lookahead 16) with QWEN_FAST_STICKY_SESSIONS=1 resumes
+          # at C0 as prefix_judge.Oracle(sticky=True) predicts, this vLLM drops a DFlash hit's last block with the
+          # prefix cache on (its own Scheduler and the TT plugin's TTScheduler), and the fast path's policy admits
+          # its CacheConfig - the three things the sticky oracle rests on, checked before any card. Those tests
+          # skip where vLLM does not import, so required_tests.py fails on any skip.
+          # All three always run; the step fails if any does.
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          docker image inspect "$image" --format "probe image $image {{.Id}}"
+          name="qwen-prefix-p0a-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'docker rm -f "$name" "$name-oracle" "$name-sticky" >/dev/null 2>&1 || true' EXIT
+          status=0
+          timeout -k 20 1320 docker run --rm --name "$name" --network none --cpus 8 --memory 16g \
+            -v /home/thatch/hf-cache/hub:/models:ro -v "$PWD:/c2:ro" \
+            --entrypoint python3 "$image" /c2/scripts/ci/prefix_p0a_probe.py 2>&1 \
+            | tee "$RUNNER_TEMP/c2-results/prefix-p0a.log" || status=$?
+          timeout -k 20 900 docker run --rm --name "$name-oracle" --network none --cpus 8 --memory 16g \
+            -v /home/thatch/hf-cache/hub:/models:ro -v "$PWD:/c2:ro" \
+            --entrypoint python3 "$image" /c2/scripts/ci/prefix_oracle_check.py 2>&1 \
+            | tee "$RUNNER_TEMP/c2-results/prefix-oracle.log" || status=$?
+          timeout -k 20 600 docker run --rm --name "$name-sticky" --network none --cpus 8 --memory 16g \
+            -e VLLM_PLUGINS= -e VLLM_TARGET_DEVICE=empty -e VLLM_USE_V2_MODEL_RUNNER=0 -e HF_HUB_OFFLINE=1 \
+            -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=2 -e MKL_NUM_THREADS=2 \
+            -v "$PWD:/c2:ro" -w /c2/scripts/ci --entrypoint python3 "$image" -B required_tests.py --min 6 \
+            test_qwen_prefix_scheduler_vllm.StickyDflashOnRealVllmTests \
+            test_serving_scheduler.RealSchedulerTests.test_a_dflash_hit_drops_its_last_block_with_the_prefix_cache_on \
+            test_serving_scheduler.TTPluginSchedulerTests.test_a_dflash_hit_drops_its_last_block_with_the_prefix_cache_on \
+            2>&1 | tee "$RUNNER_TEMP/c2-results/prefix-sticky-vllm.log" || status=$?
+          exit "$status"
+      - name: Smoke on cards M+A
+        if: contains(steps.job.outputs.actions, 'smoke')
+        working-directory: c2
+        timeout-minutes: 70
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+          PROFILE: ${{ steps.job.outputs.profile }}
+          TESTS: ${{ steps.job.outputs.tests }}
+        run: |
+          set -euo pipefail
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          results="$RUNNER_TEMP/c2-results"
+          name=qwen-c2-smoke
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
+          echo "card M $m, card A $a"
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to open M+A under it" >&2; exit 1
+          fi
+          docker rm -f "$name" >/dev/null 2>&1 || true
+          holders=$(sudo -n fuser "$m" "$a" 2>/dev/null | tr -s ' ' || true)
+          if [ -n "${holders// /}" ]; then
+            echo "M or A is held by: $holders" >&2; sudo -n fuser -v "$m" "$a" >&2 || true; exit 1
+          fi
+          trap 'docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          # The node agent's container shape (Thatch.Server.Compute container/adapter.rs), with a p300
+          # descriptor and QWEN36_BATCHED_DECODE_MODE the contract must undo, and a platform-style argv.
+          docker run -d --name "$name" --read-only \
+            --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
+            --tmpfs /root/.cache/ttnn:rw,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,size=8g \
+            --shm-size 4g --memory 80g --cpus 8 --device "$m" --device "$a" \
+            -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
+            -v /home/thatch/hf-cache/hub:/models -e HF_HOME=/models -e HF_HUB_CACHE=/models \
+            -e MESH_DEVICE=P300 -e QWEN36_BATCHED_DECODE_MODE=host -e VLLM_RPC_TIMEOUT=100000 \
+            -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto \
+            -e QWEN_C2_PROFILE="$PROFILE" -p 127.0.0.1:8010:8000 \
+            --entrypoint python3 "$image" -m vllm.entrypoints.openai.api_server \
+            --model Qwen/Qwen3.8-27B --served-model-name Qwen/Qwen3.8-27B --host 0.0.0.0 --port 8000 \
+            --reasoning-parser qwen3 --tool-call-parser qwen3_xml --enable-auto-tool-choice \
+            --max-model-len 65536 --max-num-seqs 2 --block-size 64 --no-enable-prefix-caching \
+            --additional-config '{"tt": {"l1_small_size": 24576, "fabric_config": "FABRIC_1D", "trace_region_size": 1073741824}}'
+          started=$(date +%s); ready=0
+          for i in $(seq 1 240); do
+            if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" != true ]; then
+              echo "container exited: $(docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' "$name")" >&2
+              docker logs --tail 80 "$name" >&2 || true; exit 1
+            fi
+            if curl -fsS -m 5 http://127.0.0.1:8010/v1/models > "$results/models.json" 2>/dev/null; then ready=1; break; fi
+            sleep 15
+          done
+          echo "ready=$ready after $(( $(date +%s) - started )) s"; cat "$results/models.json" || true
+          docker logs "$name" 2>&1 | grep -F '[QWEN-C2]' || true
+          [ "$ready" = 1 ] || { docker logs --tail 120 "$name" >&2; exit 1; }
+          python3 scripts/ci/c2_serving_smoke.py http://127.0.0.1:8010 Qwen/Qwen3.8-27B "$TESTS" \
+            "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')/typing.py" \
+            scripts/ci/build-c2-serving-image.sh 2>&1 | tee "$results/smoke.log"
+          docker stats --no-stream "$name" | tee "$results/stats.txt" || true
+          grep -F '[PINDIAG] dram after' <(docker logs "$name" 2>&1) | tail -8 || true
+      - name: Run the gate in the agent's container shape
+        if: contains(steps.job.outputs.actions, 'gate')
+        working-directory: c2
+        timeout-minutes: 380
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+          PROFILE: ${{ steps.job.outputs.profile }}
+          GATE_PLAN: ${{ steps.job.outputs.gate_plan }}
+          GATE_LENGTHS: ${{ steps.job.outputs.gate_lengths }}
+          GATE_MAX_TOKENS: ${{ steps.job.outputs.gate_max_tokens }}
+          GATE_MEMORY_PROMPT: ${{ steps.job.outputs.gate_memory_prompt }}
+          GATE_PAIRS: ${{ steps.job.outputs.gate_pairs }}
+          GATE_FAMILIES: ${{ steps.job.outputs.gate_families }}
+          GATE_JIT: ${{ steps.job.outputs.gate_jit }}
+          GATE_POLICY: ${{ steps.job.outputs.gate_policy }}
+          GATE_POLICY_DECISION: ${{ steps.job.outputs.gate_policy_decision }}
+          GATE_AUDITS: ${{ steps.job.outputs.gate_audits }}
+          GATE_SALT: ${{ steps.job.outputs.gate_salt }}
+        run: |
+          set -euo pipefail
+          # The fast path has never completed a request inside the serving image: every C2 rate was
+          # measured in the gate's own container. This runs the gate's harness inside the image, in the
+          # agent's container shape, with vLLM launched from the platform's argv so the contract's argv
+          # is what serves (c2-serve-for-real-plan 2.1 item 2, 2.2 items 5 and 7). One container per arm.
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          results="$RUNNER_TEMP/c2-results/gate"
+          docker image inspect "$image" > /dev/null
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to open M+A under it" >&2; exit 1
+          fi
+          # Every gate container goes with this step, however it ends (the driver removes its own too, and
+          # turns SIGTERM into an exit): one left running would hold M+A after the concurrency group let go.
+          # A leftover of a killed job is removed first - it holds the cards and makes docker run exit 125.
+          remove_gate_containers() {
+            docker ps -a --format '{{.Names}}' | grep '^qwen-c2-gate-' | xargs -r docker rm -f || true
+          }
+          stale=$(docker ps -a --format '{{.Names}}' | grep '^qwen-c2-gate-' || true)
+          if [ -n "$stale" ]; then
+            echo "removing gate containers a previous job left: $stale (reset M+A if the next arm wedges)"
+            remove_gate_containers
+          fi
+          trap remove_gate_containers EXIT
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
+          echo "card M $m, card A $a"
+          # The telemetry exporter's tt-smi opens every card for a moment every 30 s: ignored, retried.
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            sudo -n fuser -v "$m" "$a" > "$RUNNER_TEMP/c2-results/gate-holders.txt" 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s "$RUNNER_TEMP/c2-results/gate-holders.txt" ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' "$RUNNER_TEMP/c2-results/gate-holders.txt" | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then echo 'M or A is held; refusing the gate' >&2; cat "$RUNNER_TEMP/c2-results/gate-holders.txt" >&2; exit 1; fi
+          # What this step (380 min) and the job (600 min, from C2_JOB_STARTED) leave, less margins for
+          # this step's tail: the driver refuses a plan list whose worst case (every arm to its limit,
+          # every re-run) does not fit, before any container starts.
+          step_left=$(( 380 * 60 - 600 ))
+          job_left=$(( 600 * 60 - ($(date +%s) - ${C2_JOB_STARTED:?}) - 900 ))
+          budget=$(( step_left < job_left ? step_left : job_left ))
+          echo "gate budget: $budget s (step $step_left s, job $job_left s)"
+          status=0
+          python3 scripts/ci/c2_serving_gate.py --image "$image" --profile "$PROFILE" --plan "$GATE_PLAN" \
+            ${GATE_LENGTHS:+--lengths "$GATE_LENGTHS"} --max-tokens "$GATE_MAX_TOKENS" --budget-seconds "$budget" \
+            ${GATE_MEMORY_PROMPT:+--memory-prompt "$GATE_MEMORY_PROMPT"} --results "$results" \
+            ${GATE_PAIRS:+--pairs "$GATE_PAIRS"} ${GATE_FAMILIES:+--families "$GATE_FAMILIES"} \
+            ${GATE_JIT:+--jit "$GATE_JIT"} ${GATE_POLICY:+--policy "$GATE_POLICY"} \
+            ${GATE_POLICY_DECISION:+--policy-decision "$GATE_POLICY_DECISION"} ${GATE_AUDITS:+--audits "$GATE_AUDITS"} \
+            ${GATE_SALT:+--salt "$GATE_SALT"} 2>&1 \
+            | tee "$RUNNER_TEMP/c2-results/gate.log" || status=$?
+          # Read the launched argv (memory read-the-launched-argv): the contract's own line, per arm.
+          for log in "$results"/*/server.log; do
+            [ -f "$log" ] || continue
+            echo "=== $log"; grep -F '[QWEN-C2]' "$log" | head -4 || true
+            grep -F '[PINDIAG] dram after' "$log" | tail -8 || true
+          done
+          exit "$status"
+      - name: Prefix-reuse gates in the agent's container shape
+        if: contains(steps.job.outputs.actions, 'prefix')
+        working-directory: c2
+        timeout-minutes: 380
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+          PREFIX_PROFILE: ${{ steps.job.outputs.prefix_profile }}
+          PREFIX_PLAN: ${{ steps.job.outputs.prefix_plan }}
+          PREFIX_BASELINE: ${{ steps.job.outputs.prefix_baseline }}
+          PREFIX_AGENTS: ${{ steps.job.outputs.prefix_agents }}
+        run: |
+          set -euo pipefail
+          # TT prefix-reuse design 2.2 (G1): a serving container per arm in the agent's shape, launched
+          # from the platform's argv, driven over its OpenAI API from this host with real-text agent
+          # conversations; the engine's own markers judge every hit against a cold twin.
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          results="$RUNNER_TEMP/c2-results/prefix"
+          docker image inspect "$image" > /dev/null
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to open M+A under it" >&2; exit 1
+          fi
+          # The kill-switch drill writes this file through the container; the gate removes it, and so
+          # does this trap - only when its content says the gate wrote it (an operator's flag stays).
+          flag=/home/thatch/hf-cache/hub/.qwen-c2/prefix-reuse.off
+          cleanup_prefix() {
+            docker ps -a --format '{{.Names}}' | grep '^qwen-c2-prefix-' | xargs -r docker rm -f || true
+            if [ "$(sudo -n cat "$flag" 2>/dev/null)" = qwen-c2-prefix-gate ]; then sudo -n rm -f "$flag" || true; fi
+          }
+          stale=$(docker ps -a --format '{{.Names}}' | grep '^qwen-c2-prefix-' || true)
+          if [ -n "$stale" ]; then
+            echo "removing prefix containers a previous job left: $stale (reset M+A if the next arm wedges)"
+            cleanup_prefix
+          fi
+          trap cleanup_prefix EXIT
+          m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
+          a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
+          echo "card M $m, card A $a"
+          clear=0
+          for attempt in 1 2 3 4 5 6; do
+            status=0
+            sudo -n fuser -v "$m" "$a" > "$RUNNER_TEMP/c2-results/prefix-holders.txt" 2>&1 || status=$?
+            if [ "$status" = 1 ] && [ ! -s "$RUNNER_TEMP/c2-results/prefix-holders.txt" ]; then clear=1; break; fi
+            if [ "$status" = 0 ] && ! grep -v -E '^\s*USER|tt-smi|^/dev/tenstorrent/[0-9]+:\s*$' "$RUNNER_TEMP/c2-results/prefix-holders.txt" | grep -q .; then clear=1; break; fi
+            sleep 2
+          done
+          if [ "$clear" != 1 ]; then echo 'M or A is held; refusing the prefix gate' >&2; cat "$RUNNER_TEMP/c2-results/prefix-holders.txt" >&2; exit 1; fi
+          # What this step (380 min) and the job (600 min, from C2_JOB_STARTED) leave, less margins.
+          step_left=$(( 380 * 60 - 600 ))
+          job_left=$(( 600 * 60 - ($(date +%s) - ${C2_JOB_STARTED:?}) - 900 ))
+          budget=$(( step_left < job_left ? step_left : job_left ))
+          echo "prefix gate budget: $budget s (step $step_left s, job $job_left s)"
+          echo "busy ARC runner pods: $(sudo -n k3s kubectl -n arc-runners get pods --no-headers 2>/dev/null | grep -c Running || true)"
+          status=0
+          python3 scripts/ci/c2_prefix_gate.py --image "$image" --profile "$PREFIX_PROFILE" --plan "$PREFIX_PLAN" \
+            --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" \
+            --results "$results" 2>&1 | tee "$RUNNER_TEMP/c2-results/prefix.log" || status=$?
+          # Read the launched argv (memory read-the-launched-argv) and the graft's install line, per arm.
+          for log in "$results"/*/server.log; do
+            [ -f "$log" ] || continue
+            echo "=== $log"; grep -F '[QWEN-C2]' "$log" | head -4 || true
+            grep -F '[PINDIAG] prefix: install' "$log" | head -2 || true
+            grep -F 'Automatic prefix caching is' "$log" | head -2 || true
+          done
+          exit "$status"
+      - name: Replay the node agent's serving sequence
+        if: contains(steps.job.outputs.actions, 'replay')
+        working-directory: c2
+        timeout-minutes: 80
+        shell: bash
+        env:
+          IMAGE: ${{ steps.job.outputs.platform_image }}
+          REPLAY_PROFILE: ${{ steps.job.outputs.replay_profile }}
+          REPLAY_SERVED_MODEL: ${{ steps.job.outputs.replay_served_model }}
+        run: |
+          set -euo pipefail
+          test -n "$IMAGE"
+          if docker ps --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container is running; refusing to open M+A under it" >&2; exit 1
+          fi
+          # The agent's container is gone once the pair is taken for development (unserve): then the
+          # tracked record of it (replay v11's copy) is the source.
+          source=thatch-inference-Qwen-Qwen3.8-27B
+          docker inspect "$source" > /dev/null 2>&1 || source=scripts/ci/references/c2-serving/agent-container-36104200953.json
+          python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" \
+            ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
+            --results "$RUNNER_TEMP/c2-results/replay"
+      - name: Push
+        if: contains(steps.job.outputs.actions, 'push')
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          docker push "$image" | tail -3
+          echo "pushed $(docker image inspect "$image" --format '{{index .RepoDigests 0}}')"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: c2-serving-${{ github.run_id }}
+          path: ${{ runner.temp }}/c2-results
+          if-no-files-found: ignore

@@ -38,3 +38,23 @@ class RetainedOwnershipTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     retain_checkpoint_histories(None, result, tensors[5])
             release.assert_not_called()
+
+    def test_a_packed_result_retains_every_users_histories(self):
+        """The combined packed result carries only the first segment's states; retaining
+        those alone would free the second user's histories as scratch."""
+        tensors = [SimpleNamespace(binding=(index, index + 100)) for index in range(14)]
+        pieces = tuple(dict(packed_checkpoints=True, states=tensors[base], packed_conv_states=tensors[base + 1:base + 5],
+                            owned=tensors[base:base + 5]) for base in (0, 5))
+        result = dict(pieces[0], segments=((0, 16), (16, 32)), segment_results=pieces, owned=tensors[:])
+        with patch('gdn_records.addresses', side_effect=lambda operations, tensor: tensor.binding), \
+                patch('gdn_records.release_owned') as release:
+            retain_checkpoint_histories(None, result, tensors[10])
+        self.assertEqual(result['owned'], tensors[:10])
+        release.assert_called_once_with(None, tensors[11:])
+        # a user whose histories the block does not own is refused before any free
+        result = dict(pieces[0], segments=((0, 16), (16, 32)), segment_results=pieces, owned=tensors[:5] + tensors[10:])
+        with patch('gdn_records.addresses', side_effect=lambda operations, tensor: tensor.binding), \
+                patch('gdn_records.release_owned') as release:
+            with self.assertRaises(ValueError):
+                retain_checkpoint_histories(None, result, tensors[10])
+        release.assert_not_called()

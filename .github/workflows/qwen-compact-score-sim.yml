@@ -1,0 +1,47 @@
+name: Qwen full-vocabulary compact score selection simulation
+on:
+  push:
+    tags: ['experiment/compact-score-sim-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-two-p150a-exclusive
+  cancel-in-progress: false
+jobs:
+  simulator:
+    runs-on: [self-hosted, Linux, X64, thatch-qwen-p150a-pair]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: compact-score-orchestrator
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8c102b20df22329106955b4006bf4d650bb94e40
+          path: compact-score-candidate
+          persist-credentials: false
+      - name: Stage full-vocabulary compact score selection
+        run: |
+          test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
+          mkdir -p compact-score-candidate/experiment-results
+          python3 -B compact-score-orchestrator/scripts/ci/frozen_recipe_context.py \
+            --checkout compact-score-candidate --context 8192 \
+            --manifest compact-score-candidate/experiment-results/frozen-geometry.json
+          python3 -B compact-score-orchestrator/scripts/ci/compact_score_stage.py \
+            --checkout compact-score-candidate > compact-score-candidate/experiment-results/cache-candidate.json
+          git -C compact-score-candidate diff --check
+          git -C compact-score-candidate diff > compact-score-candidate/experiment-results/cache.patch
+      - name: Synthetic eager and changed-input replay qualification
+        timeout-minutes: 10
+        working-directory: compact-score-candidate
+        env:
+          QWEN_SIM_ONLY: '1'
+          QWEN_LEARNED_STACK: '1'
+          QWEN_SIM_CASE: gdn-output-grid
+        run: timeout -k 30 570 bash scripts/ci/run-simulator.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-frozen-compact-score-${{ github.run_id }}-${{ github.run_attempt }}
+          path: compact-score-candidate/experiment-results/
