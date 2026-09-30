@@ -219,6 +219,9 @@ class LaneBook:
     queued and not refused, so a fast request never waits behind the fast lane. Standard requests take slots 1..seats-1 under
     the reserve (slot 0 is the fast request's alone: a fast arrival never waits for a standard user to finish), or 1..seats-1
     and then 0 when the reserve is off (lend: a fast arrival while a standard user holds slot 0 is downgraded, reason 'slot-busy').
+    Under lend a standard request that arrives with NOBODY else live takes slot 0 first: it is then the lone user of the D0 block and
+    decodes at the one-user block's rate instead of on the per-request engines (the reserve leaves a lone standard user there: the
+    padded block cannot hold one live user and D0 is bound to slot 0). Later standard users take the others as before.
     """
 
     def __init__(self, config, log=None):
@@ -230,12 +233,15 @@ class LaneBook:
         self.aliases = {}
         self.serial = 0
 
-    def slot_order(self, lane):
+    def slot_order(self, lane, alone=False):
+        """The pool slots a request of `lane` may borrow, in preference order. `alone`: no other request is live (lend only)."""
         seats = self.config.seats
         others = tuple(range(1, seats))
         if lane == FAST:
             return (FAST_SLOT,)
-        return others if self.config.reserve else others + (FAST_SLOT,)
+        if self.config.reserve:
+            return others
+        return (FAST_SLOT,) + others if alone else others + (FAST_SLOT,)
 
     def admit(self, request_id, asked, *, slot0_free=True):
         """Grant `asked` (a lane name) to `request_id`. `slot0_free` is the pool's answer for slot 0 (only read when the
@@ -255,7 +261,7 @@ class LaneBook:
         self.granted[request_id] = granted
         self.serial += 1
         alias = self.aliases[request_id] = 'u%d' % self.serial
-        grant = Grant(request_id, asked, granted, self.slot_order(granted), reason, alias)
+        grant = Grant(request_id, asked, granted, self.slot_order(granted, alone=len(self.granted) == 1), reason, alias)
         self._log('{} request={} alias={} asked={} granted={} slots={} reason={}', ADMIT_MARKER, str(request_id)[:48], alias,
                   asked, granted, ','.join(map(str, grant.slot_order)), reason)
         return grant

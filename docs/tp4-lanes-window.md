@@ -80,8 +80,9 @@ TP4 window's packed-4 exactness (S3a) to have passed on the same kernels.
 - **Real coding tau decides it** (above). The window measures it at TP4; a lookup or n-gram drafter aimed at copy-heavy code is the
   acceptance lever the model says matters most.
 - **A lone standard user under the reserve runs on the per-request engines**: slot 0 is the fast user's, the padded block cannot
-  hold one live user, and D0 is bound to slot 0. `QWEN_FAST_LANE_RESERVE=0` lends slot 0 to standard users (a fast arrival is then
-  downgraded until it frees).
+  hold one live user, and D0 is bound to slot 0. `QWEN_FAST_LANE_RESERVE=0` (lend) gives a standard request that arrives with nobody
+  else live slot 0 first, so it decodes on D0; later standard users take slots 1-3, and a fast arrival while a standard user holds
+  slot 0 is downgraded (`reason=slot-busy`) until it frees.
 - **Prefill stalls every lane today** (no chunked prefill on the S2 TP4 path): steady rates exclude them, the report prints the
   client's wall-clock rate beside them, and Lever N (`docs/lever-N-prefill-decode-interleave.md`) is the fix.
 - **More than three standard users** needs either a per-round carry swap (rotation) or the 128-row block; neither is built.

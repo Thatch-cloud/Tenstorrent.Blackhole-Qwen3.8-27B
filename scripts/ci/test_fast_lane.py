@@ -148,10 +148,31 @@ class BookTests(unittest.TestCase):
     def test_the_reserve_keeps_slot_zero_from_standard_requests_and_lend_gives_it_last(self):
         self.assertEqual(self.book(reserve=True).slot_order(STANDARD), (1, 2, 3))
         self.assertEqual(self.book(reserve=False).slot_order(STANDARD), (1, 2, 3, 0))
+        self.assertEqual(self.book(reserve=False).slot_order(STANDARD, alone=True), (0, 1, 2, 3))
+        self.assertEqual(self.book(reserve=True).slot_order(STANDARD, alone=True), (1, 2, 3), 'the reserve never lends')
         lend = self.book(reserve=False)
         held = lend.admit('a', FAST, slot0_free=False)
         self.assertEqual((held.granted, held.reason), (STANDARD, 'slot-busy'))
         self.assertIsNone(lend.fast_id)
+
+    def test_under_lend_a_lone_standard_user_takes_slot_zero_and_decodes_on_d0_later_ones_take_the_others(self):
+        book = self.book(reserve=False)
+        first = book.admit('a', STANDARD)
+        self.assertEqual(first.slot_order, (0, 1, 2, 3))
+        second = book.admit('b', STANDARD)
+        self.assertEqual(second.slot_order, (1, 2, 3, 0), 'not alone any more')
+        self.assertIn('[LANE-ADMIT] request=a alias=u1 asked=standard granted=standard slots=0,1,2,3 reason=ok', self.log.lines)
+        book.release('a')
+        book.release('b')
+        self.assertEqual(book.admit('c', STANDARD).slot_order, (0, 1, 2, 3), 'alone again')
+        under_reserve = self.book(reserve=True)
+        self.assertEqual(under_reserve.admit('a', STANDARD).slot_order, (1, 2, 3), 'the reserve keeps slot 0 for the fast request')
+
+    def test_a_fast_arrival_while_a_lone_standard_user_holds_slot_zero_is_downgraded_under_lend(self):
+        book = self.book(reserve=False)
+        book.admit('a', STANDARD)
+        late = book.admit('b', FAST, slot0_free=False)
+        self.assertEqual((late.granted, late.reason), (STANDARD, 'slot-busy'))
 
     def test_a_request_twice_or_an_unknown_lane_is_refused(self):
         book = self.book()

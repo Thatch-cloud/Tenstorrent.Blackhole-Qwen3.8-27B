@@ -263,6 +263,17 @@ class AdmissionLoopTests(LoopCase):
         for name in world.users:
             chain_holds(self, world, name)
 
+    def test_a_lone_standard_user_decodes_on_the_one_user_block_under_lend_and_on_the_engines_under_the_reserve(self):
+        for reserve, expect_solo in (('0', True), ('1', False)):
+            with self.subTest(reserve=reserve):
+                config = LaneConfig.from_environment({'QWEN_FAST_LANE_RESERVE': reserve}, seats=4)
+                world = make('phase1', '32k', 1, fast=False, config=config, max_tokens=900)
+                run(world, steps=40)
+                self.assertEqual(world.solo.rounds > 0, expect_solo, world.kinds[:10])
+                if not expect_solo:
+                    self.assertIn('sequential', world.kinds, 'slot 1 is on neither block: the per-request engines')
+                chain_holds(self, world, 'std0')
+
     def test_standard_requests_never_take_slot_zero_under_the_reserve(self):
         world = World(round_ms=lanes_sim.ROUND_MS['phase1']['32k'])
         slots = [world.add_user('s%d' % index, index, max_tokens=500)[1] for index in range(3)]

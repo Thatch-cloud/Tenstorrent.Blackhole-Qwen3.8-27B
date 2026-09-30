@@ -174,6 +174,16 @@ class ProblemTests(unittest.TestCase):
         (entry,) = report['streams']
         self.assertAlmostEqual(entry['rate'], 120.0, delta=1.0)
         self.assertAlmostEqual(entry['tau'], 12.0, places=3)
+        self.assertAlmostEqual(entry['wall_rate'], 60 / 1.4, places=2)
+
+    def test_the_wall_clock_rate_holds_the_queue_and_the_prefill_the_steady_rate_leaves_out(self):
+        slow_start = dict(chunk_s=[9.0, 10.0, 10.1, 10.2, 10.3, 10.4], chunk_tokens=[1, 13, 25, 37, 49, 60])
+        (entry,) = report_module.stream_rates([slow_start])
+        self.assertAlmostEqual(entry['rate'], 120.0, delta=1.0)
+        self.assertLess(entry['wall_rate'], 6.0, 'nine seconds of queue and prefill before the first round')
+        report = report_module.lanes_report('', [slow_start], fast_users=[0], expect_lanes=False)
+        self.assertTrue(any(line.startswith('lanes wall-clock rate per stream') and 'F0=' in line
+                            for line in report_module.verdict_lines(report)))
 
     def test_a_stream_without_a_timeline_reads_none(self):
         self.assertEqual(report_module.stream_rates([None, dict(chunk_s=[0.0, 1.0])])[0]['rate'], None)

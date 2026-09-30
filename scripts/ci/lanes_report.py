@@ -207,8 +207,12 @@ def stream_rates(streams):
         span = seconds[-2] - seconds[1]
         tokens = counts[-2] - counts[1]
         rounds = len(seconds) - 3
+        # wall: every token of the stream over the whole request (from the request to its last chunk: the queue, the prefill and
+        # every stall included) - the number a completion sees, which the steady rate deliberately leaves out
+        wall = counts[-1] / seconds[-1] if seconds[-1] > 0 else None
         out.append(dict(user=index, rate=round(tokens / span, 2) if span > 0 else None,
-                        tau=round(tokens / rounds, 3), rounds=rounds, tokens=tokens))
+                        tau=round(tokens / rounds, 3), rounds=rounds, tokens=tokens,
+                        wall_rate=round(wall, 2) if wall is not None else None))
     return out
 
 
@@ -296,6 +300,11 @@ def verdict_lines(report):
         lines.append('lanes BEST n=%d: ratio %s fast %s std_min %s (%s; bars %g / %g)' % (
             users, cell['ratio'], cell.get('fast'), cell.get('standard_min'), label, report.get('fast_bar', FAST_BAR),
             report.get('standard_bar', STANDARD_BAR)))
+    walls = [entry for entry in report.get('streams') or [] if entry.get('wall_rate') is not None]
+    if walls:
+        lines.append('lanes wall-clock rate per stream (queue, prefill and stalls included; the steady rates leave them out): %s' % ' '.join(
+            '%s%d=%s' % ('F' if entry['user'] in (report.get('fast_users') or ()) else 'S', entry['user'], entry['wall_rate'])
+            for entry in walls))
     client = report.get('client')
     if client:
         lines.append('lanes client window %.1f s: %s' % (client['window_s'], ' '.join(
