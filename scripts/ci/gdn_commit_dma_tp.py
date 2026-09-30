@@ -9,13 +9,10 @@ QWEN_FAST_TP=4 only.
 
 from pathlib import Path
 
-import logging
-
 import tp4_vglue
 import tp_kernels
 import tp_shapes
 
-LOG = logging.getLogger(__name__)
 # QWEN_FAST_TP4_COMMIT_LANES: eight tiles in flight per barrier (gdn_commit_lanes_tp.cpp), scratch = 8 lanes x 4096.
 LANES_KERNEL = 'gdn_commit_lanes_tp.cpp'
 LANES_CB_BYTES = 32768
@@ -91,7 +88,7 @@ def prepare(mesh, layers, prefix):
 
     if lanes and 'commit' not in _LOGGED:
         _LOGGED.add('commit')
-        LOG.info(tp4_vglue.marker('commit', lanes=len(layers) * 2, chips=chips))
+        tp4_vglue.log_line(tp4_vglue.marker('commit', lanes=len(layers) * 2, chips=chips))
 
     def execute():
         ttnn.generic_op(tensors, program)

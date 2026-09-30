@@ -88,3 +88,16 @@ def engaged_levers(environ=None):
 def marker(site, **counts):
     """The ENGAGED line: `[PINDIAG] tp4 vglue engaged site=<site> k=v ...` with the counts in the order given."""
     return ' '.join([ENGAGED, 'site=%s' % site] + ['%s=%s' % pair for pair in counts.items()])
+
+
+def log_line(message):
+    """One line into the server log: loguru where it exists, stdout otherwise. Never raises."""
+    try:
+        try:
+            from loguru import logger
+        except ImportError:
+            print(message, flush=True)
+        else:
+            logger.info('{}', message)
+    except BaseException:
+        pass

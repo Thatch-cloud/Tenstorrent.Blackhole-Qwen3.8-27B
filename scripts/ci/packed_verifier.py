@@ -186,6 +186,7 @@ from verifier_pack import GDN_LAYERS, build_pack, participant
 import gdn_seq_block
 import verify_prestage
 import tp_shapes
+import tp4_vglue
 import verify_trace_t1
 import verify_trace_t2
 
@@ -1260,10 +1261,26 @@ class PackedVerifierEngine:
         if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
             raise AssertionError('Missing packed prediction rows')
         host = verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
+        self.audit_shard_values(value_parts, chip_values)
         if self.shard_audit:
             reference = self.operations.to_torch(self.operations.get_device_tensors(self.output[3])[0])
             verify_trace_t1.audit_round(host, reference.reshape(-1)[:self.block_rows].tolist())
         return host
+
+    def audit_shard_values(self, value_parts, chip_values):
+        """QWEN_FAST_TP4_SHARD_VALUES under QWEN_FAST_TP4_VGLUE_AUDIT: each chip's gathered maxima against the ttnn.max
+        taken beside them in the same trace (verify_trace_t1.shard_values), every row. Nothing to compare when the
+        lever is off or its gather fell back."""
+        reference = verify_trace_t1.VALUE_REFERENCES.get(id(self.output[2]))
+        if reference is None:
+            return
+        for chip, (part, gathered) in enumerate(zip(self.operations.get_device_tensors(reference), chip_values)):
+            rows = verify_trace_t1.compare_values(gathered, self.operations.to_torch(part).reshape(-1)[:self.block_rows])
+            if rows:
+                message = '%s site=sampler chip=%d rows=%s' % (tp4_vglue.AUDIT_MISMATCH, chip, rows[:8])
+                diagnostic(message)
+                raise AssertionError(message)
+        diagnostic('%s site=sampler shard_values exact=True rows=%d' % (tp4_vglue.AUDIT_MARKER, self.block_rows))
 
     def note_verify_t1(self, counts):
         """VERIFY_T1_MARKER once per captured verify trace: which T1 cuts the capture engaged."""

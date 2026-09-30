@@ -14,8 +14,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import torch
+
 import gdn_commit_dma_tp
 import tp4_vglue
+import verify_trace_t1 as t1
 from test_gdn_tp_twins import commit_layers, fake_ttnn, kernels_of, pair, four
 
 HERE = Path(__file__).parent
@@ -238,6 +241,128 @@ class CommitLanesTests(unittest.TestCase):
         with pair(), env(QWEN_FAST_TP4_COMMIT_LANES='1'):
             with self.assertRaises(ValueError):
                 self.launch(chips=2)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# V4a: the gathered shard maximum against ttnn.max
+
+class T:
+    """A torch-backed stand-in for a device tensor: `.t` is the data, the rest is what sample_shards reads."""
+
+    def __init__(self, t, name='t'):
+        self.t, self.name = t, name
+        self.shape, self.dtype, self.layout = tuple(t.shape), 'bf16', 'tile'
+
+
+def torch_operations(calls, gather_error=None):
+    ops = SimpleNamespace(bfloat16='bf16', TILE_LAYOUT='tile', ROW_MAJOR_LAYOUT='rm', DRAM_MEMORY_CONFIG='dram')
+    ops.to_layout = lambda value, layout, memory_config=None: T(value.t, 'row_major')
+    ops.argmax = lambda value, dim, keepdim, memory_config=None: T(torch.argmax(value.t, dim=dim, keepdim=keepdim).to(torch.int64), 'ids')
+
+    def maximum(value, dim, keepdim, memory_config=None):
+        calls.append('max')
+        return T(torch.max(value.t.to(torch.float32), dim=dim, keepdim=keepdim).values.to(torch.bfloat16), 'values')
+
+    def gather(value, dim, index, memory_config=None):
+        calls.append('gather')
+        if gather_error is not None:
+            raise gather_error
+        return T(torch.gather(value.t, dim, index.t), 'gathered')
+
+    ops.max, ops.gather, ops.deallocate = maximum, gather, lambda value: calls.append('free ' + value.name)
+    return ops
+
+
+def shard_logits(rows, width, seed):
+    """bf16 shards seeded with ties, signed zeros, all-zero rows and a flat row, the cases a value swap could show."""
+    generator = torch.Generator().manual_seed(seed)
+    logits = torch.randn(1, 1, rows, width, generator=generator).to(torch.bfloat16)
+    logits[0, 0, 0, :] = 0.0                                       # all +0: first occurrence is column 0
+    logits[0, 0, 1, :] = -0.0                                      # all -0
+    logits[0, 0, 2, 3], logits[0, 0, 2, 5] = 9.0, 9.0             # a tie inside the shard
+    logits[0, 0, 3, :] = -1.0
+    logits[0, 0, 3, 7], logits[0, 0, 3, 8] = -0.0, 0.0            # -0 first, +0 later: equal maxima
+    logits[0, 0, 4, :] = -3.0e38
+    logits[0, 0, 5, :] = 1e-40                                     # denormal-scale values
+    return logits
+
+
+class ShardValuesTests(unittest.TestCase):
+    def sample(self, logits, **flags):
+        calls = []
+        with four(), env(**flags):
+            ids, values = t1.sample_shards(torch_operations(calls), T(logits, 'logits'), logits.shape[2])
+        return ids, values, calls
+
+    def test_the_gathered_values_are_the_max_bits_on_every_row(self):
+        for seed in range(4):
+            logits = shard_logits(16, 62080, seed)
+            ids, gathered, on_calls = self.sample(logits, QWEN_FAST_TP4_SHARD_VALUES='1')
+            ids_off, maximum, off_calls = self.sample(logits)
+            self.assertTrue(torch.equal(ids.t, ids_off.t))
+            self.assertEqual(gathered.t.shape, maximum.t.shape)
+            self.assertEqual(t1.compare_values(gathered.t, maximum.t), [])
+            # not just equal as numbers: identical bits except a zero of the other sign
+            same_bits = (gathered.t.view(torch.int16) == maximum.t.view(torch.int16)).reshape(-1)
+            zero = (gathered.t == 0).reshape(-1)
+            self.assertTrue(bool((same_bits | zero).all()))
+            self.assertIn('gather', on_calls)
+            self.assertNotIn('max', on_calls)
+            self.assertIn('max', off_calls)
+            self.assertNotIn('gather', off_calls)
+
+    def test_the_four_shard_combine_is_unchanged_by_the_value_source(self):
+        rows = 16
+        parts = [shard_logits(rows, 62080, seed) for seed in range(4)]
+        combined = {}
+        for name, flags in (('max', {}), ('gather', {'QWEN_FAST_TP4_SHARD_VALUES': '1'})):
+            shard_ids, shard_values_ = [], []
+            for part in parts:
+                ids, values, _ = self.sample(part, **flags)
+                shard_ids.append(ids.t.reshape(-1)), shard_values_.append(values.t.reshape(-1))
+            with four():
+                combined[name] = t1.combine_shards(shard_ids, shard_values_).tolist()
+        self.assertEqual(combined['max'], combined['gather'])
+        whole = torch.cat([part.reshape(rows, -1) for part in parts], dim=1).to(torch.float32)
+        self.assertEqual(combined['gather'], torch.argmax(whole, dim=1).tolist())
+
+    def test_flag_off_makes_exactly_the_served_calls(self):
+        logits = shard_logits(8, 62080, 0)
+        _, _, calls = self.sample(logits)
+        self.assertEqual(calls, ['max', 'free row_major'])
+
+    def test_the_row_major_shard_lives_until_the_gather_has_read_it(self):
+        _, _, calls = self.sample(shard_logits(8, 62080, 1), QWEN_FAST_TP4_SHARD_VALUES='1')
+        self.assertLess(calls.index('gather'), calls.index('free row_major'))
+
+    def test_a_refusing_gather_falls_back_to_max_and_says_so(self):
+        logits = shard_logits(8, 62080, 2)
+        calls, lines = [], []
+        with four(), env(QWEN_FAST_TP4_SHARD_VALUES='1'), patch.object(t1, 'log_line', side_effect=lines.append):
+            ids, values = t1.sample_shards(torch_operations(calls, gather_error=RuntimeError('row-major gather')),
+                                           T(logits, 'logits'), 8)
+        self.assertEqual(calls[:2], ['gather', 'max'])
+        self.assertEqual(values.name, 'values')
+        self.assertTrue(any(line.startswith(tp4_vglue.FALLBACK) for line in lines))
+
+    def test_the_audit_keeps_max_beside_the_gather_and_compares(self):
+        logits = shard_logits(8, 62080, 3)
+        t1.VALUE_REFERENCES.clear()
+        ids, values, calls = self.sample(logits, QWEN_FAST_TP4_SHARD_VALUES='1', QWEN_FAST_TP4_VGLUE_AUDIT='1')
+        self.assertEqual(calls.count('max'), 1)
+        self.assertIn(id(values), t1.VALUE_REFERENCES)
+        self.assertEqual(t1.compare_values(values.t, t1.VALUE_REFERENCES[id(values)].t), [])
+        t1.VALUE_REFERENCES.clear()
+
+    def test_the_value_compare_rule(self):
+        one = torch.tensor([1.0, -0.0, float('nan'), 2.0])
+        self.assertEqual(t1.compare_values(one, torch.tensor([1.0, 0.0, float('nan'), 2.0])), [])
+        self.assertEqual(t1.compare_values(one, torch.tensor([1.5, 0.0, 1.0, 2.0])), [0, 2])
+
+    def test_at_the_pair_the_flag_raises_before_any_op(self):
+        with pair(), env(QWEN_FAST_TP4_SHARD_VALUES='1'):
+            with self.assertRaisesRegex(ValueError, 'TP4 levers'):
+                t1.sample_shards(torch_operations([]), T(shard_logits(8, 124160, 0), 'logits'), 8)
 
 
 if __name__ == '__main__':
