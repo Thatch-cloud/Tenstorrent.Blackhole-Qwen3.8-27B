@@ -1234,6 +1234,24 @@ def any_request_check(log_text, any_request):
     return [], engines, consumers
 
 
+def four_card_profile(profiles, name):
+    """Whether the profile opens the four-card (1, 4) mesh (mesh_device P150x4)."""
+    entry = ((profiles or {}).get('profiles') or {}).get(name) or {}
+    return entry.get('mesh_device') == c2_serving_job.TP4_MESH_DEVICE
+
+
+def prefill_tripwire_check(log_text):
+    """(problems, facts) of an S2 arm's server log at four cards: c2_smoke_check.late_program_problems, the rule the smoke and
+    the replay apply - the eager prefill warmed before the packed traces (serving_runtime.prefill_warm_before_traces) and no
+    prefill compiling a program beyond its window snapshot after the capture (the prefill-after-replay defect: garbage, EOS
+    first, or #48536's MMIO hang). A gate arm's texts can match while such a program compiled; the tripwire says so."""
+    import c2_smoke_check
+
+    if log_text is None:
+        return ['no server.log: the four-card prefill tripwire cannot be read'], None
+    return c2_smoke_check.late_program_problems(log_text)
+
+
 def s2_log_check(log_text, s2_on, env, report):
     """An arm's S2 problems as the host sees them: the harness's own (report['s2']['problems']), or without
     that record an S2 arm's missing record and a flag-off arm's S2 lines; and every -e knob the arm added
@@ -1451,6 +1469,10 @@ class Runner(object):
             # S2: the harness's S2 problems, the S2 lines off the flag, the knobs reaching the container, the
             # kernel cache, and the four-live rate from the whole server log.
             problems += s2_log_check(log_text, self.s2_for(profile), env, report)
+            if self.s2_for(profile) and four_card_profile(self.profiles, profile):
+                # Four cards: the prefill-after-replay defect's tripwire, on every arm (not only the smoke's shapes).
+                tripwire, report['c2_gate_prefill_tripwire'] = prefill_tripwire_check(log_text)
+                problems += ['prefill tripwire: %s' % text for text in tripwire]
             if judged and cache['added']:
                 problems.append('the kernel cache grew by %d entries during this arm: it compiled what M1 (warm) did '
                                 'not (s2-design B6)' % cache['added'])

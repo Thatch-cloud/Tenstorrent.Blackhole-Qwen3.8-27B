@@ -5,6 +5,7 @@ E3  the churn gate at four cards: every four-card profile runs QWEN_FAST_QUAD_DR
 E4  the platform replay on all four cards (c2_platform_replay --cards quad, the workflow's replay step, the job parser).
 E5  the two streamed smoke tests (stream_tool_call, stream_reasoning) and the smoke check's traffic-profile rules."""
 
+import copy
 import io
 import json
 import os
@@ -148,6 +149,48 @@ class ChurnAtFourCardsTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'PASS')
         self.assertIn('quad', result['lines'][0])
         self.assertEqual(result['facts']['releases']['quad_departures'], 8)
+
+
+class PrefillTripwireInTheGateTests(unittest.TestCase):
+    """Every S2 arm at four cards is read for the prefill-after-replay tripwire (c2_smoke_check.late_program_problems), not
+    only the smoke's shapes: the gate's lengths (60,000-123,136, staggered and churned arrivals) are where a late prefill
+    program would compile, and its texts can still match."""
+    WARM = '(EngineCore pid=9) INFO [PINDIAG] four-card eager prefill warmed before the packed traces: 2052'
+    UNSAFE = '(EngineCore pid=9) WARNING Allocating device buffers is unsafe due to the existence of an active trace'
+    PROGRAMS = '(EngineCore pid=9) | INFO | [PINDIAG] four-card prefill programs=%d->%d window=%d prompt=%d'
+
+    def lifecycle(self, extra, mesh_device='P150x4'):
+        ours = s2.LifecycleMemoryChurnTests('run_plan')
+        factories, logs = ours.lifecycle_reports(s2.s2_log(rounds=2))
+        logs = dict((name, text + extra) for name, text in logs.items())
+        profiles = copy.deepcopy(s2.PROFILES)
+        if mesh_device:
+            profiles['profiles']['c2-packed']['mesh_device'] = mesh_device
+        argv = ['--profile', 'c2-packed', '--plan', 'lifecycle'] + (['--cards', 'quad'] if mesh_device else [])
+        code, summary, calls, lines, records = s2.Driver(ours).run(argv, factories, logs, profiles=profiles)
+        return summary['results']['lifecycle'], lines
+
+    def test_a_four_card_arm_with_the_warm_first_and_no_late_program_passes(self):
+        extra = '\n'.join([self.WARM, self.UNSAFE, self.PROGRAMS % (10, 12, 2, 4096)]) + '\n'
+        result, lines = self.lifecycle(extra)
+        self.assertEqual(result['verdict'], 'PASS', result.get('lines'))
+
+    def test_a_late_prefill_program_or_a_missing_warm_fails_the_arm_even_with_identical_texts(self):
+        late = '\n'.join([self.WARM, self.UNSAFE, self.PROGRAMS % (10, 20, 2, 60000)]) + '\n'
+        result, lines = self.lifecycle(late)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('prefill tripwire: the prefill of 60000 tokens compiled 8 program(s)', ' '.join(lines))
+        result, lines = self.lifecycle('\n'.join([self.UNSAFE, self.PROGRAMS % (10, 12, 2, 4096)]) + '\n')
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('prefill tripwire: the four-card eager prefill warm never ran', ' '.join(lines))
+
+    def test_the_pairs_arms_are_not_read_for_it(self):
+        result, lines = self.lifecycle('', mesh_device=None)
+        self.assertEqual(result['verdict'], 'PASS', result.get('lines'))
+        self.assertNotIn('prefill tripwire', ' '.join(lines))
+        self.assertTrue(driver.four_card_profile(PROFILES, 'c2-packed-tp4-gate'))
+        self.assertFalse(driver.four_card_profile(PROFILES, 'c2-packed'))
+        self.assertEqual(driver.prefill_tripwire_check(None)[0], ['no server.log: the four-card prefill tripwire cannot be read'])
 
 
 class PlatformReplayAtFourCardsTests(unittest.TestCase):
