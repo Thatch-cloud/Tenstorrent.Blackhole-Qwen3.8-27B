@@ -109,6 +109,10 @@ scripts/ci/quad_draft.py
 # reach the image at P8's commit otherwise, without them, and the four-card quad dies at its first round on the import.
 scripts/ci/quad_draft_tp.py
 scripts/ci/draft_singles_audit.py
+# TP4 fused commit (tp4/fcommit): the four-card twin of fused_commit, which tp_addresses.install() puts in its place at
+# QWEN_FAST_TP=4 only (MODULE_TWINS). It reaches the image at P8's commit otherwise not at all, and the four-card process would
+# die on the import at the first block that sets QWEN_FAST_FUSED_COMMIT=1.
+scripts/ci/fused_commit_tp.py
 # S2 v86 (run 36416471352): every traced draft (single, pair, quad) copies its head outputs into the pool's pre-trace
 # output set (serving_buffer_pool draft_outputs=, which serving_runtime asks the coordinator's
 # pooled_draft_output_shapes for under QWEN_FAST_EXTENT_REPLAY=1), and a readback whose merge refuses them reports

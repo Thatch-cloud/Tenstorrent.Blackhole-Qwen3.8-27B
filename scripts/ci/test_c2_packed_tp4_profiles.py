@@ -67,6 +67,21 @@ DRAFT_PROFILES = {
 }
 
 
+# The fused-commit window's profiles (tp4/fcommit): each is its gate or speed base plus exactly these env differences.
+FUSED, INPLACE, LIVE, AUDIT = ('QWEN_FAST_FUSED_COMMIT', 'QWEN_FAST_FUSED_COMMIT_INPLACE', 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS',
+                               'QWEN_FAST_FUSED_COMMIT_AUDIT')
+FCOMMIT_PROFILES = {
+    'c2-packed-tp4-gate-fcommit': ('c2-packed-tp4-gate', {FUSED: '1', INPLACE: '1', AUDIT: '1', LIVE: '0', QUAD: '0'}),
+    'c2-packed-tp4-gate-fcommit-live': ('c2-packed-tp4-gate', {FUSED: '1', INPLACE: '1', AUDIT: '1', LIVE: '1', QUAD: '0',
+                                                              SINGLES: 'all'}),
+    'c2-packed-tp4-gate-fcommit-quad': ('c2-packed-tp4-gate', {FUSED: '1', INPLACE: '1', AUDIT: '1', LIVE: '1', QUAD: '1',
+                                                              SINGLES: 'all'}),
+    'c2-packed-tp4-speed-fcommit': ('c2-packed-tp4-speed', {FUSED: '1', INPLACE: '1', LIVE: '1', QUAD: '0'}),
+    'c2-packed-tp4-speed-fcommit-quad': ('c2-packed-tp4-speed', {FUSED: '1', INPLACE: '1', LIVE: '1', QUAD: '1'}),
+    'c2-packed-tp4-speed-fcommit-oop': ('c2-packed-tp4-speed', {FUSED: '1'}),
+}
+
+
 def profiles():
     return json.loads(PROFILES.read_text(encoding='utf-8'))['profiles']
 
@@ -266,7 +281,10 @@ class DraftProfileTests(unittest.TestCase):
         found = profiles()
         on = sorted(name for name, profile in found.items() if profile['env'].get(QUAD) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
-        self.assertEqual(on, ['c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-quad'])
+        self.assertEqual(on, ['c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-quad',
+                              'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad'])
+        self.assertEqual([name for name in on if 'fcommit' not in name],
+                         ['c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-quad'], 'the fused-commit family is the other two')
         image = image_env()
         for name in ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PAIR_ROW_EXACT', 'QWEN_FAST_ROUND_B1', 'QWEN_FAST_PACKED_AUDIT'):
             self.assertEqual(image[name], '1', 'the batched draft needs the image\'s own %s' % name)
@@ -288,6 +306,86 @@ class DraftProfileTests(unittest.TestCase):
     def test_the_admission_accepts_each_draft_profile_over_the_image_environment(self):
         image = image_env()
         for name in DRAFT_PROFILES:
+            environ = dict(image, **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
+
+
+class FusedCommitProfileTests(unittest.TestCase):
+    def test_each_fused_commit_profile_is_its_base_with_only_its_documented_difference(self):
+        found = profiles()
+        for name, (base_name, difference) in FCOMMIT_PROFILES.items():
+            mine, base = found[name], found[base_name]
+            with self.subTest(profile=name):
+                self.assertEqual(mine['env'], dict(base['env'], **difference))
+                self.assertEqual(mine['engine'], base['engine'])
+                for key in set(mine) | set(base):
+                    if key not in ('description', 'env'):
+                        self.assertEqual(mine.get(key), base.get(key), key)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                self.assertIs(mine['gate_only'], True)
+                self.assertEqual(mine['env']['QWEN_C2_GATE_PROFILE'], '1')
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+                self.assertIn('NOT QUALIFIED', mine['description'])
+
+    def test_the_fused_commit_is_on_in_this_family_and_nowhere_else_at_four_cards(self):
+        found = profiles()
+        on = sorted(name for name, profile in found.items() if profile['env'].get(FUSED) == '1'
+                    and profile['env'].get('QWEN_FAST_TP') == '4')
+        self.assertEqual(on, sorted(FCOMMIT_PROFILES))
+        for name, profile in found.items():
+            if name not in FCOMMIT_PROFILES and profile['env'].get('QWEN_FAST_TP') == '4':
+                for flag in (FUSED, INPLACE, LIVE, AUDIT):
+                    self.assertEqual(profile['env'].get(flag, '0'), '0', (name, flag))
+
+    def test_the_sub_flags_never_stand_without_their_parents(self):
+        """In place needs the fused commit; live banks need both (the quad twin refuses a live bank that can move); the audit is a
+        gate-family arm only and never a timed one."""
+        import quad_draft_tp
+
+        for name in FCOMMIT_PROFILES:
+            env = profiles()[name]['env']
+            with self.subTest(profile=name):
+                self.assertEqual(env[FUSED], '1')
+                if env.get(LIVE) == '1':
+                    self.assertEqual(env[INPLACE], '1')
+                self.assertEqual(quad_draft_tp.live_banks_missing(env), [])
+                audited = 'gate' in name
+                self.assertEqual(env.get(AUDIT), '1' if audited else None, name)
+                for key in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
+                    self.assertEqual(env[key], '1' if audited else '0', (name, key))
+                self.assertEqual(env.get(SINGLES), 'all' if audited and env[LIVE] == '1' else None, name)
+                self.assertEqual(env['QWEN_FAST_TP_KV_SLIDE'], '1', 'the fused commit is the four-card slide scope')
+
+    def test_the_timed_profiles_differ_from_their_unfused_twins_in_the_fused_flags_alone(self):
+        found = profiles()
+        for fused, plain, flags in (
+                ('c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-pairs', {FUSED, INPLACE, LIVE}),
+                ('c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad', {FUSED, INPLACE, LIVE}),
+                ('c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed', {FUSED})):
+            left, right = found[fused]['env'], found[plain]['env']
+            self.assertEqual({key for key in set(left) | set(right) if left.get(key) != right.get(key)}, flags, fused)
+
+    def test_the_fallback_runs_the_projection_only_and_the_quad_and_pairs_bind_live_banks(self):
+        found = profiles()
+        oop = found['c2-packed-tp4-speed-fcommit-oop']['env']
+        self.assertEqual((oop[FUSED], oop[INPLACE], oop[LIVE]), ('1', '0', '0'))
+        for name in ('c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-quad'):
+            env = found[name]['env']
+            self.assertEqual((env[FUSED], env[INPLACE], env[LIVE]), ('1', '1', '1'))
+        self.assertEqual((found['c2-packed-tp4-speed-fcommit']['env'][QUAD], found['c2-packed-tp4-speed-fcommit-quad']['env'][QUAD]),
+                         ('0', '1'))
+
+    def test_the_images_own_fused_flags_are_the_pairs_and_the_audit_is_not_the_images(self):
+        image = image_env()
+        for flag in (FUSED, INPLACE, LIVE):
+            self.assertEqual(image[flag], '1', flag)
+        self.assertNotIn(AUDIT, image, 'off in the image: only the audited gate arms ask for it')
+
+    def test_the_admission_accepts_each_fused_commit_profile_over_the_image_environment(self):
+        image = image_env()
+        for name in FCOMMIT_PROFILES:
             environ = dict(image, **profiles()[name]['env'])
             with self.subTest(profile=name):
                 self.assertEqual(admission.width(environ), 4)

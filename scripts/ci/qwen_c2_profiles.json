@@ -1039,6 +1039,503 @@
       "parser_rechunk": true,
       "gate_only": true
     },
+    "c2-packed-tp4-gate-fcommit": {
+      "description": "GATE ONLY (the fused-commit window, audited, singles drafts): c2-packed-tp4-gate with the fused commit at four cards (tp4/fcommit: fused_commit_tp, which tp_addresses.install() puts in fused_commit's place at QWEN_FAST_TP=4 only, MODULE_TWINS). Each packed user's drafter K/V publication - today one eager projection, ten slide descriptors and a fence per user (37.9 ms of a live-4 round, K2) - becomes ONE captured T_proj trace (the feature projection at count 16, the five layers' K/V projection against RoPE tables staged in the drafts' fence window, into fixed two-KV-head deltas) and, in place, ONE captured slide trace per (user, accepted prefix) that slides the ten live banks in place (80 workers a chip: the served draft_kv_slide kernel, head-count generic). No swap: the live bank never moves. A publication the guards refuse (the prefill ramp, one parity normalisation after an odd number of swaps, a sequential step) takes today's path and logs why. NOT QUALIFIED on hardware: the kernel has run in place at four KV heads only (M-F0); the one-card 2-head proof and this profile's audited smoke are the tp4-fcommit jobs. This profile: the fused commit with in-place slides and the E2 shadow audit (QWEN_FAST_FUSED_COMMIT_AUDIT=1: before every fused launch today's eager publication runs and its K/V rows and slid banks are byte-compared with the fused ones on every chip; a mismatch is logged and repaired, and the gate fails the arm), no live banks and no batched draft (the drafts are the base profile's). Every audit c2-packed-tp4-gate carries stays on. Not for timing. Every other flag and the engine are the base profile's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_FUSED_COMMIT_AUDIT": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-gate-fcommit-live": {
+      "description": "GATE ONLY (the fused-commit window, audited, pairs on live banks): c2-packed-tp4-gate with the fused commit at four cards (tp4/fcommit: fused_commit_tp, which tp_addresses.install() puts in fused_commit's place at QWEN_FAST_TP=4 only, MODULE_TWINS). Each packed user's drafter K/V publication - today one eager projection, ten slide descriptors and a fence per user (37.9 ms of a live-4 round, K2) - becomes ONE captured T_proj trace (the feature projection at count 16, the five layers' K/V projection against RoPE tables staged in the drafts' fence window, into fixed two-KV-head deltas) and, in place, ONE captured slide trace per (user, accepted prefix) that slides the ten live banks in place (80 workers a chip: the served draft_kv_slide kernel, head-count generic). No swap: the live bank never moves. A publication the guards refuse (the prefill ramp, one parity normalisation after an odd number of swaps, a sequential step) takes today's path and logs why. NOT QUALIFIED on hardware: the kernel has run in place at four KV heads only (M-F0); the one-card 2-head proof and this profile's audited smoke are the tp4-fcommit jobs. This profile: the fused commit with in-place slides and the E2 shadow audit, and the two packed pair drafts bind the pool's live banks (QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1: no copy_cache, no placeholders; a device on the spare side is normalised once), with QWEN_FAST_DRAFT_SINGLES_AUDIT=all replaying every batched user's own single-user draft in the same round and comparing it bit for bit. No quad (QWEN_FAST_QUAD_DRAFT=0). Not for timing. Every other flag and the engine are the base profile's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_FUSED_COMMIT_AUDIT": "1",
+        "QWEN_FAST_DRAFT_SINGLES_AUDIT": "all"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-gate-fcommit-quad": {
+      "description": "GATE ONLY (the fused-commit window, audited, quad on live banks): c2-packed-tp4-gate with the fused commit at four cards (tp4/fcommit: fused_commit_tp, which tp_addresses.install() puts in fused_commit's place at QWEN_FAST_TP=4 only, MODULE_TWINS). Each packed user's drafter K/V publication - today one eager projection, ten slide descriptors and a fence per user (37.9 ms of a live-4 round, K2) - becomes ONE captured T_proj trace (the feature projection at count 16, the five layers' K/V projection against RoPE tables staged in the drafts' fence window, into fixed two-KV-head deltas) and, in place, ONE captured slide trace per (user, accepted prefix) that slides the ten live banks in place (80 workers a chip: the served draft_kv_slide kernel, head-count generic). No swap: the live bank never moves. A publication the guards refuse (the prefill ramp, one parity normalisation after an odd number of swaps, a sequential step) takes today's path and logs why. NOT QUALIFIED on hardware: the kernel has run in place at four KV heads only (M-F0); the one-card 2-head proof and this profile's audited smoke are the tp4-fcommit jobs. This profile: the fused commit with in-place slides and the E2 shadow audit, and the four-card batched draft (QWEN_FAST_QUAD_DRAFT=1: quad_draft_tp) bound to the pool's live banks (QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1: 40 fewer bank copies a round, no placeholders), with QWEN_FAST_DRAFT_SINGLES_AUDIT=all replaying every batched user's own single-user draft in the same round and comparing it bit for bit. Not for timing. Every other flag and the engine are the base profile's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_FUSED_COMMIT_AUDIT": "1",
+        "QWEN_FAST_DRAFT_SINGLES_AUDIT": "all"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-fcommit": {
+      "description": "GATE ONLY (the fused-commit window, timed, pairs): c2-packed-tp4-speed with the fused commit at four cards (tp4/fcommit: fused_commit_tp, which tp_addresses.install() puts in fused_commit's place at QWEN_FAST_TP=4 only, MODULE_TWINS). Each packed user's drafter K/V publication - today one eager projection, ten slide descriptors and a fence per user (37.9 ms of a live-4 round, K2) - becomes ONE captured T_proj trace (the feature projection at count 16, the five layers' K/V projection against RoPE tables staged in the drafts' fence window, into fixed two-KV-head deltas) and, in place, ONE captured slide trace per (user, accepted prefix) that slides the ten live banks in place (80 workers a chip: the served draft_kv_slide kernel, head-count generic). No swap: the live bank never moves. A publication the guards refuse (the prefill ramp, one parity normalisation after an odd number of swaps, a sequential step) takes today's path and logs why. NOT QUALIFIED on hardware: the kernel has run in place at four KV heads only (M-F0); the one-card 2-head proof and this profile's audited smoke are the tp4-fcommit jobs. This profile: the fused commit with in-place slides, the two packed pair drafts on the pool's live banks, no batched draft. The timed arm: the verify's T1 and T2 audits are off, there is no fused-commit audit and no draft audit, the tokens are held against the audited arm's. It differs from c2-packed-tp4-speed-pairs in the three fused-commit flags alone. Every other flag and the engine are the base profile's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-fcommit-quad": {
+      "description": "GATE ONLY (the fused-commit window, timed, quad): c2-packed-tp4-speed with the fused commit at four cards (tp4/fcommit: fused_commit_tp, which tp_addresses.install() puts in fused_commit's place at QWEN_FAST_TP=4 only, MODULE_TWINS). Each packed user's drafter K/V publication - today one eager projection, ten slide descriptors and a fence per user (37.9 ms of a live-4 round, K2) - becomes ONE captured T_proj trace (the feature projection at count 16, the five layers' K/V projection against RoPE tables staged in the drafts' fence window, into fixed two-KV-head deltas) and, in place, ONE captured slide trace per (user, accepted prefix) that slides the ten live banks in place (80 workers a chip: the served draft_kv_slide kernel, head-count generic). No swap: the live bank never moves. A publication the guards refuse (the prefill ramp, one parity normalisation after an odd number of swaps, a sequential step) takes today's path and logs why. NOT QUALIFIED on hardware: the kernel has run in place at four KV heads only (M-F0); the one-card 2-head proof and this profile's audited smoke are the tp4-fcommit jobs. This profile: the fused commit with in-place slides and the four-card batched draft (QWEN_FAST_QUAD_DRAFT=1) on the pool's live banks. The timed arm: the verify's T1 and T2 audits are off, there is no fused-commit audit and no draft audit, the tokens are held against the audited arm's. It differs from c2-packed-tp4-speed-quad in the three fused-commit flags alone. Every other flag and the engine are the base profile's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-fcommit-oop": {
+      "description": "GATE ONLY (the fused-commit window, timed, the fallback): c2-packed-tp4-speed with the projection half of the fused commit at four cards (tp4/fcommit: fused_commit_tp, which tp_addresses.install() puts in fused_commit's place at QWEN_FAST_TP=4 only, MODULE_TWINS). Each packed user's drafter K/V publication - today one eager projection, ten slide descriptors and a fence per user (37.9 ms of a live-4 round, K2) - becomes ONE captured T_proj trace (the feature projection at count 16, the five layers' K/V projection against RoPE tables staged in the drafts' fence window, into fixed two-KV-head deltas) and, in place, ONE captured slide trace per (user, accepted prefix) that slides the ten live banks in place (80 workers a chip: the served draft_kv_slide kernel, head-count generic). No swap: the live bank never moves. A publication the guards refuse (the prefill ramp, one parity normalisation after an odd number of swaps, a sequential step) takes today's path and logs why. NOT QUALIFIED on hardware: the kernel has run in place at four KV heads only (M-F0); the one-card 2-head proof and this profile's audited smoke are the tp4-fcommit jobs. This profile: QWEN_FAST_FUSED_COMMIT=1 ALONE - T_proj is captured and replayed, the slides stay today's eager out-of-place four-card transports into the spare and the commit still swaps, so no in-place proof is needed (commits about 10-16 ms instead of about 2). Only if the one-card in-place proof fails. The timed arm: audits off. It differs from c2-packed-tp4-speed in QWEN_FAST_FUSED_COMMIT alone. Every other flag and the engine are the base profile's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
     "c2-packed-tp4-gate-ring": {
       "description": "GATE ONLY (an optional arm of the S2 window): c2-packed-tp4-gate under the ring fabric (FABRIC_1D_RING) with the fast path's own collectives at Ring (QWEN_FAST_CCL_TOPOLOGY=ring; its default at four cards is Linear). Every other flag, every audit and the engine are c2-packed-tp4-gate's. The ring changes how the gathers move data, not what they add, so the text is expected to equal c2-packed-tp4-gate's on the same prompts; the arm exists to time the collectives in place and to decide QWEN_FAST_CCL_TOPOLOGY's four-card default. A correctness arm, never a timed one (the audits are on). Not for traffic. UNVERIFIED on hardware. The drafter's K/V publication is the four-card slide (QWEN_FAST_TP_KV_SLIDE=1, draft_kv_slide_tp: the pair's kernel over 2 KV heads on 8 workers per chip) instead of the six-op eager chain, which built new programs every round while a prompt under 2,048 tokens filled its window; the eager chain stays behind the flag as the reference. UNVERIFIED on hardware.",
       "eos_ids": [

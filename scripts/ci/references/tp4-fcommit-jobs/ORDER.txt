@@ -1,0 +1,30 @@
+# The order of the four-card fused-commit window (tp4/fcommit), one template per line: <template name without .env> <stop|soft>.
+# stop: the window halts at the first failure of this job. soft: a failure is logged and the window goes on (its product is data).
+# What the window is for. At four cards a live-4 round of four steady users is about 65 ms of device verify plus about 110 ms of host, 38 ms of it four
+# serial K/V commits (each the drafter's own eager projection and ten slide dispatches). tp4/fcommit ports the pair's fused commit (fused_commit_tp: one
+# T_proj trace per segment plus one in-place slide trace per (segment, prefix), 68 traces) so the commits fall to about 2 ms, and its live-bank mode lets
+# the pairs and the quad bind the pool's active banks and copy nothing. The verifier keeps the text exact whatever is drafted; the fused commit's own
+# claim is stronger: it leaves the drafter's K/V banks BYTE-IDENTICAL to the eager commit path. F2-F4 prove that in model with the E2 audit (every fused
+# publication shadowed by the eager path and byte-compared on every chip), F1 proves the in-place slide on one card at two KV heads first, and F5
+# times it against the eager arm, alternated twice in one image, and compares every user's accepted-prefix sequence position by position.
+# Order, cheapest first: F0 the image (no card); F1a/F1b one card (separate tags: cardm cannot run while a quad step holds the four cards); F2 the
+# audited smoke with in-place slides; F3 + live banks with pairs and the singles audit; F4 + the quad (soft: if the quad itself fails, target pairs);
+# F5a-h the timed arms, audits off, eager and fused alternated twice per shape (judge PAIRED per round); F6 the exactness matrix, soft and last.
+# If F1 fails (in place inexact at 2 KV heads, or 1 x 80 not exact): run F5x (the -oop fallback profile) instead of F2-F5.
+# Durations (estimate): F0 18 min (at most 90); F1a 10-25; F1b 20-45; F2-F4 25-50 each (at most 90); F5 20-30 each (2.5-4 h all eight); F6 45-120.
+# Card time about 4-5 h with one repeat per shape.
+F0-build stop
+F1a-cardm-watcher stop
+F1b-cardm-full stop
+F2-fcommit-smoke stop
+F3-fcommit-live-smoke stop
+F4-fcommit-quad-smoke soft
+F5a-quad-eager-timed soft
+F5b-quad-fused-timed soft
+F5c-quad-eager-timed soft
+F5d-quad-fused-timed soft
+F5e-pairs-eager-timed soft
+F5f-pairs-fused-timed soft
+F5g-pairs-eager-timed soft
+F5h-pairs-fused-timed soft
+F6-fcommit-matrix soft

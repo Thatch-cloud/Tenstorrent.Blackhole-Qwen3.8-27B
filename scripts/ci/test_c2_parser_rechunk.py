@@ -883,6 +883,13 @@ class ProfileGatingTests(unittest.TestCase):
                                  # the batched-draft window's arms (tp4/draft)
                                  'c2-packed-tp4-speed-quad': True, 'c2-packed-tp4-speed-pairs': True,
                                  'c2-packed-tp4-gate-quad': True, 'c2-packed-tp4-gate-pairs': True,
+                                 # the fused-commit window's arms (tp4/fcommit)
+                                 'c2-packed-tp4-gate-fcommit': True,
+                                 'c2-packed-tp4-gate-fcommit-live': True,
+                                 'c2-packed-tp4-gate-fcommit-quad': True,
+                                 'c2-packed-tp4-speed-fcommit': True,
+                                 'c2-packed-tp4-speed-fcommit-oop': True,
+                                 'c2-packed-tp4-speed-fcommit-quad': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
                                  'general-prefix-eager': None,
                                  # the four-card (TP4) G1 family decodes one token per step, as general does
@@ -898,7 +905,8 @@ class ProfileGatingTests(unittest.TestCase):
                                       'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
                                       'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
                                       'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs',
-                                      'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-pairs'), name)
+                                      'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-pairs',
+                                      'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 

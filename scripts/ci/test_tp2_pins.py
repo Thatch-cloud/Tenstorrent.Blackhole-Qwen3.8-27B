@@ -154,6 +154,14 @@ class PinnedSourceTests(unittest.TestCase):
             lists = now.get(twin + '.py', set())
             self.assertIn('O', lists, twin)                       # the C2 overlay: the image that serves four cards
             self.assertEqual('D' in lists, 'W' in lists, twin)    # and the fast image's two lists agree
+        # The whole-module twins (MODULE_TWINS: quad_draft_tp, fused_commit_tp ...) travel the same way, and the pinned module they
+        # borrow from is still in the image beside them.
+        for original, twin in tp_addresses.MODULE_TWINS:
+            if twin.endswith('_tp'):
+                lists = now.get(twin + '.py', set())
+                self.assertIn('O', lists, twin)
+                self.assertEqual('D' in lists, 'W' in lists, twin)
+                self.assertTrue(now.get(original + '.py'), original)
 
     def test_the_t16_gate_sources_are_all_pinned(self):
         with open(os.path.join(HERE, 'target_t16_attention_gate.py'), encoding='utf-8') as handle:

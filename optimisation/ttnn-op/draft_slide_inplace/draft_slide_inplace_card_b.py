@@ -46,6 +46,13 @@ itself verified exact (multibank and trace) at or under 0.5 ms per user (pipelin
 parity-keyed out-of-place fallback, with why_not. Timing never fails the run: it is the input to that
 decision.
 
+Width. --heads 4 (the default) is the pair's bank, (1, 4, 2048, 128), 16 workers per bank, layouts 10 x 16 .. 1 x 160. --heads 2 is the
+four-card mesh's (draft_kv_slide_tp: (1, 2, 2048, 128), 8 workers per bank, layouts 10 x 8, 5 x 16, 2 x 40 and 1 x 80 workers, the last
+one program per user per chip): the kernels are head-count generic (head = worker / 4), so the same files and mirrors serve both, and the
+program is pinned to draft_kv_slide_tp.prepare's per-chip program in the test. --ramp history:prefix,... adds cases whose history is
+under 2048 and whose slide keeps every row (drop 0): the bank's rows past the history are random poison and the output must zero them
+(the four-card fused ramp's option). Default: none at 4 heads, the RAMP set at 2. One card is one chip, so each chip's data is a seed.
+
 Nothing is read from the model and nothing is written outside --out. The served driver refuses a one-chip
 mesh (two shards) and aliasing, so the harness builds its per-chip program itself;
 test_draft_slide_inplace_card_b.py pins that program, field for field, to draft_kv_slide.prepare's chip-0
@@ -79,7 +86,13 @@ CHIPS = (0, 1)
 # under 2048 reaches it): drop < prefix, including drop 0 (history + prefix == 2048 exactly, the window's
 # first fill: every tile rewrites itself). drop == rows cannot happen there (drop <= prefix <= 32 < 2048).
 EDGES = ((2047, 2), (2040, 16), (2033, 16), (2047, 16), (2047, 1), (2032, 16))
-LAYOUTS = (1, 2, 5, 10)             # banks per program: 10 x 16, 5 x 32, 2 x 80, 1 x 160 workers
+LAYOUTS = (1, 2, 5, 10)             # banks per program: 10 x 16, 5 x 32, 2 x 80, 1 x 160 workers (4 heads); 8 / 16 / 40 / 80 (2 heads)
+SERVED_HEADS = (2, 4)               # KV heads per chip: 4 is the pair's, 2 the four-card mesh's (tp_shapes draft_kv_heads)
+# The ramp (--ramp; the four-card fused ramp's option, QWEN_FAST_FUSED_COMMIT_RAMP): histories under 2048 whose slide keeps every
+# row (history + prefix <= 2048, drop 0): the bank's rows past history are POISON here, and the output must zero them. Default at
+# 2 heads only, so the pair's run is what it was.
+RAMP = ((1, 1), (1, 16), (16, 16), (17, 16), (31, 2), (32, 1), (33, 16), (100, 7), (1000, 16), (2000, 16), (2031, 16))
+QUICK_RAMP = ((17, 16), (2000, 16))
 MULTIBANK_PREFIXES = (1, 7, 16)
 OPEN_EXTRA_S = 300                  # open_device's extra watchdog budget: firmware JIT into a fresh cache
 TIMING_SPAN_S = 600                 # one timing variant's whole loop (warmup, iters x 2, capture, replays)
@@ -109,6 +122,19 @@ FORM_IO = {'aliased': '[bank, delta, bank] per bank', 'pair': '[bank, delta] per
 SECTIONS = ('forms', 'cases', 'multibank', 'cache', 'trace', 'timing')
 
 WATCHDOG = None
+
+
+def configure(heads):
+    """Set the served width: KV heads per chip (4 at the pair, 2 at four cards). The bank, the delta, the workers per bank and every
+    layout's worker count follow; the kernels are head-count generic (head = worker / 4). Called once, before any device work."""
+    global HEADS, KV_SHAPE, DELTA_SHAPE, WORKERS
+    if heads not in SERVED_HEADS:
+        raise ValueError('heads must be one of %s' % (SERVED_HEADS,))
+    HEADS = heads
+    KV_SHAPE = (1, heads, CAPACITY, HEAD_DIM)
+    DELTA_SHAPE = (1, heads, 32, HEAD_DIM)
+    WORKERS = heads * COLUMNS
+    return WORKERS
 
 
 class Unsupported(ValueError):
@@ -403,6 +429,9 @@ def decide(report):
         served_kind=(report.get('served') or {}).get('kind'),
         bytes_identical=bytes_ok, cases=len(checks), cases_identical=len(identical),
         full_matrix=not missing, missing=[list(pair) for pair in missing],
+        heads=report.get('heads', 4),
+        ramp_cases=len([c for c in checks if c.get('history', HISTORY) < HISTORY and c.get('history') + c.get('prefix', 0) < HISTORY]),
+        ramp_identical=len([c for c in identical if c.get('history', HISTORY) < HISTORY and c.get('history') + c.get('prefix', 0) < HISTORY]),
         multibank_programs=len(multibank), trace_replays=sum(t.get('replays', 0) for t in traced),
         verified_layouts=sorted(verified),
         form=form, forms={name: dict(accepted=entry.get('accepted'), exact=entry.get('exact'))
@@ -772,7 +801,7 @@ def section_forms(bench, kernel, report, args):
 
 
 def case_matrix(args):
-    matrix = [(HISTORY, prefix) for prefix in args.prefixes] + list(args.edges)
+    matrix = [(HISTORY, prefix) for prefix in args.prefixes] + list(args.edges) + list(getattr(args, 'ramp', ()))
     return [(history, prefix, chip) for history, prefix in matrix for chip in args.chips]
 
 
@@ -1213,6 +1242,10 @@ def parse_args(argv=None):
     parser.add_argument('--prefixes', default=','.join(map(str, PREFIXES)))
     parser.add_argument('--chips', default=','.join(map(str, CHIPS)))
     parser.add_argument('--edges', default=','.join('%d:%d' % pair for pair in EDGES), help='history:prefix,...')
+    parser.add_argument('--heads', type=int, default=4, choices=SERVED_HEADS,
+                        help='KV heads per chip: 4 is the pair banks (1, 4, 2048, 128), 2 the four-card mesh banks (1, 2, ...)')
+    parser.add_argument('--ramp', default=None,
+                        help='history:prefix,... with history + prefix <= 2048 (drop 0); default: none at 4 heads, the RAMP set at 2')
     parser.add_argument('--layouts', default=','.join(map(str, LAYOUTS)), help='banks per program')
     parser.add_argument('--multibank-prefixes', default=','.join(map(str, MULTIBANK_PREFIXES)))
     parser.add_argument('--trace-layouts', default=','.join(map(str, LAYOUTS)),
@@ -1234,11 +1267,16 @@ def parse_args(argv=None):
     args.prefixes = [int(value) for value in args.prefixes.split(',') if value]
     args.chips = [int(value) for value in args.chips.split(',') if value]
     args.edges = parse_pairs(args.edges)
+    if args.ramp is None:
+        args.ramp = list(QUICK_RAMP if args.quick else RAMP) if args.heads == 2 else []
+    else:
+        args.ramp = parse_pairs(args.ramp)
     for name in ('layouts', 'multibank_prefixes', 'trace_layouts', 'timing_layouts'):
         setattr(args, name, [int(value) for value in getattr(args, name).split(',') if value])
     unknown = (set(args.sections) - set(SECTIONS)) | (set(args.kernels) - set(KERNEL_LABELS))
     bad = ([p for p in args.prefixes + args.multibank_prefixes + [args.timing_prefix] if not 1 <= p <= 16]
            + [pair for pair in args.edges if min(CAPACITY, pair[0] + pair[1]) != CAPACITY or not 1 <= pair[1] <= 16]
+           + [pair for pair in args.ramp if not (1 <= pair[0] < CAPACITY and 1 <= pair[1] <= 16 and pair[0] + pair[1] <= CAPACITY)]
            + [n for n in args.layouts + args.trace_layouts + args.timing_layouts if n not in LAYOUTS])
     if unknown or bad or 'served' not in args.kernels[:1]:
         parser.error('unknown %s, or out-of-range %s (prefixes 1..16, edges with rows == 2048, layouts in %s, '
@@ -1249,9 +1287,10 @@ def parse_args(argv=None):
 def main(argv=None):
     global WATCHDOG
     args = parse_args(argv)
+    configure(args.heads)
     report = dict(harness='draft_slide_inplace_card_b', plan='round-fence plan S0.1 (M-F0)', passed=False,
                   failures=[], kernels=[], forms={}, form=None, cases=[], multibank=[], cache={}, trace=[],
-                  timing={}, args={k: str(v) for k, v in vars(args).items()})
+                  timing={}, heads=args.heads, args={k: str(v) for k, v in vars(args).items()})
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
     def write(extra=None):

@@ -880,5 +880,210 @@ class RunScriptTests(unittest.TestCase):
         self.assertNotIn('docker', result.stderr.lower())
 
 
+# ---------------------------------------------------------------------------------------------
+# The four-card width: --heads 2 (banks (1, 2, 2048, 128), 8 workers a bank, layouts 8 / 16 / 40 / 80 workers), and the ramp.
+# ---------------------------------------------------------------------------------------------
+
+class TwoHeadCase(unittest.TestCase):
+    """configure(2) for the test, and the pair's width put back after it (the module's globals are the harness's width)."""
+
+    def setUp(self):
+        self.assertEqual((card.HEADS, card.WORKERS), (4, 16))
+        card.configure(2)
+        self.addCleanup(card.configure, 4)
+
+
+class TwoHeadWidthTests(TwoHeadCase):
+    def test_the_width_follows_the_head_count_and_nothing_else_moves(self):
+        self.assertEqual((card.HEADS, card.KV_SHAPE, card.DELTA_SHAPE, card.WORKERS),
+                         (2, (1, 2, 2048, 128), (1, 2, 32, 128), 8))
+        self.assertEqual([card.layout_name(per) for per in card.LAYOUTS], ['10x8', '5x16', '2x40', '1x80'])
+        card.configure(4)
+        self.assertEqual((card.HEADS, card.KV_SHAPE, card.DELTA_SHAPE, card.WORKERS),
+                         (4, (1, 4, 2048, 128), (1, 4, 32, 128), 16))
+        self.assertEqual([card.layout_name(per) for per in card.LAYOUTS], ['10x16', '5x32', '2x80', '1x160'])
+        with self.assertRaises(ValueError):
+            card.configure(3)
+        card.configure(2)
+
+    def test_the_compare_locates_a_tile_at_two_heads(self):
+        expected = torch.zeros(card.KV_SHAPE, dtype=torch.int16)
+        got = expected.clone()
+        got[0, 1, 5 * 32 + 3, 7] = 1
+        self.assertEqual(card.compare(torch, got, expected)['tiles'], [[1, 5]])
+
+
+class TwoHeadMirrorTests(TwoHeadCase):
+    def test_both_kernels_give_the_oracle_out_of_place_and_in_place_at_two_heads(self):
+        active = card.random_bits(torch, card.KV_SHAPE, 31)
+        delta = card.random_bits(torch, card.DELTA_SHAPE, 32)
+        cases = [(2048, prefix) for prefix in range(1, 17)] + list(card.EDGES) + list(card.RAMP)
+        for kind in ('scalar', 'direct'):
+            for history, prefix in cases:
+                with self.subTest(kind=kind, history=history, prefix=prefix):
+                    expected = card.oracle(torch, active, delta, history, prefix)
+                    self.assertEqual(tuple(expected.shape), card.KV_SHAPE)
+                    self.assertTrue(torch.equal(slide(kind, active, delta, history, prefix, False), expected))
+                    self.assertTrue(torch.equal(slide(kind, active, delta, history, prefix, True), expected))
+
+    def test_the_backwards_walk_is_caught_in_place_at_two_heads(self):
+        active = card.random_bits(torch, card.KV_SHAPE, 33)
+        delta = card.random_bits(torch, card.DELTA_SHAPE, 34)
+        for kind in ('scalar', 'direct'):
+            for prefix in (1, 16):
+                with self.subTest(kind=kind, prefix=prefix):
+                    expected = card.oracle(torch, active, delta, 2048, prefix)
+                    self.assertTrue(torch.equal(slide(kind, active, delta, 2048, prefix, False, 'descending'), expected))
+                    self.assertFalse(card.compare(torch, slide(kind, active, delta, 2048, prefix, True, 'descending'),
+                                                  expected)['exact'])
+
+    def test_no_bank_page_is_read_after_its_worker_wrote_it_for_all_eight_workers(self):
+        for kind in ('scalar', 'direct'):
+            for history in HISTORIES:
+                for prefix in range(1, 33):
+                    for worker in range(card.WORKERS):
+                        self.assertEqual(card.in_place_hazards(kind, history, prefix, worker), [],
+                                         (kind, history, prefix, worker))
+            self.assertTrue(card.in_place_hazards(kind, 2048, 16, 7, order='descending'))
+
+    def test_eight_workers_own_disjoint_pages_of_two_heads(self):
+        for kind in ('scalar', 'direct'):
+            for history, prefix in ((2048, 16), (2047, 2), (31, 2), (100, 7)):
+                seen = {}
+                for worker in range(card.WORKERS):
+                    head, column = divmod(worker, card.COLUMNS)
+                    for tile, reads, write in card.worker_accesses(kind, history, prefix, worker):
+                        pages = {page for source, page in reads if source == 'bank'} | ({write} if write is not None else set())
+                        for page in pages:
+                            self.assertEqual((page % card.COLUMNS, page // card.COLUMNS // card.TILES), (column, head))
+                            self.assertEqual(seen.setdefault(page, worker), worker)
+                        for source, page in reads:
+                            if source == 'delta':
+                                self.assertEqual(page, head * card.COLUMNS + column)
+                self.assertTrue(all(page < card.HEADS * card.TILES * card.COLUMNS for page in seen))
+
+
+class TwoHeadProgramTests(TwoHeadCase):
+    def setUp(self):
+        super().setUp()
+        self.fake = FakeTtnn()
+        self.kernel = str(CI / 'draft_kv_slide.cpp')
+
+    def test_one_bank_out_of_place_is_the_four_card_transports_program_for_each_chip(self):
+        """The harness's program at two heads is draft_kv_slide_tp.prepare's per-chip program, field for field."""
+        import draft_kv_slide_tp
+        from tp_test_support import four_cards
+
+        fake = self.fake
+        shards = [[device_tensor(fake, shape, 200 + 10 * chip + index) for chip in range(4)]
+                  for index, shape in enumerate((card.KV_SHAPE, card.DELTA_SHAPE, card.KV_SHAPE))]
+        active, delta, spare = (TwoChip(parts) for parts in shards)
+        captured = []
+        fake.generic_op = lambda tensors, program: captured.append((tensors, program))
+        mesh = FakeDevice(fake)
+        with mock.patch.dict(sys.modules, {'ttnn': fake}), four_cards():
+            for history, prefix in ((2048, 16), (2047, 2), (31, 2), (100, 7)):
+                captured.clear()
+                draft_kv_slide_tp.prepare(mesh, active, delta, spare, history_rows=history, prefix=prefix)()
+                (tensors, served), = captured
+                self.assertEqual(tensors, [active, delta, spare])
+                served = describe(served)
+                self.assertEqual(len(served), 4)
+                for chip in range(4):
+                    mine = describe(card.build_program(fake, (11, 10), self.kernel,
+                                                       [tuple(parts[chip] for parts in shards)], history_rows=history,
+                                                       prefix=prefix, geometry_of=draft_kv_slide_tp.geometry, in_place=False))
+                    self.assertEqual(list(mine.values()), [served[((0, chip), (0, chip))]], (history, prefix, chip))
+
+    def test_ten_banks_are_one_eighty_worker_program_and_five_banks_forty(self):
+        fake = self.fake
+        banks = [(device_tensor(fake, card.KV_SHAPE, 10 + i), device_tensor(fake, card.DELTA_SHAPE, 20 + i)) for i in range(10)]
+        (program,) = describe(card.build_program(fake, (11, 10), self.kernel, [(b, d, b) for b, d in banks], history_rows=2048,
+                                                 prefix=9, geometry_of=draft_kv_slide.geometry, in_place=True)).values()
+        self.assertEqual(len(program['cores']), 80)
+        for index in range(80):
+            bank, delta = banks[index // 8]
+            self.assertEqual(program['runtime'][(index % 11, index // 11)],
+                             [bank.address, delta.address, bank.address, 2048, 9, 9, 2048, index % 8])
+        (half,) = describe(card.build_program(fake, (11, 10), self.kernel, [(b, d, b) for b, d in banks[:5]], history_rows=2048,
+                                              prefix=9, geometry_of=draft_kv_slide.geometry, in_place=True)).values()
+        self.assertEqual(len(half['cores']), 40)
+
+    def test_the_pairs_shapes_are_refused_at_two_heads(self):
+        fake = self.fake
+        four = FakeTensor(fake, torch.zeros((1, 4, 2048, 128), dtype=torch.bfloat16), True)
+        delta = device_tensor(fake, card.DELTA_SHAPE, 2)
+        with self.assertRaises(card.Unsupported):
+            card.build_program(fake, (11, 10), self.kernel, [(four, delta, four)], history_rows=2048, prefix=4,
+                               geometry_of=draft_kv_slide.geometry, in_place=True)
+
+
+class TwoHeadArgumentTests(unittest.TestCase):
+    def parse(self, *argv):
+        return card.parse_args(['--out', 'report.json', *argv])
+
+    def test_the_ramp_is_off_at_the_pairs_width_and_on_by_default_at_two_heads(self):
+        self.assertEqual(self.parse().ramp, [])
+        self.assertEqual(self.parse().heads, 4)
+        self.assertEqual(self.parse('--heads', '2').ramp, list(card.RAMP))
+        self.assertEqual(self.parse('--heads', '2', '--quick').ramp, list(card.QUICK_RAMP))
+        self.assertEqual(self.parse('--heads', '2', '--ramp', '5:3').ramp, [(5, 3)])
+        self.assertEqual(self.parse('--heads', '2', '--ramp', '').ramp, [])
+
+    def test_the_ramp_keeps_every_row_and_stays_in_the_window(self):
+        for text in ('2048:1', '2040:16', '0:1', '5:17', '5:0'):
+            with self.subTest(text=text), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                self.parse('--heads', '2', '--ramp', text)
+        for history, prefix in card.RAMP + card.QUICK_RAMP:
+            self.assertTrue(1 <= history < 2048 and 1 <= prefix <= 16 and history + prefix <= 2048, (history, prefix))
+
+    def test_the_quick_pass_still_thins_the_matrix_at_two_heads(self):
+        args = self.parse('--heads', '2', '--quick')
+        self.assertEqual((args.prefixes, args.chips, args.layouts, args.trace_layouts), ([1, 2, 15, 16], [0], [1, 5], [5]))
+
+
+class TwoHeadFlowTests(unittest.TestCase):
+    """The whole harness at two heads on the fake device: every section, the ramp cases, and the layouts of 8 to 80 workers."""
+
+    run_harness = FlowTests.run_harness
+    tearDown = FlowTests.tearDown
+
+    def setUp(self):
+        FlowTests.setUp(self)
+        self.addCleanup(card.configure, 4)
+
+    def test_every_section_runs_and_passes_at_two_heads_with_the_ramp(self):
+        extra = ['--heads', '2', '--prefixes', '1,16', '--chips', '0,1', '--edges', '2047:2', '--ramp', '17:16,2000:16,1:1',
+                 '--layouts', '1,2,5,10', '--multibank-prefixes', '16', '--trace-layouts', '10,5', '--trace-replays', '1',
+                 '--timing-layouts', '1,10', '--iters', '1', '--warmup', '1']
+        status, report, log = self.run_harness(FakeTtnn(), extra)
+        self.assertEqual(status, 0, report['failures'])
+        self.assertEqual(report['heads'], 2)
+        self.assertEqual(len(report['cases']), 2 * (2 + 1 + 3) * 2)      # kernels x (prefixes + edge + ramp) x chips
+        self.assertTrue(all(case['all_exact'] for case in report['cases']))
+        self.assertEqual([m['layout'] for m in report['multibank'] if m['kernel'] == 'served'], ['10x8', '5x16', '2x40', '1x80'])
+        self.assertEqual(sorted(t['layout'] for t in report['trace']), ['1x80', '2x40'])
+        self.assertTrue(all(t['all_exact'] for t in report['trace']))
+        variants = report['timing']['variants']
+        self.assertEqual(variants['inplace_1x80']['workers_per_program'], 80)
+        self.assertEqual(variants['inplace_10x8']['workers_per_program'], 8)
+        decision = report['decision']
+        self.assertEqual((decision['heads'], decision['ramp_cases'], decision['ramp_identical']), (2, 12, 12))
+        self.assertEqual(decision['verified_layouts'], ['1x80', '2x40'])
+        self.assertTrue(decision['bytes_identical'])
+        self.assertFalse(decision['go'], 'the thin matrix is not the served matrix')
+
+    def test_the_full_matrix_at_two_heads_says_go_on_the_fake_device(self):
+        extra = ['--heads', '2', '--kernels', 'served', '--prefixes', ','.join(map(str, card.PREFIXES)),
+                 '--multibank-prefixes', '16', '--trace-replays', '1', '--timing-layouts', '10', '--iters', '1', '--warmup', '1']
+        status, report, log = self.run_harness(FakeTtnn(), extra)
+        self.assertEqual(status, 0, report['failures'])
+        decision = report['decision']
+        self.assertTrue(decision['full_matrix'], decision['missing'])
+        self.assertEqual(decision['ramp_cases'], len(card.RAMP) * 2)
+        self.assertEqual(decision['ramp_cases'], decision['ramp_identical'])
+        self.assertIn('1x80', decision['verified_layouts'])
+
+
 if __name__ == '__main__':
     unittest.main()

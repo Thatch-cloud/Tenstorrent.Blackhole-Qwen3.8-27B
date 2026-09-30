@@ -216,9 +216,9 @@ class PackedAnyProfileTest(unittest.TestCase):
         # (the ring fabric, the bfloat16 drafter), and the four batched-draft profiles (tp4/draft).
         self.assertEqual([name for name in names if EXTENT_FLAG in self.load(name)['env']],
                          ['c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-tp4',
-                          'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
+                          'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-noslide',
                           'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring',
-                          'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs',
+                          'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs',
                           'c2-packed-tp4-speed-quad'])
         for name in names:
             env = self.load(name)['env']
@@ -513,7 +513,7 @@ MMRS_PROFILES = ('general-tp4-mmrs', 'general-tp4-ring-mmrs')
 FAST_TP4_PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16',
                      'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
                      'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-gate-quad',
-                     'c2-packed-tp4-gate-pairs')
+                     'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad')
 # The bring-up switches every TP4 profile carries in its env (see the profiles' descriptions): the fused prefill
 # out-projection off (general-tp4-mmrs is the arm that turns it on) and the prefill conv audited for four chunks.
 TP4_BRINGUP_ENV = {'QWEN_GDN_PREFILL_MMRS': '0', 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT': '4'}

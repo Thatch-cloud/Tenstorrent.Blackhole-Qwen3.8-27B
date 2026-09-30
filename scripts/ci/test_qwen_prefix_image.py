@@ -46,7 +46,10 @@ GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate
                     'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
                     # the batched-draft window's four arms (tp4/draft)
                     'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-gate-quad',
-                    'c2-packed-tp4-gate-pairs')
+                    'c2-packed-tp4-gate-pairs',
+                    # the fused-commit window's six arms (tp4/fcommit)
+                    'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad',
+                    'c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
 STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate')
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')
