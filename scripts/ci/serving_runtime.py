@@ -187,6 +187,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # QWEN_FAST_PADDED_BLOCK (default off): the 64-row block's fewest live users per round, or
     # None. Refused here at any other shape, before anything is built, like the single copy.
     padded_min_users = padded_block_admission(policy)
+    # QWEN_FAST_SOLO_LANE (D0, default off; strictly '0' or '1'): the one-user 16-row block beside M3, gate only. Refused
+    # here, before anything is built, at any shape, width or flag set serving_solo_lane does not admit; off, nothing in
+    # this attach differs from before it existed (not even the import).
+    solo_lane = None
+    if os.environ.get('QWEN_FAST_SOLO_LANE', '0') != '0':
+        import serving_solo_lane
+
+        solo_lane = serving_solo_lane.solo_lane_admission(m3_shape(policy), log=pindiag)
     # QWEN_FAST_PACKED_CAPTURE_POSITION (S2 G3b, gate only, default unset): parsed here, before
     # anything is built; each block refuses a position its capacity cannot capture at.
     capture_position = packed_capture_position()
@@ -352,6 +360,13 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # so its multiplicity is named separately, and the pool lends each block asking for
         # it its OWN independent replay table set (ServingBufferPool.packed_replay).
         distinct_shapes = tuple(dict.fromkeys((shape.users, shape.rows_per_user) for shape in packed_shapes))
+        solo_shape_value = None
+        if solo_lane is not None:
+            # D0: the pool also lends the solo block its own one-user extent storage (a (1, 16) set, beside M3's (4, 16)).
+            from packed_shapes import solo_shape
+
+            solo_shape_value = solo_shape(page_width)
+            distinct_shapes = distinct_shapes + ((solo_shape_value.users, solo_shape_value.rows_per_user),)
         if packed_shapes:
             # The packed block's own replay grouping (QWEN_FAST_REPLAY_GROUP_ROWS), which
             # may differ from the per-request bucket slots' fixed four-row grouping above -
@@ -468,20 +483,34 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 packed_blocks.append(packed_block)
                 memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)
                 slot += shape.users
+            # D0: the one-user block, after M3 (a block is built before any request exists, and the pool's slot 0 is
+            # bound by carry identity to M3's segment 0 AND to this block's only segment), over slot 0 alone.
+            solo_block = None
+            if solo_lane is not None:
+                solo_block = PackedVerifierEngine(operations, model, helpers, sampler, pool=pool, shared_weights=weights,
+                                                  shape=solo_shape_value, feature_taps=TARGET_TAPS,
+                                                  pool_slots=(solo_lane['slot'],),
+                                                  **({'capture_position': capture_position}
+                                                     if capture_position is not None else {}))
+                scopes.callback(solo_block.close)
+                memory_ledger.record('P6', point='solo', packed_block=solo_block)
             # S2: every block must be the extent block under the flag, and none may be without it. The
             # block keys on the pool's storage alone (PackedVerifierEngine.extent), so this is the one
             # attach-time proof that the flag reached the storage and the storage the block (design W2,
             # W3); refused before the lifecycle admits a request, and the scopes close what was built.
-            extents = [getattr(packed_block, 'extent', False) for packed_block in packed_blocks]
+            extents = [getattr(packed_block, 'extent', False)
+                       for packed_block in packed_blocks + ([solo_block] if solo_block is not None else [])]
             if any(value is not extent_replay for value in extents):
                 raise ValueError('%s=%d, but the packed blocks built are extent=%r'
                                  % (EXTENT_REPLAY_FLAG, int(extent_replay), extents))
             # The step bound to its block (or blocks), carrying the per-round ticket-width
             # policy the worker hook asks before drafting.
-            packed_step = PackedStep(packed_blocks if four_as_two else packed_blocks[0])
+            packed_step = PackedStep(packed_blocks if four_as_two else packed_blocks[0],
+                                     **({'solo': solo_block} if solo_block is not None else {}))
             step_description = dict(describe_packed_step(),
                 **(dict(blocks=[packed_block.describe() for packed_block in packed_blocks]) if four_as_two
-                   else dict(block=packed_blocks[0].describe())))
+                   else dict(block=packed_blocks[0].describe())),
+                **(dict(solo=solo_block.describe()) if solo_block is not None else {}))
         elif packed_requested:
             step_description = dict(step_description,
                 packed_block_skipped='no packed block shape for %d scheduler requests' % policy['scheduler_requests'])
@@ -489,7 +518,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # The executed path is the admitted one (memory graft-mounted-is-not-graft-executed): every block
             # is the extent block and every segment reader reports runtime_extent, or the attach fails here,
             # before the lifecycle admits a request (the scopes close the block, the weights and the pool).
-            packed_any_admission.admit_blocks(packed_blocks, log=pindiag)
+            packed_any_admission.admit_blocks(packed_blocks + ([solo_block] if solo_block is not None else []),
+                                              log=pindiag)
         # One line with every pre-trace address - the pooled history pairs, each named
         # shared weight and, when built, the packed block's taps, checkpoints and carries -
         # so a diverged address from the shard check can be placed against what was

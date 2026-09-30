@@ -1244,14 +1244,20 @@ class ProvenanceTests(unittest.TestCase):
         # ...and c2-packed-tp4-gate, the first four-card S2 runs, gate only until packed_any_evidence_tp4.json records them.
         # ...and the S2 window's three arms: c2-packed-tp4-gate under the ring fabric and with the bfloat16 drafter, and
         # general-tp4-ring-mmrs, the G1 defaults check.
-        self.assertEqual(gated, ["('boot', 'c2-packed-tp4-gate')", "('boot', 'c2-packed-tp4-gate-bf16')",
+        # ...and the lanes window's five gate arms (c2-packed-tp4-time-gate, -solo-gate, -solo-time-gate, -lanes-gate,
+        # -lanes-time-gate).
+        lanes = ('c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate', 'c2-packed-tp4-solo-gate',
+                 'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-time-gate')
+        self.assertEqual(gated, sorted(["('boot', 'c2-packed-tp4-gate')", "('boot', 'c2-packed-tp4-gate-bf16')",
                                  "('boot', 'c2-packed-tp4-gate-ring')", "('boot', 'general-prefix-eager')",
                                  "('boot', 'general-tp4-bench')", "('boot', 'general-tp4-mmrs')",
                                  "('boot', 'general-tp4-ring-mmrs')",
                                  "('environment', 'c2-packed-tp4-gate')", "('environment', 'c2-packed-tp4-gate-bf16')",
                                  "('environment', 'c2-packed-tp4-gate-ring')", "('environment', 'general-prefix-eager')",
                                  "('environment', 'general-tp4-bench')", "('environment', 'general-tp4-mmrs')",
-                                 "('environment', 'general-tp4-ring-mmrs')"])
+                                 "('environment', 'general-tp4-ring-mmrs')"]
+                                 + ["('boot', '%s')" % name for name in lanes]
+                                 + ["('environment', '%s')" % name for name in lanes]))
         runs = []
         real = provenance.Docker()
         real.run = lambda arguments, timeout=None: runs.append(list(arguments)) or (0, 'C2ENV {}\n', '')

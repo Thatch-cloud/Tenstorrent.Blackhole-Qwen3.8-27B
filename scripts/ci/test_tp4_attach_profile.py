@@ -53,7 +53,9 @@ import tp_shapes
 from test_c2_packed_tp4_profiles import image_env, profiles
 
 HERE = Path(__file__).resolve().parent
-PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16')
+PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16',
+            'c2-packed-tp4-time-gate', 'c2-packed-tp4-solo-gate', 'c2-packed-tp4-solo-time-gate',
+            'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate')
 RING_DESCRIPTOR = HERE / 'qwen_p150x4_ring_mesh_graph_descriptor.textproto'
 
 
@@ -62,6 +64,8 @@ def environment(name):
     environ = dict(image_env())
     contract.apply_environment(dict(profiles()[name], name=name), environ)
     environ['TT_METAL_HOME'] = str(HERE)
+    if profiles()[name].get('gate_only') is True:
+        environ['QWEN_C2_GATE'] = '1'      # what c2_serving_gate.agent_shape adds to a gate-only profile's container
     return environ
 
 
@@ -141,6 +145,7 @@ class Attach:
 
             def __init__(self, *args, **options):
                 seen['engines'].append(options.get('shape'))
+                seen.setdefault('block_options', []).append(dict(options))
 
             def describe(self):
                 return {}
@@ -169,6 +174,10 @@ class Attach:
             def __init__(self, *args, **options):
                 pass
 
+        def packed_step(blocks, **options):
+            seen['step'] = (blocks, dict(options))
+            return SimpleNamespace(blocks=blocks, **options)
+
         windows = dict(report_sha256='windows', passed=True)
         down = dict(report_sha256=mlp_down_grid_gate.REPORT_SHA256)
         native = contextmanager(lambda *args, **kwargs: (yield {}))
@@ -192,7 +201,7 @@ class Attach:
                     (serving_runtime, 'dram_line', lambda pool: ''),
                     (serving_runtime, 'register_dram_admission', lambda pool: (lambda: None)),
                     (gdn_snapshot, 'ActiveSnapshot', Snapshot), (packed_verifier, 'PackedVerifierEngine', Block),
-                    (serving_packed_step, 'PackedStep', lambda blocks: SimpleNamespace(blocks=blocks)),
+                    (serving_packed_step, 'PackedStep', packed_step),
                     (packed_any_admission, 'admit', lambda *args, **kwargs: {}),
                     (packed_any_admission, 'admit_pool', lambda *args, **kwargs: None),
                     (packed_any_admission, 'admit_blocks', lambda *args, **kwargs: None),
@@ -240,7 +249,9 @@ class AttachTests(unittest.TestCase):
                     self.assertEqual(audit['target']['direct']['disabled'], 'four-card profile')
                     self.assertEqual(audit['target']['direct']['hits'], 0)
                     self.assertEqual(seen['pool']['extent_replay'], True)
-                    self.assertEqual(len(seen['engines']), 1, 'one 64-row block over four seats')
+                    solo = 'solo' in name or 'lanes' in name
+                    self.assertEqual(len(seen['engines']), 2 if solo else 1,
+                                     'one 64-row block over four seats, and the one-user block beside it under the solo lane')
                 self.assertEqual(seen['links_after'], seen['links_before'])
                 self.assertTrue(seen['lifecycle'])
 

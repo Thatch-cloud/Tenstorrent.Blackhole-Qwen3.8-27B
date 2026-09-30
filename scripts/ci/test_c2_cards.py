@@ -38,7 +38,8 @@ class JobTests(unittest.TestCase):
 
     def test_the_tp4_profiles_are_the_profiles_that_name_the_mesh(self):
         self.assertEqual(TP4, ['c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-ring',
-                               'general-prefix-tp4', 'general-prefix-tp4-131k', 'general-tp4', 'general-tp4-131k',
+                               'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate', 'c2-packed-tp4-solo-gate',
+                               'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-time-gate', 'general-prefix-tp4', 'general-prefix-tp4-131k', 'general-tp4', 'general-tp4-131k',
                                'general-tp4-bench', 'general-tp4-mmrs', 'general-tp4-ring-mmrs'])
         self.assertIn('general', PAIR)
 
