@@ -53,7 +53,9 @@ drafter and every other shape pass straight through.
   replaced on the ccl module and in every loaded module that holds the function (`from ccl import tt_all_reduce` binds a copy in
   the graft's attention, GDN and MLP modules), the same identity sweep the other four-card twins use. The graft files, sha-pinned on
   the serving path, are untouched. The pair never installs it.
-* Scoped by `ModelBatch.collective_scope()` around the block's `_forward_decode`: nothing at the pair or within one tile.
+* Scoped by `tile_collective_tp.scoped_run`, which the same install wraps around `ModelBatch.run` (a class attribute: `model_batch.py`
+  is in the serving bundle inventory that `test_quad_draft` holds byte for byte, so it is not edited): nothing at the pair or within
+  one tile.
 * Guarded: the scope refuses the round unless every block-wide all-reduce was split (128 per forward: 16 wo + 48 GDN out + 64 w2;
   64 when the MLP is not native at the block's rows, its two-tile form already reducing 32 rows at a time). A wrapper that was never
   bound where the layers look it up would otherwise run the inexact reduction silently.

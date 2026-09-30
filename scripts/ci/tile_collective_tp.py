@@ -15,15 +15,17 @@ WHAT. TileSplitAllReduce wraps the model's own tt_all_reduce. Inside block_scope
 (rows a whole number of tiles beyond one) as one call per 32-row tile - the very call, with the very arguments, the
 sequential engine makes on its one tile - and joins the results on the row axis. Everything else (prefill, the
 sequential engine, the drafter, any other shape) passes straight through. It is installed by tp_addresses.install(),
-which the process runs at QWEN_FAST_TP != 2 only, so the pair never sees it; model_batch.ModelBatch.run enters the
-scope at four cards, and refuses the round unless every all-reduce the block issues was split.
+which the process runs at QWEN_FAST_TP != 2 only, so the pair never sees it. The same install wraps
+model_batch.ModelBatch.run (a class attribute; the pinned file is not edited) so that the block's forward runs inside the
+scope, and the scope refuses the round unless every all-reduce the block issues was split.
 
 The wrapper consumes its input, as tt_all_reduce does (ccl.py deallocates it after the gather).
 
 Stdlib only; ttnn is imported on first use.
 """
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+import functools
 import importlib
 import sys
 
@@ -138,11 +140,60 @@ def block_scope(rows, expected=None, log=None):
         log('[PINDIAG] tile-split all-reduce: {} of {} rows in {} tiles each', engaged, rows, rows // TILE)
 
 
-def install(module=None):
+class ClassAttributes:
+    """A class's attributes through the item interface tp_addresses.uninstall restores namespaces by."""
+
+    def __init__(self, cls):
+        self.cls = cls
+
+    def __setitem__(self, name, value):
+        setattr(self.cls, name, value)
+
+
+def scope_for(batch):
+    """The block scope of a ModelBatch's forward, or nothing within one tile. Inside it the model's tt_all_reduce (this
+    module's wrapper) splits every block-wide call, and the scope refuses the round unless all of them were split: the
+    mixer's (the 16 wo projections and the 48 GDN output projections) and, when the MLP is native at the block's rows, the
+    64 w2 reductions (the non-native MLP already runs two 32-row calls)."""
+    rows = getattr(batch, 'rows', None)
+    if type(rows) is not int or rows <= TILE:
+        return nullcontext()
+    from dflash_device import pindiag
+
+    layers = len(batch.model.layers)
+    return block_scope(rows, expected=layers * (2 if batch.native_m3 else 1), log=pindiag)
+
+
+def scoped_run(original):
+    """ModelBatch.run inside the batch's block scope; `original` is the pinned method, called unchanged."""
+
+    @functools.wraps(original)
+    def run(self, *args, **kwargs):
+        with scope_for(self):
+            return original(self, *args, **kwargs)
+
+    run.tile_scope_of = original
+    return run
+
+
+def install_scope():
+    """Wrap model_batch.ModelBatch.run so every block forward runs in its scope. -> [(namespace, name, original)], [] when
+    already wrapped."""
+    import model_batch
+
+    current = model_batch.ModelBatch.run
+    if getattr(current, 'tile_scope_of', None) is not None:
+        return []
+    model_batch.ModelBatch.run = scoped_run(current)
+    return [(ClassAttributes(model_batch.ModelBatch), 'run', current)]
+
+
+def install(module=None, scope=True):
     """Bind the wrapper in place of the model's tt_all_reduce: on the ccl module and on every loaded module whose
-    global of that name IS the original function (`from ccl import tt_all_reduce` binds a copy at import).
-    -> [(namespace, name, original)] for each binding changed, so tp_addresses can put them back; [] when the ccl
-    module is not importable here (no model tree: the CPU suite) or already carries the wrapper."""
+    global of that name IS the original function (`from ccl import tt_all_reduce` binds a copy at import), and (scope)
+    wrap ModelBatch.run in the block scope. -> [(namespace, name, original)] for each binding changed, so tp_addresses can
+    put them back; [] when the ccl module is not importable here (no model tree: the CPU suite, where nothing is
+    wrapped either) or already carries the wrapper."""
     if module is None:
         try:
             module = importlib.import_module(CCL_MODULE)
@@ -164,4 +215,6 @@ def install(module=None):
     if not any(namespace is module.__dict__ for namespace, _, _ in changed):
         module.__dict__[NAME] = wrapper
         changed.append((module.__dict__, NAME, original))
+    if scope:
+        changed += install_scope()
     return changed

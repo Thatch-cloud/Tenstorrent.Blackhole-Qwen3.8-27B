@@ -265,9 +265,13 @@ class TheInstall(unittest.TestCase):
             sys.modules[module.__name__] = module
         self.addCleanup(lambda: [sys.modules.pop(module.__name__, None)
                                  for module in (self.ccl, self.holder, self.other, self.alias)])
+        import model_batch
+        self.model_batch = model_batch
+        self.run_before = model_batch.ModelBatch.run
+        self.addCleanup(lambda: setattr(model_batch.ModelBatch, 'run', self.run_before))
 
     def test_the_ccl_name_and_every_module_holding_the_function_are_rebound(self):
-        changed = collective.install(self.ccl)
+        changed = collective.install(self.ccl, scope=False)
         self.assertIsInstance(self.ccl.tt_all_reduce, collective.TileSplitAllReduce)
         self.assertIs(self.holder.tt_all_reduce, self.ccl.tt_all_reduce)
         self.assertIs(self.ccl.tt_all_reduce.original, self.original)
@@ -279,18 +283,24 @@ class TheInstall(unittest.TestCase):
     def test_a_second_install_changes_nothing(self):
         collective.install(self.ccl)
         self.assertEqual(collective.install(self.ccl), [])
+        self.assertEqual(collective.install_scope(), [])
 
-    def test_without_the_model_tree_nothing_is_bound(self):
+    def test_without_the_model_tree_nothing_is_bound_and_model_batch_run_is_the_pinned_method(self):
         with patch.dict(sys.modules, {'models': None}):
             self.assertEqual(collective.install(), [])
+        self.assertIs(self.model_batch.ModelBatch.run, self.run_before)
 
-    def test_the_four_card_startup_seam_binds_it_and_uninstall_puts_it_back(self):
+    def test_the_install_wraps_model_batch_run_and_uninstall_puts_the_pinned_method_back(self):
         with patch.dict(os.environ, {'QWEN_FAST_TP': '4'}), patch.object(collective, 'CCL_MODULE', 'fake_ccl'):
             tp_addresses.install()
             try:
+                wrapped = self.model_batch.ModelBatch.run
+                self.assertIsNot(wrapped, self.run_before)
+                self.assertIs(wrapped.tile_scope_of, self.run_before)
                 self.assertIsInstance(self.holder.tt_all_reduce, collective.TileSplitAllReduce)
             finally:
                 tp_addresses.uninstall()
+        self.assertIs(self.model_batch.ModelBatch.run, self.run_before)
         self.assertIs(self.holder.tt_all_reduce, self.original)
         self.assertIs(self.ccl.tt_all_reduce, self.original)
 
@@ -299,48 +309,63 @@ class TheInstall(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tp_addresses.install()
         self.assertIs(self.ccl.tt_all_reduce, self.original)
+        self.assertIs(self.model_batch.ModelBatch.run, self.run_before)
 
 
 class TheBlocksScope(unittest.TestCase):
-    """model_batch.ModelBatch.collective_scope: at four cards only, and only for a block wider than a tile."""
+    """scope_for and scoped_run: a ModelBatch forward inside the block scope, only for a block wider than a tile."""
 
-    def scope(self, rows, native_m3=True, layers=64):
-        from model_batch import ModelBatch
-        fake = types.SimpleNamespace(rows=rows, native_m3=native_m3, model=types.SimpleNamespace(layers=[None] * layers))
-        return ModelBatch.collective_scope(fake)
+    def batch(self, rows, native_m3=True, layers=64):
+        return types.SimpleNamespace(rows=rows, native_m3=native_m3, model=types.SimpleNamespace(layers=[None] * layers))
 
-    def test_the_pair_gets_no_scope_at_any_width(self):
-        with pair():
-            for rows in (4, 32, 64):
-                with self.scope(rows):
-                    self.assertIsNone(collective._STATE['rows'])
+    def test_within_one_tile_there_is_nothing_to_split(self):
+        for rows in (1, 4, 16, 32):
+            with collective.scope_for(self.batch(rows)):
+                self.assertIsNone(collective._STATE['rows'])
 
-    def test_within_one_tile_there_is_nothing_to_split_at_four_cards(self):
-        with patch.dict(os.environ, {'QWEN_FAST_TP': '4'}):
-            for rows in (1, 4, 16, 32):
-                with self.scope(rows):
-                    self.assertIsNone(collective._STATE['rows'])
-
-    def test_a_wide_block_at_four_cards_splits_and_expects_all_128_reductions(self):
-        with patch.dict(os.environ, {'QWEN_FAST_TP': '4'}):
-            with self.assertRaises(AssertionError) as raised:
-                with self.scope(64):
-                    self.assertEqual(collective._STATE['rows'], 64)
-            self.assertIn('128 expected', str(raised.exception))
+    def test_a_wide_block_splits_and_expects_all_128_reductions(self):
+        with self.assertRaises(AssertionError) as raised:
+            with collective.scope_for(self.batch(64)):
+                self.assertEqual(collective._STATE['rows'], 64)
+        self.assertIn('128 expected', str(raised.exception))
 
     def test_without_native_m3_the_mlp_reduces_in_two_tile_calls_already(self):
-        with patch.dict(os.environ, {'QWEN_FAST_TP': '4'}):
-            with self.assertRaises(AssertionError) as raised:
-                with self.scope(64, native_m3=False):
-                    pass
-            self.assertIn('64 expected', str(raised.exception))
+        with self.assertRaises(AssertionError) as raised:
+            with collective.scope_for(self.batch(64, native_m3=False)):
+                pass
+        self.assertIn('64 expected', str(raised.exception))
 
-    def test_the_scope_is_entered_by_run_and_the_pairs_call_keywords_are_the_same(self):
+    def test_a_run_is_called_unchanged_inside_the_scope_and_returns_its_result(self):
+        seen = []
+        ring = Ring()
+        wrapper = collective.TileSplitAllReduce(ring, Operations())
+
+        def run(self, *args, **kwargs):
+            seen.append((args, kwargs, collective._STATE['rows']))
+            for _ in range(128):
+                wrapper(block(64), 'mesh', 'ccl', cluster_axis=0, dim=3, topology='Ring', memory_config='DRAM')
+            return 'result'
+
+        scoped = collective.scoped_run(run)
+        self.assertEqual(scoped(self.batch(64), sharded_logits=True), 'result')
+        self.assertEqual(seen, [((), {'sharded_logits': True}, 64)])
+        self.assertIsNone(collective._STATE['rows'])
+        self.assertIs(scoped.tile_scope_of, run)
+
+    def test_a_run_that_never_reaches_the_wrapper_is_refused(self):
+        scoped = collective.scoped_run(lambda self, **kwargs: 'unsplit result')
+        with self.assertRaises(AssertionError):
+            scoped(self.batch(64))
+        self.assertEqual(scoped(self.batch(32)), 'unsplit result')
+
+    def test_the_pinned_run_signature_and_call_are_unchanged(self):
         import inspect
         import model_batch
         source = inspect.getsource(model_batch.ModelBatch.run)
-        self.assertIn('with instance_overrides(self.bindings), mask_scope, self.collective_scope():', source)
+        self.assertIn('with instance_overrides(self.bindings), mask_scope:', source)
         self.assertIn("**({'sharded_lm_head': True} if sharded_logits else {})", source)
+        self.assertNotIn('collective', source)
+        self.assertEqual(list(inspect.signature(model_batch.ModelBatch.run).parameters), ['self', 'sharded_logits'])
 
 
 if __name__ == '__main__':
