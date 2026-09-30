@@ -273,6 +273,12 @@ class AuditCompareTests(unittest.TestCase):
         self.assertTrue(found[0].startswith('merged output: placement'))
         self.assertTrue(any('shape' in text for text in found))
 
+    def records(self, entries_of=None):
+        full = lambda: dict(segment_results=(dict(vglue_audit=[dict(label='piece user 0', mine='m', served='s')]),
+                                             dict(vglue_audit=[dict(label='piece user 1', mine='m', served='s')])),
+                            vglue_merge_audit=[dict(label='merged output', mine='m', served='s')])
+        return [(None, full(), None) for unused in range(48)]
+
     def test_audit_round_reads_the_rotation_and_raises_on_a_difference(self):
         import torch
 
@@ -280,16 +286,60 @@ class AuditCompareTests(unittest.TestCase):
         bad = good.clone()
         bad[0, 0] = 9
         tensors = {'m': good, 's': good.clone(), 'x': bad}
-        records = [(None, dict(vglue_audit=[dict(label='piece user 0', mine='m', served='s')]), None) for unused in range(48)]
+        records = self.records()
         lines = []
-        with patch('tp4_vglue.log_line', side_effect=lines.append):
-            self.assertEqual(tp4_vglue.audit_round(self.operations(tensors), records, 1), 48)
-            self.assertEqual(tp4_vglue.audit_round(self.operations(tensors), records, 2), 2)
-            records[0][1]['vglue_audit'][0]['served'] = 'x'
+        with four(), env(QWEN_FAST_TP4_GDN_GLUE='1', QWEN_FAST_TP4_VGLUE_AUDIT='1'),                 patch('tp4_vglue.log_line', side_effect=lines.append):
+            self.assertEqual(tp4_vglue.audit_round(self.operations(tensors), records, 1), 48 * 3)
+            self.assertEqual(tp4_vglue.audit_round(self.operations(tensors), records, 2), 2 * 3)
+            records[0][1]['vglue_merge_audit'][0]['served'] = 'x'
             with self.assertRaises(AssertionError):
                 tp4_vglue.audit_round(self.operations(tensors), records, 1)
         self.assertTrue(lines[0].startswith(tp4_vglue.AUDIT_MARKER) and 'layers=0-47' in lines[0])
         self.assertTrue(lines[-1].startswith(tp4_vglue.AUDIT_MISMATCH))
+
+    def test_a_declined_lever_fails_the_audit_instead_of_passing_on_what_is_left(self):
+        import torch
+
+        good = torch.arange(6, dtype=torch.int16).reshape(1, 6)
+        tensors = {'m': good, 's': good.clone()}
+        lines = []
+        with four(), env(QWEN_FAST_TP4_GDN_GLUE='1', QWEN_FAST_TP4_VGLUE_AUDIT='1'),                 patch('tp4_vglue.log_line', side_effect=lines.append):
+            records = self.records()
+            del records[3][1]['vglue_merge_audit']          # the merge declined on layer 3
+            with self.assertRaises(AssertionError):
+                tp4_vglue.audit_round(self.operations(tensors), records, 1)
+            self.assertIn('layer 3 merged output: 0 entries, expected 1', lines[-1])
+            records = self.records()
+            records[0][1]['segment_results'][1].pop('vglue_audit')   # the split declined for user 1
+            with self.assertRaises(AssertionError):
+                tp4_vglue.audit_round(self.operations(tensors), records, 1)
+            self.assertIn('layer 0 piece user 1: 0 entries', lines[-1])
+            records = [(None, dict(segment_results=({}, {})), None)] * 48   # V2 declined everywhere: nothing compared
+            with self.assertRaises(AssertionError):
+                tp4_vglue.audit_round(self.operations(tensors), records, 1)
+        self.assertFalse(any('exact=True' in line for line in lines))
+
+    def test_block_conv_requires_eight_entries_per_user(self):
+        import torch
+
+        good = torch.arange(6, dtype=torch.int16).reshape(1, 6)
+        tensors = {'m': good, 's': good.clone()}
+        block = lambda user, count: [dict(label='block conv user %d %s' % (user, name), mine='m', served='s')
+                                     for name in ('conv', 'beta', 'g', 'z', 'window 0', 'window 1', 'window 2', 'window 3')[:count]]
+        records = self.records()
+        for _, result, _ in records:
+            for user, piece in enumerate(result['segment_results']):
+                piece['vglue_block_audit'] = block(user, 8)
+        flags = dict(QWEN_FAST_TP4_GDN_GLUE='1', QWEN_FAST_TP4_GDN_BLOCK_CONV='1', QWEN_FAST_TP4_VGLUE_AUDIT='1')
+        with four(), env(**flags), patch('tp4_vglue.log_line'):
+            self.assertEqual(tp4_vglue.audit_round(self.operations(tensors), records, 2), 2 * 19)
+            records[0][1]['segment_results'][0]['vglue_block_audit'] = block(0, 5)
+            with self.assertRaises(AssertionError):
+                tp4_vglue.audit_round(self.operations(tensors), records, 1)
+
+    def test_only_levers_without_gdn_entries_leave_the_gdn_audit_idle(self):
+        with four(), env(QWEN_FAST_TP4_ATTN_FOLD='1', QWEN_FAST_TP4_VGLUE_AUDIT='1'):
+            self.assertEqual(tp4_vglue.audit_round(self.operations({}), [(None, {}, None)] * 48, 1), 0)
 
 
 class ReleaseTests(unittest.TestCase):
@@ -364,6 +414,10 @@ class ReleaseTests(unittest.TestCase):
             before = len(lines)
             self.verifier.audit_shard_values(operations, values, 2, gathered)
             self.assertEqual(len(lines), before, 'no reference recorded: nothing to compare')
+            with four(), env(QWEN_FAST_TP4_SHARD_VALUES='1', QWEN_FAST_TP4_VGLUE_AUDIT='1'):
+                with self.assertRaises(AssertionError):
+                    self.verifier.audit_shard_values(operations, values, 2, gathered)
+            self.assertIn('the gather fell back', lines[-1])
 
 
 if __name__ == '__main__':

@@ -165,20 +165,61 @@ def compare_entry(operations, entry):
     return mismatches
 
 
+def expected_entries(result, environ=None):
+    """The audit entries an audited GDN layer result must carry for the levers that are on, as {label prefix: count}: per
+    user one 'piece user k' (V2) and, when V1 is on, eight 'block conv user k ' (conv, beta, g, z, four windows), and one
+    'merged output' (V2) when the block holds two or more users. A declined or fallen-back lever leaves entries missing, so
+    the audit fails it instead of passing on what is left."""
+    pieces = result.get('segment_results') or (result,)
+    users = len(pieces)
+    want = {}
+    if enabled(GDN_GLUE, environ):
+        for user in range(users):
+            want['piece user %d' % user] = 1
+        if users >= 2:
+            want['merged output'] = 1
+    if enabled(GDN_BLOCK_CONV, environ):
+        for user in range(users):
+            want['block conv user %d ' % user] = BLOCK_ENTRIES_PER_USER
+    return want
+
+
+BLOCK_ENTRIES_PER_USER = 8
+
+
+def missing_entries(result, environ=None):
+    """Descriptions of the entries `expected_entries` names that `result` does not carry."""
+    labels = [entry['label'] for entry in audit_entries(result)]
+    found = []
+    for prefix, count in expected_entries(result, environ).items():
+        have = sum(1 for label in labels if label == prefix or (prefix.endswith(' ') and label.startswith(prefix)))
+        if have != count:
+            found.append('%s: %d entries, expected %d' % (prefix.strip(), have, count))
+    return found
+
+
 def audit_round(operations, records, round_number):
     """Compare the layers verify_trace_t2.audit_layers names for this round (every layer on round 1, then two per round in
-    rotation). Logs AUDIT_MARKER '<n> exact=True layers=<L> entries=<k>' or AUDIT_MISMATCH and raises."""
+    rotation). Every audited layer must carry the entries the engaged GDN levers imply (a lever that declined on a layer is
+    a failure, not a pass on what is left) and something must have been compared. Logs AUDIT_MARKER
+    '<n> exact=True layers=<L> entries=<k>' or AUDIT_MISMATCH and raises. With neither GDN lever on there is nothing for
+    this audit to read (V4a has its own in packed_verifier) and it returns 0 without a line."""
     import verify_trace_t2
 
+    if not enabled(GDN_GLUE):
+        return 0
     layers = verify_trace_t2.audit_layers(round_number, len(records) or verify_trace_t2.GDN_LAYERS)
     compared, mismatches = 0, []
     for layer in layers:
-        for entry in audit_entries(records[layer][1]):
+        result = records[layer][1]
+        mismatches.extend('layer %d %s' % (layer, text) for text in missing_entries(result))
+        for entry in audit_entries(result):
             compared += 1
             mismatches.extend('layer %d %s' % (layer, text) for text in compare_entry(operations, entry))
     label = verify_trace_t2.layers_label(layers)
-    if mismatches:
-        message = '%s round=%d layers=%s %s' % (AUDIT_MISMATCH, round_number, label, '; '.join(mismatches[:4]))
+    if mismatches or not compared:
+        message = '%s round=%d layers=%s %s' % (AUDIT_MISMATCH, round_number, label,
+                                               '; '.join(mismatches[:4]) or 'nothing compared')
         log_line(message)
         raise AssertionError(message)
     _AUDIT['rounds'] += 1

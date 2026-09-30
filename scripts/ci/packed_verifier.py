@@ -210,10 +210,15 @@ def diagnostic(text):
 
 def audit_shard_values(operations, output, block_rows, chip_values):
     """QWEN_FAST_TP4_SHARD_VALUES under QWEN_FAST_TP4_VGLUE_AUDIT: each chip's gathered maxima against the ttnn.max taken beside
-    them in the same trace (verify_trace_t1.shard_values), every row. Nothing to compare when the lever is off or its gather fell
-    back (no reference was recorded)."""
+    them in the same trace (verify_trace_t1.shard_values), every row. Nothing to compare when the lever is off; when it is on under
+    the audit and its gather fell back (no reference was recorded) that is a failure, V4a was not audited."""
     reference = verify_trace_t1.VALUE_REFERENCES.get(id(output[2]))
     if reference is None:
+        if tp4_vglue.audit_enabled() and tp4_vglue.enabled(tp4_vglue.SHARD_VALUES):
+            # the lever is on and audited but the gather fell back: V4a was not exercised, so the gate must not pass it
+            message = '%s site=sampler no reference: the gather fell back, V4a was not audited' % tp4_vglue.AUDIT_MISMATCH
+            diagnostic(message)
+            raise AssertionError(message)
         return
     for chip, (part, gathered) in enumerate(zip(operations.get_device_tensors(reference), chip_values)):
         rows = verify_trace_t1.compare_values(gathered, operations.to_torch(part).reshape(-1)[:block_rows])

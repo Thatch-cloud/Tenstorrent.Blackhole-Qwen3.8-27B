@@ -8,12 +8,13 @@
 # DMA), V1 (one block conv-gates launch; needs V2) and V3a (attention block fold). The levers that would change the SDPA launch
 # itself (one multi-user SDPA, K/V write folded into the attention prep) and the argmax kernel need kernel or factory work and are
 # NOT in this window: they cannot be byte-identical by construction.
-# Every saving quoted is an estimate from the profile; nothing has run on a card. Together about -13.4 ms of the 61.8 ms verify
-# and a live-4 round of about 111 ms (124.5 ms today).
+# Every saving quoted is an estimate from the profile; nothing has run on a card. The four verify levers sum to about -11.6 ms of the
+# 61.8 ms verify (C1a's -1.8 to -2.1 ms is commit time outside it): -13.4 ms per round, a live-4 round of about 111 ms (124.5 ms today).
 # Early-failure order, cheapest first: no card (G0); the timed smoke with every lever on (G1: proves the new launches run on a card
-# and the texts are coherent, and gives the number); the exactness matrix on the audited profile (G2: the S3a matrix, strict, every lever
-# audited in-trace against the served path); then the per-lever A/B timed smokes (G3z the control, G3a-e each lever alone), which are
+# and the texts are coherent, and gives the number); the exactness matrix on the audited profile (G2: the S3a matrix, strict, V2, V1 and V4a
+# audited in-trace against the served path; C1a and V3a by the offline comparison with S3a's texts, a STOP criterion); then the per-lever A/B timed smokes (G3z the control, G3a-e each lever alone), which are
 # soft: their product is the per-lever saving. G2 is a STOP: a lever that is not byte-identical is not a saving.
+# V4a may save nothing (ttnn.gather is tile based; G3b decides, and the flag stays off if it does not save).
 # After the window, offline: compare G2's solo and concurrent texts with S3a's (byte identical), and G3a-e with G3z for the per-lever
 # saving (the verify span, the commit phase, the live-4 round, medians at 4 live).
 G0-build stop
