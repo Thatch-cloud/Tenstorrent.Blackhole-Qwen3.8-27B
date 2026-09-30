@@ -555,12 +555,16 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 return from_prefill(operations, model, sampler, pages, helpers,
                     state=state, capture=capture, fixtures=fixtures, eos_ids=eos_ids,
                     collectives=collectives, buffer_pool=pool, shared_weights=weights,
-                    **(dict(capture_rows=capture_rows) if trimmed else {}))
+                    **(dict(capture_rows=capture_rows) if trimmed else {}),
+                    **(dict(parked=parked_engines) if parked_engines is not None else {}))
 
             if sticky:
                 began = time.perf_counter()
             request = create_request() if experiment is None else experiment.create(create_request)
-            if sticky:
+            # Stage E: a request rebound onto a parked engine logged the rebind's own marker in place of the sticky
+            # build time, and its engine's ledger walk ran at attach (P7p); both below are for built engines only.
+            rebound = parked_engines is not None and getattr(request, 'parked_slot', None) is not None
+            if sticky and not rebound:
                 # Sticky sessions: the engine build per request, so a gate can split a hit's TTFT into
                 # its tail prefill and the build phase 1 still pays (STICKY_ENGINE_MARKER).
                 pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}', str(state.req_id)[:48],
@@ -569,11 +573,15 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # The allocator after this request's engine and its captures: one line per
             # admitted request, so the log shows what each costs and what is left.
             pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))
-            memory_ledger.engine_admitted(str(state.req_id), engine_request=request)
+            if not rebound:
+                memory_ledger.engine_admitted(str(state.req_id), engine_request=request)
             try:
                 binding = VerifierPageBinding(request.engine, blocks, physical_pages=owner.physical_pages)
                 return FastRunnerBridge(runner, request, binding, validate_storage=owner.validate)
             except BaseException:
+                if rebound:
+                    # Stage E: a failed binding leaves the slot unfit to park; its close unparks it.
+                    request.parked_slot.unfit = 'page binding failed'
                 request.close(state.req_id)
                 raise
 
@@ -585,7 +593,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                                                              dict(parked=parked_engines))))
         lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,
             capture_factory=capture_factory, bridge_factory=bridge_factory, eos_ids=eos_ids,
-            cancelled=cancelled, packed_step=packed_step)
+            cancelled=cancelled, packed_step=packed_step,
+            **({} if parked_engines is None else dict(idle=parked_engines.idle)))
     except BaseException as failure:
         # Closing the scopes can itself raise (the block-stream scope checks at exit
         # that every layer ran the fused candidate, which nothing has at attach), and

@@ -69,8 +69,9 @@ HISTORY_ROWS = 2048
 # The serving modules Stage E edits (each must reach the C2 image through its overlay, and none may be a
 # frozen-recipe pin), and the ones it must leave byte-identical (the module docstring).
 STAGE_E_EDITS = ('verifier_engine.py', 'serving_buffer_pool.py', 'serving_runtime.py', 'serving_parked_engines.py',
-                 # E5's admission
-                 'serving_request_factory.py', 'dflash_packed_proposal_coordinator.py', 'serving_prefill_admission.py')
+                 # E4's wiring and E5's admission
+                 'serving_request_factory.py', 'serving_fast_request.py', 'serving_worker_hook.py',
+                 'dflash_packed_proposal_coordinator.py', 'serving_prefill_admission.py', 'serving_lifecycle.py')
 NEVER_EDITED = ('draft_kv_history.py', 'extent_attention_replay.py', 'serving_page_binding.py')
 
 # Every "for the request's life" or "permanent" claim in the drafter and coordinator sources, with
@@ -82,8 +83,8 @@ LIFETIME_INVARIANTS = (
          guard='packable() reads history_rows every round, so a rebound device below 2048 does not pack'),
     dict(file='dflash_packed_proposal_coordinator.py', text='2048 is monotonic and permanent once reached',
          status='changed: history_rows can fall across a rebind',
-         guard='rebind_device rebuilds a released single capture under single_proposal_bucket (one 2048 '
-               'bucket at any position); the coordinator rebuild is scoped the same way under the flag (E4)'),
+         guard='rebind_device and rebuild_single rebuild a released single capture under single_proposal_bucket '
+               '(one 2048 bucket at any position); _ensure_single_user is scoped the same way under the flag'),
     dict(file='dflash_packed_proposal_coordinator.py', text='a permanent-',
          status='unchanged: a per-round fallback, re-evaluated every round', guard=None),
     dict(file='dflash_packed_proposal_coordinator.py', text='two in a row give up for good',
@@ -100,7 +101,8 @@ LIFETIME_INVARIANTS = (
     dict(file='dflash_device.py', text='the history is marked stale for good',
          status='changed: cleared at the next rebind', guard='rebind_device'),
     dict(file='dflash_proposal_trace.py', text='for the life of this object',
-         status='unchanged: pair traces are retired when a member parks (E4, release_parked)', guard=None),
+         status='unchanged: pair traces are retired when a member parks (after_park, the coordinator\'s '
+                'release_parked), and a rebound member\'s rebind_generation retires any that were not', guard=None),
     dict(file='dflash_proposal_trace.py', text='PERMANENT, monotonic state every request',
          status='changed: per request, not per device', guard='the pair gate reads history_rows every round'),
 )
@@ -411,6 +413,10 @@ REBIND_MARKER = '[PINDIAG] parked rebind '
 UNPARKED_MARKER = '[PINDIAG] parked slot {} unparked: {}'
 REPARKED_MARKER = '[PINDIAG] parked slot {} re-parked ms={:.1f}'
 STOPPED_MARKER = '[PINDIAG] parked engines stopped at k={} of {}: short of {} (free={} largest_free={} need={})'
+# A released single-user proposal capture rebuilt when its slot parks (after a detach, or at an idle moment), or
+# kept released because the rebuild would leave the split short for the longest parked arrival.
+SINGLE_REBUILT_MARKER = '[PINDIAG] parked slot {} single rebuilt at {} ms={:.1f}'
+SINGLE_KEPT_MARKER = '[PINDIAG] parked slot {} single kept released at {}: short of {} (free={} largest_free={} need={})'
 # QWEN_FAST_GATE_DRAM_BALLAST (GATE ONLY, G-E3's ballast arm): bytes per chip held unread from the end of the parked
 # build to close, so the admissions run at the boundary of the parked need (design section 9).
 BALLAST_FLAG = 'QWEN_FAST_GATE_DRAM_BALLAST'
@@ -508,11 +514,14 @@ class ParkedSlot:
     rebindable), 'serving' (a request holds the rebound engine), 'unparked' (no parked engine: today's
     per-request builds serve the slot until it is re-parked) or 'closed'."""
 
-    def __init__(self, index, slot):
-        self.index, self.slot = index, slot
+    def __init__(self, index, slot, owner=None):
+        self.index, self.slot, self.owner = index, slot, owner
         self.device = self.engine = None
         self.state = 'unparked'
         self.rebinds = self.parks = 0
+        # E4: why the request serving the slot left it unfit to park (a failed page binding, set by the bridge
+        # factory), and why its engine refused to park (park_engine), read by park_drafter; None otherwise.
+        self.unfit = self.refusal = None
 
 
 class ParkedEngineSet:
@@ -532,9 +541,14 @@ class ParkedEngineSet:
     slot's entry when it is parked, else None (today's build, whose acquire takes that same slot).
     rebind_slot() binds a taken slot to its request; park() parks it again, or unparks it.
 
-    E5, the admission: arrival_terms are the parked terms of the slot the next request will take, asked by the
-    scheduler's predicate and the backstop. QWEN_FAST_GATE_DRAM_BALLAST (gate only) holds a ballast from the end of
-    build() to close()."""
+    E4, the serving wiring: serving_request_factory.from_prefill rebinds the taken slot (rebind_parked), and the
+    request's close parks it in two halves - park_engine for its engine, park_drafter for its device - so an
+    engine that cannot park leaves its device to be closed with it (unpark). The worker hook's detach then
+    retires the device's pair and quad drafter traces (after_park: the coordinator's release_parked) and rebuilds
+    its released single-user capture when the split allows (rebuild_single); the lifecycle's idle moment does the
+    same for every parked slot and re-parks the unparked ones (idle). E5, the admission: arrival_terms are the
+    parked terms of the slot the next request will take, asked by the scheduler's predicate and the backstop.
+    QWEN_FAST_GATE_DRAM_BALLAST (gate only) holds a ballast from the end of build() to close()."""
 
     def __init__(self, *, operations, model, sampler, helpers, pool, weights, fixtures, collectives, blocks,
                  capture_rows, components=None, environ=None, log=None):
@@ -570,7 +584,7 @@ class ParkedEngineSet:
         self.pool, self.weights, self.fixtures, self.collectives = pool, weights, fixtures, collectives
         self.capture_rows, self.components, self.environ = capture_rows, components, environ
         self.log = _log if log is None else log
-        self.slots = [ParkedSlot(index, slot) for index, slot in enumerate(pool.slots)]
+        self.slots = [ParkedSlot(index, slot, owner=self) for index, slot in enumerate(pool.slots)]
         self.unparks = self.reparks = 0
         self.attach_ms = None
         self.ledger = ReplayLedger(operations).install() if self.audit else None
@@ -798,11 +812,29 @@ class ParkedEngineSet:
     def park(self, entry, *, reason=None):
         """The request on a slot finished: park its engine (which fences first) and its device again; or,
         when either cannot park or `reason` says the request left it unfit (a failed page binding), unpark the
-        slot. Returns None when parked, else why it was unparked."""
+        slot. Returns None when parked, else why it was unparked. park_engine then park_drafter."""
+        if reason is not None:
+            entry.unfit = reason
+        self.park_engine(entry)
+        return self.park_drafter(entry)
+
+    def park_engine(self, entry):
+        """FastRequest's release_engine for a rebound slot (serving_request_factory.rebind_parked), where close()
+        called engine.close(): the engine parks - fencing first, as close() does - unless the request left the slot
+        unfit; why it cannot is kept for park_drafter, which closes it with the device. An engine with a block in
+        flight raises as close() raises, and the slot stays serving, as today's request stays open."""
         if entry.state != 'serving' or entry not in self.slots:
             raise ValueError('Only a serving slot of this set can park')
-        if reason is None:
-            reason = entry.engine.park()
+        entry.refusal = entry.unfit if entry.unfit is not None else entry.engine.park()
+
+    def park_drafter(self, entry):
+        """FastRequest's release_drafter for a rebound slot, after park_engine: the device parks (park_device:
+        a fence, its pending proposal dropped, its pooled slot verified) and the slot is parked; or, when the engine
+        or the device cannot park, the slot is unparked - both closed as today's close closes them, the slot back
+        to the pool - until an idle moment re-parks it. Returns None when parked, else why it was unparked."""
+        if entry.state != 'serving' or entry not in self.slots:
+            raise ValueError('Only a serving slot of this set can park')
+        reason, entry.refusal, entry.unfit = entry.refusal, None, None
         if reason is None:
             reason = park_device(entry.device)
         if reason is None:
@@ -811,6 +843,84 @@ class ParkedEngineSet:
             return None
         self.unpark(entry, reason)
         return reason
+
+    # -- after a park: the device's drafter traces and its single (design section 2.4) -----------------------
+    def after_park(self, entry, coordinator=None):
+        """The worker hook's release when a request on `entry` detaches, after its close parked the slot
+        (release_parked, from FastWorkerHook.detach): the device's pair and quad traces retired now by the
+        coordinator's release_parked - a parked device never closes, so release_closed never sees them dead - then
+        its released single rebuilt when the split allows (rebuild_single). A slot the close unparked has a closed
+        device, whose traces release_closed retired. A failed retirement is logged and left to the coordinator's
+        generation check (a rebound device's rebind_generation differs from the one its traces were captured at);
+        a failed rebuild propagates, as a failed capture does anywhere. Returns dict(released=, single=) or None."""
+        if self.closed or entry.state != 'parked' or entry.device is None:
+            return None
+        released = None
+        if coordinator is not None:
+            try:
+                released = coordinator.release_parked(entry.device)
+            except Exception as failure:
+                self.log('[PACKED-PROPOSE] release parked slot={} failed ({}: {}); a rebound device\'s generation '
+                         'retires them', entry.index, type(failure).__name__, str(failure)[:160])
+        return dict(released=released, single=self.rebuild_single(entry, 'park'))
+
+    def single_short(self):
+        """THE SPLIT's terms (serving_prefill_admission.split_short) a single-capture rebuild now would leave short
+        for the longest parked arrival - its need counted with S, which the rebuild takes, and its trace region
+        with the single's trace; None when it holds or the pool cannot be read."""
+        import serving_prefill_admission as admission
+
+        reserve = self.reserve()
+        reading, reason = admission.dram_reading(self.pool)
+        if reading is None:
+            return None
+        need = parked_arrival_need(reserve, self.window, single_released=True)
+        short = admission.split_short(reading['free'], reading['largest_free'], need, reserve,
+                                      reading['trace_largest_free'],
+                                      contiguous=admission.admission_contiguous_need(admission.PREFILL_TRANSIENT_FROM,
+                                                                                     reserve),
+                                      trace_need=admission.parked_trace_need(True))
+        return (short, reading, need) if short else None
+
+    def rebuild_single(self, entry, moment):
+        """A parked slot's released single-user capture rebuilt now, under the single bucket (build_single_capture),
+        iff the split still admits the longest parked arrival after it (single_short); else kept released, and the
+        slot's arrival terms carry S until its next rebind rebuilds it. True when rebuilt, False when kept, None
+        when there was nothing to rebuild. A pair's view left on the device is dropped: its trace was retired."""
+        import time
+
+        if entry.state != 'parked' or not self.single_released(entry):
+            return None
+        stop = self.single_short()
+        if stop is not None:
+            short, reading, need = stop
+            self.log(SINGLE_KEPT_MARKER, entry.index, moment, '+'.join(short), reading['free'],
+                     reading['largest_free'], need)
+            return False
+        import memory_ledger
+
+        started = time.perf_counter()
+        device = entry.device
+        # The ledger reads the rebuild either side (a no-op unless QWEN_FAST_MEMORY_LEDGER=1), at the measured S.
+        token = memory_ledger.before('single', estimate=single_capture_bytes(), point='slot=%d at=%s' % (entry.index,
+                                                                                                         moment))
+        try:
+            device.proposal_capture = None
+            device.proposal_capture = build_single_capture(device)
+            device._packed_capture_released = False
+        finally:
+            memory_ledger.after(token)
+        self.log(SINGLE_REBUILT_MARKER, entry.index, moment, (time.perf_counter() - started) * 1000)
+        return True
+
+    def idle(self):
+        """The lifecycle's idle moment (serving_lifecycle: no decoder, no prefill in flight, a step that schedules
+        nothing): every parked slot's released single rebuilt while the split allows, then every unparked slot the
+        pool has not lent re-parked (repark_idle). Returns dict(singles=[slots rebuilt], reparked=[slots])."""
+        if self.closed:
+            return dict(singles=[], reparked=[])
+        singles = [entry.index for entry in self.slots if self.rebuild_single(entry, 'idle')]
+        return dict(singles=singles, reparked=self.repark_idle())
 
     def unpark(self, entry, reason):
         """Close the slot's engine and device as today's request close does - which returns the slot and the
@@ -887,3 +997,15 @@ class ParkedEngineSet:
             self.ledger.uninstall()
         if failures:
             raise failures[0]
+
+
+def release_parked(coordinator, request):
+    """Stage E's release at a detach (serving_worker_hook.release_parked, QWEN_FAST_PARKED_ENGINES=1 only): for a
+    request that ran on a parked slot (serving_request_factory.rebind_parked sets its `parked_slot`), its set's
+    after_park with the hook's proposal coordinator (None when the hook never packed a proposal). None for a request
+    today's per-request build served, whose closed device release_closed already covered."""
+    entry = getattr(request, 'parked_slot', None)
+    owner = getattr(entry, 'owner', None)
+    if owner is None:
+        return None
+    return owner.after_park(entry, coordinator)

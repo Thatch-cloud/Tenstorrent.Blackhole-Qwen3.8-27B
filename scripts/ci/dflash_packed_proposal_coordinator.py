@@ -216,9 +216,21 @@ RELEASED_LINE = '[PACKED-PROPOSE] released quad={quad} pairs={pairs}'
 EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 
 # Stage E (QWEN_FAST_PARKED_ENGINES=1, serving_parked_engines; read at each use, and only '1' turns it on - the
-# attach refuses any other value): the capture headroom and the ledger's readings ask the captures' measured bytes
-# (serving_prefill_admission.MEASURED_*), not the estimates below, which are lower bounds. Off, every call is today's.
+# attach refuses any other value). A parked device is not closed when its request ends: its slot's next request
+# rebinds it, and every rebind advances its rebind_generation. So under the flag
+#   - the line below is logged when a departing request's parked device has its drafter traces retired
+#     (release_parked, which the worker hook reaches through serving_parked_engines.after_park);
+#   - a pair or quad trace records its members' generations when it is captured, and _cached_trace, _retire_quad and
+#     release_closed treat a member whose generation moved on like a closed one: a rebound device never replays a
+#     trace captured for its previous request, even when release_parked did not run (the backstop);
+#   - _ensure_single_user rebuilds under the single 2048 bucket (serving_request_factory.single_proposal_bucket),
+#     whatever the device's position: a device rebound below 2048 would otherwise get one narrower bucket, and the
+#     first round its history outgrew it would raise 'Committed history exceeds prepared request contexts';
+#   - the capture headroom and the ledger's readings ask the captures' measured bytes
+#     (serving_prefill_admission.MEASURED_*), not the estimates below, which are lower bounds.
+# Off, none of this runs and every call is today's.
 PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
+PARKED_RELEASED_LINE = '[PACKED-PROPOSE] released parked slot={slot} quad={quad} pairs={pairs}'
 
 
 def extent_memory_points(environ=None):
@@ -229,6 +241,15 @@ def extent_memory_points(environ=None):
 def parked_engines_on(environ=None):
     """QWEN_FAST_PARKED_ENGINES=1."""
     return (os.environ if environ is None else environ).get(PARKED_ENGINES_FLAG) == '1'
+
+
+def generation(device):
+    """A device's rebind_generation (serving_parked_engines.rebind_device advances it); 0 for one never rebound."""
+    return getattr(device, 'rebind_generation', 0)
+
+
+def generations(devices):
+    return tuple(generation(device) for device in devices)
 
 
 def single_capture_bytes():
@@ -545,6 +566,9 @@ class PackedProposalCoordinator:
         self.quad_failures = 0
         self.quad_disabled = False
         self.quad_rounds = 0
+        # Stage E (QWEN_FAST_PARKED_ENGINES=1 only; empty otherwise): {pair group, or 'quad': the members'
+        # rebind_generation when its trace was captured}.
+        self.generations = {}
 
     def close(self):
         for _, _, trace, _ in self.pairs.values():
@@ -553,6 +577,16 @@ class PackedProposalCoordinator:
         if self.quad is not None:
             self.quad[1].close()
             self.quad = None
+        self.generations.clear()
+
+    def _rebound(self, key, devices):
+        """Stage E: whether a trace recorded under `key` was captured for an earlier request of one of `devices` -
+        its generation has moved on since. Always False with QWEN_FAST_PARKED_ENGINES off."""
+        return parked_engines_on() and self.generations.get(key) != generations(devices)
+
+    def _note_generations(self, key, devices):
+        if parked_engines_on():
+            self.generations[key] = generations(devices)
 
     def release_closed(self):
         """S2 W6c: close, now, every proposal trace a closed device was captured for - the quad if any of its
@@ -562,30 +596,63 @@ class PackedProposalCoordinator:
         only in the next draft round's _prepare_quad and a stale pair only when its slots re-form, and a
         replacement's prefill and engine build, which run first, see about 0.5 GB less (s2-design.md section 3.1).
         Live traces are kept, and so is each surviving device's released single-user capture: _ensure_single_user
-        rebuilds it the first round it is needed. Logs RELEASED_LINE every time it runs."""
+        rebuilds it the first round it is needed. Logs RELEASED_LINE every time it runs. Under
+        QWEN_FAST_PARKED_ENGINES=1 a member rebound since the capture counts as closed (_rebound)."""
         quad = 0
-        if self.quad is not None and any(getattr(device, 'closed', False) for device in self.quad[0]):
+        if self.quad is not None and (any(getattr(device, 'closed', False) for device in self.quad[0])
+                                      or self._rebound('quad', self.quad[0])):
             self.quad[1].close()
             self.quad = None
+            self.generations.pop('quad', None)
             quad = 1
         pairs = []
         for group, (device_a, device_b, trace, _) in list(self.pairs.items()):
-            if getattr(device_a, 'closed', False) or getattr(device_b, 'closed', False):
+            if (getattr(device_a, 'closed', False) or getattr(device_b, 'closed', False)
+                    or self._rebound(group, (device_a, device_b))):
                 trace.close()
                 del self.pairs[group]
+                self.generations.pop(group, None)
                 pairs.append(list(group))
         audit_log(RELEASED_LINE, quad=quad, pairs=pairs)
+        return dict(quad=quad, pairs=pairs)
+
+    def release_parked(self, device):
+        """Stage E (QWEN_FAST_PARKED_ENGINES=1; serving_parked_engines.after_park, from FastWorkerHook.detach):
+        close, now, every proposal trace `device` was captured into - the quad when it is one of the four, and each
+        pair it is half of - as release_closed closes a closed device's. A parked device stays open for its slot's
+        next request, so `closed` never marks these dead; left alone they would hold their DRAM until the slots
+        re-form (and a rebound member's generation retires them then). The partners keep their released singles,
+        which _ensure_single_user rebuilds the first round each drafts alone. Logs PARKED_RELEASED_LINE."""
+        quad = 0
+        if self.quad is not None and any(member is device for member in self.quad[0]):
+            self.quad[1].close()
+            self.quad = None
+            self.generations.pop('quad', None)
+            quad = 1
+        pairs = []
+        for group, (device_a, device_b, trace, _) in list(self.pairs.items()):
+            if device_a is device or device_b is device:
+                trace.close()
+                del self.pairs[group]
+                self.generations.pop(group, None)
+                pairs.append(list(group))
+        audit_log(PARKED_RELEASED_LINE, slot=getattr(getattr(device, 'pool_slot', None), 'index', None), quad=quad,
+                  pairs=pairs)
         return dict(quad=quad, pairs=pairs)
 
     def _cached_trace(self, pair, device_a, device_b):
         """The pair's already-captured trace if the SAME two devices still occupy
         it and neither has closed, else None - a fresh capture (and the DRAM
-        reserve check that must gate one) is needed either way."""
+        reserve check that must gate one) is needed either way. Under
+        QWEN_FAST_PARKED_ENGINES=1 a member rebound since the capture is a
+        different request on the same device: None (_rebound)."""
         cached = self.pairs.get(pair)
         if cached is None:
             return None
         old_a, old_b, trace, released = cached
         if old_a is device_a and old_b is device_b and not device_a.closed and not device_b.closed:
+            if self._rebound(pair, (device_a, device_b)):
+                return None
             return trace
         return None
 
@@ -596,10 +663,12 @@ class PackedProposalCoordinator:
         if pair in self.pairs:
             self.pairs[pair][2].close()
             del self.pairs[pair]
+            self.generations.pop(pair, None)
         from dflash_proposal_trace import PreparedPackedDFlashProposal
 
         trace = PreparedPackedDFlashProposal(device_a, device_b)
         self.pairs[pair] = (device_a, device_b, trace, False)
+        self._note_generations(pair, (device_a, device_b))
         return trace
 
     def _release_single_user(self, device):
@@ -652,7 +721,15 @@ class PackedProposalCoordinator:
         ledger_token = ledger_before('single', single_capture_bytes(),
                                      'slot=%s' % getattr(getattr(device, 'pool_slot', None), 'index', None))
         try:
-            rebuilt = PreparedDFlashProposal(device, max_new_tokens=1)
+            if parked_engines_on():
+                # Stage E: a parked device is rebound at any position, so the one 2048 bucket its builds capture
+                # (the module's Stage E note), never the narrower one the position alone would give below 2048.
+                from serving_request_factory import single_proposal_bucket
+
+                with single_proposal_bucket():
+                    rebuilt = PreparedDFlashProposal(device, max_new_tokens=1)
+            else:
+                rebuilt = PreparedDFlashProposal(device, max_new_tokens=1)
         finally:
             ledger_after(ledger_token)
         if view is not None:
@@ -892,7 +969,8 @@ class PackedProposalCoordinator:
     def _retire_quad(self, by_slot):
         """Close the quad trace once a device it was built for has closed or a slot holds another device (a
         finished request's slot reused): it can never replay again, and its capture is 0.3-0.45 GB per chip (est.)
-        the pairs need back. A device merely absent this round keeps it."""
+        the pairs need back. A device merely absent this round keeps it. Under QWEN_FAST_PARKED_ENGINES=1 a device
+        rebound since the capture - its slot's next request on the same parked device - retires it too (_rebound)."""
         if self.quad is None:
             return
         import quad_draft
@@ -900,9 +978,10 @@ class PackedProposalCoordinator:
         devices, trace, _ = self.quad
         if any(device.closed for device in devices) or any(
                 slot in by_slot and by_slot[slot]['device'] is not device
-                for slot, device in zip(quad_draft.SLOTS, devices)):
+                for slot, device in zip(quad_draft.SLOTS, devices)) or self._rebound('quad', devices):
             trace.close()
             self.quad = None
+            self.generations.pop('quad', None)
 
     def _disable_quad(self, round_number, reason):
         """Give up on the quad for the process: close its trace and log DISABLED_MARKER (the gate fails on it)."""
@@ -983,6 +1062,7 @@ class PackedProposalCoordinator:
                 self.quad[1].close()
             trace = quad_draft.PreparedQuadDFlashProposal(devices)
             self.quad = (tuple(devices), trace, False)
+            self._note_generations('quad', devices)
         from dflash_proposal_trace import pair_mask_audit_enabled
 
         if pair_mask_audit_enabled():

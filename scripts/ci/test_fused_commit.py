@@ -1639,8 +1639,8 @@ def without_sticky(lines):
 def without_parked(lines):
     """serving_runtime.py less Stage E (QWEN_FAST_PARKED_ENGINES, default off; serving_parked_engines), which
     landed after this parent: the flag's constant and the parked-engine build after the P7 ledger point, with
-    the blank line before it, and E5's DRAM registration keyword. Each is cut exactly once and checked statement
-    by statement, so nothing else is hidden."""
+    the blank line before it, and E4's wiring in the bridge factory, the DRAM registration and the lifecycle. Each
+    is cut exactly once and checked statement by statement, so nothing else is hidden."""
     lines = cut_code(lines, '# Stage E (serving_parked_engines; default off): one engine per pool slot, parked at attach.',
                      "PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'", ("PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'",))
     first = "# Stage E (QWEN_FAST_PARKED_ENGINES; default off, strictly '0' or '1'): one engine per pool slot, built"
@@ -1659,13 +1659,32 @@ def without_parked(lines):
         'capture_rows=capture_rows if trimmed else None)',
         'scopes.callback(parked_engines.close)',
         'parked_engines.build()'))
-    # E5: the DRAM registration's parked keyword.
+    # E4's wiring: from_prefill's parked keyword; a rebound request skips the sticky build marker and the engine
+    # ledger walk, and a failed binding marks its slot unfit; the DRAM registration's and the lifecycle's keywords.
+    lines = cut_code(lines, '**(dict(capture_rows=capture_rows) if trimmed else {}),',
+                     '**(dict(parked=parked_engines) if parked_engines is not None else {}))',
+                     ('**(dict(capture_rows=capture_rows) if trimmed else {}),',
+                      '**(dict(parked=parked_engines) if parked_engines is not None else {}))'),
+                     ['                    **(dict(capture_rows=capture_rows) if trimmed else {}))'])
+    lines = cut_code(lines, "# Stage E: a request rebound onto a parked engine logged the rebind's own marker in place "
+                     'of the sticky', 'if sticky and not rebound:',
+                     ("rebound = parked_engines is not None and getattr(request, 'parked_slot', None) is not None",
+                      'if sticky and not rebound:'), ['            if sticky:'])
+    lines = cut_code(lines, 'if not rebound:', 'memory_ledger.engine_admitted(str(state.req_id), engine_request=request)',
+                     ('if not rebound:', 'memory_ledger.engine_admitted(str(state.req_id), engine_request=request)'),
+                     ['            memory_ledger.engine_admitted(str(state.req_id), engine_request=request)'])
+    lines = cut_code(lines, 'if rebound:', "request.parked_slot.unfit = 'page binding failed'",
+                     ('if rebound:', "request.parked_slot.unfit = 'page binding failed'"))
     lines = cut_code(lines, 'scopes.callback(register_dram_admission(pool, **({} if parked_engines is None else',
                      'dict(parked=parked_engines))))',
                      ('scopes.callback(register_dram_admission(pool, **({} if parked_engines is None else',
                       'dict(parked=parked_engines))))'),
                      ['            scopes.callback(register_dram_admission(pool))'])
-    return lines
+    return cut_code(lines, 'cancelled=cancelled, packed_step=packed_step,',
+                    '**({} if parked_engines is None else dict(idle=parked_engines.idle)))',
+                    ('cancelled=cancelled, packed_step=packed_step,',
+                     '**({} if parked_engines is None else dict(idle=parked_engines.idle)))'),
+                    ['            cancelled=cancelled, packed_step=packed_step)'])
 
 
 def without_any_request(lines):

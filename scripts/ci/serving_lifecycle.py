@@ -68,6 +68,11 @@ class FastServingLifecycle:
     # class for the same reason: off, a new request with num_computed_tokens != 0 is refused as
     # it always was.
     sticky = False
+    # Stage E (QWEN_FAST_PARKED_ENGINES=1; serving_runtime passes the parked set's idle): called at an idle moment -
+    # no request decoding, none in its prefill, a step that schedules nothing - to rebuild released drafter
+    # captures and re-park unparked slots (serving_parked_engines.ParkedEngineSet.idle). None, the default and the
+    # only value without the flag, calls nothing.
+    idle = None
 
     # request_id is assigned at five sites - construction, reset, the
     # EOS-at-first-token release, the prefill-to-decode handoff, and admission.
@@ -93,15 +98,18 @@ class FastServingLifecycle:
                 pass
 
     def __init__(self, worker, *, config, capture_factory, bridge_factory, eos_ids, cancelled,
-                 packed_step=None):
+                 packed_step=None, idle=None):
         validate_fast_config(config)
         runner = worker.model_runner
         if (not worker.is_driver_worker or runner._pending_samples
                 or getattr(worker, '_qwen_fast_lifecycle', None) is not None
-                or not all(callable(value) for value in (capture_factory, bridge_factory, cancelled))):
+                or not all(callable(value) for value in (capture_factory, bridge_factory, cancelled))
+                or (idle is not None and not callable(idle))):
             raise ValueError('Idle exclusive driver and explicit serving factories required')
         self.worker, self.runner = worker, runner
         self.capture_factory, self.bridge_factory = capture_factory, bridge_factory
+        if idle is not None:
+            self.idle = idle
         self.eos_ids, self.cancelled = tuple(eos_ids), cancelled
         self.packed_step = packed_step
         # request_id is the request in the PREFILL phase; decoding_id is the one
@@ -366,6 +374,12 @@ class FastServingLifecycle:
                 self._release_decoders()
             if self.request_id is not None and self.request_id in finished:
                 self._release_prefill()
+            if (self.idle is not None and self.hook is None and self.request_id is None
+                    and not getattr(scheduled, 'total_num_scheduled_tokens', 1)):
+                # Stage E: nothing decodes, nothing is in its prefill, and this step schedules nothing - the one
+                # moment the parked set may capture (the class attribute's comment). Before the step reaches the
+                # runner, which has nothing of the fast path's to run in it.
+                self.idle()
             # A continuation of the prefill already in flight. It arrives as a CACHED
             # request, so without this it would either be handed to the hook (which
             # refuses a request it is not decoding) or fall into the fresh-prefill

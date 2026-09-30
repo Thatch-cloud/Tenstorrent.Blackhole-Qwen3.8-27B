@@ -335,9 +335,62 @@ def adopt_prefill_slot(helpers, capture, request_id):
          slot, len(helpers), 'both chips' if verified == 2 else '%d chips' % verified, request_id)
 
 
+def rebind_parked(parked, entry, *, model, pages, state, capture, prompt, seed, budget, eos_ids, extent_memory):
+    """Stage E (QWEN_FAST_PARKED_ENGINES=1): from_prefill's request on the parked slot `entry` the set gave it,
+    after every host check and the prefill slot's adoption (design section 2.3): the slot's device and engine are
+    rebound (ParkedEngineSet.rebind_slot: the drafter from this prefill's taps, a drafter runtime and the session as
+    from_prefill makes them, the engine over the request's page table), the prefill capture is closed, and the
+    request releases its engine and drafter by parking them (park_engine, park_drafter) rather than closing them.
+    Nothing is captured and publish_prewarm does not run (the attach ran it); a rebind that fails unparks the slot
+    and propagates, as a failed build does. Under QWEN_FAST_EXTENT_REPLAY=1 the ledger reads the rebind
+    (op=rebind; a no-op unless QWEN_FAST_MEMORY_LEDGER=1) and PROPOSAL_BUCKETS_BUILT names the capture's buckets,
+    as for a build. The request carries `parked_slot`, which serving_runtime and the worker hook read."""
+    from functools import partial
+
+    components = parked.components
+    try:
+        token = None
+        if extent_memory:
+            import memory_ledger
+
+            terms = parked.slot_terms(entry)
+            token = memory_ledger.before('rebind', estimate=terms['rebind'] + terms['single'],
+                                         point='req=%s slot=%d' % (memory_ledger.short_id(state.req_id), entry.index),
+                                         request=str(state.req_id))
+
+        def make_session(runtime):
+            return components.session(state.req_id, prompt, seed, vocab_size=model.args.vocab_size,
+                max_new_tokens=budget, eos_ids=eos_ids, neural={'dflash2': runtime}, verifier_rows=16,
+                lookup_enabled=False)
+
+        bound = parked.rebind_slot(entry, capture.outputs(), pages, position=len(prompt), make_session=make_session,
+                                   request_id=state.req_id, budget=budget)
+        if token is not None:
+            memory_ledger.after(token)
+    finally:
+        capture.close()
+    if extent_memory:
+        _log(PROPOSAL_BUCKETS_BUILT + '{} contexts={}', state.req_id, built_proposal_buckets(bound.device))
+    try:
+        request = FastRequest(bound.session, bound.engine, bound.runtime,
+            release_drafter=partial(parked.park_drafter, entry), release_engine=partial(parked.park_engine, entry),
+            collect_timings=os.environ.get('QWEN_FAST_PHASE_TIMING') == '1')
+    except BaseException:
+        parked.park(entry)
+        raise
+    request.parked_slot = entry
+    return request
+
+
 def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids,
-                 collectives=None, buffer_pool=None, shared_weights=None, capture_rows=None):
+                 collectives=None, buffer_pool=None, shared_weights=None, capture_rows=None, parked=None):
     from dflash_request_runtime import TARGET_TAPS
+
+    # Stage E (QWEN_FAST_PARKED_ENGINES=1 only; serving_runtime passes `parked`, the attach's
+    # serving_parked_engines.ParkedEngineSet, and nothing otherwise): every host check below runs as it always does,
+    # in its order, so a refusal is the same with the flag on and off; the DRAM backstop asks the parked terms when
+    # the slot the request will take holds a parked engine; and once the prefill slot is adopted, that engine is
+    # rebound (rebind_parked) instead of built. A slot without one - unparked after a fault - is built as today.
 
     # QWEN_FAST_ANY_REQUEST (C2-any, serving_fast_policy.any_request_enabled; default off).
     # Off, every value below is what it always was: the server's OUTPUT_BUDGET for every
@@ -407,10 +460,19 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
     if extent_memory:
         # S2 W6b: the post-prefill DRAM backstop, host-side and before any device state, like the refusals
         # above (RequestRefused). The scheduler's hold keeps such a prompt waiting before its prefill.
-        dram_backstop(buffer_pool, request_id=state.req_id)
+        if parked is None:
+            dram_backstop(buffer_pool, request_id=state.req_id)
+        else:
+            dram_backstop(buffer_pool, request_id=state.req_id, parked=parked.arrival_terms())
     # After the host-side refusals, so a rejected request touches no device state, and
     # before the drafter, the engine and every other reader of slot 0.
     adopt_prefill_slot(helpers, capture, state.req_id)
+    if parked is not None:
+        entry = parked.take()
+        if entry is not None:
+            return rebind_parked(parked, entry, model=model, pages=pages, state=state, capture=capture, prompt=prompt,
+                                 seed=seed, budget=budget, eos_ids=() if any_request and ignore_eos else eos_ids,
+                                 extent_memory=extent_memory)
     components = device_components()
     _, layers, projection, selector = fixtures
     capture_released = False
