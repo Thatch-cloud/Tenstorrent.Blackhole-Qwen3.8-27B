@@ -211,9 +211,10 @@ class PackedAnyProfileTest(unittest.TestCase):
     def test_only_the_s2_profiles_set_the_flag_and_none_sets_a_gate_only_knob(self):
         with open(PROFILES, encoding='utf-8') as handle:
             names = sorted(json.load(handle)['profiles'])
-        # ...and the sticky-session profiles, c2-packed and c2-packed-gate with prefix reuse.
+        # ...and the sticky-session profiles, c2-packed and c2-packed-gate with prefix reuse, and their Stage E twins.
         self.assertEqual([name for name in names if EXTENT_FLAG in self.load(name)['env']],
-                         ['c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate'])
+                         ['c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate',
+                          'c2-packed-prefix-parked', 'c2-packed-prefix-parked-gate'])
         for name in names:
             env = self.load(name)['env']
             with self.subTest(profile=name):

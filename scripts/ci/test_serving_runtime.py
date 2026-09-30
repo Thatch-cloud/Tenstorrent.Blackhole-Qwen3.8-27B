@@ -51,7 +51,11 @@ class RuntimeAttachmentTests(unittest.TestCase):
             self.parked_sets.append(built)
             return built
 
+        # (The policy's own parked checks - serving_fast_policy.parked_engine_problems, held by test_parked_policy - read
+        # the whole S2 environment, which this harness does not build; the attach logic is what is under test here.)
         parked_patch = (patch('serving_parked_engines.ParkedEngineSet', side_effect=build_parked)
+                        if parked is not None else nullcontext())
+        policy_patch = (patch('serving_fast_policy.parked_engine_problems', return_value=[])
                         if parked is not None else nullcontext())
         parked_built = ['parked_build'] if parked is not None else []
         parked_closed = ['parked_close'] if parked is not None else []
@@ -177,7 +181,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 patch.object(serving_runtime, 'PreparedDraftWeights', side_effect=build_weights) as prepared, \
                 patch.object(serving_runtime, 'pindiag', side_effect=diag) as diagnostic, \
                 patch('packed_verifier.PackedVerifierEngine', side_effect=build_block) as packed_engine, \
-                parked_patch, \
+                parked_patch, policy_patch, \
                 patch('sampling_link_policy.sampler_links', side_effect=lambda *args: nullcontext()) as links, \
                 patch.object(serving_runtime, 'FastServingLifecycle', return_value=lifecycle,
                              side_effect=RuntimeError('attach failed') if attach_fail else None) as install, \

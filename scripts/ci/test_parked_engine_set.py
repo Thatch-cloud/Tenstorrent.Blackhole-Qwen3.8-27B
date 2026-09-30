@@ -432,5 +432,101 @@ class ParkedCensusTests(unittest.TestCase):
             self.assertGreaterEqual(min(entry.rebinds for entry in engines.slots), 20)
 
 
+class NegativeControlTests(unittest.TestCase):
+    """QWEN_FAST_PARKED_NEGATIVE (gate only): each control breaks exactly the rebind step its gate exists to see."""
+
+    def rebound(self, negative):
+        world = World()
+        world.__enter__()
+        engines = make_set(world, environ={parked.NEGATIVE_FLAG: negative} if negative else {})
+        engines.build()
+        entry = engines.take()
+        before = entry.device.kv_history
+        with patch.object(world.pool, 'rezero', wraps=world.pool.rezero) as rezero:
+            request = ParkedRequest(world, engines, entry, 'negative', 300, 16)
+        return world, engines, entry, request, before, rezero
+
+    def test_no_control_seeds_the_carry_and_reseeds_the_banks(self):
+        world, engines, entry, request, before, rezero = self.rebound(None)
+        try:
+            self.assertIs(world.engine_module._resident, entry.engine)
+            self.assertIsNot(entry.device.kv_history, before)
+            rezero.assert_called_once()
+            self.assertIsNone(engines.negative)
+            self.assertFalse([line for line in world.lines if line.startswith(parked.NEGATIVE_MARKER)])
+            request.finish()
+        finally:
+            world.__exit__(None, None, None)
+
+    def test_carry_seeds_no_carry_and_nothing_else_changes(self):
+        world, engines, entry, request, before, rezero = self.rebound('carry')
+        try:
+            self.assertIsNone(world.engine_module._resident, 'save_carry never ran: the engine restores on its verify')
+            self.assertNotIn('save_carry', entry.engine.__dict__, 'the shadow is removed after the rebind')
+            self.assertIsNot(entry.device.kv_history, before, 'the drafter side is rebound as usual')
+            rezero.assert_called_once()
+            self.assertEqual(entry.engine.phase, 'idle')
+            self.assertEqual([line for line in world.lines if line.startswith(parked.NEGATIVE_MARKER)],
+                             [parked.NEGATIVE_MARKER + 'mode=carry (gate only: every rebind is deliberately broken)'])
+            request.finish()
+        finally:
+            world.__exit__(None, None, None)
+
+    def test_drafter_skips_the_rezero_and_the_reseed_and_seeds_the_carry(self):
+        world, engines, entry, request, before, rezero = self.rebound('drafter')
+        try:
+            self.assertIs(world.engine_module._resident, entry.engine, 'the target side is exact')
+            self.assertIs(entry.device.kv_history, before, 'the banks were not reseeded')
+            rezero.assert_not_called()
+            self.assertEqual(entry.device.position, 300, 'the host state is still that of the request')
+            self.assertEqual(entry.device.rebind_generation, 2, 'the warm at attach, then this rebind')
+            self.assertIs(entry.device.proposal_capture.kv_history, before)
+            request.finish()
+        finally:
+            world.__exit__(None, None, None)
+
+    def test_the_injected_park_fault_unparks_the_first_park_once_and_the_slot_reparks_at_idle(self):
+        with World() as world:
+            engines = make_set(world, environ={parked.FAULT_FLAG: 'park'})
+            engines.build()
+            self.assertEqual([line for line in world.lines if line.startswith(parked.NEGATIVE_MARKER)],
+                             [parked.NEGATIVE_MARKER + 'fault=park (gate only: the first park is refused once)'])
+            entry = engines.take()
+            request = ParkedRequest(world, engines, entry, 'first', 300, 16)
+            while request.step():
+                pass
+            self.assertEqual(request.finish(), parked.FAULT_REASON)
+            self.assertEqual((entry.state, engines.unparks), ('unparked', 1))
+            self.assertIn('[PINDIAG] parked slot 0 unparked: %s' % parked.FAULT_REASON, world.lines)
+            self.assertIsNone(engines.take(), 'per-request builds serve the slot until it is re-parked')
+            self.assertEqual(engines.repark_idle(), [0])
+            self.assertEqual((entry.state, engines.reparks), ('parked', 1))
+            # once: the next request parks normally
+            again = engines.take()
+            request = ParkedRequest(world, engines, again, 'second', 300, 16)
+            while request.step():
+                pass
+            self.assertIsNone(request.finish())
+            self.assertEqual((engines.unparks, engines.reparks), (1, 1))
+            self.assertEqual(world.ops.violations, [])
+
+    def test_an_unknown_fault_is_refused(self):
+        self.assertIsNone(parked.fault_mode({}))
+        self.assertIsNone(parked.fault_mode({parked.FAULT_FLAG: ''}))
+        self.assertEqual(parked.fault_mode({parked.FAULT_FLAG: 'park'}), 'park')
+        with self.assertRaisesRegex(ValueError, 'must be one of park'):
+            parked.fault_mode({parked.FAULT_FLAG: 'engine'})
+
+    def test_an_unknown_control_is_refused_and_an_empty_one_is_none(self):
+        self.assertIsNone(parked.negative_mode({}))
+        self.assertIsNone(parked.negative_mode({parked.NEGATIVE_FLAG: ''}))
+        self.assertEqual(parked.negative_mode({parked.NEGATIVE_FLAG: 'carry'}), 'carry')
+        with self.assertRaisesRegex(ValueError, 'must be one of carry, drafter'):
+            parked.negative_mode({parked.NEGATIVE_FLAG: 'both'})
+        with World() as world:
+            with self.assertRaisesRegex(ValueError, 'must be one of'):
+                make_set(world, environ={parked.NEGATIVE_FLAG: 'both'})
+
+
 if __name__ == '__main__':
     unittest.main()

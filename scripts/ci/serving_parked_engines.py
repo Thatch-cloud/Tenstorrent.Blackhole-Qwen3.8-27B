@@ -59,6 +59,20 @@ AUDIT_FLAG = 'QWEN_FAST_PARKED_AUDIT'
 # Stage E2 (keeping the pair and quad drafter traces across requests) is deferred: its quad retention
 # does not fit the parked admission at a 123k arrival (design section 5.3). Named only to be refused.
 DEFERRED_DRAFTS_FLAG = 'QWEN_FAST_PARKED_DRAFTS'
+# The gate's negative controls (GATE ONLY: serving_c2_contract.parked_problems refuses the knob outside a -gate
+# profile). 'carry' skips save_carry at the rebind, so the engine restores the slot's zeroed carry on its first
+# verify and the tokens MUST diverge. 'drafter' skips the rezero and the reseed of the K/V banks at the rebind, so
+# the tokens stay equal (greedy verification) and the drafter-equivalence judge MUST fail. Each proves its gate can
+# see the breakage it exists for.
+NEGATIVE_FLAG = 'QWEN_FAST_PARKED_NEGATIVE'
+NEGATIVES = ('carry', 'drafter')
+NEGATIVE_MARKER = '[PINDIAG] parked negative control '
+# G-E2's injected park-time fault (GATE ONLY): 'park' refuses the first park after attach, once, as an engine that
+# cannot park is refused (a poisoned retained block, a failed page binding), so the slot unparks, serves today's
+# per-request builds and re-parks at an idle moment (design section 6.3).
+FAULT_FLAG = 'QWEN_FAST_PARKED_FAULT'
+FAULTS = ('park',)
+FAULT_REASON = 'injected park fault (gate only)'
 
 # The windowed drafter projection at a rebind (rebind_device): rows per project_features call. 0 is
 # one call over the whole window, the constructor's order.
@@ -125,6 +139,27 @@ def parked_engines_enabled(environ=None):
 def audit_enabled(environ=None):
     """QWEN_FAST_PARKED_AUDIT (gate): unset or '0' off, '1' on, anything else refused."""
     return _strict_bool(AUDIT_FLAG, environ)
+
+
+def negative_mode(environ=None):
+    """QWEN_FAST_PARKED_NEGATIVE (gate only): None when unset or empty, else 'carry' or 'drafter'; anything else
+    is refused."""
+    value = (os.environ if environ is None else environ).get(NEGATIVE_FLAG)
+    if value in (None, ''):
+        return None
+    if value not in NEGATIVES:
+        raise ValueError('%s must be one of %s, got %r' % (NEGATIVE_FLAG, ', '.join(NEGATIVES), value))
+    return value
+
+
+def fault_mode(environ=None):
+    """QWEN_FAST_PARKED_FAULT (gate only): None when unset or empty, else 'park'; anything else is refused."""
+    value = (os.environ if environ is None else environ).get(FAULT_FLAG)
+    if value in (None, ''):
+        return None
+    if value not in FAULTS:
+        raise ValueError('%s must be one of %s, got %r' % (FAULT_FLAG, ', '.join(FAULTS), value))
+    return value
 
 
 def project_rows(environ=None):
@@ -325,7 +360,7 @@ def park_device(device):
     return None
 
 
-def rebind_device(device, taps, *, position, window=None):
+def rebind_device(device, taps, *, position, window=None, negative=None):
     """Stage E: bind a parked DFlashDevice to a request prefilled to `position`, from its window's taps (the
     prefill capture's outputs), as its constructor seeds a fresh one, without capturing anything (design
     section 2.3 step 4):
@@ -339,6 +374,8 @@ def rebind_device(device, taps, *, position, window=None):
          rebind_generation advanced (the coordinator keys a pair or quad trace on it);
       6. the capture unwrapped from a pair's view and pointed at the new cache, or - released by a pair or
          the quad - rebuilt under the single bucket (build_single_capture).
+    `negative` == 'drafter' (the gate's negative control, NEGATIVE_FLAG) skips steps 2 and 4: the banks keep the
+    previous request's K/V and the old DraftKVHistory stays.
     Returns dict(ms=, single_rebuilt=, window=)."""
     import time
     from dflash_prefill_window import prefill_window
@@ -362,7 +399,8 @@ def rebind_device(device, taps, *, position, window=None):
         raise ValueError('A parked device keeps its single-user proposal capture')
     if device.pending is not None or device.kv_history.pending is not None:
         raise ValueError('A parked device has no publication pending')
-    slot.pool.rezero(slot)
+    if negative != 'drafter':
+        slot.pool.rezero(slot)
     projected = project_window(device, taps, rows, window=window)
     padded = operations.pad(projected, [(0, 0), (0, 0), (0, HISTORY_ROWS - rows), (0, 0)], 0.0)
     if addresses(operations, padded) != addresses(operations, projected):
@@ -371,11 +409,12 @@ def rebind_device(device, taps, *, position, window=None):
     operations.deallocate(padded)
     device.history, device.spare_history = slot.history, slot.spare_history
     operations.synchronize_device(device.mesh)
-    device.kv_history = DraftKVHistory(operations, device.mesh, [layer[0] for layer in device.layers], device.history,
-        position=position, history_rows=rows, capture_projection=False, storage=slot.kv,
-        **(dict(query=slot.query) if getattr(slot, 'query', None) is not None else {}))
-    if device.progress is not None:
-        device.kv_history.audit(device.history)
+    if negative != 'drafter':
+        device.kv_history = DraftKVHistory(operations, device.mesh, [layer[0] for layer in device.layers], device.history,
+            position=position, history_rows=rows, capture_projection=False, storage=slot.kv,
+            **(dict(query=slot.query) if getattr(slot, 'query', None) is not None else {}))
+        if device.progress is not None:
+            device.kv_history.audit(device.history)
     device.position, device.history_rows = position, rows
     device.name = 'DFlashDevice@%x position=%d' % (id(device), position)
     device.pending = None
@@ -558,6 +597,8 @@ class ParkedEngineSet:
         refuse_deferred(environ)
         self.window = project_rows(environ)
         self.audit = audit_enabled(environ)
+        self.negative = negative_mode(environ)
+        self.fault, self.faulted = fault_mode(environ), False
         self.ballast_size = ballast_bytes(environ)
         self.ballast = None
         if environ.get('QWEN_FAST_SHARED_CCL', '1') != '1' or environ.get('QWEN_FAST_EAGER_PROPOSAL') == '1':
@@ -631,6 +672,10 @@ class ParkedEngineSet:
             self.build_slot(entry, warm=entry.index == 0)
             built += 1
         verifier_engine.note_prefill()
+        if self.fault:
+            self.log(NEGATIVE_MARKER + 'fault={} (gate only: the first park is refused once)', self.fault)
+        if self.negative:
+            self.log(NEGATIVE_MARKER + 'mode={} (gate only: every rebind is deliberately broken)', self.negative)
         self.attach_ms = (time.perf_counter() - started) * 1000
         self.log(BUILT_MARKER + 'k={} of {} attach_ms={:.1f} {}', built, len(self.slots), self.attach_ms,
                  self.dram_text())
@@ -795,10 +840,18 @@ class ParkedEngineSet:
         try:
             if self.audit:
                 entry.slot.verify()
-            info = rebind_device(entry.device, taps, position=position, window=self.window)
+            info = rebind_device(entry.device, taps, position=position, window=self.window,
+                                 **(dict(negative=self.negative) if self.negative else {}))
             runtime = self.components.runtime(entry.device, position=position)
             session = make_session(runtime)
-            entry.engine.rebind(session, pages)
+            if self.negative == 'carry':
+                # The gate's negative control: this rebind seeds no carry (an instance attribute shadows the method
+                # for this call only), so the engine's first verify restores the slot's zeroed carry.
+                entry.engine.save_carry = lambda: None
+            try:
+                entry.engine.rebind(session, pages)
+            finally:
+                entry.engine.__dict__.pop('save_carry', None)
         except BaseException as failure:
             self.unpark(entry, 'rebind failed: %s: %s' % (type(failure).__name__, str(failure)[:120]))
             raise
@@ -825,6 +878,11 @@ class ParkedEngineSet:
         flight raises as close() raises, and the slot stays serving, as today's request stays open."""
         if entry.state != 'serving' or entry not in self.slots:
             raise ValueError('Only a serving slot of this set can park')
+        if self.fault == 'park' and not self.faulted and entry.unfit is None:
+            # G-E2's injected fault, once: the engine is left as it is (unparked, closed by park_drafter).
+            self.faulted = True
+            entry.refusal = FAULT_REASON
+            return
         entry.refusal = entry.unfit if entry.unfit is not None else entry.engine.park()
 
     def park_drafter(self, entry):
