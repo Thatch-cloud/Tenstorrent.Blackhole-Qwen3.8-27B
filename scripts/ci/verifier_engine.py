@@ -26,21 +26,6 @@ _resident = None
 _replay_count = None
 
 
-# Phase-1 quick win 2 (default off; serving_fast_policy.ENGINE_WARM_SKIP_FLAG): the engine's warm-up eager forwards
-# run once per distinct bucket shape in a process. A warm forward exists to compile the bucket's programs before its
-# trace is captured, and to nothing else that a request reads (docs/engine-warm-skip.md: what each one writes and what
-# overwrites it before any read). _warmed holds the keys (warm_key) of the buckets this process has warmed to
-# completion; an engine built with skip_compiled_warm=True skips the warm of a bucket whose key is in it. Built
-# without the parameter (the default, and every caller while the flag is off) an engine warms every bucket and
-# records nothing in it.
-_warmed = set()
-
-
-def reset_warmed():
-    """Forget every warmed key (tests, and a process that clears its program cache)."""
-    _warmed.clear()
-
-
 def set_replay_count(counter):
     """Install (a zero-argument callable) or remove (None) the replay ledger; returns the previous one."""
     global _replay_count
@@ -71,6 +56,21 @@ def reset_retained(retained):
     retained.replay_ready = retained.poisoned = retained.fence_owed = False
     retained.commit_serial = 0
     retained.replay_fence, retained.replay_fence_ms = None, 0.0
+
+
+# Phase-1 quick win 2 (default off; serving_fast_policy.ENGINE_WARM_SKIP_FLAG): the engine's warm-up eager forwards
+# run once per distinct bucket shape in a process. A warm forward exists to compile the bucket's programs before its
+# trace is captured, and to nothing else that a request reads (docs/engine-warm-skip.md: what each one writes and what
+# overwrites it before any read). _warmed holds the keys (warm_key) of the buckets this process has warmed to
+# completion; an engine built with skip_compiled_warm=True skips the warm of a bucket whose key is in it. Built
+# without the parameter (the default, and every caller while the flag is off) an engine warms every bucket and
+# records nothing in it.
+_warmed = set()
+
+
+def reset_warmed():
+    """Forget every warmed key (tests, and a process that clears its program cache)."""
+    _warmed.clear()
 
 
 def note_prefill():

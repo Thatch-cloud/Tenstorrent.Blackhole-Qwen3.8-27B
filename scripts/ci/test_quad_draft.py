@@ -2683,19 +2683,43 @@ def verifier_engine_without_stage_e(text):
         text = text.replace(hunk, replacement)
     lines = text.split(chr(10))
 
-    def cut(first, last):
+    def cut(first, last, blanks=0):
         starts = [index for index, value in enumerate(lines) if value.strip() == first]
         if len(starts) != 1 or lines[starts[0] - 1].strip():
             raise AssertionError('%r is not in verifier_engine.py exactly once, after a blank line' % first)
         ends = [index for index in range(starts[0], len(lines)) if lines[index].strip() == last]
         if not ends:
             raise AssertionError('%r has no %r after it' % (first, last))
-        return lines[:starts[0] - 1] + lines[ends[0] + 1:]
+        return lines[:starts[0] - 1] + lines[ends[0] + 1 + blanks:]
 
     lines = cut("# Stage E's R2 replay ledger (QWEN_FAST_PARKED_AUDIT=1, serving_parked_engines.ReplayLedger): a",
                 'retained.replay_fence, retained.replay_fence_ms = None, 0.0')
     # park_refusal, park and rebind, up to rebind's closing bare raise (none of the three raises bare before it)
     lines = cut('def park_refusal(self):', 'raise')
+    # Phase-1 quick win 2 (the engine warm skip, default off), which also landed after PARENT: its process-wide key set,
+    # the constructor's parameter and two attributes, the warm loop's skip and its two bookkeeping lines, and warm_key.
+    lines = cut("# Phase-1 quick win 2 (default off; serving_fast_policy.ENGINE_WARM_SKIP_FLAG): the engine's warm-up eager forwards",
+                '_warmed.clear()', blanks=1)
+    text = chr(10).join(lines)
+    for hunk, replacement in (
+            ('capture_rows=None, skip_compiled_warm=False):', 'capture_rows=None):'),
+            ('        if type(skip_compiled_warm) is not bool:' + chr(10)
+             + "            raise ValueError('Explicit boolean warm-skip selection required')" + chr(10)
+             + '        self.skip_compiled_warm = skip_compiled_warm' + chr(10)
+             + '        self.warms_run = self.warms_skipped = 0' + chr(10), ''),
+            ('                self.warms_run += 1' + chr(10) + '                if warmed is not None:' + chr(10)
+             + '                    _warmed.add(warmed)' + chr(10), '')):
+        if text.count(hunk) != 1:
+            raise AssertionError('%r is not in verifier_engine.py exactly once' % hunk)
+        text = text.replace(hunk, replacement)
+    lines = text.split(chr(10))
+    starts = [index for index, value in enumerate(lines) if value.strip() == 'warmed = self.warm_key(bucket) if self.skip_compiled_warm else None']
+    if len(starts) != 1:
+        raise AssertionError('the warm skip is not in verifier_engine.py exactly once')
+    ends = [index for index in range(starts[0], len(lines)) if lines[index].strip() == 'continue']
+    lines = lines[:starts[0]] + lines[ends[0] + 1:]
+    lines = cut('def warm_key(self, bucket):',
+                "bucket['capture_position'] if self.replay_plan is not None else None)")
     return chr(10).join(lines)
 
 
