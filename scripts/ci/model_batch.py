@@ -847,6 +847,25 @@ class ModelBatch:
 
         return forward
 
+    def collective_scope(self):
+        """The block's all-reduces, one 32-row tile each, at four cards; nothing at the pair or within one tile.
+
+        The four-card ring reduce-scatter adds its four partials in an order that depends on the tile's place in the
+        block, so a 64-row all-reduce differs in the last bit from the sequential engine's one-tile call on the block's
+        second tile (tile_collective_tp). Inside this scope the model's tt_all_reduce (rebound by tp_addresses.install
+        at QWEN_FAST_TP != 2) splits every block-wide call; the scope refuses the round unless all of them were split:
+        the mixer's (the 16 wo projections and the 48 GDN output projections) and, when the MLP is native at the block's
+        rows, the 64 w2 reductions (the non-native MLP already runs two 32-row calls)."""
+        import tp_shapes
+
+        if tp_shapes.chip_count() == tp_shapes.PAIR or self.rows <= TILE_ROWS:
+            return nullcontext()
+        import tile_collective_tp
+        from dflash_device import pindiag
+
+        layers = len(self.model.layers)
+        return tile_collective_tp.block_scope(self.rows, expected=layers * (2 if self.native_m3 else 1), log=pindiag)
+
     def run(self, *, sharded_logits=False):
         if self.retained is not None and (self.retained.closed or self.retained.records):
             raise ValueError('A retained fixture owns exactly one captured or eager block')
@@ -862,7 +881,7 @@ class ModelBatch:
         two_tile = tuple(getattr(self, 'two_tile', ()))
         before_two_tile = [binder.calls for binder in two_tile]
         mask_scope = self.replay_reader.shared_masks(16) if self.attention_mask_once else nullcontext()
-        with instance_overrides(self.bindings), mask_scope:
+        with instance_overrides(self.bindings), mask_scope, self.collective_scope():
             result = self.model._forward_decode(self.tokens, self.cos, self.sin, self.positions, self.pages,
                 **({'sharded_lm_head': True} if sharded_logits else {}))
         if self.attention_mask_once and self.replay_reader.refresh_calls - before_mask_refresh != len(self.replay_reader.metadata):

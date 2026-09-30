@@ -14,6 +14,10 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_IMAGE_TAG        the image is zot.thatch.local:5000/tt-vllm:qwen38-c2-<tag>
   C2_FABRIC           the fabric config the fabric action opens the (1, 4) mesh under: FABRIC_1D (the default, what
                       the TT plugin sets) or FABRIC_1D_RING; needs C2_CARDS=quad when set
+  C2_FABRIC_PROBE     what the fabric action runs on the (1, 4) mesh: fabric (the default: tp4_fabric_probe.py, the ring, the
+                      link count and the collectives timed) or rs-tile (tp4_rs_tile_spike.py: the model's own all-reduce on a
+                      64-row block against its one-tile calls, bit for bit, then the tile-split wrapper; the verdict line
+                      TP4_RS_TILE); needs the fabric action
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
                       Blackhole board present, the four-card (1, 4) mesh the TP4 profiles open). quad takes
@@ -95,6 +99,7 @@ TP4_MESH_DEVICE = 'P150x4'
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
+FABRIC_PROBES = ('fabric', 'rs-tile')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
 # each runs. warm and warm-off are M1 (never judged for kernel-cache growth); control and forced-cap M3-M4 (G3);
@@ -233,6 +238,15 @@ def fabric_config(values):
     return fabric
 
 
+def fabric_probe(values, actions):
+    probe = values.get('C2_FABRIC_PROBE') or FABRIC_PROBES[0]
+    if probe not in FABRIC_PROBES:
+        raise JobError('C2_FABRIC_PROBE must be one of %s, got %r' % (', '.join(FABRIC_PROBES), probe))
+    if values.get('C2_FABRIC_PROBE') and 'fabric' not in actions:
+        raise JobError('C2_FABRIC_PROBE names what the fabric action runs; C2_ACTIONS has no fabric')
+    return probe
+
+
 def positive_int(name, text):
     try:
         value = int(text)
@@ -339,7 +353,7 @@ def read_job(values, profiles, root=ROOT, meshes=None):
         named += [('C2_PREFIX_PROFILE', prefix['prefix_profile']), ('C2_PREFIX_BASELINE', prefix['prefix_baseline'])]
     cards = read_cards(values, actions, meshes, named)
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
-    outputs = dict(cards=cards, fabric=fabric_config(values), bench_shapes=bench_shapes(values), actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
+    outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,

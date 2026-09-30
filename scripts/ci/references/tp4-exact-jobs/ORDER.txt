@@ -1,0 +1,13 @@
+# The order of the four-card exactness window (tp4/exact), one template per line: <template name without .env> <stop|soft|optional>.
+# stop: the window halts at the first failure of this job. soft: a failure is logged and the window goes on (its product is
+# data, not a verdict). optional: run only after every stop job has passed, one at a time, each separable from the rest.
+# Early-failure order: no card first (X0), then the one four-card spike that reproduces the failure on the unfixed program and
+# shows the fix bit exact (X1: minutes, and four cards, because a collective needs them), then the matrix that failed (X2), then
+# the timings (X3).
+# X1 is a STOP job in both failure directions: FAIL (the fix is not exact, or a control moved) and NOT_REPRODUCED (the reduction
+# order is not what parts the block from the sequential engine, so X2 would test a change that is not the cause).
+X0-build stop
+X1-rs-tile-spike stop
+X2-s3a-matrix stop
+X3-quad-smoke-timings soft
+X4-permuted-matrix optional
