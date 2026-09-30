@@ -1,0 +1,30 @@
+# The order of the four-card batched-draft window (tp4/draft), one template per line: <template name without .env> <stop|soft>.
+# stop: the window halts at the first failure of this job. soft: a failure is logged and the window goes on (its product is data).
+# What the window is for. At four cards every user drafts singly whenever a fixed slot pair holds a user still in the draft ramp
+# (history under 2,048 rows), and a live-4 round of four steady users is 63 ms of device verify plus about 110 ms of host: four
+# serial commits (38 ms) and the drafts (64 ms, four single-user passes back to back on the device). tp4/draft batches the drafts:
+# the four-card quad (quad_draft_tp: one 64-row pass at 8 query / 2 KV heads per chip, QWEN_FAST_QUAD_DRAFT=1) and, one step
+# down, the packed pairs (the pair fold at 8 / 2 heads, already on the path and never run on a card). The verifier keeps the text
+# exact whatever is drafted, so a wrong batched draft shows up only as lower acceptance: the window's exactness is the drafts
+# themselves. QWEN_FAST_DRAFT_SINGLES_AUDIT=all replays every batched user's own single-user draft in the same round and compares
+# features, candidates, scores and tokens bit for bit (the audited profiles carry it; c2_smoke_check.py fails a run on one unequal
+# line), and speed_window_compare.py --batched-vs-singles compares the per-request accepted-prefix sequences of the concurrent arm
+# (batched) against the solo arm (one user never batches) by position.
+# Early-failure order, cheapest first: no card (D0); the audited attach with the quad on (D1: the first time the quad's kernels run
+# on a card at four-card shapes, every batched round audited against the singles); the same with the quad off (D2: the pairs at
+# four cards, the control and the R0 measurement); the exactness matrix with the quad on (D3); then the two TIMED smokes, the
+# product (D4 quad, D5 pairs; the audits cost about 30 ms of verify readback and about 80 ms of draft replays per round, so the
+# audited arms are never timed). The smokes need the concurrent4_steady test: the mixed concurrent4 holds two prompts under 2,048
+# tokens, which keep both fixed pairs drafting singly for their whole answer.
+# After the window, offline (scripts/ci/speed_window_compare.py, on the gate's results trees):
+#   python scripts/ci/speed_window_compare.py D3-results --batched-vs-singles
+#       every user's concurrent (quad) rounds against its own solo rounds, by position: exit 0 identical, 1 a different draft
+#   python scripts/ci/speed_window_compare.py E1-results D3-results --users 2,3
+#       the 4,096 and 16,384 users' texts and solo accepted-prefix sequences against the speed window's E1 (same prompts: the
+#       real-text corpus fixes a prompt by user index and length), on an E1 from tp4/speed at 9cac8a84 or later
+D0-build stop
+D1-quad-smoke stop
+D2-pairs-smoke soft
+D3-quad-matrix stop
+D4-quad-smoke-timed soft
+D5-pairs-smoke-timed soft
