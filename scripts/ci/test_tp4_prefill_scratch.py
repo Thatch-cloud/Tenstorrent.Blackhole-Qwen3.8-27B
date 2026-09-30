@@ -129,6 +129,12 @@ class WarmBeforeTraces(unittest.TestCase):
         self.assertLess(source.index("memory_ledger.record('P5', draft_weights=weights)"), call)
         self.assertLess(call, source.index('from packed_verifier import PackedVerifierEngine'))
         self.assertLess(call, source.index('packed_block = PackedVerifierEngine('))
+        # ...and before D0's one-user block (QWEN_FAST_SOLO_LANE), the other block this attach captures, and before the
+        # factories that build every per-request engine and its captures.
+        self.assertLess(call, source.index('solo_block = PackedVerifierEngine('))
+        self.assertLess(call, source.index('def capture_factory('))
+        self.assertLess(call, source.index('def bridge_factory('))
+        self.assertEqual(source.count('PackedVerifierEngine('), 2, 'a new block built here must come after the warm too')
         self.assertNotIn('prefill_scratch_before_traces', source)
 
     def test_every_prefill_shape_is_warmed(self):

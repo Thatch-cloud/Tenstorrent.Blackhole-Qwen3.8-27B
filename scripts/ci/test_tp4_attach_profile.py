@@ -53,9 +53,15 @@ import tp_shapes
 from test_c2_packed_tp4_profiles import image_env, profiles
 
 HERE = Path(__file__).resolve().parent
-PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16',
-            'c2-packed-tp4-time-gate', 'c2-packed-tp4-solo-gate', 'c2-packed-tp4-solo-time-gate',
-            'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate')
+# The profiles this attach was first written for; every four-card fast-path profile below must include them.
+NAMED = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16',
+         'c2-packed-tp4-time-gate', 'c2-packed-tp4-solo-gate', 'c2-packed-tp4-solo-time-gate',
+         'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate')
+# Every four-card fast-path profile (QWEN_FAST_TP=4 with the extent replay on), read from the profile file, so a new window's
+# arms - and the combined profiles that stack several windows' flags (tp4/next's c2-packed-tp4-best, -best-gate) - attach here
+# too, with no list to keep in step.
+PROFILES = tuple(sorted(name for name, profile in profiles().items()
+                        if profile['env'].get('QWEN_FAST_TP') == '4' and profile['env'].get('QWEN_FAST_EXTENT_REPLAY') == '1'))
 RING_DESCRIPTOR = HERE / 'qwen_p150x4_ring_mesh_graph_descriptor.textproto'
 
 
@@ -249,11 +255,20 @@ class AttachTests(unittest.TestCase):
                     self.assertEqual(audit['target']['direct']['disabled'], 'four-card profile')
                     self.assertEqual(audit['target']['direct']['hits'], 0)
                     self.assertEqual(seen['pool']['extent_replay'], True)
-                    solo = 'solo' in name or 'lanes' in name
+                    solo = profiles()[name]['env'].get('QWEN_FAST_SOLO_LANE') == '1'
                     self.assertEqual(len(seen['engines']), 2 if solo else 1,
                                      'one 64-row block over four seats, and the one-user block beside it under the solo lane')
+                    # every block, the solo one included, is built with the one shared TT_CCL (the fused commit's T_proj
+                    # traces and S2 B6's eager publication warm both need it at four cards)
+                    self.assertEqual(['collectives' in options for options in seen['block_options']], [True] * (2 if solo else 1))
                 self.assertEqual(seen['links_after'], seen['links_before'])
                 self.assertTrue(seen['lifecycle'])
+
+    def test_the_profiles_attached_here_are_every_four_card_fast_path_profile(self):
+        self.assertTrue(set(NAMED) <= set(PROFILES), sorted(set(NAMED) - set(PROFILES)))
+        for name in ('c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-speed-fcommit-quad',
+                     'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-gate-vglue'):
+            self.assertIn(name, PROFILES)
 
     def test_the_seam_is_what_makes_the_attach_possible(self):
         """The class of bug the review found: the pair's scopes refuse a (1, 4) mesh, and nothing on CPU said so."""
