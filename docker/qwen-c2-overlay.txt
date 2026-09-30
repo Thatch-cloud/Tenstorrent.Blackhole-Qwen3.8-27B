@@ -232,6 +232,7 @@ scripts/ci/serving_cache_owner.py
 scripts/ci/feature_projection_tp.py
 scripts/ci/draft_attention_tp.py
 scripts/ci/draft_kv_history_tp.py
+scripts/ci/draft_kv_slide_tp.py
 scripts/ci/draft_attention_branch.py
 scripts/ci/draft_mlp_branch.py
 scripts/ci/gdn_commit_dma_tp.cpp

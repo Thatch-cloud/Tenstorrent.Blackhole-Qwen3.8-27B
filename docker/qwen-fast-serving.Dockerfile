@@ -108,7 +108,7 @@ COPY scripts/ci/publish_prewarm.py /experiment-scripts/ci/
 COPY scripts/ci/publication_warm.py /experiment-scripts/ci/
 # S2T-07 (the drafter at four cards): these carry the per-chip counts from tp_shapes (unchanged at the pair) and the four-card
 # twins dflash_device / serving_request_factory select at QWEN_FAST_TP=4, so they travel beside their importers.
-COPY scripts/ci/serving_page_binding.py scripts/ci/verifier_inputs.py scripts/ci/feature_projection_tp.py scripts/ci/draft_kv_history_tp.py scripts/ci/verifier_engine_tp.py /experiment-scripts/ci/
+COPY scripts/ci/serving_page_binding.py scripts/ci/verifier_inputs.py scripts/ci/feature_projection_tp.py scripts/ci/draft_kv_history_tp.py scripts/ci/draft_kv_slide_tp.py scripts/ci/verifier_engine_tp.py /experiment-scripts/ci/
 # Four-card twins of the pinned pair helpers (S2 TP4 port): tp_addresses.install() rebinds the pair's functions to these at QWEN_FAST_TP=4 only;
 # the pair's own modules stay the bundle's bytes (test_tp2_pins).
 COPY scripts/ci/draft_convolution_tp.py scripts/ci/draft_convolution_fused_tp.py scripts/ci/draft_head_layout_tp.py scripts/ci/draft_kv_projection_tp.py scripts/ci/draft_mlp_tp.py scripts/ci/draft_shared_head_tp.py scripts/ci/feature_collective_tp.py scripts/ci/pair_row_exact_tp.py scripts/ci/attention_head_fold_tp.py scripts/ci/gdn_conv_prefix_copy_tp.py scripts/ci/gdn_working_state_tp.py scripts/ci/mtp_hidden_rows_tp.py scripts/ci/gdn_batched_conv_tp.py scripts/ci/gdn_conv_windows_tp.py scripts/ci/attach_scopes_tp.py scripts/ci/draft_attention_tp.py scripts/ci/ordered_cache_tp.py /experiment-scripts/ci/

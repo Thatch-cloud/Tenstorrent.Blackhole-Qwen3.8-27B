@@ -13,6 +13,7 @@ flags off).
 from types import SimpleNamespace
 
 import draft_kv_history as pair
+import draft_kv_slide_tp
 from draft_kv_projection import project_key_value
 import tp_shapes
 from tp_addresses import addresses
@@ -118,6 +119,7 @@ class DraftKVHistory(pair.DraftKVHistory):
         operations = self.operations
         kv_heads = tp_shapes.active().draft_kv_heads
         rows = min(2048, self.history_rows + prefix)
+        slide = draft_kv_slide_tp.enabled()   # QWEN_FAST_TP_KV_SLIDE; unset keeps the eager chain
         with self.temporaries([features]) as retain:
             inputs, tables = self.project_inputs(features, prefix, position, retain)
             projected = self.projection.project(inputs, tables) if self.projection is not None else None
@@ -125,6 +127,12 @@ class DraftKVHistory(pair.DraftKVHistory):
                 result = projected[layer] if projected is not None else project_key_value(
                     operations, inputs, self.query, tables, retain, parameters=parameter)
                 for name in ('k', 'v'):
+                    if slide:
+                        # One generic_op over the fixed-shape banks with history_rows, prefix, drop and rows as runtime
+                        # arguments: no program is built per (history_rows, prefix), which the eager chain below does in the ramp.
+                        draft_kv_slide_tp.prepare(self.mesh, active[name], result[name], spare[name],
+                                                  history_rows=self.history_rows, prefix=prefix)()
+                        continue
                     historical = retain(operations.slice(active[name], (0, 0, 0, 0), (1, kv_heads, self.history_rows, 128)))
                     accepted = retain(operations.slice(result[name], (0, 0, 0, 0), (1, kv_heads, prefix, 128)))
                     combined = retain(operations.concat([historical, accepted], dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))

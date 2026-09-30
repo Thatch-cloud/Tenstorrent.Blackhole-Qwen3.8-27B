@@ -106,7 +106,7 @@ jobs:
           for name in publication_warm.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
-          for name in serving_page_binding.py verifier_inputs.py feature_projection_tp.py draft_kv_history_tp.py verifier_engine_tp.py; do
+          for name in serving_page_binding.py verifier_inputs.py feature_projection_tp.py draft_kv_history_tp.py draft_kv_slide_tp.py verifier_engine_tp.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
           for name in draft_convolution_tp.py draft_convolution_fused_tp.py draft_head_layout_tp.py draft_kv_projection_tp.py draft_mlp_tp.py draft_shared_head_tp.py feature_collective_tp.py pair_row_exact_tp.py attention_head_fold_tp.py gdn_conv_prefix_copy_tp.py gdn_working_state_tp.py mtp_hidden_rows_tp.py gdn_batched_conv_tp.py gdn_conv_windows_tp.py attach_scopes_tp.py draft_attention_tp.py ordered_cache_tp.py; do
