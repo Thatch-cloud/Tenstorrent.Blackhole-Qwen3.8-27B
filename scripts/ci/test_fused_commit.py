@@ -1642,14 +1642,23 @@ def without_sticky(lines):
 
 
 def without_prefill_scratch(lines):
-    """serving_runtime.py less the four-card prefill-scratch hunk (tp4/stack-fix), which landed after this parent: the helper
-    function and its one call. Asserted to be exactly that, found once each."""
-    starts = [i for i, value in enumerate(lines) if value.startswith('def prefill_scratch_before_traces(')]
-    ends = [i for i, value in enumerate(lines) if value.startswith(('def ', '@')) and starts and i > starts[0]][:1]
-    calls = [i for i, value in enumerate(lines) if value.strip() == 'prefill_scratch_before_traces(model)']
-    if len(starts) != 1 or len(ends) != 1 or len(calls) != 1 or ends[0] < starts[0]:
-        raise AssertionError('The prefill-scratch hunk is not in serving_runtime.py exactly once')
-    return lines[:starts[0]] + lines[ends[0]:calls[0]] + lines[calls[0] + 1:]
+    """serving_runtime.py less the four-card prefill warm hunk (tp4/stack-fix), which landed after this parent: its helper
+    functions (program_count, prefill_warm_before_traces, prefill_tripwire) and the two call lines. Asserted to be exactly that,
+    found once each."""
+    starts = [i for i, value in enumerate(lines) if value.startswith('def prefill_warm_before_traces(')]
+    mine = ('def program_count(', 'def prefill_warm_before_traces(', 'def prefill_tripwire(')
+    ends = [i for i, value in enumerate(lines) if value.startswith(('def ', '@')) and starts and i > starts[0]
+            and not value.startswith(mine)][:1]
+    calls = [i for i, value in enumerate(lines)
+             if value.strip() in ("prefill_warm_before_traces(runner, model, policy['scheduler_requests'], operations=operations)",
+                                  'capture_factory, bridge_factory = prefill_tripwire(model, capture_factory, bridge_factory)')]
+    # The helpers sit between the constants they use; the marker constants and program_count/tripwire are inside the span.
+    consts = [i for i, value in enumerate(lines) if value.startswith(('WARM_MARKER = ', 'PREFILL_PROGRAMS_MARKER = ',
+                                                                     'WARM_SLOT_TOKENS = ', 'WARM_LONG_PROMPTS = '))]
+    if len(starts) != 1 or len(ends) != 1 or len(calls) != 2 or ends[0] < starts[0] or len(consts) != 4 or consts[0] > starts[0]:
+        raise AssertionError('The prefill-warm hunk is not in serving_runtime.py exactly once')
+    drop = set(range(consts[0], ends[0])) | set(calls)
+    return [value for i, value in enumerate(lines) if i not in drop]
 
 
 def without_any_request(lines):

@@ -4,7 +4,7 @@
 # rule fails on them whatever the text (those images allocate the scratch at the first prefill): their exit status is not their verdict,
 # so all three are soft and each runs as a ONE-JOB chain, read by hand (smoke.log, the container timeline). G3 is still read FIRST: EOS
 # or garbage from a steady user's first token there (all four steady prefills run before any packed round) refutes the ranking below,
-# so stop and re-plan before V0. V0-V3 share one chain on tp4-stackfix-1.
+# so stop and re-plan before V0. V0b, V1b and V3 share one chain on tp4-stackfix-3 (the image with the eager-prefill warm); V0, V1a and V2 are the tp4-stackfix-1 rows it supersedes.
 # Diagnosis (the mechanism is a ranking, not proven): a prefill after a packed replay is wrong at four cards. The fix allocates the GDN
 # prefill scratch before the traces. V1a/V1b judge the trigger by text; V3 judges it under the exactness policy (staggered arrivals
 # prefill after padded packed rounds); V2 is the exactness regression at 4k-60k and does NOT reach the trigger (the matrix admits all
@@ -12,12 +12,18 @@
 # compile after the attach capture (#48536: G1 v47, run 36246961161, compiled the eager loop after its traces were parked and its next
 # prefill hit an MMIO per-op timeout, X3's signature). If V1a or V3 still fails, that is the next candidate, and G1's remedy (warm the
 # eager prefill before the first trace: qwen_prefix_model_patch._qwen_prefix_warm_eager) the next fix.
+# tp4-stackfix-2 (scratch before the traces only) turned the garbage into a hang (V1b v188, X3 v159): the eager prefill compiled its
+# programs AFTER the packed traces were captured, #48536's sequence. tp4-stackfix-3 warms the whole eager prefill (every bucket, the
+# paged-fill widths, the slot writes, two long prompts) at four cards before the first capture, and the smoke check fails a run whose
+# warm line is missing or follows Metal's 'unsafe allocation' warning, or whose prefill compiles a program past its window snapshot's.
+# If V1b or V3 still fails with no late program, run V5: the publication warm's scratch kept for the life of the process.
 G3-stack-gate-steady soft tp4-stack-1 read-first
 R3-stack-speed-d1-sequence soft tp4-stack-1
 R2-speed-gate-d1-sequence soft tp4-speed-1 optional
-V0-build-stackfix stop tp4-stackfix-1
-V1a-fix-gate-quad-smoke stop tp4-stackfix-1
-V1b-fix-gate-pairs-smoke stop tp4-stackfix-1
-V3-fix-staggered-trigger soft tp4-stackfix-1
-V2-fix-s3a-matrix-pairs stop tp4-stackfix-1
+V0b-build-stackfix3 stop tp4-stackfix-3
+V1b-fix-gate-pairs-smoke stop tp4-stackfix-3
+V3-fix-staggered-trigger soft tp4-stackfix-3
+V0-build-stackfix stop tp4-stackfix-1 superseded
+V1a-fix-gate-quad-smoke stop tp4-stackfix-1 superseded
+V2-fix-s3a-matrix-pairs stop tp4-stackfix-1 superseded
 # Dropped: R1 (X3 is already the tp4-exact-1 positive and likely hangs), G4 (X2 covers four-live pairs), G1/G2 unless G3 fails.

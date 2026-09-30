@@ -119,30 +119,106 @@ def padded_block_admission(policy, environ=None):
     return minimum
 
 
-def prefill_scratch_before_traces(model, environ=None):
-    """Four cards only (QWEN_FAST_TP not '2'): allocate the model's persistent B=1 GDN prefill scratch BEFORE the packed
-    blocks capture their traces, and return True when it did.
+WARM_MARKER = '[PINDIAG] four-card eager prefill warmed before the packed traces'
+PREFILL_PROGRAMS_MARKER = '[PINDIAG] four-card prefill programs='
+WARM_SLOT_TOKENS = 64
+WARM_LONG_PROMPTS = (2048 + 64, 4096)
 
-    Serving runs trace_mode=decode_only, so warmup_model_prefill returns early and nothing builds the scratch at startup:
-    the first prefill does (qwen36_model._ensure_gdn_prefill_scratch), after the attach-time packed traces exist - and it
-    drops the batched zero sources as well. Metal warns that an allocation made after a trace may be overwritten when the
-    trace runs (packed_verifier.py, CONSTRUCTION ORDER), and at four cards every prefill after the first packed replay came
-    out wrong (v172: EOS at the first token or garbage; v163's tp4-exact-1 hung in it). The pair keeps its order: two cards
-    are untouched. A model without the method (a test double) is left alone."""
+
+def program_count(model):
+    """The mesh's program-cache entry count, or None where the model has no mesh that reports it (a test double)."""
+    count = getattr(getattr(model, 'mesh_device', None), 'num_program_cache_entries', None)
+    if not callable(count):
+        return None
+    try:
+        return int(count())
+    except Exception:
+        return None
+
+
+def prefill_warm_before_traces(runner, model, scheduler_requests, environ=None, operations=None):
+    """Four cards only (QWEN_FAST_TP not '2'): run the model's eager-prefill warmup BEFORE the packed blocks capture their
+    traces, and return True when it did. Two cards return False before touching anything, so the pair is unchanged.
+
+    The fast path never runs the model's own prefill warmup (qwen36_model.prefill_paged_slots: 'call the batched warmup
+    first ... pre-warmed programs, no post-park compile'): serving runs trace_mode=decode_only, so warmup_model_prefill returns
+    at once, and serving_startup.warmup replaces the plugin's warmup, so G1's _qwen_prefix_warm_eager (#48536) never runs either.
+    The first eager prefill of the process then compiled the whole prefill program set AFTER the attach-time packed traces
+    were captured, and every later packed replay could overwrite what it left in the holes the capture freed: v172 came out
+    as EOS or garbage (the GDN scratch's zero sources), and with the scratch moved before the traces (110e919b) v188 and
+    v159 hung in the first prefill chunk whose programs had compiled after the capture.
+
+    In order: (a) the persistent B=1 GDN scratch, claimed in the ledger; (b) a page table at the width the plugin gives every
+    prefill (runner.max_num_blocks_per_req; SDPA pads the table to a multiple of 32 and is keyed on that shape), refusing the
+    attach when the runner has no such width; (c) the masked-bucket warmup under the bound scratch, unbound in a finally;
+    (d) one served-entry prefill per scheduler slot, plus a 2048+64 and a 4096 prompt on slot 0, so the chunk loop, the
+    write-slot programs and the logits run through the entry the requests use. A model without the scratch method (a test
+    double) is left alone."""
     environ = os.environ if environ is None else environ
     if environ.get('QWEN_FAST_TP', '2') == '2':
         return False
     ensure = getattr(model, '_ensure_gdn_prefill_scratch', None)
     if ensure is None:
         return False
+    width = getattr(runner, 'max_num_blocks_per_req', None)
+    if type(width) is not int or width <= 0:
+        raise ValueError('The four-card eager prefill warm needs the plugin runner\'s max_num_blocks_per_req (the width '
+                         'every prefill page table has), not %r' % (width,))
+    import torch
+
+    began, programs_before = time.perf_counter(), program_count(model)
     ensure()
-    pindiag('[PINDIAG] gdn prefill scratch allocated before the packed traces (four cards)')
     # The ledger (a no-op unless QWEN_FAST_MEMORY_LEDGER=1) claims the scratch here, under its own item, so the first
-    # prefill's model_after_prefill - c2_smoke_check's four-card rule - reads only what that prefill allocated, whether
-    # or not P6's walk of the block reaches the model.
-    memory_ledger.record('P5', point='prefill_scratch',
-                         model_prefill_scratch=getattr(model, '_gdn_prefill_scratch', None))
+    # prefill's model_after_prefill - c2_smoke_check's four-card rule - reads only what that prefill allocated.
+    memory_ledger.record('P5', point='prefill_scratch', model_prefill_scratch=getattr(model, '_gdn_prefill_scratch', None))
+    page_table = torch.arange(width, dtype=torch.int32).reshape(1, width)
+    previous = model._bind_gdn_prefill_scratch()
+    try:
+        model.warmup_prefill_masked_buckets(page_table)
+    finally:
+        model._unbind_gdn_prefill_scratch(previous)
+    slots = tuple(range(int(scheduler_requests)))
+    for slot in slots:
+        model.prefill_paged_slots([torch.zeros((1, WARM_SLOT_TOKENS), dtype=torch.int64)], page_table, [slot],
+                                  valid_lens=[WARM_SLOT_TOKENS])
+    for length in WARM_LONG_PROMPTS:
+        model.prefill_paged_slots([torch.zeros((1, length), dtype=torch.int64)], page_table, [0], valid_lens=[length])
+    if operations is not None:
+        operations.synchronize_device(model.mesh_device)
+    pindiag(WARM_MARKER + ': page_table_blocks={} slots={} long_prompts={} programs={}->{} ms={:.0f}', width, len(slots),
+            list(WARM_LONG_PROMPTS), programs_before, program_count(model), (time.perf_counter() - began) * 1000.0)
+    memory_ledger.record('P5', point='prefill_warm')
     return True
+
+
+def prefill_tripwire(model, capture_factory, bridge_factory, environ=None):
+    """(capture_factory, bridge_factory), wrapped at four cards to log one line per prefill:
+    '[PINDIAG] four-card prefill programs=A->B window=W prompt=P', the program-cache count before and after the prefill
+    and how many of those entries the window snapshot compiled (dflash_prefill_window: keyed on the prompt's geometry, so
+    it cannot be warmed). c2_smoke_check fails a prefill with B-A-W above zero: a program compiled after the packed
+    traces were captured, the #48536 sequence. The pair, and a model that cannot report its cache, get the factories back
+    unwrapped."""
+    environ = os.environ if environ is None else environ
+    if environ.get('QWEN_FAST_TP', '2') == '2' or program_count(model) is None:
+        return capture_factory, bridge_factory
+    import dflash_prefill_window
+
+    dflash_prefill_window.set_program_counter(lambda: program_count(model))
+    opened = {}
+
+    def counted_capture(position, start=0):
+        dflash_prefill_window.window_programs(reset=True)
+        capture = capture_factory(position, start)
+        opened[id(capture)] = (program_count(model), position)
+        return capture
+
+    def counted_bridge(state, capture):
+        before, position = opened.pop(id(capture), (None, len(getattr(state, 'prompt_token_ids', ()) or ())))
+        pindiag(PREFILL_PROGRAMS_MARKER + '{}->{} window={} prompt={}', before, program_count(model),
+                dflash_prefill_window.window_programs(), position)
+        return bridge_factory(state, capture)
+
+    return counted_capture, counted_bridge
 
 
 def packed_capture_position(environ=None):
@@ -450,6 +526,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             block_rows=16, live_query_qk=False, native_proposal_attention=True)
         scopes.callback(weights.close)
         memory_ledger.record('P5', draft_weights=weights)
+        prefill_warm_before_traces(runner, model, policy['scheduler_requests'], operations=operations)
         # The device step. By default the sequential one - correct, not yet fast: one
         # weight pass per user per round - and describe() records that cost so a benchmark
         # reading it is not mistaken for the goal. QWEN_FAST_PACKED_STEP=1 builds the
@@ -473,7 +550,6 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # and no round ever rebinds a segment. A single configured shape (the m1
             # two-user or m3 four-user default) gets no `pool_slots=` at all, so its block
             # is built exactly as it always was: slots 0..users-1, in order.
-            prefill_scratch_before_traces(model)
             packed_blocks, slot = [], 0
             if capture_position is not None:
                 pindiag('{}{} (gate only)', CAPTURE_POSITION_MARKER, capture_position)
@@ -594,6 +670,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # this pool, is parked before the lifecycle serves a request; the scope removes it before the pool closes.
         if extent_replay_enabled():
             scopes.callback(register_dram_admission(pool))
+        capture_factory, bridge_factory = prefill_tripwire(model, capture_factory, bridge_factory)
         lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,
             capture_factory=capture_factory, bridge_factory=bridge_factory, eos_ids=eos_ids,
             cancelled=cancelled, packed_step=packed_step)
