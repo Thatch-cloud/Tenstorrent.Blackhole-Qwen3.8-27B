@@ -19,6 +19,8 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual((found.gdn_qkv, found.gdn_z, found.gdn_qkvzab, found.gdn_qkvzab_padded), (5120, 3072, 8240, 8256))
         self.assertEqual((found.gdn_key, found.gdn_value), (1024, 3072))
         self.assertEqual((found.gdn_state_pages, found.gdn_conv_pages), (384, 160))
+        # the conv gates op's a / b column offsets in one projected row: gdn_batched_conv's a_col=8192, b_col=8216
+        self.assertEqual((found.gdn_a_col, found.gdn_b_col), (8192, 8216))
         # pair_row_exact.QUERY_HEADS, KEY_HEADS = 16, 4; serving_buffer_pool QUERY_SHAPE (1, 1, 32, 2048)
         self.assertEqual((found.draft_heads, found.draft_kv_heads, found.draft_query), (16, 4, 2048))
         self.assertEqual((found.draft_embedding, found.draft_taps), (2560, 2560))
@@ -32,6 +34,7 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual((found.gdn_qkv, found.gdn_z, found.gdn_qkvzab, found.gdn_qkvzab_padded), (2560, 1536, 4120, 4128))
         self.assertEqual((found.gdn_key, found.gdn_value), (512, 1536))
         self.assertEqual((found.gdn_state_pages, found.gdn_conv_pages), (192, 80))
+        self.assertEqual((found.gdn_a_col, found.gdn_b_col), (4096, 4108))
         self.assertEqual((found.draft_heads, found.draft_kv_heads, found.draft_query), (8, 2, 1024))
         self.assertEqual((found.draft_embedding, found.draft_taps), (1280, 1280))
 

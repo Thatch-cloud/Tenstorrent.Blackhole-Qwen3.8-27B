@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+import tp_shapes
+
 
 FLAG = 'QWEN_FAST_GDN_STATE_COPY_BATCH'
 
@@ -22,16 +24,20 @@ def batch_enabled(environ=None):
 
 
 def page_counts(shapes):
-    if len(shapes) != 5 or tuple(shapes[0]) != (1, 24, 128, 128):
+    # The per-chip widths of the width this process serves at (tp_shapes: 24 value heads, 5120 conv channels,
+    # 384 / 160 pages at the pair; 12, 2560, 192 / 80 at four cards).
+    found = tp_shapes.active()
+    if len(shapes) != 5 or tuple(shapes[0]) != (1, found.gdn_nv, 128, 128):
         raise ValueError("Expected one TP2 slot of recurrent state and four conv taps")
-    if any(tuple(shape) != (1, 1, 5120) for shape in shapes[1:]):
+    if any(tuple(shape) != (1, 1, found.gdn_qkv) for shape in shapes[1:]):
         raise ValueError("Expected frozen TP2 convolution channel shape")
-    return [384, 160, 160, 160, 160]
+    return [found.gdn_state_pages] + [found.gdn_conv_pages] * 4
 
 
 def transfer_counts(source_shapes, destination_shapes, compact_only=False):
-    compact_shapes = [(1, 24, 128, 128)] + [(1, 1, 5120)] * 4
-    full_shapes = [(8, 24, 128, 128)] + [(1, 8, 5120)] * 4
+    found = tp_shapes.active()
+    compact_shapes = [(1, found.gdn_nv, 128, 128)] + [(1, 1, found.gdn_qkv)] * 4
+    full_shapes = [(8, found.gdn_nv, 128, 128)] + [(1, 8, found.gdn_qkv)] * 4
     source_shapes = [tuple(shape) for shape in source_shapes]
     destination_shapes = [tuple(shape) for shape in destination_shapes]
     allowed = [(compact_shapes, compact_shapes)] if compact_only else [
@@ -86,14 +92,15 @@ def _copy_state(transfers, compact_only):
            or tensor.memory_config() != ttnn.DRAM_MEMORY_CONFIG for tensor in tensors):
         raise ValueError("Only interleaved DRAM BF16 tiles supported")
     shards = [ttnn.get_device_tensors(tensor) for tensor in tensors]
-    if any(len(local) != 2 for local in shards):
-        raise ValueError("Both chips required")
+    chips = tp_shapes.chip_count()
+    if any(len(local) != chips for local in shards):
+        raise ValueError("%s chips required" % tp_shapes.all_chips())
     cores = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(7, 5))])
     buffer = ttnn.CBDescriptor(total_size=2048, core_ranges=cores,
         format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=0, data_format=ttnn.bfloat16,
             page_size=2048, tile=ttnn.TileDescriptor(ttnn.Tile([32, 32])))])
     mesh_program = ttnn.MeshProgramDescriptor()
-    for chip in range(2):
+    for chip in range(chips):
         local = [parts[chip] for parts in shards]
         if len({tensor.buffer_address() for tensor in local}) != len(local):
             raise ValueError("State-copy buffers must not alias")

@@ -53,6 +53,7 @@ from gdn_multitoken_conv import addresses, release_owned, validate_projected
 
 import gdn_seq_block
 import gdn_user_batch
+import tp_shapes
 from verify_trace_t2 import audit_enabled as t2_audit, cut as t2_cut, fell_back as t2_fell_back, note as t2_note
 
 
@@ -71,9 +72,10 @@ def conv_gates(operations, projected, windows, taps, dt_bias, neg_exp_A, rows):
     advanced in place (old slot 1 -> 0, 2 -> 1, 3 -> 2, the piece's rows -> 3;
     optimisation/ttnn-op/test_gdn_conv_gates.py:4-7) - the windows the commit DMA later reads.
     The model's call and the audit's shadow call are both this one, so they cannot drift."""
+    found = tp_shapes.active()
     return operations.transformer.gdn_decode_conv_gates(projected, windows, taps, projected, projected,
         dt_bias, neg_exp_A, batch=rows, memory_config=operations.DRAM_MEMORY_CONFIG,
-        channels=5120, a_col=8192, b_col=8216)
+        channels=found.gdn_qkv, a_col=found.gdn_a_col, b_col=found.gdn_b_col)
 
 
 def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, kernels, operations=None, *,
@@ -90,10 +92,10 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
 
     validate_options(dma_windows, packed_checkpoints, defer_conv_publication, prefix_zero_reuse)
     groups = [tuple(user) for user in users]
-    if not 1 <= len(groups) <= gdn_user_batch.MAX_USERS or any(len(user) != 3 for user in groups):
+    if not 1 <= len(groups) <= gdn_seq_block.batch.MAX_USERS or any(len(user) != 3 for user in groups):
         raise ValueError('One to %d packed (projected, initial, conv_states) users required'
-                         % gdn_user_batch.MAX_USERS)
-    if len(taps) != 4 or any(tuple(tap.shape) != (1, 1, 5120) for tap in taps):
+                         % gdn_seq_block.batch.MAX_USERS)
+    if len(taps) != 4 or any(tuple(tap.shape) != (1, 1, tp_shapes.active().gdn_qkv) for tap in taps):
         raise ValueError('Four channel-wise convolution taps required')
 
     owned, shared = [], []
@@ -103,6 +105,7 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
     audit, audit_owned = {}, []
     packed_windows = None
     try:
+        found = tp_shapes.active()
         weights = operations.to_memory_config(norm_w, operations.DRAM_MEMORY_CONFIG)
         if addresses(operations, weights) != addresses(operations, norm_w):
             shared.append(weights)
@@ -140,7 +143,7 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
             mine.extend(windows)
             packed = conv_gates(operations, projected, windows, taps, dt_bias, neg_exp_A, rows)
             mine.extend(packed)
-            z = operations.slice(projected, (0, 0, 5120), (1, rows, 8192),
+            z = operations.slice(projected, (0, 0, found.gdn_qkv), (1, rows, found.gdn_a_col),
                                  memory_config=operations.DRAM_MEMORY_CONFIG)
             if addresses(operations, z) != addresses(operations, projected):
                 mine.append(z)
@@ -156,7 +159,7 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
             build = gdn_seq_block.served_kernels()
             produced = gdn_seq_block.execute(mesh, inputs, operations, output_memory=output_memory, kernels=build)
         else:
-            produced = gdn_user_batch.execute(mesh, inputs, kernels, operations, output_memory=output_memory)
+            produced = gdn_seq_block.batch.execute(mesh, inputs, kernels, operations, output_memory=output_memory)
         # Owned BEFORE anything below can raise. The per-user loop asserts on state
         # addresses, and a raise part way through it would otherwise strand the outputs
         # of every user it had not reached yet: `execute` has already handed ownership

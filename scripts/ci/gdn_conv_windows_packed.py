@@ -46,14 +46,16 @@ so the pair travels together (test_serving_image_copy_closure).
 import hashlib
 from pathlib import Path
 
-PAGES = 160            # 5120 channels / 32: one tile row of every window, piece and history
+import tp_shapes
+
+PAGES = 160            # 5120 channels / 32: one tile row of every window, piece and history (the pair's)
 ROWS = 16              # the only width the trimmed kernel serves (faces 2-3 zeroed once)
 SLOTS = 4
 HISTORY = 4
 PAGE = 2048            # one bf16 32x32 tile
 FACE_BYTES = 512
 ROW_BYTES = 32
-CHANNELS = 5120
+CHANNELS = 5120         # the pair's conv channels per chip; four cards: 2560 (tp_shapes)
 TILES_IN = 1 + HISTORY  # the piece tile and four history tiles per task
 NBUF_IN = 2            # CB_IN depth in tasks
 CB_IN, CB_SCRATCH = 0, 1
@@ -78,13 +80,23 @@ class Unsupported(ValueError):
 # Pure planners (CPU-tested).
 # ---------------------------------------------------------------------------------------------
 
+def pages():
+    """Conv tile-rows per window at the width this process serves at: 160 at the pair, 80 at four cards."""
+    return tp_shapes.active().gdn_conv_pages
+
+
+def channels():
+    """Conv channels per chip: 5120 at the pair, 2560 at four cards."""
+    return tp_shapes.active().gdn_qkv
+
+
 def plan(users, cores):
     """Tasks t in [0, users * 160): user t // 160, page t % 160. Worker w takes the contiguous
     range [start_w, start_w + count_w), count_w = tasks // cores plus one for the first
     tasks % cores workers. 4 users on 110 cores: [6] * 90 + [5] * 20."""
     if type(users) is not int or users < 1 or type(cores) is not int or cores < 1:
         raise ValueError('positive users and cores required')
-    tasks = users * PAGES
+    tasks = users * pages()
     base, extra = divmod(tasks, cores)
     ranges, start = [], 0
     for worker in range(cores):
@@ -96,7 +108,7 @@ def plan(users, cores):
 
 def task(index):
     """(user, page) of task `index`."""
-    return divmod(index, PAGES)
+    return divmod(index, pages())
 
 
 def window_copies(slot):
@@ -201,7 +213,7 @@ def compile_args(users, settings, accessor_args):
     """[USERS, PAGES, ROWS, NBUF, TASKS] + the three class representatives' TensorAccessorArgs
     (piece, history, output), identical for every kernel."""
     settings = resolve_settings(settings)
-    return [users, PAGES, ROWS, settings['nbuf'], users * PAGES] + [int(value) for value in accessor_args]
+    return [users, pages(), ROWS, settings['nbuf'], users * pages()] + [int(value) for value in accessor_args]
 
 
 def source_path(directory=None):
@@ -336,8 +348,8 @@ def unsupported(operations, mesh, users):
         shape = tuple(mesh.shape)
     except (AttributeError, TypeError):
         return 'no mesh shape'
-    if shape not in ((1, 1), (1, 2)):
-        return 'mesh %s is not [1, 1] or [1, 2]' % (shape,)
+    if shape not in ((1, 1), (1, tp_shapes.chip_count())):
+        return 'mesh %s is not [1, 1] or [1, %d]' % (shape, tp_shapes.chip_count())
     return None
 
 
@@ -481,7 +493,7 @@ def build_windows_packed(mesh, users, *, operations=None, directory=None, settin
         for user in range(count):
             own = []
             for slot in range(SLOTS):
-                own.append(operations.empty((1, rows, CHANNELS), device=mesh, dtype=operations.bfloat16,
+                own.append(operations.empty((1, rows, channels()), device=mesh, dtype=operations.bfloat16,
                                             layout=operations.TILE_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG))
                 flat.append(own[-1])
             outputs.append(own)

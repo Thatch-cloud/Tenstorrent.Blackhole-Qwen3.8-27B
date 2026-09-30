@@ -5,6 +5,8 @@ import inspect
 import textwrap
 from types import MethodType
 
+import tp_shapes
+
 
 def split_gated_source(source):
     tree = ast.parse(textwrap.dedent(source))
@@ -70,8 +72,9 @@ def prepare_token_rows(operations, packed, reuse=False):
 def independent_row(operations, packed, sliced):
     source = operations.get_device_tensors(packed)
     destination = operations.get_device_tensors(sliced)
-    if len(source) != 2 or len(destination) != 2:
-        raise ValueError("Both chips required for projected-row ownership")
+    chips = tp_shapes.chip_count()
+    if len(source) != chips or len(destination) != chips:
+        raise ValueError("%s chips required for projected-row ownership" % tp_shapes.all_chips())
     if any(first.buffer_address() == second.buffer_address()
            for first, second in zip(source, destination, strict=True)):
         raise ValueError("Projected row aliases its live packed projection")

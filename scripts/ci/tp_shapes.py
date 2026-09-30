@@ -51,7 +51,7 @@ Geometry = namedtuple('Geometry', (
     'tp', 'residual', 'vocab', 'mlp',
     'attn_heads', 'attn_kv_heads', 'attn_group', 'attn_fold_rows', 'attn_out',
     'gdn_nk', 'gdn_nv', 'gdn_qkv', 'gdn_z', 'gdn_qkvzab', 'gdn_qkvzab_padded', 'gdn_key', 'gdn_value',
-    'gdn_state_pages', 'gdn_conv_pages',
+    'gdn_state_pages', 'gdn_conv_pages', 'gdn_a_col', 'gdn_b_col',
     'draft_heads', 'draft_kv_heads', 'draft_query', 'draft_embedding', 'draft_taps'))
 
 
@@ -86,11 +86,19 @@ def geometry(tp):
         gdn_nk=nk, gdn_nv=nv, gdn_qkv=qkv, gdn_z=z, gdn_qkvzab=qkvzab, gdn_qkvzab_padded=ceil_tile(qkvzab),
         gdn_key=nk * GDN_HEAD_DIM, gdn_value=nv * GDN_HEAD_DIM,
         gdn_state_pages=STATE_PAGES_PER_HEAD * nv, gdn_conv_pages=qkv // TILE,
+        # Columns of one projected row [qkv | z | a | b | pad]: a starts after qkv and z, b after a's one column
+        # per value head (8192 / 8216 at the pair, 4096 / 4108 at four cards).
+        gdn_a_col=qkv + z, gdn_b_col=qkv + z + nv,
         draft_heads=divide(DRAFT_HEADS, tp, 'drafter query heads'),
         draft_kv_heads=divide(DRAFT_KV_HEADS, tp, 'drafter KV heads'),
         draft_query=divide(DRAFT_HEADS, tp, 'drafter query heads') * DRAFT_HEAD_DIM,
         draft_embedding=divide(HIDDEN, tp, 'drafter embedding width'),
         draft_taps=divide(HIDDEN, tp, 'drafter feature taps'))
+
+
+def active(environ=None):
+    """The geometry of the width this process serves at (QWEN_FAST_TP, else the pair)."""
+    return geometry(chip_count(environ))
 
 
 def sampler_fits(tp):

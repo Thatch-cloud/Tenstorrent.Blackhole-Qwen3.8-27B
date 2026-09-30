@@ -187,6 +187,27 @@ scripts/ci/draft_shared_head.py
 # pair and the four-card sibling otherwise.
 scripts/ci/gdn_seq_block.py
 scripts/ci/gdn_user_batch_tp.py
+# The packed GDN block's state plumbing at any width (S2T-03 / S2T-05a): the state copy, conv windows (per-user and
+# packed), conv prefix copy, commit DMA, restore and record helpers read their page counts, channel widths and chip
+# counts from tp_shapes. The pair's kernels are untouched; each DMA kernel that carried a literal page count has a
+# _tp sibling (defines from tp_kernels) that only a four-card launch selects, and gdn_multitoken_conv / gdn_records /
+# gdn_commit_dma (pinned by the TP2 evidence) stay byte for byte: tp_addresses.install() rebinds their helpers to the
+# gdn_*_tp twins at QWEN_FAST_TP=4 only.
+scripts/ci/tp_kernels.py
+scripts/ci/gdn_multitoken_conv_tp.py
+scripts/ci/gdn_records_tp.py
+scripts/ci/gdn_commit_dma_tp.py
+scripts/ci/gdn_commit_dma_tp.cpp
+scripts/ci/gdn_conv_prefix_copy_tp.cpp
+scripts/ci/gdn_conv_windows_tp.cpp
+scripts/ci/gdn_state_copy.py
+scripts/ci/gdn_conv_prefix_copy.py
+scripts/ci/gdn_conv_windows.py
+scripts/ci/gdn_conv_windows_packed.py
+scripts/ci/gdn_prefix.py
+scripts/ci/gdn_working_state.py
+scripts/ci/gdn_batched_conv.py
+scripts/ci/gdn_user_batch_conv.py
 
 # Four cards, one (1, 4) mesh (the TP4 profiles: general-tp4 and its variants). The contract imports tp4_mesh at
 # boot under a profile that names mesh_device P150x4 (the ring check it installs on the TT plugin's

@@ -12,7 +12,8 @@ the pinned function object, are pointed at the functions below, which count the 
 import the names afterwards read the rebound attributes. The pair never installs: its modules keep the pinned function
 objects, and these functions are call-for-call the pinned ones at two chips.
 
-Stdlib only, except that install() imports gdn_multitoken_conv (which needs the fast path's gdn_multitoken).
+Stdlib only, except that install() imports the pinned modules it rebinds (gdn_multitoken_conv needs the fast
+path's gdn_multitoken) and their twins.
 """
 
 import sys
@@ -35,24 +36,60 @@ def release_owned(operations, tensors):
         operations.deallocate(tensor)
 
 
-def install(environ=None):
-    """Rebind the pinned helpers to the chip-count-generic ones in every loaded module. -> how many names were
-    rebound (0 when already installed). Refused at the pair, where nothing may change."""
-    if tp_shapes.chip_count(environ) == tp_shapes.PAIR:
-        raise ValueError('The pinned two-chip address helpers stay in place at the pair')
-    import gdn_multitoken_conv as pinned
+# (module, attribute, twin module, twin attribute): the pinned or literal-carrying helpers the four-card process
+# replaces. The first two are this module's own; the rest are the sibling twins (each written call for call after the
+# pinned body, with the widths from tp_shapes).
+TWINS = (
+    ('gdn_multitoken_conv', 'addresses', 'tp_addresses', 'addresses'),
+    ('gdn_multitoken_conv', 'release_owned', 'tp_addresses', 'release_owned'),
+    ('gdn_multitoken_conv', 'validate_projected', 'gdn_multitoken_conv_tp', 'validate_projected'),
+    ('gdn_multitoken_conv', 'restore_prefix', 'gdn_multitoken_conv_tp', 'restore_prefix'),
+    ('gdn_records', 'retain_checkpoint_histories', 'gdn_records_tp', 'retain_checkpoint_histories'),
+    ('gdn_commit_dma', 'validate_shapes', 'gdn_commit_dma_tp', 'validate_shapes'),
+    ('gdn_commit_dma', 'prepare', 'gdn_commit_dma_tp', 'prepare'),
+    ('gdn_commit_dma', 'publish', 'gdn_commit_dma_tp', 'publish'),
+)
 
-    swaps = ((pinned.addresses, addresses), (pinned.release_owned, release_owned))
-    if pinned.addresses is addresses and pinned.release_owned is release_owned:
+# What install() changed: (namespace, name, the pinned object), so a test can put the pair's functions back.
+_REBOUND = []
+
+
+def install(environ=None):
+    """Rebind the pinned helpers to the chip-count-generic twins in every loaded module. -> how many names were
+    rebound (0 when already installed). Refused at the pair, where nothing may change.
+
+    A module holds a pinned function if its global of the same name IS the pinned function object (`from m import
+    name`, or the pinned module's own attribute): both the name and the identity must match, so a same-named function
+    of another module, and an alias under another name, are left alone."""
+    if tp_shapes.chip_count(environ) == tp_shapes.PAIR:
+        raise ValueError('The pinned two-chip helpers stay in place at the pair')
+    import importlib
+
+    swaps = []
+    for module_name, name, twin_module, twin_name in TWINS:
+        old = getattr(importlib.import_module(module_name), name)
+        new = getattr(importlib.import_module(twin_module), twin_name)
+        if old is not new:
+            swaps.append((name, old, new))
+    if not swaps:
         return 0
     rebound = 0
     for module in list(sys.modules.values()):
         namespace = getattr(module, '__dict__', None)
         if not isinstance(namespace, dict):
             continue
-        for name in ('addresses', 'release_owned'):
-            for old, new in swaps:
-                if getattr(old, '__name__', None) == name and namespace.get(name) is old:
-                    namespace[name] = new
-                    rebound += 1
+        for name, old, new in swaps:
+            if namespace.get(name) is old:
+                namespace[name] = new
+                _REBOUND.append((namespace, name, old))
+                rebound += 1
     return rebound
+
+
+def uninstall():
+    """Put back every pinned object install() replaced (tests only: the four-card process never goes back)."""
+    count = len(_REBOUND)
+    while _REBOUND:
+        namespace, key, old = _REBOUND.pop()
+        namespace[key] = old
+    return count

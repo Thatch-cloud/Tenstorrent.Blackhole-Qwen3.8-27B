@@ -3,6 +3,7 @@
 from types import FunctionType, MethodType
 
 from gdn_prefix import decode_projected, gated_decode
+import tp_shapes
 
 
 class WorkingState:
@@ -41,8 +42,8 @@ class WorkingState:
         result = []
         for tensor in tensors:
             shards = self.operations.get_device_tensors(tensor)
-            if len(shards) != 2:
-                raise ValueError("Both chips required")
+            if len(shards) != tp_shapes.chip_count():
+                raise ValueError("%s chips required" % tp_shapes.all_chips())
             result.append(tuple(shard.buffer_address() for shard in shards))
         return result
 

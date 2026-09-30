@@ -68,10 +68,7 @@ class InstallTests(unittest.TestCase):
                              or module.__dict__.get('release_owned') is PINNED_RELEASE)]
 
         def restore():
-            for module in self.holders:
-                for name, function in (('addresses', PINNED_ADDRESSES), ('release_owned', PINNED_RELEASE)):
-                    if module.__dict__.get(name) in (tp_addresses.addresses, tp_addresses.release_owned):
-                        module.__dict__[name] = function
+            tp_addresses.uninstall()
             for name in (self.holder.__name__, self.unrelated.__name__):
                 sys.modules.pop(name, None)
 
@@ -102,6 +99,28 @@ class InstallTests(unittest.TestCase):
             tp_addresses.install()
             pinned.release_owned(ops, [tensor_on(1, 2, 3, 4)])
         ops.deallocate.assert_called_once()
+
+    def test_the_gdn_twins_replace_the_literal_carrying_helpers_by_identity(self):
+        import gdn_commit_dma
+        import gdn_records
+        pairs = dict(validate_projected=pinned.validate_projected, restore_prefix=pinned.restore_prefix,
+                     retain=gdn_records.retain_checkpoint_histories, publish=gdn_commit_dma.publish,
+                     prepare=gdn_commit_dma.prepare, shapes=gdn_commit_dma.validate_shapes)
+        with patch.dict(os.environ, {'QWEN_FAST_TP': '4'}):
+            tp_addresses.install()
+        import gdn_commit_dma_tp
+        import gdn_multitoken_conv_tp
+        import gdn_records_tp
+        self.assertIs(pinned.validate_projected, gdn_multitoken_conv_tp.validate_projected)
+        self.assertIs(pinned.restore_prefix, gdn_multitoken_conv_tp.restore_prefix)
+        self.assertIs(gdn_records.retain_checkpoint_histories, gdn_records_tp.retain_checkpoint_histories)
+        self.assertIs(gdn_commit_dma.publish, gdn_commit_dma_tp.publish)
+        self.assertIs(gdn_commit_dma.prepare, gdn_commit_dma_tp.prepare)
+        self.assertIs(gdn_commit_dma.validate_shapes, gdn_commit_dma_tp.validate_shapes)
+        tp_addresses.uninstall()
+        self.assertIs(pinned.validate_projected, pairs['validate_projected'])
+        self.assertIs(gdn_commit_dma.publish, pairs['publish'])
+        self.assertIs(pinned.addresses, PINNED_ADDRESSES)
 
     def test_a_second_install_changes_nothing(self):
         with patch.dict(os.environ, {'QWEN_FAST_TP': '4'}):
