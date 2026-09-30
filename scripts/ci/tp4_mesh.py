@@ -50,6 +50,10 @@ DESCRIPTOR_SOURCE = 'scripts/ci/' + DESCRIPTOR_NAME
 # Where the serving image lays it (docker/qwen-c2-overlay.txt); the TP4 profiles name this path.
 DESCRIPTOR_PATH = '/opt/qwen-c2/mesh/' + DESCRIPTOR_NAME
 DESCRIPTOR_DIMS = (2, 2)
+# The pair (a (1, 2) mesh) at the links this cabling trains: 2 per pair, where the p150_x2 descriptor declares 4.
+PAIR_DESCRIPTOR_NAME = 'qwen_p150x2_2link_mesh_graph_descriptor.textproto'
+PAIR_DESCRIPTOR_SOURCE = 'scripts/ci/' + PAIR_DESCRIPTOR_NAME
+PAIR_DESCRIPTOR_PATH = '/opt/qwen-c2/mesh/' + PAIR_DESCRIPTOR_NAME
 DESCRIPTOR_POLICY = 'RELAXED'
 # Vocabulary shards the on-device sampler takes (qwen36 model.py: <= 65,536 logits per device).
 SAMPLER_MAX_LOGITS = 65536
@@ -74,6 +78,27 @@ def descriptor_text(dims=DESCRIPTOR_DIMS, channels=LINKS, policy=DESCRIPTOR_POLI
         '  name: "M0"\n',
         '  arch: BLACKHOLE\n',
         '  device_topology { dims: [ %d, %d ] }\n' % (rows, cols),
+        '  host_topology   { dims: [ 1, 1 ] }\n',
+        '  channels { count: %d policy: %s }\n' % (channels, policy),
+        '}\n',
+        '\n',
+        'top_level_instance { mesh { mesh_descriptor: "M0" mesh_id: 0 } }\n',
+    ))
+
+
+def pair_descriptor_text(channels=LINKS, policy=DESCRIPTOR_POLICY):
+    """The two-card mesh graph descriptor at `channels` links, byte for byte as scripts/ci carries it. Under
+    STRICT_INIT (the TT plugin's default) fabric init needs as many trained links per edge as the descriptor
+    declares (control_plane.cpp), and upstream's p150_x2 declares 4 where M-A now trains 2: the pair's TP2
+    reference and baseline profiles (general-2link) open under this one instead."""
+    return ''.join((
+        '# Two p150a cards opened as one (1, 2) mesh (the TP2 pair) on a cabling that trains %d links per pair.\n' % channels,
+        '# Upstream p150_x2 declares 4 channels; STRICT_INIT refuses an edge that trains fewer than declared.\n',
+        '\n',
+        'mesh_descriptors {\n',
+        '  name: "M0"\n',
+        '  arch: BLACKHOLE\n',
+        '  device_topology { dims: [ 1, 2 ] }\n',
         '  host_topology   { dims: [ 1, 1 ] }\n',
         '  channels { count: %d policy: %s }\n' % (channels, policy),
         '}\n',

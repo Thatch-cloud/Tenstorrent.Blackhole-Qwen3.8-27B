@@ -85,6 +85,22 @@ class DescriptorTests(unittest.TestCase):
         self.assertEqual(len(line), 1)
         self.assertIn(mesh.DESCRIPTOR_PATH, line[0].split())
 
+    def test_the_two_link_pair_descriptor_is_the_generated_one_and_is_laid_by_the_image(self):
+        with open(os.path.join(HERE, mesh.PAIR_DESCRIPTOR_NAME), 'rb') as handle:
+            data = handle.read()
+        self.assertNotIn(b'\r', data)
+        self.assertEqual(data.decode('utf-8'), mesh.pair_descriptor_text())
+        found = mesh.parse_descriptor(mesh.pair_descriptor_text())
+        self.assertEqual((found['dims'], found['host'], found['channels'], found['policy']),
+                         ((1, 2), (1, 1), 2, 'RELAXED'))
+        for word in ('blackhole-', 'pinnings', 'asic', 'tray_id', '0000:'):
+            self.assertNotIn(word, mesh.pair_descriptor_text())
+        with open(os.path.join(ROOT, 'docker', 'qwen-c2-overlay.txt'), encoding='utf-8') as handle:
+            manifest = handle.read()
+        line = [raw for raw in manifest.splitlines() if raw.startswith(mesh.PAIR_DESCRIPTOR_SOURCE)]
+        self.assertEqual(len(line), 1)
+        self.assertIn(mesh.PAIR_DESCRIPTOR_PATH, line[0].split())
+
 
 class EthernetParseTests(unittest.TestCase):
     def test_block_and_flow_styles_give_the_same_links(self):

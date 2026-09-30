@@ -2683,14 +2683,13 @@ def devices_for(cards):
 def cards_problem(cards, profiles, names):
     """Why the named profiles cannot open card set `cards` (a four-card profile on the pair, or a pair profile on all
     four), or None. Reads each profile's mesh_device as the contract does (serving_c2_contract.mesh_of)."""
-    wanted = 'P150x4' if cards == 'quad' else None
     for name in names:
         if not name or name == 'none' or name not in profiles['profiles']:
             continue
         device = profiles['profiles'][name].get('mesh_device')
-        if device != wanted:
+        if (device != 'P150x4') if cards == 'quad' else (device not in (None, 'P300')):
             return ('profile %s opens %s, but C2_CARDS=%s gives %s' % (
-                name, 'the four-card (1, 4) mesh' if device else 'the (1, 2) pair', cards,
+                name, 'the four-card (1, 4) mesh' if device == 'P150x4' else 'the (1, 2) pair', cards,
                 'all four cards' if cards == 'quad' else 'cards M and A'))
     return None
 

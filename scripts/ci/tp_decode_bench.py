@@ -12,7 +12,10 @@ runs the whole length. Per stream: time to first token (the prefill), tokens, an
 token. Per shape: the median per-user rate, and the STEADY rate - tokens per second per user over the window in which
 every stream was decoding (from the last first-token to the first last-token), the number the pair's multi-user
 figures are (a stagger of long prefills would otherwise lower a plain average). One shape at a time, in the order given,
-against a server that is already up: a shape the server refuses (too long for its context, more streams than seats) is
+against a server that is already up (every stream ahead of the last is budgeted STAGGER_TOKENS more than the one
+after it, as far as the server's context has room, so early streams are still decoding when the last prompt finishes
+its prefill; and when the streams still never all decode at once, the shape reports `peak_overlap`, the window with the
+most streams decoding together, instead of nothing): a shape the server refuses (too long for its context, more streams than seats) is
 recorded as an error and the run continues.
 """
 import argparse
@@ -27,6 +30,12 @@ import urllib.request
 
 CHARS_PER_TOKEN = 3.6
 MAX_TOKENS = 256
+# Extra decode budget per stream ahead of the last one, so a stagger of long prefills cannot end a stream before the
+# window in which all decode; bounded by the context room (the corpus is 3.71-3.80 characters per token as the
+# tokenizer measures, so a prompt is at most chars / PROMPT_CHARS_PER_TOKEN_FLOOR tokens).
+STAGGER_TOKENS = 1536
+PROMPT_CHARS_PER_TOKEN_FLOOR = 3.7
+CONTEXT_MARGIN = 64
 DEFAULT_SHAPES = ('1x4096', '1x32768', '1x65536', '1x130000', '4x4096', '4x32768', '4x65536', '8x4096', '8x32768',
                   '8x65536', '4x130000')
 SOURCES = ('docs/bringup-2026-08-24.md', 'docs/gotchas.md', 'docs/decode-payload-bound.md',
@@ -121,7 +130,53 @@ def steady(all_times, all_tokens):
                 aggregate_tok_s=round(sum(rates), 3), min_user_tok_s=round(min(rates), 3))
 
 
-def run_shape(base, model, corpus, streams, tokens, max_tokens, stream_fn=post_stream, clock=time.time):
+def peak_overlap(all_times, all_tokens):
+    """The window with the most streams decoding at once (a stream decodes between its first and last chunk), for when
+    steady() has none: {streams, window_s, per_user_tok_s}, or None when no two streams ever overlap."""
+    spans = [(times[0], times[-1], tokens / float(len(times)), times) for times, tokens in zip(all_times, all_tokens)
+             if len(times) > 1]
+    edges = sorted(set([span[0] for span in spans] + [span[1] for span in spans]))
+    best = None
+    for left, right in zip(edges, edges[1:]):
+        active = [span for span in spans if span[0] <= left and span[1] >= right]
+        if len(active) > 1 and (best is None or (len(active), right - left) > (len(best[0]), best[1])):
+            best = (active, right - left, left, right)
+    if best is None:
+        return None
+    active, width, left, right = best
+    rates = []
+    for span in active:
+        inside = [moment for moment in span[3] if left <= moment <= right]
+        if len(inside) >= 2:
+            rates.append((len(inside) - 1) * span[2] / (inside[-1] - inside[0]))
+    if not rates:
+        return None
+    return dict(streams=len(active), window_s=round(width, 3), per_user_tok_s=round(statistics.median(rates), 3))
+
+
+def stream_budget(context, streams, index, tokens, max_tokens):
+    """Stream `index`'s max_tokens: the base, plus STAGGER_TOKENS per stream after it, never past the context room its
+    prompt leaves (a prompt is at most tokens * CHARS_PER_TOKEN / PROMPT_CHARS_PER_TOKEN_FLOOR tokens)."""
+    if not context or streams < 2:
+        return max_tokens
+    room = context - int(tokens * CHARS_PER_TOKEN / PROMPT_CHARS_PER_TOKEN_FLOOR) - CONTEXT_MARGIN
+    return max(max_tokens, min(max_tokens + (streams - 1 - index) * STAGGER_TOKENS, room))
+
+
+def model_context(base, get=None):
+    """The server's max_model_len from /v1/models, or None."""
+    try:
+        if get is None:
+            with urllib.request.urlopen(base + '/v1/models', timeout=30) as response:
+                body = json.loads(response.read())
+        else:
+            body = get(base + '/v1/models')
+        return int(body['data'][0].get('max_model_len') or 0) or None
+    except Exception:
+        return None
+
+
+def run_shape(base, model, corpus, streams, tokens, max_tokens, stream_fn=post_stream, clock=time.time, context=None):
     """One shape: `streams` simultaneous requests; the record of each, and the shape's summary."""
     records = [None] * streams
     times_of = [[] for _ in range(streams)]
@@ -131,7 +186,8 @@ def run_shape(base, model, corpus, streams, tokens, max_tokens, stream_fn=post_s
     def one(index):
         started[index] = clock()
         try:
-            times, usage, finish = stream_fn(base, model, prompt_for(corpus, index, tokens), max_tokens)
+            times, usage, finish = stream_fn(base, model, prompt_for(corpus, index, tokens),
+                                             stream_budget(context, streams, index, tokens, max_tokens))
             times_of[index] = times
             records[index] = summarise_stream(started[index], times, usage, finish)
         except urllib.error.HTTPError as error:
@@ -156,21 +212,28 @@ def run_shape(base, model, corpus, streams, tokens, max_tokens, stream_fn=post_s
     shape.update(median_decode_tok_s=round(statistics.median(rates), 3) if rates else None,
                  max_ttft_s=max(record['ttft_s'] for record in records if record['ttft_s'] is not None),
                  steady=steady(times_of, [record['tokens'] for record in records]))
+    if shape['steady'] is None and streams > 1:
+        shape['peak_overlap'] = peak_overlap(times_of, [record['tokens'] for record in records])
     return shape
 
 
-def bench(base, model, root, label, shapes, max_tokens=MAX_TOKENS, stream_fn=post_stream, log=print):
+def bench(base, model, root, label, shapes, max_tokens=MAX_TOKENS, stream_fn=post_stream, log=print, context=None):
     corpus = read_corpus(root)
     results = []
+    context = context if context is not None else model_context(base)
     for streams, tokens in shapes:
-        shape = run_shape(base, model, corpus, streams, tokens, max_tokens, stream_fn)
+        shape = run_shape(base, model, corpus, streams, tokens, max_tokens, stream_fn, context=context)
         results.append(shape)
         steady_rate = (shape.get('steady') or {}).get('per_user_tok_s')
+        peak = shape.get('peak_overlap')
+        note = (' (no window with every stream decoding; peak overlap %d streams at %s tok/s/user)' % (
+            peak['streams'], peak['per_user_tok_s'])) if peak else ''
         log('BENCH %s: %s' % (shape['name'], ('ERROR ' + shape['error']) if shape.get('error') else
-                              'median %s tok/s/user, steady %s, max ttft %s s, wall %s s' % (
-                                  shape.get('median_decode_tok_s'), steady_rate, shape.get('max_ttft_s'),
+                              'median %s tok/s/user, steady %s%s, max ttft %s s, wall %s s' % (
+                                  shape.get('median_decode_tok_s'), steady_rate, note, shape.get('max_ttft_s'),
                                   shape['wall_s'])))
-    return dict(label=label, model=model, max_tokens=max_tokens, chars_per_token=CHARS_PER_TOKEN, shapes=results)
+    return dict(label=label, model=model, max_tokens=max_tokens, chars_per_token=CHARS_PER_TOKEN, context=context,
+                shapes=results)
 
 
 def build_parser():

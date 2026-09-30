@@ -58,7 +58,7 @@ name: Qwen C2 serving image
 # containers, with the general-tp4 profiles). It is one job, one runner and one concurrency group either way: the
 # four-card job holds every card the pair job does, so the group needs no second name and no run of any other
 # hardware workflow can overlap it. scripts/ci/c2_serving_job.py refuses a quad job that asks for a pair-shaped
-# step (cardm, smoke, replay, priority) or a profile that does not open the (1, 4) mesh, and the reverse.
+# step (cardm, replay, priority) or a profile that does not open the (1, 4) mesh, and the reverse.
 # The smoke opens M+A, so it shares the two-card concurrency group and refuses if anything
 # holds either card or a platform serving container exists.
 on:
@@ -130,6 +130,24 @@ jobs:
             card_set_unheld "$RUNNER_TEMP/c2-results/quad-holders.txt" && echo "no holders (tt-smi aside)" \
               || { echo "held:"; cat "$RUNNER_TEMP/c2-results/quad-holders.txt"; }
           fi
+          # The four-card preconditions (each printed, none acted on): 1 GiB hugepages (four devices map one each),
+          # the firmware and ethernet versions tt-smi reports per board, the driver's -121 (I2C/telemetry) errors
+          # since boot, and whether this user can open every node.
+          echo "=== hugepages (1 GiB pages: four devices need four free)"
+          hp=/sys/kernel/mm/hugepages/hugepages-1048576kB
+          echo "total $(cat $hp/nr_hugepages 2>&1) free $(cat $hp/free_hugepages 2>&1)"
+          [ "$(cat $hp/free_hugepages 2>/dev/null || echo 0)" -ge 4 ] || echo "WARNING: fewer than 4 free 1 GiB hugepages"
+          echo "=== firmware and ethernet versions"
+          smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          "$smi" --version 2>&1 | head -2
+          "$smi" -s 2>/dev/null | grep -i -E 'fw_bundle|eth_fw|cm_fw|dm_app_fw|dm_bl_fw|flash_bundle' | sort | uniq -c
+          echo "=== driver -121 errors since boot"
+          sudo -n dmesg 2>/dev/null | grep -i -E 'tenstorrent|tt-kmd' | grep -E -e '-121' | tail -5 || true
+          echo "count: $(sudo -n dmesg 2>/dev/null | grep -i -E 'tenstorrent|tt-kmd' | grep -c -E -e '-121')"
+          echo "=== node permissions (this user opens each)"
+          for node in "${CARD_SET_NODES[@]}"; do
+            if [ -r "$node" ] && [ -w "$node" ]; then echo "$node rw"; else echo "WARNING: $node not readable and writable by $(id -un)"; fi
+          done
           echo "=== persistent cache (a (1, 4) weight cache is a new ~28 GiB beside the pair's)"
           df -h /home/thatch/hf-cache/hub 2>&1 | tail -2
           sudo -n du -sh /home/thatch/hf-cache/hub/.qwen-c2 2>&1
@@ -318,7 +336,7 @@ jobs:
             --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" \
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
             -v "$PWD:/c2:ro" -v "$results:/probe-results" \
-            -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 \
+            -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
             -e TT_MESH_GRAPH_DESC_PATH=/c2/scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto \
             --entrypoint python3 "$image" -B /c2/scripts/ci/tp4_fabric_probe.py --fabric "$FABRIC" \
             --output /probe-results/fabric-probe.json 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?

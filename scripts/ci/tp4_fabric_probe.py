@@ -20,7 +20,9 @@ WHAT IT REPORTS (one JSON file, and FABRIC_PROBE lines on stdout):
            synchronize_device: the median, and the bus bandwidth the median implies - (n - 1) / n of the
            gathered tensor's bytes per device per call for an all-gather, the same of the reduced input for a
            reduce-scatter (the standard ring-algorithm figure, so 1 and 2 links compare directly)
-  verdict  PASS when the mesh opened, the ring is OK (not merely DEGRADED), the link count is 2 and every op
+  verdict  FAIL, without touching a device, unless TT_MESH_GRAPH_DESC_PATH names the ring descriptor and it has no
+           problems (the image's serving contract, QWEN_C2_SERVING=1, would otherwise replace it with the pair's
+           before ttnn loads: the workflow runs the probe with QWEN_C2_SERVING=0); PASS when the mesh opened, the ring is OK (not merely DEGRADED), the link count is 2 and every op
            was exact; the timings are reported, never judged (the upstream p150_x4 goldens are a different box)
 
 Stdlib at import; ttnn, torch and the models tree only inside run(), so the CPU suite can test the arithmetic.
@@ -48,7 +50,10 @@ WARM, TIMED = 3, 20
 KNOWN_SIGNATURES = (('No core coordinate found at', 'tenstorrent/tt-metal#49701 (harvested ETH core in the L1 '
                                                     'banking allocator on a 4 x p150a open)'),
                     ('Timed out while waiting for active ethernet core', 'the ethernet-core wedge: reset all four '
-                                                                         'cards together'))
+                                                                         'cards together'),
+                    ('eth links', 'a cabled pair trained fewer links than the descriptor declares: STRICT_INIT '
+                                  'refuses the edge at fabric init (TT_FATAL "Expected N eth links"); reset all '
+                                  'four cards together and read the trained links before blaming the model'))
 
 
 def bus_bytes(op, rows, width, devices, element_bytes=2):
@@ -71,9 +76,26 @@ def known_signature(text):
     return None
 
 
+def descriptor_refusal(path, problems):
+    """Why the mesh must not be opened under this descriptor, None when it is the ring's: the path must name the
+    ring descriptor file (an image whose serving contract booted in this process would have replaced it with the
+    pair's) and the file must have no problems."""
+    if not path or os.path.basename(path) != tp4_mesh.DESCRIPTOR_NAME:
+        return 'TT_MESH_GRAPH_DESC_PATH is %r, not the ring descriptor %s' % (path, tp4_mesh.DESCRIPTOR_NAME)
+    if problems is None:
+        return 'the ring descriptor %s is not readable' % path
+    if problems:
+        return 'the ring descriptor has problems: %s' % '; '.join(problems)
+    return None
+
+
 def verdict(report):
     """(passed, reasons) for a finished report."""
     reasons = []
+    if report.get('descriptor_refusal') or report.get('descriptor_problems'):
+        reasons.append('descriptor: %s' % (report.get('descriptor_refusal')
+                                           or '; '.join(report['descriptor_problems'])))
+        return False, reasons
     if not report.get('opened'):
         reasons.append('the (1, 4) mesh did not open: %s' % (report.get('error') or 'unknown'))
         return False, reasons
@@ -105,9 +127,19 @@ def run(options, log=print):
 
     report = dict(fabric=options.fabric, descriptor=os.environ.get('TT_MESH_GRAPH_DESC_PATH'), opened=False, ops=[])
     descriptor = report['descriptor']
+    problems = None
     if descriptor and os.path.isfile(descriptor):
         with open(descriptor, encoding='utf-8') as handle:
-            report['descriptor_problems'] = tp4_mesh.descriptor_problems(handle.read())
+            problems = tp4_mesh.descriptor_problems(handle.read())
+        report['descriptor_problems'] = problems
+    report['serving_contract'] = os.environ.get('QWEN_C2_SERVING')
+    refusal = descriptor_refusal(descriptor, problems)
+    if refusal:
+        # Refuse before any device is touched: a (1, 4) open under another descriptor fails, and would read as a
+        # TP4 blocker when it is only the wrong descriptor.
+        report['descriptor_refusal'] = refusal
+        report['error'] = 'refused to open: ' + refusal
+        return report
     mesh = None
     try:
         report['cluster_type'] = str(ttnn.cluster.get_cluster_type())

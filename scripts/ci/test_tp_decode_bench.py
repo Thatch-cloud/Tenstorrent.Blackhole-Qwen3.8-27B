@@ -68,6 +68,39 @@ class ArithmeticTests(unittest.TestCase):
         self.assertIsNone(bench.steady([[1.0], times(0.0, 10, 10)], [1, 10]))
 
 
+class OverlapTests(unittest.TestCase):
+    def test_peak_overlap_finds_the_widest_window_when_no_window_has_every_stream(self):
+        # 0..10 s, 8..30 s, 50..60 s: the last never overlaps the others, so steady is None; 8..10 s has two streams
+        early, middle, late = times(0.0, 201, 20), times(8.0, 441, 20), times(50.0, 201, 20)
+        streams = [early, middle, late]
+        self.assertIsNone(bench.steady(streams, [201, 441, 201]))
+        peak = bench.peak_overlap(streams, [201, 441, 201])
+        self.assertEqual(peak['streams'], 2)
+        self.assertAlmostEqual(peak['window_s'], 2.0, places=2)
+        self.assertAlmostEqual(peak['per_user_tok_s'], 20.0, places=1)
+
+    def test_no_overlap_at_all_is_none(self):
+        self.assertIsNone(bench.peak_overlap([times(0.0, 10, 10), times(50.0, 10, 10)], [10, 10]))
+
+    def test_the_budget_staggers_earlier_streams_within_the_context_room(self):
+        self.assertEqual(bench.stream_budget(None, 4, 0, 130000, 256), 256)
+        self.assertEqual(bench.stream_budget(131072, 1, 0, 130000, 256), 256)
+        budgets = [bench.stream_budget(131072, 4, index, 4096, 256) for index in range(4)]
+        self.assertEqual(budgets, [256 + 3 * bench.STAGGER_TOKENS, 256 + 2 * bench.STAGGER_TOKENS,
+                                   256 + bench.STAGGER_TOKENS, 256])
+        # 130,000-token prompts leave ~5,000 tokens of a 131,072 context: never asked for more than the room
+        top = bench.stream_budget(131072, 4, 0, 130000, 256)
+        self.assertLessEqual(130000 * bench.CHARS_PER_TOKEN / bench.PROMPT_CHARS_PER_TOKEN_FLOOR + top, 131072)
+        self.assertGreater(top, 256)
+        # a context with no room keeps the base
+        self.assertEqual(bench.stream_budget(4096, 4, 0, 4096, 256), 256)
+
+    def test_the_context_is_read_from_the_models_list(self):
+        self.assertEqual(bench.model_context('http://x', get=lambda url: dict(data=[dict(max_model_len=131072)])), 131072)
+        self.assertIsNone(bench.model_context('http://x', get=lambda url: dict(data=[dict()])))
+        self.assertIsNone(bench.model_context('http://x', get=lambda url: 1 / 0))
+
+
 class RunTests(unittest.TestCase):
     def fake(self, rate=25.0, tokens=256, fail_on=None):
         def stream(base, model, message, max_tokens, timeout=0):

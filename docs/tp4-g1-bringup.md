@@ -44,21 +44,42 @@ capacity: eight seats at 64k, or four at 131k, on the same KV per chip. (U) unti
 
 | Job | Question | Est. wall |
 |---|---|---|
-| J0 (J0b) | four boards enumerate, ring OK at 2 links, tt_ccl at 2 links, collectives exact, GB/s | 30-40 min |
+| J0 (J0b) | four boards enumerate, ring OK at 2 links, tt_ccl at 2 links, collectives exact, GB/s (the probe runs alone in its job, with the serving contract off and the ring descriptor checked before any device opens) | 30-40 min |
 | J1 | image build with the TP4 overlay (no card) | 60-125 min |
-| J2r, J2 | pair reference and TP4 smoke: coherent text, token agreement (`tp_agreement.py`) | 45-75, 60-110 min |
-| J3r, J3 | decode benchmark, pair and TP4 (`tp_decode_bench.py`): 1 stream 4k-130k, 4 and 8 streams, prefill 130k | 30-60, 80-150 min |
+| Jr, J2r | four-card reset, then the pair reference (`general-2link`): coherent text, the agreement file | 5-15, 30-60 min |
+| J2 | TP4 smoke and token agreement (`tp_agreement.py`) | 60-110 min |
+| Jr, J3r | four-card reset, then the pair benchmark | 5-15, 30-60 min |
+| J3 | decode benchmark at TP4 (`tp_decode_bench.py`): 1 stream 4k-130k, 4 and 8 streams, prefill 130k | 80-150 min |
+| J2m | the fused prefill out-projection on (`general-tp4-mmrs`), only after J2 | 45-80 min |
 | J4 | prefix-reuse bringup gate at TP4 | 60-120 min |
 
-TP4 reduces in a different order from TP2, so its greedy tokens are not bit-equal to the pair's: the agreement
-report gives the common prefix before the first flip, coherence, and the ratio of the perplexity each side assigns
-to its own text. Its thresholds are a first guess to be revised from J2's data.
+The pair reference cannot be `general`: it pins upstream's `p150_x2` descriptor, which declares four channels per edge,
+and the TT plugin's default fabric reliability (STRICT_INIT) refuses an open whose edge trained fewer links than the
+descriptor declares (control_plane.cpp). M-A now trains two, so `general` (and with it G1 and the fast path, whose
+link policy pins that descriptor) cannot open on this cabling, on this branch or any other. `general-2link` is
+`general` under a two-channel 1x2 descriptor. Its jobs carry no pair-only reset: a reset of M and A alone leaves
+their links to B and C untrained on the full mesh, so each pair job runs straight after Jr.
+
+TP4 reduces in a different order from TP2, so its greedy tokens are not bit-equal to the pair's. The smoke's
+agreement test asks every prompt twice: with logprobs (the plugin samples any batch with a logprobs request on the
+host at four devices) and without (the on-device sampler the TP4 profiles enable, the path real traffic takes), and
+fails the step when an answer errors or is incoherent, when the device-sampled text departs from the host's outside a
+bfloat16 near-tie, or when the model's perplexity of its own text is garbage. `tp_agreement.py compare` then judges
+the two configurations: the same prompts (sha256 per prompt; else NOT_COMPARABLE), the first token where they part
+(each side's token inside the other's top 5 and within half a nat), the common prefix, and the perplexity ratio on
+both sides (a confidently wrong model scores itself lower). The thresholds are a first guess, revised from J2's data.
+
+Bring-up switches carried in the TP4 profiles' env: `QWEN_FAST_GDN_PREFILL_CONV_AUDIT=4` runs the exact prefill conv
+beside the FIR for the first chunks at the never-run shape (C = 2560, kd = 512) and stops the engine on a mismatch;
+`QWEN_GDN_PREFILL_MMRS=0` keeps the fused prefill out-projection off until its own arm (J2m). The trace region is 1 GiB
+with eight seats and an in-trace sampling trace per bucket, unmeasured at TP4: read J2's log for a trace overflow.
 
 ## Open risks (U)
 
 1. Whether `MeshShape(1, 4)` maps ring-first on the 2x2 descriptor on this fabric, and whether FABRIC_1D accepts it
    (upstream issue 49701 is how a 2x2 open on four p150a has failed elsewhere).
-2. The fused matmul + reduce-scatter prefill out-projection at four devices (it deadlocked on the pair).
+2. The fused matmul + reduce-scatter prefill out-projection at four devices (it deadlocked on the pair): off in J2,
+   J3 and J4, on only in J2m.
 3. The GDN kernels were qualified at 24 value heads per chip and run 12 here; the exact prefill conv is held to the
    FIR on hardware by its audit switch.
 4. The fast path (C2, S2 sticky sessions) is TP2 only: its kernels, per-chip literals and evidence are two-chip.

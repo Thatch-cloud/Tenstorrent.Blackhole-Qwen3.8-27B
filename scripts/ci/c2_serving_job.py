@@ -91,6 +91,9 @@ CARD_SETS = ('pair', 'quad')
 QUAD_ACTIONS = ('status', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
                 'push')
 TP4_MESH_DEVICE = 'P150x4'
+# The mesh_device values of a pair profile: none (the image's P300 under upstream's four-channel p150_x2) and P300
+# (general-2link: the same pair under the two-channel descriptor this cabling needs).
+PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
@@ -178,6 +181,15 @@ def profile_meshes(path=PROFILES):
         return dict((name, body.get('mesh_device')) for name, body in json.load(handle)['profiles'].items())
 
 
+def refuse_fabric_with_serving(actions):
+    """The fabric probe closes the mesh it opened, and a second open in one job is what the ethernet-core teardown
+    wedge punishes: it runs in a job of its own, never beside a step that serves or gates."""
+    beside = sorted(set(actions) & set(('smoke', 'gate', 'prefix')))
+    if 'fabric' in actions and beside:
+        raise JobError('C2_ACTIONS has fabric with %s: the probe closes the mesh and a second open in one job wedges '
+                       'the ethernet cores; run the probe in its own job, reset first' % ', '.join(beside))
+
+
 def read_cards(values, actions, profile_of, named):
     """C2_CARDS, refused when an action or a profile of the job does not fit the card set. `named`: the profiles the
     job's steps serve, (key, name) pairs; profile_of maps a profile to its mesh_device."""
@@ -186,6 +198,7 @@ def read_cards(values, actions, profile_of, named):
         raise JobError('C2_CARDS must be one of %s, got %r' % (', '.join(CARD_SETS), cards))
     if cards == 'pair' and 'fabric' in actions:
         raise JobError('C2_ACTIONS has fabric: the four-card fabric probe needs C2_CARDS=quad')
+    refuse_fabric_with_serving(actions)
     if cards == 'quad':
         wrong = sorted(set(actions) - set(QUAD_ACTIONS))
         if wrong:
@@ -193,13 +206,12 @@ def read_cards(values, actions, profile_of, named):
                 ', '.join(wrong), ' '.join(QUAD_ACTIONS)))
     if values.get('C2_FABRIC') and cards != 'quad':
         raise JobError('C2_FABRIC needs C2_CARDS=quad')
-    wanted = TP4_MESH_DEVICE if cards == 'quad' else None
     for key, name in named:
         if not name or name == 'none' or name not in profile_of:
             continue
-        if profile_of[name] != wanted:
+        if (profile_of[name] != TP4_MESH_DEVICE) if cards == 'quad' else (profile_of[name] not in PAIR_MESH_DEVICES):
             raise JobError('%s %s opens %s, but C2_CARDS=%s gives %s' % (
-                key, name, 'the four-card (1, 4) mesh' if profile_of[name] else 'the (1, 2) pair', cards,
+                key, name, 'the four-card (1, 4) mesh' if profile_of[name] == TP4_MESH_DEVICE else 'the (1, 2) pair', cards,
                 'all four cards' if cards == 'quad' else 'cards M and A'))
     return cards
 

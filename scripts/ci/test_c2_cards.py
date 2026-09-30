@@ -38,11 +38,11 @@ class JobTests(unittest.TestCase):
 
     def test_the_tp4_profiles_are_the_profiles_that_name_the_mesh(self):
         self.assertEqual(TP4, ['general-prefix-tp4', 'general-prefix-tp4-131k', 'general-tp4', 'general-tp4-131k',
-                               'general-tp4-bench'])
+                               'general-tp4-bench', 'general-tp4-mmrs'])
         self.assertIn('general', PAIR)
 
     def test_quad_takes_a_tp4_profile_and_refuses_a_pair_profile(self):
-        outputs = read(C2_CARDS='quad', C2_ACTIONS='reset fabric gate', C2_PROFILE='general-tp4')
+        outputs = read(C2_CARDS='quad', C2_ACTIONS='reset gate', C2_PROFILE='general-tp4')
         self.assertEqual(outputs['cards'], 'quad')
         with self.assertRaisesRegex(job.JobError, 'C2_PROFILE general opens the \\(1, 2\\) pair, but C2_CARDS=quad'):
             read(C2_CARDS='quad', C2_ACTIONS='gate', C2_PROFILE='general')
@@ -76,6 +76,40 @@ class JobTests(unittest.TestCase):
                          'FABRIC_1D_RING')
         with self.assertRaisesRegex(job.JobError, 'C2_FABRIC must be one of'):
             read(C2_CARDS='quad', C2_FABRIC='FABRIC_2D')
+
+    def test_the_fabric_probe_runs_alone(self):
+        # the probe closes its mesh, and a second open in one job is what the ethernet-core teardown wedge punishes
+        for beside in ('smoke', 'gate', 'prefix'):
+            with self.assertRaisesRegex(job.JobError, 'fabric with %s' % beside):
+                read(C2_CARDS='quad', C2_ACTIONS='reset fabric ' + beside, C2_PROFILE='general-tp4',
+                     C2_PREFIX_PROFILE='general-prefix-tp4', C2_PREFIX_BASELINE='general-tp4')
+        self.assertEqual(read(C2_CARDS='quad', C2_ACTIONS='status reset fabric', C2_PROFILE='general-tp4')['cards'],
+                         'quad')
+
+    def test_the_two_link_pair_profile_is_a_pair_profile_the_quad_refuses(self):
+        self.assertEqual(PROFILES['profiles']['general-2link']['mesh_device'], 'P300')
+        self.assertIn('general-2link', PAIR)
+        self.assertEqual(read(C2_ACTIONS='smoke', C2_PROFILE='general-2link')['cards'], 'pair')
+        with self.assertRaisesRegex(job.JobError, 'opens the'):
+            read(C2_CARDS='quad', C2_ACTIONS='smoke', C2_PROFILE='general-2link')
+        self.assertIsNone(gate.cards_problem('pair', PROFILES, ['general-2link', 'general']))
+        self.assertIn('opens the (1, 2) pair', gate.cards_problem('quad', PROFILES, ['general-2link']))
+
+    def test_the_job_templates_run_the_pair_jobs_without_the_pair_reset(self):
+        # a pair-only reset leaves M's and A's links to B and C untrained on the full-mesh cabling: the pair jobs
+        # follow a four-card reset job instead
+        folder = os.path.join(HERE, 'references', 'tp4-jobs')
+        for name in ('J2r-tp2-reference.env', 'J3r-tp2-bench.env'):
+            with open(os.path.join(folder, name), encoding='utf-8') as handle:
+                values = dict(line.split('=', 1) for line in handle.read().splitlines()
+                              if line and not line.startswith('#'))
+            self.assertEqual(values['C2_PROFILE'], 'general-2link', name)
+            self.assertNotIn('reset', values['C2_ACTIONS'].split(), name)
+            self.assertNotIn('C2_CARDS', values, name)
+        with open(os.path.join(folder, 'Jr-quad-reset.env'), encoding='utf-8') as handle:
+            text = handle.read()
+        self.assertIn('C2_CARDS=quad', text)
+        self.assertIn('C2_ACTIONS=reset', text)
 
     def test_an_unknown_card_set_is_refused(self):
         with self.assertRaisesRegex(job.JobError, 'C2_CARDS must be one of pair, quad'):
@@ -194,11 +228,23 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('-e MESH_DEVICE=P150x4', probe)
         self.assertIn('qwen_p150x4_ring_mesh_graph_descriptor.textproto', probe)
         self.assertIn('--fabric "$FABRIC"', probe)
+        # the image bakes QWEN_C2_SERVING=1, whose boot would replace the ring descriptor with the pair's before
+        # ttnn loads: the probe runs with the contract off, and the ring descriptor is the -e that reaches python3
+        self.assertIn('-e QWEN_C2_SERVING=0', probe)
+        self.assertLess(probe.index('-e QWEN_C2_SERVING=0'), probe.index('--entrypoint python3'))
+        self.assertLess(probe.index('-e TT_MESH_GRAPH_DESC_PATH='), probe.index('--entrypoint python3'))
         self.assertIn('-v "$PWD:/c2:ro"', probe)
         self.assertNotIn('blackhole-', probe)
         for script in ('tp4_fabric_probe.py', 'tp4_mesh.py'):
             self.assertTrue(os.path.isfile(os.path.join(HERE, script)), script)
         self.assertLess(int(re.search(r'timeout-minutes: ([0-9]+)', probe).group(1)) * 60, 600 * 60)
+
+    def test_the_quad_status_prints_the_bring_up_preconditions(self):
+        status = step('Status of the four-card set')
+        for needle in ('hugepages-1048576kB', 'free 1 GiB hugepages', 'dmesg', '-121', 'fw_bundle',
+                       'not readable and writable'):
+            self.assertIn(needle, status)
+        self.assertNotIn('blackhole-', status)
 
     def test_the_quad_smoke_maps_the_resolved_set_and_the_pair_smoke_steps_aside(self):
         self.assertIn("steps.job.outputs.cards != 'quad'", step('Smoke on cards M+A'))
@@ -262,8 +308,8 @@ class TemplateTests(unittest.TestCase):
         for name in self.templates():
             _, outputs = self.parsed(name)
             if name.startswith(('J2r', 'J3r')):
-                self.assertEqual((outputs['cards'], outputs['profile']), ('pair', 'general'), name)
-            elif name.startswith(('J0', 'J2-', 'J3-', 'J4')):
+                self.assertEqual((outputs['cards'], outputs['profile']), ('pair', 'general-2link'), name)
+            elif name.startswith(('J0', 'J2-', 'J2m', 'J3-', 'J4', 'Jr-')):
                 self.assertEqual(outputs['cards'], 'quad', name)
                 self.assertIn(outputs['profile'], TP4, name)
 

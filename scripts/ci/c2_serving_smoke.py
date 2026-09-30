@@ -127,8 +127,14 @@ def agreement():
     out = tp_agreement.collect(BASE, MODEL, (os.environ.get('AGREEMENT_ROOT') or '.'), os.environ.get('AGREEMENT_LABEL', 'run'))
     with open(os.environ.get('AGREEMENT_OUT', 'agreement.json'), 'w') as handle:
         json.dump(out, handle)
-    return dict(prompts=[dict(name=p['name'], tokens=len(p['tokens']), logprobs=p['logprobs_available'],
-                              finish=p['finish'], error=p.get('error')) for p in out['prompts']])
+    # Every answer twice (host-sampled with logprobs, device-sampled without): self_check fails the step on an errored
+    # or incoherent answer, a device sampler that departs from the host's outside a bfloat16 near-tie, or a garbage
+    # perplexity. It cannot say the answers are RIGHT: tp_agreement.py compare against the reference does.
+    ok, reasons = tp_agreement.self_check(out)
+    return dict(ok=ok, reasons=reasons[:8],
+                prompts=[dict(name=p['name'], tokens=len(p['tokens']), logprobs=p['logprobs_available'],
+                              finish=p['finish'], error=p.get('error'),
+                              device_vs_host=tp_agreement.device_check(p)['ok']) for p in out['prompts']])
 
 
 if ONLY and 'agreement' in ONLY:
@@ -154,3 +160,6 @@ def bench():
 if ONLY and 'bench' in ONLY:
     record('bench', bench)
 print('SMOKE_JSON ' + json.dumps(results))
+if (results.get('agreement') or {}).get('ok') is False or 'error' in (results.get('agreement') or {}):
+    print('SMOKE_FAILED agreement: %s' % json.dumps((results['agreement'].get('reasons') or results['agreement'].get('error')))[:600])
+    sys.exit(1)

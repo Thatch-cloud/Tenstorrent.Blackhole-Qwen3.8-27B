@@ -54,6 +54,7 @@ class ArithmeticTests(unittest.TestCase):
     def test_known_signatures(self):
         self.assertIn('49701', probe.known_signature('RuntimeError: No core coordinate found at (1, 2)'))
         self.assertIn('reset all four', probe.known_signature('Timed out while waiting for active ethernet core 3'))
+        self.assertIn('fewer links', probe.known_signature('TT_FATAL: Expected 2 eth links between chips 0 and 1'))
         self.assertIsNone(probe.known_signature('nothing known'))
         self.assertIsNone(probe.known_signature(None))
 
@@ -90,6 +91,63 @@ class VerdictTests(unittest.TestCase):
         passed, reasons = probe.verdict(good_report(ops=[]))
         self.assertFalse(passed)
         self.assertIn('no collective ran', reasons)
+
+
+class DescriptorRefusalTests(unittest.TestCase):
+    RING = '/c2/scripts/ci/' + tp4_mesh.DESCRIPTOR_NAME
+
+    def test_only_the_ring_descriptor_without_problems_is_admitted(self):
+        self.assertIsNone(probe.descriptor_refusal(self.RING, []))
+
+    def test_the_pairs_descriptor_or_none_is_refused(self):
+        for path in (None, '', '/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor'
+                                                                                     '.textproto'):
+            self.assertIn('not the ring descriptor', probe.descriptor_refusal(path, []))
+
+    def test_an_unreadable_or_faulty_ring_descriptor_is_refused(self):
+        self.assertIn('not readable', probe.descriptor_refusal(self.RING, None))
+        self.assertIn('4 channels', probe.descriptor_refusal(self.RING, ['4 channels, not the 2']))
+
+    def test_the_verdict_fails_on_a_descriptor_problem_alone(self):
+        passed, reasons = probe.verdict(good_report(descriptor_problems=['4 channels, not the 2']))
+        self.assertFalse(passed)
+        self.assertIn('descriptor', reasons[0])
+        passed, reasons = probe.verdict(good_report(descriptor_refusal='wrong path'))
+        self.assertFalse(passed)
+
+    def test_run_refuses_before_importing_a_device_library(self):
+        # a stub environment with no ttnn: the refusal returns first, so the import inside run() is the only
+        # thing that could fail - it must come after the refusal in the source
+        with open(probe.__file__, encoding='utf-8') as handle:
+            body = handle.read().split('def run(')[1].split('def time_op')[0]
+        self.assertLess(body.index('descriptor_refusal(descriptor, problems)'), body.index('open_mesh_device'))
+        old = os.environ.get('TT_MESH_GRAPH_DESC_PATH')
+        os.environ['TT_MESH_GRAPH_DESC_PATH'] = '/x/p150_x2_mesh_graph_descriptor.textproto'
+        fake = {}
+        for name in ('torch', 'ttnn', 'models', 'models.common', 'models.common.modules',
+                     'models.common.modules.tt_ccl', 'models.tt_transformers', 'models.tt_transformers.tt',
+                     'models.tt_transformers.tt.ccl'):
+            fake[name] = sys.modules.get(name)
+            module = type(sys)(name)
+            module.get_num_links = module.TT_CCL = module.tt_all_gather = module.tt_all_reduce = None
+            module.cluster = None
+            sys.modules[name] = module
+        try:
+            options = probe.build_parser().parse_args(['--output', 'x'])
+            report = probe.run(options, log=lambda *a: None)
+        finally:
+            for name, old_module in fake.items():
+                if old_module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = old_module
+            if old is None:
+                os.environ.pop('TT_MESH_GRAPH_DESC_PATH', None)
+            else:
+                os.environ['TT_MESH_GRAPH_DESC_PATH'] = old
+        self.assertFalse(report['opened'])
+        self.assertIn('refused to open', report['error'])
+        self.assertFalse(probe.verdict(report)[0])
 
 
 class MainTests(unittest.TestCase):

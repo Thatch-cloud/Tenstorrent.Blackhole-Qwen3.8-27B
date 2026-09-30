@@ -92,8 +92,13 @@ GATE_SWITCH = 'QWEN_C2_GATE'
 # where docker/qwen-c2-overlay.txt lays scripts/ci's descriptor).
 PAIR_DESCRIPTOR = '/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto'
 RING_DESCRIPTOR = '/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto'
+# The pair at the two links this cabling trains (M-A: 2, where p150_x2 declares 4, which STRICT_INIT refuses at
+# fabric init): only the general-2link profile, the TP2 reference and baseline for TP4, names it. mesh_device
+# P300 is the image's own MESH_DEVICE for the pair, so nothing else about the open changes.
+PAIR_2LINK_DESCRIPTOR = '/opt/qwen-c2/mesh/qwen_p150x2_2link_mesh_graph_descriptor.textproto'
 MESHES = {
     None: dict(shape=(1, 2), descriptor=PAIR_DESCRIPTOR),
+    'P300': dict(shape=(1, 2), descriptor=PAIR_2LINK_DESCRIPTOR),
     'P150x4': dict(shape=(1, 4), descriptor=RING_DESCRIPTOR),
 }
 # The on-device sampler takes at most this many logits per device (qwen36 model.py; vocabulary 248,320).
@@ -211,9 +216,11 @@ def mesh_problems(profile):
     if 'MESH_DEVICE' in (profile.get('env') or {}):
         problems.append("MESH_DEVICE is the profile's mesh_device, never an env value")
     rows, cols = mesh['shape']
-    if ((profile.get('engine') or {}).get('additional-config') or {}).get('qwen_fast_t16') and mesh['shape'] != (1, 2):
-        problems.append('the fast path (qwen_fast_t16) serves the (1, 2) pair only: its kernels, per-chip widths and '
-                        'qualification evidence are two-chip; a (%d, %d) mesh serves the general profiles' % (rows, cols))
+    if ((profile.get('engine') or {}).get('additional-config') or {}).get('qwen_fast_t16') and profile.get('mesh_device'):
+        problems.append('the fast path (qwen_fast_t16) serves the p150_x2 pair only: its kernels, per-chip widths, link '
+                        'policy (sampling_link_policy pins that descriptor) and qualification evidence are two-chip '
+                        'at four links; a (%d, %d) mesh under %s serves the general profiles'
+                        % (rows, cols, profile['mesh_device']))
     mode = tt_config(profile).get('sample_on_device_mode')
     if mode is not None:
         if mode not in SAMPLE_ON_DEVICE_MODES:

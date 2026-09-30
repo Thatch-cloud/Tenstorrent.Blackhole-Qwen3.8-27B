@@ -498,7 +498,11 @@ class BootTest(unittest.TestCase):
         self.assertIsNone(contract.boot(environ={}, orig_argv=['python3', '-m', contract.API_SERVER]))
 
 
-TP4_PROFILES = ('general-tp4', 'general-prefix-tp4', 'general-tp4-131k', 'general-prefix-tp4-131k', 'general-tp4-bench')
+TP4_PROFILES = ('general-tp4', 'general-prefix-tp4', 'general-tp4-131k', 'general-prefix-tp4-131k', 'general-tp4-bench',
+                'general-tp4-mmrs')
+# The bring-up switches every TP4 profile carries in its env (see the profiles' descriptions): the fused prefill
+# out-projection off (general-tp4-mmrs is the arm that turns it on) and the prefill conv audited for four chunks.
+TP4_BRINGUP_ENV = {'QWEN_GDN_PREFILL_MMRS': '0', 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT': '4'}
 # KV bytes per token per chip at TP4: 16 attention layers x (K, V) x one KV head x 256 x 1.0625 B (bf8).
 TP4_KV_BYTES_PER_TOKEN = 16 * 2 * 1 * 256 * 17 // 16
 
@@ -518,7 +522,7 @@ class MeshTest(unittest.TestCase):
 
     def test_the_pairs_profiles_are_untouched(self):
         for name, profile in document()['profiles'].items():
-            if name in TP4_PROFILES:
+            if name in TP4_PROFILES or name == 'general-2link':
                 continue
             self.assertNotIn('mesh_device', profile, name)
             self.assertEqual(profile['mesh_graph_descriptor'], contract.PAIR_DESCRIPTOR, name)
@@ -528,6 +532,30 @@ class MeshTest(unittest.TestCase):
             self.assertFalse(contract.ring_mesh(profile), name)
             environ = contract.apply_environment(dict(profile, name=name), {'MESH_DEVICE': 'P300'})
             self.assertEqual(environ['MESH_DEVICE'], 'P300', 'a pair profile leaves MESH_DEVICE as it found it')
+
+    def test_the_two_link_pair_is_general_under_a_two_channel_descriptor(self):
+        import tp4_mesh
+
+        self.assertEqual(contract.PAIR_2LINK_DESCRIPTOR, tp4_mesh.PAIR_DESCRIPTOR_PATH)
+        self.assertEqual(contract.MESHES['P300']['shape'], (1, 2))
+        mine, general = contract.load_profile(PROFILES, 'general-2link'), contract.load_profile(PROFILES, 'general')
+        self.assertEqual(mine['mesh_device'], 'P300')
+        self.assertEqual(mine['mesh_graph_descriptor'], contract.PAIR_2LINK_DESCRIPTOR)
+        for key in ('engine', 'env', 'eos_ids', 'snapshots', 'request_contract', 'drop_batched_decode_mode'):
+            self.assertEqual(mine[key], general[key], key)
+        self.assertEqual(contract.mesh_problems(mine), [])
+        self.assertFalse(contract.ring_mesh(mine))
+        environ = contract.apply_environment(mine, {'MESH_DEVICE': 'P300', 'TT_MESH_GRAPH_DESC_PATH': 'p300'})
+        self.assertEqual((environ['MESH_DEVICE'], environ['TT_MESH_GRAPH_DESC_PATH']),
+                         ('P300', contract.PAIR_2LINK_DESCRIPTOR))
+
+    def test_the_fast_path_is_refused_under_the_two_link_pair(self):
+        fast = json.loads(json.dumps(contract.load_profile(PROFILES, 'general-2link')))
+        fast['engine']['additional-config']['qwen_fast_t16'] = True
+        problems = contract.mesh_problems(fast)
+        self.assertTrue(any('fast path' in problem and 'p150_x2' in problem for problem in problems), problems)
+        pinned = contract.load_profile(PROFILES, 'c2')
+        self.assertEqual(contract.mesh_problems(pinned), [], 'the fast path stays on the four-channel pair')
 
     def test_the_tp4_family_opens_the_four_card_ring(self):
         import tp4_mesh
@@ -550,7 +578,8 @@ class MeshTest(unittest.TestCase):
 
     def test_each_tp4_profile_is_its_pair_twin_at_its_own_seats_and_context(self):
         twins = {'general-tp4': 'general', 'general-prefix-tp4': 'general-prefix', 'general-tp4-131k': 'general',
-                 'general-prefix-tp4-131k': 'general-prefix', 'general-tp4-bench': 'general'}
+                 'general-prefix-tp4-131k': 'general-prefix', 'general-tp4-bench': 'general',
+                 'general-tp4-mmrs': 'general'}
         sized = ('max-model-len', 'max-num-batched-tokens', 'max-num-seqs')
         for name, twin in twins.items():
             mine, theirs = contract.load_profile(PROFILES, name), contract.load_profile(PROFILES, twin)
@@ -562,7 +591,8 @@ class MeshTest(unittest.TestCase):
             self.assertEqual(tt, contract.tt_config(theirs), name)
             context = mine['engine']['max-model-len']
             self.assertEqual(mine['engine']['max-num-batched-tokens'], context, 'whole-prompt prefill')
-            expected_env = dict(theirs['env'], QWEN_FAST_MAX_POSITION=str(context), QWEN_DSPARK_REQUEST_CONTEXT=str(context))
+            expected_env = dict(theirs['env'], QWEN_FAST_MAX_POSITION=str(context), QWEN_DSPARK_REQUEST_CONTEXT=str(context),
+                                **dict(TP4_BRINGUP_ENV, **({'QWEN_GDN_PREFILL_MMRS': '1'} if name == 'general-tp4-mmrs' else {})))
             self.assertEqual(mine['env'], expected_env, name)
             for key in ('eos_ids', 'snapshots', 'request_contract', 'drop_batched_decode_mode'):
                 self.assertEqual(mine.get(key), theirs.get(key), (name, key))
@@ -575,6 +605,7 @@ class MeshTest(unittest.TestCase):
             engine = contract.load_profile(PROFILES, name)['engine']
             pools[name] = engine['max-model-len'] * engine['max-num-seqs']
         serving = [name for name in TP4_PROFILES if name != 'general-tp4-bench']
+        self.assertIs(contract.load_profile(PROFILES, 'general-tp4-mmrs').get('gate_only'), True)
         for name in serving:
             self.assertEqual(pools[name], 524288, name)
             # the same KV per chip as general's 4 x 65,536 on the pair (17,408 B per token per chip there)
@@ -586,7 +617,8 @@ class MeshTest(unittest.TestCase):
                       'the 9.13 GB-per-chip pool is unmeasured: gate only until G5 at TP4')
         seats = {name: contract.load_profile(PROFILES, name)['engine']['max-num-seqs'] for name in TP4_PROFILES}
         self.assertEqual(seats, {'general-tp4': 8, 'general-prefix-tp4': 8, 'general-tp4-131k': 4,
-                                 'general-prefix-tp4-131k': 4, 'general-tp4-bench': 8})
+                                 'general-prefix-tp4-131k': 4, 'general-tp4-bench': 8,
+                                 'general-tp4-mmrs': 8})
 
     def test_what_a_mesh_cannot_serve_is_refused(self):
         ring = contract.load_profile(PROFILES, 'general-tp4')
@@ -602,7 +634,7 @@ class MeshTest(unittest.TestCase):
         pair_on_ring = dict(contract.load_profile(PROFILES, 'general'), mesh_graph_descriptor=contract.RING_DESCRIPTOR)
         self.assertTrue(contract.mesh_problems(pair_on_ring)[0].startswith('mesh P300 (the pair) needs'))
         self.assertEqual(contract.mesh_problems(dict(ring, mesh_device='P150x8')),
-                         ["mesh_device 'P150x8' is not one of P150x4"])
+                         ["mesh_device 'P150x8' is not one of P150x4, P300"])
         env_mesh = dict(ring, env=dict(ring['env'], MESH_DEVICE='P150x4'))
         self.assertIn("MESH_DEVICE is the profile's mesh_device, never an env value", contract.mesh_problems(env_mesh))
         bad_mode = json.loads(json.dumps(ring))
