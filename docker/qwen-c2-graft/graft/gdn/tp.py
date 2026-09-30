@@ -260,9 +260,13 @@ class TPGatedDeltaNet:
         # .log), while the unfused _row_proj + tt_all_reduce path (reduce_scatter_minimal_async)
         # is silicon-proven on the same mesh (gdn-silicon-mmrs-probe4.log PASS pcc 1.0007). Keep the
         # fusion only on the topologies it was validated on (P150x4).
+        # QWEN_GDN_PREFILL_MMRS=0 (TP4 bring-up): the unfused path on every mesh. Upstream validated the fused
+        # op on its P150x4 box; ours is four discrete p150a on a full-mesh fabric, and the op deadlocked on
+        # 1x2, so the four-card jobs can take it out without an image rebuild. Unset, nothing changes.
         _mesh_shape = list(mesh.shape)
         self._fuse_out_mmrs_prefill = (
             not self._out_sharded and args.num_devices > 1 and not (args.num_devices == 2 and 1 in _mesh_shape)
+            and os.environ.get("QWEN_GDN_PREFILL_MMRS", "1") != "0"
         )
         # Pre-build chunk masks once (trace-safe; avoids from_torch inside captured trace)
         self.chunk_seq_masks = create_chunk_masks_seq(args.gdn_chunk_size, mesh)
