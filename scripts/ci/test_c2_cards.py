@@ -251,6 +251,31 @@ class WorkflowTests(unittest.TestCase):
         quad = step('Reset all four cards')
         self.assertIn("steps.job.outputs.cards == 'quad'", quad)
 
+    def test_both_resets_refuse_while_a_platform_serving_container_exists(self):
+        """fuser sees only a process with the cards open; the node agent's container holds none between its docker
+        run (or a redispatch) and the engine's mesh open, so a reset then would pull the cards from under it."""
+        for name in ('Reset cards M and A', 'Reset all four cards'):
+            with self.subTest(step=name):
+                text = step(name)
+                guard = text.index("docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'")
+                self.assertLess(guard, text.index('"$smi" -r'))
+                self.assertIn('refusing to reset the cards under it', text[guard:])
+
+    def test_the_replay_step_removes_its_copy_however_it_ends(self):
+        replay = step("Replay the node agent's serving sequence")
+        trap = replay.index("trap 'docker rm -f qwen-c2-platform")
+        self.assertLess(trap, replay.index('c2_platform_replay.py'))
+
+    def test_the_status_step_prints_the_fleet_tag_and_the_agents_mesh_shape_only(self):
+        status = step('Status')
+        self.assertIn('PLATFORM_IMAGE: ${{ steps.job.outputs.platform_image }}', status)
+        self.assertIn('zot.thatch.local:5000/thatch-serving-tt:latest ${PLATFORM_IMAGE:+"$PLATFORM_IMAGE"}', status)
+        self.assertIn("{{.Id}} {{join .RepoDigests", status)
+        # one variable of the agent's environment, never the rest (the repo and its logs are public)
+        self.assertIn("tr '\\0' '\\n' < \"/proc/$pid/environ\" 2>/dev/null | grep '^THATCH_TT_MESH_SHAPE='", status)
+        self.assertEqual(status.count('/proc/$pid/environ'), 1)
+        self.assertNotIn('systemctl --user show', status)
+
     def test_the_quad_reset_is_one_tt_smi_call_over_the_resolved_set_then_the_heal(self):
         quad = step('Reset all four cards')
         self.assertEqual(len(re.findall(r'"\$smi" -r ', quad)), 1)

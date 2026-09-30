@@ -18,7 +18,7 @@ C1 = 'abc1234'
 TS7 = '0123abc'
 ACTIONS = {
     'S1-build-tp4-g1': 'status build',
-    'S2a-reset-probe-prefix-quad': 'status reset probe prefix',
+    'S2a-reset-prefix-quad': 'status reset prefix',
     'S2b-replay-quad': 'status replay',
     'S3-unserve-quad': 'status platform unserve reset',
     'S4-reserve-reset-quad': 'status reset',
@@ -54,8 +54,15 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(outputs['replay_expect_profile'], 'general-prefix-tp4')
         self.assertEqual(outputs['platform_image'], 'zot.thatch.local:5000/thatch-serving-tt:' + TS7)
 
+    def test_the_status_checks_before_and_after_the_placement_name_the_thin_layer(self):
+        # the status step prints :latest beside C2_PLATFORM_IMAGE by id and digest: V0 is the check that the rig's
+        # LOCAL :latest (what the agent runs) is the replayed layer, V1 that the placement runs it
+        for name in ('V0-status-quad', 'V1-verify-platform-quad', 'S2b-replay-quad'):
+            _, outputs = read(name)
+            self.assertEqual(outputs['platform_image'], 'zot.thatch.local:5000/thatch-serving-tt:' + TS7, name)
+
     def test_the_prefix_gate_compares_the_tp4_profile_with_its_tp4_baseline(self):
-        _, outputs = read('S2a-reset-probe-prefix-quad')
+        _, outputs = read('S2a-reset-prefix-quad')
         self.assertEqual((outputs['prefix_profile'], outputs['prefix_baseline']), ('general-prefix-tp4', 'general-tp4'))
 
     def test_the_unserve_and_the_reserve_reset_run_no_serving_step(self):
