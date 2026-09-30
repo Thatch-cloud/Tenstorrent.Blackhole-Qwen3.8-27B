@@ -361,6 +361,49 @@ class CloseTests(unittest.TestCase):
             self.assertIsNone(verifier_engine._replay_count)
 
 
+class DigestAuditTests(unittest.TestCase):
+    def test_the_audit_digests_the_rebound_state_at_every_rebind_and_only_under_the_audit(self):
+        for audit in (False, True):
+            with self.subTest(audit=audit), World() as world:
+                engines = make_set(world, environ={parked.AUDIT_FLAG: '1'} if audit else {})
+                engines.build()
+                for index, length in enumerate((300, 40)):
+                    entry = engines.take()
+                    request = ParkedRequest(world, engines, entry, 'r%d' % index, length, 4)
+                    while request.step():
+                        pass
+                    request.finish()
+                lines = [line for line in world.lines if line.startswith(parked.DIGEST_MARKER)]
+                if audit:
+                    self.assertEqual(len(lines), 2)
+                    self.assertRegex(lines[0], r'slot=0 snapshots=[1-9][0-9]* tables=[1-9][0-9]* equal=1$')
+                else:
+                    self.assertEqual(lines, [])
+
+    def test_a_carry_that_differs_from_the_initial_snapshot_or_a_page_table_that_differs_between_chips_is_refused(self):
+        real = parked.shard_digests
+        for what in ('carry', 'table'):
+            with self.subTest(what=what), World() as world:
+                engines = make_set(world, environ={parked.AUDIT_FLAG: '1'})
+                engines.build()
+                entry = engines.take()
+                calls = []
+
+                def digests(operations, tensor):
+                    calls.append(tensor)
+                    result = real(operations, tensor)
+                    if what == 'carry' and len(calls) == 2:
+                        return ['other'] * len(result)
+                    if what == 'table' and tensor in [b[0] for b in parked.page_table_bindings(entry.engine).values()]:
+                        return ['a', 'b']
+                    return result
+                with patch.object(parked, 'shard_digests', digests):
+                    with self.assertRaises(AssertionError):
+                        ParkedRequest(world, engines, entry, 'bad', 300, 4)
+                self.assertEqual(entry.state, 'unparked', 'a failed audit unparks the slot as any failed rebind does')
+                self.assertEqual([line for line in world.lines if line.startswith(parked.DIGEST_MARKER)], [])
+
+
 class AttachTests(unittest.TestCase):
     def test_the_set_is_built_after_the_block_and_closed_before_it(self):
         import test_serving_runtime

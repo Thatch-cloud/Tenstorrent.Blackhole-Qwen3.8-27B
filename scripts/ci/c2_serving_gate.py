@@ -1882,7 +1882,8 @@ def parked_facts_brief(facts):
                 negative=facts['negative'], prewarm=facts['prewarm'], p7p=facts['p7p'][:8],
                 rebinds=len(facts['rebinds']), rebind_ms=[entry['ms'] for entry in facts['rebinds']][:64],
                 slots=sorted(set(entry['slot'] for entry in facts['rebinds'])),
-                peak_held_max=max(peaks) if peaks else None, peaks=len(peaks), unparked=facts['unparked'],
+                peak_held_max=max(peaks) if peaks else None, peaks=len(peaks), digests=len(facts['digests']),
+                digests_unequal=len([entry for entry in facts['digests'] if not entry['equal']]), unparked=facts['unparked'],
                 reparked=len(facts['reparked']), single_rebuilt=rebuilt[:8], single_rebuilt_count=len(rebuilt),
                 single_kept=len(facts['single_kept']), released=len(facts['released']),
                 rebind_ops=len(facts['rebind_ops']))
@@ -2940,6 +2941,11 @@ def parked_rebind_problems(name, report, streams, problems, shortfalls):
         return
     if brief['rebinds'] != streams:
         shortfalls.append('%s: %d rebind lines for %d streams' % (name, brief['rebinds'], streams))
+    if brief.get('digests_unequal'):
+        problems.append('%s: %d rebind digest lines report unequal state' % (name, brief['digests_unequal']))
+    if brief.get('peaks') and brief.get('digests') != brief['peaks']:
+        shortfalls.append('%s: %s rebind digest lines for %s audited rebinds (QWEN_FAST_PARKED_AUDIT=1): the rebound state '
+                          'is unchecked' % (name, brief.get('digests'), brief['peaks']))
 
 
 def run_parked_exact(plan, runner, profiles, arms):

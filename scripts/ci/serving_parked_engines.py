@@ -212,6 +212,40 @@ def page_table_bindings(engine):
     return bindings
 
 
+def shard_digests(operations, tensor):
+    """sha256 of every chip's bytes of a device tensor, in chip order."""
+    import hashlib
+
+    import torch
+
+    return [hashlib.sha256(operations.to_torch(shard).contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
+            .hexdigest() for shard in operations.get_device_tensors(tensor)]
+
+
+def audit_rebound_state(engine, slot_index, log):
+    """QWEN_FAST_PARKED_AUDIT=1, at every rebind, after the engine's (design section 8): digests of the rebound pooled state.
+    The initial snapshot and the carry were both written from native slot 0 by the rebind, so on every chip each carry
+    tensor's digest must equal its initial tensor's (no assumption is made about how a state tensor is sharded across
+    chips); every page table the captures read is replicated, so its chip 0 digest must equal its chip 1 digest. The
+    active K/V banks are held by DraftKVHistory.audit at the reseed. Raises AssertionError naming the first mismatch;
+    logs DIGEST_MARKER with the counts either way it passes."""
+    operations = engine.operations
+    snapshots = tables = 0
+    for helper_index, (initial, carry) in enumerate(zip(engine.initial, engine.carry, strict=True)):
+        for tensor_index, (left, right) in enumerate(zip(initial, carry, strict=True)):
+            snapshots += 1
+            a, b = shard_digests(operations, left), shard_digests(operations, right)
+            if a != b:
+                raise AssertionError('Rebound state differs: helper %d tensor %d, carry against initial (slot %d)'
+                                     % (helper_index, tensor_index, slot_index))
+    for tensor, _ in page_table_bindings(engine).values():
+        tables += 1
+        digests = shard_digests(operations, tensor)
+        if len(set(digests)) != 1:
+            raise AssertionError('A replicated page table differs between chips (slot %d)' % slot_index)
+    log(DIGEST_MARKER + 'slot={} snapshots={} tables={} equal=1', slot_index, snapshots, tables)
+
+
 def write_page_tables(operations, mesh, bindings, host):
     """VerifierPageBinding.refresh's device write (serving_page_binding.py), for a whole table: every bound
     table's addresses and shape checked, each rewritten with the (1, width) host table's first columns
@@ -490,6 +524,7 @@ BUILT_MARKER = '[PINDIAG] parked engines built '
 WARM_MARKER = '[PINDIAG] parked drafter warm '
 REBIND_MARKER = '[PINDIAG] parked rebind '
 PEAK_MARKER = '[PINDIAG] parked rebind peak '
+DIGEST_MARKER = '[PINDIAG] parked rebind digest '
 UNPARKED_MARKER = '[PINDIAG] parked slot {} unparked: {}'
 REPARKED_MARKER = '[PINDIAG] parked slot {} re-parked ms={:.1f}'
 STOPPED_MARKER = '[PINDIAG] parked engines stopped at k={} of {}: short of {} (free={} largest_free={} need={})'
@@ -905,6 +940,8 @@ class ParkedEngineSet:
                 entry.engine.rebind(session, pages)
             finally:
                 entry.engine.__dict__.pop('save_carry', None)
+            if self.audit and self.negative != 'carry':
+                audit_rebound_state(entry.engine, entry.index, self.log)
         except BaseException as failure:
             self.unpark(entry, 'rebind failed: %s: %s' % (type(failure).__name__, str(failure)[:120]))
             raise

@@ -15,6 +15,7 @@ never guessed around. Stdlib only, Python 3.7 syntax: the gate reads this on the
   per request:
     [PINDIAG] parked rebind req=<id> slot=<k> gen=<n> P=<n> budget=<n> ms=<f> single_rebuilt=<0|1> window=<rows>
     [PINDIAG] parked rebind peak slot=<k> P=<n> free_before=<b> free_at_peak=<b> held=<b> (QWEN_FAST_PARKED_AUDIT)
+    [PINDIAG] parked rebind digest slot=<k> snapshots=<n> tables=<n> equal=1    (QWEN_FAST_PARKED_AUDIT)
     [PINDIAG] parked slot <k> unparked: <reason>
     [PINDIAG] parked slot <k> re-parked ms=<f>
     [PINDIAG] parked slot <k> single rebuilt at <park|idle> ms=<f> trace_delta=<bytes|n/a> dram_delta=<bytes|n/a>
@@ -38,6 +39,7 @@ BALLAST = '[PINDIAG] gate dram ballast '
 NEGATIVE = '[PINDIAG] parked negative control '
 REBIND = '[PINDIAG] parked rebind req='
 PEAK = '[PINDIAG] parked rebind peak '
+DIGEST = '[PINDIAG] parked rebind digest '
 SLOT = '[PINDIAG] parked slot '
 RELEASED = '[PACKED-PROPOSE] released parked '
 PREWARM = '[PINDIAG] publish prewarm'
@@ -58,6 +60,7 @@ REBIND_LINE = re.compile(r'\[PINDIAG\] parked rebind req=(\S+) slot=([0-9]+) gen
                          r'ms=([0-9.]+) single_rebuilt=([01]) window=([0-9]+)')
 PEAK_LINE = re.compile(r'\[PINDIAG\] parked rebind peak slot=([0-9]+) P=([0-9]+) free_before=([0-9]+) '
                        r'free_at_peak=([0-9]+) held=([0-9]+)')
+DIGEST_LINE = re.compile(r'\[PINDIAG\] parked rebind digest slot=([0-9]+) snapshots=([0-9]+) tables=([0-9]+) equal=([01])')
 UNPARKED_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) unparked: (.*)$')
 REPARKED_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) re-parked ms=([0-9.]+)')
 REBUILT_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) single rebuilt at (\S+) ms=([0-9.]+)'
@@ -78,7 +81,7 @@ def scan(lines):
     """The parked facts of a log (an iterable of lines), in log order: built, stopped, warm, ballast, negative,
     rebinds, peaks, unparked, reparked, single_rebuilt, single_kept, released, prewarm (counts) and prewarm_skipped,
     p7p (per chip), rebind_ops (before/after, the ledger's bracket) and the count of every marker seen."""
-    facts = dict(built=[], stopped=[], warm=[], ballast=[], negative=[], rebinds=[], peaks=[], unparked=[],
+    facts = dict(built=[], stopped=[], warm=[], ballast=[], negative=[], rebinds=[], peaks=[], digests=[], unparked=[],
                  reparked=[], single_rebuilt=[], single_kept=[], released=[], prewarm=[], prewarm_skipped=[],
                  p7p=[], rebind_ops=[], markers=0)
     for line in lines:
@@ -126,6 +129,11 @@ def scan(lines):
                 facts['peaks'].append(dict(slot=int(match.group(1)), prompt=int(match.group(2)),
                                            free_before=int(match.group(3)), free_at_peak=int(match.group(4)),
                                            held=int(match.group(5))))
+                found = True
+            match = DIGEST_LINE.search(line)
+            if match:
+                facts['digests'].append(dict(slot=int(match.group(1)), snapshots=int(match.group(2)),
+                                             tables=int(match.group(3)), equal=match.group(4) == '1'))
                 found = True
             match = UNPARKED_LINE.search(line)
             if match:
@@ -182,7 +190,7 @@ def problems(facts, parked, slots=4, warm_required=True, allow_unparks=False, pr
     known generation, and - unless the arm injects a fault - no unpark."""
     out, missing = [], []
     if not parked:
-        seen = sorted(set(key for key in ('built', 'stopped', 'warm', 'ballast', 'negative', 'rebinds', 'peaks',
+        seen = sorted(set(key for key in ('built', 'stopped', 'warm', 'ballast', 'negative', 'rebinds', 'peaks', 'digests',
                                           'unparked', 'reparked', 'single_rebuilt', 'single_kept', 'released')
                           if facts.get(key)))
         if seen:

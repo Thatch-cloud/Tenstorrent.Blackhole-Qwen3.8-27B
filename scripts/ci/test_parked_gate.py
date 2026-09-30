@@ -264,6 +264,20 @@ class JudgeRunTests(unittest.TestCase):
         self.assertEqual(feed.asked, [arm[0] for arm in arms])
         self.assertEqual(result['facts']['exact-p-shuf']['drafting_identical'], True)
 
+    def test_an_audited_rebind_owes_a_digest_line_and_an_unequal_one_fails(self):
+        problems, shortfalls = [], []
+        gate.parked_rebind_problems('arm', dict(c2_gate_parked=dict(facts=dict(rebinds=2, peaks=2, digests=2))), 2,
+                                    problems, shortfalls)
+        self.assertEqual((problems, shortfalls), ([], []))
+        gate.parked_rebind_problems('arm', dict(c2_gate_parked=dict(facts=dict(rebinds=2, peaks=2, digests=1))), 2,
+                                    problems, shortfalls)
+        self.assertEqual(len(shortfalls), 1)
+        gate.parked_rebind_problems('arm', dict(c2_gate_parked=dict(facts=dict(rebinds=2, digests_unequal=1))), 2,
+                                    problems, shortfalls)
+        self.assertEqual(len(problems), 1)
+        facts = markers.scan(['[PINDIAG] parked rebind digest slot=1 snapshots=96 tables=6 equal=1'])
+        self.assertEqual(facts['digests'], [dict(slot=1, snapshots=96, tables=6, equal=True)])
+
     def test_a_request_that_ends_at_its_first_token_owes_no_rebind_and_no_path_records(self):
         arms = arms_of('parked-exact')
         ended = [i for i, b in enumerate(gate.asked(arms[0][1])['budgets']) if b == 1]
