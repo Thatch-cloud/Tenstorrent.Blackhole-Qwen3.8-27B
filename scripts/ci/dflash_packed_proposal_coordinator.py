@@ -215,10 +215,52 @@ RELEASED_LINE = '[PACKED-PROPOSE] released quad={quad} pairs={pairs}'
 # never raises over it.
 EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 
+# Stage E (QWEN_FAST_PARKED_ENGINES=1, serving_parked_engines; read at each use, and only '1' turns it on - the
+# attach refuses any other value): the capture headroom and the ledger's readings ask the captures' measured bytes
+# (serving_prefill_admission.MEASURED_*), not the estimates below, which are lower bounds. Off, every call is today's.
+PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
+
 
 def extent_memory_points(environ=None):
     """QWEN_FAST_EXTENT_REPLAY=1."""
     return (os.environ if environ is None else environ).get(EXTENT_REPLAY_FLAG) == '1'
+
+
+def parked_engines_on(environ=None):
+    """QWEN_FAST_PARKED_ENGINES=1."""
+    return (os.environ if environ is None else environ).get(PARKED_ENGINES_FLAG) == '1'
+
+
+def single_capture_bytes():
+    """What a single-capture rebuild's ledger reading counts on: under QWEN_FAST_PARKED_ENGINES=1 the measured
+    serving_prefill_admission.MEASURED_SINGLE_CAPTURE_BYTES, else estimated_single_capture_bytes(), as always."""
+    if parked_engines_on():
+        import serving_prefill_admission
+
+        return serving_prefill_admission.MEASURED_SINGLE_CAPTURE_BYTES
+    return estimated_single_capture_bytes()
+
+
+def pair_capture_bytes():
+    """What a fresh pair capture's headroom (and its ledger reading) asks: under QWEN_FAST_PARKED_ENGINES=1 the
+    measured serving_prefill_admission.MEASURED_PAIR_CAPTURE_BYTES, else estimated_pair_capture_bytes(), as always."""
+    if parked_engines_on():
+        import serving_prefill_admission
+
+        return serving_prefill_admission.MEASURED_PAIR_CAPTURE_BYTES
+    return estimated_pair_capture_bytes()
+
+
+def quad_capture_bytes():
+    """What a fresh quad capture's headroom (and its ledger reading) asks: under QWEN_FAST_PARKED_ENGINES=1 the
+    measured serving_prefill_admission.MEASURED_QUAD_CAPTURE_BYTES, else quad_draft.QUAD_CAPTURE_BYTES_EST, as always."""
+    if parked_engines_on():
+        import serving_prefill_admission
+
+        return serving_prefill_admission.MEASURED_QUAD_CAPTURE_BYTES
+    import quad_draft
+
+    return quad_draft.QUAD_CAPTURE_BYTES_EST
 
 
 def ledger_before(op, estimate, point):
@@ -607,7 +649,7 @@ class PackedProposalCoordinator:
         from dflash_proposal_trace import PreparedDFlashProposal
 
         # S2 W6d: this rebuild checks no headroom, so the ledger reads the allocator either side of it.
-        ledger_token = ledger_before('single', estimated_single_capture_bytes(),
+        ledger_token = ledger_before('single', single_capture_bytes(),
                                      'slot=%s' % getattr(getattr(device, 'pool_slot', None), 'index', None))
         try:
             rebuilt = PreparedDFlashProposal(device, max_new_tokens=1)
@@ -724,7 +766,7 @@ class PackedProposalCoordinator:
                             # forms, never every round after (run 35585107688). Under
                             # the S2 flag the check is the admission's split
                             # (capture_headroom, gate v79).
-                            short, _ = capture_headroom(device_a, estimated_pair_capture_bytes())
+                            short, _ = capture_headroom(device_a, pair_capture_bytes())
                             if short:
                                 headroom_ok = False
                                 single_reason = 'dram_reserve'
@@ -742,7 +784,7 @@ class PackedProposalCoordinator:
                             ids = '%s,%s' % (entry_a['bridge'].request.session.request_id,
                                              entry_b['bridge'].request.session.request_id)
                             # S2 W6d: a fresh pair capture allocates; the ledger reads either side of it.
-                            ledger_token = (ledger_before('pair', estimated_pair_capture_bytes(),
+                            ledger_token = (ledger_before('pair', pair_capture_bytes(),
                                                           'slots=%s,%s' % (slot_a, slot_b)) if fresh_build else None)
                             try:
                                 ready = phase('propose_pair', ids,
@@ -929,7 +971,7 @@ class PackedProposalCoordinator:
             # A fresh capture - a new quad, or the same four devices' quad whose last build failed (its _bucket
             # released what that attempt built) - needs the headroom; replaying a built quad allocates nothing. Under
             # the S2 flag the headroom is the admission's split (capture_headroom, gate v79).
-            short, reading = capture_headroom(devices[0], quad_draft.QUAD_CAPTURE_BYTES_EST)
+            short, reading = capture_headroom(devices[0], quad_capture_bytes())
             if short:
                 reason = 'dram_reserve:headroom=%d' % reading['largest_free']
                 if 'free' in reading:
@@ -948,7 +990,7 @@ class PackedProposalCoordinator:
         seeds = [entry['seed'] for entry in entries]
         ids = ','.join(str(entry['bridge'].request.session.request_id) for entry in entries)
         # S2 W6d: a fresh quad capture allocates; the ledger reads either side of it.
-        ledger_token = ledger_before('quad', quad_draft.QUAD_CAPTURE_BYTES_EST, 'slots=0,1,2,3') if fresh else None
+        ledger_token = ledger_before('quad', quad_capture_bytes(), 'slots=0,1,2,3') if fresh else None
         started = time.perf_counter()
         try:
             ready = phase('propose_quad', ids, lambda: trace.prepare_device(seeds))

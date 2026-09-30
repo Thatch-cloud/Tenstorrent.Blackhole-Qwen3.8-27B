@@ -581,7 +581,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # as before): the scheduler-side DRAM admission hold's predicate (serving_prefill_admission), read through
         # this pool, is parked before the lifecycle serves a request; the scope removes it before the pool closes.
         if extent_replay_enabled():
-            scopes.callback(register_dram_admission(pool))
+            scopes.callback(register_dram_admission(pool, **({} if parked_engines is None else
+                                                             dict(parked=parked_engines))))
         lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,
             capture_factory=capture_factory, bridge_factory=bridge_factory, eos_ids=eos_ids,
             cancelled=cancelled, packed_step=packed_step)

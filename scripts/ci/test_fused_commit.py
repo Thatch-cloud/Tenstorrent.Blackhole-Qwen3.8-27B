@@ -1639,8 +1639,8 @@ def without_sticky(lines):
 def without_parked(lines):
     """serving_runtime.py less Stage E (QWEN_FAST_PARKED_ENGINES, default off; serving_parked_engines), which
     landed after this parent: the flag's constant and the parked-engine build after the P7 ledger point, with
-    the blank line before it. Each is cut exactly once and checked statement by statement, so nothing else is
-    hidden."""
+    the blank line before it, and E5's DRAM registration keyword. Each is cut exactly once and checked statement
+    by statement, so nothing else is hidden."""
     lines = cut_code(lines, '# Stage E (serving_parked_engines; default off): one engine per pool slot, parked at attach.',
                      "PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'", ("PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'",))
     first = "# Stage E (QWEN_FAST_PARKED_ENGINES; default off, strictly '0' or '1'): one engine per pool slot, built"
@@ -1648,7 +1648,7 @@ def without_parked(lines):
     if len(starts) != 1 or lines[starts[0] - 1].strip():
         raise AssertionError('The parked-engine build is not in serving_runtime.py exactly once, after a blank line')
     lines = lines[:starts[0] - 1] + lines[starts[0]:]
-    return cut_code(lines, first, 'parked_engines.build()', (
+    lines = cut_code(lines, first, 'parked_engines.build()', (
         'parked_engines = None',
         "if os.environ.get(PARKED_ENGINES_FLAG, '0') != '0':",
         'import serving_parked_engines',
@@ -1659,6 +1659,13 @@ def without_parked(lines):
         'capture_rows=capture_rows if trimmed else None)',
         'scopes.callback(parked_engines.close)',
         'parked_engines.build()'))
+    # E5: the DRAM registration's parked keyword.
+    lines = cut_code(lines, 'scopes.callback(register_dram_admission(pool, **({} if parked_engines is None else',
+                     'dict(parked=parked_engines))))',
+                     ('scopes.callback(register_dram_admission(pool, **({} if parked_engines is None else',
+                      'dict(parked=parked_engines))))'),
+                     ['            scopes.callback(register_dram_admission(pool))'])
+    return lines
 
 
 def without_any_request(lines):

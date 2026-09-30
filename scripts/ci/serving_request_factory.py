@@ -82,6 +82,8 @@ EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 # W6a: the one proposal bucket every engine captures under the flag.
 SINGLE_PROPOSAL_CONTEXT = 2048
 DRAM_REGISTERED = '[PINDIAG] dram admission hold registered: '
+# Stage E (QWEN_FAST_PARKED_ENGINES=1 only): the parked terms the registered predicate also asks.
+DRAM_PARKED_REGISTERED = '[PINDIAG] dram admission parked terms: '
 DRAM_BACKSTOP_REFUSED = '[PINDIAG] dram backstop refused request '
 # W6a's executed-path marker: the buckets the engine's proposal capture actually holds, read after the build.
 PROPOSAL_BUCKETS_BUILT = '[PINDIAG] proposal buckets built request='
@@ -134,17 +136,23 @@ def built_proposal_buckets(device):
         return 'unavailable (%s)' % type(failure).__name__
 
 
-def register_dram_admission(pool, *, log=None):
+def register_dram_admission(pool, *, log=None, parked=None):
     """S2 W6b: park the scheduler-side DRAM admission hold's predicate (serving_prefill_admission) for this
     attach: it reads the smallest largest-free block over the chips through `pool`, against the one set of
     defaults there and the coordinator's DRAM reserve (QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB). Returns
     the callable that removes it; serving_runtime registers it in the attach's scope, so it goes before
-    the pool closes."""
+    the pool closes.
+
+    `parked` (Stage E, QWEN_FAST_PARKED_ENGINES=1 only): the attach's serving_parked_engines.ParkedEngineSet, whose
+    arrival_terms the predicate asks at every call, so an arrival onto a parked engine is admitted on the parked
+    terms (serving_prefill_admission's docstring); one more line says so. None, the predicate is today's."""
     import serving_prefill_admission as admission
     from dflash_packed_proposal_coordinator import dram_reserve_bytes
 
     reserve = dram_reserve_bytes()
-    unregister = admission.register_dram_predicate(admission.dram_predicate(pool, reserve))
+    unregister = admission.register_dram_predicate(
+        admission.dram_predicate(pool, reserve) if parked is None
+        else admission.dram_predicate(pool, reserve, parked=parked.arrival_terms))
     reading, reason = admission.dram_reading(pool)
     (_log if log is None else log)(
         DRAM_REGISTERED + 'need = engine {} + build margin {} + prefill {} at >= {} prompt tokens + reserve {} bytes '
@@ -156,10 +164,18 @@ def register_dram_admission(pool, *, log=None):
         'unavailable (%s)' % reason if reading is None else
         'free {} largest_free {} trace_largest_free {}'.format(reading['free'], reading['largest_free'],
                                                                reading['trace_largest_free']))
+    if parked is not None:
+        (_log if log is None else log)(
+            DRAM_PARKED_REGISTERED + 'an arrival onto a parked engine needs prefill {} at >= {} prompt tokens + rebind {} '
+            '+ a released single\'s rebuild {} + reserve {} bytes per chip, of the free less {} stranded; the trace '
+            'region\'s >= {} only with the rebuild; the backstop the rebind + the rebuild + the reserve',
+            admission.PREFILL_TRANSIENT_BYTES, admission.PREFILL_TRANSIENT_FROM,
+            parked.arrival_rebind_bytes(), admission.MEASURED_SINGLE_CAPTURE_BYTES, reserve, admission.STRANDED_BYTES,
+            admission.SINGLE_TRACE_BYTES)
     return unregister
 
 
-def dram_backstop(pool, *, request_id, reserve=None, log=None):
+def dram_backstop(pool, *, request_id, reserve=None, log=None, parked=None):
     """S2 W6b's post-prefill backstop: RequestRefused (quarantined under QWEN_FAST_ANY_REQUEST, so the
     request ends FINISHED_ABORTED and the engine lives) when the pool's reading is short of a term of the
     admission's split (serving_prefill_admission.split_short, gate v79's fix) for the engine build's peak plus
@@ -168,28 +184,40 @@ def dram_backstop(pool, *, request_id, reserve=None, log=None):
     neither term; the admission asked it of both (admission_contiguous_need), which leaves a long prompt 300 MB of
     the block for what its prefill takes before this point. Returns the smallest largest free block, or
     None when the pool cannot be read: then it is a diagnostic, as the coordinator's headroom is (the attach refuses
-    such a pool under the flag, W7)."""
+    such a pool under the flag, W7).
+
+    `parked` (Stage E, QWEN_FAST_PARKED_ENGINES=1 only): the parked set's arrival_terms for the slot this request will
+    take, dict(rebind=, single=), and then the need is the rebind's (serving_prefill_admission.parked_backstop_need)
+    and the trace region is asked only for a released single's rebuild (parked_trace_need). None: today's terms."""
     import serving_prefill_admission as admission
 
     if reserve is None:
         from dflash_packed_proposal_coordinator import dram_reserve_bytes
 
         reserve = dram_reserve_bytes()
-    need = admission.backstop_need(reserve)
+    if parked is None:
+        need = admission.backstop_need(reserve)
+    else:
+        need = admission.parked_backstop_need(reserve, rebind=parked['rebind'], single=parked['single'])
     reading, reason = admission.dram_reading(pool)
     log = _log if log is None else log
     if reading is None:
         log('[PINDIAG] dram backstop unavailable for request {}: {} (not refused)', request_id, reason)
         return None
     largest, free, trace = reading['largest_free'], reading['free'], reading['trace_largest_free']
-    short = admission.split_short(free, largest, need, reserve, trace)
+    if parked is None:
+        short = admission.split_short(free, largest, need, reserve, trace)
+    else:
+        short = admission.split_short(free, largest, need, reserve, trace,
+                                      trace_need=admission.parked_trace_need(parked['single']))
     if short:
         log(DRAM_BACKSTOP_REFUSED + '{}: largest_free={} free={} trace_largest_free={} need={} short={} bytes per chip',
             request_id, largest, free, trace, need, '+'.join(short))
         raise RequestRefused('DRAM backstop: short of %s on the smallest chip (free %d bytes less %d stranded, largest '
-                             'free block %d, trace region largest free block %s) for the engine build peak plus the '
+                             'free block %d, trace region largest free block %s) for the %s plus the '
                              'reserve (%d bytes)' % ('+'.join(short), free, admission.STRANDED_BYTES, largest,
-                                                     trace, need))
+                                                     trace, 'engine build peak' if parked is None
+                                                     else 'parked rebind peak', need))
     return largest
 
 

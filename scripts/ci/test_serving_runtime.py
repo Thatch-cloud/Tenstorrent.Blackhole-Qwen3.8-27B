@@ -39,11 +39,17 @@ class RuntimeAttachmentTests(unittest.TestCase):
         # serving_parked_engines.ParkedEngineSet ('parked_build' at its build, 'parked_close' at its close; the
         # constructor's keywords in self.parked_calls). None leaves both alone.
         self.parked_calls = []
+        # E4/E5: the fake set's idle (the lifecycle's idle moment), arrival_terms and arrival_rebind_bytes (the DRAM
+        # registration's parked terms), one fake per attach in self.parked_sets.
+        self.parked_sets = []
 
         def build_parked(**options):
             self.parked_calls.append(options)
-            return SimpleNamespace(build=lambda: events.append('parked_build'),
-                                   close=lambda: events.append('parked_close'))
+            built = SimpleNamespace(build=lambda: events.append('parked_build'),
+                                    close=lambda: events.append('parked_close'), idle=Mock(),
+                                    arrival_terms=Mock(return_value=None), arrival_rebind_bytes=Mock(return_value=100))
+            self.parked_sets.append(built)
+            return built
 
         parked_patch = (patch('serving_parked_engines.ParkedEngineSet', side_effect=build_parked)
                         if parked is not None else nullcontext())

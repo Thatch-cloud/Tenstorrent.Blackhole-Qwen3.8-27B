@@ -108,6 +108,11 @@ the same terms, with the contiguous term that carries no prefill transient: the 
 so a long prompt keeps the 300 MB gap between its admission and its backstop that it had before the split
 (1568.4 against 1268.4 MB then). No predicate, an unreadable one, or a reading that is unavailable holds nothing:
 the rule above, call for call.
+STAGE E, THE PARKED TERMS (QWEN_FAST_PARKED_ENGINES=1 only; serving_parked_engines, design section 5.2): when the slot
+the next request will take holds a parked engine, nothing is built at its admission, so the predicate and the
+backstop ask parked_need and parked_backstop_need (the prefill transient, the rebind's peak R, a released single's
+rebuild S, the reserve) and a trace-region block only for S (parked_trace_need). The predicate asks the parked set
+which terms apply at every call; with the flag off it is built without one and every call is today's.
     [PINDIAG] dram hold prompt=<n> largest_free=<MB> need=<MB> request=<id> decodes=<d> free=<MB>
         trace_largest_free=<MB> short=<terms>                                         once per (request, decodes)
     [PINDIAG] dram hold released prompt=<n> ...                                        once, when it fits
@@ -189,6 +194,24 @@ LARGEST_BUFFER_BYTES = 128 * MEGABYTE
 TRACE_CONTIGUOUS_BYTES = 44 * MEGABYTE
 SPLIT_TERMS = ('free', 'contiguous', 'trace')
 
+# Stage E (QWEN_FAST_PARKED_ENGINES=1, serving_parked_engines; design section 5.2): THE PARKED TERMS, per chip. An
+# arrival whose slot holds a parked engine builds nothing: its engine, drafter and captures were built at attach and
+# are rebound (the pool slot re-zeroed, the history projected, the page tables rewritten). So the engine's resident
+# 800 MB and its 200 MB margin leave its need, and what is left is the prefill's transient, the rebind's peak (R) and,
+# when a pair or the quad released that slot's single-user proposal capture, the capture's rebuild (S), which the
+# rebind makes before the request's first proposal. The contiguous term is today's; the trace term asks only the
+# single's trace, and only with S. Every other slot keeps today's terms. G-E0 measures R and G-E3 pins all three.
+PARKED_REBIND_BYTES = 100 * MEGABYTE         # (e) R: the rebind with the windowed projection (256 rows per call)
+PARKED_REBIND_WHOLE_BYTES = 350 * MEGABYTE   # (e) R with the projection in one call (QWEN_FAST_PARKED_PROJECT_ROWS=0)
+# (m) Each capture's allocator growth per chip, read either side of it (gates v61, v70, v79; the source estimates in
+# dflash_packed_proposal_coordinator and quad_draft are lower bounds: 64.5, 86.3 and 471.9 MB). S is the single's.
+# Under the flag the coordinator's capture headroom asks these in place of the estimates.
+MEASURED_SINGLE_CAPTURE_BYTES = 227 * MEGABYTE
+MEASURED_PAIR_CAPTURE_BYTES = 212_800_000
+MEASURED_QUAD_CAPTURE_BYTES = 428_300_000
+# (e, G-E0 records it) The trace region a single-capture rebuild takes: its one 2048 bucket's trace.
+SINGLE_TRACE_BYTES = 4 * MEGABYTE
+
 
 def _log(message, *values):
     try:
@@ -255,6 +278,30 @@ def backstop_need(reserve):
     return engine_build_peak() + _reserve(reserve)
 
 
+def _parked_bytes(rebind, single):
+    if any(type(value) is not int or value < 0 for value in (rebind, single)):
+        raise ValueError('Non-negative integer rebind and single-capture bytes are required, got %r and %r'
+                         % (rebind, single))
+    return rebind + single
+
+
+def parked_need(prompt_tokens, reserve, *, rebind, single):
+    """THE PARKED TERMS' free term before the prefill (Stage E, design section 5.2): the prefill's transient, the
+    rebind's peak (R, `rebind`), the single-capture rebuild (S, `single`: 0 unless that slot's capture was released)
+    and the reserve. 668.4 MB for a long prompt at the 256 MiB reserve with R = 100 MB, 895.4 MB with S."""
+    return prefill_transient(prompt_tokens) + _parked_bytes(rebind, single) + _reserve(reserve)
+
+
+def parked_backstop_need(reserve, *, rebind, single):
+    """What the post-prefill backstop requires of a parked arrival: the prefill has run, so R, S and the reserve."""
+    return _parked_bytes(rebind, single) + _reserve(reserve)
+
+
+def parked_trace_need(single):
+    """THE PARKED TERMS' trace term: the single's trace when that slot rebuilds it (S applies), else nothing (0)."""
+    return SINGLE_TRACE_BYTES if single else 0
+
+
 def contiguous_need(reserve):
     """THE SPLIT's contiguous term: the largest free block must hold the largest single buffer and leave the
     reserve beside it (396.4 MB at the 256 MiB default). What the backstop and the coordinator's captures ask."""
@@ -276,26 +323,31 @@ def admission_contiguous_need(prompt_tokens, reserve):
     return contiguous_need(reserve) + prefill_residue(prompt_tokens)
 
 
-def split_short(free, largest, need, reserve, trace_largest=None, contiguous=None):
+def split_short(free, largest, need, reserve, trace_largest=None, contiguous=None, trace_need=None):
     """The terms of THE SPLIT (the module docstring) a reading is short of, in SPLIT_TERMS order; () when it fits.
 
     free and largest are the smallest chip's total free and largest free DRAM block; need what the operation needs
     with the reserve in it (dram_need, backstop_need, or a capture's estimate plus the reserve); trace_largest the
     smallest chip's largest free trace-region block, None where it cannot be read (that term then holds nothing);
     contiguous the block the operation needs (the admission's admission_contiguous_need), contiguous_need(reserve)
-    when None. Gate v79 (run 36368363993) held 2.319 GB free beside a 1079.7 MB largest block against a 1568.4 MB
-    need: free less STRANDED_BYTES is 2019 MB, the block holds a 120000-token prompt's 696.4 MB contiguous need, so
-    it fits."""
+    when None; trace_need the trace-region block it needs, TRACE_CONTIGUOUS_BYTES (an engine's traces) when None -
+    THE PARKED TERMS pass parked_trace_need. Gate v79 (run 36368363993) held 2.319 GB free beside a 1079.7 MB
+    largest block against a 1568.4 MB need: free less STRANDED_BYTES is 2019 MB, the block holds a 120000-token
+    prompt's 696.4 MB contiguous need, so it fits."""
     short = []
     if contiguous is None:
         contiguous = contiguous_need(reserve)
     elif type(contiguous) is not int or contiguous < 0:
         raise ValueError('A non-negative integer contiguous need in bytes is required, got %r' % (contiguous,))
+    if trace_need is None:
+        trace_need = TRACE_CONTIGUOUS_BYTES
+    elif type(trace_need) is not int or trace_need < 0:
+        raise ValueError('A non-negative integer trace-region need in bytes is required, got %r' % (trace_need,))
     if free - STRANDED_BYTES < need:
         short.append('free')
     if largest < contiguous:
         short.append('contiguous')
-    if trace_largest is not None and trace_largest < TRACE_CONTIGUOUS_BYTES:
+    if trace_largest is not None and trace_largest < trace_need:
         short.append('trace')
     return tuple(short)
 
@@ -351,23 +403,37 @@ def dram_reading(pool):
     return reading, None
 
 
-def dram_predicate(pool, reserve):
+def dram_predicate(pool, reserve, parked=None):
     """The predicate the worker registers, admits(prompt_tokens) -> (ok, detail): ok is False only when the
     pool's reading exists and is short of a term of THE SPLIT for dram_need, its contiguous term the admission's
     (admission_contiguous_need: the prefill transient in the block for a long prompt), detail['short'] naming them.
     An unavailable reading admits, and detail['unavailable'] says why (the attach refuses a pool without statistics
-    under the flag, W7)."""
+    under the flag, W7).
+
+    `parked` (Stage E, QWEN_FAST_PARKED_ENGINES=1 only; None otherwise, and then every call is today's): a zero-argument
+    callable asked at each call - serving_parked_engines.ParkedEngineSet.arrival_terms - answering None when the next
+    request's slot is served by today's per-request build (today's terms), else dict(rebind=, single=) for its parked
+    engine: THE PARKED TERMS (parked_need, parked_trace_need), detail['parked'] then carrying them."""
     _reserve(reserve)
+    if parked is not None and not callable(parked):
+        raise ValueError('The parked arrival terms must be a zero-argument callable or None')
 
     def admits(prompt_tokens):
-        need = dram_need(prompt_tokens, reserve)
+        terms = None if parked is None else parked()
+        if terms is None:
+            need = dram_need(prompt_tokens, reserve)
+        else:
+            need = parked_need(prompt_tokens, reserve, rebind=terms['rebind'], single=terms['single'])
         reading, reason = dram_reading(pool)
         if reading is None:
-            return True, dict(largest_free=None, need=need, unavailable=reason)
+            return True, dict(largest_free=None, need=need, unavailable=reason,
+                              **({} if terms is None else dict(parked=terms)))
         short = split_short(reading['free'], reading['largest_free'], need, reserve, reading['trace_largest_free'],
-                            contiguous=admission_contiguous_need(prompt_tokens, reserve))
+                            contiguous=admission_contiguous_need(prompt_tokens, reserve),
+                            **({} if terms is None else dict(trace_need=parked_trace_need(terms['single']))))
         return not short, dict(largest_free=reading['largest_free'], need=need, free=reading['free'],
-                               trace_largest_free=reading['trace_largest_free'], short=short)
+                               trace_largest_free=reading['trace_largest_free'], short=short,
+                               **({} if terms is None else dict(parked=terms)))
 
     return admits
 

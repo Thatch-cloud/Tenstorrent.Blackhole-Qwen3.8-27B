@@ -68,7 +68,9 @@ HISTORY_ROWS = 2048
 
 # The serving modules Stage E edits (each must reach the C2 image through its overlay, and none may be a
 # frozen-recipe pin), and the ones it must leave byte-identical (the module docstring).
-STAGE_E_EDITS = ('verifier_engine.py', 'serving_buffer_pool.py', 'serving_runtime.py', 'serving_parked_engines.py')
+STAGE_E_EDITS = ('verifier_engine.py', 'serving_buffer_pool.py', 'serving_runtime.py', 'serving_parked_engines.py',
+                 # E5's admission
+                 'serving_request_factory.py', 'dflash_packed_proposal_coordinator.py', 'serving_prefill_admission.py')
 NEVER_EDITED = ('draft_kv_history.py', 'extent_attention_replay.py', 'serving_page_binding.py')
 
 # Every "for the request's life" or "permanent" claim in the drafter and coordinator sources, with
@@ -392,14 +394,11 @@ def rebind_device(device, taps, *, position, window=None):
 
 # -- the set (design sections 2.2, 2.4, 6.3, 6.4) ---------------------------------------------------------
 
-MEGABYTE = 10 ** 6
-# The parked admission's terms (design section 5.2; E5 pins them into the admission, G-E0 and G-E3 measure
-# them): R, the rebind's peak - estimated at 100 MB with the windowed projection and 350 MB with the whole
-# call - and S, a single-capture rebuild (227 MB measured), which applies when that slot's single is
-# released. With the prefill transient and the reserve they are what a parked arrival needs free.
-REBIND_PEAK_BYTES = 100 * MEGABYTE
-REBIND_WHOLE_PEAK_BYTES = 350 * MEGABYTE
-SINGLE_CAPTURE_BYTES = 227 * MEGABYTE
+# The parked admission's terms (design section 5.2) are serving_prefill_admission's, its one set of defaults (THE
+# PARKED TERMS): R, the rebind's peak - estimated at 100 MB with the windowed projection and 350 MB with the whole
+# call - and S, a single-capture rebuild (227 MB measured), which applies when that slot's single is released. With
+# the prefill transient and the reserve they are what a parked arrival needs free. Read at call time, so this module
+# imports nothing at load.
 SYNTHETIC_POSITION = 1
 SYNTHETIC_BUDGET = 16
 SYNTHETIC_TOKEN = SYNTHETIC_SEED = 0
@@ -412,19 +411,78 @@ REBIND_MARKER = '[PINDIAG] parked rebind '
 UNPARKED_MARKER = '[PINDIAG] parked slot {} unparked: {}'
 REPARKED_MARKER = '[PINDIAG] parked slot {} re-parked ms={:.1f}'
 STOPPED_MARKER = '[PINDIAG] parked engines stopped at k={} of {}: short of {} (free={} largest_free={} need={})'
+# QWEN_FAST_GATE_DRAM_BALLAST (GATE ONLY, G-E3's ballast arm): bytes per chip held unread from the end of the parked
+# build to close, so the admissions run at the boundary of the parked need (design section 9).
+BALLAST_FLAG = 'QWEN_FAST_GATE_DRAM_BALLAST'
+BALLAST_MARKER = '[PINDIAG] gate dram ballast '
+# The ballast in buffers of at most this many bytes (whole 32-row tiles of 1024 bf16 columns: 64 KiB each), so it
+# takes the holes as well as the largest block, as an engine's 1,400 buffers do.
+BALLAST_CHUNK_BYTES = 32 * 2 ** 20
+BALLAST_ROW_BYTES = 1024 * 2
+BALLAST_TILE_BYTES = 32 * BALLAST_ROW_BYTES
 
 
 def rebind_peak_bytes(window):
-    return REBIND_PEAK_BYTES if window else REBIND_WHOLE_PEAK_BYTES
+    """R (serving_prefill_admission.PARKED_REBIND_BYTES; the whole call's when `window` is 0)."""
+    import serving_prefill_admission as admission
+
+    return admission.PARKED_REBIND_BYTES if window else admission.PARKED_REBIND_WHOLE_BYTES
+
+
+def single_capture_bytes():
+    """S (serving_prefill_admission.MEASURED_SINGLE_CAPTURE_BYTES)."""
+    import serving_prefill_admission as admission
+
+    return admission.MEASURED_SINGLE_CAPTURE_BYTES
 
 
 def parked_arrival_need(reserve, window, *, single_released=False):
-    """What a parked arrival needs free per chip, the reserve in it (design section 5.2): the prefill's
-    transient, the rebind's peak, a single-capture rebuild when that slot's single is released."""
+    """What a parked arrival at the longest prompt needs free per chip, the reserve in it (design section 5.2;
+    serving_prefill_admission.parked_need): the prefill's transient, the rebind's peak, a single-capture rebuild
+    when that slot's single is released."""
     import serving_prefill_admission as admission
 
-    return (admission.PREFILL_TRANSIENT_BYTES + rebind_peak_bytes(window)
-            + (SINGLE_CAPTURE_BYTES if single_released else 0) + reserve)
+    return admission.parked_need(admission.PREFILL_TRANSIENT_FROM, reserve, rebind=rebind_peak_bytes(window),
+                                 single=single_capture_bytes() if single_released else 0)
+
+
+def ballast_bytes(environ=None):
+    """QWEN_FAST_GATE_DRAM_BALLAST: a decimal byte count per chip, 0 (the default) for none; anything else refused."""
+    text = (os.environ if environ is None else environ).get(BALLAST_FLAG, '0')
+    if type(text) is not str or re.fullmatch('0|[1-9][0-9]*', text) is None:
+        raise ValueError('%s must be a decimal byte count, got %r' % (BALLAST_FLAG, text))
+    return int(text)
+
+
+class DramBallast:
+    """G-E3's ballast (QWEN_FAST_GATE_DRAM_BALLAST, gate only): `size` bytes per chip, rounded up to whole 64 KiB tiles,
+    replicated to both chips in buffers of at most BALLAST_CHUNK_BYTES, never read; close() frees them."""
+
+    def __init__(self, operations, mesh, size):
+        import torch
+
+        if type(size) is not int or size < 1:
+            raise ValueError('A positive ballast in bytes is required, got %r' % (size,))
+        self.operations = operations
+        self.tensors = []
+        self.size = -(-size // BALLAST_TILE_BYTES) * BALLAST_TILE_BYTES
+        left = self.size
+        try:
+            while left:
+                chunk = min(left, BALLAST_CHUNK_BYTES)
+                self.tensors.append(operations.from_torch(
+                    torch.zeros((1, 1, chunk // BALLAST_ROW_BYTES, 1024), dtype=torch.bfloat16), device=mesh,
+                    dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
+                    memory_config=operations.DRAM_MEMORY_CONFIG, mesh_mapper=operations.ReplicateTensorToMesh(mesh)))
+                left -= chunk
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        tensors, self.tensors = self.tensors, []
+        for value in tensors:
+            self.operations.deallocate(value)
 
 
 def zero_taps(operations, mesh, rows):
@@ -472,7 +530,11 @@ class ParkedEngineSet:
     take() gives the next request the lowest free slot - the rule ServingBufferPool.acquire applies to
     unlent slots - so the same arrivals get the same slots, and segments, with the flag on or off: the
     slot's entry when it is parked, else None (today's build, whose acquire takes that same slot).
-    rebind_slot() binds a taken slot to its request; park() parks it again, or unparks it."""
+    rebind_slot() binds a taken slot to its request; park() parks it again, or unparks it.
+
+    E5, the admission: arrival_terms are the parked terms of the slot the next request will take, asked by the
+    scheduler's predicate and the backstop. QWEN_FAST_GATE_DRAM_BALLAST (gate only) holds a ballast from the end of
+    build() to close()."""
 
     def __init__(self, *, operations, model, sampler, helpers, pool, weights, fixtures, collectives, blocks,
                  capture_rows, components=None, environ=None, log=None):
@@ -482,6 +544,8 @@ class ParkedEngineSet:
         refuse_deferred(environ)
         self.window = project_rows(environ)
         self.audit = audit_enabled(environ)
+        self.ballast_size = ballast_bytes(environ)
+        self.ballast = None
         if environ.get('QWEN_FAST_SHARED_CCL', '1') != '1' or environ.get('QWEN_FAST_EAGER_PROPOSAL') == '1':
             raise ValueError('%s=1 keeps one device per slot for the process: it needs the shared collectives '
                              '(QWEN_FAST_SHARED_CCL=1) and captured proposals (QWEN_FAST_EAGER_PROPOSAL unset)' % FLAG)
@@ -557,6 +621,11 @@ class ParkedEngineSet:
         self.log(BUILT_MARKER + 'k={} of {} attach_ms={:.1f} {}', built, len(self.slots), self.attach_ms,
                  self.dram_text())
         memory_ledger.record('P7p', point='parked k=%d' % built, parked_engines=self)
+        if self.ballast_size:
+            # G-E3's ballast, after the P7p reading, so the baseline it records is the parked set's own.
+            self.ballast = DramBallast(self.operations, self.model.mesh_device, self.ballast_size)
+            self.log(BALLAST_MARKER + 'bytes={} buffers={} (gate only; unread) {}', self.ballast.size,
+                     len(self.ballast.tensors), self.dram_text())
         return built
 
     def dram_text(self):
@@ -654,18 +723,50 @@ class ParkedEngineSet:
                  (time.perf_counter() - started) * 1000, self.window, len(warmed))
 
     # -- serving -------------------------------------------------------------------------------------------
+    def peek(self):
+        """The entry take() would give the next request, without taking it: the lowest free slot's when it is
+        parked, else None (today's build takes that slot, or no slot is free)."""
+        if self.closed:
+            return None
+        for entry in self.slots:
+            if entry.state == 'parked':
+                return entry
+            if entry.state == 'unparked' and not entry.slot.lent:
+                return None
+        return None
+
     def take(self):
         """The next request's slot (the class docstring): its entry, now 'serving', when it is parked; else
         None, and today's per-request build takes it."""
         if self.closed:
             raise ValueError('The parked engines are closed')
-        for entry in self.slots:
-            if entry.state == 'parked':
-                entry.state = 'serving'
-                return entry
-            if entry.state == 'unparked' and not entry.slot.lent:
-                return None
-        return None
+        entry = self.peek()
+        if entry is not None:
+            entry.state = 'serving'
+        return entry
+
+    def single_released(self, entry):
+        """Whether the slot's device has no single-user proposal capture: a pair or the quad released it, and
+        neither a park nor a rebind has rebuilt it yet."""
+        return entry.device is not None and single_capture(entry.device) is None
+
+    def arrival_rebind_bytes(self):
+        """R for this set's projection window."""
+        return rebind_peak_bytes(self.window)
+
+    def slot_terms(self, entry):
+        """THE PARKED TERMS of a request on `entry` (serving_prefill_admission): dict(rebind=R, single=S when its
+        single was released, else 0)."""
+        return dict(rebind=self.arrival_rebind_bytes(),
+                    single=single_capture_bytes() if self.single_released(entry) else 0)
+
+    def arrival_terms(self):
+        """E5: the terms the next request is admitted and backstopped on (serving_prefill_admission.dram_predicate,
+        serving_request_factory.dram_backstop): None when the slot it will take is served by today's per-request
+        build (today's terms), else slot_terms of its parked slot. Read at each call, so it follows every park,
+        unpark and rebuild."""
+        entry = self.peek()
+        return None if entry is None else self.slot_terms(entry)
 
     def rebind_slot(self, entry, taps, pages, *, position, make_session, request_id=None, budget=None):
         """Bind a taken slot to its request (design section 2.3, steps 4-6): the device from the prefill's
@@ -766,6 +867,9 @@ class ParkedEngineSet:
         if self.closed:
             return
         self.closed = True
+        if self.ballast is not None:
+            self.ballast.close()
+            self.ballast = None
         failures = []
         for entry in self.slots:
             for owner in (entry.engine, entry.device):
