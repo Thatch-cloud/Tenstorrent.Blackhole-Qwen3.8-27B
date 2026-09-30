@@ -1,8 +1,8 @@
 """The four-card K/V slide (draft_kv_slide_tp, QWEN_FAST_TP_KV_SLIDE) against the eager chain it replaces.
 
 Held here, on the CPU:
-  - the twin's geometry is the pair's for every (history_rows, prefix), and the kernel it launches is the qualified scalar
-    draft_kv_slide.cpp, unedited (its sha256 is draft_kv_slide_gate's);
+  - the twin's geometry is the pair's for every (history_rows, prefix), and the kernel it launches is a qualified
+    draft_kv_slide.cpp, unedited (the image carries the bundle's direct-DMA kernel; both digests are draft_kv_slide_gate's);
   - the transport's launch: at the pair its programs are exactly draft_kv_slide.prepare's (two chips, sixteen workers, the same
     runtime arguments), at four cards they are four chips x eight workers over (1, 2, ...) banks, and it refuses the pair's
     shapes, aliasing storage and a wrong chip count;
@@ -36,6 +36,7 @@ from test_pair_row_exact import Device
 
 HERE = Path(__file__).resolve().parent
 QUALIFIED_SCALAR_KERNEL = 'bc45d47257c844aff4bf17f478b536a48763578e544597884b7d1620083b6ba1'
+QUALIFIED_DIRECT_KERNEL = '1679bbd779add56b4bd445a6b4c51bd3e49c39a8a520dfaddfc3bd9f36667d47'
 RAMP = (1, 2, 15, 16, 31, 32, 33, 47, 452, 533, 1000, 2000, 2016, 2040, 2047, 2048)
 
 
@@ -50,17 +51,23 @@ class GeometryAndKernelTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 draft_kv_slide_tp.geometry(history, prefix)
 
-    def test_the_kernel_is_the_qualified_scalar_one_unedited(self):
+    def test_the_kernel_is_a_qualified_one_unedited(self):
+        """The transport launches draft_kv_slide.cpp beside it. The image carries the bundle's (the direct-DMA kernel: nothing
+        copies the checkout's, test_draft_slide_inplace_card_b), the checkout holds the scalar one: each is a qualified digest."""
         self.assertEqual(draft_kv_slide_tp.KERNEL, HERE / 'draft_kv_slide.cpp')
-        self.assertEqual(hashlib.sha256(draft_kv_slide_tp.KERNEL.read_bytes()).hexdigest(), QUALIFIED_SCALAR_KERNEL)
+        self.assertIn(hashlib.sha256(draft_kv_slide_tp.KERNEL.read_bytes()).hexdigest(), (QUALIFIED_SCALAR_KERNEL, QUALIFIED_DIRECT_KERNEL))
+        self.assertEqual(hashlib.sha256((HERE / 'draft_kv_slide_direct.cpp').read_bytes()).hexdigest(), QUALIFIED_DIRECT_KERNEL)
 
-    def test_the_kernel_is_generic_in_the_head_count(self):
-        """The kernel derives head and column from the worker index and pages from a 64 x 4 tile grid per head, and names no
-        head count: which is what lets the four-card transport launch 4 workers per KV head over 2 heads."""
-        text = draft_kv_slide_tp.KERNEL.read_text()
-        for line in ('const uint32_t head = worker / 4;', 'const uint32_t column = worker % 4;',
-                     '(head * 64 + source_tile) * 4 + column', 'noc_async_read_tile(head * 4 + column, delta, added);'):
-            self.assertIn(line, text)
+    def test_both_qualified_kernels_are_generic_in_the_head_count(self):
+        """Each kernel derives head and column from the worker index and addresses pages of a 64 x 4 tile grid per head, and
+        names no head count: which is what lets the four-card transport launch 4 workers per KV head over 2 heads."""
+        for name, delta in (('draft_kv_slide.cpp', 'noc_async_read_tile(head * 4 + column, delta, added);'),
+                            ('draft_kv_slide_direct.cpp', ': head * 4 + column;')):
+            text = (HERE / name).read_text()
+            for line in ('const uint32_t head = worker / 4;', 'const uint32_t column = worker % 4;',
+                         'noc_async_write_tile((head * 64 + tile) * 4 + column, spare, output);', delta):
+                self.assertIn(line, text, (name, line))
+            self.assertNotRegex(text, r'head\s*<\s*\d|heads?\s*=\s*\d|worker\s*[<>]=?\s*\d')
 
     def test_widths_and_workers_follow_tp_shapes(self):
         with pair():

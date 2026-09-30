@@ -83,7 +83,9 @@ class SourcePinTests(unittest.TestCase):
         for path in (ROOT / 'docker' / 'qwen-fast-serving.Dockerfile',
                      ROOT / '.github' / 'workflows' / 'qwen-fast-serving-image.yml'):
             with self.subTest(path=path.name):
-                self.assertNotIn('draft_kv_slide', path.read_text(encoding='utf-8'))
+                # the four-card transport (draft_kv_slide_tp.py, a new module beside them) is the one name allowed: it is the
+                # driver's own file, and the kernel it launches is still the bundle's draft_kv_slide.cpp
+                self.assertNotIn('draft_kv_slide', path.read_text(encoding='utf-8').replace('draft_kv_slide_tp', ''))
 
 
 # ---------------------------------------------------------------------------------------------

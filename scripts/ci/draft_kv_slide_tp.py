@@ -14,8 +14,9 @@ WHAT. The same kernel, driven from a host transport that reads the served width 
     (1, 2, 32, 128)), where the pair's are (1, 4, ...);
   - workers: one per (head, column tile) = 4 per head (8 at four cards, 16 at the pair). The kernel takes head = worker / 4
     and column = worker % 4 and addresses page (head * 64 + tile) * 4 + column of the 64 x 4 tile grid, so it is generic in the
-    head count: draft_kv_slide.cpp is used AS IT IS (its sha256 is the qualified scalar kernel's; test_draft_kv_slide_tp
-    holds it), never a four-card copy.
+    head count: draft_kv_slide.cpp is used AS IT IS, never a four-card copy. The image carries the bundle's (the qualified
+    direct-DMA kernel, sha256 1679bbd7; nothing copies the checkout's scalar one, bc45d472) and both are generic in the head count;
+    test_draft_kv_slide_tp holds the checkout's file to one of the two qualified digests.
 draft_kv_slide.py stays what the frozen bundle carries (test_tp2_pins); this module imports nothing from it (the pair's
 module is off at four cards and the closure test keeps it out of the served set), so the small geometry below is its own and
 test_draft_kv_slide_tp holds it equal to the pair's.
