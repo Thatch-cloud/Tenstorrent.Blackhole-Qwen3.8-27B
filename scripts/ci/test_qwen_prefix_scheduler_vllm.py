@@ -36,6 +36,7 @@ serving image, on its own vLLM, through required_tests.py (a skip fails there).
 """
 
 import collections
+import contextlib
 import copy
 import dataclasses
 import importlib
@@ -146,6 +147,23 @@ def tokens(count, seed):
     return [rng.randrange(1000, 200000) for _ in range(count)]
 
 
+class hook_switches_off(object):
+    """The staged TTScheduler.__init__ installs the graft itself when QWEN_PREFIX_REUSE=1 is in the process
+    environment (it is in the serving image), reading the sticky switch from the same environment. A test that
+    installs the graft explicitly, with its own environ, builds the scheduler with both switches out so the
+    constructor hook does not install first."""
+
+    NAMES = ('QWEN_PREFIX_REUSE', 'QWEN_FAST_STICKY_SESSIONS')
+
+    def __enter__(self):
+        self.saved = {name: os.environ.pop(name, None) for name in self.NAMES}
+
+    def __exit__(self, *exc):
+        for name, value in self.saved.items():
+            if value is not None:
+                os.environ[name] = value
+
+
 class Env(object):
     """The general profile's scheduler shape on a stand-in model config."""
 
@@ -178,13 +196,14 @@ class Env(object):
                        cache_salt=salt, block_hasher=self.hasher)
 
     def make(self, num_blocks=None, install=True, registry=None, kill_switch_path=None, clock=None, ledger=None,
-             vllm_config=None, mid_loop=False):
+             vllm_config=None, mid_loop=False, hook=False):
         kv_cache_config = self.kv_cache_config
         if num_blocks is not None:
             kv_cache_config = dataclasses.replace(kv_cache_config, num_blocks=num_blocks)
-        scheduler = self.scheduler_cls(vllm_config=vllm_config or self.vllm_config, kv_cache_config=kv_cache_config,
-                                       structured_output_manager=self.structured, block_size=BLOCK,
-                                       hash_block_size=BLOCK, include_finished_set=False, log_stats=True)
+        with contextlib.nullcontext() if hook else hook_switches_off():
+            scheduler = self.scheduler_cls(vllm_config=vllm_config or self.vllm_config, kv_cache_config=kv_cache_config,
+                                           structured_output_manager=self.structured, block_size=BLOCK,
+                                           hash_block_size=BLOCK, include_finished_set=False, log_stats=True)
         scheduler.use_v2_model_runner = False
         if ledger is not None:
             attach_ledger(scheduler, ledger)
@@ -313,7 +332,7 @@ class GraftOnRealVllmTests(unittest.TestCase):
         try:
             os.environ['QWEN_PREFIX_REUSE'] = '1'
             os.environ['QWEN_PREFIX_STATS_PATH'] = ''
-            scheduler, _ = self.env.make(install=False)
+            scheduler, _ = self.env.make(install=False, hook=True)
             state = scheduler.__dict__.get('_qwen_prefix')
             self.assertIsNotNone(state, 'TTScheduler.__init__ did not install the graft')
             self.assertIs(state.registry, sys.modules[key].registry)
@@ -323,10 +342,10 @@ class GraftOnRealVllmTests(unittest.TestCase):
             self.assertIn('cache_blocks', vars(scheduler.kv_cache_manager.coordinator))
             self.assertIn('_maybe_evict_cached_block', vars(scheduler.kv_cache_manager.block_pool))
             with self.assertRaises(graft.PrefixInstallError):
-                self.env.make(install=False)  # a second live scheduler on the shared registry
+                self.env.make(install=False, hook=True)  # a second live scheduler on the shared registry
             del scheduler, state
             os.environ.pop('QWEN_PREFIX_REUSE')
-            plain, _ = self.env.make(install=False)
+            plain, _ = self.env.make(install=False, hook=True)
             self.assertNotIn('schedule', vars(plain))
             self.assertNotIn('_qwen_prefix', vars(plain))
         finally:
@@ -915,9 +934,10 @@ class StickyEnv(Env):
         self.structured = StructuredOutputManager(self.vllm_config)
 
     def make_sticky(self, environ=None, mid_loop=True):
-        scheduler = self.scheduler_cls(vllm_config=self.vllm_config, kv_cache_config=self.kv_cache_config,
-                                       structured_output_manager=self.structured, block_size=BLOCK,
-                                       hash_block_size=BLOCK, include_finished_set=False, log_stats=True)
+        with hook_switches_off():
+            scheduler = self.scheduler_cls(vllm_config=self.vllm_config, kv_cache_config=self.kv_cache_config,
+                                           structured_output_manager=self.structured, block_size=BLOCK,
+                                           hash_block_size=BLOCK, include_finished_set=False, log_stats=True)
         scheduler.use_v2_model_runner = False
         registry = self.graft.PrefixRegistry(budget_bytes=1 << 40)
         registry.mid_loop_capture = mid_loop
