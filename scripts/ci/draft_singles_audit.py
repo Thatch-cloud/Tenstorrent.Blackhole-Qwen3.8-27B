@@ -22,7 +22,7 @@ and logs one AUDIT_LINE per batched group. The first difference names the stage.
 its stage, never a failed round; the singles' pending replays are always discarded. A correctness arm only: it spends back what
 batching saves.
 
-READ AT EACH ROUND, never at import. Unset or empty: off, and nothing here is imported. 'all', or a positive N (the first N
+READ AT EACH ROUND, never at import. Unset, empty or '0': off, and nothing here is imported. 'all', or a positive N (the first N
 rounds that ran a batched group). Anything else raises ValueError at the round.
 
 Stdlib and torch only, torch inside functions.
@@ -38,7 +38,7 @@ BLOCK = 16
 def audit_rounds(environ=None):
     """None (unset or empty), 'all', or a positive count N (the first N rounds with a batched group)."""
     value = (os.environ if environ is None else environ).get(FLAG)
-    if value is None or value == '':
+    if value is None or value in ('', '0'):
         return None
     if value == 'all':
         return value

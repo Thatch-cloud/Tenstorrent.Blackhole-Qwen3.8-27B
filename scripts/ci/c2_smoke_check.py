@@ -186,7 +186,7 @@ def draft_problems(facts, env, steady):
                             % (facts['quad_markers'], facts['quad_lines'], facts['quad_rounds'], QUAD_FLAG))
         if not facts['pair_rounds']:
             problems.append('no round was served by two packed pairs: the comparison arm never batched a draft')
-    if env.get(SINGLES_AUDIT_FLAG) and not facts['singles_audits']:
+    if env.get(SINGLES_AUDIT_FLAG) not in (None, '', '0') and not facts['singles_audits']:
         problems.append('%s is set and no [DRAFT-SINGLES-AUDIT] line was logged' % SINGLES_AUDIT_FLAG)
     return problems
 

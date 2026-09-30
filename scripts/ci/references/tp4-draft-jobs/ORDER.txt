@@ -8,23 +8,25 @@
 # exact whatever is drafted, so a wrong batched draft shows up only as lower acceptance: the window's exactness is the drafts
 # themselves. QWEN_FAST_DRAFT_SINGLES_AUDIT=all replays every batched user's own single-user draft in the same round and compares
 # features, candidates, scores and tokens bit for bit (the audited profiles carry it; c2_smoke_check.py fails a run on one unequal
-# line), and speed_window_compare.py --batched-vs-singles compares the per-request accepted-prefix sequences of the concurrent arm
-# (batched) against the solo arm (one user never batches) by position.
+# line), and speed_window_compare.py --position-keyed --strict-concurrent-prefixes compares, concurrent against concurrent on the same
+# verify rows, the accepted-prefix sequences of E1 (users drafting singly) against D3 (the quad). --batched-vs-singles is NOT used
+# at four cards: the solo arm drafts in 4-row sequential steps, so it shares no 16-row position with the concurrent arm (always
+# INCOMPARABLE), and it verifies on a different engine.
 # Early-failure order, cheapest first: no card (D0); the audited attach with the quad on (D1: the first time the quad's kernels run
 # on a card at four-card shapes, every batched round audited against the singles); the same with the quad off (D2: the pairs at
 # four cards, the control and the R0 measurement); the exactness matrix with the quad on (D3); then the two TIMED smokes, the
 # product (D4 quad, D5 pairs; the audits cost about 30 ms of verify readback and about 80 ms of draft replays per round, so the
-# audited arms are never timed). The smokes need the concurrent4_steady test: the mixed concurrent4 holds two prompts under 2,048
+# audited arms are never timed). D3 runs LAST and is soft: the strict text policy compares packed-block texts with the sequential
+# solo engine, and this branch does not carry the tp4/exact ring-reduction fix, so users in rows 32-63 may differ for a verify-side
+# reason; that must not halt the window before the timed arms. Judge D3 by its audit lines and the concurrent compare below. The smokes need the concurrent4_steady test: the mixed concurrent4 holds two prompts under 2,048
 # tokens, which keep both fixed pairs drafting singly for their whole answer.
 # After the window, offline (scripts/ci/speed_window_compare.py, on the gate's results trees):
-#   python scripts/ci/speed_window_compare.py D3-results --batched-vs-singles
-#       every user's concurrent (quad) rounds against its own solo rounds, by position: exit 0 identical, 1 a different draft
-#   python scripts/ci/speed_window_compare.py E1-results D3-results --users 2,3
-#       the 4,096 and 16,384 users' texts and solo accepted-prefix sequences against the speed window's E1 (same prompts: the
-#       real-text corpus fixes a prompt by user index and length), on an E1 from tp4/speed at 9cac8a84 or later
+#   python scripts/ci/speed_window_compare.py E1-results D3-results --users 2,3 --position-keyed --strict-concurrent-prefixes
+#       the 4,096 and 16,384 users (same prompts: the real-text corpus fixes a prompt by user index and length), E1 from tp4/speed
+#       at 9cac8a84 or later: exit 0 identical, 1 a different draft, 2 too few shared positions
 D0-build stop
 D1-quad-smoke stop
 D2-pairs-smoke soft
-D3-quad-matrix stop
 D4-quad-smoke-timed soft
 D5-pairs-smoke-timed soft
+D3-quad-matrix soft

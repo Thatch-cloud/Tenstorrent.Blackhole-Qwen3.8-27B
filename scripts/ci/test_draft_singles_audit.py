@@ -48,11 +48,12 @@ class FlagTests(unittest.TestCase):
     def test_unset_and_empty_are_off_all_and_a_count_are_on_anything_else_raises(self):
         self.assertIsNone(audit.audit_rounds({}))
         self.assertIsNone(audit.audit_rounds({FLAG: ''}))
+        self.assertIsNone(audit.audit_rounds({FLAG: '0'}))
         self.assertFalse(audit.enabled({}))
         self.assertEqual(audit.audit_rounds({FLAG: 'all'}), 'all')
         self.assertEqual(audit.audit_rounds({FLAG: '3'}), 3)
         self.assertTrue(audit.enabled({FLAG: '1'}))
-        for value in ('0', '-1', '03', 'x', '1.5', ' 2', 'ALL'):
+        for value in ('-1', '03', 'x', '1.5', ' 2', 'ALL'):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 audit.audit_rounds({FLAG: value})
 

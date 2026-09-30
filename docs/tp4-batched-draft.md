@@ -34,7 +34,10 @@ BOTH members' draft history is at 2,048 rows, and each pair held one prompt shor
   group names the first difference. Off, nothing changes.
 - `acceptance_report.compare_packed(by_position=True)` and `speed_window_compare.py --batched-vs-singles` compare a user's
   accepted prefixes by the position each round drafted at, so a scheduling difference cannot pass for a draft difference and a real
-  one cannot hide behind it.
+  one cannot hide behind it. At four cards the solo arm drafts in 4-row sequential steps on a different verify engine, so it shares
+  no 16-row position with the concurrent arm: the valid comparison is concurrent against concurrent on the same verify rows
+  (`speed_window_compare.py E1 D3 --users 2,3 --position-keyed --strict-concurrent-prefixes`), and the in-model singles audit is
+  the bit-level proof.
 
 ## Why exactness needs its own proof
 
@@ -44,7 +47,11 @@ bit equality with the pair fold and with each user's single-user SDPA (two stand
 firing controls), the K/V layout, the readback against four singles' rows; the audit and the per-request prefix comparison hold it
 in the model.
 
-## Projection (verify held at 63 ms, four steady users)
+What it does not change: on the measured K1/K2 mix every live-4 round was a ramp round (a batch needs every member at 2,048 draft
+rows), so nothing batches there; the branch helps only steady users. It keeps two per-user costs each round (each user's K/V bank
+copy, and the four serial commits), and under a lane scheduler the quad forms only in rounds where all four users are members.
+
+## Projection (not measured; verify held at 63 ms, four steady users)
 
 | Config | Round (ms) | tok/s per user at 4.2 / 10 tokens per round |
 |---|---|---|
@@ -58,6 +65,6 @@ and belongs to the verify-side branches.
 
 ## Running it
 
-`scripts/ci/references/tp4-draft-jobs` (ORDER.txt): D0 build, D1 the audited quad smoke, D2 the same with the quad off, D3 the
+`scripts/ci/references/tp4-draft-jobs` (ORDER.txt): D0 build, D1 the audited quad smoke, D2 the same with the quad off, D3 (soft, last) the
 exactness matrix on four steady users, D4 and D5 the timed smokes. The smoke's `concurrent4_steady` test is the mix that can form a
 batch (the mixed `concurrent4` keeps two users in the ramp).

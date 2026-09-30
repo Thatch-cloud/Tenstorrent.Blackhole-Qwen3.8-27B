@@ -174,6 +174,12 @@ QUAD_DRAFT_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 # single-user captures are kept (_release_single_user releases nothing): the audit replays them.
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
 
+
+def _singles_audit_on():
+    """Unset, empty and '0' are off (the repo's usual off value); anything else is on and validated by draft_singles_audit."""
+    return os.environ.get(SINGLES_AUDIT_FLAG, '') not in ('', '0')
+
+
 # One packed pair's own placeholder buffers at the only packable geometry (steady
 # state, 2048-row context, T16 block_rows=16): identifiers (1,32) uint32 (~128 B,
 # negligible), mask (1,1,32,4160) bf16 (~266 KB), rope.q (2x(1,1,32,128) bf16,
@@ -580,7 +586,7 @@ class PackedProposalCoordinator:
         device whose capture is already released is left alone.
 
         Under QWEN_FAST_DRAFT_SINGLES_AUDIT nothing is released: the audit replays every member's own single-user capture."""
-        if os.environ.get(SINGLES_AUDIT_FLAG):
+        if _singles_audit_on():
             return
         capture = device.proposal_capture
         if isinstance(capture, _PackedCaptureView):
@@ -838,7 +844,7 @@ class PackedProposalCoordinator:
                         discard()
             raise
         singles_module = None
-        if batched and os.environ.get(SINGLES_AUDIT_FLAG):
+        if batched and _singles_audit_on():
             # QWEN_FAST_DRAFT_SINGLES_AUDIT: every member of every batched group also drafts on its own single-user capture,
             # with the seed the batched pass got, enqueued behind it and before the round's one fence.
             import draft_singles_audit as singles_module

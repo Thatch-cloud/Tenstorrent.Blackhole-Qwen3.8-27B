@@ -67,13 +67,13 @@ class OrderTests(unittest.TestCase):
 
     def test_the_stages_build_then_the_audited_smokes_then_exactness_then_the_timed_arms(self):
         order = read_order()
-        self.assertEqual([name.split('-')[0] for name, _ in order], ['D0', 'D1', 'D2', 'D3', 'D4', 'D5'])
+        self.assertEqual([name.split('-')[0] for name, _ in order], ['D0', 'D1', 'D2', 'D4', 'D5', 'D3'])
         self.assertEqual(order[0], ('D0-build', 'stop'))
         self.assertEqual([name for name, mode in order if mode == 'soft'],
-                         ['D2-pairs-smoke', 'D4-quad-smoke-timed', 'D5-pairs-smoke-timed'])
+                         ['D2-pairs-smoke', 'D4-quad-smoke-timed', 'D5-pairs-smoke-timed', 'D3-quad-matrix'])
         self.assertEqual({mode for _, mode in order}, {'stop', 'soft'})
         self.assertEqual([name for name, mode in order if mode == 'stop'],
-                         ['D0-build', 'D1-quad-smoke', 'D3-quad-matrix'], 'the quad is stopped on; the pairs are data')
+                         ['D0-build', 'D1-quad-smoke'], 'D3 is soft and last: its text policy can fail on the verify side')
 
     def test_every_template_parses_names_no_host_and_uses_the_one_image_tag(self):
         for name, _ in read_order():
@@ -214,10 +214,13 @@ class CompareTests(unittest.TestCase):
         for text in (order, matrix):
             for flag in re.findall(r'speed_window_compare\.py [^\n]*?(--[a-z-]+)', text):
                 self.assertIn("'%s'" % flag, compare, flag)
-        for flag in ('--batched-vs-singles', '--users'):
+        for flag in ('--position-keyed', '--strict-concurrent-prefixes', '--users'):
             self.assertIn(flag, order)
             self.assertIn(flag, matrix)
-        self.assertIn('python scripts/ci/speed_window_compare.py <E1 results> <D3 results> --users 2,3', matrix)
+            self.assertIn("'%s'" % flag, compare)
+        for text in (order, matrix):
+            self.assertNotIn('speed_window_compare.py <D3 results> --batched-vs-singles', text)
+        self.assertIn('<E1 results> <D3 results> --users 2,3 --position-keyed --strict-concurrent-prefixes', matrix)
 
     def test_the_stop_rules_the_smokes_name_are_enforced_by_the_smoke_check(self):
         import c2_smoke_check as check
