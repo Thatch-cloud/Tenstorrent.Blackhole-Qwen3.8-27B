@@ -116,7 +116,7 @@ class TemplateTests(unittest.TestCase):
                     self.assertEqual(outputs['cards'], 'pair')
                     self.assertNotIn('reset', actions, 'a pair-only reset leaves the links to the other boards untrained')
 
-    def test_the_card_harnesses_are_the_four_card_ports_two_and_a_watcher_pass_precedes_each_full_pass(self):
+    def test_the_card_harnesses_are_the_four_card_ports_two_and_every_first_launch_is_under_the_watcher(self):
         harness = {}
         for name, _ in read_order():
             _, outputs = parsed(name)
@@ -125,7 +125,7 @@ class TemplateTests(unittest.TestCase):
                 harness[name] = (env['K64J_HARNESS'], env.get('WATCHER') == '1', env.get('TP4_WIDTH'))
                 self.assertEqual(outputs['cardm_harness'], 'optimisation/ttnn-op/k64j/run_card_b.sh', name)
         self.assertEqual(harness, {'S1a-nkv1-watcher': ('nkv1_spike', True, None),
-                                   'S1b-gdn-parity': ('gdn_tp4', False, '2'),
+                                   'S1b-gdn-parity': ('gdn_tp4', True, '2'),
                                    'S1c-gdn-tp4-watcher': ('gdn_tp4', True, '4'),
                                    'S1d-gdn-tp4': ('gdn_tp4', False, '4'),
                                    'O1-nkv1-full': ('nkv1_spike', False, None)})
