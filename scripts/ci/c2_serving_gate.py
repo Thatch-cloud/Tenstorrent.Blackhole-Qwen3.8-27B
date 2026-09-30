@@ -2947,18 +2947,22 @@ def run_parked_exact(plan, runner, profiles, arms):
     reports, problems = run_parked_arms(plan, runner, arms)
     shortfalls, lines, facts = [], [], {}
     reference = reports.get('exact-f-desc')
-    users = asked(next(spec for spec in arms if spec[0] == 'exact-f-desc')[1])['streams']
+    wanted = asked(next(spec for spec in arms if spec[0] == 'exact-f-desc')[1])
+    users = wanted['streams']
+    # A request with a budget of 1 ends at its first token: no bridge, no rebind, no round to record (the 2048 rung).
+    first_token = [index for index, budget in enumerate(wanted['budgets']) if budget == 1]
     for spec in arms:
         if spec.role == 'p':
             verdicts = compare_arms('%s against exact-f-desc' % spec[0], reference, reports.get(spec[0]), problems)
             lines.append('%s: users %s' % (spec[0], verdicts))
             facts[spec[0]] = dict(users=verdicts)
             if reference is not None and reports.get(spec[0]) is not None:
-                more, unseen, detail = parked_judge.equivalence(reference, reports[spec[0]], users=users)
+                more, unseen, detail = parked_judge.equivalence(reference, reports[spec[0]], users=users,
+                                                                skip=first_token)
                 problems += ['%s: %s' % (spec[0], item) for item in more]
                 shortfalls += ['%s: %s' % (spec[0], item) for item in unseen]
                 facts[spec[0]]['drafting_identical'] = detail['solo']['identical']
-            parked_rebind_problems(spec[0], reports.get(spec[0]), users, problems, shortfalls)
+            parked_rebind_problems(spec[0], reports.get(spec[0]), users - len(first_token), problems, shortfalls)
     first_ref = reports.get('exact-first-f')
     for spec in arms:
         if spec.role == 'first':

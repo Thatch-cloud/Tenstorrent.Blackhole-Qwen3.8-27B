@@ -263,6 +263,24 @@ class JudgeRunTests(unittest.TestCase):
         self.assertEqual(feed.asked, [arm[0] for arm in arms])
         self.assertEqual(result['facts']['exact-p-shuf']['drafting_identical'], True)
 
+    def test_a_request_that_ends_at_its_first_token_owes_no_rebind_and_no_path_records(self):
+        arms = arms_of('parked-exact')
+        ended = [i for i, b in enumerate(gate.asked(arms[0][1])['budgets']) if b == 1]
+        self.assertTrue(ended, 'the 2048 rung has a budget of 1')
+
+        def report(spec, rebinds):
+            made = synthetic(spec, parked_record=dict(on=True, facts=dict(rebinds=rebinds)) if spec.role == 'p' else None)
+            for user in ended:
+                made['s2']['paths']['users'].pop(str(user), None)
+            return made
+        streams = gate.asked(arms[0][1])['streams']
+        table = dict((arm[0], (lambda spec, arm=arm: report(spec, streams - len(ended)))) for arm in arms)
+        result, _, _ = self.run_plan('parked-exact', table)
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        table = dict((arm[0], (lambda spec, arm=arm: report(spec, streams))) for arm in arms)
+        result, _, _ = self.run_plan('parked-exact', table)
+        self.assertNotEqual(result['verdict'], 'PASS', 'a rebind for a request that never reached the engine is a miscount')
+
     def test_parked_exact_fails_on_one_changed_token_and_on_one_changed_round(self):
         arms = arms_of('parked-exact')
         result, _, _ = self.run_plan('parked-exact', self.exact_table(

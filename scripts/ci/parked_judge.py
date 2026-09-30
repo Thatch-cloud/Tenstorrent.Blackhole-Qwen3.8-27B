@@ -86,12 +86,14 @@ def accepted_sequence(records):
     return [(record['path'], record['prefix'], record['emitted']) for record in records or ()]
 
 
-def compare_sequences(reference, other, users):
+def compare_sequences(reference, other, users, skip=()):
     """Per-round accepted-prefix sequences of two arms of one script, user by user: dict(identical, users=[...]),
     each differing user's first differing round (its index and both records, None past an end), `missing` the users
     either arm carries no path records for. Identical only with every user present and equal."""
     entries, missing = [], []
     for user in range(users):
+        if user in skip:
+            continue  # a request that ends at its first token has no round to record
         left, right = paths_of(reference, user), paths_of(other, user)
         if left is None or right is None:
             missing.append(user)
@@ -131,12 +133,12 @@ def acceptance_delta(reference, other):
     return dict(reference=round(a, 4), other=round(b, 4), delta=round(b - a, 4), rounds=(rounds_a, rounds_b))
 
 
-def equivalence(solo_reference, solo_other, live_reference=None, live_other=None, users=None):
+def equivalence(solo_reference, solo_other, live_reference=None, live_other=None, users=None, skip=()):
     """The drafter-equivalence judge: (problems, shortfalls, facts). Solo: identical accepted-prefix sequences for
     every user. Concurrent (when both live arms are given): acceptance within ACCEPTANCE_TOLERANCE, absolute."""
     problems, shortfalls = [], []
     users = users if users is not None else len(((solo_reference or {}).get('streams')) or ())
-    solo = compare_sequences(solo_reference, solo_other, users)
+    solo = compare_sequences(solo_reference, solo_other, users, skip)
     if solo['missing']:
         shortfalls.append('no path records for users %s: their drafting is unseen (the arms did not log [SEQ-PUBLISH] '
                           'or [PACKED] lines)' % solo['missing'])
