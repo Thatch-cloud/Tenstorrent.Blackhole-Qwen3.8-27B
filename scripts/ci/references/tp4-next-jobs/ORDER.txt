@@ -1,0 +1,30 @@
+# The order of the four-card tp4/next window, one template per line: <template name without .env> <stop|soft>.
+# stop: the window halts at the first failure of this job. soft: a failure is logged and the window goes on (its product is data).
+# tp4/next merges tp4/stack-fix (the validated base: speed slide, exact per-tile collectives, quad draft, the prefill warm before every
+# capture), tp4/fcommit (fused commit, live banks, quad live-bank mode), tp4/vglue (five verify levers) and tp4/lanes-d0fix (D0, lane
+# scheduler). NOTHING COMBINED HAS RUN ON A CARD: the best profiles as a set, and the lanes profiles with the K/V slide on, are
+# unverified. ONE IMAGE FOR THE WHOLE WINDOW: C2_IMAGE_TAG=tp4-next-1, built by N0 from the commit the window tag sits on.
+# Early-failure order, cheapest first: no card (N0); the audited smoke of the best gate profile (N1: coherence, every audit, the prefill
+# tripwire, the fused-commit and vglue lines); the S3a matrix on the same profile (N2, strict); then the soft jobs, whose products are data:
+# the staggered trigger (N3), the round timing of the best (N4), and the lanes programme (N5-N7).
+# The lanes profiles do not apply to the best config (the attach refuses the fused commit with the solo lane on; lanes with the levers is
+# in no profile), so N5-N7 run the lanes profiles as tp4-lanes-jobs does and are compared with N4 only for round shapes.
+# Durations (estimate, wall clock; an engine build is 3-8 min on a warm kernel cache and 10-30 min the first time a profile compiles).
+# Typical / at most:
+#   N0 build                      18 min typical / 90 min at most
+#   N1 best-gate smoke audited    30 / 50 / 100 min (typical / expected / at most; a hang runs the 80-min ready loop)
+#   N2 S3a matrix (best-gate)     40-90 min, up to 170 min with a re-run on a divergence
+#   N3 staggered trigger          35-60 min, worst case about 6 h
+#   N4 timed smoke (best)         20 / 35 / 90 min
+#   N5 lanes round timing         45-100 min
+#   N6 lanes timing L3            30-70 min
+#   N7 lanes exactness L1         35-100 min, up to 180 min with a re-run
+# Stop jobs N0-N2: about 1 h 30 min at best, 3 h expected, 6 h at worst. The whole window: about 3 h 30 min at best, 6 h expected, 17 h at worst.
+N0-build stop
+N1-best-gate-smoke-audited stop
+N2-s3a-matrix-best-gate stop
+N3-staggered-trigger-best-gate soft
+N4-best-smoke-timed soft
+N5-lanes-round-timing soft
+N6-lanes-timing-l3 soft
+N7-lanes-exact-l1 soft
