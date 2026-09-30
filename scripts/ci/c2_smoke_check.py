@@ -19,6 +19,12 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     [DRAFT-SINGLES-AUDIT] line with equal=0 or a [QUAD-AUDIT] line with equal=0 fails; a profile with
     QWEN_FAST_DRAFT_SINGLES_AUDIT set and no audit line fails.
 
+  - a code-prompt answer that is not text (coding, concurrent4_steady): a stream that finished with `stop` at its first token
+    (an instant EOS: v172's users 0 and 1) or before MIN_ANSWER_TOKENS, or whose sample is mostly non-Latin script (v172's users 2
+    and 3: mixed-script symbols), and, at four cards (QWEN_FAST_TP not 2), a first prefill whose [MEMLEDGER] item=model_after_prefill
+    line reports buffers: the model allocated device state at request time, after the packed traces were captured
+    (serving_runtime.prefill_scratch_before_traces), which is the hazard v172 fell into;
+
   python c2_smoke_check.py --smoke-log smoke.log --container-log container.log --profile P [--profiles qwen_c2_profiles.json]
 """
 
@@ -46,6 +52,11 @@ QUAD_FALLBACK = '[QUAD-DRAFT] fallback'
 QUAD_LINE = re.compile(r'\[QUAD-DRAFT\] round=\d+ built=')
 QUAD_AUDIT = re.compile(r'\[QUAD-AUDIT\] round=\S+ equal=([01]) ')
 SINGLES_AUDIT_LINE = re.compile(r'\[DRAFT-SINGLES-AUDIT\] round=\S+ group=\[[0-9, ]*\] equal=([01]) stage=(\S+) ')
+# A code prompt asked to be explained and rewritten (800 or 1500 tokens out) does not end by itself in a few tokens.
+MIN_ANSWER_TOKENS = 16
+TEXT_TESTS = ('coding', STEADY_TEST)
+FOREIGN_SHARE = 0.3
+FIRST_PREFILL_ITEM = re.compile(r'\[MEMLEDGER\] phase=prefill point=after \S+ item=model_after_prefill chip0=\S+ .*?buffers=(\d+) ')
 DEFAULT_PROFILES = Path(__file__).resolve().parent / 'qwen_c2_profiles.json'
 
 
@@ -73,6 +84,29 @@ def garbage(text):
     if len(sample) >= 100 and len(set(sample)) <= 4:
         return 'a repetition of %d characters' % len(set(sample))
     return None
+
+
+def foreign_script(text):
+    """The share of a sample's letters outside Latin script (code and English are Latin), or 0.0 when it has none."""
+    sample = [char for char in text[:300] if char.isalpha()]
+    if not sample:
+        return 0.0
+    return sum(1 for char in sample if ord(char) > 0x2FF) / len(sample)
+
+
+def answer_problems(name, stream):
+    """Why a code-prompt stream is not an answer: an instant or early stop, or mostly foreign-script text."""
+    if not isinstance(stream, dict) or 'error' in stream:
+        return []
+    problems = []
+    tokens = stream.get('tokens')
+    if stream.get('finish') == 'stop' and isinstance(tokens, int) and tokens < MIN_ANSWER_TOKENS:
+        problems.append('%s: finished with stop after %d token(s), under %d (an instant EOS is not an answer to a code prompt)'
+                        % (name, tokens, MIN_ANSWER_TOKENS))
+    share = foreign_script(stream['text']) if isinstance(stream.get('text'), str) else 0.0
+    if share > FOREIGN_SHARE:
+        problems.append('%s: %.0f%% of the letters are outside Latin script (garbage, not an answer)' % (name, 100 * share))
+    return problems
 
 
 def stream_problems(name, stream, text_needed=True):
@@ -106,10 +140,13 @@ def smoke_problems(results):
         problems.append('warmup: status %s' % results['warmup'].get('value'))
     if 'coding' in results and 'error' not in results['coding']:
         problems += stream_problems('coding', results['coding'])
+        problems += answer_problems('coding', results['coding'])
     for name in ('concurrent4', STEADY_TEST):
         if name in results and 'error' not in results[name]:
             for index, user in enumerate(results[name].get('users') or []):
                 problems += stream_problems('%s user %d' % (name, index), user)
+                if name in TEXT_TESTS:
+                    problems += answer_problems('%s user %d' % (name, index), user)
     if 'warm_lifecycle' in results and 'error' not in results['warm_lifecycle']:
         for label, rows in results['warm_lifecycle'].items():
             if not isinstance(rows, list):
@@ -144,6 +181,12 @@ def profile_env(profile, profiles_path):
     if entry is None:
         raise ValueError('profile %s is not in %s' % (profile, profiles_path))
     return entry.get('env') or {}
+
+
+def first_prefill_buffers(container_text):
+    """Buffers the model held after the FIRST prefill of the container log ([MEMLEDGER] item=model_after_prefill), or None."""
+    match = FIRST_PREFILL_ITEM.search(container_text)
+    return int(match.group(1)) if match else None
 
 
 def draft_facts(container_text):
@@ -200,6 +243,12 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None):
     problems += ['audit mismatch in the container log: %s' % line for line in mismatches[:4]]
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
+    if env is not None and env.get('QWEN_FAST_TP', '2') != '2':
+        late = first_prefill_buffers(container_text)
+        facts['first_prefill_model_buffers'] = late
+        if late:
+            problems.append('the first prefill left %d model buffers allocated after the packed traces were captured '
+                            '([MEMLEDGER] item=model_after_prefill): the prefill scratch must exist before the traces' % late)
     if env is not None:
         drafts = draft_facts(container_text)
         facts['draft'] = drafts

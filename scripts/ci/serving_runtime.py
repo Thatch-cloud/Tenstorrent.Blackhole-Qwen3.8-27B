@@ -119,6 +119,27 @@ def padded_block_admission(policy, environ=None):
     return minimum
 
 
+def prefill_scratch_before_traces(model, environ=None):
+    """Four cards only (QWEN_FAST_TP not '2'): allocate the model's persistent B=1 GDN prefill scratch BEFORE the packed
+    blocks capture their traces, and return True when it did.
+
+    Serving runs trace_mode=decode_only, so warmup_model_prefill returns early and nothing builds the scratch at startup:
+    the first prefill does (qwen36_model._ensure_gdn_prefill_scratch), after the attach-time packed traces exist - and it
+    drops the batched zero sources as well. Metal warns that an allocation made after a trace may be overwritten when the
+    trace runs (packed_verifier.py, CONSTRUCTION ORDER), and at four cards every prefill after the first packed replay came
+    out wrong (v172: EOS at the first token or garbage; v163's tp4-exact-1 hung in it). The pair keeps its order: two cards
+    are untouched. A model without the method (a test double) is left alone."""
+    environ = os.environ if environ is None else environ
+    if environ.get('QWEN_FAST_TP', '2') == '2':
+        return False
+    ensure = getattr(model, '_ensure_gdn_prefill_scratch', None)
+    if ensure is None:
+        return False
+    ensure()
+    pindiag('[PINDIAG] gdn prefill scratch allocated before the packed traces (four cards)')
+    return True
+
+
 def packed_capture_position(environ=None):
     """QWEN_FAST_PACKED_CAPTURE_POSITION (S2 design W3, B1; GATE ONLY, unset by default): the
     position every packed block of this attach captures at, or None for the block's own default
@@ -447,6 +468,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # and no round ever rebinds a segment. A single configured shape (the m1
             # two-user or m3 four-user default) gets no `pool_slots=` at all, so its block
             # is built exactly as it always was: slots 0..users-1, in order.
+            prefill_scratch_before_traces(model)
             packed_blocks, slot = [], 0
             if capture_position is not None:
                 pindiag('{}{} (gate only)', CAPTURE_POSITION_MARKER, capture_position)
