@@ -227,7 +227,7 @@ EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 #     whatever the device's position: a device rebound below 2048 would otherwise get one narrower bucket, and the
 #     first round its history outgrew it would raise 'Committed history exceeds prepared request contexts';
 #   - the capture headroom and the ledger's readings ask the captures' measured bytes
-#     (serving_prefill_admission.MEASURED_*), not the estimates below, which are lower bounds.
+#     (serving_prefill_admission.MEASURED_*), not the estimates below (the single and pair estimates are below the measurements, the quad estimate above it).
 # Off, none of this runs and every call is today's.
 PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
 PARKED_RELEASED_LINE = '[PACKED-PROPOSE] released parked slot={slot} quad={quad} pairs={pairs}'

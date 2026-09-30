@@ -204,7 +204,7 @@ SPLIT_TERMS = ('free', 'contiguous', 'trace')
 PARKED_REBIND_BYTES = 100 * MEGABYTE         # (e) R: the rebind with the windowed projection (256 rows per call)
 PARKED_REBIND_WHOLE_BYTES = 350 * MEGABYTE   # (e) R with the projection in one call (QWEN_FAST_PARKED_PROJECT_ROWS=0)
 # (m) Each capture's allocator growth per chip, read either side of it (gates v61, v70, v79; the source estimates in
-# dflash_packed_proposal_coordinator and quad_draft are lower bounds: 64.5, 86.3 and 471.9 MB). S is the single's.
+# dflash_packed_proposal_coordinator and quad_draft are 64.5, 86.3 and 471.9 MB: the single and pair estimates sit below the measurement, the quad estimate above it, so the flag lowers the quad headroom by about 44 MB). S is the single's.
 # Under the flag the coordinator's capture headroom asks these in place of the estimates.
 MEASURED_SINGLE_CAPTURE_BYTES = 227 * MEGABYTE
 MEASURED_PAIR_CAPTURE_BYTES = 212_800_000

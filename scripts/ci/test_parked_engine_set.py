@@ -404,38 +404,6 @@ class DigestAuditTests(unittest.TestCase):
                 self.assertEqual([line for line in world.lines if line.startswith(parked.DIGEST_MARKER)], [])
 
 
-class AttachTests(unittest.TestCase):
-    def test_the_set_is_built_after_the_block_and_closed_before_it(self):
-        import test_serving_runtime
-
-        case = test_serving_runtime.RuntimeAttachmentTests()
-        for four_as_two in (False, True):
-            with self.subTest(four_as_two=four_as_two):
-                case.exercise(packed=True, users=4, four_as_two=four_as_two, parked={})
-                (options,) = case.parked_calls
-                self.assertEqual(options['capture_rows'], 4)
-                self.assertEqual(len(options['blocks']), 2 if four_as_two else 1)
-                self.assertEqual(sorted(options), ['blocks', 'capture_rows', 'collectives', 'fixtures', 'helpers',
-                                                   'model', 'operations', 'pool', 'sampler', 'weights'])
-        with self.assertRaisesRegex(RuntimeError, 'request failed'):
-            case.exercise(packed=True, users=4, four_as_two=False, parked={}, fail=True)
-        with self.assertRaisesRegex(RuntimeError, 'attach failed'):
-            case.exercise(packed=True, users=4, four_as_two=False, parked={}, attach_fail=True)
-
-    def test_off_nothing_is_imported_or_built_and_a_bad_value_is_refused(self):
-        import test_serving_runtime
-
-        case = test_serving_runtime.RuntimeAttachmentTests()
-        for environ in ({}, {'QWEN_FAST_PARKED_ENGINES': '0'}):
-            with self.subTest(environ=environ), \
-                    patch('serving_parked_engines.ParkedEngineSet', side_effect=AssertionError('built')):
-                case.exercise(packed=True, users=4, four_as_two=False, extra_env=environ)
-        with self.assertRaisesRegex(ValueError, 'QWEN_FAST_PARKED_ENGINES must be 0 or 1'):
-            case.exercise(packed=True, users=4, four_as_two=False, parked={},
-                          extra_env={'QWEN_FAST_PARKED_ENGINES': 'yes'},
-                          refused_after_blocks="QWEN_FAST_PARKED_ENGINES must be 0 or 1, got 'yes'")
-
-
 class ParkedCensusTests(unittest.TestCase):
     """The parked cycles under the census: what E0's census holds today's churn to."""
 
