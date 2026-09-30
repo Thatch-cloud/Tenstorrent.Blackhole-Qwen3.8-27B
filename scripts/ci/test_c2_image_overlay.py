@@ -1250,7 +1250,8 @@ class ProvenanceTests(unittest.TestCase):
         # ...and the fused-commit window's six arms (tp4/fcommit): the gate and speed profiles with the fused commit on.
         # ...and the verify-glue window's arms (tp4/vglue): the five levers, singly and together, on the gate and speed profiles.
         # ...and the lanes window's five gate arms (the one-user lane and the fast lane, audited and timed).
-        tp4 = ['c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-gate-pairs',
+        # ...and the combined best (tp4/next): the fcommit-quad arms with all five verify-glue levers on, timed and audited.
+        tp4 = ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-gate-pairs',
                'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-vglue', 'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-noslide',
                'c2-packed-tp4-solo-gate', 'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad',
                'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-time-gate',

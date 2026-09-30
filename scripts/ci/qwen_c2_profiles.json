@@ -3394,6 +3394,183 @@
       "default_max_tokens": 8192,
       "parser_rechunk": true,
       "gate_only": true
+    },
+    "c2-packed-tp4-best": {
+      "description": "GATE ONLY (the combined best, timed): c2-packed-tp4-speed-fcommit-quad (the verify audits off, the K/V slide, two packed pairs and the quad on live banks, the fused commit in place) with all five verify-glue levers on. tp4/next, the merge of tp4/stack-fix (the speed slide, per-tile exact collectives, the quad twin, the prefill-before-capture warm), tp4/fcommit (the TP4 fused commit, in place, on live banks, with the quad on live banks) and tp4/vglue (the five verify-glue levers C1a, V4a, V2, V1, V3a). Every lever is its own flag, each byte-identical to the path it replaces, so the flags compose; the attach's prefill warm runs before every packed and fused-commit trace capture. The lone-user lanes (QWEN_FAST_SOLO_LANE, QWEN_FAST_LANE) are NOT in this profile: serving_solo_lane refuses QWEN_FAST_FUSED_COMMIT (the fused commit is built for the M3 block alone), so the lanes stay on their own profiles. Not for traffic. NOT QUALIFIED: UNVERIFIED on hardware as a combination (each part has its own card evidence).",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-best-gate": {
+      "description": "GATE ONLY (the combined best, audited): c2-packed-tp4-gate-fcommit-quad (the verify audits, the fused-commit audit and the singles audit on; the quad on live banks, the fused commit in place) with all five verify-glue levers on and QWEN_FAST_TP4_VGLUE_AUDIT=1. A correctness arm, never a timed one; the tokens are held against c2-packed-tp4-best's. tp4/next, the merge of tp4/stack-fix (the speed slide, per-tile exact collectives, the quad twin, the prefill-before-capture warm), tp4/fcommit (the TP4 fused commit, in place, on live banks, with the quad on live banks) and tp4/vglue (the five verify-glue levers C1a, V4a, V2, V1, V3a). Every lever is its own flag, each byte-identical to the path it replaces, so the flags compose; the attach's prefill warm runs before every packed and fused-commit trace capture. The lone-user lanes (QWEN_FAST_SOLO_LANE, QWEN_FAST_LANE) are NOT in this profile: serving_solo_lane refuses QWEN_FAST_FUSED_COMMIT (the fused commit is built for the M3 block alone), so the lanes stay on their own profiles. Not for traffic. NOT QUALIFIED: UNVERIFIED on hardware as a combination (each part has its own card evidence).",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_FUSED_COMMIT_AUDIT": "1",
+        "QWEN_FAST_DRAFT_SINGLES_AUDIT": "all",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_TP4_VGLUE_AUDIT": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
     }
   }
 }

@@ -547,7 +547,10 @@ class ProfileTests(unittest.TestCase):
                 solo = {'QWEN_FAST_SOLO_LANE'} if 'solo' in name or 'lanes' in name else set()
                 lanes = {'QWEN_FAST_LANE'} if 'lanes' in name else set()
                 timing = audits if name.endswith('time-gate') else set()
-                self.assertEqual(differing, timing | solo | lanes)
+                # The lanes profiles predate the K/V slide (tp4/speed put QWEN_FAST_TP_KV_SLIDE=1 into c2-packed-tp4-gate): they
+                # keep the no-slide gate they were qualified on, so that one key is the drift of the base, not a lanes difference.
+                slide = {'QWEN_FAST_TP_KV_SLIDE'} if 'QWEN_FAST_TP_KV_SLIDE' not in profile['env'] else set()
+                self.assertEqual(differing, timing | solo | lanes | slide)
 
     def test_the_flags_are_in_exactly_the_profiles_that_name_them_and_no_traffic_profile(self):
         for name, profile in profiles().items():

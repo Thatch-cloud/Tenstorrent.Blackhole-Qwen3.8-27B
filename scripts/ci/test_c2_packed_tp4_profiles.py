@@ -81,6 +81,10 @@ FCOMMIT_PROFILES = {
     'c2-packed-tp4-speed-fcommit-oop': ('c2-packed-tp4-speed', {FUSED: '1'}),
 }
 
+# The combined best (tp4/next): the fused-commit quad arms with the five verify-glue levers added (see VGLUE_PROFILES).
+BEST_PROFILES = ('c2-packed-tp4-best', 'c2-packed-tp4-best-gate')
+FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES))
+
 
 def profiles():
     return json.loads(PROFILES.read_text(encoding='utf-8'))['profiles']
@@ -281,9 +285,9 @@ class DraftProfileTests(unittest.TestCase):
         found = profiles()
         on = sorted(name for name, profile in found.items() if profile['env'].get(QUAD) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
-        self.assertEqual(on, ['c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-quad',
-                              'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad'])
-        self.assertEqual([name for name in on if 'fcommit' not in name],
+        self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-gate-fcommit-quad',
+                              'c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad'])
+        self.assertEqual([name for name in on if 'fcommit' not in name and 'best' not in name],
                          ['c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-quad'], 'the fused-commit family is the other two')
         image = image_env()
         for name in ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PAIR_ROW_EXACT', 'QWEN_FAST_ROUND_B1', 'QWEN_FAST_PACKED_AUDIT'):
@@ -333,9 +337,9 @@ class FusedCommitProfileTests(unittest.TestCase):
         found = profiles()
         on = sorted(name for name, profile in found.items() if profile['env'].get(FUSED) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
-        self.assertEqual(on, sorted(FCOMMIT_PROFILES))
+        self.assertEqual(on, FUSED_FAMILY)
         for name, profile in found.items():
-            if name not in FCOMMIT_PROFILES and profile['env'].get('QWEN_FAST_TP') == '4':
+            if name not in FUSED_FAMILY and profile['env'].get('QWEN_FAST_TP') == '4':
                 for flag in (FUSED, INPLACE, LIVE, AUDIT):
                     self.assertEqual(profile['env'].get(flag, '0'), '0', (name, flag))
 
@@ -344,7 +348,7 @@ class FusedCommitProfileTests(unittest.TestCase):
         gate-family arm only and never a timed one."""
         import quad_draft_tp
 
-        for name in FCOMMIT_PROFILES:
+        for name in FUSED_FAMILY:
             env = profiles()[name]['env']
             with self.subTest(profile=name):
                 self.assertEqual(env[FUSED], '1')
@@ -405,7 +409,11 @@ VGLUE_PROFILES = {
     'c2-packed-tp4-speed-vglue-v2': ('c2-packed-tp4-speed', {V2: '1'}),
     'c2-packed-tp4-speed-vglue-v1': ('c2-packed-tp4-speed', {V2: '1', V1: '1'}),
     'c2-packed-tp4-speed-vglue-v3a': ('c2-packed-tp4-speed', {V3A: '1'}),
+    # the combined best: the fused-commit quad arms plus the five levers (and the lever audit on the audited arm)
+    'c2-packed-tp4-best': ('c2-packed-tp4-speed-fcommit-quad', dict(ALL_LEVERS)),
+    'c2-packed-tp4-best-gate': ('c2-packed-tp4-gate-fcommit-quad', dict(ALL_LEVERS, **{VGLUE_AUDIT: '1'})),
 }
+VGLUE_AUDITED = ('c2-packed-tp4-gate-vglue', 'c2-packed-tp4-best-gate')
 
 
 class VglueProfileTests(unittest.TestCase):
@@ -434,9 +442,9 @@ class VglueProfileTests(unittest.TestCase):
         found = profiles()
         for name in VGLUE_PROFILES:
             env = found[name]['env']
-            self.assertEqual(env.get(VGLUE_AUDIT), '1' if name == 'c2-packed-tp4-gate-vglue' else None, name)
+            self.assertEqual(env.get(VGLUE_AUDIT), '1' if name in VGLUE_AUDITED else None, name)
             for key in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
-                self.assertEqual(env[key], '1' if name == 'c2-packed-tp4-gate-vglue' else '0', (name, key))
+                self.assertEqual(env[key], '1' if name in VGLUE_AUDITED else '0', (name, key))
 
     def test_the_levers_are_four_card_profiles_only_and_the_image_leaves_them_unset(self):
         found = profiles()
@@ -463,6 +471,49 @@ class VglueProfileTests(unittest.TestCase):
         image = image_env()
         for name in ('QWEN_FAST_VERIFY_T1', 'QWEN_FAST_VERIFY_T2', 'QWEN_FAST_GDN_USER_BATCH', 'QWEN_FAST_GDN_SEQ_BLOCK'):
             self.assertEqual(image.get(name), '1', 'the glue levers ride the verify trace these select: %s' % name)
+
+
+class BestProfileTests(unittest.TestCase):
+    """The combined best profiles (tp4/next) are the union of the fused-commit quad arm and the verify-glue arm."""
+
+    PARENTS = {'c2-packed-tp4-best': ('c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-vglue'),
+               'c2-packed-tp4-best-gate': ('c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-vglue')}
+
+    def test_each_best_profile_carries_every_flag_of_both_parents_and_nothing_else(self):
+        found = profiles()
+        for name, (fused, glue) in self.PARENTS.items():
+            with self.subTest(profile=name):
+                env = found[name]['env']
+                glue_base = found['c2-packed-tp4-gate' if 'gate' in name else 'c2-packed-tp4-speed']['env']
+                glue_delta = {key: value for key, value in found[glue]['env'].items() if glue_base.get(key) != value}
+                self.assertEqual(set(glue_delta), set(ALL_LEVERS) | ({VGLUE_AUDIT} if 'gate' in name else set()))
+                self.assertEqual(env, dict(found[fused]['env'], **glue_delta))
+                self.assertEqual((env[QUAD], env[FUSED], env[INPLACE], env[LIVE]), ('1', '1', '1', '1'))
+                self.assertEqual({env[flag] for flag in ALL_LEVERS}, {'1'})
+                self.assertEqual(env['QWEN_FAST_TP_KV_SLIDE'], '1')
+
+    def test_the_timed_best_has_every_audit_off_and_the_audited_best_every_audit_on(self):
+        found = profiles()
+        timed, audited = found['c2-packed-tp4-best']['env'], found['c2-packed-tp4-best-gate']['env']
+        for key in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
+            self.assertEqual((timed[key], audited[key]), ('0', '1'), key)
+        for key in (AUDIT, VGLUE_AUDIT, SINGLES):
+            self.assertNotIn(key, timed, key)
+            self.assertIn(key, audited, key)
+
+    def test_the_lone_user_lanes_are_not_on_the_best_profiles_because_the_solo_lane_refuses_the_fused_commit(self):
+        """The D0 solo block is built for the M3 block beside an unfused publication: serving_solo_lane.UNSUPPORTED_FLAGS lists
+        QWEN_FAST_FUSED_COMMIT, so the lanes profiles stay on their own gate base and the best profiles carry no lane flag."""
+        import serving_solo_lane
+
+        self.assertIn('QWEN_FAST_FUSED_COMMIT', serving_solo_lane.UNSUPPORTED_FLAGS)
+        for name in BEST_PROFILES:
+            env = profiles()[name]['env']
+            self.assertNotIn('QWEN_FAST_SOLO_LANE', env, name)
+            self.assertNotIn('QWEN_FAST_LANE', env, name)
+            with self.assertRaisesRegex(ValueError, 'QWEN_FAST_FUSED_COMMIT=1'):
+                serving_solo_lane.solo_lane_admission((True, 'm3'), dict(image_env(), **env, QWEN_FAST_SOLO_LANE='1'),
+                                                      log=lambda *args: None)
 
 
 if __name__ == '__main__':
