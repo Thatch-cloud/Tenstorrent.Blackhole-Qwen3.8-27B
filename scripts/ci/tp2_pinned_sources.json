@@ -1,4 +1,41 @@
 {
+ "attach_hashed": {
+  "dflash-t16-native-attention-probe.py": "7c5beee6f69f6a4a40fc8db46b833ea09ab80b62fa5f2075c9636130530f9b58",
+  "dflash_attention_mask.py": "00bcec71c01075126c655670773495763a9835bd7eaaba5aedd6acb40a325b39",
+  "dflash_combined_sim_runtime.py": "720bcd5a64b6a6e3283e0c1ec39bf2cc175f09f09482f989394e886265200062",
+  "dflash_t16_native_attention.py": "4ddf61f812a523c0633f723bebb3ede069a1d00240ae7c329945abc860aa1a3f",
+  "dflash_t16_native_attention_gate.py": "70d12b6f51c9e09012dc261e56f9a6479feed7ec0f7c05d9f62693edce6b10d5",
+  "draft_kv_slide.cpp": "bc45d47257c844aff4bf17f478b536a48763578e544597884b7d1620083b6ba1",
+  "draft_kv_slide.py": "8ea58ae42260cb03f37e224d18572c4efe467ff556912a64ebcb1d15aed9c7fc",
+  "gdn-direct-window-probe.py": "700259b0ce07b0f46bfabfdbb8c5419973c383bdc22eb6336bf04212b1bc77b8",
+  "gdn-output-grid-probe.py": "c6f8ac7226b06f7f28345ba44691607f7574a55c1e0efae1d67568089ffcfad0",
+  "gdn-shared-recurrence-probe.py": "dae62fa31b6028fb2cc03d9d18404e1c4b459648f1f4030248c67d6806ccd18c",
+  "gdn_batched_conv.py": "6d5fe07d4fbabd953fa5681b3f055578e18f3719a23a128edbb7fb5de5b1af27",
+  "gdn_conv_windows.cpp": "176f2fa93c3e36fc7d136b3e3e3743782b3999702d4c107a8ae157428af988c4",
+  "gdn_conv_windows.py": "06e09a9046312690d50b42b223fc9e2b5d4ab50859bbad744388980a766ee9e2",
+  "gdn_direct_window.py": "f9bc15e4653e1aa4f54817b3c87fed55372e2e2d868cb75dbbef8f03fb6bd16e",
+  "gdn_direct_window_device.py": "06cb0b8e843f9018665a053ebea2feeea309a45ef074da96c780e0e4596b081b",
+  "gdn_norm_scatter.py": "118cf04275d7e214eb7297f90209817602f881d6d49f7dc49872c198502e72ea",
+  "gdn_shared_qk_compute.py": "b71a59d18fdc11b239c4da472457379e7d239aa7241d0589dab8de595719df5a",
+  "gdn_shared_qk_dataflow.py": "c3ed6dec98fd2750d061a96e3da7d43b63ecaf72d72f9c22f40692505cf3680a",
+  "gdn_shared_qk_pipeline.py": "d22958177ff87a34e569cf905e98e4a40796ca3a200bc9faaab066eef46977c9",
+  "gdn_shared_qk_program.py": "d7760469e0f4c5f9eb5f1d200814511f12e0f7c92407845ad732e23e9df79138",
+  "gdn_shared_qk_recurrence.py": "359896600b2b97428b08ba1923c10fedd0d896a7124dc3e81b5465c1e2147dff",
+  "gdn_vsplit.py": "e70bc1be39953d316cb24785a7f4f435d9f8ccb807168e3e4f886f0c7d5a57a5",
+  "gdn_vsplit_norm_batch.py": "1c451370058f19e011490c458015e00b3ee0f47abff19ac4d35503b4732bfe9e",
+  "gdn_vsplit_prefetch.py": "4e818cee01f0d2667a590d533c14fe5a761cb8b33ab474a71b687d56cfaeb509",
+  "gdn_vsplit_prepared.py": "efb4aa829ab795bc38e28623632344f348be53df25b1e098ca3a7ed02a68d361",
+  "live_qk_gate.py": "1e64ab6bbdc4936b6fb94d1291375aea31648639830fc64e0ce6f009105a7c78",
+  "mlp-down-grid-probe.py": "1e1cff6a32bf72d234877eace99953180e29e431300248f875dfee190f3e7d6f",
+  "mlp_block_stream.cpp": "d2cb451e48702c93eaa499c421560dbf94e78ca4fae246650e338a10d4011e17",
+  "mlp_block_stream.py": "4b826527eec61ae0a24757c51cc4aed982d17157cb46b39d4d234dc73f80fdd9",
+  "mlp_block_stream_probe.py": "5e9320bf561cdc2658b221c81ac0a542fb37bbfb4dfc5735b9ec79677f782269",
+  "mlp_block_stream_projection.py": "5d5bb9b1cd41bb19de992dba99c4001f39a9684519d55da98d3fe0ff62445e66",
+  "mlp_down_grid.py": "e6c70e8ca61bb524de79b09d2007869c39d4bd377f3e90c18d95a8b9702c6bec",
+  "mlp_register_epilogue.py": "a44b8bff866c1c1b4ae07f54800849c2d4a7c94dcb5ad70e6bde433b07120cca",
+  "mlp_rounding_policy.py": "39f108b367984a07d960f5188ab690e9475268751b7ac9ec69e8b04495e54b9f",
+  "shared_qk_norm_scatter.py": "ea6eba6f96ca72748f176a5924747d932b61053578ae310cb5e1f0837a215133"
+ },
  "frozen_evidence_sources": {
   "attention_batch.py": {
    "pinned": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
@@ -169,13 +206,33 @@
    "repo": "e7f6a169453300f01842ed1d41c054c44d8f8b1c34a76a07cd9e2e0cfb5ebbae"
   }
  },
+ "image_lists_at_base": {
+  "draft_convolution.py": "DW",
+  "draft_convolution_fused.py": "DW",
+  "extent_attention_replay.py": "O",
+  "pair_row_exact.py": "DW",
+  "quad_conv_io.cpp": "DW"
+ },
  "other_pinned": {
+  "attention_head_fold.py": "7b542d9d1d2b29304d38828740236c1725f6e9c55a919bf0a614d2ecae694b02",
+  "draft_convolution.py": "850bc44a7df20b4a2ecebefb91f880101b283d24a4addf589fe93f10c4d258ca",
+  "draft_convolution_fused.py": "30c72b0ca4cf9f5e5099dde11a9846da05c08984b00513dc8a403c741d1a4626",
+  "draft_head_layout.py": "5ed358bd35ef86a2b09d696d71602bf225632b33ece1b6b43affd1c5359b48bf",
+  "draft_kv_projection.py": "2b1b938295cd7efab73fe9128fff5fab095857d87ab63febce2f69e7aac13ec0",
+  "draft_mlp.py": "3608b333e0486249847bee8e2b73cdbd6458ffda53a93508cd8640a686a9b760",
+  "draft_shared_head.py": "5cfb00e1bb76c362ccba164a19a8254f758ae005cee1fd59566e3aa710c036fb",
   "extent_attention_replay.py": "5633fc3a21a400360542913fb47559db999117e2e3b6e8d540c770d45720cd31",
+  "feature_collective.py": "32e254feed0d7ea959b6c5d90f3e04c02a658272ca30d1610be9e7ee39a305b8",
+  "gdn_conv_prefix_copy.cpp": "a694b75598c606135e514997c3d3731d46522c4865bff9171b4c5bff258b4361",
+  "gdn_conv_prefix_copy.py": "9ac3e1af4dac3508f0ed65727dbc1386e10c30cd14fab361d2f10f1155ae7316",
   "gdn_multitoken.py": "6436703e10ac46485a95b6c371edcbc1cd5fbb98d6973d29c2ec6ceeea14c4b4",
+  "gdn_working_state.py": "693f13b3c463993dd427ed081c8031965e8adeb6dbd5e1596a06ad93c594af04",
   "model_link_policy.py": "fb75ac4b5ae933dcc6b29ea120c42383e38ee7b6cc8903d6b585f0fc7d2127ae",
+  "mtp_hidden_rows.py": "dd2126c0977fb9c005b0a777265c81c8fb26d7765922366bc8a23ed744d470de",
+  "pair_row_exact.py": "b3e31fde9682bf0b56443a8ffb38812a2c3195ccfc9bb9a715cc3d419f6ba34d",
   "quad_conv_io.cpp": "8c4e8f93f8ced3a3c8ef8f551b8f711e5fdc03e7bcd0aeeade3e15ee94e0492b",
   "target_t16_attention_gate.py": "f8f0d2f782738fc5b2f72404a79fd472b344fe8862619e332ece47e6660ee8e1"
  },
  "schema": 1,
- "what": "sha256 (LF-normalised) of the sources TP2 attach evidence pins; TP4 must not edit them (siblings only)"
+ "what": "sha256 (LF-normalised) of the sources TP2 attach evidence pins; TP4 must not edit them (siblings only). frozen_evidence_sources: the 42 frozen component reports; other_pinned: sources named by other recorded evidence or held unedited by a git guard (fused commit, quad draft, dspark reports); attach_hashed: every other file the serving attach hashes (gdn_direct_window_report, hardware_sources.BATCH_SHA256, the down-grid, shared-QK, register-epilogue, native T16, K/V slide and block-stream gates); image_lists_at_base: where each pinned file was in the fast-serving Dockerfile (D), the image workflow (W) and the C2 overlay (O) at the port's base - no pinned file may reach the image by a list it was not in"
 }

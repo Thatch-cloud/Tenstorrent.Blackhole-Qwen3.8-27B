@@ -523,7 +523,9 @@ if [ "$MAIN" = gdn_tp4 ]; then
       || { echo "refusing: $ci/$file missing (the four-card GDN test runs this checkout's scripts/ci)" >&2; exit 1; }
   done
   echo "### code under test: $ci (QWEN_FAST_TP=${TP4_WIDTH:-4}, 2 meaning unset)"
-  XE=(-e PYTHONPATH=/bench/ci)
+  # /bench/ci goes FIRST and the image's own entries stay behind it: replacing the variable outright would drop
+  # /opt/tt-metal/ttnn and /opt/tt-metal, and the harness's `import ttnn` (and `models`) would die on the card.
+  XE=(-e PYTHONPATH=/bench/ci:/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal)
   case ${TP4_WIDTH:-4} in
     4) XE+=(-e QWEN_FAST_TP=4) ;;
     2) ;;

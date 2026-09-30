@@ -382,5 +382,19 @@ class MainTests(unittest.TestCase):
             self.assertTrue(report['verdict_line'].startswith('GDN_TP4 verdict=NO-DECISION'))
 
 
+class LauncherEnvironmentTests(unittest.TestCase):
+    """run_card_b.sh launches the harness in the serving image with the code under test at /bench/ci."""
+
+    def test_the_harness_path_keeps_the_images_own_entries_behind_the_checkout(self):
+        script = (HERE.parent.parent / 'optimisation' / 'ttnn-op' / 'k64j' / 'run_card_b.sh').read_text(encoding='utf-8')
+        line = next(text for text in script.splitlines() if '-e PYTHONPATH=' in text and '/bench/ci' in text)
+        path = line.split('PYTHONPATH=')[1].rstrip(')').split(':')
+        # the fast image's own PYTHONPATH (docker/qwen-fast-serving.Dockerfile), which replacing the variable would drop:
+        # without /opt/tt-metal/ttnn and /opt/tt-metal `import ttnn` and `models` die at the top of the harness
+        dockerfile = (HERE.parent.parent / 'docker' / 'qwen-fast-serving.Dockerfile').read_text(encoding='utf-8')
+        image = next(text for text in dockerfile.splitlines() if text.startswith('ENV PYTHONPATH=')).split('=', 1)[1].split(':')
+        self.assertEqual(path[0], '/bench/ci')
+        self.assertEqual(path[1:], image)
+
 if __name__ == '__main__':
     unittest.main()

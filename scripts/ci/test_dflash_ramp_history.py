@@ -27,6 +27,7 @@ Pinned here, on the host:
 """
 
 import ast
+import json
 import os
 import re
 import types
@@ -506,9 +507,18 @@ class HistorySiteTests(unittest.TestCase):
         self.assertNotIn('progress', keywords)
         dockerfile = (ROOT / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
         self.assertIn('QWEN_FAST_ROUND_B1=1', dockerfile)
+        profiles = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
         for flag in ('QWEN_FAST_EAGER_PROPOSAL', 'QWEN_FAST_PROPOSAL_AUDIT'):
             self.assertIsNone(re.search(flag + '=1', dockerfile), flag)
-            self.assertNotIn(flag, (HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))
+            setting = sorted(name for name, profile in profiles.items() if flag in profile.get('env', {}))
+            if flag == 'QWEN_FAST_EAGER_PROPOSAL':
+                self.assertEqual(setting, [], flag)
+            else:
+                # The proposal audit changes the drafter's capture (ProposalAudit observes each gather). No traffic
+                # profile sets it; the four-card gate profile does, deliberately: it is the correctness arm that
+                # holds the drafter's 8 / 2 head shards against the pair's reference (gate_only, never placed).
+                self.assertEqual(setting, ['c2-packed-tp4-gate'], flag)
+                self.assertIs(profiles['c2-packed-tp4-gate'].get('gate_only'), True)
 
 
 if __name__ == '__main__':

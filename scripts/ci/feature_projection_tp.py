@@ -4,7 +4,7 @@ feature_projection.py is frozen evidence (its sha256 is pinned by the TP2 attach
 projection for TWO hidden-sharded chips: projection_shards splits the tap-major fc weight into two halves of the hidden
 size, concatenate_local_features expects chip-local taps of hidden / 2. The four-card drafter shards the same fc weight
 over four chips (1,280 columns per tap and chip), so this twin is the same two functions with the chip count from
-tp_shapes; at the pair each is call for call the pinned one (test_feature_projection_tp holds them equal). dflash_device
+tp_shapes; at the pair each is call for call the pinned one (test_draft_tp4.FeatureProjectionTests holds them equal). dflash_device
 imports these directly; the pinned module stays for the experiment scripts that import it.
 
 Stdlib only (torch arrives with the weights).
