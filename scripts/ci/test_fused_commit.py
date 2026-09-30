@@ -1575,10 +1575,12 @@ class ParentTests(unittest.TestCase):
         self.assertEqual(added[0], "if padded_min_users is not None else {}),")
         self.assertIn("**({'collectives': collectives}", added)
         self.assertIn("if os.environ.get('QWEN_FAST_FUSED_COMMIT') == '1'", added)
-        # S2 B6's publication warm needs the collectives too (four cards run fused commit off).
-        self.assertIn("or os.environ.get('QWEN_FAST_EXTENT_REPLAY') == '1' else {}))", added)
+        # On four cards (fused commit off) S2 B6's publication warm needs the collectives too.
+        self.assertIn("or (os.environ.get('QWEN_FAST_EXTENT_REPLAY') == '1'", added)
+        self.assertIn("and os.environ.get('QWEN_FAST_TP', '2') != '2') else {}))", added)
         self.assertTrue(all(line.startswith('#') for line in added[1:]
-                            if 'collectives' not in line and 'FUSED' not in line and 'EXTENT_REPLAY' not in line))
+                            if 'collectives' not in line and 'FUSED' not in line and 'EXTENT_REPLAY' not in line
+                            and 'QWEN_FAST_TP' not in line))
 
 
 def cut_code(lines, first, last, code, replacement=()):
