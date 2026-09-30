@@ -41,19 +41,26 @@ To replay an image without the alias (a rollback candidate), pass --served-model
 FOUR CARDS (--cards quad, the c2-packed-tp4 serving of serving/tp4-s2). The copy gets EVERY Blackhole board present
 (exactly four by-id links, resolved now, none named here: c2_serving_gate.card_set) in place of cards M and A, and
 --profile is required and must name a mesh_device P150x4 profile of --profiles (a pair profile is refused, and under
---cards pair a P150x4 one is): the contract overrides the recorded pair mesh variables from the profile. The startup
-wait defaults to the agent's own ceiling (THATCH_SERVING_STARTUP_CEILING_SECS, 1020 s) instead of 600. The runtime log
-must then also show the contract's P150x4 (1, 4) mesh line, the extent replay engaged, the packed-any admission PASSED
-(no UNQUALIFIED waiver, no refusal) on a traffic profile, parser M armed on a parser_rechunk profile, and the four-card
-prefill warm before Metal's unsafe-allocation warning with no late prefill program (c2_smoke_check's rules). The restart
-step (docker stop with the teardown skipped, then docker start) is the first time a four-card (1, 4) FABRIC_1D mesh is
-reopened after an unclean exit: a wedge there fails the replay and the next job must begin with the four-card reset.
+--cards pair a P150x4 one is): the contract overrides the recorded pair mesh variables from the profile. Under quad
+--profile is the profile the copy must BOOT, never one it is given: the node agent forwards no QWEN_C2_PROFILE, so the
+copy keeps the source's env as it is and the image's default profile serves, as it will in production; every boot must
+log '[QWEN-C2] profile <--profile>: vLLM argv'. The startup wait defaults to the agent's own ceiling
+(THATCH_SERVING_STARTUP_CEILING_SECS, 1020 s) instead of 600. Each boot (the traffic load, the reload, the restart) must
+then also show the contract's P150x4 (1, 4) mesh line, the extent replay engaged, the packed-any admission PASSED (no
+UNQUALIFIED waiver, no refusal) on a traffic profile, parser M armed on a parser_rechunk profile, and the four-card prefill
+warm before Metal's unsafe-allocation warning with no late prefill program (c2_smoke_check's rules). Those lines are the
+API server's and the engine's: the runtime writes them to its vLLM subprocess log under the container's /tmp (named in
+its own log, 'vLLM subprocess log: /tmp/thatch_vllm_N.log', rewritten at every load), never to docker logs, so the replay
+reads that file after each boot's requests (engine-<boot>.log in the results). The restart step (docker stop with the
+teardown skipped, then docker start) is the first time a four-card (1, 4) FABRIC_1D mesh is reopened after an unclean
+exit: a wedge there fails the replay and the next job must begin with the four-card reset.
 """
 import argparse
 import glob
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import sysconfig
@@ -518,15 +525,39 @@ ENGINE_LOADS = ('load', 'reload', 'load_after_restart')  # the replay's serving.
 
 MESH_LINE_QUAD = '[QWEN-C2] mesh device %s [1, 4]' % TP4_MESH_DEVICE
 EXTENT_ENGAGED = '[PINDIAG] extent replay engaged'
+# The runtime runs vLLM as a subprocess whose output goes to a file under the container's /tmp, which it names in its own
+# log (py/serving: 'thatch.serving vLLM subprocess log: /tmp/thatch_vllm_1.log'); the contract's [QWEN-C2] lines and the
+# engine's [PINDIAG] lines are only there (run 36358575977's replay: none in docker logs, all in /tmp/thatch_vllm_1.log).
+ENGINE_LOG_LINE = re.compile(r'vLLM subprocess log: (/tmp/[\w.\-]+\.log)')
+ENGINE_LOG_DEFAULT = '/tmp/thatch_vllm_1.log'
+PROFILE_LINE = re.compile(r'\[QWEN-C2\] profile (\S+): vLLM argv ')
+# (the engine log's label, the step whose boot it is): the traffic load, the in-place reload, the load after the restart.
+BOOTS = (('load', 'load'), ('reload', 'reload'), ('restart', 'load_after_restart'))
+
+
+def engine_log(container, runtime_text, execute=None):
+    """The vLLM subprocess log of the boot running now: the last path the runtime named (ENGINE_LOG_LINE), else its
+    default, read from the running container ('' when it cannot be read). The runtime rewrites it at every load."""
+    execute = run if execute is None else execute
+    named = ENGINE_LOG_LINE.findall(runtime_text or '')
+    result = execute(['docker', 'exec', container, 'cat', named[-1] if named else ENGINE_LOG_DEFAULT], timeout=120,
+                     check=False)
+    return (result.stdout or '') if result.returncode == 0 else ''
 
 
 def quad_log_problems(text, entry):
-    """What the runtime log of a four-card replay must show beyond the pair's rules (module docstring): the contract's
-    P150x4 (1, 4) mesh line, the extent replay engaged (an extent profile), and c2_smoke_check's own rules for the
-    profile - the packed-any admission passed without the UNQUALIFIED waiver, parser M armed, the four-card prefill
-    warm before Metal's unsafe-allocation warning and no prefill program compiled late."""
+    """What one boot's engine log (engine_log) of a four-card replay must show beyond the pair's rules (module docstring):
+    the profile the copy was expected to boot (entry['name'], by the image default), the contract's P150x4 (1, 4) mesh
+    line, the extent replay engaged (an extent profile), and c2_smoke_check's own rules for the profile - the packed-any
+    admission passed without the UNQUALIFIED waiver, parser M armed, the four-card prefill warm before Metal's
+    unsafe-allocation warning and no prefill program compiled late."""
     import c2_smoke_check
     problems = []
+    name = entry.get('name')
+    booted = sorted(set(PROFILE_LINE.findall(text)))
+    if name and booted != [name]:
+        problems.append('the copy booted profile %s, not %s: the agent forwards no QWEN_C2_PROFILE, so the image default '
+                        'is what production serves' % (','.join(booted) or '(no "[QWEN-C2] profile ...: vLLM argv" line)', name))
     if MESH_LINE_QUAD not in text:
         problems.append('no "%s" line: the runtime did not open the four-card mesh' % MESH_LINE_QUAD)
     if (entry.get('env') or {}).get('QWEN_FAST_EXTENT_REPLAY') == '1' and EXTENT_ENGAGED not in text:
@@ -537,14 +568,15 @@ def quad_log_problems(text, entry):
     return problems
 
 
-def runtime_log_verdict(text, steps, quad_profile=None):
+def runtime_log_verdict(text, steps, quad_profile=None, engine_logs=None):
     """After the steps, the runtime log (docker logs): the runtime did only what the replay asked.
     Fails on a health recovery, an os._exit ('generation health ...; exiting'), more runtime starts
     ('serving X on http://') than the replay's start steps, or more engine loads ('model reload:')
     than its load steps; every such line is recorded (platform-replay.json runtime_log). The G7
     replay of e570ee2 (run 36227190700) passed every step while its runtime reloaded a healthy
-    engine three times: only this log showed it. `quad_profile` (a four-card replay: the served profile's record)
-    adds quad_log_problems."""
+    engine three times: only this log showed it. `quad_profile` (a four-card replay: the expected profile's record with
+    its 'name') adds quad_log_problems for every boot the steps made, on that boot's engine log (`engine_logs`: (boot,
+    text) pairs, BOOTS); a boot with no engine log read is a problem, never a pass."""
     starts = sum(step in steps for step in RUNTIME_STARTS)
     loads = sum(step in steps for step in ENGINE_LOADS)
     lines = text.splitlines()
@@ -562,7 +594,15 @@ def runtime_log_verdict(text, steps, quad_profile=None):
     if len(reloads) > loads:
         problems.append('%d engine loads, the replay asked for %d' % (len(reloads), loads))
     if quad_profile is not None:
-        problems += quad_log_problems(text, quad_profile)
+        logs = dict(engine_logs or ())
+        for boot, step in BOOTS:
+            if step not in steps:
+                continue
+            if not logs.get(boot):
+                problems.append('%s: no vLLM subprocess log read (the runtime\'s /tmp/thatch_vllm_N.log): the four-card '
+                                'checks read nothing' % boot)
+                continue
+            problems += ['%s: %s' % (boot, problem) for problem in quad_log_problems(logs[boot], quad_profile)]
     flagged = set(recoveries + exits + (banners if len(banners) > starts else [])
                   + (reloads if len(reloads) > loads else []))
     return dict(ok=not problems, problems=problems, lines=[line for line in lines if line in flagged])
@@ -578,7 +618,8 @@ def main():
                         help='the name /v1/models must advertise and every request after the warmup names')
     parser.add_argument('--name', default='qwen-c2-platform')
     parser.add_argument('--port', type=int, default=8011)
-    parser.add_argument('--profile', default=None, help='QWEN_C2_PROFILE for the copy (default: the source\'s)')
+    parser.add_argument('--profile', default=None, help='QWEN_C2_PROFILE for the copy (default: the source\'s); under '
+                        '--cards quad the profile the copy must boot by the image default, never set')
     parser.add_argument('--seed', type=int, default=None, help='the arrivals\' seed (default: the clock)')
     parser.add_argument('--cards', choices=CARD_SETS, default='pair',
                         help='pair: cards M and A (the default); quad: every Blackhole board present, with a P150x4 --profile')
@@ -638,12 +679,26 @@ def main():
             json.dump(dict(passed=False, steps=steps), handle, indent=1)
         print('PLATFORM_REPLAY passed=False refused: %s' % problem, flush=True)
         return 1
-    quad_profile = profile_entry(options.profile, options.profiles) if quad else None
-    arguments = run_arguments(info, options.image, name, port, options.profile, devices=devices,
+    quad_profile = dict(profile_entry(options.profile, options.profiles), name=options.profile) if quad else None
+    # Four cards: the copy keeps the source's env as the agent passed it (no QWEN_C2_PROFILE of the replay's own), so the
+    # image default boots as in production; quad_log_problems checks it is --profile.
+    arguments = run_arguments(info, options.image, name, port, None if quad else options.profile, devices=devices,
                               image_env=inherited or (), extra_env=extra_env)
     with open(os.path.join(options.results, 'docker-run.json'), 'w') as handle:
         json.dump(arguments, handle, indent=1)
     passed = False
+    engine_logs = []
+
+    def read_engine(boot=None):
+        """This boot's engine log (engine_log), kept as engine-<boot>.log and for the verdict when `boot` is named."""
+        logs = run(['docker', 'logs', name], check=False)
+        text = engine_log(name, (logs.stdout or '') + (logs.stderr or ''))
+        if boot is not None:
+            engine_logs.append((boot, text))
+            with open(os.path.join(options.results, 'engine-%s.log' % boot), 'w') as handle:
+                handle.write(text)
+        return (logs.stdout or '') + (logs.stderr or '') + '\n' + text
+
     try:
         started = time.time()
         run(arguments)
@@ -670,11 +725,13 @@ def main():
                                                    'required': ['path']}}}])
                 tool['ok'] = tool['ok'] and bool(tool.get('tool_calls'))
                 ok = record('tool_call', tool) and ok
-                logs = run(['docker', 'logs', name], check=False)
-                contract = CONTRACT_INSTALLED in (logs.stdout or '') + (logs.stderr or '')
+                # The contract logs from the API server, into the engine log (engine_log), not docker logs.
+                contract = CONTRACT_INSTALLED in read_engine()
                 ok = traffic_steps(port, served, record, seed, contract=contract) and ok
+                read_engine('load')
                 ok = record('reload', load(name, model)) and ok
                 ok = record('after_reload', chat(port, served, 'Say OK.', 8)) and ok
+                read_engine('reload')
                 capture('before-restart')
                 run(['docker', 'stop', '-t', '60', name], timeout=120, check=False)
                 restarted = time.time()
@@ -688,13 +745,14 @@ def main():
                     ok = record('load_after_restart', loaded) and ok
                     ok = record('served_name_after_restart', served_name(port, model, served)) and ok
                     ok = record('after_restart', chat(port, served, 'Say OK.', 8)) and ok
+                    read_engine('restart')
                 passed = ok
     finally:
         capture('final')
         logs = run(['docker', 'logs', name], check=False)
         with open(os.path.join(options.results, 'platform-container.log'), 'w') as handle:
             handle.write(logs.stdout + '\n----- stderr -----\n' + logs.stderr)
-        runtime_log = runtime_log_verdict(logs.stdout + '\n' + logs.stderr, steps, quad_profile)
+        runtime_log = runtime_log_verdict(logs.stdout + '\n' + logs.stderr, steps, quad_profile, engine_logs)
         print('RUNTIME_LOG %s' % json.dumps(runtime_log)[:1500], flush=True)
         passed = passed and runtime_log['ok']
         run(['docker', 'rm', '-f', name], check=False)

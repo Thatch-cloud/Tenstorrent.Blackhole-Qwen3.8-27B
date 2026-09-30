@@ -53,8 +53,10 @@ name: Qwen C2 serving image
 #   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py);
 #            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt).
 #            With C2_CARDS=quad the copy gets every Blackhole board present (card_set.sh, none named) and
-#            C2_REPLAY_PROFILE, a P150x4 profile, is required; the runtime log must then also show the four-card
-#            mesh, the admission passed, parser M armed, the extent path engaged and the prefill warm
+#            C2_REPLAY_PROFILE, a P150x4 profile, is required: the profile the copy must BOOT by the image default
+#            (the agent forwards no QWEN_C2_PROFILE, so none is set); each boot's vLLM subprocess log (/tmp in the
+#            container, not docker logs) must then also show that profile, the four-card mesh, the admission
+#            passed, parser M armed, the extent path engaged and the prefill warm
 #   push   - push it to zot and print the digest
 # (status, platform, unserve, priority and reset are described at their steps.) The job file is
 # parsed by scripts/ci/c2_serving_job.py, which refuses anything these steps must not act on.

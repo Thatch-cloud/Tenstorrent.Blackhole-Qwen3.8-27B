@@ -164,19 +164,20 @@ class PlatformReplayAtFourCardsTests(unittest.TestCase):
         self.assertIn('not in', replay.cards_problem('quad', 'no-such-profile'))
         self.assertIn('--cards must be', replay.cards_problem('triple', QUAD_PROFILE))
 
-    def test_the_quad_copy_gets_four_device_nodes_and_the_profile_and_names_no_board(self):
+    def test_the_quad_copy_gets_four_device_nodes_and_names_no_board(self):
         info, image = replay.inspect_source(replay_fixture.AGENT)
         with open(replay_fixture.AGENT, encoding='utf-8') as handle:
             recorded = json.load(handle)['argv']
         nodes = ['/dev/tenstorrent/%d' % index for index in range(4)]
-        arguments = replay.run_arguments(info, 'img', 'copy', 8011, QUAD_PROFILE, devices=nodes,
+        arguments = replay.run_arguments(info, 'img', 'copy', 8011, None, devices=nodes,
                                          image_env=(), extra_env=replay.DEFAULT_ENV)
         devices = [arguments[index + 1] for index, token in enumerate(arguments) if token == '--device']
         self.assertEqual([device for device in devices if device.startswith('/dev/tenstorrent/')], nodes)
         self.assertEqual(sum(1 for device in devices if 'tenstorrent' in device), 4)
-        self.assertIn('QWEN_C2_PROFILE=%s' % QUAD_PROFILE, arguments)
         self.assertNotIn('by-id', ' '.join(arguments), 'the four boards are resolved to nodes at run time, never named')
         self.assertTrue(recorded, 'the tracked pair record is the source')
+        self.assertFalse(any(token.startswith('QWEN_C2_PROFILE=') for token in recorded + arguments),
+                         'the agent forwards no profile: the image default is what serves')
 
     def test_the_quad_devices_are_the_gates_card_set_and_exactly_four(self):
         with tempfile.TemporaryDirectory() as root:
@@ -189,31 +190,67 @@ class PlatformReplayAtFourCardsTests(unittest.TestCase):
         self.assertEqual((replay.PAIR_STARTUP_S, replay.QUAD_STARTUP_S), (600, 1020))
 
     @staticmethod
-    def quad_log():
-        return '\n'.join(['[QWEN-C2] mesh device P150x4 [1, 4]',
-                          '[PINDIAG] extent replay engaged segments=4 flags=[0x23] mask=narrow',
-                          '[PINDIAG] packed-any admission passed: K64j 152951c1 x1; CB1 1 CB2a 2 CB2b 3',
-                          'parser M armed: stream re-chunking on'])
+    def quad_log(profile=QUAD_PROFILE):
+        """One boot's engine log (the runtime's /tmp/thatch_vllm_1.log) as a four-card traffic boot writes it."""
+        return '\n'.join([
+            '(APIServer pid=7) [QWEN-C2] profile %s: vLLM argv ["--port", "8001"]' % profile,
+            '(APIServer pid=7) [QWEN-C2] mesh device P150x4 [1, 4], fabric FABRIC_1D, sampling host',
+            '(APIServer pid=7) [QWEN-C2] profile %s: parser M armed: m.DelegatingParser.parse_delta re-chunks' % profile,
+            '(EngineCore pid=9) [PINDIAG] packed-any admission passed: K64j 152951c1c0de5c9d x2; CB1 1 CB2a 2 CB2b 3',
+            '(EngineCore pid=9) [PINDIAG] four-card eager prefill warmed before the packed traces: 2052',
+            '(EngineCore pid=9) Allocating device buffers is unsafe due to the existence of an active trace',
+            '(EngineCore pid=9) [PINDIAG] extent replay engaged segments=4 flags=0x23,0x23,0x23,0x23 mask=narrow',
+            '(EngineCore pid=9) | INFO | [PINDIAG] four-card prefill programs=10->12 window=2 prompt=4096'])
 
-    def test_the_runtime_log_of_a_quad_replay_needs_the_mesh_the_extent_the_admission_and_parser_m(self):
-        entry = PROFILES['profiles'][QUAD_PROFILE]
-        steps = ['start', 'load']
-        banner = 'serving Qwen/Qwen3.8-27B:tt on http://0.0.0.0:8000\nmodel reload: x\n'
-        good = replay.runtime_log_verdict(banner + self.quad_log(), steps, entry)
-        for problem in good['problems']:
-            self.assertNotIn('mesh', problem)
-            self.assertNotIn('extent', problem)
-            self.assertNotIn('admission', problem)
-        silent = replay.runtime_log_verdict(banner, steps, entry)
+    def entry(self):
+        return dict(PROFILES['profiles'][QUAD_PROFILE], name=QUAD_PROFILE)
+
+    def test_the_four_card_checks_read_each_boots_engine_log_not_docker_logs(self):
+        steps = dict(start={}, load={})
+        banner = 'thatch.serving serving Qwen/Qwen3.8-27B:tt on http://0.0.0.0:8000\n'
+        good = replay.runtime_log_verdict(banner, steps, self.entry(), [('load', self.quad_log())])
+        self.assertEqual(good['problems'], [])
+        # the same lines in docker logs are not read: run 36358575977's replay had none of them there
+        unread = replay.runtime_log_verdict(banner + self.quad_log(), steps, self.entry(), [])
+        self.assertFalse(unread['ok'])
+        self.assertIn('load: no vLLM subprocess log read', ' '.join(unread['problems']))
+        # every boot the steps made is judged on its own log: the reload and the restart too
+        both = replay.runtime_log_verdict(banner, dict(steps, reload={}, load_after_restart={}), self.entry(),
+                                          [('load', self.quad_log()), ('reload', self.quad_log())])
+        self.assertEqual([problem.split(':')[0] for problem in both['problems']], ['restart'])
+
+    def test_a_boot_log_needs_the_profile_the_mesh_the_extent_the_admission_parser_m_and_the_warm(self):
+        steps = dict(start={}, load={})
+        silent = replay.runtime_log_verdict('', steps, self.entry(), [('load', 'INFO vLLM API server version 0.25.1')])
         text = ' '.join(silent['problems'])
         self.assertFalse(silent['ok'])
-        self.assertIn('P150x4', text)
-        self.assertIn('extent replay engaged', text)
-        self.assertIn('packed-any admission passed:', text)
-        self.assertIn('parser M armed', text)
-        waived = replay.runtime_log_verdict(
-            banner + self.quad_log() + '\n[PINDIAG] packed-any admission passed UNQUALIFIED: K64j', steps, entry)
+        for needle in ('booted profile', 'P150x4', 'extent replay engaged', 'packed-any admission passed:', 'parser M armed',
+                       'eager prefill warm'):
+            self.assertIn(needle, text)
+        waived = replay.runtime_log_verdict('', steps, self.entry(), [(
+            'load', self.quad_log() + '\n[PINDIAG] packed-any admission passed UNQUALIFIED: K64j')])
         self.assertIn('UNQUALIFIED', ' '.join(waived['problems']))
+        other = replay.runtime_log_verdict('', steps, self.entry(), [('load', self.quad_log('general-prefix'))])
+        self.assertIn('booted profile general-prefix, not %s' % QUAD_PROFILE, ' '.join(other['problems']))
+        late = replay.runtime_log_verdict('', steps, self.entry(), [(
+            'load', self.quad_log() + '\n[PINDIAG] four-card prefill programs=12->20 window=2 prompt=9000')])
+        self.assertIn('beyond its window snapshot', ' '.join(late['problems']))
+
+    def test_the_engine_log_is_the_file_the_runtime_names_read_from_the_running_container(self):
+        calls = []
+
+        def execute(command, timeout=None, check=True):
+            calls.append(command)
+            return mock.Mock(returncode=0, stdout='engine text', stderr='')
+
+        runtime = ('thatch.serving vLLM subprocess log: /tmp/thatch_vllm_1.log\n'
+                   'thatch.serving vLLM subprocess log: /tmp/thatch_vllm_2.log\n')
+        self.assertEqual(replay.engine_log('copy', runtime, execute), 'engine text')
+        self.assertEqual(calls[-1], ['docker', 'exec', 'copy', 'cat', '/tmp/thatch_vllm_2.log'])
+        replay.engine_log('copy', 'no path named', execute)
+        self.assertEqual(calls[-1][-1], replay.ENGINE_LOG_DEFAULT)
+        gone = replay.engine_log('copy', runtime, lambda *a, **k: mock.Mock(returncode=1, stdout='partial', stderr='x'))
+        self.assertEqual(gone, '')
 
     def test_a_pair_replays_runtime_log_rules_are_unchanged(self):
         steps = ['start', 'load']
@@ -268,6 +305,8 @@ class PlatformReplayAtFourCardsTests(unittest.TestCase):
         docker_run = next(command for command in ran if command[:2] == ['docker', 'run'])
         self.assertEqual([docker_run[i + 1] for i, token in enumerate(docker_run) if token == '--device'
                           and 'tenstorrent' in docker_run[i + 1]], nodes)
+        self.assertFalse(any(token.startswith('QWEN_C2_PROFILE=') for token in docker_run),
+                         'under quad the copy boots the image default, as the agent does')
         self.assertEqual(waits, [1020])
         self.assertEqual((recorded['steps']['cards']['devices'], recorded['steps']['cards']['startup_wait_s']), (4, 1020))
 

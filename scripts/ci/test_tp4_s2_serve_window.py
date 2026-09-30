@@ -29,7 +29,11 @@ BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3})
 PRE_IMAGE, POST_IMAGE = 'tp4-stackfix-3', 'tp4-serve-1'
 GATES = ('G-L1-lifecycle', 'G-L2-lifecycle-arrival', 'G-M1-mixed', 'G-M2-mixed-long', 'G-S-short', 'G-B-boundaries', 'G-MEM-memory',
          'G-ST-staggered', 'G-C-churn')
+RESET = ('EV-R0-quad-reset',)
 EVIDENCE = ('EV-W1-cb1-cb2a-watcher', 'EV-F1-cb1', 'EV-F2-cb2a', 'EV-W2-cb2b-watcher', 'EV-F3-cb2b')
+# The reader twin's bytes as tp4/stack-fix 8e0113e3 holds them: the image the pre-evidence gates serve (tp4-stackfix-3) runs these,
+# CB2b qualifies the checkout's copy, and the image built after the evidence serves it; one set of bytes throughout.
+READER_TP_STACK_FIX = '89761985a45b5fe4038f9ff556e497b7c9eab84808144c3cd62748db62b10152'
 POST = ('SB-build', 'SS-smoke', 'SM-mixed-traffic', 'SR-quad-replay')
 
 
@@ -61,7 +65,7 @@ class OrderTests(unittest.TestCase):
         ordered = [row[0] for row in rows]
         self.assertEqual(sorted(ordered), on_disk)
         self.assertEqual(len(set(ordered)), len(ordered))
-        self.assertEqual(ordered, list(GATES + EVIDENCE + POST))
+        self.assertEqual(ordered, list(GATES + RESET + EVIDENCE + POST))
 
     def test_the_modes_minutes_and_images_are_the_ones_each_job_uses(self):
         for name, mode, image, minutes in read_order():
@@ -76,6 +80,11 @@ class OrderTests(unittest.TestCase):
     def test_the_stages_run_gates_then_evidence_on_one_card_then_the_post_evidence_jobs(self):
         names = [row[0] for row in read_order()]
         self.assertLess(max(names.index(name) for name in GATES), min(names.index(name) for name in EVIDENCE))
+        # the four-card jobs leave the ring fabric on the ethernet cores: card M alone opens only after an all-four reset (v140)
+        self.assertEqual(names.index('EV-R0-quad-reset') + 1, min(names.index(name) for name in EVIDENCE))
+        self.assertGreater(names.index('EV-R0-quad-reset'), max(names.index(name) for name in GATES))
+        _, reset = parsed('EV-R0-quad-reset')
+        self.assertEqual((reset['cards'], reset['actions']), ('quad', 'reset'))
         self.assertLess(max(names.index(name) for name in EVIDENCE), min(names.index(name) for name in POST))
         self.assertLess(names.index('EV-W1-cb1-cb2a-watcher'), names.index('EV-F1-cb1'))
         self.assertLess(names.index('EV-W1-cb1-cb2a-watcher'), names.index('EV-F2-cb2a'))
@@ -246,6 +255,19 @@ class TemplateTests(unittest.TestCase):
         with self.assertRaises(job.JobError):
             job.read_job(job.parse_env(text_of('SR-quad-replay').replace('C2_REPLAY_PROFILE=c2-packed-tp4\n', '')
                                        .replace('@THIN_LAYER_IMAGE@', 'thin-layer-image-ref')), NAMES)
+
+
+class ReaderBytesTests(unittest.TestCase):
+    def test_the_reader_twin_stays_at_the_bytes_the_gates_ran_and_the_record_names(self):
+        import hashlib
+        import packed_any_admission as admission
+        with open(os.path.join(HERE, 'extent_attention_replay_tp.py'), 'rb') as handle:
+            live = hashlib.sha256(handle.read().replace(b'\r\n', b'\n')).hexdigest()
+        self.assertEqual(live, READER_TP_STACK_FIX, 'extent_attention_replay_tp.py changed on the serving branch: the '
+                         'pre-evidence gates on tp4-stackfix-3 no longer ran the served reader, and CB2b must be re-run on it')
+        recorded = json.loads(admission.EVIDENCE_TP4.read_text(encoding='utf-8')).get('sources') or {}
+        if 'extent_attention_replay_tp.py' in recorded:
+            self.assertEqual(recorded['extent_attention_replay_tp.py'], live)
 
 
 class ProfileTests(unittest.TestCase):

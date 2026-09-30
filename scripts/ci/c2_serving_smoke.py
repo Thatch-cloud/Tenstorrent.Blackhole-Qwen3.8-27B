@@ -240,7 +240,9 @@ def stream_tool_call():
 def stream_reasoning():
     """Opt-in: a streamed thinking-on prompt. The reasoning arrives in reasoning_content and only the answer in content:
     a </think> in the content means the parser lost the marker at a multi-token delta (the defect parser M fixes)."""
-    got = stream_events([{'role': 'user', 'content': 'How many prime numbers are there below 30? Think first.'}], 1200)
+    # 4096, not the answer's size: the reasoning comes first and a verbose one must not end the stream before any content
+    # (T1's coding answer spent all of its 1,500 tokens reasoning), which would fail a stop job on the budget, not the parser.
+    got = stream_events([{'role': 'user', 'content': 'How many prime numbers are there below 30? Think first.'}], 4096)
     problems = []
     if not got['reasoning'].strip():
         problems.append('no reasoning_content in the stream')

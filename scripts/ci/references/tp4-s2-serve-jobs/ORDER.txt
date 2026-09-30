@@ -7,6 +7,7 @@
 # STAGE 1, before any evidence: the gate plans on c2-packed-tp4-gate and tp4-stackfix-3 (about 2.6-3 h). They need no harness port and
 # run on the cards while the ports are finished and the CPU suite runs. G-C needs the E3 churn fix of serving/tp4-s2.
 # STAGE 2, the evidence on card M alone (about 25 min of runner time, 5 of card time). Needs the two four-card harness ports (E1, E2).
+# EV-R0 first: the four-card jobs leave the ring fabric on the ethernet cores and card M alone does not open after them (v140).
 # A watcher job (W) runs before its full job (F); a REDUCED-PASS is never evidence. After EV-F3: record the three reports with
 #   py -3.11 -B scripts/ci/record_packed_any_evidence_tp4.py ...   (its --help gives the flags),
 # commit packed_any_evidence_tp4.json and the re-pinned EVIDENCE_TP4_SHA256 together (git add by path: scripts/ci/__pycache__ is
@@ -25,6 +26,7 @@ G-B-boundaries stop tp4-stackfix-3 28
 G-MEM-memory stop tp4-stackfix-3 23
 G-ST-staggered stop tp4-stackfix-3 25
 G-C-churn stop tp4-stackfix-3 23
+EV-R0-quad-reset stop tp4-stackfix-3 12
 EV-W1-cb1-cb2a-watcher stop tp4-stackfix-3 6
 EV-F1-cb1 stop tp4-stackfix-3 6
 EV-F2-cb2a stop tp4-stackfix-3 6
