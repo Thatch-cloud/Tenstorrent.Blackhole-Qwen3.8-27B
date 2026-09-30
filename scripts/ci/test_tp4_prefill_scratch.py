@@ -12,8 +12,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import c2_smoke_check as check
+import memory_ledger
 import serving_runtime
 import test_tp4_draft_window as window
+from test_memory_ledger import FakeOperations, ledger_for
 
 HERE = Path(__file__).resolve().parent
 LEDGER = ('(EngineCore pid=66) 2026-09-30 14:15:09.482 | INFO     | memory_ledger:log_line:121 - [MEMLEDGER] phase=prefill '
@@ -36,11 +38,22 @@ class ScratchBeforeTraces(unittest.TestCase):
             self.assertTrue(serving_runtime.prefill_scratch_before_traces(model, {'QWEN_FAST_TP': '4'}))
         self.assertEqual(model.calls, 1)
 
+    def test_the_ledger_claims_the_scratch_before_the_blocks(self):
+        # Claimed at attach under its own item, the scratch is known before the first prefill's walk, so model_after_prefill
+        # reports only what that prefill allocated, whatever P6's walk of the block reaches.
+        model = Model()
+        model._gdn_prefill_scratch = ['scratch']
+        with patch.object(serving_runtime, 'pindiag'), patch.object(serving_runtime.memory_ledger, 'record') as record:
+            serving_runtime.prefill_scratch_before_traces(model, {'QWEN_FAST_TP': '4'})
+        record.assert_called_once_with('P5', point='prefill_scratch', model_prefill_scratch=['scratch'])
+
     def test_the_pair_is_unchanged(self):
         for environ in ({}, {'QWEN_FAST_TP': '2'}):
             model = Model()
-            self.assertFalse(serving_runtime.prefill_scratch_before_traces(model, environ))
+            with patch.object(serving_runtime.memory_ledger, 'record') as record:
+                self.assertFalse(serving_runtime.prefill_scratch_before_traces(model, environ))
             self.assertEqual(model.calls, 0)
+            record.assert_not_called()
 
     def test_a_model_without_the_method_is_left_alone(self):
         self.assertFalse(serving_runtime.prefill_scratch_before_traces(SimpleNamespace(), {'QWEN_FAST_TP': '4'}))
@@ -97,6 +110,36 @@ class FirstPrefillLedger(unittest.TestCase):
         problems, facts = self.run_check(LEDGER % ('0.081GB', 1484), '2')
         self.assertNotIn('first_prefill_model_buffers', facts)
         self.assertEqual(problems, [])
+
+
+class LedgerEndToEnd(unittest.TestCase):
+    """The ledger's own item line, the helper's claim and c2_smoke_check's four-card rule together: a scratch allocated by the
+    first prefill is reported there, one allocated (and claimed) before the block is not, and the block's walk plays no part."""
+
+    def first_prefill(self, before_traces):
+        operations = FakeOperations()
+        ledger, lines, _ = ledger_for(operations)
+        model = SimpleNamespace(weights=[operations.tensor((32, 1024))], _gdn_prefill_scratch=None)
+
+        def ensure():
+            if model._gdn_prefill_scratch is None:
+                model._gdn_prefill_scratch = [operations.tensor((1, 32, 2560)) for _ in range(3)]
+
+        model._ensure_gdn_prefill_scratch = ensure
+        with patch.object(memory_ledger, '_active', ledger), patch.object(serving_runtime, 'pindiag'):
+            memory_ledger.record('P0', model=model)
+            if before_traces:
+                serving_runtime.prefill_scratch_before_traces(model, {'QWEN_FAST_TP': '4'})
+            # A block whose walk does not reach the model.
+            memory_ledger.record('P6', point='block1', packed_block=SimpleNamespace(rows=[operations.tensor((64, 64))]))
+            ensure()   # the first prefill binds the scratch, allocating it only if nothing did before
+            memory_ledger.record('prefill', point='after req=%s' % memory_ledger.short_id('chatcmpl-4b3-b36e8145'),
+                                 request='chatcmpl-4b3-b36e8145', model_after_prefill=model)
+        return check.first_prefill_buffers('\n'.join(lines))
+
+    def test_the_late_scratch_is_reported_and_the_claimed_one_is_not(self):
+        self.assertEqual(self.first_prefill(False), 6)   # three tensors on two chips
+        self.assertIsNone(self.first_prefill(True))
 
 
 class Templates(unittest.TestCase):

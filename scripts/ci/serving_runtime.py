@@ -137,6 +137,11 @@ def prefill_scratch_before_traces(model, environ=None):
         return False
     ensure()
     pindiag('[PINDIAG] gdn prefill scratch allocated before the packed traces (four cards)')
+    # The ledger (a no-op unless QWEN_FAST_MEMORY_LEDGER=1) claims the scratch here, under its own item, so the first
+    # prefill's model_after_prefill - c2_smoke_check's four-card rule - reads only what that prefill allocated, whether
+    # or not P6's walk of the block reaches the model.
+    memory_ledger.record('P5', point='prefill_scratch',
+                         model_prefill_scratch=getattr(model, '_gdn_prefill_scratch', None))
     return True
 
 
