@@ -1,5 +1,7 @@
 # The order of the four-card verify-glue window (tp4/vglue), one template per line: <template name without .env> <stop|soft>.
 # stop: the window halts at the first failure of this job. soft: a failure is logged and the window goes on (its product is data).
+# The window image is built from a tp4/vglue commit that MERGES tp4/stack-fix (prefill after a packed replay at four cards); a build
+# from an earlier head would stop G1 on garbage/EOS that vglue did not cause.
 # What the window is for. The device profile of the packed 64-row verify at four cards (trace 0, 61.8 ms per replay per chip; the
 # S3a-era profile, run 36734970169) shows where the verify is not weights: conv-gates launched four times per GDN layer (192 per replay,
 # 3.97 ms of kernels and 2.25 ms of dispatch stalls), 960 per-user GDN glue ops (6.07 ms), 37 attention glue ops per layer (2.3 ms), a

@@ -173,5 +173,21 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(profile['mesh_device'], 'P150x4', name)
 
 
+class SmokeRuleTests(unittest.TestCase):
+    def test_a_fallen_back_lever_fails_the_smoke(self):
+        import c2_smoke_check
+
+        line = '[PINDIAG] tp4 vglue fell back site=sampler reason=RuntimeError: gather'
+        problems, facts = c2_smoke_check.check('', 'ok'+'\n' + line + '\n', False)
+        self.assertTrue(any('a vglue lever fell back' in text and 'site=sampler' in text for text in problems), problems)
+        problems, facts = c2_smoke_check.check('', 'ok\n', False)
+        self.assertFalse(any('vglue lever' in text for text in problems))
+
+    def test_the_window_builds_from_the_stack_fix_merge(self):
+        for name in ('G0-build.env', 'ORDER.txt'):
+            with open(os.path.join(FOLDER, name), encoding='utf-8') as handle:
+                self.assertIn('tp4/stack-fix', handle.read(), name)
+
+
 if __name__ == '__main__':
     unittest.main()
