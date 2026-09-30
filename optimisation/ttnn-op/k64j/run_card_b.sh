@@ -71,6 +71,19 @@
 #                                         # restaged twice each, four idle patterns; K64J_READER verdict=PASS
 #                                         # scope=full is CB2b's evidence
 #
+# THE FOUR-CARD PORT'S ONE-CARD WINDOW (S2T-01 / S2T-10, HW-A): two more harnesses, both on card M through the cardm action
+# with the graft K64j mounted and verified as above (QUAL_CARD, ALLOW_SERVING_CARD and RESULTS are set by the step):
+#   K64J_HARNESS=nkv1_spike   k64j_nkv1_spike.py: K64j at ONE KV head per chip (6 query heads on 1 KV head, cache
+#                             (N, 1, 64, 256)): the extent program 0x23 at G8B2 and 0x21 at G16B1 against its compile-time twin
+#                             (bit-equal on the poisoned table), the legacy numerics, the factory lines and timings.
+#                             Verdict line K64J_NKV1. WATCHER=1 first: one family, two starts, no timing.
+#   K64J_HARNESS=gdn_tp4      scripts/ci/gdn_tp4_card_test.py (this checkout's scripts/ci at /bench/ci): the packed GDN pieces
+#                             at the four-card widths on this ONE card with QWEN_FAST_TP=4 - user-batch and K5 at 12 value
+#                             heads (against the per-user launch and the pinned pair launch's first 12 heads), the native
+#                             twin, and the DMA sibling kernels at 192 / 80 pages. Verdict line GDN_TP4 (scope full needs all
+#                             four sections and three seeds). TP4_WIDTH=2 runs its PARITY section instead (QWEN_FAST_TP
+#                             unset: the pinned DMA kernels against their _tp siblings at the pair's page counts):
+#                               C2_CARDM_ENV=K64J_HARNESS=gdn_tp4 TP4_WIDTH=2 ... C2_CARDM_ARGS=--sections PARITY
 # Before anything is launched the graft must verify against its MANIFEST.sha256, its _ttnncpp.so must be
 # EXPECT_TTNNCPP_SHA256 (REQUIRED for a real run: K64j's sha is the K64J_TTNNCPP_SHA256 line build_k64j.sh prints)
 # and carry the F22 literal '[QWEN-SDPA] runtime-extent entries=', its four qwen decode kernels must be K64j's
@@ -83,7 +96,8 @@
 #
 # Env: KOPGRAFT64 (default ~/opgraft-K64j), EXPECT_TTNNCPP_SHA256, IMAGE (default image P8), RESULTS
 # (~/kwork64/k64j/<card tag>), CARD_B_ARGS (extra harness args, appended last, e.g. "--sections X,M --seeds 0"),
-# WATCHER=1, WATCHDOG_S, K64J_CARD_DRY_RUN=1, K64J_HARNESS (card, the default, or extent_reader), QUAL_CARD (the
+# WATCHER=1, WATCHDOG_S, K64J_CARD_DRY_RUN=1, K64J_HARNESS (card, the default, extent_reader, nkv1_spike or gdn_tp4; the last
+# two are the four-card port's one-card window, see below; TP4_WIDTH=2 is gdn_tp4's PARITY run), QUAL_CARD (the
 # target board id under /dev/tenstorrent/by-id; required, no default: card B is reserved for another project and refused; card M or card A, the
 # serving pair, is refused unless ALLOW_SERVING_CARD=1, which prints a loud warning). QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
 # is set as the arm sets it. Every run gets a fresh kernel cache.
@@ -450,8 +464,10 @@ MAIN=${K64J_HARNESS:-card}
 case $MAIN in
   card) stem=card; verdict_tag=K64J_CARD ;;
   extent_reader) stem=reader; verdict_tag=K64J_READER ;;
-  *) echo "refusing: K64J_HARNESS=$MAIN is neither card (k64j_card_b.py) nor extent_reader" \
-       "(extent_reader_card_b.py)" >&2
+  nkv1_spike) stem=nkv1; verdict_tag=K64J_NKV1 ;;
+  gdn_tp4) stem=gdn; verdict_tag=GDN_TP4 ;;
+  *) echo "refusing: K64J_HARNESS=$MAIN is none of card (k64j_card_b.py), extent_reader" \
+       "(extent_reader_card_b.py), nkv1_spike (k64j_nkv1_spike.py) and gdn_tp4 (scripts/ci/gdn_tp4_card_test.py)" >&2
      exit 1 ;;
 esac
 name=qwen-k64j-$stem-$QUAL_TAG
@@ -478,6 +494,9 @@ HARNESS=("$here/k64j_card_b.py" "$probe_dir/probe_k64j_card_b.py" "$probe_dir/sp
 if [ "$MAIN" = extent_reader ]; then
   HARNESS+=("$here/extent_reader_card_b.py")
 fi
+if [ "$MAIN" = nkv1_spike ]; then
+  HARNESS+=("$here/k64j_nkv1_spike.py")
+fi
 for file in "${HARNESS[@]}"; do
   test -s "$file" || { echo "refusing: $file missing (ship k64j, k64j_probe and sdpa_decode_qwen side by side)" >&2; exit 1; }
 done
@@ -492,6 +511,24 @@ if [ "$MAIN" = extent_reader ]; then
   done
   echo "### code under test: $ci; pinned sources: the image's $SERVED_CI"
   XE=(-e QWEN_FAST_SDPA_MODES=tail,share,slice)
+fi
+if [ "$MAIN" = gdn_tp4 ]; then
+  # The code under test is this checkout's scripts/ci, first on PYTHONPATH; the four-card width is a launch variable
+  # (tp_shapes reads it at import): 4 for the qualification sections, unset for the pair's PARITY section.
+  ci=$(cd "$here/../../../scripts/ci" 2>/dev/null && pwd || echo "$here/../../../scripts/ci")
+  for file in gdn_tp4_card_test.py chip_view.py tp_shapes.py tp_kernels.py tp_addresses.py gdn_user_batch_tp.py \
+              gdn_multitoken_tp.py gdn_commit_dma_tp.py gdn_commit_dma_tp.cpp gdn_conv_windows_tp.cpp \
+              gdn_conv_prefix_copy_tp.cpp; do
+    test -s "$ci/$file" \
+      || { echo "refusing: $ci/$file missing (the four-card GDN test runs this checkout's scripts/ci)" >&2; exit 1; }
+  done
+  echo "### code under test: $ci (QWEN_FAST_TP=${TP4_WIDTH:-4}, 2 meaning unset)"
+  XE=(-e PYTHONPATH=/bench/ci)
+  case ${TP4_WIDTH:-4} in
+    4) XE+=(-e QWEN_FAST_TP=4) ;;
+    2) ;;
+    *) echo "refusing: TP4_WIDTH=${TP4_WIDTH} is neither 4 nor 2" >&2; exit 1 ;;
+  esac
 fi
 
 # Graft K64j, checked before anything is launched (in a dry run, only when it exists here).
@@ -547,7 +584,7 @@ BM=()
 for file in "${HARNESS[@]}"; do
   BM+=(--mount "type=bind,src=$file,dst=/bench/$(basename "$file"),readonly")
 done
-if [ "$MAIN" = extent_reader ]; then
+if [ "$MAIN" = extent_reader ] || [ "$MAIN" = gdn_tp4 ]; then
   BM+=(--mount "type=bind,src=$ci,dst=/bench/ci,readonly")
 fi
 WM=()
@@ -558,6 +595,10 @@ if [ "${WATCHER:-}" = "1" ]; then
   if [ "$MAIN" = extent_reader ]; then
     args+=(--seeds 0 --variants peaky --r1-words 0,32,255 --r2-families 5 --r2-restages 1 --idle-patterns 2+3
            --watchdog "${WATCHDOG_S:-120}")
+  elif [ "$MAIN" = nkv1_spike ]; then
+    args+=(--extents 2304 --starts 128,255 --seeds 0 --iterations 0 --no-legacy --watchdog "${WATCHDOG_S:-120}")
+  elif [ "$MAIN" = gdn_tp4 ]; then
+    args+=(--seeds 17 --prefixes 0,16 --iterations 0 --watchdog "${WATCHDOG_S:-120}")
   else
     args+=(--extents 2304,33024 --seeds 0 --variants normal --combos G4B3:0x21,G4B3:0x23,G8B2:0x27
            --trace-combos G4B3:0x21,G8B2:0x27 --trace-families 8 --trace-references 2 --no-timing
@@ -592,6 +633,10 @@ fi
 inner+='2>&1; '
 if [ "$MAIN" = extent_reader ]; then
   inner+='exec python3 -B /bench/extent_reader_card_b.py "$@"'
+elif [ "$MAIN" = nkv1_spike ]; then
+  inner+='exec python3 -B /bench/k64j_nkv1_spike.py "$@"'
+elif [ "$MAIN" = gdn_tp4 ]; then
+  inner+='exec python3 -B /bench/ci/gdn_tp4_card_test.py "$@"'
 else
   inner+='exec python3 -B /bench/k64j_card_b.py "$@"'
 fi
