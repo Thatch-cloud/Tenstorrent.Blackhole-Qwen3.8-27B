@@ -30,7 +30,8 @@ name: Qwen C2 serving image
 #            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile.
 #            C2_GATE_PLAN parked-exact, parked-drafter, parked-lifecycle, parked-churn, parked-corner and
 #            parked-ballast (C2_GATE_BALLAST_MB) are Stage E's (parked per-slot engines): run them on
-#            c2-packed-prefix-parked, against its flag-off twin c2-packed-prefix on the same image.
+#            c2-packed-prefix-parked-gate (the gate-only knobs need a -gate profile), against its flag-off twin
+#            c2-packed-prefix-gate on the same image.
 #            C2_GATE_PLAN quickwin-ledger and quickwin-warm are the phase-1 quick wins' byte comparisons
 #            (docs/engine-warm-skip.md): run them on c2-packed-prefix or any S2 profile.
 #            C2_GATE_SALT fresh|none salts every stream on a prefix-reuse profile (c2-packed-prefix: the

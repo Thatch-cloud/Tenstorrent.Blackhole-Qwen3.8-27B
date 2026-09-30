@@ -104,7 +104,7 @@ that path is (sticky design, harness items B1, B2 and B4):
     (lever_n_m3native_gate.s2_report: the admission, engaged, F22 and publication-warm lines, every packed
     round audited and clean, no cap refusal, deadline or unpooled draft) and the C2-any lines
     (c2_serving_gate.any_request_check); no '[PINDIAG] verify t2 kv shared' line (KV_SHARED);
-  - a PARKED arm (--profile c2-packed-prefix-parked --baseline c2-packed-prefix: Stage E, the profile with
+  - a PARKED arm (--profile c2-packed-prefix-parked --baseline c2-packed, as the jobs run it: Stage E, the profile with
     QWEN_FAST_PARKED_ENGINES=1, its flag-off twin the baseline; the design's G-E1 (c), phase-1 chained hits landing on
     parked engines) is read with parked_markers too: 4 of 4 engines built, the 2048 drafter warm with its publish
     prewarm, no unpark, and a '[PINDIAG] parked rebind' line in place of the sticky engine build line (a rebind builds

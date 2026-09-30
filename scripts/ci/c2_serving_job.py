@@ -87,7 +87,7 @@ GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # churn M11 (G5); permuted is built but required only under decision D-c(i).
 S2_GATE_PLANS = ('warm', 'warm-off', 'control', 'forced-cap', 'control-below', 'lifecycle-arrival', 'mixed', 'short',
                  'boundaries', 'staggered', 'churn', 'permuted')
-# Stage E, parked per-slot engines (QWEN_FAST_PARKED_ENGINES): run on a parked profile (c2-packed-prefix-parked; its
+# Stage E, parked per-slot engines (QWEN_FAST_PARKED_ENGINES): run on a parked gate profile (c2-packed-prefix-parked-gate; its
 # flag-off twin, the profile less '-parked', is the reference); c2_serving_gate.py says what each runs. parked-exact is
 # G-E1 (a) and (f), parked-drafter G-E1 (b) and (g) with both negative controls, parked-lifecycle G-E2, parked-churn
 # G-E3 (i), parked-corner G-E3 (ii), parked-ballast G-E3 (iii).

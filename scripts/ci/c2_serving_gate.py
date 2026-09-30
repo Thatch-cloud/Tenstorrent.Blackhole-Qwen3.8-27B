@@ -139,7 +139,8 @@ NOT_COMPARABLE (real_text_compare.S2_EXACT_CLAIMS); --policy dc-i (the user's de
   permuted  built, required only under D-c(i): two concurrent arms, the second admitted in reverse order;
            at least two SAME_PATH users (else NOT_EXERCISED), and no same-path user may differ.
 PARKED PLANS (Stage E, parked per-slot engines, QWEN_FAST_PARKED_ENGINES; the design's G-E0..G-E3). Run on a parked
-profile (--profile c2-packed-prefix-parked); the arms' flag-off reference is its twin, the profile less '-parked'
+profile's gate twin (--profile c2-packed-prefix-parked-gate: the audit, negative-control, fault and ballast knobs are
+gate-only, and the contract refuses them outside a -gate profile); the arms' flag-off reference is its twin, the profile less '-parked'
 (c2-packed-prefix), on the same image and the same prompts. Every parked arm's server log is read with parked_markers
 (4 of 4 engines built, the drafter warmed at 2048 with a publish prewarm that counted a pair, no unpark unless the arm
 injects one), every flag-off arm's must show none of it, and the judgements are parked_judge's. The strict policy holds
@@ -586,8 +587,11 @@ def parked_pair(profiles, profile, plan):
     """(the parked profile, its flag-off twin) a parked plan serves: --profile, and the profile less '-parked'.
     PlanError when --profile is not a parked profile, or its twin is missing, parked itself, or lacks the extent flag."""
     if not parked_profile(profiles, profile):
-        raise PlanError('%s is a parked-engines plan: run it on c2-packed-prefix-parked (a profile with '
+        raise PlanError('%s is a parked-engines plan: run it on c2-packed-prefix-parked-gate (a -gate profile with '
                         'QWEN_FAST_PARKED_ENGINES=1), not %s' % (plan, profile))
+    if not serving_c2_contract.gate_profile(dict(profiles['profiles'][profile], name=profile)):
+        raise PlanError('%s adds gate-only knobs (audit, negative controls, fault, ballast) that the contract refuses '
+                        'outside a -gate profile: run it on %s-gate, not %s' % (plan, profile, profile))
     twin = profile.replace('-parked', '', 1)
     if twin == profile or twin not in profiles['profiles'] or parked_profile(profiles, twin) \
             or not s2_profile(profiles, twin):
@@ -599,6 +603,8 @@ def parked_pair(profiles, profile, plan):
 def warm_profiles(profiles, profile):
     """(traffic, gate) the warm plan serves: c2-packed and c2-packed-gate, or - with --profile a sticky prefix
     profile that has a '-gate' twin (c2-packed-prefix) - that profile and its twin, so their capture path warms."""
+    if profile.endswith('-gate') and parked_profile(profiles, profile) and profile[:-5] in profiles['profiles']:
+        profile = profile[:-5]  # a parked gate profile names its traffic twin: warm-solo serves the traffic profile
     twin = '%s-gate' % profile
     if (profile in profiles['profiles'] and twin in profiles['profiles'] and sticky_profile(profiles, profile)
             and sticky_profile(profiles, twin)):
@@ -946,7 +952,7 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
                 args += ['--user-max-tokens', ','.join('%d:%d' % (index, WARM_SHORT_TOKENS) for index in short),
                          '--user-ignore-eos', ','.join(str(index) for index in short)]
             arms.append(Arm('warm-solo', args, ARM_SECONDS['warm'], profile=traffic,
-                            env=s2_env(profiles, traffic) + (PARKED_AUDIT_ENV if parked_warm else ()), judged=False,
+                            env=s2_env(profiles, traffic), judged=False,
                             role='solo', parked=dict(on=True) if parked_warm else None))
         gate_parked = plan == 'warm' and parked_profile(profiles, gate)
         arms.append(Arm('%s-4x%d' % (plan, BRINGUP_PROMPT), v235_args(profiles, gate, plan), ARM_SECONDS['warm-off'],
@@ -2872,10 +2878,21 @@ def parked_g_e0(reports):
                                    for entry in p7p[:2]) or 'not read', brief.get('peak_held_max'), brief.get('peaks'),
                          admission.PARKED_REBIND_BYTES, brief.get('single_rebuilt_count') or 0,
                          [(entry['trace_delta'], entry['dram_delta']) for entry in brief.get('single_rebuilt') or []]))
+        # M1: the admission's constants are what the hold and the backstop are sized by; a reading above one fails.
+        if brief.get('peak_held_max') is not None and brief['peak_held_max'] > admission.PARKED_REBIND_BYTES:
+            problems.append('%s: the rebind held %d B at its peak, above the admission constant R = %d B' % (
+                name, brief['peak_held_max'], admission.PARKED_REBIND_BYTES))
+        for entry in brief.get('single_rebuilt') or []:
+            if (entry.get('dram_delta') or 0) > admission.MEASURED_SINGLE_CAPTURE_BYTES:
+                problems.append('%s: the single rebuild took %d B of DRAM, above the admission constant %d B' % (
+                    name, entry['dram_delta'], admission.MEASURED_SINGLE_CAPTURE_BYTES))
+            if (entry.get('trace_delta') or 0) > admission.SINGLE_TRACE_BYTES:
+                problems.append('%s: the single rebuild took %d B of trace region, above the admission constant %d B' % (
+                    name, entry['trace_delta'], admission.SINGLE_TRACE_BYTES))
         if not p7p:
             shortfalls.append('%s: no "[MEMLEDGER] phase=P7p" line (QWEN_FAST_MEMORY_LEDGER=1): the parked baseline is '
                               'unrecorded' % name)
-        if brief.get('peak_held_max') is None:
+        if brief.get('peak_held_max') is None and name != 'warm-solo':
             shortfalls.append('%s: no "%s" line (QWEN_FAST_PARKED_AUDIT=1): R is unmeasured' % (name, parked_markers.PEAK.strip()))
     gate = [name for name in reports if '4x%d' % BRINGUP_PROMPT in name]
     frees = [entry['free_gb'] for name in gate for entry in facts[name]['p7p']]

@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROFILES = os.path.join(HERE, 'qwen_c2_profiles.json')
 with open(PROFILES, encoding='utf-8') as handle:
     PROFILE_SET = json.load(handle)
-PARKED, TWIN = 'c2-packed-prefix-parked', 'c2-packed-prefix'
+PARKED, TWIN = 'c2-packed-prefix-parked-gate', 'c2-packed-prefix-gate'
 PLANS = job.PARKED_GATE_PLANS
 S2 = dict(ballast_mb=1500)
 
@@ -150,14 +150,26 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(args[args.index('--drops') + 1], gate.CORNER_DROP)
         self.assertEqual(arms['corner-f'].profile, TWIN)
 
+    def test_every_planned_arm_passes_the_contract_the_server_boots_under(self):
+        import serving_c2_contract as contract
+        for plan in list(PLANS) + ['warm']:
+            for arm in arms_of(plan):
+                served = contract.load_profile(PROFILES, arm.profile)
+                self.assertEqual(contract.parked_problems(served, dict(arm.env)), [], (plan, arm[0], arm.profile))
+
+    def test_a_parked_plan_refuses_a_profile_that_is_not_a_gate_profile(self):
+        with self.assertRaisesRegex(gate.PlanError, 'gate-only knobs'):
+            arms_of('parked-exact', PARKED[:-len('-gate')])
+
     def test_the_warm_plan_on_the_parked_profile_is_g_e0(self):
         arms = by_name(arms_of('warm'))
-        self.assertEqual(arms['warm-solo'].profile, PARKED)
-        self.assertEqual(arms['warm-4x131072'].profile, PARKED + '-gate')
+        self.assertEqual(arms['warm-solo'].profile, PARKED[:-len('-gate')], 'the traffic profile: no gate knob reaches it')
+        self.assertEqual(arms['warm-4x131072'].profile, PARKED)
         self.assertTrue(all(arm.extra['parked']['on'] for arm in arms.values()))
         lengths = gate.asked(arms['warm-solo'][1])['lengths']
         self.assertTrue(set(parked_judge.RUNGS) <= set(lengths), 'every G-E1 rung is warmed')
-        self.assertIn(('QWEN_FAST_PARKED_AUDIT', '1'), arms['warm-solo'].env)
+        self.assertNotIn(('QWEN_FAST_PARKED_AUDIT', '1'), arms['warm-solo'].env)
+        self.assertIn(('QWEN_FAST_PARKED_AUDIT', '1'), arms['warm-4x131072'].env)
         # on the sticky profile it is what it was
         for arm in gate.plan_arms('warm', TWIN, PROFILE_SET):
             self.assertFalse(arm.extra.get('parked'))
@@ -381,9 +393,28 @@ class GeZeroTests(unittest.TestCase):
         self.assertIn('ballast_advice_bytes', facts)
         self.assertTrue(any('C2_GATE_BALLAST_MB=' in line for line in lines))
         self.assertTrue(any('R measured' in line for line in lines))
-        bare = {'warm-solo': dict(c2_gate_parked=dict(on=True, facts=dict(built=[built])))}
+        bare = {'warm-4x%d' % gate.BRINGUP_PROMPT: dict(c2_gate_parked=dict(on=True, facts=dict(built=[built])))}
         _, shortfalls, _, _ = gate.parked_g_e0(bare)
         self.assertEqual(len(shortfalls), 2, 'no P7p and no peak reading are unrecorded, never a pass')
+        solo = {'warm-solo': dict(c2_gate_parked=dict(on=True, facts=dict(built=[built])))}
+        self.assertEqual(len(gate.parked_g_e0(solo)[1]), 1, 'the solo warm runs no audit: only its P7p is owed')
+
+    def test_a_measurement_above_the_admission_constants_fails(self):
+        import serving_prefill_admission as admission
+        built = dict(k=4, attach_ms=1.0, free=1, largest_free=1, trace_used=1)
+        p7p = [dict(chip=0, free_gb=1.4, largest_free_mb=1300.0)]
+
+        def run(peak, dram, trace):
+            record = dict(on=True, facts=dict(built=[built], p7p=p7p, peak_held_max=peak, peaks=1, rebinds=1,
+                                              single_rebuilt=[dict(trace_delta=trace, dram_delta=dram)],
+                                              single_rebuilt_count=1))
+            return gate.parked_g_e0({'warm-4x%d' % gate.BRINGUP_PROMPT: dict(c2_gate_parked=record)})[0]
+
+        self.assertEqual(run(admission.PARKED_REBIND_BYTES, admission.MEASURED_SINGLE_CAPTURE_BYTES,
+                             admission.SINGLE_TRACE_BYTES), [])
+        problems = run(admission.PARKED_REBIND_BYTES + 1, admission.MEASURED_SINGLE_CAPTURE_BYTES + 1,
+                       admission.SINGLE_TRACE_BYTES + 1)
+        self.assertEqual(len(problems), 3, problems)
 
 
 class JobTests(unittest.TestCase):
