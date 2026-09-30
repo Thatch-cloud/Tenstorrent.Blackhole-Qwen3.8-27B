@@ -690,7 +690,9 @@ class ProfileTests(unittest.TestCase):
 
     def test_only_the_sticky_profiles_set_the_switch(self):
         names = sorted(name for name, data in load_profiles()['profiles'].items() if STICKY in data['env'])
-        self.assertEqual(names, ['c2-packed-prefix', 'c2-packed-prefix-gate'])
+        # ...and Stage E's parked twins of them (the same environment plus QWEN_FAST_PARKED_ENGINES=1).
+        self.assertEqual(names, ['c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-prefix-parked',
+                                 'c2-packed-prefix-parked-gate'])
 
     def test_the_argv_turns_prefix_caching_on_beside_dflash(self):
         argv = contract.engine_arguments(profile('c2-packed-prefix'), '/snap')
