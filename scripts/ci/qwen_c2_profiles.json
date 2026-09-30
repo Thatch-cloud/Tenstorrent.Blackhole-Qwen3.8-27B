@@ -530,6 +530,48 @@
       "request_contract": false,
       "drop_batched_decode_mode": false
     },
+    "general-2link": {
+      "description": "general on the pair at the two links this cabling trains: the TP2 reference and baseline for the TP4 jobs (J2r agreement, J3r benchmark). general itself pins upstream's p150_x2 descriptor, which declares four channels per edge; the TT plugin's default fabric reliability, STRICT_INIT, refuses an open whose edge trained fewer links than declared (control_plane.cpp), and M-A trains two, so general cannot open on this cabling. This profile is general with mesh_device P300 (the image's own pair MESH_DEVICE, tt_ccl's table gives it 2 links) under a two-channel 1x2 descriptor (tp4_mesh.pair_descriptor_text). Same engine, context, seats and environment as general; a bring-up profile for the reference, not the fast path (the contract refuses qwen_fast_t16 under it). UNVERIFIED on hardware until J2r opens it.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P300",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x2_2link_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "65536",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "65536"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 65536,
+        "max-num-seqs": 4,
+        "block-size": 64,
+        "max-num-batched-tokens": 65536,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "no-enable-chunked-prefill": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576
+          }
+        }
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
     "general-prefix": {
       "description": "general with conversation prefix reuse (the TT prefix-reuse design, G1): vLLM's attention prefix cache plus GDN checkpoints the model saves at 2048-token boundaries, so a turn that extends an earlier prompt re-prefills only from the last checkpoint below its vLLM hit, byte-identical to a cold prefill. Exactly general's engine argv with enable-prefix-caching and enable-chunked-prefill in place of the no- flags (the argv the P0a probe built and passed): vLLM's align-mode assertion needs chunking on, and the TT platform turns chunking off again for qwen3_5 and raises max-num-batched-tokens to max-model-len, so prefill stays whole-prompt. QWEN_PREFIX_REUSE=1 switches every prefix-reuse graft in the image on (the model's supports_prefix_caching, the scheduler graft, the runner patch); QWEN_PREFIX_STORE_GIB is the host checkpoint budget (about 154 MB per checkpoint; design D-P4). Hits need a cache_salt the platform minted: the API server drops any cache_salt that does not verify against the salt key in /models/.qwen-c2/prefix-salt.key (serving_c2_contract.salt_verdict), so without that key no request hits and the profile serves as general does (fail closed; the ADM gateway must mint salts first, design 2.2 need 4). prefix-caching-hash-algo is pinned to sha256, vLLM's default. The runtime kill switch is the file /models/.qwen-c2/prefix-reuse.off. Needs an image whose prefix stage grafted every target (/opt/qwen-c2/prefix-stage.json complete=true); without it the platform drops prefix caching and vLLM refuses to start. Not the default: UNVERIFIED on hardware until the G1 gates pass.",
       "eos_ids": [
@@ -616,6 +658,290 @@
         "enable-prefix-caching": true,
         "enable-chunked-prefill": true,
         "prefix-caching-hash-algo": "sha256"
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
+    "general-tp4": {
+      "description": "general at TP4, 8 seats x 65,536: All four p150a cards as one (1, 4) mesh (mesh_device P150x4, TP4): the four-card ring descriptor (tp4_mesh: 2x2, 2 channels), FABRIC_1D (the plugin default, stated) with the model's own Ring collectives at 2 links (tt_ccl P150x4), the ring check at mesh open, and on-device sampling for decode (sample_on_device_mode decode_only: 248,320 / 4 = 62,080 logits per device fits the sampler; the TT plugin falls back to host sampling per batch for min_p, logit_bias, bad_words, any logprobs request (at four devices the fixture refuses device sampling for a batch with a logprobs request) and the like, and /models/.qwen-c2/device-sampling.off or QWEN_HOST_SAMPLING=1 drops it for every batch). The image's model graft and kernels are TP-generic (per-device widths from tp = 4); the GDN kernels were qualified at 24 value heads per chip and run 12 here. KV per chip at TP4 is one KV head: 16 attention layers x (K, V) x 1 head x 256 x 1.0625 B (bf8, QWEN_SDPA_BF8=1) = 8,704 B per token, half the pair's 17,408 (4 x 131,328 held 9.149 GB per chip at TP2, four-streams feasibility doc). Per chip: weights ~7.4 GB (27.49 GiB / 4), non-weight non-KV <= 6.9 GB (the TP2 plain path's bound 21.69 - 14.8, assumed not to shrink), so ~14.3 GB before KV of the ~33.9 GB each chip allocates. Pool 8 x 65,536 = 524,288 tokens = 4.56 GB per chip - the same KV per chip as general's 4 x 65,536 on the pair - leaving ~15 GB per chip free (d, until G5 at TP4 measures it). Twice general's seats; B = 8 fits the GDN core waves at TP4 (8 x 12 = 96 value heads of 110 cores). UNVERIFIED on hardware until the TP4 jobs pass (J2 smoke and agreement, J3 benchmark). TP4 bring-up switches (env): QWEN_GDN_PREFILL_MMRS=0 keeps the fused matmul + reduce-scatter prefill out-projection off (it deadlocked on the pair and has never run at four devices; the general-tp4-mmrs profile is its dedicated arm), and QWEN_FAST_GDN_PREFILL_CONV_AUDIT=4 runs the exact prefill conv beside the FIR for the first four chunks at C = 2560, kd = 512 (a shape that has never run on hardware) and stops the engine on a byte mismatch; drop it once J2 passes.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "65536",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "65536",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 65536,
+        "max-num-seqs": 8,
+        "block-size": 64,
+        "max-num-batched-tokens": 65536,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "no-enable-chunked-prefill": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        }
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
+    "general-tp4-mmrs": {
+      "description": "GATE ONLY (J2m, the fused-prefill arm): general-tp4 with QWEN_GDN_PREFILL_MMRS=1, the fused matmul + reduce-scatter prefill out-projection on at four devices. It deadlocked on the pair; upstream validated it on its own P150x4 box. Run it after J2 passed with the fused op off, so a hang here costs one job and is attributed to the op. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "65536",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "65536",
+        "QWEN_GDN_PREFILL_MMRS": "1",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 65536,
+        "max-num-seqs": 8,
+        "block-size": 64,
+        "max-num-batched-tokens": 65536,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "no-enable-chunked-prefill": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        }
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false,
+      "gate_only": true
+    },
+    "general-prefix-tp4": {
+      "description": "general-prefix at TP4, 8 seats x 65,536: general-tp4's engine with conversation prefix reuse, exactly as general-prefix is general's (enable-prefix-caching and enable-chunked-prefill in place of the no- flags, QWEN_PREFIX_REUSE=1, sha256 block hashes, hits only under a platform-minted cache_salt, kill switch /models/.qwen-c2/prefix-reuse.off). All four p150a cards as one (1, 4) mesh (mesh_device P150x4, TP4): the four-card ring descriptor (tp4_mesh: 2x2, 2 channels), FABRIC_1D (the plugin default, stated) with the model's own Ring collectives at 2 links (tt_ccl P150x4), the ring check at mesh open, and on-device sampling for decode (sample_on_device_mode decode_only: 248,320 / 4 = 62,080 logits per device fits the sampler; the TT plugin falls back to host sampling per batch for min_p, logit_bias, bad_words, any logprobs request (at four devices the fixture refuses device sampling for a batch with a logprobs request) and the like, and /models/.qwen-c2/device-sampling.off or QWEN_HOST_SAMPLING=1 drops it for every batch). The image's model graft and kernels are TP-generic (per-device widths from tp = 4); the GDN kernels were qualified at 24 value heads per chip and run 12 here. Pool 524,288 tokens, 4.56 GB per chip (general-tp4 says how). The host checkpoint store stays 8 GiB (a checkpoint is the whole model's GDN state, ~154 MB, at any TP). Its no-reuse baseline for the prefix gates is general-tp4. UNVERIFIED on hardware until the G1 gates pass at TP4. TP4 bring-up switches (env): QWEN_GDN_PREFILL_MMRS=0 keeps the fused matmul + reduce-scatter prefill out-projection off (it deadlocked on the pair and has never run at four devices; the general-tp4-mmrs profile is its dedicated arm), and QWEN_FAST_GDN_PREFILL_CONV_AUDIT=4 runs the exact prefill conv beside the FIR for the first four chunks at C = 2560, kd = 512 (a shape that has never run on hardware) and stops the engine on a byte mismatch; drop it once J2 passes.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "65536",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "65536",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 65536,
+        "max-num-seqs": 8,
+        "block-size": 64,
+        "max-num-batched-tokens": 65536,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        },
+        "enable-prefix-caching": true,
+        "enable-chunked-prefill": true,
+        "prefix-caching-hash-algo": "sha256"
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
+    "general-tp4-131k": {
+      "description": "general at TP4, 4 seats x 131,072: general-tp4 with the context doubled and the seats halved - the same pool, 524,288 tokens = 4.56 GB per chip. All four p150a cards as one (1, 4) mesh (mesh_device P150x4, TP4): the four-card ring descriptor (tp4_mesh: 2x2, 2 channels), FABRIC_1D (the plugin default, stated) with the model's own Ring collectives at 2 links (tt_ccl P150x4), the ring check at mesh open, and on-device sampling for decode (sample_on_device_mode decode_only: 248,320 / 4 = 62,080 logits per device fits the sampler; the TT plugin falls back to host sampling per batch for min_p, logit_bias, bad_words, any logprobs request (at four devices the fixture refuses device sampling for a batch with a logprobs request) and the like, and /models/.qwen-c2/device-sampling.off or QWEN_HOST_SAMPLING=1 drops it for every batch). The image's model graft and kernels are TP-generic (per-device widths from tp = 4); the GDN kernels were qualified at 24 value heads per chip and run 12 here. UNVERIFIED on hardware until the TP4 jobs pass. TP4 bring-up switches (env): QWEN_GDN_PREFILL_MMRS=0 keeps the fused matmul + reduce-scatter prefill out-projection off (it deadlocked on the pair and has never run at four devices; the general-tp4-mmrs profile is its dedicated arm), and QWEN_FAST_GDN_PREFILL_CONV_AUDIT=4 runs the exact prefill conv beside the FIR for the first four chunks at C = 2560, kd = 512 (a shape that has never run on hardware) and stops the engine on a byte mismatch; drop it once J2 passes.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "131072",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131072,
+        "max-num-seqs": 4,
+        "block-size": 64,
+        "max-num-batched-tokens": 131072,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "no-enable-chunked-prefill": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        }
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
+    "general-prefix-tp4-131k": {
+      "description": "general-prefix at TP4, 4 seats x 131,072: general-prefix-tp4 with the context doubled and the seats halved (pool 524,288 tokens, 4.56 GB per chip); its no-reuse baseline is general-tp4-131k. All four p150a cards as one (1, 4) mesh (mesh_device P150x4, TP4): the four-card ring descriptor (tp4_mesh: 2x2, 2 channels), FABRIC_1D (the plugin default, stated) with the model's own Ring collectives at 2 links (tt_ccl P150x4), the ring check at mesh open, and on-device sampling for decode (sample_on_device_mode decode_only: 248,320 / 4 = 62,080 logits per device fits the sampler; the TT plugin falls back to host sampling per batch for min_p, logit_bias, bad_words, any logprobs request (at four devices the fixture refuses device sampling for a batch with a logprobs request) and the like, and /models/.qwen-c2/device-sampling.off or QWEN_HOST_SAMPLING=1 drops it for every batch). The image's model graft and kernels are TP-generic (per-device widths from tp = 4); the GDN kernels were qualified at 24 value heads per chip and run 12 here. UNVERIFIED on hardware until the G1 gates pass at TP4. TP4 bring-up switches (env): QWEN_GDN_PREFILL_MMRS=0 keeps the fused matmul + reduce-scatter prefill out-projection off (it deadlocked on the pair and has never run at four devices; the general-tp4-mmrs profile is its dedicated arm), and QWEN_FAST_GDN_PREFILL_CONV_AUDIT=4 runs the exact prefill conv beside the FIR for the first four chunks at C = 2560, kd = 512 (a shape that has never run on hardware) and stops the engine on a byte mismatch; drop it once J2 passes.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "131072",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131072,
+        "max-num-seqs": 4,
+        "block-size": 64,
+        "max-num-batched-tokens": 131072,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        },
+        "enable-prefix-caching": true,
+        "enable-chunked-prefill": true,
+        "prefix-caching-hash-algo": "sha256"
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
+    "general-tp4-bench": {
+      "description": "GATE ONLY (J3, the TP4 decode benchmark, and G5 at TP4): general at TP4 with 8 seats x 131,072, a pool of 1,048,576 tokens = 9.13 GB per chip of bf8 KV, ~23.4 GB per chip in all by the arithmetic in general-tp4 (~10 GB free, d): one engine serves every benchmark shape - one stream at 4k to 131k, 4 and 8 concurrent streams at 4k to 64k, 4 at 131k - so the job opens the cards once. Not for traffic until G5 at TP4 has measured that pool. All four p150a cards as one (1, 4) mesh (mesh_device P150x4, TP4): the four-card ring descriptor (tp4_mesh: 2x2, 2 channels), FABRIC_1D (the plugin default, stated) with the model's own Ring collectives at 2 links (tt_ccl P150x4), the ring check at mesh open, and on-device sampling for decode (sample_on_device_mode decode_only: 248,320 / 4 = 62,080 logits per device fits the sampler; the TT plugin falls back to host sampling per batch for min_p, logit_bias, bad_words, any logprobs request (at four devices the fixture refuses device sampling for a batch with a logprobs request) and the like, and /models/.qwen-c2/device-sampling.off or QWEN_HOST_SAMPLING=1 drops it for every batch). The image's model graft and kernels are TP-generic (per-device widths from tp = 4); the GDN kernels were qualified at 24 value heads per chip and run 12 here.  TP4 bring-up switches (env): QWEN_GDN_PREFILL_MMRS=0 keeps the fused matmul + reduce-scatter prefill out-projection off (it deadlocked on the pair and has never run at four devices; the general-tp4-mmrs profile is its dedicated arm), and QWEN_FAST_GDN_PREFILL_CONV_AUDIT=4 runs the exact prefill conv beside the FIR for the first four chunks at C = 2560, kd = 512 (a shape that has never run on hardware) and stops the engine on a byte mismatch; drop it once J2 passes.",
+      "gate_only": true,
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "131072",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131072,
+        "max-num-seqs": 8,
+        "block-size": 64,
+        "max-num-batched-tokens": 131072,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "no-enable-chunked-prefill": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        }
       },
       "request_contract": false,
       "drop_batched_decode_mode": false

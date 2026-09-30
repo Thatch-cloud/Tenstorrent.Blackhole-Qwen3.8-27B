@@ -21,6 +21,9 @@ This patch is deliberately conservative:
     serialising the descriptor each time would cost more than the links save
   - it logs what it found, so the arm can prove the lever moved rather than be
     assumed to have
+  - on a mesh of more than two devices (the four-card (1, 4) ring) it counts the
+    links of every consecutive pair in mesh order, the closing pair included, and
+    uses the smallest; a two-device mesh is counted exactly as before (chip 0 to 1)
 
 WHAT IT IS BEING USED TO TEST. Prefill loses about 280 ms, 7.6% of device time,
 to collectives waiting: the two chips do identical non-collective work (2322.5
@@ -67,12 +70,25 @@ def _qwen_discovered_links(mesh_device):
         return _QWEN_LINK_CACHE[key]
     found = None
     try:
-        if mesh_device.get_num_devices() == 2:
+        devices = mesh_device.get_num_devices()
+        if devices == 2:
             path = ttnn.cluster.serialize_cluster_descriptor()
             with open(path, "r") as handle:
                 found = _qwen_count_descriptor_links(handle.read())
             if found:
                 logger.info("[CCLLINKS] cluster descriptor reports {} links", found)
+        elif devices > 2:
+            # A (1, N) mesh is a ring in mesh order: every collective crosses each consecutive pair, the
+            # closing pair included, so the usable count is the smallest of those edges.
+            order = [int(device) for device in mesh_device.get_device_ids()]
+            path = ttnn.cluster.serialize_cluster_descriptor()
+            with open(path, "r") as handle:
+                text = handle.read()
+            counts = [_qwen_count_descriptor_links(text, order[i], order[(i + 1) % len(order)])
+                      for i in range(len(order))]
+            if all(counts):
+                found = min(counts)
+                logger.info("[CCLLINKS] cluster descriptor reports ring edges {} -> {} links", counts, found)
     except BaseException as error:
         logger.warning("[CCLLINKS] discovery failed, keeping the table: {}", error)
         found = None

@@ -227,6 +227,8 @@ UNREVIEWED = 'UNREVIEWED: changed at HEAD since bundle 77d6995a and overlaid by 
 KNOWN_STALE = {
     'lever_n_model_patch.py': 'host-side only: imported by lever_n_m3native_patch in the graft '
                               'job on the runner, never inside the container',
+    'ccl_link_patch.py': 'host-side only: qwen-ccl-link-gate.yml runs it on the runner to patch a copy of tt_ccl.py '
+                         'for that gate, never inside the serving container (the four-card ring count changed at HEAD)',
     'longctx_cycle_bench.py': 'mounted per arm at /bench/longctx_cycle_bench.py '
                               '(lever_n_m3native_run_arm.sh), not imported from the baked tree',
     'feature_collective.py': UNREVIEWED,

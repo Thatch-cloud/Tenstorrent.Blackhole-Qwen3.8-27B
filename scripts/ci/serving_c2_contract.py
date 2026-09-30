@@ -45,6 +45,17 @@ process match it:
    to feed the parsers one token per sub-delta where that matters and merge the results into one
    message per step. general, the general-prefix profiles and exact never arm it (general and
    general-prefix decode one token per step).
+8. meshes: a profile that names no mesh_device serves the pair exactly as before - the image's MESH_DEVICE
+   (P300, a (1, 2) mesh) under the p150_x2 descriptor. A profile with mesh_device P150x4 (the general-tp4
+   family) serves all four cards as one (1, 4) mesh: the contract sets MESH_DEVICE from it, the profile names
+   the four-card ring's descriptor (tp4_mesh: 2x2, two channels, laid by the overlay), and every process
+   installs the ring check on the TT plugin's open_mesh_device (tp4_mesh.install_ring_check: a broken ring
+   stops the engine, a degraded one is logged; QWEN_TP4_RING_CHECK=0 skips it). mesh_problems refuses a mesh
+   and descriptor that disagree, the fast path anywhere but the pair (its kernels, per-chip literals and
+   evidence are TP2), and on-device sampling on a mesh whose vocabulary shard exceeds the sampler's 65,536
+   logits (the pair's 124,160). The TP4 profiles sample on device (sample_on_device_mode decode_only; the TT
+   plugin still falls back to host sampling per batch for what the device sampler cannot do); the file
+   HOST_SAMPLING_FILE or QWEN_HOST_SAMPLING=1 drops it at boot, so every batch samples on the host.
 
 Nothing here changes a gate: every step is off unless QWEN_C2_SERVING=1.
 """
@@ -75,6 +86,32 @@ PREFIX_HASH_ALGO = 'sha256'
 MODEL_ENTRY = 'models.demos.blackhole.qwen36.tt.qwen36_vllm'
 # A profile with gate_only: true boots only with this set to 1.
 GATE_SWITCH = 'QWEN_C2_GATE'
+
+# The meshes a profile may open (item 8), keyed by its mesh_device: None is every profile that names none (the
+# pair, under the image's own MESH_DEVICE=P300), P150x4 the four-card (1, 4) ring (tp4_mesh.DESCRIPTOR_PATH,
+# where docker/qwen-c2-overlay.txt lays scripts/ci's descriptor).
+PAIR_DESCRIPTOR = '/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_x2_mesh_graph_descriptor.textproto'
+RING_DESCRIPTOR = '/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto'
+# The pair at the two links this cabling trains (M-A: 2, where p150_x2 declares 4, which STRICT_INIT refuses at
+# fabric init): only the general-2link profile, the TP2 reference and baseline for TP4, names it. mesh_device
+# P300 is the image's own MESH_DEVICE for the pair, so nothing else about the open changes.
+PAIR_2LINK_DESCRIPTOR = '/opt/qwen-c2/mesh/qwen_p150x2_2link_mesh_graph_descriptor.textproto'
+MESHES = {
+    None: dict(shape=(1, 2), descriptor=PAIR_DESCRIPTOR),
+    'P300': dict(shape=(1, 2), descriptor=PAIR_2LINK_DESCRIPTOR),
+    'P150x4': dict(shape=(1, 4), descriptor=RING_DESCRIPTOR),
+}
+# The on-device sampler takes at most this many logits per device (qwen36 model.py; vocabulary 248,320).
+VOCABULARY = 248320
+SAMPLER_MAX_LOGITS = 65536
+SAMPLE_ON_DEVICE_MODES = ('decode_only', 'all')
+# Host sampling for every batch of a profile that samples on device: this file on the persistent mount (an
+# operator's switch, like the prefix-reuse kill switch) or QWEN_HOST_SAMPLING=1 drops sample_on_device_mode.
+HOST_SAMPLING_FILE = '/models/.qwen-c2/device-sampling.off'
+HOST_SAMPLING_ENV = 'QWEN_HOST_SAMPLING'
+# The ring check on the TT plugin's open_mesh_device (tp4_mesh.install_ring_check); 0 skips it.
+RING_CHECK_ENV = 'QWEN_TP4_RING_CHECK'
+PLUGIN_WORKER = 'vllm_tt_plugin.worker'
 
 # Client cache_salt under a prefix profile (design 2.2 need 4, decision D-P2). A salt partitions vLLM's
 # prefix cache and the checkpoint registry: requests with one salt share KV blocks and checkpoints, and
@@ -153,11 +190,91 @@ def resolve_snapshot(profile, exists=os.path.isdir):
     raise ValueError('None of the pinned target snapshots is mounted: %s' % ', '.join(profile['snapshots']))
 
 
+def mesh_of(profile):
+    """The MESHES entry of a profile (its mesh_device, or the pair's when it names none)."""
+    device = profile.get('mesh_device')
+    if device not in MESHES:
+        raise ValueError('mesh_device %r is not one of %s' % (device, ', '.join(sorted(
+            name for name in MESHES if name is not None))))
+    return MESHES[device]
+
+
+def tt_config(profile):
+    return ((profile.get('engine') or {}).get('additional-config') or {}).get('tt') or {}
+
+
+def mesh_problems(profile):
+    """Every way the profile's mesh, descriptor, fast path and sampling disagree (item 8), [] when none."""
+    try:
+        mesh = mesh_of(profile)
+    except ValueError as error:
+        return [str(error)]
+    problems = []
+    if profile.get('mesh_graph_descriptor') != mesh['descriptor']:
+        problems.append('mesh %s needs the descriptor %s, not %s' % (
+            profile.get('mesh_device') or 'P300 (the pair)', mesh['descriptor'], profile.get('mesh_graph_descriptor')))
+    if 'MESH_DEVICE' in (profile.get('env') or {}):
+        problems.append("MESH_DEVICE is the profile's mesh_device, never an env value")
+    rows, cols = mesh['shape']
+    if ((profile.get('engine') or {}).get('additional-config') or {}).get('qwen_fast_t16') and profile.get('mesh_device'):
+        problems.append('the fast path (qwen_fast_t16) serves the p150_x2 pair only: its kernels, per-chip widths, link '
+                        'policy (sampling_link_policy pins that descriptor) and qualification evidence are two-chip '
+                        'at four links; a (%d, %d) mesh under %s serves the general profiles'
+                        % (rows, cols, profile['mesh_device']))
+    mode = tt_config(profile).get('sample_on_device_mode')
+    if mode is not None:
+        if mode not in SAMPLE_ON_DEVICE_MODES:
+            problems.append('sample_on_device_mode %r is not one of %s' % (mode, ', '.join(SAMPLE_ON_DEVICE_MODES)))
+        per_device = -(-VOCABULARY // (rows * cols))
+        if per_device > SAMPLER_MAX_LOGITS:
+            problems.append('on-device sampling needs at most %d logits per device; a (%d, %d) mesh has %d'
+                            % (SAMPLER_MAX_LOGITS, rows, cols, per_device))
+    return problems
+
+
+def ring_mesh(profile):
+    """Whether the profile opens a mesh of more than two devices (the four-card ring)."""
+    rows, cols = mesh_of(profile)['shape']
+    return rows * cols > 2
+
+
+def host_sampling_forced(environ=None, exists=os.path.exists):
+    environ = os.environ if environ is None else environ
+    return environ.get(HOST_SAMPLING_ENV) == '1' or exists(HOST_SAMPLING_FILE)
+
+
+def without_device_sampling(profile):
+    """The profile with sample_on_device_mode removed from its engine's tt config (a copy; the input is kept)."""
+    copied = json.loads(json.dumps(profile))
+    tt = ((copied.get('engine') or {}).get('additional-config') or {}).get('tt')
+    if tt is not None:
+        tt.pop('sample_on_device_mode', None)
+    return copied
+
+
+def install_ring_check(environ=None):
+    """Under a ring profile, in every process: tp4_mesh's check on the TT plugin's open_mesh_device, when the
+    plugin's worker module is imported (the engine process opens the mesh). -> whether it was armed."""
+    environ = os.environ if environ is None else environ
+    if environ.get(RING_CHECK_ENV) == '0':
+        log('mesh: the four-card ring check is off (%s=0)', RING_CHECK_ENV)
+        return False
+    import tp4_mesh
+
+    sys.meta_path.insert(0, PostImportHook(PLUGIN_WORKER, lambda module: tp4_mesh.install_ring_check(
+        module, lambda line: log('%s', line))))
+    return True
+
+
 def apply_environment(profile, environ=None):
     environ = os.environ if environ is None else environ
     for key, value in profile['env'].items():
         environ[key] = str(value)
     environ['TT_MESH_GRAPH_DESC_PATH'] = profile['mesh_graph_descriptor']
+    # Item 8: a profile that names its mesh sets MESH_DEVICE over the image's and the platform's P300; one that
+    # names none leaves MESH_DEVICE as it found it, exactly as before.
+    if profile.get('mesh_device'):
+        environ['MESH_DEVICE'] = profile['mesh_device']
     # The fast path was measured without it; the stock decode path (general profile) is what
     # it configures, and the platform bakes it =host, so that profile keeps it.
     if profile.get('drop_batched_decode_mode', True):
@@ -682,7 +799,12 @@ def boot(environ=None, orig_argv=None):
     problems = prefix_reuse_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve prefix reuse exactly: %s' % (profile['name'], '; '.join(problems)))
+    problems = mesh_problems(profile)
+    if problems:
+        raise ValueError('profile %s cannot open its mesh: %s' % (profile['name'], '; '.join(problems)))
     apply_environment(profile, environ)
+    if ring_mesh(profile):
+        install_ring_check(environ)
     if profile.get('skip_device_teardown', True):
         # Registered at interpreter start, so it runs after every other atexit handler.
         install_teardown_skip()
@@ -696,10 +818,18 @@ def boot(environ=None, orig_argv=None):
         sys.meta_path.insert(0, PostImportHook(MODEL_ENTRY, log_model_tree))
     if api_server:
         snapshot = resolve_snapshot(profile)
+        if tt_config(profile).get('sample_on_device_mode') is not None and host_sampling_forced(environ):
+            profile = dict(without_device_sampling(profile), name=profile['name'])
+            log('profile %s: host sampling for every batch (%s=1 or %s): sample_on_device_mode dropped',
+                profile['name'], HOST_SAMPLING_ENV, HOST_SAMPLING_FILE)
         sys.argv[:] = rewrite_argv(sys.argv, profile, snapshot)
         log('profile %s: vLLM argv %s', profile['name'], json.dumps(sys.argv[1:]))
         log('mesh %s, output budget %d, context %s', environ['TT_MESH_GRAPH_DESC_PATH'], budget,
             profile['engine'].get('max-model-len'))
+        if profile.get('mesh_device'):
+            log('mesh device %s %s, fabric %s, sampling %s', profile['mesh_device'], list(mesh_of(profile)['shape']),
+                tt_config(profile).get('fabric_config', 'the plugin default'),
+                tt_config(profile).get('sample_on_device_mode') or 'host')
         if prefix_reuse(profile):
             refusals, warnings = prefix_launch_problems(sys.argv[1:])
             if refusals:

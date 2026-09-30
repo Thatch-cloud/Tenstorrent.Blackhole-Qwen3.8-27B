@@ -1,0 +1,14 @@
+# Four p150a cards opened as one (1, 4) mesh (scripts/ci/tp4_mesh.py says why the mesh is 2x2).
+# A 2x2 mesh makes every edge of the 4-cycle a mesh edge; MeshShape(1, 4) maps onto it ring-first.
+# 2 channels per edge: the links each card pair trains. No card is named: the fabric maps
+# logical chips onto whatever the cluster discovers, and tp4_mesh.check_ring verifies the ring.
+
+mesh_descriptors {
+  name: "M0"
+  arch: BLACKHOLE
+  device_topology { dims: [ 2, 2 ] }
+  host_topology   { dims: [ 1, 1 ] }
+  channels { count: 2 policy: RELAXED }
+}
+
+top_level_instance { mesh { mesh_descriptor: "M0" mesh_id: 0 } }

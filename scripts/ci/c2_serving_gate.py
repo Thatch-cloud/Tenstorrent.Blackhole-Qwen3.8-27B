@@ -2639,6 +2639,61 @@ def serving_pair(root='/dev/tenstorrent/by-id'):
     return devices
 
 
+# The card sets a hardware step can open (qwen-c2-serving.yml C2_CARDS): the pair above, or every Blackhole board
+# present - the four-card (1, 4) mesh - resolved by board id at the moment of use and never named (card_set.sh is
+# the shell's copy of the rule: exactly QUAD_BOARDS by-id links named blackhole-*, on distinct device nodes).
+CARD_SETS = ('pair', 'quad')
+QUAD_BOARDS = 4
+BOARD_ID = re.compile(r'blackhole-[A-Za-z0-9._-]+\Z')
+
+
+def card_set(root='/dev/tenstorrent/by-id', expect=QUAD_BOARDS, listdir=os.listdir, realpath=os.path.realpath,
+             is_device=None):
+    """Every Blackhole board present, resolved by board id now: their device nodes in board-id order. Refuses
+    (RuntimeError) anything but exactly `expect` boards on distinct nodes."""
+    if is_device is None:
+        import stat
+
+        def is_device(path):
+            try:
+                return stat.S_ISCHR(os.stat(path).st_mode)
+            except OSError:
+                return False
+    boards = sorted(name for name in listdir(root) if BOARD_ID.match(name))
+    if len(boards) != expect:
+        raise RuntimeError('%d Blackhole boards under %s (%s), not %d' % (len(boards), root, ', '.join(boards), expect))
+    devices = []
+    for board in boards:
+        path = realpath(os.path.join(root, board))
+        if path == os.path.join(root, board) or not is_device(path):
+            raise RuntimeError('board %s has no device node under %s' % (board, root))
+        if path in devices:
+            raise RuntimeError('two boards resolve to %s' % path)
+        devices.append(path)
+    return devices
+
+
+def devices_for(cards):
+    """The device nodes a step opens for C2_CARDS `cards`, resolved now."""
+    if cards not in CARD_SETS:
+        raise ValueError('cards must be one of %s, got %r' % (', '.join(CARD_SETS), cards))
+    return serving_pair() if cards == 'pair' else card_set()
+
+
+def cards_problem(cards, profiles, names):
+    """Why the named profiles cannot open card set `cards` (a four-card profile on the pair, or a pair profile on all
+    four), or None. Reads each profile's mesh_device as the contract does (serving_c2_contract.mesh_of)."""
+    for name in names:
+        if not name or name == 'none' or name not in profiles['profiles']:
+            continue
+        device = profiles['profiles'][name].get('mesh_device')
+        if (device != 'P150x4') if cards == 'quad' else (device not in (None, 'P300')):
+            return ('profile %s opens %s, but C2_CARDS=%s gives %s' % (
+                name, 'the four-card (1, 4) mesh' if device == 'P150x4' else 'the (1, 2) pair', cards,
+                'all four cards' if cards == 'quad' else 'cards M and A'))
+    return None
+
+
 def image_corpus(image, checkout):
     """The real-text corpus the image's harness would build (real_text_prompts.build_corpus over the
     image's installed vLLM), read in a throwaway container - no network, no devices, the contract's
@@ -2694,6 +2749,9 @@ def build_parser():
     parser.add_argument('--profiles', default=None, help='a profiles JSON instead of the image\'s own')
     parser.add_argument('--hub', default=HUB)
     parser.add_argument('--dry-run', action='store_true', help='print every arm\'s docker argv and run nothing')
+    parser.add_argument('--cards', choices=CARD_SETS, default='pair',
+                        help='pair: cards M and A (the default); quad: every Blackhole board present, the four-card '
+                             '(1, 4) mesh the TP4 profiles open (qwen-c2-serving.yml C2_CARDS)')
     # S2 (the module docstring's S2 PLANS; c2_serving_job's C2_GATE_* keys).
     parser.add_argument('--pairs', type=int, default=None, help='control and control-below A/B pairs (default %d; '
                                                                 'control adds one audited arm after them)'
@@ -2797,6 +2855,10 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
     if options.profile not in profiles['profiles']:
         log('profile %r is not in the image\'s profiles (%s)' % (options.profile, ', '.join(sorted(profiles['profiles']))))
         return 2
+    problem = cards_problem(options.cards, profiles, (options.profile,))
+    if problem:
+        log('refused: %s' % problem)
+        return 2
     # Every plan is checked against the image's profile before any container starts.
     arms_of = {}
     for plan in plans:
@@ -2831,7 +2893,9 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                 arm, args, timeout = spec
                 log(json.dumps(dict(arm=arm, timeout=timeout, docker=gate_run(
                     options.image, CONTAINER_PREFIX + arm, getattr(spec, 'profile', None) or options.profile,
-                    devices or ['<M>', '<A>'], options.checkout, os.path.join(options.results, arm), args, options.hub,
+                    devices or (['<M>', '<A>'] if options.cards == 'pair' else
+                                ['<card %d>' % n for n in range(QUAD_BOARDS)]),
+                    options.checkout, os.path.join(options.results, arm), args, options.hub,
                     env=getattr(spec, 'env', ()), salt=options.salt, salt_key_path=salt_key_path))))
         return 0
     cache_dir = None
@@ -2846,7 +2910,7 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
             log('[C2-GATE] note: the image\'s kernel cache (%s) is not on the hub: kernel-cache growth is not counted, '
                 'and every arm that judges it leaves its plan NOT_EXERCISED' % KERNEL_CACHE_ENV)
     runner = Runner(options.image, options.profile, options.results, options.checkout,
-                    devices if devices is not None else serving_pair(), options.hub, execute, log, containers, corpus,
+                    devices if devices is not None else devices_for(options.cards), options.hub, execute, log, containers, corpus,
                     any_request=any_request_profile(profiles, options.profile), profiles=profiles,
                     cache_entries=cache_entries, jit=options.jit, policy=options.policy,
                     decision=options.policy_decision, salt=options.salt, salt_key_path=salt_key_path)

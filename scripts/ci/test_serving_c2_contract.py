@@ -498,5 +498,218 @@ class BootTest(unittest.TestCase):
         self.assertIsNone(contract.boot(environ={}, orig_argv=['python3', '-m', contract.API_SERVER]))
 
 
+TP4_PROFILES = ('general-tp4', 'general-prefix-tp4', 'general-tp4-131k', 'general-prefix-tp4-131k', 'general-tp4-bench',
+                'general-tp4-mmrs')
+# The bring-up switches every TP4 profile carries in its env (see the profiles' descriptions): the fused prefill
+# out-projection off (general-tp4-mmrs is the arm that turns it on) and the prefill conv audited for four chunks.
+TP4_BRINGUP_ENV = {'QWEN_GDN_PREFILL_MMRS': '0', 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT': '4'}
+# KV bytes per token per chip at TP4: 16 attention layers x (K, V) x one KV head x 256 x 1.0625 B (bf8).
+TP4_KV_BYTES_PER_TOKEN = 16 * 2 * 1 * 256 * 17 // 16
+
+
+def document():
+    with open(PROFILES, encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+class MeshTest(unittest.TestCase):
+    """Item 8: the pair's profiles name no mesh and serve as before; the TP4 family opens all four cards."""
+
+    def test_every_profile_opens_a_mesh_its_descriptor_and_sampling_agree_with(self):
+        for name in document()['profiles']:
+            profile = contract.load_profile(PROFILES, name)
+            self.assertEqual(contract.mesh_problems(profile), [], name)
+
+    def test_the_pairs_profiles_are_untouched(self):
+        for name, profile in document()['profiles'].items():
+            if name in TP4_PROFILES or name == 'general-2link':
+                continue
+            self.assertNotIn('mesh_device', profile, name)
+            self.assertEqual(profile['mesh_graph_descriptor'], contract.PAIR_DESCRIPTOR, name)
+            tt = profile['engine']['additional-config']['tt']
+            self.assertNotIn('sample_on_device_mode', tt, name)
+            self.assertNotIn('fabric_config', tt, name)
+            self.assertFalse(contract.ring_mesh(profile), name)
+            environ = contract.apply_environment(dict(profile, name=name), {'MESH_DEVICE': 'P300'})
+            self.assertEqual(environ['MESH_DEVICE'], 'P300', 'a pair profile leaves MESH_DEVICE as it found it')
+
+    def test_the_two_link_pair_is_general_under_a_two_channel_descriptor(self):
+        import tp4_mesh
+
+        self.assertEqual(contract.PAIR_2LINK_DESCRIPTOR, tp4_mesh.PAIR_DESCRIPTOR_PATH)
+        self.assertEqual(contract.MESHES['P300']['shape'], (1, 2))
+        mine, general = contract.load_profile(PROFILES, 'general-2link'), contract.load_profile(PROFILES, 'general')
+        self.assertEqual(mine['mesh_device'], 'P300')
+        self.assertEqual(mine['mesh_graph_descriptor'], contract.PAIR_2LINK_DESCRIPTOR)
+        for key in ('engine', 'env', 'eos_ids', 'snapshots', 'request_contract', 'drop_batched_decode_mode'):
+            self.assertEqual(mine[key], general[key], key)
+        self.assertEqual(contract.mesh_problems(mine), [])
+        self.assertFalse(contract.ring_mesh(mine))
+        environ = contract.apply_environment(mine, {'MESH_DEVICE': 'P300', 'TT_MESH_GRAPH_DESC_PATH': 'p300'})
+        self.assertEqual((environ['MESH_DEVICE'], environ['TT_MESH_GRAPH_DESC_PATH']),
+                         ('P300', contract.PAIR_2LINK_DESCRIPTOR))
+
+    def test_the_fast_path_is_refused_under_the_two_link_pair(self):
+        fast = json.loads(json.dumps(contract.load_profile(PROFILES, 'general-2link')))
+        fast['engine']['additional-config']['qwen_fast_t16'] = True
+        problems = contract.mesh_problems(fast)
+        self.assertTrue(any('fast path' in problem and 'p150_x2' in problem for problem in problems), problems)
+        pinned = contract.load_profile(PROFILES, 'c2')
+        self.assertEqual(contract.mesh_problems(pinned), [], 'the fast path stays on the four-channel pair')
+
+    def test_the_tp4_family_opens_the_four_card_ring(self):
+        import tp4_mesh
+
+        self.assertEqual(contract.RING_DESCRIPTOR, tp4_mesh.DESCRIPTOR_PATH)
+        self.assertEqual(contract.MESHES['P150x4']['shape'], tp4_mesh.MESH_SHAPE)
+        for name in TP4_PROFILES:
+            profile = contract.load_profile(PROFILES, name)
+            self.assertEqual(profile['mesh_device'], tp4_mesh.MESH_DEVICE, name)
+            self.assertEqual(profile['mesh_graph_descriptor'], tp4_mesh.DESCRIPTOR_PATH, name)
+            tt = contract.tt_config(profile)
+            self.assertEqual(tt['fabric_config'], tp4_mesh.FABRIC_CONFIG, name)
+            self.assertEqual(tt['sample_on_device_mode'], 'decode_only', name)
+            self.assertTrue(contract.ring_mesh(profile), name)
+            self.assertNotIn('qwen_fast_t16', profile['engine']['additional-config'], name)
+            self.assertIs(profile['request_contract'], False, name)
+            environ = contract.apply_environment(profile, {'MESH_DEVICE': 'P300', 'TT_MESH_GRAPH_DESC_PATH': 'p300'})
+            self.assertEqual((environ['MESH_DEVICE'], environ['TT_MESH_GRAPH_DESC_PATH']),
+                             ('P150x4', tp4_mesh.DESCRIPTOR_PATH), name)
+
+    def test_each_tp4_profile_is_its_pair_twin_at_its_own_seats_and_context(self):
+        twins = {'general-tp4': 'general', 'general-prefix-tp4': 'general-prefix', 'general-tp4-131k': 'general',
+                 'general-prefix-tp4-131k': 'general-prefix', 'general-tp4-bench': 'general',
+                 'general-tp4-mmrs': 'general'}
+        sized = ('max-model-len', 'max-num-batched-tokens', 'max-num-seqs')
+        for name, twin in twins.items():
+            mine, theirs = contract.load_profile(PROFILES, name), contract.load_profile(PROFILES, twin)
+            self.assertEqual({key: value for key, value in mine['engine'].items() if key not in sized + ('additional-config',)},
+                             {key: value for key, value in theirs['engine'].items() if key not in sized + ('additional-config',)},
+                             name)
+            tt = dict(contract.tt_config(mine))
+            self.assertEqual((tt.pop('fabric_config'), tt.pop('sample_on_device_mode')), ('FABRIC_1D', 'decode_only'))
+            self.assertEqual(tt, contract.tt_config(theirs), name)
+            context = mine['engine']['max-model-len']
+            self.assertEqual(mine['engine']['max-num-batched-tokens'], context, 'whole-prompt prefill')
+            expected_env = dict(theirs['env'], QWEN_FAST_MAX_POSITION=str(context), QWEN_DSPARK_REQUEST_CONTEXT=str(context),
+                                **dict(TP4_BRINGUP_ENV, **({'QWEN_GDN_PREFILL_MMRS': '1'} if name == 'general-tp4-mmrs' else {})))
+            self.assertEqual(mine['env'], expected_env, name)
+            for key in ('eos_ids', 'snapshots', 'request_contract', 'drop_batched_decode_mode'):
+                self.assertEqual(mine.get(key), theirs.get(key), (name, key))
+            self.assertEqual(contract.prefix_reuse(mine), contract.prefix_reuse(theirs), name)
+            self.assertEqual(contract.prefix_reuse_problems(mine), [], name)
+
+    def test_the_pools_follow_the_dram_arithmetic(self):
+        pools = {}
+        for name in TP4_PROFILES:
+            engine = contract.load_profile(PROFILES, name)['engine']
+            pools[name] = engine['max-model-len'] * engine['max-num-seqs']
+        serving = [name for name in TP4_PROFILES if name != 'general-tp4-bench']
+        self.assertIs(contract.load_profile(PROFILES, 'general-tp4-mmrs').get('gate_only'), True)
+        for name in serving:
+            self.assertEqual(pools[name], 524288, name)
+            # the same KV per chip as general's 4 x 65,536 on the pair (17,408 B per token per chip there)
+            self.assertEqual(pools[name] * TP4_KV_BYTES_PER_TOKEN, 4 * 65536 * 17408, name)
+        self.assertEqual(TP4_KV_BYTES_PER_TOKEN, 8704)
+        self.assertEqual(pools['general-tp4-bench'], 8 * 131072)
+        self.assertLess(pools['general-tp4-bench'] * TP4_KV_BYTES_PER_TOKEN, 9.2e9)
+        self.assertIs(contract.load_profile(PROFILES, 'general-tp4-bench').get('gate_only'), True,
+                      'the 9.13 GB-per-chip pool is unmeasured: gate only until G5 at TP4')
+        seats = {name: contract.load_profile(PROFILES, name)['engine']['max-num-seqs'] for name in TP4_PROFILES}
+        self.assertEqual(seats, {'general-tp4': 8, 'general-prefix-tp4': 8, 'general-tp4-131k': 4,
+                                 'general-prefix-tp4-131k': 4, 'general-tp4-bench': 8,
+                                 'general-tp4-mmrs': 8})
+
+    def test_what_a_mesh_cannot_serve_is_refused(self):
+        ring = contract.load_profile(PROFILES, 'general-tp4')
+        fast = dict(contract.load_profile(PROFILES, 'c2'), mesh_device='P150x4',
+                    mesh_graph_descriptor=contract.RING_DESCRIPTOR)
+        self.assertTrue(any('fast path' in problem for problem in contract.mesh_problems(fast)))
+        pair_sampling = json.loads(json.dumps(contract.load_profile(PROFILES, 'general')))
+        pair_sampling['engine']['additional-config']['tt']['sample_on_device_mode'] = 'decode_only'
+        self.assertEqual(contract.mesh_problems(pair_sampling),
+                         ['on-device sampling needs at most 65536 logits per device; a (1, 2) mesh has 124160'])
+        wrong_descriptor = dict(ring, mesh_graph_descriptor=contract.PAIR_DESCRIPTOR)
+        self.assertTrue(contract.mesh_problems(wrong_descriptor)[0].startswith('mesh P150x4 needs the descriptor'))
+        pair_on_ring = dict(contract.load_profile(PROFILES, 'general'), mesh_graph_descriptor=contract.RING_DESCRIPTOR)
+        self.assertTrue(contract.mesh_problems(pair_on_ring)[0].startswith('mesh P300 (the pair) needs'))
+        self.assertEqual(contract.mesh_problems(dict(ring, mesh_device='P150x8')),
+                         ["mesh_device 'P150x8' is not one of P150x4, P300"])
+        env_mesh = dict(ring, env=dict(ring['env'], MESH_DEVICE='P150x4'))
+        self.assertIn("MESH_DEVICE is the profile's mesh_device, never an env value", contract.mesh_problems(env_mesh))
+        bad_mode = json.loads(json.dumps(ring))
+        bad_mode['engine']['additional-config']['tt']['sample_on_device_mode'] = 'prefill'
+        self.assertTrue(any('not one of' in problem for problem in contract.mesh_problems(bad_mode)))
+
+    def test_host_sampling_drops_device_sampling_and_nothing_else(self):
+        ring = contract.load_profile(PROFILES, 'general-tp4')
+        self.assertFalse(contract.host_sampling_forced({}, exists=lambda path: False))
+        self.assertTrue(contract.host_sampling_forced({contract.HOST_SAMPLING_ENV: '1'}, exists=lambda path: False))
+        self.assertTrue(contract.host_sampling_forced({}, exists=lambda path: path == contract.HOST_SAMPLING_FILE))
+        host = contract.without_device_sampling(ring)
+        self.assertNotIn('sample_on_device_mode', contract.tt_config(host))
+        self.assertIn('sample_on_device_mode', contract.tt_config(ring), 'the input profile is kept')
+        before, after = contract.engine_arguments(ring, '/snap'), contract.engine_arguments(host, '/snap')
+        self.assertEqual([token for token in before if not token.startswith('{')],
+                         [token for token in after if not token.startswith('{')])
+        additional = json.loads(after[after.index('--additional-config') + 1])
+        self.assertEqual(additional['tt'], {'trace_region_size': 1073741824, 'l1_small_size': 24576,
+                                            'fabric_config': 'FABRIC_1D'})
+
+    def boot(self, name, environ, argv):
+        """contract.boot under a TP4 profile in the API server, with the process-wide effects patched out."""
+        import unittest.mock as mock
+
+        environ = dict(environ, QWEN_C2_SERVING='1', QWEN_C2_PROFILE=name, QWEN_C2_PROFILES=PROFILES)
+        before = list(sys.meta_path)
+        saved_argv = list(sys.argv)
+        sys.argv[:] = list(argv)
+        try:
+            # load_profile reads the profile NAME from the process environment (the image's boot passes none).
+            with mock.patch.dict(os.environ, {'QWEN_C2_PROFILE': name}),                     mock.patch.object(contract, 'fix_sys_path'), mock.patch.object(contract, 'install_teardown_skip'), \
+                    mock.patch.object(contract, 'resolve_snapshot', return_value='/snap'), \
+                    mock.patch.object(contract, 'install_prefix_metrics'), \
+                    mock.patch.object(contract, 'read_salt_key', return_value=(None, 'none')), \
+                    mock.patch.object(contract, 'log'):
+                contract.boot(environ=environ, orig_argv=['python3', '-m', contract.API_SERVER])
+            hooks = [hook for hook in sys.meta_path if hook not in before]
+            return list(sys.argv), environ, hooks
+        finally:
+            sys.argv[:] = saved_argv
+            sys.meta_path[:] = before
+
+    def test_boot_serves_the_ring_samples_on_device_and_arms_the_ring_check(self):
+        platform = ['api_server', '--model', 'Qwen/Qwen3.8-27B', '--port', '8000', '--max-model-len', '65536',
+                    '--max-num-seqs', '2', '--additional-config', '{"tt": {"fabric_config": "FABRIC_1D"}}']
+        with mock_exists(False):
+            argv, environ, hooks = self.boot('general-tp4', {'MESH_DEVICE': 'P300'}, platform)
+        self.assertEqual(environ['MESH_DEVICE'], 'P150x4')
+        self.assertEqual(argv[argv.index('--max-num-seqs') + 1], '8')
+        additional = json.loads(argv[argv.index('--additional-config') + 1])
+        self.assertEqual(additional['tt']['sample_on_device_mode'], 'decode_only')
+        self.assertEqual([hook.name for hook in hooks if isinstance(hook, contract.PostImportHook)
+                          and hook.name == contract.PLUGIN_WORKER], [contract.PLUGIN_WORKER])
+        with mock_exists(False):
+            argv, _, hooks = self.boot('general-tp4', {'MESH_DEVICE': 'P300', contract.HOST_SAMPLING_ENV: '1',
+                                                       contract.RING_CHECK_ENV: '0'}, platform)
+        additional = json.loads(argv[argv.index('--additional-config') + 1])
+        self.assertNotIn('sample_on_device_mode', additional['tt'])
+        self.assertFalse([hook for hook in hooks if getattr(hook, 'name', None) == contract.PLUGIN_WORKER])
+
+    def test_boot_under_a_pair_profile_arms_no_ring_check_and_keeps_its_mesh(self):
+        with mock_exists(False):
+            argv, environ, hooks = self.boot('general', {'MESH_DEVICE': 'P300'}, ['api_server', '--port', '8000'])
+        self.assertEqual(environ['MESH_DEVICE'], 'P300')
+        self.assertFalse([hook for hook in hooks if getattr(hook, 'name', None) == contract.PLUGIN_WORKER])
+        additional = json.loads(argv[argv.index('--additional-config') + 1])
+        self.assertNotIn('sample_on_device_mode', additional['tt'])
+
+
+def mock_exists(value):
+    import unittest.mock as mock
+
+    return mock.patch.object(contract.os.path, 'exists', return_value=value)
+
+
 if __name__ == '__main__':
     unittest.main()
