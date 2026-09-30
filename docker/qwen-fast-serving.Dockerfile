@@ -68,6 +68,9 @@ COPY scripts/ci/ordered_cache.py /experiment-scripts/ci/
 # (QWEN_FAST_MEMORY_LEDGER); serving_startup, serving_runtime and serving_packed_step
 # import it. Every flag defaults off.
 COPY scripts/ci/serving_startup.py scripts/ci/dflash_combined_request.py scripts/ci/memory_ledger.py /experiment-scripts/ci/
+# Tensor-parallel width (S2 TP4 port; TP2 unless QWEN_FAST_TP names four cards): serving_startup and, through
+# mesh_link_policy, feature_collective / quad_draft / dflash_device import these, so they travel beside them.
+COPY scripts/ci/tp_shapes.py scripts/ci/tp4_mesh.py scripts/ci/mesh_link_policy.py scripts/ci/feature_collective.py /experiment-scripts/ci/
 # Verify-trace T1 (QWEN_FAST_VERIFY_T1, default off): packed_verifier, gdn_device_loop_state
 # and gdn_user_batch import it, so it must reach the image beside them.
 COPY scripts/ci/verify_trace_t1.py /experiment-scripts/ci/

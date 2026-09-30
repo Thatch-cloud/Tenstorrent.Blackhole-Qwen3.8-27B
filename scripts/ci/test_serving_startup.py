@@ -3,6 +3,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+
+import mesh_link_policy  # noqa: F401 - the real module, before start() tests replace sampling_link_policy
 from unittest.mock import Mock, patch
 
 from contextlib import ExitStack, contextmanager
@@ -271,11 +273,32 @@ class StartWidthTests(unittest.TestCase):
             self.assertEqual(seen['tp'], 2)
             self.assertIsNone(worker._qwen_fast_tp)
 
-    def test_four_cards_start_when_the_switch_names_them_and_the_mesh_agrees(self):
-        # the descriptor branch is the pair's until the link policy takes the ring; the fake descriptor passes it
-        seen, _, _, worker = self.run_start({'QWEN_FAST_TP': '4'}, **self.mesh(4))
+    def test_four_cards_start_when_the_switch_names_them_and_the_ring_descriptor_audits(self):
+        with patch('mesh_link_policy.audit_descriptor', return_value='sha') as audit:
+            seen, _, _, worker = self.run_start({'QWEN_FAST_TP': '4'}, **self.mesh(4))
         self.assertEqual(seen['tp'], 4)
+        self.assertEqual([call.args[1] for call in audit.call_args_list], [(1, 4)])
         self.assertIsNone(worker._qwen_fast_tp)
+
+    def test_four_cards_do_not_pass_on_the_pairs_descriptor(self):
+        # the fake run_start descriptor is the pair's stand-in path; the ring audit refuses anything else
+        with patch('mesh_link_policy.audit_descriptor', side_effect=ValueError('Mesh [1, 4] requires')):
+            with self.assertRaises(ValueError) as failure:
+                self.run_start({'QWEN_FAST_TP': '4'}, **self.mesh(4))
+        self.assertIn('Mesh [1, 4]', str(failure.exception))
+
+    def test_the_pair_never_reaches_the_ring_audit(self):
+        with patch('mesh_link_policy.audit_descriptor') as audit:
+            self.run_start({}, **self.mesh(2))
+        audit.assert_not_called()
+
+    def test_a_simulator_or_mock_cluster_is_refused_at_both_widths(self):
+        for environ, model in (({'TT_METAL_SIMULATOR': '1'}, self.mesh(2)),
+                               ({'QWEN_FAST_TP': '4', 'TT_METAL_MOCK_CLUSTER_DESC_PATH': '/x'}, self.mesh(4))):
+            with patch('mesh_link_policy.audit_descriptor'):
+                with self.assertRaises(ValueError) as failure:
+                    self.run_start(environ, **model)
+            self.assertIn('hardware descriptor required', str(failure.exception))
 
     def test_an_unset_switch_refuses_a_four_card_mesh(self):
         with self.assertRaises(ValueError) as failure:

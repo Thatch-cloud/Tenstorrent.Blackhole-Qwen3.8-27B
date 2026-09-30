@@ -9,6 +9,7 @@ import sys
 import tempfile
 import types
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -200,6 +201,91 @@ class TargetTests(unittest.TestCase):
             self.assertEqual(target.tt_ccl.get_num_links(1), 4)
         self.assertTrue(report['restored'])
         self.assertNotIn('mesh', report, "the pinned policy's own report")
+
+
+class FastPathPolicyTests(unittest.TestCase):
+    """projection_links and fast_ccl_topology: the pair's pinned resolver and Linear, unchanged; the ring's own rules."""
+
+    def setUp(self):
+        policy._ring_projection_links.cache_clear()
+        self.addCleanup(policy._ring_projection_links.cache_clear)
+
+    def environ(self, **values):
+        patcher = unittest.mock.patch.dict(os.environ, values, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_ring_descriptor_pin_is_the_checked_in_file(self):
+        self.assertEqual(policy.RING_DESCRIPTOR_SHA256,
+                         hashlib.sha256((HERE / tp4_mesh.DESCRIPTOR_NAME).read_bytes()).hexdigest())
+        self.assertEqual(policy.expected_sha256((1, 4)), policy.RING_DESCRIPTOR_SHA256)
+
+    def test_the_pair_resolves_through_the_pinned_module(self):
+        self.environ()
+        with unittest.mock.patch('projection_link_policy.projection_links', return_value=4) as pinned:
+            self.assertEqual(policy.projection_links(), 4)
+        pinned.assert_called_once_with()
+        self.environ(QWEN_FAST_TP='2')
+        with unittest.mock.patch('projection_link_policy.projection_links', return_value=1):
+            self.assertEqual(policy.projection_links(), 1)
+
+    def test_the_ring_takes_one_or_two_links_and_never_the_pairs_four(self):
+        stdout = io.StringIO()
+        self.environ(QWEN_FAST_TP='4', QWEN_PROJECTION_LINKS='1')
+        with redirect_stdout(stdout):
+            self.assertEqual(policy.projection_links(), 1)
+        self.assertIn('"stage": "mesh_link_policy"', stdout.getvalue())
+        self.environ(QWEN_FAST_TP='4', QWEN_PROJECTION_LINKS='4')
+        with self.assertRaises(ValueError):
+            policy.projection_links()
+
+    def test_two_ring_links_need_allocated_hardware_and_the_audited_descriptor(self):
+        base = dict(QWEN_FAST_TP='4', QWEN_PROJECTION_LINKS='2', QWEN_HARDWARE_TESTS='1', QWEN_CARDS_ALLOCATED='1')
+        self.environ(**{key: value for key, value in base.items() if key != 'QWEN_CARDS_ALLOCATED'})
+        with self.assertRaises(ValueError):
+            policy.projection_links()
+        self.environ(**dict(base, TT_MESH_GRAPH_DESC_PATH='/elsewhere.textproto'))
+        with self.assertRaises(ValueError):
+            policy.projection_links()
+        self.environ(**dict(base, TT_MESH_GRAPH_DESC_PATH=tp4_mesh.DESCRIPTOR_PATH))
+        audited = (HERE / tp4_mesh.DESCRIPTOR_NAME).read_bytes()
+        with unittest.mock.patch.object(Path, 'read_bytes', return_value=audited), redirect_stdout(io.StringIO()):
+            self.assertEqual(policy.projection_links(), 2)
+
+    def test_the_ring_resolution_is_cached_per_environment(self):
+        self.environ(QWEN_FAST_TP='4', QWEN_PROJECTION_LINKS='1')
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            policy.projection_links()
+            policy.projection_links()
+        self.assertEqual(stdout.getvalue().count('mesh_link_policy'), 1)
+
+    def test_an_unsupported_width_is_refused_not_read_as_the_pair(self):
+        self.environ(QWEN_FAST_TP='3')
+        with self.assertRaises(ValueError):
+            policy.projection_links()
+
+    def operations(self):
+        return SimpleNamespace(Topology=SimpleNamespace(Linear='linear', Ring='ring'))
+
+    def test_the_pair_is_always_linear(self):
+        self.environ()
+        self.assertEqual(policy.fast_ccl_topology(self.operations()), 'linear')
+        self.environ(QWEN_FAST_CCL_TOPOLOGY='linear')
+        self.assertEqual(policy.fast_ccl_topology(self.operations()), 'linear')
+        self.environ(QWEN_FAST_CCL_TOPOLOGY='ring')
+        with self.assertRaises(ValueError):
+            policy.fast_ccl_topology(self.operations())
+
+    def test_four_cards_default_to_the_probed_default_and_take_either_by_name(self):
+        self.environ(QWEN_FAST_TP='4')
+        self.assertEqual(policy.fast_ccl_topology(self.operations()), policy.RING_DEFAULT_TOPOLOGY)
+        for name in ('linear', 'ring'):
+            self.environ(QWEN_FAST_TP='4', QWEN_FAST_CCL_TOPOLOGY=name)
+            self.assertEqual(policy.fast_ccl_topology(self.operations()), name)
+        self.environ(QWEN_FAST_TP='4', QWEN_FAST_CCL_TOPOLOGY='Ring')
+        with self.assertRaises(ValueError):
+            policy.fast_ccl_topology(self.operations())
 
 
 FAKE_TT_CCL = '''import ttnn

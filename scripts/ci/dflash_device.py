@@ -15,7 +15,7 @@ from draft_shared_head import shared_head_candidates, merge_chunk_candidates
 from feature_collective import gather_add_projection
 from feature_projection import concatenate_local_features, projection_shards
 from gdn_multitoken_conv import addresses, release_owned
-from projection_link_policy import projection_links
+from mesh_link_policy import fast_ccl_topology, projection_links
 from dflash_prefill_window import prefill_window
 
 
@@ -990,7 +990,7 @@ class DFlashDevice:
         hidden = retain(operations.experimental.all_gather_async(local, persistent_output_buffer=None, dim=3,
             multi_device_global_semaphore=self.collectives.get_and_cycle_ag_semaphore_handles(),
             barrier_semaphore=self.collectives.get_and_cycle_barrier_semaphore_handle(), num_links=projection_links(),
-            memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Linear,
+            memory_config=operations.DRAM_MEMORY_CONFIG, topology=fast_ccl_topology(operations),
             chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2))
         watch('embedding.gathered', hidden)
         if rows < 32:

@@ -20,22 +20,33 @@ model_link_policy are imported where delegated to (model_link_policy pulls in th
 """
 
 from contextlib import contextmanager
+from functools import lru_cache
 import hashlib
+import json
 import os
 from pathlib import Path
 
 from sampling_link_policy import DESCRIPTOR as PAIR_DESCRIPTOR, SOURCES as PAIR_SOURCES
 import tp4_mesh
+import tp_shapes
 
 HERE = Path(__file__).resolve().parent
 # The pair's descriptor and its audited bytes are sampling_link_policy's own (one source of truth).
 PAIR_DESCRIPTOR_SHA256 = PAIR_SOURCES[PAIR_DESCRIPTOR]
 
 
+# The four-card descriptor's audited bytes (scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto, which the
+# image lays ONLY at tp4_mesh.DESCRIPTOR_PATH, not beside this module). Pinned here so the startup audit compares
+# the file the runtime reads against bytes a review saw, not against itself; test_mesh_link_policy holds this
+# constant to the checked-in file.
+RING_DESCRIPTOR_SHA256 = '3603ef30556a92305739592b13064a30f2c65372f90f8e8dbd9292d966fd0bc0'
+
+
 def ring_descriptor_sha256(path=None):
-    """The checked-in four-card descriptor's sha256 (the file the image lays at tp4_mesh.DESCRIPTOR_PATH)."""
-    path = Path(path) if path is not None else HERE / tp4_mesh.DESCRIPTOR_NAME
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """The checked-in four-card descriptor's sha256, or `path`'s when one is named (a test's copy)."""
+    if path is None:
+        return RING_DESCRIPTOR_SHA256
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 MESHES = {
@@ -203,6 +214,55 @@ def target_links(model, links, layers=64):
         if {name: collective.get_num_links(axis) for name, axis in AXES} != before:
             raise AssertionError('Target collective policy was not restored')
         report['restored'] = True
+
+
+PROJECTION_KEYS = ('QWEN_FAST_TP', 'QWEN_PROJECTION_LINKS', 'TT_METAL_SIMULATOR', 'TT_METAL_HOME',
+                   'QWEN_HARDWARE_TESTS', 'QWEN_CARDS_ALLOCATED', 'TT_METAL_MOCK_CLUSTER_DESC_PATH',
+                   'TT_METAL_SLOW_DISPATCH_MODE', 'TT_MESH_GRAPH_DESC_PATH')
+
+
+@lru_cache(maxsize=8)
+def _ring_projection_links(values):
+    report = projection_validate(dict(values), tp4_mesh.MESH_SHAPE)
+    print(json.dumps(dict(stage='mesh_link_policy', **report)), flush=True)
+    return report['requested_links']
+
+
+def projection_links():
+    """The fast path's collective link count for the width this process serves at (QWEN_FAST_TP; unset is the
+    pair): projection_link_policy.projection_links() itself at (1, 2), unchanged, and at (1, 4) the same explicit
+    QWEN_PROJECTION_LINKS rule against the ring (1 or 2 links, the audited descriptor), validated once per
+    environment and printed as one JSON line as the pinned resolver does. Read from os.environ, like it."""
+    if tp_shapes.requested_tp(os.environ) == tp_shapes.PAIR:
+        import projection_link_policy
+
+        return projection_link_policy.projection_links()
+    return _ring_projection_links(tuple((key, os.environ[key]) for key in PROJECTION_KEYS if key in os.environ))
+
+
+TOPOLOGY_SWITCH = 'QWEN_FAST_CCL_TOPOLOGY'
+TOPOLOGIES = ('linear', 'ring')
+# The four-card default until the fabric probe (tp4_fabric_probe: Ring vs Linear at 32 x 5120, exact and timed)
+# says otherwise: the descriptor's fabric is FABRIC_1D, which upstream exercises with Linear at four devices.
+RING_DEFAULT_TOPOLOGY = 'linear'
+
+
+def fast_ccl_topology(operations, environment=None):
+    """The ttnn Topology the fast path's own collectives (feature projection, drafter gathers) run with.
+
+    The pair is always Linear, as the code it replaces hard-coded, and refuses any other request: its bytes are
+    what the TP2 evidence qualified. At four cards QWEN_FAST_CCL_TOPOLOGY picks 'linear' or 'ring' (default
+    RING_DEFAULT_TOPOLOGY); an unknown value is refused, not read as the default."""
+    environment = os.environ if environment is None else environment
+    wanted = environment.get(TOPOLOGY_SWITCH)
+    if tp_shapes.requested_tp(environment) == tp_shapes.PAIR:
+        if wanted not in (None, 'linear'):
+            raise ValueError('%s=%r: the pair runs Linear only' % (TOPOLOGY_SWITCH, wanted))
+        return operations.Topology.Linear
+    choice = RING_DEFAULT_TOPOLOGY if wanted is None else wanted
+    if choice not in TOPOLOGIES:
+        raise ValueError('%s must be one of %s, got %r' % (TOPOLOGY_SWITCH, ', '.join(TOPOLOGIES), wanted))
+    return operations.Topology.Ring if choice == 'ring' else operations.Topology.Linear
 
 
 def environment_shape(environment=None):

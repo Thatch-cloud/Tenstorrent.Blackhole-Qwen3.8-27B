@@ -390,13 +390,17 @@ def concatenate_query_heads(operations, value, retain):
 
 def gather_add_projection(operations, mesh, collectives, value, *, retain_temporaries=None, observe=None):
     """feature_collective.gather_add_projection at 64 rows, trace-owned only (the served branches always pass
-    retain_temporaries): the dim-0 all-gather, one slice per chip, the fp32 add."""
-    from projection_link_policy import projection_links
+    retain_temporaries): the dim-0 all-gather, one slice per chip, the fp32 add (chip order, ((p0 + p1) + p2) + p3
+    at four cards)."""
+    from mesh_link_policy import fast_ccl_topology, projection_links
+    import tp_shapes
 
     links = projection_links()
-    if (list(mesh.shape) != [1, 2] or tuple(value.shape) != (1, 1, ROWS, HIDDEN) or value.dtype != operations.float32
+    width = tp_shapes.mesh_width(mesh)
+    if (width is None or tuple(value.shape) != (1, 1, ROWS, HIDDEN) or value.dtype != operations.float32
             or not callable(retain_temporaries)):
-        raise ValueError('64 rows of full-width FP32 TP2 projection and a trace lifetime owner required')
+        raise ValueError('64 rows of full-width FP32 TP%d projection and a trace lifetime owner required'
+                         % tp_shapes.requested_tp(os.environ))
     temporaries = []
 
     def retain(tensor):
@@ -408,15 +412,21 @@ def gather_add_projection(operations, mesh, collectives, value, *, retain_tempor
         persistent_output_buffer=None, dim=0,
         multi_device_global_semaphore=collectives.get_and_cycle_ag_semaphore_handles(),
         barrier_semaphore=collectives.get_and_cycle_barrier_semaphore_handle(), num_links=links,
-        memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Linear,
+        memory_config=operations.DRAM_MEMORY_CONFIG, topology=fast_ccl_topology(operations),
         chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2)
     retain(gathered)
     if observe is not None:
         observe('gathered', gathered)
-    for chip in range(2):
+    for chip in range(width):
         retain(operations.slice(gathered, (chip, 0, 0, 0), (chip + 1, 1, ROWS, HIDDEN)))
-    return operations.add(temporaries[1], temporaries[2], dtype=operations.float32,
-                          memory_config=operations.DRAM_MEMORY_CONFIG)
+    total = operations.add(temporaries[1], temporaries[2], dtype=operations.float32,
+                           memory_config=operations.DRAM_MEMORY_CONFIG)
+    for chip in range(2, width):
+        partial = total
+        total = operations.add(partial, temporaries[chip + 1], dtype=operations.float32,
+                               memory_config=operations.DRAM_MEMORY_CONFIG)
+        retain(partial)
+    return total
 
 
 # ---------------------------------------------------------------------------------------------

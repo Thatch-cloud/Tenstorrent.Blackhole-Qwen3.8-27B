@@ -15,6 +15,7 @@ Stdlib only, importable on py 3.7. Nothing here is sha256-pinned.
 """
 
 from collections import namedtuple
+import os
 
 TP_SWITCH = 'QWEN_FAST_TP'
 SUPPORTED = (2, 4)
@@ -135,6 +136,14 @@ def select_for_model(environ, model):
         raise ValueError('%s is unset, which serves the (1, 2) pair, but the model opened %s with %r devices'
                          % (TP_SWITCH, None if shape is None else list(shape), devices))
     return PAIR
+
+
+def mesh_width(mesh, environ=None):
+    """The chip count of `mesh` when it is exactly the (1, tp) mesh this process serves at (QWEN_FAST_TP, else the
+    pair), or None when it is not. Callers keep their own refusal text: `if width is None: raise ValueError(...)`.
+    At the pair this is the `list(mesh.shape) == [1, 2]` test the fast path's collectives carried as a literal."""
+    tp = requested_tp(os.environ if environ is None else environ)
+    return tp if list(mesh.shape) == [1, tp] else None
 
 
 def select(environ, num_devices, shape):

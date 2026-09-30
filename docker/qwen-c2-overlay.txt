@@ -63,6 +63,7 @@ scripts/ci/pooled_attention_replay.py
 # compiled new slice/concat/pad shapes every round (~1 s each on a cold kernel cache, run 36211578069).
 # P8 lays this file at its base commit; without this line the C2 image ships that version.
 scripts/ci/dflash_device.py
+scripts/ci/feature_collective.py
 
 # C2-any (stage 1, the c2 profiles) changes serving_request_factory, serving_runtime and
 # serving_lifecycle together and adds serving_request_quarantine (D2): all of them here, or c2
@@ -180,6 +181,7 @@ scripts/ci/tp_shapes.py
 # it. New files: no older layer holds either, so without these lines a TP4 profile's boot dies on the import or
 # its fabric init on the missing descriptor. No TP2 profile reads either.
 scripts/ci/tp4_mesh.py
+scripts/ci/mesh_link_policy.py
 scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto  /opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto
 # The pair at the two links this cabling trains (profile general-2link, the TP2 reference and baseline for TP4):
 # upstream's p150_x2 declares four and STRICT_INIT refuses the open.

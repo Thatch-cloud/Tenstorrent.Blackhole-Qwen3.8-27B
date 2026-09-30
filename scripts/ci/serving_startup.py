@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 
 from serving_fast_policy import validate_fast_config
+import tp4_mesh
 import tp_shapes
 
 
@@ -105,12 +106,24 @@ def start(worker):
     from sampling_link_policy import DESCRIPTOR, SOURCES
     import hashlib
 
-    if (os.environ.get('TT_MESH_GRAPH_DESC_PATH') != str(paths['runtime_root'] / DESCRIPTOR)
-            or any(os.environ.get(name) for name in
-                ('TT_METAL_SIMULATOR', 'TT_METAL_SLOW_DISPATCH_MODE', 'TT_METAL_MOCK_CLUSTER_DESC_PATH'))):
-        raise ValueError('Explicit P150 pair hardware descriptor required for serving startup')
+    hostile = any(os.environ.get(name) for name in
+                  ('TT_METAL_SIMULATOR', 'TT_METAL_SLOW_DISPATCH_MODE', 'TT_METAL_MOCK_CLUSTER_DESC_PATH'))
+    if tp == tp_shapes.PAIR:
+        if os.environ.get('TT_MESH_GRAPH_DESC_PATH') != str(paths['runtime_root'] / DESCRIPTOR) or hostile:
+            raise ValueError('Explicit P150 pair hardware descriptor required for serving startup')
+        pinned = SOURCES
+    else:
+        # Four cards: the ring descriptor tp4_mesh lays in the image, held to its audited bytes
+        # (mesh_link_policy.RING_DESCRIPTOR_SHA256). The pair's descriptor is not in play, so the sources the model
+        # runtime pins beside it (the collective and sampler) are all that is checked under the runtime root.
+        import mesh_link_policy
+
+        if hostile:
+            raise ValueError('Explicit P150 four-card hardware descriptor required for serving startup')
+        mesh_link_policy.audit_descriptor(os.environ, tp4_mesh.MESH_SHAPE)
+        pinned = {name: digest for name, digest in SOURCES.items() if name != DESCRIPTOR}
     if any(hashlib.sha256((paths['runtime_root'] / name).read_bytes()).hexdigest() != digest
-            for name, digest in SOURCES.items()):
+            for name, digest in pinned.items()):
         raise ValueError('Four-link serving descriptor or sampling sources changed')
     import ttnn
     from full_dflash_request import load_dflash_fixtures

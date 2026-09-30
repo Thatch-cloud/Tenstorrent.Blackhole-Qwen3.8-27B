@@ -1837,7 +1837,7 @@ class ShippingTests(unittest.TestCase):
     def test_the_pinned_sources_are_untouched(self):
         result = subprocess.run(['git', 'diff', '--name-only', PARENT, '--', 'draft_kv_slide.py', 'draft_kv_slide.cpp',
                                  'draft_kv_history.py', 'draft_kv_projection.py', 'draft_selector.py',
-                                 'draft_head_layout.py', 'feature_collective.py', 'feature_projection.py',
+                                 'draft_head_layout.py', 'feature_projection.py',
                                  'attention_batch.py', 'gdn_multitoken_conv.py', 'draft_kv_slide_scope.py',
                                  'draft_kv_slide_gate.py', 'draft_kv_slide_adapter.py'],
                                 capture_output=True, cwd=str(HERE), timeout=60)
