@@ -17,7 +17,7 @@ repeating pattern of rounds the scheduler runs. So the target is a statement abo
   fusion, value split, weight delivery, and for packed rounds host batching, a data-parallel drafter, a 2-way value split) bring
   them to F = 53-59 and P(4) = 85-102. The conservative anchors (full pessimism gaps, the quad draft and fused commit off in
   `c2-packed-tp4`, a 4 ms lane switch, no value split on the solo block) put phase 1 at F = 58-66 and P(4) = 93-111.
-- **Tau (m).** The offline coding fixture commits 12.1 tokens per round. Real coding text committed **4.4-5.1** (four v158/v160
+- **Tau (m).** The offline coding fixture commits 12.1 tokens per round. Real coding text committed **4.4-5.3** (the four v157-v160 runs, mean over four
   code tasks: pytest tests, review, explanation) and **7.1-9.5 on refactors** (`docs/real-text-2026-09-24.md`). The served image
   runs the bfloat8 drafter, which the fixture's 12.1 would lower to about 11.6 (e).
 
@@ -32,9 +32,9 @@ fast user and one to three standard users:
 | All levers | 8.1-10.0 | 8.9-10.9 |
 
 **On measured coding tau the two bars do not hold together with any lever set in the plans.** The standard bar alone (no fast
-user, every round packed) needs tau >= 7.0-8.3 at phase 1 and >= 5.2-6.2 with all levers (conservative anchors, 4k to 131k), and code tasks sit at 4.4-5.1. What the
+user, every round packed) needs tau >= 7.0-8.3 at phase 1 and >= 5.2-6.2 with all levers (conservative anchors, 4k to 131k), and code tasks sit at 4.4-5.3. What the
 build does deliver is (1) **D0**: a lone coding user decodes at F-rate instead of on the 1/2/4-row engines, 152-208 tok/s at
-tau 12.1 and 75-163 at tau 4.9-9.5 (conservative F, straight and phase 1), and (2) the lanes machinery and its gate, which measure tau at TP4 and
+tau 12.1 and 62-163 at tau 4.9-9.5 (conservative F, straight and phase 1), and (2) the lanes machinery and its gate, which measure tau at TP4 and
 say exactly which lever or acceptance work moves the target.
 
 ## What is built (flags default off; gate-only profiles; TP2 pins untouched)
