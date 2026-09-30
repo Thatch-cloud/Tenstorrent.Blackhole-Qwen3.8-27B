@@ -91,8 +91,34 @@ from pathlib import Path
 import re
 
 import gdn_multitoken as native
-import gdn_user_batch as batch
+import gdn_user_batch as pair_batch
+import gdn_user_batch_tp as quad_batch
+import tp_shapes
 import verify_trace_t1
+
+
+class WidthBatch(object):
+    """`batch` for this module: gdn_user_batch (pinned, the served launch the K5 qualification compares against) at the
+    pair, gdn_user_batch_tp at four cards, resolved at each attribute read from the width the process serves at
+    (QWEN_FAST_TP). At the pair every name is the pinned module's own object."""
+
+    @staticmethod
+    def module():
+        return pair_batch if tp_shapes.chip_count() == tp_shapes.PAIR else quad_batch
+
+    def __getattr__(self, name):
+        return getattr(self.module(), name)
+
+    @staticmethod
+    def geometry():
+        return tp_shapes.geometry(tp_shapes.chip_count())
+
+    @classmethod
+    def heads(cls):
+        return cls.geometry().gdn_nv
+
+
+batch = WidthBatch()
 
 
 DEFAULT_ROOT = batch.DEFAULT_ROOT
@@ -126,7 +152,7 @@ FLAG = 'QWEN_FAST_GDN_SEQ_BLOCK'
 LEVEL_FLAG = 'QWEN_FAST_GDN_SEQ_BLOCK_LEVEL'
 AUDIT_FLAG = 'QWEN_FAST_GDN_SEQ_BLOCK_AUDIT'
 ROWS = 16
-HEADS = batch.HEADS
+HEADS = pair_batch.HEADS   # the pair's; batch.heads() is the live figure (12 at four cards)
 LAYERS = 48
 LEVEL_BITS = 4                 # the A+ increments (i)-(iv) of the plan
 IMPLEMENTED_LEVELS = (0,)      # none of the increments exists yet
@@ -444,9 +470,9 @@ def compile_args(role, kernels):
     (gdn_user_batch.compile_args, which the unit tests hold these against)."""
     if role == 'reader':
         # Kt, Vt, H, RF, Ct, QOT, KOT, VOT, WTZ, ZOT, SRC_TAG
-        return [4, 4, HEADS, 3, 160, 0, 32, 64, 96, 0, kernels.tag(role)]
+        return [*tp_shapes.k5_reader_arguments(tp_shapes.chip_count()), kernels.tag(role)]
     if role == 'writer':
-        return [4, 4, HEADS, kernels.tag(role)]
+        return [4, 4, batch.heads(), kernels.tag(role)]
     if role == 'compute':
         return [batch.bits(1e-6), batch.bits(128 ** -0.5), batch.bits(128e-6), batch.bits(128 ** 0.5),
                 kernels.level, kernels.tag(role)]
@@ -461,8 +487,8 @@ ACCESSORS = dict(reader=(0, 1, 2, 3, 6, 7, 5), writer=(4, 5), compute=())
 def runtime_args(role, head, addresses):
     """One core's runtime arguments from that user's eight buffer addresses. The compute reads
     none; it is still given the served [rows] so every core's argument shape is the served one."""
-    if type(head) is not int or not 0 <= head < HEADS:
-        raise ValueError('Head index within the 24-head TP2 shard required')
+    if type(head) is not int or not 0 <= head < batch.heads():
+        raise ValueError('Head index within the %d-head TP%d shard required' % (batch.heads(), tp_shapes.chip_count()))
     if len(addresses) != 8:
         raise ValueError('Eight per-user buffer addresses required')
     if role == 'reader':
@@ -609,10 +635,10 @@ def execute(mesh, users, operations=None, *, output_memory=None, kernels=None):
     produced = []
     try:
         for rows in widths:
-            output = operations.empty((1, rows, 3072), device=mesh, dtype=operations.bfloat16,
+            output = operations.empty((1, rows, batch.geometry().gdn_value), device=mesh, dtype=operations.bfloat16,
                                       layout=operations.TILE_LAYOUT, memory_config=output_memory)
             produced.append(output)
-            states = operations.empty((rows, 24, 128, 128), device=mesh, dtype=operations.bfloat16,
+            states = operations.empty((rows, batch.heads(), 128, 128), device=mesh, dtype=operations.bfloat16,
                                       layout=operations.TILE_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG)
             produced.append(states)
         tensor_groups = [[*user[:4], produced[2 * index], produced[2 * index + 1], *user[4:]]
@@ -780,7 +806,7 @@ def audit(root=DEFAULT_ROOT, users=batch.MAX_USERS, built_level=0, variant='A', 
                 generated_sha256=sha256(kernels),
                 src_tag={role: kernels.tag(role) for role in ROLES},
                 compile_args={role: compile_args(role, kernels) for role in ROLES},
-                users=users, workers_per_user=HEADS, workers=users * HEADS,
+                users=users, workers_per_user=batch.heads(), workers=users * batch.heads(),
                 core_shares=batch.core_shares(11, 10, users), rows_per_user=ROWS,
                 cb_indices=sorted(list(io) + list(fp32)),
                 cb_bytes_per_worker=cb_bytes(variant), served_cb_bytes_per_worker=SERVED_CB_BYTES,

@@ -76,7 +76,7 @@ jobs:
           for name in serving_startup.py dflash_combined_request.py memory_ledger.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
-          for name in tp_shapes.py tp_addresses.py tp4_mesh.py mesh_link_policy.py feature_collective.py draft_shared_head.py; do
+          for name in tp_shapes.py tp_addresses.py tp4_mesh.py mesh_link_policy.py feature_collective.py draft_shared_head.py gdn_user_batch_tp.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
           for name in verify_trace_t1.py; do

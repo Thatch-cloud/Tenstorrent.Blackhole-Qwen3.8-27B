@@ -103,7 +103,7 @@ jobs:
           python -B -m unittest test_serving_c2_contract
           python -B -m unittest test_tp4_mesh test_mesh_link_policy test_sampling_link_policy test_projection_link_policy test_model_link_policy
           python -B -m unittest test_tp4_model_widths test_tp4_fabric_probe test_tp_agreement test_tp_decode_bench test_c2_cards test_card_set
-          python -B -m unittest test_tp_shapes test_tp2_pins test_tp_addresses test_tp4_shard_merges
+          python -B -m unittest test_tp_shapes test_tp2_pins test_tp_addresses test_tp4_shard_merges test_gdn_user_batch_tp
           python -B -m unittest test_qwen_prefix_metrics test_qwen_prefix_image
           python -B -m unittest test_c2_parser_rechunk
           python -B -m unittest test_serving_plugin_patch

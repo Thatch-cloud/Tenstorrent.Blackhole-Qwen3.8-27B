@@ -23,7 +23,6 @@ import packed_verifier
 import serving_sequential_step
 import tp_addresses
 import tp_shapes
-import verifier_engine
 
 
 class Four(unittest.TestCase):

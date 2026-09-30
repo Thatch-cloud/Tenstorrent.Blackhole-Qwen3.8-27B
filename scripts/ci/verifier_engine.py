@@ -11,7 +11,6 @@ from gdn_commit_dma import prepare
 from gdn_multitoken_conv import addresses, release_owned
 from model_batch import ModelBatch
 from verifier_inputs import stage_inputs
-import tp_shapes
 
 
 # Which engine's state native GDN slot 0 holds right now. Runs 35477522469 and
@@ -501,8 +500,8 @@ class VerifierEngine:
             logits, ids = bucket['output']
             tensor = logits if ids is None else ids
             parts = self.operations.get_device_tensors(tensor)
-            if len(parts) != tp_shapes.chip_count():
-                raise AssertionError('%s chip-local outputs required' % tp_shapes.count_word())
+            if len(parts) != 2:
+                raise AssertionError('Two chip-local outputs required')
             host = self.operations.to_torch(parts[0])
             predictions = (host.reshape(len(ticket.tokens), self.model.args.vocab_size).float().argmax(dim=-1)
                            if ids is None else host.reshape(-1)[:len(ticket.tokens)]).tolist()
