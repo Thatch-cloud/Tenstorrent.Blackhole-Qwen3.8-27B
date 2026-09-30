@@ -1593,6 +1593,9 @@ def build_parser():
     parser.add_argument('--port', type=int, default=PORT)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--dry-run', action='store_true', help='print every arm\'s docker argv and run nothing')
+    parser.add_argument('--cards', choices=gate.CARD_SETS, default='pair',
+                        help='pair: cards M and A (the default); quad: every Blackhole board present, the four-card '
+                             '(1, 4) mesh the TP4 profiles open (qwen-c2-serving.yml C2_CARDS)')
     return parser
 
 
@@ -1613,6 +1616,10 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
             profiles = json.load(handle)
     else:
         profiles = gate.image_profiles(options.image)
+    problem = gate.cards_problem(options.cards, profiles, (options.profile, options.baseline))
+    if problem:
+        log('refused: %s' % problem)
+        return 2
     arms_of, ran, skipped = {}, {}, {}
     for plan in plans:
         try:
@@ -1648,7 +1655,9 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
             for arm in arms_of[plan]:
                 log(json.dumps(dict(plan=plan, arm=arm['arm'], served=arm['served'], timeout=arm['timeout'],
                                     docker=server_run(options.image, CONTAINER_PREFIX + arm['arm'], arm['served'],
-                                                      devices or ['<M>', '<A>'], options.port, options.hub,
+                                                      devices or (['<M>', '<A>'] if options.cards == 'pair' else
+                                                                  ['<card %d>' % n for n in range(gate.QUAD_BOARDS)]),
+                                                      options.port, options.hub,
                                                       '<results>/%s/profiles.json' % arm['arm'] if arm['derived']
                                                       else None, digests=wants_digests(arm),
                                                       salt_key_path='<results>/%s/salt.key' % arm['arm']
@@ -1657,7 +1666,8 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
         return 0
     log_not_applicable(skipped, options.profile, log)
     runner = (runner_factory or Runner)(options.image, options.results, options.checkout,
-                                        devices if devices is not None else gate.serving_pair(), options.hub,
+                                        devices if devices is not None else gate.devices_for(options.cards),
+                                        options.hub,
                                         options.port, log=log, seed=options.seed, agents=agents, turns=options.turns)
     summary = dict(image=options.image, profile=options.profile, baseline=options.baseline, plans=plans,
                    worst_case_seconds=worst_case, budget_seconds=options.budget_seconds, results={},
