@@ -36,6 +36,7 @@ import dflash_packed_proposal  # noqa: E402,F401
 import draft_attention  # noqa: E402
 import draft_kv_history  # noqa: E402,F401
 import draft_kv_history_tp  # noqa: E402
+import draft_kv_slide_tp  # noqa: E402
 import feature_projection_tp  # noqa: E402
 import mesh_link_policy  # noqa: E402
 from packed_shapes import m3_shape  # noqa: E402
@@ -48,6 +49,22 @@ from tp4_shape_fake import Collectives, ShapeError, ShapeOps, Tensor  # noqa: E4
 from tp_test_support import four_cards  # noqa: E402
 
 PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate')
+# The profiles that run the eager publication chain (QWEN_FAST_TP_KV_SLIDE=0): the fake ttnn runs it for real; the slide's launch is a
+# card's job, so under the profiles that switch it on the transport is a shape-checking stand-in (test_draft_kv_slide_tp holds the
+# launch itself and the slide's bytes against the eager chain).
+EAGER_PROFILES = ('c2-packed-tp4-gate-noslide', 'c2-packed-tp4-speed-noslide')
+SLIDES = []
+
+
+def checking_transport(mesh, active, delta, spare, *, history_rows, prefix):
+    """draft_kv_slide_tp.prepare's contract on the shape fake: refuse what the launch would refuse, record the call."""
+    draft_kv_slide_tp.geometry(history_rows, prefix)
+    for value, expected in ((active, draft_kv_slide_tp.bank_shape()), (delta, draft_kv_slide_tp.delta_shape()),
+                            (spare, draft_kv_slide_tp.bank_shape())):
+        if tuple(value.shape) != expected:
+            raise ShapeError('slide operand %r, wanted %r' % (tuple(value.shape), expected))
+    SLIDES.append((history_rows, prefix))
+    return lambda: None
 WIDTH = 2052
 LAYERS = 5
 RING_DESCRIPTOR = HERE / 'qwen_p150x4_ring_mesh_graph_descriptor.textproto'
@@ -63,6 +80,8 @@ def served(name):
         with ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, profile_environment(name), clear=True))
             stack.enter_context(four_cards())
+            stack.enter_context(patch.object(draft_kv_slide_tp, 'prepare', checking_transport))
+            del SLIDES[:]
             # The ring descriptor lives in the image; the committed copy has the audited bytes (test_tp4_attach_profile).
             real_audit = mesh_link_policy.audit_descriptor
             stack.enter_context(patch.object(mesh_link_policy, 'audit_descriptor',
@@ -134,6 +153,18 @@ class WarmTests(unittest.TestCase):
                 gathers = [event for event in ops.events if event[0] == 'all_gather']
                 self.assertGreaterEqual(len(gathers), 71)
                 self.assertEqual(ops.live, held, 'the warm released exactly what it allocated')
+                # Every publication slid each layer's k and v at the steady state: 71 publications x 5 layers x 2
+                self.assertEqual(len(SLIDES), 71 * LAYERS * 2)
+                self.assertEqual({rows for rows, _ in SLIDES}, {2048})
+
+    def test_the_eager_chain_profiles_publish_the_same_plan_without_the_slide(self):
+        for name in EAGER_PROFILES:
+            with self.subTest(profile=name):
+                ops, held, summary, lines, allocated = self.run_warm(name)
+                self.assertIsNotNone(summary, lines)
+                self.assertEqual(summary['shapes'], 71)
+                self.assertEqual(SLIDES, [], 'QWEN_FAST_TP_KV_SLIDE=0 runs the eager six-op chain')
+                self.assertEqual(ops.live, held)
 
     def test_the_fake_refuses_the_pairs_shapes_on_the_four_card_path(self):
         """Control: with the two literals the review found put back, the same run fails."""
@@ -181,6 +212,8 @@ class DraftCacheTests(unittest.TestCase):
                 features = Tensor(ops, (1, 1, 32, 5120), ops.bfloat16)
                 publication = cache.prepare(features, prefix, position=cache.position)
                 cache.discard(publication)
+            # the slide published each layer's k and v at every prefix, over the four-card operand shapes
+            self.assertEqual(SLIDES, [(2048, prefix) for prefix in (1, 7, 16, 32) for _ in range(LAYERS * 2)])
 
     def test_pool_lent_banks_at_the_pairs_shape_are_refused_at_four_cards(self):
         ops = ShapeOps(4)
