@@ -1,0 +1,181 @@
+{
+ "frozen_evidence_sources": {
+  "attention_batch.py": {
+   "pinned": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+   "repo": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0"
+  },
+  "attention_fold_dma.cpp": {
+   "pinned": "066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9",
+   "repo": "066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9"
+  },
+  "attention_fold_dma.py": {
+   "pinned": "5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5",
+   "repo": "5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5"
+  },
+  "attention_mask_replay.cpp": {
+   "pinned": "e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8",
+   "repo": "e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8"
+  },
+  "attention_mask_replay.py": {
+   "pinned": null,
+   "repo": "3e431742e35a2b94b4a02a60fa334a93a44a471eaefcacd25e52fbafdf03361f"
+  },
+  "attention_parallel.py": {
+   "pinned": "7bf5ba445100d184f7b9289fed4c20b4a730dbee29ee382cb97b6c2ad17f0e58",
+   "repo": "7bf5ba445100d184f7b9289fed4c20b4a730dbee29ee382cb97b6c2ad17f0e58"
+  },
+  "attention_replay.py": {
+   "pinned": "4eff1c51fd42bb04adf68fc40bf74a0cca0cd455c3ae2fc50caf720f5281137a",
+   "repo": "4eff1c51fd42bb04adf68fc40bf74a0cca0cd455c3ae2fc50caf720f5281137a"
+  },
+  "draft_attention.py": {
+   "pinned": "a6684d962b9c5aece726ad555962805e2283fed5db54efd3652efc92ae3f443d",
+   "repo": "a6684d962b9c5aece726ad555962805e2283fed5db54efd3652efc92ae3f443d"
+  },
+  "draft_dot.py": {
+   "pinned": "d456c0d3eef435e25bf0dee4d1cdd4e85ead7acae8df5ba5e7ed783726e24708",
+   "repo": "d456c0d3eef435e25bf0dee4d1cdd4e85ead7acae8df5ba5e7ed783726e24708"
+  },
+  "draft_dot_compute.cpp": {
+   "pinned": "e52badb2f61f1958a6d8050e3a4490232bdce26625f319da02b1019619f99a55",
+   "repo": "e52badb2f61f1958a6d8050e3a4490232bdce26625f319da02b1019619f99a55"
+  },
+  "draft_dot_io.cpp": {
+   "pinned": "ebc2dfca5395c5d47b13a09a5ea75521684a979e09cdd51cb6ae743a7858c4d1",
+   "repo": "ebc2dfca5395c5d47b13a09a5ea75521684a979e09cdd51cb6ae743a7858c4d1"
+  },
+  "draft_row_sum.py": {
+   "pinned": "72f9ae0d42ae1dd4312e9312305b3158cc110c62e8966372acbce2c8812674ec",
+   "repo": "72f9ae0d42ae1dd4312e9312305b3158cc110c62e8966372acbce2c8812674ec"
+  },
+  "draft_row_sum_compute.cpp": {
+   "pinned": "d9f06391e32a4869577975c308158739adfb4657ddef609b9b54db023b1c13b7",
+   "repo": "d9f06391e32a4869577975c308158739adfb4657ddef609b9b54db023b1c13b7"
+  },
+  "draft_row_sum_io.cpp": {
+   "pinned": "8d5d1539388a6945227b52ef939c29ebaf96581f1999a81eccc71e5db9e7752a",
+   "repo": "8d5d1539388a6945227b52ef939c29ebaf96581f1999a81eccc71e5db9e7752a"
+  },
+  "dspark_attention_chunk_trial.py": {
+   "pinned": null,
+   "repo": "d0d64cb30b8ba0e4a9f6ff4c38c80454a3305904c79dbc6bd24ef520c17d73d9"
+  },
+  "dspark_backbone_mesh.py": {
+   "pinned": "8ae0be9c7601b7a1103c444e9086fa19bdfa5dcc163ea89360d6722249174876",
+   "repo": "8ae0be9c7601b7a1103c444e9086fa19bdfa5dcc163ea89360d6722249174876"
+  },
+  "dspark_cached_layer.py": {
+   "pinned": "f4c7ad7d7c14cdd25195dfe10c7536ac9c9b019f226d7fa666661ac4e6166647",
+   "repo": "f4c7ad7d7c14cdd25195dfe10c7536ac9c9b019f226d7fa666661ac4e6166647"
+  },
+  "dspark_fixed_inputs.py": {
+   "pinned": "ef246b2de160a4f1e8c72066b95d5509f839575fb14b4c2a236b3bd913fecfd2",
+   "repo": "ef246b2de160a4f1e8c72066b95d5509f839575fb14b4c2a236b3bd913fecfd2"
+  },
+  "dspark_full_attention.py": {
+   "pinned": "6dfde13f646530227d2ff15eee2cf0893081b8f19fcc5db6392eed039bebb450",
+   "repo": "6dfde13f646530227d2ff15eee2cf0893081b8f19fcc5db6392eed039bebb450"
+  },
+  "dspark_inputs.py": {
+   "pinned": "7e10860f92d2bc89f9ab645ea5b8229c7d8aef7e33309188596fe1fdedbb1119",
+   "repo": "7e10860f92d2bc89f9ab645ea5b8229c7d8aef7e33309188596fe1fdedbb1119"
+  },
+  "dspark_ladder_scalar_reciprocal.py": {
+   "pinned": "5e0d91dbce6e2c3c08e2fbe68fd51d276676ff150485a642ace5c007c5b0e405",
+   "repo": "5e0d91dbce6e2c3c08e2fbe68fd51d276676ff150485a642ace5c007c5b0e405"
+  },
+  "dspark_layer.py": {
+   "pinned": "af18ff31ed9470e96f6c753e522983f0c8cd30bdb9d84acc10fae6de395e773d",
+   "repo": "af18ff31ed9470e96f6c753e522983f0c8cd30bdb9d84acc10fae6de395e773d"
+  },
+  "dspark_layer_diagnostic.py": {
+   "pinned": "9e5c1aeec08ff57fedd92abc67c546e58acae8ed8475f7af220d3ae9602cf649",
+   "repo": "9e5c1aeec08ff57fedd92abc67c546e58acae8ed8475f7af220d3ae9602cf649"
+  },
+  "dspark_layer_mesh.py": {
+   "pinned": "b15fd12efb3809487dce343607c62a73ba429f85a10c70a8566d67abf35f13dd",
+   "repo": "b15fd12efb3809487dce343607c62a73ba429f85a10c70a8566d67abf35f13dd"
+  },
+  "dspark_layer_reference.py": {
+   "pinned": "16b8d52b200637b4ce9c17f93b14fe0853cba836c0b93512da5880e650431ae8",
+   "repo": "16b8d52b200637b4ce9c17f93b14fe0853cba836c0b93512da5880e650431ae8"
+  },
+  "dspark_markov_device.py": {
+   "pinned": "026fb41b4ed38bc82db72c1505ae13b7d789be4ce3e9b0d14d0b16231a046f25",
+   "repo": "026fb41b4ed38bc82db72c1505ae13b7d789be4ce3e9b0d14d0b16231a046f25"
+  },
+  "dspark_mesh.py": {
+   "pinned": "f4badecd225af8115f63778c1b7043e49e7e16a13a951093450c353f4c674a87",
+   "repo": "f4badecd225af8115f63778c1b7043e49e7e16a13a951093450c353f4c674a87"
+  },
+  "dspark_native_full_attention.py": {
+   "pinned": "e27b73c43129d2861c3e8e6a37dfe61960943c694c9759edce42a61b29cc71f0",
+   "repo": "e27b73c43129d2861c3e8e6a37dfe61960943c694c9759edce42a61b29cc71f0"
+  },
+  "dspark_pipeline.py": {
+   "pinned": "78dce33a910155acf5f55649954f6b4ab4aff23bdbe475368664da48fe047778",
+   "repo": "78dce33a910155acf5f55649954f6b4ab4aff23bdbe475368664da48fe047778"
+  },
+  "dspark_projection.py": {
+   "pinned": "15a19fe6a57ad6791c74e36a290613513e8f547695a72c0a285d12fff1a70a99",
+   "repo": "15a19fe6a57ad6791c74e36a290613513e8f547695a72c0a285d12fff1a70a99"
+  },
+  "dspark_residual.py": {
+   "pinned": "35bd485c72c481cdc56308714a51aae7e3087dcc9ab5735b8a385f35a63970dd",
+   "repo": "35bd485c72c481cdc56308714a51aae7e3087dcc9ab5735b8a385f35a63970dd"
+  },
+  "dspark_stats_pack.py": {
+   "pinned": null,
+   "repo": "d6e33c6ebc041a4ee2974f9ce767438a1c7d3a19066e88de9d9470e45472ce3e"
+  },
+  "dspark_target.py": {
+   "pinned": "e4092783ba5f7f239d463e1f78d5efd371a00b6977152d03d0bc986cb72bf080",
+   "repo": "e4092783ba5f7f239d463e1f78d5efd371a00b6977152d03d0bc986cb72bf080"
+  },
+  "dspark_vocabulary.py": {
+   "pinned": "1d1782fc6eccf8f81a66747863c4c91a3fcf9efb2e3cbd768e80094561462185",
+   "repo": "1d1782fc6eccf8f81a66747863c4c91a3fcf9efb2e3cbd768e80094561462185"
+  },
+  "dspark_vocabulary_fixture.py": {
+   "pinned": "3b675fa776f67fd67c86efc19327fa49f66ed8ec52ce9f6dba0aa508e4e52217",
+   "repo": "3b675fa776f67fd67c86efc19327fa49f66ed8ec52ce9f6dba0aa508e4e52217"
+  },
+  "feature_projection.py": {
+   "pinned": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a",
+   "repo": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a"
+  },
+  "frozen_context_geometry.py": {
+   "pinned": null,
+   "repo": "a5bcc57042153ad09ff0dcc151bda16532b974d57c6afdc2d49574b746234c0f"
+  },
+  "gdn_multitoken_conv.py": {
+   "pinned": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+   "repo": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859"
+  },
+  "native_draft_sdpa.py": {
+   "pinned": null,
+   "repo": "49ee63e16c9a447eac09c0142b943199001a78f3b163fff7e0a7001c7707a56c"
+  },
+  "projection_link_policy.py": {
+   "pinned": "659c90f163f15b59ecd7a45d11637243d01cafbda81c5c598fda8bf9ace1774d",
+   "repo": "659c90f163f15b59ecd7a45d11637243d01cafbda81c5c598fda8bf9ace1774d"
+  },
+  "sampling_link_policy.py": {
+   "pinned": "f9e8d30c8347fc99bed94957dc6aa9b273fcba6f09881fbccefb0395204ec668",
+   "repo": "f9e8d30c8347fc99bed94957dc6aa9b273fcba6f09881fbccefb0395204ec668"
+  },
+  "sim_memory_budget.py": {
+   "pinned": "e7f6a169453300f01842ed1d41c054c44d8f8b1c34a76a07cd9e2e0cfb5ebbae",
+   "repo": "e7f6a169453300f01842ed1d41c054c44d8f8b1c34a76a07cd9e2e0cfb5ebbae"
+  }
+ },
+ "other_pinned": {
+  "extent_attention_replay.py": "5633fc3a21a400360542913fb47559db999117e2e3b6e8d540c770d45720cd31",
+  "gdn_multitoken.py": "6436703e10ac46485a95b6c371edcbc1cd5fbb98d6973d29c2ec6ceeea14c4b4",
+  "model_link_policy.py": "fb75ac4b5ae933dcc6b29ea120c42383e38ee7b6cc8903d6b585f0fc7d2127ae",
+  "quad_conv_io.cpp": "8c4e8f93f8ced3a3c8ef8f551b8f711e5fdc03e7bcd0aeeade3e15ee94e0492b",
+  "target_t16_attention_gate.py": "f8f0d2f782738fc5b2f72404a79fd472b344fe8862619e332ece47e6660ee8e1"
+ },
+ "schema": 1,
+ "what": "sha256 (LF-normalised) of the sources TP2 attach evidence pins; TP4 must not edit them (siblings only)"
+}

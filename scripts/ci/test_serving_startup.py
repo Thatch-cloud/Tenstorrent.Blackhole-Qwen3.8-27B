@@ -170,13 +170,14 @@ class StartLedgerTests(unittest.TestCase):
     """start() end to end on fakes: P0 and P1 are recorded only with
     QWEN_FAST_MEMORY_LEDGER=1, and the skip branch's recipe (None) reaches the attach."""
 
-    def run_start(self, environ):
+    def run_start(self, environ, **model_fields):
         import sys
         import memory_ledger
 
         weights = SimpleNamespace(w1='w1', w2='w2', w3='w3', w_gate_up='wgu')
         model = SimpleNamespace(mesh_device='mesh', args=SimpleNamespace(vocab_size=1000),
                                 layers=[SimpleNamespace(feed_forward=SimpleNamespace(weights=weights))])
+        vars(model).update(model_fields)
         runner = SimpleNamespace(model=SimpleNamespace(model=[model]), kv_caches=[])
         worker = SimpleNamespace(vllm_config='config', model_runner=runner)
         seen = {}
@@ -226,6 +227,7 @@ class StartLedgerTests(unittest.TestCase):
                     patch('dflash_device.pindiag'):
                 try:
                     start(worker)
+                    seen['tp'] = worker._qwen_fast_tp
                     self.assertEqual(worker._qwen_fast_attachment['lifecycle'], 'lifecycle')
                     stop(worker)
                 finally:
@@ -251,3 +253,41 @@ class StartLedgerTests(unittest.TestCase):
                                                         'QWEN_FAST_FOUR_AS_TWO': '0'})
         self.assertNotIn('streams', seen)
         self.assertIsNone(seen['attach']['block_stream'])
+
+
+class StartWidthTests(unittest.TestCase):
+    """QWEN_FAST_TP against the mesh the model opened: refused before anything is attached, and the pair's
+    start (switch unset) unchanged."""
+
+    run_start = StartLedgerTests.run_start
+
+    def mesh(self, columns, devices=None):
+        return dict(mesh_device=SimpleNamespace(shape=(1, columns)), num_devices=columns if devices is None else devices)
+
+    def test_the_pair_starts_unchanged_with_the_switch_unset_or_naming_two(self):
+        for environ in ({}, {'QWEN_FAST_TP': '2'}):
+            seen, _, _, worker = self.run_start(environ, **self.mesh(2))
+            self.assertIn('attach', seen)
+            self.assertEqual(seen['tp'], 2)
+            self.assertIsNone(worker._qwen_fast_tp)
+
+    def test_four_cards_start_when_the_switch_names_them_and_the_mesh_agrees(self):
+        # the descriptor branch is the pair's until the link policy takes the ring; the fake descriptor passes it
+        seen, _, _, worker = self.run_start({'QWEN_FAST_TP': '4'}, **self.mesh(4))
+        self.assertEqual(seen['tp'], 4)
+        self.assertIsNone(worker._qwen_fast_tp)
+
+    def test_an_unset_switch_refuses_a_four_card_mesh(self):
+        with self.assertRaises(ValueError) as failure:
+            self.run_start({}, **self.mesh(4))
+        self.assertIn('unset', str(failure.exception))
+
+    def test_a_named_width_refuses_a_different_mesh_before_the_attach(self):
+        for environ, model in (({'QWEN_FAST_TP': '4'}, self.mesh(2)), ({'QWEN_FAST_TP': '2'}, self.mesh(4)),
+                               ({'QWEN_FAST_TP': '4'}, dict(mesh_device='mesh'))):
+            with self.assertRaises(ValueError):
+                self.run_start(environ, **model)
+
+    def test_a_garbage_width_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.run_start({'QWEN_FAST_TP': 'four'}, **self.mesh(4))

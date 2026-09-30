@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 
 from serving_fast_policy import validate_fast_config
+import tp_shapes
 
 
 def recipe_paths(config):
@@ -98,6 +99,9 @@ def start(worker):
     if getattr(worker, '_qwen_fast_resources', None) is not None:
         raise ValueError('Fast worker already initialized')
     paths = recipe_paths(worker.vllm_config)
+    # The tensor-parallel width the launched process asked for (QWEN_FAST_TP; unset is the pair), held against
+    # the mesh the model actually opened before anything else is attached: a disagreement stops the worker here.
+    tp = tp_shapes.select_for_model(os.environ, worker.model_runner.model.model[0])
     from sampling_link_policy import DESCRIPTOR, SOURCES
     import hashlib
 
@@ -141,6 +145,7 @@ def start(worker):
             kv_publication_evidence=paths['directory'] / 'draft-kv-slide-evidence',
             eos_ids=eos_ids, cancelled=lambda: False))
         worker._qwen_fast_resources = resources
+        worker._qwen_fast_tp = tp
         worker._qwen_fast_attachment = dict(attached, weight_pool=pool)
     except BaseException:
         resources.close()
@@ -153,6 +158,7 @@ def stop(worker):
         resources.close()
         worker._qwen_fast_resources = None
         worker._qwen_fast_attachment = None
+        worker._qwen_fast_tp = None
 
 
 # The prefix-reuse switch (serving_c2_contract.PREFIX_SWITCH; only a profile sets it: the

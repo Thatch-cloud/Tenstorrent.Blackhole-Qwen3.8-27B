@@ -172,6 +172,7 @@ scripts/ci/dflash_prefill_window.py
 # never runs, and the first granted resume stops the engine. Not a frozen-recipe pin (the same pin probe). Flag
 # off, warmup is its P8 self (test_sticky_sessions.FastPathWarmupTests).
 scripts/ci/serving_startup.py
+scripts/ci/tp_shapes.py
 
 # Four cards, one (1, 4) mesh (the TP4 profiles: general-tp4 and its variants). The contract imports tp4_mesh at
 # boot under a profile that names mesh_device P150x4 (the ring check it installs on the TT plugin's
