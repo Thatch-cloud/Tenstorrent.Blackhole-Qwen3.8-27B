@@ -619,6 +619,233 @@
       },
       "request_contract": false,
       "drop_batched_decode_mode": false
+    },
+    "general-tp4": {
+      "description": "general at TP4, 8 seats x 65,536: All four p150a cards as one (1, 4) mesh (mesh_device P150x4, TP4): the four-card ring descriptor (tp4_mesh: 2x2, 2 channels), FABRIC_1D (the plugin default, stated) with the model's own Ring collectives at 2 links (tt_ccl P150x4), the ring check at mesh open, and on-device sampling for decode (sample_on_device_mode decode_only: 248,320 / 4 = 62,080 logits per device fits the sampler; the TT plugin falls back to host sampling per batch for min_p, logit_bias, bad_words, logprobs > 1 and the like, and /models/.qwen-c2/device-sampling.off or QWEN_HOST_SAMPLING=1 drops it for every batch). The image's model graft and kernels are TP-generic (per-device widths from tp = 4); the GDN kernels were qualified at 24 value heads per chip and run 12 here. KV per chip at TP4 is one KV head: 16 attention layers x (K, V) x 1 head x 256 x 1.0625 B (bf8, QWEN_SDPA_BF8=1) = 8,704 B per token, half the pair's 17,408 (4 x 131,328 held 9.149 GB per chip at TP2, four-streams feasibility doc). Per chip: weights ~7.4 GB (27.49 GiB / 4), non-weight non-KV <= 6.9 GB (the TP2 plain path's bound 21.69 - 14.8, assumed not to shrink), so ~14.3 GB before KV of the ~33.9 GB each chip allocates. Pool 8 x 65,536 = 524,288 tokens = 4.56 GB per chip - the same KV per chip as general's 4 x 65,536 on the pair - leaving ~15 GB per chip free (d, until G5 at TP4 measures it). Twice general's seats; B = 8 fits the GDN core waves at TP4 (8 x 12 = 96 value heads of 110 cores). UNVERIFIED on hardware until the TP4 jobs pass (J2 smoke and agreement, J3 benchmark).",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "65536",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "65536"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 65536,
+        "max-num-seqs": 8,
+        "block-size": 64,
+        "max-num-batched-tokens": 65536,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "no-enable-chunked-prefill": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        }
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
+    "general-prefix-tp4": {
+      "description": "general-prefix at TP4, 8 seats x 65,536: general-tp4's engine with conversation prefix reuse, exactly as general-prefix is general's (enable-prefix-caching and enable-chunked-prefill in place of the no- flags, QWEN_PREFIX_REUSE=1, sha256 block hashes, hits only under a platform-minted cache_salt, kill switch /models/.qwen-c2/prefix-reuse.off). All four p150a cards as one (1, 4) mesh (mesh_device P150x4, TP4): the four-card ring descriptor (tp4_mesh: 2x2, 2 channels), FABRIC_1D (the plugin default, stated) with the model's own Ring collectives at 2 links (tt_ccl P150x4), the ring check at mesh open, and on-device sampling for decode (sample_on_device_mode decode_only: 248,320 / 4 = 62,080 logits per device fits the sampler; the TT plugin falls back to host sampling per batch for min_p, logit_bias, bad_words, logprobs > 1 and the like, and /models/.qwen-c2/device-sampling.off or QWEN_HOST_SAMPLING=1 drops it for every batch). The image's model graft and kernels are TP-generic (per-device widths from tp = 4); the GDN kernels were qualified at 24 value heads per chip and run 12 here. Pool 524,288 tokens, 4.56 GB per chip (general-tp4 says how). The host checkpoint store stays 8 GiB (a checkpoint is the whole model's GDN state, ~154 MB, at any TP). Its no-reuse baseline for the prefix gates is general-tp4. UNVERIFIED on hardware until the G1 gates pass at TP4.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "65536",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "65536",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 65536,
+        "max-num-seqs": 8,
+        "block-size": 64,
+        "max-num-batched-tokens": 65536,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        },
+        "enable-prefix-caching": true,
+        "enable-chunked-prefill": true,
+        "prefix-caching-hash-algo": "sha256"
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
+    "general-tp4-131k": {
+      "description": "general at TP4, 4 seats x 131,072: general-tp4 with the context doubled and the seats halved - the same pool, 524,288 tokens = 4.56 GB per chip. All four p150a cards as one (1, 4) mesh (mesh_device P150x4, TP4): the four-card ring descriptor (tp4_mesh: 2x2, 2 channels), FABRIC_1D (the plugin default, stated) with the model's own Ring collectives at 2 links (tt_ccl P150x4), the ring check at mesh open, and on-device sampling for decode (sample_on_device_mode decode_only: 248,320 / 4 = 62,080 logits per device fits the sampler; the TT plugin falls back to host sampling per batch for min_p, logit_bias, bad_words, logprobs > 1 and the like, and /models/.qwen-c2/device-sampling.off or QWEN_HOST_SAMPLING=1 drops it for every batch). The image's model graft and kernels are TP-generic (per-device widths from tp = 4); the GDN kernels were qualified at 24 value heads per chip and run 12 here. UNVERIFIED on hardware until the TP4 jobs pass.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "131072",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131072,
+        "max-num-seqs": 4,
+        "block-size": 64,
+        "max-num-batched-tokens": 131072,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "no-enable-chunked-prefill": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        }
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
+    "general-prefix-tp4-131k": {
+      "description": "general-prefix at TP4, 4 seats x 131,072: general-prefix-tp4 with the context doubled and the seats halved (pool 524,288 tokens, 4.56 GB per chip); its no-reuse baseline is general-tp4-131k. All four p150a cards as one (1, 4) mesh (mesh_device P150x4, TP4): the four-card ring descriptor (tp4_mesh: 2x2, 2 channels), FABRIC_1D (the plugin default, stated) with the model's own Ring collectives at 2 links (tt_ccl P150x4), the ring check at mesh open, and on-device sampling for decode (sample_on_device_mode decode_only: 248,320 / 4 = 62,080 logits per device fits the sampler; the TT plugin falls back to host sampling per batch for min_p, logit_bias, bad_words, logprobs > 1 and the like, and /models/.qwen-c2/device-sampling.off or QWEN_HOST_SAMPLING=1 drops it for every batch). The image's model graft and kernels are TP-generic (per-device widths from tp = 4); the GDN kernels were qualified at 24 value heads per chip and run 12 here. UNVERIFIED on hardware until the G1 gates pass at TP4.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "131072",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131072,
+        "max-num-seqs": 4,
+        "block-size": 64,
+        "max-num-batched-tokens": 131072,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        },
+        "enable-prefix-caching": true,
+        "enable-chunked-prefill": true,
+        "prefix-caching-hash-algo": "sha256"
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
+    },
+    "general-tp4-bench": {
+      "description": "GATE ONLY (J3, the TP4 decode benchmark, and G5 at TP4): general at TP4 with 8 seats x 131,072, a pool of 1,048,576 tokens = 9.13 GB per chip of bf8 KV, ~23.4 GB per chip in all by the arithmetic in general-tp4 (~10 GB free, d): one engine serves every benchmark shape - one stream at 4k to 131k, 4 and 8 concurrent streams at 4k to 64k, 4 at 131k - so the job opens the cards once. Not for traffic until G5 at TP4 has measured that pool. All four p150a cards as one (1, 4) mesh (mesh_device P150x4, TP4): the four-card ring descriptor (tp4_mesh: 2x2, 2 channels), FABRIC_1D (the plugin default, stated) with the model's own Ring collectives at 2 links (tt_ccl P150x4), the ring check at mesh open, and on-device sampling for decode (sample_on_device_mode decode_only: 248,320 / 4 = 62,080 logits per device fits the sampler; the TT plugin falls back to host sampling per batch for min_p, logit_bias, bad_words, logprobs > 1 and the like, and /models/.qwen-c2/device-sampling.off or QWEN_HOST_SAMPLING=1 drops it for every batch). The image's model graft and kernels are TP-generic (per-device widths from tp = 4); the GDN kernels were qualified at 24 value heads per chip and run 12 here. ",
+      "gate_only": true,
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "256",
+        "QWEN_FAST_MAX_POSITION": "131072",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131072,
+        "max-num-seqs": 8,
+        "block-size": 64,
+        "max-num-batched-tokens": 131072,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "no-enable-chunked-prefill": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_region_size": 1073741824,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D",
+            "sample_on_device_mode": "decode_only"
+          }
+        }
+      },
+      "request_contract": false,
+      "drop_batched_decode_mode": false
     }
   }
 }

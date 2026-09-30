@@ -1234,7 +1234,9 @@ class ProvenanceTests(unittest.TestCase):
         problems, docker = self.verify()
         self.assertEqual(problems, [])
         gated = sorted(str(key) for key, gate in docker.gates.items() if gate)
-        self.assertEqual(gated, ["('boot', 'general-prefix-eager')", "('environment', 'general-prefix-eager')"])
+        # ...and general-tp4-bench, the four-card benchmark engine, gate only until G5 at TP4 measures its pool.
+        self.assertEqual(gated, ["('boot', 'general-prefix-eager')", "('boot', 'general-tp4-bench')",
+                                 "('environment', 'general-prefix-eager')", "('environment', 'general-tp4-bench')"])
         runs = []
         real = provenance.Docker()
         real.run = lambda arguments, timeout=None: runs.append(list(arguments)) or (0, 'C2ENV {}\n', '')

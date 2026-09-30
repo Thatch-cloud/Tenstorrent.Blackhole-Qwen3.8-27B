@@ -173,6 +173,14 @@ scripts/ci/dflash_prefill_window.py
 # off, warmup is its P8 self (test_sticky_sessions.FastPathWarmupTests).
 scripts/ci/serving_startup.py
 
+# Four cards, one (1, 4) mesh (the TP4 profiles: general-tp4 and its variants). The contract imports tp4_mesh at
+# boot under a profile that names mesh_device P150x4 (the ring check it installs on the TT plugin's
+# open_mesh_device); the profiles' descriptor is the checked-in 2x2 two-channel textproto, laid where they name
+# it. New files: no older layer holds either, so without these lines a TP4 profile's boot dies on the import or
+# its fabric init on the missing descriptor. No TP2 profile reads either.
+scripts/ci/tp4_mesh.py
+scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto  /opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto
+
 # Tests run inside the image at build time (every overlaid scripts/ci/test_*.py is).
 scripts/ci/test_serving_c2_contract.py
 scripts/ci/test_serving_fast_policy.py

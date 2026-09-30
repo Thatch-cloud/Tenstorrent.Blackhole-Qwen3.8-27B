@@ -875,7 +875,10 @@ class ProfileGatingTests(unittest.TestCase):
         self.assertEqual(asked, {'exact': None, 'c2': True, 'c2-gate': True, 'c2-packed': True, 'c2-packed-gate': True,
                                  'c2-packed-prefix': True, 'c2-packed-prefix-gate': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
-                                 'general-prefix-eager': None})
+                                 'general-prefix-eager': None,
+                                 # the four-card (TP4) G1 family decodes one token per step, as general does
+                                 'general-tp4': None, 'general-prefix-tp4': None, 'general-tp4-131k': None,
+                                 'general-prefix-tp4-131k': None, 'general-tp4-bench': None})
         for name, profile in self.profiles().items():
             self.assertEqual(contract.parser_rechunk(profile),
                              name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate', 'c2-packed-prefix',
