@@ -382,6 +382,8 @@ class BallastTests(unittest.TestCase):
 
 
 class ShippingTests(unittest.TestCase):
+    # The image build runs this suite without the repository's .github tree: the allowlist check is a checkout test.
+    @unittest.skipUnless(CPU_WORKFLOW.exists(), 'no .github tree (inside the image)')
     def test_the_suite_runs_in_the_cpu_workflow(self):
         self.assertRegex(CPU_WORKFLOW.read_text(encoding='utf-8'), r'python -B -m unittest [^\n]*\btest_parked_admission\b')
 
