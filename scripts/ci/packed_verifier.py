@@ -208,6 +208,38 @@ def diagnostic(text):
         pass
 
 
+def audit_shard_values(operations, output, block_rows, chip_values):
+    """QWEN_FAST_TP4_SHARD_VALUES under QWEN_FAST_TP4_VGLUE_AUDIT: each chip's gathered maxima against the ttnn.max taken beside
+    them in the same trace (verify_trace_t1.shard_values), every row. Nothing to compare when the lever is off or its gather fell
+    back (no reference was recorded)."""
+    reference = verify_trace_t1.VALUE_REFERENCES.get(id(output[2]))
+    if reference is None:
+        return
+    for chip, (part, gathered) in enumerate(zip(operations.get_device_tensors(reference), chip_values)):
+        rows = verify_trace_t1.compare_values(gathered, operations.to_torch(part).reshape(-1)[:block_rows])
+        if rows:
+            message = '%s site=sampler chip=%d rows=%s' % (tp4_vglue.AUDIT_MISMATCH, chip, rows[:8])
+            diagnostic(message)
+            raise AssertionError(message)
+    diagnostic('%s site=sampler shard_values exact=True rows=%d' % (tp4_vglue.AUDIT_MARKER, block_rows))
+
+
+def release_vglue_audit(operations, fixture, values=None):
+    """QWEN_FAST_TP4_VGLUE_AUDIT: free what the audit holds outside `owned` - each retained record's held tensors (tp4_vglue) and
+    the sampler's ttnn.max reference for the trace output `values` - before the fixture that owns the records closes."""
+    if not tp4_vglue.audit_enabled():
+        return
+    held = []
+    retained = getattr(fixture, 'retained', None)
+    if retained is not None:
+        held += [value for state, result, checkpoint in retained.records for value in tp4_vglue.audit_held_of(result)]
+    reference = verify_trace_t1.VALUE_REFERENCES.pop(id(values), None) if values is not None else None
+    if reference is not None:
+        held.append(reference)
+    if held:
+        release_owned(operations, held)
+
+
 class PackedFeatureTaps(tuple):
     """The block's five block_rows-row taps with one user's row offset attached, so that
     DFlashDevice.project_features (dflash_device.py, row_offset=) slices that user's rows
@@ -895,7 +927,10 @@ class PackedVerifierEngine:
                 operations.synchronize_device(self.mesh)
             finally:
                 if result is not None:
+                    release_vglue_audit(operations, warm, result[2] if len(result) > 2 else None)
                     release_owned(operations, [value for value in result if value is not None])
+                else:
+                    release_vglue_audit(operations, warm)
                 warm.close()
             self.stage = 'verify trace capture'
             self.fixture = self.build_fixture(placeholders)
@@ -1263,26 +1298,11 @@ class PackedVerifierEngine:
         if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
             raise AssertionError('Missing packed prediction rows')
         host = verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
-        self.audit_shard_values(value_parts, chip_values)
+        audit_shard_values(self.operations, self.output, self.block_rows, chip_values)
         if self.shard_audit:
             reference = self.operations.to_torch(self.operations.get_device_tensors(self.output[3])[0])
             verify_trace_t1.audit_round(host, reference.reshape(-1)[:self.block_rows].tolist())
         return host
-
-    def audit_shard_values(self, value_parts, chip_values):
-        """QWEN_FAST_TP4_SHARD_VALUES under QWEN_FAST_TP4_VGLUE_AUDIT: each chip's gathered maxima against the ttnn.max
-        taken beside them in the same trace (verify_trace_t1.shard_values), every row. Nothing to compare when the
-        lever is off or its gather fell back."""
-        reference = verify_trace_t1.VALUE_REFERENCES.get(id(self.output[2]))
-        if reference is None:
-            return
-        for chip, (part, gathered) in enumerate(zip(self.operations.get_device_tensors(reference), chip_values)):
-            rows = verify_trace_t1.compare_values(gathered, self.operations.to_torch(part).reshape(-1)[:self.block_rows])
-            if rows:
-                message = '%s site=sampler chip=%d rows=%s' % (tp4_vglue.AUDIT_MISMATCH, chip, rows[:8])
-                diagnostic(message)
-                raise AssertionError(message)
-        diagnostic('%s site=sampler shard_values exact=True rows=%d' % (tp4_vglue.AUDIT_MARKER, self.block_rows))
 
     def note_verify_t1(self, counts):
         """VERIFY_T1_MARKER once per captured verify trace: which T1 cuts the capture engaged."""
@@ -1921,10 +1941,12 @@ class PackedVerifierEngine:
                        % (self.stage, abandoned))
         if self.feature_capture is not None:
             self.feature_capture.close()
+        shard_values = self.output[2] if self.output is not None and len(self.output) > 2 else None
         if self.output is not None:
             release_owned(operations, [value for value in self.output if value is not None])
             self.output = None
         if self.fixture is not None:
+            release_vglue_audit(operations, self.fixture, shard_values)
             self.fixture.close()
             self.fixture = None
         # The readers' page tables are the pool's: handed back, never freed here.

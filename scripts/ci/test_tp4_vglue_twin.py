@@ -292,5 +292,79 @@ class AuditCompareTests(unittest.TestCase):
         self.assertTrue(lines[-1].startswith(tp4_vglue.AUDIT_MISMATCH))
 
 
+class ReleaseTests(unittest.TestCase):
+    """packed_verifier frees what the audit holds (model_batch is held unedited by test_quad_draft, so the verifier does it)."""
+
+    def setUp(self):
+        import verify_trace_t1
+        import packed_verifier
+
+        self.t1, self.verifier = verify_trace_t1, packed_verifier
+        self.freed = []
+        self.operations = SimpleNamespace(
+            get_device_tensors=lambda value: [SimpleNamespace(buffer_address=lambda a=id(value) + chip: a) for chip in range(4)],
+            deallocate=lambda value: self.freed.append(value))
+        self.t1.VALUE_REFERENCES.clear()
+        self.addCleanup(self.t1.VALUE_REFERENCES.clear)
+        # the pinned release_owned counts two chips; at four cards install() rebinds it to tp_addresses', which counts four
+        patcher = patch('packed_verifier.release_owned', side_effect=lambda operations, values: self.freed.extend(values))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fixture(self):
+        entry = dict(label='piece user 0', mine='held-mine', served='held-served')
+        merged = dict(label='merged output', mine='merged-mine', served='merged-served')
+        records = [(None, dict(segment_results=(dict(vglue_audit=[entry]), {}), vglue_merge_audit=[merged]), None)]
+        return SimpleNamespace(retained=SimpleNamespace(records=records))
+
+    def test_the_held_tensors_and_the_sampler_reference_are_freed_when_the_audit_is_on(self):
+        values = object()
+        self.t1.VALUE_REFERENCES[id(values)] = 'reference'
+        with four(), env(QWEN_FAST_TP4_SHARD_VALUES='1', QWEN_FAST_TP4_VGLUE_AUDIT='1'):
+            self.verifier.release_vglue_audit(self.operations, self.fixture(), values)
+        self.assertEqual(sorted(self.freed), ['held-mine', 'held-served', 'merged-mine', 'merged-served', 'reference'])
+        self.assertEqual(self.t1.VALUE_REFERENCES, {})
+
+    def test_nothing_is_touched_when_the_audit_is_off_or_the_fixture_is_not_a_model_batch(self):
+        with four(), env(QWEN_FAST_TP4_SHARD_VALUES='1'):
+            self.verifier.release_vglue_audit(self.operations, self.fixture(), object())
+        with four(), env(QWEN_FAST_TP4_SHARD_VALUES='1', QWEN_FAST_TP4_VGLUE_AUDIT='1'):
+            self.verifier.release_vglue_audit(self.operations, SimpleNamespace(), None)
+        with pair():
+            self.verifier.release_vglue_audit(self.operations, self.fixture(), object())
+        self.assertEqual(self.freed, [])
+
+    def test_another_traces_reference_is_left_alone(self):
+        mine, other = object(), object()
+        self.t1.VALUE_REFERENCES[id(other)] = 'other'
+        with four(), env(QWEN_FAST_TP4_SHARD_VALUES='1', QWEN_FAST_TP4_VGLUE_AUDIT='1'):
+            self.verifier.release_vglue_audit(self.operations, SimpleNamespace(retained=None), mine)
+        self.assertEqual(self.freed, [])
+        self.assertEqual(self.t1.VALUE_REFERENCES, {id(other): 'other'})
+
+    def test_the_value_audit_compares_every_chip_and_raises_on_a_difference(self):
+        import torch
+
+        values = ('ids', 'ignored', 'values')
+        maxima = SimpleNamespace(name='max')
+        self.t1.VALUE_REFERENCES[id(values[2])] = maxima
+        logical = {id(maxima) + chip: torch.tensor([[1.0], [2.0]]) for chip in range(4)}
+        operations = SimpleNamespace(get_device_tensors=lambda value: [SimpleNamespace(address=id(value) + chip) for chip in range(4)],
+                                     to_torch=lambda part: logical[part.address])
+        lines = []
+        with patch('packed_verifier.diagnostic', side_effect=lines.append):
+            gathered = [torch.tensor([1.0, 2.0])] * 4
+            self.verifier.audit_shard_values(operations, values, 2, gathered)
+            self.assertTrue(lines[-1].startswith(tp4_vglue.AUDIT_MARKER))
+            with self.assertRaises(AssertionError):
+                self.verifier.audit_shard_values(operations, values, 2, gathered[:3] + [torch.tensor([1.0, 3.0])])
+        self.assertTrue(lines[-1].startswith(tp4_vglue.AUDIT_MISMATCH) and 'chip=3' in lines[-1])
+        with patch('packed_verifier.diagnostic', side_effect=lines.append):
+            self.t1.VALUE_REFERENCES.clear()
+            before = len(lines)
+            self.verifier.audit_shard_values(operations, values, 2, gathered)
+            self.assertEqual(len(lines), before, 'no reference recorded: nothing to compare')
+
+
 if __name__ == '__main__':
     unittest.main()

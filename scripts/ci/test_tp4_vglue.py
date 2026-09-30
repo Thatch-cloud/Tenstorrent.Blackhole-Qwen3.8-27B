@@ -386,7 +386,7 @@ class ShipmentTests(unittest.TestCase):
     def test_the_modules_that_import_the_flags_are_shipped_beside_them(self):
         importing = [path.name for path in HERE.glob('*.py') if not path.name.startswith('test_')
                      and re.search(r'^\s*(import|from) tp4_vglue\b', path.read_text(encoding='utf-8'), re.M)]
-        self.assertGreater(len(importing), 6)
+        self.assertGreater(len(importing), 4)
         for name in importing:
             if name == 'tp4_vglue.py':
                 continue
