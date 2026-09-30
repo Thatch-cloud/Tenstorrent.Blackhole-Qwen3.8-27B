@@ -1,0 +1,11 @@
+name: Qwen C2 serving (tag placeholder)
+# A placeholder so the org runner group can allowlist this workflow at a tag before the tag is moved to a real job
+# commit; it triggers on nothing and does nothing.
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'true'
