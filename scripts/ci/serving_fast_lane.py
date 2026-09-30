@@ -47,13 +47,14 @@ KMAX_FLAG = 'QWEN_FAST_LANE_KMAX'            # the most solo rounds between two 
 GAP_FLAG = 'QWEN_FAST_LANE_GAP_MS'           # a packed round at least this often, in ms (default 250)
 FLOOR_FLAG = 'QWEN_FAST_LANE_FLOOR'          # the standard lanes' floor, tok/s (default 75)
 MARGIN_FLAG = 'QWEN_FAST_LANE_MARGIN'        # the controller aims at floor x (1 + margin) (default 0.05)
+SCHEDULE_FLAG = 'QWEN_FAST_LANE_SCHEDULE'    # a ratio SCHEDULE for the gate's sweeps: 'k@frames,k@frames,...,auto' (parse_schedule)
 RESERVE_FLAG = 'QWEN_FAST_LANE_RESERVE'      # 1 (default): slot 0 is the fast request's alone; 0: a standard request may lend it
 EXTRA_ARG = 'qwen_lane'
 FAST, STANDARD = 'fast', 'standard'
 LANES = (FAST, STANDARD)
 GATE_KEY = '_qwen_lane_gate'
 FAST_SLOT = 0
-FLAG_NAMES = (LANE_FLAG, RATIO_FLAG, KMAX_FLAG, GAP_FLAG, FLOOR_FLAG, MARGIN_FLAG, RESERVE_FLAG)
+FLAG_NAMES = (LANE_FLAG, RATIO_FLAG, SCHEDULE_FLAG, KMAX_FLAG, GAP_FLAG, FLOOR_FLAG, MARGIN_FLAG, RESERVE_FLAG)
 
 DEFAULT_KMAX = 3
 DEFAULT_GAP_MS = 250.0
@@ -104,8 +105,32 @@ def _decimal(name, text, low, high, whole=False):
     return value
 
 
-class LaneConfig(collections.namedtuple('LaneConfig', 'ratio k_max gap_ms floor margin reserve seats')):
-    """The lanes' knobs, read once at attach. `ratio` is None for the controller's k ('auto') or the fixed k."""
+def parse_schedule(text, k_max):
+    """QWEN_FAST_LANE_SCHEDULE: 'k@frames,k@frames,...,k' as ((k or None, frames or None), ...), None for no schedule. k is 'auto' (the
+    controller's) or a decimal within [0, k_max]; `frames` counts frames in which BOTH lanes are live (a packed round carrying the
+    fast user and a standard user), so a sweep is the same rounds on every run whatever the clock does. Every entry but the last needs
+    its @frames (a whole number 1..100000); the last runs for good, with or without one. The gate's ratio sweep: one boot measures
+    k = 0, 0.5, 1, 1.5, 2 and the controller, instead of one boot each."""
+    if text is None or text == '':
+        return None
+    entries = []
+    parts = text.split(',')
+    for index, part in enumerate(parts):
+        ratio, at, frames = part.strip().partition('@')
+        k = None if ratio == 'auto' else _decimal(SCHEDULE_FLAG, ratio, 0.0, float(k_max))
+        if at:
+            n = _decimal(SCHEDULE_FLAG, frames, 1, 100000, whole=True)
+        elif index != len(parts) - 1:
+            raise ValueError('%s: %r needs its @frames (only the last entry runs for good)' % (SCHEDULE_FLAG, part.strip()))
+        else:
+            n = None
+        entries.append((k, n))
+    return tuple(entries)
+
+
+class LaneConfig(collections.namedtuple('LaneConfig', 'ratio k_max gap_ms floor margin reserve seats schedule', defaults=(None,))):
+    """The lanes' knobs, read once at attach. `ratio` is None for the controller's k ('auto') or the fixed k; `schedule` (the gate's
+    sweeps, QWEN_FAST_LANE_SCHEDULE) replaces it with a k per stretch of frames."""
 
     __slots__ = ()
 
@@ -115,7 +140,10 @@ class LaneConfig(collections.namedtuple('LaneConfig', 'ratio k_max gap_ms floor 
         k_max = _decimal(KMAX_FLAG, environ.get(KMAX_FLAG, DEFAULT_KMAX), 1, 8, whole=True)
         text = environ.get(RATIO_FLAG, 'auto')
         ratio = None if text == 'auto' else _decimal(RATIO_FLAG, text, 0.0, float(k_max))
-        return cls(ratio=ratio, k_max=k_max,
+        schedule = parse_schedule(environ.get(SCHEDULE_FLAG), k_max)
+        if schedule is not None and ratio is not None:
+            raise ValueError('%s and a fixed %s are two answers to one question: set one' % (SCHEDULE_FLAG, RATIO_FLAG))
+        return cls(ratio=ratio, k_max=k_max, schedule=schedule,
                    gap_ms=_decimal(GAP_FLAG, environ.get(GAP_FLAG, DEFAULT_GAP_MS), 20.0, 5000.0),
                    floor=_decimal(FLOOR_FLAG, environ.get(FLOOR_FLAG, DEFAULT_FLOOR), 1.0, 1000.0),
                    margin=_decimal(MARGIN_FLAG, environ.get(MARGIN_FLAG, DEFAULT_MARGIN), 0.0, 0.5),
@@ -345,6 +373,7 @@ class LaneController:
         self.last_kind = None
         self.k = 0.0 if config.ratio is None else config.ratio
         self.frame = 0
+        self.sched_frames = 0       # frames run with both lanes live: the schedule's clock
         self.rounds = 0
         self.stall_ms = 0.0
         # The cycle of each kind of round as run (packed_ms, solo_ms: every round), the same over the rounds that did NOT follow a
@@ -368,11 +397,37 @@ class LaneController:
         values = [ewma.value for ewma in self.tau_std.values() if ewma.value is not None and ewma.count >= MIN_TAU_ROUNDS]
         return min(values) if values else None
 
+    def scheduled(self):
+        """(k or None, label) of the schedule's entry in force, or None without a schedule: the entry whose stretch of frames
+        (frames with both lanes live) the count has reached; the last entry runs for good."""
+        schedule = self.config.schedule
+        if not schedule:
+            return None
+        # The frame the last packed round OPENED (its solo rounds follow, at this entry's k) is frame sched_frames - 1.
+        index = max(self.sched_frames - 1, 0)
+        seen = 0
+        for k, frames in schedule:
+            if frames is None or index < seen + frames:
+                return k, ('auto' if k is None else '%g' % k)
+            seen += frames
+        k = schedule[-1][0]
+        return k, ('auto' if k is None else '%g' % k)
+
+    def ratio_label(self):
+        """The ratio in force as the gate's lines print it: 'auto', or the fixed / scheduled k."""
+        entry = self.scheduled()
+        if entry is not None:
+            return entry[1]
+        return 'auto' if self.config.ratio is None else '%g' % self.config.ratio
+
     def target_k(self):
-        """The k the frame aims at: the fixed ratio, or the closed form on the measured EWMAs held below what the measured standard
-        rate allows (S1). Returns (k, reason)."""
+        """The k the frame aims at: the fixed ratio (or the schedule's entry), or the closed form on the measured EWMAs held below
+        what the measured standard rate allows (S1). Returns (k, reason)."""
         config = self.config
-        if config.ratio is not None:
+        entry = self.scheduled()
+        if entry is not None and entry[0] is not None:
+            return entry[0], 'sched'
+        if entry is None and config.ratio is not None:
             return config.ratio, 'fixed'
         packed, solo = self.packed_ms.value, self.solo_ms.value
         if packed is None:
@@ -449,6 +504,8 @@ class LaneController:
             self.last_packed_end = now
             self.solo_run = 0
             self.frame += 1
+            if fast_ids and standard_ids:
+                self.sched_frames += 1
             k, self.reason = self.target_k()
             if k < self.k and self.reason == 'floor-bound':
                 self.credit = 0.0
@@ -464,7 +521,7 @@ class LaneController:
         return dict(frame=self.frame, k=self.k, F_ms=self.solo_ms.value, P_ms=self.packed_ms.value,
                     sigma_ms=self.switch_extra.value, tau_fast=self.tau_fast.value, tau_std_min=self.tau_std_min(),
                     fast_rate=self.fast_rate.rate(), std_rate_min=self.std_rate_min(), floor=self.config.floor,
-                    reason=self.reason, stall_ms=self.stall_ms)
+                    reason=self.reason, stall_ms=self.stall_ms, ratio=self.ratio_label())
 
     def forget(self, request_id):
         """A request left: its rate window and tau no longer bind the controller."""
@@ -523,7 +580,8 @@ class LaneRuntime:
         self.rounds = 0
         if log is not None:
             log('{} seats={} ratio={} k_max={} gap_ms={} floor={} margin={} reserve={}', ENGAGED_MARKER, config.seats,
-                'auto' if config.ratio is None else config.ratio, config.k_max, config.gap_ms, config.floor,
+                ('schedule:' + os.environ.get(SCHEDULE_FLAG, '')) if config.schedule else
+                ('auto' if config.ratio is None else config.ratio), config.k_max, config.gap_ms, config.floor,
                 config.margin, int(config.reserve))
 
     # -- admission (the bridge factory)
@@ -589,15 +647,16 @@ class LaneRuntime:
         fields = self.controller.note_round(now, kind, committed=committed, fast_ids=fast_ids, standard_ids=standard_ids,
                                             live=live, switch=switch)
         self.rounds += 1
-        self._log('{} round={} kind={} block={} members={} live={} ms={} committed={} switch={}', ROUND_MARKER, self.rounds,
+        self._log('{} round={} kind={} block={} members={} live={} ms={} committed={} switch={} ratio={}', ROUND_MARKER, self.rounds,
                   kind, block or kind, ','.join(self.book.alias(rid) for rid in request_ids), live if live is not None else len(request_ids),
-                  fmt(fields['cycle_ms']), ','.join(str(committed.get(rid, 0)) for rid in request_ids), int(switch))
+                  fmt(fields['cycle_ms']), ','.join(str(committed.get(rid, 0)) for rid in request_ids), int(switch),
+                  self.controller.ratio_label())
         if kind == 'packed':
             frame = self.controller.frame_fields()
             self._log('{} frame={} k={} F_ms={} P_ms={} sigma_ms={} tau_fast={} tau_std_min={} fast_rate={} std_rate_min={} '
-                      'floor={} reason={}', FRAME_MARKER, frame['frame'], fmt(frame['k'], 2), fmt(frame['F_ms']),
+                      'floor={} reason={} ratio={}', FRAME_MARKER, frame['frame'], fmt(frame['k'], 2), fmt(frame['F_ms']),
                       fmt(frame['P_ms']), fmt(frame['sigma_ms'], 2), fmt(frame['tau_fast']), fmt(frame['tau_std_min']),
-                      fmt(frame['fast_rate']), fmt(frame['std_rate_min']), fmt(frame['floor'], 0), frame['reason'])
+                      fmt(frame['fast_rate']), fmt(frame['std_rate_min']), fmt(frame['floor'], 0), frame['reason'], frame['ratio'])
         return fields
 
     def note_other(self, kind, request_ids, committed, *, now=None, live=None):
@@ -606,9 +665,9 @@ class LaneRuntime:
         now = self.clock() if now is None else now
         self.controller.last_end = now
         self.rounds += 1
-        self._log('{} round={} kind={} block=- members={} live={} ms=- committed={} switch=0', ROUND_MARKER, self.rounds, kind,
+        self._log('{} round={} kind={} block=- members={} live={} ms=- committed={} switch=0 ratio={}', ROUND_MARKER, self.rounds, kind,
                   ','.join(self.book.alias(rid) for rid in request_ids), live if live is not None else len(request_ids),
-                  ','.join(str(committed.get(rid, 0)) for rid in request_ids))
+                  ','.join(str(committed.get(rid, 0)) for rid in request_ids), self.controller.ratio_label())
 
     def _log(self, template, *values):
         if self.log is not None:

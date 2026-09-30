@@ -395,6 +395,85 @@ class ControllerTests(unittest.TestCase):
         self.assertGreater(controller.tau_std_min(), 2.0)
 
 
+class ScheduleTests(unittest.TestCase):
+    """QWEN_FAST_LANE_SCHEDULE: the gate's ratio sweep on one boot, in frames with both lanes live (never the clock)."""
+
+    def test_the_grammar(self):
+        self.assertIsNone(lanes.parse_schedule(None, 3))
+        self.assertIsNone(lanes.parse_schedule('', 3))
+        self.assertEqual(lanes.parse_schedule('0@30,0.5@30,1@30,2@30,auto', 3),
+                         ((0.0, 30), (0.5, 30), (1.0, 30), (2.0, 30), (None, None)))
+        self.assertEqual(lanes.parse_schedule('1', 3), ((1.0, None),))
+        self.assertEqual(lanes.parse_schedule('auto@5,2@9', 3), ((None, 5), (2.0, 9)))
+        for bad in ('0.5,1', '4@3,auto', '-1@3,auto', 'x@3,auto', '1@0,auto', '1@1.5,auto', '1@,auto', '1@3,,auto', 'auto@100001,1'):
+            with self.subTest(text=bad):
+                with self.assertRaises(ValueError):
+                    lanes.parse_schedule(bad, 3)
+
+    def test_the_config_takes_it_and_refuses_a_fixed_ratio_beside_it(self):
+        made = LaneConfig.from_environment({'QWEN_FAST_LANE_SCHEDULE': '0@2,auto'})
+        self.assertEqual(made.schedule, ((0.0, 2), (None, None)))
+        self.assertIsNone(LaneConfig.from_environment({}).schedule)
+        with self.assertRaisesRegex(ValueError, 'two answers to one question'):
+            LaneConfig.from_environment({'QWEN_FAST_LANE_SCHEDULE': '0@2,auto', 'QWEN_FAST_LANE_RATIO': '1'})
+        self.assertEqual(LaneConfig.from_environment({'QWEN_FAST_LANE_SCHEDULE': '0@2,auto', 'QWEN_FAST_LANE_RATIO': 'auto'}).ratio, None)
+        with self.assertRaises(ValueError):
+            LaneConfig.from_environment({'QWEN_FAST_LANE_SCHEDULE': '5@2,auto'})
+        self.assertIn('QWEN_FAST_LANE_SCHEDULE', lanes.FLAG_NAMES)
+
+    def test_each_entry_runs_for_its_frames_with_both_lanes_live_and_the_last_for_good(self):
+        controller = LaneController(config(schedule=((0.0, 3), (1.0, 3), (2.0, None)), gap_ms=5000.0))
+        feed = Feed(controller)
+        labels = []
+        for _ in range(60):
+            kind = feed.decide().kind
+            feed.round(kind, 80.0 if kind == 'packed' else 50.0)
+            if kind == 'packed':
+                labels.append(controller.ratio_label())
+        self.assertEqual(labels[:3], ['0', '0', '0'], 'the packed round labels the frame it opens')
+        self.assertEqual(labels[3:6], ['1', '1', '1'])
+        self.assertEqual(set(labels[6:]), {'2'})
+        # the solo rounds each frame follow the k in force: none in the first stretch, one per frame in the second
+        text = ''.join('P' if kind == 'packed' else 'S' for kind in feed.kinds)
+        self.assertTrue(text.startswith('PPP'), text)
+        self.assertIn('PSPSPS', text)
+        self.assertIn('PSSPSSPSS', text)
+
+    def test_frames_without_both_lanes_do_not_advance_the_schedule(self):
+        controller = LaneController(config(schedule=((1.0, 2), (None, None))))
+        for _ in range(5):        # a packed round of standard users alone (no fast user live)
+            controller.note_round(0.1, 'packed', committed={'s1': 5}, fast_ids=[], standard_ids=['s1'])
+        self.assertEqual(controller.sched_frames, 0)
+        self.assertEqual(controller.ratio_label(), '1')
+        for _ in range(2):
+            controller.note_round(0.2, 'packed', committed={'f': 5, 's1': 5}, fast_ids=['f'], standard_ids=['s1'])
+        self.assertEqual(controller.ratio_label(), '1', 'two frames with both lanes live: the second is still the first entry')
+        controller.note_round(0.3, 'packed', committed={'f': 5, 's1': 5}, fast_ids=['f'], standard_ids=['s1'])
+        self.assertEqual(controller.ratio_label(), 'auto')
+
+    def test_an_auto_entry_is_the_controllers_own_k_and_a_fixed_one_is_reported_as_sched(self):
+        controller = LaneController(config(schedule=((0.5, 1), (None, None))))
+        self.assertEqual(controller.target_k(), (0.5, 'sched'))
+        controller.note_round(0.1, 'packed', committed={'f': 5, 's1': 5}, fast_ids=['f'], standard_ids=['s1'])
+        self.assertEqual(controller.ratio_label(), '0.5', 'the first frame is the first entry')
+        controller.note_round(0.2, 'packed', committed={'f': 5, 's1': 5}, fast_ids=['f'], standard_ids=['s1'])
+        self.assertEqual(controller.ratio_label(), 'auto')
+        self.assertEqual(controller.target_k(), (0.0, 'probe-solo'))
+
+    def test_a_fixed_ratio_is_labelled_and_a_scheduled_round_line_names_its_stretch(self):
+        self.assertEqual(LaneController(config(ratio=1.5)).ratio_label(), '1.5')
+        self.assertEqual(LaneController(config()).ratio_label(), 'auto')
+        lines = Lines()
+        runtime = LaneRuntime(config(schedule=((1.0, 1), (None, None))), log=lines, clock=lambda: 0.0)
+        runtime.book.admit('f', FAST)
+        runtime.book.admit('s', STANDARD)
+        runtime.note_round('packed', ['f', 's'], {'f': 9, 's': 9}, now=0.1, block='packed', live=2)
+        runtime.note_round('packed', ['f', 's'], {'f': 9, 's': 9}, now=0.2, block='packed', live=2)
+        rounds = [line for line in lines.lines if line.startswith('[LANE-ROUND]')]
+        self.assertTrue(rounds[0].endswith('ratio=1'), 'the line names the ratio of the frame this round opens')
+        self.assertTrue(rounds[1].endswith('ratio=auto'))
+
+
 class RateWindowTests(unittest.TestCase):
     def test_tokens_after_the_first_event_over_the_span(self):
         window = RateWindow()
@@ -514,12 +593,12 @@ class TelemetryTests(unittest.TestCase):
         runtime.note_round('packed', [fast_id, std_id], {fast_id: 13, std_id: 9}, now=0.1, block='packed', live=2)
         runtime.note_round('solo', [fast_id], {fast_id: 12}, now=0.15, block='solo', live=2)
         rounds = [line for line in lines.lines if line.startswith('[LANE-ROUND]')]
-        self.assertEqual(rounds[0], '[LANE-ROUND] round=1 kind=packed block=packed members=u1,u2 live=2 ms=- committed=13,9 switch=0')
-        self.assertEqual(rounds[1], '[LANE-ROUND] round=2 kind=solo block=solo members=u1 live=2 ms=50.0 committed=12 switch=1')
+        self.assertEqual(rounds[0], '[LANE-ROUND] round=1 kind=packed block=packed members=u1,u2 live=2 ms=- committed=13,9 switch=0 ratio=auto')
+        self.assertEqual(rounds[1], '[LANE-ROUND] round=2 kind=solo block=solo members=u1 live=2 ms=50.0 committed=12 switch=1 ratio=auto')
         frames = [line for line in lines.lines if line.startswith('[LANE-FRAME]')]
         self.assertEqual(len(frames), 1, 'one frame line per packed round')
         for name in ('frame=', 'k=', 'F_ms=', 'P_ms=', 'sigma_ms=', 'tau_fast=', 'tau_std_min=', 'fast_rate=',
-                     'std_rate_min=', 'floor=', 'reason='):
+                     'std_rate_min=', 'floor=', 'reason=', 'ratio='):
             self.assertIn(' ' + name, frames[0].replace('[LANE-FRAME] ', '[LANE-FRAME]  '))
         self.assertTrue(all(len(line) < 250 for line in lines.lines), max(len(line) for line in lines.lines))
         self.assertTrue(all(len(line) < 180 for line in lines.lines if not line.startswith('[LANE-FRAME]')))
@@ -529,7 +608,7 @@ class TelemetryTests(unittest.TestCase):
         runtime = LaneRuntime(config(), log=lines, clock=lambda: 0.0)
         runtime.book.admit('a', STANDARD)
         runtime.note_other('sequential', ['a'], {'a': 4}, now=1.0, live=1)
-        self.assertEqual(lines.lines[-1], '[LANE-ROUND] round=1 kind=sequential block=- members=u1 live=1 ms=- committed=4 switch=0')
+        self.assertEqual(lines.lines[-1], '[LANE-ROUND] round=1 kind=sequential block=- members=u1 live=1 ms=- committed=4 switch=0 ratio=auto')
         self.assertEqual(runtime.controller.rounds, 0)
         self.assertEqual(runtime.controller.last_end, 1.0)
 
