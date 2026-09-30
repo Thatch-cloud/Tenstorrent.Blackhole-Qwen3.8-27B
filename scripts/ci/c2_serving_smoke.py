@@ -130,15 +130,20 @@ def concurrent():
 record('concurrent4', concurrent)
 
 
+def steady_prompts():
+    # About 3,500 tokens each: four different 14,000-character stretches of the same real code.
+    span = 14000
+    starts = [(index * span) % max(len(source) - span, 1) for index in range(4)]
+    return ['Explain what this code does, then rewrite it with complete type annotations:\n\n' + source[start:start + span]
+            for start in starts]
+
+
 def concurrent4_steady():
     # Opt-in (named in the tests list). Four users, every one past the 2,048-row draft window from its first round (a prompt of
     # about 3,500 tokens each: four different 14,000-character stretches of the same real code), so the fixed slot pairs (0, 1)
     # and (2, 3) can pack and, with QWEN_FAST_QUAD_DRAFT=1, the four-user quad can draft. The mixed concurrent4 above holds two
     # short prompts in the ramp, which keep both pairs drafting singly for their whole answer: it can never show a batched draft.
-    span = 14000
-    starts = [(index * span) % max(len(source) - span, 1) for index in range(4)]
-    prompts = ['Explain what this code does, then rewrite it with complete type annotations:\n\n' + source[start:start + span]
-               for start in starts]
+    prompts = steady_prompts()
     out = [None] * 4
 
     def run(index):
@@ -155,6 +160,18 @@ def concurrent4_steady():
 
 if ONLY and 'concurrent4_steady' in ONLY:
     record('concurrent4_steady', concurrent4_steady)
+
+
+def steady_resend():
+    # Opt-in (named in the tests list, after concurrent4_steady): the first steady prompt again, alone. Its prefill reuses the
+    # prompt geometry whose window-snapshot programs (keyed on the prompt's length, so no attach warm can cover them) the steady
+    # test compiled after the packed traces were captured, and it runs after that test's packed and pair rounds replayed them:
+    # a program compiled after the capture and reused after a replay is the four-card hang's sequence (#48536).
+    return stream([{'role': 'user', 'content': steady_prompts()[0]}], 800)
+
+
+if ONLY and 'steady_resend' in ONLY:
+    record('steady_resend', steady_resend)
 record('tool_call', lambda: post('/v1/chat/completions', dict(model=MODEL, max_tokens=400, tool_choice='auto',
        messages=[{'role': 'user', 'content': 'What is the weather in Wellington? Use the tool.'}],
        tools=[{'type': 'function', 'function': {'name': 'get_weather', 'description': 'Current weather for a city',

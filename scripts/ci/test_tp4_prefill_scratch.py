@@ -9,9 +9,12 @@ line's place before Metal's 'unsafe allocation' warning, and each prefill's late
 """
 import re
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import torch
 
 import c2_smoke_check as check
 import dflash_prefill_window
@@ -137,16 +140,34 @@ class WarmBeforeTraces(unittest.TestCase):
         self.assertRegex(fixture, r'_PREFILL_MASK_BUCKETS\s*=\s*[\(\[]128,\s*256,\s*512,\s*1024,\s*2048[\)\]]')
 
 
+class Capture:
+    """A capture double with PrefillWindowCapture's shape: capture() enters its own segment() through self."""
+
+    def __init__(self, position):
+        self.position, self.segments = position, 0
+
+    @contextmanager
+    def segment(self):
+        self.segments += 1
+        yield self
+
+    @contextmanager
+    def capture(self):
+        with self.segment():
+            yield self
+
+
 class Tripwire(unittest.TestCase):
     def setUp(self):
         self.addCleanup(dflash_prefill_window.set_program_counter, None)
 
     def factories(self, cache):
         def capture_factory(position, start=0):
-            cache[0] += 3
-            return SimpleNamespace(position=position)
+            cache[0] += 3   # nothing the capture's construction compiles is the prefill's
+            return Capture(position)
 
         def bridge_factory(state, capture):
+            cache[0] += 30   # the engine build
             return 'bridge'
 
         return capture_factory, bridge_factory
@@ -157,11 +178,82 @@ class Tripwire(unittest.TestCase):
         capture_factory, bridge_factory = serving_runtime.prefill_tripwire(model, *self.factories(cache), FOUR)
         with patch.object(serving_runtime, 'pindiag') as line:
             capture = capture_factory(8376)
-            cache[0] += 10   # the prefill's programs, two of them the window snapshot's
-            dflash_prefill_window._WINDOW_PROGRAMS[0] = 2
-            self.assertEqual(bridge_factory(SimpleNamespace(), capture), 'bridge')
+            with capture.capture():
+                cache[0] += 10   # the prefill's programs, two of them the window snapshot's
+                dflash_prefill_window._WINDOW_PROGRAMS[0] = 2
+        self.assertEqual(capture.segments, 1)
         self.assertEqual(line.call_args.args, (serving_runtime.PREFILL_PROGRAMS_MARKER + '{}->{} window={} prompt={}',
                                                103, 113, 2, 8376))
+
+    def test_a_prefill_that_is_never_bridged_is_counted(self):
+        # The platform's max_tokens=1 warmup - the first prefill after the attach - and an instant EOS end at their first
+        # token and never reach the bridge; a count taken at the bridge never sees them.
+        cache = [100]
+        model = Model(cache=cache)
+        capture_factory, _ = serving_runtime.prefill_tripwire(model, *self.factories(cache), FOUR)
+        with patch.object(serving_runtime, 'pindiag') as line:
+            with capture_factory(54).capture():
+                cache[0] += 7
+        self.assertEqual(line.call_args_list[-1].args[1:], (103, 110, 0, 54))
+
+    def test_each_segment_is_counted_and_a_failed_one_too(self):
+        cache = [100]
+        model = Model(cache=cache)
+        capture_factory, _ = serving_runtime.prefill_tripwire(model, *self.factories(cache), FOUR)
+        with patch.object(serving_runtime, 'pindiag') as line:
+            capture = capture_factory(6000)
+            with capture.segment():
+                cache[0] += 4
+            with self.assertRaises(RuntimeError):
+                with capture.segment():
+                    cache[0] += 1
+                    raise RuntimeError('MMIO per-op timeout')
+        self.assertEqual([call.args[1:] for call in line.call_args_list], [(103, 107, 0, 6000), (107, 108, 0, 6000)])
+
+    def test_the_real_capture_enters_the_counted_segment(self):
+        # PrefillWindowCapture.capture() runs self.segment(), so the instance attribute the tripwire sets is what runs: a
+        # snapshot's own programs land in window=, the chunk's in B-A.
+        cache = [100]
+
+        def bump(count, value):
+            cache[0] += count
+            return value
+
+        operations = SimpleNamespace(bfloat16=torch.bfloat16, DRAM_MEMORY_CONFIG='dram', deallocate=Mock(),
+                                     slice=lambda value, start, end: bump(1, value[..., start[2]:end[2], :]),
+                                     clone=lambda value, **kwargs: value.clone())
+        model = SimpleNamespace(layers=[SimpleNamespace(forward=lambda value: value) for _ in range(4)],
+                                mesh_device=SimpleNamespace(num_program_cache_entries=lambda: cache[0]))
+
+        def chunk(token_buf, valid_len, chunk_start, page_table, bucket, **kwargs):
+            cache[0] += 5
+            for layer in model.layers:
+                token_buf = layer.forward(token_buf)
+            return token_buf
+
+        model._forward_prefill_chunk_masked_tp = chunk
+        capture_factory, _ = serving_runtime.prefill_tripwire(
+            model, lambda position, start=0: dflash_prefill_window.PrefillWindowCapture(operations, model, position, (1, 3)),
+            lambda state, capture: None, FOUR)
+        value = torch.zeros((1, 1, 192, 2560), dtype=torch.bfloat16)
+        addresses = patch('dflash_prefill_window.addresses',
+                          side_effect=lambda operations, tensor: (tensor.untyped_storage().data_ptr(),) * 2)
+        with patch.object(serving_runtime, 'pindiag') as line, addresses:
+            capture = capture_factory(170)
+            with capture.capture():
+                model._forward_prefill_chunk_masked_tp(value, 170, 0, None, 192)
+            self.assertTrue(capture.complete)
+            capture.close()
+        self.assertEqual(line.call_args.args[1:], (100, 107, 2, 170))
+
+    def test_the_engine_build_logs_its_own_line(self):
+        cache = [100]
+        model = Model(cache=cache)
+        _, bridge_factory = serving_runtime.prefill_tripwire(model, *self.factories(cache), FOUR)
+        with patch.object(serving_runtime, 'pindiag') as line:
+            self.assertEqual(bridge_factory(SimpleNamespace(req_id='chatcmpl-4b3-b36e8145'), Capture(10)), 'bridge')
+        self.assertEqual(line.call_args.args, (serving_runtime.ENGINE_PROGRAMS_MARKER + '{}->{} req={}', 100, 130,
+                                               'chatcmpl-4b3-b36e8145'))
 
     def test_the_window_snapshot_counts_its_own_programs(self):
         cache = [5]
@@ -208,6 +300,24 @@ class TextJudge(unittest.TestCase):
         users = [dict(tokens=300, finish='stop', text='An answer that ends. ' * 20)] + [self.good()] * 3
         self.assertEqual(check.smoke_problems(self.results(users)), [])
 
+    def test_the_resend_is_judged_as_a_code_answer(self):
+        good = dict(self.results([self.good()] * 4), steady_resend=self.good())
+        self.assertEqual(check.smoke_problems(good), [])
+        for bad, reason in ((dict(tokens=1, finish='stop', text=''), 'stop after 1 token'),
+                            (dict(tokens=800, finish='length', text=u'\u0e01\u0e02\u0e03 \u4e2d\u6587\u5b57 \u0416\u0417\u041a ' * 30),
+                             'Latin'),
+                            (dict(error="ReadTimeout('timed out')"), 'ReadTimeout')):
+            problems = check.smoke_problems(dict(self.results([self.good()] * 4), steady_resend=bad))
+            self.assertTrue(any(p.startswith('steady_resend') and reason in p for p in problems), (bad, problems))
+
+    def test_the_smoke_sends_the_first_steady_prompt_again_after_the_steady_test(self):
+        smoke = (HERE / 'c2_serving_smoke.py').read_text(encoding='utf-8')
+        steady = smoke.index("if ONLY and 'concurrent4_steady' in ONLY:\n    record('concurrent4_steady', concurrent4_steady)")
+        resend = smoke.index("if ONLY and 'steady_resend' in ONLY:\n    record('steady_resend', steady_resend)")
+        self.assertLess(steady, resend)
+        self.assertIn("stream([{'role': 'user', 'content': steady_prompts()[0]}], 800)", smoke)
+        self.assertIn('prompts = steady_prompts()', smoke)
+
 
 WARM = '(EngineCore pid=66) | INFO | [PINDIAG] four-card eager prefill warmed before the packed traces: page_table_blocks=2052 slots=4 programs=117->503 ms=9000'
 UNSAFE = ('(EngineCore pid=66) [warning] Allocating device buffers is unsafe due to the existence of an active trace. '
@@ -219,7 +329,9 @@ def log_of(*lines):
     return '\n'.join(lines)
 
 
-CLEAN = log_of(WARM, UNSAFE, PROGRAMS % (600, 603, 3, 54), LEDGER % ('0.000GB', 0), PROGRAMS % (603, 603, 0, 8376))
+ENGINE = '(EngineCore pid=66) | INFO | [PINDIAG] four-card engine programs=%s->%s req=chatcmpl-4b3-b36e8145'
+CLEAN = log_of(WARM, UNSAFE, PROGRAMS % (600, 603, 3, 54), LEDGER % ('0.000GB', 0), PROGRAMS % (603, 603, 0, 8376),
+               ENGINE % (603, 700))
 
 
 class FirstPrefillLedger(unittest.TestCase):
@@ -272,6 +384,10 @@ class LateProgramTripwire(unittest.TestCase):
     def test_the_facts_carry_the_order_and_the_count(self):
         facts = check.check('SMOKE_JSON {"warmup": {"value": 200}}', CLEAN, False, env=FOUR)[1]
         self.assertEqual((facts['prefill_warm_line'], facts['unsafe_allocation_line'], facts['prefills_with_late_programs']), (1, 2, 0))
+        self.assertEqual((facts['prefill_window_programs'], facts['engines_counted'], facts['engine_programs']), (3, 1, 97))
+
+    def test_engine_programs_are_a_fact_not_a_rule(self):
+        self.assertEqual(self.problems(WARM, UNSAFE, PROGRAMS % (600, 600, 0, 54), ENGINE % (600, 900)), [])
 
 
 class LedgerEndToEnd(unittest.TestCase):
@@ -318,7 +434,7 @@ class Templates(unittest.TestCase):
         build = window.parsed('V0b-build-stackfix3', self.folder)[0]
         self.assertEqual((build['C2_ACTIONS'], build['C2_IMAGE_TAG']), ('status reset build', 'tp4-stackfix-3'))
         self.assertEqual(window.parsed('V1b-fix-gate-pairs-smoke', self.folder)[0]['C2_SMOKE_TESTS'],
-                         'warmup,coding,concurrent4,concurrent4_steady')
+                         'warmup,coding,concurrent4,concurrent4_steady,steady_resend')
 
     def test_every_template_parses_and_is_ordered_with_its_image(self):
         rows = window.read_order(self.folder)

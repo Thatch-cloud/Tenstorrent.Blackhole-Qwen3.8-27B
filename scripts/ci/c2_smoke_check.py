@@ -19,14 +19,19 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     [DRAFT-SINGLES-AUDIT] line with equal=0 or a [QUAD-AUDIT] line with equal=0 fails; a profile with
     QWEN_FAST_DRAFT_SINGLES_AUDIT set and no audit line fails.
 
-  - a code-prompt answer that is not text (coding, concurrent4_steady): a stream that finished with `stop` at its first token
-    (an instant EOS: v172's users 0 and 1) or before MIN_ANSWER_TOKENS, or whose sample is mostly non-Latin script (v172's users 2
-    and 3: mixed-script symbols), and, at four cards (QWEN_FAST_TP not 2), a first prefill whose [MEMLEDGER] item=model_after_prefill
+  - a code-prompt answer that is not text (coding, concurrent4_steady, steady_resend): a stream that finished with `stop` at
+    its first token (an instant EOS: v172's users 0 and 1) or before MIN_ANSWER_TOKENS, or whose sample is mostly non-Latin
+    script (v172's users 2 and 3: mixed-script symbols), and, at four cards (QWEN_FAST_TP not 2), a first prefill whose [MEMLEDGER] item=model_after_prefill
     line reports buffers: the model allocated device state at request time, after the packed traces were captured
     (serving_runtime.prefill_warm_before_traces), which is the hazard v172 fell into; also at four cards the eager prefill warm
     line must precede Metal's 'Allocating device buffers is unsafe due to the existence of an active trace' warning, and no
     prefill may compile a program beyond its window snapshot's ('[PINDIAG] four-card prefill programs=A->B window=W': B-A-W
-    above zero is the #48536 sequence);
+    above zero is the #48536 sequence). Every prefill is counted, the ones that end at their first token (the max_tokens=1
+    warmup, the first prefill after the attach) included; the engine builds' own lines ('[PINDIAG] four-card engine
+    programs=A->B') are facts, not rules: they compile after the capture by design;
+  - steady_resend (opt-in, after concurrent4_steady): the first steady prompt again, alone, judged as a code answer (above).
+    Its prefill reuses, after packed and pair replays, the window-snapshot programs the steady test compiled after the
+    capture - the one prefill program set no attach warm covers;
 
   python c2_smoke_check.py --smoke-log smoke.log --container-log container.log --profile P [--profiles qwen_c2_profiles.json]
 """
@@ -38,13 +43,14 @@ import statistics
 import sys
 from pathlib import Path
 
-CORE = ('warmup', 'warm_lifecycle', 'coding', 'concurrent4', 'concurrent4_steady', 'long_real_text')
+CORE = ('warmup', 'warm_lifecycle', 'coding', 'concurrent4', 'concurrent4_steady', 'long_real_text', 'steady_resend')
 PUBLISH = re.compile(r'\[PACKED-PUBLISH\] round=\d+ stages=\{.*?prepare_history: \[([0-9.,\s]*)\]')
 MISMATCH = re.compile(r'audit mismatch', re.IGNORECASE)
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
 STEADY_TEST = 'concurrent4_steady'
+RESEND_TEST = 'steady_resend'
 # One line per packed round the coordinator selected (dflash_packed_proposal_coordinator.SELECT_LINE, QWEN_FAST_PACKED_AUDIT):
 # the quad's one group of four slots, or two packed pairs.
 QUAD_ROUND = re.compile(r'\[PACKED-SELECT\] round=\d+ pairs=\[\[0, 1, 2, 3\]\] users=4 ')
@@ -57,7 +63,7 @@ QUAD_AUDIT = re.compile(r'\[QUAD-AUDIT\] round=\S+ equal=([01]) ')
 SINGLES_AUDIT_LINE = re.compile(r'\[DRAFT-SINGLES-AUDIT\] round=\S+ group=\[[0-9, ]*\] equal=([01]) stage=(\S+) ')
 # A code prompt asked to be explained and rewritten (800 or 1500 tokens out) does not end by itself in a few tokens.
 MIN_ANSWER_TOKENS = 16
-TEXT_TESTS = ('coding', STEADY_TEST)
+TEXT_TESTS = ('coding', STEADY_TEST, RESEND_TEST)
 FOREIGN_SHARE = 0.3
 FIRST_PREFILL_ITEM = re.compile(r'\[MEMLEDGER\] phase=prefill point=after \S+ item=model_after_prefill chip0=\S+ .*?buffers=(\d+) ')
 # Four cards: the eager prefill is warmed before the packed traces (serving_runtime.prefill_warm_before_traces) and every prefill
@@ -66,6 +72,7 @@ FIRST_PREFILL_ITEM = re.compile(r'\[MEMLEDGER\] phase=prefill point=after \S+ it
 WARM_LINE = '[PINDIAG] four-card eager prefill warmed before the packed traces'
 UNSAFE_ALLOCATION = 'Allocating device buffers is unsafe due to the existence of an active trace'
 PREFILL_PROGRAMS = re.compile(r'\[PINDIAG\] four-card prefill programs=(\d+|None)->(\d+|None) window=(\d+) prompt=(\d+)')
+ENGINE_PROGRAMS = re.compile(r'\[PINDIAG\] four-card engine programs=(\d+|None)->(\d+|None) ')
 DEFAULT_PROFILES = Path(__file__).resolve().parent / 'qwen_c2_profiles.json'
 
 
@@ -147,9 +154,10 @@ def smoke_problems(results):
             problems.append('%s: %s' % (name, entry['error']))
     if 'warmup' in results and 'error' not in results['warmup'] and results['warmup'].get('value') != 200:
         problems.append('warmup: status %s' % results['warmup'].get('value'))
-    if 'coding' in results and 'error' not in results['coding']:
-        problems += stream_problems('coding', results['coding'])
-        problems += answer_problems('coding', results['coding'])
+    for name in ('coding', RESEND_TEST):
+        if name in results and 'error' not in results[name]:
+            problems += stream_problems(name, results[name])
+            problems += answer_problems(name, results[name])
     for name in ('concurrent4', STEADY_TEST):
         if name in results and 'error' not in results[name]:
             for index, user in enumerate(results[name].get('users') or []):
@@ -223,8 +231,12 @@ def late_program_problems(container_text):
                  'captured ([PINDIAG] four-card prefill programs=): the warm did not cover its shape' % item for item in late[:4]]
     if warm is not None and not prefills:
         problems.append('no "[PINDIAG] four-card prefill programs=" line: the prefill tripwire did not run')
+    engines = [(before, after) for before, after in (m.groups() for m in map(ENGINE_PROGRAMS.search, lines) if m)
+               if before != 'None' and after != 'None']
     return problems, dict(prefill_warm_line=None if warm is None else warm + 1, unsafe_allocation_line=None if unsafe is None else unsafe + 1,
-                          prefills_counted=len(prefills), prefills_with_late_programs=len(late))
+                          prefills_counted=len(prefills), prefills_with_late_programs=len(late),
+                          prefill_window_programs=sum(int(window) for _, _, window, _ in prefills),
+                          engines_counted=len(engines), engine_programs=sum(int(after) - int(before) for before, after in engines))
 
 
 def draft_facts(container_text):

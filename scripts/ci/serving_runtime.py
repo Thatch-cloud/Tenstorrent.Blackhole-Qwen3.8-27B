@@ -121,6 +121,7 @@ def padded_block_admission(policy, environ=None):
 
 WARM_MARKER = '[PINDIAG] four-card eager prefill warmed before the packed traces'
 PREFILL_PROGRAMS_MARKER = '[PINDIAG] four-card prefill programs='
+ENGINE_PROGRAMS_MARKER = '[PINDIAG] four-card engine programs='
 WARM_SLOT_TOKENS = 64
 WARM_LONG_PROMPTS = (2048 + 64, 4096)
 
@@ -192,31 +193,53 @@ def prefill_warm_before_traces(runner, model, scheduler_requests, environ=None, 
 
 
 def prefill_tripwire(model, capture_factory, bridge_factory, environ=None):
-    """(capture_factory, bridge_factory), wrapped at four cards to log one line per prefill:
-    '[PINDIAG] four-card prefill programs=A->B window=W prompt=P', the program-cache count before and after the prefill
-    and how many of those entries the window snapshot compiled (dflash_prefill_window: keyed on the prompt's geometry, so
-    it cannot be warmed). c2_smoke_check fails a prefill with B-A-W above zero: a program compiled after the packed
-    traces were captured, the #48536 sequence. The pair, and a model that cannot report its cache, get the factories back
-    unwrapped."""
+    """(capture_factory, bridge_factory), wrapped at four cards to log one line per prefill segment (one per prompt
+    without chunked prefill): '[PINDIAG] four-card prefill programs=A->B window=W prompt=P', the program-cache count
+    before and after the segment's device work and how many of those entries the window snapshot compiled
+    (dflash_prefill_window: keyed on the prompt's geometry, so it cannot be warmed). c2_smoke_check fails a prefill with
+    B-A-W above zero: a program compiled after the packed traces were captured, the #48536 sequence.
+
+    Counted around the capture's segment (PrefillWindowCapture.capture runs its own segment), not at the bridge: a
+    request that ends at its first token - the platform's max_tokens=1 warmup, the first prefill after the attach, and
+    an instant EOS - is never bridged, and must be counted all the same. The bridge (the engine build) logs its own
+    '[PINDIAG] four-card engine programs=A->B req=R' line: those programs compile after the capture by design, at both
+    widths, so the line is a fact to read and not a rule. The pair, and a model that cannot report its cache, get the
+    factories back unwrapped."""
     environ = os.environ if environ is None else environ
     if environ.get('QWEN_FAST_TP', '2') == '2' or program_count(model) is None:
         return capture_factory, bridge_factory
     import dflash_prefill_window
 
     dflash_prefill_window.set_program_counter(lambda: program_count(model))
-    opened = {}
+
+    def counted_segment(segment, position):
+        @contextmanager
+        def counted():
+            dflash_prefill_window.window_programs(reset=True)
+            before = program_count(model)
+            try:
+                with segment() as value:
+                    yield value
+            finally:
+                pindiag(PREFILL_PROGRAMS_MARKER + '{}->{} window={} prompt={}', before, program_count(model),
+                        dflash_prefill_window.window_programs(), position)
+        return counted
 
     def counted_capture(position, start=0):
-        dflash_prefill_window.window_programs(reset=True)
         capture = capture_factory(position, start)
-        opened[id(capture)] = (program_count(model), position)
+        segment = getattr(capture, 'segment', None)
+        if callable(segment):
+            # An instance attribute: capture() and the lifecycle's continuations both enter it through self.segment.
+            capture.segment = counted_segment(segment, position)
         return capture
 
     def counted_bridge(state, capture):
-        before, position = opened.pop(id(capture), (None, len(getattr(state, 'prompt_token_ids', ()) or ())))
-        pindiag(PREFILL_PROGRAMS_MARKER + '{}->{} window={} prompt={}', before, program_count(model),
-                dflash_prefill_window.window_programs(), position)
-        return bridge_factory(state, capture)
+        before = program_count(model)
+        try:
+            return bridge_factory(state, capture)
+        finally:
+            pindiag(ENGINE_PROGRAMS_MARKER + '{}->{} req={}', before, program_count(model),
+                    str(getattr(state, 'req_id', None))[:48])
 
     return counted_capture, counted_bridge
 

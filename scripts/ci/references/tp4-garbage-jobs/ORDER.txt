@@ -5,17 +5,19 @@
 # so all three are soft and each runs as a ONE-JOB chain, read by hand (smoke.log, the container timeline). G3 is still read FIRST: EOS
 # or garbage from a steady user's first token there (all four steady prefills run before any packed round) refutes the ranking below,
 # so stop and re-plan before V0. V0b, V1b and V3 share one chain on tp4-stackfix-3 (the image with the eager-prefill warm); V0, V1a and V2 are the tp4-stackfix-1 rows it supersedes.
-# Diagnosis (the mechanism is a ranking, not proven): a prefill after a packed replay is wrong at four cards. The fix allocates the GDN
-# prefill scratch before the traces. V1a/V1b judge the trigger by text; V3 judges it under the exactness policy (staggered arrivals
-# prefill after padded packed rounds); V2 is the exactness regression at 4k-60k and does NOT reach the trigger (the matrix admits all
-# four users before round 1, and its solo arm serves one at a time). Not covered by the fix: the prefill programs the first requests
-# compile after the attach capture (#48536: G1 v47, run 36246961161, compiled the eager loop after its traces were parked and its next
-# prefill hit an MMIO per-op timeout, X3's signature). If V1a or V3 still fails, that is the next candidate, and G1's remedy (warm the
-# eager prefill before the first trace: qwen_prefix_model_patch._qwen_prefix_warm_eager) the next fix.
+# Diagnosis (the mechanism is a ranking, not proven): a prefill after a packed replay is wrong at four cards. tp4-stackfix-1 allocated
+# the GDN prefill scratch before the traces. V1a/V1b judge the trigger by text; V3 judges it under the exactness policy (staggered
+# arrivals prefill after padded packed rounds); V2 is the exactness regression at 4k-60k and does NOT reach the trigger (the matrix admits
+# all four users before round 1, and its solo arm serves one at a time). tp4-stackfix-1 did not cover the prefill programs the first
+# requests compile after the attach capture (#48536: G1 v47, run 36246961161, compiled the eager loop after its traces were parked and its
+# next prefill hit an MMIO per-op timeout, X3's signature); tp4-stackfix-3 does (below).
 # tp4-stackfix-2 (scratch before the traces only) turned the garbage into a hang (V1b v188, X3 v159): the eager prefill compiled its
 # programs AFTER the packed traces were captured, #48536's sequence. tp4-stackfix-3 warms the whole eager prefill (every bucket, the
 # paged-fill widths, the slot writes, two long prompts) at four cards before the first capture, and the smoke check fails a run whose
 # warm line is missing or follows Metal's 'unsafe allocation' warning, or whose prefill compiles a program past its window snapshot's.
+# NOT covered by any warm: the window snapshot's slice and clone programs (dflash_prefill_window, keyed on the prompt's length) and the
+# engine builds' programs compile after the capture by design, at both widths. V1b's steady_resend reuses a steady prompt's window
+# programs after packed and pair replays; the engine lines ('[PINDIAG] four-card engine programs=') say what each build compiled.
 # If V1b or V3 still fails with no late program, run V5: the publication warm's scratch kept for the life of the process.
 G3-stack-gate-steady soft tp4-stack-1 read-first
 R3-stack-speed-d1-sequence soft tp4-stack-1
