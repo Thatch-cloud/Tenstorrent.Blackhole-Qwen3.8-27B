@@ -451,6 +451,10 @@ def rebind_device(device, taps, *, position, window=None, negative=None, audit=F
             **(dict(query=slot.query) if getattr(slot, 'query', None) is not None else {}))
         if device.progress is not None:
             device.kv_history.audit(device.history)
+    else:
+        # The drafter control keeps the stale banks, but its host frontier follows the request: the proposal replay
+        # refuses a cache whose frontier does not match, and the control must run to a verdict, not crash the engine.
+        device.kv_history.position, device.kv_history.history_rows = position, rows
     device.position, device.history_rows = position, rows
     device.name = 'DFlashDevice@%x position=%d' % (id(device), position)
     device.pending = None

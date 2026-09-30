@@ -485,6 +485,21 @@ class NegativeControlTests(unittest.TestCase):
         finally:
             world.__exit__(None, None, None)
 
+    def test_a_drafter_control_request_runs_to_completion_over_stale_banks(self):
+        # The control keeps the old banks, so the cache frontier must follow the request or the replay refuses it.
+        with World() as world:
+            engines = make_set(world, environ={parked.NEGATIVE_FLAG: 'drafter'})
+            engines.build()
+            for index, length in enumerate((300, 3000, 40)):
+                entry = engines.take()
+                request = ParkedRequest(world, engines, entry, 'r%d' % index, length, 16)
+                self.assertEqual((entry.device.kv_history.position, entry.device.kv_history.history_rows),
+                                 (entry.device.position, entry.device.history_rows))
+                while request.step():
+                    pass
+                request.finish()
+            self.assertFalse(world.ops.violations)
+
     def test_the_injected_park_fault_unparks_the_first_park_once_and_the_slot_reparks_at_idle(self):
         with World() as world:
             engines = make_set(world, environ={parked.FAULT_FLAG: 'park'})
