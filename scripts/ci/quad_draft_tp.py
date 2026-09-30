@@ -48,8 +48,12 @@ from types import SimpleNamespace
 
 import quad_draft as _pinned
 import tp_shapes
-from quad_draft import (BLOCK, CONTEXT, HEAD_DIM, HIDDEN, PAIRS, ROWS, SPAN, USERS, conv_kernel_path,
-                        conv_pages, core_ranges, grid_fits, log_line, seam_words, validate_conv_shapes)
+from quad_draft import (HIDDEN, PAIRS, conv_kernel_path, conv_pages, core_ranges, grid_fits, log_line, seam_words,
+                        validate_conv_shapes)
+
+# The pinned geometry (one assignment there: the image's copy-closure check reads simple assignments), read off the module.
+CONTEXT, BLOCK, SPAN = _pinned.CONTEXT, _pinned.BLOCK, _pinned.SPAN
+USERS, ROWS, HEAD_DIM = _pinned.USERS, _pinned.ROWS, _pinned.HEAD_DIM
 
 # What the four-card quad serves. The live-banks flag is not required (the four-card fused commit is not ported) and, set,
 # is refused: an F4-bound quad would read banks the four-card slide swaps.
