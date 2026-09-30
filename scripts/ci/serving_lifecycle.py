@@ -2,7 +2,8 @@
 
 from types import MethodType
 
-from serving_fast_policy import any_request_enabled, validate_fast_config, validate_request_sampling
+from serving_fast_policy import (any_request_enabled, sticky_sessions_enabled, validate_fast_config,
+                                  validate_request_sampling)
 from serving_worker_hook import FastWorkerHook, note_fixture_writer
 
 # The scheduler cannot see the lifecycle: one is the mounted plugin, the other the
@@ -11,6 +12,22 @@ from serving_worker_hook import FastWorkerHook, note_fixture_writer
 # path. Readers treat absent-or-unset as "no prefill held", which is the behaviour
 # before this existed.
 PREFILL_GATE_KEY = '_qwen_prefill_gate'
+# Sticky sessions: the prefix-reuse registry the scheduler graft commits grants into, parked
+# under this key the same way (qwen_prefix_registry.REGISTRY_KEY). Read only under
+# QWEN_FAST_STICKY_SESSIONS=1.
+PREFIX_REGISTRY_KEY = '_qwen_prefix_registry'
+# A granted hit resumes on a 2048-token prefill chunk boundary (qwen_prefix_registry.CHUNK), and
+# at most at the prompt minus one chunk, so the draft window is this prefill's own.
+RESUME_CHUNK = 2048
+
+
+def committed_grant(request_id):
+    """The prefix-reuse registry's committed grant for request_id in this step, or None (no
+    registry in this process, or no grant)."""
+    import sys
+    registry = getattr(sys.modules.get(PREFIX_REGISTRY_KEY), 'registry', None)
+    grant_for = getattr(registry, 'grant_for', None)
+    return grant_for(request_id) if callable(grant_for) else None
 
 
 def prefill_gate():
@@ -47,6 +64,10 @@ class FastServingLifecycle:
     admission = None
     refused = None
     max_model_len = None
+    # Sticky sessions (QWEN_FAST_STICKY_SESSIONS, set per instance in __init__), defaulted on the
+    # class for the same reason: off, a new request with num_computed_tokens != 0 is refused as
+    # it always was.
+    sticky = False
 
     # request_id is assigned at five sites - construction, reset, the
     # EOS-at-first-token release, the prefill-to-decode handoff, and admission.
@@ -118,6 +139,9 @@ class FastServingLifecycle:
         #   TTScheduler the platform installs batches them into one step, which the step-shape
         #   check in _execute refuses (run 36211578069).
         self.any_request = any_request_enabled()
+        # QWEN_FAST_STICKY_SESSIONS (phase 1; default off), read once for the lifecycle's life.
+        # Off, nothing below reads the prefix registry and a hit is refused as it always was.
+        self.sticky = sticky_sessions_enabled()
         self.max_model_len = getattr(getattr(config, 'model_config', None), 'max_model_len', None)
         self.quarantine = None
         # The qualified name of the scheduler class that admits one fresh prompt per step, or None.
@@ -188,6 +212,44 @@ class FastServingLifecycle:
         from serving_request_factory import RequestRefused
 
         return isinstance(failure, RequestRefused)
+
+    def _granted_resume(self, new, chunk):
+        """Sticky sessions: where this new request's prefill resumes - R when it arrives at
+        num_computed_tokens == R > 0 on a granted prefix hit, else 0 (a cold prompt, judged by
+        the uncached clause in _execute exactly as without the flag).
+
+        vLLM's hit reaches the worker only through the scheduler graft's trim, which cuts it to
+        a 2048-token boundary Q with a GDN checkpoint, at or below the prompt minus 2048, and
+        commits a grant for this request at start_pos == Q in this step
+        (qwen_prefix_scheduler_patch). So R > 0 is admitted only when all of these hold, and
+        anything else is a broken invariant that fails the engine (a ValueError here, as the
+        uncached clause's refusal always was), never a silent cold prefill over cached blocks:
+        - the registry holds this step's committed grant for the request, with Q == R;
+        - R is a whole number of 2048-token chunks;
+        - R <= P - 2048, so the draft window [P - 2048, P) is this prefill's own chunks;
+        - the step carries the whole rest of the prompt, P - R tokens (prefix reuse never
+          splits a prefill)."""
+        computed = getattr(new, 'num_computed_tokens', None)
+        if type(computed) is not int or computed <= 0 or new.prompt_token_ids is None:
+            return 0
+        prompt = len(new.prompt_token_ids)
+        grant = committed_grant(new.req_id)
+        granted = None if grant is None else getattr(grant, 'q', None)
+        problems = []
+        if grant is None:
+            problems.append('no committed prefix grant')
+        elif type(granted) is not int or granted != computed:
+            problems.append('the committed grant is at Q=%r' % (granted,))
+        if computed % RESUME_CHUNK:
+            problems.append('R is not a %d-token boundary' % RESUME_CHUNK)
+        if computed > prompt - RESUME_CHUNK:
+            problems.append('R is above the prompt minus %d (the draft window)' % RESUME_CHUNK)
+        if chunk != prompt - computed:
+            problems.append('the step carries %r of the %d tokens after R' % (chunk, prompt - computed))
+        if problems:
+            raise ValueError('Sticky admission refused: req=%r R=%d P=%d: %s'
+                             % (new.req_id, computed, prompt, '; '.join(problems)))
+        return computed
 
     def _terminal_at_seed(self, state):
         """D4: why vLLM stops this request at its first token anyway (so building a verifier
@@ -391,10 +453,14 @@ class FastServingLifecycle:
             # step carries the first chunk, and the capture is still built for the full
             # prompt below, so the draft window stays anchored at the true position.
             chunk = scheduled.num_scheduled_tokens.get(new.req_id)
-            if (new.prompt_token_ids is None or new.num_computed_tokens != 0
+            # Sticky sessions: a granted prefix hit arrives at num_computed_tokens == R > 0
+            # (_granted_resume, which refuses - fatally - a hit it cannot prove granted). Off,
+            # resume is 0 and the clause below is exactly the uncached one.
+            resume = self._granted_resume(new, chunk) if self.sticky else 0
+            if (new.prompt_token_ids is None or new.num_computed_tokens != resume
                     or new.mm_features or new.prompt_embeds is not None or new.lora_request is not None
                     or set(scheduled.num_scheduled_tokens) != {new.req_id}
-                    or not isinstance(chunk, int) or not 1 <= chunk <= len(new.prompt_token_ids)
+                    or not isinstance(chunk, int) or not 1 <= chunk <= len(new.prompt_token_ids) - resume
                     or scheduled.total_num_scheduled_tokens != chunk):
                 raise ValueError('Text-only uncached prompt, whole or first chunk, required: '
                                  'computed=%r chunk=%r prompt=%r total=%r'
@@ -416,7 +482,22 @@ class FastServingLifecycle:
             self.ignore_eos = bool(getattr(new.sampling_params, 'ignore_eos', False))
             self.refused = refused
             self.request_id = new.req_id
-            self.capture = self.capture_factory(len(new.prompt_token_ids))
+            if resume:
+                # The capture's ledger counts from R, and it must record the prefix-reuse route's
+                # slot: the model prefills [R, P) through that route, which runs under this capture
+                # only when the capture declares it records it.
+                self.capture = self.capture_factory(len(new.prompt_token_ids), start=resume)
+                if getattr(self.capture, 'records_prefix_route', False) is not True:
+                    raise ValueError('Sticky admission of %r at %d: the prefill capture does not record the '
+                                     'prefix-reuse route' % (new.req_id, resume))
+                try:
+                    from loguru import logger
+                    logger.info(f"[PINDIAG] sticky admit req={new.req_id!r} Q={resume} "
+                                f"P={len(new.prompt_token_ids)} tail={chunk}")
+                except BaseException:
+                    pass
+            else:
+                self.capture = self.capture_factory(len(new.prompt_token_ids))
             # Per-request, not per-process: without this the mid-prompt sampler
             # check below compares this prompt's first chunk against the PREVIOUS
             # request's last one.
@@ -430,7 +511,7 @@ class FastServingLifecycle:
             # unchunked path behaves exactly as it did and needs no capture that knows
             # about suspension. segment() is only for a step that does NOT finish the
             # prompt, which cannot happen until chunked prefill is enabled.
-            whole = chunk == len(new.prompt_token_ids)
+            whole = resume + chunk == len(new.prompt_token_ids)
             with (self.capture.capture() if whole else self.capture.segment()):
                 result = self.original_execute(scheduled)
             return self._after_prefill_chunk(result, whole)

@@ -3,7 +3,8 @@
 The defaults must leave every existing arm exactly as it was: synthetic prompts, ignore_eos=True,
 and stream_once called with no keywords at all (so its payload and its recorded fields are the
 same bytes). Real text is opt-in, refuses the combinations the fast path cannot serve, builds its
-prompts before the server starts, and records what the offline compare needs."""
+prompts before the server starts, and records what the offline compare needs. Cache salts (sticky
+sessions B3) are opt-in too: each stream its own verifiable salt, the contract's own format."""
 
 import io
 import json
@@ -33,6 +34,60 @@ IMAGE_A5 = 'sha256:126b30dfa72b0e008884f3a8a1cfcb5b7f79eadcdeaeda1cd0f91350dde6e
 def parse(*argv):
     with redirect_stdout(io.StringIO()), mock.patch.object(sys, 'stderr', io.StringIO()):
         return gate.parse_options(list(argv))
+
+
+class CacheSaltTests(unittest.TestCase):
+    """--cache-salt (the C2 serving gate's C2_GATE_SALT): unset sends the payload exactly as before."""
+
+    def key_file(self, key=b'k' * 64):
+        handle = tempfile.NamedTemporaryFile(delete=False)
+        handle.write(key + b'\n')
+        handle.close()
+        self.addCleanup(os.remove, handle.name)
+        return handle.name
+
+    def test_fresh_gives_every_stream_its_own_verifiable_salt(self):
+        import serving_c2_contract as contract
+        path = self.key_file()
+        options = parse('--cache-salt', 'fresh', '--cache-salt-key', path, '--users', '4')
+        self.assertEqual(len(set(options.salts)), 4)
+        self.assertEqual([contract.salt_verdict(salt, b'k' * 64) for salt in options.salts], ['verified'] * 4)
+        self.assertEqual(options.salts[2], contract.mint_salt(b'k' * 64, options.salt_tags[2]))
+        self.assertTrue(all(re.match(r'^c2gate-[0-9a-f]{12}-u0[0-3]$', tag) for tag in options.salt_tags))
+        _, kwargs = gate.user_stream(options, 2, gate.stream_kwargs(options))
+        self.assertEqual(kwargs['cache_salt'], options.salts[2])
+        solo = parse('--cache-salt', 'fresh', '--cache-salt-key', path, '--users', '1', '--sequential-users', '3')
+        self.assertEqual(len(solo.salts), 3)
+        again = parse('--cache-salt', 'fresh', '--cache-salt-key', path, '--users', '4')
+        self.assertFalse(set(again.salts) & set(options.salts), 'another run, other salts')
+
+    def test_none_and_unset_send_no_salt(self):
+        for argv in ((), ('--cache-salt', 'none')):
+            options = parse(*argv)
+            self.assertEqual((options.salts, options.salt_tags), ([], []))
+            self.assertNotIn('cache_salt', gate.user_stream(options, 0, gate.stream_kwargs(options))[1])
+
+    def test_what_is_refused(self):
+        for argv in (('--cache-salt', 'fresh'), ('--cache-salt', 'fresh', '--cache-salt-key', '/no/such/key'),
+                     ('--cache-salt', 'fresh', '--cache-salt-key', self.key_file(b'short')),
+                     ('--cache-salt-key', self.key_file()), ('--cache-salt', 'tenant')):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                parse(*argv)
+        with self.assertRaises(ValueError):
+            gate.mint_salt(b'k' * 64, 'short')
+
+    def test_the_salt_rides_in_the_payload_only_when_set(self):
+        sent = []
+
+        def urlopen(request, timeout):
+            sent.append(json.loads(request.data))
+            return FakeResponse(CHUNKS)
+
+        with mock.patch.object(longctx_cycle_bench, 'urlopen', side_effect=urlopen):
+            longctx_cycle_bench.stream_once(8000, [5, 6, 7], 256, [None], 0, 600, cache_salt='qps1.abcdefgh.00')
+            longctx_cycle_bench.stream_once(8000, [5, 6, 7], 256, [None], 0, 600)
+        self.assertEqual(sent[0]['cache_salt'], 'qps1.abcdefgh.00')
+        self.assertNotIn('cache_salt', sent[1])
 
 
 class OptionTests(unittest.TestCase):

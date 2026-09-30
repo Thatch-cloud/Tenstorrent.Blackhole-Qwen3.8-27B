@@ -25,6 +25,18 @@ BATCHED_PREFILL_ENTRIES = frozenset({'prefill_paged_slots', 'prefill_paged_slots
 # The one entry a resumed chunk arrives through. The plugin sends a prompt's first
 # chunk (start 0) to prefill_paged_slots and every chunk with a nonzero start here.
 RESUMABLE_PREFILL_ENTRY = 'prefill_paged_slots_range'
+# The prefix-reuse route (qwen_prefix_model_patch: Qwen36Model._qwen_prefix_prefill_slots),
+# which qwen36_vllm's batched TP prefill calls instead of prefill_paged_slots while
+# QWEN_PREFIX_REUSE=1 as (token_ids_list, page_table, empty_slots, valid_lens=, starts=,
+# req_ids=): the first three positional, starts a keyword naming the row's absolute
+# start (the granted hit Q, or 0). Its name is outside prefill_paged_slots* on purpose,
+# so bindings() wraps it only for a capture built with prefix_route=True (sticky
+# sessions); every other capture leaves it unbound, and the route refuses to run under a
+# capture that does not declare records_prefix_route.
+PREFIX_ROUTE_ENTRY = '_qwen_prefix_prefill_slots'
+# A resumed prefill starts on a 2048-token chunk boundary: the only point a GDN
+# checkpoint is exact at (qwen_prefix_registry.CHUNK).
+RESUME_CHUNK = 2048
 
 
 def _log(message, *values):
@@ -87,8 +99,21 @@ def chunk_window(position, chunk_start, valid_rows):
     return dict(start=start, end=max(start, end), rows=max(0, end - start))
 
 
-def validate_prefill_chunks(position, chunks):
-    cursor, pieces = 0, []
+def resume_start(position, start):
+    """The absolute token a prefill capture's ledger starts at: 0 for a cold prompt, or a
+    granted prefix hit R (sticky sessions) - a 2048-token boundary at or below
+    position - 2048, so the whole draft window [position - 2048, position) is prefilled
+    by this capture's own chunks exactly as a cold run prefills it."""
+    if (type(start) is not int or start < 0 or start % RESUME_CHUNK
+            or (start and start > position - RESUME_CHUNK)):
+        raise ValueError('A resumed prefill must start at 0 or at a %d-token boundary at or below the '
+                         'draft window (position - %d): start=%r position=%r'
+                         % (RESUME_CHUNK, RESUME_CHUNK, start, position))
+    return start
+
+
+def validate_prefill_chunks(position, chunks, start=0):
+    cursor, pieces = resume_start(position, start), []
     for chunk in chunks:
         if (chunk.get('chunk_start') != cursor or type(chunk.get('bucket')) is not int
                 or not 32 <= chunk['bucket'] <= 2048 or chunk['bucket'] % 32
@@ -140,13 +165,26 @@ def snapshot_prefill_tail(operations, value, position, *, checks=None, chunk_sta
 
 
 class PrefillWindowCapture:
-    def __init__(self, operations, model, position, taps, *, checks=None):
+    def __init__(self, operations, model, position, taps, *, checks=None, start=0, prefix_route=False):
         self.operations, self.model, self.position, self.taps = operations, model, position, tuple(taps)
         self.window = prefill_window(position)
         if not callable(getattr(model, '_forward_prefill_chunk_masked_tp', None)):
             raise ValueError('Pinned native TP slot-prefill chunk boundary required')
+        # Sticky sessions (QWEN_FAST_STICKY_SESSIONS; default start 0 and no route, which is
+        # exactly the capture as it always was). start is a granted prefix hit R: the model
+        # restores the GDN checkpoint at R and runs the chunk loop from R, so the ledger
+        # counts from R and [0, R) is vLLM's cached KV. prefix_route wraps the prefix-reuse
+        # route (PREFIX_ROUTE_ENTRY) when the model has it, so its GDN slot is recorded like
+        # any batched entry's; records_prefix_route is what the route checks before it runs
+        # under this capture.
+        self.start = resume_start(position, start)
+        self.prefix_route = prefix_route is True
+        self.records_prefix_route = self.prefix_route and callable(getattr(model, PREFIX_ROUTE_ENTRY, None))
+        if self.start and not self.records_prefix_route:
+            raise ValueError('A prefill resumed at %d needs the prefix-reuse route (%s) wrapped by this capture'
+                             % (self.start, PREFIX_ROUTE_ENTRY))
         self.checks, self.chunks, self.children, self.merged = checks, [], [], []
-        self.cursor = 0
+        self.cursor = self.start
         self.started = self.active = self.complete = self.closed = False
         # How many engine steps this prompt's chunks arrived across. One for an
         # unsuspended prefill; more once Lever N interleaves decode between chunks.
@@ -223,7 +261,7 @@ class PrefillWindowCapture:
             if not self.active or self.segment_calls:
                 raise ValueError('One batched prefill per capture required')
             slot = prefill_slot(empty_slots)
-            self.check_resumed_call(slot, entry, args[0] if args else kwargs.get('starts'))
+            self.check_resumed_call(slot, entry, self.call_starts(entry, args, kwargs))
             self.segment_calls += 1
             # The LAST slot is the one admission adopts: every chunk writes a complete
             # snapshot of the prefill scratch, so only the final chunk's write holds
@@ -231,6 +269,21 @@ class PrefillWindowCapture:
             self.prefill_slot = self.segment_slot = slot
             return original(token_ids_list, page_table, empty_slots, *args, **kwargs)
         return slots
+
+    @staticmethod
+    def call_starts(entry, args, kwargs):
+        """The starts argument of one batched call, read the way its entry takes it:
+        positional after empty_slots for prefill_paged_slots_range (and, as it always was,
+        whatever sits there for the other stock entries, which never resume), and only as the
+        keyword for the prefix-reuse route, whose first positional after empty_slots is
+        valid_lens. A route call passing anything positionally is refused: reading valid_lens
+        as starts would compare the prompt length against the cursor."""
+        if entry == PREFIX_ROUTE_ENTRY:
+            if args:
+                raise ValueError('The prefix-reuse route takes valid_lens, starts and req_ids as keywords; got %d '
+                                 'positional argument(s) after empty_slots' % len(args))
+            return kwargs.get('starts')
+        return args[0] if args else kwargs.get('starts')
 
     def check_resumed_call(self, slot, entry, starts):
         """Accept a batched call after the prompt's first chunk only if it resumes it.
@@ -251,8 +304,27 @@ class PrefillWindowCapture:
         refused any call this refuses; it now happens before any device work. A
         prompt's first call (cursor 0, slot unmoved) is the whole-prompt shape, and is
         never checked here.
+
+        The prefix-reuse route (sticky sessions) is resumable on EVERY call, its first
+        included: it restores a checkpoint and runs from its starts[0], so that must be this
+        capture's cursor - start (the granted hit, or 0) on its first call. A capture resumed
+        at start > 0 takes its first call only through the route: the stock entries would
+        run from 0, or continue a suspended scratch that is not this checkpoint.
         """
         moved = self.prefill_slot is not None and self.prefill_slot != slot
+        if entry == PREFIX_ROUTE_ENTRY:
+            start = resumed_start(starts)
+            if start is None or start != self.cursor:
+                raise ValueError('The prefix-reuse route must start at this capture\'s cursor: slot %r, '
+                                 'starts=%r cursor=%r (resumed at %r)' % (slot, starts, self.cursor, self.start))
+            if moved:
+                _log('[PINDIAG] prefill slot moved: {} -> {} at cursor={} of {} (segment {}); the plugin '
+                     're-allocated the resumed prompt\'s GDN slot, the last slot written is adopted',
+                     self.prefill_slot, slot, self.cursor, self.position, self.segments)
+            return
+        if self.start and self.cursor == self.start:
+            raise ValueError('A prefill resumed at %d takes its first call only through %s, not %r'
+                             % (self.start, PREFIX_ROUTE_ENTRY, entry))
         if self.cursor <= 0 and not moved:
             return
         start = resumed_start(starts) if entry == RESUMABLE_PREFILL_ENTRY else None
@@ -297,6 +369,9 @@ class PrefillWindowCapture:
                                  'once its empty_slots argument is confirmed third-positional.'
                                  % (name,))
             found.append((self.model, name, self.wrap_slots(getattr(self.model, name), name)))
+        if self.records_prefix_route:
+            found.append((self.model, PREFIX_ROUTE_ENTRY,
+                          self.wrap_slots(getattr(self.model, PREFIX_ROUTE_ENTRY), PREFIX_ROUTE_ENTRY)))
         return found
 
     @contextmanager
@@ -336,7 +411,7 @@ class PrefillWindowCapture:
             with instance_overrides(self.bindings()):
                 yield self
             if self.cursor >= self.position:
-                validate_prefill_chunks(self.position, self.chunks)
+                validate_prefill_chunks(self.position, self.chunks, self.start)
                 if self.prefill_slot is not None and self.segment_slot is None:
                     # Admission adopts prefill_slot as the FINAL chunk's slot. It carries
                     # over between segments, so a final segment that finished the prompt
@@ -374,7 +449,7 @@ class PrefillWindowCapture:
             # chunk set raises HERE rather than inside the segment, and an abandoned
             # capture must still release its snapshots and un-install its hooks.
             try:
-                validate_prefill_chunks(self.position, self.chunks)
+                validate_prefill_chunks(self.position, self.chunks, self.start)
             except BaseException:
                 self.close()
                 raise

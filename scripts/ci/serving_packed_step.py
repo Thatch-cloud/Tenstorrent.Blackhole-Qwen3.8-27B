@@ -470,6 +470,44 @@ def ineligible(entries, block):
     return None
 
 
+def pad_sentinels_enabled():
+    """Sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG): the guard maps a row past an engine's
+    bound blocks to a per-request sentinel page (pad_sentinel_table). Off, the guard reads the
+    engines' tables exactly as it always did."""
+    from serving_fast_policy import sticky_sessions_enabled
+
+    return sticky_sessions_enabled()
+
+
+def pad_sentinel_table(table, segment):
+    """An engine's page table as the K/V guard should read it under prefix caching: the entries past
+    its bound blocks - the page binding pads them with the request's FIRST block
+    (serving_page_binding.VerifierPageBinding.refresh, serving_runtime's bridge factory) - mapped to
+    a sentinel page of this segment's own, -(segment + 1), which no real page and no other segment
+    names.
+
+    Why: at proposal time (kv_shared_at_proposal) a round's 16 rows are mapped through the table of
+    the LAST refresh, so a row past it maps to the pad. With prefix caching off that pad is the
+    request's own first block and can never alias another user's; with it on, same-tenant requests
+    share their first block (a cached prefix), and two of them crossing a 64-token boundary in one
+    round would hit (blocks[0], tile row 0) together - a KV_SHARED conflict that is not real (the
+    rows are written only after vLLM appends their own block and the binding refreshes; the refresh
+    refuses a table that does not cover every row, and the step-time guard reads that refreshed
+    table, where no row is past the bound). The pad is recognised without the binding: the bound
+    blocks are unique (validate_blocks), so the first entry after index 0 equal to entry 0 starts
+    the pad. Returns a one-row list of ints; anything that is not a table is returned unchanged,
+    so the guard still fails closed on it."""
+    try:
+        row = table[0]
+        values = [int(value) for value in (row.tolist() if hasattr(row, 'tolist') else row)]
+    except (IndexError, TypeError, ValueError):
+        return table
+    if not values:
+        return table
+    bound = next((index for index in range(1, len(values)) if values[index] == values[0]), len(values))
+    return [values[:bound] + [-(segment + 1)] * (len(values) - bound)]
+
+
 def kv_guard(owners, block):
     """QWEN_FAST_VERIFY_T2 (#2, verify_trace_t2): the reason the block's per-user K/V chains
     cannot serve these owners - [(engine, frontier position)] - or None. The same host values
@@ -484,9 +522,13 @@ def kv_guard(owners, block):
     import verify_trace_t2
 
     users = [None] * block.shape.users
+    sentinels = pad_sentinels_enabled()
     for engine, position in owners:
-        users[block.segment_of(engine)] = (range(position, position + block.shape.rows_per_user),
-                                           getattr(engine, 'pages', None))
+        segment = block.segment_of(engine)
+        table = getattr(engine, 'pages', None)
+        if sentinels:
+            table = pad_sentinel_table(table, segment)
+        users[segment] = (range(position, position + block.shape.rows_per_user), table)
     if any(user is None for user in users) and pads(block, len(owners)):
         live = tuple(segment for segment, user in enumerate(users) if user is not None)
         if len(live) != len(owners):
@@ -510,10 +552,13 @@ def kv_shared_at_proposal(requests, block):
     """`kv_guard` over the live requests' frontiers, before the round is drafted
     (proposal_rows): a reason there drafts the round at the engines' own widths, so the exact
     sequential step serves it. The engines' page tables are the last refresh's; a block vLLM
-    appends for this round's rows is that request's own (prefix caching is off, allocations
-    are disjoint), and an unrefreshed entry names the request's own first block
-    (serving_page_binding), so neither can hide a conflict between two users. Logged once
-    per reason: the hook asks every tick."""
+    appends for this round's rows is that request's own (allocations past a request's cached
+    prefix are disjoint), and an unrefreshed entry names the request's own first block
+    (serving_page_binding), so neither can hide a conflict between two users. Under sticky
+    sessions two same-tenant requests share their cached first block, so kv_guard reads an
+    unrefreshed entry as a per-request sentinel page instead (pad_sentinel_table) - it would
+    otherwise report a conflict on the shared pad that no write makes. Logged once per reason:
+    the hook asks every tick."""
     import verify_trace_t2
 
     reason = kv_guard([(request.engine, request.session.position) for request in requests], block)

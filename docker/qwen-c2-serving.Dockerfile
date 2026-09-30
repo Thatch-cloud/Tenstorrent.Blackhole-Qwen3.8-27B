@@ -53,13 +53,34 @@ RUN set -eu; root=/opt/tt-metal/models/demos/blackhole/qwen36/tt; cd /opt/qwen-c
 # Then the contract's boot hook, and every overlaid scripts/ci test module, run inside the image.
 COPY qwen-c2-overlay.txt c2_overlay.py /opt/qwen-c2/
 COPY overlay/ /opt/qwen-c2/overlay/
+# /opt/qwen-c2/mesh holds the checked-in mesh graph descriptors the TP4 and 2-link profiles name; the installer
+# refuses a destination whose directory the image lacks, so the directory is made first.
 RUN set -eu; \
+    install -d -m 0755 /opt/qwen-c2/mesh; \
     python3 -B /opt/qwen-c2/c2_overlay.py install --manifest /opt/qwen-c2/qwen-c2-overlay.txt \
       --root /opt/qwen-c2/overlay --record /opt/qwen-c2/overlay-install.json; \
     site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'); \
     echo 'import qwen_c2_boot' > "$site/qwen_c2_serving.pth"; \
     tests=$(python3 -B /opt/qwen-c2/c2_overlay.py tests --manifest /opt/qwen-c2/qwen-c2-overlay.txt); \
     cd /experiment-scripts/ci && VLLM_PLUGINS='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python3 -B -m unittest $tests
+
+# Conversation prefix reuse (the TT prefix-reuse design, G1): the AST stages that graft it into the TT
+# plugin (scheduler.py, model_runner.py, worker.py) and the model tree (model.py, qwen36_vllm.py), none
+# of them an overlay destination. apply runs each stage from the overlaid tree, compiles the result and
+# records every target's sha256 before and after, and the sha256 of every overlaid module the stages
+# imported, which c2_image_provenance (f) holds the image to. Once the stage table patches anything it
+# refuses unless vllm_tt_plugin and models import from the trees it patches and every target holds its
+# pinned original bytes (the source.sha256 pattern above, checked before anything is written); with the
+# table empty it only records what it found. check then imports every patched module with
+# QWEN_PREFIX_REUSE unset and =1 (each must load the patched file) and re-runs P8's installed-plugin
+# tests and the overlay's in-image tests against the patched files with the switch unset - the files
+# every profile serves. Every grafted branch stays off unless QWEN_PREFIX_REUSE=1, which only the
+# general-prefix profiles set.
+COPY qwen_prefix_stage.py /opt/qwen-c2/
+RUN set -eu; cd /experiment-scripts/ci && VLLM_PLUGINS='' python3 -B /opt/qwen-c2/qwen_prefix_stage.py apply \
+      --modules /experiment-scripts/ci --record /opt/qwen-c2/prefix-stage.json; \
+    tests=$(python3 -B /opt/qwen-c2/c2_overlay.py tests --manifest /opt/qwen-c2/qwen-c2-overlay.txt); \
+    python3 -B /opt/qwen-c2/qwen_prefix_stage.py check --record /opt/qwen-c2/prefix-stage.json --tests $tests
 
 # The DFlash2 draft: its config (the speculative model path) and the fixture weights.
 COPY draft-config/ /draft-config/

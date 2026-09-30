@@ -845,6 +845,20 @@ class DescriptorTests(unittest.TestCase):
         self.call(qkv, carry, taps, valid_len=3)
         self.assertEqual(sorted(self.last_program()[2]), [((0, 0), (0, 0))])
 
+    def test_the_four_card_mesh_runs_one_program_per_chip_at_its_widths(self):
+        """TP4: (1, 4), qkv_dim / 4 = 2560 columns per chip with kd = 512; one program per chip, nothing shared."""
+        self.mesh = FakeMesh((1, 4))
+        qkv, carry, taps = inputs(self.ops, C=2560, mesh_shape=(1, 4))
+        self.assertIsNone(pcx.unsupported(self.ops, self.mesh, qkv, carry, taps, 5, 512))
+        q, k, v, state = self.call(qkv, carry, taps, valid_len=1288, key_dim_tp=512)
+        self.assertEqual([t.shape for t in (q, k, v, state)], [(1, 2048, 512), (1, 2048, 512), (1, 2048, 1536), (1, 3, 2560)])
+        programs = self.last_program()[2]
+        self.assertEqual(sorted(programs), [((0, col), (0, col)) for col in range(4)])
+        self.assertEqual(pcx.SUPPORTED_MESHES, ((1, 1), (1, 2), (1, 4)))
+        for refused in ((2, 2), (1, 8), (4, 1)):
+            reason = pcx.unsupported(self.ops, FakeMesh(refused), qkv, carry, taps, 5, 512)
+            self.assertIn('is not one of', reason)
+
     def test_unsupported_inputs_refuse_before_any_allocation(self):
         qkv, carry, taps = inputs(self.ops)
         bad = [

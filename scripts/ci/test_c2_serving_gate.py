@@ -286,7 +286,11 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(driver.profile_limits(profiles_with_c2(), 'exact'), (131328, 256, 131072))
         self.assertEqual([name for name in sorted(CHECKOUT_PROFILES['profiles'])
                           if driver.any_request_profile(CHECKOUT_PROFILES, name)],
-                         ['c2', 'c2-gate', 'c2-packed', 'c2-packed-gate'])
+                         ['c2', 'c2-gate', 'c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate'])
+        # Sticky sessions: each prefix-reuse profile serves exactly its no-reuse twin's edge.
+        for sticky, twin in (('c2-packed-prefix', 'c2-packed'), ('c2-packed-prefix-gate', 'c2-packed-gate')):
+            self.assertEqual(driver.profile_limits(CHECKOUT_PROFILES, sticky), driver.profile_limits(CHECKOUT_PROFILES, twin))
+            self.assertEqual(driver.profile_seats(CHECKOUT_PROFILES, sticky), driver.profile_seats(CHECKOUT_PROFILES, twin))
 
     def test_the_s2_profiles_limits_are_their_flag_off_twins(self):
         """S2 (design W8): c2-packed serves c2's edge (123,136-token prompts, 8,192 of answer room), and

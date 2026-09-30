@@ -44,7 +44,7 @@ def response_socket(response):
 
 
 def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *, ignore_eos=True, detail=False,
-                model='qwen-longctx', watch=None):
+                model='qwen-longctx', watch=None, cache_salt=None):
     """One streaming completion; record the gap between successive tokens.
 
     The defaults send exactly the payload every existing caller always sent (ignore_eos=True,
@@ -65,15 +65,21 @@ def stream_once(port, prompt, max_tokens, results, index, stream_timeout=180, *,
     chunk (watch.chunk, which returns a reason when the client should go away now), and when it
     ended (watch.end). A drop - at a chunk, or a cancel the watch made (watch.cancelled) - records
     `dropped` (why) and what had arrived, and is not an error. The socket's inactivity limit stays
-    stream_timeout throughout: a cancel is the watch's doing, never a timeout's."""
+    stream_timeout throughout: a cancel is the watch's doing, never a timeout's.
+
+    `cache_salt` (None by default, which sends exactly the payload above) is the request's vLLM cache_salt:
+    the C2 serving gate's salted arms on a prefix-reuse profile (lever_n_m3native_gate --cache-salt)."""
     stream_options = dict(include_usage=True)
     if detail:
         stream_options['continuous_usage_stats'] = True
-    payload = json.dumps(dict(model=model, prompt=prompt,
-                              max_tokens=max_tokens, temperature=0.0,
-                              stream=True,
-                              stream_options=stream_options,
-                              ignore_eos=ignore_eos)).encode()
+    body = dict(model=model, prompt=prompt,
+                max_tokens=max_tokens, temperature=0.0,
+                stream=True,
+                stream_options=stream_options,
+                ignore_eos=ignore_eos)
+    if cache_salt is not None:
+        body['cache_salt'] = cache_salt
+    payload = json.dumps(body).encode()
     request = Request('http://127.0.0.1:%d/v1/completions' % port, data=payload,
                       headers={'Content-Type': 'application/json'})
     gaps, tokens, started = [], 0, time.perf_counter()

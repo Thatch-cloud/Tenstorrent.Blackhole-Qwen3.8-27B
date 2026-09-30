@@ -143,6 +143,54 @@ scripts/ci/publication_warm.py
 # install refuses a changed copy and G1 (e) fails the build.
 speculative-decoding/harness/greedy_session.py
 
+# Conversation prefix reuse (the TT prefix-reuse design, G1; the general-prefix profiles). Every G1
+# runtime module goes here - the registry and scheduler graft the patched TTScheduler.__init__
+# installs from, the metrics exporter and collector the contract boots - and so does every stage module
+# scripts/ci/qwen_prefix_stage.py (a build tool, staged beside c2_overlay.py, never overlaid) runs, AND
+# every scripts/ci module those import, directly or not: test_qwen_prefix_image fails while one is
+# missing here, and c2_image_provenance (f) fails an image whose stages ran a module this list does not
+# lay at the context's bytes. lever_n_model_patch is the model stage's (its patch_tp_replay makes both
+# chunk loops resumable; the bundle's 77d6995a copy patches the traced loop only). Nothing else in the
+# container imports it, so laying it changes no profile. The patched TTScheduler.__init__ imports the
+# scheduler graft and the registry from the plugin package itself (a relative import, only under
+# QWEN_PREFIX_REUSE=1), so both also land at the plugin path, and provenance (b) hashes those copies
+# against the same source (test_qwen_prefix_image_closure).
+scripts/ci/qwen_prefix_registry.py  /experiment-scripts/ci/qwen_prefix_registry.py  /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_prefix_registry.py
+scripts/ci/qwen_prefix_scheduler_patch.py  /experiment-scripts/ci/qwen_prefix_scheduler_patch.py  /opt/qwen-fast-plugin/src/vllm_tt_plugin/qwen_prefix_scheduler_patch.py
+scripts/ci/qwen_prefix_runner_patch.py
+scripts/ci/qwen_prefix_model_patch.py
+scripts/ci/qwen_prefix_metrics.py
+scripts/ci/lever_n_model_patch.py
+
+# Sticky sessions, phase 1 (QWEN_FAST_STICKY_SESSIONS; the c2-packed-prefix profiles): the fast path's
+# prefill capture counts from a granted 2048-token boundary and wraps the prefix-reuse route, so the GDN
+# slot the route writes is recorded (dflash_prefill_window). P8 lays that file at its base commit; without
+# this line the image ships that copy, which cannot record the route, and the route refuses every prefill
+# under it. The frozen recipe does not pin it (the pin probe in docs/batch-spec-tasks-2026-09-19.md). Flag
+# off, the capture is its P8 self call for call (test_sticky_sessions). Every other module sticky sessions
+# change is overlaid above: serving_fast_policy (both copies), serving_lifecycle, serving_runtime,
+# serving_packed_step, serving_c2_contract, qwen_c2_profiles.json, qwen_prefix_scheduler_patch (both
+# copies) and qwen_prefix_model_patch.
+scripts/ci/dflash_prefill_window.py
+# The fast path's worker warmup (serving_startup.warmup, which the P8 worker patch returns before the plugin's
+# own warmup) runs the prefix-reuse model graft's warm first under QWEN_PREFIX_REUSE=1: the GDN restore path
+# and the mid-loop capture declaration, which the plugin's warmup_model_prefill would otherwise be the only
+# caller of. P8 lays serving_startup at its base commit; without this line the image ships that copy, the warm
+# never runs, and the first granted resume stops the engine. Not a frozen-recipe pin (the same pin probe). Flag
+# off, warmup is its P8 self (test_sticky_sessions.FastPathWarmupTests).
+scripts/ci/serving_startup.py
+
+# Four cards, one (1, 4) mesh (the TP4 profiles: general-tp4 and its variants). The contract imports tp4_mesh at
+# boot under a profile that names mesh_device P150x4 (the ring check it installs on the TT plugin's
+# open_mesh_device); the profiles' descriptor is the checked-in 2x2 two-channel textproto, laid where they name
+# it. New files: no older layer holds either, so without these lines a TP4 profile's boot dies on the import or
+# its fabric init on the missing descriptor. No TP2 profile reads either.
+scripts/ci/tp4_mesh.py
+scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto  /opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto
+# The pair at the two links this cabling trains (profile general-2link, the TP2 reference and baseline for TP4):
+# upstream's p150_x2 declares four and STRICT_INIT refuses the open.
+scripts/ci/qwen_p150x2_2link_mesh_graph_descriptor.textproto  /opt/qwen-c2/mesh/qwen_p150x2_2link_mesh_graph_descriptor.textproto
+
 # Tests run inside the image at build time (every overlaid scripts/ci/test_*.py is).
 scripts/ci/test_serving_c2_contract.py
 scripts/ci/test_serving_fast_policy.py
@@ -153,6 +201,7 @@ scripts/ci/test_extent_attention_replay.py
 # S2 W7: the admission against fake runtimes and evidence, and (InImageRuntimeTests) check_runtime on the image's
 # own /opt/tt-metal: K64j at both binary paths with its literals, its four kernels, the patched tree scratch.
 scripts/ci/test_packed_any_admission.py
+scripts/ci/test_qwen_prefix_metrics.py
 # Fix M against the image's own vLLM parsers and tokenizers (CorpusTests), on its token-id corpus.
 scripts/ci/test_c2_parser_rechunk.py
 scripts/ci/c2_parser_corpus.json

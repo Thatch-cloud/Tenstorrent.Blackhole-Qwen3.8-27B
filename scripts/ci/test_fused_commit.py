@@ -1565,7 +1565,8 @@ class ParentTests(unittest.TestCase):
         if result.returncode != 0:
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
-        after = without_any_request((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())
+        after = without_any_request(without_sticky(
+            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1575,6 +1576,64 @@ class ParentTests(unittest.TestCase):
         self.assertIn("**({'collectives': collectives}", added)
         self.assertIn("if os.environ.get('QWEN_FAST_FUSED_COMMIT') == '1' else {}))", added)
         self.assertTrue(all(line.startswith('#') for line in added[1:] if 'collectives' not in line and 'FUSED' not in line))
+
+
+def cut_code(lines, first, last, code, replacement=()):
+    """cut_once, asserting that the run's statements (its lines less blanks and comments, stripped) are
+    exactly `code`, so the cut hides nothing else."""
+    starts = [index for index, value in enumerate(lines) if value.strip() == first]
+    if len(starts) != 1:
+        raise AssertionError('%r is not in serving_runtime.py exactly once' % first)
+    ends = [index for index in range(starts[0], len(lines)) if lines[index].strip() == last]
+    if not ends:
+        raise AssertionError('%r has no %r after it' % (first, last))
+    found = tuple(value.strip() for value in lines[starts[0]:ends[0] + 1]
+                  if value.strip() and not value.strip().startswith('#'))
+    if found != tuple(code):
+        raise AssertionError('The run from %r holds more than expected: %r' % (first, found))
+    return lines[:starts[0]] + list(replacement) + lines[ends[0] + 1:]
+
+
+def without_sticky(lines):
+    """serving_runtime.py less phase-1 sticky sessions (QWEN_FAST_STICKY_SESSIONS, default off), which
+    landed after this parent: its widened policy import back to C2-any's, the `import time` it added, the
+    STICKY_ENGINE_MARKER constant, the prefix-warm note in the attach comment, the flag read and
+    capture_factory's `start` branch back to the one return, and the timed engine build back to the bare
+    call. Each is cut exactly once and checked statement by statement, so nothing else is hidden."""
+    line = ('from serving_fast_policy import STICKY_SESSIONS_FLAG, any_request_enabled, sticky_sessions_enabled, '
+            'validate_fast_config')
+    if lines.count(line) != 1:
+        raise AssertionError('The sticky import %r is not in serving_runtime.py exactly once' % line)
+    lines = ['from serving_fast_policy import any_request_enabled, validate_fast_config' if value == line else value
+             for value in lines]
+    lines = cut_code(lines, 'import time', 'import time', ('import time',))
+    lines = cut_code(lines, "# Sticky sessions (QWEN_FAST_STICKY_SESSIONS=1 only): one line per admitted request's "
+                     'engine build,', "STICKY_ENGINE_MARKER = '[PINDIAG] sticky engine built req='",
+                     ("STICKY_ENGINE_MARKER = '[PINDIAG] sticky engine built req='",))
+    lines = cut_code(lines, "# (Under QWEN_PREFIX_REUSE=1 that warmup first runs the prefix-reuse model graft's",
+                     "# model's persistent B=1 prefill scratch, and no trace.)", ())
+    lines = cut_code(lines, '# Sticky sessions (QWEN_FAST_STICKY_SESSIONS, read once at attach; default off). On, every',
+                     'def capture_factory(position, start=0):',
+                     ('sticky = sticky_sessions_enabled()', 'def capture_factory(position, start=0):'),
+                     ['        def capture_factory(position):'])
+    lines = cut_code(lines, 'if not sticky:',
+                     'return PrefillWindowCapture(operations, model, position, TARGET_TAPS, start=start, '
+                     'prefix_route=True)',
+                     ('if not sticky:', 'if start:',
+                      "raise ValueError('A prefill resumed at %d needs %s=1' % (start, STICKY_SESSIONS_FLAG))",
+                      'return PrefillWindowCapture(operations, model, position, TARGET_TAPS)',
+                      'return PrefillWindowCapture(operations, model, position, TARGET_TAPS, start=start, '
+                      'prefix_route=True)'),
+                     ['            return PrefillWindowCapture(operations, model, position, TARGET_TAPS)'])
+    guards = [index for index, value in enumerate(lines) if value.strip() == 'if sticky:']
+    if len(guards) != 2 or lines[guards[0] + 1].strip() != 'began = time.perf_counter()':
+        raise AssertionError('The sticky engine-build timing is not in serving_runtime.py exactly once')
+    lines = lines[:guards[0]] + lines[guards[0] + 2:]
+    return cut_code(lines, 'if sticky:', 'len(state.prompt_token_ids))',
+                    ('if sticky:',
+                     "pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}', str(state.req_id)[:48],",
+                     '(time.perf_counter() - began) * 1000.0, state.num_computed_tokens,',
+                     'len(state.prompt_token_ids))'))
 
 
 def without_any_request(lines):

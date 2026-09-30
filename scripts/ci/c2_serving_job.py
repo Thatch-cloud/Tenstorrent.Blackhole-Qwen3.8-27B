@@ -12,8 +12,19 @@ integer, and a card-M harness, argument or environment the cardm step must not r
 Keys (every one optional but C2_IMAGE_TAG):
   C2_ACTIONS          ACTIONS, run in the workflow's order (default: status)
   C2_IMAGE_TAG        the image is zot.thatch.local:5000/tt-vllm:qwen38-c2-<tag>
+  C2_FABRIC           the fabric config the fabric action opens the (1, 4) mesh under: FABRIC_1D (the default, what
+                      the TT plugin sets) or FABRIC_1D_RING; needs C2_CARDS=quad when set
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
-  C2_SMOKE_TESTS      comma-separated c2_serving_smoke.py tests, empty for all
+  C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
+                      Blackhole board present, the four-card (1, 4) mesh the TP4 profiles open). quad takes
+                      status, platform, unserve, reset (all four together), fabric (the four-card fabric probe),
+                      build, drift, probe, smoke, gate, prefix and push - not cardm, replay or priority, which
+                      are pair-shaped - and only profiles that name mesh_device P150x4 (general-tp4 ...);
+                      pair takes only profiles that name none. Anything else is refused here, before a card opens.
+  C2_SMOKE_TESTS      comma-separated c2_serving_smoke.py tests, empty for all (agreement and bench are opt-in: only
+                      when named - tp_agreement.py collect and tp_decode_bench.py, results in agreement-<profile>.json
+                      and bench-<profile>.json)
+  C2_BENCH_SHAPES     the bench test's shapes, comma-separated STREAMSxPROMPT (default: tp_decode_bench's ladder)
   C2_PLATFORM_IMAGE   the thatch-serving-tt image the replay runs
   C2_GATE_PLAN        GATE_PLANS, comma- or space-separated, run in order (default: bringup)
   C2_GATE_LENGTHS     the matrix's prompt lengths, one per user (default, rendered empty: the S1 G4
@@ -51,6 +62,23 @@ Keys (every one optional but C2_IMAGE_TAG):
                       llk-decode-twin, llk-decode-zones, llk-decode-counters, llk-prefill-twin,
                       llk-prefill-zones, llk-prefill-counters - attribution only, never judged for timing or
                       against v235, never blocking a placement (llk_profile_plan says what each runs)
+  C2_GATE_SALT        a cache_salt for every gate stream (sticky sessions, harness item B3; default, rendered
+                      empty: none sent, the payload exactly as before): fresh (each stream its own salt, minted
+                      under a key the gate mounts, so every request takes the prefix route's capture path and
+                      publishes, and none can hit) or none (said explicitly: every request unsalted, which a
+                      prefix profile serves with reuse off). Only on a prefix profile (the gate refuses it on
+                      any other before a container starts); warm on c2-packed-prefix then warms the prefix twins
+  C2_PREFIX_PLAN      PREFIX_PLANS for the prefix action (c2_prefix_gate.py), in order (default: bringup);
+                      each exactness and lifecycle arm is a plan too (PREFIX_ARM_PLANS): exactness-eager
+                      re-runs that arm alone. Never beside its own plan, and no plan twice (one arm, one
+                      results directory). exactness-shared (the four-agent shared-block arm) applies to the
+                      sticky-session profiles only; on them exactness-traced and lifecycle-tiny are
+                      NOT_APPLICABLE, and a plan with no applicable arm is refused by the gate
+  C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
+  C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
+                      the baseline arm)
+  C2_PREFIX_AGENTS    the timing plan's busy-agent counts, one phase each (default 1,4,5,6)
+  The C2_PREFIX_* keys are read only when C2_ACTIONS has prefix; otherwise their defaults are output.
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -60,8 +88,18 @@ import re
 import sys
 
 # llkcheck (no card): llk_profile_plan preflight - every LLK instrumentation made from the image's own bytes.
-ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'cardm', 'drift', 'build', 'llkcheck', 'smoke', 'gate',
-           'replay', 'push')
+ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'fabric', 'cardm', 'drift', 'build', 'llkcheck', 'probe',
+           'smoke', 'gate', 'prefix', 'replay', 'push')
+CARD_SETS = ('pair', 'quad')
+# What a four-card job may run: the pair-shaped steps (a single-card harness on card M, the M+A smoke and replay, the
+# CPU-priority measurement of the M+A container) do not apply to it, and fabric applies to nothing else.
+QUAD_ACTIONS = ('status', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
+                'push')
+TP4_MESH_DEVICE = 'P150x4'
+# The mesh_device values of a pair profile: none (the image's P300 under upstream's four-channel p150_x2) and P300
+# (general-2link: the same pair under the two-channel descriptor this cabling needs).
+PAIR_MESH_DEVICES = (None, 'P300')
+FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
 # each runs. warm and warm-off are M1 (never judged for kernel-cache growth); control and forced-cap M3-M4 (G3);
@@ -81,7 +119,21 @@ BELOW_FAMILY_RANGE = (4096, 16640)   # capacities the pinned (flag-off) mask adm
 JIT_MODES = ('auto', 'judge', 'record')
 POLICIES = ('strict', 'dc-i')
 AUDIT_SETS = ('extent', 'all')
+# C2_GATE_SALT (sticky sessions B3): what cache_salt the gate's streams carry; unset sends none, as before.
+SALT_MODES = ('none', 'fresh')
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
+# The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing')
+# (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
+# only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
+# G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.
+PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exactness'),
+                    ('exactness-eager', 'exactness'), ('exactness-shared', 'exactness'),
+                    ('lifecycle-evict', 'lifecycle'), ('lifecycle-store', 'lifecycle'),
+                    ('lifecycle-tiny', 'lifecycle'))
+PREFIX_PROFILE = 'general-prefix'
+PREFIX_BASELINE = 'general'
+PREFIX_AGENTS = (1, 4, 5, 6)
 # S1's G4 ladder (c2-serve-for-real-plan 2.2, gate table row G4 part 1): both sides of every page and
 # chunk boundary the fast path has (2048 = the draft window and the prefill chunk), a short prompt
 # far below any of them, and long ones up to the ~123k prompt cap.
@@ -132,6 +184,64 @@ def parse_env(text):
 def profile_names(path=PROFILES):
     with open(path, encoding='utf-8') as handle:
         return sorted(json.load(handle)['profiles'])
+
+
+def profile_meshes(path=PROFILES):
+    """{profile: its mesh_device, or None}: what a profile opens (serving_c2_contract.mesh_of reads the same key)."""
+    with open(path, encoding='utf-8') as handle:
+        return dict((name, body.get('mesh_device')) for name, body in json.load(handle)['profiles'].items())
+
+
+def refuse_fabric_with_serving(actions):
+    """The fabric probe closes the mesh it opened, and a second open in one job is what the ethernet-core teardown
+    wedge punishes: it runs in a job of its own, never beside a step that serves or gates."""
+    beside = sorted(set(actions) & set(('smoke', 'gate', 'prefix')))
+    if 'fabric' in actions and beside:
+        raise JobError('C2_ACTIONS has fabric with %s: the probe closes the mesh and a second open in one job wedges '
+                       'the ethernet cores; run the probe in its own job, reset first' % ', '.join(beside))
+
+
+def read_cards(values, actions, profile_of, named):
+    """C2_CARDS, refused when an action or a profile of the job does not fit the card set. `named`: the profiles the
+    job's steps serve, (key, name) pairs; profile_of maps a profile to its mesh_device."""
+    cards = values.get('C2_CARDS') or 'pair'
+    if cards not in CARD_SETS:
+        raise JobError('C2_CARDS must be one of %s, got %r' % (', '.join(CARD_SETS), cards))
+    if cards == 'pair' and 'fabric' in actions:
+        raise JobError('C2_ACTIONS has fabric: the four-card fabric probe needs C2_CARDS=quad')
+    refuse_fabric_with_serving(actions)
+    if cards == 'quad':
+        wrong = sorted(set(actions) - set(QUAD_ACTIONS))
+        if wrong:
+            raise JobError('C2_CARDS=quad: %s are pair-shaped steps (M+A, card M); quad takes %s' % (
+                ', '.join(wrong), ' '.join(QUAD_ACTIONS)))
+    if values.get('C2_FABRIC') and cards != 'quad':
+        raise JobError('C2_FABRIC needs C2_CARDS=quad')
+    for key, name in named:
+        if not name or name == 'none' or name not in profile_of:
+            continue
+        if (profile_of[name] != TP4_MESH_DEVICE) if cards == 'quad' else (profile_of[name] not in PAIR_MESH_DEVICES):
+            raise JobError('%s %s opens %s, but C2_CARDS=%s gives %s' % (
+                key, name, 'the four-card (1, 4) mesh' if profile_of[name] == TP4_MESH_DEVICE else 'the (1, 2) pair', cards,
+                'all four cards' if cards == 'quad' else 'cards M and A'))
+    return cards
+
+
+BENCH_SHAPES = re.compile(r'[0-9]+x[0-9]+(?:,[0-9]+x[0-9]+)*')
+
+
+def bench_shapes(values):
+    shapes = values.get('C2_BENCH_SHAPES', '')
+    if shapes and not BENCH_SHAPES.fullmatch(shapes):
+        raise JobError('C2_BENCH_SHAPES is STREAMSxPROMPT shapes, comma-separated (4x4096,1x131072), got %r' % shapes)
+    return shapes
+
+
+def fabric_config(values):
+    fabric = values.get('C2_FABRIC') or FABRIC_CONFIGS[0]
+    if fabric not in FABRIC_CONFIGS:
+        raise JobError('C2_FABRIC must be one of %s, got %r' % (', '.join(FABRIC_CONFIGS), fabric))
+    return fabric
 
 
 def positive_int(name, text):
@@ -199,8 +309,8 @@ def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY):
     return harness, ' '.join(args), ' '.join(pairs)
 
 
-def read_job(values, profiles, root=ROOT):
-    """The workflow outputs for a parsed job file, or JobError."""
+def read_job(values, profiles, root=ROOT, meshes=None):
+    """The workflow outputs for a parsed job file, or JobError. `meshes`: profile_meshes() (the checkout's when not given)."""
     actions = split_list(values.get('C2_ACTIONS', 'status')) or ['status']
     unknown = sorted(set(actions) - set(ACTIONS))
     if unknown:
@@ -235,14 +345,23 @@ def read_job(values, profiles, root=ROOT):
     replay_served_model = values.get('C2_REPLAY_SERVED_MODEL', '')
     if replay_served_model and not MODEL_ID.fullmatch(replay_served_model):
         raise JobError('C2_REPLAY_SERVED_MODEL must match %s, got %r' % (MODEL_ID.pattern, replay_served_model))
+    prefix = read_prefix(values, profiles, 'prefix' in actions)
+    if meshes is None:
+        meshes = profile_meshes()
+    named = [('C2_PROFILE', profile if set(actions) & set(('smoke', 'gate')) else ''),
+             ('C2_REPLAY_PROFILE', replay_profile if 'replay' in actions else '')]
+    if 'prefix' in actions:
+        named += [('C2_PREFIX_PROFILE', prefix['prefix_profile']), ('C2_PREFIX_BASELINE', prefix['prefix_baseline'])]
+    cards = read_cards(values, actions, meshes, named)
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
-    outputs = dict(actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
+    outputs = dict(cards=cards, fabric=fabric_config(values), bench_shapes=bench_shapes(values), actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, cardm_harness=cardm_harness, cardm_args=cardm_args,
                    cardm_env=cardm_env)
     outputs.update(s2)
+    outputs.update(prefix)
     return outputs
 
 
@@ -298,8 +417,43 @@ def read_s2_gate(values):
     audits = values.get('C2_GATE_AUDITS', '')
     if audits and audits not in AUDIT_SETS:
         raise JobError('C2_GATE_AUDITS must be one of %s, got %r' % (', '.join(AUDIT_SETS), audits))
+    salt = values.get('C2_GATE_SALT', '')
+    if salt and salt not in SALT_MODES:
+        raise JobError('C2_GATE_SALT must be one of %s, got %r' % (', '.join(SALT_MODES), salt))
     return dict(gate_pairs=pairs, gate_families=','.join(str(family) for family in families), gate_jit=jit,
-                gate_policy=policy, gate_policy_decision=decision, gate_audits=audits)
+                gate_policy=policy, gate_policy_decision=decision, gate_audits=audits, gate_salt=salt)
+
+
+def read_prefix(values, profiles, running):
+    """The prefix action's outputs. Its keys are checked only when the action runs: a job that does
+    not run it (an exact or c2 run) is never refused over them, and gets the defaults. The profile
+    must then be one the checkout defines (general-prefix lands in qwen_c2_profiles.json on another
+    track, and the image's own profiles are what c2_prefix_gate.py finally checks)."""
+    if not running:
+        return dict(prefix_plan='bringup', prefix_profile=PREFIX_PROFILE, prefix_baseline=PREFIX_BASELINE,
+                    prefix_agents=','.join(str(count) for count in PREFIX_AGENTS))
+    plans = split_list(values.get('C2_PREFIX_PLAN', 'bringup')) or ['bringup']
+    known = PREFIX_PLANS + tuple(arm for arm, _ in PREFIX_ARM_PLANS)
+    unknown = sorted(set(plans) - set(known))
+    if unknown:
+        raise JobError('C2_PREFIX_PLAN: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(known)))
+    parent = dict(PREFIX_ARM_PLANS)
+    twice = sorted(set(plan for plan in plans if plans.count(plan) > 1 or parent.get(plan) in plans))
+    if twice:
+        raise JobError('C2_PREFIX_PLAN: %s would run an arm twice into one results directory (a plan named twice, '
+                       'or an arm beside its own plan)' % ', '.join(twice))
+    profile = values.get('C2_PREFIX_PROFILE') or PREFIX_PROFILE
+    if profile not in profiles:
+        raise JobError('C2_PREFIX_PROFILE %r is not a profile of qwen_c2_profiles.json (%s)' % (profile, ', '.join(profiles)))
+    baseline = values.get('C2_PREFIX_BASELINE') or PREFIX_BASELINE
+    if baseline != 'none' and baseline not in profiles:
+        raise JobError('C2_PREFIX_BASELINE %r is not a profile of qwen_c2_profiles.json' % baseline)
+    if baseline == 'none' and 'bringup' in plans:
+        raise JobError('C2_PREFIX_BASELINE none: the bringup plan compares against a baseline profile')
+    agents_text = values.get('C2_PREFIX_AGENTS', '')
+    agents = [positive_int('C2_PREFIX_AGENTS', part) for part in split_list(agents_text)] or list(PREFIX_AGENTS)
+    return dict(prefix_plan=','.join(plans), prefix_profile=profile, prefix_baseline=baseline,
+                prefix_agents=','.join(str(count) for count in agents))
 
 
 def render(outputs):
