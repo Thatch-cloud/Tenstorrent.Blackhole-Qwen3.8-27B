@@ -81,6 +81,16 @@
 #                                         # restaged twice each, four idle patterns; K64J_READER verdict=PASS
 #                                         # scope=full is CB2b's evidence
 #
+# CB2b AT FOUR CARDS (the S2 fast path on the four-card mesh; the evidence jobs EV-W2 and EV-F3): K64J_HARNESS=extent_reader
+# TP4_WIDTH=4 runs the same harness with --width 4 (TP4_WIDTH unset or 2 is the pair's run above, unchanged) and sets QWEN_FAST_TP=4
+# in the container. The code under test is then also scripts/ci's extent_attention_replay_tp.py, tp_shapes.py, tp_kernels.py,
+# tp_addresses.py and chip_view.py (/bench/ci), driven through ChipView(chips=4) at flags 0x23 on ONE KV head (six query heads per
+# token); the pinned pair modules and the twin's siblings (attention_mask_replay_tp.py/.cpp, attention_fold_dma_tp.py/.cpp) come
+# from the image's served tree, so IMAGE must be the four-card S2 image (the P8 default has no such siblings):
+#   C2_CARDM_ENV=K64J_HARNESS=extent_reader TP4_WIDTH=4 [WATCHER=1] IMAGE=<the four-card image> KOPGRAFT64=... EXPECT_TTNNCPP_SHA256=...
+#   C2_CARDM_ARGS=--sections R1,S,R2,R4 --seeds 0,1,2 --variants normal,peaky    (the full pass; the watcher pass: --seeds 0 --variants normal)
+# Verdict line: K64J_READER verdict=PASS scope=full ... chips=1of4 ... extent_sha256=<extent_attention_replay_tp.py's sha256>.
+#
 # THE FOUR-CARD PORT'S ONE-CARD WINDOW (S2T-01 / S2T-10, HW-A): two more harnesses, both on card M through the cardm action
 # with the graft K64j mounted and verified as above (QUAL_CARD, ALLOW_SERVING_CARD and RESULTS are set by the step):
 #   K64J_HARNESS=nkv1_spike   k64j_nkv1_spike.py: K64j at ONE KV head per chip (6 query heads on 1 KV head, cache
@@ -107,7 +117,8 @@
 # Env: KOPGRAFT64 (default ~/opgraft-K64j), EXPECT_TTNNCPP_SHA256, IMAGE (default image P8), RESULTS
 # (~/kwork64/k64j/<card tag>), CARD_B_ARGS (extra harness args, appended last, e.g. "--sections X,M --seeds 0"),
 # WATCHER=1, WATCHDOG_S, K64J_CARD_DRY_RUN=1, K64J_HARNESS (card, the default, extent_reader, nkv1_spike or gdn_tp4; the last
-# two are the four-card port's one-card window, see below; TP4_WIDTH=2 is gdn_tp4's PARITY run), QUAL_CARD (the
+# two are the four-card port's one-card window, see below; TP4_WIDTH=2 is gdn_tp4's PARITY run; TP4_WIDTH=4 is extent_reader's
+# four-card run, unset being its pair run), QUAL_CARD (the
 # target board id under /dev/tenstorrent/by-id; required, no default: card B is reserved for another project and refused; card M or card A, the
 # serving pair, is refused unless ALLOW_SERVING_CARD=1, which prints a loud warning). QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
 # is set as the arm sets it. Every run gets a fresh kernel cache.
@@ -139,6 +150,10 @@ CI_SOURCES='extent_attention_replay.py pooled_attention_replay.py serving_buffer
 gdn_multitoken_conv.py'
 SERVED_CI=/experiment-scripts/ci
 SERVED_SOURCES='attention_mask_replay.py attention_mask_replay.cpp attention_fold_dma.py attention_fold_dma.cpp'
+# ... and at TP4_WIDTH=4 (extent_reader_card_b.QUAD_RECORDED_SOURCES / QUAD_SIBLINGS): the four-card twin and its helpers from the
+# checkout, the twin's sibling kernels and modules from the image.
+QUAD_CI_SOURCES='extent_attention_replay_tp.py tp_shapes.py tp_kernels.py tp_addresses.py chip_view.py'
+QUAD_SERVED_SOURCES='attention_mask_replay_tp.py attention_mask_replay_tp.cpp attention_fold_dma_tp.py attention_fold_dma_tp.cpp'
 
 # >>> qual_card.sh: which board a qualification harness runs on (canonical copy scripts/ci/qual_card.sh)
 # Every single-card harness under optimisation/ttnn-op embeds this block byte for byte (the scripts in
@@ -511,7 +526,17 @@ for file in "${HARNESS[@]}"; do
   test -s "$file" || { echo "refusing: $file missing (ship k64j, k64j_probe and sdpa_decode_qwen side by side)" >&2; exit 1; }
 done
 XE=()
+WIDTH_ARGS=()
 if [ "$MAIN" = extent_reader ]; then
+  # The width: the pair by default (the harness's own default), or TP4_WIDTH=4, the four-card reader twin on one KV head. The
+  # launch carries it both ways, --width for the harness and QWEN_FAST_TP=4 for tp_shapes, which the harness checks.
+  case ${TP4_WIDTH:-2} in
+    2) ;;
+    4) CI_SOURCES="$CI_SOURCES $QUAD_CI_SOURCES"
+       SERVED_SOURCES="$SERVED_SOURCES $QUAD_SERVED_SOURCES"
+       WIDTH_ARGS=(--width 4) ;;
+    *) echo "refusing: TP4_WIDTH=${TP4_WIDTH} is neither 4 nor 2" >&2; exit 1 ;;
+  esac
   # The code under test is this checkout's scripts/ci, mounted read-only. The pinned sources it runs are the image's
   # ($SERVED_CI). The harness loads them from there and checks their served bytes before it opens the device.
   ci=$(cd "$here/../../../scripts/ci" 2>/dev/null && pwd || echo "$here/../../../scripts/ci")
@@ -521,6 +546,9 @@ if [ "$MAIN" = extent_reader ]; then
   done
   echo "### code under test: $ci; pinned sources: the image's $SERVED_CI"
   XE=(-e QWEN_FAST_SDPA_MODES=tail,share,slice)
+  if [ "${TP4_WIDTH:-2}" = 4 ]; then
+    XE+=(-e QWEN_FAST_TP=4)
+  fi
 fi
 if [ "$MAIN" = gdn_tp4 ]; then
   # The code under test is this checkout's scripts/ci, first on PYTHONPATH; the four-card width is a launch variable
@@ -592,6 +620,9 @@ if [ "$DRY" != 1 ]; then
 fi
 
 args=(--out "/results/$stem-$stamp.json" --expect-binary-sha256 "$EXPECT")
+if [ "$MAIN" = extent_reader ]; then
+  args+=(${WIDTH_ARGS[@]+"${WIDTH_ARGS[@]}"})
+fi
 # One KV head per chip: --kv-heads 1 in CARD_B_ARGS (the last --kv-heads wins, as argparse reads it). The watcher pass below
 # then runs the one-head combos: G8B2 0x27 (the q-slice) needs a second KV head and the harness refuses it as a combo.
 ONE_HEAD=0

@@ -97,6 +97,25 @@ Verdict: one 'K64J_READER verdict=...' line.
                line, a section that raised, the watchdog), a dead liveness control, a decisive section cut by the
                deadline, SIGTERM, or a requested section without a decisive comparison.
 
+WIDTH 4 (--width 4; run_card_b.sh TP4_WIDTH=4 passes it and sets QWEN_FAST_TP=4): the four-card reader twin
+(scripts/ci/extent_attention_replay_tp.py, the code under test from --ci-root) at one KV head per chip, six query heads
+per token. The same sections and the same contract with these numbers changed and nothing else:
+  - the reader is ChipView(ttnn, chips=4) (scripts/ci/chip_view.py) in place of TwoChipView: the one chip shown as the
+    four-card mesh; the verdict line says chips=1of4 and the report holds 'chip_view' in place of 'two_chip_view';
+  - the served flags are 0x23 (tail | share | extent; the q-slice 0x4 needs a second KV head to slice between) and the
+    compile-time reference is 0x3: the engaged line reads flags=0x23,0x23,0x23,0x23, each construction logs one
+    '[PINDIAG] sdpa qwen-modes ... flags=['0x23'] mask=narrow' line per segment, and the 0x23 program's F22 line carries
+    entries=2 kv_share=true q_slice=false;
+  - a token's query is (6, 256): the pool holds ONE KV head ((C / 64 + 64, 1, 64, 256)), the fold is the token-major
+    repack of rows * 6 head rows, the host mirrors of the mask kernel are narrow_mask_host at 6 head rows (G8B2, G4B3
+    and G4B1) and the reference's wide mask is (2, 1, 48, E);
+  - the sibling kernels and modules (attention_mask_replay_tp, attention_fold_dma_tp, beside the frozen pair modules)
+    come from the image's served tree like the pair's pinned ones: their bytes are recorded, never taken from the
+    checkout, and the report says when they differ from the checkout's copies; the width itself is the launch's
+    (QWEN_FAST_TP=4 must be in the environment and tp_shapes must read 4 from it: read the launched argv);
+  - extent_sha256 on the verdict line is that of extent_attention_replay_tp.py (its bytes are frozen on serving/tp4-s2).
+The pair's flow (--width 2, the default) is byte for byte what it was.
+
 RUN with run_card_b.sh and K64J_HARNESS=extent_reader, WATCHER=1 first; on card M through the cardm action (card B is
 reserved for another agent). The helpers above the device part import no ttnn and are tested on CPU by
 test_extent_reader_card_b.py, which also runs the whole flow - the real reader classes included - on a fake one-chip
@@ -183,6 +202,56 @@ DECISIVE_KINDS = tuple(kind for kinds in SECTION_KINDS.values() for kind in kind
 DEADLINE_MARGIN_S = probe.DEADLINE_MARGIN_S
 OPEN_EXTRA_S = probe.OPEN_EXTRA_S
 ENV_RECORDED = probe.ENV_RECORDED + (SDPA_MODES_ENV,)
+
+# The width this harness runs at: 2 (the pair: 12 query heads per token on 2 KV heads, flags 0x27, the pinned reader) or 4
+# (the four-card mesh: 6 heads on 1 KV head, flags 0x23, the reader twin). Everything above is the pair's; a Geometry names what
+# the width changes.
+PAIR_WIDTH, QUAD_WIDTH = 2, 4
+WIDTHS = (PAIR_WIDTH, QUAD_WIDTH)
+TP_ENV = 'QWEN_FAST_TP'                         # tp_shapes.TP_SWITCH: the width of the launch
+QUAD_FLAGS = card_b.TAIL | card_b.SHARE | card_b.EXTENT      # 0x23: the q-slice (0x4) needs a second KV head
+QUAD_MODULES = (('extent', 'extent_attention_replay_tp'), ('extent_pair', 'extent_attention_replay'),
+                ('mask', 'attention_mask_replay'), ('fold', 'attention_fold_dma_tp'), ('fold_pair', 'attention_fold_dma'),
+                ('head_fold', 'attention_head_fold'), ('pooled', 'pooled_attention_replay'),
+                ('pool', 'serving_buffer_pool'), ('conv', 'gdn_multitoken_conv'), ('tp_shapes', 'tp_shapes'),
+                ('tp_kernels', 'tp_kernels'), ('tp_addresses', 'tp_addresses'), ('chip_view', 'chip_view'))
+QUAD_SERVED_MODULES = ('attention_fold_dma', 'attention_mask_replay', 'attention_fold_dma_tp')
+QUAD_PRELOADED = ('tp_shapes', 'tp_kernels')    # from the checkout, before a served sibling's own imports can take the image's
+QUAD_RECORDED_SOURCES = ('extent_attention_replay_tp.py', 'extent_attention_replay.py', 'pooled_attention_replay.py',
+                         'serving_buffer_pool.py', 'attention_head_fold.py', 'gdn_multitoken_conv.py', 'tp_shapes.py',
+                         'tp_kernels.py', 'tp_addresses.py', 'chip_view.py')
+# The reader twin's pinned siblings: served from the image, never the checkout. Their bytes are recorded (the recorder's
+# pinned_modules); a difference from the checkout's own copies is a warning, not a refusal (the image was built from a commit).
+QUAD_SIBLINGS = ('attention_fold_dma_tp.cpp', 'attention_fold_dma_tp.py', 'attention_mask_replay_tp.cpp',
+                 'attention_mask_replay_tp.py')
+QUAD_READER = 'extent_attention_replay_tp.py'
+
+
+class Geometry:
+    """What the width changes. `heads` query heads per token on `kv_heads` KV heads; the flags the reader serves and the
+    compile-time call it is compared with; the modules, the recorded sources and how the one chip is shown as `chips`."""
+
+    def __init__(self, width, heads, kv_heads, served_flags, modules, served_modules, recorded_sources, reader_source,
+                 view_key, siblings=(), preloaded=()):
+        self.width, self.heads, self.kv_heads = width, heads, kv_heads
+        self.served_flags = served_flags
+        self.compile_flags = served_flags & ~card_b.EXTENT
+        self.modules, self.served_modules, self.recorded_sources = modules, served_modules, recorded_sources
+        self.reader_source, self.view_key, self.siblings, self.preloaded = reader_source, view_key, siblings, preloaded
+        self.chips = width
+
+    @property
+    def group(self):
+        """Query heads per KV head."""
+        return self.heads // self.kv_heads
+
+
+PAIR = Geometry(PAIR_WIDTH, 12, 2, SERVED_FLAGS, MODULES, SERVED_MODULES, RECORDED_SOURCES, 'extent_attention_replay.py',
+                'two_chip_view')
+QUAD = Geometry(QUAD_WIDTH, 6, 1, QUAD_FLAGS, QUAD_MODULES, QUAD_SERVED_MODULES, QUAD_RECORDED_SOURCES, QUAD_READER,
+                'chip_view', QUAD_SIBLINGS, QUAD_PRELOADED)
+GEOMETRIES = {PAIR_WIDTH: PAIR, QUAD_WIDTH: QUAD}
+assert PAIR.served_flags == SERVED_FLAGS and PAIR.compile_flags == COMPILE_FLAGS and PAIR.chips == 2
 
 
 # ---------------------------------------------------------------------------------------------
@@ -284,6 +353,83 @@ def idle_assignment(pattern):
     """{segment: start}: the k-th idle segment in segment order at 32 * (k % 2), page 0 tile row k % 2
     (packed_verifier.idle_inputs, with E = 256's family start 0 in place of its C - 256, design 2.1)."""
     return {segment: IDLE_STARTS[index % 2] for index, segment in enumerate(sorted(pattern))}
+
+
+def served_mask(torch, word, capacity, rows, batches, offset, geometry=PAIR, width=None):
+    """attention_mask_replay.cpp's mask on the host at `geometry` (the pair's: k64j_card_b.served_mask itself):
+    (batches, 1, rows * heads, width) bf16, -inf in the last 256 columns wherever the cache position is past the row's
+    (word + offset + b * rows + (h % (rows * 6)) / 6), +0.0 elsewhere. width (default capacity) keeps the LAST width columns."""
+    if geometry.heads == PAIR.heads:
+        return card_b.served_mask(torch, word, capacity, width=width, rows=rows, batches=batches, offset=offset)
+    width = capacity if width is None else width
+    if (any(type(value) is not int for value in (word, capacity, width)) or word < 0 or capacity < K_CHUNK
+            or capacity % K_CHUNK or not K_CHUNK <= width <= capacity):
+        raise ValueError('served_mask needs a word >= 0, a 256-aligned capacity and a width of 256 .. capacity')
+    count = rows * geometry.heads
+    positions = torch.tensor([[word + offset + batch * rows + (head % (rows * geometry.group)) // geometry.group
+                               for head in range(count)] for batch in range(batches)], dtype=torch.int64)
+    cache = torch.arange(capacity - K_CHUNK, capacity, dtype=torch.int64)
+    tail = torch.where(cache[None, None, :] > positions[:, :, None], float('-inf'), 0.0)
+    mask = torch.zeros(batches, 1, count, width, dtype=torch.float32)
+    mask[:, 0, :, width - K_CHUNK:] = tail
+    return mask.to(torch.bfloat16)
+
+
+def wide_mask(torch, start, extent, geometry=PAIR):
+    """v235's (2, 1, rows * heads, E) mask for a served ticket at `start`: the pinned kernel at capacity E, the absolute word."""
+    return served_mask(torch, start, extent, SERVED_ROWS, SERVED_BATCH, 0, geometry)
+
+
+def token_query(torch, seed, variant, position, keys=None, table=None, geometry=PAIR):
+    """One token's (heads, 256) bf16 query at `position`. The pair's: k64j_card_b.token_query. At one KV head the same
+    recipe with six heads, every head on the one KV head (keys[page, 0])."""
+    if geometry.heads == PAIR.heads:
+        return card_b.token_query(torch, seed, variant, position, keys=keys, table=table)
+    generator = torch.Generator().manual_seed((seed * 1000003 + position) * 2 + (1 if variant == 'peaky' else 0))
+    tokens = torch.randn(geometry.heads, card.HEAD_DIM, generator=generator)
+    if variant == 'peaky':
+        if keys is None or table is None:
+            raise ValueError('Peaky queries need the host keys and the page table')
+        tokens *= 0.1
+        last = len(table) * card.PAGE - 1
+        chunk = extent(position) - K_CHUNK
+        earlier = chunk if chunk < position else 0
+        for head in range(geometry.heads):
+            kv = head // geometry.group
+            aims = [position, position + 1]
+            if position > 0:
+                aims += torch.randint(earlier, position, (2,), generator=generator).tolist()
+                aims += torch.randint(0, position, (3,), generator=generator).tolist()
+            for aim in aims:
+                aim = min(aim, last)
+                vector = keys[int(table[aim // card.PAGE]), kv, aim % card.PAGE].float()
+                tokens[head] += 6 * vector / vector.norm().clamp_min(1e-3)
+    elif variant != 'normal':
+        raise ValueError('Unknown query variant %r' % (variant,))
+    return tokens.to(torch.bfloat16)
+
+
+def fold_entries(torch, tokens, offsets, rows, geometry=PAIR):
+    """A bundle's (1, B, rows * heads, 256) query from token-level (1, T, heads, 256) queries: KV head major, then token,
+    then the head's query heads (attention_head_fold.fold_query). The pair's: card.fold_entries."""
+    if geometry.heads == PAIR.heads:
+        return card.fold_entries(torch, tokens, offsets, rows)
+    return torch.cat([tokens[:, offset:offset + rows].reshape(
+        rows, geometry.kv_heads, geometry.group, card.HEAD_DIM).permute(1, 0, 2, 3).reshape(
+        1, 1, rows * geometry.heads, card.HEAD_DIM).contiguous() for offset in offsets], dim=1)
+
+
+def unfold_entries(torch, output, rows, geometry=PAIR):
+    """A bundle's (1, B, >= rows * heads, 256) output back to (1, B * rows, heads, 256), entry order. The pair's:
+    card.unfold_entries."""
+    if geometry.heads == PAIR.heads:
+        return card.unfold_entries(torch, output, rows)
+    parts = []
+    for entry in range(output.shape[1]):
+        folded = output[:, entry:entry + 1][:, :, :rows * geometry.heads]
+        parts.append(folded.reshape(geometry.kv_heads, rows, geometry.group, card.HEAD_DIM).permute(1, 0, 2, 3).reshape(
+            1, rows, geometry.heads, card.HEAD_DIM).contiguous())
+    return torch.cat(parts, dim=1)
 
 
 def run_tag(seed, name):
@@ -389,10 +535,12 @@ def verdict_line(report):
     liveness = report.get('liveness', [])
     words.append('live=%d/%d' % (sum(1 for entry in liveness if entry['live']), len(liveness)))
     words.append('families=%d' % len(report.get('r2_families_replayed') or ()))
-    view = report.get('two_chip_view') or {}
+    geometry = GEOMETRIES.get(report.get('width', PAIR_WIDTH), PAIR)
+    view = report.get(geometry.view_key) or {}
     if view:
-        words.append('chips=1of2 phantom=%d' % view.get('phantom_programs', 0))
-    source = ((report.get('modules') or {}).get('sha256') or {}).get('extent_attention_replay.py')
+        words.append('chips=1of%d phantom=%d' % (view.get('chips_presented', geometry.chips),
+                                                 view.get('phantom_programs', 0)))
+    source = ((report.get('modules') or {}).get('sha256') or {}).get(geometry.reader_source)
     if source:
         words.append('extent_sha256=%s' % source)
     if decision.get('scope_short'):
@@ -408,21 +556,22 @@ def verdict_line(report):
     return ' '.join(words)
 
 
-def pindiag_problems(lines, capacity, segments=len(SEGMENTS)):
-    """What one construction's PINDIAG lines lack: exactly one engaged line naming the four 0x27 segments, the
-    narrow mask and the capacity, and one sdpa qwen-modes line per segment with flags ['0x27'] and mask=narrow."""
+def pindiag_problems(lines, capacity, segments=len(SEGMENTS), flags=SERVED_FLAGS):
+    """What one construction's PINDIAG lines lack: exactly one engaged line naming the four `flags` segments (0x27; at
+    width 4, 0x23), the narrow mask and the capacity, and one sdpa qwen-modes line per segment with those flags and
+    mask=narrow."""
     problems = []
     engaged = [line for line in lines if line.startswith(ENGAGED_MARKER)]
     want = '%s segments=%d flags=%s mask=narrow capacity=%d' % (ENGAGED_MARKER, segments,
-                                                                ','.join(['0x%x' % SERVED_FLAGS] * segments), capacity)
+                                                                ','.join(['0x%x' % flags] * segments), capacity)
     if engaged != [want]:
         problems.append('expected one %r line, got %r' % (want, engaged))
     modes = [line for line in lines if line.startswith(MODES_MARKER + ' modes=')]
-    good = [line for line in modes if "flags=['0x%x'] mask=narrow" % SERVED_FLAGS in line
+    good = [line for line in modes if "flags=['0x%x'] mask=narrow" % flags in line
             and 'modes=extent,share,slice,tail ' in line and ' capacity=%d ' % capacity in line]
     if len(modes) != segments or len(good) != segments:
-        problems.append('expected %d %s lines with flags=[\'0x27\'] and mask=narrow, got %r' % (segments, MODES_MARKER,
-                                                                                                modes))
+        problems.append('expected %d %s lines with flags=[\'0x%x\'] and mask=narrow, got %r' % (segments, MODES_MARKER,
+                                                                                                flags, modes))
     return problems
 
 
@@ -549,14 +698,14 @@ def tee_pindiag(modules, sink):
             module._pindiag = original
 
 
-def load_served(served, failures):
-    """Execute each of SERVED_MODULES from the directory `served` and register it in sys.modules before anything
+def load_served(served, failures, names=SERVED_MODULES):
+    """Execute each of `names` (SERVED_MODULES; at width 4 the geometry's) from the directory `served` and register it in sys.modules before anything
     imports it, so the code under test imported afterwards binds to these copies. Each one's own imports resolve in
     `served` first, as in serving (the mask module's frozen_context_geometry, which only validate_ticket uses). A
     module already imported from anywhere else is refused, not replaced, because whatever imported it keeps that copy.
     Returns whether all loaded."""
     ok = True
-    for name in SERVED_MODULES:
+    for name in names:
         path = served / (name + '.py')
         earlier = sys.modules.get(name)
         if earlier is not None:
@@ -585,11 +734,13 @@ def load_served(served, failures):
     return ok
 
 
-def load_modules(ci_root, report, served_root=SERVED_ROOT):
+def load_modules(ci_root, report, served_root=SERVED_ROOT, geometry=PAIR):
     """The code under test from `ci_root` (this checkout's scripts/ci as the runner mounts it), and the pinned modules
     the reader runs (SERVED_MODULES) from `served_root` (the image's served tree), as a serving process has them. It
     records each module's file, the pinned sources' served bytes and the recorded shas. '' for either root takes
-    sys.path as it is, for the CPU tests. Returns None, with failures, when any of it is wrong."""
+    sys.path as it is, for the CPU tests. Returns None, with failures, when any of it is wrong. At width 4 (`geometry`)
+    the reader twin and the width's own helpers (tp_shapes, tp_kernels, tp_addresses, chip_view) are the code under
+    test, the frozen pair modules and the twin's sibling modules are served, and the launch must say width 4."""
     root = Path(ci_root).resolve() if ci_root else None
     served = Path(served_root).resolve() if served_root else None
     failures, ok = report['failures'], True
@@ -598,15 +749,17 @@ def load_modules(ci_root, report, served_root=SERVED_ROOT):
                              files=files, sha256=shas)
     if root is not None and str(root) not in sys.path[:1]:
         sys.path.insert(0, str(root))
-    if served is not None and not load_served(served, failures):
+    for name in geometry.preloaded:
+        importlib.import_module(name)
+    if served is not None and not load_served(served, failures, geometry.served_modules):
         return None
     modules = {}
-    for key, name in MODULES:
+    for key, name in geometry.modules:
         module = importlib.import_module(name)
         modules[key] = module
         path = Path(module.__file__).resolve()
         files[name] = str(path)
-        if name in SERVED_MODULES:
+        if name in geometry.served_modules:
             if served is not None and path.parent != served:
                 failures.append('%s was loaded from %s, not from --served-root %s (the pinned modules are the '
                                 'image\'s)' % (name, path, served))
@@ -616,22 +769,54 @@ def load_modules(ci_root, report, served_root=SERVED_ROOT):
                             'checkout\'s)' % (name, path, root))
             ok = False
     # The code under test must run the loaded pinned modules, not other copies of them.
-    for what, same in (('extent_attention_replay.attention_mask_replay',
-                        modules['extent'].attention_mask_replay is modules['mask']),
-                       ('extent_attention_replay.device_layout_dma',
-                        modules['extent'].device_layout_dma is modules['fold'].device_layout_dma),
-                       ('pooled_attention_replay.validate_ticket',
-                        modules['pooled'].validate_ticket is modules['mask'].validate_ticket)):
+    extent_name = geometry.modules[0][1]
+    checks = [('%s.attention_mask_replay' % extent_name, modules['extent'].attention_mask_replay is modules['mask']),
+              ('%s.device_layout_dma' % extent_name,
+               modules['extent'].device_layout_dma is modules['fold'].device_layout_dma),
+              ('pooled_attention_replay.validate_ticket',
+               modules['pooled'].validate_ticket is modules['mask'].validate_ticket)]
+    if geometry.width != PAIR_WIDTH:
+        # The twin borrows the frozen reader's helpers: that reader must bind to the served pair modules too.
+        checks += [('extent_attention_replay.attention_mask_replay',
+                    modules['extent_pair'].attention_mask_replay is modules['mask']),
+                   ('extent_attention_replay.device_layout_dma',
+                    modules['extent_pair'].device_layout_dma is modules['fold_pair'].device_layout_dma)]
+        try:
+            tp = modules['tp_shapes'].chip_count()
+        except ValueError as error:
+            tp = probe.one_line(error)
+        if tp != geometry.width:
+            failures.append('tp_shapes reads the width %r from %s=%r, not %d: the launch did not carry the four-card '
+                            'width into the process (read the launched argv)'
+                            % (tp, TP_ENV, os.environ.get(TP_ENV), geometry.width))
+            ok = False
+    # The code under test must run the loaded pinned modules, not other copies of them.
+    for what, same in checks:
         if not same:
             failures.append('%s is not the loaded pinned module\'s (another copy was imported first)' % what)
             ok = False
     for name in PINNED:
         path = Path(files[name.rsplit('.', 1)[0]]).parent / name
         shas[name] = file_sha256(path) if path.is_file() else None
-    directory = Path(files['extent_attention_replay']).parent
-    for name in RECORDED_SOURCES:
+    directory = Path(files[extent_name]).parent
+    for name in geometry.recorded_sources:
         path = directory / name
         shas[name] = file_sha256(path) if path.is_file() else None
+    if geometry.siblings:
+        # The sibling twins' bytes as the image serves them (provenance, not a pin): where the checkout holds other bytes, the
+        # evidence describes an image built from another commit, and the report says so.
+        served_directory = Path(files['attention_fold_dma_tp']).parent
+        drift = []
+        for name in geometry.siblings:
+            path = served_directory / name
+            shas[name] = file_sha256(path) if path.is_file() else None
+            ours = directory / name
+            if root is not None and served_directory != directory and ours.is_file() and shas[name] != file_sha256(ours):
+                drift.append(name)
+        report['sibling_drift'] = drift
+        if drift:
+            report['warnings'].append('the image\'s served %s differ from this checkout\'s (the run tested the image\'s)'
+                                      % ', '.join(drift))
     for name, digest in PINNED.items():
         if shas[name] != digest:
             failures.append('pinned source %s is %s, not its served %s'
@@ -703,12 +888,13 @@ def lend_storage(operations, mesh, torch, pool_module, page_width, users=USERS, 
         raise
 
 
-def mirrors_agree(torch, extent_module, rows, batches, offset, words, report, geometry):
-    """The module's narrow_mask_host against k64j_card_b.served_mask at capacity 256, on the host: two
-    transliterations of attention_mask_replay.cpp:18-33 that must agree before either is an oracle."""
+def mirrors_agree(torch, extent_module, rows, batches, offset, words, report, geometry, layout=PAIR):
+    """The module's narrow_mask_host against k64j_card_b.served_mask (at width 4 this file's served_mask at 6 head rows)
+    at capacity 256, on the host: two transliterations of attention_mask_replay.cpp:18-33 that must agree before either
+    is an oracle. `geometry` names the R1 shape in the failure; `layout` is the width's Geometry."""
     for word in words:
         mirror = extent_module.narrow_mask_host(word, rows, batches, offset)
-        other = card_b.served_mask(torch, word, K_CHUNK, rows=rows, batches=batches, offset=offset)
+        other = served_mask(torch, word, K_CHUNK, rows, batches, offset, layout)
         if card.differing(torch, mirror, other):
             report['failures'].append('R1/%s: the host mirrors of the mask kernel disagree at word %d '
                                       '(narrow_mask_host vs k64j_card_b.served_mask): no oracle' % (geometry, word))
@@ -722,9 +908,9 @@ def section_r1(ttnn, torch, device, mods, view, args, report):
     ran = report.setdefault('r1_run', {})
     for name in args.r1_geometries:
         rows, batches, offset = R1_GEOMETRIES[name]
-        if not mirrors_agree(torch, x, rows, batches, offset, args.r1_words, report, name):
+        if not mirrors_agree(torch, x, rows, batches, offset, args.r1_words, report, name, args.geometry):
             continue
-        shape = (batches, 1, rows * 12, K_CHUNK)
+        shape = (batches, 1, rows * args.geometry.heads, K_CHUNK)
         owned, trace = [], None
         try:
             with view.installed(), probe.WATCHDOG.op('R1 %s prepare' % name):
@@ -770,14 +956,44 @@ def section_r1(ttnn, torch, device, mods, view, args, report):
                 ttnn.deallocate(value)
 
 
+class OneKvHeadPool(card_b.ExtentPool):
+    """card_b.ExtentPool over ONE KV head (the four-card chip's cache, (blocks, 1, 64, 256)): probe.Pool's constructor with
+    the KV head count a parameter (its module constant is the pair's two), every other method the pool's own."""
+
+    def __init__(self, ttnn, torch, device, capacity, seed, users, report, kv_heads=QUAD.kv_heads):
+        self.ttnn, self.torch, self.device, self.capacity, self.report = ttnn, torch, device, capacity, report
+        self.kv_heads = kv_heads
+        clean = capacity // card.PAGE
+        blocks = clean + probe.POISON_BLOCKS
+        generator = torch.Generator().manual_seed(4000 + seed)
+        shape = (kv_heads, card.PAGE, card.HEAD_DIM)
+        poison = (probe.POISON_BLOCKS,) + shape
+        keys = torch.cat([torch.randn((clean,) + shape, generator=generator) * 2, torch.full(poison, probe.POISON_K)])
+        values = torch.cat([torch.randn((clean,) + shape, generator=generator), torch.full(poison, probe.POISON_V)])
+        self.keys = keys.to(torch.bfloat16)
+        self.poison = list(range(clean, blocks))
+        self.tables = [torch.randperm(clean, generator=generator).to(torch.int32) for _ in range(users)]
+        self.k = self.v = None
+        self.k = self.upload(self.keys, ttnn.bfloat8_b)
+        self.v = self.upload(values.to(torch.bfloat16), ttnn.bfloat8_b)
+
+
+def make_pool(ttnn, torch, device, capacity, seed, users, report, geometry=PAIR):
+    """The seed's pool at `geometry`: the pair's card_b.ExtentPool, or the one-KV-head pool."""
+    if geometry.kv_heads == PAIR.kv_heads:
+        return card_b.ExtentPool(ttnn, torch, device, capacity, seed, users, report)
+    return OneKvHeadPool(ttnn, torch, device, capacity, seed, users, report, geometry.kv_heads)
+
+
 class Block:
     """One seed's packed block: the pool (the seed's bf8 K / V, the poison, a page table per user), the lent storage,
-    the PackedExtentReplayReader over it, the (1, 64, 12, 256) query, the trace, and what is staged now."""
+    the PackedExtentReplayReader over it, the (1, 64, heads, 256) query (12 heads; 6 at width 4), the trace, and what is staged now."""
 
     def __init__(self, ttnn, torch, device, mods, view, seed, args, report):
         self.ttnn, self.torch, self.device, self.mods, self.view = ttnn, torch, device, mods, view
         self.seed, self.args, self.report = seed, args, report
         self.capacity = args.capacity
+        self.geometry = args.geometry
         self.width = args.capacity // card.PAGE
         self.pool = self.storage = self.reader = self.query = self.trace = self.output = None
         self.starts, self.tables, self.tokens = [None] * USERS, [None] * USERS, [None] * USERS
@@ -794,13 +1010,13 @@ class Block:
         return self.torch.zeros(1, self.width, dtype=self.torch.int32)
 
     def segment_tokens(self, segment, start, variant):
-        """(1, 16, 12, 256): k64j_card_b.token_query per row position (peaky aims at the user's own keys)."""
+        """(1, 16, heads, 256): token_query per row position (peaky aims at the user's own keys)."""
         key = (segment, start, variant)
         if key not in self.token_cache:
             pool, torch = self.pool, self.torch
             peaky = variant == 'peaky'
-            rows = [card_b.token_query(torch, self.seed, variant, position, keys=pool.keys if peaky else None,
-                                       table=pool.tables[segment] if peaky else None)
+            rows = [token_query(torch, self.seed, variant, position, keys=pool.keys if peaky else None,
+                                table=pool.tables[segment] if peaky else None, geometry=self.geometry)
                     for position in range(start, start + SEGMENT_ROWS)]
             self.token_cache[key] = torch.stack(rows)[None]
         return self.token_cache[key]
@@ -809,7 +1025,7 @@ class Block:
     def build(self, first):
         ttnn, torch, view, report = self.ttnn, self.torch, self.view, self.report
         x, pool_module = self.mods.extent, self.mods.pool
-        self.pool = card_b.ExtentPool(ttnn, torch, self.device, self.capacity, self.seed, USERS, report)
+        self.pool = make_pool(ttnn, torch, self.device, self.capacity, self.seed, USERS, report, self.geometry)
         self.pool.output = self.args.output_memory
         with probe.WATCHDOG.op('lend storage seed%d' % self.seed):
             self.storage = lend_storage(view, self.device, torch, pool_module, self.width).take()
@@ -823,9 +1039,9 @@ class Block:
             self.reader = x.PackedExtentReplayReader(view, self.device, SEGMENTS, self.width, tables,
                                                      storage=self.storage.segment_storage(), max_group_rows=GROUP_ROWS,
                                                      starts=tuple(first['starts']))
-        for problem in pindiag_problems(report['pindiag'][before:], self.capacity):
+        for problem in pindiag_problems(report['pindiag'][before:], self.capacity, flags=self.geometry.served_flags):
             report['failures'].append('block/seed%d: PINDIAG: %s' % (self.seed, problem))
-        report['_requested'].add(probe.program_key(self.capacity, SERVED_BATCH, K_CHUNK, SERVED_FLAGS))
+        report['_requested'].add(probe.program_key(self.capacity, SERVED_BATCH, K_CHUNK, self.geometry.served_flags))
         self.starts, self.tables = list(first['starts']), tables
         report.setdefault('extent_reader', dict(flags=['0x%x' % value for reader in self.reader.readers
                                                 for value in reader.sdpa_modes_applied],
@@ -900,22 +1116,23 @@ class Block:
     def reference(self, tokens, start, family, table_row, label, zero=False):
         """The 0x7 compile-time call at capacity `family`: the ticket folded on the host (two eight-row groups), the
         table truncated to E / 64 and repeated per entry, the wide mask with the real -inf tail (or zero), then
-        unfolded on the host: (1, 16, 12, 256)."""
+        unfolded on the host: (1, 16, heads, 256)."""
         torch, pool = self.torch, self.pool
-        folded = card.fold_entries(torch, tokens, SERVED_OFFSETS, SERVED_ROWS)
+        geometry = self.geometry
+        folded = fold_entries(torch, tokens, SERVED_OFFSETS, SERVED_ROWS, geometry)
         pages = table_row.reshape(-1)[:family // card.PAGE].repeat(SERVED_BATCH, 1).contiguous()
-        mask = (torch.zeros(SERVED_BATCH, 1, SERVED_ROWS * 12, family, dtype=torch.bfloat16) if zero
-                else card_b.wide_mask(torch, start, family))
+        mask = (torch.zeros(SERVED_BATCH, 1, SERVED_ROWS * geometry.heads, family, dtype=torch.bfloat16) if zero
+                else wide_mask(torch, start, family, geometry))
         tensors = []
         try:
             tensors.append(pool.upload(folded))
             tensors.append(pool.upload(pages, self.ttnn.int32))
             tensors.append(pool.upload(mask))
-            output = pool.served_run(tensors[0], tensors[1], tensors[2], COMPILE_FLAGS, label=label)
+            output = pool.served_run(tensors[0], tensors[1], tensors[2], geometry.compile_flags, label=label)
         finally:
             for value in tensors:
                 self.ttnn.deallocate(value)
-        return card.unfold_entries(torch, output, SERVED_ROWS)
+        return unfold_entries(torch, output, SERVED_ROWS, geometry)
 
     def reader_masks(self, label):
         """R1 through the reader: each segment's narrow masks after the replay's in-trace refresh."""
@@ -977,8 +1194,9 @@ def section_block(ttnn, torch, device, mods, view, seed, args, report):
             return
         first = plan[0]
         with view.installed():
-            block.query = mods.extent._upload(view, device, torch.zeros(1, USERS * SEGMENT_ROWS, 12, card.HEAD_DIM,
-                                                                        dtype=torch.bfloat16), view.bfloat16)
+            block.query = mods.extent._upload(view, device, torch.zeros(1, USERS * SEGMENT_ROWS, args.geometry.heads,
+                                                                        card.HEAD_DIM, dtype=torch.bfloat16),
+                                              view.bfloat16)
         block.kwargs = dict(page_table_tensor=None, cur_pos_tensor=None, scale=card_b.NATIVE_SCALE,
                             program_config=None, memory_config=block.pool.output_memory())
         variant = args.variants[0]
@@ -1109,7 +1327,8 @@ def run(args, report, checkpoint=None):
     import torch
     import ttnn
 
-    mods = load_modules(args.ci_root, report, args.served_root)
+    geometry = args.geometry
+    mods = load_modules(args.ci_root, report, args.served_root, geometry)
     if mods is None:
         return
     options = dict(device_id=args.device_id, l1_small_size=24576)
@@ -1141,14 +1360,14 @@ def run(args, report, checkpoint=None):
             report['failures'].append('%s must be %s, the image\'s (the reader adds extent itself); got %r'
                                       % (SDPA_MODES_ENV, ','.join(('tail', 'share', 'slice')), modes))
             return
-        view = TwoChipView(ttnn)
+        view = TwoChipView(ttnn) if geometry.width == PAIR_WIDTH else mods.chip_view.ChipView(ttnn, chips=geometry.chips)
         try:
             with tee_pindiag((mods.extent, mods.pooled), report['pindiag']):
                 run_sections(ttnn, torch, device, mods, view, args, report, checkpoint)
         finally:
-            report['two_chip_view'] = dict(chips_physical=1, chips_presented=view.chips,
-                                           programs_realised=view.realised, phantom_programs=view.phantom,
-                                           launches=view.launches)
+            report[geometry.view_key] = dict(chips_physical=1, chips_presented=view.chips,
+                                             programs_realised=view.realised, phantom_programs=view.phantom,
+                                             launches=view.launches)
     finally:
         with probe.WATCHDOG.op('close device'):
             ttnn.close_device(device)
@@ -1194,6 +1413,10 @@ def run_sections(ttnn, torch, device, mods, view, args, report, checkpoint=None)
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split(chr(10))[0])
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--width', type=int, choices=WIDTHS, default=PAIR_WIDTH,
+                        help='2: the pair (12 heads on 2 KV heads, 0x27, the pinned reader through TwoChipView); 4: the '
+                             'four-card chip (6 heads on 1 KV head, 0x23, the reader twin through ChipView); run_card_b.sh '
+                             'TP4_WIDTH=4 passes 4 and sets %s=4' % TP_ENV)
     parser.add_argument('--device-id', type=int, default=0)
     parser.add_argument('--capacity', type=int, default=CAPACITY, help='the C-wide lent table (keys)')
     parser.add_argument('--sections', default=','.join(SECTIONS), help='any of %s' % ','.join(SECTIONS))
@@ -1224,6 +1447,7 @@ def parse_args(argv=None):
     parser.add_argument('--served-root', default=SERVED_ROOT,
                         help='the image\'s served tree the pinned modules must come from ("" takes sys.path as it is)')
     args = parser.parse_args(argv)
+    args.geometry = GEOMETRIES[args.width]
 
     def ints(text):
         return [int(value) for value in text.split(',') if value.strip()]
@@ -1296,12 +1520,16 @@ def main(argv=None):
                   r1_geometries=args.r1_geometries, r1_words=args.r1_words, r2_families=args.families,
                   r2_residues=args.r2_residues, r2_restages=args.r2_restages,
                   idle_patterns=[list(pattern) for pattern in args.idle_patterns], output_memory=args.output_memory,
-                  segments=[list(span) for span in SEGMENTS], served=dict(flags='0x%x' % SERVED_FLAGS,
-                  reference_flags='0x%x' % COMPILE_FLAGS, rows=SERVED_ROWS, batch=SERVED_BATCH,
+                  segments=[list(span) for span in SEGMENTS], served=dict(flags='0x%x' % args.geometry.served_flags,
+                  reference_flags='0x%x' % args.geometry.compile_flags, rows=SERVED_ROWS, batch=SERVED_BATCH,
                   offsets=list(SERVED_OFFSETS), k_chunk_size=K_CHUNK),
                   poison=dict(k=probe.POISON_K, v=probe.POISON_V, blocks=probe.POISON_BLOCKS),
                   deadline_s=args.deadline_s, env={name: os.environ.get(name) for name in ENV_RECORDED},
                   watchdog=args.watchdog, pindiag=[], failures=[], warnings=[], comparisons=[], liveness=[])
+    if args.geometry.width != PAIR_WIDTH:
+        # The width the report speaks for, in the report itself (the pair's report keeps exactly its keys).
+        report.update(width=args.geometry.width, heads=args.geometry.heads, kv_heads=args.geometry.kv_heads)
+        report['env'][TP_ENV] = os.environ.get(TP_ENV)
     report['_requested'] = card_b.RequestLog()
     native = card.NativeLog(args.out.with_name(args.out.name + '.native.log'))
     args.out.parent.mkdir(parents=True, exist_ok=True)

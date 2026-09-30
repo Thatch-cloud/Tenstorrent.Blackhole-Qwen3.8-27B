@@ -56,7 +56,12 @@ for _path in (str(HERE), str(PROBE_DIR), str(OPS / 'sdpa_decode_qwen'), str(CI))
 
 import torch  # noqa: E402
 
+import attention_fold_dma_tp  # noqa: E402
+import chip_view  # noqa: E402
 import extent_attention_replay as extent_module  # noqa: E402
+import extent_attention_replay_tp as extent_tp  # noqa: E402
+import packed_any_admission as admission  # noqa: E402
+import record_packed_any_evidence_tp4 as recorder  # noqa: E402
 import pooled_attention_replay  # noqa: E402
 import extent_reader_card_b as reader_b  # noqa: E402
 import k64j_card_b as card_b  # noqa: E402
@@ -70,7 +75,7 @@ RUNNER = HERE / 'run_card_b.sh'
 CARD_B, CARD_M, CARD_A = probe_tests.CARD_B, probe_tests.CARD_M, card_tests.qual_tests.CARD_A
 CARD_X = probe_tests.CARD_X
 BASH = probe_tests.BASH
-SCRUB = probe_tests.SCRUB + ('K64J_CARD_DRY_RUN', 'K64J_HARNESS', 'QWEN_FAST_SDPA_MODES')
+SCRUB = probe_tests.SCRUB + ('K64J_CARD_DRY_RUN', 'K64J_HARNESS', 'QWEN_FAST_SDPA_MODES', 'TP4_WIDTH', 'QWEN_FAST_TP')
 NL = chr(10)
 ONE = ('range', ('coord', 0, 0), ('coord', 0, 0))
 
@@ -151,6 +156,8 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
 
     class NOC:
         RISCV_0_default = 'noc0'
+
+    head_rows = 12                          # query-head rows per token the kernels are built for (6 at width 4: the define)
 
     def __init__(self, torch, *args, **kwargs):
         super().__init__(torch, *args, **kwargs)
@@ -296,10 +303,16 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
             if not path.is_file():
                 raise RuntimeError('TT_FATAL: kernel source %s not found' % path)
             tasks = [list(values) for column in kernel.runtime_args.values() for values in column.values()]
-            run = {'attention_mask_replay.cpp': self.mask_launch,
-                   'attention_fold_dma.cpp': self.fold_launch}.get(path.name)
+            run = {'attention_mask_replay.cpp': self.mask_launch, 'attention_fold_dma.cpp': self.fold_launch,
+                   'attention_mask_replay_tp.cpp': self.mask_launch,
+                   'attention_fold_dma_tp.cpp': self.fold_launch}.get(path.name)
             if run is None:
                 raise RuntimeError('TT_FATAL: no emulation of %s' % path.name)
+            # The sibling kernels take the head-row count as a define, the pinned ones as a literal and no defines.
+            defines = dict(getattr(kernel, 'defines', None) or ())
+            want = {'QWEN_FOLD_HEAD_ROWS': str(self.head_rows)} if path.name.endswith('_tp.cpp') else {}
+            if defines != want:
+                raise RuntimeError('TT_FATAL: %s built with defines %r, not %r' % (path.name, defines, want))
             # What each positions word holds as the launch is issued (at capture, for a launch recorded in a trace).
             seen = ({task[0]: self.memory[task[0]].clone() for task in tasks}
                     if path.name == 'attention_mask_replay.cpp' else {})
@@ -327,7 +340,7 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
                 raise RuntimeError('one mask per launch')
             source = seen if (replay and 'mask_trace_word' in self.broken) else self.memory
             word = int(source[positions].reshape(-1)[0]) & 0xffffffff
-            head_tiles = (rows * 12 + 31) // 32
+            head_tiles = (rows * self.head_rows + 31) // 32
             batch, head_tile, column_tile = task // (head_tiles * 8), (task // 8) % head_tiles, task % 8
             if 'mask_stale_tile' in self.broken and column_tile == 7:
                 continue
@@ -336,7 +349,7 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
             head = head_tile * 32 + torch.arange(32)
             position = word + offset + batch * rows + (head % (rows * 6)) // 6
             cache = capacity - 256 + column_tile * 32 + torch.arange(32)
-            masked = (head[:, None] >= rows * 12) | (cache[None, :] > position[:, None])
+            masked = (head[:, None] >= rows * self.head_rows) | (cache[None, :] > position[:, None])
             tile = torch.where(masked, float('-inf'), 0.0).to(torch.bfloat16)
             page = (batch * head_tiles + head_tile) * (capacity // 32) + capacity // 32 - 8 + column_tile
             block, column = divmod(page, width // 32)
@@ -365,13 +378,13 @@ class FakeReaderTtnn(card_tests.FakeExtentTtnn):
             covered = torch.zeros(rows, 8, dtype=torch.bool)
             for task in tasks:
                 covered[task[5] // 8, task[5] % 8] = True
-            heads = torch.arange(12)
+            heads = torch.arange(self.head_rows)
             folded = (heads // 6)[None, :] * rows * 6 + torch.arange(rows)[:, None] * 6 + (heads % 6)[None, :]
-            full = data[0, 0][folded]                                            # (rows, 12, 256)
-            cover = covered.repeat_interleave(32, dim=1)[:, None, :].expand(rows, 12, 256)
+            full = data[0, 0][folded]                                            # (rows, head_rows, 256)
+            cover = covered.repeat_interleave(32, dim=1)[:, None, :].expand(rows, self.head_rows, 256)
             output[0] = torch.where(cover, full, output[0])
         else:
-            count = rows * 12
+            count = rows * self.head_rows
             covered = torch.zeros((count + 31) // 32, 8, dtype=torch.bool)
             for task in tasks:
                 covered[task[5] // 8, task[5] % 8] = True
@@ -824,8 +837,9 @@ def make_tree(directory):
         shutil.copyfile(source, ops / source.parent.name / source.name)
     ci = root / 'scripts' / 'ci'
     ci.mkdir(parents=True)
-    for name in reader_b.RECORDED_SOURCES:                   # the pinned sources are the image's, never these
-        shutil.copyfile(CI / name, ci / name)
+    for name in tuple(reader_b.RECORDED_SOURCES) + tuple(reader_b.QUAD_RECORDED_SOURCES):   # the pinned sources are the
+        if not (ci / name).exists():                                                          # image's, never these
+            shutil.copyfile(CI / name, ci / name)
     return ops / 'k64j' / 'run_card_b.sh', ci
 
 
@@ -1130,10 +1144,9 @@ class ServedLoaderTests(unittest.TestCase):
 # The device flow on the fake one-chip ttnn, through the real reader classes.
 # ---------------------------------------------------------------------------------------------
 
-class DryRunTests(unittest.TestCase):
-    """The harness end to end on the fake: a 2,304-key table (9 chunks), the families 256 / 512 / 2,304 and three
-    spread ones. One FULL run covers every section; each broken variant runs only what must catch it, on a 1,280-key
-    table whose five families make two assignments (SMALL)."""
+class FlowBase(unittest.TestCase):
+    """The harness end to end on a fake one-chip ttnn: the fixture and the runner every flow test uses. A width's class
+    sets the harness's own --width arguments, the launch variables it needs and the patches of its geometry."""
 
     FULL = ['--capacity', '2304', '--r2-named', '256,512,2304', '--r2-families', '6', '--r2-residues',
             '0,7,240,255', '--seeds', '0', '--variants', 'normal,peaky', '--r1-words', '0,7,32,240,255',
@@ -1141,12 +1154,11 @@ class DryRunTests(unittest.TestCase):
     SMALL = ['--capacity', '1280', '--r2-named', '256,512,1280', '--r2-families', '5', '--r2-residues', '7,250',
              '--seeds', '0', '--variants', 'normal', '--r1-words', '7,255', '--r1-geometries', 'G8B2',
              '--r2-restages', '1', '--idle-patterns', '2+3']
+    WIDTH_ARGV = ()
+    WIDTH_ENV = {}
 
-    # C = 1,280 again, but the named families put C in the second assignment: [256, 512, 768, 1024], then
-    # [1280, 256, 512, 768] - segment 0 live at C while segments 2 and 3 go idle.
-    AT_C = ['--capacity', '1280', '--r2-named', '256,512,768,1024,1280', '--r2-families', '5', '--r2-residues',
-            '7,250', '--seeds', '0', '--variants', 'normal', '--r1-words', '7,255', '--r1-geometries', 'G8B2',
-            '--r2-restages', '1', '--idle-patterns', '2+3']
+    def width_patches(self):
+        return ()
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1163,8 +1175,9 @@ class DryRunTests(unittest.TestCase):
         fake.report_path = out
         markers = dict(flags=True, share=True, stage1=False)
         argv = ['--out', str(out), '--kernel-root', str(self.kernels), '--ci-root', '', '--served-root', '',
-                '--expect-binary-sha256', sha(self.binary.read_bytes())]
+                '--expect-binary-sha256', sha(self.binary.read_bytes())] + list(self.WIDTH_ARGV)
         environ = {card.SCRATCH_ENV: '1', 'QWEN_FAST_SDPA_MODES': 'tail,share,slice'}
+        environ.update(self.WIDTH_ENV)
         environ.update(env or {})
         with ExitStack() as stack:
             stack.enter_context(mock.patch.dict(sys.modules, {'ttnn': fake}))
@@ -1188,7 +1201,7 @@ class DryRunTests(unittest.TestCase):
             stack.enter_context(mock.patch('pooled_attention_replay._binary_checked', []))
             stack.enter_context(mock.patch('pooled_attention_replay.loaded_binary_has_modes',
                                            return_value=('/k64j/_ttnncpp.so', True)))
-            for patch in patches:
+            for patch in list(self.width_patches()) + list(patches):
                 stack.enter_context(patch)
             status = reader_b.main(argv + list(self.FULL if base is None else base) + list(extra))
         return status, json.loads(out.read_text())
@@ -1198,6 +1211,18 @@ class DryRunTests(unittest.TestCase):
 
     def failing(self, report):
         return {kind for kind, (equal, runs) in self.kinds(report).items() if equal != runs}
+
+
+class DryRunTests(FlowBase):
+    """The harness end to end on the fake: a 2,304-key table (9 chunks), the families 256 / 512 / 2,304 and three
+    spread ones. One FULL run covers every section; each broken variant runs only what must catch it, on a 1,280-key
+    table whose five families make two assignments (SMALL)."""
+
+    # C = 1,280 again, but the named families put C in the second assignment: [256, 512, 768, 1024], then
+    # [1280, 256, 512, 768] - segment 0 live at C while segments 2 and 3 go idle.
+    AT_C = ['--capacity', '1280', '--r2-named', '256,512,768,1024,1280', '--r2-families', '5', '--r2-residues',
+            '7,250', '--seeds', '0', '--variants', 'normal', '--r1-words', '7,255', '--r1-geometries', 'G8B2',
+            '--r2-restages', '1', '--idle-patterns', '2+3']
 
     def test_pass_end_to_end(self):
         fake = FakeReaderTtnn(torch)
@@ -1234,6 +1259,9 @@ class DryRunTests(unittest.TestCase):
             self.assertIn([0x7, 2, family // 32, family // 32], report['requested_programs'])
         self.assertEqual([(line['entries'], line['kv_share'], line['q_slice']) for line in report['extent_lines']],
                          [(2, 'true', 'true')])
+        self.assertFalse({'width', 'heads', 'kv_heads', 'chip_view', 'sibling_drift'} & set(report),
+                         'the pair report keeps exactly its keys')
+        self.assertEqual((report['served']['flags'], report['served']['reference_flags']), ('0x27', '0x7'))
         view = report['two_chip_view']
         self.assertEqual((view['chips_physical'], view['chips_presented']), (1, 2))
         self.assertEqual(view['phantom_programs'], view['programs_realised'])
@@ -1466,6 +1494,699 @@ class DryRunTests(unittest.TestCase):
         self.assertTrue(report['deadline']['skipped'], report.get('deadline'))
         self.assertNotIn(1, report.get('seeds_run') or [])
         self.assertEqual((fake.closed, fake.live_traces_at_close), (True, 0))
+
+
+# ---------------------------------------------------------------------------------------------
+# WIDTH 4: the four-card reader twin on one KV head (--width 4, run_card_b.sh TP4_WIDTH=4).
+# ---------------------------------------------------------------------------------------------
+
+QUAD = reader_b.QUAD
+PAIR = reader_b.PAIR
+TEMPLATES = CI / 'references' / 'tp4-s2-serve-jobs'
+
+
+def four():
+    """The launch variable that carries the four-card width into the process (tp_shapes reads it at call time)."""
+    return mock.patch.dict(os.environ, {reader_b.TP_ENV: '4'})
+
+
+def template(name):
+    """{KEY: value} of a committed job template (comment lines and blanks skipped)."""
+    values = {}
+    for line in read(TEMPLATES / name).splitlines():
+        if line.strip() and not line.startswith('#'):
+            key, _, value = line.partition('=')
+            values[key] = value
+    return values
+
+
+class FakeQuadTtnn(FakeReaderTtnn):
+    """FakeReaderTtnn for the four-card chip: its mask and fold kernels are the _tp siblings, built for 6 head rows."""
+    head_rows = 6
+
+
+class QuadHelperTests(unittest.TestCase):
+    full_report = HelperTests.full_report
+    comparisons = HelperTests.comparisons
+
+    def test_the_two_geometries_and_what_the_recorder_and_the_admission_expect_of_the_four_card_one(self):
+        self.assertEqual((PAIR.width, PAIR.heads, PAIR.kv_heads, PAIR.group, PAIR.served_flags, PAIR.compile_flags,
+                          PAIR.chips, PAIR.view_key, PAIR.reader_source),
+                         (2, 12, 2, 6, 0x27, 0x7, 2, 'two_chip_view', 'extent_attention_replay.py'))
+        self.assertEqual((reader_b.SERVED_FLAGS, reader_b.COMPILE_FLAGS, reader_b.MODULES[0]),
+                         (0x27, 0x7, ('extent', 'extent_attention_replay')), 'the pair\'s constants never move')
+        self.assertEqual((QUAD.width, QUAD.heads, QUAD.kv_heads, QUAD.group, QUAD.served_flags, QUAD.compile_flags,
+                          QUAD.chips, QUAD.view_key, QUAD.reader_source),
+                         (4, 6, 1, 6, 0x23, 0x3, 4, 'chip_view', 'extent_attention_replay_tp.py'))
+        self.assertEqual(QUAD.served_flags, extent_tp.EXTENT_FLAGS, 'the twin serves exactly these flags')
+        self.assertEqual(reader_b.GEOMETRIES, {2: PAIR, 4: QUAD})
+        self.assertEqual('0x%x' % QUAD.served_flags, recorder.SERVED_FLAGS)
+        self.assertEqual('0x%x' % QUAD.served_flags, admission.CB2B_SERVED_FLAGS_TP4)
+        self.assertEqual(('1of%d' % QUAD.chips,), admission.CB2B_CHIPS_TP4)
+        self.assertEqual(reader_b.QUAD_READER, recorder.READER_TP)
+        self.assertEqual(reader_b.QUAD_SIBLINGS, recorder.PINNED_SIBLINGS)
+        self.assertEqual(reader_b.CAPACITY, admission.CB2B_CAPACITY)
+        self.assertEqual(tuple(reader_b.R1_GEOMETRIES), admission.CB2B_R1_GEOMETRIES)
+        self.assertEqual(reader_b.DESIGN_RESIDUES, admission.CB2B_RESIDUES)
+        self.assertEqual((reader_b.R2_NAMED, reader_b.R2_MIN_FAMILIES, reader_b.IDLE_STARTS),
+                         (admission.CB2B_R2_NAMED, admission.CB2B_R2_MIN_FAMILIES, admission.CB2B_IDLE_STARTS))
+        # Every source the four-card run records is one the runner requires, and the siblings are the image's.
+        self.assertIn(reader_b.QUAD_READER, reader_b.QUAD_RECORDED_SOURCES)
+        self.assertFalse(set(reader_b.QUAD_SIBLINGS) & set(reader_b.QUAD_RECORDED_SOURCES))
+        self.assertEqual({name.rsplit('.', 1)[0] for name in reader_b.PINNED} | {'attention_fold_dma_tp'},
+                         set(reader_b.QUAD_SERVED_MODULES))
+        self.assertEqual({name for _key, name in reader_b.QUAD_MODULES if name in reader_b.QUAD_SERVED_MODULES},
+                         set(reader_b.QUAD_SERVED_MODULES))
+
+    def test_the_width_argument_changes_nothing_else(self):
+        default, quad = parse(), parse(['--width', '4'])
+        self.assertEqual((default.width, default.geometry, quad.width, quad.geometry), (2, PAIR, 4, QUAD))
+        self.assertEqual({key for key in vars(default) if vars(default)[key] != vars(quad)[key]}, {'width', 'geometry'})
+        for bad in (['--width', '3'], ['--width', '1'], ['--width', 'four']):
+            with self.subTest(bad=bad), mock.patch('sys.stderr'), self.assertRaises(SystemExit):
+                parse(bad)
+        # The full pass at four cards is the harness's own defaults: what EV-F3 leaves to them.
+        self.assertEqual((quad.capacity, quad.sections, quad.seeds, quad.variants, quad.r1_geometries, len(quad.families),
+                          quad.r2_restages), (131328, ['R1', 'S', 'R2', 'R4'], [0, 1, 2], ['normal', 'peaky'],
+                                              ['G8B2', 'G4B3', 'G4B1'], 56, 2))
+
+    def test_the_host_mirrors_of_the_mask_kernel_agree_at_six_head_rows(self):
+        """extent_attention_replay_tp.narrow_mask_host against this harness's own served_mask, for every R1 geometry at
+        every word: two transliterations of attention_mask_replay_tp.cpp that must agree before either is an oracle."""
+        report = dict(failures=[])
+        with four():
+            for name, (rows, batches, offset) in reader_b.R1_GEOMETRIES.items():
+                self.assertTrue(reader_b.mirrors_agree(torch, extent_tp, rows, batches, offset, range(256), report, name,
+                                                       QUAD), name)
+            self.assertEqual(report['failures'], [])
+            with mock.patch.object(extent_tp, 'narrow_mask_host', lambda word, *a: reader_b.served_mask(
+                    torch, word + 1, 256, a[0], a[1], a[2], QUAD)):
+                self.assertFalse(reader_b.mirrors_agree(torch, extent_tp, 8, 2, 0, [7], report, 'G8B2', QUAD))
+            self.assertIn('disagree at word 7', report['failures'][0])
+            # The wide mask of a ticket at `start`: the twin's replay_mask_host at capacity E, bit for bit.
+            for start, extent in ((128, 256), (700, 1024), (2200, 2304)):
+                wide = reader_b.wide_mask(torch, start, extent, QUAD)
+                self.assertEqual(tuple(wide.shape), (2, 1, 8 * 6, extent))
+                self.assertEqual(card.differing(torch, wide, extent_tp.replay_mask_host(start, 8, 2, 0, extent)), 0)
+                # The semantics, not a transliteration: row h of entry b is token h // 6 of the group at position
+                # start + 8 b + token; every cache position in the last chunk past it is -inf, every other +0.0.
+                for batch in range(2):
+                    for head in (0, 5, 6, 47):
+                        position = start + batch * 8 + head // 6
+                        for column in (extent - 256, extent - 1):
+                            want = float('-inf') if column > position else 0.0
+                            self.assertEqual(float(wide[batch, 0, head, column]), want, (start, batch, head, column))
+                self.assertTrue(bool((wide[..., :extent - 256] == 0).all()))
+        # The pair's is k64j_card_b's own.
+        self.assertEqual(card.differing(torch, reader_b.served_mask(torch, 7, 256, 8, 2, 0),
+                                        card_b.served_mask(torch, 7, 256, rows=8, batches=2, offset=0)), 0)
+        self.assertEqual(tuple(reader_b.wide_mask(torch, 300, 512).shape), (2, 1, 96, 512))
+
+    def test_fold_and_unfold_at_six_head_rows_are_the_kernels_index_maps(self):
+        tokens = torch.randn(1, 16, 6, 256).to(torch.bfloat16)
+        folded = reader_b.fold_entries(torch, tokens, (0, 8), 8, QUAD)
+        self.assertEqual(tuple(folded.shape), (1, 2, 48, 256))
+        with four():
+            for entry, offset in enumerate((0, 8)):
+                flat = tokens[:, offset:offset + 8].reshape(48, 256)
+                for row in range(48):
+                    self.assertTrue(torch.equal(folded[0, entry, row], flat[attention_fold_dma_tp.source_row(8, row)]))
+        self.assertTrue(torch.equal(reader_b.unfold_entries(torch, folded, 8, QUAD), tokens))
+        padded = torch.cat([folded, torch.zeros(1, 2, 16, 256, dtype=folded.dtype)], dim=2)      # the tile-padded output
+        self.assertTrue(torch.equal(reader_b.unfold_entries(torch, padded, 8, QUAD), tokens))
+        wide = torch.randn(1, 16, 12, 256).to(torch.bfloat16)                   # the pair's are card's own
+        self.assertTrue(torch.equal(reader_b.fold_entries(torch, wide, (0, 8), 8),
+                                    card.fold_entries(torch, wide, (0, 8), 8)))
+        self.assertTrue(torch.equal(reader_b.unfold_entries(torch, reader_b.fold_entries(torch, wide, (0, 8), 8), 8), wide))
+
+    def test_a_token_query_is_six_heads_on_the_one_kv_head(self):
+        normal = reader_b.token_query(torch, 0, 'normal', 130, geometry=QUAD)
+        self.assertEqual((tuple(normal.shape), normal.dtype), ((6, 256), torch.bfloat16))
+        self.assertTrue(torch.equal(normal, reader_b.token_query(torch, 0, 'normal', 130, geometry=QUAD)))
+        self.assertFalse(torch.equal(normal, reader_b.token_query(torch, 0, 'normal', 131, geometry=QUAD)))
+        generator = torch.Generator().manual_seed(5)
+        keys = torch.randn(10, 1, 64, 256, generator=generator).to(torch.bfloat16)          # ONE KV head
+        table = torch.randperm(10, generator=generator).to(torch.int32)
+        peaky = reader_b.token_query(torch, 0, 'peaky', 130, keys=keys, table=table, geometry=QUAD)
+        self.assertEqual(tuple(peaky.shape), (6, 256))
+        self.assertFalse(torch.equal(peaky, normal))
+        with self.assertRaises(ValueError):
+            reader_b.token_query(torch, 0, 'peaky', 130, geometry=QUAD)
+        with self.assertRaises(ValueError):
+            reader_b.token_query(torch, 0, 'zeroq', 130, geometry=QUAD)
+        # A pair pool's second KV head is never read: the lookup stays on KV head 0.
+        self.assertTrue(torch.equal(peaky, reader_b.token_query(torch, 0, 'peaky', 130, geometry=QUAD,
+                                                                 keys=torch.cat([keys, keys * 7], dim=1), table=table)))
+        # The pair's query is k64j_card_b's own, bit for bit.
+        keys2 = torch.randn(10, 2, 64, 256, generator=generator).to(torch.bfloat16)
+        for variant in ('normal', 'peaky'):
+            self.assertTrue(torch.equal(reader_b.token_query(torch, 1, variant, 200, keys=keys2, table=table),
+                                        card_b.token_query(torch, 1, variant, 200, keys=keys2, table=table)))
+
+    def test_the_one_kv_head_pool(self):
+        fake = FakeReaderTtnn(torch)
+        report = dict(_requested=set(), failures=[])
+        pool = reader_b.make_pool(fake, torch, fake, 512, 3, 4, report, QUAD)
+        self.assertIsInstance(pool, reader_b.OneKvHeadPool)
+        self.assertIsInstance(pool, card_b.ExtentPool)
+        self.assertEqual((tuple(pool.keys.shape), pool.kv_heads, len(pool.tables), len(pool.poison)),
+                         ((512 // 64 + probe.POISON_BLOCKS, 1, 64, 256), 1, 4, probe.POISON_BLOCKS))
+        self.assertEqual((tuple(pool.k.shape), tuple(pool.v.shape)), ((8 + probe.POISON_BLOCKS, 1, 64, 256),) * 2)
+        self.assertTrue(bool((pool.keys[8:] == probe.POISON_K).all()))
+        self.assertEqual(sorted(pool.tables[0].tolist()), list(range(8)))
+        pool.close()
+        pair = reader_b.make_pool(fake, torch, fake, 512, 3, 4, report, PAIR)
+        self.assertIs(type(pair), card_b.ExtentPool)
+        self.assertEqual(tuple(pair.keys.shape), (8 + probe.POISON_BLOCKS, 2, 64, 256))
+        pair.close()
+
+    def test_the_pindiag_lines_at_width_four(self):
+        engaged = '[PINDIAG] extent replay engaged segments=4 flags=0x23,0x23,0x23,0x23 mask=narrow capacity=4352'
+        mode = ("[PINDIAG] sdpa qwen-modes modes=extent,share,slice,tail rows=16 capacity=4352 bundles=[2] "
+                "flags=['0x23'] mask=narrow")
+        flags = QUAD.served_flags
+        self.assertEqual(reader_b.pindiag_problems([mode] * 4 + [engaged], 4352, flags=flags), [])
+        # The four-card lines are not the pair's and the pair's are not four-card evidence.
+        self.assertEqual(len(reader_b.pindiag_problems([mode] * 4 + [engaged], 4352)), 2)
+        pair_lines = [line.replace('0x23', '0x27') for line in [mode] * 4 + [engaged]]
+        self.assertEqual(len(reader_b.pindiag_problems(pair_lines, 4352, flags=flags)), 2)
+        self.assertEqual(reader_b.pindiag_problems(pair_lines, 4352), [])
+        self.assertEqual(len(reader_b.pindiag_problems([mode] * 4 + [engaged.replace('0x23,0x23', '0x3,0x23')], 4352,
+                                                       flags=flags)), 1)
+        self.assertIn("flags=['0x23']", reader_b.pindiag_problems([engaged], 4352, flags=flags)[0])
+
+    def test_the_verdict_line_at_width_four(self):
+        report = self.full_report()
+        report.update(width=4, heads=6, kv_heads=1, chip_view=dict(chips_presented=4, phantom_programs=30),
+                      modules=dict(sha256={'extent_attention_replay_tp.py': 'cd' * 32,
+                                           'extent_attention_replay.py': 'ab' * 32}))
+        report['decision'] = reader_b.decide(report)
+        line = reader_b.verdict_line(report)
+        self.assertTrue(line.startswith('K64J_READER verdict=PASS scope=full r1=2/2 r1_reader=1/1 staging=6/6 r2=2/2 '
+                                        'r2_trace=1/1 r4=3/3 live=1/1 families=56 chips=1of4 phantom=30 '
+                                        'extent_sha256=' + 'cd' * 32), line)
+        words = recorder.line_words(line)
+        self.assertEqual((words['chips'], words['phantom'], words['scope'], words['extent_sha256']),
+                         ('1of4', '30', 'full', 'cd' * 32))
+        # The same report without the width is the pair's line (its sha, its chips).
+        report.pop('width')
+        report.pop('chip_view')
+        report['two_chip_view'] = dict(chips_presented=2, phantom_programs=30)
+        line = reader_b.verdict_line(report)
+        self.assertIn(' chips=1of2 phantom=30 extent_sha256=' + 'ab' * 32, line)
+
+
+class QuadContractTests(unittest.TestCase):
+    def test_the_four_chip_view_is_the_two_chip_views_contract_at_four_shards(self):
+        fake = FakeReaderTtnn(torch)
+        view = chip_view.ChipView(fake, chips=QUAD.chips)
+        tensor = fake.from_torch(torch.zeros(8, dtype=torch.int32), dtype=fake.int32, layout=fake.ROW_MAJOR_LAYOUT,
+                                 device=fake)
+        self.assertEqual([shard.buffer_address() for shard in view.get_device_tensors(tensor)], [tensor.address] * 4)
+        program = view.MeshProgramDescriptor()
+        for chip in range(4):
+            coordinate = view.MeshCoordinate(0, chip)
+            program[view.MeshCoordinateRange(coordinate, coordinate)] = 'chip%d' % chip
+        with self.assertRaises(ValueError):
+            program[view.MeshCoordinateRange((0, 4), (0, 4))] = 'chip4'
+        with self.assertRaises(ValueError):
+            program[view.MeshCoordinateRange((0, 3), (0, 3))] = 'again'
+        real = program.realise()
+        self.assertEqual(dict(real), {ONE: 'chip0'})
+        self.assertEqual((view.realised, view.phantom), (1, 3))
+        half = view.MeshProgramDescriptor()
+        for chip in (0, 1):
+            half[view.MeshCoordinateRange((0, chip), (0, chip))] = 'chip%d' % chip
+        with self.assertRaisesRegex(ValueError, 'every chip'):
+            half.realise()
+        two = mock.Mock(get_device_tensors=lambda value: [Shard(1), Shard(2)])
+        with self.assertRaisesRegex(RuntimeError, 'ONE chip'):
+            chip_view.ChipView(two, chips=4).get_device_tensors(tensor)
+        saved = sys.modules.get('ttnn')
+        with view.installed():
+            self.assertIs(sys.modules['ttnn'], view)
+        self.assertIs(sys.modules.get('ttnn'), saved)
+
+    def test_without_the_view_the_real_twin_refuses_one_chip(self):
+        fake = FakeReaderTtnn(torch)
+        positions = extent_tp._upload(fake, fake, torch.zeros(8, dtype=torch.int32), fake.int32)
+        mask = extent_tp._upload(fake, fake, torch.zeros(2, 1, 48, 256, dtype=torch.bfloat16), fake.bfloat16)
+        with four(), mock.patch.dict(sys.modules, {'ttnn': fake}):
+            with self.assertRaisesRegex(ValueError, 'Four chip-local metadata buffers required'):
+                extent_tp.prepare_narrow(fake, positions, mask, rows=8, batches=2, offset=0)
+
+    def test_the_fake_kernels_are_the_siblings_mirrors_at_six_head_rows(self):
+        """The fake's emulations of attention_mask_replay_tp.cpp and attention_fold_dma_tp.cpp agree with the twin's host
+        mirror and with this harness's fold, so the device flow below tests the reader, not the fake."""
+        fake = FakeQuadTtnn(torch)
+        with four():
+            view = chip_view.ChipView(fake, chips=4)
+            for rows, batches, offset in reader_b.R1_GEOMETRIES.values():
+                positions = extent_tp._upload(view, fake, torch.zeros(8, dtype=torch.int32), view.int32)
+                mask = extent_tp._upload(view, fake, torch.zeros(batches, 1, rows * 6, 256, dtype=torch.bfloat16),
+                                         view.bfloat16)
+                with view.installed():
+                    program = extent_tp.prepare_narrow(fake, positions, mask, rows=rows, batches=batches, offset=offset)
+                for word in (0, 7, 32, 200, 255):
+                    fake.memory[positions.address] = torch.tensor([word] + [0] * 7, dtype=torch.int32)
+                    with view.installed():
+                        extent_tp.attention_mask_replay.execute(positions, mask, program)
+                    self.assertEqual(card.differing(torch, fake.memory[mask.address],
+                                                    extent_tp.narrow_mask_host(word, rows, batches, offset)), 0)
+            tokens = torch.randn(1, 16, 6, 256).to(torch.bfloat16)
+            source = fake.from_torch(tokens, dtype=fake.bfloat16, layout=fake.TILE_LAYOUT, device=fake)
+            owned = []
+            with view.installed():
+                folded = attention_fold_dma_tp.device_layout_dma(fake, source, 8, owned, offset=8)
+            self.assertTrue(torch.equal(fake.memory[folded.address],
+                                        reader_b.fold_entries(torch, tokens, (8,), 8, QUAD)))
+            with view.installed():
+                back = attention_fold_dma_tp.device_layout_dma(fake, folded, 8, owned, inverse=True)
+            self.assertTrue(torch.equal(fake.memory[back.address], tokens[:, 8:16]))
+        names = {name for name, _tasks in fake.launched}
+        self.assertEqual(names, {'attention_mask_replay_tp.cpp', 'attention_fold_dma_tp.cpp'})
+
+    def test_a_sibling_built_without_its_define_is_refused_by_the_fake(self):
+        """The fake checks what the device would: a _tp kernel without QWEN_FOLD_HEAD_ROWS does not compile."""
+        fake = FakeQuadTtnn(torch)
+        with four():
+            view = chip_view.ChipView(fake, chips=4)
+            positions = extent_tp._upload(view, fake, torch.zeros(8, dtype=torch.int32), view.int32)
+            mask = extent_tp._upload(view, fake, torch.zeros(2, 1, 48, 256, dtype=torch.bfloat16), view.bfloat16)
+            with view.installed(), mock.patch.object(extent_tp.tp_kernels, 'fold_defines', lambda environ=None: []):
+                program = extent_tp.prepare_narrow(fake, positions, mask, rows=8, batches=2, offset=0)
+            with view.installed(), self.assertRaisesRegex(RuntimeError, 'built with defines'):
+                extent_tp.attention_mask_replay.execute(positions, mask, program)
+
+
+class QuadFlowTests(FlowBase):
+    """The harness at width 4 end to end on the fake one-chip ttnn: the REAL twin classes (extent_attention_replay_tp)
+    through ChipView(chips=4), at 0x23 on one KV head, against the 0x3 compile-time call. The fake's K64j SDPA is
+    FakeExtentTtnn's at one KV head (card.KV_HEADS, the cores per head)."""
+
+    WIDTH_ARGV = ('--width', '4')
+    WIDTH_ENV = {reader_b.TP_ENV: '4'}
+
+    def width_patches(self):
+        original = model.cores_per_head
+        return [mock.patch.object(card, 'KV_HEADS', 1),
+                mock.patch.object(model, 'cores_per_head',
+                                  lambda batches, kv_heads=1, *args, **kwargs: original(batches, kv_heads, *args, **kwargs)),
+                mock.patch.object(extent_tp, 'print', create=True)]
+
+    def test_pass_end_to_end(self):
+        fake = FakeQuadTtnn(torch)
+        status, report = self.run_reader(fake)
+        self.assertEqual((report.get('error'), report['failures'], report['warnings']), (None, [], []))
+        self.assertEqual((status, report['passed'], report['decision']['verdict']), (0, True, 'PASS'))
+        self.assertEqual(report['sections_done'], ['R1/seed0', 'block/seed0'])
+        kinds = self.kinds(report)
+        # The same comparisons as the pair's run: the plan does not depend on the width.
+        self.assertEqual(kinds['r1_eager'], (15, 15))
+        self.assertEqual(kinds['r1_trace'], (15, 15))
+        self.assertEqual(kinds['r1_reader'], (32, 32))
+        self.assertEqual((kinds['staging_word'], kinds['staging_cur_pos'], kinds['staging_table']), ((4, 4),) * 3)
+        self.assertEqual((kinds['restage_word'], kinds['restage_table']), ((40, 40), (24, 24)))
+        self.assertEqual((kinds['r2_construction_vs_wide'], kinds['r2_trace_vs_wide'], kinds['r2_trace_vs_eager']),
+                         ((4, 4), (32, 32), (8, 8)))
+        self.assertEqual((kinds['r4_live_unchanged'], kinds['r4_idle_finite'], kinds['r4_idle_vs_wide']),
+                         ((16, 16), (8, 8), (8, 8)))
+        self.assertTrue(report['liveness'] and all(entry['live'] for entry in report['liveness']), report['liveness'])
+        self.assertEqual(report['r2_families_replayed'], [256, 512, 768, 1280, 2048, 2304])
+        # What the recorder reads of the report: the width, the flags, the reader's sha, the siblings' shas, chips=1of4.
+        self.assertEqual((report['width'], report['heads'], report['kv_heads'], report['env'][reader_b.TP_ENV]),
+                         (4, 6, 1, '4'))
+        self.assertIs(type(report['kv_heads']), int)
+        self.assertEqual({key: report['served'][key] for key in ('flags', 'reference_flags', 'rows', 'batch')},
+                         dict(flags='0x23', reference_flags='0x3', rows=8, batch=2))
+        self.assertEqual(len(report['segments']), 4)
+        self.assertEqual(report['extent_reader'], dict(flags=['0x23'] * 4, segments=4, capacity=2304, borrowed=8))
+        self.assertIn([0x23, 2, 2304 // 32, 8], report['requested_programs'])
+        self.assertNotIn(0x27, {row[0] for row in report['requested_programs']})
+        for family in (256, 512, 768, 1280, 2048, 2304):
+            self.assertIn([0x3, 2, family // 32, family // 32], report['requested_programs'])
+        self.assertEqual([(line['entries'], line['kv_share'], line['q_slice']) for line in report['extent_lines']],
+                         [(2, 'true', 'false')])
+        engaged = [line for line in report['pindiag'] if line.startswith(reader_b.ENGAGED_MARKER)]
+        self.assertEqual(engaged, ['%s segments=4 flags=0x23,0x23,0x23,0x23 mask=narrow capacity=2304'
+                                   % reader_b.ENGAGED_MARKER])
+        self.assertNotIn('two_chip_view', report)
+        view = report['chip_view']
+        self.assertEqual((view['chips_physical'], view['chips_presented']), (1, 4))
+        self.assertEqual(view['phantom_programs'], 3 * view['programs_realised'])
+        self.assertGreater(view['launches'], 100)
+        shas = report['modules']['sha256']
+        self.assertEqual(shas[recorder.READER_TP], sha((CI / recorder.READER_TP).read_bytes()))
+        for name in recorder.PINNED_SIBLINGS:
+            self.assertEqual(shas[name], sha((CI / name).read_bytes()), name)
+        self.assertEqual(report['sibling_drift'], [])
+        self.assertEqual(report['modules']['files']['extent_attention_replay_tp'], str((CI / recorder.READER_TP).resolve()))
+        line = report['verdict_line']
+        self.assertTrue(line.startswith('K64J_READER verdict=PASS scope=reduced r1=30/30 r1_reader=32/32 staging=116/116 '
+                                        'r2=36/36 r2_trace=8/8 r4=32/32 live=4/4 families=6 chips=1of4 phantom='), line)
+        words = recorder.line_words(line)
+        self.assertEqual((words['chips'], words['extent_sha256'], int(words['phantom'])),
+                         ('1of4', shas[recorder.READER_TP], view['phantom_programs']))
+        self.assertEqual((fake.closed, fake.live_traces_at_close), (True, 0))
+        self.assertIn(('attention_mask_replay_tp.cpp', 32), fake.launched)      # 2 entries x 2 head tiles x 8 column tiles
+        self.assertIn(('attention_fold_dma_tp.cpp', 64), fake.launched)
+        self.assertFalse({name for name, _tasks in fake.launched} & {'attention_mask_replay.cpp', 'attention_fold_dma.cpp'},
+                         'the pair\'s kernels never run at four cards')
+
+    def test_a_stale_cur_pos_fails(self):
+        def wrapper(original):
+            def stage_values(self, start, table):
+                values = original(self, start, table)
+                if self.start is None:
+                    return values
+                return [value for value in values if not any(value[0] is positions for positions in self.cur_pos)]
+            return stage_values
+
+        original = extent_tp.ExtentSegmentReader.stage_values
+        status, report = self.run_reader(FakeQuadTtnn(torch), base=self.SMALL, extra=['--sections', 'S,R2'],
+                                         patches=[mock.patch.object(extent_tp.ExtentSegmentReader, 'stage_values',
+                                                                    wrapper(original))])
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (1, [], 'FAIL'))
+        self.assertEqual(self.failing(report), {'restage_cur_pos', 'r2_trace_vs_wide'})
+
+    def test_a_wide_mask_read_fails_r2_only(self):
+        status, report = self.run_reader(FakeQuadTtnn(torch, broken={'tail_at_capacity'}), base=self.SMALL,
+                                         extra=['--sections', 'R1,S,R2'])
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (1, [], 'FAIL'))
+        failing = self.failing(report)
+        self.assertLessEqual({'r2_construction_vs_wide', 'r2_trace_vs_wide'}, failing)
+        self.assertFalse(failing & {'r1_eager', 'r1_trace', 'r1_reader', 'staging_word', 'staging_cur_pos'})
+
+    def test_a_mask_kernel_that_skips_a_tile_fails_r1(self):
+        status, report = self.run_reader(FakeQuadTtnn(torch, broken={'mask_stale_tile'}), base=self.SMALL,
+                                         extra=['--sections', 'R1'])
+        self.assertEqual((status, report['decision']['verdict']), (1, 'FAIL'))
+        self.assertLessEqual({'r1_eager', 'r1_trace'}, self.failing(report))
+
+    def test_an_absolute_word_fails(self):
+        def absolute(start):
+            return start, extent_module.extent(start) - 1
+
+        status, report = self.run_reader(FakeQuadTtnn(torch), base=self.SMALL, extra=['--sections', 'R1,S,R2'],
+                                         patches=[mock.patch.object(extent_tp, 'extent_values', absolute)])
+        self.assertEqual((status, report['failures'], report['decision']['verdict']), (1, [], 'FAIL'))
+        self.assertLessEqual({'staging_word', 'restage_word', 'r1_reader', 'r2_trace_vs_wide'}, self.failing(report))
+
+    def test_a_launch_that_did_not_carry_the_width_decides_nothing(self):
+        """--width 4 with the process at the pair's width (QWEN_FAST_TP 2): tp_shapes would build twelve-row kernels.
+        Refused before the device opens, with no comparison."""
+        status, report = self.run_reader(FakeQuadTtnn(torch), base=self.SMALL, env={reader_b.TP_ENV: '2'})
+        self.assertEqual(report['decision']['verdict'], 'NO-DECISION')
+        self.assertTrue(any('tp_shapes reads the width' in failure and 'read the launched argv' in failure
+                            for failure in report['failures']), report['failures'])
+        self.assertEqual(report['comparisons'], [])
+
+    def test_the_sdpa_modes_and_the_scratch_are_checked_first_at_four_cards_too(self):
+        for env, needle in (({'QWEN_FAST_SDPA_MODES': 'tail,share'}, 'QWEN_FAST_SDPA_MODES must be'),
+                            ({card.SCRATCH_ENV: '0'}, 'QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 is required')):
+            with self.subTest(env=env):
+                status, report = self.run_reader(FakeQuadTtnn(torch), base=self.SMALL, env=env)
+                self.assertEqual(report['decision']['verdict'], 'NO-DECISION')
+                self.assertTrue(any(needle in failure for failure in report['failures']), report['failures'])
+                self.assertEqual(report['comparisons'], [])
+
+    def test_the_code_under_test_must_come_from_the_ci_root(self):
+        status, report = self.run_reader(FakeQuadTtnn(torch), base=self.SMALL,
+                                         extra=['--sections', 'S', '--ci-root', str(self.dir)])
+        self.assertEqual(report['decision']['verdict'], 'NO-DECISION')
+        self.assertTrue(any('was loaded from' in failure for failure in report['failures']), report['failures'])
+        self.assertEqual(report['comparisons'], [])
+
+
+@unittest.skipUnless(BASH, 'bash not found')
+class QuadRunnerTests(unittest.TestCase):
+    """run_card_b.sh K64J_HARNESS=extent_reader TP4_WIDTH=4 (dry run): the launch carries the width both ways, the
+    four-card sources are required, the pair's run is what it was, and the evidence job templates call the harness
+    with flags it implements and with the scopes the admission needs."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.graft = card_tests.make_graft(self.dir)
+        self.helper = RunnerTests('test_the_extent_readers_dry_run')
+        self.helper.dir = self.dir
+        self.helper.graft = self.graft
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_runner(self, runner=RUNNER, **env):
+        return self.helper.run_runner(runner, **env)
+
+    def env_of(self, argv):
+        return [argv[i + 1] for i, word in enumerate(argv) if word == '-e']
+
+    def test_the_four_card_dry_run(self):
+        result = self.run_runner(TP4_WIDTH='4')
+        argv = self.helper.argv(result)
+        self.assertEqual(result.stderr, '')
+        env = self.env_of(argv)
+        for value in ('QWEN_FAST_TP=4', 'QWEN_FAST_SDPA_MODES=tail,share,slice', 'QWEN_SDPA_TREE_SCRATCH_ROUNDS=1'):
+            self.assertIn(value, env)
+        args = self.helper.harness_args(argv)
+        self.assertEqual((args.width, args.geometry, args.ci_root, args.served_root, args.sections, len(args.families)),
+                         (4, QUAD, '/bench/ci', '/experiment-scripts/ci', ['R1', 'S', 'R2', 'R4'], 56))
+        inner = argv[argv.index('--entrypoint') + 4]
+        self.assertTrue(inner.endswith('exec python3 -B /bench/extent_reader_card_b.py "$@"'), inner)
+        logged = inner.split('2>&1; ')[0]
+        for name in tuple(reader_b.PINNED) + reader_b.QUAD_SIBLINGS:          # the image's copies, logged before the run
+            self.assertIn('/experiment-scripts/ci/%s ' % name, logged)
+        # Nothing of the image's is mounted; the code under test is this checkout's scripts/ci alone.
+        self.assertNotIn('/experiment-scripts/ci', ' '.join(m.get('src', '') for m in self.helper.mounts(argv)))
+        bench = {m['dst'] for m in self.helper.mounts(argv) if m['dst'].startswith('/bench/')}
+        self.assertEqual(bench, {'/bench/ci', '/bench/extent_reader_card_b.py', '/bench/k64j_card_b.py',
+                                 '/bench/probe_k1_card_b.py', '/bench/probe_k64j_card_b.py', '/bench/split_model.py',
+                                 '/bench/test_sdpa_decode_qwen_card_m.py'})
+        # The harness's own flags are the ones after the image: --width 4 comes from the width, never from CARD_B_ARGS.
+        self.assertIn('--width', argv[argv.index('card') + 1:])
+        watcher = self.helper.harness_args(self.helper.argv(self.run_runner(TP4_WIDTH='4', WATCHER='1')))
+        self.assertEqual((watcher.width, watcher.seeds, watcher.variants, len(watcher.families)),
+                         (4, [0], ['peaky'], 5))
+        self.assertIn('TT_METAL_WATCHER=5', self.env_of(self.helper.argv(self.run_runner(TP4_WIDTH='4', WATCHER='1'))))
+
+    def test_the_pairs_run_is_what_it_was(self):
+        for width in ({}, {'TP4_WIDTH': '2'}):
+            with self.subTest(width=width):
+                argv = self.helper.argv(self.run_runner(**width))
+                self.assertNotIn('--width', argv[argv.index('card') + 1:])
+                self.assertFalse([value for value in self.env_of(argv) if value.startswith('QWEN_FAST_TP')])
+                self.assertEqual(self.helper.harness_args(argv).width, 2)
+                inner = argv[argv.index('--entrypoint') + 4]
+                self.assertFalse([name for name in reader_b.QUAD_SIBLINGS if name in inner])
+        # The other harnesses never see the width argument: TP4_WIDTH is gdn_tp4's and extent_reader's alone.
+        argv = self.helper.argv(self.run_runner(K64J_HARNESS='card', TP4_WIDTH='4'))
+        self.assertNotIn('--width', argv)
+        self.assertFalse([value for value in self.env_of(argv) if value.startswith('QWEN_FAST_TP')])
+
+    def test_a_width_that_is_neither_is_refused_before_anything_is_launched(self):
+        for value in ('3', '1', 'four'):
+            result = self.run_runner(TP4_WIDTH=value)
+            self.assertEqual(result.returncode, 1, value)
+            self.assertIn('refusing: TP4_WIDTH=%s is neither 4 nor 2' % value, result.stderr)
+            self.assertNotIn('### argv: ', result.stdout)
+
+    def test_the_four_card_sources_are_required_and_the_pairs_run_needs_none_of_them(self):
+        runner, ci = make_tree(self.dir)
+        for name in reader_b.QUAD_RECORDED_SOURCES:
+            self.assertTrue((ci / name).is_file(), name)
+        self.helper.argv(self.run_runner(runner, TP4_WIDTH='4'))
+        for name in ('extent_attention_replay_tp.py', 'chip_view.py', 'tp_shapes.py', 'tp_kernels.py', 'tp_addresses.py'):
+            (ci / name).rename(ci / (name + '.moved'))
+            result = self.run_runner(runner, TP4_WIDTH='4')
+            self.assertEqual(result.returncode, 1, name)
+            self.assertIn('%s missing (the extent reader runs this checkout' % name, result.stderr, name)
+            self.helper.argv(self.run_runner(runner))                      # the pair's run does not need it
+            (ci / (name + '.moved')).rename(ci / name)
+        self.helper.argv(self.run_runner(runner, TP4_WIDTH='4'))
+
+    def parse_template(self, name, **fill):
+        values = template(name)
+        self.assertEqual(values['C2_ACTIONS'], 'cardm')
+        self.assertEqual(values['C2_CARDM_HARNESS'], 'optimisation/ttnn-op/k64j/run_card_b.sh')
+        text = values['C2_CARDM_ENV']
+        for placeholder, value in (('@K64J_GRAFT_DIR@', self.graft.as_posix()),
+                                   ('@K64J_TTNNCPP_SHA256@', sha(card_tests.BINARY)),
+                                   ('@SERVED_IMAGE@', 'tt-vllm:four-card-test')):
+            text = text.replace(placeholder, value)
+        self.assertNotIn('@', text)
+        env = dict(pair.split('=', 1) for pair in text.split())
+        env['CARD_B_ARGS'] = values['C2_CARDM_ARGS']
+        return values, env
+
+    def test_the_evidence_job_templates_call_the_harness_with_the_flags_it_implements(self):
+        import c2_serving_job as job
+        for name, watcher in (('EV-W2-cb2b-watcher.env', True), ('EV-F3-cb2b.env', False)):
+            with self.subTest(template=name):
+                values, env = self.parse_template(name)
+                # The cardm step accepts the values (the workflow's own check).
+                plain = values['C2_CARDM_ENV'].replace('@K64J_GRAFT_DIR@', '/home/thatch/opgraft-K64j').replace(
+                    '@K64J_TTNNCPP_SHA256@', 'ab' * 32).replace('@SERVED_IMAGE@', 'tt-vllm:four-card-test')
+                harness, words, pairs = job.read_cardm(dict(values, C2_CARDM_ENV=plain), True, root=str(ROOT))
+                self.assertEqual((harness, words), (values['C2_CARDM_HARNESS'], values['C2_CARDM_ARGS']))
+                self.assertEqual((env['K64J_HARNESS'], env['TP4_WIDTH'], env.get('WATCHER') == '1'),
+                                 ('extent_reader', '4', watcher))
+                result = self.run_runner(**env)
+                argv = self.helper.argv(result)
+                self.assertEqual(result.stderr, '')
+                self.assertEqual(argv[argv.index('--entrypoint') + 2], 'tt-vllm:four-card-test',
+                                 'the pinned siblings are served from the four-card image, not the P8 default')
+                environment = self.env_of(argv)
+                self.assertIn('QWEN_FAST_TP=4', environment)
+                self.assertEqual('TT_METAL_WATCHER=5' in environment, watcher)
+                args = self.helper.harness_args(argv)       # every flag the template passes is one the harness parses
+                self.assertEqual((args.width, args.sections, args.capacity), (4, ['R1', 'S', 'R2', 'R4'], 131328))
+                if watcher:
+                    self.assertEqual((args.seeds, args.variants), ([0], ['normal']))
+                    self.assertLess(len(args.families), admission.CB2B_R2_MIN_FAMILIES,
+                                    'a watcher pass is the reduced scope: never CB2b\'s evidence')
+                    continue
+                # The full job: what the admission needs, from the harness's defaults and the template's own flags.
+                self.assertEqual((args.seeds, args.variants), (list(admission.CB2B_SEEDS), ['normal', 'peaky']))
+                self.assertGreaterEqual(len(args.families), admission.CB2B_R2_MIN_FAMILIES)
+                self.assertLessEqual(set(admission.CB2B_R2_NAMED), set(args.families))
+                self.assertEqual(set(args.r1_geometries), set(admission.CB2B_R1_GEOMETRIES))
+                self.assertLessEqual(set(admission.CB2B_RESIDUES), set(args.r1_words))
+                self.assertLessEqual(set(admission.CB2B_RESIDUES), set(args.r2_residues))
+                idle = {start for pattern in args.idle_patterns for start in reader_b.idle_assignment(pattern).values()}
+                self.assertLessEqual(set(admission.CB2B_IDLE_STARTS), idle)
+                self.assertNotIn('--capacity', values['C2_CARDM_ARGS'])
+                # The scope the harness itself judges a run of these arguments to have covered is full.
+                report = dict(capacity=args.capacity, sections=args.sections, seeds_run=args.seeds,
+                              variants_run=args.variants, idle_starts_run=sorted(idle),
+                              r1_run={name: list(args.r1_words) for name in args.r1_geometries},
+                              r2_families_replayed=args.families)
+                self.assertEqual(reader_b.scope(report), ('full', []))
+
+    def test_the_template_header_comments_do_not_promise_a_flag_the_harness_lacks(self):
+        for name in ('EV-W2-cb2b-watcher.env', 'EV-F3-cb2b.env'):
+            text = read(TEMPLATES / name)
+            self.assertIn('K64J_HARNESS=extent_reader TP4_WIDTH=4', text)
+            self.assertNotIn('extent_reader_tp', text)
+
+
+class QuadServedLoaderTests(unittest.TestCase):
+    """load_modules at width 4 in a fresh interpreter, as the container runs it: the frozen pair modules and the twin's
+    siblings from a served tree, the twin and its helpers from the checkout's scripts/ci, the width from the launch. The
+    served tree holds DECOYS of tp_shapes and tp_kernels: the checkout's must be the ones the twin runs."""
+
+    def setUp(self):
+        import test_extent_attention_replay as extent_tests
+        self.tmp = tempfile.TemporaryDirectory()
+        self.served = Path(self.tmp.name) / 'experiment-scripts' / 'ci'
+        self.served.mkdir(parents=True)
+        with open(self.served / 'attention_mask_replay.py', 'w', encoding='utf-8', newline='\n') as handle:
+            handle.write(extent_tests.served_mask_source())
+        for name in ('attention_mask_replay.cpp', 'attention_fold_dma.py', 'attention_fold_dma.cpp',
+                     'frozen_context_geometry.py') + reader_b.QUAD_SIBLINGS:
+            shutil.copyfile(CI / name, self.served / name)
+        for name in ('tp_shapes.py', 'tp_kernels.py'):
+            (self.served / name).write_text('DECOY = True' + NL, encoding='utf-8')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def load(self, width='4', prelude=''):
+        script = NL.join((
+            'import json, sys',
+            'sys.path[:0] = %r' % [str(HERE), str(PROBE_DIR), str(OPS / 'sdpa_decode_qwen')],
+            prelude,
+            'import extent_reader_card_b as reader_b',
+            'report = dict(failures=[], warnings=[])',
+            'mods = reader_b.load_modules(%r, report, %r, reader_b.QUAD)' % (str(CI), str(self.served)),
+            'out = dict(failures=report["failures"], warnings=report["warnings"], modules=report.get("modules"),',
+            '           drift=report.get("sibling_drift"), loaded=mods is not None)',
+            'if mods is not None:',
+            '    out.update(bound=[mods.extent.attention_mask_replay is mods.mask,',
+            '                      mods.extent.device_layout_dma is mods.fold.device_layout_dma,',
+            '                      mods.extent_pair.attention_mask_replay is mods.mask,',
+            '                      mods.extent_pair.device_layout_dma is mods.fold_pair.device_layout_dma,',
+            '                      mods.pooled.validate_ticket is mods.mask.validate_ticket,',
+            '                      sys.modules["attention_replay"].prepare is mods.mask.prepare],',
+            '               tp_shapes=mods.tp_shapes.__file__, decoy=hasattr(mods.tp_shapes, "DECOY"),',
+            '               kernels=mods.tp_kernels.__file__, view=mods.chip_view.__file__,',
+            '               chips=mods.tp_shapes.chip_count(), cpp=mods.tp_kernels.source(%r))'
+            % str(self.served / 'attention_mask_replay.cpp'),
+            'print("LOADED " + json.dumps(out))'))
+        environ = dict(os.environ, OMP_NUM_THREADS='2', MKL_NUM_THREADS='2')
+        environ.pop(reader_b.TP_ENV, None)
+        if width is not None:
+            environ[reader_b.TP_ENV] = width
+        result = subprocess.run([sys.executable, '-B', '-c', script], capture_output=True, text=True, encoding='utf-8',
+                                errors='replace', timeout=300, env=environ)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.startswith('LOADED ')]
+        self.assertEqual(len(lines), 1, result.stdout + result.stderr)
+        return json.loads(lines[0][len('LOADED '):])
+
+    def test_the_twin_and_its_helpers_are_the_checkouts_and_the_pair_modules_and_siblings_the_served_trees(self):
+        out = self.load()
+        self.assertEqual((out['failures'], out['warnings'], out['loaded']), ([], [], True))
+        self.assertEqual(out['bound'], [True] * 6)
+        files = {name: Path(path) for name, path in out['modules']['files'].items()}
+        for name in reader_b.QUAD_SERVED_MODULES:
+            self.assertEqual(files[name], (self.served / (name + '.py')).resolve(), name)
+        for _key, name in reader_b.QUAD_MODULES:
+            if name not in reader_b.QUAD_SERVED_MODULES:
+                self.assertEqual(files[name].parent, CI.resolve(), name)
+        # The decoys in the served tree were never run: the twin's tp_shapes / tp_kernels are the checkout's.
+        self.assertEqual([Path(out['tp_shapes']).parent, Path(out['kernels']).parent, Path(out['view']).parent],
+                         [CI.resolve()] * 3)
+        self.assertFalse(out['decoy'])
+        self.assertEqual(out['chips'], 4)
+        shas = out['modules']['sha256']
+        self.assertEqual({name: shas[name] for name in reader_b.PINNED}, reader_b.PINNED)
+        for name in reader_b.QUAD_SIBLINGS:                     # the served bytes (here the checkout's own)
+            self.assertEqual(shas[name], sha((self.served / name).read_bytes()), name)
+        for name in reader_b.QUAD_RECORDED_SOURCES:
+            self.assertEqual(shas[name], sha((CI / name).read_bytes()), name)
+        self.assertEqual(out['drift'], [])
+        # The sibling kernel the launch builders pick: the _tp sibling beside the served pinned .cpp.
+        self.assertEqual(Path(out['cpp']), (self.served / 'attention_mask_replay_tp.cpp').resolve())
+
+    def test_a_served_sibling_that_is_not_the_checkouts_is_recorded_and_warned_about_not_refused(self):
+        with open(self.served / 'attention_mask_replay_tp.cpp', 'ab') as handle:
+            handle.write(b'// drift\n')
+        out = self.load()
+        self.assertEqual((out['failures'], out['loaded']), ([], True))
+        self.assertEqual(out['drift'], ['attention_mask_replay_tp.cpp'])
+        self.assertEqual(len(out['warnings']), 1)
+        self.assertIn('attention_mask_replay_tp.cpp', out['warnings'][0])
+        self.assertEqual(out['modules']['sha256']['attention_mask_replay_tp.cpp'],
+                         sha((self.served / 'attention_mask_replay_tp.cpp').read_bytes()))
+        self.assertNotEqual(out['modules']['sha256']['attention_mask_replay_tp.cpp'],
+                            sha((CI / 'attention_mask_replay_tp.cpp').read_bytes()))
+
+    def test_the_frozen_pair_bytes_are_refused_at_four_cards_too(self):
+        with open(self.served / 'attention_fold_dma.cpp', 'ab') as handle:
+            handle.write(b'// drift\n')
+        out = self.load()
+        self.assertFalse(out['loaded'])
+        self.assertTrue(any(failure.startswith('pinned source attention_fold_dma.cpp is ')
+                            for failure in out['failures']), out['failures'])
+
+    def test_a_launch_without_the_width_decides_nothing(self):
+        for width in (None, '2'):
+            out = self.load(width=width)
+            self.assertFalse(out['loaded'], width)
+            self.assertTrue(any('tp_shapes reads the width 2' in failure and 'read the launched argv' in failure
+                                for failure in out['failures']), out['failures'])
+
+    def test_a_missing_served_sibling_module_or_one_imported_first_decides_nothing(self):
+        (self.served / 'attention_fold_dma_tp.py').unlink()
+        out = self.load()
+        self.assertFalse(out['loaded'])
+        self.assertTrue(any(failure.startswith('attention_fold_dma_tp.py is not in --served-root ')
+                            for failure in out['failures']), out['failures'])
+        shutil.copyfile(CI / 'attention_fold_dma_tp.py', self.served / 'attention_fold_dma_tp.py')
+        out = self.load(prelude='sys.path.insert(0, %r); import attention_fold_dma_tp' % str(CI))
+        self.assertFalse(out['loaded'])
+        self.assertTrue(any(failure.startswith('attention_fold_dma_tp was imported from ')
+                            and '--served-root' in failure for failure in out['failures']), out['failures'])
 
 
 if __name__ == '__main__':
