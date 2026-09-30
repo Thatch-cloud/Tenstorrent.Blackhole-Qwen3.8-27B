@@ -1,3 +1,4 @@
+import os
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -6,6 +7,8 @@ import torch
 from transformers import GPT2Config
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, SchedulerConfig, SpeculativeConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
@@ -15,6 +18,9 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from serving_page_binding import validate_initial_capture_pages
 from serving_vllm_contract import admit_scheduler_output
+
+
+HOOK_SWITCHES = ('QWEN_PREFIX_REUSE', 'QWEN_FAST_STICKY_SESSIONS')
 
 
 class RealSchedulerTests(unittest.TestCase):
@@ -40,7 +46,21 @@ class RealSchedulerTests(unittest.TestCase):
             KVCacheGroupSpec(['layer'], FullAttentionSpec(block_size=64,
                 num_kv_heads=2, head_size=256, dtype=torch.bfloat16))])
         register_all_kvcache_specs(config)
-        scheduler = self.scheduler_type(config, cache, StructuredOutputManager(config), block_size=64)
+        hash_fn = get_hash_fn_by_name(config.cache_config.prefix_caching_hash_algo)
+        init_none_hash(hash_fn)
+        # With the prefix cache on, a request must carry the block hasher vLLM's engine core gives it.
+        self.block_hasher = get_request_block_hasher(64, hash_fn)
+        # The image's TTScheduler installs the prefix-reuse graft in __init__ when QWEN_PREFIX_REUSE=1 is in the
+        # environment (as it is in the image), and the graft refuses DFlash's lookahead without the sticky
+        # switch. These tests are about vLLM's own scheduler behaviour, so they build the scheduler with both
+        # switches out.
+        saved = {name: os.environ.pop(name, None) for name in HOOK_SWITCHES}
+        try:
+            scheduler = self.scheduler_type(config, cache, StructuredOutputManager(config), block_size=64)
+        finally:
+            for name, value in saved.items():
+                if value is not None:
+                    os.environ[name] = value
         scheduler.use_v2_model_runner = False
         self.assertEqual(scheduler.num_lookahead_tokens, 16)
         return scheduler
@@ -108,14 +128,15 @@ class RealSchedulerTests(unittest.TestCase):
         why the fast path's scheduler graft resumes one chunk lower (C0) than general-prefix (C1)."""
         scheduler = self.scheduler(prefix_caching=True)
         parameters = SamplingParams(temperature=0, max_tokens=1)
-        first = Request('first', [42] * 2048, parameters, None)
+        first = Request('first', [42] * 2048, parameters, None, block_hasher=self.block_hasher)
         scheduler.add_request(first)
         scheduled = scheduler.schedule()
         self.assertEqual(scheduled.num_scheduled_tokens, {'first': 2048})
         scheduler.update_from_output(scheduled, self.output('first', [100]))
         self.assertNotIn('first', scheduler.requests)
         scheduler.schedule()
-        second = Request('second', [42] * 2048 + [43] * 1024, SamplingParams(temperature=0, max_tokens=1), None)
+        second = Request('second', [42] * 2048 + [43] * 1024, SamplingParams(temperature=0, max_tokens=1), None,
+            block_hasher=self.block_hasher)
         scheduler.add_request(second)
         scheduled = scheduler.schedule()
         new, = scheduled.scheduled_new_reqs
