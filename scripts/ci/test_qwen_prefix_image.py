@@ -42,7 +42,9 @@ PREFIX_PROFILES = ('general-prefix', 'general-prefix-eager', 'general-prefix-tp4
 # Gate-only profiles that are not prefix profiles: the TP4 benchmark engine (J3, G5 at TP4).
 GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
-STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate')
+# ...and Stage E's parked-engine twins of those two (the same environment plus QWEN_FAST_PARKED_ENGINES=1).
+STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-prefix-parked',
+                   'c2-packed-prefix-parked-gate')
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')
 PLUGIN_CHECKOUT = Path(os.environ.get('QWEN_TT_PLUGIN_CHECKOUT') or JOB / 'risks' / 'vllm-tt-plugin')
 IMG_TREE = Path(os.environ.get('QWEN_IMG_TREE') or JOB / 'matmul-attr' / 'img')

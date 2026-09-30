@@ -1342,7 +1342,8 @@ def required_flag_markers(environ, users, prompt_tokens=None):
     required.update(quad_draft_markers(environ, users))
     if on(PUBLISH_PREWARM_FLAG):
         required[PUBLISH_PREWARM_FLAG] = [PUBLISH_PREWARM_MARKER]
-    if on('QWEN_FAST_MEMORY_LEDGER'):
+    if on('QWEN_FAST_MEMORY_LEDGER') and not on('QWEN_FAST_MEMORY_LEDGER_OFF'):
+        # QWEN_FAST_MEMORY_LEDGER_OFF=1 (phase-1 quick win 1) wins over the image's flag: the ledger writes nothing then.
         required['QWEN_FAST_MEMORY_LEDGER'] = list(LEDGER_MARKERS)
     if on('QWEN_PREFILL_PROFILE_FLUSH'):
         required['QWEN_PREFILL_PROFILE_FLUSH'] = [PREFILL_FLUSH_MARKER]
@@ -3039,6 +3040,7 @@ def trace_region(log_text):
         if len(lines) < 16:
             lines.append(message.strip()[:240])
     return dict(readings=len(used), unavailable=unavailable, max_used_gb=round(max(used), 4) if used else None,
+                min_used_gb=round(min(used), 4) if used else None,
                 min_largest_free_gb=round(min(largest), 4) if largest else None, lines=lines)
 
 
@@ -3230,10 +3232,13 @@ def parse_options(argv=None):
         parser.error('--sequential-users needs --users 1: each request must run alone')
     if options.start_order is not None:
         try:
-            options.start_order = start_order(options.start_order, options.users)
+            options.start_order = start_order(options.start_order, options.sequential_users or options.users)
         except ValueError as error:
             parser.error(str(error))
-        if options.sequential_users or not options.stagger > 0:
+        # Concurrent users need a stagger (without one the requests race); a sequential run (--sequential-users)
+        # sends its requests one at a time, so the order alone is the point: the same prompts, in another order
+        # (the parked-engine gates' ascending and shuffled chains, each held against the descending one).
+        if not options.sequential_users and not options.stagger > 0:
             parser.error('--start-order needs --stagger > 0 and concurrent users: without a stagger the requests race')
     real_text = options.prompt_source == 'real-text'
     if options.eos is None:
@@ -3334,6 +3339,13 @@ def start_order(text, users):
 def request_order(options):
     """The order the request threads start in: --start-order, or 0..users-1."""
     return list(options.start_order) if getattr(options, 'start_order', None) else list(range(options.users))
+
+
+def sequential_order(options):
+    """The order a --sequential-users run sends its requests in: --start-order, or 0..N-1. Each request is still
+    user `index`'s (its prompt, budget and result slot), only sent in another order."""
+    return (list(options.start_order) if getattr(options, 'start_order', None)
+            else list(range(options.sequential_users)))
 
 
 def start_order_report(report, options):
@@ -3555,7 +3567,7 @@ def main():
             if options.sequential_users:
                 # One request at a time: each is the only stream on the server, which is
                 # what a single-stream reference means.
-                for index in range(streams):
+                for index in sequential_order(options):
                     budget, user_kwargs = user_stream(options, index, kwargs, watch)
                     stream_once(options.port, prompt(index), budget, results, index, options.stream_timeout,
                                 **user_kwargs)

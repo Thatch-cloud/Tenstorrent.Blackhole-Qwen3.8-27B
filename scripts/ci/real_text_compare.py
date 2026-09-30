@@ -255,7 +255,7 @@ def compare(concurrent, single):
 ARITHMETIC_NEUTRAL = frozenset((
     'QWEN_C2_SERVING', 'QWEN_C2_PROFILE', 'QWEN_C2_PROFILES', 'QWEN_CARDS_ALLOCATED', 'QWEN_HARDWARE_TESTS',
     'QWEN_FABRIC_LINK_PROBE', 'QWEN_FAST_FAULTHANDLER', 'QWEN_FAST_CARRY_LOG', 'QWEN_FAST_PHASE_LOG',
-    'QWEN_FAST_PHASE_TIMING', 'QWEN_FAST_SEQ_PUBLISH_LOG', 'QWEN_FAST_MEMORY_LEDGER', 'QWEN_FAST_SHARD_CHECK',
+    'QWEN_FAST_PHASE_TIMING', 'QWEN_FAST_SEQ_PUBLISH_LOG', 'QWEN_FAST_MEMORY_LEDGER', 'QWEN_FAST_MEMORY_LEDGER_OFF', 'QWEN_FAST_SHARD_CHECK',
     # Paths (the 'qwen-tt' scope): where the runtime, the weight cache and the kernel cache live.
     'TT_METAL_HOME', 'TT_CACHE_PATH', 'TT_METAL_CACHE',
 ))
@@ -284,7 +284,15 @@ POLICY_EXIT = dict(PASS=0, FAIL=1, NOT_COMPARABLE=3, UNSTABLE=4, RERUN=5)
 # NOT_COMPARABLE - that is what makes G3, G3b and the forced-cap pair decisive. (QWEN_FAST_EXTENT_AUDIT is
 # already neutral as an *_AUDIT flag.)
 S2_EXACT_CLAIMS = frozenset(('QWEN_FAST_EXTENT_REPLAY', 'QWEN_FAST_PACKED_CAPTURE_POSITION',
-                             'QWEN_FAST_GATE_FORCE_CAP'))
+                             'QWEN_FAST_GATE_FORCE_CAP',
+                             # Stage E (parked per-slot engines): a parked engine's output is byte-identical to a fresh
+                             # build's by the design's strict rule, and the negative controls exist to make a
+                             # divergence visible, so none of these may turn a divergence into NOT_COMPARABLE.
+                             'QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_PROJECT_ROWS', 'QWEN_FAST_PARKED_NEGATIVE',
+                             'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_GATE_DRAM_BALLAST',
+                             # Phase-1 quick win 2: the engine's warm-up forwards are skipped where an earlier build
+                             # compiled them; its byte comparison must FAIL, not read NOT_COMPARABLE, on a divergence.
+                             'QWEN_FAST_ENGINE_WARM_SKIP'))
 # The strict policy is the user's standing default and K2 upheld it. The one relaxation the design allows is
 # decision D-c(i), taken by the user and only if K2 had failed: a reproduced concurrent-vs-solo divergence
 # whose first differing token was committed on DIFFERENT paths in the two arms (packed in one, sequential in

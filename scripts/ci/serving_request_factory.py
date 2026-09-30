@@ -6,7 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from serving_fast_request import FastRequest
-from serving_fast_policy import OUTPUT_BUDGET, any_request_enabled, validate_request_sampling
+from serving_fast_policy import (ENGINE_WARM_MARKER, OUTPUT_BUDGET, any_request_enabled, engine_warm_skip_enabled,
+                                 validate_request_sampling)
 from serving_page_binding import validate_initial_capture_pages
 
 
@@ -82,6 +83,8 @@ EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 # W6a: the one proposal bucket every engine captures under the flag.
 SINGLE_PROPOSAL_CONTEXT = 2048
 DRAM_REGISTERED = '[PINDIAG] dram admission hold registered: '
+# Stage E (QWEN_FAST_PARKED_ENGINES=1 only): the parked terms the registered predicate also asks.
+DRAM_PARKED_REGISTERED = '[PINDIAG] dram admission parked terms: '
 DRAM_BACKSTOP_REFUSED = '[PINDIAG] dram backstop refused request '
 # W6a's executed-path marker: the buckets the engine's proposal capture actually holds, read after the build.
 PROPOSAL_BUCKETS_BUILT = '[PINDIAG] proposal buckets built request='
@@ -134,17 +137,23 @@ def built_proposal_buckets(device):
         return 'unavailable (%s)' % type(failure).__name__
 
 
-def register_dram_admission(pool, *, log=None):
+def register_dram_admission(pool, *, log=None, parked=None):
     """S2 W6b: park the scheduler-side DRAM admission hold's predicate (serving_prefill_admission) for this
     attach: it reads the smallest largest-free block over the chips through `pool`, against the one set of
     defaults there and the coordinator's DRAM reserve (QWEN_FAST_PACKED_PROPOSAL_DRAM_RESERVE_MB). Returns
     the callable that removes it; serving_runtime registers it in the attach's scope, so it goes before
-    the pool closes."""
+    the pool closes.
+
+    `parked` (Stage E, QWEN_FAST_PARKED_ENGINES=1 only): the attach's serving_parked_engines.ParkedEngineSet, whose
+    arrival_terms the predicate asks at every call, so an arrival onto a parked engine is admitted on the parked
+    terms (serving_prefill_admission's docstring); one more line says so. None, the predicate is today's."""
     import serving_prefill_admission as admission
     from dflash_packed_proposal_coordinator import dram_reserve_bytes
 
     reserve = dram_reserve_bytes()
-    unregister = admission.register_dram_predicate(admission.dram_predicate(pool, reserve))
+    unregister = admission.register_dram_predicate(
+        admission.dram_predicate(pool, reserve) if parked is None
+        else admission.dram_predicate(pool, reserve, parked=parked.arrival_terms))
     reading, reason = admission.dram_reading(pool)
     (_log if log is None else log)(
         DRAM_REGISTERED + 'need = engine {} + build margin {} + prefill {} at >= {} prompt tokens + reserve {} bytes '
@@ -156,10 +165,18 @@ def register_dram_admission(pool, *, log=None):
         'unavailable (%s)' % reason if reading is None else
         'free {} largest_free {} trace_largest_free {}'.format(reading['free'], reading['largest_free'],
                                                                reading['trace_largest_free']))
+    if parked is not None:
+        (_log if log is None else log)(
+            DRAM_PARKED_REGISTERED + 'an arrival onto a parked engine needs prefill {} at >= {} prompt tokens + rebind {} '
+            '+ a released single\'s rebuild {} + reserve {} bytes per chip, of the free less {} stranded; the trace '
+            'region\'s >= {} only with the rebuild; the backstop the rebind + the rebuild + the reserve',
+            admission.PREFILL_TRANSIENT_BYTES, admission.PREFILL_TRANSIENT_FROM,
+            parked.arrival_rebind_bytes(), admission.MEASURED_SINGLE_CAPTURE_BYTES, reserve, admission.STRANDED_BYTES,
+            admission.SINGLE_TRACE_BYTES)
     return unregister
 
 
-def dram_backstop(pool, *, request_id, reserve=None, log=None):
+def dram_backstop(pool, *, request_id, reserve=None, log=None, parked=None):
     """S2 W6b's post-prefill backstop: RequestRefused (quarantined under QWEN_FAST_ANY_REQUEST, so the
     request ends FINISHED_ABORTED and the engine lives) when the pool's reading is short of a term of the
     admission's split (serving_prefill_admission.split_short, gate v79's fix) for the engine build's peak plus
@@ -168,28 +185,40 @@ def dram_backstop(pool, *, request_id, reserve=None, log=None):
     neither term; the admission asked it of both (admission_contiguous_need), which leaves a long prompt 300 MB of
     the block for what its prefill takes before this point. Returns the smallest largest free block, or
     None when the pool cannot be read: then it is a diagnostic, as the coordinator's headroom is (the attach refuses
-    such a pool under the flag, W7)."""
+    such a pool under the flag, W7).
+
+    `parked` (Stage E, QWEN_FAST_PARKED_ENGINES=1 only): the parked set's arrival_terms for the slot this request will
+    take, dict(rebind=, single=), and then the need is the rebind's (serving_prefill_admission.parked_backstop_need)
+    and the trace region is asked only for a released single's rebuild (parked_trace_need). None: today's terms."""
     import serving_prefill_admission as admission
 
     if reserve is None:
         from dflash_packed_proposal_coordinator import dram_reserve_bytes
 
         reserve = dram_reserve_bytes()
-    need = admission.backstop_need(reserve)
+    if parked is None:
+        need = admission.backstop_need(reserve)
+    else:
+        need = admission.parked_backstop_need(reserve, rebind=parked['rebind'], single=parked['single'])
     reading, reason = admission.dram_reading(pool)
     log = _log if log is None else log
     if reading is None:
         log('[PINDIAG] dram backstop unavailable for request {}: {} (not refused)', request_id, reason)
         return None
     largest, free, trace = reading['largest_free'], reading['free'], reading['trace_largest_free']
-    short = admission.split_short(free, largest, need, reserve, trace)
+    if parked is None:
+        short = admission.split_short(free, largest, need, reserve, trace)
+    else:
+        short = admission.split_short(free, largest, need, reserve, trace,
+                                      trace_need=admission.parked_trace_need(parked['single']))
     if short:
         log(DRAM_BACKSTOP_REFUSED + '{}: largest_free={} free={} trace_largest_free={} need={} short={} bytes per chip',
             request_id, largest, free, trace, need, '+'.join(short))
         raise RequestRefused('DRAM backstop: short of %s on the smallest chip (free %d bytes less %d stranded, largest '
-                             'free block %d, trace region largest free block %s) for the engine build peak plus the '
+                             'free block %d, trace region largest free block %s) for the %s plus the '
                              'reserve (%d bytes)' % ('+'.join(short), free, admission.STRANDED_BYTES, largest,
-                                                     trace, need))
+                                                     trace, 'engine build peak' if parked is None
+                                                     else 'parked rebind peak', need))
     return largest
 
 
@@ -307,9 +336,62 @@ def adopt_prefill_slot(helpers, capture, request_id):
          slot, len(helpers), 'both chips' if verified == 2 else '%d chips' % verified, request_id)
 
 
+def rebind_parked(parked, entry, *, model, pages, state, capture, prompt, seed, budget, eos_ids, extent_memory):
+    """Stage E (QWEN_FAST_PARKED_ENGINES=1): from_prefill's request on the parked slot `entry` the set gave it,
+    after every host check and the prefill slot's adoption (design section 2.3): the slot's device and engine are
+    rebound (ParkedEngineSet.rebind_slot: the drafter from this prefill's taps, a drafter runtime and the session as
+    from_prefill makes them, the engine over the request's page table), the prefill capture is closed, and the
+    request releases its engine and drafter by parking them (park_engine, park_drafter) rather than closing them.
+    Nothing is captured and publish_prewarm does not run (the attach ran it); a rebind that fails unparks the slot
+    and propagates, as a failed build does. Under QWEN_FAST_EXTENT_REPLAY=1 the ledger reads the rebind
+    (op=rebind; a no-op unless QWEN_FAST_MEMORY_LEDGER=1) and PROPOSAL_BUCKETS_BUILT names the capture's buckets,
+    as for a build. The request carries `parked_slot`, which serving_runtime and the worker hook read."""
+    from functools import partial
+
+    components = parked.components
+    try:
+        token = None
+        if extent_memory:
+            import memory_ledger
+
+            terms = parked.slot_terms(entry)
+            token = memory_ledger.before('rebind', estimate=terms['rebind'] + terms['single'],
+                                         point='req=%s slot=%d' % (memory_ledger.short_id(state.req_id), entry.index),
+                                         request=str(state.req_id))
+
+        def make_session(runtime):
+            return components.session(state.req_id, prompt, seed, vocab_size=model.args.vocab_size,
+                max_new_tokens=budget, eos_ids=eos_ids, neural={'dflash2': runtime}, verifier_rows=16,
+                lookup_enabled=False)
+
+        bound = parked.rebind_slot(entry, capture.outputs(), pages, position=len(prompt), make_session=make_session,
+                                   request_id=state.req_id, budget=budget)
+        if token is not None:
+            memory_ledger.after(token)
+    finally:
+        capture.close()
+    if extent_memory:
+        _log(PROPOSAL_BUCKETS_BUILT + '{} contexts={}', state.req_id, built_proposal_buckets(bound.device))
+    try:
+        request = FastRequest(bound.session, bound.engine, bound.runtime,
+            release_drafter=partial(parked.park_drafter, entry), release_engine=partial(parked.park_engine, entry),
+            collect_timings=os.environ.get('QWEN_FAST_PHASE_TIMING') == '1')
+    except BaseException:
+        parked.park(entry)
+        raise
+    request.parked_slot = entry
+    return request
+
+
 def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids,
-                 collectives=None, buffer_pool=None, shared_weights=None, capture_rows=None):
+                 collectives=None, buffer_pool=None, shared_weights=None, capture_rows=None, parked=None):
     from dflash_request_runtime import TARGET_TAPS
+
+    # Stage E (QWEN_FAST_PARKED_ENGINES=1 only; serving_runtime passes `parked`, the attach's
+    # serving_parked_engines.ParkedEngineSet, and nothing otherwise): every host check below runs as it always does,
+    # in its order, so a refusal is the same with the flag on and off; the DRAM backstop asks the parked terms when
+    # the slot the request will take holds a parked engine; and once the prefill slot is adopted, that engine is
+    # rebound (rebind_parked) instead of built. A slot without one - unparked after a fault - is built as today.
 
     # QWEN_FAST_ANY_REQUEST (C2-any, serving_fast_policy.any_request_enabled; default off).
     # Off, every value below is what it always was: the server's OUTPUT_BUDGET for every
@@ -379,10 +461,19 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
     if extent_memory:
         # S2 W6b: the post-prefill DRAM backstop, host-side and before any device state, like the refusals
         # above (RequestRefused). The scheduler's hold keeps such a prompt waiting before its prefill.
-        dram_backstop(buffer_pool, request_id=state.req_id)
+        if parked is None:
+            dram_backstop(buffer_pool, request_id=state.req_id)
+        else:
+            dram_backstop(buffer_pool, request_id=state.req_id, parked=parked.arrival_terms())
     # After the host-side refusals, so a rejected request touches no device state, and
     # before the drafter, the engine and every other reader of slot 0.
     adopt_prefill_slot(helpers, capture, state.req_id)
+    if parked is not None:
+        entry = parked.take()
+        if entry is not None:
+            return rebind_parked(parked, entry, model=model, pages=pages, state=state, capture=capture, prompt=prompt,
+                                 seed=seed, budget=budget, eos_ids=() if any_request and ignore_eos else eos_ids,
+                                 extent_memory=extent_memory)
     components = device_components()
     _, layers, projection, selector = fixtures
     capture_released = False
@@ -520,13 +611,20 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
         # capture_rows: the serving runtime's cap on this engine's captures beside a packed
         # block (packed_shapes.sequential_capture_rows); only when it caps, so a runtime
         # without one calls the engine exactly as before.
+        # QWEN_FAST_ENGINE_WARM_SKIP (phase-1 quick win 2; default off): only when set does the engine hear of it, so
+        # an unset flag calls the engine exactly as before.
+        skip_warm = engine_warm_skip_enabled()
         engine = components.engine(model, session, pages, helpers, sampler=sampler,
             norm_batch=True, attention_replay=not sequential, replay_group_rows=4, max_verify_rows=16,
             native_sampling_rows=True, retain_feature_taps=TARGET_TAPS,
             commit_only_gdn=True, target_attention_t16=not sequential, before_capture=prepare_proposal,
             **(dict(storage=verifier_storage) if verifier_storage is not None else {}),
-            **(dict(capture_rows=capture_rows) if capture_rows is not None else {}))
+            **(dict(capture_rows=capture_rows) if capture_rows is not None else {}),
+            **(dict(skip_compiled_warm=True) if skip_warm else {}))
         owned.callback(engine.close)
+        if skip_warm:
+            _log(ENGINE_WARM_MARKER + 'run={} skipped={} request={}', getattr(engine, 'warms_run', None),
+                 getattr(engine, 'warms_skipped', None), state.req_id)
         if extent_memory:
             # S2 W6a, the executed path: before_capture (prepare_proposal) has built the capture inside the engine
             # build, so its buckets are read from the capture itself - the line M8 checks for (2048,).

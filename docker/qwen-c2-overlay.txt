@@ -180,6 +180,20 @@ scripts/ci/dflash_prefill_window.py
 # off, warmup is its P8 self (test_sticky_sessions.FastPathWarmupTests).
 scripts/ci/serving_startup.py
 
+# Stage E, parked per-slot engines (QWEN_FAST_PARKED_ENGINES; default off): serving_parked_engines is new, and
+# verifier_engine gains the parked phase (park, rebind) and R2's replay-ledger hook (live only under
+# QWEN_FAST_PARKED_AUDIT=1). P8 lays verifier_engine at its base commit; without this line the image ships that
+# copy, which cannot park. The frozen recipe does not pin it (the pin probe in docs/batch-spec-tasks-2026-09-19.md).
+# Flag off, the engine is its P8 self call for call (test_parked_census's base-commit trail). serving_buffer_pool
+# and serving_runtime, which Stage E also changes, are overlaid above.
+scripts/ci/serving_parked_engines.py
+scripts/ci/verifier_engine.py
+# Stage E's wiring (E4): a request on a parked engine releases it through FastRequest's release_engine, which P8's
+# serving_fast_request does not take, so a parked request would fail at its first token without this line. Flag
+# off, close() is its P8 self (release_engine None calls engine.close; test_parked_wiring's base-commit trail).
+# serving_request_factory, serving_worker_hook, serving_lifecycle, dflash_packed_proposal_coordinator and
+# serving_prefill_admission, which E4 and E5 also change, are overlaid above.
+scripts/ci/serving_fast_request.py
 # Four cards, one (1, 4) mesh (the TP4 profiles: general-tp4 and its variants). The contract imports tp4_mesh at
 # boot under a profile that names mesh_device P150x4 (the ring check it installs on the TT plugin's
 # open_mesh_device); the profiles' descriptor is the checked-in 2x2 two-channel textproto, laid where they name
@@ -202,6 +216,14 @@ scripts/ci/test_extent_attention_replay.py
 # own /opt/tt-metal: K64j at both binary paths with its literals, its four kernels, the patched tree scratch.
 scripts/ci/test_packed_any_admission.py
 scripts/ci/test_qwen_prefix_metrics.py
+# Stage E: the parked-engine census, set, rebinds, admission terms and policy, against the image's own modules (a test
+# that needs git history skips inside the image; the census fake is the only device).
+scripts/ci/test_parked_policy.py
+scripts/ci/test_parked_admission.py
+scripts/ci/test_parked_census.py
+scripts/ci/test_parked_engine_set.py
+scripts/ci/test_parked_engine_rebind.py
+scripts/ci/test_parked_device_rebind.py
 # Fix M against the image's own vLLM parsers and tokenizers (CorpusTests), on its token-id corpus.
 scripts/ci/test_c2_parser_rechunk.py
 scripts/ci/c2_parser_corpus.json

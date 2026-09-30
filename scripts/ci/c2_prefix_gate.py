@@ -104,6 +104,12 @@ that path is (sticky design, harness items B1, B2 and B4):
     (lever_n_m3native_gate.s2_report: the admission, engaged, F22 and publication-warm lines, every packed
     round audited and clean, no cap refusal, deadline or unpooled draft) and the C2-any lines
     (c2_serving_gate.any_request_check); no '[PINDIAG] verify t2 kv shared' line (KV_SHARED);
+  - a PARKED arm (--profile c2-packed-prefix-parked --baseline c2-packed, as the jobs run it: Stage E, the profile with
+    QWEN_FAST_PARKED_ENGINES=1, its flag-off twin the baseline; the design's G-E1 (c), phase-1 chained hits landing on
+    parked engines) is read with parked_markers too: 4 of 4 engines built, the 2048 drafter warm with its publish
+    prewarm, no unpark, and a '[PINDIAG] parked rebind' line in place of the sticky engine build line (a rebind builds
+    nothing); every baseline arm must show none of it. Hits against their cold twins, and the cold turns against the
+    baseline's, are judged as on any sticky profile: the strict pair rule, byte for byte;
   - a sticky arm also needs the scheduler graft's 'install sticky=1 lookahead=16 drop_last=True' line, the
     model graft's warmup line ('[PINDIAG] prefix: model warm': the restore path and the mid-loop capture
     declaration ran on the fast path's warmup), one '[PINDIAG] sticky admit' line per hit agreeing with its
@@ -176,6 +182,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import c2_serving_gate as gate  # noqa: E402
 import c2_serving_job  # noqa: E402
+import parked_markers  # noqa: E402  (stdlib only)
 import prefix_agent_corpus as corpus_module  # noqa: E402
 import prefix_judge as judge  # noqa: E402
 import prefix_markers as markers  # noqa: E402
@@ -187,6 +194,7 @@ PLANS = c2_serving_job.PREFIX_PLANS + tuple(arm for arm, _ in c2_serving_job.PRE
 harness = gate.harness
 # The fast path's sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG) and its S2 extent flag.
 STICKY_FLAG = 'QWEN_FAST_STICKY_SESSIONS'
+PARKED_FLAG = 'QWEN_FAST_PARKED_ENGINES'     # Stage E (serving_fast_policy.PARKED_ENGINES_FLAG)
 STICKY_LOOKAHEAD = 16          # DFlash with 15 proposals (qwen_prefix_scheduler_patch.STICKY_LOOKAHEAD)
 # The arms a sticky (decode_only) profile runs longer than their G1 limits: the eager arm carries the whole
 # traced set to 123k, and the audit reads a pool twice general's per row.
@@ -1055,6 +1063,16 @@ def s2_findings(arm, log_text, scanned, records):
     problems += ['S2: %s' % problem for problem in report.get('problems') or ()]
     any_request = str(environ.get(gate.ANY_REQUEST_FLAG, '0')) == '1'
     problems += gate.any_request_check(log_text, any_request)[0]
+    # Stage E: a parked arm shows the parked set, and every other arm none of it (parked_markers.problems).
+    parked = str(environ.get(PARKED_FLAG, '0')) == '1'
+    parked_facts = parked_markers.scan(text.splitlines())
+    parked_problems, parked_missing = parked_markers.problems(parked_facts, parked)
+    problems += ['parked: %s' % item for item in parked_problems]
+    missing += parked_missing
+    if parked:
+        lines.append('parked: %s engines built (attach %s ms), %d rebinds, %d unparks, drafter warm %s' % (
+            (parked_facts['built'] or [{}])[-1].get('k'), (parked_facts['built'] or [{}])[-1].get('attach_ms'),
+            len(parked_facts['rebinds']), len(parked_facts['unparked']), parked_facts['warm']))
     rounds = report.get('rounds') or {}
     audit = report.get('extent_audit') or {}
     lines.append('S2: %s packed extent rounds (by live users %s), %s audit lines, %s mismatches' % (
@@ -1088,7 +1106,12 @@ def s2_findings(arm, log_text, scanned, records):
                         'asserts' % entry.get('line'))
     served = [r for r in records if r.get('ok') and r.get('role') not in ('seat', 'flood')]
     built = [r for r in served if (r.get('markers') or {}).get('sticky_builds')]
-    if served and not built:
+    if parked:
+        # A rebind builds nothing: the parked rebind line is the TTFT split's marker (it carries no frontier).
+        if served and not parked_facts['rebinds']:
+            problems.append('no "%s" line for any of %d served requests: the parked TTFT split is not measured' % (
+                parked_markers.REBIND.strip(), len(served)))
+    elif served and not built:
         problems.append('no "[PINDIAG] sticky engine built" line for any of %d served requests (A8): the TTFT split '
                         'is not measured' % len(served))
     for record in built:

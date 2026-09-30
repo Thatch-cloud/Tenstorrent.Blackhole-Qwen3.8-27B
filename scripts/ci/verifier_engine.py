@@ -18,6 +18,60 @@ from verifier_inputs import stage_inputs
 # it between them, so each user's second block ran on the other user's recurrence.
 _resident = None
 
+# Stage E's R2 replay ledger (QWEN_FAST_PARKED_AUDIT=1, serving_parked_engines.ReplayLedger): a
+# zero-argument callable giving the process's trace-replay count, or None. With it, verify notes the
+# count right after its own replay and publish asserts that no other trace replayed before its commit
+# trace reads what that verify wrote (check_replay_mark). None - the default, and the only value
+# without the audit - runs neither check.
+_replay_count = None
+
+
+def set_replay_count(counter):
+    """Install (a zero-argument callable) or remove (None) the replay ledger; returns the previous one."""
+    global _replay_count
+    if counter is not None and not callable(counter):
+        raise ValueError('The replay ledger must be a zero-argument callable or None')
+    previous, _replay_count = _replay_count, counter
+    return previous
+
+
+def check_replay_mark(engine):
+    """R2: no trace replayed between this engine's verify and now. Clears the mark."""
+    mark, engine.replay_mark = getattr(engine, 'replay_mark', None), None
+    if mark is None or _replay_count is None:
+        return
+    count = _replay_count()
+    if count != mark:
+        raise AssertionError('R2: %d other trace replay(s) ran between the verify of request %s and its '
+                             'publication' % (count - mark, str(engine.session.request_id)[:48]))
+
+
+def reset_retained(retained):
+    """Stage E: a retained GDN block's decision flags back to the values a fresh engine's hold after its
+    capture (gdn_records.RetainedGDNBlock.__init__; the capture appends records and decides nothing), so
+    the rebound engine's first verify and commit take a fresh engine's path. The records stay: they are
+    the trace's. replay_epoch is a counter and stays."""
+    retained.selected_prefix = None
+    retained.decisions = {}
+    retained.replay_ready = retained.poisoned = retained.fence_owed = False
+    retained.commit_serial = 0
+    retained.replay_fence, retained.replay_fence_ms = None, 0.0
+
+
+# Phase-1 quick win 2 (default off; serving_fast_policy.ENGINE_WARM_SKIP_FLAG): the engine's warm-up eager forwards
+# run once per distinct bucket shape in a process. A warm forward exists to compile the bucket's programs before its
+# trace is captured, and to nothing else that a request reads (docs/engine-warm-skip.md: what each one writes and what
+# overwrites it before any read). _warmed holds the keys (warm_key) of the buckets this process has warmed to
+# completion; an engine built with skip_compiled_warm=True skips the warm of a bucket whose key is in it. Built
+# without the parameter (the default, and every caller while the flag is off) an engine warms every bucket and
+# records nothing in it.
+_warmed = set()
+
+
+def reset_warmed():
+    """Forget every warmed key (tests, and a process that clears its program cache)."""
+    _warmed.clear()
+
 
 def note_prefill():
     """A prefill overwrote slot 0: no engine is resident until one restores or publishes."""
@@ -118,7 +172,7 @@ class VerifierEngine:
                  attention_mask_once=False, replay_group_rows=4, max_verify_rows=32, retain_mtp_hidden=False,
                  native_sampling_rows=False, short_context=False, attention_audit=False, retain_feature_taps=(),
                  commit_only_gdn=False, before_capture=None, target_attention_t16=False, storage=None,
-                 capture_rows=None):
+                 capture_rows=None, skip_compiled_warm=False):
         import ttnn
 
         if before_capture is not None and not callable(before_capture):
@@ -132,6 +186,10 @@ class VerifierEngine:
         if storage is not None and not callable(getattr(storage, 'take', None)):
             raise ValueError('Pooled verifier storage must lend width buckets')
         self.storage, self.borrowed = storage, []
+        if type(skip_compiled_warm) is not bool:
+            raise ValueError('Explicit boolean warm-skip selection required')
+        self.skip_compiled_warm = skip_compiled_warm
+        self.warms_run = self.warms_skipped = 0
 
         if type(commit_only_gdn) is not bool:
             raise ValueError('Explicit commit-only GDN policy required')
@@ -281,6 +339,14 @@ class VerifierEngine:
                 before_capture(self)
             for bucket in self.buckets.values():
                 rows = bucket['rows']
+                warmed = self.warm_key(bucket) if self.skip_compiled_warm else None
+                if warmed is not None and warmed in _warmed:
+                    # Compiled by an earlier build in this process. Nothing here is skipped that a request reads: the
+                    # capture loop below restores slot 0 from `initial` before every capture, the warm's K/V rows
+                    # [position, position + rows) and its checkpoints are rewritten by the verify replay before any
+                    # read, and an unwarmed bucket (a key not yet in _warmed) still warms below.
+                    self.warms_skipped += 1
+                    continue
                 self.restore_initial()
                 warm = self.fixture(rows, bucket['checkpoints'], retain=self.commit_only_gdn and rows > 1,
                     position=bucket['capture_position'])
@@ -293,6 +359,9 @@ class VerifierEngine:
                     if result is not None:
                         release_owned(ttnn, [value for value in result if value is not None])
                     warm.close()
+                self.warms_run += 1
+                if warmed is not None:
+                    _warmed.add(warmed)
             if self.mtp_row_reader is not None:
                 self.mtp_row_reader.prepare()
             for bucket in self.buckets.values():
@@ -324,6 +393,18 @@ class VerifierEngine:
             session.fail_preparation(session.request_id)
             self.close()
             raise
+
+    def warm_key(self, bucket):
+        """What the programs a bucket's warm forward compiles depend on: the bucket's rows and GDN retention, the page
+        table's width (the paged attention's shape), the engine's options, the model and mesh, and - only when a replay
+        plan keys the buckets by position - the capture position. The position of an ordinary bucket is a device input
+        of the traced forward (stage_inputs writes it per verify), not a program parameter: a trace captured at one
+        position replays at any other."""
+        return (id(self.model), id(self.mesh), bucket['rows'], bool(self.commit_only_gdn and bucket['rows'] > 1),
+                tuple(self.pages.shape), self.norm_batch, self.attention_replay, self.attention_mask_once,
+                self.replay_group_rows, self.short_context, self.native_sampling_rows, self.sampler is not None,
+                self.target_attention_t16, self.retain_feature_taps, self.retain_mtp_hidden,
+                bucket['capture_position'] if self.replay_plan is not None else None)
 
     def borrow(self, value):
         """Record lent storage so close() frees none of it; a snapshot set is a list of lists."""
@@ -494,6 +575,8 @@ class VerifierEngine:
                 self.operations.synchronize_device(self.mesh)
             else:
                 bucket['fixture'].retained.replay(operation)
+            if _replay_count is not None:
+                self.replay_mark = _replay_count()
             if getattr(self, 'attention_audit', False) and bucket['fixture'].replay_reader is not None:
                 bucket['fixture'].replay_reader.audit.check(ticket.position, ticket.tokens)
             replay_finished = time.perf_counter()
@@ -588,6 +671,8 @@ class VerifierEngine:
                 _resident = None
                 del self.buckets[self.pending_key]
             else:
+                if _replay_count is not None:
+                    check_replay_mark(self)
                 if bucket['fixture'].retained is not None:
                     bucket['fixture'].retained.commit(prefix, dma=True, synchronize=True,
                         publication=lambda selected: self.operations.execute_trace(self.mesh, bucket['commits'][selected], cq_id=0, blocking=True))
@@ -605,11 +690,100 @@ class VerifierEngine:
             self.phase = 'failed'
             raise
 
+    def park_refusal(self):
+        """Stage E (serving_parked_engines): why this engine cannot park, or None. A parked engine keeps its
+        captures for the process, so only an idle one with no ticket, sequential captures and sound retained
+        blocks may."""
+        if self.phase != 'idle':
+            return 'engine phase %s' % self.phase
+        if self.pending is not None or self.pending_key is not None:
+            return 'a pending ticket'
+        if getattr(self, 'replay_plan', None) is not None or getattr(self, 'target_attention_t16', False):
+            return 'captures that are not sequential'
+        for key, bucket in self.buckets.items():
+            retained = getattr(bucket.get('fixture'), 'retained', None)
+            if retained is not None and retained.poisoned:
+                return 'the retained block of bucket %r is poisoned' % (key,)
+        return None
+
+    def park(self):
+        """Stage E (QWEN_FAST_PARKED_ENGINES, serving_parked_engines): fence, then park this engine for its
+        next rebind - phase 'parked', no session, not resident - and return None; or return why it cannot
+        park (park_refusal), changing nothing, and its owner closes it as today. The fence is close()'s: a
+        parked engine's owner discards nothing before it. A block in flight is refused as close() refuses it."""
+        global _resident
+        if self.phase in ('parked', 'closed'):
+            raise ValueError('Only a live engine can park; this one is %s' % self.phase)
+        if self.phase not in ('idle', 'preparing', 'failed'):
+            raise ValueError('Finish or abort the pending verifier block before closing')
+        self.operations.synchronize_device(self.mesh)
+        reason = self.park_refusal()
+        if reason is not None:
+            return reason
+        self.phase, self.pending, self.pending_key = 'parked', None, None
+        self.session = None
+        if _resident is self:
+            _resident = None
+        return None
+
+    def rebind(self, session, pages):
+        """Stage E: bind this parked engine to a request at its prefilled frontier, as the constructor binds
+        a fresh one but capturing nothing (design section 2.3, step 6). The constructor's host checks run
+        first, in its order and with its messages, and a refusal leaves the engine parked with nothing
+        written. Then: every fixture's page tables rewritten in full with the request's table
+        (serving_parked_engines.write_page_tables, VerifierPageBinding.refresh's write), a stale packed
+        adoption dropped, every bucket's first verify back on the unreplayed path with its retained block's
+        flags reset (reset_retained), the initial snapshot saved from native slot 0 - which holds the
+        request's prefilled state, adopted before this - and the carry seeded from it (_resident = self).
+        The widths stay the captured (1, 2, 4): proposal_rows picks the widest the budget holds, which is
+        the ticket a fresh engine with fewer widths would verify."""
+        from serving_parked_engines import page_table_bindings, write_page_tables
+
+        if self.phase != 'parked':
+            raise ValueError('Only a parked engine can be rebound; this one is %s' % self.phase)
+        if session.phase != 'idle' or session.pending is not None or session.finished or len(self.helpers) != 48:
+            raise ValueError('An unfinished prefilled request and all native GDN helpers are required')
+        if len(pages.shape) != 2 or pages.shape[0] != 1:
+            raise ValueError('One request page table required')
+        if tuple(pages.shape) != tuple(self.pages.shape):
+            raise ValueError('The parked engine was captured over a %r page table; the request brings %r'
+                             % (tuple(self.pages.shape), tuple(pages.shape)))
+        widths = capture_widths(session.position, pages.shape[1] * 64, session.verifier_rows,
+                                session.max_new_tokens - len(session.emitted), self.capture_rows)
+        if not set(widths) <= set(self.widths):
+            raise ValueError('The request needs widths %r; the parked engine captured %r' % (widths, self.widths))
+        bindings = page_table_bindings(self)
+        started = time.perf_counter()
+        session.begin_preparation(session.request_id)
+        self.session, self.position = session, session.position
+        self.pages.copy_(pages)
+        self.phase = 'preparing'
+        note_prefill()
+        try:
+            write_page_tables(self.operations, self.mesh, bindings, self.pages)
+            for key in [key for key in self.buckets if isinstance(key, tuple) and key[:1] == ('packed',)]:
+                del self.buckets[key]
+            for bucket in self.buckets.values():
+                bucket['first'] = True
+                if bucket['fixture'].retained is not None:
+                    reset_retained(bucket['fixture'].retained)
+            for helper, snapshot in zip(self.helpers, self.initial, strict=True):
+                helper.save(snapshot)
+            self.validate_bindings()
+            self.save_carry()
+            self.rebind_ms = (time.perf_counter() - started) * 1000
+            session.finish_preparation(session.request_id)
+            self.phase = 'idle'
+        except BaseException:
+            self.phase = 'failed'
+            session.fail_preparation(session.request_id)
+            raise
+
     def close(self):
         global _resident
         if self.phase == 'closed':
             return
-        if self.phase not in ('idle', 'preparing', 'failed'):
+        if self.phase not in ('idle', 'preparing', 'failed', 'parked'):
             raise ValueError('Finish or abort the pending verifier block before closing')
         self.operations.synchronize_device(self.mesh)
         if getattr(self, 'mtp_row_reader', None) is not None:
