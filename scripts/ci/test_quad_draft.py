@@ -2697,7 +2697,7 @@ class ShippingTests(unittest.TestCase):
 
     def test_the_bundle_only_helpers_and_the_served_kernels_are_untouched(self):
         """Plan section 4.3: in neither copy list, so never edited; the served conv kernels stay as served."""
-        self.assertEqual(self.git_changed(['draft_shared_head.py', 'draft_head_layout.py',
+        self.assertEqual(self.git_changed(['draft_head_layout.py',
                                            'draft_kv_projection.py', 'draft_selector.py', 'draft_mlp.py',
                                            'draft_convolution_fused_compute.cpp', 'dflash_proposal_inputs.py',
                                            'draft_head_preparation.py', 'draft_convolution_fused_io.cpp',

@@ -19,6 +19,7 @@ properties the fakes cannot show (ArgMax's first occurrence, ttnn.max's value) a
 """
 
 import ast
+import os
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ import torch
 import gdn_user_batch as batch
 import packed_verifier
 import verify_t1_device_compare as g0
+import tp_shapes
 import verify_trace_t1 as t1
 from test_gdn_packed_segments import PackedFixture
 from test_gdn_records import M3_SEGMENTS, packed_block
@@ -88,7 +90,8 @@ class FlagTests(unittest.TestCase):
         tree = ast.parse((HERE / 'verify_trace_t1.py').read_text(encoding='utf-8'))
         imported = [alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names]
         imported += [node.module for node in tree.body if isinstance(node, ast.ImportFrom)]
-        self.assertEqual(imported, ['os'])
+        # tp_shapes is stdlib only and travels beside it (both P8 copy lists and the C2 overlay)
+        self.assertEqual(imported, ['os', 'tp_shapes'])
 
     def test_it_reaches_the_image_with_every_module_that_imports_it(self):
         from test_serving_image_copy_closure import copied_modules, dockerfile_text
@@ -480,6 +483,90 @@ class CombineTests(unittest.TestCase):
                             (good[0][:1], good[1]), ([torch.tensor([])] * 2, [torch.tensor([])] * 2)):
             with self.assertRaises(ValueError):
                 t1.combine_shards(ids, values, shard_width=2)
+
+
+def shard_emulation_n(logits, width, chips):
+    """shard_emulation over `chips` shards."""
+    flat = logits.reshape(logits.shape[-2], -1)
+    ids, values = [], []
+    for shard in range(chips):
+        part = flat[:, shard * width:(shard + 1) * width]
+        ids.append(part.float().argmax(dim=-1).to(torch.int32))
+        values.append(part.amax(dim=-1))
+    return ids, values
+
+
+class FourShardCombineTests(unittest.TestCase):
+    """QWEN_FAST_TP=4: the same first-occurrence argmax folded over four 62,080-wide shards."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {'QWEN_FAST_TP': '4'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_shard_is_the_four_card_width(self):
+        self.assertEqual(tp_shapes.vocab_shard(), 62080)
+        self.assertEqual(4 * tp_shapes.vocab_shard(), t1.VOCABULARY)
+
+    def test_every_g0_case_at_four_cards_matches_the_first_occurrence_over_the_whole_row(self):
+        for kind in g0.ARGMAX_KINDS:
+            with self.subTest(kind=kind):
+                logits = g0.argmax_case(kind)
+                ids, values = shard_emulation_n(logits, 62080, 4)
+                combined = t1.combine_shards(ids, values)
+                self.assertTrue(torch.equal(combined, logits.reshape(64, -1).argmax(dim=-1)))
+
+    def test_ties_signed_zeros_and_nan_across_four_shards(self):
+        generator = torch.Generator().manual_seed(11)
+        palette = torch.tensor([-1.0, -0.0, 0.0, 0.5, 1.0, 2.0, float('nan'), float('-inf'), float('inf')])
+        for trial in range(60):
+            width = 1 + trial % 9
+            choice = torch.randint(0, len(palette), (256, 4 * width), generator=generator)
+            logits = palette[choice].to(torch.bfloat16).reshape(1, 1, 256, 4 * width)
+            ids, values = shard_emulation_n(logits, width, 4)
+            combined = t1.combine_shards(ids, values, shard_width=width)
+            self.assertTrue(torch.equal(combined, logits.reshape(256, -1).argmax(dim=-1)), trial)
+
+    def test_a_later_shard_wins_only_when_strictly_greater_than_the_best_so_far(self):
+        ids = [torch.tensor([3, 3, 3, 3]), torch.tensor([4, 4, 4, 4]), torch.tensor([5, 5, 5, 5]),
+               torch.tensor([6, 6, 6, 6])]
+        one = torch.tensor([1.0, 1.0, 2.0, 1.0]).bfloat16()
+        values = [one, torch.tensor([1.0, 3.0, 1.0, 1.0]).bfloat16(), torch.tensor([1.0, 3.0, 1.0, 1.0]).bfloat16(),
+                  torch.tensor([1.0, 1.0, 1.0, 1.0078125]).bfloat16()]
+        # row 0: all tie -> shard 0; row 1: shard 1 and 2 tie at 3 -> shard 1; row 2: shard 0 (2 beats the rest);
+        # row 3: only shard 3 is strictly greater
+        self.assertEqual(t1.combine_shards(ids, values, shard_width=10).tolist(), [3, 14, 3, 36])
+
+    def test_the_first_nan_wins_whichever_shard_holds_it(self):
+        nan = float('nan')
+        ids = [torch.tensor([1, 1]), torch.tensor([2, 2]), torch.tensor([3, 3]), torch.tensor([4, 4])]
+        values = [torch.tensor([0.0, 0.0]), torch.tensor([nan, 0.0]), torch.tensor([nan, nan]),
+                  torch.tensor([0.0, 5.0])]
+        self.assertEqual(t1.combine_shards(ids, values, shard_width=10).tolist(), [12, 23])
+
+    def test_a_pair_of_reports_is_refused_at_four_cards_and_four_at_the_pair(self):
+        two = [torch.tensor([0, 1])] * 2, [torch.zeros(2)] * 2
+        with self.assertRaises(ValueError) as failure:
+            t1.combine_shards(*two, shard_width=2)
+        self.assertIn('Four', str(failure.exception))
+        with patch.dict(os.environ, {'QWEN_FAST_TP': '2'}):
+            with self.assertRaises(ValueError) as failure:
+                t1.combine_shards([torch.tensor([0, 1])] * 4, [torch.zeros(2)] * 4, shard_width=2)
+        self.assertIn('Two', str(failure.exception))
+
+    def test_the_per_shard_argmax_takes_only_the_four_card_shard_width(self):
+        rows = 8
+        operations = SimpleNamespace(bfloat16='bf16', TILE_LAYOUT='tile', ROW_MAJOR_LAYOUT='rm',
+                                     DRAM_MEMORY_CONFIG='dram', to_layout=Mock(return_value='row_major'),
+                                     argmax=Mock(return_value='ids'), max=Mock(return_value='values'),
+                                     deallocate=Mock())
+        for width, accepted in ((62080, True), (124160, False)):
+            logits = SimpleNamespace(shape=(1, 1, rows, width), dtype='bf16', layout='tile')
+            if accepted:
+                self.assertEqual(t1.sample_shards(operations, logits, rows), ('ids', 'values'))
+            else:
+                with self.assertRaises(ValueError):
+                    t1.sample_shards(operations, logits, rows)
 
 
 def greedy_sampler(**changes):

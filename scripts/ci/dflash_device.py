@@ -16,6 +16,7 @@ from feature_collective import gather_add_projection
 from feature_projection import concatenate_local_features, projection_shards
 from gdn_multitoken_conv import addresses, release_owned
 from mesh_link_policy import fast_ccl_topology, projection_links
+import tp_shapes
 from dflash_prefill_window import prefill_window
 
 
@@ -298,10 +299,17 @@ class ProposalAudit:
     def observe(self, name, value):
         operations = self.operations
         shards = operations.get_device_tensors(value)
-        if len(shards) != 2:
-            raise AssertionError('Both chips required to audit %s' % name)
-        left, right = (operations.to_torch(shard) for shard in shards)
-        result = compare_shards(left, right)
+        if len(shards) != tp_shapes.chip_count():
+            raise AssertionError('%s chips required to audit %s' % (tp_shapes.all_chips(), name))
+        left, *others = (operations.to_torch(shard) for shard in shards)
+        # chip 0 against chip 1 at the pair; at four cards against the first chip that differs from it, so a
+        # divergence anywhere is the stage's result (all equal: the last comparison, which is equal)
+        for chip, right in enumerate(others, 1):
+            result = compare_shards(left, right)
+            if result['differing']:
+                break
+        if chip != 1 and result['larger_norm'] in ('chip1',):
+            result['larger_norm'] = 'chip%d' % chip
         self.stages.append((name, result))
         marker = ''
         if not all(result['finite']):

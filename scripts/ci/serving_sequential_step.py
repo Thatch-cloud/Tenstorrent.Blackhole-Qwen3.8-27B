@@ -21,6 +21,7 @@ was produced for. Stepping in entry order is what keeps that true.
 import os
 
 from serving_worker_hook import phase
+import tp_shapes
 
 # Diagnostic for the two-user selector divergence (runs 35478872085 and
 # 35479238722): after each user's step, every OTHER user's replicated draft
@@ -245,20 +246,21 @@ def check_shards(entries, stepped):
                                 [*((name, value) for category, name, value in replicated),
                                  *banks, *kv_banks(device, spare=True)]}
             RECORDED[victim].update({name: addresses(engine.operations, value) for name, value in tables})
-            for name, (first, second) in RECORDED[victim].items():
-                logger.info('[PINDIAG] address {} {} {} {}', victim, name, first, second)
+            for name, chip_addresses in RECORDED[victim].items():
+                logger.info('[PINDIAG] address {} {}' + ' {}' * len(chip_addresses), victim, name, *chip_addresses)
         for category, name, value in replicated:
             shards = [operations.to_torch(shard).contiguous() for shard in operations.get_device_tensors(value)]
-            if len(shards) != 2:
-                raise AssertionError('Both chips required')
-            if same(*shards):
+            if len(shards) != tp_shapes.chip_count():
+                raise AssertionError('%s chips required' % tp_shapes.all_chips())
+            differing = next((other for other in shards[1:] if not same(shards[0], other)), None)
+            if differing is None:
                 equal += 1
                 continue
             diverged += 1
             if SHARD_CHECK == 'warn' and (victim, name, None) in REPORTED:
                 continue
             REPORTED.add((victim, name, None))
-            report('mismatch', operations, index, name, value, 'category=%s' % category, *shards,
+            report('mismatch', operations, index, name, value, 'category=%s' % category, shards[0], differing,
                    'Replicated draft %s differs between chips' % category)
         saved = SNAPSHOTS.get(victim, {})
         for name, value in banks:

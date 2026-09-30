@@ -174,6 +174,15 @@ scripts/ci/dflash_prefill_window.py
 # off, warmup is its P8 self (test_sticky_sessions.FastPathWarmupTests).
 scripts/ci/serving_startup.py
 scripts/ci/tp_shapes.py
+scripts/ci/tp_addresses.py
+# Readbacks and merges the four-card port made width-generic (S2T-04): the shard argmax fold, the packed and
+# sequential target readbacks, the drafter's borrowed-head chunks, the sequential shard check. At the pair each is
+# call for call what it was.
+scripts/ci/verify_trace_t1.py
+scripts/ci/verifier_engine.py
+scripts/ci/serving_sequential_step.py
+scripts/ci/force_argmax.py
+scripts/ci/draft_shared_head.py
 
 # Four cards, one (1, 4) mesh (the TP4 profiles: general-tp4 and its variants). The contract imports tp4_mesh at
 # boot under a profile that names mesh_device P150x4 (the ring check it installs on the TT plugin's

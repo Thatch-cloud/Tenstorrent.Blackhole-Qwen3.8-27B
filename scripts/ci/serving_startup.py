@@ -103,6 +103,12 @@ def start(worker):
     # The tensor-parallel width the launched process asked for (QWEN_FAST_TP; unset is the pair), held against
     # the mesh the model actually opened before anything else is attached: a disagreement stops the worker here.
     tp = tp_shapes.select_for_model(os.environ, worker.model_runner.model.model[0])
+    if tp != tp_shapes.PAIR:
+        # gdn_multitoken_conv.addresses / release_owned (frozen-pinned, two chips only) rebound to the chip-count
+        # generic ones before anything of the fast path imports or calls them; the pair leaves them in place.
+        import tp_addresses
+
+        tp_addresses.install(os.environ)
     from sampling_link_policy import DESCRIPTOR, SOURCES
     import hashlib
 

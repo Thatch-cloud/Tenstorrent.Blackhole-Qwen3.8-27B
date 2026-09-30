@@ -119,6 +119,31 @@ def check_mesh(tp, num_devices, shape):
     return tp
 
 
+def chip_count(environ=None):
+    """How many per-chip shards a fast-path readback must return: the width this process serves at (QWEN_FAST_TP,
+    else the pair). startup's select_for_model has already held it against the opened mesh, so a readback that
+    finds another count has met a broken device set, not a different configuration."""
+    return requested_tp(os.environ if environ is None else environ)
+
+
+def all_chips(environ=None):
+    """'Both' at the pair, 'All 4' at four cards: the subject of a refusal such as '<Both> chip-local outputs
+    required', so the pair's messages stay the text they were."""
+    count = chip_count(environ)
+    return 'Both' if count == PAIR else 'All %d' % count
+
+
+def count_word(environ=None):
+    """'Two' at the pair, 'Four' at four cards: the leading word of a refusal such as '<Two> chip-local outputs
+    required'."""
+    return {2: 'Two', 4: 'Four'}[chip_count(environ)]
+
+
+def vocab_shard(environ=None):
+    """The vocabulary columns each chip holds of the LM head: 124,160 at the pair, 62,080 at four cards."""
+    return geometry(chip_count(environ)).vocab
+
+
 def select_for_model(environ, model):
     """The width `model` (the loaded target: num_devices, mesh_device.shape) must serve at, or ValueError.
 

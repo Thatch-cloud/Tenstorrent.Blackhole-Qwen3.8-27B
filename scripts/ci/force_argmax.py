@@ -10,6 +10,7 @@ sampler launches inside one outer verify trace, and it has not run on hardware.
 """
 
 from gdn_multitoken_conv import addresses, release_owned
+import tp_shapes
 
 SAMPLER_ROWS = 32
 SAMPLE_WIDTHS = (1, 2, 4, 8, 16, 32, 64)
@@ -62,10 +63,11 @@ def sample_rows(sampler, logits, rows, operations, *, native_rows=False):
         raise ValueError('Pinned 32-row force-argmax sampler required')
     if sampler.seed_manager.has_active_request_seed():
         raise ValueError('Seeded sampling is outside the greedy verifier contract')
-    if native_rows and (shape[-1] != 124160 or sampler.tt_sampling.vocab_size != 248320
+    if native_rows and (shape[-1] != tp_shapes.vocab_shard() or sampler.tt_sampling.vocab_size != 248320
             or sampler.tt_sampling.padded_vocab_size != 248320
             or sampler._penalties_active or getattr(sampler, '_log_probs_active', False)):
-        raise ValueError('Native-row experiment requires unpadded Qwen TP2 vocabulary without penalties or logprobs')
+        raise ValueError('Native-row experiment requires unpadded Qwen TP%d vocabulary without penalties or logprobs'
+                         % tp_shapes.chip_count())
     if rows > SAMPLER_ROWS:
         return sample_tiles(sampler, logits, rows, operations, shape)
     padded = logits

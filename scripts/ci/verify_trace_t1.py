@@ -53,6 +53,8 @@ unknown name raises: a typo must never silently run every cut.
 
 import os
 
+import tp_shapes
+
 FLAG = 'QWEN_FAST_VERIFY_T1'
 AUDIT_FLAG = 'QWEN_FAST_VERIFY_T1_AUDIT'
 SKIP_FLAG = 'QWEN_FAST_VERIFY_T1_SKIP'
@@ -65,7 +67,8 @@ CUTS = ('matmul_configs', 'mask_once', 'direct_carry', 'last_carry', 'coalesce',
 # What the packed verify engages (all but the graft's #11): skipping all of these is a wave-1 arm.
 WAVE2_CUTS = ('mask_once', 'direct_carry', 'coalesce', 'shard_argmax')
 
-# The TP2 Qwen vocabulary: one 124160-wide shard per chip, 248320 in all, no padding.
+# The TP2 Qwen vocabulary: one 124160-wide shard per chip, 248320 in all, no padding. At four cards
+# (QWEN_FAST_TP=4) the shard is 62080 wide (tp_shapes.vocab_shard); SHARD_WIDTH stays the pair's constant.
 SHARD_WIDTH = 124160
 VOCABULARY = 2 * SHARD_WIDTH
 
@@ -207,9 +210,10 @@ def sample_shards(operations, logits, rows):
     Only bf16 TILE logits: a block-float shard would come back from ttnn.max packed with a
     shared exponent, which can round the max and flip a near tie across shards."""
     shape = tuple(logits.shape)
-    if len(shape) != 4 or shape[:3] != (1, 1, rows) or shape[3] != SHARD_WIDTH:
+    width = tp_shapes.vocab_shard()
+    if len(shape) != 4 or shape[:3] != (1, 1, rows) or shape[3] != width:
         raise ValueError('Per-shard argmax needs the pre-gather (1, 1, %d, %d) vocab shard; got %r'
-                         % (rows, SHARD_WIDTH, shape))
+                         % (rows, width, shape))
     dtype, layout = getattr(logits, 'dtype', None), getattr(logits, 'layout', None)
     if dtype != operations.bfloat16 or layout != operations.TILE_LAYOUT:
         raise ValueError('Per-shard argmax needs bf16 TILE logits; got %r %r' % (dtype, layout))
@@ -231,17 +235,23 @@ def sample_shards(operations, logits, rows):
             operations.deallocate(row_major)
 
 
-def combine_shards(chip_ids, chip_values, shard_width=SHARD_WIDTH):
-    """The first-occurrence argmax over [shard 0 | shard 1] from each shard's own argmax and max.
+def combine_shards(chip_ids, chip_values, shard_width=None):
+    """The first-occurrence argmax over [shard 0 | shard 1 | ...] from each shard's own argmax and max
+    (two shards at the pair, four at QWEN_FAST_TP=4; shard_width defaults to tp_shapes.vocab_shard()).
 
-    Shard 1 wins a row only when its max is strictly greater than shard 0's, so a tie keeps the
-    earlier index, as torch.argmax (and the pinned sampler, sampling-links.py) do. -0 and +0
-    compare equal. NaN is greater than everything, as torch.argmax treats it: shard 1 wins only
-    when its max is NaN and shard 0's is not. Returns an int64 tensor of global vocabulary ids."""
+    The shards are folded in chip order: shard k takes a row from the running best only when its max is
+    strictly greater than the best so far, so a tie keeps the earlier index, as torch.argmax (and the pinned
+    sampler, sampling-links.py) do. -0 and +0 compare equal. NaN is greater than everything, as torch.argmax
+    treats it: a later shard wins only when its max is NaN and the best so far is not, so the first NaN in the
+    row wins. Returns an int64 tensor of global vocabulary ids. At two shards this is the one comparison the
+    pair always made."""
     import torch
 
-    if len(chip_ids) != 2 or len(chip_values) != 2:
-        raise ValueError('Two chip-local vocab shards required')
+    chips = tp_shapes.chip_count()
+    if shard_width is None:
+        shard_width = tp_shapes.vocab_shard()
+    if len(chip_ids) != chips or len(chip_values) != chips:
+        raise ValueError('%s chip-local vocab shards required' % tp_shapes.count_word())
     ids = [torch.as_tensor(value).reshape(-1).to(torch.int64) for value in chip_ids]
     values = [torch.as_tensor(value).reshape(-1).to(torch.float32) for value in chip_values]
     rows = ids[0].numel()
@@ -249,9 +259,12 @@ def combine_shards(chip_ids, chip_values, shard_width=SHARD_WIDTH):
         raise ValueError('Every shard must report one id and one value per row')
     if any(bool(((value < 0) | (value >= shard_width)).any()) for value in ids):
         raise ValueError('A shard-local argmax lies outside its %d-wide shard' % shard_width)
-    first, second = values
-    later = (second > first) | (torch.isnan(second) & ~torch.isnan(first))
-    return torch.where(later, ids[1] + shard_width, ids[0])
+    best_ids, best_values = ids[0], values[0]
+    for chip in range(1, chips):
+        later = (values[chip] > best_values) | (torch.isnan(values[chip]) & ~torch.isnan(best_values))
+        best_ids = torch.where(later, ids[chip] + chip * shard_width, best_ids)
+        best_values = torch.where(later, values[chip], best_values)
+    return best_ids
 
 
 def audit_round(combined, reference):

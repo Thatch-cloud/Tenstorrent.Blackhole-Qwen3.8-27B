@@ -1,17 +1,24 @@
-"""Experimental borrowed target LM head and chunked candidates; no hardware or serving certification."""
+"""Experimental borrowed target LM head and chunked candidates; no hardware or serving certification.
+
+Each chip holds tp_shapes.vocab_shard() columns of the head (124,160 at the pair, 62,080 at QWEN_FAST_TP=4) and
+reports the top 16 of each 32,768-column chunk of them; a chunk short of 32,768 is padded with -inf."""
+
+import tp_shapes
 
 
 def candidate_chunks():
-    return tuple((start, min(start + 32768, 124160)) for start in range(0, 124160, 32768))
+    width = tp_shapes.vocab_shard()
+    return tuple((start, min(start + 32768, width)) for start in range(0, width, 32768))
 
 
 def shared_head_candidates(operations, model, normalized, owned):
     rows = normalized.shape[2] if len(normalized.shape) == 4 else 0
-    if (model.num_devices != 2 or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
+    if (model.num_devices != tp_shapes.chip_count() or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
             or rows not in (8, 16, 32) or tuple(normalized.shape) != (1, 1, rows, 5120)
             or normalized.dtype != operations.bfloat16 or normalized.layout != operations.TILE_LAYOUT
             or normalized.memory_config() != operations.DRAM_MEMORY_CONFIG):
-        raise ValueError('Replicated eight/16/32-row learned-normalized input and pinned TP2 vocabulary head required')
+        raise ValueError('Replicated eight/16/32-row learned-normalized input and pinned TP%d vocabulary head required'
+                         % tp_shapes.chip_count())
     logits = operations.linear(normalized, model.lm_head_weight)
     owned.append(logits)
     return local_head_candidates(operations, logits, owned)
@@ -19,7 +26,7 @@ def shared_head_candidates(operations, model, normalized, owned):
 
 def local_head_candidates(operations, logits, owned):
     rows = logits.shape[2] if len(logits.shape) == 4 else 0
-    if rows not in (8, 16, 32) or tuple(logits.shape) != (1, 1, rows, 124160):
+    if rows not in (8, 16, 32) or tuple(logits.shape) != (1, 1, rows, tp_shapes.vocab_shard()):
         raise ValueError('Expected local vocabulary shards, not gathered logits')
     outputs = []
     for start, stop in candidate_chunks():
@@ -39,7 +46,7 @@ def merge_chunk_candidates(chunks, *, block_rows=8):
 
     if type(block_rows) is not int or block_rows not in (8, 16, 32):
         raise ValueError('Explicit eight/16/32-row candidate block required')
-    expected = {(chip, start, stop) for chip in range(2) for start, stop in candidate_chunks()}
+    expected = {(chip, start, stop) for chip in range(tp_shapes.chip_count()) for start, stop in candidate_chunks()}
     seen, scores, identifiers = set(), [], []
     for chunk in chunks:
         chip, start, stop = (chunk[key] for key in ('chip', 'start', 'stop'))
@@ -58,7 +65,7 @@ def merge_chunk_candidates(chunks, *, block_rows=8):
         if torch.any(ordered[:, 1:] == ordered[:, :-1]):
             raise ValueError('Duplicate local candidate index')
         scores.append(values)
-        identifiers.append(indices.long() + start + chip * 124160)
+        identifiers.append(indices.long() + start + chip * tp_shapes.vocab_shard())
     if seen != expected:
         raise ValueError('Missing candidate chunks')
     values, tokens = torch.cat(scores, dim=-1), torch.cat(identifiers, dim=-1)

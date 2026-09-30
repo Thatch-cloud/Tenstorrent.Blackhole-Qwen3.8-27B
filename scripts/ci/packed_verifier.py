@@ -185,6 +185,7 @@ from verifier_inputs import host_inputs, validate_tokens
 from verifier_pack import GDN_LAYERS, build_pack, participant
 import gdn_seq_block
 import verify_prestage
+import tp_shapes
 import verify_trace_t1
 import verify_trace_t2
 
@@ -360,8 +361,11 @@ def write_packed(operations, model, values, readers, *, indices=None, fence=True
     chosen = values if indices is None else [values[index] for index in indices]
     destinations = [destination for destination, value, dtype, layout in chosen]
     before = [addresses(operations, destination) for destination in destinations]
-    if any(len({pair[chip] for pair in before}) != len(before) for chip in range(2)):
-        raise ValueError('Two independent chip-local buffers per packed input required')
+    chips = tp_shapes.chip_count()
+    if any(len(pair) != chips for pair in before):
+        raise ValueError('%s chip-local addresses per packed input required' % tp_shapes.count_word())
+    if any(len({pair[chip] for pair in before}) != len(before) for chip in range(chips)):
+        raise ValueError('%s independent chip-local buffers per packed input required' % tp_shapes.count_word())
     staged = [operations.from_torch(value, device=None, dtype=dtype, layout=layout,
                                     mesh_mapper=operations.ReplicateTensorToMesh(model.mesh_device))
               for destination, value, dtype, layout in chosen]
@@ -1249,8 +1253,8 @@ class PackedVerifierEngine:
         ids, values = self.output[1], self.output[2]
         id_parts = self.operations.get_device_tensors(ids)
         value_parts = self.operations.get_device_tensors(values)
-        if len(id_parts) != 2 or len(value_parts) != 2:
-            raise AssertionError('Two chip-local outputs required')
+        if len(id_parts) != tp_shapes.chip_count() or len(value_parts) != tp_shapes.chip_count():
+            raise AssertionError('%s chip-local outputs required' % tp_shapes.count_word())
         chip_ids = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in id_parts]
         chip_values = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in value_parts]
         if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
@@ -1547,8 +1551,8 @@ class PackedVerifierEngine:
             else:
                 logits, ids = self.output
                 parts = self.operations.get_device_tensors(ids)
-                if len(parts) != 2:
-                    raise AssertionError('Two chip-local outputs required')
+                if len(parts) != tp_shapes.chip_count():
+                    raise AssertionError('%s chip-local outputs required' % tp_shapes.count_word())
                 host = self.operations.to_torch(parts[0]).reshape(-1)[:self.block_rows].tolist()
             if len(host) != self.block_rows:
                 raise AssertionError('Missing packed prediction rows')

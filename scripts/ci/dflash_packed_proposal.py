@@ -27,6 +27,8 @@ stay at the device's 32.
 
 import os
 
+import tp_shapes
+
 DRAFT_FILLER = 248070
 BLOCK_WIDTH = 32
 BLOCK_WIDTHS = (32, 64)
@@ -493,8 +495,8 @@ def rejected_output_lines(device, outputs, host_chunks, failure):
 
     def projected():
         parts = [operations.to_torch(value).float() for value in operations.get_device_tensors(outputs.projected)]
-        equal = int(len(parts) == 2 and tuple(parts[0].shape) == tuple(parts[1].shape)
-                    and bool(torch.equal(parts[0], parts[1])))
+        equal = int(len(parts) == tp_shapes.chip_count() and all(
+            tuple(parts[0].shape) == tuple(other.shape) and bool(torch.equal(parts[0], other)) for other in parts[1:]))
         return [int(bool(torch.isfinite(part).all())) for part in parts], equal
 
     def buffer_addresses(chip):
@@ -505,7 +507,7 @@ def rejected_output_lines(device, outputs, host_chunks, failure):
     equal_text = guarded(chips_equal)
     projection = guarded(projected)
     lines = []
-    for chip in range(2):
+    for chip in range(tp_shapes.chip_count()):
         mine = chunks_of(chip)
         values = guarded(lambda mine=mine: torch.cat([chunk['values'].float().reshape(-1) for chunk in mine]))
         indices = guarded(lambda mine=mine: torch.cat([chunk['indices'].long().reshape(-1) for chunk in mine]))
@@ -571,15 +573,16 @@ def select_device_outputs(device, outputs, seeds, counts, users, block_rows):
     for chunk in outputs.chunks:
         values = operations.get_device_tensors(chunk['values'])
         indices = operations.get_device_tensors(chunk['indices'])
-        if len(values) != 2 or len(indices) != 2:
-            raise AssertionError('Both learned head shards required')
-        for chip in range(2):
+        chips = tp_shapes.chip_count()
+        if len(values) != chips or len(indices) != chips:
+            raise AssertionError('%s learned head shards required' % tp_shapes.all_chips())
+        for chip in range(chips):
             host_chunks.append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
                 values=operations.to_torch(values[chip]).float().reshape(32, 16),
                 indices=operations.to_torch(indices[chip]).long().reshape(32, 16)))
     candidates, unary = merged_candidates(device, outputs, host_chunks, block_rows=32)
     parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
-    if len(parts) != 2 or not torch.equal(*parts):
+    if len(parts) != tp_shapes.chip_count() or any(not torch.equal(parts[0], other) for other in parts[1:]):
         raise AssertionError('Replicated learned selector features differ')
     hidden = parts[0].reshape(1, 32, 256)
     return select_packed(split_selection(hidden, candidates, unary, users, block_rows),
@@ -601,15 +604,16 @@ def read_device_outputs(device, outputs, users, block_rows):
     for chunk in outputs.chunks:
         values = operations.get_device_tensors(chunk['values'])
         indices = operations.get_device_tensors(chunk['indices'])
-        if len(values) != 2 or len(indices) != 2:
-            raise AssertionError('Both learned head shards required')
-        for chip in range(2):
+        chips = tp_shapes.chip_count()
+        if len(values) != chips or len(indices) != chips:
+            raise AssertionError('%s learned head shards required' % tp_shapes.all_chips())
+        for chip in range(chips):
             host_chunks.append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
                 values=operations.to_torch(values[chip]).float().reshape(32, 16),
                 indices=operations.to_torch(indices[chip]).long().reshape(32, 16)))
     candidates, unary = merged_candidates(device, outputs, host_chunks, block_rows=32)
     parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
-    if len(parts) != 2 or not torch.equal(*parts):
+    if len(parts) != tp_shapes.chip_count() or any(not torch.equal(parts[0], other) for other in parts[1:]):
         raise AssertionError('Replicated learned selector features differ')
     hidden = parts[0].reshape(1, 32, 256)
     return split_selection(hidden, candidates, unary, users, block_rows)
