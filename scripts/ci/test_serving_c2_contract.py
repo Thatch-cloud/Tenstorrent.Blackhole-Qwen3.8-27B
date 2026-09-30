@@ -212,8 +212,10 @@ class PackedAnyProfileTest(unittest.TestCase):
         with open(PROFILES, encoding='utf-8') as handle:
             names = sorted(json.load(handle)['profiles'])
         # ...and the sticky-session profiles, c2-packed and c2-packed-gate with prefix reuse.
+        # ...and the four-card twins, c2-packed-tp4 and its gate profile (plan S2-TP4).
         self.assertEqual([name for name in names if EXTENT_FLAG in self.load(name)['env']],
-                         ['c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate'])
+                         ['c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-tp4',
+                          'c2-packed-tp4-gate'])
         for name in names:
             env = self.load(name)['env']
             with self.subTest(profile=name):
@@ -500,6 +502,8 @@ class BootTest(unittest.TestCase):
 
 TP4_PROFILES = ('general-tp4', 'general-prefix-tp4', 'general-tp4-131k', 'general-prefix-tp4-131k', 'general-tp4-bench',
                 'general-tp4-mmrs')
+# The four-card fast-path (S2) profiles: mesh_device P150x4 with the fast path on, under QWEN_FAST_TP=4.
+FAST_TP4_PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate')
 # The bring-up switches every TP4 profile carries in its env (see the profiles' descriptions): the fused prefill
 # out-projection off (general-tp4-mmrs is the arm that turns it on) and the prefill conv audited for four chunks.
 TP4_BRINGUP_ENV = {'QWEN_GDN_PREFILL_MMRS': '0', 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT': '4'}
@@ -522,7 +526,7 @@ class MeshTest(unittest.TestCase):
 
     def test_the_pairs_profiles_are_untouched(self):
         for name, profile in document()['profiles'].items():
-            if name in TP4_PROFILES or name == 'general-2link':
+            if name in TP4_PROFILES or name in FAST_TP4_PROFILES or name == 'general-2link':
                 continue
             self.assertNotIn('mesh_device', profile, name)
             self.assertEqual(profile['mesh_graph_descriptor'], contract.PAIR_DESCRIPTOR, name)

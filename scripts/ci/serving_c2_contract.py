@@ -51,8 +51,10 @@ process match it:
    the four-card ring's descriptor (tp4_mesh: 2x2, two channels, laid by the overlay), and every process
    installs the ring check on the TT plugin's open_mesh_device (tp4_mesh.install_ring_check: a broken ring
    stops the engine, a degraded one is logged; QWEN_TP4_RING_CHECK=0 skips it). mesh_problems refuses a mesh
-   and descriptor that disagree, the fast path anywhere but the pair (its kernels, per-chip literals and
-   evidence are TP2), and on-device sampling on a mesh whose vocabulary shard exceeds the sampler's 65,536
+   and descriptor that disagree, the fast path anywhere but the pair - or the four-card mesh under a profile that
+   sets QWEN_FAST_TP=4 (the c2-packed-tp4 profiles: tp_shapes, its own kernels' siblings and its own evidence,
+   packed_any_evidence_tp4.json, which admission requires) - and on-device sampling on a mesh whose vocabulary shard
+   exceeds the sampler's 65,536
    logits (the pair's 124,160). The TP4 profiles sample on device (sample_on_device_mode decode_only; the TT
    plugin still falls back to host sampling per batch for what the device sampler cannot do); the file
    HOST_SAMPLING_FILE or QWEN_HOST_SAMPLING=1 drops it at boot, so every batch samples on the host.
@@ -111,6 +113,8 @@ HOST_SAMPLING_FILE = '/models/.qwen-c2/device-sampling.off'
 HOST_SAMPLING_ENV = 'QWEN_HOST_SAMPLING'
 # The ring check on the TT plugin's open_mesh_device (tp4_mesh.install_ring_check); 0 skips it.
 RING_CHECK_ENV = 'QWEN_TP4_RING_CHECK'
+# The fast path's tensor-parallel width (tp_shapes.TP_SWITCH): only the four-card fast profiles set it, to 4.
+FAST_TP_ENV = 'QWEN_FAST_TP'
 PLUGIN_WORKER = 'vllm_tt_plugin.worker'
 
 # Client cache_salt under a prefix profile (design 2.2 need 4, decision D-P2). A salt partitions vLLM's
@@ -216,11 +220,19 @@ def mesh_problems(profile):
     if 'MESH_DEVICE' in (profile.get('env') or {}):
         problems.append("MESH_DEVICE is the profile's mesh_device, never an env value")
     rows, cols = mesh['shape']
-    if ((profile.get('engine') or {}).get('additional-config') or {}).get('qwen_fast_t16') and profile.get('mesh_device'):
-        problems.append('the fast path (qwen_fast_t16) serves the p150_x2 pair only: its kernels, per-chip widths, link '
-                        'policy (sampling_link_policy pins that descriptor) and qualification evidence are two-chip '
-                        'at four links; a (%d, %d) mesh under %s serves the general profiles'
-                        % (rows, cols, profile['mesh_device']))
+    fast = ((profile.get('engine') or {}).get('additional-config') or {}).get('qwen_fast_t16')
+    four_card = fast and profile.get('mesh_device') == 'P150x4' and (profile.get('env') or {}).get(FAST_TP_ENV) == '4'
+    if fast and profile.get('mesh_device') and not four_card:
+        problems.append('the fast path (qwen_fast_t16) serves the p150_x2 pair only, or the four-card (1, 4) mesh '
+                        'under %s=4: its kernels, per-chip widths, link policy (sampling_link_policy pins that '
+                        'descriptor) and qualification evidence are two-chip at four links; a (%d, %d) mesh under %s '
+                        'serves the general profiles' % (FAST_TP_ENV, rows, cols, profile['mesh_device']))
+    if (profile.get('env') or {}).get(FAST_TP_ENV) == '4' and (profile.get('mesh_device') != 'P150x4' or not fast):
+        problems.append('%s=4 is the four-card width of the fast path: it needs mesh_device P150x4 and qwen_fast_t16, '
+                        'and serving_startup refuses a width the opened mesh does not have' % FAST_TP_ENV)
+    if four_card and tt_config(profile).get('sample_on_device_mode') is not None:
+        problems.append('the four-card fast path verifies with its own shard argmax (62,080 columns per chip): a '
+                        'profile that names sample_on_device_mode would sample twice')
     mode = tt_config(profile).get('sample_on_device_mode')
     if mode is not None:
         if mode not in SAMPLE_ON_DEVICE_MODES:

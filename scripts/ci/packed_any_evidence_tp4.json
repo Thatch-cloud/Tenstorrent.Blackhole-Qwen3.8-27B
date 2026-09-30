@@ -1,0 +1,30 @@
+{
+ "schema": "qwen-c2-packed-any-evidence/1",
+ "what": "The four-card (QWEN_FAST_TP=4) record of packed_any_admission: the same three sections as packed_any_evidence.json, to be recorded from a one-card window (CB1-TP4, CB2a-TP4 and CB2b-TP4 with the four-card ChipView, 1of4) and a four-card window (the extent audit on chips 0-3). SKELETON: every section is PENDING, so packed_any_admission refuses the attach, except for a gate-only profile (QWEN_C2_GATE=1), which logs each missing piece as UNQUALIFIED and proceeds. Recording a section changes this file and EVIDENCE_TP4_SHA256 in the same commit.",
+ "provenance": "Skeleton written with the four-card S2 port (docs: the S2 TP4 plan, S2T-09). Nothing here has run on a card.",
+ "binary": {
+  "ttnncpp_sha256": "152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7",
+  "note": "the same K64j binary and kernels as the pair's record: K64j takes the head count and geometry as arguments; whether it is exact at one KV head (0x23) is what CB1-TP4 decides"
+ },
+ "kernels": {
+  "dataflow/reader_decode_qwen.cpp": "adb6091878ba3f0a0805846ff56f05352610d7fe779b5ae96320c437c095db49",
+  "dataflow/reader_decode_qwen_slice.cpp": "518d8096e3cceb160eaef8ab4f0ae976ccbffd3904d31176b7f9d02828c37f8a",
+  "compute/sdpa_flash_decode_qwen.cpp": "409a1aafc3ffaaca2c6afba0e999525b7d141491f0a52e5583efa70447ee5c0e",
+  "dataflow/writer_decode_qwen_slice.cpp": "642c36f809be0f1ad1664deb405dc310dabaa32d5628710320a118eb37a6cc7a"
+ },
+ "sources": {},
+ "sections": {
+  "CB1": {
+   "status": "PENDING",
+   "what": "K64j K1/K3 at NKV = 1: the runtime extent (0x20) at cur_pos E - 1 equals the compile-time call at capacity E, G8B2 flags 0x21, 0x23 (and G16B1 if the spike prefers it)"
+  },
+  "CB2a": {
+   "status": "PENDING",
+   "what": "K2 (bitwise), X7 and Z at one KV head with the extent flag"
+  },
+  "CB2b": {
+   "status": "PENDING",
+   "what": "The extent reader twin (extent_attention_replay_tp.py) at full scope with the 1of4 chip view, C = 131328"
+  }
+ }
+}

@@ -874,6 +874,8 @@ class ProfileGatingTests(unittest.TestCase):
         asked = {name: profile.get('parser_rechunk') for name, profile in self.profiles().items()}
         self.assertEqual(asked, {'exact': None, 'c2': True, 'c2-gate': True, 'c2-packed': True, 'c2-packed-gate': True,
                                  'c2-packed-prefix': True, 'c2-packed-prefix-gate': True,
+                                 # the four-card S2 twins of c2-packed and c2-packed-gate (plan S2-TP4)
+                                 'c2-packed-tp4': True, 'c2-packed-tp4-gate': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
                                  'general-prefix-eager': None,
                                  # the four-card (TP4) G1 family decodes one token per step, as general does
@@ -884,7 +886,7 @@ class ProfileGatingTests(unittest.TestCase):
         for name, profile in self.profiles().items():
             self.assertEqual(contract.parser_rechunk(profile),
                              name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate', 'c2-packed-prefix',
-                                      'c2-packed-prefix-gate'), name)
+                                      'c2-packed-prefix-gate', 'c2-packed-tp4', 'c2-packed-tp4-gate'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 

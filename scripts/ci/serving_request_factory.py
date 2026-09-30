@@ -229,6 +229,15 @@ def attach_source_check(directory=None, *, qualify=None, log=None):
     if qualify is None:
         from target_t16_attention_gate import qualify
     evidence = qualify(directory)
+    import tp_shapes
+
+    if tp_shapes.chip_count() != tp_shapes.PAIR:
+        # Four cards (QWEN_FAST_TP=4): the sources just qualified are the pair's frozen evidence, which says nothing about
+        # a (1, 4) mesh. The four-card record must qualify too, or this must be a gate run of a gate-only profile
+        # (packed_any_admission.tp_guard; refuses otherwise, before any request).
+        import packed_any_admission
+
+        packed_any_admission.tp_guard(log=log)
     if not isinstance(evidence, dict) or not evidence:
         raise ValueError('The attach-time source qualification must return its evidence, got %r' % (evidence,))
     _ATTACH_QUALIFICATION[key] = evidence

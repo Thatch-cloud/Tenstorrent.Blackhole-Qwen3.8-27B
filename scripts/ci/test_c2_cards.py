@@ -37,7 +37,7 @@ class JobTests(unittest.TestCase):
         self.assertEqual((outputs['cards'], outputs['fabric']), ('pair', 'FABRIC_1D'))
 
     def test_the_tp4_profiles_are_the_profiles_that_name_the_mesh(self):
-        self.assertEqual(TP4, ['general-prefix-tp4', 'general-prefix-tp4-131k', 'general-tp4', 'general-tp4-131k',
+        self.assertEqual(TP4, ['c2-packed-tp4', 'c2-packed-tp4-gate', 'general-prefix-tp4', 'general-prefix-tp4-131k', 'general-tp4', 'general-tp4-131k',
                                'general-tp4-bench', 'general-tp4-mmrs'])
         self.assertIn('general', PAIR)
 

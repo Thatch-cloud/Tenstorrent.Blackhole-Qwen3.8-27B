@@ -117,6 +117,9 @@ scripts/ci/model_batch.py
 # bytes they qualified), flat beside it: packed_any_admission reads packed_any_evidence.json from its own directory.
 scripts/ci/packed_any_admission.py
 scripts/ci/packed_any_evidence.json
+# The four-card record (QWEN_FAST_TP=4), read from the same directory at its own pin: a skeleton until the card windows record
+# its sections, so admission refuses a four-card attach except in a gate run.
+scripts/ci/packed_any_evidence_tp4.json
 # S2 B6: the extent block (packed_verifier, overlaid above) imports publication_warm at attach and publishes the
 # drafter's eager publication once at every shape serving can ask of it, so a refused fused commit or a sequential
 # step compiles nothing after attach. New: no older layer holds it, so without this line the extent block's attach

@@ -55,6 +55,16 @@ r1 plus r1_reader), S (staging), R2 (r2 plus r2_trace), R4 (r4) and liveness (li
 line's extent_sha256, which must be the top-level sources' own). Re-pin EVIDENCE_SHA256 in the same
 commit. Nothing else changes: the tests that read the checked-in file follow its CB2b status.
 
+FOUR CARDS (QWEN_FAST_TP=4, the c2-packed-tp4 profiles). The same admission with the four-card numbers and its own
+record. K64j at one KV head serves 0x23 (tail | share | extent; the slice needs a second KV head), so the modes are exactly
+tail and share and CB1 must hold a G8B2 0x23 combo; the reader is extent_attention_replay_tp.py, whose sha256 CB2b records;
+CB2b's harness presents one chip as chip 1of4; the record is packed_any_evidence_tp4.json at its own pin. Until that record
+holds a qualifying pass, `admit` refuses - except for a GATE-ONLY profile (QWEN_C2_GATE=1: the contract boots gate_only
+profiles only for a gate and never for traffic), where the evidence problems are logged one per line as UNQUALIFIED and the
+attach proceeds, so the first four-card rounds can run at all. Every other condition (the shape, the modes, the K64j binary
+and kernels, the tree-scratch patch) still refuses. tp_guard is the same rule applied by serving_request_factory's attach
+source check, so a process that never reaches admit cannot serve four cards on the pair's evidence either.
+
 Stdlib only at import: the image build runs this module's in-image test (check_runtime on /opt/tt-metal).
 """
 
@@ -62,6 +72,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+
+import tp_shapes
 
 
 FLAG = 'QWEN_FAST_EXTENT_REPLAY'
@@ -105,9 +117,19 @@ SDPA_MODES_ENV = 'QWEN_FAST_SDPA_MODES'
 # The modes the environment must name, exactly: with the extent the reader adds, 0x27 - the one flag set
 # CB2a (K2, X7, Z) and CB2b ran and the extent reader asserts at G8B2. The image's v235 value.
 QUALIFIED_MODES = frozenset(('tail', 'share', 'slice'))
+# Four cards: one KV head, so no slice; the extent reader serves 0x23.
+QUALIFIED_MODES_TP4 = frozenset(('tail', 'share'))
 
 # The reader sources the evidence qualified, next to this module: the live bytes must be the recorded ones.
 QUALIFIED_SOURCES = ('extent_attention_replay.py',)
+QUALIFIED_SOURCES_TP4 = ('extent_attention_replay_tp.py',)
+# The four-card record, its own pin, and the flag set its CB1 combo must hold.
+EVIDENCE_TP4 = HERE / 'packed_any_evidence_tp4.json'
+EVIDENCE_TP4_SHA256 = 'c55da96d49f0aac73adaf26f500d8b4d07c29c1c7a6316ae1ffb5cc4db7de283'
+CB1_FLAG = '0x27'
+CB1_FLAG_TP4 = '0x23'
+# A gate-only profile boots only with this set (serving_c2_contract.GATE_SWITCH).
+GATE_ENV = 'QWEN_C2_GATE'
 SECTIONS = ('CB1', 'CB2a', 'CB2b')
 SEEDS = (0, 1, 2, 3, 4)
 K1_EXTENTS = (2304, 16896, 33024, 65792, 98560, 131328)       # K1's six families (probe_k64j_card_b.EXTENTS)
@@ -128,6 +150,7 @@ Z_FLOOR = len(Z_FAMILIES) * len(Z_STARTS) * len(SEEDS) * 2                      
 # families including the five named, R4 at both idle starts, seeds 0-2 and both variants, at C = 131,328.
 CB2B_SCOPE = 'full'
 CB2B_CHIPS = ('1of2',)            # TwoChipView on a one-chip p150a: chip 1 is left to the extent audit and G3/G3b
+CB2B_CHIPS_TP4 = ('1of4',)        # the four-card harness's ChipView: one chip of four, the rest left to the extent audit
 CB2B_CAPACITY = 131328
 CB2B_SEEDS = (0, 1, 2)
 CB2B_R1_GEOMETRIES = ('G8B2', 'G4B3', 'G4B1')
@@ -150,6 +173,32 @@ class AdmissionRefused(ValueError):
     def __init__(self, message, problems=None):
         super().__init__(message)
         self.problems = list(problems) if problems else [message]
+
+
+def width(environ=None):
+    """The tensor-parallel width this process serves at (QWEN_FAST_TP; the pair when unset)."""
+    return tp_shapes.requested_tp(os.environ if environ is None else environ)
+
+
+def qualified_modes(tp):
+    return QUALIFIED_MODES if tp == tp_shapes.PAIR else QUALIFIED_MODES_TP4
+
+
+def qualified_sources(tp):
+    return QUALIFIED_SOURCES if tp == tp_shapes.PAIR else QUALIFIED_SOURCES_TP4
+
+
+def evidence_path(tp):
+    return EVIDENCE if tp == tp_shapes.PAIR else EVIDENCE_TP4
+
+
+def evidence_pin(tp):
+    return EVIDENCE_SHA256 if tp == tp_shapes.PAIR else EVIDENCE_TP4_SHA256
+
+
+def gate_only(environ=None):
+    """Whether this process is a gate run of a gate-only profile: the contract's boot condition for such profiles."""
+    return (os.environ if environ is None else environ).get(GATE_ENV) == '1'
 
 
 def _log(template, *values):
@@ -221,24 +270,27 @@ def check_environment(environ, m3):
             problems.append('%s=%s, not %s: %s' % (name, environ.get(name, '(unset)'), wanted, why))
     from pooled_attention_replay import sdpa_modes
 
+    tp = width(environ)
     value = environ.get(SDPA_MODES_ENV, '')
     try:
         modes = sdpa_modes(environ)
     except ValueError as error:
         problems.append(str(error))
     else:
-        missing = sorted(QUALIFIED_MODES - modes)
+        wanted = qualified_modes(tp)
+        missing = sorted(wanted - modes)
+        served = '0x27 (tail, share, slice and extent)' if tp == tp_shapes.PAIR else '0x23 (tail, share and extent)'
         if missing:
-            problems.append('%s=%s lacks %s: the extent reader serves 0x27 (tail, share, slice and extent) only, '
-                            'and K64j refuses 0x20 without 0x1' % (SDPA_MODES_ENV, value, ','.join(missing)))
+            problems.append('%s=%s lacks %s: the extent reader serves %s only, '
+                            'and K64j refuses 0x20 without 0x1' % (SDPA_MODES_ENV, value, ','.join(missing), served))
         if 'extent' in modes:
             problems.append('%s=%s names extent: the extent reader adds it itself, and any pinned or pooled reader '
                             'in the process would refuse it' % (SDPA_MODES_ENV, value))
-        others = sorted(modes - QUALIFIED_MODES - {'extent'})
+        others = sorted(modes - wanted - {'extent'})
         if others:
-            problems.append('%s=%s names %s: CB2a and CB2b qualified 0x27 only (readahead makes 0x2F, which the '
+            problems.append('%s=%s names %s: CB2a and CB2b qualified %s only (readahead makes 0x2F, which the '
                             'extent reader refuses after the attach has built everything)'
-                            % (SDPA_MODES_ENV, value, ','.join(others)))
+                            % (SDPA_MODES_ENV, value, ','.join(others), served.split(' ')[0]))
     return problems
 
 
@@ -337,15 +389,15 @@ def _cover(problems, section, key, wanted, what):
         problems.append('%s: %s lack %s' % (what, key, missing))
 
 
-def _cb1_problems(cb1, problems):
+def _cb1_problems(cb1, problems, flag=CB1_FLAG):
     _cover(problems, cb1, 'seeds', SEEDS, 'CB1')
     missing = _missing(cb1.get('extents'), K1_EXTENTS)
     if missing:
         problems.append('CB1: extents lack K1\'s %s' % missing)
     combos = cb1.get('combos') or []
-    if not any(isinstance(combo, dict) and combo.get('geometry') == 'G8B2' and '0x27' in (combo.get('flags') or [])
+    if not any(isinstance(combo, dict) and combo.get('geometry') == 'G8B2' and flag in (combo.get('flags') or [])
                for combo in combos):
-        problems.append('CB1: no G8B2 0x27 combo, the one the extent reader serves')
+        problems.append('CB1: no G8B2 %s combo, the one the extent reader serves' % flag)
     counts = cb1.get('counts') or {}
     for key in CB1_COUNTS:
         if not _full(counts.get(key)):
@@ -374,12 +426,12 @@ def _cb2a_problems(cb2a, problems):
         problems.append('CB2a: Z families lack %s of the 15 below 4096' % missing)
 
 
-def _cb2b_problems(cb2b, sources, problems):
+def _cb2b_problems(cb2b, sources, problems, chips=CB2B_CHIPS, source_names=QUALIFIED_SOURCES):
     if cb2b.get('scope') != CB2B_SCOPE:
         problems.append('CB2b: scope %s, not full (a reduced run - the watcher pass, one seed - is never CB2b\'s '
                         'evidence)' % cb2b.get('scope'))
-    if cb2b.get('chips') not in CB2B_CHIPS:
-        problems.append('CB2b: chips %s, not the harness\'s %s' % (cb2b.get('chips'), '/'.join(CB2B_CHIPS)))
+    if cb2b.get('chips') not in chips:
+        problems.append('CB2b: chips %s, not the harness\'s %s' % (cb2b.get('chips'), '/'.join(chips)))
     if cb2b.get('capacity') != CB2B_CAPACITY:
         problems.append('CB2b: capacity %s, not the served C = %d' % (cb2b.get('capacity'), CB2B_CAPACITY))
     _cover(problems, cb2b, 'seeds', CB2B_SEEDS, 'CB2b')
@@ -408,14 +460,17 @@ def _cb2b_problems(cb2b, sources, problems):
         if not _full(counts.get(key)):
             problems.append('CB2b: %s %s is not a full pass' % (key, counts.get(key)))
     ran = cb2b.get('sources') or {}
-    for name in QUALIFIED_SOURCES:
+    for name in source_names:
         if ran.get(name) != sources.get(name):
             problems.append('CB2b: ran %s at %s, not the qualified %s' % (name, str(ran.get(name))[:16],
                                                                          str(sources.get(name))[:16]))
 
 
-def evidence_problems(evidence, sources_root=HERE):
-    """Every reason the evidence does not qualify the extent path for these bytes; [] when it does."""
+def evidence_problems(evidence, sources_root=HERE, tp=None):
+    """Every reason the evidence does not qualify the extent path for these bytes; [] when it does. `tp` is the
+    width the record is for (default: the width this process serves at); four cards read the reader twin's sha256,
+    a G8B2 0x23 CB1 combo and CB2b's 1of4 chip view."""
+    tp = width() if tp is None else tp
     problems = []
     if not isinstance(evidence, dict) or evidence.get('schema') != EVIDENCE_SCHEMA:
         return ['the evidence is not a %s record' % EVIDENCE_SCHEMA]
@@ -426,7 +481,7 @@ def evidence_problems(evidence, sources_root=HERE):
     if evidence.get('kernels') != K64J_KERNELS:
         problems.append('kernels: the evidence names other kernel bytes than K64j\'s four')
     sources = evidence.get('sources') or {}
-    for name in QUALIFIED_SOURCES:
+    for name in qualified_sources(tp):
         recorded = sources.get(name)
         path = Path(sources_root) / name
         live = sha256_file(path) if path.is_file() else None
@@ -439,19 +494,22 @@ def evidence_problems(evidence, sources_root=HERE):
     for name in sorted(set(sections) - set(SECTIONS)):
         problems.append('%s: not a section this admission knows' % name)
     if _passed(sections.get('CB1'), 'CB1', problems):
-        _cb1_problems(sections['CB1'], problems)
+        _cb1_problems(sections['CB1'], problems, CB1_FLAG if tp == tp_shapes.PAIR else CB1_FLAG_TP4)
     if _passed(sections.get('CB2a'), 'CB2a', problems):
         _cb2a_problems(sections['CB2a'], problems)
     if _passed(sections.get('CB2b'), 'CB2b', problems):
-        _cb2b_problems(sections['CB2b'], sources, problems)
+        _cb2b_problems(sections['CB2b'], sources, problems,
+                       CB2B_CHIPS if tp == tp_shapes.PAIR else CB2B_CHIPS_TP4, qualified_sources(tp))
     return problems
 
 
-def check_evidence(path=EVIDENCE, *, expected_sha256=None, sources_root=HERE):
+def check_evidence(path=None, *, expected_sha256=None, sources_root=HERE, tp=None):
     """Item 4: the evidence file at its pinned sha256, and evidence_problems empty. Returns the parsed
-    record; raises AdmissionRefused naming every problem (one entry each in its `problems`)."""
-    expected_sha256 = EVIDENCE_SHA256 if expected_sha256 is None else expected_sha256
-    path = Path(path)
+    record; raises AdmissionRefused naming every problem (one entry each in its `problems`). The file and its pin
+    are the pair's or the four-card record's by `tp` (default: the width this process serves at)."""
+    tp = width() if tp is None else tp
+    expected_sha256 = evidence_pin(tp) if expected_sha256 is None else expected_sha256
+    path = Path(evidence_path(tp) if path is None else path)
     if not path.is_file():
         raise AdmissionRefused('the extent path has no evidence: %s is missing' % path,
                                ['evidence: %s is missing' % path.name])
@@ -465,14 +523,50 @@ def check_evidence(path=EVIDENCE, *, expected_sha256=None, sources_root=HERE):
     except ValueError as error:
         raise AdmissionRefused('%s does not parse: %s' % (path.name, error),
                                ['evidence: %s does not parse: %s' % (path.name, str(error)[:120])])
-    problems = evidence_problems(evidence, sources_root)
+    problems = evidence_problems(evidence, sources_root, tp)
     if problems:
         raise AdmissionRefused('the evidence does not qualify the extent path: ' + '; '.join(problems),
                                ['evidence: %s' % problem for problem in problems])
     return evidence
 
 
-def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evidence=EVIDENCE):
+UNQUALIFIED_MARKER = '[PINDIAG] packed-any admission UNQUALIFIED (gate only, four cards)'
+
+
+def unqualified_allowed(environ=None):
+    """Whether missing four-card evidence may be waved through: only at four cards, only in a gate run of a
+    gate-only profile (the contract never boots one for traffic)."""
+    environ = os.environ if environ is None else environ
+    return width(environ) != tp_shapes.PAIR and gate_only(environ)
+
+
+def _log_unqualified(log, problems):
+    for index, problem in enumerate(problems, 1):
+        log('{} ({}/{}): {}', UNQUALIFIED_MARKER, index, len(problems), problem)
+
+
+def tp_guard(environ=None, *, log=None, sources_root=HERE):
+    """The four-card rule for a process that has not reached admit (serving_request_factory.attach_source_check):
+    at the pair nothing (returns None); at four cards the four-card record must qualify, or the process must be a
+    gate run, in which case the problems are logged as UNQUALIFIED and returned. Otherwise AdmissionRefused."""
+    environ = os.environ if environ is None else environ
+    tp = width(environ)
+    if tp == tp_shapes.PAIR:
+        return None
+    log = _log if log is None else log
+    try:
+        check_evidence(tp=tp, sources_root=sources_root)
+    except AdmissionRefused as refusal:
+        if not unqualified_allowed(environ):
+            raise AdmissionRefused('QWEN_FAST_TP=%d serves on the pair\'s evidence otherwise, and %s is not a qualifying '
+                                   'four-card record (%s): %s' % (tp, EVIDENCE_TP4.name, GATE_ENV + ' is not 1',
+                                                                 '; '.join(refusal.problems)), refusal.problems)
+        _log_unqualified(log, refusal.problems)
+        return list(refusal.problems)
+    return []
+
+
+def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evidence=None):
     """Items 1-4, once per process: the record on success (cached; a second call returns it), else
     AdmissionRefused naming every failed condition, each logged on its own line before it is raised.
     `binary_record` is runtime_binary_override.install's return value (None when it admitted nothing)."""
@@ -490,21 +584,38 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
                                                   K64J_TTNNCPP_SHA256[:16]))
     if binary_record is not None and binary_record.get('override') != K64J_TTNNCPP_SHA256:
         problems.append('the runtime binary override admitted %s, not K64j' % str(binary_record.get('override'))[:16])
+    tp = width(environ)
     record = dict(flag=FLAG, shape=m3[1])
+    unqualified = []
     for name, check in (('runtime', lambda: check_runtime(runtime_root, (binary_record or {}).get('binaries'))),
-                        ('evidence', lambda: check_evidence(evidence))):
+                        ('evidence', lambda: check_evidence(evidence) if tp == tp_shapes.PAIR
+                         else check_evidence(evidence, tp=tp))):
         try:
             record[name] = check()
         except AdmissionRefused as refusal:
-            problems.extend(refusal.problems)
+            if name == 'evidence' and unqualified_allowed(environ):
+                unqualified.extend(refusal.problems)
+                record[name] = None
+            else:
+                problems.extend(refusal.problems)
     if problems:
         _refuse(log, 'at attach', problems)
+    if unqualified:
+        # A gate run at four cards, before any four-card evidence exists: every missing piece is on the record, one
+        # line each, and the process may never take traffic (its profile is gate_only).
+        record['unqualified'] = unqualified
+        _log_unqualified(log, unqualified)
+        log('{} passed UNQUALIFIED: K64j {} x{}; kernels {}; {} evidence problems (gate only)',
+            MARKER, K64J_TTNNCPP_SHA256[:16], len(record['runtime']['binaries']),
+            ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), len(unqualified))
+        _STATE['record'] = record
+        return record
     sections = record['evidence']['sections']
     log('{} passed: K64j {} x{}; kernels {}; evidence {}; CB1 {} CB2a {} CB2b {}; reader {}',
         MARKER, K64J_TTNNCPP_SHA256[:16], len(record['runtime']['binaries']),
-        ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), EVIDENCE_SHA256[:16],
+        ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), evidence_pin(tp)[:16],
         sections['CB1']['run'], sections['CB2a']['run'], sections['CB2b']['run'],
-        ','.join(record['evidence']['sources'][name][:16] for name in QUALIFIED_SOURCES))
+        ','.join(record['evidence']['sources'][name][:16] for name in qualified_sources(tp)))
     _STATE['record'] = record
     return record
 
