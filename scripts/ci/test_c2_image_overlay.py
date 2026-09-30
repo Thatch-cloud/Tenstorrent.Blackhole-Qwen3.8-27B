@@ -59,6 +59,11 @@ _UNREVIEWED = ('UNREVIEWED whether serving reaches the changed code; blob-pinned
 # path, never by basename, and never inherited from P8's KNOWN_STALE (whose UNREVIEWED entries
 # are basename-keyed and unpinned).
 C2_KNOWN_STALE = {
+    'scripts/ci/ccl_link_patch.py': (
+        'e84f430e79dbefe9a33728258554bf93f88d1dc6',
+        'host-side graft tool: qwen-ccl-link-gate.yml runs it on the runner to patch a copy of tt_ccl.py for that '
+        'gate; the serving image neither imports nor runs it, so the image keeps the bundle copy. HEAD adds the '
+        'four-card ring count (smallest consecutive edge in mesh order); a two-device mesh counts as before'),
     'scripts/ci/lever_n_m1_run_arm.sh': (
         '804b9382408287bb9a8d1421be6f628024468b79',
         'host-side runner script (card-B guard, 97d6671a): run on the runner by a legacy workflow that is disabled, never inside the serving container, so the image keeps the bundle copy'),

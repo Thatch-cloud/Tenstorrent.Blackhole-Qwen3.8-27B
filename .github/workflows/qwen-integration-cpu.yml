@@ -101,7 +101,7 @@ jobs:
           python -B -m unittest test_serving_image_copy_closure
           python -B -m unittest test_c2_image_overlay
           python -B -m unittest test_serving_c2_contract
-          python -B -m unittest test_tp4_mesh
+          python -B -m unittest test_tp4_mesh test_mesh_link_policy test_sampling_link_policy test_projection_link_policy test_model_link_policy
           python -B -m unittest test_qwen_prefix_metrics test_qwen_prefix_image
           python -B -m unittest test_c2_parser_rechunk
           python -B -m unittest test_serving_plugin_patch
