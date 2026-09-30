@@ -206,6 +206,18 @@ scripts/ci/attention_fold_dma_tp.py
 scripts/ci/attention_fold_dma_tp.cpp
 scripts/ci/attention_mask_replay_tp.cpp
 scripts/ci/extent_attention_replay_tp.py
+# The sequential engine's attention and K/V writers at one KV head (S2T-06b): the fixed-family replay reader, its mask
+# program and parallel executor, the ordered cache writer (num_heads 1 in the upstream kernels' arguments) and the
+# host fold oracle, all read from tp_shapes; the packed chained writer, the cache owner and the pooled readers take the
+# width from tp_shapes too. Pinned attention_replay / attention_parallel / attention_mask_replay / ordered_cache are
+# rebound to the twins by tp_addresses.install() at QWEN_FAST_TP=4 only.
+scripts/ci/attention_replay_tp.py
+scripts/ci/attention_mask_replay_tp.py
+scripts/ci/attention_parallel_tp.py
+scripts/ci/ordered_cache_tp.py
+scripts/ci/attention_head_fold.py
+scripts/ci/packed_ordered_cache.py
+scripts/ci/serving_cache_owner.py
 scripts/ci/gdn_commit_dma_tp.cpp
 scripts/ci/gdn_conv_prefix_copy_tp.cpp
 scripts/ci/gdn_conv_prefix_copy.cpp

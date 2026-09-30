@@ -51,7 +51,13 @@ from pathlib import Path
 
 from attention_head_fold import parallel_groups
 from attention_mask_replay import validate_ticket
+import tp_shapes
 from attention_replay import ReplayAttentionReader
+
+if tp_shapes.chip_count() != tp_shapes.PAIR:
+    # The pinned reader is written for the pair (12 folded rows per token); at four cards the readers below derive from
+    # its twin, whose head layout is the width's. QWEN_FAST_TP is a launch environment variable, read at import.
+    from attention_replay_tp import ReplayAttentionReader
 from gdn_multitoken_conv import addresses
 
 
@@ -371,7 +377,11 @@ class PooledReplayAttentionReader(ReplayAttentionReader):
         super().close()
 
 
-PACKED_QUERY_HEADS, PACKED_QUERY_WIDTH = 12, 256
+PACKED_QUERY_HEADS, PACKED_QUERY_WIDTH = 12, 256   # the pair's; the reader below reads the width's (query_heads())
+
+
+def query_heads():
+    return tp_shapes.active().attn_fold_rows
 
 
 # 64: the M3 block, four T16 users (packed_shapes.m3_shape), four 16-row readers.
@@ -509,7 +519,7 @@ class PackedReplayAttentionReader:
 
     def __call__(self, query, keys, values, *, page_table_tensor=None, cur_pos_tensor=None, **kwargs):
         self.check_open()
-        if tuple(query.shape) != (1, self.rows, PACKED_QUERY_HEADS, PACKED_QUERY_WIDTH):
+        if tuple(query.shape) != (1, self.rows, query_heads(), PACKED_QUERY_WIDTH):
             raise ValueError('Packed replay query geometry changed')
         operations = self.operations
         rows, outputs = [], []
@@ -517,7 +527,7 @@ class PackedReplayAttentionReader:
             for reader, (first, last) in zip(self.readers, self.segments, strict=True):
                 # This user's rows, the way SerialAttentionReader takes one row: a DRAM slice on
                 # the row axis, so the reader sees exactly its (1, rows, 12, 256) query.
-                selected = operations.slice(query, (0, first, 0, 0), (1, last, PACKED_QUERY_HEADS, PACKED_QUERY_WIDTH),
+                selected = operations.slice(query, (0, first, 0, 0), (1, last, query_heads(), PACKED_QUERY_WIDTH),
                                             memory_config=operations.DRAM_MEMORY_CONFIG)
                 rows.append(selected)
                 outputs.append(reader(selected, keys, values, page_table_tensor=page_table_tensor,

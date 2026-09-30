@@ -39,6 +39,8 @@ The descriptors are rebuilt on every call, exactly as ordered_cache.update does,
 program-cache behaviour is the served one.
 """
 
+import tp_shapes
+
 KV_HEADS, KV_WIDTH = 32, 256
 TILE_ROWS = 32
 LAUNCH_ROWS = (64, 32)
@@ -47,7 +49,16 @@ GRID_WIDTH = 8
 CB16_SERVED = 256
 CACHE_PAGE, INPUT_PAGE = 1088, 2048
 NEGATIVE_CONTROLS = ('nochain', 'index', 'conflict')
-COMPUTE_ARGS = (0, 1, 24, 25, 26, 16, 8, 2)
+COMPUTE_ARGS = (0, 1, 24, 25, 26, 16, 8, 2)     # the pair's; the last is the cache's KV head count (compute_args())
+
+
+def cache_heads():
+    """KV heads per chip in the cache and in the upstream kernels' num_heads arguments: 2 at the pair, 1 at four cards."""
+    return tp_shapes.active().attn_kv_heads
+
+
+def compute_args():
+    return COMPUTE_ARGS[:-1] + (cache_heads(),)
 
 
 class Unsupported(ValueError):
@@ -115,13 +126,14 @@ def apply_negative(args, spans, negative):
 
 
 def reader_compile_args(rows, width):
-    """ordered_cache.update's reader list (line 128) at `rows`: only arg 7 (rows * 4) moves."""
-    return [0, 1, 1, 2, 0, 8, 0, rows * 4, 1, 2, 64, 2, width, 0, width * 4, 3, 2, 0, 0]
+    """ordered_cache.update's reader list (line 128) at `rows`: only arg 7 (rows * 4) moves; arg 9 is the cache's KV
+    head count (2 at the pair, 1 at four cards)."""
+    return [0, 1, 1, 2, 0, 8, 0, rows * 4, 1, cache_heads(), 64, 2, width, 0, width * 4, 3, 2, 0, 0]
 
 
 def writer_compile_args(width):
-    """ordered_cache.update's writer list (line 131), unchanged."""
-    return [16, 24, 25, 26, 1, 2, 0, 8, 512, 1, 2, 64, 2, width, 3, 2, 0, 0]
+    """ordered_cache.update's writer list (line 131); arg 10 is the cache's KV head count."""
+    return [16, 24, 25, 26, 1, 2, 0, 8, 512, 1, cache_heads(), 64, 2, width, 3, 2, 0, 0]
 
 
 def cb_table(width, cb16_pages=CB16_SERVED):
@@ -154,8 +166,8 @@ def validate_chained(cache, packed, positions, pages, rows):
 
     if rows not in LAUNCH_ROWS or tuple(packed) != (1, rows, KV_HEADS, KV_WIDTH):
         raise ValueError('Chained K/V writes take (1, 64 or 32, 32, 256) prepared tiles; got %r' % (tuple(packed),))
-    if len(cache) != 4 or cache[0] < 1 or tuple(cache[1:]) != (2, 64, 256):
-        raise ValueError('Expected two-head 64-row BF8 paged cache')
+    if len(cache) != 4 or cache[0] < 1 or tuple(cache[1:]) != (cache_heads(), 64, 256):
+        raise ValueError('Expected %s-head 64-row BF8 paged cache' % {1: 'one', 2: 'two'}[cache_heads()])
     if (tuple(positions) != (rows,) or len(pages) != 2 or pages[0] != rows
             or not page_width_admitted(pages[1]) or pages[1] > cache[0]):
         raise ValueError('Paired position vector and page-table rows required')
@@ -196,8 +208,8 @@ def update_chained(mesh, cache, packed, positions, pages, kernels, spans, *, cb1
         shape = tuple(mesh.shape)
     except (AttributeError, TypeError):
         raise Unsupported('no mesh shape') from None
-    if shape not in ((1, 1), (1, 2)):
-        raise Unsupported('mesh %s is not [1, 1] or [1, 2]' % (shape,))
+    if shape not in ((1, 1), (1, tp_shapes.chip_count())):
+        raise Unsupported('mesh %s is not [1, 1] or [1, %d]' % (shape, tp_shapes.chip_count()))
     coordinates = mesh_coordinates(shape)
     shards = [operations.get_device_tensors(value) for value in tensors]
     if any(len(parts) != len(coordinates) for parts in shards):
@@ -237,7 +249,7 @@ def update_chained(mesh, cache, packed, positions, pages, kernels, spans, *, cb1
                 processor=operations.DataMovementProcessor.RISCV_1, noc=operations.NOC.RISCV_1_default)),
             ('writer', writer_args, operations.DataMovementConfigDescriptor(
                 processor=operations.DataMovementProcessor.RISCV_0, noc=operations.NOC.RISCV_0_default)),
-            ('compute', list(COMPUTE_ARGS), operations.ComputeConfigDescriptor(fp32_dest_acc_en=False)),
+            ('compute', list(compute_args()), operations.ComputeConfigDescriptor(fp32_dest_acc_en=False)),
         ):
             runtime = operations.RuntimeArgs()
             for row, core in enumerate(coordinates_of):

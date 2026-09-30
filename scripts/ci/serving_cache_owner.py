@@ -1,14 +1,15 @@
 """Verify that serving and captured target execution share the same physical KV."""
 
 from gdn_multitoken_conv import addresses
+import tp_shapes
 
 
 class ServingCacheOwner:
     def __init__(self, operations, runner, model):
         self.operations, self.runner, self.model = operations, runner, model
         if (len(runner.model.model) != 1 or runner.model.model[0] is not model
-                or model.num_devices != 2 or model.args.max_batch_size != 8):
-            raise ValueError('One TP2 target with native eight-slot GDN required')
+                or model.num_devices != tp_shapes.chip_count() or model.args.max_batch_size != 8):
+            raise ValueError('One TP%d target with native eight-slot GDN required' % tp_shapes.chip_count())
         self.bindings = self.inspect()
         self.physical_pages = self.bindings[0][1][0]
 
@@ -26,9 +27,9 @@ class ServingCacheOwner:
                 if target is not serving or target is not bound:
                     raise ValueError('Serving, model and attention caches do not share ownership')
                 shape = tuple(target.shape)
-                if (len(shape) != 4 or shape[0] < 68 or shape[1:] != (2, 64, 256)
+                if (len(shape) != 4 or shape[0] < 68 or shape[1:] != (tp_shapes.active().attn_kv_heads, 64, 256)
                         or target.dtype != self.operations.bfloat8_b):
-                    raise ValueError('Qualified BF8 TP2 paged KV geometry required')
+                    raise ValueError('Qualified BF8 TP%d paged KV geometry required' % tp_shapes.chip_count())
                 if pages is not None and shape[0] != pages:
                     raise ValueError('Inconsistent physical KV capacity')
                 pages = shape[0]

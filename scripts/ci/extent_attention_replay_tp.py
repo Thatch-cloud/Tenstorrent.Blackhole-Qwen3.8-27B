@@ -28,8 +28,8 @@ from attention_fold_dma_tp import device_layout_dma
 from extent_attention_replay import (BF16_NEG_INF, ENGAGED_MARKER, EXTENT_BUNDLE_ENTRIES, EXTENT_GROUP_ROWS, F22_MARKER,
                                      K, LAYOUT, MIN_LIVE_START, TREE_SCRATCH_ENV, _integer, _pindiag, accept_limit,
                                      admits, check_start, extent, extent_values)
-from pooled_attention_replay import (QWEN_KV_SHARE, QWEN_MASK_TAIL, QWEN_RUNTIME_EXTENT, apply_sdpa_modes, sdpa_modes,
-                                     validate_segments)
+import pooled_attention_replay as pooled
+from pooled_attention_replay import apply_sdpa_modes, sdpa_modes, validate_segments
 import tp_kernels
 import tp_shapes
 from tp_addresses import addresses, release_owned
@@ -37,7 +37,7 @@ from tp_addresses import addresses, release_owned
 
 # The one geometry the four-card extent replay is written for: 0x1 | 0x2 | 0x20 on bundles of two eight-row groups (the
 # slice, 0x4, needs a second KV head to slice between).
-EXTENT_FLAGS = QWEN_MASK_TAIL | QWEN_KV_SHARE | QWEN_RUNTIME_EXTENT
+EXTENT_FLAGS = pooled.QWEN_MASK_TAIL | pooled.QWEN_KV_SHARE | pooled.QWEN_RUNTIME_EXTENT
 
 
 def head_rows():
