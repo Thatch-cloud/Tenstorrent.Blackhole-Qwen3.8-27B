@@ -181,6 +181,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # check runs inside it.
     from profiled_block_stream_override import install as admit_profiled_block_stream
     admit_profiled_block_stream(log=pindiag)
+    # LLK zone profiling (QWEN_LLK_ZONES, default unset): the gate's llk-* arms only, attribution never a
+    # throughput claim; llk_zone_override refuses it without TT_METAL_DEVICE_PROFILER=1. Unset - every served
+    # profile - not even the import runs. Before combined_runtime(), which builds the K5-A kernels it wraps.
+    if os.environ.get('QWEN_LLK_ZONES'):
+        from llk_zone_override import install as install_llk_zones
+        install_llk_zones(log=pindiag)
     # The serial weight stream stays mandatory except at the shape register_reader_reason
     # admits (each flag default-off), where the register-epilogue reader over the native
     # w_gate_up replaces it. Read before anything is built: QWEN_FAST_SINGLE_GATEUP=1 at any

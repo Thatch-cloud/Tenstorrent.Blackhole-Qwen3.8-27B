@@ -1713,7 +1713,29 @@ def without_any_request(lines):
             or not code[2].startswith("raise ValueError('QWEN_FAST_ANY_REQUEST=1 needs")
             or not all(value.startswith("'") for value in code[3:-1]) or code[-1] != 'attach_source_check()'):
         raise AssertionError('The C2-any attach hunk holds more than its guard: %r' % (code,))
-    return without_s2_memory(without_no_block(lines[:starts[0]] + lines[ends[0] + 1:]))
+    return without_llk_zones(without_s2_memory(without_no_block(lines[:starts[0]] + lines[ends[0] + 1:])))
+
+
+LLK_ZONES_HUNK = ("if os.environ.get('QWEN_LLK_ZONES'):",
+                  'from llk_zone_override import install as install_llk_zones',
+                  'install_llk_zones(log=pindiag)')
+
+
+def without_llk_zones(lines):
+    """serving_runtime.py less the LLK profiling attach hunk (QWEN_LLK_ZONES, default unset; the gate's llk-* arms
+    only), which landed after this parent: its comment and exactly the three statements of LLK_ZONES_HUNK, cut
+    once, so nothing else is hidden."""
+    first = '# LLK zone profiling (QWEN_LLK_ZONES, default unset): the gate\'s llk-* arms only, attribution never a'
+    starts = [index for index, value in enumerate(lines) if value.strip() == first]
+    if len(starts) != 1:
+        raise AssertionError('The LLK zones attach hunk is not in serving_runtime.py exactly once')
+    ends = [index for index in range(starts[0], len(lines)) if lines[index].strip() == LLK_ZONES_HUNK[-1]]
+    if not ends:
+        raise AssertionError('The LLK zones attach hunk has no %r' % LLK_ZONES_HUNK[-1])
+    code = tuple(value.strip() for value in lines[starts[0]:ends[0] + 1] if not value.strip().startswith('#'))
+    if code != LLK_ZONES_HUNK:
+        raise AssertionError('The LLK zones attach hunk holds more than its guard: %r' % (code,))
+    return lines[:starts[0]] + lines[ends[0] + 1:]
 
 
 def without_s2_memory(lines):

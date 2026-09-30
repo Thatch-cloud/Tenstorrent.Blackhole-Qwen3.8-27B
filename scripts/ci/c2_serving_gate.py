@@ -236,6 +236,7 @@ import math
 import os
 import random
 import re
+import shutil
 import signal
 import statistics
 import subprocess
@@ -245,6 +246,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import c2_serving_job  # noqa: E402
+import llk_profile_plan  # noqa: E402  (stdlib only: the LLK profiling plans, docs/llk-profiling-harness.md)
 import lever_n_m3native_gate as harness  # noqa: E402  (stdlib only; real_text_compare imports it too)
 import real_text_compare  # noqa: E402
 import parked_judge  # noqa: E402  (stdlib and real_text_compare only)
@@ -488,12 +490,13 @@ AGENT_ENV = ('HF_HOME=/models', 'HF_HUB_CACHE=/models', 'MESH_DEVICE=P300', 'QWE
              'DO_NOT_TRACK=1', 'VLLM_NO_USAGE_STATS=1', 'PYTHONDONTWRITEBYTECODE=1')
 
 
-def agent_shape(image, name, profile, devices, hub=HUB, env=()):
+def agent_shape(image, name, profile, devices, hub=HUB, env=(), llk_env=()):
     """`docker run` of the node agent's container, up to the image: read-only root, the agent's tmpfs
     set, 8 CPUs, 80g, 4g shm, the two cards in the order given, hugepages, SYS_NICE, the hub at
     /models, the environment the platform adds (AGENT_ENV), and QWEN_C2_SERVING=1 with the profile.
     `env` (an S2 arm's gate-only knobs, ARM_ENV_NAMES) follows as more -e pairs; empty, the argv is
-    exactly the agent's."""
+    exactly the agent's. `llk_env` (an llk-* arm's profiler variables, llk_profile_plan.ARM_ENV_NAMES) comes
+    last; no other arm can carry one."""
     arguments = ['docker', 'run', '--rm', '--name', name, '--read-only']
     for tmpfs in AGENT_TMPFS:
         arguments += ['--tmpfs', tmpfs]
@@ -508,19 +511,30 @@ def agent_shape(image, name, profile, devices, hub=HUB, env=()):
             raise PlanError('%s is not an environment an arm may add (%s): a profile\'s keys are the profile\'s'
                             % (name_, ', '.join(sorted(ARM_ENV_NAMES))))
         arguments += ['-e', '%s=%s' % (name_, value)]
+    try:
+        llk_profile_plan.check_env(llk_env)
+    except llk_profile_plan.LlkPlanError as error:
+        raise PlanError(str(error))
+    for name_, value in llk_env:
+        arguments += ['-e', '%s=%s' % (name_, value)]
     return arguments
 
 
-def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HUB, env=(), salt=None,
+def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HUB, env=(), llk=None, salt=None,
              salt_key_path=None):
     """The whole `docker run` of one arm: the agent's shape, the harness mounted read-only at /bench,
-    the arm's results directory, and the harness as the entrypoint. `salt` (the module docstring's SALTED
-    ARMS): fresh mounts the gate's salt key and points the contract at it, and both modes tell the harness."""
-    arguments = agent_shape(image, name, profile, devices, hub, env)
+    the arm's results directory, and the harness as the entrypoint. `llk` (an llk-* arm prepared by
+    llk_profile_plan) adds its profiler variables, its mounts (the profile directory, the instrumented kernel
+    copies read-only over their paths) and the tracy wrapper around the harness; None, the argv is unchanged.
+    `salt` (the module docstring's SALTED ARMS): fresh mounts the gate's salt key and points the contract at it,
+    and both modes tell the harness."""
+    llk_env, llk_mounts, entry = llk_profile_plan.docker_additions(llk) if llk else ((), [], None)
+    arguments = agent_shape(image, name, profile, devices, hub, env, llk_env=llk_env)
     for script in BENCH_SCRIPTS:
         arguments += ['--mount', 'type=bind,src=%s,dst=/bench/%s,readonly' % (
             os.path.join(checkout, 'scripts', 'ci', script), script)]
     arguments += ['--mount', 'type=bind,src=%s,dst=%s' % (arm_dir, RESULTS_IN_CONTAINER)]
+    arguments += llk_mounts
     salted = []
     if salt == 'fresh':
         if not salt_key_path:
@@ -530,8 +544,8 @@ def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HU
         salted = ['--cache-salt', 'fresh', '--cache-salt-key', SALT_KEY_MOUNT]
     elif salt == 'none':
         salted = ['--cache-salt', 'none']
-    return (arguments + ['--entrypoint', 'python3', image, '-B', '/bench/lever_n_m3native_gate.py'] + list(gate_args)
-            + salted)
+    return (arguments + ['--entrypoint', 'python3', image] + (entry or ['-B']) + ['/bench/lever_n_m3native_gate.py']
+            + list(gate_args) + salted)
 
 
 def profile_limits(profiles, name):
@@ -750,7 +764,9 @@ def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.D
     Refuses (PlanError) what the profile cannot serve as asked; `lengths` None is the default ladder,
     whose rungs past the profile's largest admitted prompt are lowered to it (noted in `notes`). An S2
     plan's arms, and the S1 plans' on an S2 profile, are Arms (s2: pairs, families, audits); on any
-    other profile the S1 plans' arms are exactly what they were."""
+    other profile the S1 plans' arms are exactly what they were. An llk-* plan's arm is llk_profile_plan's."""
+    if plan in llk_profile_plan.PLANS:
+        return llk_profile_plan.plan_arms(plan, profile, profiles, sys.modules[__name__])
     if plan in S2_PLANS:
         return s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2 or {})
     if plan in PARKED_PLANS:
@@ -1659,6 +1675,15 @@ class Runner(object):
         # What an arm could not judge (a judged arm whose kernel cache could not be counted): run_plan turns a
         # plan that would pass into NOT_EXERCISED with these.
         self.unjudged = []
+        # LLK arms (llk_profile_plan): how the image's kernel sources are read and the profile tree handed back -
+        # docker for a real run, nothing for a fake executor - and which arm kinds the image cannot run.
+        self.llk_reader = llk_profile_plan.read_image if execute is None else llk_profile_plan.empty_reader
+        self.llk_handback = llk_profile_plan.docker_handback if execute is None else (lambda image, path: 0)
+        self.llk_unsupported = {}
+        # The results disk and the stop the disk guard uses (a fake executor: an empty disk, no stop).
+        self.llk_disk_usage = shutil.disk_usage if execute is None else (lambda path: (1 << 50, 0, 1 << 50))
+        self.llk_stop = llk_profile_plan.docker_stop if execute is None else (lambda name: 0)
+        self.llk_guard_seconds = llk_profile_plan.GUARD_SECONDS
 
     def any_request_for(self, profile):
         if self.profiles is not None and profile in self.profiles['profiles']:
@@ -1714,7 +1739,8 @@ class Runner(object):
         finally:
             remove_container(name)
 
-    def run(self, arm, gate_args, timeout, profile=None, env=(), judged=False, measure=False, parked=None, quick=None):
+    def run(self, arm, gate_args, timeout, profile=None, env=(), judged=False, measure=False, parked=None, quick=None,
+            llk=None):
         """One arm on --profile, or (an S2 arm) on `profile` with `env` added; `judged`: its kernel-cache
         growth is a problem (judges()); `measure`: the host reads its four-live rounds from the whole server
         log (report['c2_gate_live4']: both arms of a G3 pair read the same way). `parked` (a parked plan's arms, and the warm
@@ -1735,7 +1761,7 @@ class Runner(object):
             return None
         name = CONTAINER_PREFIX + arm
         arguments = gate_run(self.image, name, profile, self.devices, self.checkout, arm_dir, gate_args, self.hub,
-                             env=env, salt=self.salt, salt_key_path=self.salt_key_path)
+                             env=env, llk=llk, salt=self.salt, salt_key_path=self.salt_key_path)
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         self.log('[C2-GATE] arm %s: %s%s%s' % (arm, ' '.join(gate_args),
@@ -1743,7 +1769,23 @@ class Runner(object):
                                                 ''.join(' [-e %s=%s]' % pair for pair in env)))
         cache_before = self.count_cache()
         started = time.time()
-        status = self.execute(arguments, os.path.join(arm_dir, 'gate-stdout.log'), timeout, name)
+        handed = None
+        guard = None
+        if llk is not None and llk.get('kind') != 'twin' and not llk.get('skip'):
+            # A profiled arm's raw device log is tens of GB: stopped before it can fill the rig's disk.
+            guard = llk_profile_plan.DiskGuard(os.path.join(arm_dir, llk_profile_plan.PROFILE_SUBDIR),
+                                               llk_profile_plan.PROFILE_CAP[llk['phase']],
+                                               lambda: self.llk_stop(name), usage=self.llk_disk_usage,
+                                               interval=self.llk_guard_seconds, log=self.log).start()
+        try:
+            status = self.execute(arguments, os.path.join(arm_dir, 'gate-stdout.log'), timeout, name)
+        finally:
+            if guard is not None:
+                guard.finish()
+            if llk is not None:
+                # However the arm ended (a SIGTERM included): the profiler's root-owned tree goes back to this user
+                # before anything else, or the runner's next checkout dies on EACCES.
+                handed = llk_profile_plan.handback_arm(self.image, arm_dir, llk, self.llk_handback)
         seconds = round(time.time() - started, 1)
         cache_after = self.count_cache()
         cache = dict(before=cache_before, after=cache_after, judged=judged,
@@ -1818,6 +1860,16 @@ class Runner(object):
         self.arms[arm] = dict(exit=status, seconds=seconds, launched=line, gate_passed=(report or {}).get('gate_passed'),
                               fatal=(report or {}).get('fatal'), infra=infra,
                               any_request_engines=engines[:ANY_REQUEST_LINES_KEPT], quarantine_consumers=consumers)
+        if llk is not None:
+            try:
+                summary = llk_profile_plan.finish_arm(self.image, arm_dir, llk, console=server_log(arm_dir) or '',
+                                                      twin=llk_profile_plan.twin_report_of(self.results, arm),
+                                                      profiled=report, log=self.log)
+            except Exception as error:   # the analysis is attribution: it never takes the gate down
+                summary = dict(kind=llk['kind'], level=llk.get('level'), problem='analysis failed: %r' % (error,))
+            summary['handback'] = handed
+            summary['disk_guard'] = guard.tripped if guard is not None else None
+            self.arms[arm].update(llk=summary, llk_env=[list(pair) for pair in llk.get('env') or ()])
         if profile != self.profile or env or cache['before'] is not None:
             # S2 arms (and any counted cache): what served and what the kernel cache did.
             self.arms[arm].update(profile=profile, env=['%s=%s' % pair for pair in env], kernel_cache=cache)
@@ -1932,16 +1984,55 @@ def spec_profile(runner, spec):
     return getattr(spec, 'profile', None) or runner.profile
 
 
-def run_arm(runner, plan, spec, suffix=''):
+def run_arm(runner, plan, spec, suffix='', llk=None):
     """Run one arm - a plain (name, args, timeout) or an Arm - with its profile, environment and kernel-cache
-    judgement (Runner.judges); `suffix` names a re-run ('-rerun')."""
+    judgement (Runner.judges); `suffix` names a re-run ('-rerun'); `llk` an llk-* arm's prepared additions."""
     name, args, timeout = spec
     profile = spec_profile(runner, spec)
+    extra = {} if llk is None else dict(llk=llk)
     return runner.run(name + suffix, args, timeout, profile=getattr(spec, 'profile', None), env=getattr(spec, 'env', ()),
                       judged=runner.judges(plan, profile, getattr(spec, 'judged', True)),
                       measure=plan in S2_PLANS or plan in PARKED_PLANS or plan in QUICKWIN_PLANS,
                       parked=(getattr(spec, 'extra', None) or {}).get('parked'),
-                      quick=(getattr(spec, 'extra', None) or {}).get('quick'))
+                      quick=(getattr(spec, 'extra', None) or {}).get('quick'), **extra)
+
+
+def run_llk_plan(plan, runner, arms):
+    """One llk-* plan (llk_profile_plan): its arm prepared from the image's own kernel sources, run, analysed
+    and judged. Attribution only. Without starting a container, NOT_EXERCISED: a kind the image cannot run (once
+    the counters read UNSUPPORTED the other phase's counter arm is skipped too), a window past the marker budget,
+    a results disk that cannot take the raw log, and every profiled arm after one whose server never came up
+    (each compiles cold: the next would wait out the same allowance)."""
+    spec, = arms
+    llk = spec.extra['llk']
+    profiled = llk['kind'] != 'twin'
+    skipped = runner.llk_unsupported.get(llk['kind']) or (profiled and runner.llk_unsupported.get('profiled'))
+    if skipped:
+        return dict(verdict='NOT_EXERCISED', reason='skipped: %s' % skipped, lines=[])
+    if profiled:
+        full = llk_profile_plan.disk_problem(runner.results, llk_profile_plan.DISK_NEED[llk['phase']],
+                                             runner.llk_disk_usage)
+        if full:
+            return dict(verdict='NOT_EXERCISED', reason=full, lines=[])
+    arm_dir = os.path.join(runner.results, spec[0])
+    os.makedirs(arm_dir, exist_ok=True)
+    os.chmod(arm_dir, 0o777)
+    try:
+        prepared = llk_profile_plan.prepare_arm(runner.image, arm_dir, llk, runner.llk_reader, runner.log)
+    except Exception as error:
+        return dict(verdict='NOT_EXERCISED', reason='the arm could not be prepared from the image: %s' % error, lines=[])
+    if prepared.get('skip'):
+        if llk['kind'] == 'counters' and prepared.get('skip_scope') == 'image':
+            runner.llk_unsupported['counters'] = prepared['skip']
+        return dict(verdict='NOT_EXERCISED', reason=prepared['skip'], lines=[])
+    report = run_arm(runner, plan, spec, llk=prepared)
+    result = llk_profile_plan.verdict(plan, report, runner.arms.get(spec[0]),
+                                      llk_profile_plan.twin_report_of(runner.results, plan))
+    if llk['kind'] == 'counters' and 'UNSUPPORTED' in (result.get('reason') or ''):
+        runner.llk_unsupported['counters'] = result['reason']
+    if profiled and llk_profile_plan.never_ready(report):
+        runner.llk_unsupported['profiled'] = llk_profile_plan.never_ready(report)
+    return result
 
 
 def s2_of(report):
@@ -3341,6 +3432,8 @@ def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2
         runner.log('[C2-GATE] note: %s' % note)
     if plan in S2_PLANS:
         result = run_s2_plan(plan, runner, profiles, reference, arms)
+    elif plan in llk_profile_plan.PLANS:
+        result = run_llk_plan(plan, runner, arms)
     elif plan in PARKED_PLANS:
         result = run_parked_plan(plan, runner, profiles, arms)
     elif plan in QUICKWIN_PLANS:
@@ -3591,7 +3684,8 @@ def write_records(results, plan, result):
             for where, record in found if record.get('verdict') in ('NOT_COMPARABLE', 'UNSTABLE')]
 
 
-def main(argv=None, execute=None, devices=None, log=print, containers=None, corpus=None, cache_entries=None):
+def main(argv=None, execute=None, devices=None, log=print, containers=None, corpus=None, cache_entries=None,
+         llk_reader=None, llk_handback=None, llk_disk_usage=None):
     options = build_parser().parse_args(argv)
     plans = c2_serving_job.split_list(options.plan)
     unknown = sorted(set(plans) - set(c2_serving_job.ALL_GATE_PLANS))
@@ -3647,12 +3741,15 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
         for plan in plans:
             for spec in arms_of[plan]:
                 arm, args, timeout = spec
+                llk = (getattr(spec, 'extra', None) or {}).get('llk')
                 log(json.dumps(dict(arm=arm, timeout=timeout, docker=gate_run(
                     options.image, CONTAINER_PREFIX + arm, getattr(spec, 'profile', None) or options.profile,
                     devices or (['<M>', '<A>'] if options.cards == 'pair' else
                                 ['<card %d>' % n for n in range(QUAD_BOARDS)]),
                     options.checkout, os.path.join(options.results, arm), args, options.hub,
-                    env=getattr(spec, 'env', ()), salt=options.salt, salt_key_path=salt_key_path))))
+                    env=getattr(spec, 'env', ()),
+                    llk=llk_profile_plan.planned(os.path.join(options.results, arm), llk) if llk else None,
+                    salt=options.salt, salt_key_path=salt_key_path))))
         return 0
     cache_dir = None
     s2_run = (any(plan in S2_PLANS or plan in PARKED_PLANS or plan in QUICKWIN_PLANS for plan in plans)
@@ -3671,6 +3768,12 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     any_request=any_request_profile(profiles, options.profile), profiles=profiles,
                     cache_entries=cache_entries, jit=options.jit, policy=options.policy,
                     decision=options.policy_decision, salt=options.salt, salt_key_path=salt_key_path)
+    if llk_reader is not None:
+        runner.llk_reader = llk_reader
+    if llk_handback is not None:
+        runner.llk_handback = llk_handback
+    if llk_disk_usage is not None:
+        runner.llk_disk_usage = llk_disk_usage
     context, ceiling, room = profile_limits(profiles, options.profile)
     summary = dict(image=options.image, profile=options.profile, plans=plans, context=context,
                    output_ceiling=ceiling, largest_prompt=room, worst_case_seconds=worst_case,
