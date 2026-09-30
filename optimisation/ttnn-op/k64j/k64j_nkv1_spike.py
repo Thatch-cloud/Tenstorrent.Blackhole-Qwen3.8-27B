@@ -324,6 +324,12 @@ def timed(ttnn, device, call, iterations):
     return dict(median_ms=statistics.median(samples), best_ms=samples[0], worst_ms=samples[-1], samples=len(samples))
 
 
+def forget(handles, tensor):
+    """Drop `tensor` from `handles` by identity. list.remove compares with ==, which ttnn.Tensor overrides with a
+    device op (ttnn.eq) that throws on a deallocated tensor (run 36697129380)."""
+    handles[:] = [handle for handle in handles if handle is not tensor]
+
+
 def run_geometry(ttnn, torch, device, args, report, name, seed, deadline):
     rows, batch, flags = GEOMETRIES[name]
     share = bool(flags & SHARE)
@@ -369,11 +375,11 @@ def run_geometry(ttnn, torch, device, args, report, name, seed, deadline):
                     report['numerics'].append(dict(label=label, **numerics(torch, legacy, got)))
                 for tensor in (words, narrow, wide, query):
                     ttnn.deallocate(tensor)
-                    handles.remove(tensor)
+                    forget(handles, tensor)
                 write(args, report)
             for tensor in (pages, reference_pages):
                 ttnn.deallocate(tensor)
-                handles.remove(tensor)
+                forget(handles, tensor)
         if args.iterations and seed == args.seeds[0]:
             for extent in (min(args.extents), max(args.extents)):
                 positions = bundle_positions(extent, args.starts[-1], batch, rows)
