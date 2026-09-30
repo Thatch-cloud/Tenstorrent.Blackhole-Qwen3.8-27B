@@ -1895,6 +1895,597 @@
       },
       "request_contract": false,
       "drop_batched_decode_mode": false
+    },
+    "c2-packed-tp4-speed-vglue": {
+      "description": "GATE ONLY (the vglue window's timed arm): c2-packed-tp4-speed with all five verify-glue levers on. The levers are byte-identical replacements of ops the packed 64-row verify and the GDN commit already run (tp4/vglue, scripts/ci/tp4_vglue.py): C1a the eight-lane pipelined commit DMA, V4a the shard maximum by gather at the argmax id, V2 the GDN split and merge as one half-tile DMA launch each, V1 one conv-gates launch per layer for all four users (needs V2), V3a the attention fold-in and fold-out as one launch each. Every other flag and the engine are c2-packed-tp4-speed's. The tokens are held against c2-packed-tp4-gate-vglue's (the audited arm) and, for the S3a matrix, against the solo engine. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-gate-vglue": {
+      "description": "GATE ONLY (the vglue window's audited arm): c2-packed-tp4-gate with all five verify-glue levers on and QWEN_FAST_TP4_VGLUE_AUDIT=1: beside each lever's launch the served path's output is built and held, and every audited layer is compared bit for bit after the replay (pieces, merged output, per-user conv / beta / g / z and advanced windows, each on every chip; the sampler's gathered maxima against ttnn.max). The levers are byte-identical replacements of ops the packed 64-row verify and the GDN commit already run (tp4/vglue, scripts/ci/tp4_vglue.py): C1a the eight-lane pipelined commit DMA, V4a the shard maximum by gather at the argmax id, V2 the GDN split and merge as one half-tile DMA launch each, V1 one conv-gates launch per layer for all four users (needs V2), V3a the attention fold-in and fold-out as one launch each. A correctness arm, never a timed one. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_TP4_VGLUE_AUDIT": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-vglue-c1a": {
+      "description": "GATE ONLY (the vglue window's A/B arm): c2-packed-tp4-speed with the pipelined GDN commit only (C1a) on and nothing else different, to isolate what that lever saves against c2-packed-tp4-speed. The levers are byte-identical replacements of ops the packed 64-row verify and the GDN commit already run (tp4/vglue, scripts/ci/tp4_vglue.py): C1a the eight-lane pipelined commit DMA, V4a the shard maximum by gather at the argmax id, V2 the GDN split and merge as one half-tile DMA launch each, V1 one conv-gates launch per layer for all four users (needs V2), V3a the attention fold-in and fold-out as one launch each. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-vglue-v4a": {
+      "description": "GATE ONLY (the vglue window's A/B arm): c2-packed-tp4-speed with the gathered shard maximum only (V4a) on and nothing else different, to isolate what that lever saves against c2-packed-tp4-speed. The levers are byte-identical replacements of ops the packed 64-row verify and the GDN commit already run (tp4/vglue, scripts/ci/tp4_vglue.py): C1a the eight-lane pipelined commit DMA, V4a the shard maximum by gather at the argmax id, V2 the GDN split and merge as one half-tile DMA launch each, V1 one conv-gates launch per layer for all four users (needs V2), V3a the attention fold-in and fold-out as one launch each. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-vglue-v2": {
+      "description": "GATE ONLY (the vglue window's A/B arm): c2-packed-tp4-speed with the GDN split and merge DMA only (V2) on and nothing else different, to isolate what that lever saves against c2-packed-tp4-speed. The levers are byte-identical replacements of ops the packed 64-row verify and the GDN commit already run (tp4/vglue, scripts/ci/tp4_vglue.py): C1a the eight-lane pipelined commit DMA, V4a the shard maximum by gather at the argmax id, V2 the GDN split and merge as one half-tile DMA launch each, V1 one conv-gates launch per layer for all four users (needs V2), V3a the attention fold-in and fold-out as one launch each. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_TP4_GDN_GLUE": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-vglue-v1": {
+      "description": "GATE ONLY (the vglue window's A/B arm): c2-packed-tp4-speed with V2 and the block conv-gates launch (V1 needs V2) on and nothing else different, to isolate what that lever saves against c2-packed-tp4-speed. The levers are byte-identical replacements of ops the packed 64-row verify and the GDN commit already run (tp4/vglue, scripts/ci/tp4_vglue.py): C1a the eight-lane pipelined commit DMA, V4a the shard maximum by gather at the argmax id, V2 the GDN split and merge as one half-tile DMA launch each, V1 one conv-gates launch per layer for all four users (needs V2), V3a the attention fold-in and fold-out as one launch each. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-vglue-v3a": {
+      "description": "GATE ONLY (the vglue window's A/B arm): c2-packed-tp4-speed with the attention block fold only (V3a) on and nothing else different, to isolate what that lever saves against c2-packed-tp4-speed. The levers are byte-identical replacements of ops the packed 64-row verify and the GDN commit already run (tp4/vglue, scripts/ci/tp4_vglue.py): C1a the eight-lane pipelined commit DMA, V4a the shard maximum by gather at the argmax id, V2 the GDN split and merge as one half-tile DMA launch each, V1 one conv-gates launch per layer for all four users (needs V2), V3a the attention fold-in and fold-out as one launch each. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
     }
   }
 }
