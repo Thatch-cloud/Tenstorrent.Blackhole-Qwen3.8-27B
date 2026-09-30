@@ -117,6 +117,24 @@ class Templates(unittest.TestCase):
                          {'G3-stack-gate-steady': 'tp4-stack-1', 'R3-stack-speed-d1-sequence': 'tp4-stack-1',
                           'R2-speed-gate-d1-sequence': 'tp4-speed-1'})
 
+    def test_the_isolation_jobs_are_soft(self):
+        # Their images allocate the scratch at the first prefill, so this checkout's ledger rule fails them whatever the
+        # text: a 'stop' there would halt a chain on a verdict the exit status does not carry.
+        for name, kind, *_ in window.read_order(self.folder)[:3]:
+            self.assertEqual(kind, 'soft', name)
+
+    def test_the_trigger_is_verified_under_the_exactness_policy(self):
+        # V2's matrix admits all four users before round 1 and its solo arm serves one at a time, so no prefill there follows
+        # a packed replay; the staggered plan's later arrivals prefill after padded packed rounds, judged against solo.
+        rows = {row[0]: row for row in window.read_order(self.folder)}
+        values, _ = window.parsed('V3-fix-staggered-trigger', self.folder)
+        self.assertEqual((values['C2_GATE_PLAN'], values['C2_IMAGE_TAG']), ('staggered', 'tp4-stackfix-1'))
+        self.assertEqual(rows['V3-fix-staggered-trigger'][2], 'tp4-stackfix-1')
+        self.assertEqual(window.parsed('V2-fix-s3a-matrix-pairs', self.folder)[0]['C2_GATE_PLAN'], 'matrix')
+        order = [row[0] for row in window.read_order(self.folder)]
+        self.assertLess(order.index('V0-build-stackfix'), order.index('V3-fix-staggered-trigger'))
+        self.assertNotIn('exercised by the matrix', window.text_of('V2-fix-s3a-matrix-pairs', self.folder))
+
 
 if __name__ == '__main__':
     unittest.main()
