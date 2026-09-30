@@ -13,7 +13,7 @@ from draft_operation_audit import audit_operations
 from draft_selector import select_active_candidates
 from draft_shared_head import shared_head_candidates, merge_chunk_candidates
 from feature_collective import gather_add_projection
-from feature_projection import concatenate_local_features, projection_shards
+from feature_projection_tp import concatenate_local_features, projection_shards
 from gdn_multitoken_conv import addresses, release_owned
 from mesh_link_policy import fast_ccl_topology, projection_links
 import tp_shapes
@@ -529,7 +529,7 @@ class DFlashDevice:
 
         window = prefill_window(position)
         features = tuple(features)
-        if (model.num_devices != 2 or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
+        if (model.num_devices != tp_shapes.chip_count() or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
                 or len(layers) != 5 or type(feature_start) is not int or feature_start != window['start']
                 or len(features) != 5 or any(len(value.shape) != 4 or value.shape[2] != window['rows'] for value in features)
                 or type(block_rows) is not int or block_rows not in (8, 16, 32) or type(proposal_capture) is not bool
@@ -542,7 +542,7 @@ class DFlashDevice:
                     (not proposal_capture or not cache_history or block_rows not in (8, 16) or live_query_qk or cache_projection_capture))
                 or (buffer_pool is not None and not callable(getattr(buffer_pool, 'acquire', None)))
                 or (shared_weights is not None and not callable(getattr(shared_weights, 'lend', None)))):
-            raise ValueError('Pinned TP2 target, all five DFlash2 layers and bounded prefill required')
+            raise ValueError('Pinned TP%d target, all five DFlash2 layers and bounded prefill required' % tp_shapes.chip_count())
         self.operations, self.model, self.mesh, self.collectives = operations, model, model.mesh_device, collectives
         self.position, self.history_rows = position, window['rows']
         self.block_rows, self.max_drafts = block_rows, block_rows - 1
@@ -610,7 +610,11 @@ class DFlashDevice:
                 self.history, self.spare_history = self.pool_slot.history, self.pool_slot.spare_history
             operations.synchronize_device(self.mesh)
             if cache_history:
-                from draft_kv_history import DraftKVHistory
+                if tp_shapes.chip_count() == tp_shapes.PAIR:
+                    from draft_kv_history import DraftKVHistory
+                else:
+                    # the bundle's class is text-patched at attach and carries the pair's 4 KV heads; four cards' 2 are a sibling
+                    from draft_kv_history_tp import DraftKVHistory
 
                 # Pooled, the cache adopts the slot's K/V banks rather than allocating
                 # its own: run 35481466425 found kv_history[0].k of the other request
@@ -670,7 +674,8 @@ class DFlashDevice:
         operations = self.operations
         if (len(features) != 5 or type(count) is not int or count < 1 or type(offset) is not int or offset < 0
                 or any(len(value.shape) != 4 or tuple(value.shape)[:2] != (1, 1)
-                    or value.shape[2] < offset + count or value.shape[3] != 2560 or value.dtype != operations.bfloat16
+                    or value.shape[2] < offset + count or value.shape[3] != tp_shapes.active().draft_taps
+                    or value.dtype != operations.bfloat16
                     for value in features)):
             raise ValueError('Five complete ordered BF16 local feature taps required')
         # QWEN_FAST_PIPELINED_PUBLISH (dflash_pipelined_publish.install_merge_release):
@@ -693,7 +698,7 @@ class DFlashDevice:
                 rows = min(32, count - start)
                 parts = []
                 for value in features:
-                    sliced = retain(operations.slice(value, (0, 0, offset + start, 0), (1, 1, offset + start + rows, 2560)))
+                    sliced = retain(operations.slice(value, (0, 0, offset + start, 0), (1, 1, offset + start + rows, tp_shapes.active().draft_taps)))
                     if rows < 32:
                         sliced = retain(operations.pad(sliced, [(0, 0), (0, 0), (0, 32 - rows), (0, 0)], 0.0))
                     parts.append(sliced)
@@ -993,7 +998,7 @@ class DFlashDevice:
 
         stage('borrowed-embedding')
         local = retain(self.model.embd(identifiers, memory_config=operations.DRAM_MEMORY_CONFIG))
-        local = retain(operations.reshape(local, (1, 1, rows, 2560)))
+        local = retain(operations.reshape(local, (1, 1, rows, tp_shapes.active().draft_embedding)))
         stage('embedding-all-gather')
         hidden = retain(operations.experimental.all_gather_async(local, persistent_output_buffer=None, dim=3,
             multi_device_global_semaphore=self.collectives.get_and_cycle_ag_semaphore_handles(),
@@ -1064,9 +1069,9 @@ class DFlashDevice:
         for chunk in outputs.chunks:
             values = operations.get_device_tensors(chunk['values'])
             indices = operations.get_device_tensors(chunk['indices'])
-            if len(values) != 2 or len(indices) != 2:
-                raise AssertionError('Both learned head shards required')
-            for chip in range(2):
+            if len(values) != tp_shapes.chip_count() or len(indices) != tp_shapes.chip_count():
+                raise AssertionError('%s learned head shards required' % tp_shapes.all_chips())
+            for chip in range(tp_shapes.chip_count()):
                 host_chunks.append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
                     values=operations.to_torch(values[chip]).float().reshape(self.block_rows, 16),
                     indices=operations.to_torch(indices[chip]).long().reshape(self.block_rows, 16)))
@@ -1078,15 +1083,18 @@ class DFlashDevice:
             report_rejected_readback(self, outputs, host_chunks, failure)
             raise
         projected_parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
-        if len(projected_parts) != 2 or not torch.equal(*projected_parts):
+        if len(projected_parts) != tp_shapes.chip_count() or not all(torch.equal(projected_parts[0], other) for other in projected_parts[1:]):
             # Runs 35478872085 and 35479238722 both died here on the third block of
             # two users, and neither the per-request trace nor per-request
             # collectives explained it. Report the SIZE and SHAPE of the divergence:
             # a tiny difference is fidelity, a large one is memory, and all-finite
             # versus not separates a bad read from a bad write.
             detail = 'shards=%d' % len(projected_parts)
-            if len(projected_parts) == 2:
-                left, right = (value.float() for value in projected_parts)
+            if len(projected_parts) == tp_shapes.chip_count():
+                # chip 0 against the first chip that differs from it (chip 1 at the pair)
+                other = next((part for part in projected_parts[1:] if not torch.equal(projected_parts[0], part)),
+                             projected_parts[1])
+                left, right = projected_parts[0].float(), other.float()
                 difference = (left - right).abs()
                 detail = ('call=%d position=%d rows=%d max_abs=%g mean_abs=%g '
                           'differing=%d of %d finite=%s/%s'

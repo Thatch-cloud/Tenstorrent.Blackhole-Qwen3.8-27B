@@ -2,6 +2,7 @@
 
 import os
 from gdn_multitoken_conv import addresses
+import tp_shapes
 from contextlib import contextmanager
 import operator
 from model_batch import instance_overrides
@@ -134,20 +135,21 @@ def snapshot_prefill_tail(operations, value, position, *, checks=None, chunk_sta
     valid_rows = position if valid_rows is None else valid_rows
     window = chunk_window(position, chunk_start, valid_rows)
     if (not window['rows'] or len(value.shape) != 4 or tuple(value.shape)[:2] != (1, 1) or value.shape[2] < valid_rows
-            or value.shape[3] != 2560 or value.dtype != operations.bfloat16):
-        raise ValueError('Complete TP2 BF16 prefill feature output required; chunks cannot stand in for the full context')
+            or value.shape[3] != tp_shapes.active().draft_taps or value.dtype != operations.bfloat16):
+        raise ValueError('Complete TP%d BF16 prefill feature output required; chunks cannot stand in for the full context'
+                         % tp_shapes.chip_count())
     sliced = output = None
     try:
         sliced = operations.slice(value, (0, 0, window['start'] - chunk_start, 0),
-            (1, 1, window['end'] - chunk_start, 2560))
+            (1, 1, window['end'] - chunk_start, tp_shapes.active().draft_taps))
         output = operations.clone(sliced, memory_config=operations.DRAM_MEMORY_CONFIG)
         if checks is not None:
             import torch
 
             originals = operations.get_device_tensors(value)
             snapshots = operations.get_device_tensors(output)
-            if len(originals) != 2 or len(snapshots) != 2:
-                raise AssertionError('Both prefill feature shards required')
+            if len(originals) != tp_shapes.chip_count() or len(snapshots) != tp_shapes.chip_count():
+                raise AssertionError('%s prefill feature shards required' % tp_shapes.all_chips())
             for chip, (original, snapshot) in enumerate(zip(originals, snapshots, strict=True)):
                 expected = operations.to_torch(original)[..., window['start'] - chunk_start:window['end'] - chunk_start, :].contiguous()
                 actual = operations.to_torch(snapshot).contiguous()

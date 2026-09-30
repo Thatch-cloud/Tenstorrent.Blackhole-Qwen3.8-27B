@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from draft_convolution import validate_boundaries, validate_shapes
+import tp_shapes
 
 
 def seam_mask(boundaries, rows):
@@ -50,13 +51,14 @@ def fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries=Non
     rows = validate_shapes(hidden, dynamic, base)
     seams = seam_mask(boundaries, rows)
     tensors = [hidden, *dynamic, *base]
-    if list(mesh.shape) != [1, 2] or any(value.dtype != operations.bfloat16
+    chips = tp_shapes.chip_count()
+    if list(mesh.shape) != [1, chips] or any(value.dtype != operations.bfloat16
             or value.layout != operations.TILE_LAYOUT or value.memory_config() != operations.DRAM_MEMORY_CONFIG
             for value in tensors):
         raise ValueError('Two-chip interleaved DRAM BF16 convolution operands required')
     parts = [operations.get_device_tensors(value) for value in tensors]
-    if any(len(shards) != 2 for shards in parts):
-        raise ValueError('Both operand shards required')
+    if any(len(shards) != chips for shards in parts):
+        raise ValueError('%s operand shards required' % tp_shapes.all_chips())
     output = operations.empty(tuple(hidden.shape), dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
         device=mesh, memory_config=operations.DRAM_MEMORY_CONFIG)
     tensors.append(output)
@@ -71,7 +73,7 @@ def fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries=Non
             math_fidelity=operations.MathFidelity.HiFi4, fp32_dest_acc_en=True, math_approx_mode=False))
     program = operations.MeshProgramDescriptor()
     try:
-        for chip in range(2):
+        for chip in range(chips):
             local = [shards[chip] for shards in parts]
             if local[-1].buffer_address() in {value.buffer_address() for value in local[:-1]}:
                 raise ValueError('Convolution output must not alias borrowed inputs')

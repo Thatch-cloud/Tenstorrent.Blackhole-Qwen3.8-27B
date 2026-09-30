@@ -55,6 +55,8 @@ TWINS = (
     ('attention_fold_dma', 'source_row', 'attention_fold_dma_tp', 'source_row'),
     ('ordered_cache', 'validate_shapes', 'ordered_cache_tp', 'validate_shapes'),
     ('ordered_cache', 'update', 'ordered_cache_tp', 'update'),
+    ('draft_attention', 'validate_attention', 'draft_attention_tp', 'validate_attention'),
+    ('draft_attention', 'draft_sdpa', 'draft_attention_tp', 'draft_sdpa'),
     ('gdn_records', 'retain_checkpoint_histories', 'gdn_records_tp', 'retain_checkpoint_histories'),
     ('gdn_commit_dma', 'validate_shapes', 'gdn_commit_dma_tp', 'validate_shapes'),
     ('gdn_commit_dma', 'prepare', 'gdn_commit_dma_tp', 'prepare'),

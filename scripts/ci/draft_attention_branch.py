@@ -5,6 +5,7 @@ from draft_convolution import grouped_causal_convolution
 from feature_collective import gather_add_projection
 from draft_head_layout import split_projected_heads, concatenate_query_heads
 from draft_mlp_branch import draft_projection_dtype
+import tp_shapes
 
 
 def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, precise_native=False, native_head_layout=False, block_rows=8, live_query_qk=False, native_proposal_attention=False):
@@ -38,7 +39,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
             mesh_mapper=operations.ShardTensorToMesh(mesh, dim=0) if sharded else operations.ReplicateTensorToMesh(mesh)))
 
     def projection(name, dimension):
-        parts = [part.T.contiguous() for part in weights[f'layers.0.self_attn.{name}_proj.weight'].chunk(2, dim=dimension)]
+        parts = [part.T.contiguous() for part in weights[f'layers.0.self_attn.{name}_proj.weight'].chunk(tp_shapes.chip_count(), dim=dimension)]
         return upload(torch.cat(parts, dim=0), sharded=True, dtype=draft_projection_dtype(operations))
 
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
@@ -155,7 +156,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             raise ValueError('Explicit native fixed-bucket historical K/V heads required')
         for cache, length in zip(caches, lengths):
             if (length not in (256, 512, 1024, 2048) or set(cache) != {'k', 'v'}
-                    or any(tuple(value.shape) != (1, 4, length, 128)
+                    or any(tuple(value.shape) != (1, tp_shapes.active().draft_kv_heads, length, 128)
                            or value.dtype != operations.bfloat16 for value in cache.values())):
                 raise ValueError('Explicit native fixed-bucket historical K/V heads required')
     kernel = parameters['kernel']
@@ -215,7 +216,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
                 # quad's name their pair's rows, so every segment is its pair's bytes.
                 start = part['source'].start if 'source' in part else 0
                 pieces.append(retain(operations.slice(live[name], (0, 0, start, 0),
-                    (1, 4, start + part['rows'], 128))))
+                    (1, tp_shapes.active().draft_kv_heads, start + part['rows'], 128))))
             heads[name] = retain(operations.concat(pieces, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
     else:
         context_input = retain(operations.slice(history, (0, 0, 0, 0), (1, 1, context, 5120)))
@@ -226,7 +227,8 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             parts.append(retain(operations.slice(zeros, (0, 0, 0, 0), (1, 1, key_rows - context - block_rows, 5120))))
         keys = watch('keys', retain(operations.concat(parts, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG)))
         heads, flat = {}, {}
-        for name, count in (('q', 16), ('k', 4), ('v', 4)):
+        found = tp_shapes.active()
+        for name, count in (('q', found.draft_heads), ('k', found.draft_kv_heads), ('v', found.draft_kv_heads)):
             rows = 32 if name == 'q' else key_rows
             projection = project(prepared if name == 'q' else keys, parameters['projections'][name], (8, 8), rows, 1)
             rounded = retain(operations.typecast(projection, operations.bfloat16))
@@ -284,7 +286,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         merged = (concatenate_query_heads if quad is None else quad.concatenate_query_heads)(operations, rounded, retain)
     else:
         transposed = retain(operations.transpose(rounded, 1, 2))
-        merged = retain(operations.reshape(transposed, (1, 1, 32, 2048)))
+        merged = retain(operations.reshape(transposed, (1, 1, 32, tp_shapes.active().draft_query)))
     partial = project(merged, parameters['output_projection'], (8, 10), proposal_rows, 2)
     gather = gather_add_projection if quad is None else quad.gather_add_projection
     reduced = watch('reduced', retain(gather(operations, mesh, collectives, partial, retain_temporaries=retain,

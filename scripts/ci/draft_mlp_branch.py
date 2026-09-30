@@ -1,7 +1,9 @@
 """Device-resident learned layer-zero MLP branch and independent stage checks."""
 
+import math
 import os
 
+import tp_shapes
 from draft_convolution import grouped_causal_convolution, convolution_reference
 from draft_mlp import split_mlp_weights, swiglu_device, swiglu_reference
 from feature_collective import gather_add_projection
@@ -19,6 +21,15 @@ def draft_projection_dtype(operations, environ=None):
     convolution kernels and bases, the selector). Read at each upload, never cached."""
     environ = os.environ if environ is None else environ
     return operations.bfloat8_b if environ.get(DRAFT_BF8_FLAG) == '1' else operations.bfloat16
+
+
+def gate_up_columns_of(parameters):
+    """Per-core output columns of the gate / up matmuls: ceil(shard tiles / 80 cores) from the prepared shards (4 at the
+    pair, 2 at four cards); without shards (a fixture) the width's own value."""
+    shards = parameters.get('shards')
+    if shards:
+        return math.ceil((shards[0][0].shape[1] // 32) / 80)
+    return 4 if tp_shapes.chip_count() == tp_shapes.PAIR else 2
 
 
 def prepare_mlp_branch(operations, mesh, weights, convolution, retain):
@@ -89,7 +100,10 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
         for offset in range(4)]
     bases = parameters['bases']
     prepared = watch('conv-in', retain(convolve(operations, mesh, normalized, dynamic[:2], bases[:2], fp32_intermediates=True, **ownership, **seams)))
-    projections = [project(prepared, parameters['device_projections'][index], (8, 10), 4)
+    # per-core output columns of the gate and up matmuls on the 8x10 grid: ceil(tiles / 80) - 4 at the pair (272 tiles),
+    # 2 at four cards (136); only which core owns each output tile moves, never the K reduction
+    gate_up_columns = gate_up_columns_of(parameters)
+    projections = [project(prepared, parameters['device_projections'][index], (8, 10), gate_up_columns)
         for index in range(2)]
     activation = swiglu_device(operations, *projections, retain)
     partial = project(activation, parameters['device_projections'][2], (8, 10), 2)

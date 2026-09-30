@@ -56,6 +56,12 @@ scripts/ci/serving_fast_policy.py  /experiment-scripts/ci/serving_fast_policy.py
 # Fast-path modules changed for serving.
 scripts/ci/packed_verifier.py
 scripts/ci/serving_request_factory.py
+# The sequential engine's verify readback at any width (verifier_engine.py is a critical bundle-inventory file and stays
+# untouched: its four-card class is a subclass) and the per-chip page / metadata / hidden-row bindings that counted two chips.
+scripts/ci/verifier_engine_tp.py
+scripts/ci/serving_page_binding.py
+scripts/ci/verifier_inputs.py
+scripts/ci/mtp_hidden_rows.py
 scripts/ci/pooled_attention_replay.py
 
 # The drafter skips its feature-history write through the prefill ramp (history_rows < 2048) under
@@ -221,6 +227,23 @@ scripts/ci/ordered_cache_tp.py
 scripts/ci/attention_head_fold.py
 scripts/ci/packed_ordered_cache.py
 scripts/ci/serving_cache_owner.py
+# The drafter at one 8-query / 2-KV-head shard per chip (S2T-07, host side): the fc feature projection over four 1,280-column
+# taps, the GQA validation and native SDPA call at the width's heads, the head layout, K/V projection, MLP shards and gate /
+# up partition, the folded pair SDPA at 8 / 2 heads, the sibling K/V history (the pair's class is text-patched at attach and
+# stays byte for byte), the prefill tail, the convolution's chip loops and the pool's draft banks. The pinned
+# feature_projection / draft_attention are untouched (frozen evidence); tp_addresses.install() rebinds draft_attention's
+# validate_attention / draft_sdpa for their unedited importers at QWEN_FAST_TP=4 only.
+scripts/ci/feature_projection_tp.py
+scripts/ci/draft_attention_tp.py
+scripts/ci/draft_kv_history_tp.py
+scripts/ci/draft_head_layout.py
+scripts/ci/draft_kv_projection.py
+scripts/ci/draft_attention_branch.py
+scripts/ci/draft_mlp.py
+scripts/ci/draft_mlp_branch.py
+scripts/ci/pair_row_exact.py
+scripts/ci/draft_convolution.py
+scripts/ci/draft_convolution_fused.py
 scripts/ci/gdn_commit_dma_tp.cpp
 scripts/ci/gdn_conv_prefix_copy_tp.cpp
 scripts/ci/gdn_conv_prefix_copy.cpp

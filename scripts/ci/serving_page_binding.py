@@ -1,6 +1,7 @@
 """Opt-in append-only vLLM page allocation binding for captured T16 verifier metadata."""
 
 from gdn_multitoken_conv import addresses
+import tp_shapes
 
 
 def validate_initial_capture_pages(pages, blocks, *, position, output_budget, rows=16):
@@ -60,8 +61,8 @@ class VerifierPageBinding:
             shape = tuple(tensor.shape)
             identity = tuple(addresses(self.operations, tensor))
             if (len(shape) != 2 or shape[0] < 1 or not 1 <= shape[1] <= self.capacity
-                    or len(identity) != 2):
-                raise ValueError('Bounded two-chip page metadata required')
+                    or len(identity) != tp_shapes.chip_count()):
+                raise ValueError('Bounded %s-chip page metadata required' % tp_shapes.count_word().lower())
             if identity in self.bindings and self.bindings[identity][1] != shape:
                 raise ValueError('Aliased page metadata has conflicting geometry')
             self.bindings[identity] = (tensor, shape)

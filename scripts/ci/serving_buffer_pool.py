@@ -153,13 +153,24 @@ from pooled_attention_replay import bundle_batches, family_capacities
 from gdn_multitoken_conv import addresses, release_owned
 from packed_shapes import BLOCK_ROWS as PACKED_BLOCK_WIDTHS
 from serving_fast_policy import NATIVE_GDN_SLOTS
+import tp_shapes
 
 
 HISTORY_SHAPE = (1, 1, 2048, 5120)
-KV_SHAPE = (1, 4, 2048, 128)
+KV_SHAPE = (1, 4, 2048, 128)     # the pair's; the pool reads the served width's (kv_shape())
 # The draft cache's zero query input (draft_kv_history.QUERY_SHAPE): the draft proposes
 # in 32-row passes whatever the verify block's width, so this is not a verify-block pin.
-QUERY_SHAPE = (1, 1, 32, 2048)
+QUERY_SHAPE = (1, 1, 32, 2048)   # the pair's (query_shape())
+
+
+def kv_shape():
+    """One draft K/V bank at the width this process serves at: 4 KV heads per chip at the pair, 2 at four cards."""
+    return (1, tp_shapes.active().draft_kv_heads, 2048, 128)
+
+
+def query_shape():
+    """The draft cache's zero query: 32 rows of the chip's query heads (2048 wide at the pair, 1024 at four cards)."""
+    return (1, 1, 32, tp_shapes.active().draft_query)
 FEATURE_WIDTH = 5120
 DRAFT_LAYERS = 5
 GDN_LAYERS = 48
@@ -708,11 +719,11 @@ class ServingBufferPool:
                 pair = [allocate(HISTORY_SHAPE) for name in ('history', 'spare_history')]
                 # The K/V banks DraftKVHistory keeps for the request's whole life - the
                 # buffer run 35481466425 found overwritten while the pooled pair survived.
-                kv = [{side: {head: allocate(KV_SHAPE) for head in HEADS} for side in SIDES}
+                kv = [{side: {head: allocate(kv_shape()) for head in HEADS} for side in SIDES}
                       for layer in range(DRAFT_LAYERS)]
                 query = verifier = None
                 if helpers is not None:
-                    query = allocate(QUERY_SHAPE)
+                    query = allocate(query_shape())
                     verifier = VerifierSlot(snapshot_set(), snapshot_set(), [bucket_slot(rows) for rows in bucket_rows])
                 self.slots.append(HistorySlot(self, index, *pair, kv, query, verifier, counted[0]))
             # The packed block's per-user replay page tables (PackedReplayTables): per shape,
@@ -891,16 +902,16 @@ class ServingBufferPool:
             slot.verifier.reset()
 
     def describe(self):
-        draft_bytes = 2 * tensor_bytes(HISTORY_SHAPE) + 4 * DRAFT_LAYERS * tensor_bytes(KV_SHAPE)
-        report = dict(users=self.users, shape=list(HISTORY_SHAPE), kv_shape=list(KV_SHAPE), layers=DRAFT_LAYERS,
+        draft_bytes = 2 * tensor_bytes(HISTORY_SHAPE) + 4 * DRAFT_LAYERS * tensor_bytes(kv_shape())
+        report = dict(users=self.users, shape=list(HISTORY_SHAPE), kv_shape=list(kv_shape()), layers=DRAFT_LAYERS,
             bytes_per_slot=draft_bytes, slots=[slot.describe() for slot in self.slots])
         if self.helpers is not None:
             slot_bytes = self.slots[0].bytes if self.slots else draft_bytes
             replay_bytes = sum(tensor_bytes(tuple(table.shape), 4) for bucket in self.slots[0].verifier.buckets
                                for table in bucket.replay_tables()) if self.slots else 0
             report.update(bytes_per_slot=slot_bytes, draft_bytes_per_slot=draft_bytes,
-                verifier_bytes_per_slot=slot_bytes - draft_bytes - tensor_bytes(QUERY_SHAPE),
-                query_bytes_per_slot=tensor_bytes(QUERY_SHAPE), query_shape=list(QUERY_SHAPE),
+                verifier_bytes_per_slot=slot_bytes - draft_bytes - tensor_bytes(query_shape()),
+                query_bytes_per_slot=tensor_bytes(query_shape()), query_shape=list(query_shape()),
                 page_width=self.page_width, bucket_rows=list(self.bucket_rows),
                 gdn_snapshot_sets=2 + len(self.bucket_rows), feature_taps=self.feature_taps,
                 mtp_hidden=self.mtp_hidden, replay_group_rows=self.replay_group_rows,

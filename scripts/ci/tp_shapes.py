@@ -96,6 +96,11 @@ def geometry(tp):
         draft_taps=divide(HIDDEN, tp, 'drafter feature taps'))
 
 
+def number_word(count):
+    """The word the fast path's refusal texts use for a small count (two, four, eight, sixteen)."""
+    return {2: 'two', 4: 'four', 8: 'eight', 16: 'sixteen'}[count]
+
+
 def active(environ=None):
     """The geometry of the width this process serves at (QWEN_FAST_TP, else the pair)."""
     return geometry(chip_count(environ))

@@ -256,7 +256,13 @@ def device_components():
     from dflash_proposal_trace import PreparedDFlashProposal
     from dflash_request_runtime import DFlashRequestRuntime
     from greedy_session import GreedySession
-    from verifier_engine import VerifierEngine
+    import tp_shapes
+
+    if tp_shapes.chip_count() == tp_shapes.PAIR:
+        from verifier_engine import VerifierEngine
+    else:
+        # the sequential engine's verify readback requires two chips and its file is held by the bundle inventory
+        from verifier_engine_tp import VerifierEngine
     from models.tt_transformers.tt.ccl import TT_CCL
 
     return SimpleNamespace(device=DFlashDevice, proposal=PreparedDFlashProposal,

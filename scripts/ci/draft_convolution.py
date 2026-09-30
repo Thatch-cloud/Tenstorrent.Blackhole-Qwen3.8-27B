@@ -1,6 +1,7 @@
 """DFlash2 kernel-two, group-16 causal convolution arithmetic diagnostic."""
 
 from gdn_multitoken_conv import addresses, release_owned
+import tp_shapes
 
 
 def validate_shapes(hidden, dynamic, base):
@@ -62,7 +63,7 @@ def grouped_causal_convolution(operations, mesh, hidden, dynamic, base, *, fp32_
     rows = validate_shapes(hidden, dynamic, base)
     boundaries = validate_boundaries(boundaries, rows)
     borrowed = (hidden, *dynamic, *base)
-    if list(mesh.shape) != [1, 2] or any(value.dtype != operations.bfloat16 for value in borrowed):
+    if list(mesh.shape) != [1, tp_shapes.chip_count()] or any(value.dtype != operations.bfloat16 for value in borrowed):
         raise ValueError('TP2 BF16 operands required')
     protected = {addresses(operations, value) for value in borrowed}
     temporaries = []

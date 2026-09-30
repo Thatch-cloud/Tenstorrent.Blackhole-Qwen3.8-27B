@@ -37,8 +37,14 @@ PAIR_DIGESTS = {
 }
 FOUR_ENV = {'QWEN_FAST_TP': '4', 'QWEN_FAST_SDPA_MODES': 'tail,share', 'QWEN_PROJECTION_LINKS': '2',
             'QWEN_GDN_PREFILL_MMRS': '0', 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT': '4'}
-AUDIT_ENV = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1', 'QWEN_FAST_QUAD_DRAFT_AUDIT': '8',
-             'QWEN_FAST_PROPOSAL_AUDIT': '1'}
+# The nine image flags the four-card profiles turn off: their code carries the pair's chip or head literals in text-patched,
+# kernel or two-chip form (quad_draft, fused_commit, the draft K/V slide and the traced publish's K/V fusion, the MLP block
+# stream, the GDN direct-window and shared-QK experiments) that the four-card port has not reached.
+OFF_ENV = {'QWEN_FAST_QUAD_DRAFT': '0', 'QWEN_FAST_FUSED_COMMIT': '0', 'QWEN_FAST_FUSED_COMMIT_INPLACE': '0',
+           'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS': '0', 'QWEN_DRAFT_KV_SLIDE_EXPERIMENT': '0',
+           'QWEN_FAST_TRACED_PUBLISH': '0', 'QWEN_MLP_BLOCK_STREAM_EXPERIMENT': '0', 'QWEN_GDN_DIRECT_WINDOW': '0',
+           'QWEN_GDN_SHARED_QK_EXPERIMENT': '0'}
+AUDIT_ENV = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1', 'QWEN_FAST_PROPOSAL_AUDIT': '1'}
 
 
 def profiles():
@@ -85,7 +91,7 @@ class FourCardProfileTests(unittest.TestCase):
         for four, twin, extra in (('c2-packed-tp4', 'c2-packed', {}), ('c2-packed-tp4-gate', 'c2-packed-gate', AUDIT_ENV)):
             mine, theirs = profiles()[four], self.pair(twin)
             with self.subTest(profile=four):
-                self.assertEqual(mine['env'], dict(theirs['env'], **dict(FOUR_ENV, **extra)))
+                self.assertEqual(mine['env'], dict(theirs['env'], **dict(FOUR_ENV, **dict(OFF_ENV, **extra))))
                 engine = json.loads(json.dumps(mine['engine']))
                 self.assertEqual(engine['additional-config']['tt'].pop('fabric_config'), 'FABRIC_1D')
                 self.assertEqual(engine, theirs['engine'], 'the engine block is the twin\'s: 131,328 x 4 seats, 8,208 blocks')
@@ -141,6 +147,14 @@ class FourCardProfileTests(unittest.TestCase):
             env = profiles()[name]['env']
             self.assertEqual(all(env.get(key) == value for key, value in AUDIT_ENV.items()), wanted, name)
             self.assertEqual(any(key in env for key in AUDIT_ENV), wanted, name)
+
+    def test_the_switched_off_flags_are_the_images_own_and_are_off(self):
+        image = image_env()
+        for name in OFF_ENV:
+            self.assertIn(name, image, name)
+            self.assertEqual(image[name], '1', 'the image turns it on: %s' % name)
+            for profile in ('c2-packed-tp4', 'c2-packed-tp4-gate'):
+                self.assertEqual(profiles()[profile]['env'][name], '0', (profile, name))
 
     def test_the_four_card_environment_names_no_value_the_pair_does(self):
         for name in ('c2-packed-tp4', 'c2-packed-tp4-gate'):

@@ -1,5 +1,7 @@
 """Host staging for fixed-shape verifier traces; page ownership remains unchanged."""
 
+import tp_shapes
+
 
 def validate_tokens(tokens, rows, start, vocab_size, capacity):
     if type(rows) is not int or rows not in (1, 2, 4, 8, 16, 32) or len(tokens) != rows:
@@ -53,8 +55,9 @@ def stage_inputs(fixture, tokens, start):
         raise ValueError('Staged metadata must preserve every captured tensor signature')
     destinations = [destination for destination, value, dtype, layout in values]
     addresses = [tuple(part.buffer_address() for part in operations.get_device_tensors(value)) for value in destinations]
-    if any(len(pair) != 2 for pair in addresses) or any(len({pair[chip] for pair in addresses}) != len(addresses) for chip in range(2)):
-        raise ValueError('Two independent chip-local buffers per metadata input required')
+    chips = tp_shapes.chip_count()
+    if any(len(pair) != chips for pair in addresses) or any(len({pair[chip] for pair in addresses}) != len(addresses) for chip in range(chips)):
+        raise ValueError('%s independent chip-local buffers per metadata input required' % tp_shapes.count_word())
     staged = [operations.from_torch(value, device=None, dtype=dtype, layout=layout,
               mesh_mapper=operations.ReplicateTensorToMesh(model.mesh_device)) for destination, value, dtype, layout in values]
     try:
