@@ -395,7 +395,7 @@ class ShipmentTests(unittest.TestCase):
     def test_the_cpu_suite_names_every_vglue_test_module(self):
         workflow = self.read('.github/workflows/qwen-integration-cpu.yml')
         for module in ('test_tp4_vglue', 'test_tp4_vglue_attention', 'test_tp4_vglue_gdn', 'test_tp4_vglue_twin',
-                       'test_tp4_vglue_block'):
+                       'test_tp4_vglue_block', 'test_tp4_vglue_window'):
             self.assertRegex(workflow, r'unittest [^\n]*\b%s\b' % module)
             self.assertTrue((HERE / (module + '.py')).is_file())
 

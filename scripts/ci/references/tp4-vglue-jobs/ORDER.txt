@@ -1,0 +1,27 @@
+# The order of the four-card verify-glue window (tp4/vglue), one template per line: <template name without .env> <stop|soft>.
+# stop: the window halts at the first failure of this job. soft: a failure is logged and the window goes on (its product is data).
+# What the window is for. The device profile of the packed 64-row verify at four cards (trace 0, 61.8 ms per replay per chip; the
+# S3a-era profile, run 36734970169) shows where the verify is not weights: conv-gates launched four times per GDN layer (192 per replay,
+# 3.97 ms of kernels and 2.25 ms of dispatch stalls), 960 per-user GDN glue ops (6.07 ms), 37 attention glue ops per layer (2.3 ms), a
+# 2-core Reduce in the sampler (0.79 ms) and four GDN commit traces per round that wait on every tile (2.6 ms). tp4/vglue replaces
+# each with a byte-identical launch behind its own flag: C1a (commit lanes), V4a (gathered shard maximum), V2 (GDN split and merge
+# DMA), V1 (one block conv-gates launch; needs V2) and V3a (attention block fold). The levers that would change the SDPA launch
+# itself (one multi-user SDPA, K/V write folded into the attention prep) and the argmax kernel need kernel or factory work and are
+# NOT in this window: they cannot be byte-identical by construction.
+# Every saving quoted is an estimate from the profile; nothing has run on a card. Together about -13.4 ms of the 61.8 ms verify
+# and a live-4 round of about 111 ms (124.5 ms today).
+# Early-failure order, cheapest first: no card (G0); the timed smoke with every lever on (G1: proves the new launches run on a card
+# and the texts are coherent, and gives the number); the exactness matrix on the audited profile (G2: the S3a matrix, strict, every lever
+# audited in-trace against the served path); then the per-lever A/B timed smokes (G3z the control, G3a-e each lever alone), which are
+# soft: their product is the per-lever saving. G2 is a STOP: a lever that is not byte-identical is not a saving.
+# After the window, offline: compare G2's solo and concurrent texts with S3a's (byte identical), and G3a-e with G3z for the per-lever
+# saving (the verify span, the commit phase, the live-4 round, medians at 4 live).
+G0-build stop
+G1-quad-smoke-timed stop
+G2-s3a-matrix-gate stop
+G3z-baseline-smoke-timed soft
+G3a-c1a-smoke-timed soft
+G3b-v4a-smoke-timed soft
+G3c-v2-smoke-timed soft
+G3d-v1-smoke-timed soft
+G3e-v3a-smoke-timed soft
