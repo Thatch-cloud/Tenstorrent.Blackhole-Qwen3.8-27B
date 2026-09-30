@@ -42,9 +42,12 @@ import time
 import draft_kv_slide_tp
 import fused_commit as _pinned
 import tp_shapes
-from fused_commit import (CB_BYTES, DRAFT_LAYERS, ENGAGED_MARKER, HEADS, HISTORY_ROWS, MARKER, PAGE_BYTES, Refused,
-                          SegmentStorage, TABLE_SHAPE, FEATURE_WIDTH, audit_enabled, enabled, groups, inplace_enabled, io_list,
-                          kernel_kind, live_banks_enabled, log_line)
+from fused_commit import (DRAFT_LAYERS, ENGAGED_MARKER, HEADS, HISTORY_ROWS, MARKER, Refused, SegmentStorage, TABLE_SHAPE,
+                          FEATURE_WIDTH, audit_enabled, enabled, groups, inplace_enabled, io_list, kernel_kind,
+                          live_banks_enabled, log_line)
+
+# The pinned circular buffer (one tuple assignment there: the image's copy-closure check reads simple assignments), read off the module.
+CB_BYTES, PAGE_BYTES = _pinned.CB_BYTES, _pinned.PAGE_BYTES
 
 # The pair's own literals, which this module exists to replace: refused by name.
 PAIR_ONLY = ('KV_SHAPE', 'DELTA_SHAPE', 'WORKERS', 'BANKS_PER_PROGRAM')

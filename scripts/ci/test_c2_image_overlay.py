@@ -1246,8 +1246,9 @@ class ProvenanceTests(unittest.TestCase):
         # general-tp4-ring-mmrs, the G1 defaults check.
         # ...and the speed window's arms (tp4/speed): the gate with the K/V slide off, and the timed pair with the verify audits off.
         # ...and the batched-draft window's four arms (tp4/draft): the speed and gate profiles with the quad on and with it off.
-        tp4 = ['c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-gate-pairs',
-               'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
+        # ...and the fused-commit window's six arms (tp4/fcommit): the gate and speed profiles with the fused commit on.
+        tp4 = ['c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-gate-pairs',
+               'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-noslide',
                'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad', 'general-prefix-eager', 'general-tp4-bench',
                'general-tp4-mmrs', 'general-tp4-ring-mmrs']
         self.assertEqual(gated, sorted("('%s', '%s')" % (step, name) for step in ('boot', 'environment') for name in tp4))
