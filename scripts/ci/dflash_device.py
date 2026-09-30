@@ -744,7 +744,7 @@ class DFlashDevice:
         if type(merge_release) is not bool or type(fused_steady_state) is not bool:
             raise ValueError('Explicit merge_release and fused_steady_state selection required')
         operations = self.operations
-        owned, retain = self.temporaries([self.history, self.spare_history])
+        owned, retain = self.temporaries([self.history, self.spare_history, *(tuple(features) if merge_release else ())])
         output = None
         cache_publication = None
         try:
@@ -868,7 +868,7 @@ class DFlashDevice:
         splits = PUBLICATION_SPLITS.get()
         clock = time.perf_counter
         operations = self.operations
-        owned, retain = self.temporaries([self.history, self.spare_history])
+        owned, retain = self.temporaries([self.history, self.spare_history, *(tuple(features) if merge_release else ())])
         output = None
         cache_publication = None
         try:
