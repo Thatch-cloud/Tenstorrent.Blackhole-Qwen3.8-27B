@@ -30,6 +30,16 @@
 #                                         # at all 15 stale-writer families; K2 decides the exactness policy
 #                                         # (k2_verdict=PASS only with k2_coverage=1980/1980)
 #
+# ONE KV HEAD PER CHIP (the four-card S2 evidence, CB1-TP4 and CB2a-TP4; K64J_HARNESS=card only): CARD_B_ARGS="--kv-heads 1
+# ..." runs k64j_card_b.py at 6 query heads on ONE KV head (the four-card chip's geometry; the default, 2, is the pair's). The
+# harness then defaults to the combos G4B3 / G8B2 at 0x21 / 0x23 (0x27 and 0x2F need a second KV head) and the trace combos
+# G4B3 0x21 / G8B2 0x23, and the WATCHER=1 pass below runs those instead of G8B2 0x27; everything else is unchanged. The
+# reports say kv_heads=1 and the verdict line 'kv_heads=1'. The jobs (scripts/ci/references/tp4-s2-serve-jobs):
+#   EV-W1  WATCHER=1, --kv-heads 1 --sections N,X,M,K,L,T,K2,X7,Z --seeds 0 --extents 2304,131328 --variants normal,peaky
+#          --no-timing                       (reduced scope: a REDUCED-PASS, the go/no-go and the watcher pass, never evidence)
+#   EV-F1  --kv-heads 1 --seeds 0,1,2,3,4    (CB1-TP4: the default sections N,X,M,K,L,T at K1's six extents and starts)
+#   EV-F2  --kv-heads 1 --sections K2,X7,Z --seeds 0,1,2,3,4 --variants normal,peaky --no-timing   (CB2a-TP4: 1980 tickets)
+#
 # ON CARD M (card B is reserved for another project): the same runner, by hand on the rig or through the cardm
 # action, which sets both variables itself. Two variables select card M, both required:
 #   QUAL_CARD=blackhole-CEF5729692C19E6D   card M's board id (the target is resolved by board id, never a node number)
@@ -582,6 +592,20 @@ if [ "$DRY" != 1 ]; then
 fi
 
 args=(--out "/results/$stem-$stamp.json" --expect-binary-sha256 "$EXPECT")
+# One KV head per chip: --kv-heads 1 in CARD_B_ARGS (the last --kv-heads wins, as argparse reads it). The watcher pass below
+# then runs the one-head combos: G8B2 0x27 (the q-slice) needs a second KV head and the harness refuses it as a combo.
+ONE_HEAD=0
+prev=
+for word in ${CARD_B_ARGS:-}; do
+  case $word in
+    --kv-heads=1) ONE_HEAD=1 ;;
+    --kv-heads=*) ONE_HEAD=0 ;;
+  esac
+  if [ "$prev" = --kv-heads ]; then
+    if [ "$word" = 1 ]; then ONE_HEAD=1; else ONE_HEAD=0; fi
+  fi
+  prev=$word
+done
 BM=()
 for file in "${HARNESS[@]}"; do
   BM+=(--mount "type=bind,src=$file,dst=/bench/$(basename "$file"),readonly")
@@ -602,8 +626,13 @@ if [ "${WATCHER:-}" = "1" ]; then
   elif [ "$MAIN" = gdn_tp4 ]; then
     args+=(--seeds 17 --prefixes 0,16 --iterations 0 --watchdog "${WATCHDOG_S:-120}")
   else
-    args+=(--extents 2304,33024 --seeds 0 --variants normal --combos G4B3:0x21,G4B3:0x23,G8B2:0x27
-           --trace-combos G4B3:0x21,G8B2:0x27 --trace-families 8 --trace-references 2 --no-timing
+    if [ "$ONE_HEAD" = 1 ] && [ "$MAIN" = card ]; then
+      watcher_combos=(--combos G4B3:0x21,G4B3:0x23,G8B2:0x23 --trace-combos G4B3:0x21,G8B2:0x23)
+    else
+      watcher_combos=(--combos G4B3:0x21,G4B3:0x23,G8B2:0x27 --trace-combos G4B3:0x21,G8B2:0x27)
+    fi
+    args+=(--extents 2304,33024 --seeds 0 --variants normal "${watcher_combos[@]}"
+           --trace-families 8 --trace-references 2 --no-timing
            --k2-sweep 232:263 --k2-floor 120:127 --cb2-extents 2304,131328 --cb2-starts 0,240,255
            --z-families 256,512,2304,3840 --watchdog "${WATCHDOG_S:-120}")
   fi

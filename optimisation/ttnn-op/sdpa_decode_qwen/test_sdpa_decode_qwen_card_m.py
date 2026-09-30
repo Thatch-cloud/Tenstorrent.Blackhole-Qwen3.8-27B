@@ -86,6 +86,7 @@ import threading
 import time
 
 HEADS, KV_HEADS, HEAD_DIM, PAGE, K_CHUNK, TILE = 48, 2, 256, 64, 256, 32
+Q_PER_KV = 6                               # query heads per KV head (24 / 4 heads, Qwen3.8-27B)
 ROWS = 4                                   # draft rows per four-row fold group (4 x 12 heads = 48)
 ROWS8 = 8                                  # eight-row groups (8 x 12 = 96 folded rows, PNHt=3)
 BUNDLES = ((0, 4, 8), (12,))              # G4 group offsets per bundle: batch 3, then batch 1
@@ -125,6 +126,22 @@ SHARE_MODES = (('plain', QWEN_PLAIN, False), ('share', SHARE, False), ('tail', T
                ('tail_share', TAIL_SHARE, False), ('tail_narrow', TAIL, True), ('tail_share_narrow', TAIL_SHARE, True))
 
 
+def local_heads():
+    """Query heads per chip: 12 on the pair (2 KV heads of 6), 6 on a four-card chip (1 KV head). Every folded row
+    count below is rows * local_heads(); KV_HEADS is the one switch (set_kv_heads), 2 unless a one-head run sets it."""
+    return KV_HEADS * Q_PER_KV
+
+
+def set_kv_heads(kv_heads):
+    """Select the geometry (2: the pair's, the default; 1: a four-card chip's) and return the previous value, which
+    the caller restores. The helpers below and probe_k64j_card_b's read KV_HEADS at call time."""
+    global KV_HEADS
+    if kv_heads not in (1, 2):
+        raise ValueError('kv_heads must be 1 or 2, got %r' % (kv_heads,))
+    previous, KV_HEADS = KV_HEADS, kv_heads
+    return previous
+
+
 def num_blocks(capacity):
     if type(capacity) is not int or capacity <= 0 or capacity % K_CHUNK:
         raise ValueError('Positive chunk-aligned capacity required')
@@ -136,7 +153,7 @@ def mask_positions(start, offsets, rows=ROWS):
     refresh kernel's `start + offset + batch * rows + (head % (rows * 6)) / 6`, where the
     kernel's offset is the bundle's first group offset and batch the entry index."""
     first = offsets[0]
-    return [[start + first + b * rows + (head % (rows * 6)) // 6 for head in range(rows * 12)]
+    return [[start + first + b * rows + (head % (rows * 6)) // 6 for head in range(rows * local_heads())]
             for b in range(len(offsets))]
 
 
@@ -149,7 +166,7 @@ def build_mask(torch, capacity, start, offsets, *, width=None, plant=False, rows
     positions = torch.tensor(mask_positions(start, offsets, rows), dtype=torch.int64)   # (B, rows*12)
     cache = torch.arange(capacity - 256, capacity, dtype=torch.int64)                   # (256,)
     tail = torch.where(cache[None, None, :] > positions[:, :, None], float('-inf'), 0.0)
-    mask = torch.zeros(len(offsets), 1, rows * 12, width, dtype=torch.float32)
+    mask = torch.zeros(len(offsets), 1, rows * local_heads(), width, dtype=torch.float32)
     mask[:, 0, :, width - 256:] = tail
     if plant:
         if width < capacity:
@@ -163,7 +180,7 @@ def build_query(torch, batches, seed, variant, keys=None, table=None, rows=ROWS)
     random cached keys of its KV head plus small noise, so those scores dominate wherever
     they fall (their chunks, cores and tree order move with the seed); 'zeroq': every
     fourth folded row is zero, so its scores are +-0. rows=4 draws exactly the stage-1 bytes."""
-    heads = rows * 12
+    heads = rows * local_heads()
     generator = torch.Generator().manual_seed(1000 + seed)
     query = torch.randn(1, batches, heads, HEAD_DIM, generator=generator)
     if variant == 'peaky':
@@ -185,14 +202,17 @@ def build_query(torch, batches, seed, variant, keys=None, table=None, rows=ROWS)
 def fold_tokens(tokens):
     """(1, rows, 12, 256) -> (1, 1, rows*12, 256): attention_head_fold.fold_query's layout
     (KV head major, then token, then the head's six query heads)."""
-    rows = tokens.shape[1]
-    return tokens.reshape(rows, KV_HEADS, 6, HEAD_DIM).permute(1, 0, 2, 3).reshape(1, 1, rows * 12, HEAD_DIM).contiguous()
+    rows, heads = tokens.shape[1], local_heads()
+    return tokens.reshape(rows, KV_HEADS, Q_PER_KV, HEAD_DIM).permute(1, 0, 2, 3).reshape(
+        1, 1, rows * heads, HEAD_DIM).contiguous()
 
 
 def unfold_rows(folded, rows):
     """(1, 1, >= rows*12, 256) -> (1, rows, 12, 256): attention_head_fold.unfold_output."""
-    folded = folded[:, :, :rows * 12]
-    return folded.reshape(KV_HEADS, rows, 6, HEAD_DIM).permute(1, 0, 2, 3).reshape(1, rows, 12, HEAD_DIM).contiguous()
+    heads = local_heads()
+    folded = folded[:, :, :rows * heads]
+    return folded.reshape(KV_HEADS, rows, Q_PER_KV, HEAD_DIM).permute(1, 0, 2, 3).reshape(
+        1, rows, heads, HEAD_DIM).contiguous()
 
 
 def fold_entries(torch, tokens, offsets, rows):

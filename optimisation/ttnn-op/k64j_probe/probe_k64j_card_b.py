@@ -317,7 +317,7 @@ def position_mask(torch, positions, extents, rows, width, zero=False):
     entry sits at p: the causal writer's generated mask, dataflow_common.hpp:215-305). width is E for the full
     mask (legacy reads every chunk of it) or 256 for the narrow one; zero=True gives the all-zero mask."""
     batch = len(positions)
-    mask = torch.zeros(batch, 1, rows * 12, width, dtype=torch.float32)
+    mask = torch.zeros(batch, 1, rows * card.local_heads(), width, dtype=torch.float32)
     if not zero:
         for slot, (position, extent) in enumerate(zip(positions, extents)):
             cache = torch.arange(extent - split_model.K_CHUNK, extent, dtype=torch.int64)
@@ -332,7 +332,7 @@ def rows_query(torch, batch, rows, seed, variant, keys=None, tables=None, positi
     keys the entry can see (positions <= p, through its page table) plus 0.1 x noise, so those scores dominate
     wherever they fall. 'zeroq': every fourth folded row zero (+-0 scores)."""
     generator = torch.Generator().manual_seed(7000 + 97 * seed + salt)
-    tokens = torch.randn(batch, rows, 12, card.HEAD_DIM, generator=generator)
+    tokens = torch.randn(batch, rows, card.local_heads(), card.HEAD_DIM, generator=generator)
     if variant == 'peaky':
         if keys is None or tables is None or positions is None:
             raise ValueError('Peaky queries need the host keys, the tables and the positions')
@@ -340,8 +340,8 @@ def rows_query(torch, batch, rows, seed, variant, keys=None, tables=None, positi
         for slot in range(batch):
             visible = int(positions[slot]) + 1
             for token in range(rows):
-                for head in range(12):
-                    kv = head // 6
+                for head in range(card.local_heads()):
+                    kv = head // card.Q_PER_KV
                     for position in torch.randint(0, visible, (8,), generator=generator).tolist():
                         vector = keys[int(tables[slot][position // card.PAGE]), kv, position % card.PAGE].float()
                         tokens[slot, token, head] += 6 * vector / vector.norm().clamp_min(1e-3)
@@ -450,12 +450,13 @@ def verdict_line(report):
     return ' '.join(words)
 
 
-def split_predictions(extents, capacity, batches):
-    """What split_model says the hardware should do, recorded beside the measurements."""
+def split_predictions(extents, capacity, batches, kv_heads=split_model.KV_HEADS):
+    """What split_model says the hardware should do, recorded beside the measurements (kv_heads per chip: 2 on the
+    pair, 1 on a four-card chip)."""
     out = []
     for extent in extents:
         for batch in sorted(set(batches)):
-            cores = split_model.cores_per_head(batch)
+            cores = split_model.cores_per_head(batch, kv_heads)
             live = split_model.split(extent - 1, cores)
             out.append(dict(extent=extent, batch=batch, cores_per_head=cores, chunks=live['num_chunks'],
                             busiest_core_chunks=max(end - start for start, end in live['ranges']),
@@ -479,11 +480,12 @@ def binary_stage(markers, sliced):
     return stage
 
 
-def q_slice_saves(rows, kv_heads=card.KV_HEADS):
+def q_slice_saves(rows, kv_heads=None):
     """pooled_attention_replay.q_slice_saves, the stage-4 factory's rule (F14/F15): each KV head's rows * 6 folded
     rows span row tiles [floor(h G / 32), ceil((h + 1) G / 32)); 0x4 builds only when the widest span is narrower
     than Q's own row tiles (6-8 rows per group; 1-5 rows save nothing and are refused)."""
-    folded = rows * 12
+    kv_heads = card.KV_HEADS if kv_heads is None else kv_heads     # the geometry in force (card.set_kv_heads)
+    folded = rows * card.Q_PER_KV * kv_heads
     if kv_heads <= 1 or folded % kv_heads:
         return False
     per_kv = folded // kv_heads

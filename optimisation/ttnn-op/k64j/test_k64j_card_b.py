@@ -647,7 +647,9 @@ class FakeExtentTtnn(probe_tests.FakeTtnn):
 
     broken: 'ignore_word' (a 0x20 program runs at capacity - 1), 'own_slot' (share entries read their own word),
     'skip_bleeds' (a skipped entry zeroes the next one), 'stale_trace' (a replay keeps the captured words), 'clamp'
-    (a word on a family boundary is taken one lower: the liveness control goes dead), 'no_f22', 'accept_0x11';
+    (a word on a family boundary is taken one lower: the liveness control goes dead), 'no_f22', 'accept_0x11', and
+    at one KV head (card.set_kv_heads(1)) 'accept_slice_one_head' (a q-slice call is taken, where F15 refuses it; the pair
+    never meets that refusal);
     for CB2a (test_k64j_cb2a): 'tail_at_capacity' (a tail call reads its mask at the call's capacity, [C - 256, C),
     not at the mask's own last chunk: a wide mask read there, and a narrow one past its width, reading 0.0),
     'narrow_batch_offset' (a sliced call with a narrow mask reads entry 0's mask rows for every entry: the mask
@@ -784,6 +786,10 @@ class FakeExtentTtnn(probe_tests.FakeTtnn):
             known = card_b.KNOWN_FLAGS | (card_b.UNKNOWN_CONTROL if 'accept_0x11' in self.broken else 0)
             if flags & ~known:
                 raise RuntimeError('TT_FATAL: [QWEN-SDPA] unknown flags %#x' % flags)
+            if flags & card_b.SLICE and card.KV_HEADS == 1 and 'accept_slice_one_head' not in self.broken:
+                # F15: the q-slice needs a second KV head to slice between (the pair's two heads never meet this).
+                raise RuntimeError('TT_FATAL: %s (%d) a multiple of num_kv_heads (1) > 1' % (card_b.SLICE_HEADS_REFUSAL,
+                                                                                           query.shape[2]))
             extent = bool(flags & card_b.EXTENT)
             if is_causal or (cur_pos_tensor is not None and not extent):
                 raise RuntimeError('TT_FATAL: ' + card_b.CUR_POS_REFUSAL)

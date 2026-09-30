@@ -76,6 +76,22 @@ kwargs: page_table_tensor by keyword, the model's scale (HD ** -0.5) and output 
 K4 (the mask kernel at capacity 256 against its host mirror) is W10b's R1 (extent_reader_card_b.py): the report lists
 it as not_run.
 
+ONE KV HEAD PER CHIP (--kv-heads 1, the four-card S2 port, CB1-TP4 and CB2a-TP4). A four-card chip holds 6 query heads on
+ONE KV head (24 / 4 and 4 / 4), not 12 on 2: a token's folded query is 6 rows (token-major: at one KV head the fold is a
+reshape, tp_shapes.geometry(4).attn_fold_rows), the paged cache (blocks, 1, 64, 256), a group of R tokens (1, 1, 6R, 256)
+and the narrow mask (B, 1, 6R, 256). K64j takes the head counts from the tensors, but its q-slice (flag 0x4) needs a second
+KV head to slice between (F15: 'q-slice needs num_q_heads .. a multiple of num_kv_heads (..) > 1'), so the served flags are
+tail 0x1 | share 0x2 | extent 0x20 = 0x23 (the pair's 0x27 without the slice) and 0x21. At --kv-heads 1:
+  - the default combos are G4B3 and G8B2 at 0x21 and 0x23 (0x27 and 0x2F are refused as combos); the trace combos G4B3 0x21 and
+    G8B2 0x23; section N adds a decisive refusal: 0x27 at one KV head must be refused with F15's literal;
+  - CB2a's subject is G8B2 0x23 (the extent reader's call without the slice; COMPILE_FLAGS_ONE_HEAD 0x3 is its compile-time
+    twin), K2's reference is the native decode call at 6 local heads on 1 KV head (the same attention/tp.py kwargs: the query
+    is (1, 1, 6, 256)), and X7 / Z are the section texts above at 0x3 / 0x23; the floors are the pair's (K2 1980 tickets,
+    X7 500, Z 900);
+  - the report carries kv_heads=1 (an int) and local_heads=6, the verdict line 'kv_heads=1' (before k2_verdict=), and the
+    F4 cb_bytes are recorded but not compared with K64i's pair-measured table.
+The default (--kv-heads 2) is the pair's run, unchanged: its report and verdict line have no kv_heads key or word.
+
 The log: every 0x20 program built must log one F4 '[QWEN-SDPA] flags=' line with 0x20 set, followed by exactly one
 F22 '[QWEN-SDPA] runtime-extent entries=' line carrying its B, kv_share and q_slice; a requested program without its
 lines means the graft was mounted but not executed. The F4 cb_bytes of each 0x20 program at 131,328 keys is
@@ -147,6 +163,8 @@ SHAPES = {'G4B3': (4, 3), 'G8B2': (8, 2), 'G4B1': (4, 1)}   # rows per fold grou
 BUNDLE_SHAPES = ('G4B3', 'G8B2')
 FLAG_SETS = (0x21, 0x23, 0x27, 0x2F)
 TRACE_COMBOS = (('G4B3', 0x21), ('G8B2', 0x27))
+PAIR_KV_HEADS, ONE_KV_HEAD = 2, 1                       # KV heads per chip: the pair's (the default) and a four-card chip's
+TRACE_COMBOS_ONE_HEAD = (('G4B3', 0x21), ('G8B2', 0x23))   # G8B2 0x27 needs the q-slice, so a second KV head
 TRACE_FAMILIES = 64
 TRACE_REFERENCES = 8
 SKIP_EXTENTS = probe.SKIP_EXTENTS
@@ -175,6 +193,8 @@ SERVED_ROWS, SERVED_BATCH = 8, 2                        # LAYOUT(16, 8) = parall
 SERVED_OFFSETS = (0, 8)                                 # its one bundle's group offsets: one G8B2 call per ticket
 SERVED_FLAGS = TAIL | SHARE | SLICE | EXTENT            # 0x27: the extent reader's call at G8B2
 COMPILE_FLAGS = SERVED_FLAGS & ~EXTENT                  # 0x7: v235's served call, at capacity E
+SERVED_FLAGS_ONE_HEAD = TAIL | SHARE | EXTENT           # 0x23 at one KV head: no q-slice (F15 refuses it), the same bundle
+COMPILE_FLAGS_ONE_HEAD = SERVED_FLAGS_ONE_HEAD & ~EXTENT    # 0x3: its compile-time twin, at capacity E
 MIN_LIVE_START = 128                                    # the admission floor (design 1.4 #9, W1 MIN_LIVE_START)
 K2_SWEEP = (128, 300)                                   # every ticket start in it (families 256 and 512)
 K2_FLOOR = (100, 127)                                   # recorded: the floor's other side
@@ -222,11 +242,17 @@ UNVERIFIED = (
     'as this harness\'s pool (probe.Pool) holds them',
 )
 
+ONE_HEAD_QUERY_SHAPE = (
+    'the query shape (1, 1, 6, 256), HD 256 and 6 local heads on 1 KV head (--kv-heads 1): the four-card chip\'s '
+    'geometry (scripts/ci/tp_shapes.geometry(4): attn_heads 6, attn_kv_heads 1, attn_fold_rows 6), not a log line of the '
+    'four-card model; the native call\'s kwargs are the graft attention/tp.py\'s, unchanged')
+
 # The K64j factory's literals (apply_factory_k64j.py; test_k64j_card_b keeps these equal to it).
 EXTENT_LOG_MARKER = '[QWEN-SDPA] runtime-extent entries='
 EXTENT_BINARY_MARKER = EXTENT_LOG_MARKER.encode()
 EXTENT_MASK_REFUSAL = '[QWEN-SDPA] runtime extent (0x20) needs the tail flag (0x1) and a narrow'
 EXTENT_CUR_POS_REFUSAL = '[QWEN-SDPA] runtime extent (0x20) needs an interleaved cur_pos tensor'
+SLICE_HEADS_REFUSAL = '[QWEN-SDPA] q-slice needs num_q_heads'     # F15 (apply_factory_slice.HEADS_REFUSAL): 0x27 at one KV head
 EXTENT_LAYOUT_REFUSAL = '[QWEN-SDPA] runtime extent (0x20) needs an int32 row-major cur_pos tensor of B='
 CUR_POS_REFUSAL = '[QWEN-SDPA] modes are non-causal, full-window and take no cur_pos tensor'
 UNKNOWN_NEEDLE = probe.UNKNOWN_NEEDLE
@@ -249,25 +275,42 @@ STOCK_KERNELS = probe.STOCK_KERNELS
 # Pure helpers (no ttnn).
 # ---------------------------------------------------------------------------------------------
 
-def valid_combo(shape, flags):
+def local_heads():
+    """Query heads per chip in force: 12 (the pair), 6 (one KV head per chip). card.set_kv_heads is the switch."""
+    return card.local_heads()
+
+
+def valid_combo(shape, flags, kv_heads=PAIR_KV_HEADS):
     """A (shape, flags) the K64j factory builds and this harness runs: 0x20 with the tail flag; share needs B > 1;
-    the slice only where it saves a tile (the 8-row groups); read-ahead needs share."""
+    the slice only where it saves a tile (the 8-row groups) and there is a second KV head to slice between (F15: never at
+    one KV head); read-ahead needs share."""
     if shape not in SHAPES or flags & ~KNOWN_FLAGS or not flags & EXTENT or not flags & TAIL:
         return False
     rows, batch = SHAPES[shape]
     if flags & SHARE and batch < 2:
         return False
-    if flags & SLICE and not probe.q_slice_saves(rows):
+    if flags & SLICE and not probe.q_slice_saves(rows, kv_heads):
         return False
     return not (flags & READAHEAD and not flags & SHARE)
 
 
-def default_combos():
-    return [(shape, flags) for shape in BUNDLE_SHAPES for flags in FLAG_SETS if valid_combo(shape, flags)]
+def default_combos(kv_heads=PAIR_KV_HEADS):
+    return [(shape, flags) for shape in BUNDLE_SHAPES for flags in FLAG_SETS if valid_combo(shape, flags, kv_heads)]
 
 
-def parse_combos(text):
-    """'G4B3:0x21,G8B2:0x27' -> [(shape, flags)]; ValueError on an unknown or invalid combo."""
+def default_trace_combos(kv_heads=PAIR_KV_HEADS):
+    return TRACE_COMBOS if kv_heads == PAIR_KV_HEADS else TRACE_COMBOS_ONE_HEAD
+
+
+def served_flags_for(kv_heads=PAIR_KV_HEADS):
+    """(served, compile-time) flags of CB2a's G8B2 bundle: 0x27 / 0x7 on the pair, 0x23 / 0x3 at one KV head."""
+    if kv_heads == PAIR_KV_HEADS:
+        return SERVED_FLAGS, COMPILE_FLAGS
+    return SERVED_FLAGS_ONE_HEAD, COMPILE_FLAGS_ONE_HEAD
+
+
+def parse_combos(text, kv_heads=PAIR_KV_HEADS):
+    """'G4B3:0x21,G8B2:0x27' -> [(shape, flags)]; ValueError on an unknown or invalid combo (at kv_heads 1: no slice)."""
     out = []
     for token in (part.strip() for part in text.split(',')):
         if not token:
@@ -277,7 +320,7 @@ def parse_combos(text):
             flags = int(value, 16) if sep else None
         except ValueError:
             flags = None
-        if flags is None or not valid_combo(shape, flags):
+        if flags is None or not valid_combo(shape, flags, kv_heads):
             raise ValueError('not a runnable (shape, flags) combo: %r' % token)
         if (shape, flags) not in out:
             out.append((shape, flags))
@@ -342,14 +385,16 @@ def reference_sample(count, wanted):
 
 def mask_row_positions(word, rows=SERVED_ROWS, batches=SERVED_BATCH, offset=0):
     """attention_mask_replay.cpp:24 (and attention_mask_replay.mask_position): folded row h of entry b sits at
-    word + offset + b * rows + (h % (rows * 6)) / 6 - [[position per row] per entry]."""
-    return [[word + offset + batch * rows + (head % (rows * 6)) // 6 for head in range(rows * 12)]
+    word + offset + b * rows + (h % (rows * 6)) / 6 - [[position per row] per entry]. The folded rows are rows * 12 on
+    the pair (two KV-head blocks of rows * 6) and rows * 6 at one KV head (token-major: h / 6 is the token)."""
+    return [[word + offset + batch * rows + (head % (rows * 6)) // 6 for head in range(rows * local_heads())]
             for batch in range(batches)]
 
 
 def served_mask(torch, word, capacity, width=None, rows=SERVED_ROWS, batches=SERVED_BATCH, offset=0):
     """The pinned mask kernel on the host (attention_mask_replay.cpp:18-33) run with the start word `word` at
-    `capacity`, into a zero-initialised tensor (attention_replay.py:51): (batches, 1, rows * 12, width) bf16, -inf
+    `capacity`, into a zero-initialised tensor (attention_replay.py:51): (batches, 1, rows * 12, width) bf16 (rows * 6
+    at one KV head: local_heads()), -inf
     (0xff80) in the last 256 columns - the cache positions [capacity - 256, capacity) - wherever the column's position
     is past the row's (mask_row_positions), +0.0 elsewhere. At rows 8 there is no padding head (h < 96 = rows * 12,
     cpp :28). width (default capacity) keeps the tensor's LAST width columns: the wide mask is width = capacity."""
@@ -360,7 +405,7 @@ def served_mask(torch, word, capacity, width=None, rows=SERVED_ROWS, batches=SER
     positions = torch.tensor(mask_row_positions(word, rows, batches, offset), dtype=torch.int64)    # (B, rows*12)
     cache = torch.arange(capacity - K_CHUNK, capacity, dtype=torch.int64)                           # cpp :27
     tail = torch.where(cache[None, None, :] > positions[:, :, None], float('-inf'), 0.0)            # cpp :28
-    mask = torch.zeros(batches, 1, rows * 12, width, dtype=torch.float32)
+    mask = torch.zeros(batches, 1, rows * local_heads(), width, dtype=torch.float32)
     mask[:, 0, :, width - K_CHUNK:] = tail
     return mask.to(torch.bfloat16)
 
@@ -434,13 +479,13 @@ def z_plan(families, starts):
 
 
 def token_query(torch, seed, variant, position, keys=None, table=None):
-    """One token's (12, 256) bf16 query at `position`: the same bytes for the solo row and inside the packed ticket.
+    """One token's (12, 256) bf16 query at `position` ((6, 256) at one KV head: local_heads()): the same bytes for the solo row and inside the packed ticket.
     normal: N(0, 1). peaky: 0.1 x N(0, 1) plus, per head, 6 x the unit vector of its KV head's key at the token's own
     position, at the first position PAST it (masked on both paths: a boundary read one key too far moves the row),
     at two earlier positions in its final chunk (anywhere earlier when it opens the chunk) and three anywhere earlier
     (the host keys through `table`), so the own key and the one past it weigh alike."""
     generator = torch.Generator().manual_seed((seed * 1000003 + position) * 2 + (1 if variant == 'peaky' else 0))
-    tokens = torch.randn(12, card.HEAD_DIM, generator=generator)
+    tokens = torch.randn(local_heads(), card.HEAD_DIM, generator=generator)
     if variant == 'peaky':
         if keys is None or table is None:
             raise ValueError('Peaky queries need the host keys and the page table')
@@ -448,8 +493,8 @@ def token_query(torch, seed, variant, position, keys=None, table=None):
         last = len(table) * card.PAGE - 1
         chunk = split_model.extent(position) - K_CHUNK
         earlier = chunk if chunk < position else 0
-        for head in range(12):
-            kv = head // 6
+        for head in range(local_heads()):
+            kv = head // card.Q_PER_KV
             aims = [position, position + 1]
             if position > 0:
                 aims += torch.randint(earlier, position, (2,), generator=generator).tolist()
@@ -464,7 +509,7 @@ def token_query(torch, seed, variant, position, keys=None, table=None):
 
 
 def ticket_query(torch, tokens, start):
-    """The ticket's (1, 2, 96, 256) G8B2 query: its 16 token queries (tokens: position -> (12, 256)) folded as the
+    """The ticket's (1, 2, 96, 256) G8B2 query ((1, 2, 48, 256) at one KV head): its 16 token queries (tokens: position -> (12, 256)) folded as the
     extent reader's device fold lays them (attention_head_fold.fold_query per group, groups at SERVED_OFFSETS)."""
     host = torch.stack([tokens(position) for position in ticket_positions(start)])[None]
     return card.fold_entries(torch, host, SERVED_OFFSETS, SERVED_ROWS)
@@ -713,6 +758,8 @@ def verdict_line(report):
         words.append('k2_rows=%d/%d' % (rows['equal'], rows['compared']))
     if rows.get('floor'):
         words.append('k2_floor_differing=%d/%d' % (rows['floor_differing'], rows['floor']))
+    if report.get('kv_heads') is not None:
+        words.append('kv_heads=%d' % report['kv_heads'])          # one-head runs only; the pair's line has no such word
     words.append('k2_verdict=%s' % decision.get('k2', 'not_run'))
     coverage = decision.get('k2_coverage')
     if coverage:
@@ -821,7 +868,8 @@ def repeated(torch, host, index, batch):
 
 
 def section_refusals(ttnn, torch, pool, args, report):
-    """N: every call the K64j factory must refuse, refused with its literal."""
+    """N: every call the K64j factory must refuse, refused with its literal. At one KV head (args.kv_heads 1) also the
+    q-slice: 0x27 on the G8B2 bundle must be refused with F15's literal (the slice needs a second KV head)."""
     rows, batch = SHAPES['G4B3']
     extent = min(args.extents)
     positions = bundle_positions(extent, 0, batch, rows)
@@ -845,11 +893,23 @@ def section_refusals(ttnn, torch, pool, args, report):
             ('0x21 on a causal call', dict(causal=True, cur_pos=words, sentinel=MAGIC | EXTENT | TAIL), CUR_POS_REFUSAL),
             ('0x01 with a cur_pos tensor', dict(mask=narrow, cur_pos=words, sentinel=MAGIC | TAIL), CUR_POS_REFUSAL),
         )
+        if args.kv_heads != PAIR_KV_HEADS:
+            slice_rows, slice_batch = SHAPES['G8B2']
+            slice_positions = bundle_positions(extent, 0, slice_batch, slice_rows)
+            slice_query = scope.keep(pool.upload(query_for(torch, pool, slice_batch, slice_rows, 0, 'normal', extent,
+                                                           salt=41)))
+            slice_pages = scope.keep(pool.pages_reference(0, extent, slice_batch))
+            slice_mask = scope.keep(pool.mask(slice_positions, [extent] * slice_batch, slice_rows))
+            slice_words = scope.keep(pool.words([extent - 1] * slice_batch))
+            cases += (('0x27 q-slice at one KV head', dict(query=slice_query, pages=slice_pages, mask=slice_mask,
+                                                           cur_pos=slice_words, sentinel=MAGIC | 0x27),
+                       SLICE_HEADS_REFUSAL),)
         for name, call, needle in cases:
             label = 'N/%s' % name
             probe.DEADLINE.check(label)
             try:
-                out = pool.launch(query, pages, causal=call.get('causal', False), cur_pos=call.get('cur_pos'),
+                out = pool.launch(call.get('query', query), call.get('pages', pages), causal=call.get('causal', False),
+                                  cur_pos=call.get('cur_pos'),
                                   mask=call.get('mask'), sentinel=call['sentinel'], label=label, expect_program=False)
             except Exception as error:  # noqa: BLE001 - a TT_FATAL surfaces as RuntimeError
                 text = ' '.join(str(error).split())
@@ -965,7 +1025,7 @@ def section_skip(ttnn, torch, pool, seed, args, report):
     positions = [extent - 1 - 17 * index for index, extent in enumerate(extents)]
     users = list(range(batch))
     written = report.setdefault('skip_rows', [])
-    shape = (1, batch, rows * 12, card.HEAD_DIM)
+    shape = (1, batch, rows * local_heads(), card.HEAD_DIM)
     scope = probe.Scope(ttnn)
     try:
         query = scope.keep(pool.upload(query_for(torch, pool, batch, rows, seed, 'normal', min(extents), salt=13)))
@@ -983,10 +1043,11 @@ def section_skip(ttnn, torch, pool, seed, args, report):
 
         def rows_state(got, index, reused, label):
             nan = int(torch.isnan(probe.slot(got, index).float()).all(dim=-1).sum())
-            state = 'unwritten' if nan == rows * 12 else ('written' if nan == 0 else 'partial')
+            state = 'unwritten' if nan == rows * local_heads() else ('written' if nan == 0 else 'partial')
             if reused is not True:
                 state += '-unpoisoned'
-            written.append(dict(label='%s/entry%d' % (label, index), nan_rows=nan, rows=rows * 12, state=state))
+            written.append(dict(label='%s/entry%d' % (label, index), nan_rows=nan, rows=rows * local_heads(),
+                                state=state))
 
         for pattern in SKIP_PATTERNS:
             if max(pattern) >= batch:
@@ -1309,7 +1370,7 @@ class ServedRig(TraceRig):
 
 
 def row_slice(rows, index):
-    """(1, 1, 12, 256): one token row of an unfolded (1, T, 12, 256) output."""
+    """(1, 1, 12, 256): one token row of an unfolded (1, T, 12, 256) output ((1, 1, 6, 256) at one KV head)."""
     return rows[:, index:index + 1]
 
 
@@ -1364,12 +1425,12 @@ def section_k2(ttnn, torch, pool, seed, args, report):
                 query = pool.upload(ticket_query(torch, token, start))
                 mask = pool.upload(narrow_mask(torch, start))
                 try:
-                    got = pool.served_run(query, tables['subject'], mask, SERVED_FLAGS, words=tables['words'],
+                    got = pool.served_run(query, tables['subject'], mask, args.served_flags, words=tables['words'],
                                           label=label + ' extent')
                 finally:
                     ttnn.deallocate(query)
                     ttnn.deallocate(mask)
-                rows = card.unfold_entries(torch, got, SERVED_ROWS)             # (1, 16, 12, 256), ticket order
+                rows = card.unfold_entries(torch, got, SERVED_ROWS)             # (1, 16, 12, 256), ticket order (6 heads at one KV head)
                 compared = k2_compared(ticket)
                 decisive = kind != 'floor'
                 differing, moved = 0, []
@@ -1397,7 +1458,7 @@ def section_k2(ttnn, torch, pool, seed, args, report):
                     beyond = native(position, position + 1, '%s/p%d native at p + 1' % (label, position))
                     moved_rows = probe.moved_rows(torch, own, beyond)[0]
                     report['liveness'].append(dict(section='K2', label='%s/p%d+1' % (label, position),
-                                                   moved_rows=moved_rows, rows=12, live=moved_rows > 0))
+                                                   moved_rows=moved_rows, rows=local_heads(), live=moved_rows > 0))
     finally:
         scope.close()
 
@@ -1427,16 +1488,17 @@ def section_x7(ttnn, torch, pool, seed, args, report):
                         query = inner.keep(pool.upload(ticket_query(
                             torch, lambda position, variant=variant: token_query(torch, seed, variant, position,
                                                                                  pool.keys, table), start)))
-                        got_narrow = pool.served_run(query, reference_pages, narrow, COMPILE_FLAGS,
-                                                     label=label + ' 0x7 narrow')
-                        got_wide = pool.served_run(query, reference_pages, wide, COMPILE_FLAGS, label=label + ' 0x7 wide')
-                        got_extent = pool.served_run(query, extent_pages, narrow, SERVED_FLAGS, words=words,
-                                                     label=label + ' 0x27')
+                        got_narrow = pool.served_run(query, reference_pages, narrow, args.compile_flags,
+                                                     label=label + ' 0x%x narrow' % args.compile_flags)
+                        got_wide = pool.served_run(query, reference_pages, wide, args.compile_flags,
+                                                   label=label + ' 0x%x wide' % args.compile_flags)
+                        got_extent = pool.served_run(query, extent_pages, narrow, args.served_flags, words=words,
+                                                     label=label + ' 0x%x' % args.served_flags)
                         probe.finite_or_fail(torch, report, label, got_wide)
                         record(report, probe.comparison('X7', 'x7_narrow_vs_wide', label + '/narrow',
                                                         card.differing(torch, got_narrow, got_wide), True,
                                                         extent=extent, start=start, seed=seed, variant=variant))
-                        record(report, probe.comparison('X7', 'x7_extent_vs_wide', label + '/0x27',
+                        record(report, probe.comparison('X7', 'x7_extent_vs_wide', label + '/0x%x' % args.served_flags,
                                                         card.differing(torch, got_extent, got_wide), True,
                                                         extent=extent, start=start, seed=seed, variant=variant))
                         # Liveness, on the reference (wide) path alone: a zero wide mask must move every entry
@@ -1444,14 +1506,14 @@ def section_x7(ttnn, torch, pool, seed, args, report):
                         masked = [index for index in range(SERVED_BATCH)
                                   if bool(torch.isinf(narrow_host[index].float()).any())]
                         if not live_done and masked:
-                            zero = inner.keep(pool.upload(torch.zeros(SERVED_BATCH, 1, SERVED_ROWS * 12, extent,
-                                                                      dtype=torch.bfloat16)))
-                            opened = pool.served_run(query, reference_pages, zero, COMPILE_FLAGS,
-                                                     label=label + ' 0x7 zero wide mask')
+                            zero = inner.keep(pool.upload(torch.zeros(SERVED_BATCH, 1, SERVED_ROWS * local_heads(),
+                                                                      extent, dtype=torch.bfloat16)))
+                            opened = pool.served_run(query, reference_pages, zero, args.compile_flags,
+                                                     label=label + ' 0x%x zero wide mask' % args.compile_flags)
                             moved = probe.moved_rows(torch, got_wide, opened)
                             for index in masked:
                                 report['liveness'].append(dict(section='X7', label='%s/zero_mask/entry%d' % (label, index),
-                                                               moved_rows=moved[index], rows=SERVED_ROWS * 12,
+                                                               moved_rows=moved[index], rows=SERVED_ROWS * local_heads(),
                                                                live=moved[index] > 0))
                             live_done = True
                 finally:
@@ -1468,7 +1530,7 @@ def section_z(ttnn, torch, device, pool, seed, args, report):
     try:
         query = scope.keep(pool.upload(card.build_query(torch, SERVED_BATCH, seed, 'normal', rows=SERVED_ROWS)))
         pages = scope.keep(pool.pages_causal([0] * SERVED_BATCH, [pool.capacity] * SERVED_BATCH, poison=False))
-        rig = ServedRig(ttnn, torch, device, pool, scope, query, pages, SERVED_FLAGS, SERVED_ROWS, SERVED_BATCH)
+        rig = ServedRig(ttnn, torch, device, pool, scope, query, pages, args.served_flags, SERVED_ROWS, SERVED_BATCH)
 
         def words(extent):
             return [extent - 1] * SERVED_BATCH
@@ -1486,8 +1548,8 @@ def section_z(ttnn, torch, device, pool, seed, args, report):
                 references[extent] = scope.keep(pool.pages_reference(0, extent, SERVED_BATCH))
             mask = pool.upload(host_mask)
             try:
-                reference = pool.served_run(query, references[extent], mask, COMPILE_FLAGS,
-                                            label=label + ' 0x7 reference')
+                reference = pool.served_run(query, references[extent], mask, args.compile_flags,
+                                            label=label + ' 0x%x reference' % args.compile_flags)
             finally:
                 ttnn.deallocate(mask)
             probe.finite_or_fail(torch, report, label, reference)
@@ -1500,13 +1562,22 @@ def section_z(ttnn, torch, device, pool, seed, args, report):
         scope.close()
 
 
-def native_decode_lines():
+def unverified_items(kv_heads=PAIR_KV_HEADS):
+    """UNVERIFIED for the geometry in force: the pair's list as it is, or (one KV head) with the query-shape item naming
+    the four-card chip's 6 local heads on 1 KV head, from tp_shapes.geometry(4) rather than the pair's log line."""
+    if kv_heads == PAIR_KV_HEADS:
+        return UNVERIFIED
+    return tuple(ONE_HEAD_QUERY_SHAPE if item.startswith('the query shape (1, 1, 12, 256)') else item
+                 for item in UNVERIFIED)
+
+
+def native_decode_lines(kv_heads=PAIR_KV_HEADS):
     """What the harness prints before K2 runs: the native kwargs it uses and what source cannot pin."""
     lines = ['K2 native decode (%s:%s, sha256 %s): program_config %s, call kwargs %s, scale %r, memory_config %s; '
              'not passed: %s' % (NATIVE_DECODE['source'], NATIVE_DECODE['lines']['call'], NATIVE_DECODE['sha256'][:16],
                                  NATIVE_DECODE['program_config'], ','.join(NATIVE_DECODE['call']), NATIVE_SCALE,
                                  NATIVE_DECODE['memory_config'], ','.join(NATIVE_DECODE['not_passed']))]
-    lines += ['UNVERIFIED K2: %s' % item for item in UNVERIFIED]
+    lines += ['UNVERIFIED K2: %s' % item for item in unverified_items(kv_heads)]
     return lines
 
 
@@ -1658,9 +1729,18 @@ def parse_args(argv=None):
     parser.add_argument('--starts', default=','.join(map(str, STARTS)), help='entry 0 at E - 256 + s, 0..255')
     parser.add_argument('--seeds', default=','.join(map(str, SEEDS)), help='K1 asks 0-4')
     parser.add_argument('--variants', default=','.join(VARIANTS), help='normal and/or peaky')
-    parser.add_argument('--combos', default=','.join(combo_name(*combo) for combo in default_combos()),
-                        help='X, M and L: shape:flags pairs (G4B3 0x21/0x23, G8B2 0x21/0x23/0x27/0x2F)')
-    parser.add_argument('--trace-combos', default=','.join(combo_name(*combo) for combo in TRACE_COMBOS))
+    parser.add_argument('--kv-heads', type=int, choices=(PAIR_KV_HEADS, ONE_KV_HEAD), default=PAIR_KV_HEADS,
+                        help='KV heads per chip: 2 (the pair: 12 query heads, the default) or 1 (a four-card chip: 6 query '
+                             'heads on one KV head; the q-slice combos 0x27 / 0x2F are refused, the defaults are G4B3 and '
+                             'G8B2 at 0x21 / 0x23 and CB2a\'s served call is 0x23)')
+    parser.add_argument('--combos', default=None,
+                        help='X, M and L: shape:flags pairs (G4B3 0x21/0x23, G8B2 0x21/0x23/0x27/0x2F; default %s, at '
+                             '--kv-heads 1 %s)' % (','.join(combo_name(*combo) for combo in default_combos()),
+                                                   ','.join(combo_name(*combo) for combo in default_combos(ONE_KV_HEAD))))
+    parser.add_argument('--trace-combos', default=None,
+                        help='T: default %s, at --kv-heads 1 %s' % (
+                            ','.join(combo_name(*combo) for combo in default_trace_combos()),
+                            ','.join(combo_name(*combo) for combo in default_trace_combos(ONE_KV_HEAD))))
     parser.add_argument('--sections', default=','.join(DEFAULT_SECTIONS),
                         help='any of %s (default K1/K3\'s %s; CB2a is K2,X7,Z)' % (', '.join(SECTIONS),
                                                                                 ','.join(DEFAULT_SECTIONS)))
@@ -1699,8 +1779,10 @@ def parse_args(argv=None):
         args.extents = ints(args.extents)
         args.starts = ints(args.starts)
         args.seeds = ints(args.seeds)
-        args.combos = parse_combos(args.combos)
-        args.trace_combos = parse_combos(args.trace_combos)
+        args.combos = (default_combos(args.kv_heads) if args.combos is None
+                       else parse_combos(args.combos, args.kv_heads))
+        args.trace_combos = (list(default_trace_combos(args.kv_heads)) if args.trace_combos is None
+                             else parse_combos(args.trace_combos, args.kv_heads))
         args.k2_sweep = parse_range(args.k2_sweep, '--k2-sweep')
         args.k2_floor = parse_range(args.k2_floor, '--k2-floor')
         args.cb2_extents = ints(args.cb2_extents)
@@ -1709,6 +1791,7 @@ def parse_args(argv=None):
         args.z_starts = ints(args.z_starts)
     except ValueError as error:
         parser.error(str(error))
+    args.served_flags, args.compile_flags = served_flags_for(args.kv_heads)
     if args.deadline_s < 0:
         parser.error('--deadline-s must be >= 0')
     args.variants = [value for value in args.variants.split(',') if value]
@@ -1795,6 +1878,8 @@ def check_log(report, text):
         report['failures'].append('extent log: %s' % problem)
     report['cb_bytes'] = cb_extras(events, report.get('capacity', CAPACITY))
     for entry in report['cb_bytes']:
+        if report.get('kv_heads', PAIR_KV_HEADS) != PAIR_KV_HEADS:
+            break                                       # K64i's table was measured on the pair: recorded, not compared
         if not 0 < entry['extra'] <= 1024:
             report['warnings'].append('cb_bytes of the 0x20 program flags=%s B=%d PNHt=%d is %d, K64i\'s table %d: '
                                       'expected two cur_pos sticks more' % (entry['flags'], entry['B'], entry['PNHt'],
@@ -1802,7 +1887,16 @@ def check_log(report, text):
 
 
 def main(argv=None):
+    """parse_args, then run_main with the geometry (card.set_kv_heads) of --kv-heads in force and restored afterwards."""
     args = parse_args(argv)
+    previous = card.set_kv_heads(args.kv_heads)
+    try:
+        return run_main(args, argv)
+    finally:
+        card.set_kv_heads(previous)
+
+
+def run_main(args, argv=None):
     probe.DEADLINE = probe.Deadline(args.deadline_s)
     report = dict(card=CARD, plan=PLAN, passed=False, argv=list(sys.argv[1:] if argv is None else argv),
                   capacity=args.capacity, extents=args.extents, starts=args.starts, seeds=args.seeds,
@@ -1810,9 +1904,12 @@ def main(argv=None):
                   trace_combos=[combo_name(*combo) for combo in args.trace_combos], sections=args.sections,
                   deadline_s=args.deadline_s, run_order=list(RUN_ORDER), flag='0x%x' % EXTENT,
                   poison=dict(k=probe.POISON_K, v=probe.POISON_V, blocks=probe.POISON_BLOCKS),
-                  predictions=probe.split_predictions(args.extents, args.capacity, [3, 2, 1]),
+                  predictions=probe.split_predictions(args.extents, args.capacity, [3, 2, 1], args.kv_heads),
                   not_run=dict(NOT_RUN), env={name: os.environ.get(name) for name in ENV_RECORDED},
                   watchdog=args.watchdog, failures=[], warnings=[], comparisons=[], liveness=[])
+    if args.kv_heads != PAIR_KV_HEADS:
+        # The four-card record's own words (record_packed_any_evidence_tp4.kv_problems reads kv_heads, an int).
+        report.update(kv_heads=args.kv_heads, local_heads=local_heads(), fold_rows_per_token=local_heads())
     if set(CB2A_SECTIONS) & set(args.sections):
         tickets = (k2_tickets(args.k2_sweep, args.k2_floor, args.cb2_extents, args.cb2_starts)
                    if 'K2' in args.sections else [])
@@ -1820,14 +1917,17 @@ def main(argv=None):
             k2_sweep=list(args.k2_sweep), k2_floor=list(args.k2_floor) if args.k2_floor else None,
             cb2_extents=args.cb2_extents, cb2_starts=args.cb2_starts, z_families=args.z_families,
             z_starts=args.z_starts, output_memory=args.output_memory, min_live_start=MIN_LIVE_START,
-            served=dict(flags='0x%x' % SERVED_FLAGS, compile_flags='0x%x' % COMPILE_FLAGS, rows=SERVED_ROWS,
+            served=dict(flags='0x%x' % args.served_flags, compile_flags='0x%x' % args.compile_flags, rows=SERVED_ROWS,
                         batch=SERVED_BATCH, offsets=list(SERVED_OFFSETS), k_chunk_size=K_CHUNK),
             k2_tickets={kind: sum(1 for ticket in tickets if ticket['kind'] == kind)
                         for kind in ('sweep', 'family', 'floor')} if 'K2' in args.sections else None)
     if 'K2' in args.sections:
         report['native_decode'] = dict(NATIVE_DECODE)
-        report['unverified'] = list(UNVERIFIED)
-        for line in native_decode_lines():
+        if args.kv_heads != PAIR_KV_HEADS:
+            report['native_decode'].update(local_heads=local_heads(), kv_heads=args.kv_heads,
+                                           query_shape=[1, 1, local_heads(), card.HEAD_DIM])
+        report['unverified'] = list(unverified_items(args.kv_heads))
+        for line in native_decode_lines(args.kv_heads):
             print(line, flush=True)
     report['_requested'] = RequestLog()
     native = card.NativeLog(args.out.with_name(args.out.name + '.native.log'))
