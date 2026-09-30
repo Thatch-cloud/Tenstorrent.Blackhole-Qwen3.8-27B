@@ -4,7 +4,8 @@
 
 S3a at four cards (docs/tp4-exact-ring-parity.md): the users that sit in rows 32..63 of the 64-row verify block diverge
 from the sequential engine in their first rounds; the users in rows 0..31 do not. The suspect is the model's own
-all-reduce (tt_transformers ccl.tt_all_reduce: reduce_scatter_minimal_async, then all_gather_async), whose RING
+all-reduce (tt_transformers ccl.tt_all_reduce, which on a (1, N) mesh is the reduce_scatter_minimal_async alone: each
+chip keeps its own 5120/4 = 1280-column slice of the sum, ccl.py returns straight after it), whose RING
 reduce-scatter adds its four partials forward for even chunks and backward for odd ones, the parity taken from the
 tile's flat index in the per-chip slice, so the block's second tile is added in another order than a one-tile call.
 A collective needs four chips: this cannot be shown on one card (the sums have nothing to associate there), and at two
@@ -18,10 +19,16 @@ bit; integers, as the fabric probe used, are exact under any order and cannot se
             sequential engine runs, one tile). Predicted: tile 0 identical, every later tile differing.
   FIX       the same block through tile_collective_tp (the wrapper the four-card process installs) inside its block
             scope: every tile must equal the one-tile call. Its split count must be one per call.
-  CONTROLS  the one-tile call twice (deterministic), four rows against the tile's first four (shape-invariant), every
-            device's copy of a result against device 0's (replicated), Linear topology on the whole block against its
-            one-tile call (the pair's topology: no parity), and, informational, the block reshaped unit-major to
-            (1, R/32, 32, 5120), the cheaper split that would need no extra launches.
+            EVERY comparison covers all four chips: each chip holds a different 1280-column slice (chip k is not chip 0),
+            and each chip starts its ring at another slice index, so a comparison of one chip's columns shows nothing
+            about the others. A comparison joins chip 0..3's slices of a tile and compares that with the joined slices of
+            the one-tile call.
+  CONTROLS  the one-tile call twice (deterministic) and four rows against the tile's first four (shape-invariant).
+            There is no replication control: at (1, 4) the outputs of the chips differ by construction.
+  INFORMATIONAL (never a verdict input; an error here does not fail the run) Linear topology on the whole block against
+            its one-tile call (the pair's topology, not the served path), and the reduce-scatter called directly on the
+            block reshaped unit-major to (1, R/32, 32, 5120), the cheaper split that would need no extra launches (only
+            the direct call restarts the ring's parity per unit; tt_all_reduce flattens the units back first).
 
 VERDICT LINE (also in the report file): TP4_RS_TILE verdict=PASS|NOT_REPRODUCED|FAIL comparisons=C differing=D ...
   PASS            the unfixed tiles beyond the first differ, the first does not, the fix is bit exact, the controls hold.
@@ -100,12 +107,12 @@ def verdict(report):
     records = report.get('records') or []
     if not records:
         return 'FAIL', reasons + ['no comparison ran']
-    errors = [row['name'] for row in records if 'error' in row]
+    errors = [row['name'] for row in records if 'error' in row and row['group'] != 'informational']
     if errors:
         reasons.append('errored: %s' % ', '.join(errors))
     controls = [row['name'] for row in records if row['group'] == 'control' and row.get('differing')]
     if controls:
-        reasons.append('a control differs (the baseline is not repeatable or not replicated): %s' % ', '.join(controls))
+        reasons.append('a control differs (the baseline is not repeatable): %s' % ', '.join(controls))
     first_tile = [row for row in records if row['group'] == 'unfixed' and row.get('tile') == 0 and 'error' not in row]
     later_tiles = [row for row in records if row['group'] == 'unfixed' and row.get('tile', 0) > 0 and 'error' not in row]
     fixed = [row for row in records if row['group'] == 'fixed' and 'error' not in row]
@@ -157,7 +164,7 @@ def run(options, log=print, modules=None):
     """The measurement. `modules` (a test): dict(torch, ttnn, TT_CCL, tt_all_reduce, get_num_links) in place of the
     image's."""
     report = dict(fabric=options.fabric, opened=False, records=[], heights=list(options.heights), seeds=options.seeds,
-                  topology='Ring', descriptor=os.environ.get('TT_MESH_GRAPH_DESC_PATH'),
+                  topology='Ring', cluster_type=None, descriptor=os.environ.get('TT_MESH_GRAPH_DESC_PATH'),
                   serving_contract=os.environ.get('QWEN_C2_SERVING'))
     if modules is None:
         import torch
@@ -185,6 +192,10 @@ def run(options, log=print, modules=None):
         report['order'] = [int(device) for device in mesh.get_device_ids()]
         devices = mesh.get_num_devices()
         report['num_links'] = int(modules['get_num_links'](mesh))
+        try:
+            report['cluster_type'] = str(ttnn.cluster.get_cluster_type())
+        except Exception as error:
+            report['cluster_type'] = 'unknown (%s: %s)' % (type(error).__name__, error)
         collective = modules['TT_CCL'](mesh)
         measure(options, report, log, torch, ttnn, mesh, collective, modules['tt_all_reduce'], devices, tile_collective_tp)
     except Exception as error:
@@ -231,9 +242,47 @@ def measure(options, report, log, torch, ttnn, mesh, collective, all_reduce, dev
             records.append(dict(group=group, name=name, error='%s: %s' % (type(error).__name__, error)))
             log('TP4_RS_TILE compare %s %s ERROR %s' % (group, name, error))
 
-    def replicated(group, name, copies):
-        for chip in range(1, len(copies)):
-            compare(group, '%s/chip%d-vs-chip0' % (name, chip), copies[chip], copies[0])
+    def chips(copies, first=None, last=None):
+        """Every chip's rows first..last side by side: chip k holds columns k*w..(k+1)*w of the sum, so the four
+        together are the whole result and a comparison of them is a comparison of all of it."""
+        return torch.cat([copy[:, :, first:last, :] for copy in copies], dim=3)
+
+    def note_widths(copies):
+        widths = {int(copy.shape[3]) for copy in copies} | set(report.get('output_widths') or ())
+        report['output_widths'] = sorted(widths)
+
+    def informational(label, tiles, source, singles):
+        """Two arms that inform the choice of a cheaper split and never decide a verdict."""
+        try:
+            # The pair's topology on the whole block: no chunk parity, so every tile equals its one-tile call.
+            linear_whole = reduce(all_reduce, source, 'Linear')
+            for tile in range(tiles):
+                linear_single = reduce(all_reduce, source[:, :, tile * TILE:(tile + 1) * TILE, :].contiguous(), 'Linear')
+                compare('informational', '%s/linear-block-tile%d-vs-one-tile' % (label, tile),
+                        chips(linear_whole, tile * TILE, (tile + 1) * TILE), chips(linear_single))
+        except Exception as error:
+            records.append(dict(group='informational', name='%s/linear' % label,
+                                error='%s: %s' % (type(error).__name__, error)))
+        try:
+            # Unit-major (1, tiles, 32, 5120) through the reduce-scatter itself (tt_all_reduce flattens the units first,
+            # so only the direct call restarts the ring's parity for each unit); each chip's slice is 1280 wide.
+            reshaped = ttnn.reshape(upload(source), (1, tiles, TILE, WIDTH))
+            output = ttnn.experimental.reduce_scatter_minimal_async(
+                reshaped, persistent_output_buffers=None, dim=3,
+                multi_device_global_semaphore=collective.get_and_cycle_rs_semaphore_handles(),
+                barrier_semaphore=collective.get_and_cycle_barrier_semaphore_handle(),
+                num_links=int(report['num_links']), memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                intermediate_memory_config=ttnn.DRAM_MEMORY_CONFIG, topology=ttnn.Topology.Ring,
+                chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2)
+            copies = download(output)
+            ttnn.deallocate(output)
+            for tile in range(tiles):
+                joined = torch.cat([copy[:, tile:tile + 1, :, :] for copy in copies], dim=3)
+                compare('informational', '%s/unit-major-tile%d-vs-one-tile' % (label, tile),
+                        joined.reshape(1, 1, TILE, -1), chips(singles[tile]))
+        except Exception as error:
+            records.append(dict(group='informational', name='%s/unit-major' % label,
+                                error='%s: %s' % (type(error).__name__, error)))
 
     wrapped = tile_collective_tp.TileSplitAllReduce(all_reduce, ttnn)
     for height in options.heights:
@@ -247,18 +296,17 @@ def measure(options, report, log, torch, ttnn, mesh, collective, all_reduce, dev
                 piece = source[:, :, tile * TILE:(tile + 1) * TILE, :].contiguous()
                 first = reduce(all_reduce, piece, 'Ring')
                 singles.append(first)
+                note_widths(first)
                 if tile == 0:
                     again = reduce(all_reduce, piece, 'Ring')
-                    compare('control', '%s/one-tile-twice' % label, again[0], first[0])
+                    compare('control', '%s/one-tile-twice' % label, chips(again), chips(first))
                     four = reduce(all_reduce, source[:, :, :4, :].contiguous(), 'Ring')
-                    compare('control', '%s/four-rows-vs-tile0' % label, four[0][:, :, :4, :], first[0][:, :, :4, :])
-                replicated('control', '%s/one-tile%d' % (label, tile), first)
+                    compare('control', '%s/four-rows-vs-tile0' % label, chips(four, 0, 4), chips(first, 0, 4))
             # The unfixed program: the whole block through the model's own call.
             whole = reduce(all_reduce, source, 'Ring')
-            replicated('control', '%s/block' % label, whole)
             for tile in range(tiles):
                 compare('unfixed', '%s/block-tile%d-vs-one-tile' % (label, tile),
-                        whole[0][:, :, tile * TILE:(tile + 1) * TILE, :], singles[tile][0], tile=tile, height=height)
+                        chips(whole, tile * TILE, (tile + 1) * TILE), chips(singles[tile]), tile=tile, height=height)
             # The fix: the same block through the four-card process's wrapper, inside its scope.
             before = tile_collective_tp.splits()
             with tile_collective_tp.block_scope(height):
@@ -266,31 +314,11 @@ def measure(options, report, log, torch, ttnn, mesh, collective, all_reduce, dev
             engaged = tile_collective_tp.splits() - before
             records.append(dict(group='control', name='%s/wrapper-splits' % label, elements=1, differing=0, first=None,
                                 splits=engaged, splits_expected=1))
-            replicated('control', '%s/fixed' % label, fixed)
             for tile in range(tiles):
                 compare('fixed', '%s/split-tile%d-vs-one-tile' % (label, tile),
-                        fixed[0][:, :, tile * TILE:(tile + 1) * TILE, :], singles[tile][0], tile=tile, height=height)
-            # The pair's topology on the whole block: no chunk parity, so every tile equals its one-tile call.
+                        chips(fixed, tile * TILE, (tile + 1) * TILE), chips(singles[tile]), tile=tile, height=height)
             if seed == 0:
-                linear_whole = reduce(all_reduce, source, 'Linear')
-                for tile in range(tiles):
-                    linear_single = reduce(all_reduce, source[:, :, tile * TILE:(tile + 1) * TILE, :].contiguous(), 'Linear')
-                    compare('control', '%s/linear-block-tile%d-vs-one-tile' % (label, tile),
-                            linear_whole[0][:, :, tile * TILE:(tile + 1) * TILE, :], linear_single[0])
-                # Informational: unit-major (1, tiles, 32, 5120), the split that would need no extra launch.
-                try:
-                    reshaped = upload(source)
-                    reshaped = ttnn.reshape(reshaped, (1, tiles, TILE, WIDTH))
-                    output = all_reduce(reshaped, mesh, collective, cluster_axis=0, dim=3, topology=ttnn.Topology.Ring,
-                                        memory_config=ttnn.DRAM_MEMORY_CONFIG)
-                    copies = download(output)
-                    ttnn.deallocate(output)
-                    for tile in range(tiles):
-                        compare('informational', '%s/unit-major-tile%d-vs-one-tile' % (label, tile),
-                                copies[0][:, tile:tile + 1, :, :].reshape(1, 1, TILE, WIDTH), singles[tile][0])
-                except Exception as error:
-                    records.append(dict(group='informational', name='%s/unit-major' % label,
-                                        error='%s: %s' % (type(error).__name__, error)))
+                informational(label, tiles, source, singles)
     report['summary'] = summarise(records)
 
 

@@ -2,7 +2,7 @@
 
 WHY (S3a at four cards, docs/tp4-exact-ring-parity.md). At the pair every cross-chip sum has two addends, which
 commute, so the block's second 32-row tile can never differ from a one-tile call. At four cards the model's
-tt_all_reduce (ccl.py: reduce_scatter_minimal_async, then all_gather_async) runs RING collectives, and the ring
+tt_all_reduce (ccl.py: at (1, N) the reduce_scatter_minimal_async alone, each chip keeping its slice) runs RING collectives, and the ring
 reduce-scatter sends even chunks forward and odd chunks backward, so the two directions add the four partials in
 different orders. The parity of a chunk is fixed by the flat tile index inside the per-chip slice
 (reduce_scatter_common::chunk_ring_parity: (tiles_read / tile_granularity) % 2), and the slice of a (1, 1, 64, 5120)
@@ -19,7 +19,7 @@ which the process runs at QWEN_FAST_TP != 2 only, so the pair never sees it. The
 model_batch.ModelBatch.run (a class attribute; the pinned file is not edited) so that the block's forward runs inside the
 scope, and the scope refuses the round unless every all-reduce the block issues was split.
 
-The wrapper consumes its input, as tt_all_reduce does (ccl.py deallocates it after the gather).
+The wrapper consumes its input, as tt_all_reduce does (ccl.py deallocates it after the reduce-scatter).
 
 Stdlib only; ttnn is imported on first use.
 """

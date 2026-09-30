@@ -23,7 +23,8 @@ matrix passed.
 ## The mechanism
 
 What TP4 changes in arithmetic: every cross-chip sum has four addends, and the model's collective runs on the RING. `tt_all_reduce`
-(`models/tt_transformers/tt/ccl.py`) is `reduce_scatter_minimal_async` then `all_gather_async`. The ring reduce-scatter sends the
+(`models/tt_transformers/tt/ccl.py`) on a `(1, N)` mesh is the `reduce_scatter_minimal_async` alone: it returns straight after it, so
+each chip keeps only its own 1280-column slice of the sum (the fabric probe and the MLP already expect that). The ring reduce-scatter sends the
 even chunks of a slice forward and the odd chunks backward (`ring_reduce_scatter_minimal_async_reader.cpp`), the parity being
 `(tiles_read / tile_granularity) % 2` (`reduce_scatter_common::chunk_ring_parity`), and the last step adds three terms
 (`DST = interm2 + (interm + input)`, `ring_reduction.cpp`), so the two directions associate the four partials differently. At two
@@ -36,11 +37,12 @@ one-tile call, which is what the sequential engine issues (four rows are one pad
 that flips a near-tie. Users 2 and 3 sit in rows 32..63; users 0 and 1 in rows 0..31. The mechanism depends on the row tile, not on
 the extent, which is why the 16k user agrees.
 
-This reading is from tt-metal main, not from the image. If the image's `tile_granularity` is 4 (an even 10 chunks a row), nothing
+This reading is from the tt-metal source at v0.77.0-rc1 (the image's tag; the same code is on main). The one unknown is the fabric
+payload size on this image. If the image's `tile_granularity` is 4 (an even 10 chunks a row), nothing
 flips and the mechanism is wrong; the spike says which (verdict NOT_REPRODUCED).
 
 The fabric probe (J0) could not have caught it: its inputs are small integers, exact in bfloat16 under any association, and it only
-tested 32 rows.
+tested 32 rows and 2,048 rows, never a 64-row block.
 
 ## The fix
 
@@ -59,10 +61,14 @@ drafter and every other shape pass straight through.
 * Guarded: the scope refuses the round unless every block-wide all-reduce was split (128 per forward: 16 wo + 48 GDN out + 64 w2;
   64 when the MLP is not native at the block's rows, its two-tile form already reducing 32 rows at a time). A wrapper that was never
   bound where the layers look it up would otherwise run the inexact reduction silently.
-* Cost: 128 extra reduce-scatter and gather pairs plus slices and a concat per packed round; predicted 3-6 ms, measured by X3.
-  A cheaper variant (one reduce-scatter per tile, one shared gather; or a unit-major `(1, 2, 32, 5120)` reshape whose per-unit slice
-  restarts the parity) is left for after the measurement: neither is proven on the image, and X1 records the unit-major variant as
-  informational.
+* Cost: per packed round, 128 extra reduce-scatters (there is no gather to add), 256 slices and 128 concats around them; the
+  3-6 ms predicted is a guess that may be low; X3 measures it.
+  Cheaper variants, exact with no extra launches, left for after the measurement (neither is proven on the image): a direct
+  `reduce_scatter_minimal_async` on the unit-major `(1, 2, 32, 5120)` view (its ring count restarts for each unit; only the direct
+  call does, `tt_all_reduce` flattens the units first), which X1 records as informational; or Linear topology for the target's
+  `tt_all_reduce` at TP4 (its reader has no chunk parity: it always adds local, forward and backward in that order).
+* Refused, deliberately: a TP4 block wider than 32 rows that is not a whole number of tiles (`validate_rows`). Serving blocks are 32
+  and 64; an experiment harness at another width fails loudly rather than run the inexact reduction.
 
 ## The spike (X1, four cards)
 
@@ -72,6 +78,11 @@ same call on each tile alone, bit for bit: tile 0 equal, later tiles differing) 
 one-tile calls everywhere. Controls: the one-tile call twice, four rows against the tile's first four, every chip's copy against
 chip 0's, Linear topology on the whole block. The verdict line is `TP4_RS_TILE verdict=PASS|NOT_REPRODUCED|FAIL comparisons=C
 differing=D ...`; exit 0 only on PASS.
+
+At `(1, 4)` the outputs of the chips are different column slices, so every comparison joins all four chips' slices of a tile (each
+chip starts its ring at a different slice index, so one chip's columns prove nothing about the others). There is no replication
+control. Informational rows (Linear on the block, the direct unit-major reduce-scatter) never enter the verdict, and an error in
+them is recorded, not fatal. The report records the cluster type (Ring is assumed from P150_X4, the model's own choice).
 
 ## The window
 

@@ -71,18 +71,21 @@ def fake_ttnn():
         open_mesh_device=lambda shape, **kwargs: Mesh(), close_mesh_device=lambda mesh: None,
         ShardTensorToMesh=lambda mesh, dim: (mesh, dim), from_torch=from_torch,
         to_torch=lambda part: part, get_device_tensors=lambda tensor: list(tensor.parts),
-        slice=slice_, concat=concat, deallocate=deallocate, reshape=reshape)
+        slice=slice_, concat=concat, deallocate=deallocate, reshape=reshape,
+        cluster=types.SimpleNamespace(get_cluster_type=lambda: 'P150_X4'),
+        experimental=types.SimpleNamespace(reduce_scatter_minimal_async=None))
 
 
 def ring_all_reduce(chunk_tiles=8, nondeterministic=False, whole_call_order=False):
-    """tt_all_reduce as far as the order of its four-way sums goes: reduce-scatter then gather, so every chip ends with
-    the full reduced tensor. `chunk_tiles` 10**6 makes every chunk even (no dependence on the tile); `whole_call_order`
-    makes the order depend on the call's own height instead (a fake that breaks the one-tile invariance)."""
+    """tt_all_reduce at a (1, 4) mesh as far as the order of its four-way sums goes: ccl.py returns straight after the
+    reduce-scatter, so chip k ends with ONLY its own 1280-column slice of the sum (not a replicated result). Like the real
+    one it flattens the units dimension into the rows first; `.direct` is the reduce-scatter called on the units as
+    given (each unit restarts the ring's tile count). `chunk_tiles` 10**6 makes every chunk even (no dependence on the
+    tile); `whole_call_order` makes the order depend on the call's own height instead (a fake that breaks the one-tile
+    invariance)."""
     calls = []
 
-    def call(tensor, mesh, ccl, cluster_axis=0, dim=3, topology='Ring', memory_config='DRAM'):
-        assert not tensor.freed and dim == 3
-        calls.append((tensor.shape, topology))
+    def scatter(tensor, topology):
         partials = tensor.parts                       # four (1, units, rows, width) partials
         units, rows, width = partials[0].shape[1:]
         forward = ((partials[0] + partials[1]) + partials[2]) + partials[3]
@@ -91,6 +94,8 @@ def ring_all_reduce(chunk_tiles=8, nondeterministic=False, whole_call_order=Fals
         if topology == 'Ring':
             for row_tile in range(-(-rows // 32)):     # a short tensor is tile padded: four rows are one tile
                 for column_tile in range(width // 32):
+                    # the ring's tile count restarts for every unit and, within one, runs over the rows of the
+                    # per-chip slice: 40 tiles a row
                     chunk = (row_tile * SLICE_TILES + column_tile % SLICE_TILES) // chunk_tiles
                     if whole_call_order:
                         chunk = 1 if rows == 32 else 0
@@ -99,15 +104,39 @@ def ring_all_reduce(chunk_tiles=8, nondeterministic=False, whole_call_order=Fals
         if nondeterministic:
             reduced = reduced + torch.rand(1).to(torch.bfloat16) * 1e-3
         tensor.freed = True
-        return Device([reduced.clone() for _ in range(CHIPS)])
+        shard = width // CHIPS
+        return Device([reduced[..., chip * shard:(chip + 1) * shard].clone() for chip in range(CHIPS)])
+
+    def call(tensor, mesh, ccl, cluster_axis=0, dim=3, topology='Ring', memory_config='DRAM'):
+        assert not tensor.freed and dim == 3
+        calls.append((tensor.shape, topology))
+        units, rows = tensor.parts[0].shape[1:3]
+        if units != 1:
+            tensor = Device([part.reshape(1, 1, units * rows, part.shape[3]) for part in tensor.parts])
+        return scatter(tensor, topology)
+
+    def direct(tensor, persistent_output_buffers=None, dim=3, topology='Ring', **kwargs):
+        assert not tensor.freed and dim == 3 and kwargs['num_links'] == 2
+        calls.append((tensor.shape, 'direct-' + topology))
+        return scatter(tensor, topology)
 
     call.calls = calls
+    call.direct = direct
     return call
+
+
+class Collective:
+    def get_and_cycle_rs_semaphore_handles(self):
+        return 'rs'
+
+    def get_and_cycle_barrier_semaphore_handle(self):
+        return 'barrier'
 
 
 def run_spike(all_reduce, heights='64', seeds='1', ttnn=None):
     ttnn = ttnn or fake_ttnn()
-    modules = dict(torch=torch, ttnn=ttnn, TT_CCL=lambda mesh: 'ccl', tt_all_reduce=all_reduce,
+    ttnn.experimental.reduce_scatter_minimal_async = all_reduce.direct
+    modules = dict(torch=torch, ttnn=ttnn, TT_CCL=lambda mesh: Collective(), tt_all_reduce=all_reduce,
                    get_num_links=lambda mesh: 2)
     lines = []
     with tempfile.TemporaryDirectory() as directory:
@@ -148,14 +177,58 @@ class Reproduction(unittest.TestCase):
         self.assertTrue(controls)
         self.assertEqual([row['name'] for row in controls if row['differing']], [])
         names = [row['name'] for row in controls]
-        for expected in ('r64/s0/one-tile-twice', 'r64/s0/four-rows-vs-tile0', 'r64/s0/block/chip3-vs-chip0',
-                         'r64/s0/linear-block-tile1-vs-one-tile'):
-            self.assertIn(expected, names)
+        # no replication control: at (1, 4) the chips hold different column slices by construction
+        self.assertEqual(sorted(names), ['r64/s0/four-rows-vs-tile0', 'r64/s0/one-tile-twice', 'r64/s0/wrapper-splits'])
+
+    def test_every_comparison_covers_all_four_chips_columns(self):
+        status, report, lines = run_spike(ring_all_reduce())
+        rows = {row['name']: row for row in report['records']}
+        self.assertEqual(rows['r64/s0/block-tile1-vs-one-tile']['elements'], 32 * 5120)
+        self.assertEqual(rows['r64/s0/split-tile1-vs-one-tile']['elements'], 32 * 5120)
+        self.assertEqual(rows['r64/s0/one-tile-twice']['elements'], 32 * 5120)
+        self.assertEqual(rows['r64/s0/four-rows-vs-tile0']['elements'], 4 * 5120)
+        self.assertEqual(report['output_widths'], [1280])
+        self.assertEqual(report['cluster_type'], 'P150_X4')
+
+    def test_a_difference_in_one_chips_columns_only_is_seen(self):
+        inner = ring_all_reduce()
+
+        def only_chip3_wrong(tensor, *args, **kwargs):
+            out = inner(tensor, *args, **kwargs)
+            if kwargs.get('topology') == 'Ring' and tensor.shape[2] == 32 and len(inner.calls) == 1:
+                out.parts[3] = out.parts[3] + torch.ones_like(out.parts[3])   # chip 3 of the very first one-tile call
+            return out
+        only_chip3_wrong.calls = inner.calls
+        only_chip3_wrong.direct = inner.direct
+        status, report, lines = run_spike(only_chip3_wrong)
+        self.assertEqual(status, 1)
+        self.assertTrue(any('control' in reason or 'fix' in reason or 'first tile' in reason for reason in report['reasons']))
 
     def test_unit_major_is_informational_and_equal_on_the_fake(self):
         status, report, lines = run_spike(ring_all_reduce())
         info = [row for row in report['records'] if row['group'] == 'informational']
-        self.assertEqual([row['differing'] for row in info], [0, 0])
+        self.assertEqual([row['name'] for row in info if 'error' not in row],
+                         ['r64/s0/linear-block-tile0-vs-one-tile', 'r64/s0/linear-block-tile1-vs-one-tile',
+                          'r64/s0/unit-major-tile0-vs-one-tile', 'r64/s0/unit-major-tile1-vs-one-tile'])
+        self.assertEqual([row['differing'] for row in info], [0, 0, 0, 0])
+
+    def test_an_informational_arm_that_raises_does_not_fail_the_run(self):
+        function = ring_all_reduce()
+
+        def broken(*args, **kwargs):
+            raise RuntimeError('reshape refused')
+        function.direct = broken
+        status, report, lines = run_spike(function)
+        self.assertEqual(status, 0, [line for line in lines if 'reason' in line])
+        self.assertEqual(report['verdict'], 'PASS')
+        errors = [row for row in report['records'] if 'error' in row]
+        self.assertEqual([row['group'] for row in errors], ['informational'])
+
+    def test_a_control_that_errors_still_fails_the_run(self):
+        report = dict(opened=True, records=[
+            spike.record('unfixed', 't0', 10, 0, None, tile=0), spike.record('unfixed', 't1', 10, 4, 3, tile=1),
+            spike.record('fixed', 'f0', 10, 0, None, tile=0), dict(group='control', name='c', error='boom')])
+        self.assertEqual(spike.verdict(report)[0], 'FAIL')
 
     def test_two_heights_and_seeds_run_every_combination(self):
         status, report, lines = run_spike(ring_all_reduce(), heights='64,128', seeds='2')
@@ -174,9 +247,9 @@ class Reproduction(unittest.TestCase):
         function = ring_all_reduce()
         run_spike(function)
         ring = [shape for shape, topology in function.calls if topology == 'Ring']
-        # the unfixed whole block once, the unit-major reshape once; the fix's calls are one tile each
+        # the unfixed whole block once; the fix's calls are one tile each; the unit-major arm is the direct call
         self.assertEqual(ring.count((1, 1, 64, 5120)), 1)
-        self.assertEqual(ring.count((1, 2, 32, 5120)), 1)
+        self.assertEqual([shape for shape, topology in function.calls if topology == 'direct-Ring'], [(1, 2, 32, 5120)])
         self.assertGreaterEqual(ring.count((1, 1, 32, 5120)), 4)
 
 
