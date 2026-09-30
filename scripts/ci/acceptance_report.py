@@ -187,13 +187,25 @@ def packed_fingerprints(log_text, streams):
                 users=users, unattributed=len(found['unattributed']))
 
 
-def compare_packed(log_a, streams_a, log_b, streams_b):
+def compare_packed(log_a, streams_a, log_b, streams_b, *, by_position=False, min_coverage=0.5):
     """Two arms' packed-round sequences, user by user (packed_sequences): identical when the admission
     orders match and every user's whole sequence does; otherwise each differing user's first differing
     round (its index, and both arms' (position, prefix, emitted, predictions) there - None past a
     sequence's end). Sequences from different admission orders are not comparable line by line (the pair
-    drafter drafts a user in row 1 differently from row 0): `comparable` says so."""
+    drafter drafts a user in row 1 differently from row 0): `comparable` says so.
+
+    `by_position` (the batched-draft check: a packed pair, the four-user quad, against the singles): every user's rounds are
+    keyed by the position they were drafted at, and (prefix, emitted, predictions) are compared at every position BOTH
+    arms drafted at. A round at a position is a function of the text up to it and the draft alone, so a vLLM scheduling
+    difference (the rare sequential round, another round boundary) cannot pass for a draft difference and a real draft
+    difference cannot hide behind one. Where one arm's rounds fall between the other's (no shared position) there is
+    nothing to compare: a user is identical only when it shares at least `min_coverage` of the shorter arm's positions
+    (`coverage`), so a comparison that saw too little is not a pass. The admission order does not matter here (the fold
+    makes a user's draft independent of its row): `comparable` is True, the orders are still reported. The entries carry
+    `common`, `only_a`, `only_b`, `differing` and the first difference by position."""
     a, b = packed_sequences(log_a, streams_a), packed_sequences(log_b, streams_b)
+    if by_position:
+        return _compare_packed_by_position(a, b, min_coverage)
     users = []
     for user in sorted(set(a['users']) | set(b['users'])):
         left, right = a['users'].get(user, []), b['users'].get(user, [])
@@ -210,12 +222,50 @@ def compare_packed(log_a, streams_a, log_b, streams_b):
                 unattributed_a=len(a['unattributed']), unattributed_b=len(b['unattributed']), users=users)
 
 
+def compare_by_position(left, right, min_coverage=0.5):
+    """Two rounds lists [(position, prefix, emitted, predictions)] keyed by position: (entry fields, identical). Repeated
+    positions (a round drafted twice at one position) are compared as the lists they are, in log order."""
+    def keyed(rounds):
+        found = {}
+        for position, prefix, emitted, predictions in rounds:
+            found.setdefault(position, []).append((prefix, emitted, predictions))
+        return found
+
+    first, second = keyed(left), keyed(right)
+    common = sorted(set(first) & set(second))
+    differing = [position for position in common if first[position] != second[position]]
+    shorter = min(len(first), len(second))
+    coverage = (len(common) / shorter) if shorter else 0.0
+    entry = dict(rounds_a=len(left), rounds_b=len(right), common=len(common), only_a=len(first) - len(common),
+                 only_b=len(second) - len(common), differing=len(differing), coverage=round(coverage, 3))
+    if differing:
+        position = differing[0]
+        entry['first_difference'] = dict(position=position, a=first[position], b=second[position])
+    return entry, bool(common) and not differing and coverage >= min_coverage
+
+
+def _compare_packed_by_position(a, b, min_coverage):
+    users = []
+    for user in sorted(set(a['users']) | set(b['users'])):
+        entry, identical = compare_by_position(a['users'].get(user, []), b['users'].get(user, []), min_coverage)
+        users.append(dict(user=user, identical=identical, **entry))
+    return dict(identical=bool(users) and all(entry['identical'] for entry in users), comparable=True,
+                by_position=True, min_coverage=min_coverage,
+                admission_order_a=a['admission_order'], admission_order_b=b['admission_order'],
+                lines_a=sum(len(s) for s in a['users'].values()), lines_b=sum(len(s) for s in b['users'].values()),
+                unattributed_a=len(a['unattributed']), unattributed_b=len(b['unattributed']), users=users)
+
+
 def compare_line(result):
     """One '[PACKED-COMPARE] ...' line for compare_packed's result."""
     differing = [entry['user'] for entry in result['users'] if not entry['identical']]
-    return ('[PACKED-COMPARE] identical=%s comparable=%s order_a=%s order_b=%s lines=%d/%d differing_users=%s'
+    line = ('[PACKED-COMPARE] identical=%s comparable=%s order_a=%s order_b=%s lines=%d/%d differing_users=%s'
             % (result['identical'], result['comparable'], result['admission_order_a'], result['admission_order_b'],
                result['lines_a'], result['lines_b'], differing or '-'))
+    if result.get('by_position'):
+        line += ' by_position=True common=%s coverage=%s' % (
+            [entry['common'] for entry in result['users']], [entry['coverage'] for entry in result['users']])
+    return line
 
 
 def recover_drafts(mean_text, accepted, drafted, rate_texts, positions=POSITIONS):

@@ -436,5 +436,92 @@ class DetailStreamTests(unittest.TestCase):
         self.assertIsNone(ar.decode_rates([None])['window'])
 
 
+class PackedCompareByPositionTests(unittest.TestCase):
+    """compare_packed(by_position=True): the batched-draft check - rounds keyed by the position they were drafted at."""
+
+    def log(self, tag, rounds, order=(0, 1, 2, 3)):
+        streams = [dict(request_id='cmpl-%s%d' % (tag, user)) for user in range(4)]
+        lines = []
+        for segment, user in enumerate(order):
+            for position, prefix, emitted, predictions in rounds.get(user, []):
+                lines.append('[PACKED] request=cmpl-%s%d-0-ab segment=%d position=%d prefix=%d emitted=%d predictions=%s'
+                             % (tag, user, segment, position, prefix, emitted, predictions))
+        return chr(10).join(lines), streams
+
+    ROUNDS = {user: [(4096 + 100 * user + 7 * step, 3 + step % 4, 4 + step % 4, '[%d, %d]' % (user, step)) for step in range(10)]
+              for user in range(4)}
+
+    def test_equal_drafts_are_identical_whatever_the_admission_order(self):
+        result = ar.compare_packed(*self.log('a', self.ROUNDS), *self.log('b', self.ROUNDS, (2, 1, 3, 0)), by_position=True)
+        self.assertTrue(result['identical'])
+        self.assertTrue(result['comparable'], 'the fold makes a draft independent of its row')
+        self.assertEqual([entry['common'] for entry in result['users']], [10] * 4)
+        self.assertEqual([entry['coverage'] for entry in result['users']], [1.0] * 4)
+        line = ar.compare_line(result)
+        self.assertIn('identical=True', line)
+        self.assertIn('by_position=True common=[10, 10, 10, 10]', line)
+        by_round = ar.compare_packed(*self.log('a', self.ROUNDS), *self.log('b', self.ROUNDS, (2, 1, 3, 0)))
+        self.assertFalse(by_round['comparable'], 'the round-keyed comparison still refuses another admission order')
+
+    def test_a_scheduling_difference_is_not_a_draft_difference(self):
+        """One arm has an extra round in the middle of user 1's answer (a sequential step the other did not take): the
+        round-keyed comparison reads every later round as different, the position-keyed one compares the same positions."""
+        shifted = dict(self.ROUNDS)
+        shifted[1] = self.ROUNDS[1][:4] + [(5000, 2, 2, '[9]')] + self.ROUNDS[1][4:]
+        by_round = ar.compare_packed(*self.log('a', self.ROUNDS), *self.log('b', shifted))
+        self.assertFalse(by_round['identical'])
+        result = ar.compare_packed(*self.log('a', self.ROUNDS), *self.log('b', shifted), by_position=True)
+        self.assertTrue(result['identical'], result['users'])
+        self.assertEqual((result['users'][1]['common'], result['users'][1]['only_a'], result['users'][1]['only_b']), (10, 0, 1))
+
+    def test_a_real_draft_difference_cannot_hide_behind_a_scheduling_one(self):
+        shifted = dict(self.ROUNDS)
+        wrong = list(self.ROUNDS[2])
+        wrong[6] = (wrong[6][0], wrong[6][1], wrong[6][2], '[not, the, draft]')
+        shifted[2] = wrong[:3] + [(4999, 1, 1, '[0]')] + wrong[3:]
+        result = ar.compare_packed(*self.log('a', self.ROUNDS), *self.log('b', shifted), by_position=True)
+        self.assertFalse(result['identical'])
+        entry = result['users'][2]
+        self.assertEqual((entry['identical'], entry['differing'], entry['first_difference']['position']),
+                         (False, 1, self.ROUNDS[2][6][0]))
+        self.assertEqual(entry['first_difference']['a'], [(self.ROUNDS[2][6][1], self.ROUNDS[2][6][2], self.ROUNDS[2][6][3])])
+        self.assertEqual([item['identical'] for item in result['users']], [True, True, False, True])
+        # prefix and emitted count as much as the predictions
+        for field in (1, 2):
+            changed = dict(self.ROUNDS)
+            row = list(self.ROUNDS[0][2])
+            row[field] += 1
+            changed[0] = self.ROUNDS[0][:2] + [tuple(row)] + self.ROUNDS[0][3:]
+            self.assertFalse(ar.compare_packed(*self.log('a', self.ROUNDS), *self.log('b', changed),
+                                               by_position=True)['identical'], field)
+
+    def test_too_little_overlap_is_not_a_pass(self):
+        disjoint = {user: [(position + 3, *rest) for position, *rest in rounds] for user, rounds in self.ROUNDS.items()}
+        result = ar.compare_packed(*self.log('a', self.ROUNDS), *self.log('b', disjoint), by_position=True)
+        self.assertFalse(result['identical'], 'no shared position: nothing was compared')
+        self.assertEqual([entry['common'] for entry in result['users']], [0] * 4)
+        half = {user: rounds[:5] + [(position + 3, *rest) for position, *rest in rounds[5:]]
+                for user, rounds in self.ROUNDS.items()}
+        loose = ar.compare_packed(*self.log('a', self.ROUNDS), *self.log('b', half), by_position=True, min_coverage=0.5)
+        strict = ar.compare_packed(*self.log('a', self.ROUNDS), *self.log('b', half), by_position=True, min_coverage=0.6)
+        self.assertTrue(loose['identical'])
+        self.assertFalse(strict['identical'])
+        self.assertEqual(loose['users'][0]['coverage'], 0.5)
+
+    def test_an_arm_missing_a_user_is_not_identical(self):
+        fewer = {user: rounds for user, rounds in self.ROUNDS.items() if user != 3}
+        result = ar.compare_packed(*self.log('a', self.ROUNDS), *self.log('b', fewer), by_position=True)
+        self.assertFalse(result['identical'])
+        self.assertEqual(result['users'][3]['common'], 0)
+
+    def test_repeated_positions_are_compared_as_lists(self):
+        left, right = [(100, 3, 4, '[1]'), (100, 5, 6, '[2]')], [(100, 3, 4, '[1]'), (100, 5, 6, '[3]')]
+        entry, identical = ar.compare_by_position(left, right)
+        self.assertFalse(identical)
+        self.assertEqual(entry['differing'], 1)
+        self.assertTrue(ar.compare_by_position(left, list(left))[1])
+        self.assertFalse(ar.compare_by_position([], [])[1])
+
+
 if __name__ == '__main__':
     unittest.main()

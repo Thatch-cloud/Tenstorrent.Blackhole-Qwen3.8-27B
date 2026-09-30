@@ -11,7 +11,13 @@ own SMOKE_JSON line and the container log and exits non-zero on:
   - a ramp commit above --max-ramp-kv-ms (default 50) when the served profile has the drafter's K/V slide on
     (QWEN_FAST_TP_KV_SLIDE=1): the MEDIAN, over the [PACKED-PUBLISH] rounds with a commit, of each round's largest
     prepare_history entry. The median, so the attach's few compile-bearing rounds do not fail it; the eager chain's ~310 ms
-    per ramp user in v140 would.
+    per ramp user in v140 would;
+  - the batched draft, when the smoke ran the `concurrent4_steady` test (four users past the 2,048-row draft window from the
+    first round, the only mix a pair or the quad can serve): what the profile asked for must have run. QWEN_FAST_QUAD_DRAFT=1:
+    the quad's marker exactly once, at least one round the quad served, no fallback and no disable line. Off: no quad line, and
+    at least one round two packed pairs served (a comparison arm that never batched compares nothing). A
+    [DRAFT-SINGLES-AUDIT] line with equal=0 or a [QUAD-AUDIT] line with equal=0 fails; a profile with
+    QWEN_FAST_DRAFT_SINGLES_AUDIT set and no audit line fails.
 
   python c2_smoke_check.py --smoke-log smoke.log --container-log container.log --profile P [--profiles qwen_c2_profiles.json]
 """
@@ -23,10 +29,23 @@ import statistics
 import sys
 from pathlib import Path
 
-CORE = ('warmup', 'warm_lifecycle', 'coding', 'concurrent4', 'long_real_text')
+CORE = ('warmup', 'warm_lifecycle', 'coding', 'concurrent4', 'concurrent4_steady', 'long_real_text')
 PUBLISH = re.compile(r'\[PACKED-PUBLISH\] round=\d+ stages=\{.*?prepare_history: \[([0-9.,\s]*)\]')
 MISMATCH = re.compile(r'audit mismatch', re.IGNORECASE)
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
+QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
+SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
+STEADY_TEST = 'concurrent4_steady'
+# One line per packed round the coordinator selected (dflash_packed_proposal_coordinator.SELECT_LINE, QWEN_FAST_PACKED_AUDIT):
+# the quad's one group of four slots, or two packed pairs.
+QUAD_ROUND = re.compile(r'\[PACKED-SELECT\] round=\d+ pairs=\[\[0, 1, 2, 3\]\] users=4 ')
+PAIR_ROUND = re.compile(r'\[PACKED-SELECT\] round=\d+ pairs=\[\[0, 1\], \[2, 3\]\] users=4 ')
+QUAD_MARKER = '[PINDIAG] quad draft engaged'
+QUAD_DISABLED = '[PINDIAG] quad draft disabled'
+QUAD_FALLBACK = '[QUAD-DRAFT] fallback'
+QUAD_LINE = re.compile(r'\[QUAD-DRAFT\] round=\d+ built=')
+QUAD_AUDIT = re.compile(r'\[QUAD-AUDIT\] round=\S+ equal=([01]) ')
+SINGLES_AUDIT_LINE = re.compile(r'\[DRAFT-SINGLES-AUDIT\] round=\S+ group=\[[0-9, ]*\] equal=([01]) stage=(\S+) ')
 DEFAULT_PROFILES = Path(__file__).resolve().parent / 'qwen_c2_profiles.json'
 
 
@@ -87,9 +106,10 @@ def smoke_problems(results):
         problems.append('warmup: status %s' % results['warmup'].get('value'))
     if 'coding' in results and 'error' not in results['coding']:
         problems += stream_problems('coding', results['coding'])
-    if 'concurrent4' in results and 'error' not in results['concurrent4']:
-        for index, user in enumerate(results['concurrent4'].get('users') or []):
-            problems += stream_problems('concurrent4 user %d' % index, user)
+    for name in ('concurrent4', STEADY_TEST):
+        if name in results and 'error' not in results[name]:
+            for index, user in enumerate(results[name].get('users') or []):
+                problems += stream_problems('%s user %d' % (name, index), user)
     if 'warm_lifecycle' in results and 'error' not in results['warm_lifecycle']:
         for label, rows in results['warm_lifecycle'].items():
             if not isinstance(rows, list):
@@ -118,13 +138,73 @@ def slide_on(profile, profiles_path):
     return (entry.get('env') or {}).get(SLIDE_FLAG) == '1'
 
 
-def check(smoke_text, container_text, slide, max_ramp_ms=50.0):
-    """(problems, facts) for a smoke log and a container log."""
-    problems = smoke_problems(smoke_results(smoke_text))
+def profile_env(profile, profiles_path):
+    document = json.loads(Path(profiles_path).read_text(encoding='utf-8'))
+    entry = (document.get('profiles') or {}).get(profile)
+    if entry is None:
+        raise ValueError('profile %s is not in %s' % (profile, profiles_path))
+    return entry.get('env') or {}
+
+
+def draft_facts(container_text):
+    """What the container log says about the batched draft: rounds served by the quad and by two packed pairs, the quad's marker,
+    fallback and disable lines, and the two audits' lines."""
+    singles = SINGLES_AUDIT_LINE.findall(container_text)
+    quad_audit = QUAD_AUDIT.findall(container_text)
+    return dict(quad_rounds=len(QUAD_ROUND.findall(container_text)), pair_rounds=len(PAIR_ROUND.findall(container_text)),
+                quad_markers=container_text.count(QUAD_MARKER), quad_disabled=container_text.count(QUAD_DISABLED),
+                quad_fallbacks=container_text.count(QUAD_FALLBACK), quad_lines=len(QUAD_LINE.findall(container_text)),
+                quad_audits=len(quad_audit), quad_audits_unequal=sum(1 for equal in quad_audit if equal != '1'),
+                singles_audits=len(singles), singles_audits_unequal=sum(1 for equal, _ in singles if equal != '1'),
+                singles_audit_stages=sorted({stage for equal, stage in singles if equal != '1'})[:4])
+
+
+def draft_problems(facts, env, steady):
+    """The problems the profile's batched-draft settings leave: see the module docstring. Only a smoke that ran the steady
+    four-user mix can be held to it; the audits' unequal lines fail whatever ran."""
+    problems = []
+    if facts['quad_audits_unequal']:
+        problems.append('%d [QUAD-AUDIT] lines with equal=0: the quad differs from the pair traces' % facts['quad_audits_unequal'])
+    if facts['singles_audits_unequal']:
+        problems.append('%d [DRAFT-SINGLES-AUDIT] lines with equal=0 (%s): a batched draft differs from the single-user draft'
+                        % (facts['singles_audits_unequal'], ', '.join(facts['singles_audit_stages'])))
+    if not steady:
+        return problems
+    if env.get(QUAD_FLAG) == '1':
+        if facts['quad_markers'] != 1:
+            problems.append('the quad marker (%s) appears %d times, not once: the quad never engaged or engaged twice'
+                            % (QUAD_MARKER, facts['quad_markers']))
+        if not facts['quad_rounds']:
+            problems.append('no round was served by the quad (no [PACKED-SELECT] pairs=[[0, 1, 2, 3]] line): the four '
+                            'steady users drafted some other way')
+        if facts['quad_fallbacks'] or facts['quad_disabled']:
+            problems.append('the quad fell back %d times and was disabled %d times' % (facts['quad_fallbacks'],
+                                                                                        facts['quad_disabled']))
+    else:
+        if facts['quad_markers'] or facts['quad_lines'] or facts['quad_rounds']:
+            problems.append('the quad ran (marker %d, round lines %d, rounds %d) on a profile with %s off'
+                            % (facts['quad_markers'], facts['quad_lines'], facts['quad_rounds'], QUAD_FLAG))
+        if not facts['pair_rounds']:
+            problems.append('no round was served by two packed pairs: the comparison arm never batched a draft')
+    if env.get(SINGLES_AUDIT_FLAG) and not facts['singles_audits']:
+        problems.append('%s is set and no [DRAFT-SINGLES-AUDIT] line was logged' % SINGLES_AUDIT_FLAG)
+    return problems
+
+
+def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None):
+    """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
+    stop conditions."""
+    smoke = smoke_results(smoke_text)
+    problems = smoke_problems(smoke)
     mismatches = [line.strip()[:200] for line in container_text.splitlines() if MISMATCH.search(line)]
     problems += ['audit mismatch in the container log: %s' % line for line in mismatches[:4]]
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
+    if env is not None:
+        drafts = draft_facts(container_text)
+        facts['draft'] = drafts
+        steady = STEADY_TEST in (smoke or {}) and 'error' not in smoke[STEADY_TEST]
+        problems += draft_problems(drafts, env, steady)
     if slide:
         if median is None:
             problems.append('no [PACKED-PUBLISH] round with a commit: the ramp commit time is unread (QWEN_FAST_PACKED_AUDIT?)')
@@ -146,10 +226,11 @@ def main(argv=None):
         smoke = options.smoke_log.read_text(encoding='utf-8', errors='replace')
         container = options.container_log.read_text(encoding='utf-8', errors='replace')
         slide = slide_on(options.profile, options.profiles)
+        env = profile_env(options.profile, options.profiles)
     except (OSError, ValueError) as error:
         print('SMOKE_CHECK unreadable: %s' % error, file=sys.stderr)
         return 2
-    problems, facts = check(smoke, container, slide, options.max_ramp_kv_ms)
+    problems, facts = check(smoke, container, slide, options.max_ramp_kv_ms, env)
     print('SMOKE_CHECK profile=%s slide=%s %s' % (options.profile, 'on' if slide else 'off', json.dumps(facts)))
     for problem in problems:
         print('SMOKE_CHECK FAILED: %s' % problem)
