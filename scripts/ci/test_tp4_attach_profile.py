@@ -55,6 +55,13 @@ from test_c2_packed_tp4_profiles import image_env, profiles
 HERE = Path(__file__).resolve().parent
 PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16')
 RING_DESCRIPTOR = HERE / 'qwen_p150x4_ring_mesh_graph_descriptor.textproto'
+# The environment the ops-trace arm adds (ops_profile_plan.PROFILER_ENV, which test_ops_profile_plan holds this equal to; that
+# module is host-only and must not be imported by an attach test: the closure test takes every module the attach loads).
+OPS_PROFILER_ENV = (('TT_METAL_DEVICE_PROFILER', '1'), ('TT_METAL_PROFILER_TRACE_TRACKING', '1'),
+                    ('TT_METAL_PROFILER_MID_RUN_DUMP', '1'), ('TT_METAL_PROFILER_CPP_POST_PROCESS', '1'),
+                    ('TTNN_OP_PROFILER', '1'), ('TT_METAL_PROFILER_DIR', '/opt/tt-metal/generated/profiler'),
+                    ('QWEN_FAST_PROFILED_BLOCK_STREAM', '1'), ('TT_METAL_CACHE', '/root/.cache/tt-metal-cache'),
+                    ('QWEN_FAST_PROFILE_DUMP_EVERY', '2'))
 
 
 def environment(name):
@@ -249,8 +256,7 @@ class AttachTests(unittest.TestCase):
     def test_the_timed_profile_attaches_with_the_op_profiler_environment(self):
         """The ops-trace arm (ops_profile_plan.PROFILER_ENV) adds the profiler variables to the timed profile: the attach must
         not refuse them (the block stream, which refuses TT_METAL_DEVICE_PROFILER, is off at four cards)."""
-        import ops_profile_plan
-        with Attach('c2-packed-tp4-speed', extra_env=ops_profile_plan.PROFILER_ENV).run() as seen:
+        with Attach('c2-packed-tp4-speed', extra_env=OPS_PROFILER_ENV).run() as seen:
             self.assertEqual(seen['links_after_attach'], 2)
             self.assertEqual(seen['pool']['extent_replay'], True)
             self.assertEqual(os.environ['QWEN_FAST_PROFILE_DUMP_EVERY'], '2')
