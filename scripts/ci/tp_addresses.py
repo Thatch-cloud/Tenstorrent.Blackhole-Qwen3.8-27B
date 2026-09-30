@@ -53,8 +53,16 @@ TWINS = (
     ('gdn_commit_dma', 'publish', 'gdn_commit_dma_tp', 'publish'),
 )
 
+# (module, twin module): whole modules whose lazy `import name` sites must reach the four-card twin. The pinned original
+# is imported first (the twin borrows its geometry-free helpers from it), then sys.modules[name] and every module global
+# that IS the original module object are pointed at the twin.
+MODULE_TWINS = (
+    ('extent_attention_replay', 'extent_attention_replay_tp'),
+)
+
 # What install() changed: (namespace, name, the pinned object), so a test can put the pair's functions back.
 _REBOUND = []
+_ALIASED = []
 
 
 def install(environ=None):
@@ -74,9 +82,23 @@ def install(environ=None):
         new = getattr(importlib.import_module(twin_module), twin_name)
         if old is not new:
             swaps.append((name, old, new))
-    if not swaps:
-        return 0
     rebound = 0
+    for original_name, twin_name in MODULE_TWINS:
+        original = importlib.import_module(original_name)
+        twin = importlib.import_module(twin_name)
+        if original is twin or sys.modules.get(original_name) is twin:
+            continue
+        sys.modules[original_name] = twin
+        _ALIASED.append((original_name, original))
+        rebound += 1
+        for module in list(sys.modules.values()):
+            namespace = getattr(module, '__dict__', None)
+            if isinstance(namespace, dict) and namespace.get(original_name) is original:
+                namespace[original_name] = twin
+                _REBOUND.append((namespace, original_name, original))
+                rebound += 1
+    if not swaps:
+        return rebound
     for module in list(sys.modules.values()):
         namespace = getattr(module, '__dict__', None)
         if not isinstance(namespace, dict):
@@ -91,7 +113,10 @@ def install(environ=None):
 
 def uninstall():
     """Put back every pinned object install() replaced (tests only: the four-card process never goes back)."""
-    count = len(_REBOUND)
+    count = len(_REBOUND) + len(_ALIASED)
+    while _ALIASED:
+        name, original = _ALIASED.pop()
+        sys.modules[name] = original
     while _REBOUND:
         namespace, key, old = _REBOUND.pop()
         namespace[key] = old

@@ -198,8 +198,18 @@ scripts/ci/gdn_multitoken_conv_tp.py
 scripts/ci/gdn_records_tp.py
 scripts/ci/gdn_commit_dma_tp.py
 scripts/ci/gdn_multitoken_tp.py
+# Packed-block attention at one KV head per chip (S2T-06a): the extent readers, the fold DMA and the mask kernel's four-card
+# siblings (6 folded head rows per token, K64j 0x23), and the q-slice rule's width-aware head layout. The pinned
+# extent_attention_replay / attention_fold_dma / attention_mask_replay stay byte for byte (frozen evidence);
+# tp_addresses.install() puts extent_attention_replay_tp in place of the pinned module at QWEN_FAST_TP=4 only.
+scripts/ci/attention_fold_dma_tp.py
+scripts/ci/attention_fold_dma_tp.cpp
+scripts/ci/attention_mask_replay_tp.cpp
+scripts/ci/extent_attention_replay_tp.py
 scripts/ci/gdn_commit_dma_tp.cpp
 scripts/ci/gdn_conv_prefix_copy_tp.cpp
+scripts/ci/gdn_conv_prefix_copy.cpp
+scripts/ci/gdn_conv_windows.cpp
 scripts/ci/gdn_conv_windows_tp.cpp
 scripts/ci/gdn_state_copy.py
 scripts/ci/gdn_conv_prefix_copy.py

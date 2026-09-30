@@ -126,10 +126,18 @@ def sdpa_modes(environ=None):
     return modes
 
 
-def q_slice_saves(rows, per_token=FOLDED_ROWS_PER_TOKEN, kv_heads=KV_HEADS_PER_CHIP):
+def q_slice_saves(rows, per_token=None, kv_heads=None):
     """The stage-4 factory's rule (F14/F15) for a bundle of `rows`-row groups: each KV head's G folded rows
     span row tiles [floor(h*G/32), ceil((h+1)*G/32)); the slice is the widest span, and the factory builds 0x4
-    only when it is narrower than Q's own row tiles (6-8 rows: 2 of 3; 1-5 rows: no saving, refused)."""
+    only when it is narrower than Q's own row tiles (6-8 rows: 2 of 3; 1-5 rows: no saving, refused).
+    The head layout is the width this process serves at (12 rows per token over 2 KV heads at the pair, 6 over 1 at
+    four cards, where there is nothing to slice between); the module constants are the pair's."""
+    if per_token is None or kv_heads is None:
+        import tp_shapes
+
+        found = tp_shapes.active()
+        per_token = found.attn_fold_rows if per_token is None else per_token
+        kv_heads = found.attn_kv_heads if kv_heads is None else kv_heads
     folded = rows * per_token
     if kv_heads <= 1 or folded % kv_heads:
         return False

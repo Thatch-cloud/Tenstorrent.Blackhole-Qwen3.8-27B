@@ -31,3 +31,11 @@ def defines(environ=None):
     return [('QWEN_STATE_PAGES', str(found.gdn_state_pages)),
             ('QWEN_CONV_PAGES', str(found.gdn_conv_pages)),
             ('QWEN_CONV_TASKS', str(4 * found.gdn_conv_pages))]
+
+
+def fold_defines(environ=None):
+    """The define the attention fold and mask siblings read: the folded query rows per token (12 at the pair, 6 at four
+    cards: one row per local query head). Empty at the pair, whose kernels take no defines."""
+    if tp_shapes.chip_count(environ) == tp_shapes.PAIR:
+        return []
+    return [('QWEN_FOLD_HEAD_ROWS', str(tp_shapes.active(environ).attn_fold_rows))]

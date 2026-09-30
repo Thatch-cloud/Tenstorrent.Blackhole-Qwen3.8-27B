@@ -76,7 +76,7 @@ jobs:
           for name in serving_startup.py dflash_combined_request.py memory_ledger.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
-          for name in tp_shapes.py tp_addresses.py tp4_mesh.py mesh_link_policy.py feature_collective.py draft_shared_head.py gdn_user_batch_tp.py tp_kernels.py gdn_multitoken_conv_tp.py gdn_records_tp.py gdn_commit_dma_tp.py gdn_commit_dma_tp.cpp gdn_multitoken_tp.py gdn_batched_conv.py gdn_conv_prefix_copy.py gdn_conv_windows.py gdn_working_state.py gdn_conv_prefix_copy_tp.cpp gdn_conv_windows_tp.cpp; do
+          for name in tp_shapes.py tp_addresses.py tp4_mesh.py mesh_link_policy.py feature_collective.py draft_shared_head.py gdn_user_batch_tp.py tp_kernels.py gdn_multitoken_conv_tp.py gdn_records_tp.py gdn_commit_dma_tp.py gdn_commit_dma_tp.cpp gdn_multitoken_tp.py gdn_batched_conv.py gdn_conv_prefix_copy.py gdn_conv_windows.py gdn_working_state.py gdn_conv_prefix_copy_tp.cpp gdn_conv_windows_tp.cpp attention_fold_dma_tp.py extent_attention_replay_tp.py attention_fold_dma_tp.cpp attention_mask_replay_tp.cpp gdn_conv_prefix_copy.cpp gdn_conv_windows.cpp; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
           for name in verify_trace_t1.py; do
