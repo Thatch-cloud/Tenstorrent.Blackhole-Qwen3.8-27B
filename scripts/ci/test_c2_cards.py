@@ -67,9 +67,24 @@ class JobTests(unittest.TestCase):
             read(C2_ACTIONS='prefix', C2_PREFIX_PROFILE='general-prefix-tp4', C2_PREFIX_BASELINE='general-tp4')
 
     def test_quad_refuses_the_pair_shaped_steps(self):
-        for action in ('cardm', 'replay', 'priority'):
+        for action in ('cardm', 'priority'):
             with self.assertRaisesRegex(job.JobError, 'pair-shaped'):
                 read(C2_CARDS='quad', C2_ACTIONS=action)
+
+    def test_quad_takes_the_replay_with_a_four_card_profile_only(self):
+        """serving/tp4-s2 (E4): the agent's serving sequence on all four boards needs C2_REPLAY_PROFILE, a P150x4 profile."""
+        self.assertIn('replay', job.QUAD_ACTIONS)
+        outputs = read(C2_CARDS='quad', C2_ACTIONS='reset replay', C2_REPLAY_PROFILE='c2-packed-tp4',
+                       C2_PLATFORM_IMAGE='thatch-serving-tt:abcdef123456')
+        self.assertEqual((outputs['cards'], outputs['replay_profile']), ('quad', 'c2-packed-tp4'))
+        with self.assertRaisesRegex(job.JobError, 'needs C2_REPLAY_PROFILE'):
+            read(C2_CARDS='quad', C2_ACTIONS='reset replay')
+        with self.assertRaisesRegex(job.JobError, 'C2_REPLAY_PROFILE c2-packed opens the \\(1, 2\\) pair, but C2_CARDS=quad'):
+            read(C2_CARDS='quad', C2_ACTIONS='replay', C2_REPLAY_PROFILE='c2-packed')
+        with self.assertRaisesRegex(job.JobError, 'C2_REPLAY_PROFILE c2-packed-tp4 opens the four-card'):
+            read(C2_ACTIONS='replay', C2_REPLAY_PROFILE='c2-packed-tp4')
+        # the pair's replay stays as it was: the profile is optional
+        self.assertEqual(read(C2_ACTIONS='replay')['cards'], 'pair')
 
     def test_fabric_needs_quad(self):
         with self.assertRaisesRegex(job.JobError, 'fabric probe needs C2_CARDS=quad'):

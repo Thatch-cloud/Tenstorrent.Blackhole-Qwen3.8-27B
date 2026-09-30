@@ -2447,15 +2447,28 @@ def trace_region_text(region):
     return 'not logged (Q18)'
 
 
+QUAD_DRAFT_FLAG = 'QWEN_FAST_QUAD_DRAFT'
+
+
+def quad_draft_off(profiles, name):
+    """Whether the profile switches the quad draft off (QWEN_FAST_QUAD_DRAFT=0 in its own env: every four-card profile
+    does, the pair's c2-packed leaves the image's 1): no quad ever forms there, so M11 judges its PAIR releases."""
+    return str((profiles['profiles'][name].get('env') or {}).get(QUAD_DRAFT_FLAG, '')) == '0'
+
+
 def run_churn(plan, runner, profiles, arms):
     """M11 (G5 churn): no engine death, no DRAM hold with a seat free, no lifted hold or refusal, the floor, and a
     released quad at every departure while a quad was formed (harness.proposal_releases), over at least
-    CHURN_MIN_REPLACEMENTS replacements seen as departures; the trace region's readings recorded (Q18)."""
+    CHURN_MIN_REPLACEMENTS replacements seen as departures; the trace region's readings recorded (Q18). On a profile
+    with the quad draft off (the four-card profiles, E3) no quad forms, and the same rule is judged on the PAIRS: a
+    released pair at every departure while a pair was formed and every live user drafted in one; a run in which no
+    pair round formed, or no such departure happened, is NOT_EXERCISED, never a pass."""
     spec, = arms
     report = run_arm(runner, plan, spec)
     if report is None:
         return dict(verdict='FAIL', reason='the arm left no gate report', lines=[])
     seats = profile_seats(profiles, spec_profile(runner, spec))
+    pair_mode = quad_draft_off(profiles, spec_profile(runner, spec))
     memory, shortfalls = memory_s2_checks('churn', report, seats)
     problems = arm_problems('churn', report, asked(spec[1])) + memory
     if not report.get('alive'):
@@ -2467,7 +2480,22 @@ def run_churn(plan, runner, profiles, arms):
     if (releases.get('departures') or 0) < replacements:
         shortfalls.append('%s departures seen ([PHASE] finished ids) for %d replacements: the seats did not churn '
                           'as asked' % (releases.get('departures') or 0, replacements))
-    if not releases.get('quad_rounds'):
+    if pair_mode:
+        if releases.get('quad_rounds'):
+            problems.append('%d quad rounds on a profile with %s=0: the quad draft is not off' % (
+                releases['quad_rounds'], QUAD_DRAFT_FLAG))
+        if not releases.get('pair_rounds'):
+            shortfalls.append('no pair round ran: no departure met a formed pair (W6c unexercised)')
+        elif not releases.get('pair_departures'):
+            shortfalls.append('%d pair rounds, but no request left while a pair was formed and every live user '
+                              'drafted in one (%s ambiguous: a single was live) (W6c unexercised)' % (
+                                  releases['pair_rounds'], releases.get('pair_ambiguous') or 0))
+        elif releases.get('pair_unreleased'):
+            problems.append('%d of %d departures while a pair was formed carry no "[PACKED-PROPOSE] released quad=0 '
+                            'pairs=[[..]]" line naming a pair (%s): dead proposal traces were not released at detach '
+                            '(W6c)' % (releases['pair_unreleased'], releases['pair_departures'],
+                                       '; '.join(releases.get('pair_unreleased_steps') or [])))
+    elif not releases.get('quad_rounds'):
         shortfalls.append('no quad round ran: no departure met a formed quad (W6c unexercised)')
     elif not releases.get('quad_departures'):
         shortfalls.append('%d quad rounds, but no request left while a quad was formed (W6c unexercised)'
@@ -2481,12 +2509,22 @@ def run_churn(plan, runner, profiles, arms):
     facts = dict(releases=releases, replacements=replacements, quads_built=s2.get('quads_built'),
                  before=s2.get('before'), dram_hold=s2.get('dram_hold'), trace_region=region,
                  request_buffers=s2.get('request_buffers'), draft_outputs=s2.get('draft_outputs'))
+    if pair_mode:
+        first = ('departures %s (%s while a pair was formed and every live user drafted in one, %s released it; %s '
+                 'ambiguous) over %d replacements; %s pair rounds; release lines %s (%s quads, %s pairs); trace '
+                 'region %s' % (
+                     releases.get('departures'), releases.get('pair_departures'),
+                     (releases.get('pair_departures') or 0) - (releases.get('pair_unreleased') or 0),
+                     releases.get('pair_ambiguous'), replacements, releases.get('pair_rounds'), releases.get('lines'),
+                     releases.get('quad'), releases.get('pairs'), trace_region_text(region)))
+    else:
+        first = ('departures %s (%s while a quad was formed, %s released it) over %d replacements; release lines %s '
+                 '(%s quads, %s pairs); trace region %s' % (
+                     releases.get('departures'), releases.get('quad_departures'),
+                     (releases.get('quad_departures') or 0) - (releases.get('unreleased') or 0), replacements,
+                     releases.get('lines'), releases.get('quad'), releases.get('pairs'), trace_region_text(region)))
     result = dict(verdict='PASS', lines=[
-        'departures %s (%s while a quad was formed, %s released it) over %d replacements; release lines %s (%s '
-        'quads, %s pairs); trace region %s' % (
-            releases.get('departures'), releases.get('quad_departures'),
-            (releases.get('quad_departures') or 0) - (releases.get('unreleased') or 0), replacements,
-            releases.get('lines'), releases.get('quad'), releases.get('pairs'), trace_region_text(region)),
+        first,
         full_seat_admissions_text((s2.get('dram_hold') or {}).get('fit_readings'), seats),
         request_buffers_text(s2.get('request_buffers')), draft_outputs_text(s2.get('draft_outputs'))])
     return with_checks(result, problems, shortfalls, facts)

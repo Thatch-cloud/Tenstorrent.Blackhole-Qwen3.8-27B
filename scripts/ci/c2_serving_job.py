@@ -22,7 +22,8 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
                       Blackhole board present, the four-card (1, 4) mesh the TP4 profiles open). quad takes
                       status, platform, unserve, reset (all four together), fabric (the four-card fabric probe),
-                      build, drift, probe, smoke, gate, prefix and push - not cardm, replay or priority, which
+                      build, drift, probe, smoke, gate, prefix, replay (the agent's serving sequence on all four
+                      boards: it needs C2_REPLAY_PROFILE, a P150x4 profile) and push - not cardm or priority, which
                       are pair-shaped - and only profiles that name mesh_device P150x4 (general-tp4 ...);
                       pair takes only profiles that name none. Anything else is refused here, before a card opens.
   C2_SMOKE_TESTS      comma-separated c2_serving_smoke.py tests, empty for all (agreement and bench are opt-in: only
@@ -93,7 +94,7 @@ CARD_SETS = ('pair', 'quad')
 # What a four-card job may run: the pair-shaped steps (a single-card harness on card M, the M+A smoke and replay, the
 # CPU-priority measurement of the M+A container) do not apply to it, and fabric applies to nothing else.
 QUAD_ACTIONS = ('status', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
-                'push')
+                'replay', 'push')
 TP4_MESH_DEVICE = 'P150x4'
 # The mesh_device values of a pair profile: none (the image's P300 under upstream's four-channel p150_x2) and P300
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
@@ -211,6 +212,9 @@ def read_cards(values, actions, profile_of, named):
                 ', '.join(wrong), ' '.join(QUAD_ACTIONS)))
     if values.get('C2_FABRIC') and cards != 'quad':
         raise JobError('C2_FABRIC needs C2_CARDS=quad')
+    if cards == 'quad' and 'replay' in actions and not values.get('C2_REPLAY_PROFILE'):
+        raise JobError('C2_CARDS=quad with replay needs C2_REPLAY_PROFILE: the source container\'s profile is a pair '
+                       'profile, and the four-card mesh is the profile\'s (mesh_device P150x4)')
     for key, name in named:
         if not name or name == 'none' or name not in profile_of:
             continue

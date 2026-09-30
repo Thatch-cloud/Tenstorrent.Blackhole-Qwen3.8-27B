@@ -153,12 +153,12 @@ class ProfileTest(unittest.TestCase):
         with open(path, encoding='utf-8') as handle:
             self.assertNotIn('QWEN_FAST_ANY_REQUEST', handle.read(), 'only the c2 profiles may set it')
 
-    def test_default_profile_is_general_prefix(self):
-        # From the G1 release on, the image serves general-prefix when the platform names no profile.
+    def test_default_profile_is_the_four_card_traffic_profile(self):
+        # serving/tp4-s2: the image serves c2-packed-tp4 when the platform names no profile (the agent forwards none).
         environ = dict(os.environ)
         os.environ.pop('QWEN_C2_PROFILE', None)
         try:
-            self.assertEqual(contract.load_profile(PROFILES)['name'], 'general-prefix')
+            self.assertEqual(contract.load_profile(PROFILES)['name'], 'c2-packed-tp4')
         finally:
             os.environ.clear()
             os.environ.update(environ)

@@ -2647,6 +2647,12 @@ QUARANTINED_MARKER = '[PINDIAG] request quarantined:'            # D2: a Request
 # reaches the hook - so just ahead of that step's '[PHASE] execute ... finished=[ids]' line.
 RELEASED_LINE = re.compile(r'\[PACKED-PROPOSE\] released quad=([0-9]+) pairs=(\[[^\n]*\]|[0-9]+)')
 QUAD_BUILT_LINE = re.compile(r'\[QUAD-DRAFT\] round=[0-9]+ built=1 ')
+# E3 (serving/tp4-s2): the four-card profiles run with the quad draft off (QWEN_FAST_QUAD_DRAFT=0), so the units a departure
+# must release are PAIRS. A pair round is dflash_packed_proposal_coordinator.AUDIT_LINE (one per round that formed a pair, under
+# QWEN_FAST_PACKED_AUDIT) and its slots the users that round drafted as a pair; SINGLES_LINE names the slots that drafted alone.
+PAIR_ROUND_LINE = re.compile(r'\[PACKED-PROPOSE\] round=([0-9]+) pairs=(\[\[[0-9, \[\]]*\]\]) propose_ms=')
+SINGLES_ROUND_LINE = re.compile(r'\[PACKED-PROPOSE\] singles round=([0-9]+) slots=\[([0-9, ]*)\]')
+PAIR_GROUP = re.compile(r'\[([0-9]+), ([0-9]+)\]')
 # S2 v86 (run 36416471352): every traced draft copies its head outputs into a set the pool allocated at attach, before
 # any trace, so no other trace's replay can overwrite them before the round reads them (the G5 churn death: a fresh
 # pair's outputs sat in an older single-user trace's holes). One DRAFT_OUTPUTS_POOLED_LINE per draft build that pools
@@ -2861,24 +2867,55 @@ def proposal_releases(log_text):
     member's detach). In log order a quad is formed from a quad round line (quad_draft.ROUND_LINE, every quad
     round) until a quad=1 release frees it; a departure is a finished request in a step's [PHASE] execute line,
     and the detach's release line comes just ahead of that line (RELEASED_LINE). A step with a departure while a
-    quad was formed (as the step began) must carry a quad=1 release, else it is 'unreleased'."""
+    quad was formed (as the step began) must carry a quad=1 release, else it is 'unreleased'.
+
+    Four cards (E3, QWEN_FAST_QUAD_DRAFT=0: no quad ever forms) the same lines answer for PAIRS. A pair is formed
+    from a pair round line (PAIR_ROUND_LINE: pairs=[[a, b], ...]) until a release line names it in pairs=. A step
+    with a departure began with a pair formed owes a release that frees at least one pair - when that round drafted
+    every live user in a pair (no singles line for the round: a lone user's departure releases nothing, so a
+    round with singles makes the departure 'ambiguous': counted, never judged). pair_rounds, pair_departures,
+    pair_unreleased (+ pair_unreleased_steps) and pair_ambiguous are the fields; the quad fields are unchanged."""
     formed, at_start, step = False, None, []
     lines = quads = pairs = quad_rounds = steps = departures = quad_departures = 0
     unreleased = []
+    pair_formed, pair_at_start, pair_step, pair_clean = set(), None, 0, False
+    pair_rounds = pair_departures = pair_ambiguous = 0
+    pair_unreleased = []
     for line in log_text.splitlines():
         if QUAD_ROUND_LINE.search(line):
             formed = True
             quad_rounds += 1
+            continue
+        match = PAIR_ROUND_LINE.search(line)
+        if match:
+            pair_rounds += 1
+            pair_formed.update(tuple(int(slot) for slot in group) for group in PAIR_GROUP.findall(match.group(2)))
+            pair_clean = True
+            continue
+        match = SINGLES_ROUND_LINE.search(line)
+        if match:
+            if match.group(2).strip():
+                pair_clean = False
             continue
         match = RELEASED_LINE.search(line)
         if match:
             quad = int(match.group(1))
             lines += 1
             quads += quad
-            pairs += pair_count(match.group(2))
+            released = pair_count(match.group(2))
+            pairs += released
             if at_start is None:
                 at_start = formed
+            if pair_at_start is None:
+                pair_at_start = bool(pair_formed)
             step.append(quad)
+            pair_step += released
+            if released:
+                if match.group(2).isdigit():
+                    pair_formed.clear()                     # a bare count names no pair: everything formed is released
+                else:
+                    pair_formed.difference_update(tuple(int(slot) for slot in group)
+                                                  for group in PAIR_GROUP.findall(match.group(2)))
             if quad:
                 formed = False
             continue
@@ -2895,10 +2932,22 @@ def proposal_releases(log_text):
                         unreleased.append('departure %d (%s): %s' % (
                             steps, ','.join(value[-12:] for value in finished),
                             'released quad=0' if step else 'no release line'))
-            at_start, step = None, []
+                pair_began = bool(pair_formed) if pair_at_start is None else pair_at_start
+                if pair_began:
+                    if not pair_clean:
+                        pair_ambiguous += 1
+                    else:
+                        pair_departures += 1
+                        if not pair_step:
+                            pair_unreleased.append('departure %d (%s): %s' % (
+                                steps, ','.join(value[-12:] for value in finished),
+                                'released no pair' if step else 'no release line'))
+            at_start, step, pair_at_start, pair_step = None, [], None, 0
     return dict(lines=lines, quad=quads, pairs=pairs, quad_rounds=quad_rounds, departures=departures,
                 departure_steps=steps, quad_departures=quad_departures, unreleased=len(unreleased),
-                unreleased_steps=unreleased[:4])
+                unreleased_steps=unreleased[:4], pair_rounds=pair_rounds, pair_departures=pair_departures,
+                pair_ambiguous=pair_ambiguous, pair_unreleased=len(pair_unreleased),
+                pair_unreleased_steps=pair_unreleased[:4])
 
 
 def ladder_of(text):

@@ -686,7 +686,7 @@ class ProfileTests(unittest.TestCase):
                         self.assertEqual(mine.get(key), theirs.get(key), key)
                 self.assertEqual(contract.prefix_reuse_problems(mine), [])
                 self.assertTrue(contract.prefix_reuse(mine) and contract.sticky_sessions(mine))
-        self.assertEqual(load_profiles()['default'], 'general-prefix', 'the image default stays general-prefix')
+        self.assertEqual(load_profiles()['default'], 'c2-packed-tp4', 'serving/tp4-s2: the image default is the four-card traffic profile')
 
     def test_only_the_sticky_profiles_set_the_switch(self):
         names = sorted(name for name, data in load_profiles()['profiles'].items() if STICKY in data['env'])

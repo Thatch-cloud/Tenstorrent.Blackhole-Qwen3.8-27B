@@ -32,6 +32,14 @@ own SMOKE_JSON line and the container log and exits non-zero on:
   - steady_resend (opt-in, after concurrent4_steady): the first steady prompt again, alone, judged as a code answer (above).
     Its prefill reuses, after packed and pair replays, the window-snapshot programs the steady test compiled after the
     capture - the one prefill program set no attach warm covers;
+  - the two STREAMED parser tests (opt-in): stream_tool_call (a streamed tool_choice auto request must arrive as tool_calls
+    deltas with a JSON call and no <tool_call> marker in the content) and stream_reasoning (reasoning_content non-empty, no
+    <think> or </think> in the content): parser M runs on the streaming path only, so the non-streaming tool_call test does
+    not exercise it;
+  - a TRAFFIC profile (one that is not gate only, serving the extent replay), judged when the check is given the profile's
+    entry (--profile always does): its attach must log '[PINDIAG] packed-any admission passed:' and no 'UNQUALIFIED' or
+    'refused' admission line (the record qualified these bytes, no waiver), and a parser_rechunk profile must log the
+    contract's 'parser M armed' line (the parser fix is live in the server that took the requests);
 
   python c2_smoke_check.py --smoke-log smoke.log --container-log container.log --profile P [--profiles qwen_c2_profiles.json]
 """
@@ -64,6 +72,13 @@ SINGLES_AUDIT_LINE = re.compile(r'\[DRAFT-SINGLES-AUDIT\] round=\S+ group=\[[0-9
 # A code prompt asked to be explained and rewritten (800 or 1500 tokens out) does not end by itself in a few tokens.
 MIN_ANSWER_TOKENS = 16
 TEXT_TESTS = ('coding', STEADY_TEST, RESEND_TEST)
+STREAM_PARSER_TESTS = ('stream_tool_call', 'stream_reasoning')
+EXTENT_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
+GATE_PROFILE_FLAG = 'QWEN_C2_GATE_PROFILE'
+ADMISSION_PASSED = '[PINDIAG] packed-any admission passed:'
+ADMISSION_UNQUALIFIED = 'packed-any admission passed UNQUALIFIED'
+ADMISSION_REFUSED = '[PINDIAG] packed-any admission refused'
+PARSER_ARMED = 'parser M armed'
 FOREIGN_SHARE = 0.3
 FIRST_PREFILL_ITEM = re.compile(r'\[MEMLEDGER\] phase=prefill point=after \S+ item=model_after_prefill chip0=\S+ .*?buffers=(\d+) ')
 # Four cards: the eager prefill is warmed before the packed traces (serving_runtime.prefill_warm_before_traces) and every prefill
@@ -164,6 +179,14 @@ def smoke_problems(results):
                 problems += stream_problems('%s user %d' % (name, index), user)
                 if name in TEXT_TESTS:
                     problems += answer_problems('%s user %d' % (name, index), user)
+    for name in STREAM_PARSER_TESTS:
+        entry = results.get(name)
+        if entry is None:
+            continue
+        if 'error' in entry:
+            problems.append('%s: %s' % (name, entry['error']))
+        elif entry.get('ok') is not True:
+            problems += ['%s: %s' % (name, reason) for reason in (entry.get('problems') or ['not ok'])[:4]]
     if 'warm_lifecycle' in results and 'error' not in results['warm_lifecycle']:
         for label, rows in results['warm_lifecycle'].items():
             if not isinstance(rows, list):
@@ -198,6 +221,14 @@ def profile_env(profile, profiles_path):
     if entry is None:
         raise ValueError('profile %s is not in %s' % (profile, profiles_path))
     return entry.get('env') or {}
+
+
+def profile_entry(profile, profiles_path):
+    document = json.loads(Path(profiles_path).read_text(encoding='utf-8'))
+    entry = (document.get('profiles') or {}).get(profile)
+    if entry is None:
+        raise ValueError('profile %s is not in %s' % (profile, profiles_path))
+    return entry
 
 
 def first_prefill_buffers(container_text):
@@ -284,9 +315,31 @@ def draft_problems(facts, env, steady):
     return problems
 
 
-def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None):
+def traffic_problems(container_text, entry):
+    """What a TRAFFIC profile's boot must show (`entry`: the profile's whole record). A profile that is gate only, or that
+    does not serve the extent replay, is not judged. The attach's packed-any admission must have PASSED - on a record that
+    qualifies these bytes, so neither the UNQUALIFIED waiver (which only a gate-only profile is given) nor a refusal line -
+    and a parser_rechunk profile must have armed parser M."""
+    env = entry.get('env') or {}
+    if entry.get('gate_only') or env.get(GATE_PROFILE_FLAG) or env.get(EXTENT_FLAG) != '1':
+        return []
+    problems = []
+    if ADMISSION_PASSED not in container_text:
+        problems.append('no "%s" line in the container log: the traffic profile was not admitted by the packed-any '
+                        'admission' % ADMISSION_PASSED)
+    if ADMISSION_UNQUALIFIED in container_text:
+        problems.append('the packed-any admission passed UNQUALIFIED on a traffic profile: the four-card record does not '
+                        'qualify these bytes')
+    if ADMISSION_REFUSED in container_text:
+        problems.append('a "%s" line in the container log' % ADMISSION_REFUSED)
+    if entry.get('parser_rechunk') and PARSER_ARMED not in container_text:
+        problems.append('the profile sets parser_rechunk but the container log has no "%s" line' % PARSER_ARMED)
+    return problems
+
+
+def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
-    stop conditions."""
+    stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
     smoke = smoke_results(smoke_text)
     problems = smoke_problems(smoke)
     mismatches = [line.strip()[:200] for line in container_text.splitlines() if MISMATCH.search(line)]
@@ -307,6 +360,8 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None):
         facts['draft'] = drafts
         steady = STEADY_TEST in (smoke or {}) and 'error' not in smoke[STEADY_TEST]
         problems += draft_problems(drafts, env, steady)
+    if entry is not None:
+        problems += traffic_problems(container_text, entry)
     if slide:
         if median is None:
             problems.append('no [PACKED-PUBLISH] round with a commit: the ramp commit time is unread (QWEN_FAST_PACKED_AUDIT?)')
@@ -329,10 +384,11 @@ def main(argv=None):
         container = options.container_log.read_text(encoding='utf-8', errors='replace')
         slide = slide_on(options.profile, options.profiles)
         env = profile_env(options.profile, options.profiles)
+        entry = profile_entry(options.profile, options.profiles)
     except (OSError, ValueError) as error:
         print('SMOKE_CHECK unreadable: %s' % error, file=sys.stderr)
         return 2
-    problems, facts = check(smoke, container, slide, options.max_ramp_kv_ms, env)
+    problems, facts = check(smoke, container, slide, options.max_ramp_kv_ms, env, entry)
     print('SMOKE_CHECK profile=%s slide=%s %s' % (options.profile, 'on' if slide else 'off', json.dumps(facts)))
     for problem in problems:
         print('SMOKE_CHECK FAILED: %s' % problem)

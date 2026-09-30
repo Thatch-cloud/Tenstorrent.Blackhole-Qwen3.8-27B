@@ -176,6 +176,87 @@ record('tool_call', lambda: post('/v1/chat/completions', dict(model=MODEL, max_t
        messages=[{'role': 'user', 'content': 'What is the weather in Wellington? Use the tool.'}],
        tools=[{'type': 'function', 'function': {'name': 'get_weather', 'description': 'Current weather for a city',
                'parameters': {'type': 'object', 'properties': {'city': {'type': 'string'}}, 'required': ['city']}}}])))
+def stream_events(messages, max_tokens, **extra):
+    """One streamed chat completion, kept apart by kind (stream() merges content with reasoning): the content, the
+    reasoning, the tool-call deltas accumulated by index ({name, arguments}), the finish reason, the delta count and the
+    usage. Parser M (c2_parser_rechunk) runs on this path only."""
+    body = dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
+                stream_options={'include_usage': True}, **extra)
+    request = urllib.request.Request(BASE + '/v1/chat/completions', data=json.dumps(body).encode(), method='POST',
+                                     headers={'content-type': 'application/json'})
+    content, reasoning, calls, finish, deltas, usage = [], [], {}, None, 0, None
+    with urllib.request.urlopen(request, timeout=1800) as response:
+        for raw in response:
+            line = raw.decode(errors='replace').strip()
+            if not line.startswith('data:') or line == 'data: [DONE]':
+                continue
+            chunk = json.loads(line[5:])
+            if chunk.get('usage'):
+                usage = chunk['usage']
+            for choice in chunk.get('choices', ()):
+                delta = choice.get('delta') or {}
+                deltas += 1
+                content.append(delta.get('content') or '')
+                reasoning.append(delta.get('reasoning_content') or delta.get('reasoning') or '')
+                for call in delta.get('tool_calls') or ():
+                    slot = calls.setdefault(call.get('index', 0), dict(name='', arguments=''))
+                    function = call.get('function') or {}
+                    slot['name'] += function.get('name') or ''
+                    slot['arguments'] += function.get('arguments') or ''
+                finish = choice.get('finish_reason') or finish
+    return dict(content=''.join(content), reasoning=''.join(reasoning), calls=[calls[index] for index in sorted(calls)],
+                finish=finish, deltas=deltas, tokens=(usage or {}).get('completion_tokens'))
+
+
+def stream_tool_call():
+    """Opt-in (named in the tests list): a STREAMED tool_choice auto request, the only path parser M re-chunks. The
+    call must arrive as tool_calls deltas (a name and arguments that parse as JSON with the asked city) and the
+    <tool_call> markers must not leak into the content."""
+    tools = [{'type': 'function', 'function': {'name': 'get_weather', 'description': 'Current weather for a city',
+              'parameters': {'type': 'object', 'properties': {'city': {'type': 'string'}}, 'required': ['city']}}}]
+    got = stream_events([{'role': 'user', 'content': 'What is the weather in Wellington? Use the tool.'}], 400,
+                        tool_choice='auto', tools=tools)
+    problems = []
+    if not got['calls']:
+        problems.append('no tool_calls in the stream (content %r)' % got['content'][:120])
+    else:
+        call = got['calls'][0]
+        if call['name'] != 'get_weather':
+            problems.append('the call names %r, not get_weather' % call['name'])
+        try:
+            arguments = json.loads(call['arguments'])
+        except ValueError:
+            arguments = None
+            problems.append('the call arguments are not JSON: %r' % call['arguments'][:120])
+        if isinstance(arguments, dict) and 'wellington' not in str(arguments.get('city', '')).lower():
+            problems.append('the call asks for %r, not Wellington' % arguments.get('city'))
+    for marker in ('<tool_call>', '</tool_call>'):
+        if marker in got['content']:
+            problems.append('%s leaked into the content' % marker)
+    return dict(ok=not problems, problems=problems, calls=got['calls'][:2], finish=got['finish'], deltas=got['deltas'],
+                tokens=got['tokens'], content=got['content'][:120])
+
+
+def stream_reasoning():
+    """Opt-in: a streamed thinking-on prompt. The reasoning arrives in reasoning_content and only the answer in content:
+    a </think> in the content means the parser lost the marker at a multi-token delta (the defect parser M fixes)."""
+    got = stream_events([{'role': 'user', 'content': 'How many prime numbers are there below 30? Think first.'}], 1200)
+    problems = []
+    if not got['reasoning'].strip():
+        problems.append('no reasoning_content in the stream')
+    for marker in ('</think>', '<think>'):
+        if marker in got['content']:
+            problems.append('%s leaked into the content' % marker)
+    if not got['content'].strip():
+        problems.append('no answer content after the reasoning (finish %s, %s tokens)' % (got['finish'], got['tokens']))
+    return dict(ok=not problems, problems=problems, finish=got['finish'], deltas=got['deltas'], tokens=got['tokens'],
+                reasoning=got['reasoning'][:120], content=got['content'][:120])
+
+
+if ONLY and 'stream_tool_call' in ONLY:
+    record('stream_tool_call', stream_tool_call)
+if ONLY and 'stream_reasoning' in ONLY:
+    record('stream_reasoning', stream_reasoning)
 record('refused_n2', lambda: dict(status=post('/v1/chat/completions', dict(model=MODEL, n=2, max_tokens=8,
        messages=[{'role': 'user', 'content': 'hi'}]))[0]))
 record('alive_after_refusal', alive)

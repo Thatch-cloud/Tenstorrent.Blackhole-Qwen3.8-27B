@@ -35,7 +35,19 @@ out before the container is removed. Exit 0 only if every step passed.
 
 Usage: c2_platform_replay.py --source thatch-inference-Qwen-Qwen3.8-27B|<inspect.json> --image <ref> --results <dir>
        [--profile NAME] [--seed N] [--model CHECKPOINT] [--served-model NAME] [--env NAME=value ...]
+       [--cards pair|quad] [--profiles qwen_c2_profiles.json] [--startup-wait SECONDS]
 To replay an image without the alias (a rollback candidate), pass --served-model Qwen/Qwen3.8-27B.
+
+FOUR CARDS (--cards quad, the c2-packed-tp4 serving of serving/tp4-s2). The copy gets EVERY Blackhole board present
+(exactly four by-id links, resolved now, none named here: c2_serving_gate.card_set) in place of cards M and A, and
+--profile is required and must name a mesh_device P150x4 profile of --profiles (a pair profile is refused, and under
+--cards pair a P150x4 one is): the contract overrides the recorded pair mesh variables from the profile. The startup
+wait defaults to the agent's own ceiling (THATCH_SERVING_STARTUP_CEILING_SECS, 1020 s) instead of 600. The runtime log
+must then also show the contract's P150x4 (1, 4) mesh line, the extent replay engaged, the packed-any admission PASSED
+(no UNQUALIFIED waiver, no refusal) on a traffic profile, parser M armed on a parser_rechunk profile, and the four-card
+prefill warm before Metal's unsafe-allocation warning with no late prefill program (c2_smoke_check's rules). The restart
+step (docker stop with the teardown skipped, then docker start) is the first time a four-card (1, 4) FABRIC_1D mesh is
+reopened after an unclean exit: a wedge there fails the replay and the next job must begin with the four-card reset.
 """
 import argparse
 import glob
@@ -153,6 +165,49 @@ def source_problem(source_image, image, inherited):
 
 def serving_devices(root='/dev/tenstorrent/by-id'):
     return [os.path.realpath(os.path.join(root, board)) for board in (CARD_M, CARD_A)]
+
+
+CARD_SETS = ('pair', 'quad')
+TP4_MESH_DEVICE = 'P150x4'
+PAIR_MESH_DEVICES = (None, 'P300')
+PAIR_STARTUP_S = 600
+QUAD_STARTUP_S = 1020         # the node agent's THATCH_SERVING_STARTUP_CEILING_SECS
+PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qwen_c2_profiles.json')
+
+
+def quad_devices(root='/dev/tenstorrent/by-id'):
+    """Every Blackhole board present, resolved now, as the four-card gate resolves them (c2_serving_gate.card_set:
+    exactly four by-id links on distinct device nodes, else RuntimeError). Names no board."""
+    import c2_serving_gate
+    return c2_serving_gate.card_set(root)
+
+
+def cards_problem(cards, profile, profiles_path=PROFILES):
+    """Why the replay cannot serve `profile` on card set `cards`, or None. Four cards need the profile named and
+    a mesh_device P150x4 profile of the checkout's profiles; the pair refuses a P150x4 one (and leaves a profile this
+    checkout does not define to the image, as before)."""
+    if cards not in CARD_SETS:
+        return '--cards must be pair or quad, got %r' % cards
+    if cards == 'quad' and not profile:
+        return ('--cards quad needs --profile: the source container' + chr(39) + 's own profile is a pair profile, and the '
+                'four-card mesh is the profile' + chr(39) + 's (mesh_device P150x4)')
+    if not profile:
+        return None
+    with open(profiles_path, encoding='utf-8') as handle:
+        known = json.load(handle)['profiles']
+    if profile not in known:
+        return ('profile %s is not in %s' % (profile, profiles_path)) if cards == 'quad' else None
+    device = known[profile].get('mesh_device')
+    if (device != TP4_MESH_DEVICE) if cards == 'quad' else (device not in PAIR_MESH_DEVICES):
+        return 'profile %s opens %s, but --cards %s gives %s' % (
+            profile, 'the four-card (1, 4) mesh' if device == TP4_MESH_DEVICE else 'the (1, 2) pair', cards,
+            'all four cards' if cards == 'quad' else 'cards M and A')
+    return None
+
+
+def profile_entry(profile, profiles_path=PROFILES):
+    with open(profiles_path, encoding='utf-8') as handle:
+        return json.load(handle)['profiles'][profile]
 
 
 # The runtime's Tenstorrent session cap (Thatch.Server #2628: 4 sessions, each held 10 minutes after
@@ -461,13 +516,35 @@ RUNTIME_STARTS = ('start', 'restart')                  # the replay's docker run
 ENGINE_LOADS = ('load', 'reload', 'load_after_restart')  # the replay's serving.manage loads
 
 
-def runtime_log_verdict(text, steps):
+MESH_LINE_QUAD = '[QWEN-C2] mesh device %s [1, 4]' % TP4_MESH_DEVICE
+EXTENT_ENGAGED = '[PINDIAG] extent replay engaged'
+
+
+def quad_log_problems(text, entry):
+    """What the runtime log of a four-card replay must show beyond the pair's rules (module docstring): the contract's
+    P150x4 (1, 4) mesh line, the extent replay engaged (an extent profile), and c2_smoke_check's own rules for the
+    profile - the packed-any admission passed without the UNQUALIFIED waiver, parser M armed, the four-card prefill
+    warm before Metal's unsafe-allocation warning and no prefill program compiled late."""
+    import c2_smoke_check
+    problems = []
+    if MESH_LINE_QUAD not in text:
+        problems.append('no "%s" line: the runtime did not open the four-card mesh' % MESH_LINE_QUAD)
+    if (entry.get('env') or {}).get('QWEN_FAST_EXTENT_REPLAY') == '1' and EXTENT_ENGAGED not in text:
+        problems.append('no "%s" line: the S2 extent path did not engage' % EXTENT_ENGAGED)
+    problems += c2_smoke_check.traffic_problems(text, entry)
+    if (entry.get('env') or {}).get('QWEN_FAST_TP', '2') != '2':
+        problems += c2_smoke_check.late_program_problems(text)[0]
+    return problems
+
+
+def runtime_log_verdict(text, steps, quad_profile=None):
     """After the steps, the runtime log (docker logs): the runtime did only what the replay asked.
     Fails on a health recovery, an os._exit ('generation health ...; exiting'), more runtime starts
     ('serving X on http://') than the replay's start steps, or more engine loads ('model reload:')
     than its load steps; every such line is recorded (platform-replay.json runtime_log). The G7
     replay of e570ee2 (run 36227190700) passed every step while its runtime reloaded a healthy
-    engine three times: only this log showed it."""
+    engine three times: only this log showed it. `quad_profile` (a four-card replay: the served profile's record)
+    adds quad_log_problems."""
     starts = sum(step in steps for step in RUNTIME_STARTS)
     loads = sum(step in steps for step in ENGINE_LOADS)
     lines = text.splitlines()
@@ -484,6 +561,8 @@ def runtime_log_verdict(text, steps):
         problems.append('%d runtime starts, the replay asked for %d' % (len(banners), starts))
     if len(reloads) > loads:
         problems.append('%d engine loads, the replay asked for %d' % (len(reloads), loads))
+    if quad_profile is not None:
+        problems += quad_log_problems(text, quad_profile)
     flagged = set(recoveries + exits + (banners if len(banners) > starts else [])
                   + (reloads if len(reloads) > loads else []))
     return dict(ok=not problems, problems=problems, lines=[line for line in lines if line in flagged])
@@ -501,6 +580,12 @@ def main():
     parser.add_argument('--port', type=int, default=8011)
     parser.add_argument('--profile', default=None, help='QWEN_C2_PROFILE for the copy (default: the source\'s)')
     parser.add_argument('--seed', type=int, default=None, help='the arrivals\' seed (default: the clock)')
+    parser.add_argument('--cards', choices=CARD_SETS, default='pair',
+                        help='pair: cards M and A (the default); quad: every Blackhole board present, with a P150x4 --profile')
+    parser.add_argument('--profiles', default=PROFILES, help='the profiles --cards checks --profile against')
+    parser.add_argument('--startup-wait', type=int, default=None, metavar='SECONDS',
+                        help='how long a start may take to answer HTTP (default: %d pair, %d quad)' % (PAIR_STARTUP_S,
+                                                                                                        QUAD_STARTUP_S))
     parser.add_argument('--env', action='append', default=None, metavar='NAME=value',
                         help='extra container env, repeatable (default: %s)' % ' '.join(DEFAULT_ENV))
     options = parser.parse_args()
@@ -537,15 +622,32 @@ def main():
     extra_env = tuple(options.env) if options.env is not None else DEFAULT_ENV
     if any('=' not in variable for variable in extra_env):
         parser.error('--env takes NAME=value')
-    arguments = run_arguments(info, options.image, name, port, options.profile, image_env=inherited or (),
-                              extra_env=extra_env)
+    quad = options.cards == 'quad'
+    startup = options.startup_wait or (QUAD_STARTUP_S if quad else PAIR_STARTUP_S)
+    problem, devices = cards_problem(options.cards, options.profile, options.profiles), None
+    if problem is None and quad:
+        try:
+            devices = quad_devices()
+        except RuntimeError as error:
+            problem = str(error)
+    if quad or problem is not None:
+        record('cards', dict(ok=problem is None, cards=options.cards, profile=options.profile, problem=problem,
+                             devices=len(devices or ()), startup_wait_s=startup))
+    if problem is not None:
+        with open(os.path.join(options.results, 'platform-replay.json'), 'w') as handle:
+            json.dump(dict(passed=False, steps=steps), handle, indent=1)
+        print('PLATFORM_REPLAY passed=False refused: %s' % problem, flush=True)
+        return 1
+    quad_profile = profile_entry(options.profile, options.profiles) if quad else None
+    arguments = run_arguments(info, options.image, name, port, options.profile, devices=devices,
+                              image_env=inherited or (), extra_env=extra_env)
     with open(os.path.join(options.results, 'docker-run.json'), 'w') as handle:
         json.dump(arguments, handle, indent=1)
     passed = False
     try:
         started = time.time()
         run(arguments)
-        problem = wait_http(port, name, 600)
+        problem = wait_http(port, name, startup)
         if record('start', dict(ok=problem is None, problem=problem, http_s=round(time.time() - started, 1))):
             if record('load', load(name, model)):
                 ok = record('served_name', served_name(port, model, served))
@@ -577,7 +679,7 @@ def main():
                 run(['docker', 'stop', '-t', '60', name], timeout=120, check=False)
                 restarted = time.time()
                 run(['docker', 'start', name])
-                problem = wait_http(port, name, 600)
+                problem = wait_http(port, name, startup)
                 ok = record('restart', dict(ok=problem is None, problem=problem,
                                             http_s=round(time.time() - restarted, 1))) and ok
                 if problem is None:
@@ -592,7 +694,7 @@ def main():
         logs = run(['docker', 'logs', name], check=False)
         with open(os.path.join(options.results, 'platform-container.log'), 'w') as handle:
             handle.write(logs.stdout + '\n----- stderr -----\n' + logs.stderr)
-        runtime_log = runtime_log_verdict(logs.stdout + '\n' + logs.stderr, steps)
+        runtime_log = runtime_log_verdict(logs.stdout + '\n' + logs.stderr, steps, quad_profile)
         print('RUNTIME_LOG %s' % json.dumps(runtime_log)[:1500], flush=True)
         passed = passed and runtime_log['ok']
         run(['docker', 'rm', '-f', name], check=False)

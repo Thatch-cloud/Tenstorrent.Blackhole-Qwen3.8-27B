@@ -51,7 +51,10 @@ name: Qwen C2 serving image
 #            Every prefix container is removed however the step ends, and the kill-switch file only if the
 #            gate wrote it
 #   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py);
-#            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt)
+#            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt).
+#            With C2_CARDS=quad the copy gets every Blackhole board present (card_set.sh, none named) and
+#            C2_REPLAY_PROFILE, a P150x4 profile, is required; the runtime log must then also show the four-card
+#            mesh, the admission passed, parser M armed, the extent path engaged and the prefill warm
 #   push   - push it to zot and print the digest
 # (status, platform, unserve, priority and reset are described at their steps.) The job file is
 # parsed by scripts/ci/c2_serving_job.py, which refuses anything these steps must not act on.
@@ -60,7 +63,7 @@ name: Qwen C2 serving image
 # containers, with the general-tp4 profiles). It is one job, one runner and one concurrency group either way: the
 # four-card job holds every card the pair job does, so the group needs no second name and no run of any other
 # hardware workflow can overlap it. scripts/ci/c2_serving_job.py refuses a quad job that asks for a pair-shaped
-# step (cardm, replay, priority) or a profile that does not open the (1, 4) mesh, and the reverse.
+# step (cardm, priority) or a profile that does not open the (1, 4) mesh, and the reverse.
 # The smoke opens M+A, so it shares the two-card concurrency group and refuses if anything
 # holds either card or a platform serving container exists.
 on:
@@ -846,17 +849,33 @@ jobs:
           IMAGE: ${{ steps.job.outputs.platform_image }}
           REPLAY_PROFILE: ${{ steps.job.outputs.replay_profile }}
           REPLAY_SERVED_MODEL: ${{ steps.job.outputs.replay_served_model }}
+          CARDS: ${{ steps.job.outputs.cards }}
         run: |
           set -euo pipefail
           test -n "$IMAGE"
           if docker ps --format '{{.Names}}' | grep -q '^thatch-inference-'; then
-            echo "a platform serving container is running; refusing to open M+A under it" >&2; exit 1
+            echo "a platform serving container is running; refusing to open the cards under it" >&2; exit 1
           fi
           # The agent's container is gone once the pair is taken for development (unserve): then the
-          # tracked record of it (replay v11's copy) is the source.
+          # tracked record of it (replay v11's copy) is the source. A four-card replay takes the four-card record
+          # when one is tracked (the mesh variables of the pair's are overridden by the profile's contract either way).
           source=thatch-inference-Qwen-Qwen3.8-27B
-          docker inspect "$source" > /dev/null 2>&1 || source=scripts/ci/references/c2-serving/agent-container-36104200953.json
-          python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" \
+          record=scripts/ci/references/c2-serving/agent-container-36104200953.json
+          if [ "$CARDS" = quad ] && [ -f scripts/ci/references/c2-serving/agent-container-quad.json ]; then
+            record=scripts/ci/references/c2-serving/agent-container-quad.json
+          fi
+          docker inspect "$source" > /dev/null 2>&1 || source=$record
+          if [ "$CARDS" = quad ]; then
+            # Every Blackhole board present, read now (card_set.sh names none): exactly four, none held. The replay
+            # resolves the same set for its --device list and refuses any other count.
+            mkdir -p "$RUNNER_TEMP/c2-results"
+            . scripts/ci/card_set.sh
+            card_set_nodes 60
+            if ! card_set_unheld "$RUNNER_TEMP/c2-results/replay-holders.txt"; then
+              echo 'a card of the set is held; refusing the replay' >&2; cat "$RUNNER_TEMP/c2-results/replay-holders.txt" >&2; exit 1
+            fi
+          fi
+          python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" --cards "$CARDS" \
             ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
             --results "$RUNNER_TEMP/c2-results/replay"
       - name: Push
