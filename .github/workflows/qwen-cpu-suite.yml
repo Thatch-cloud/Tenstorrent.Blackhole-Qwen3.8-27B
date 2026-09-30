@@ -1,0 +1,91 @@
+name: Qwen CPU suite (any ref)
+run-name: CPU suite ${{ inputs.ref }}${{ inputs.only != '' && ' (selected modules)' || '' }}
+# Runs the CPU regression suite of ANY branch, tag or sha - the ref's own qwen-integration-cpu.yml
+# dependency and regression steps - in parallel shards, reporting every failure instead of stopping at
+# the first. Dispatch: gh workflow run qwen-cpu-suite.yml -f ref=<branch|tag|sha> [-f shards=6] [-f only="test_a test_b"]
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to test
+        required: true
+      shards:
+        description: Parallel shards
+        default: '6'
+      only:
+        description: Optional space-separated unittest modules (empty runs the ref's full suite)
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: qwen-cpu-suite-${{ inputs.ref }}
+  cancel-in-progress: true
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      install: ${{ steps.plan.outputs.install }}
+      shards: ${{ steps.plan.outputs.shards }}
+      indices: ${{ steps.plan.outputs.indices }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - id: plan
+        env:
+          SHARDS: ${{ inputs.shards }}
+          ONLY: ${{ inputs.only }}
+          TOOL_SHA: ${{ github.sha }}
+        run: |
+          python -m pip install -q PyYAML==6.0.2
+          git show "$TOOL_SHA:scripts/ci/cpu_suite_plan.py" > "$RUNNER_TEMP/cpu_suite_plan.py"
+          python "$RUNNER_TEMP/cpu_suite_plan.py" plan "$SHARDS" "$ONLY" > "$RUNNER_TEMP/plan.json"
+          python - "$RUNNER_TEMP/plan.json" >> "$GITHUB_OUTPUT" <<'EOF'
+          import json, sys
+          plan = json.load(open(sys.argv[1]))
+          print('shards=' + json.dumps(plan['shards']))
+          print('indices=' + json.dumps(list(range(len(plan['shards'])))))
+          EOF
+          echo "tested ref: $(git rev-parse HEAD)"
+  suite:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.indices) }}
+    env:
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      PYTHONPATH: scripts/ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: .github/workflows/qwen-integration-cpu.yml
+      - name: Dependencies (the ref's own install step)
+        env:
+          TOOL_SHA: ${{ github.sha }}
+        run: |
+          python -m pip install -q PyYAML==6.0.2
+          git show "$TOOL_SHA:scripts/ci/cpu_suite_plan.py" > "$RUNNER_TEMP/cpu_suite_plan.py"
+          python "$RUNNER_TEMP/cpu_suite_plan.py" install
+      - name: Shard ${{ matrix.shard }}
+        env:
+          SHARDS_JSON: ${{ needs.plan.outputs.shards }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          echo "tested ref: $(git rev-parse HEAD)"
+          python -c "import json, os; print(json.dumps(json.loads(os.environ['SHARDS_JSON'])[int(os.environ['SHARD'])]))" > "$RUNNER_TEMP/shard.json"
+          python "$RUNNER_TEMP/cpu_suite_plan.py" run "$(cat "$RUNNER_TEMP/shard.json")"
