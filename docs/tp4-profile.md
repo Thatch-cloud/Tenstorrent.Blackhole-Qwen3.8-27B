@@ -83,3 +83,12 @@ time at 12 heads (it does not shrink: 10.3 ms projected), and the SDPA fixed cos
 research ranking is re-sized from its own measured category: L3a (ring fabric for the fast path's collectives, a profile flip),
 L1 (split the recurrence's value columns over the idle cores), L4 (68-core grids for the bf4 gate/up; decide the fused gate/up before
 the TP4 references are re-recorded), L2 (one conv-gates launch, pieces folded into the windows copy), the rest of L3, then L6-L8.
+
+## Known hardware risk: host memory and the read-back cadence
+
+The profiled arm runs in the agent's container shape (80g, 8 CPUs, 4g shm), less than v138's recipe (96g, 16 CPUs, 8g shm, two
+chips), and the cold JIT fills a tmpfs that counts against the same memory limit. About 30 mid-run read-backs at op-support 20000
+over four chips have not been run before (v133 and v138 did one). An out-of-memory kill looks like a hang and trips the STOP rule;
+the CPP report is appended at each read-back and the `always()` step keeps it, so data up to the crash survives. When an arm dies
+this way, read the container's `memory.events` before drawing any conclusion about the profiler, and rerun with the JIT cache on a
+bind-mounted disk directory (TT_METAL_CACHE) rather than the tmpfs.
