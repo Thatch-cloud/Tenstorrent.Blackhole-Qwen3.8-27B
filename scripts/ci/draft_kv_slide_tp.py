@@ -23,8 +23,10 @@ test_draft_kv_slide_tp holds it equal to the pair's.
 
 SELECTION. draft_kv_history_tp.DraftKVHistory.prepare calls prepare() here under QWEN_FAST_TP_KV_SLIDE=1 and keeps the
 eager chain as the flag-off reference (the exactness tests compare the two, and the hardware A/B does). Nothing at the pair
-imports this module. Not qualified on hardware: the kernel has run at four KV heads only; the first four-card run is the
-S0-S3 window of scripts/ci/references/tp4-speed-jobs.
+imports this module. Not qualified on hardware: the kernel has run at four KV heads only (the pair's one-card harness); the
+first run at two heads is the speed window of scripts/ci/references/tp4-speed-jobs (K0-E4; a quad job cannot run the one-card
+cardm step). Its exactness is judged on the drafter's PROPOSALS, not the texts: speed_window_compare.py compares the solo
+accepted-prefix sequences of two arms.
 """
 
 from pathlib import Path

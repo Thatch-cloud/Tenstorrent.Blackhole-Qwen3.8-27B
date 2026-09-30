@@ -26,10 +26,11 @@ DEVICE_STEPS = ('cardm', 'smoke', 'gate', 'prefix', 'fabric', 'replay')
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.')
 SMOKES = ('K1-smoke-gate-slide-on', 'K2-smoke-speed', 'K3-smoke-speed-noslide')
-MATRICES = ('E1-matrix-slide-on', 'E2-matrix-slide-off', 'E3-g1-tp4-reference')
+MATRICES = ('E1-matrix-slide-on', 'E4-matrix-speed', 'E2-matrix-slide-off', 'E3-g1-tp4-reference')
 EXPECTED_PROFILES = {'K0-build': 'c2-packed-tp4-speed', 'K1-smoke-gate-slide-on': 'c2-packed-tp4-gate',
                      'K2-smoke-speed': 'c2-packed-tp4-speed', 'K3-smoke-speed-noslide': 'c2-packed-tp4-speed-noslide',
-                     'E1-matrix-slide-on': 'c2-packed-tp4-gate', 'E2-matrix-slide-off': 'c2-packed-tp4-gate-noslide',
+                     'E1-matrix-slide-on': 'c2-packed-tp4-gate', 'E4-matrix-speed': 'c2-packed-tp4-speed',
+                     'E2-matrix-slide-off': 'c2-packed-tp4-gate-noslide',
                      'E3-g1-tp4-reference': 'general-tp4'}
 
 
@@ -57,7 +58,7 @@ class OrderTests(unittest.TestCase):
 
     def test_the_stages_build_then_smokes_then_exactness(self):
         order = read_order()
-        self.assertEqual([name.split('-')[0] for name, _ in order], ['K0', 'K1', 'K2', 'K3', 'E1', 'E2', 'E3'])
+        self.assertEqual([name.split('-')[0] for name, _ in order], ['K0', 'K1', 'K2', 'K3', 'E1', 'E4', 'E2', 'E3'])
         self.assertEqual([name for name, mode in order if mode == 'soft'], ['K3-smoke-speed-noslide', 'E3-g1-tp4-reference'])
         self.assertEqual(set(mode for _, mode in order), {'stop', 'soft'})
         self.assertEqual(order[0], ('K0-build', 'stop'))
@@ -124,7 +125,10 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual((env(name)['QWEN_FAST_VERIFY_T1_AUDIT'], env(name)['QWEN_FAST_VERIFY_T2_AUDIT']), ('0', '0'), name)
         self.assertEqual([env(name)['QWEN_FAST_TP_KV_SLIDE'] for name in ('K1-smoke-gate-slide-on', 'K2-smoke-speed', 'K3-smoke-speed-noslide')],
                          ['1', '1', '0'])
-        self.assertEqual([env(name)['QWEN_FAST_TP_KV_SLIDE'] for name in ('E1-matrix-slide-on', 'E2-matrix-slide-off')], ['1', '0'])
+        self.assertEqual([env(name)['QWEN_FAST_TP_KV_SLIDE'] for name in ('E1-matrix-slide-on', 'E4-matrix-speed', 'E2-matrix-slide-off')], ['1', '1', '0'])
+        # the timed configuration has its own exactness job (its verify trace differs from the audited one's)
+        self.assertEqual((env('E4-matrix-speed')['QWEN_FAST_VERIFY_T1_AUDIT'], env('E4-matrix-speed')['QWEN_FAST_VERIFY_T2_AUDIT']), ('0', '0'))
+        self.assertEqual(parsed('E4-matrix-speed')[1]['profile'], parsed('K2-smoke-speed')[1]['profile'])
 
 
 class MatrixTests(unittest.TestCase):
@@ -139,7 +143,7 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual([length < 2048 for length in lengths], [True, True, False, False])
 
     def test_the_fast_path_arms_record_the_kernel_cache_and_keep_the_pair_only_audits_off(self):
-        for name in ('E1-matrix-slide-on', 'E2-matrix-slide-off'):
+        for name in ('E1-matrix-slide-on', 'E4-matrix-speed', 'E2-matrix-slide-off'):
             _, outputs = parsed(name)
             self.assertEqual(outputs['gate_jit'], 'record', name)
             self.assertEqual(outputs['gate_audits'], '', 'the prestage and fused-commit audits are not ported to four cards')

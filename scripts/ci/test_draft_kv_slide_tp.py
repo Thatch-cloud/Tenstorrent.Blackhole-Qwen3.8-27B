@@ -12,7 +12,9 @@ Held here, on the CPU:
     per-row rule (draft_kv_slide.cpp: destination row < rows reads logical row + drop from the active bank while it is below
     history_rows, else the delta's row, else zero) - not from the eager chain it is compared with;
   - the flag: unset, '0' and anything but '1' keep the eager chain and call no transport; '1' calls one per (layer, k / v).
-The kernel itself runs only on a card: the one-card harness of the S0-S3 window is the hardware half of this test."""
+The kernel itself runs only on a card: the hardware half of this test is the speed window's E1 and E2 jobs, read with
+speed_window_compare.py (the solo accepted-prefix sequences: the texts cannot see a wrong slide, the greedy verifier emits the
+target's own argmax whatever the draft holds). No one-card (cardm) job runs it: a quad job cannot."""
 
 import hashlib
 import os

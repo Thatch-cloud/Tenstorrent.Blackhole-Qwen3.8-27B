@@ -818,6 +818,11 @@ jobs:
             python3 scripts/ci/c2_serving_smoke.py http://127.0.0.1:8010 Qwen/Qwen3.8-27B "$TESTS" \
             "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')/typing.py" \
             scripts/ci/build-c2-serving-image.sh 2>&1 | tee "$results/smoke.log"
+          # The smoke exits 0 whatever its tests recorded: enforce the stop conditions (an errored or empty stream, garbage
+          # text, an audit mismatch, and on a slide-on profile a ramp commit above 50 ms) before the next job of a chain.
+          docker logs "$name" > "$results/container.log" 2>&1 || true
+          python3 scripts/ci/c2_smoke_check.py --smoke-log "$results/smoke.log" --container-log "$results/container.log" \
+            --profile "$PROFILE"
           docker stats --no-stream "$name" | tee "$results/stats.txt" || true
           grep -F '[PINDIAG] dram after' <(docker logs "$name" 2>&1) | tail -8 || true
       - name: Replay the node agent's serving sequence
