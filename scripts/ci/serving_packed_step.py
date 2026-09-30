@@ -494,6 +494,15 @@ class PackedStep:
         if previous is not None and previous != self.last_solo:
             note_fixture_writer('lane-switch')
 
+    def announce_round(self, solo_round):
+        """The coming round's block, known when the lanes plan it (the drafts, before their fence window): the epoch bump of a
+        switch belongs HERE, before that window pre-stages the coming verify, not at the step after it - a bump at the step
+        throws away the pre-stage the window just made, and every round after a switch restages in full. The step's own
+        note_switch then finds the block already noted and does not bump again. Over-bumping is the safe direction: a plan
+        that does not hold bumps again when the next plan differs, and the step's check still catches the rest."""
+        if self.solo is not None:
+            self.note_switch(solo_round)
+
     def proposal_rows(self, requests):
         rows = proposal_rows(self.blocks, requests)
         if rows is None and self.solo is not None:

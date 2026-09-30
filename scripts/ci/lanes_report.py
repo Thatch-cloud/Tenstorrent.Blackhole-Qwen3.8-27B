@@ -107,6 +107,7 @@ def stretches(parsed, min_rounds=MIN_STRETCH_ROUNDS):
             current = dict(key=key, rounds=[])
             runs.append(current)
         current['rounds'].append(entry)
+    has_fast = any(value == FAST for value in lane.values())
     out = []
     for run in runs:
         rounds = run['rounds']
@@ -137,7 +138,9 @@ def stretches(parsed, min_rounds=MIN_STRETCH_ROUNDS):
         cell['P_no_switch_ms'] = round(sum(steady) / len(steady), 2) if steady else None
         cell['sigma_ms'] = (round(cell['P_after_switch_ms'] - cell['P_no_switch_ms'], 2)
                             if following and steady else None)
-        readable = len(packed) >= min_rounds and total_ms > 0
+        # A stretch is read only with the fast user in it, when the arm has one: once it leaves, the schedule's clock (frames with
+        # both lanes live) stops and the ratio label freezes, so later standard-only rounds would 'read' a ratio no frame ran.
+        readable = len(packed) >= min_rounds and total_ms > 0 and (bool(fast) or not has_fast)
         cell['read'] = readable
         if fast:
             cell['tau_fast'] = round(tokens[fast[0]] / member_rounds[fast[0]], 3)
@@ -287,7 +290,7 @@ def verdict_lines(report):
     report = report or {}
     for cell in report.get('stretches') or []:
         if not cell.get('read'):
-            lines.append('lanes ratio=%s n=%d: %d packed rounds, unread (fewer than %d)' % (
+            lines.append('lanes ratio=%s n=%d: %d packed rounds, unread (fewer than %d, or the fast user not in it)' % (
                 cell['ratio'], cell['standard_users'], cell['packed_rounds'], MIN_STRETCH_ROUNDS))
             continue
         predicted = cell.get('predicted') or {}

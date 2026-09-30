@@ -183,7 +183,7 @@ def lane_admission(solo_lane, environ=None, *, seats, log=None):
 def request_lane(sampling_params):
     """The lane a request asks for: 'fast' or 'standard' (absent means standard). Anything else - an unknown name, a value
     that is not a string, several marks - raises LaneRefused. The mark changes no sampling, so validate_request_sampling is
-    what it was; a platform maps an authenticated entitlement to this field and strips any client-supplied value."""
+    what it was. The field is client-settable here: whatever fronts the server decides who may set it."""
     extra = getattr(sampling_params, 'extra_args', None)
     if extra is None:
         return STANDARD
@@ -215,7 +215,7 @@ class LaneBook:
     """The worker's lane registry: which request holds the ONE fast lane, and each request's granted lane.
 
     admit(request_id, asked) returns the Grant: a fast request is granted the fast lane, pool slot 0 alone, while nobody holds it;
-    a second one is DOWNGRADED to standard (reason 'fast-lane-busy'; the response header the platform adds says so) - it is not
+    a second one is DOWNGRADED to standard (reason 'fast-lane-busy', logged as [LANE-ADMIT]) - it is not
     queued and not refused, so a fast request never waits behind the fast lane. Standard requests take slots 1..seats-1 under
     the reserve (slot 0 is the fast request's alone: a fast arrival never waits for a standard user to finish), or 1..seats-1
     and then 0 when the reserve is off (lend: a fast arrival while a standard user holds slot 0 is downgraded, reason 'slot-busy').
@@ -490,6 +490,11 @@ class LaneController:
             else:
                 self.stall_ms += gap
                 self.credit, self.solo_run = 0.0, 0
+                # A stall is not a cadence for the rates either (the steady estimator's convention): a prefill's seconds inside
+                # a window would read as a standard lane far below the floor and halve k for the next RATE_EVENTS rounds.
+                for window in self.std_rates.values():
+                    window.reset()
+                self.fast_rate.reset()
         self.rounds += 1
         self.last_end = now
         for request_id in standard_ids:
@@ -610,15 +615,21 @@ class LaneRuntime:
 
     # -- planning (before the drafts)
 
-    def plan(self, requests, *, rows_of, solo_rows_of, now=None):
+    def plan(self, requests, *, rows_of, solo_rows_of, budget_of=None, now=None):
         """The coming round, or None when the lanes do not own it (today's path serves it, nothing hidden).
 
         `requests` are the live decode requests (objects with .session.request_id / .session.finished); `rows_of(requests)` is
         the packed step's proposal_rows over a set (None: the block cannot serve it as one pass); `solo_rows_of(request)` the
-        same for one request on the solo block. Pure: reads the controller, changes nothing.
+        same for one request on the solo block. `budget_of(request)` is the request's REAL remaining token budget (vLLM's own
+        max_tokens, which session.finished never sees; None: unknown). A request at or past it is about to leave the scheduler
+        on vLLM's own stop, so it is not live for the plan, and a solo round is not planned for a fast request with fewer
+        than one round's rows left (a solo plan whose only member leaves before the step is an empty step, and vLLM takes
+        drafts only after a step that ran the model). Pure: reads the controller, changes nothing.
         """
         now = self.clock() if now is None else now
-        live = [request for request in requests if not request.session.finished]
+        budget_of = budget_of if callable(budget_of) else (lambda request: None)
+        live = [request for request in requests if not request.session.finished
+                and not ((budget_of(request) if budget_of(request) is not None else 1) <= 0)]
         if not live:
             return None
         lanes = {request.session.request_id: self.book.lane(request.session.request_id) for request in live}
@@ -626,7 +637,9 @@ class LaneRuntime:
             return None        # a request the book does not know (admitted before the lanes were engaged): not ours
         fast = [request for request in live if lanes[request.session.request_id] == FAST]
         standard = [request for request in live if lanes[request.session.request_id] != FAST]
-        solo_possible = bool(fast) and solo_rows_of(fast[0]) is not None
+        solo_rows = solo_rows_of(fast[0]) if fast else None
+        fast_budget = budget_of(fast[0]) if fast else None
+        solo_possible = solo_rows is not None and (fast_budget is None or fast_budget >= solo_rows)
         decision = self.controller.decide(now, fast_live=bool(fast), standard_live=bool(standard),
                                           solo_possible=solo_possible)
         if decision.kind == 'solo':

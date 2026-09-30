@@ -518,15 +518,25 @@ class FastWorkerHook:
         policy = getattr(self.packed_step, 'proposal_rows', None)
         have_policy = callable(policy)
         bridges = list(self.bridges.values())
+        held_back = []
         if self.lanes is not None and have_policy:
             # QWEN_FAST_LANE: which round is next - a packed round of every live user, or a solo round of the fast user - is
             # decided HERE, where every live request is known, and handed to the scheduler side (the lane gate hides the
             # rest); only the round's members are drafted. Planning is pure (an early draft may be discarded and drafted
             # again), and a round the lanes do not own (None) is today's, every request.
+            by_request = {id(bridge.request): bridge for bridge in bridges}
             plan = self.lanes.plan([bridge.request for bridge in bridges], rows_of=policy,
-                                   solo_rows_of=getattr(self.packed_step, 'solo_rows', lambda request: None))
+                                   solo_rows_of=getattr(self.packed_step, 'solo_rows', lambda request: None),
+                                   budget_of=lambda request: real_remaining_budget(by_request[id(request)]))
             self.lanes.publish(plan)
             if plan is not None:
+                announce = getattr(self.packed_step, 'announce_round', None)
+                if callable(announce):
+                    announce(plan.kind == 'solo')
+                # Every live request keeps a drafted ticket, members or not: a hidden request's ticket stays valid at its
+                # frontier, so a member that leaves before the step (an abort) leaves a step the survivors can run, and vLLM
+                # takes no drafts after an empty step. The non-members are drafted after the members, below.
+                held_back = [bridge for bridge in bridges if bridge.request.session.request_id not in plan.members]
                 bridges = [bridge for bridge in bridges if bridge.request.session.request_id in plan.members]
         packed_rows = policy([bridge.request for bridge in bridges]) if have_policy else None
         if packed_rows is not None:
@@ -644,6 +654,22 @@ class FastWorkerHook:
                 continue
             request_ids.extend(drafts.req_ids)
             tokens.extend(drafts.draft_token_ids)
+        if held_back:
+            # The width their own next round will draft at: the block's rows for the whole live set, else each engine's own.
+            rows_all = policy([bridge.request for bridge in held_back + bridges])
+            if rows_all is not None and any(
+                    remaining is not None and remaining < rows_all
+                    for remaining in (real_remaining_budget(bridge) for bridge in held_back + bridges
+                                      if not getattr(bridge.request.session, 'finished', False))):
+                rows_all = None
+            for bridge in held_back:
+                discard_stale_ticket(bridge.request, rows_all)
+                drafts = phase('propose', bridge.request.session.request_id,
+                               bridge.drafts if rows_all is None else partial(bridge.drafts, packed_rows=rows_all))
+                if drafts is None:
+                    continue
+                request_ids.extend(drafts.req_ids)
+                tokens.extend(drafts.draft_token_ids)
         if not request_ids:
             return None
         return DraftTokenIds(req_ids=request_ids, draft_token_ids=tokens)

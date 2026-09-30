@@ -141,7 +141,7 @@ class ArmTests(unittest.TestCase):
     def test_the_exactness_schedule_reaches_every_ratio_the_window_needs(self):
         from serving_fast_lane import parse_schedule
         entries = parse_schedule(plans.EXACT_SCHEDULE, 3)
-        self.assertEqual([k for k, _ in entries], [0.0, 0.5, 1.0, 2.0, None])
+        self.assertEqual([k for k, _ in entries], [2.0, 1.0, 0.5, 0.0, None])
         self.assertEqual([frames for _, frames in entries][:4], [25] * 4)
         self.assertGreaterEqual(25, lanes_report.MIN_STRETCH_ROUNDS, 'a stretch is read from 24 packed rounds')
         self.assertEqual(len(parse_schedule(plans.SWEEP_SCHEDULE, 3)), 6)

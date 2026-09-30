@@ -380,6 +380,19 @@ class ControllerTests(unittest.TestCase):
         self.assertAlmostEqual(controller.stall_ms, 8080.0, delta=1.0)
         self.assertEqual((controller.credit, controller.solo_run), (1.0, 0), 'the banked credit is the round after the stall\'s own')
 
+    def test_a_stall_does_not_reach_the_rate_windows_and_so_never_halves_k(self):
+        controller = LaneController(config())
+        feed = Feed(controller, standard=('s1', 's2'), tau_standard=12.0)
+        feed.run(80.0, 50.0, 200)
+        k = controller.k
+        self.assertGreater(k, 0.3)
+        feed.now += 7.0                      # a prefill: 7 s inside every window would read as a lane far under the floor
+        feed.round('packed', 80.0)
+        self.assertIsNone(controller.std_rate_min(), 'the windows restart after a stall')
+        for _ in range(3):
+            feed.round(feed.decide().kind, 80.0)
+        self.assertNotEqual(controller.reason, 'floor-bound')
+
     def test_the_first_solo_round_is_a_probe_once_packed_rounds_are_known(self):
         controller = LaneController(config(gap_ms=5000.0))
         feed = Feed(controller)
@@ -553,6 +566,20 @@ class PlanTests(unittest.TestCase):
         runtime.book.admit('s', STANDARD)
         plan = self.plan(runtime, [request('f'), request('s')], solo=None)
         self.assertEqual((plan.kind, plan.reason, plan.members), ('packed', 'no-solo', frozenset('fs')))
+
+    def test_a_fast_request_at_its_real_budget_is_not_live_and_no_solo_round_is_planned_for_one_with_under_a_round_left(self):
+        runtime = self.runtime()
+        runtime.book.admit('f', FAST)
+        runtime.book.admit('s', STANDARD)
+        live = [request('f'), request('s')]
+        budgets = dict(f=0, s=500)
+        plan = runtime.plan(live, rows_of=lambda ok: 16, solo_rows_of=lambda r: 16, budget_of=lambda r: budgets[r.session.request_id])
+        self.assertEqual((plan.kind, plan.members), ('packed', frozenset('s')))
+        budgets['f'] = 5
+        for _ in range(3):
+            plan = runtime.plan(live, rows_of=lambda ok: 16, solo_rows_of=lambda r: 16,
+                                budget_of=lambda r: budgets[r.session.request_id])
+            self.assertNotEqual(plan.kind, 'solo', 'a fast request with 5 tokens left cannot fill a 16-row round')
 
     def test_a_finished_request_is_not_a_member(self):
         runtime = self.runtime()

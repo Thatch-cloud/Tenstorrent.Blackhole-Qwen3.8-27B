@@ -330,6 +330,20 @@ class RoutingTests(unittest.TestCase):
             self.run_round(third)                         # M3 -> solo
             self.assertEqual(bumps, ['lane-switch'] * 2)
 
+    def test_an_announced_switch_bumps_once_at_the_announcement_and_the_step_does_not_bump_again(self):
+        bumps = []
+        with patch.object(serving_packed_step, 'note_fixture_writer', bumps.append):
+            self.run_round(self.request('A', 0))          # solo
+            self.step.announce_round(False)                # the plan for the next round: M3 - the bump, before any window
+            self.assertEqual(bumps, ['lane-switch'])
+            pair = [self.request('B', 0, propose=False, solo_bound=True), self.request('C', 1, propose=False)]
+            for request in pair:
+                request.propose(self.m3.predictions_for(0), accept=15)
+            self.run_round(*pair)                         # the step: already noted
+            self.assertEqual(bumps, ['lane-switch'])
+            self.step.announce_round(False)
+            self.assertEqual(bumps, ['lane-switch'], 'a repeat of the same block is no switch')
+
     def test_arming_and_flushing_deferred_commits_reach_the_solo_block_too(self):
         armed, flushed = [], []
         for name, block in (('m3', self.m3), ('solo', self.solo)):

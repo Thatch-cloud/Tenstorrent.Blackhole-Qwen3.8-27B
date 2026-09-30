@@ -44,7 +44,7 @@ say exactly which lever or acceptance work moves the target.
 | **D0**: a one-segment 16-row extent block over pool slot 0, built beside M3 at attach; a lone slot-0 user's rounds run on it | `serving_solo_lane.py`, `packed_shapes.solo_shape`, `serving_packed_step.py` | `QWEN_FAST_SOLO_LANE=1` |
 | **Lane marking and admission**: `SamplingParams.extra_args['qwen_lane']` = `fast` or `standard`; exactly one fast lane on slot 0 (reserved); a second fast request is downgraded to standard, never queued; standard requests never take slot 0 | `serving_fast_lane.py`, `serving_buffer_pool.py` (slot order), `serving_lifecycle.py` | `QWEN_FAST_LANE=1` (needs D0) |
 | **The lane gate**: the worker plans each round where every live request is known, drafts only its members and publishes the plan; a scheduler wrapper hides the other running decodes for that step (the plugin's own hide-and-restore, decode steps only) so the scheduled set equals the prepared set | `serving_fast_lane_scheduler.py`, `serving_worker_hook.py` | with the lane |
-| **The controller**: the fast user rides every packed round and gets k solo rounds between them; k fixed (`QWEN_FAST_LANE_RATIO`), swept (`QWEN_FAST_LANE_SCHEDULE`, gate only) or the closed form on the measured round times, held by the standard floor; deficit counter for fractional k; at most `KMAX` solo rounds between packed rounds and a packed round at least every `GAP_MS`; standard lanes never slowed below the packed-only rate for the fast lane's sake | `serving_fast_lane.py` | `QWEN_FAST_LANE_RATIO / _SCHEDULE / _KMAX / _GAP_MS / _FLOOR / _MARGIN / _RESERVE` |
+| **The controller**: the fast user rides every packed round and gets k solo rounds between them; k fixed (`QWEN_FAST_LANE_RATIO`), swept (`QWEN_FAST_LANE_SCHEDULE`, gate only) or the closed form on the measured round times, held by the standard floor; deficit counter for fractional k; at most `KMAX` solo rounds between packed rounds and a packed round at least every `GAP_MS`; the controller takes the standard lanes down to the floor (75 tok/s, less the margin) for the fast lane, never below it: a standard user's measured rate binds k, and a stall (a prefill) is not counted in it | `serving_fast_lane.py` | `QWEN_FAST_LANE_RATIO / _SCHEDULE / _KMAX / _GAP_MS / _FLOOR / _MARGIN / _RESERVE` |
 
 Telemetry (server log): `[LANE-ADMIT]` per request, `[LANE-ROUND]` per executed round (kind, block, members, cycle ms, tokens per
 member, ratio in force), `[LANE-FRAME]` per packed round, `[LANE-SCHED]` once per distinct scheduler state, `[LANE-DESYNC]` when a
@@ -65,15 +65,16 @@ One image (`tp4-lanes-1`) for the whole window; every arm is a gate-only profile
 | Job | Mode | Plan and what it measures | Duration (e) |
 |---|---|---|---|
 | L0 build | stop | status, all-four reset with heal, image build | 10-30 min (cached), 40-90 cold |
+| L0b lanes-attach-smoke | stop | all-four reset, the lanes profile's first four-card attach (D0's M=16 programs, the second block's trace region, the solo block's publication warm) and a two-test smoke: fails once, cheaply, before L1's long arms | 15-45 min |
 | L1 lanes-exact | stop | every audit on: each lane's text, and D0's, equals that user's text alone on the per-request engines (3 arms: reference, D0, lanes with the ratio swept on the boot) | 35-100 min, up to 180 with a re-run |
 | L2 round-timing | soft | audits off: P(4), P(3), P(2) and the lone user on today's engines in one boot per context (4k, 32k); D0 against those engines for a lone coding user (tokens per round and tok/s) | 45-100 min |
-| L3 lanes-timing | soft | audits off: one fast user beside 3, 2 and 1 standard users at 4k and 3 at 32k, real text, the ratio swept (k = 0, 0.5, 1, 1.5, 2, then the controller); per-lane steady rates, P, F, sigma, tau per lane, MET/MISSED against 150 / 75 | 30-70 min |
+| L3 lanes-timing | soft | audits off: one fast user beside 3, 2 and 1 standard users at 4k and 3 at 32k, real text, the ratio swept from the high end down (k = 2, 1.5, 1, 0.5, 0, then the controller; a stretch counts only with the fast user in it); per-lane steady rates, P, F, sigma, tau per lane, MET/MISSED against 150 / 75 | 30-70 min |
 | O1 lanes-timing-more | optional | 2 and 1 standard users at 32k, 3 at 120k | 25-60 min |
 
-Required jobs L0-L3: about 2 h at best, 3 h 30 min expected, 7 h at worst. A missed bar is a result, not a failure: the timing
+Required jobs L0-L3 (with L0b): about 2 h 15 min at best, 3 h 45 min expected, 7 h 30 min at worst. A missed bar is a result, not a failure: the timing
 plans PASS when every arm was healthy and its cells were read, print the model's frame beside every measured stretch, and say
 NOT_EXERCISED where a stretch had too few rounds. The hardware step also needs an image built from the window's own commit and the S2
-TP4 window's packed-4 exactness (S3a) to have passed on the same kernels.
+TP4 window's packed-4 exactness (S3a) to have passed on the same kernels (image tp4-s2-2 or later, which carries the four-card collectives fix).
 
 ## Known limits (each is a decision or a measurement, not an oversight)
 

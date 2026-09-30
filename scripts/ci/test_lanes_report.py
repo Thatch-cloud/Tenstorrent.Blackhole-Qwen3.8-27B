@@ -118,6 +118,21 @@ class ShapeTests(unittest.TestCase):
         self.assertNotIn('fast', cell)
         self.assertTrue(any('unread' in line for line in report_module.verdict_lines(report)))
 
+    def test_a_stretch_the_fast_user_has_left_is_not_a_reading_of_any_ratio(self):
+        # Once the fast user leaves, the schedule's clock (frames with both lanes live) stops and the ratio label freezes: rounds of
+        # the standard users alone must not read as that ratio.
+        world = make('phase1', '32k', 3, config=LaneConfig.from_environment({'QWEN_FAST_LANE_SCHEDULE': '1@40,2@40,auto'}, seats=4),
+                     max_tokens=12000)
+        for request in world.scheduler.running:
+            if request.request_id == 'fast':
+                request.sampling_params.max_tokens = 500
+        world.runner.requests['fast'].sampling_params.max_tokens = 500
+        run(world, seconds=40.0)
+        report = report_module.lanes_report(chr(10).join(world.lines), None, fast_users=[0])
+        after = [cell for cell in report['stretches'] if cell['live'] == 3]
+        self.assertTrue(after, [(c['ratio'], c['live'], c['standard_users']) for c in report['stretches']])
+        self.assertFalse(any(cell['read'] for cell in after), [(c['ratio'], c['live']) for c in after])
+
     def test_a_stall_between_rounds_ends_a_stretch_and_is_in_none(self):
         text = '\n'.join(
             '[LANE-ROUND] round=%d kind=packed block=packed members=u1,u2 live=2 ms=%s committed=12,12 switch=0 ratio=auto'

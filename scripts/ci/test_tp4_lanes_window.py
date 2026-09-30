@@ -56,8 +56,8 @@ class OrderTests(unittest.TestCase):
 
     def test_build_then_exactness_then_the_two_timing_jobs_then_the_optional_one(self):
         order = read_order()
-        self.assertEqual([name.split('-')[0] for name, _ in order], ['L0', 'L1', 'L2', 'L3', 'O1'])
-        self.assertEqual([mode for _, mode in order], ['stop', 'stop', 'soft', 'soft', 'optional'])
+        self.assertEqual([name.split('-')[0] for name, _ in order], ['L0', 'L0b', 'L1', 'L2', 'L3', 'O1'])
+        self.assertEqual([mode for _, mode in order], ['stop', 'stop', 'stop', 'soft', 'soft', 'optional'])
 
     def test_the_build_runs_no_card_and_every_device_job_follows_an_all_four_reset(self):
         for name, _ in read_order():
@@ -66,9 +66,12 @@ class OrderTests(unittest.TestCase):
             with self.subTest(template=name):
                 self.assertEqual(outputs['cards'], 'quad')
                 self.assertLessEqual(len(set(actions) & set(DEVICE_STEPS)), 1)
-                if name.startswith('L0'):
+                if name == 'L0-build':
                     self.assertEqual(actions, ['status', 'reset', 'build'])
                     self.assertEqual(set(actions) & set(DEVICE_STEPS), set())
+                elif name == 'L0b-lanes-attach-smoke':
+                    self.assertEqual(actions, ['reset', 'smoke'])
+                    self.assertEqual(outputs['profile'], 'c2-packed-tp4-lanes-gate')
                 else:
                     self.assertEqual(actions, ['reset', 'gate'], 'links train only at board init: a four-card run follows a reset')
 

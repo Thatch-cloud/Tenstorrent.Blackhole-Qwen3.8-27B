@@ -502,7 +502,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                                                   shape=solo_shape_value, feature_taps=TARGET_TAPS,
                                                   pool_slots=(solo_lane['slot'],),
                                                   **({'capture_position': capture_position}
-                                                     if capture_position is not None else {}))
+                                                     if capture_position is not None else {}),
+                                                  # The same shared collectives as the M3 blocks (on four cards
+                                                  # under extent replay), or the 16-row publication shapes are
+                                                  # never warmed and compile mid-request.
+                                                  **({'collectives': collectives}
+                                                     if os.environ.get('QWEN_FAST_FUSED_COMMIT') == '1'
+                                                     or (os.environ.get('QWEN_FAST_EXTENT_REPLAY') == '1'
+                                                         and os.environ.get('QWEN_FAST_TP', '2') != '2') else {}))
                 scopes.callback(solo_block.close)
                 memory_ledger.record('P6', point='solo', packed_block=solo_block)
             # S2: every block must be the extent block under the flag, and none may be without it. The

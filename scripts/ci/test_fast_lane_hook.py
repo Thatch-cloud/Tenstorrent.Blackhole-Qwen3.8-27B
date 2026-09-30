@@ -84,6 +84,16 @@ class TargetsTests(LoopCase):
         self.assertGreater(fasts[0], fasts[1])
         self.assertGreater(fasts[1], fasts[2])
 
+    def test_at_the_conservative_switch_cost_the_floor_holds_and_the_fast_bar_is_met_or_missed_as_the_frame_says(self):
+        """sigma 4 ms (the design's conservative anchor, not the mid 1 ms the tests above use): the whole stack against the target, not
+        against the model at its friendliest. Phase 1 at three standard users: 32k meets both bars, 131k holds the floor and misses 150."""
+        for context, meets in (('32k', True), ('131k', False)):
+            with self.subTest(context=context):
+                world = run(make('phase1', context, 3, sigma_ms=4.0), seconds=16.0)
+                fast, others = self.rates(world)
+                self.assertGreaterEqual(min(others), 75.0 * 0.98, others)
+                self.assertEqual(fast >= 150.0, meets, 'fast %.1f' % fast)
+
     def test_the_straight_port_misses_the_fast_bar_and_still_keeps_the_floor(self):
         """The honest cell: no lever, three standard users, the fixture tau. The controller holds the floor and the fast lane gets less."""
         world = run(make('straight', '32k', 3), seconds=14.0)
@@ -166,10 +176,11 @@ class InvariantTests(LoopCase):
             self.assertEqual(len(set(scheduled)), len(scheduled))
             live_ids = set(step['before'])
             for request_id in live_ids - set(scheduled):
-                # a request held out of a round carries no proposals into it: it is drafted again before its next round
-                self.assertEqual(step['before'][request_id][1], [], 'stale proposals on a held request %s' % request_id)
+                # a request held out of a round keeps its drafted ticket at the frontier it left (vLLM takes no drafts after an
+                # empty step, so a hidden request must never depend on being drafted again before it runs)
+                self.assertNotEqual(step['before'][request_id][1], [], 'no ticket on a held request %s' % request_id)
 
-    def test_every_step_serves_only_planned_members_and_a_held_request_carries_no_proposals(self):
+    def test_every_step_serves_only_planned_members_and_a_held_request_keeps_its_ticket(self):
         world = run(make('phase1', '32k', 3), steps=300)
         self.check_steps(world)
         self.assertIn('solo', world.kinds)
@@ -308,13 +319,72 @@ class DesyncTests(LoopCase):
         scheduled = world.scheduler.schedule()
         self.assertEqual(len(scheduled.scheduled_cached_reqs.req_ids), 0)
 
+    def test_a_fast_user_that_ends_on_length_before_a_planned_solo_round_leaves_the_standard_users_drafted(self):
+        # vLLM takes drafts only after a step that ran the model. The fast user's own max_tokens stop is invisible to
+        # session.finished, so a solo plan made for its last round must not leave the standard users without tickets.
+        for cap in range(60, 84):
+            with self.subTest(cap=cap):
+                world = make('phase1', '32k', 3, max_tokens=6000)
+                world.runner.requests['fast'].sampling_params.max_tokens = cap
+                world.scheduler.running[0].sampling_params.max_tokens = cap
+                run(world, steps=260)
+                self.assertNotIn('fast', world.hook.bridges)
+                for name in world.users:
+                    if name != 'fast':
+                        self.assertGreater(len(world.commits[name]), 40, name)
+
+    def test_a_fast_user_aborted_after_a_solo_plan_leaves_the_standard_users_a_step_they_can_run(self):
+        world = make('phase1', '32k', 3, max_tokens=6000)
+        run(world, steps=40)
+        for _ in range(60):
+            plan = world.lanes.planned
+            if plan is not None and plan.kind == 'solo':
+                break
+            world.engine_step()
+        self.assertEqual(world.lanes.planned.kind, 'solo')
+        world.finish_user('fast')
+        before = {name: len(world.commits[name]) for name in world.users if name != 'fast'}
+        run(world, steps=60)
+        for name, count in before.items():
+            self.assertGreater(len(world.commits[name]), count + 10, name)
+            chain_holds(self, world, name)
+
+
+class SwitchEpochTests(LoopCase):
+    def test_the_block_switch_bumps_the_epoch_in_the_drafts_before_the_window_and_never_at_the_step(self):
+        from unittest.mock import patch
+        import serving_packed_step
+
+        world = make('phase1', '32k', 3)
+        where, phase = [], ['idle']
+        drafts, execute = world.worker.take_draft_token_ids, world.runner.execute_model
+
+        def in_phase(name, call):
+            def run_it(*args, **kwargs):
+                phase[0] = name
+                try:
+                    return call(*args, **kwargs)
+                finally:
+                    phase[0] = 'idle'
+            return run_it
+
+        world.worker.take_draft_token_ids = in_phase('drafts', drafts)
+        world.runner.execute_model = in_phase('step', execute)
+        with patch.object(serving_packed_step, 'note_fixture_writer', lambda reason: where.append((reason, phase[0]))):
+            run(world, steps=120)
+        switches = [entry for entry in where if entry[0] == 'lane-switch']
+        self.assertTrue(switches)
+        self.assertEqual({entry[1] for entry in switches}, {'drafts'}, switches)
+
 
 class OffTests(unittest.TestCase):
     def test_the_lane_off_is_the_hooks_own_path(self):
         from serving_worker_hook import FastWorkerHook
 
         self.assertIsNone(FastWorkerHook.lanes)
-        self.assertNotIn('lanes', FastWorkerHook.__init__.__code__.co_varnames[:1])
+        import inspect
+
+        self.assertIsNone(inspect.signature(FastWorkerHook.__init__).parameters['lanes'].default)
 
     def test_a_config_without_the_flag_builds_no_runtime(self):
         self.assertIsNone(lanes.lane_admission({'slot': 0}, {}, seats=4))

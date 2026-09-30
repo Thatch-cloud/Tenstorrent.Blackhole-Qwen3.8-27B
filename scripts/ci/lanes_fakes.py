@@ -272,7 +272,10 @@ class World:
                 scheduler.update_from_output(scheduled, output)
                 for request_id, tokens in zip(output.req_ids, output.sampled_token_ids):
                     self.commits[request_id].append((self.clock.now, len(tokens)))
-            drafts = self.worker.take_draft_token_ids()
+                # vLLM (EngineCore.post_step) takes drafts only after a step that ran the model: an empty step never does.
+                drafts = self.worker.take_draft_token_ids()
+            else:
+                drafts = None
         if drafts is not None:
             scheduler.update_draft_token_ids(drafts)
         self.steps += 1

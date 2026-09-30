@@ -60,8 +60,10 @@ GATE_KNOBS = (SCHEDULE_ENV, RATIO_ENV)           # what an arm may add with -e b
 
 EXACT_LENGTHS = (4096, 16384, 32768, 60000)
 EXACT_MAX_TOKENS = 1024
-EXACT_SCHEDULE = '0@25,0.5@25,1@25,2@25,auto'    # 100 frames with both lanes live, then the controller
-SWEEP_SCHEDULE = '0@25,0.5@25,1@25,1.5@25,2@25,auto'
+# Descending k: the fast user's rounds are what runs out first (a stretch at k costs (1 + k) of them per frame, and text ends where it
+# ends), so the ratios where 150 could be met are read first and the cheap packed-only end is the one left unread.
+EXACT_SCHEDULE = '2@25,1@25,0.5@25,0@25,auto'    # 100 frames with both lanes live, then the controller
+SWEEP_SCHEDULE = '2@25,1.5@25,1@25,0.5@25,0@25,auto'
 LADDER_BUDGETS = '3:600,2:1200,1:1800'           # user 3 ends first (live 4 -> 3), then user 2, then user 1; user 0 runs to LADDER_MAX
 LADDER_MAX_TOKENS = 2400
 LONE_MAX_TOKENS = 1024
