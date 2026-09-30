@@ -173,9 +173,14 @@ class SmallJudgementTests(unittest.TestCase):
         import serving_prefill_admission as admission
 
         free = 1_400_000_000
-        need = admission.PREFILL_TRANSIENT_BYTES + admission.PARKED_REBIND_BYTES + admission.STRANDED_BYTES
+        need = (admission.PREFILL_TRANSIENT_BYTES + admission.PARKED_REBIND_BYTES + judge.DEFAULT_RESERVE_BYTES
+                + admission.STRANDED_BYTES)
         self.assertEqual(judge.ballast_advice(free), free - need)
         self.assertEqual(judge.ballast_advice(100), 0)
+        # what it leaves, less the stranded bytes the free term ignores, covers the parked need to the byte
+        left = free - judge.ballast_advice(free) - admission.STRANDED_BYTES
+        self.assertEqual(left, admission.parked_need(2048, judge.DEFAULT_RESERVE_BYTES,
+                                                     rebind=admission.PARKED_REBIND_BYTES, single=0))
         self.assertIsNone(judge.ballast_advice(None))
 
 

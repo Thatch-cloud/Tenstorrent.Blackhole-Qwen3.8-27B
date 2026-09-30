@@ -300,6 +300,18 @@ class JudgeRunTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertTrue(any('exact-first-b against exact-first-f' in text for text in result['s2_problems']))
 
+    def test_the_ballast_arms_must_exercise_the_rebind(self):
+        arms = arms_of('parked-ballast')
+
+        def table(facts):
+            return dict((arm[0], (lambda spec: synthetic(spec, parked_record=dict(on=True, facts=facts)))) for arm in arms)
+        result, _, _ = self.run_plan('parked-ballast', table(dict(rebinds=1, peak_held_max=90_000_000)))
+        self.assertEqual(result['verdict'], 'PASS', result)
+        result, _, _ = self.run_plan('parked-ballast', table(dict(rebinds=0)))
+        self.assertNotEqual(result['verdict'], 'PASS')
+        self.assertTrue(any('did not exercise R' in text for text in result.get('s2_shortfalls', []) or [str(result)]),
+                        result)
+
     def test_a_missing_arm_report_fails_the_plan(self):
         arms = arms_of('parked-exact')
         table = self.exact_table(arms)
@@ -392,7 +404,8 @@ class JudgeRunTests(unittest.TestCase):
         refused = dict((arm[0], (lambda spec: synthetic(spec, extra=dict(s2=dict(quarantined=1))))) for arm in arms)
         result, _, _ = self.run_plan('parked-ballast', refused)
         self.assertEqual(result['verdict'], 'FAIL')
-        fine = dict((arm[0], (lambda spec: synthetic(spec))) for arm in arms)
+        fine = dict((arm[0], (lambda spec: synthetic(spec, parked_record=dict(on=True, facts=dict(
+            rebinds=1, peak_held_max=90_000_000))))) for arm in arms)
         result, _, _ = self.run_plan('parked-ballast', fine)
         self.assertEqual(result['verdict'], 'PASS', result['lines'])
 

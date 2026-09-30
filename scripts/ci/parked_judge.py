@@ -240,16 +240,20 @@ def trace_spread(region, limit=TRACE_SPREAD_GB):
     return [], []
 
 
-def ballast_advice(p7p_free_bytes, environ=None):
-    """The ballast (bytes per chip) that leaves the parked arrival at the boundary of its need less the reserve: the
-    P7p free reading less (the prefill's transient + the rebind's peak + the stranded bytes), so what the arrival
-    really uses is all that is left and the reserve the admission asks on top is gone. The single is held at idle
-    (S = 0). None without a reading. serving_prefill_admission's terms, read at call time."""
+DEFAULT_RESERVE_BYTES = 256 * 2 ** 20   # the admission's default DRAM reserve (the 256 MiB the design's need terms use)
+
+
+def ballast_advice(p7p_free_bytes, reserve=DEFAULT_RESERVE_BYTES):
+    """The ballast (bytes per chip) that leaves the parked arrival exactly its ADMISSION need: the P7p free reading less
+    (the parked need - the prefill's transient, the rebind's peak R and the reserve - and the stranded bytes the free term
+    leaves out). The reserve stays in: without it the admission's need is unmet, the arrival waits or is refused at the
+    backstop, and the rebind (R) never runs. Leaving the need's whole 968 MB beside the first prefill's resident residue
+    still clears the backstop (R and the reserve). The single is held at idle (S = 0). None without a reading.
+    serving_prefill_admission's terms, read at call time."""
     if p7p_free_bytes is None:
         return None
     import serving_prefill_admission as admission
 
-    transient = admission.PREFILL_TRANSIENT_BYTES
-    rebind = admission.PARKED_REBIND_BYTES
-    stranded = admission.STRANDED_BYTES
-    return max(int(p7p_free_bytes) - (transient + rebind + stranded), 0)
+    need = admission.parked_need(admission.PREFILL_TRANSIENT_FROM, reserve, rebind=admission.PARKED_REBIND_BYTES,
+                                 single=0)
+    return max(int(p7p_free_bytes) - (need + admission.STRANDED_BYTES), 0)

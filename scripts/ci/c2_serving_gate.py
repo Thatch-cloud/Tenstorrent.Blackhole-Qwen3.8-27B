@@ -2900,7 +2900,7 @@ def parked_g_e0(reports):
         advice = parked_judge.ballast_advice(int(min(frees) * 1e9))
         facts['ballast_advice_bytes'] = advice
         lines.append('ballast advice: C2_GATE_BALLAST_MB=%d (the smallest P7p free reading %.3f GB per chip less the '
-                     'prefill transient, R and the stranded bytes)' % (advice // 2 ** 20, min(frees)))
+                     'parked need - transient, R, reserve - and the stranded bytes)' % (advice // 2 ** 20, min(frees)))
     return problems, shortfalls, facts, lines
 
 
@@ -3148,6 +3148,10 @@ def run_parked_ballast(plan, runner, profiles, arms):
         if s2.get('quarantined'):
             problems.append('%s: %d requests refused: the parked need did not cover the arrival' % (
                 spec[0], s2['quarantined']))
+        brief = parked_facts_of(report)
+        if not brief.get('rebinds') or brief.get('peak_held_max') is None:
+            shortfalls.append('%s: no arrival rebind and peak line (rebinds %s, peak %s): the ballast did not exercise R' % (
+                spec[0], brief.get('rebinds'), brief.get('peak_held_max')))
     return parked_result(lines, problems, shortfalls, facts)
 
 
