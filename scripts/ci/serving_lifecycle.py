@@ -63,6 +63,8 @@ class FastServingLifecycle:
     quarantine = None
     admission = None
     refused = None
+    lanes = None            # QWEN_FAST_LANE's runtime (per instance in __init__); a lifecycle built without __init__ has none
+    lane_gate = None
     max_model_len = None
     # Sticky sessions (QWEN_FAST_STICKY_SESSIONS, set per instance in __init__), defaulted on the
     # class for the same reason: off, a new request with num_computed_tokens != 0 is refused as

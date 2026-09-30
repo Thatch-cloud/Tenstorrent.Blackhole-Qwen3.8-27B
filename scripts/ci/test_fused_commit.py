@@ -1565,8 +1565,8 @@ class ParentTests(unittest.TestCase):
         if result.returncode != 0:
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
-        after = without_any_request(without_sticky(
-            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))
+        after = without_any_request(without_sticky(without_solo_and_lanes(
+            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1592,6 +1592,54 @@ def cut_code(lines, first, last, code, replacement=()):
     if found != tuple(code):
         raise AssertionError('The run from %r holds more than expected: %r' % (first, found))
     return lines[:starts[0]] + list(replacement) + lines[ends[0] + 1:]
+
+
+def replace_run(lines, run, replacement):
+    """lines with the one contiguous run whose lines equal (stripped) `run` replaced by `replacement` (lines, indentation as given);
+    exactly one such run, or AssertionError."""
+    stripped = [value.strip() for value in lines]
+    starts = [index for index in range(len(lines) - len(run) + 1) if stripped[index:index + len(run)] == list(run)]
+    if len(starts) != 1:
+        raise AssertionError('%r is not in serving_runtime.py exactly once' % (run,))
+    return lines[:starts[0]] + list(replacement) + lines[starts[0] + len(run):]
+
+
+def without_solo_and_lanes(lines):
+    """serving_runtime.py less the lanes window's two default-off hunks, which landed after every parent this test compares with:
+    D0, the one-user block (QWEN_FAST_SOLO_LANE) and the fast lane (QWEN_FAST_LANE). Every statement they add or widen is put back to
+    the line it was, each found exactly once, so nothing else is hidden."""
+    lines = cut_once(lines, '# QWEN_FAST_SOLO_LANE (D0, default off; strictly \'0\' or \'1\'): the one-user 16-row block beside M3, gate only. Refused',
+                     "lane_config = serving_fast_lane.lane_admission(solo_lane, seats=policy['scheduler_requests'], log=pindiag)")
+    lines = cut_once(lines, 'solo_shape_value = None',
+                     'distinct_shapes = distinct_shapes + ((solo_shape_value.users, solo_shape_value.rows_per_user),)')
+    lines = cut_once(lines, "# D0: the one-user block, after M3 (a block is built before any request exists, and the pool's slot 0 is",
+                     "memory_ledger.record('P6', point='solo', packed_block=solo_block)")
+    lines = replace_run(lines, ("extents = [getattr(packed_block, 'extent', False)",
+                                'for packed_block in packed_blocks + ([solo_block] if solo_block is not None else [])]'),
+                        [' ' * 12 + "extents = [getattr(packed_block, 'extent', False) for packed_block in packed_blocks]"])
+    lines = replace_run(lines, ('packed_step = PackedStep(packed_blocks if four_as_two else packed_blocks[0],',
+                                "**({'solo': solo_block} if solo_block is not None else {}))"),
+                        [' ' * 12 + 'packed_step = PackedStep(packed_blocks if four_as_two else packed_blocks[0])'])
+    lines = replace_run(lines, ('else dict(block=packed_blocks[0].describe())),',
+                                '**(dict(solo=solo_block.describe()) if solo_block is not None else {}))'),
+                        [' ' * 19 + 'else dict(block=packed_blocks[0].describe())))'])
+    lines = replace_run(lines, ('packed_any_admission.admit_blocks(packed_blocks + ([solo_block] if solo_block is not None else []),',
+                                'log=pindiag)'),
+                        [' ' * 12 + 'packed_any_admission.admit_blocks(packed_blocks, log=pindiag)'])
+    lines = cut_run(lines, ('lanes = None', 'if lane_config is not None:',
+                            'lanes = serving_fast_lane.LaneRuntime(lane_config, log=pindiag)'))
+    lines = cut_once(lines, '# QWEN_FAST_LANE: the lane the request is granted decides which pool slots its engine may borrow (the fast request',
+                     'grant = lanes.admit(state.req_id, state.sampling_params, slot0_free=not pool.slots[0].lent)')
+    lines = replace_run(lines, ('try:', 'if grant is None:',
+                                'request = create_request() if experiment is None else experiment.create(create_request)',
+                                'else:', 'with pool.slot_order(grant.slot_order):',
+                                'request = create_request() if experiment is None else experiment.create(create_request)',
+                                'except BaseException:', 'if lanes is not None:', 'lanes.release(state.req_id)', 'raise'),
+                        [' ' * 12 + 'request = create_request() if experiment is None else experiment.create(create_request)'])
+    lines = replace_run(lines, ('if lanes is not None:', 'lanes.release(state.req_id)', 'request.close(state.req_id)'),
+                        [' ' * 16 + 'request.close(state.req_id)'])
+    return replace_run(lines, ('cancelled=cancelled, packed_step=packed_step,', "**({'lanes': lanes} if lanes is not None else {}))"),
+                       [' ' * 12 + 'cancelled=cancelled, packed_step=packed_step)'])
 
 
 def without_sticky(lines):

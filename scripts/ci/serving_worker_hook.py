@@ -271,7 +271,7 @@ class FastWorkerHook:
         if request_id in self.bridges:
             raise ValueError('That request already decodes on this worker')
         self.bridges[request_id] = bridge
-        if self.lanes is not None:
+        if getattr(self, 'lanes', None) is not None:
             self.lanes.publish(None)    # the plan was made without this request: the drafts after this step make the next
         note_fixture_writer('admission')
         return self
@@ -281,7 +281,7 @@ class FastWorkerHook:
         if bridge is None:
             raise ValueError('That request does not decode on this worker')
         bridge.close()
-        if self.lanes is not None:
+        if getattr(self, 'lanes', None) is not None:
             self.lanes.release(request_id)
         release_dead_proposals(self)
         note_fixture_writer('detach')
@@ -660,7 +660,7 @@ class FastWorkerHook:
         for bridge in list(self.bridges.values()):
             bridge.close()
         self.bridges.clear()
-        if self.lanes is not None:
+        if getattr(self, 'lanes', None) is not None:
             self.lanes.publish(None)    # a stale plan must never hide a request the next hook serves
         for owner, name, existed, value in reversed(self.saved):
             if existed:
