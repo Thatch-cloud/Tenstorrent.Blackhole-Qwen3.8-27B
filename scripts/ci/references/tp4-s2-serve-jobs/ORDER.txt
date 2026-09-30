@@ -1,0 +1,36 @@
+# The order of the four-card S2 serving window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job (a differing comparison, a reproduced divergence, a replay restart wedge, a refusal).
+# optional: not needed to place; run after every stop job has passed. Image: the tag of the tt-vllm image the job serves or builds
+# (tp4-stackfix-3 is validated and built; tp4-serve-1 is built by SB from the commit that records the evidence). Minutes: runner time
+# for the job, a quad reset included (1-3 min) where the job has one.
+#
+# STAGE 1, before any evidence: the gate plans on c2-packed-tp4-gate and tp4-stackfix-3 (about 2.6-3 h). They need no harness port and
+# run on the cards while the ports are finished and the CPU suite runs. G-C needs the E3 churn fix of serving/tp4-s2.
+# STAGE 2, the evidence on card M alone (about 25 min of runner time, 5 of card time). Needs the two four-card harness ports (E1, E2).
+# A watcher job (W) runs before its full job (F); a REDUCED-PASS is never evidence. After EV-F3: record the three reports with
+#   py -3.11 -B scripts/ci/record_packed_any_evidence_tp4.py ...   (its --help gives the flags),
+# commit packed_any_evidence_tp4.json and the re-pinned EVIDENCE_TP4_SHA256 together (git add by path: scripts/ci/__pycache__ is
+# tracked), run the CPU suite, and only then build.
+# STAGE 3, after the evidence commit: build tp4-serve-1, smoke and confirm on the traffic profile, then the four-card replay of the thin
+# layer. Then the quad reset, the platform's fabric re-measure, the :latest retag in the rig daemon's local store, and placement,
+# which needs the user's go-ahead and an admin token (not part of this window).
+# Optional go/no-go BEFORE stage 1 or 2 (not a template here; it is tp4/evidence-jobs CB1-nkv1-full, the nkv1 spike at seeds 0-2,
+# 3-5 min): it shows 0x21 / 0x23 at one KV head over every K1 extent, and is not evidence.
+G-L1-lifecycle stop tp4-stackfix-3 18
+G-L2-lifecycle-arrival stop tp4-stackfix-3 15
+G-M1-mixed stop tp4-stackfix-3 21
+G-M2-mixed-long stop tp4-stackfix-3 23
+G-S-short stop tp4-stackfix-3 18
+G-B-boundaries stop tp4-stackfix-3 28
+G-MEM-memory stop tp4-stackfix-3 23
+G-ST-staggered stop tp4-stackfix-3 25
+G-C-churn stop tp4-stackfix-3 23
+EV-W1-cb1-cb2a-watcher stop tp4-stackfix-3 6
+EV-F1-cb1 stop tp4-stackfix-3 6
+EV-F2-cb2a stop tp4-stackfix-3 6
+EV-W2-cb2b-watcher stop tp4-stackfix-3 8
+EV-F3-cb2b stop tp4-stackfix-3 10
+SB-build stop tp4-serve-1 23
+SS-smoke stop tp4-serve-1 23
+SM-mixed-traffic stop tp4-serve-1 21
+SR-quad-replay stop tp4-serve-1 38
