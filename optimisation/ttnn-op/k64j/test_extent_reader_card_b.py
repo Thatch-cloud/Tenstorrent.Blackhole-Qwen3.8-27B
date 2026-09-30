@@ -920,7 +920,7 @@ class RunnerTests(unittest.TestCase):
     def test_an_unknown_harness_is_refused(self):
         result = self.run_runner(K64J_HARNESS='k2')
         self.assertEqual(result.returncode, 1)
-        self.assertIn('refusing: K64J_HARNESS=k2 is neither card', result.stderr)
+        self.assertIn('refusing: K64J_HARNESS=k2 is none of card', result.stderr)
         self.assertNotIn('### argv: ', result.stdout)
 
     def tree(self):
