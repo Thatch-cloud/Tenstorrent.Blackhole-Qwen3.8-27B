@@ -1,0 +1,17 @@
+# The order of the four-card S2 window, one template per line: <template name without .env> <stop|soft|optional>.
+# stop: the window halts at the first failure of this job. soft: a failure is logged and the window goes on (its product is
+# data, not a verdict). optional: run only after every stop job has passed, one at a time, each separable from the rest.
+# Early-failure order: no card first (S0), then one card (S1: the riskiest kernel item first), then four cards from the
+# cheapest attach to the most expensive gate.
+S0-build stop
+S1a-nkv1-watcher stop
+S1b-gdn-parity stop
+S1c-gdn-tp4-watcher stop
+S1d-gdn-tp4 stop
+S2-quad-attach-smoke stop
+S3a-s2-matrix stop
+S3b-g1-tp4-reference soft
+S4-g1-ring-mmrs stop
+O1-nkv1-full optional
+O2-s2-bf16-drafter optional
+O3-s2-ring-topology optional

@@ -212,10 +212,11 @@ class PackedAnyProfileTest(unittest.TestCase):
         with open(PROFILES, encoding='utf-8') as handle:
             names = sorted(json.load(handle)['profiles'])
         # ...and the sticky-session profiles, c2-packed and c2-packed-gate with prefix reuse.
-        # ...and the four-card twins, c2-packed-tp4 and its gate profile (plan S2-TP4).
+        # ...and the four-card twins, c2-packed-tp4 and its gate profile (plan S2-TP4), and the two gate arms of the S2 window
+        # (the ring fabric, the bfloat16 drafter).
         self.assertEqual([name for name in names if EXTENT_FLAG in self.load(name)['env']],
                          ['c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-tp4',
-                          'c2-packed-tp4-gate'])
+                          'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-ring'])
         for name in names:
             env = self.load(name)['env']
             with self.subTest(profile=name):
@@ -501,9 +502,12 @@ class BootTest(unittest.TestCase):
 
 
 TP4_PROFILES = ('general-tp4', 'general-prefix-tp4', 'general-tp4-131k', 'general-prefix-tp4-131k', 'general-tp4-bench',
-                'general-tp4-mmrs')
+                'general-tp4-mmrs', 'general-tp4-ring-mmrs')
+# The S2 window's G1 defaults arm: the ring fabric and the fused prefill out-projection on together.
+RING_FABRIC_PROFILES = ('general-tp4-ring-mmrs', 'c2-packed-tp4-gate-ring')
+MMRS_PROFILES = ('general-tp4-mmrs', 'general-tp4-ring-mmrs')
 # The four-card fast-path (S2) profiles: mesh_device P150x4 with the fast path on, under QWEN_FAST_TP=4.
-FAST_TP4_PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate')
+FAST_TP4_PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16')
 # The bring-up switches every TP4 profile carries in its env (see the profiles' descriptions): the fused prefill
 # out-projection off (general-tp4-mmrs is the arm that turns it on) and the prefill conv audited for four chunks.
 TP4_BRINGUP_ENV = {'QWEN_GDN_PREFILL_MMRS': '0', 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT': '4'}
@@ -571,7 +575,7 @@ class MeshTest(unittest.TestCase):
             self.assertEqual(profile['mesh_device'], tp4_mesh.MESH_DEVICE, name)
             self.assertEqual(profile['mesh_graph_descriptor'], tp4_mesh.DESCRIPTOR_PATH, name)
             tt = contract.tt_config(profile)
-            self.assertEqual(tt['fabric_config'], tp4_mesh.FABRIC_CONFIG, name)
+            self.assertEqual(tt['fabric_config'], 'FABRIC_1D_RING' if name in RING_FABRIC_PROFILES else tp4_mesh.FABRIC_CONFIG, name)
             self.assertEqual(tt['sample_on_device_mode'], 'decode_only', name)
             self.assertTrue(contract.ring_mesh(profile), name)
             self.assertNotIn('qwen_fast_t16', profile['engine']['additional-config'], name)
@@ -583,7 +587,7 @@ class MeshTest(unittest.TestCase):
     def test_each_tp4_profile_is_its_pair_twin_at_its_own_seats_and_context(self):
         twins = {'general-tp4': 'general', 'general-prefix-tp4': 'general-prefix', 'general-tp4-131k': 'general',
                  'general-prefix-tp4-131k': 'general-prefix', 'general-tp4-bench': 'general',
-                 'general-tp4-mmrs': 'general'}
+                 'general-tp4-mmrs': 'general', 'general-tp4-ring-mmrs': 'general'}
         sized = ('max-model-len', 'max-num-batched-tokens', 'max-num-seqs')
         for name, twin in twins.items():
             mine, theirs = contract.load_profile(PROFILES, name), contract.load_profile(PROFILES, twin)
@@ -591,12 +595,13 @@ class MeshTest(unittest.TestCase):
                              {key: value for key, value in theirs['engine'].items() if key not in sized + ('additional-config',)},
                              name)
             tt = dict(contract.tt_config(mine))
-            self.assertEqual((tt.pop('fabric_config'), tt.pop('sample_on_device_mode')), ('FABRIC_1D', 'decode_only'))
+            self.assertEqual((tt.pop('fabric_config'), tt.pop('sample_on_device_mode')),
+                             ('FABRIC_1D_RING' if name in RING_FABRIC_PROFILES else 'FABRIC_1D', 'decode_only'))
             self.assertEqual(tt, contract.tt_config(theirs), name)
             context = mine['engine']['max-model-len']
             self.assertEqual(mine['engine']['max-num-batched-tokens'], context, 'whole-prompt prefill')
             expected_env = dict(theirs['env'], QWEN_FAST_MAX_POSITION=str(context), QWEN_DSPARK_REQUEST_CONTEXT=str(context),
-                                **dict(TP4_BRINGUP_ENV, **({'QWEN_GDN_PREFILL_MMRS': '1'} if name == 'general-tp4-mmrs' else {})))
+                                **dict(TP4_BRINGUP_ENV, **({'QWEN_GDN_PREFILL_MMRS': '1'} if name in MMRS_PROFILES else {})))
             self.assertEqual(mine['env'], expected_env, name)
             for key in ('eos_ids', 'snapshots', 'request_contract', 'drop_batched_decode_mode'):
                 self.assertEqual(mine.get(key), theirs.get(key), (name, key))
@@ -609,7 +614,8 @@ class MeshTest(unittest.TestCase):
             engine = contract.load_profile(PROFILES, name)['engine']
             pools[name] = engine['max-model-len'] * engine['max-num-seqs']
         serving = [name for name in TP4_PROFILES if name != 'general-tp4-bench']
-        self.assertIs(contract.load_profile(PROFILES, 'general-tp4-mmrs').get('gate_only'), True)
+        for gated in MMRS_PROFILES:
+            self.assertIs(contract.load_profile(PROFILES, gated).get('gate_only'), True, gated)
         for name in serving:
             self.assertEqual(pools[name], 524288, name)
             # the same KV per chip as general's 4 x 65,536 on the pair (17,408 B per token per chip there)
@@ -622,7 +628,7 @@ class MeshTest(unittest.TestCase):
         seats = {name: contract.load_profile(PROFILES, name)['engine']['max-num-seqs'] for name in TP4_PROFILES}
         self.assertEqual(seats, {'general-tp4': 8, 'general-prefix-tp4': 8, 'general-tp4-131k': 4,
                                  'general-prefix-tp4-131k': 4, 'general-tp4-bench': 8,
-                                 'general-tp4-mmrs': 8})
+                                 'general-tp4-mmrs': 8, 'general-tp4-ring-mmrs': 8})
 
     def test_what_a_mesh_cannot_serve_is_refused(self):
         ring = contract.load_profile(PROFILES, 'general-tp4')

@@ -53,7 +53,7 @@ import tp_shapes
 from test_c2_packed_tp4_profiles import image_env, profiles
 
 HERE = Path(__file__).resolve().parent
-PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate')
+PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16')
 RING_DESCRIPTOR = HERE / 'qwen_p150x4_ring_mesh_graph_descriptor.textproto'
 
 
