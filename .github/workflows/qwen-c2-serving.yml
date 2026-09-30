@@ -192,6 +192,12 @@ jobs:
             echo "=== $c"
             docker inspect -f '{{.State.Status}} started={{.State.StartedAt}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} image={{.Image}}' "$c"
             docker inspect -f '{{json .Config.Env}}' "$c" | tr ',' '\n' | grep -E 'QWEN_C2|THATCH_VLLM_KWARGS|MESH|TT_MESH|THATCH_MODEL_ENGINE|QWEN36' | cut -c1-300
+            # What the placement serves, in the contract's own words: the argv line of the profile it launched (the
+            # agent forwards no QWEN_C2_PROFILE, so the Env above cannot show it) and, on four cards, the ring check at
+            # mesh open. Both are in the runtime's vLLM subprocess log in the container's tmpfs, never in `docker logs`
+            # (and the agent's containers log to nowhere). Read-only.
+            echo "--- launched profile"
+            docker exec "$c" sh -c 'cat /tmp/thatch_vllm_*.log 2>/dev/null' | grep -F -e ': vLLM argv' -e '[QWEN-TP4] ring ' | cut -c1-400 | tail -6
             port=$(docker port "$c" 8000/tcp | head -1 | sed 's/.*://')
             echo "published port: $port"
             curl -sS -m 10 "http://127.0.0.1:$port/healthz"; echo

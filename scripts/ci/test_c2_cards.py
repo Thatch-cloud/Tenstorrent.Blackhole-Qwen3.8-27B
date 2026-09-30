@@ -276,6 +276,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(status.count('/proc/$pid/environ'), 1)
         self.assertNotIn('systemctl --user show', status)
 
+    def test_the_platform_step_prints_the_profile_the_placement_launched(self):
+        """The agent forwards no QWEN_C2_PROFILE and its containers log to nowhere, so the contract's argv line and
+        the ring check - in the runtime's vLLM subprocess log, where the replay's expect_profile reads them too - are
+        the one direct proof of what a live placement serves. Read-only: a cat inside the running container."""
+        import c2_platform_replay as replay
+        platform = step('Platform serving container (read-only)')
+        self.assertIn("docker exec \"$c\" sh -c 'cat %s 2>/dev/null'" % replay.ENGINE_LOG_GLOB, platform)
+        self.assertIn("grep -F -e ': vLLM argv' -e '[QWEN-TP4] ring '", platform)
+        self.assertLess(platform.index('--- launched profile'), platform.index('/v1/chat/completions'))
+
     def test_the_quad_reset_is_one_tt_smi_call_over_the_resolved_set_then_the_heal(self):
         quad = step('Reset all four cards')
         self.assertEqual(len(re.findall(r'"\$smi" -r ', quad)), 1)
