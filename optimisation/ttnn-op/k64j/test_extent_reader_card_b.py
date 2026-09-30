@@ -1662,18 +1662,38 @@ class QuadHelperTests(unittest.TestCase):
 
     def test_the_pindiag_lines_at_width_four(self):
         engaged = '[PINDIAG] extent replay engaged segments=4 flags=0x23,0x23,0x23,0x23 mask=narrow capacity=4352'
-        mode = ("[PINDIAG] sdpa qwen-modes modes=extent,share,slice,tail rows=16 capacity=4352 bundles=[2] "
+        mode = ("[PINDIAG] sdpa qwen-modes modes=extent,share,tail rows=16 capacity=4352 bundles=[2] "
                 "flags=['0x23'] mask=narrow")
-        flags = QUAD.served_flags
-        self.assertEqual(reader_b.pindiag_problems([mode] * 4 + [engaged], 4352, flags=flags), [])
+        self.assertEqual(reader_b.pindiag_problems([mode] * 4 + [engaged], 4352, geometry=QUAD), [])
         # The four-card lines are not the pair's and the pair's are not four-card evidence.
         self.assertEqual(len(reader_b.pindiag_problems([mode] * 4 + [engaged], 4352)), 2)
-        pair_lines = [line.replace('0x23', '0x27') for line in [mode] * 4 + [engaged]]
-        self.assertEqual(len(reader_b.pindiag_problems(pair_lines, 4352, flags=flags)), 2)
+        pair_lines = [line.replace('0x23', '0x27').replace('extent,share,tail', 'extent,share,slice,tail')
+                      for line in [mode] * 4 + [engaged]]
+        self.assertEqual(len(reader_b.pindiag_problems(pair_lines, 4352, geometry=QUAD)), 2)
         self.assertEqual(reader_b.pindiag_problems(pair_lines, 4352), [])
         self.assertEqual(len(reader_b.pindiag_problems([mode] * 4 + [engaged.replace('0x23,0x23', '0x3,0x23')], 4352,
-                                                       flags=flags)), 1)
-        self.assertIn("flags=['0x23']", reader_b.pindiag_problems([engaged], 4352, flags=flags)[0])
+                                                       geometry=QUAD)), 1)
+        self.assertIn("flags=['0x23']", reader_b.pindiag_problems([engaged], 4352, geometry=QUAD)[0])
+        # 0x23 reached with the pair image's modes (the slice dropped at one KV head) is not how four cards serve it.
+        sliced = [line.replace('extent,share,tail', 'extent,share,slice,tail') for line in [mode] * 4]
+        self.assertEqual(len(reader_b.pindiag_problems(sliced + [engaged], 4352, geometry=QUAD)), 1)
+
+    def test_the_four_card_modes_are_the_four_card_profiles(self):
+        """CB2b-TP4 runs the reader with the QWEN_FAST_SDPA_MODES every four-card S2 profile serves (tail,share), which
+        gives the twin's 0x23; the pair keeps the image's tail,share,slice."""
+        profiles = json.loads(read(CI / 'qwen_c2_profiles.json'))['profiles']
+        served = {name: profile['env'].get(reader_b.SDPA_MODES_ENV) for name, profile in profiles.items()
+                  if isinstance(profile, dict) and (profile.get('env') or {}).get(reader_b.TP_ENV) == '4'
+                  and (profile.get('env') or {}).get('QWEN_FAST_EXTENT_REPLAY') == '1'}
+        self.assertIn('c2-packed-tp4', served)
+        self.assertEqual(set(served.values()), {QUAD.modes_env}, served)
+        self.assertEqual((QUAD.modes_env, QUAD.modes_logged, QUAD.sdpa_modes), ('tail,share', 'extent,share,tail',
+                                                                                 ('share', 'tail')))
+        self.assertEqual((PAIR.modes_env, PAIR.modes_logged, PAIR.sdpa_modes),
+                         ('tail,share,slice', 'extent,share,slice,tail', reader_b.SDPA_MODES))
+        with four():
+            self.assertEqual(pooled_attention_replay.mode_flags(set(QUAD.sdpa_modes) | {'extent'}, 2, 8),
+                             QUAD.served_flags)
 
     def test_the_verdict_line_at_width_four(self):
         report = self.full_report()
@@ -1785,7 +1805,7 @@ class QuadFlowTests(FlowBase):
     FakeExtentTtnn's at one KV head (card.KV_HEADS, the cores per head)."""
 
     WIDTH_ARGV = ('--width', '4')
-    WIDTH_ENV = {reader_b.TP_ENV: '4'}
+    WIDTH_ENV = {reader_b.TP_ENV: '4', 'QWEN_FAST_SDPA_MODES': 'tail,share'}      # what run_card_b.sh TP4_WIDTH=4 sets
 
     def width_patches(self):
         original = model.cores_per_head
@@ -1830,6 +1850,11 @@ class QuadFlowTests(FlowBase):
         engaged = [line for line in report['pindiag'] if line.startswith(reader_b.ENGAGED_MARKER)]
         self.assertEqual(engaged, ['%s segments=4 flags=0x23,0x23,0x23,0x23 mask=narrow capacity=2304'
                                    % reader_b.ENGAGED_MARKER])
+        # Served as the four-card profiles serve it: tail,share (no slice to drop), extent added by the reader.
+        modes = [line for line in report['pindiag'] if line.startswith(reader_b.MODES_MARKER + ' modes=')]
+        self.assertEqual(len(modes), 4)
+        self.assertTrue(all(' modes=extent,share,tail ' in line and "flags=['0x23']" in line for line in modes), modes)
+        self.assertEqual(report['env']['QWEN_FAST_SDPA_MODES'], 'tail,share')
         self.assertNotIn('two_chip_view', report)
         view = report['chip_view']
         self.assertEqual((view['chips_physical'], view['chips_presented']), (1, 4))
@@ -1902,7 +1927,9 @@ class QuadFlowTests(FlowBase):
         self.assertEqual(report['comparisons'], [])
 
     def test_the_sdpa_modes_and_the_scratch_are_checked_first_at_four_cards_too(self):
-        for env, needle in (({'QWEN_FAST_SDPA_MODES': 'tail,share'}, 'QWEN_FAST_SDPA_MODES must be'),
+        # The pair image's modes are not the four-card profiles': refused, although they would give 0x23 at one KV head.
+        for env, needle in (({'QWEN_FAST_SDPA_MODES': 'tail,share,slice'}, 'QWEN_FAST_SDPA_MODES must be tail,share,'),
+                            ({'QWEN_FAST_SDPA_MODES': 'tail'}, 'QWEN_FAST_SDPA_MODES must be tail,share,'),
                             ({card.SCRATCH_ENV: '0'}, 'QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 is required')):
             with self.subTest(env=env):
                 status, report = self.run_reader(FakeQuadTtnn(torch), base=self.SMALL, env=env)
@@ -1946,8 +1973,10 @@ class QuadRunnerTests(unittest.TestCase):
         argv = self.helper.argv(result)
         self.assertEqual(result.stderr, '')
         env = self.env_of(argv)
-        for value in ('QWEN_FAST_TP=4', 'QWEN_FAST_SDPA_MODES=tail,share,slice', 'QWEN_SDPA_TREE_SCRATCH_ROUNDS=1'):
+        for value in ('QWEN_FAST_TP=4', 'QWEN_FAST_SDPA_MODES=tail,share', 'QWEN_SDPA_TREE_SCRATCH_ROUNDS=1'):
             self.assertIn(value, env)
+        self.assertEqual([value for value in env if value.startswith('QWEN_FAST_SDPA_MODES=')],
+                         ['QWEN_FAST_SDPA_MODES=' + QUAD.modes_env], 'the four-card profiles\' modes, set once')
         args = self.helper.harness_args(argv)
         self.assertEqual((args.width, args.geometry, args.ci_root, args.served_root, args.sections, len(args.families)),
                          (4, QUAD, '/bench/ci', '/experiment-scripts/ci', ['R1', 'S', 'R2', 'R4'], 56))
@@ -1975,6 +2004,8 @@ class QuadRunnerTests(unittest.TestCase):
                 argv = self.helper.argv(self.run_runner(**width))
                 self.assertNotIn('--width', argv[argv.index('card') + 1:])
                 self.assertFalse([value for value in self.env_of(argv) if value.startswith('QWEN_FAST_TP')])
+                self.assertEqual([value for value in self.env_of(argv) if value.startswith('QWEN_FAST_SDPA_MODES=')],
+                                 ['QWEN_FAST_SDPA_MODES=tail,share,slice'])
                 self.assertEqual(self.helper.harness_args(argv).width, 2)
                 inner = argv[argv.index('--entrypoint') + 4]
                 self.assertFalse([name for name in reader_b.QUAD_SIBLINGS if name in inner])
@@ -2037,6 +2068,7 @@ class QuadRunnerTests(unittest.TestCase):
                                  'the pinned siblings are served from the four-card image, not the P8 default')
                 environment = self.env_of(argv)
                 self.assertIn('QWEN_FAST_TP=4', environment)
+                self.assertIn('QWEN_FAST_SDPA_MODES=tail,share', environment)
                 self.assertEqual('TT_METAL_WATCHER=5' in environment, watcher)
                 args = self.helper.harness_args(argv)       # every flag the template passes is one the harness parses
                 self.assertEqual((args.width, args.sections, args.capacity), (4, ['R1', 'S', 'R2', 'R4'], 131328))

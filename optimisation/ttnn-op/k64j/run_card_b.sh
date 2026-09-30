@@ -83,7 +83,8 @@
 #
 # CB2b AT FOUR CARDS (the S2 fast path on the four-card mesh; the evidence jobs EV-W2 and EV-F3): K64J_HARNESS=extent_reader
 # TP4_WIDTH=4 runs the same harness with --width 4 (TP4_WIDTH unset or 2 is the pair's run above, unchanged) and sets QWEN_FAST_TP=4
-# in the container. The code under test is then also scripts/ci's extent_attention_replay_tp.py, tp_shapes.py, tp_kernels.py,
+# and QWEN_FAST_SDPA_MODES=tail,share (the four-card profiles' modes, not the pair's tail,share,slice) in the container. The code
+# under test is then also scripts/ci's extent_attention_replay_tp.py, tp_shapes.py, tp_kernels.py,
 # tp_addresses.py and chip_view.py (/bench/ci), driven through ChipView(chips=4) at flags 0x23 on ONE KV head (six query heads per
 # token); the pinned pair modules and the twin's siblings (attention_mask_replay_tp.py/.cpp, attention_fold_dma_tp.py/.cpp) come
 # from the image's served tree, so IMAGE must be the four-card S2 image (the P8 default has no such siblings):
@@ -545,9 +546,11 @@ if [ "$MAIN" = extent_reader ]; then
       || { echo "refusing: $ci/$file missing (the extent reader runs this checkout's scripts/ci)" >&2; exit 1; }
   done
   echo "### code under test: $ci; pinned sources: the image's $SERVED_CI"
-  XE=(-e QWEN_FAST_SDPA_MODES=tail,share,slice)
   if [ "${TP4_WIDTH:-2}" = 4 ]; then
-    XE+=(-e QWEN_FAST_TP=4)
+    # The four-card profiles' modes (c2-packed-tp4: tail,share; the slice needs a second KV head), and the width.
+    XE=(-e QWEN_FAST_SDPA_MODES=tail,share -e QWEN_FAST_TP=4)
+  else
+    XE=(-e QWEN_FAST_SDPA_MODES=tail,share,slice)
   fi
 fi
 if [ "$MAIN" = gdn_tp4 ]; then

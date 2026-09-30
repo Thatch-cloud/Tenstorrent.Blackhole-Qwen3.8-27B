@@ -92,10 +92,11 @@ Verdict: one 'K64J_READER verdict=...' line.
                PASS is CB2b's evidence.
   FAIL         a decisive comparison differs on an otherwise valid run.
   NO-DECISION  a failure (the wrong binary or kernels, no compact scratch, QWEN_FAST_SDPA_MODES other than
-               tail,share,slice, a module not from --ci-root or --served-root, a pinned source that is not its served
-               bytes, the host mirrors disagreeing, a requested program without its factory lines, a missing PINDIAG
-               line, a section that raised, the watchdog), a dead liveness control, a decisive section cut by the
-               deadline, SIGTERM, or a requested section without a decisive comparison.
+               tail,share,slice (tail,share at width 4), a module not from --ci-root or --served-root, a pinned
+               source that is not its served bytes, the host mirrors disagreeing, a requested program without its
+               factory lines, a missing PINDIAG line, a section that raised, the watchdog), a dead liveness
+               control, a decisive section cut by the deadline, SIGTERM, or a requested section without a decisive
+               comparison.
 
 WIDTH 4 (--width 4; run_card_b.sh TP4_WIDTH=4 passes it and sets QWEN_FAST_TP=4): the four-card reader twin
 (scripts/ci/extent_attention_replay_tp.py, the code under test from --ci-root) at one KV head per chip, six query heads
@@ -104,8 +105,10 @@ per token. The same sections and the same contract with these numbers changed an
     four-card mesh; the verdict line says chips=1of4 and the report holds 'chip_view' in place of 'two_chip_view';
   - the served flags are 0x23 (tail | share | extent; the q-slice 0x4 needs a second KV head to slice between) and the
     compile-time reference is 0x3: the engaged line reads flags=0x23,0x23,0x23,0x23, each construction logs one
-    '[PINDIAG] sdpa qwen-modes ... flags=['0x23'] mask=narrow' line per segment, and the 0x23 program's F22 line carries
-    entries=2 kv_share=true q_slice=false;
+    '[PINDIAG] sdpa qwen-modes modes=extent,share,tail ... flags=['0x23'] mask=narrow' line per segment, and the 0x23
+    program's F22 line carries entries=2 kv_share=true q_slice=false;
+  - QWEN_FAST_SDPA_MODES is tail,share, as the four-card profiles serve it (c2-packed-tp4), not the pair image's
+    tail,share,slice (run_card_b.sh sets it; any other value decides nothing);
   - a token's query is (6, 256): the pool holds ONE KV head ((C / 64 + 64, 1, 64, 256)), the fold is the token-major
     repack of rows * 6 head rows, the host mirrors of the mask kernel are narrow_mask_host at 6 head rows (G8B2, G4B3
     and G4B1) and the reference's wide mask is (2, 1, 48, E);
@@ -225,19 +228,25 @@ QUAD_RECORDED_SOURCES = ('extent_attention_replay_tp.py', 'extent_attention_repl
 QUAD_SIBLINGS = ('attention_fold_dma_tp.cpp', 'attention_fold_dma_tp.py', 'attention_mask_replay_tp.cpp',
                  'attention_mask_replay_tp.py')
 QUAD_READER = 'extent_attention_replay_tp.py'
+# The four-card profiles' QWEN_FAST_SDPA_MODES (qwen_c2_profiles.json c2-packed-tp4 and its gate twin: tail,share). The reader
+# adds extent itself: 0x23. The pair's image value (tail,share,slice) would give the same flags at one KV head (the slice
+# saves no tile there), but CB2b-TP4 runs the reader as the four-card profile serves it, PINDIAG line included.
+QUAD_SDPA_MODES = ('share', 'tail')
 
 
 class Geometry:
     """What the width changes. `heads` query heads per token on `kv_heads` KV heads; the flags the reader serves and the
-    compile-time call it is compared with; the modules, the recorded sources and how the one chip is shown as `chips`."""
+    compile-time call it is compared with; the QWEN_FAST_SDPA_MODES it is served with (`sdpa_modes`, sorted); the modules,
+    the recorded sources and how the one chip is shown as `chips`."""
 
     def __init__(self, width, heads, kv_heads, served_flags, modules, served_modules, recorded_sources, reader_source,
-                 view_key, siblings=(), preloaded=()):
+                 view_key, siblings=(), preloaded=(), sdpa_modes=SDPA_MODES):
         self.width, self.heads, self.kv_heads = width, heads, kv_heads
         self.served_flags = served_flags
         self.compile_flags = served_flags & ~card_b.EXTENT
         self.modules, self.served_modules, self.recorded_sources = modules, served_modules, recorded_sources
         self.reader_source, self.view_key, self.siblings, self.preloaded = reader_source, view_key, siblings, preloaded
+        self.sdpa_modes = tuple(sorted(sdpa_modes))
         self.chips = width
 
     @property
@@ -245,13 +254,25 @@ class Geometry:
         """Query heads per KV head."""
         return self.heads // self.kv_heads
 
+    @property
+    def modes_env(self):
+        """QWEN_FAST_SDPA_MODES as the runner sets it: tail first, then share, then slice (tail,share,slice; tail,share)."""
+        return ','.join(name for name in ('tail', 'share', 'slice') if name in self.sdpa_modes)
+
+    @property
+    def modes_logged(self):
+        """The modes word of the reader's '[PINDIAG] sdpa qwen-modes modes=...' line (apply_sdpa_modes: sorted, extent
+        added): extent,share,slice,tail on the pair, extent,share,tail at four cards."""
+        return ','.join(sorted(set(self.sdpa_modes) | {'extent'}))
+
 
 PAIR = Geometry(PAIR_WIDTH, 12, 2, SERVED_FLAGS, MODULES, SERVED_MODULES, RECORDED_SOURCES, 'extent_attention_replay.py',
                 'two_chip_view')
 QUAD = Geometry(QUAD_WIDTH, 6, 1, QUAD_FLAGS, QUAD_MODULES, QUAD_SERVED_MODULES, QUAD_RECORDED_SOURCES, QUAD_READER,
-                'chip_view', QUAD_SIBLINGS, QUAD_PRELOADED)
+                'chip_view', QUAD_SIBLINGS, QUAD_PRELOADED, QUAD_SDPA_MODES)
 GEOMETRIES = {PAIR_WIDTH: PAIR, QUAD_WIDTH: QUAD}
 assert PAIR.served_flags == SERVED_FLAGS and PAIR.compile_flags == COMPILE_FLAGS and PAIR.chips == 2
+assert PAIR.modes_env == 'tail,share,slice' and PAIR.modes_logged == 'extent,share,slice,tail'
 
 
 # ---------------------------------------------------------------------------------------------
@@ -556,10 +577,11 @@ def verdict_line(report):
     return ' '.join(words)
 
 
-def pindiag_problems(lines, capacity, segments=len(SEGMENTS), flags=SERVED_FLAGS):
-    """What one construction's PINDIAG lines lack: exactly one engaged line naming the four `flags` segments (0x27; at
-    width 4, 0x23), the narrow mask and the capacity, and one sdpa qwen-modes line per segment with those flags and
-    mask=narrow."""
+def pindiag_problems(lines, capacity, segments=len(SEGMENTS), geometry=PAIR):
+    """What one construction's PINDIAG lines lack: exactly one engaged line naming the four segments at the geometry's
+    served flags (0x27; at width 4, 0x23), the narrow mask and the capacity, and one sdpa qwen-modes line per segment
+    with the geometry's modes (extent,share,slice,tail; at width 4 extent,share,tail), those flags and mask=narrow."""
+    flags = geometry.served_flags
     problems = []
     engaged = [line for line in lines if line.startswith(ENGAGED_MARKER)]
     want = '%s segments=%d flags=%s mask=narrow capacity=%d' % (ENGAGED_MARKER, segments,
@@ -568,7 +590,7 @@ def pindiag_problems(lines, capacity, segments=len(SEGMENTS), flags=SERVED_FLAGS
         problems.append('expected one %r line, got %r' % (want, engaged))
     modes = [line for line in lines if line.startswith(MODES_MARKER + ' modes=')]
     good = [line for line in modes if "flags=['0x%x'] mask=narrow" % flags in line
-            and 'modes=extent,share,slice,tail ' in line and ' capacity=%d ' % capacity in line]
+            and 'modes=%s ' % geometry.modes_logged in line and ' capacity=%d ' % capacity in line]
     if len(modes) != segments or len(good) != segments:
         problems.append('expected %d %s lines with flags=[\'0x%x\'] and mask=narrow, got %r' % (segments, MODES_MARKER,
                                                                                                 flags, modes))
@@ -699,11 +721,11 @@ def tee_pindiag(modules, sink):
 
 
 def load_served(served, failures, names=SERVED_MODULES):
-    """Execute each of `names` (SERVED_MODULES; at width 4 the geometry's) from the directory `served` and register it in sys.modules before anything
-    imports it, so the code under test imported afterwards binds to these copies. Each one's own imports resolve in
-    `served` first, as in serving (the mask module's frozen_context_geometry, which only validate_ticket uses). A
-    module already imported from anywhere else is refused, not replaced, because whatever imported it keeps that copy.
-    Returns whether all loaded."""
+    """Execute each of `names` (SERVED_MODULES; at width 4 the geometry's) from the directory `served` and register it
+    in sys.modules before anything imports it, so the code under test imported afterwards binds to these copies. Each
+    one's own imports resolve in `served` first, as in serving (the mask module's frozen_context_geometry, which only
+    validate_ticket uses). A module already imported from anywhere else is refused, not replaced, because whatever
+    imported it keeps that copy. Returns whether all loaded."""
     ok = True
     for name in names:
         path = served / (name + '.py')
@@ -987,7 +1009,8 @@ def make_pool(ttnn, torch, device, capacity, seed, users, report, geometry=PAIR)
 
 class Block:
     """One seed's packed block: the pool (the seed's bf8 K / V, the poison, a page table per user), the lent storage,
-    the PackedExtentReplayReader over it, the (1, 64, heads, 256) query (12 heads; 6 at width 4), the trace, and what is staged now."""
+    the PackedExtentReplayReader over it, the (1, 64, heads, 256) query (12 heads; 6 at width 4), the trace, and what
+    is staged now."""
 
     def __init__(self, ttnn, torch, device, mods, view, seed, args, report):
         self.ttnn, self.torch, self.device, self.mods, self.view = ttnn, torch, device, mods, view
@@ -1039,7 +1062,7 @@ class Block:
             self.reader = x.PackedExtentReplayReader(view, self.device, SEGMENTS, self.width, tables,
                                                      storage=self.storage.segment_storage(), max_group_rows=GROUP_ROWS,
                                                      starts=tuple(first['starts']))
-        for problem in pindiag_problems(report['pindiag'][before:], self.capacity, flags=self.geometry.served_flags):
+        for problem in pindiag_problems(report['pindiag'][before:], self.capacity, geometry=self.geometry):
             report['failures'].append('block/seed%d: PINDIAG: %s' % (self.seed, problem))
         report['_requested'].add(probe.program_key(self.capacity, SERVED_BATCH, K_CHUNK, self.geometry.served_flags))
         self.starts, self.tables = list(first['starts']), tables
@@ -1356,9 +1379,9 @@ def run(args, report, checkpoint=None):
             modes = sorted(mods.pooled.sdpa_modes())
         except ValueError as error:
             modes = repr(error)
-        if modes != list(SDPA_MODES):
+        if modes != list(geometry.sdpa_modes):
             report['failures'].append('%s must be %s, the image\'s (the reader adds extent itself); got %r'
-                                      % (SDPA_MODES_ENV, ','.join(('tail', 'share', 'slice')), modes))
+                                      % (SDPA_MODES_ENV, geometry.modes_env, modes))
             return
         view = TwoChipView(ttnn) if geometry.width == PAIR_WIDTH else mods.chip_view.ChipView(ttnn, chips=geometry.chips)
         try:
