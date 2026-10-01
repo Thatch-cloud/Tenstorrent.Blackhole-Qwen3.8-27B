@@ -44,8 +44,8 @@ class FastRequest:
         """Prepare this request's ticket. `packed_rows` is the width of a round the packed
         block will serve (the worker hook asks the packed step before drafting); without it
         the engine proposes at its own captured width, exactly as before. Under QWEN_FAST_BUDGET_CAP
-        a block round's ticket keeps the block's width past the remaining budget, and the session's
-        commit cuts the emission there."""
+        every ticket keeps the width the engine (or the block) answers past the remaining budget, and
+        the session's commit cuts the emission there."""
         if (self.closed or self.busy or self.cancelled or request_id != self.session.request_id
                 or self.session.phase != 'idle' or self.session.finished or self.engine.phase != 'idle'):
             raise ValueError('One unfinished idle owner required for draft preparation')
@@ -56,7 +56,7 @@ class FastRequest:
                     else self.engine.proposal_rows(packed_rows=packed_rows))
             if type(rows) is not int or rows not in (1, 2, 4, 8, 16):
                 raise ValueError('Qualified T16 verifier bucket required')
-            if packed_rows is not None and budget_cap_enabled():
+            if budget_cap_enabled():
                 ticket = self.session.propose(request_id, max_rows=rows, selected=self.runtime.drafter_name,
                                               full_width=True)
             else:

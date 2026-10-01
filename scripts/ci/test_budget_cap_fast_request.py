@@ -37,6 +37,30 @@ class BudgetCapTests(unittest.TestCase):
             request, events = self.fixture(4, 4)
             self.assertEqual(len(request.prepare('request').tokens), 2)
 
+    def test_a_sequential_step_at_three_left_drafts_four_rows_emits_three_and_publishes_prefix_three(self):
+        request, events = self.fixture(4, 4)
+        output = request.step('request', cancelled=lambda: False)
+        self.assertEqual(output.token_ids, (11, 12, 13))
+        self.assertTrue(output.finished)
+        self.assertEqual(events, [('verify', 4), ('target', 3), ('history', 3)])
+
+    def test_the_capped_emission_is_the_uncapped_prefix_for_every_remaining(self):
+        for left in (1, 2, 3, 4, 5):
+            request, events = self.fixture(left + 1, 4)
+            uncapped, _ = self.fixture(32, 4)
+            expected = uncapped.step('request', cancelled=lambda: False).token_ids
+            output = request.step('request', cancelled=lambda: False)
+            with self.subTest(left=left):
+                self.assertEqual(output.token_ids, expected[:left])
+                self.assertEqual(request.session.finished, left <= 4)
+
+    def test_a_cancelled_step_aborts_as_before(self):
+        request, events = self.fixture(4, 4)
+        output = request.step('request', cancelled=Mock(side_effect=(False, True)))
+        self.assertTrue(output.cancelled)
+        self.assertEqual(events, [('verify', 4), ('target', 0)])
+        self.assertEqual(request.session.emitted, [10])
+
 
 if __name__ == '__main__':
     unittest.main()

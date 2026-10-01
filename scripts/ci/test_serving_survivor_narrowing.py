@@ -521,6 +521,21 @@ class InstalledVllmTailCapTests(unittest.TestCase):
                                  (list(request.output_token_ids), request.num_computed_tokens),
                                  'the runner state is the scheduler state')
 
+    def test_a_sequential_request_with_one_token_left_is_scheduled_four_rows_and_finishes_on_one(self):
+        from vllm.v1.request import RequestStatus
+
+        for source, scheduler_type in self.scheduler_types():
+            with self.subTest(scheduler=source):
+                scheduler, request = self.started(scheduler_type, 4096, max_tokens=2)
+                scheduled = self.decode_step(scheduler, ['request'], self.DRAFTS[:3])
+                self.assertEqual(scheduled.num_scheduled_tokens, {'request': 4})
+                decision, state = self.commit(scheduler, scheduled, request, 4096, 4, budget=2)
+                self.assertEqual(len(decision.emitted), 1)
+                self.assertEqual(request.status, RequestStatus.FINISHED_LENGTH_CAPPED)
+                self.assertEqual(len(request.output_token_ids), 2)
+                self.assertEqual((state.output_token_ids, state.num_computed_tokens),
+                                 (list(request.output_token_ids), request.num_computed_tokens))
+
     def test_the_scheduler_offers_at_most_max_model_len_minus_one_minus_the_frontier_rows(self):
         """Pins serving_worker_hook.schedulable_rows: sixteen rows through num_computed = max_model_len - 17,
         fifteen at max_model_len - 16."""

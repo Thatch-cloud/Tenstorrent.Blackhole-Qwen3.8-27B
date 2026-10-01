@@ -4,7 +4,7 @@ verifier_engine.py is one of serving_bundle.package's eight critical staged-sour
 untouched: the frozen bundle's inventory sha is checked against the checkout's bytes), and its sequential verify readback
 requires exactly two chip-local outputs. So the four-card engine is a subclass with that one method, verify, restated with the
 chip count from tp_shapes (the pair's message is unchanged: 'Two chip-local outputs required'), and proposal_rows, which
-QWEN_FAST_BUDGET_CAP widens for a block round (below); every other method is inherited.
+QWEN_FAST_BUDGET_CAP widens (below); every other method is inherited.
 serving_request_factory.device_components builds this class at four cards and the pair's at the pair.
 """
 
@@ -18,16 +18,28 @@ import tp_shapes
 
 class VerifierEngine(PairVerifierEngine):
     def proposal_rows(self, packed_rows=None):
-        """QWEN_FAST_BUDGET_CAP: a round the packed block serves answers the block's rows from one token
-        left (the inherited answer needs the whole block's worth of budget): GreedySession.commit cuts
-        the user's emission at its budget. Flag off, or without the block's hint, the inherited answer."""
+        """QWEN_FAST_BUDGET_CAP: while any budget is left the engine answers its widest capture the
+        scheduler will still schedule, not the widest that fits the remaining tokens: a request at its
+        last 1-3 tokens drafts four rows and GreedySession.commit cuts the emission at the budget, so
+        ordinary traffic never replays a one- or two-row capture (only an engine built without a
+        four-row width, a budget under four at admission, and the last rows of the context do). A round
+        the packed block serves answers the block's rows from one token left. Flag off, or a replay
+        plan without the block's hint (its own width selection), the inherited answer.
+
+        vLLM schedules a request at most max_model_len - 1 - position tokens (scheduler.py caps
+        num_new_tokens there), so that bound, from the request page table (ceil(max_model_len / 64)
+        pages, serving_runtime), keeps a full-width ticket the scheduler will offer whole."""
         remaining = self.session.max_new_tokens - len(self.session.emitted)
-        if not budget_cap_enabled() or remaining < 1 or packed_rows is None:
+        if not budget_cap_enabled() or remaining < 1 or (packed_rows is None and getattr(self, 'replay_plan', None) is not None):
             return super().proposal_rows(packed_rows)
-        if (type(packed_rows) is not int or packed_rows not in VERIFY_WIDTHS
-                or packed_rows > self.session.verifier_rows):
-            raise ValueError('The packed block rows must be a supported verify width within the session verifier rows')
-        return packed_rows
+        if packed_rows is not None:
+            if (type(packed_rows) is not int or packed_rows not in VERIFY_WIDTHS
+                    or packed_rows > self.session.verifier_rows):
+                raise ValueError('The packed block rows must be a supported verify width within the session verifier rows')
+            return packed_rows
+        schedulable = self.pages.shape[1] * 64 - 1 - self.session.position
+        fits = [rows for rows in self.widths if rows <= schedulable]
+        return max(fits) if fits else super().proposal_rows()
 
     def verify(self, ticket):
         self.session.check_ticket(self.session.request_id, ticket)
