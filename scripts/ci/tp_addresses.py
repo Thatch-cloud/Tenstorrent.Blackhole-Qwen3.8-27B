@@ -58,6 +58,9 @@ TWINS = (
     ('draft_attention', 'validate_attention', 'draft_attention_tp', 'validate_attention'),
     ('draft_attention', 'draft_sdpa', 'draft_attention_tp', 'draft_sdpa'),
     ('gdn_records', 'retain_checkpoint_histories', 'gdn_records_tp', 'retain_checkpoint_histories'),
+    # The packed block's split and merge as one DMA launch each (tp4/vglue, QWEN_FAST_TP4_GDN_GLUE): the twin subclasses the pinned
+    # class and delegates to it with the flag off. model_batch imports the class lazily, so it gets the twin.
+    ('gdn_device_loop_state', 'DeviceLoopState', 'gdn_device_loop_state_tp', 'DeviceLoopState'),
     ('gdn_commit_dma', 'validate_shapes', 'gdn_commit_dma_tp', 'validate_shapes'),
     ('gdn_commit_dma', 'prepare', 'gdn_commit_dma_tp', 'prepare'),
     ('gdn_commit_dma', 'publish', 'gdn_commit_dma_tp', 'publish'),
@@ -107,6 +110,10 @@ MODULE_TWINS = (
     # The four-user draft pass (QWEN_FAST_QUAD_DRAFT, off in the four-card profiles that do not name it): the coordinator imports
     # quad_draft lazily, so at four cards it gets the twin; the pair keeps the pinned module and its evidence.
     ('quad_draft', 'quad_draft_tp'),
+    # The fused commit (QWEN_FAST_FUSED_COMMIT, _INPLACE, _LIVE_BANKS, _AUDIT): packed_verifier, serving_packed_step, verify_prestage and
+    # dflash_proposal_trace import fused_commit lazily, so at four cards they get the twin (the pair's slide scope, two-chip program,
+    # four-head banks and 16-worker layout stay in the pinned module and its evidence).
+    ('fused_commit', 'fused_commit_tp'),
 )
 
 # What install() changed: (namespace, name, the pinned object), so a test can put the pair's functions back.

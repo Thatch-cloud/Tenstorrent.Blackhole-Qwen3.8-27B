@@ -1,0 +1,30 @@
+# The order of the four-card LANES window, one template per line: <template name without .env> <stop|soft|optional>.
+# stop: the window halts at the first failure of this job. soft: a failure is logged and the window goes on (its product is data, not
+# a verdict). optional: run only after every stop job has passed, one at a time, each separable from the rest.
+#
+# What the window decides (docs/tp4-lanes-window.md): whether ONE fast lane at >= 150 tok/s can run beside standard lanes at >= 75 tok/s
+# each on the four cards, coding workloads. Three measurements, in order of what they cost to be wrong about:
+#   L1  EXACTNESS: every lane's text, and D0's (the one-user 16-row block a lone user decodes on), equals that user's text alone on the
+#       per-request engines, every audit on. Nothing after it means anything if this fails.
+#   L2  ROUND TIMES: P(4), P(3), P(2) and the lone user's rate on today's engines, in one boot per context; D0's rate and tokens per
+#       round for a lone user against those engines, on the same prompts.
+#   L3  BOTH BARS: one fast user beside 3, 2 and 1 standard users, the ratio swept on each boot (k = 2, 1.5, 1, 0.5, 0, high k first, then the
+#       controller), real coding text, audits off; per-lane steady rates, the frame's P / F / sigma and tau per lane, and MET or MISSED
+#       against 150 / 75 for each standard-user count.
+# ONE IMAGE FOR THE WHOLE WINDOW (tp4-lanes-1, built by L0 from the commit the window's tag sits on).
+# Precondition: the S2 TP4 window (tp4-s2-jobs) passed S3a on the same kernels (image tp4-s2-2 or later, which carries the four-card collectives fix): this window builds on packed-4 rounds being exact.
+#
+# Duration (estimate, wall clock; an engine build is 3-8 min on a warm kernel cache and 10-30 min the first time a profile compiles):
+#   L0  status, reset and image build                        10-30 min cached layers, 40-90 cold
+#   L0b lanes-profile attach smoke (D0's first attach)       15-45 min
+#   L1  three arms (reference, D0, lanes) and one pair re-run on a divergence      35-100 min, up to 180 with a re-run
+#   L2  five arms                                            45-100 min
+#   L3  four arms                                            30-70 min
+#   O1  three more arms                                      25-60 min
+#   Required jobs L0-L3: about 2 h at best, 3 h 30 min expected, 7 h at worst (every arm to its limit and a re-run in L1).
+L0-build stop
+L0b-lanes-attach-smoke stop
+L1-lanes-exact stop
+L2-round-timing soft
+L3-lanes-timing soft
+O1-lanes-timing-more optional

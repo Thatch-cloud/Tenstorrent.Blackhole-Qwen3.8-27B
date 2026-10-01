@@ -42,6 +42,7 @@ PREFIX_PROFILES = ('general-prefix', 'general-prefix-eager', 'general-prefix-tp4
 # Gate-only profiles that are not prefix profiles: the TP4 benchmark engine (J3, G5 at TP4), the fused-prefill arm, and
 # the four-card S2 gate profile (unqualified until packed_any_evidence_tp4.json records its sections).
 GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate', 'general-tp4-ring-mmrs',
+                    'c2-packed-tp4-best', 'c2-packed-tp4-best-gate',
                     'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
                     'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
                     # the batched-draft window's four arms (tp4/draft)
@@ -54,7 +55,15 @@ GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate
                     # the sampler isolation arms (tp4/sampler)
                     'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace',
                     # the admission-freeze window's arms (tp4/freeze)
-                    'c2-packed-tp4-f2', 'c2-packed-tp4-f12')
+                    'c2-packed-tp4-f2', 'c2-packed-tp4-f12',
+                    # the fused-commit window's six arms (tp4/fcommit)
+                    'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad',
+                    'c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad',
+                    # the verify-glue window's arms (tp4/vglue)
+                    'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-gate-vglue',
+                    # the lanes window's five gate arms
+                    'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate', 'c2-packed-tp4-solo-gate',
+                    'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-time-gate')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
 STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate')
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')

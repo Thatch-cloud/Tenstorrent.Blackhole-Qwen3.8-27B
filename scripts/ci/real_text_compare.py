@@ -296,8 +296,15 @@ POLICY_EXIT = dict(PASS=0, FAIL=1, NOT_COMPARABLE=3, UNSTABLE=4, RERUN=5)
 # differ only in them are held to the strict policy: a reproduced divergence between them FAILS, never
 # NOT_COMPARABLE - that is what makes G3, G3b and the forced-cap pair decisive. (QWEN_FAST_EXTENT_AUDIT is
 # already neutral as an *_AUDIT flag.)
+# The lanes window's claim is the same kind: the one-user block (D0, QWEN_FAST_SOLO_LANE) runs the packed block's programs at one
+# segment, and the fast lane (QWEN_FAST_LANE and its knobs) only chooses WHICH round a user is in, never what a round computes, so
+# every lane's text equals that user's text alone on the per-request engines (c2_lanes_plans, plan lanes-exact). An arm pair that
+# differs only in them FAILS on a reproduced divergence, never reads NOT_COMPARABLE: that is what makes the plan decisive.
+LANES_EXACT_CLAIMS = ('QWEN_FAST_SOLO_LANE', 'QWEN_FAST_LANE', 'QWEN_FAST_LANE_RATIO', 'QWEN_FAST_LANE_SCHEDULE',
+                      'QWEN_FAST_LANE_KMAX', 'QWEN_FAST_LANE_GAP_MS', 'QWEN_FAST_LANE_FLOOR', 'QWEN_FAST_LANE_MARGIN',
+                      'QWEN_FAST_LANE_RESERVE')
 S2_EXACT_CLAIMS = frozenset(('QWEN_FAST_EXTENT_REPLAY', 'QWEN_FAST_PACKED_CAPTURE_POSITION',
-                             'QWEN_FAST_GATE_FORCE_CAP'))
+                             'QWEN_FAST_GATE_FORCE_CAP') + LANES_EXACT_CLAIMS)
 # The strict policy is the user's standing default and K2 upheld it. The one relaxation the design allows is
 # decision D-c(i), taken by the user and only if K2 had failed: a reproduced concurrent-vs-solo divergence
 # whose first differing token was committed on DIFFERENT paths in the two arms (packed in one, sequential in

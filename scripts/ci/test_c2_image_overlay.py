@@ -126,12 +126,13 @@ C2_KNOWN_STALE = {
         '65536 replay numerics (5edded94..0d182ee5); imported by frozen_combined_gate and '
         'frozen_recipe_context. ' + _UNREVIEWED),
     'scripts/ci/longctx_cycle_bench.py': (
-        '51b43893415b184e40b6b883fccb33cf2374a404',
+        '64cd7f2debb1efd0dead1791450b1dfd6127e436',
         'mounted per arm at /bench/longctx_cycle_bench.py (lever_n_m3native_run_arm.sh, and c2_serving_gate.'
         'BENCH_SCRIPTS since s1/gates), not imported from the baked tree: its only importer is the harness, '
         'lever_n_m3native_gate, mounted beside it. Re-pinned at the S1 integration for the stream_once of s1/gates '
         '(a cancel through the StreamWatch), at S2 W11 for chunk_chars (detail streams only), and at sticky '
-        'sessions B3 for cache_salt (salted gate streams only; unset, the payload is byte-identical)'),
+        'sessions B3 for cache_salt (salted gate streams only; unset, the payload is byte-identical), and at the lanes window for lane '
+        '(--user-lane: vllm_xargs qwen_lane on a marked stream only; unset, the payload is byte-identical)'),
     'scripts/ci/mlp_clock_samples.py': (
         'e3e5d6602c4296e7927ac5689a7139f357d96fc6',
         'clock evidence tooling; HEAD re-pins the drain regeneration (d08c1140). ' + _UNREVIEWED),
@@ -1248,11 +1249,23 @@ class ProvenanceTests(unittest.TestCase):
         # ...and the sampler isolation arms (tp4/sampler): the diag and speed twins with the sampler prewarm or in-trace flag.
         # ...and the hang diagnosis's three arms (tp4-serve-3): the audits-off speed environment with the caps off and the
         # host-only instruments on, and the two one-audit factorial arms.
-        tp4 = ['c2-packed-tp4-diag', 'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f2', 'c2-packed-tp4-f12',
-               'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-gate-pairs',
-               'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix',
-               'c2-packed-tp4-speed-noslide',
-               'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'general-prefix-eager', 'general-tp4-bench',
+        # ...and the fused-commit window's six arms (tp4/fcommit): the gate and speed profiles with the fused commit on.
+        # ...and the verify-glue window's arms (tp4/vglue): the five levers, singly and together, on the gate and speed profiles.
+        # ...and the lanes window's five gate arms (the one-user lane and the fast lane, audited and timed).
+        # ...and the combined best (tp4/next): the fcommit-quad arms with all five verify-glue levers on, timed and audited.
+        tp4 = ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-sprewarm',
+               'c2-packed-tp4-diag-strace', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f12',
+               'c2-packed-tp4-f2', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-fcommit',
+               'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-noslide',
+               'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-vglue',
+               'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate', 'c2-packed-tp4-solo-gate',
+               'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fcommit',
+               'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-fix',
+               'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad',
+               'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-vglue',
+               'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2',
+               'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-time-gate',
+               'general-prefix-eager', 'general-tp4-bench',
                'general-tp4-mmrs', 'general-tp4-ring-mmrs']
         self.assertEqual(gated, sorted("('%s', '%s')" % (step, name) for step in ('boot', 'environment') for name in tp4))
         runs = []

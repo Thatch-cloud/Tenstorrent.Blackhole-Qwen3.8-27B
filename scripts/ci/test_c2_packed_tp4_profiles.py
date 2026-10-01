@@ -103,6 +103,29 @@ DRAFT_PROFILES = {
 }
 
 
+# The fused-commit window's profiles (tp4/fcommit): each is its gate or speed base plus exactly these env differences.
+FUSED, INPLACE, LIVE, AUDIT = ('QWEN_FAST_FUSED_COMMIT', 'QWEN_FAST_FUSED_COMMIT_INPLACE', 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS',
+                               'QWEN_FAST_FUSED_COMMIT_AUDIT')
+FCOMMIT_PROFILES = {
+    'c2-packed-tp4-gate-fcommit': ('c2-packed-tp4-gate', {FUSED: '1', INPLACE: '1', AUDIT: '1', LIVE: '0', QUAD: '0'}),
+    'c2-packed-tp4-gate-fcommit-live': ('c2-packed-tp4-gate', {FUSED: '1', INPLACE: '1', AUDIT: '1', LIVE: '1', QUAD: '0',
+                                                              SINGLES: 'all'}),
+    'c2-packed-tp4-gate-fcommit-quad': ('c2-packed-tp4-gate', {FUSED: '1', INPLACE: '1', AUDIT: '1', LIVE: '1', QUAD: '1',
+                                                              SINGLES: 'all'}),
+    'c2-packed-tp4-speed-fcommit': ('c2-packed-tp4-speed', {FUSED: '1', INPLACE: '1', LIVE: '1', QUAD: '0'}),
+    'c2-packed-tp4-speed-fcommit-quad': ('c2-packed-tp4-speed', {FUSED: '1', INPLACE: '1', LIVE: '1', QUAD: '1'}),
+    'c2-packed-tp4-speed-fcommit-oop': ('c2-packed-tp4-speed', {FUSED: '1'}),
+}
+
+# The combined best (tp4/next): the fused-commit quad arms with the five verify-glue levers added (see VGLUE_PROFILES).
+BEST_PROFILES = ('c2-packed-tp4-best', 'c2-packed-tp4-best-gate')
+FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES))
+
+
+def without_caps(env):
+    return {key: value for key, value in env.items() if key not in TAIL_CAPS}
+
+
 def profiles():
     return json.loads(PROFILES.read_text(encoding='utf-8'))['profiles']
 
@@ -289,7 +312,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES):
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + BEST_PROFILES:
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -511,7 +534,10 @@ class DraftProfileTests(unittest.TestCase):
         found = profiles()
         on = sorted(name for name, profile in found.items() if profile['env'].get(QUAD) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
-        self.assertEqual(on, ['c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-quad'])
+        self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-gate-fcommit-quad',
+                              'c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad'])
+        self.assertEqual([name for name in on if 'fcommit' not in name and 'best' not in name],
+                         ['c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-quad'], 'the fused-commit family is the other two')
         image = image_env()
         for name in ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PAIR_ROW_EXACT', 'QWEN_FAST_ROUND_B1', 'QWEN_FAST_PACKED_AUDIT'):
             self.assertEqual(image[name], '1', 'the batched draft needs the image\'s own %s' % name)
@@ -587,6 +613,226 @@ class SamplerProfileTests(unittest.TestCase):
             with self.subTest(profile=name):
                 self.assertEqual(admission.width(environ), 4)
                 self.assertEqual(admission.check_environment(environ, M3), [])
+
+
+class FusedCommitProfileTests(unittest.TestCase):
+    def test_each_fused_commit_profile_is_its_base_with_only_its_documented_difference(self):
+        found = profiles()
+        for name, (base_name, difference) in FCOMMIT_PROFILES.items():
+            mine, base = found[name], found[base_name]
+            with self.subTest(profile=name):
+                # the fused-commit window's arms predate the tail caps: they are the speed twin without them
+                self.assertEqual(mine['env'], dict(without_caps(base['env']), **difference))
+                self.assertEqual(mine['engine'], base['engine'])
+                for key in set(mine) | set(base):
+                    if key not in ('description', 'env'):
+                        self.assertEqual(mine.get(key), base.get(key), key)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                self.assertIs(mine['gate_only'], True)
+                self.assertEqual(mine['env']['QWEN_C2_GATE_PROFILE'], '1')
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+                self.assertIn('NOT QUALIFIED', mine['description'])
+
+    def test_the_fused_commit_is_on_in_this_family_and_nowhere_else_at_four_cards(self):
+        found = profiles()
+        on = sorted(name for name, profile in found.items() if profile['env'].get(FUSED) == '1'
+                    and profile['env'].get('QWEN_FAST_TP') == '4')
+        self.assertEqual(on, FUSED_FAMILY)
+        for name, profile in found.items():
+            if name not in FUSED_FAMILY and profile['env'].get('QWEN_FAST_TP') == '4':
+                for flag in (FUSED, INPLACE, LIVE, AUDIT):
+                    self.assertEqual(profile['env'].get(flag, '0'), '0', (name, flag))
+
+    def test_the_sub_flags_never_stand_without_their_parents(self):
+        """In place needs the fused commit; live banks need both (the quad twin refuses a live bank that can move); the audit is a
+        gate-family arm only and never a timed one."""
+        import quad_draft_tp
+
+        for name in FUSED_FAMILY:
+            env = profiles()[name]['env']
+            with self.subTest(profile=name):
+                self.assertEqual(env[FUSED], '1')
+                if env.get(LIVE) == '1':
+                    self.assertEqual(env[INPLACE], '1')
+                self.assertEqual(quad_draft_tp.live_banks_missing(env), [])
+                audited = 'gate' in name
+                self.assertEqual(env.get(AUDIT), '1' if audited else None, name)
+                for key in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
+                    self.assertEqual(env[key], '1' if audited else '0', (name, key))
+                self.assertEqual(env.get(SINGLES), 'all' if audited and env[LIVE] == '1' else None, name)
+                self.assertEqual(env['QWEN_FAST_TP_KV_SLIDE'], '1', 'the fused commit is the four-card slide scope')
+
+    def test_the_timed_profiles_differ_from_their_unfused_twins_in_the_fused_flags_alone(self):
+        found = profiles()
+        for fused, plain, flags in (
+                ('c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-pairs', {FUSED, INPLACE, LIVE}),
+                ('c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad', {FUSED, INPLACE, LIVE}),
+                ('c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed', {FUSED})):
+            left, right = found[fused]['env'], without_caps(found[plain]['env'])    # the fused arms predate the tail caps
+            self.assertEqual({key for key in set(left) | set(right) if left.get(key) != right.get(key)}, flags, fused)
+
+    def test_the_fallback_runs_the_projection_only_and_the_quad_and_pairs_bind_live_banks(self):
+        found = profiles()
+        oop = found['c2-packed-tp4-speed-fcommit-oop']['env']
+        self.assertEqual((oop[FUSED], oop[INPLACE], oop[LIVE]), ('1', '0', '0'))
+        for name in ('c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-quad'):
+            env = found[name]['env']
+            self.assertEqual((env[FUSED], env[INPLACE], env[LIVE]), ('1', '1', '1'))
+        self.assertEqual((found['c2-packed-tp4-speed-fcommit']['env'][QUAD], found['c2-packed-tp4-speed-fcommit-quad']['env'][QUAD]),
+                         ('0', '1'))
+
+    def test_the_images_own_fused_flags_are_the_pairs_and_the_audit_is_not_the_images(self):
+        image = image_env()
+        for flag in (FUSED, INPLACE, LIVE):
+            self.assertEqual(image[flag], '1', flag)
+        self.assertNotIn(AUDIT, image, 'off in the image: only the audited gate arms ask for it')
+
+    def test_the_admission_accepts_each_fused_commit_profile_over_the_image_environment(self):
+        image = image_env()
+        for name in FCOMMIT_PROFILES:
+            environ = dict(image, **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
+
+
+# The verify-glue window's profiles (tp4/vglue): each is its speed or gate base plus exactly these env differences.
+C1A, V4A, V2, V1, V3A = ('QWEN_FAST_TP4_COMMIT_LANES', 'QWEN_FAST_TP4_SHARD_VALUES', 'QWEN_FAST_TP4_GDN_GLUE',
+                         'QWEN_FAST_TP4_GDN_BLOCK_CONV', 'QWEN_FAST_TP4_ATTN_FOLD')
+VGLUE_AUDIT = 'QWEN_FAST_TP4_VGLUE_AUDIT'
+ALL_LEVERS = {C1A: '1', V4A: '1', V2: '1', V1: '1', V3A: '1'}
+VGLUE_PROFILES = {
+    'c2-packed-tp4-speed-vglue': ('c2-packed-tp4-speed', dict(ALL_LEVERS)),
+    'c2-packed-tp4-gate-vglue': ('c2-packed-tp4-gate', dict(ALL_LEVERS, **{VGLUE_AUDIT: '1'})),
+    'c2-packed-tp4-speed-vglue-c1a': ('c2-packed-tp4-speed', {C1A: '1'}),
+    'c2-packed-tp4-speed-vglue-v4a': ('c2-packed-tp4-speed', {V4A: '1'}),
+    'c2-packed-tp4-speed-vglue-v2': ('c2-packed-tp4-speed', {V2: '1'}),
+    'c2-packed-tp4-speed-vglue-v1': ('c2-packed-tp4-speed', {V2: '1', V1: '1'}),
+    'c2-packed-tp4-speed-vglue-v3a': ('c2-packed-tp4-speed', {V3A: '1'}),
+    # the combined best (tp4/next-2): the speed twin (tail caps included) with the quad, the fused commit in place on live
+    # banks and the five levers; its audited twin is the gate fused-commit quad arm with the same caps, the levers and the audit
+    'c2-packed-tp4-best': ('c2-packed-tp4-speed', dict(ALL_LEVERS, **{QUAD: '1', FUSED: '1', INPLACE: '1', LIVE: '1'})),
+    'c2-packed-tp4-best-gate': ('c2-packed-tp4-gate-fcommit-quad', dict(ALL_LEVERS, **dict(TAIL_CAPS, **{VGLUE_AUDIT: '1'}))),
+}
+VGLUE_AUDITED = ('c2-packed-tp4-gate-vglue', 'c2-packed-tp4-best-gate')
+
+
+class VglueProfileTests(unittest.TestCase):
+    def test_each_vglue_profile_is_its_base_with_only_its_documented_difference(self):
+        found = profiles()
+        for name, (base_name, difference) in VGLUE_PROFILES.items():
+            mine, base = found[name], found[base_name]
+            with self.subTest(profile=name):
+                # the single-lever arms predate the tail caps (the speed twin without them); the combined best is built on the
+                # speed twin as it stands, caps included, so the two timed arms schedule the same rounds
+                base_env = base['env'] if name in BEST_PROFILES else without_caps(base['env'])
+                self.assertEqual(mine['env'], dict(base_env, **difference))
+                self.assertEqual(mine['engine'], base['engine'])
+                for key in set(mine) | set(base):
+                    if key not in ('description', 'env'):
+                        self.assertEqual(mine.get(key), base.get(key), key)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                self.assertIs(mine['gate_only'], True)
+                self.assertEqual(mine['env']['QWEN_C2_GATE_PROFILE'], '1')
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+
+    def test_the_block_conv_lever_always_comes_with_the_glue_lever(self):
+        for name, profile in profiles().items():
+            env = profile['env']
+            if env.get(V1) == '1':
+                self.assertEqual(env.get(V2), '1', name)
+
+    def test_the_audit_is_on_the_audited_profile_only_and_the_timed_ones_have_no_audit(self):
+        found = profiles()
+        for name in VGLUE_PROFILES:
+            env = found[name]['env']
+            self.assertEqual(env.get(VGLUE_AUDIT), '1' if name in VGLUE_AUDITED else None, name)
+            for key in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
+                self.assertEqual(env[key], '1' if name in VGLUE_AUDITED else '0', (name, key))
+
+    def test_the_levers_are_four_card_profiles_only_and_the_image_leaves_them_unset(self):
+        found = profiles()
+        image = image_env()
+        flags = (C1A, V4A, V2, V1, V3A, VGLUE_AUDIT)
+        for name, profile in found.items():
+            if name in VGLUE_PROFILES:
+                self.assertEqual(profile['env']['QWEN_FAST_TP'], '4', name)
+                continue
+            for flag in flags:
+                self.assertNotIn(flag, profile['env'], (name, flag))
+        for flag in flags:
+            self.assertNotIn(flag, image, 'the image leaves every lever off: a profile asks for it')
+
+    def test_the_admission_accepts_each_vglue_profile_over_the_image_environment(self):
+        image = image_env()
+        for name in VGLUE_PROFILES:
+            environ = dict(image, **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
+
+    def test_the_levers_need_the_verify_cuts_the_image_turns_on(self):
+        image = image_env()
+        for name in ('QWEN_FAST_VERIFY_T1', 'QWEN_FAST_VERIFY_T2', 'QWEN_FAST_GDN_USER_BATCH', 'QWEN_FAST_GDN_SEQ_BLOCK'):
+            self.assertEqual(image.get(name), '1', 'the glue levers ride the verify trace these select: %s' % name)
+
+
+class BestProfileTests(unittest.TestCase):
+    """The combined best profiles (tp4/next) are the union of the fused-commit quad arm and the verify-glue arm."""
+
+    def test_the_timed_best_is_the_speed_twin_plus_the_levers_and_nothing_else(self):
+        found = profiles()
+        speed, best = found['c2-packed-tp4-speed'], found['c2-packed-tp4-best']
+        added = {key: value for key, value in best['env'].items() if speed['env'].get(key) != value}
+        self.assertEqual(added, dict(ALL_LEVERS, **{QUAD: '1', FUSED: '1', INPLACE: '1', LIVE: '1'}))
+        self.assertEqual({key for key in speed['env'] if key not in best['env']}, set(), 'no speed flag is dropped')
+        self.assertEqual({key: best['env'][key] for key in TAIL_CAPS}, TAIL_CAPS, 'the tail caps ride the timed best')
+        self.assertEqual(best['engine'], speed['engine'])
+        for key in set(best) | set(speed):
+            if key not in ('description', 'env'):
+                self.assertEqual(best.get(key), speed.get(key), key)
+        self.assertIn('c2-packed-tp4-speed', best['description'])
+
+    def test_the_audited_best_is_the_gate_fused_commit_quad_arm_plus_the_caps_the_levers_and_their_audit(self):
+        found = profiles()
+        gate, audited, best = (found['c2-packed-tp4-gate-fcommit-quad'], found['c2-packed-tp4-best-gate'],
+                               found['c2-packed-tp4-best'])
+        added = {key: value for key, value in audited['env'].items() if gate['env'].get(key) != value}
+        self.assertEqual(added, dict(ALL_LEVERS, **dict(TAIL_CAPS, **{VGLUE_AUDIT: '1'})))
+        self.assertEqual({key for key in gate['env'] if key not in audited['env']}, set())
+        # held against the timed best: the same scheduling (caps), arithmetic (every lever and fused flag) and slide; only the audits differ
+        differing = {key for key in set(audited['env']) | set(best['env']) if audited['env'].get(key) != best['env'].get(key)}
+        self.assertEqual(differing, {'QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT', 'QWEN_FAST_FUSED_COMMIT_AUDIT',
+                                     SINGLES, VGLUE_AUDIT})
+
+    def test_the_audited_best_is_the_traffic_profile_with_the_gate_switches_and_the_levers(self):
+        found = profiles()
+        traffic, audited = found['c2-packed-tp4']['env'], found['c2-packed-tp4-best-gate']['env']
+        differing = {key for key in set(traffic) | set(audited) if traffic.get(key) != audited.get(key)}
+        self.assertEqual(differing, {'QWEN_C2_GATE_PROFILE', QUAD, FUSED, INPLACE, LIVE, AUDIT, SINGLES, VGLUE_AUDIT} | set(ALL_LEVERS))
+
+    def test_the_timed_best_has_every_audit_off_and_the_audited_best_every_audit_on(self):
+        found = profiles()
+        timed, audited = found['c2-packed-tp4-best']['env'], found['c2-packed-tp4-best-gate']['env']
+        for key in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
+            self.assertEqual((timed[key], audited[key]), ('0', '1'), key)
+        for key in (AUDIT, VGLUE_AUDIT, SINGLES):
+            self.assertNotIn(key, timed, key)
+            self.assertIn(key, audited, key)
+
+    def test_the_lone_user_lanes_are_not_on_the_best_profiles_because_the_solo_lane_refuses_the_fused_commit(self):
+        """The D0 solo block is built for the M3 block beside an unfused publication: serving_solo_lane.UNSUPPORTED_FLAGS lists
+        QWEN_FAST_FUSED_COMMIT, so the lanes profiles stay on their own gate base and the best profiles carry no lane flag."""
+        import serving_solo_lane
+
+        self.assertIn('QWEN_FAST_FUSED_COMMIT', serving_solo_lane.UNSUPPORTED_FLAGS)
+        for name in BEST_PROFILES:
+            env = profiles()[name]['env']
+            self.assertNotIn('QWEN_FAST_SOLO_LANE', env, name)
+            self.assertNotIn('QWEN_FAST_LANE', env, name)
+            with self.assertRaisesRegex(ValueError, 'QWEN_FAST_FUSED_COMMIT=1'):
+                serving_solo_lane.solo_lane_admission((True, 'm3'), dict(image_env(), **env, QWEN_FAST_SOLO_LANE='1'),
+                                                      log=lambda *args: None)
 
 
 if __name__ == '__main__':

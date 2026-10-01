@@ -2082,6 +2082,10 @@ def build_parser():
                         help='lifecycle, detail mode only: U:M gives user U its own max_tokens; comma-separated')
     parser.add_argument('--user-ignore-eos', default=None,
                         help='lifecycle, detail mode only: comma-separated users sent with ignore_eos=True')
+    parser.add_argument('--user-lane', default=None,
+                        help='the lanes window: U:LANE, comma-separated, LANE fast or standard. That user\'s request carries '
+                             'vllm_xargs {"qwen_lane": LANE}, which the C2 lane runtime (QWEN_FAST_LANE) reads at admission; '
+                             'report[\'lanes\'] then reads the arm (lanes_report). Unset, the payload is exactly what it was')
     parser.add_argument('--alive-check', type=int, nargs='?', const=1, default=0, metavar='N',
                         help='after every stream, N more requests at once (the shortest prompt, 8 tokens each; '
                              'N=1 without a value): the engine survived what the streams did and gave every '
@@ -2200,6 +2204,31 @@ def user_events(options, streams):
     return dict(drops=drops, max_tokens=budgets, ignore_eos=sorted(ignore_eos))
 
 
+LANE_NAMES = ('fast', 'standard')
+
+
+def user_lanes(text, streams):
+    """--user-lane as {user: lane}, or ValueError. At most one fast lane: the runtime grants one, a second fast mark would only be
+    downgraded, and an arm that asks for it has misread the feature."""
+    out = {}
+    for part in [p.strip() for p in (text or '').split(',') if p.strip()]:
+        user, _, lane = part.partition(':')
+        try:
+            number = int(user)
+        except ValueError:
+            raise ValueError('--user-lane: %r is not USER:LANE' % part)
+        if not 0 <= number < streams:
+            raise ValueError('--user-lane: %r names no stream of 0..%d' % (part, streams - 1))
+        if lane not in LANE_NAMES:
+            raise ValueError('--user-lane: %r is not one of %s' % (part, ' / '.join(LANE_NAMES)))
+        if number in out:
+            raise ValueError('--user-lane: %r names a stream twice' % part)
+        out[number] = lane
+    if sum(1 for lane in out.values() if lane == 'fast') > 1:
+        raise ValueError('--user-lane: at most one stream may be fast (the runtime grants one fast lane)')
+    return out
+
+
 def user_stream(options, index, kwargs, watch=None):
     """(max_tokens, stream_once keywords) for one user: the arm's, with that user's events applied.
     Every stream of a watched arm reports to the watch (the live count needs all of them)."""
@@ -2212,6 +2241,9 @@ def user_stream(options, index, kwargs, watch=None):
         kwargs['cache_salt'] = salts[index]
     if index in (events.get('ignore_eos') or ()):
         kwargs['ignore_eos'] = True
+    lane = (getattr(options, 'lanes', None) or {}).get(index)
+    if lane is not None:
+        kwargs['lane'] = lane
     return (events.get('max_tokens') or {}).get(index, options.max_tokens), kwargs
 
 
@@ -3271,6 +3303,24 @@ def add_s2_report(report, environ, log_text, streams, prompt_lengths):
     markers.setdefault('missing', []).extend(report['s2']['problems'])
 
 
+def add_lanes_report(report, options, log_text, streams):
+    """report['lanes'] (lanes_report) for an arm that marked a stream fast or whose log carries the lane runtime's lines; its
+    problems are added to flag_markers['missing'] like an S2 arm's, so gate_passed carries them. A failure here is itself such
+    a problem, never a lost report. An arm with neither keeps exactly its keys."""
+    fast_users = sorted(user for user, lane in (getattr(options, 'lanes', None) or {}).items() if lane == 'fast')
+    engaged = '[LANE] engaged' in log_text or '[LANE-ROUND]' in log_text or '[LANE-ADMIT]' in log_text
+    if not fast_users and not engaged:
+        return
+    try:
+        import lanes_report
+        report['lanes'] = lanes_report.lanes_report(log_text, streams, fast_users=fast_users, expect_lanes=True)
+    except Exception as error:
+        report['lanes'] = dict(error='%s: %s' % (type(error).__name__, str(error)[:300]),
+                               problems=['lanes_report failed: %s: %s' % (type(error).__name__, str(error)[:300])])
+    markers = report.setdefault('flag_markers', dict(found={}, missing=[]))
+    markers.setdefault('missing', []).extend(report['lanes']['problems'])
+
+
 def parse_options(argv=None):
     """The gate's options, with --eos resolved and the real-text combinations it refuses refused."""
     parser = build_parser()
@@ -3302,6 +3352,10 @@ def parse_options(argv=None):
         parser.error('--readiness-seconds must be positive')
     try:
         options.events = user_events(options, options.sequential_users or options.users)
+    except ValueError as error:
+        parser.error(str(error))
+    try:
+        options.lanes = user_lanes(options.user_lane, options.sequential_users or options.users)
     except ValueError as error:
         parser.error(str(error))
     if any(options.events.values()) and not detail_mode(options):
@@ -3724,6 +3778,7 @@ def main():
             # S2 (s2-design W11): only an arm with the extent flag, a gate knob or an S2 line gets report['s2'];
             # every other arm's report keeps exactly its keys.
             add_s2_report(report, os.environ, log_text, results, (report.get('real_text') or {}).get('prompt_lengths'))
+            add_lanes_report(report, options, log_text, results)
         checked = [c for c in comparisons if c.get('reference_present')]
         report['users_checked'] = len(checked)
         report['allow_missing_references'] = options.allow_missing_references

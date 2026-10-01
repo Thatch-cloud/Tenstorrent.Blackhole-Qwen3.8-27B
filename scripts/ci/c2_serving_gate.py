@@ -197,6 +197,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import c2_lanes_plans  # noqa: E402  (stdlib only; the lanes window's plans)
 import c2_serving_job  # noqa: E402
 import lever_n_m3native_gate as harness  # noqa: E402  (stdlib only; real_text_compare imports it too)
 import real_text_compare  # noqa: E402
@@ -217,7 +218,7 @@ CONTAINER_PREFIX = 'qwen-c2-gate-'
 PLATFORM_PREFIX = 'thatch-inference-'
 # What the harness imports from scripts/ci, mounted at /bench over the image's (bundle) copies.
 BENCH_SCRIPTS = ('lever_n_m3native_gate.py', 'longctx_cycle_bench.py', 'm3native_ttft_profile.py',
-                 'acceptance_report.py', 'real_text_prompts.py')
+                 'acceptance_report.py', 'real_text_prompts.py', 'lanes_report.py')
 REFERENCE = os.path.join(HERE, 'references', 'c2-serving', 'v235-real-text-4x131072.json')
 # v235's served engine is what these profiles rewrite the platform argv to (test_real_text_gate; c2-gate
 # is exact's engine with c2's environment, test_serving_c2_contract): on them a launched argv that is
@@ -254,6 +255,9 @@ STAGGER = 0.25            # v235's M3NATIVE_STAGGER: admission in user order
 READINESS_SECONDS = 1800
 ARM_SECONDS = dict(bringup=3600, matrix=5400, memory=5400, lifecycle=3300)
 STREAM_SECONDS = dict(bringup=900, matrix=3600, memory=3600, lifecycle=1800)
+# The lanes window's plans (c2_lanes_plans): their docker limits and the streams' inactivity limits.
+ARM_SECONDS.update(c2_lanes_plans.ARM_SECONDS)
+STREAM_SECONDS.update(c2_lanes_plans.STREAM_SECONDS)
 ARM_OVERHEAD_SECONDS = 120   # docker start and removal, the profile read, per arm
 RERUN_PLANS = ('matrix', 'lifecycle')   # a first divergence runs every arm of these once more
 # Lifecycle (gate table row Lifecycle): six users on four seats, so users 4 and 5 are the 5th and 6th
@@ -291,10 +295,12 @@ G4_ALL_AUDITS = (('QWEN_FAST_PRESTAGE_AUDIT', '1'), ('QWEN_FAST_PAIR_MASK_AUDIT'
 ALL_AUDIT_PLANS = ('mixed',)
 PADDED_PROBE_ENV = (('QWEN_FAST_PADDED_PROBE', '1'),)
 # What an arm may add with -e: the gate-only knobs, the padded probe and the G4 audits - never a profile key.
-ARM_ENV_NAMES = frozenset(harness.S2_GATE_KNOBS + ('QWEN_FAST_PADDED_PROBE',) + tuple(name for name, _ in G4_ALL_AUDITS))
+ARM_ENV_NAMES = frozenset(harness.S2_GATE_KNOBS + ('QWEN_FAST_PADDED_PROBE',) + tuple(name for name, _ in G4_ALL_AUDITS)
+                          + c2_lanes_plans.GATE_KNOBS)
 S2_OFF_PROFILE, S2_GATE_PROFILE, S2_TRAFFIC_PROFILE = 'c2-gate', 'c2-packed-gate', 'c2-packed'
 EXACT_PROFILE = 'exact'
 S2_PLANS = c2_serving_job.S2_GATE_PLANS
+LANES_PLANS = c2_serving_job.LANES_GATE_PLANS
 WARM_PLANS = ('warm', 'warm-off')
 DEFAULT_PAIRS = 2
 BELOW_FAMILIES = (16640, 4352)
@@ -649,6 +655,8 @@ def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.D
     whose rungs past the profile's largest admitted prompt are lowered to it (noted in `notes`). An S2
     plan's arms, and the S1 plans' on an S2 profile, are Arms (s2: pairs, families, audits); on any
     other profile the S1 plans' arms are exactly what they were."""
+    if plan in LANES_PLANS:
+        return c2_lanes_plans.plan_arms(sys.modules[__name__], plan, profiles, lengths, notes)
     if plan in S2_PLANS:
         return s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2 or {})
     arms = base_plan_arms(plan, profile, profiles, lengths, max_tokens, memory_prompt, notes)
@@ -2662,7 +2670,9 @@ def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2
     arms = plan_arms(plan, runner.profile, profiles, lengths, max_tokens, memory_prompt, notes, s2)
     for note in notes:
         runner.log('[C2-GATE] note: %s' % note)
-    if plan in S2_PLANS:
+    if plan in LANES_PLANS:
+        result = c2_lanes_plans.run_plan(sys.modules[__name__], plan, runner, arms)
+    elif plan in S2_PLANS:
         result = run_s2_plan(plan, runner, profiles, reference, arms)
     elif plan == 'bringup':
         warning = bringup_warning(profiles, runner.profile)

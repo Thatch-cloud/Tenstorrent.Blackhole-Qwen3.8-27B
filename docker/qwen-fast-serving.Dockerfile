@@ -17,6 +17,7 @@ COPY scripts/ci/serving_canary_runner.py /experiment-scripts/ci/
 COPY scripts/ci/serving_fast_request.py /experiment-scripts/ci/
 COPY scripts/ci/serving_worker_hook.py /experiment-scripts/ci/
 COPY scripts/ci/serving_one_in_flight.py /experiment-scripts/ci/
+COPY scripts/ci/serving_solo_lane.py /experiment-scripts/ci/
 COPY scripts/ci/runtime_binary_override.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_proposal_trace.py /experiment-scripts/ci/
 COPY scripts/ci/gdn_user_batch.py scripts/ci/gdn_user_batch_conv.py scripts/ci/gdn_seq_block.py /experiment-scripts/ci/
@@ -78,6 +79,8 @@ COPY scripts/ci/verify_trace_t1.py /experiment-scripts/ci/
 # gdn_user_batch_conv, model_batch, packed_verifier and serving_packed_step import it; the
 # packed windows kernel is the SIBLING .cpp of its driver, so the pair travels together.
 COPY scripts/ci/verify_trace_t2.py scripts/ci/gdn_conv_windows_packed.py scripts/ci/gdn_conv_windows_packed.cpp scripts/ci/packed_ordered_cache.py /experiment-scripts/ci/
+# TP4 verify-glue levers (tp4/vglue; QWEN_FAST_TP4_*, default off): tp4_vglue.RUNTIME_FILES, the one table.
+COPY scripts/ci/tp4_vglue.py scripts/ci/gdn_commit_lanes_tp.cpp scripts/ci/gdn_rows_dma_tp.py scripts/ci/gdn_rows_dma_tp.cpp scripts/ci/gdn_device_loop_state_tp.py scripts/ci/gdn_block_conv_tp.py scripts/ci/attention_block_fold_tp.py scripts/ci/attention_block_fold_tp.cpp /experiment-scripts/ci/
 # Variable-user packed rounds M1 (QWEN_FAST_PADDED_PROBE, default off): packed_verifier imports
 # padded_probe when the flag is set. M0 changes only modules already listed above.
 COPY scripts/ci/padded_probe.py /experiment-scripts/ci/
@@ -103,6 +106,11 @@ COPY scripts/ci/quad_draft.py scripts/ci/quad_conv_io.cpp /experiment-scripts/ci
 # The four-card twin of the quad (quad_draft_tp: tp_addresses.install() puts it in quad_draft's place at QWEN_FAST_TP=4 only,
 # MODULE_TWINS) and the singles audit (QWEN_FAST_DRAFT_SINGLES_AUDIT, imported by the coordinator when the flag is set).
 COPY scripts/ci/quad_draft_tp.py scripts/ci/draft_singles_audit.py /experiment-scripts/ci/
+# The four-card twin of the fused commit (fused_commit_tp: tp_addresses.install() puts it in fused_commit's place at QWEN_FAST_TP=4
+# only, MODULE_TWINS; packed_verifier, serving_packed_step, verify_prestage and dflash_proposal_trace import fused_commit lazily, so
+# they reach it). It borrows the pair's fused_commit (listed above) for every name it does not redefine and drives the bundle's
+# slide kernel through draft_kv_slide_tp.
+COPY scripts/ci/fused_commit_tp.py /experiment-scripts/ci/
 # Publish prewarm (QWEN_FAST_PUBLISH_PREWARM, default off): serving_request_factory imports publish_prewarm when the
 # flag is set, so it must reach the image beside it.
 COPY scripts/ci/publish_prewarm.py /experiment-scripts/ci/

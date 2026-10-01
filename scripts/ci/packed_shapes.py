@@ -27,6 +27,10 @@ ROWS_PER_USER = (1, 2, 4, 8, 16, 32)
 BLOCK_ROWS = (2, 4, 8, 16, 32, 64)
 M1_USERS, M1_ROWS_PER_USER, M1_BLOCK_ROWS = 2, 16, 32
 M3_USERS, M3_ROWS_PER_USER, M3_BLOCK_ROWS = 4, 16, 64
+# The one-user lane (QWEN_FAST_SOLO_LANE, gate only; serving_solo_lane): ONE T16 user in a 16-row block, the block
+# a lone user's rounds run on beside the M3 block. It is not a serving count of `serving_shape` - the solo block
+# is built beside M3 over pool slot 0, never in its place.
+SOLO_USERS, SOLO_ROWS_PER_USER, SOLO_BLOCK_ROWS = 1, 16, 16
 
 
 class PackedShape(NamedTuple):
@@ -58,6 +62,12 @@ def m1_shape(page_width):
 def m3_shape(page_width):
     """Four T16 users in one 64-row block over the serving page-table width."""
     return validate_shape(PackedShape(M3_USERS, M3_ROWS_PER_USER, M3_BLOCK_ROWS,
+                                      page_width, page_width * PAGE_TOKENS))
+
+
+def solo_shape(page_width):
+    """One T16 user in one 16-row block over the serving page-table width (the D0 lane)."""
+    return validate_shape(PackedShape(SOLO_USERS, SOLO_ROWS_PER_USER, SOLO_BLOCK_ROWS,
                                       page_width, page_width * PAGE_TOKENS))
 
 

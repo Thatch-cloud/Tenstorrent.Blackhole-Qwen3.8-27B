@@ -83,14 +83,17 @@ jobs:
           python -B -m unittest test_serving_survivor_narrowing
           python -B -m unittest test_verify_prestage test_round_fences
           python -B -m unittest test_fused_commit
+          python -B -m unittest test_fused_commit_tp4
+          python -B -m unittest test_c2_smoke_check_fcommit
           python -B -m unittest test_publication_warm
           python -B -m unittest test_early_draft
           python -B -m unittest test_pair_row_exact
           python -B -m unittest test_quad_draft
-          python -B -m unittest test_quad_draft_tp4 test_draft_singles_audit test_tp4_draft_window test_tp4_prefill_scratch
+          python -B -m unittest test_quad_draft_tp4 test_draft_singles_audit test_tp4_draft_window test_tp4_prefill_scratch test_tp4_fcommit_window
           python -B -m unittest discover -s optimisation/ttnn-op/pair_row_probe -p 'test_*.py'
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
+          python -B -m unittest test_tp4_vglue test_tp4_vglue_attention test_tp4_vglue_gdn test_tp4_vglue_twin test_tp4_vglue_block test_tp4_vglue_window test_tp4_next_window
           python -B -m unittest test_qual_card
           python -B -m unittest test_real_text_prompts test_acceptance_report test_real_text_compare test_real_text_gate
           python -B -m unittest test_c2_serving_job test_c2_serving_gate test_c2_serving_gate_s2 test_c2_platform_replay
@@ -109,8 +112,10 @@ jobs:
           python -B -m unittest test_tp4_mesh test_mesh_link_policy test_sampling_link_policy test_projection_link_policy test_model_link_policy
           python -B -m unittest test_tp4_model_widths test_tp4_fabric_probe test_tp4_rs_tile_spike test_tile_collective_tp test_tp4_exact_window test_tp_agreement test_tp_decode_bench test_c2_cards test_card_set
           python -B -m unittest test_tp_shapes test_tp2_pins test_tp_addresses test_tp4_shard_merges test_gdn_user_batch_tp test_gdn_tp_twins test_extent_attention_replay_tp test_attention_tp_twins test_tp4_verify_configs test_packed_any_admission_tp4 test_c2_packed_tp4_profiles test_gdn_tp4_card_test test_draft_tp4 test_draft_kv_slide_tp test_tp4_speed_window test_speed_window_compare
-          python -B -m unittest test_tp4_attach_profile test_tp4_served_literals test_tp4_s2_window test_tp4_serving_shapes test_tp4_closure_literals
+          python -B -m unittest test_tp4_attach_profile test_tp4_served_literals test_tp4_s2_window test_tp4_serving_shapes test_tp4_closure_literals test_solo_lane
           python -B -m unittest test_record_packed_any_evidence_tp4 test_tp4_s2_serve_window test_tp4_s2_serve_code test_tp4_tonight_window test_tp4_serve4_window test_tp4_serve5_window test_tp4_sampler_window test_packed_sampler_arms
+          python -B -m unittest test_tp4_attach_profile test_tp4_served_literals test_tp4_s2_window test_tp4_serving_shapes test_tp4_closure_literals test_solo_lane
+          python -B -m unittest test_fast_lane test_fast_lane_scheduler test_fast_lane_hook test_lanes_report test_lanes_gate test_tp4_lanes_window
           python -B -m unittest test_gdn_direct_window_hardware_sources test_gdn_direct_window_t32_scope test_dflash_t32_combined_stage test_fused_t16_admission test_frozen_gdn_norm_gate test_frozen_target_replay
           python -B -m unittest test_attention_batch test_attention_fold_dma test_attention_head_fold test_attention_mask_replay test_attention_parallel
           python -B -m unittest test_draft_convolution test_draft_convolution_fused test_draft_head_layout test_draft_kv_projection test_draft_mlp test_feature_collective test_feature_projection

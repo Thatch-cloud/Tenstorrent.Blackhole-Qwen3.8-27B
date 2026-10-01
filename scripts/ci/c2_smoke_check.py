@@ -8,6 +8,7 @@ own SMOKE_JSON line and the container log and exits non-zero on:
   - garbage text: a coding or concurrent stream whose kept text is empty, mostly non-printable, or a repetition of a few
     characters;
   - an audit mismatch line in the container log ('audit mismatch': the verify t1 audit, round b1, the extent audit);
+  - a '[PINDIAG] tp4 vglue fell back' line: a verify-glue lever declined and its served path ran, so its timing is not the lever's;
   - a ramp commit above --max-ramp-kv-ms (default 50) when the served profile has the drafter's K/V slide on
     (QWEN_FAST_TP_KV_SLIDE=1): the MEDIAN, over the [PACKED-PUBLISH] rounds with a commit, of each round's largest
     prepare_history entry. The median, so the attach's few compile-bearing rounds do not fail it; the eager chain's ~310 ms
@@ -17,7 +18,14 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     the quad's marker exactly once, at least one round the quad served, no fallback and no disable line. Off: no quad line, and
     at least one round two packed pairs served (a comparison arm that never batched compares nothing). A
     [DRAFT-SINGLES-AUDIT] line with equal=0 or a [QUAD-AUDIT] line with equal=0 fails; a profile with
-    QWEN_FAST_DRAFT_SINGLES_AUDIT set and no audit line fails.
+    QWEN_FAST_DRAFT_SINGLES_AUDIT set and no audit line fails;
+  - the fused commit (QWEN_FAST_FUSED_COMMIT=1, the round-fence plan's H1b; at four cards fused_commit_tp), by the gate's own H1b
+    rules (lever_n_m3native_gate.h1b_report: a refused build, an engaged line that disagrees with the flags, no fused publication,
+    a refusal reason but `ramp` and `parity`, a discard after an in-place slide, an audit count that is not the fused count, an audit
+    mismatch) and, here, that the engaged line is there once with the trace count the flags imply (users x (1 + 16 prefixes) in
+    place, users otherwise), every audit line checked the items the width implies (10 banks x chips, twice in place: 80 at four
+    cards), and - in a smoke that ran `concurrent4_steady` - that a round of four fused publications happened and, under
+    QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, that the live-bank marker was logged. A profile with the flag off must log no fused line.
 
   - a code-prompt answer that is not text (coding, concurrent4_steady, steady_resend): a stream that finished with `stop` at
     its first token (an instant EOS: v172's users 0 and 1) or before MIN_ANSWER_TOKENS, or whose sample is mostly non-Latin
@@ -72,9 +80,17 @@ SOLO_FIELDS = (('content_sha256', 'content'), ('reasoning_sha256', 'reasoning'),
                ('finish', 'finish'))
 PUBLISH = re.compile(r'\[PACKED-PUBLISH\] round=\d+ stages=\{.*?prepare_history: \[([0-9.,\s]*)\]')
 MISMATCH = re.compile(r'audit mismatch', re.IGNORECASE)
+VGLUE_FELL_BACK = '[PINDIAG] tp4 vglue fell back'
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
+FUSED_FLAG = 'QWEN_FAST_FUSED_COMMIT'
+FUSED_INPLACE_FLAG = 'QWEN_FAST_FUSED_COMMIT_INPLACE'
+FUSED_LIVE_BANKS_FLAG = 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS'
+FUSED_AUDIT_FLAG = 'QWEN_FAST_FUSED_COMMIT_AUDIT'
+FUSED_PREFIXES = 16          # one slide trace per (segment, accepted prefix 1..rows_per_user) in place
+FUSED_LINES = ('[PINDIAG] fused commit engaged', '[PINDIAG] fused commit refused', '[PACKED-FUSED] round=',
+               '[PACKED-FUSED-AUDIT] round=')
 STEADY_TEST = 'concurrent4_steady'
 RESEND_TEST = 'steady_resend'
 # One line per packed round the coordinator selected (dflash_packed_proposal_coordinator.SELECT_LINE, QWEN_FAST_PACKED_AUDIT):
@@ -423,6 +439,61 @@ def traffic_problems(container_text, entry):
     return problems
 
 
+def fused_facts(env, container_text):
+    """lever_n_m3native_gate.h1b_summary of the container log (the gate's own reading of the H1b lines), or None when the profile has
+    no fused-commit flag on and the log holds none of its lines."""
+    import lever_n_m3native_gate as gate
+
+    if env.get(FUSED_FLAG) != '1' and not any(line in container_text for line in FUSED_LINES):
+        return None
+    return gate.h1b_summary(container_text)
+
+
+def fused_problems(env, container_text, steady, facts=None):
+    """The problems the profile's fused-commit settings leave: see the module docstring."""
+    import lever_n_m3native_gate as gate
+
+    problems = []
+    if env.get(FUSED_FLAG) != '1':
+        if any(line in container_text for line in FUSED_LINES):
+            problems.append('%s is not set and the log holds fused-commit lines: the fused commit ran on a profile without it'
+                            % FUSED_FLAG)
+        return problems
+    report = gate.h1b_report(env, container_text)
+    problems += report['problems']
+    facts = report if facts is None else facts
+    engaged_lines = container_text.count(gate.FUSED_ENGAGED_MARKER)
+    if engaged_lines != 1:
+        problems.append('the fused commit\'s engaged line (%s) appears %d times, not once' % (gate.FUSED_ENGAGED_MARKER,
+                                                                                            engaged_lines))
+    engaged = facts.get('engaged')
+    inplace = env.get(FUSED_INPLACE_FLAG) == '1'
+    if engaged is not None:
+        wanted = engaged['users'] * (1 + FUSED_PREFIXES) if inplace else engaged['users']
+        if engaged['traces'] != wanted:
+            problems.append('the fused commit captured %d traces, not %d (%d users, %s)' % (
+                engaged['traces'], wanted, engaged['users'], 'a T_proj and %d slides each' % FUSED_PREFIXES if inplace
+                else 'a T_proj each'))
+    if env.get(FUSED_AUDIT_FLAG) == '1':
+        chips = int(env.get('QWEN_FAST_TP') or 2)
+        expected = 10 * chips * (2 if inplace else 1)    # ten deltas a chip, and in place ten banks a chip
+        wrong = sorted({int(match.group(5)) for match in gate.FUSED_AUDIT_LINE.finditer(container_text)
+                        if int(match.group(5)) != expected})
+        if wrong:
+            problems.append('audit lines checked %s items, not %d (10 K/V pieces x %d chips%s)' % (
+                wrong, expected, chips, ', deltas and banks' if inplace else ''))
+        if not facts.get('audits'):
+            problems.append('%s is set and no [PACKED-FUSED-AUDIT] line was logged' % FUSED_AUDIT_FLAG)
+    if steady:
+        if not facts.get('four_fused_rounds'):
+            problems.append('no round had all four users on the fused path (%d fused publications, %d today; reasons %s)' % (
+                facts.get('fused', 0), facts.get('today', 0), facts.get('today_reasons')))
+        if env.get(FUSED_LIVE_BANKS_FLAG) == '1' and not facts.get('live_banks'):
+            problems.append('%s is set and the live-bank marker (%s) was never logged' % (FUSED_LIVE_BANKS_FLAG,
+                                                                                            gate.FUSED_LIVE_BANKS_MARKER))
+    return problems
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
@@ -430,6 +501,8 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems = smoke_problems(smoke, container_text)
     mismatches = [line.strip()[:200] for line in container_text.splitlines() if MISMATCH.search(line)]
     problems += ['audit mismatch in the container log: %s' % line for line in mismatches[:4]]
+    fell = [line.strip()[:200] for line in container_text.splitlines() if VGLUE_FELL_BACK in line]
+    problems += ['a vglue lever fell back (its served path ran, it saved nothing): %s' % line for line in fell[:4]]
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':
@@ -448,6 +521,10 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         # The batched-draft conditions are the S2 fast path's: a G1 profile (general-*) never drafts, so they would fail it.
         if fast_path(env):
             problems += draft_problems(drafts, env, steady)
+        fused = fused_facts(env, container_text)
+        if fused is not None:
+            facts['fused'] = fused
+        problems += fused_problems(env, container_text, steady, fused)
     if entry is not None:
         problems += traffic_problems(container_text, entry)
     if slide:

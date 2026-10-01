@@ -241,7 +241,11 @@ def prepare_pipelined_drafts(bridges):
 
 
 class FastWorkerHook:
-    def __init__(self, worker, bridge, *, cancelled, packed_step=None):
+    # QWEN_FAST_LANE (serving_fast_lane.LaneRuntime, default off): the lanes' book, controller and gate. None, and every path
+    # below is what it was; class-level so a hook built without __init__ (a test's) reads None.
+    lanes = None
+
+    def __init__(self, worker, bridge, *, cancelled, packed_step=None, lanes=None):
         runner = worker.model_runner
         if (not worker.is_driver_worker or runner is not bridge.runner
                 or runner.non_dp_async_scheduling or runner.tt_data_parallel_size != 1
@@ -256,6 +260,7 @@ class FastWorkerHook:
         # so the worker has to serve them together or not at all.
         self.bridges = {bridge.request.session.request_id: bridge}
         self.packed_step = packed_step
+        self.lanes = lanes
         self.cancelled = cancelled
         self.closed = False
         self.saved = []
@@ -283,6 +288,8 @@ class FastWorkerHook:
         if request_id in self.bridges:
             raise ValueError('That request already decodes on this worker')
         self.bridges[request_id] = bridge
+        if getattr(self, 'lanes', None) is not None:
+            self.lanes.publish(None)    # the plan was made without this request: the drafts after this step make the next
         note_fixture_writer('admission')
         return self
 
@@ -291,6 +298,8 @@ class FastWorkerHook:
         if bridge is None:
             raise ValueError('That request does not decode on this worker')
         bridge.close()
+        if getattr(self, 'lanes', None) is not None:
+            self.lanes.release(request_id)
         release_dead_proposals(self)
         note_fixture_writer('detach')
         return self.bridges
@@ -357,6 +366,16 @@ class FastWorkerHook:
             return self.bridge.execute_decode(scheduled, cancelled=self.cancelled)
         from serving_packed_bridge import execute_packed_decode
 
+        if self.lanes is not None:
+            # QWEN_FAST_LANE: the round serves the scheduled subset (the lane gate hid the rest), through the same
+            # step; the round's kind and tokens teach the controller before the next round is drafted (early or not).
+            if self.packed_step is not None and early_draft_requested():
+                if early is None:
+                    from early_draft import EarlyDraft
+
+                    early = self._early_draft = EarlyDraft()
+                return early.execute(self, lambda: self._lane_round(scheduled))
+            return self._lane_round(scheduled)
         if self.packed_step is not None and early_draft_requested():
             # Round-fence plan H2 (early_draft.py): the packed step, then - inside this same
             # execute_model - the next round's drafts (this hook's own _drafts), cached for
@@ -370,6 +389,43 @@ class FastWorkerHook:
                 self.bridges, scheduled, cancelled=self.cancelled, packed_step=self.packed_step))
         return execute_packed_decode(self.bridges, scheduled, cancelled=self.cancelled,
                                      packed_step=self.packed_step)
+
+    def _lane_bridges(self, scheduled):
+        """The bridges the scheduled step serves under the lane gate: every scheduled request, which must be one the plan named.
+        A scheduled request outside the plan means the lane gate never ran on this scheduler (the class the engine runs is not
+        the one it was installed on): refused by name - the worker's own contract would only say a ticket is missing."""
+        ids = list(getattr(getattr(scheduled, 'scheduled_cached_reqs', None), 'req_ids', None) or ())
+        members = getattr(self.lanes.gate, 'members', None)
+        if members is not None:
+            outside = [request_id for request_id in ids if request_id not in members]
+            if outside:
+                import serving_fast_lane
+
+                alias = self.lanes.book.alias
+                message = ('%s the lane gate planned %s and the step scheduled %s: the scheduler did not hide %s'
+                           % (serving_fast_lane.DESYNC_MARKER, sorted(alias(value) for value in members), sorted(alias(value) for value in ids),
+                              sorted(alias(value) for value in outside)))
+                try:
+                    from loguru import logger
+                    logger.error(message)
+                except BaseException:
+                    pass
+                raise ValueError(message)
+        chosen = {request_id: self.bridges[request_id] for request_id in ids if request_id in self.bridges}
+        return chosen if chosen else self.bridges
+
+    def _lane_round(self, scheduled):
+        from serving_packed_bridge import execute_packed_decode
+
+        bridges = self._lane_bridges(scheduled)
+        output = execute_packed_decode(bridges, scheduled, cancelled=self.cancelled, packed_step=self.packed_step)
+        route = getattr(self.packed_step, 'route', None)
+        committed = {request_id: len(tokens) for request_id, tokens in zip(output.req_ids, output.sampled_token_ids)}
+        if route in ('solo', 'packed'):
+            self.lanes.note_round(route, list(output.req_ids), committed, block=route, live=len(self.bridges))
+        else:
+            self.lanes.note_other(route or 'sequential', list(output.req_ids), committed, live=len(self.bridges))
+        return output
 
     @staticmethod
     def _carries_tokens(scheduled, request_ids):
@@ -489,6 +545,26 @@ class FastWorkerHook:
         policy = getattr(self.packed_step, 'proposal_rows', None)
         have_policy = callable(policy)
         bridges = list(self.bridges.values())
+        held_back = []
+        if self.lanes is not None and have_policy:
+            # QWEN_FAST_LANE: which round is next - a packed round of every live user, or a solo round of the fast user - is
+            # decided HERE, where every live request is known, and handed to the scheduler side (the lane gate hides the
+            # rest); only the round's members are drafted. Planning is pure (an early draft may be discarded and drafted
+            # again), and a round the lanes do not own (None) is today's, every request.
+            by_request = {id(bridge.request): bridge for bridge in bridges}
+            plan = self.lanes.plan([bridge.request for bridge in bridges], rows_of=policy,
+                                   solo_rows_of=getattr(self.packed_step, 'solo_rows', lambda request: None),
+                                   budget_of=lambda request: real_remaining_budget(by_request[id(request)]))
+            self.lanes.publish(plan)
+            if plan is not None:
+                announce = getattr(self.packed_step, 'announce_round', None)
+                if callable(announce):
+                    announce(plan.kind == 'solo')
+                # Every live request keeps a drafted ticket, members or not: a hidden request's ticket stays valid at its
+                # frontier, so a member that leaves before the step (an abort) leaves a step the survivors can run, and vLLM
+                # takes no drafts after an empty step. The non-members are drafted after the members, below.
+                held_back = [bridge for bridge in bridges if bridge.request.session.request_id not in plan.members]
+                bridges = [bridge for bridge in bridges if bridge.request.session.request_id in plan.members]
         packed_rows = policy([bridge.request for bridge in bridges]) if have_policy else None
         if packed_rows is not None:
             # QWEN_FAST_BUDGET_CAP: the round keeps the block's width for any user with a token
@@ -618,6 +694,22 @@ class FastWorkerHook:
                 continue
             request_ids.extend(drafts.req_ids)
             tokens.extend(drafts.draft_token_ids)
+        if held_back:
+            # The width their own next round will draft at: the block's rows for the whole live set, else each engine's own.
+            rows_all = policy([bridge.request for bridge in held_back + bridges])
+            if rows_all is not None and any(
+                    remaining is not None and remaining < rows_all
+                    for remaining in (real_remaining_budget(bridge) for bridge in held_back + bridges
+                                      if not getattr(bridge.request.session, 'finished', False))):
+                rows_all = None
+            for bridge in held_back:
+                discard_stale_ticket(bridge.request, rows_all)
+                drafts = phase('propose', bridge.request.session.request_id,
+                               bridge.drafts if rows_all is None else partial(bridge.drafts, packed_rows=rows_all))
+                if drafts is None:
+                    continue
+                request_ids.extend(drafts.req_ids)
+                tokens.extend(drafts.draft_token_ids)
         if not request_ids:
             return None
         return DraftTokenIds(req_ids=request_ids, draft_token_ids=tokens)
@@ -634,6 +726,8 @@ class FastWorkerHook:
         for bridge in list(self.bridges.values()):
             bridge.close()
         self.bridges.clear()
+        if getattr(self, 'lanes', None) is not None:
+            self.lanes.publish(None)    # a stale plan must never hide a request the next hook serves
         for owner, name, existed, value in reversed(self.saved):
             if existed:
                 setattr(owner, name, value)
