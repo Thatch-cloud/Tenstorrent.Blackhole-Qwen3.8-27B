@@ -42,6 +42,7 @@ jobs:
           python -B -m unittest test_serving_fast_request
           python -B -m unittest test_budget_cap_fast_request
           python -B -m unittest test_verifier_engine_tp
+          python -B -m unittest test_trace_census
           python -B -m unittest discover -s speculative-decoding/harness -p 'test_greedy_session.py'
           python -B -m unittest test_serving_vllm_contract
           python -B -m unittest test_serving_vllm_state

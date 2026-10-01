@@ -191,6 +191,10 @@ scripts/ci/dflash_prefill_window.py
 scripts/ci/serving_startup.py
 scripts/ci/tp_shapes.py
 scripts/ci/tp_addresses.py
+# The sequential-hang diagnostics (flag-gated, host-only, off by default): stage markers, stall watchdog, first-replay and
+# per-capture census; tp_addresses.install() binds its capture_operation twin at QWEN_FAST_TP=4 only.
+scripts/ci/trace_census.py
+scripts/ci/test_trace_census.py
 # Readbacks and merges the four-card port made width-generic (S2T-04): the shard argmax fold, the packed target
 # readback, the drafter's borrowed-head chunks, the sequential shard check. At the pair each is call for call what it
 # was. (verifier_engine.py is NOT here: it is one of serving_bundle.package's eight critical inventory files, which

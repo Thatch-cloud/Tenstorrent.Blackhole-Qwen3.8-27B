@@ -79,6 +79,7 @@ from serving_fast_request import CommittedOutput, budget_cap_enabled
 from serving_sequential_step import describe as describe_sequential, sequential_packed_step
 from serving_worker_hook import phase
 import memory_ledger
+import trace_census
 import verifier_engine
 
 # Under QWEN_FAST_PACKED_AUDIT=1, one line per user per round for the token-exact gate
@@ -143,12 +144,16 @@ class _StageTimer:
     """One with-block's wall time, written into `sink[name]` on exit - the
     publication_stage(name, prefix) seam's real implementation, installed only for the
     span of one commit_entry() call (install_stage_timer below)."""
-    __slots__ = ('name', 'sink', 'started')
+    __slots__ = ('name', 'sink', 'started', 'context')
 
-    def __init__(self, name, sink):
-        self.name, self.sink = name, sink
+    def __init__(self, name, sink, context=None):
+        self.name, self.sink, self.context = name, sink, context
 
     def __enter__(self):
+        # QWEN_FAST_SEQ_STAGE_LOG: the stage's 'begin' line, flushed before it runs (trace_census.stage), so a hang inside a
+        # publication stage names it; context is the runtime's (request id, rows), None when the flag is off.
+        if self.context is not None:
+            trace_census.stage(*self.context, self.name)
         self.started = time.perf_counter()
         return self
 
@@ -167,8 +172,10 @@ def install_stage_timer(runtime, sink):
     if 'publication_stage' in runtime.__dict__:
         raise ValueError('runtime.publication_stage is already overridden')
 
+    context = trace_census.runtime_context(runtime) if trace_census.stage_log_enabled() else None
+
     def stage(name, prefix):
-        return _StageTimer(name, sink)
+        return _StageTimer(name, sink, context)
 
     runtime.publication_stage = stage
 

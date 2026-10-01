@@ -9,6 +9,7 @@ import time
 
 from dflash_device import PreparedDraftWeights, pindiag
 import memory_ledger
+import trace_census
 from serving_buffer_pool import ServingBufferPool, dram_line
 from serving_cache_owner import ServingCacheOwner
 from serving_fast_policy import STICKY_SESSIONS_FLAG, any_request_enabled, sticky_sessions_enabled, validate_fast_config
@@ -530,6 +531,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         experiment = from_environment(directory, runtime_root)
 
         scopes.enter_context(sampler_links(sampler.tt_sampling, 4))
+        trace_census.note_collectives(collectives)
         memory_ledger.record('P3', serving_collectives=collectives, serving_sampler=sampler, gather_experiment=experiment)
         audit = scopes.enter_context(combined_runtime(operations, model, directory=directory,
             runtime_root=runtime_root, native_attention_evidence=native_attention_evidence,
@@ -670,6 +672,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
 
             if sticky:
                 began = time.perf_counter()
+            trace_census.engine_begin()
             request = create_request() if experiment is None else experiment.create(create_request)
             if sticky:
                 # Sticky sessions: the engine build per request, so a gate can split a hit's TTFT into
@@ -681,6 +684,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # admitted request, so the log shows what each costs and what is left.
             pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))
             memory_ledger.engine_admitted(str(state.req_id), engine_request=request)
+            trace_census.census_engine(str(state.req_id), request, operations)
             try:
                 binding = VerifierPageBinding(request.engine, blocks, physical_pages=owner.physical_pages)
                 return FastRunnerBridge(runner, request, binding, validate_storage=owner.validate)

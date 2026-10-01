@@ -120,6 +120,45 @@ class InertByDefaultTests(unittest.TestCase):
         self.assertIsNone(memory_ledger.active())
 
 
+class L1ViewTests(unittest.TestCase):
+    """QWEN_FAST_MEMORY_LEDGER_L1: an L1 line per chip at P6, P7 and each engine build, and nothing else changes."""
+
+    def run_phases(self, environ):
+        operations = FakeOperations()
+        ledger, lines, reports = ledger_for(operations)
+        with patch.dict(os.environ, environ):
+            if memory_ledger.L1_FLAG not in environ:
+                os.environ.pop(memory_ledger.L1_FLAG, None)
+            for name in ('P5', 'P6', 'P7', 'P8', 'engine5', 'P12'):
+                ledger.phase(name)
+        return operations, lines, reports
+
+    def test_the_view_appears_only_under_the_flag(self):
+        _, lines, reports = self.run_phases({})
+        self.assertFalse([line for line in lines if ' l1' in line])
+        self.assertTrue(all('l1' not in report for report in reports))
+        operations, with_l1, reports = self.run_phases({memory_ledger.L1_FLAG: '1'})
+        phases = [line.split()[1] for line in with_l1 if ' l1_allocated=' in line]
+        self.assertEqual(sorted(set(phases)), ['phase=P6', 'phase=P7', 'phase=P8', 'phase=engine5'])
+        self.assertEqual(len([line for line in with_l1 if ' l1_allocated=' in line]), 8)
+        self.assertEqual(sorted(report['phase'] for report in reports if 'l1' in report), ['P6', 'P7', 'P8', 'engine5'])
+
+    def test_every_existing_line_is_unchanged_by_the_flag(self):
+        _, plain, _ = self.run_phases({})
+        _, with_l1, _ = self.run_phases({memory_ledger.L1_FLAG: '1'})
+        self.assertEqual([line for line in with_l1 if ' l1_allocated=' not in line], plain)
+
+    def test_a_refused_view_is_one_line_not_a_failed_phase(self):
+        operations = FakeOperations()
+        ledger, lines, reports = ledger_for(operations)
+        original = operations.get_memory_view
+        operations.get_memory_view = lambda device, kind: (_ for _ in ()).throw(RuntimeError('no l1')) if kind == 'l1' else original(device, kind)
+        with patch.dict(os.environ, {memory_ledger.L1_FLAG: '1'}):
+            report = ledger.phase('P7')
+        self.assertIsNotNone(report)
+        self.assertTrue(any('phase=P7 l1 unavailable' in line for line in lines))
+
+
 class SizingTests(unittest.TestCase):
     def test_tile_bytes_per_dtype(self):
         operations = FakeOperations()

@@ -344,7 +344,21 @@ SEQ_PUBLISH_SPLITS = ('proj', 'hist', 'kv', 'sync', 'rel')
 
 def step_request(request, ticket, cancelled):
     """sequential_packed_step's call of one request's step: without QWEN_FAST_SEQ_PUBLISH_LOG
-    exactly request.step(ticket.request_id, cancelled=cancelled), nothing before or after."""
+    exactly request.step(ticket.request_id, cancelled=cancelled), nothing before or after.
+
+    QWEN_FAST_SEQ_DEADLINE_S and QWEN_FAST_SEQ_STAGE_LOG (trace_census) put the step - whichever of the two calls
+    below - between its '[SEQ-STAGE]' lines and a faulthandler timer that dumps every thread's stack and exits if the
+    step stalls; with neither set this is the call above, unchanged."""
+    import trace_census
+
+    if trace_census.watching():
+        tokens = getattr(ticket, 'tokens', None)
+        return trace_census.watched_step(ticket.request_id, 'n/a' if tokens is None else len(tokens),
+                                         lambda: unwatched_step(request, ticket, cancelled))
+    return unwatched_step(request, ticket, cancelled)
+
+
+def unwatched_step(request, ticket, cancelled):
     if not SEQ_PUBLISH_LOG:
         return request.step(ticket.request_id, cancelled=cancelled)
     return logged_step(request, ticket, cancelled)

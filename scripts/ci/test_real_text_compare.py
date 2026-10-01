@@ -227,6 +227,13 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'RERUN', 'a divergence under neutral flags is still a divergence')
         self.assertIsNone(rtc.arithmetic_diff(report(configuration=None), self.solo()))
 
+    def test_the_hang_diagnostics_are_not_arithmetic(self):
+        diagnostics = dict(CONFIGURATION, QWEN_FAST_SEQ_DEADLINE_S='120', QWEN_FAST_SEQ_STAGE_LOG='1',
+                           QWEN_FAST_TRACE_CENSUS='1', QWEN_FAST_TRACE_CENSUS_GRAPH='0',
+                           QWEN_FAST_CCL_HANDLE_LOG='1', QWEN_FAST_MEMORY_LEDGER_L1='1')
+        self.assertEqual(rtc.arithmetic_diff(report(configuration=diagnostics), self.solo()), {})
+        self.assertEqual(rtc.exactness_policy(report(configuration=diagnostics), self.solo())['verdict'], 'PASS')
+
     def test_errors_fail_and_prompt_or_budget_differences_are_not_comparable(self):
         streams = report()
         streams['streams'][3] = dict(error='HTTP 400')

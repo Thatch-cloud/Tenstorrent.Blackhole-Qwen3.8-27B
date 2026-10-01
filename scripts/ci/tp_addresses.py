@@ -166,6 +166,13 @@ def install(environ=None):
     for namespace, name, old in tile_collective_tp.install():
         _REBOUND.append((namespace, name, old))
         rebound += 1
+    # The sequential-hang diagnostics (trace_census): a capture_operation that is the original's call unless
+    # QWEN_FAST_TRACE_CENSUS=1, and a packed-step counter. Bound here only, so the pair's modules keep the pinned functions.
+    import trace_census
+
+    for namespace, name, old in trace_census.install():
+        _REBOUND.append((namespace, name, old))
+        rebound += 1
     return rebound
 
 

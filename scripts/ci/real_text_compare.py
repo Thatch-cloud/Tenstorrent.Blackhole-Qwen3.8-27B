@@ -256,6 +256,9 @@ ARITHMETIC_NEUTRAL = frozenset((
     'QWEN_C2_SERVING', 'QWEN_C2_PROFILE', 'QWEN_C2_PROFILES', 'QWEN_CARDS_ALLOCATED', 'QWEN_HARDWARE_TESTS',
     'QWEN_FABRIC_LINK_PROBE', 'QWEN_FAST_FAULTHANDLER', 'QWEN_FAST_CARRY_LOG', 'QWEN_FAST_PHASE_LOG',
     'QWEN_FAST_PHASE_TIMING', 'QWEN_FAST_SEQ_PUBLISH_LOG', 'QWEN_FAST_MEMORY_LEDGER', 'QWEN_FAST_SHARD_CHECK',
+    # The sequential-hang diagnostics (trace_census): host-side logging and a stall watchdog, no device operation.
+    'QWEN_FAST_SEQ_DEADLINE_S', 'QWEN_FAST_SEQ_STAGE_LOG', 'QWEN_FAST_TRACE_CENSUS', 'QWEN_FAST_TRACE_CENSUS_GRAPH',
+    'QWEN_FAST_CCL_HANDLE_LOG', 'QWEN_FAST_MEMORY_LEDGER_L1',
     # Paths (the 'qwen-tt' scope): where the runtime, the weight cache and the kernel cache live.
     'TT_METAL_HOME', 'TT_CACHE_PATH', 'TT_METAL_CACHE',
 ))

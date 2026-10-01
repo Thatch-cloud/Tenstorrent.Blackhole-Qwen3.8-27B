@@ -79,6 +79,9 @@ import os
 import types
 
 FLAG = 'QWEN_FAST_MEMORY_LEDGER'
+# QWEN_FAST_MEMORY_LEDGER_L1=1 (with the ledger on): an L1 allocator view per chip at P6, P7 and each engine build, for the
+# hang census (trace_census): the DRAM figures say nothing about the L1 a trace's circular buffers and replay kernels share.
+L1_FLAG = 'QWEN_FAST_MEMORY_LEDGER_L1'
 RESIDUAL_LIMIT = 1.5e9
 RESIDUAL_PHASE = 'P7'
 # Bank rounding is bounded per buffer by one of ITS OWN pages per bank (see the module
@@ -110,6 +113,16 @@ _active = None
 
 def enabled(environ=None):
     return (os.environ if environ is None else environ).get(FLAG) == '1'
+
+
+def l1_enabled(environ=None):
+    return (os.environ if environ is None else environ).get(L1_FLAG) == '1'
+
+
+def l1_phase(name):
+    """The phases that carry the L1 view: the packed blocks (P6), after attach (P7) and each engine build (P8..P11, engineN)."""
+    return name in ('P6', 'P7') or name.startswith('engine') or (name[:1] == 'P' and name[1:].isdigit()
+                                                                 and 8 <= int(name[1:]) <= 11)
 
 
 def log_line(message):
@@ -234,6 +247,26 @@ def trace_statistics(operations, tensor):
                 largest_free=int(view.largest_contiguous_bytes_free_per_bank) * banks,
                 total=int(view.total_bytes_per_bank) * banks))
         return report
+    except BaseException as failure:
+        return dict(unavailable='%s: %s' % (type(failure).__name__, str(failure)[:80]))
+
+
+def device_view(operations, device, buffer_type):
+    """One device's allocator figures for one buffer type, in bytes over all banks."""
+    view = operations.get_memory_view(device, buffer_type)
+    banks = int(view.num_banks)
+    return dict(banks=banks, allocated=int(view.total_bytes_allocated_per_bank) * banks,
+                free=int(view.total_bytes_free_per_bank) * banks,
+                largest_free=int(view.largest_contiguous_bytes_free_per_bank) * banks,
+                total=int(view.total_bytes_per_bank) * banks)
+
+
+def l1_statistics(operations, tensor):
+    """Each chip's L1 allocator figures, read through the chips a device tensor spans as dram_statistics reads DRAM's, or
+    dict(unavailable=why) when this ttnn refuses the view."""
+    try:
+        return [dict(chip=chip, **device_view(operations, shard.device(), operations.BufferType.L1))
+                for chip, shard in enumerate(operations.get_device_tensors(tensor))]
     except BaseException as failure:
         return dict(unavailable='%s: %s' % (type(failure).__name__, str(failure)[:80]))
 
@@ -416,6 +449,9 @@ class MemoryLedger:
     def trace_reading(self):
         return trace_statistics(self.operations, self.probe)
 
+    def l1_reading(self):
+        return l1_statistics(self.operations, self.probe)
+
     # --- S2 W6d: before and after points (outside the phase chain) ------------------------------
 
     def before(self, op, *, estimate, point=None, request=None):
@@ -544,6 +580,16 @@ class MemoryLedger:
             self.log('[MEMLEDGER] phase=%s chip%d allocated=%s free=%s largest_free=%s total=%s known=%s residual=%s'
                      % (label, index, _gb(chip['allocated']), _gb(chip['free']), _mb(chip['largest_free']),
                         _gb(chip['total']), _gb(known), _gb(residual)))
+        l1 = None
+        if l1_enabled() and l1_phase(name):
+            l1 = self.l1_reading()
+            if isinstance(l1, dict):
+                self.log('[MEMLEDGER] phase=%s l1 unavailable (%s)' % (label, str(l1.get('unavailable'))[:100]))
+            else:
+                for item in l1:
+                    self.log('[MEMLEDGER] phase=%s chip%d l1_allocated=%s l1_free=%s l1_largest_free=%s l1_total=%s'
+                             % (label, item['chip'], _mb(item['allocated']), _mb(item['free']),
+                                _mb(item['largest_free']), _mb(item['total'])))
         for category, entry in sorted(categories.items()):
             if entry['bytes'] or entry['unreadable']:
                 self.log('[MEMLEDGER] phase=%s item=%s %s buffers=%s largest=%s unreadable=%d'
@@ -575,6 +621,8 @@ class MemoryLedger:
         report = dict(stage='memory_ledger', phase=name, point=point, request=request, chips=chips,
                       known=categories, check=check, residual=residual_check,
                       categories_total=self.category_totals())
+        if l1 is not None:
+            report['l1'] = l1
         self.emit(json.dumps(report, default=str))
         return report
 

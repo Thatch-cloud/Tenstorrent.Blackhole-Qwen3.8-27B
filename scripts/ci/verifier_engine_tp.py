@@ -4,13 +4,14 @@ verifier_engine.py is one of serving_bundle.package's eight critical staged-sour
 untouched: the frozen bundle's inventory sha is checked against the checkout's bytes), and its sequential verify readback
 requires exactly two chip-local outputs. So the four-card engine is a subclass with that one method, verify, restated with the
 chip count from tp_shapes (the pair's message is unchanged: 'Two chip-local outputs required'), and proposal_rows, which
-QWEN_FAST_BUDGET_CAP widens (below); every other method is inherited.
+QWEN_FAST_BUDGET_CAP widens (below); every other method is inherited. publish is inherited too, with QWEN_FAST_SEQ_STAGE_LOG's begin and end lines around it.
 serving_request_factory.device_components builds this class at four cards and the pair's at the pair.
 """
 
 import time
 
 from serving_fast_request import budget_cap_enabled
+import trace_census
 from verifier_engine import VERIFY_WIDTHS, VerifierEngine as PairVerifierEngine
 from verifier_inputs import stage_inputs
 import tp_shapes
@@ -41,6 +42,18 @@ class VerifierEngine(PairVerifierEngine):
         fits = [rows for rows in self.widths if rows <= schedulable]
         return max(fits) if fits else super().proposal_rows()
 
+    def publish(self, prefix):
+        if not trace_census.stage_log_enabled():
+            return super().publish(prefix)
+        request, rows = self.session.request_id, len(self.pending.tokens) if self.pending is not None else 'n/a'
+        trace_census.stage(request, rows, 'publish')
+        try:
+            super().publish(prefix)
+        except BaseException:
+            trace_census.stage(request, rows, 'publish', 'failed')
+            raise
+        trace_census.stage(request, rows, 'publish', 'end')
+
     def verify(self, ticket):
         self.session.check_ticket(self.session.request_id, ticket)
         key = self.bucket_key(ticket)
@@ -49,12 +62,22 @@ class VerifierEngine(PairVerifierEngine):
         self.phase, self.pending = 'verifying', ticket
         self.pending_key = key
         bucket = self.buckets[key]
+        # QWEN_FAST_SEQ_STAGE_LOG: a flushed 'begin' line before each stage, so a stall names the stage it is in.
+        marking = trace_census.stage_log_enabled()
+        request, rows, first = self.session.request_id, len(ticket.tokens), ' first=%d' % bool(bucket.get('first'))
+
+        def mark(name):
+            if marking:
+                trace_census.stage(request, rows, name, extra=first)
         try:
             binding_started = time.perf_counter()
+            mark('validate')
             self.validate_bindings()
             carry_started = time.perf_counter()
+            mark('restore')
             restored = self.restore_carry()
             started = time.perf_counter()
+            mark('stage_inputs')
             stage_inputs(bucket['fixture'], ticket.tokens, ticket.position)
             staged = time.perf_counter()
             trace_ms = 0.0
@@ -64,14 +87,20 @@ class VerifierEngine(PairVerifierEngine):
                 result = self.operations.execute_trace(self.mesh, bucket['trace'], cq_id=0, blocking=True)
                 trace_ms += (time.perf_counter() - trace_started) * 1000
                 return result
+            mark('execute_trace')
+            if marking and bucket['first']:
+                trace_census.first_replay(self, request, rows)
             if bucket['first'] or bucket['fixture'].retained is None:
                 operation()
+                mark('sync')
                 self.operations.synchronize_device(self.mesh)
             else:
                 bucket['fixture'].retained.replay(operation)
+                mark('sync')
             if getattr(self, 'attention_audit', False) and bucket['fixture'].replay_reader is not None:
                 bucket['fixture'].replay_reader.audit.check(ticket.position, ticket.tokens)
             replay_finished = time.perf_counter()
+            mark('readback')
             logits, ids = bucket['output']
             tensor = logits if ids is None else ids
             parts = self.operations.get_device_tensors(tensor)
