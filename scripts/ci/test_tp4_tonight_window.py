@@ -144,6 +144,19 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(t2, SS + ['concurrent4_solo', 'replay_concurrent4'] + CODE)
         self.assertEqual(t1[:len(SS)], t2[:len(SS)], 'T2 is T1 on the audits-off profile: the same like-for-like part in the same order')
 
+    def test_the_smoke_runs_each_templates_tests_in_the_order_the_template_lists_them(self):
+        # The smoke ignores the order of the list it is given: it runs record() calls in source order, filtered by the list.
+        with open(os.path.join(HERE, 'c2_serving_smoke.py'), encoding='utf-8') as handle:
+            executed = re.findall(r"^\s*record\('([a-z0-9_]+)'", handle.read(), re.M)
+        for name in ('T1-build-smoke', 'T2-smoke-audits-off', 'T3-g1-smoke', 'T5-diag-repro', 'T5b-diag-t1', 'T5c-diag-t2'):
+            with self.subTest(template=name):
+                listed = tests_of(name)
+                self.assertEqual([test for test in executed if test in listed], listed)
+        for name in ('T1-build-smoke', 'T2-smoke-audits-off'):
+            with self.subTest(template=name):
+                ran = [test for test in executed if test in tests_of(name)]
+                self.assertEqual(ran[:len(SS)], SS, "v166's like-for-like list, unchanged and first")
+
     def test_t3_runs_the_coding_text_tests_so_s2_and_g1_compare_on_coding_text(self):
         t3 = tests_of('T3-g1-smoke')
         self.assertEqual(t3, ['warmup', 'coding', 'long_real_text', 'concurrent4', 'concurrent4_steady'] + CODE)

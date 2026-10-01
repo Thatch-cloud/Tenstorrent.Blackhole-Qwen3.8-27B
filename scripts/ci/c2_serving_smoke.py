@@ -253,12 +253,6 @@ def concurrent4_code_equal():
     return dict(run_users('concurrent4_code_equal', prompts), corpus=corpus)
 
 
-if ONLY and 'concurrent4_code' in ONLY:
-    record('concurrent4_code', concurrent4_code)
-if ONLY and 'concurrent4_code_equal' in ONLY:
-    record('concurrent4_code_equal', concurrent4_code_equal)
-
-
 def steady_prompts():
     # About 3,500 tokens each: four different 14,000-character stretches of the same real code.
     span = 14000
@@ -418,6 +412,12 @@ if ONLY and 'concurrent4_solo' in ONLY:
     record('concurrent4_solo', concurrent4_solo)
 if ONLY and 'replay_concurrent4' in ONLY:
     record('replay_concurrent4', replay_concurrent4)
+# The coding-text tests run after every like-for-like test (the smoke runs in source order, not list order), so the earlier
+# part keeps v166's order and clock.
+if ONLY and 'concurrent4_code' in ONLY:
+    record('concurrent4_code', concurrent4_code)
+if ONLY and 'concurrent4_code_equal' in ONLY:
+    record('concurrent4_code_equal', concurrent4_code_equal)
 
 
 def agreement():

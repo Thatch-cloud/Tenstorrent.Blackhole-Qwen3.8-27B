@@ -469,6 +469,9 @@ class SmokeNewTestsTests(unittest.TestCase):
             "record('alive_after_drop', alive)", "record('concurrent4_solo', concurrent4_solo)",
             "record('replay_concurrent4', replay_concurrent4)")]
         self.assertEqual(order, sorted(order))
+        for name in ('concurrent4_code', 'concurrent4_code_equal'):
+            self.assertGreater(SMOKE_SOURCE.index("record('%s', %s)" % (name, name)), order[-1],
+                               name + ' runs after the like-for-like part, replay_concurrent4 included')
         between = SMOKE_SOURCE[order[0]:order[1]]
         self.assertNotIn("record('", between[len("record('concurrent4', concurrent)"):])
         for name in ('concurrent4_v164order', 'concurrent4_solo', 'replay_concurrent4', 'concurrent4_code', 'concurrent4_code_equal'):
