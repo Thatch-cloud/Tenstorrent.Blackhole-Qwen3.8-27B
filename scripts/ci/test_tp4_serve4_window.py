@@ -23,7 +23,7 @@ DEVICE_STEPS = ('cardm', 'smoke', 'gate', 'prefix', 'fabric', 'replay')
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.|@[A-Z0-9_]+@')
 IMAGE = 'tp4-serve-4'
-ORDERED = ('B4-build-smoke', 'FX-fix-arm', 'F1-diag-t1', 'F2-diag-t2', 'H4-handback-reset')
+ORDERED = ('B4-build-smoke', 'D0-diag-repro', 'FX-fix-arm', 'F1-diag-t1', 'F2-diag-t2', 'H4-handback-reset')
 WORK = ORDERED[:-1]   # the jobs that run the stack; the last one hands the cards back
 SS = ['warmup', 'coding', 'long_real_text', 'concurrent4', 'concurrent4_steady', 'steady_resend', 'tool_call', 'stream_tool_call',
       'stream_reasoning', 'refused_n2', 'alive_after_refusal', 'stream_dropped', 'alive_after_drop']

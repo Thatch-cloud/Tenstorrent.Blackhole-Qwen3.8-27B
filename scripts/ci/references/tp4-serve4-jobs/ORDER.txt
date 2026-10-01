@@ -15,6 +15,7 @@
 # F1 and F2 are the factorial arms with the instruments and the stall watch on (T1 audit only; T2 audit only): run them only if FX
 # stalls or the hang is still not localised, as the stall watch's triage is what they are for.
 B4-build-smoke stop tp4-serve-4 45
+D0-diag-repro optional tp4-serve-4 25
 FX-fix-arm optional tp4-serve-4 25
 F1-diag-t1 optional tp4-serve-4 20
 F2-diag-t2 optional tp4-serve-4 20
