@@ -56,6 +56,14 @@ class TriageTests(unittest.TestCase):
         environ = {stall_watch.ROOT_FLAG: '/r', stall_watch.COMMAND_FLAG: '{python} {root}/x.py {tool}'}
         self.assertEqual(stall_watch.triage_commands('t', environ, python='py'), [['py', '/r/x.py', 't']])
 
+    def test_the_tools_run_under_the_isolated_triage_venv_when_it_exists_or_is_named(self):
+        self.assertEqual(stall_watch.VENV_PYTHON, '/opt/triage-venv/bin/python3')
+        self.assertEqual(stall_watch.triage_python({stall_watch.PYTHON_FLAG: '/x/python'}), '/x/python')
+        commands = stall_watch.triage_commands('t', {stall_watch.PYTHON_FLAG: '/x/python'})
+        self.assertEqual(commands[0][0], '/x/python')
+        if not os.path.isfile(stall_watch.VENV_PYTHON):
+            self.assertIsNone(stall_watch.triage_python({}))
+
     def runner(self, outcomes, calls):
         def run(argv, **kwargs):
             calls.append((argv, kwargs.get('timeout')))
@@ -120,6 +128,16 @@ class TriageReadinessTests(unittest.TestCase):
             self.assertEqual(stall_watch.triage_problems(environ, have), [])
             self.assertEqual(len(stall_watch.triage_problems(environ, lack)), 1)
         self.assertIn('does not exist', stall_watch.triage_problems({stall_watch.ROOT_FLAG: root}, have)[0])
+
+    def test_readiness_asks_the_interpreter_the_tools_run_under(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, 'triage.py'), 'w') as handle:
+                handle.write('')
+            environ = {stall_watch.ROOT_FLAG: root, stall_watch.PYTHON_FLAG: sys.executable}
+            problems = stall_watch.triage_problems(environ)       # this interpreter has no ttexalens: the venv's question is real
+            self.assertEqual(len(problems), 1)
+            self.assertIn(sys.executable, problems[0])
 
     def test_a_stall_says_plainly_that_the_triage_is_unavailable(self):
         log = []

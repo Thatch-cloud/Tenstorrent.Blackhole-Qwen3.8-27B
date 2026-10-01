@@ -1,8 +1,8 @@
-# The order of the tp4-serve-5 window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# The order of the tp4-serve-6 window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
 # stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window. Image: the tag of the
-# tt-vllm image the job serves or builds (B5 builds tp4-serve-5). Minutes: runner time for ONE run of the job, a quad reset (1-3 min)
+# tt-vllm image the job serves or builds (B5 builds tp4-serve-6). Minutes: runner time for ONE run of the job, a quad reset (1-3 min)
 # included.
-# B5 first: build tp4-serve-5 (the capture plug seal fix, ttexalens in the image) and smoke the PRODUCTION profile (audits on, caps on).
+# B5 first: build tp4-serve-6 (the capture plug seal fix, ttexalens in the image) and smoke the PRODUCTION profile (audits on, caps on).
 # A hang or a refusal on it stops the window.
 # FX5a..FX5e are the fix arm (audits OFF, caps, the capture plug, the stall watch and the handle guard) on B5's image, five IDENTICAL
 # jobs. Accepting the fix needs FIVE consecutive passing runs on the same image, each preceded by its own card reset (the template's
@@ -14,11 +14,11 @@
 # H5 hands the cards back to production (status, then the all-four reset; the re-placement of the AUDITED production image, never a gate
 # arm, is the template's text). It is always last and it runs even when a stop job (B5) halts the window or an FX5 run stalled: the
 # stall watch never resets the cards, so a stall leaves them hung until H5's reset.
-B5-build-smoke stop tp4-serve-5 45
-FX5a-fix-arm optional tp4-serve-5 25
-FX5b-fix-arm optional tp4-serve-5 25
-FX5c-fix-arm optional tp4-serve-5 25
-FX5d-fix-arm optional tp4-serve-5 25
-FX5e-fix-arm optional tp4-serve-5 25
-D5-diag-repro optional tp4-serve-5 25
-H5-handback-reset stop tp4-serve-5 15
+B5-build-smoke stop tp4-serve-6 45
+FX5a-fix-arm optional tp4-serve-6 25
+FX5b-fix-arm optional tp4-serve-6 25
+FX5c-fix-arm optional tp4-serve-6 25
+FX5d-fix-arm optional tp4-serve-6 25
+FX5e-fix-arm optional tp4-serve-6 25
+D5-diag-repro optional tp4-serve-6 25
+H5-handback-reset stop tp4-serve-6 15

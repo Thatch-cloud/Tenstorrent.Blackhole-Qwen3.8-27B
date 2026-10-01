@@ -32,11 +32,18 @@ binary that reaches it cannot be placed: the allocation fails (fail closed) inst
 what binaries may use, and monitor() refuses (CapturePlugError) when the free memory left drops under MIN_FREE_MB.
 
 WHAT IT DOES NOT COVER, AND WHAT CHECKS IT. The temporaries' high-water mark is not observable without the graph census (a freed
-extent above the zone's top would be merged into the free region), so the zone has to be large enough: a capture that does not fit
-fails at attach (out of memory, fail closed). One that spills into RESERVE does not fail: seal() finds where the used memory ends
-(plugging the zone first, then every hole above it except the last one, the reserve) and seals up to it. Every plug is
-inert: nothing reads it, and nothing is allocated inside a captured region. The graph census is not needed for any of this (it is
-off in every profile: its str() of a tensor inside a capture is what killed v173).
+extent above the zone's top would be merged into the free region), so the zone has to be large enough. A capture that does not fit
+fails at attach (out of memory, fail closed) only when the whole free region is too small; a capture that SPILLS above the zone's top
+does not fail: a temporary that spilled and was freed merges into the START of the reserve hole, the seal cannot tell that hole from
+the reserve, and bottom-up allocations made after the seal (once the ballast's old region cannot take them) land exactly there, over
+a temporary the replay rewrites, until the 128 MB floor trips after up to 128 MB of the reserve is gone. seal() finds where the used
+memory ends (plugging the zone first, then every hole above it except the last one, the reserve) and seals up to it; a ZONE-TOO-SMALL
+refusal does NOT catch a spill. What does show one: a sealed hi well under the open hi is only the free top of the zone swept down
+(not a sign of the captures' live memory), and a sealed plugged_mb far over the sweep's plugged_mb says a spill hole was plugged;
+compare them in the log. An engine zone is held to the same rules by its BOUNDARY (the packed zone's sealed top): the first hole
+at or above it is the reserve and is never plugged. Every plug is inert: nothing reads it, and nothing is allocated inside a
+captured region. The graph census is not needed for any of this (it is off in every profile: its str() of a tensor inside a capture
+is what killed v173).
 
 THE FREE-MEMORY FLOOR is read ABOVE the packed zone (free_above): the bytes the reserve still has for kernel binaries and the
 program cache, found by plugging everything below the zone's top for the length of the read. Total free memory would count the
@@ -262,11 +269,14 @@ class Zone:
     """One owner's capture zone in one buffer type (see the module docstring): open(), the captures, seal(), release(); the
     plugs close with close() once the owner's traces are gone."""
 
-    def __init__(self, memory, leave, reserve, log=None, name='packed', ceiling=None, floor=None):
+    def __init__(self, memory, leave, reserve, log=None, name='packed', ceiling=None, floor=None, boundary=None):
         self.memory, self.leave, self.reserve, self.log, self.name = memory, align_down(leave), align_down(reserve), log, name
-        # The least free memory per bank the seal may leave (the kernel-binary reserve); None checks nothing. Only a zone with a
-        # reserve above it is held to it: an engine zone has the packed zone above it, not free memory.
-        self.floor = floor if reserve > 0 else None
+        # The least free memory per bank the seal may leave (the kernel-binary reserve); None checks nothing. A zone is held to it
+        # when it has the reserve above it (the packed zone) or knows where the reserve starts (an engine zone: `boundary`).
+        self.floor = floor if (reserve > 0 or boundary is not None) else None
+        # The top of the sealed packed zone, for an engine zone: every hole that starts at or above it is the kernel-binary reserve
+        # and is never plugged (the packed zone below it is full of plugs, so the first hole above an engine zone IS the reserve).
+        self.boundary = boundary
         # Where the zone must end at the latest: an engine's zone must stay below the packed zone, never in the binary reserve above.
         self.ceiling = ceiling
         self.low_plugs, self.zone_plugs, self.ballast = [], [], None
@@ -330,9 +340,24 @@ class Zone:
         # Slivers (free pieces under a page, which no plug can take) are part of memory.free(); with a reserve above the zone they
         # must not make the reserve look like "a hole and then more free memory", or it is plugged whole.
         slack = max(PAGE, min(SLIVER_ALLOWANCE, self.reserve // 64)) if self.reserve > 0 else PAGE
+        if self.boundary is not None:
+            slack = SLIVER_ALLOWANCE
         for unused in range(MAX_SPILL_ROUNDS + 1):
             address, size = lowest_hole(memory)
             remaining = memory.free() - size
+            if self.boundary is not None and address >= self.boundary:
+                # An engine zone: the hole is the binary reserve above the packed zone. It must hold everything that is left (bar
+                # slivers); if not, a hole lies above it that the engine's capture left, and plugging either would take the reserve.
+                if remaining >= SLIVER_ALLOWANCE:
+                    raise CapturePlugError('capture plug zone %s: the free memory above the packed zone (%#x) is not one hole: %.1f MB '
+                                           'per bank is free outside the hole at %#x (refused instead of plugging the reserve)' % (
+                                               self.name, self.boundary, remaining / MB, address))
+                if self.floor is not None and size < self.floor:
+                    raise CapturePlugError('capture plug zone %s: only %.1f MB per bank is free above the packed zone (a hole at %#x), '
+                                           'under the %.1f MB floor for kernel binaries: the engine zone spilled into the reserve or '
+                                           'the reserve is nearly gone; raise %s' % (
+                                               self.name, size / MB, address, self.floor / MB, ENGINE_LEAVE_FLAG))
+                break
             if remaining < slack:
                 # This hole holds all the free memory that is left: the reserve. It is never plugged; the used memory ends where it
                 # starts (a hole that starts a sliver under the zone top, because the sweep cannot plug under a page, ends the
@@ -429,7 +454,7 @@ def engine_settings(environ=None):
 def open_engine(settings, operations, mesh, log=None, memory_factory=None):
     """One engine's capture zone (Plug.engine), checked against the free-memory floor and opened, under the packed zone."""
     extra = {} if memory_factory is None else dict(memory_factory=memory_factory)
-    plug = Plug.engine(settings, operations, mesh, log, ceiling=packed_ceiling(), **extra)
+    plug = Plug.engine(settings, operations, mesh, log, ceiling=packed_ceiling(), boundary=packed_top(), **extra)
     plug.monitor('before engine build')
     plug.open()
     return plug
@@ -495,9 +520,10 @@ class Plug:
         return cls(zones, memories, settings['min_free'], log)
 
     @classmethod
-    def engine(cls, settings, operations, mesh, log=None, memory_factory=DeviceMemory, ceiling=None):
+    def engine(cls, settings, operations, mesh, log=None, memory_factory=DeviceMemory, ceiling=None, boundary=None):
         memory = memory_factory(operations, mesh, 'DRAM')
-        return cls([Zone(memory, settings['engine_leave'], 0, log, 'engine', ceiling)], [memory], settings['min_free'], log)
+        zone = Zone(memory, settings['engine_leave'], 0, log, 'engine', ceiling, floor=settings['min_free'], boundary=boundary)
+        return cls([zone], [memory], settings['min_free'], log)
 
     def zone_lo(self):
         """Where this plug's (DRAM) zone begins: the ceiling an engine's zone must stay under."""
@@ -532,7 +558,8 @@ class Plug:
         """The address the free-memory floor is read above: this plug's own sealed DRAM zone top, else the packed zone's top (an
         engine plug before its zone opens), else None (the total free memory)."""
         own = [zone.hi for zone in self.zones if zone.state in ('sealed', 'released') and zone.memory.kind == 'DRAM']
-        return max(own) if own else packed_top()
+        top = packed_top()
+        return max(own + ([top] if top is not None else [])) if own or top is not None else None
 
     def monitor(self, where=''):
         monitor(self.memories, self.min_free, self.log, where, above=self.reserve_floor())

@@ -383,7 +383,8 @@ class V186SealTests(unittest.TestCase):
     allocation died with 'free: 3136 B'. The numbers below are the logged ones (per bank): zone [0xcceba240, 0xeceba240), 512 MB
     leave, 256 MB reserve; the captures' live memory ended 960 B under the zone top, a freed hole [0xeceb9e80, 0xfce8b680) was
     left above it (kernel binaries had taken the top 0x2ebc0 bytes), and 3136 B of free slivers (each under a page) sat between
-    buffers, so memory.free() was a page and a half more than that hole."""
+    buffers, so memory.free() was a page and a half more than that hole. (A used memory that ends 960 B under the zone top is the
+    seal's own sweep plugging the free top of the zone down to under a page, not where the captures' live memory ended.)"""
 
     TOP = 0xfceba240
     LO = 0xcceba240
@@ -463,7 +464,67 @@ class V186SealTests(unittest.TestCase):
         packed = plug.Plug.packed(settings, None, None, memory_factory=lambda operations, mesh, kind: FakeMemory(heap, kind))
         engine = plug.Plug.engine(settings, None, None, memory_factory=lambda operations, mesh, kind: FakeMemory(heap, kind))
         self.assertEqual(packed.zones[0].floor, 90 * PAGE)
-        self.assertIsNone(engine.zones[0].floor)
+        self.assertIsNone(engine.zones[0].floor, 'an engine with no packed zone sealed has no reserve boundary to hold a floor above')
+        engine = plug.Plug.engine(settings, None, None, memory_factory=lambda operations, mesh, kind: FakeMemory(heap, kind), boundary=5 * PAGE)
+        self.assertEqual(engine.zones[0].floor, 90 * PAGE)
+
+    def engine_cycle(self, heap, packed, engine_leave=128 * plug.MB, floor=128 * plug.MB):
+        """One engine build the way open_engine wires it: ceiling = the packed zone's lo, boundary = its sealed top."""
+        zone = plug.Zone(FakeMemory(heap), engine_leave, 0, name='engine', ceiling=packed.lo, floor=floor, boundary=packed.hi)
+        zone.open()
+        temporaries = []
+        # persistent 62 MB, a 40 MB temporary that is freed, a sub-page sliver between buffers (as the v186 model has)
+        persistent = heap.allocate(62 * plug.MB)
+        temporary = heap.allocate(40 * plug.MB)
+        sliver = heap.allocate(1045)
+        heap.allocate(64)
+        heap.free(temporary)
+        heap.free(sliver)
+        temporaries.append((temporary, temporary + 40 * plug.MB))
+        return zone, persistent, temporaries
+
+    def test_engine_seals_after_the_v186_packed_sequence_never_plug_the_reserve_and_give_everything_back(self):
+        suite = V186SealTests()
+        heap, packed = suite.heap_and_zone()
+        packed.open()
+        suite.run_captures(heap, packed)
+        packed.seal()
+        packed.release()
+        slivers = sum(room for _, room in heap.free_blocks() if room < PAGE)
+        self.assertGreaterEqual(slivers, PAGE, 'the model must carry at least one page of sub-page slivers')
+        reserve = heap.free_blocks()[-1]
+        self.assertGreater(reserve[1], 255 * plug.MB)
+        before = dict(heap.used)
+        engines = []
+        for index in range(3):
+            zone, persistent, temporaries = self.engine_cycle(heap, packed)
+            zone.seal()                             # the unfixed engine seal plugged the reserve and raised 'Out of Memory'
+            zone.release()
+            self.assertEqual(heap.free_blocks()[-1], reserve, 'engine %d: the binary reserve is untouched' % index)
+            self.assertTrue(all(block.address < packed.hi for block in zone.zone_plugs), 'no plug in the reserve')
+            self.assertTrue(zone.zone_plugs)
+            probes = [heap.allocate(8 * PAGE), heap.allocate(30 * PAGE)]
+            for address in probes:
+                self.assertFalse(hits(address, 8 * PAGE, temporaries), 'a later buffer sits in an engine temporary')
+                heap.free(address)
+            engines.append((zone, persistent))
+        for zone, _ in reversed(engines):
+            zone.close()
+        self.assertEqual(sorted(heap.used.values()), sorted(list(before.values()) + [62 * plug.MB, 64] * 3),
+                         'closing gave back every plug, ballast and low plug, and nothing else')
+        self.assertEqual(heap.free_blocks()[-1], reserve)
+
+    def test_an_engine_that_spilled_into_the_reserve_or_left_less_than_the_floor_is_refused_not_plugged(self):
+        suite = V186SealTests()
+        heap, packed = suite.heap_and_zone()
+        packed.open()
+        suite.run_captures(heap, packed)
+        packed.seal()
+        packed.release()
+        zone = plug.Zone(FakeMemory(heap), 128 * plug.MB, 0, name='engine', ceiling=packed.lo, floor=300 * plug.MB, boundary=packed.hi)
+        zone.open()
+        with self.assertRaisesRegex(plug.CapturePlugError, 'under the 300.0 MB floor'):
+            zone.seal()
 
 
 class PlugTests(unittest.TestCase):

@@ -1,6 +1,6 @@
-"""The tp4-serve-5 window: its job templates (scripts/ci/references/tp4-serve5-jobs), their order and what each asks of the tree.
+"""The tp4-serve-6 window: its job templates (scripts/ci/references/tp4-serve5-jobs), their order and what each asks of the tree.
 
-B5 builds the image tp4-serve-5 (the capture plug seal fix and ttexalens in the image) and smokes the production profile; FX5a..FX5e are
+B5 builds the image tp4-serve-6 (the capture plug seal fix and ttexalens in the image) and smokes the production profile; FX5a..FX5e are
 the fix arm (audits off, the capture plug, the stall watch) run five times IDENTICALLY, the acceptance bar being five consecutive passes;
 D5 repeats the diagnosis with working triage and runs only if an FX5 run fails. Every job resets the cards first. The templates are
 public, so they name no rig, card, address, registry or digest."""
@@ -21,7 +21,7 @@ FOLDER4 = os.path.join(HERE, 'references', 'tp4-serve4-jobs')
 PROFILES_PATH = os.path.join(HERE, 'qwen_c2_profiles.json')
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.|@[A-Z0-9_]+@')
-IMAGE = 'tp4-serve-5'
+IMAGE = 'tp4-serve-6'
 FX5 = ('FX5a-fix-arm', 'FX5b-fix-arm', 'FX5c-fix-arm', 'FX5d-fix-arm', 'FX5e-fix-arm')
 ORDERED = ('B5-build-smoke',) + FX5 + ('D5-diag-repro', 'H5-handback-reset')
 WORK = ORDERED[:-1]

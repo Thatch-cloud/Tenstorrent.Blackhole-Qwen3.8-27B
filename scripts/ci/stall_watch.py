@@ -28,6 +28,7 @@ Flags (all optional; the watch is on only with QWEN_FAST_STALL_DEADLINE_S):
   QWEN_FAST_TRIAGE_ROOT        the triage tools' directory, default /opt/tt-metal/tools/triage
   QWEN_FAST_TRIAGE_TOOLS       comma list overriding the six tools
   QWEN_FAST_TRIAGE_TIMEOUT_S   per tool, default 180
+  QWEN_FAST_TRIAGE_PYTHON      the interpreter the tools run under, default /opt/triage-venv/bin/python3 when it exists, else this one
   QWEN_FAST_TRIAGE_CMD         a command template overriding the two tried by default ('{python} {root}/{tool}.py', then
                                '{python} {root}/triage.py --run={tool}'): the first that exits 0 is the tool's reading
   QWEN_FAST_STALL_KILL         '0' keeps the hung process alive after the triage
@@ -53,6 +54,8 @@ ROOT_FLAG = 'QWEN_FAST_TRIAGE_ROOT'
 TOOLS_FLAG = 'QWEN_FAST_TRIAGE_TOOLS'
 TIMEOUT_FLAG = 'QWEN_FAST_TRIAGE_TIMEOUT_S'
 COMMAND_FLAG = 'QWEN_FAST_TRIAGE_CMD'
+PYTHON_FLAG = 'QWEN_FAST_TRIAGE_PYTHON'
+VENV_PYTHON = '/opt/triage-venv/bin/python3'   # the image's isolated triage environment (docker/qwen-c2-serving.Dockerfile)
 KILL_FLAG = 'QWEN_FAST_STALL_KILL'
 DEFAULT_ROOT = '/opt/tt-metal/tools/triage'
 DEFAULT_BUILD_S = 600.0
@@ -105,11 +108,18 @@ def triage_tools(environ=None):
     return tuple(name.strip() for name in text.split(',') if name.strip())
 
 
+def triage_python(environ=None):
+    """The interpreter the triage tools run under: QWEN_FAST_TRIAGE_PYTHON, else the image's isolated venv when it exists, else None
+    (this interpreter)."""
+    environ = os.environ if environ is None else environ
+    return environ.get(PYTHON_FLAG) or (VENV_PYTHON if os.path.isfile(VENV_PYTHON) else None)
+
+
 def triage_commands(tool, environ=None, python=None):
     """The argv lists to try, in order, for one triage tool."""
     environ = os.environ if environ is None else environ
     templates = (environ[COMMAND_FLAG],) if environ.get(COMMAND_FLAG) else COMMANDS
-    values = dict(python=python or sys.executable or 'python3', root=environ.get(ROOT_FLAG) or DEFAULT_ROOT, tool=tool)
+    values = dict(python=python or triage_python(environ) or sys.executable or 'python3', root=environ.get(ROOT_FLAG) or DEFAULT_ROOT, tool=tool)
     return [template.format(**values).split() for template in templates]
 
 
@@ -127,12 +137,20 @@ def triage_problems(environ=None, find_spec=None):
                       if not (os.path.isfile(os.path.join(root, tool + '.py')) or os.path.isfile(os.path.join(root, 'triage.py')))]
             if absent:
                 problems.append('missing from %s: %s' % (root, ', '.join(absent)))
-        if find_spec is None:
-            import importlib.util
-            find_spec = importlib.util.find_spec
-        if find_spec('ttexalens') is None:
-            problems.append('the ttexalens module is not installed for %s (the image build installs the pinned '
-                            '%s/requirements.txt)' % (sys.executable or 'python3', root))
+        python = triage_python(environ)
+        if find_spec is None and python is not None:
+            # The triage tools run under the isolated venv, not this interpreter: ask that interpreter.
+            done = subprocess.run([python, '-c', 'import ttexalens'], capture_output=True, timeout=60)
+            if done.returncode != 0:
+                problems.append('the ttexalens module does not import under %s (the image build installs the pinned '
+                                '%s/requirements.txt there)' % (python, root))
+        else:
+            if find_spec is None:
+                import importlib.util
+                find_spec = importlib.util.find_spec
+            if find_spec('ttexalens') is None:
+                problems.append('the ttexalens module is not installed for %s (the image build installs the pinned '
+                                '%s/requirements.txt)' % (sys.executable or 'python3', root))
     except BaseException as failure:
         problems.append('the triage readiness check failed: %s: %s' % (type(failure).__name__, str(failure)[:80]))
     return problems

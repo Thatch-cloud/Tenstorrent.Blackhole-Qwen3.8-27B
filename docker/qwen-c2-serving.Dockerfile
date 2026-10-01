@@ -9,6 +9,26 @@ FROM ${BASE}
 ARG KERNEL_CACHE
 LABEL thatch.qwen.c2-serving="1" thatch.qwen.serving-qualified="false"
 
+# The stall watch's device triage (scripts/ci/stall_watch.py) runs /opt/tt-metal/tools/triage/*.py from INSIDE the serving container,
+# whose root filesystem is read-only, and those tools import ttexalens, which the base image lacked (v185: "the image lacks the
+# ttexalens module"). They are installed into their OWN venv, /opt/triage-venv, from the requirements the pinned tt-metal checkout
+# itself ships (so their versions are the checkout's): tt-exalens pins its dependencies exactly (rich, pyyaml, prompt-toolkit, ...), so
+# installing them into the serving environment could conflict with what is there or replace it. In a venv nothing the serving stack
+# imports (torch, numpy, ttnn's dependencies) can change, and there is nothing for a constraints file to conflict with. The triage tools
+# import only ttexalens, capnp, rich, docopt, packaging and their own modules, never ttnn; stall_watch runs them with
+# /opt/triage-venv/bin/python3 when it exists. This layer sits ABOVE the overlay COPY: it is cached across overlay changes, and the
+# in-image tests below run after it. The tt-metal commit is asserted first, and the build fails (no hidden step) unless ttexalens
+# imports in the venv and every triage tool file is there. Needs network at build time; --build-arg TRIAGE_INSTALL=0 skips it (the
+# stall watch then logs [TRIAGE-CHECK] UNAVAILABLE at a stall).
+ARG TRIAGE_INSTALL=1
+RUN set -eu; if [ "${TRIAGE_INSTALL}" = 1 ]; then \
+      test "$(git -C /opt/tt-metal rev-parse HEAD)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9; \
+      req=/opt/tt-metal/tools/triage/requirements.txt; test -s "$req"; \
+      python3 -m venv /opt/triage-venv; \
+      /opt/triage-venv/bin/python3 -m pip install --no-cache-dir -r "$req"; \
+      /opt/triage-venv/bin/python3 -c "import os, sys; r = '/opt/tt-metal/tools/triage'; import ttexalens; tools = ('dump_running_operations', 'dump_callstacks', 'check_binary_integrity', 'check_noc_status', 'dump_fast_dispatch', 'check_eth_status'); missing = [t for t in tools if not (os.path.isfile(os.path.join(r, t + '.py')) or os.path.isfile(os.path.join(r, 'triage.py')))]; print('[TRIAGE-CHECK] ttexalens', getattr(ttexalens, '__file__', '?'), 'missing', missing or 'none'); sys.exit(1 if missing else 0)"; \
+    else echo '[TRIAGE-CHECK] TRIAGE_INSTALL=0: ttexalens not installed'; fi
+
 # K64j (S2, design W9; optimisation/ttnn-op/k64j/build_k64j.sh, card-b-v7 run 36222920898): K64i's contents,
 # the decode factory with the runtime extent (flag 0x20, F19-F22) and its four kernels, _ttnncpp.so 152951c1
 # (K64i's 30 QWEN strings kept, 34 in all). The arm mounts each binary over its path and each op directory
@@ -114,16 +134,6 @@ ENV QWEN_ATTN_PREP=1 QWEN_CARDS_ALLOCATED=1 QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 QWE
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 VLLM_USE_V2_MODEL_RUNNER=0 TT_METAL_HOME=/opt/tt-metal \
     MESH_DEVICE=P300 OMP_NUM_THREADS=8 TT_CACHE_PATH=/experiment-cache/weights TT_METAL_CACHE=${KERNEL_CACHE} \
     VLLM_CACHE_ROOT=/tmp/vllm-cache QWEN_C2_SERVING=1
-
-# The stall watch's device triage (scripts/ci/stall_watch.py) runs /opt/tt-metal/tools/triage/*.py from INSIDE the serving container,
-# whose root filesystem is read-only, and those tools import ttexalens, which the base image lacked (v185: "the image lacks the
-# ttexalens module"). Install the triage requirements the pinned tt-metal checkout itself ships (so their versions are the
-# checkout's), under a constraints file of everything already installed so nothing the serving stack imports (torch, numpy,
-# ttnn's dependencies) can be upgraded or replaced: a conflict fails the build instead of changing the stack. The tt-metal commit
-# is asserted first, and the build fails unless ttexalens imports and every triage tool file is there. Needs network at build time;
-# --build-arg TRIAGE_INSTALL=0 skips it (the stall watch then logs [TRIAGE-CHECK] UNAVAILABLE at a stall).
-ARG TRIAGE_INSTALL=1
-RUN set -eu; if [ "${TRIAGE_INSTALL}" = 1 ]; then       test "$(git -C /opt/tt-metal rev-parse HEAD)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9;       req=/opt/tt-metal/tools/triage/requirements.txt; test -s "$req";       python3 -m pip freeze 2>/dev/null | grep -v ' @ \|^-e ' > /tmp/triage-constraints.txt;       python3 -m pip install --no-cache-dir -c /tmp/triage-constraints.txt -r "$req";       rm -f /tmp/triage-constraints.txt;       python3 -c "import importlib.util, os, sys; r = '/opt/tt-metal/tools/triage'; import ttexalens; tools = ('dump_running_operations', 'dump_callstacks', 'check_binary_integrity', 'check_noc_status', 'dump_fast_dispatch', 'check_eth_status'); missing = [t for t in tools if not (os.path.isfile(os.path.join(r, t + '.py')) or os.path.isfile(os.path.join(r, 'triage.py')))]; print('[TRIAGE-CHECK] ttexalens', getattr(ttexalens, '__file__', '?'), 'missing', missing or 'none'); sys.exit(1 if missing else 0)";     else echo '[TRIAGE-CHECK] TRIAGE_INSTALL=0: ttexalens not installed'; fi
 
 # Provenance, last so a new commit or stamp never invalidates the cached layers above (an ARG
 # busts the cache of every RUN after it). P8's revision label names P8's commit; this one names

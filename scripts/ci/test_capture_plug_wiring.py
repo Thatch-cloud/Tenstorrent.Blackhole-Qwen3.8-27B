@@ -128,10 +128,12 @@ class EnginePlugTests(Isolated):
         settings = capture_plug.config({'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1'})
         packed = FakePlug()
         packed.sealed = True
+        packed.zones = [type('Zone', (), dict(hi=0x9000))()]
         capture_plug.PACKED.append(packed)
-        made = []
+        made, boundaries = [], []
 
-        def engine(cls, settings, operations, mesh, log=None, ceiling=None, **extra):
+        def engine(cls, settings, operations, mesh, log=None, ceiling=None, boundary=None, **extra):
+            boundaries.append(boundary)
             made.append(FakePlug(settings, operations, mesh, ceiling))
             return made[-1]
 
@@ -140,6 +142,7 @@ class EnginePlugTests(Isolated):
         self.assertIs(plug, made[0])
         self.assertEqual(plug.calls, [('monitor', 'before engine build'), 'open'])
         self.assertEqual(plug.args[1:], ('ops', 'mesh', 0x4000))
+        self.assertEqual(boundaries, [0x9000], 'the engine seal is told where the binary reserve starts: the packed zone top')
 
     def test_sealing_plugs_the_engine_verifies_its_extents_and_ties_the_plugs_life_to_the_engines(self):
         closed = []

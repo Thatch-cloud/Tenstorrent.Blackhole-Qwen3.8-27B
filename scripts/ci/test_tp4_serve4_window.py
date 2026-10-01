@@ -157,15 +157,18 @@ class TriageInstallTests(unittest.TestCase):
         with open(DOCKERFILE, encoding='utf-8') as handle:
             text = handle.read()
         start = text.index('ARG TRIAGE_INSTALL=1')
-        block = text[start:text.index('# Provenance, last')]
+        block = text[start:text.index('# K64j (S2, design W9;')]
         self.assertIn('/opt/tt-metal/tools/triage/requirements.txt', block)
-        self.assertIn('-c /tmp/triage-constraints.txt', block, 'the installed stack must not be upgraded by the triage requirements')
-        self.assertIn('pip freeze', block)
+        self.assertIn('python3 -m venv /opt/triage-venv', block, 'installed in its own venv, not the serving environment')
+        self.assertIn('/opt/triage-venv/bin/python3 -m pip install', block)
+        self.assertNotIn('pip freeze', block, 'no hidden freeze: nothing shares an environment with the serving stack')
+        self.assertNotIn('2>/dev/null', block)
         self.assertIn('import ttexalens', block)
         self.assertIn('rev-parse HEAD', block)
         self.assertIn('9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9', block, 'pinned to the tt-metal commit the image carries')
         self.assertIn('sys.exit(1 if missing else 0)', block, 'a missing tool or module fails the build')
         self.assertNotIn('set +e', block)
+        self.assertLess(start, text.index('COPY overlay/'), 'above the overlay COPY: cached, and the in-image tests run after it')
         self.assertLess(start, text.index('ARG SOURCE_REVISION'), 'before the provenance layers, which stay last')
 
 
