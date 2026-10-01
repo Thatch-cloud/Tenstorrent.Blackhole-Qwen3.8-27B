@@ -8,16 +8,135 @@ QWEN_FAST_BUDGET_CAP widens (below); every other method is inherited. publish is
 serving_request_factory.device_components builds this class at four cards and the pair's at the pair.
 """
 
+import os
 import time
+from contextlib import ExitStack
 
+from force_argmax import sample_rows
+from gdn_multitoken_conv import release_owned
 from serving_fast_request import budget_cap_enabled
 import trace_census
+import verify_trace_t1
 from verifier_engine import VERIFY_WIDTHS, VerifierEngine as PairVerifierEngine
 from verifier_inputs import stage_inputs
 import tp_shapes
 
+# QWEN_FAST_REQUEST_SHARD_ARGMAX=1 (default off, read once per engine at construction): the request engine's rows=1/2/4 verify traces pick
+# tokens with the packed block's per-chip shard argmax (verify_trace_t1.sample_shards / combine_shards) instead of the pinned sampler, so they
+# bake no sampler AllGather, untilize or ArgMax. Engaged only where verify_trace_t1.shard_sampling_problem(sampler) is None and the logits
+# are the bf16 TILE vocab shard; otherwise the pinned sampler runs as today and the reason is logged once.
+# QWEN_FAST_REQUEST_SHARD_AUDIT=1 (beside the arm): also run the pinned sampler in the trace, compare every row with the combined ids, log
+# a mismatch, and serve the pinned sampler's ids.
+SHARD_FLAG = 'QWEN_FAST_REQUEST_SHARD_ARGMAX'
+SHARD_AUDIT_FLAG = 'QWEN_FAST_REQUEST_SHARD_AUDIT'
+ENGAGED_MARKER = '[PINDIAG] request shard argmax engaged'
+FALLBACK_MARKER = '[PINDIAG] request shard argmax kept the pinned sampler'
+AUDIT_MARKER = '[PINDIAG] request shard argmax audit'
+AUDIT_MISMATCH = '[PINDIAG] request shard argmax audit mismatch'
+_LOGGED = set()
+
+
+def shard_arm_enabled(environ=None):
+    return (os.environ if environ is None else environ).get(SHARD_FLAG) == '1'
+
+
+def shard_audit_enabled(environ=None):
+    return shard_arm_enabled(environ) and (os.environ if environ is None else environ).get(SHARD_AUDIT_FLAG) == '1'
+
+
+def _log_once(key, message):
+    if key not in _LOGGED:
+        _LOGGED.add(key)
+        verify_trace_t1.log_line(message)
+
+
+def logits_problem(operations, logits, rows):
+    """Why sample_shards cannot take these logits, or None: the pre-gather (1, 1, rows, vocab shard) bf16 TILE tensor, and no
+    QWEN_FAST_TP4_VGLUE_AUDIT beside the gathered shard maxima (its ttnn.max reference is consumed only by the packed block)."""
+    shape = tuple(logits.shape)
+    if len(shape) != 4 or shape[:3] != (1, 1, rows) or shape[3] != tp_shapes.vocab_shard():
+        return 'logits shape %r is not the (1, 1, %d, %d) vocab shard' % (shape, rows, tp_shapes.vocab_shard())
+    dtype, layout = getattr(logits, 'dtype', None), getattr(logits, 'layout', None)
+    if dtype != operations.bfloat16 or layout != operations.TILE_LAYOUT:
+        return 'logits are %r %r, not bf16 TILE' % (dtype, layout)
+    import tp4_vglue
+
+    if tp4_vglue.audit_enabled() and tp4_vglue.enabled(tp4_vglue.SHARD_VALUES):
+        return 'QWEN_FAST_TP4_VGLUE_AUDIT audits the shard maxima in the packed block only'
+    return None
+
 
 class VerifierEngine(PairVerifierEngine):
+    def __init__(self, *args, sampler=None, **options):
+        # read before the base constructor: it captures every width's trace (operation) from inside __init__
+        self.request_shard = self.request_shard_audit = False
+        self.request_shard_problem = None
+        if shard_arm_enabled():
+            self.request_shard_problem = (verify_trace_t1.shard_sampling_problem(sampler) if sampler is not None
+                                          else 'there is no device sampler')
+            self.request_shard = self.request_shard_problem is None
+            self.request_shard_audit = self.request_shard and shard_audit_enabled()
+            if self.request_shard_problem is not None:
+                _log_once(('sampler', self.request_shard_problem), '%s: %s' % (FALLBACK_MARKER, self.request_shard_problem))
+        super().__init__(*args, sampler=sampler, **options)
+
+    def operation(self, fixture, *, hidden_capture=None, feature_capture=None):
+        """The inherited (logits, pinned ids); under the arm (logits, shard ids, shard maxima) or, audited, (logits, shard ids, shard
+        maxima, pinned ids). verify reads the tuple's length."""
+        if not self.request_shard:
+            return super().operation(fixture, hidden_capture=hidden_capture, feature_capture=feature_capture)
+        logits = None
+        try:
+            with ExitStack() as captures:
+                for capture in (hidden_capture, feature_capture):
+                    if capture is not None:
+                        captures.enter_context(capture.capture())
+                logits = fixture.run(sharded_logits=True)
+            problem = logits_problem(self.operations, logits, fixture.rows)
+            if problem is not None:
+                _log_once(('logits', problem), '%s: %s' % (FALLBACK_MARKER, problem))
+                return logits, sample_rows(self.sampler, logits, fixture.rows, self.operations, native_rows=self.native_sampling_rows)
+            ids, values = verify_trace_t1.sample_shards(self.operations, logits, fixture.rows)
+            _log_once(('engaged', fixture.rows, self.request_shard_audit), '%s rows=%d audit=%d' % (
+                ENGAGED_MARKER, fixture.rows, int(self.request_shard_audit)))
+            if not self.request_shard_audit:
+                return logits, ids, values
+            try:
+                reference = sample_rows(self.sampler, logits, fixture.rows, self.operations, native_rows=self.native_sampling_rows)
+            except BaseException:
+                release_owned(self.operations, [ids, values])
+                raise
+            return logits, ids, values, reference
+        except BaseException:
+            if logits is not None:
+                self.operations.deallocate(logits)
+            raise
+
+    def shard_predictions(self, output, rows):
+        """The ticket's ids from a shard-argmax output: each chip's (id, max) read back and folded on the host exactly as
+        packed_verifier.PackedVerifierEngine.shard_predictions does (verify_trace_t1.combine_shards). Audited, every row is compared
+        with the pinned sampler's id from the same replay, a mismatch is logged, and the pinned sampler's ids are what is served."""
+        chips = tp_shapes.chip_count()
+        id_parts = self.operations.get_device_tensors(output[1])
+        value_parts = self.operations.get_device_tensors(output[2])
+        if len(id_parts) != chips or len(value_parts) != chips:
+            raise AssertionError('%s chip-local outputs required' % tp_shapes.count_word())
+        chip_ids = [self.operations.to_torch(part).reshape(-1)[:rows] for part in id_parts]
+        chip_values = [self.operations.to_torch(part).reshape(-1)[:rows] for part in value_parts]
+        if any(len(value) != rows for value in (*chip_ids, *chip_values)):
+            raise AssertionError('Missing target prediction rows')
+        combined = verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
+        if len(output) < 4:
+            return combined
+        pinned = self.operations.to_torch(self.operations.get_device_tensors(output[3])[0]).reshape(-1)[:rows].tolist()
+        differing = [row for row, (mine, kept) in enumerate(zip(combined, pinned)) if mine != kept]
+        if differing:
+            verify_trace_t1.log_line('%s rows=%d differing=%s shard=%s sampler=%s' % (
+                AUDIT_MISMATCH, rows, differing[:8], [combined[row] for row in differing[:8]], [pinned[row] for row in differing[:8]]))
+        else:
+            _log_once(('audit', rows), '%s exact=True rows=%d' % (AUDIT_MARKER, rows))
+        return pinned
+
     def proposal_rows(self, packed_rows=None):
         """QWEN_FAST_BUDGET_CAP: while any budget is left the engine answers its widest capture the
         scheduler will still schedule, not the widest that fits the remaining tokens: a request at its
@@ -101,14 +220,17 @@ class VerifierEngine(PairVerifierEngine):
                 bucket['fixture'].replay_reader.audit.check(ticket.position, ticket.tokens)
             replay_finished = time.perf_counter()
             mark('readback')
-            logits, ids = bucket['output']
-            tensor = logits if ids is None else ids
-            parts = self.operations.get_device_tensors(tensor)
-            if len(parts) != tp_shapes.chip_count():
-                raise AssertionError('%s chip-local outputs required' % tp_shapes.count_word())
-            host = self.operations.to_torch(parts[0])
-            predictions = (host.reshape(len(ticket.tokens), self.model.args.vocab_size).float().argmax(dim=-1)
-                           if ids is None else host.reshape(-1)[:len(ticket.tokens)]).tolist()
+            if len(bucket['output']) > 2:
+                predictions = self.shard_predictions(bucket['output'], len(ticket.tokens))
+            else:
+                logits, ids = bucket['output']
+                tensor = logits if ids is None else ids
+                parts = self.operations.get_device_tensors(tensor)
+                if len(parts) != tp_shapes.chip_count():
+                    raise AssertionError('%s chip-local outputs required' % tp_shapes.count_word())
+                host = self.operations.to_torch(parts[0])
+                predictions = (host.reshape(len(ticket.tokens), self.model.args.vocab_size).float().argmax(dim=-1)
+                               if ids is None else host.reshape(-1)[:len(ticket.tokens)]).tolist()
             finished = time.perf_counter()
             if len(predictions) != len(ticket.tokens):
                 raise AssertionError('Missing target prediction rows')

@@ -234,6 +234,13 @@ class PolicyTests(unittest.TestCase):
                 self.assertEqual(rtc.arithmetic_diff(report(configuration=arm), self.solo()), {})
                 self.assertEqual(rtc.exactness_policy(report(texts=diverged(0), configuration=arm), self.solo())['verdict'], 'RERUN')
 
+    def test_the_request_shard_argmax_arm_and_its_audit_are_not_arithmetic(self):
+        for flag in ('QWEN_FAST_REQUEST_SHARD_ARGMAX', 'QWEN_FAST_REQUEST_SHARD_AUDIT'):
+            with self.subTest(flag=flag):
+                arm = dict(CONFIGURATION, **{flag: '1'})
+                self.assertEqual(rtc.arithmetic_diff(report(configuration=arm), self.solo()), {})
+                self.assertEqual(rtc.exactness_policy(report(texts=diverged(0), configuration=arm), self.solo())['verdict'], 'RERUN')
+
     def test_the_hang_diagnostics_are_not_arithmetic(self):
         diagnostics = dict(CONFIGURATION, QWEN_FAST_SEQ_DEADLINE_S='120', QWEN_FAST_SEQ_STAGE_LOG='1',
                            QWEN_FAST_TRACE_CENSUS='1', QWEN_FAST_TRACE_CENSUS_GRAPH='0',

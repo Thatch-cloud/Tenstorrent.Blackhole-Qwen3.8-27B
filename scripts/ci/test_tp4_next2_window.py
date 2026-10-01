@@ -3,7 +3,8 @@
 tp4/next-2 is tp4/serve-4 (the hang-fix arms) merged with tp4/next (the round-time levers). N0 builds the image tp4-next-2 and smokes
 the PRODUCTION profile (the merge must not have changed it); N1 is the audited smoke of the best gate profile; N2 and N3 are the strict
 exactness plans (S3a matrix, staggered trigger) on it; N4a..N4d are the paired timing ABAB of the timed best against its control, the
-speed twin, on coding prompts (4 x 4k, 4 x 32k); N5 hands the cards back. Every job resets the cards first. The templates are public,
+speed twin, on coding prompts (4 x 4k, 4 x 32k); R1, R2, R0 and R3 (optional, after N0) test the request engine's shard argmax
+(QWEN_FAST_REQUEST_SHARD_ARGMAX) on the hang shapes, audited, and timed against the speed twin; N5 hands the cards back. Every job resets the cards first. The templates are public,
 so they name no rig, card, address, registry or digest."""
 
 import json
@@ -27,10 +28,15 @@ BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3})
 IMAGE = 'tp4-next-2'
 TIMED = ('N4a-speed-timed', 'N4b-best-timed', 'N4c-speed-timed', 'N4d-best-timed')
 CONTROL, BEST, BEST_GATE, PRODUCTION = 'c2-packed-tp4-speed', 'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4'
-ORDERED = ('N0-build-smoke', 'N1-best-gate-smoke-audited', 'N2-s3a-matrix-best-gate', 'N3-staggered-trigger-best-gate') + TIMED + (
+RSHARD_JOBS = ('R1-diag-rshard', 'R2-rshard-audit', 'R0-speed-base', 'R3-speed-rshard')
+ORDERED = ('N0-build-smoke',) + RSHARD_JOBS + ('N1-best-gate-smoke-audited', 'N2-s3a-matrix-best-gate', 'N3-staggered-trigger-best-gate') + TIMED + (
     'N5-handback-reset',)
 WORK = ORDERED[:-1]
-PROFILE_OF = {'N0-build-smoke': PRODUCTION, 'N1-best-gate-smoke-audited': BEST_GATE, 'N2-s3a-matrix-best-gate': BEST_GATE,
+RSHARD_ARM = 'QWEN_FAST_REQUEST_SHARD_ARGMAX'
+HANG_SHAPES = ['warmup', 'coding', 'long_real_text', 'concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'replay_concurrent4']
+RSHARD_TIMING_TESTS = ['warmup', 'coding', 'concurrent4_code', 'concurrent4_code_equal', 'concurrent8_code']
+PROFILE_OF = {'N0-build-smoke': PRODUCTION, 'R1-diag-rshard': 'c2-packed-tp4-diag-rshard', 'R2-rshard-audit': 'c2-packed-tp4-gate-rshard-audit',
+              'R0-speed-base': CONTROL, 'R3-speed-rshard': 'c2-packed-tp4-speed-rshard', 'N1-best-gate-smoke-audited': BEST_GATE, 'N2-s3a-matrix-best-gate': BEST_GATE,
               'N3-staggered-trigger-best-gate': BEST_GATE, 'N4a-speed-timed': CONTROL, 'N4b-best-timed': BEST,
               'N4c-speed-timed': CONTROL, 'N4d-best-timed': BEST}
 SS = ['warmup', 'coding', 'long_real_text', 'concurrent4', 'concurrent4_steady', 'steady_resend', 'tool_call', 'stream_tool_call',
@@ -83,9 +89,9 @@ class OrderTests(unittest.TestCase):
                 self.assertEqual(parsed(name)['tag'], IMAGE)
                 self.assertTrue(minutes.isdigit() and 15 <= int(minutes) <= 180, minutes)
         modes = {row[0]: row[1] for row in read_order()}
-        for name in ORDERED[:4] + ('N5-handback-reset',):
+        for name in ('N0-build-smoke',) + ORDERED[5:8] + ('N5-handback-reset',):
             self.assertEqual(modes[name], 'stop', name)
-        for name in TIMED:
+        for name in TIMED + RSHARD_JOBS:
             self.assertEqual(modes[name], 'optional', name)
 
     def test_the_hand_back_is_last_and_the_order_says_it_runs_even_when_a_stop_job_halts_the_window(self):
@@ -193,12 +199,49 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual([parsed(name)['profile'] for name in TIMED], [CONTROL, BEST, CONTROL, BEST], 'A B A B')
 
 
+class RequestShardJobTests(unittest.TestCase):
+    """R1, R2, R0, R3: the request engine's shard argmax (QWEN_FAST_REQUEST_SHARD_ARGMAX) on the hang shapes, audited, and timed paired."""
+
+    def test_the_four_jobs_follow_n0_in_the_order_and_are_optional(self):
+        names = [row[0] for row in read_order()]
+        self.assertEqual(names[:5], ['N0-build-smoke', 'R1-diag-rshard', 'R2-rshard-audit', 'R0-speed-base', 'R3-speed-rshard'])
+        modes = {row[0]: row[1] for row in read_order()}
+        for name in RSHARD_JOBS:
+            self.assertEqual(modes[name], 'optional', name)
+
+    def test_r1_runs_the_hang_shapes_on_the_diag_arm_and_r2_the_production_smoke_on_the_audited_arm(self):
+        self.assertEqual(tests_of('R1-diag-rshard'), HANG_SHAPES)
+        self.assertEqual(tests_of('R2-rshard-audit'), SS + ['concurrent4_solo'] + CODE)
+        self.assertEqual(tests_of('R2-rshard-audit'), tests_of('N0-build-smoke'), 'the production smoke of the serve window (B5)')
+
+    def test_r0_is_the_speed_twin_and_r3_the_speed_twin_plus_the_flag_on_the_same_tests(self):
+        self.assertEqual(parsed('R0-speed-base')['profile'], CONTROL)
+        self.assertEqual(tests_of('R0-speed-base'), RSHARD_TIMING_TESTS)
+        self.assertEqual(tests_of('R3-speed-rshard'), RSHARD_TIMING_TESTS)
+        control, armed = env_of(CONTROL), env_of('c2-packed-tp4-speed-rshard')
+        self.assertEqual({key for key in set(control) | set(armed) if control.get(key) != armed.get(key)}, {RSHARD_ARM})
+        names = [row[0] for row in read_order()]
+        self.assertEqual(names.index('R0-speed-base') + 1, names.index('R3-speed-rshard'), 'the baseline runs just before R3')
+
+    def test_only_the_arm_profiles_carry_the_flag_and_the_audit_is_the_audited_arms(self):
+        for name in RSHARD_JOBS:
+            profile = parsed(name)['profile']
+            carries = env_of(profile).get(RSHARD_ARM) == '1'
+            self.assertEqual(carries, name != 'R0-speed-base', name)
+        self.assertEqual(env_of('c2-packed-tp4-gate-rshard-audit')['QWEN_FAST_REQUEST_SHARD_AUDIT'], '1')
+        for name in ('c2-packed-tp4-diag-rshard', 'c2-packed-tp4-speed-rshard'):
+            self.assertNotIn('QWEN_FAST_REQUEST_SHARD_AUDIT', env_of(name))
+        for flag in (RSHARD_ARM, 'QWEN_FAST_REQUEST_SHARD_AUDIT'):
+            for profile in (PRODUCTION, BEST, BEST_GATE):
+                self.assertNotIn(flag, env_of(profile), profile)
+
+
 class SmokeTests(unittest.TestCase):
     def test_every_named_test_is_one_the_smoke_knows_and_runs_in_the_order_the_template_lists_them(self):
         with open(os.path.join(HERE, 'c2_serving_smoke.py'), encoding='utf-8') as handle:
             smoke = handle.read()
         executed = re.findall(r"^\s*record\('([a-z0-9_]+)'", smoke, re.M)
-        for name in ORDERED[:2] + TIMED:
+        for name in ('N0-build-smoke', 'N1-best-gate-smoke-audited') + RSHARD_JOBS + TIMED:
             listed = tests_of(name)
             with self.subTest(template=name):
                 for test in listed:

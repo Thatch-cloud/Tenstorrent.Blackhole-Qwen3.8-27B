@@ -4479,6 +4479,270 @@
       "default_max_tokens": 8192,
       "parser_rechunk": true,
       "gate_only": true
+    },
+    "c2-packed-tp4-diag-rshard": {
+      "description": "GATE ONLY (the audits-off hang, request-shard-argmax arm): c2-packed-tp4-diag plus QWEN_FAST_REQUEST_SHARD_ARGMAX=1. The request engine's rows=1/2/4 verify traces pick tokens with the packed block's per-chip shard argmax (verify_trace_t1.sample_shards, combined on the host by combine_shards: first occurrence in chip order, the pinned sampler's tie rule) instead of the pinned sampler, so they bake no sampler AllGather, untilize or ArgMax; the packed rounds are unchanged. It engages only where the sampler is the plain greedy force-argmax one (no penalties, log-probabilities or request seed) and the logits are the bf16 TILE vocab shard, else the pinned sampler runs as before and the reason is logged once; a '[PINDIAG] request shard argmax engaged' line marks each width. Hypothesis under test: the pinned sampler's AllGather baked into the rows=2 request-verify trace is the hazard behind the audits-off first-replay hang. Not for traffic. UNVERIFIED on hardware. Audits stay OFF (QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0); the old tail (QWEN_FAST_BUDGET_CAP=0), the hang instruments, the stall watch and the handle guard are c2-packed-tp4-diag's.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "0",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_SEQ_STAGE_LOG": "1",
+        "QWEN_FAST_TRACE_CENSUS": "1",
+        "QWEN_FAST_CCL_HANDLE_LOG": "1",
+        "QWEN_FAST_MEMORY_LEDGER_L1": "1",
+        "QWEN_FAST_TRACE_CENSUS_GRAPH": "0",
+        "QWEN_FAST_STALL_DEADLINE_S": "120",
+        "QWEN_FAST_CCL_HANDLE_GUARD": "log",
+        "QWEN_FAST_REQUEST_SHARD_ARGMAX": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-rshard": {
+      "description": "GATE ONLY (timing arm of the request-shard-argmax lever): c2-packed-tp4-speed plus QWEN_FAST_REQUEST_SHARD_ARGMAX=1. The request engine's rows=1/2/4 verify traces pick tokens with the packed block's per-chip shard argmax (verify_trace_t1.sample_shards, combined on the host by combine_shards: first occurrence in chip order, the pinned sampler's tie rule) instead of the pinned sampler, so they bake no sampler AllGather, untilize or ArgMax; the packed rounds are unchanged. It engages only where the sampler is the plain greedy force-argmax one (no penalties, log-probabilities or request seed) and the logits are the bf16 TILE vocab shard, else the pinned sampler runs as before and the reason is logged once; a '[PINDIAG] request shard argmax engaged' line marks each width. Hypothesis under test: the pinned sampler's AllGather baked into the rows=2 request-verify trace is the hazard behind the audits-off first-replay hang. Not for traffic. UNVERIFIED on hardware. Audits OFF, the tail caps and the sequential-step watchdog are c2-packed-tp4-speed's; pair it with c2-packed-tp4-speed on the same image for the per-step cost of the readback against the removed sampler.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_REQUEST_SHARD_ARGMAX": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-gate-rshard-audit": {
+      "description": "GATE ONLY (correctness arm of the request-shard-argmax lever): c2-packed-tp4 (the audited production shape: both verify audits on, the tail caps) plus QWEN_FAST_REQUEST_SHARD_ARGMAX=1 and QWEN_FAST_REQUEST_SHARD_AUDIT=1. The request engine's rows=1/2/4 verify traces pick tokens with the packed block's per-chip shard argmax (verify_trace_t1.sample_shards, combined on the host by combine_shards: first occurrence in chip order, the pinned sampler's tie rule) instead of the pinned sampler, so they bake no sampler AllGather, untilize or ArgMax; the packed rounds are unchanged. It engages only where the sampler is the plain greedy force-argmax one (no penalties, log-probabilities or request seed) and the logits are the bf16 TILE vocab shard, else the pinned sampler runs as before and the reason is logged once; a '[PINDIAG] request shard argmax engaged' line marks each width. Hypothesis under test: the pinned sampler's AllGather baked into the rows=2 request-verify trace is the hazard behind the audits-off first-replay hang. Not for traffic. UNVERIFIED on hardware. Under the audit each request verify trace also runs the pinned sampler beside the shard argmax; every row is compared on the host, a mismatch is logged ('[PINDIAG] request shard argmax audit mismatch') and the pinned sampler's ids are what is served, so this arm cannot change a token.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_REQUEST_SHARD_ARGMAX": "1",
+        "QWEN_FAST_REQUEST_SHARD_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "max_prompt_tokens": 123136,
+      "min_answer_tokens": 8192,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
     }
   }
 }

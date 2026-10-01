@@ -76,6 +76,12 @@ SAMPLER_PROFILES = {'c2-packed-tp4-diag-sprewarm': ('c2-packed-tp4-diag', PREWAR
                     'c2-packed-tp4-diag-strace': ('c2-packed-tp4-diag', IN_TRACE),
                     'c2-packed-tp4-speed-sprewarm': ('c2-packed-tp4-speed', PREWARM),
                     'c2-packed-tp4-speed-strace': ('c2-packed-tp4-speed', IN_TRACE)}
+# The request-shard-argmax arms (tp4/next-2): each is its base profile plus exactly these env flags (the audited one also carries the gate
+# waiver's marker, as every gate-only twin of the traffic profile does).
+RSHARD, RSHARD_AUDIT = 'QWEN_FAST_REQUEST_SHARD_ARGMAX', 'QWEN_FAST_REQUEST_SHARD_AUDIT'
+RSHARD_PROFILES = {'c2-packed-tp4-diag-rshard': ('c2-packed-tp4-diag', {RSHARD: '1'}),
+                   'c2-packed-tp4-speed-rshard': ('c2-packed-tp4-speed', {RSHARD: '1'}),
+                   'c2-packed-tp4-gate-rshard-audit': ('c2-packed-tp4', {RSHARD: '1', RSHARD_AUDIT: '1', 'QWEN_C2_GATE_PROFILE': '1'})}
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
@@ -312,7 +318,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + BEST_PROFILES:
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES:
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -428,7 +434,7 @@ class FixProfileTests(unittest.TestCase):
             with self.subTest(profile=name):
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG', env if name != 'c2-packed-tp4-speed-fix' else {})
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG_ENGINES', env if name != 'c2-packed-tp4-speed-fix' else {})
-                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and not name.startswith('c2-packed-tp4-diag-s'):
+                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and not name.startswith('c2-packed-tp4-diag-s') and name != 'c2-packed-tp4-diag-rshard':
                     for flag in ('QWEN_FAST_STALL_DEADLINE_S', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_TRACE_CENSUS_GRAPH'):
                         self.assertNotIn(flag, env)
 
@@ -609,6 +615,53 @@ class SamplerProfileTests(unittest.TestCase):
 
     def test_the_admission_accepts_each_arm_over_the_image_environment(self):
         for name in SAMPLER_PROFILES:
+            environ = dict(image_env(), **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
+
+
+class RequestShardProfileTests(unittest.TestCase):
+    """tp4/next-2: the request-shard-argmax arms, each its base profile plus exactly its flags, gate only."""
+
+    def test_each_arm_is_its_base_plus_exactly_its_flags(self):
+        found = profiles()
+        for name, (base, flags) in RSHARD_PROFILES.items():
+            mine = found[name]
+            with self.subTest(profile=name):
+                self.assertEqual(mine['env'], dict(found[base]['env'], **flags))
+                for key in set(mine) | set(found[base]):
+                    if key not in ('description', 'env', 'gate_only'):
+                        self.assertEqual(mine.get(key), found[base].get(key), key)
+                self.assertIs(mine['gate_only'], True)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                self.assertIn(RSHARD + '=1', mine['description'])
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+
+    def test_the_audits_and_tails_are_the_bases(self):
+        found = profiles()
+        for name in ('c2-packed-tp4-diag-rshard', 'c2-packed-tp4-speed-rshard'):
+            env = found[name]['env']
+            self.assertEqual((env['QWEN_FAST_VERIFY_T1_AUDIT'], env['QWEN_FAST_VERIFY_T2_AUDIT']), ('0', '0'), name)
+        self.assertEqual({key: found['c2-packed-tp4-diag-rshard']['env'].get(key) for key in DIAG_INSTRUMENTS}, DIAG_INSTRUMENTS)
+        env = found['c2-packed-tp4-gate-rshard-audit']['env']
+        self.assertEqual((env['QWEN_FAST_VERIFY_T1_AUDIT'], env['QWEN_FAST_VERIFY_T2_AUDIT']), ('1', '1'))
+        self.assertEqual({key: env[key] for key in TAIL_CAPS}, TAIL_CAPS)
+        self.assertIn('audit', found['c2-packed-tp4-gate-rshard-audit']['description'].lower())
+
+    def test_no_other_profile_and_not_the_image_carries_either_flag(self):
+        for name, profile in profiles().items():
+            if name not in RSHARD_PROFILES:
+                self.assertNotIn(RSHARD, profile['env'], name)
+                self.assertNotIn(RSHARD_AUDIT, profile['env'], name)
+        self.assertNotIn(RSHARD, image_env())
+        self.assertNotIn(RSHARD_AUDIT, image_env())
+        for name in RSHARD_PROFILES:
+            if name != 'c2-packed-tp4-gate-rshard-audit':
+                self.assertNotIn(RSHARD_AUDIT, profiles()[name]['env'], 'the audit is the audited arm alone')
+
+    def test_the_admission_accepts_each_arm_over_the_image_environment(self):
+        for name in RSHARD_PROFILES:
             environ = dict(image_env(), **profiles()[name]['env'])
             with self.subTest(profile=name):
                 self.assertEqual(admission.width(environ), 4)

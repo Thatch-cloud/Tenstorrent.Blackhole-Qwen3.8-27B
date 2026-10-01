@@ -269,6 +269,8 @@ ARITHMETIC_NEUTRAL = frozenset((
     'QWEN_FAST_CAPTURE_PLUG_L1_LEAVE_KB', 'QWEN_FAST_CAPTURE_PLUG_L1_RESERVE_KB',
     # tp4/sampler: the pinned sampler's output is never read (tokens come from the shard argmax), so neither isolation arm changes a token.
     'QWEN_FAST_PACKED_SAMPLER_PREWARM', 'QWEN_FAST_PACKED_SAMPLER_IN_TRACE',
+    # tp4/next-2: the request engine's shard argmax equals the pinned sampler's ids by construction (the same combine the T1 audit proved on every packed round).
+    'QWEN_FAST_REQUEST_SHARD_ARGMAX',
     # Paths (the 'qwen-tt' scope): where the runtime, the weight cache and the kernel cache live.
     'TT_METAL_HOME', 'TT_CACHE_PATH', 'TT_METAL_CACHE',
 ))

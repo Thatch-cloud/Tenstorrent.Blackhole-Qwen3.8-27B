@@ -29,9 +29,18 @@
 # N5 hands the cards back to production (status, then the all-four reset; the re-placement of the AUDITED production image, never a gate
 # arm, is the template's text). It is always last and it runs even when a stop job halts the window: a stall leaves the cards hung until
 # its reset.
+# R1, R2, R0 and R3 (optional, after N0) test one lever in the request engine: QWEN_FAST_REQUEST_SHARD_ARGMAX=1 makes the rows=1/2/4 verify
+# traces pick tokens with the packed block's per-chip shard argmax instead of the pinned sampler (verifier_engine_tp.py), the hypothesis
+# being that the pinned sampler's AllGather in the rows=2 request trace is the hazard behind the audits-off hang. R1 repeats the hang shapes
+# on the diag twin; R2 is the audited correctness arm (both samplers run, the pinned ids are served, every row compared); R0 is the speed
+# twin's baseline and R3 the speed twin with the lever, paired on this image. The lever is its own flag and is in no other profile.
 # Durations (estimate, wall clock): N0 45 min typical / 120 at most; N1 35 / 55 / 100; N2 40-90 min, up to 170 with a re-run on a
 # divergence; N3 35-60 min, worst case about 6 h; N4a-d 30-60 min each; N5 15 min. Stop jobs N0-N3: about 2 h at best, 4 h expected.
 N0-build-smoke stop tp4-next-2 120
+R1-diag-rshard optional tp4-next-2 20
+R2-rshard-audit optional tp4-next-2 45
+R0-speed-base optional tp4-next-2 25
+R3-speed-rshard optional tp4-next-2 25
 N1-best-gate-smoke-audited stop tp4-next-2 100
 N2-s3a-matrix-best-gate stop tp4-next-2 170
 N3-staggered-trigger-best-gate stop tp4-next-2 180

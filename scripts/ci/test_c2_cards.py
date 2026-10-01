@@ -37,16 +37,16 @@ class JobTests(unittest.TestCase):
         self.assertEqual((outputs['cards'], outputs['fabric']), ('pair', 'FABRIC_1D'))
 
     def test_the_tp4_profiles_are_the_profiles_that_name_the_mesh(self):
-        self.assertEqual(TP4, ['c2-packed-tp4', 'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-sprewarm',
+        self.assertEqual(TP4, ['c2-packed-tp4', 'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-sprewarm',
                                'c2-packed-tp4-diag-strace', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f12',
                                'c2-packed-tp4-f2', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-fcommit',
                                'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-noslide',
-                               'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-vglue',
+                               'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-rshard-audit', 'c2-packed-tp4-gate-vglue',
                                'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate', 'c2-packed-tp4-solo-gate',
                                'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fcommit',
                                'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-fix',
                                'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad',
-                               'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-vglue',
+                               'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-vglue',
                                'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2',
                                'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-time-gate', 'general-prefix-tp4',
                                'general-prefix-tp4-131k', 'general-tp4', 'general-tp4-131k',
