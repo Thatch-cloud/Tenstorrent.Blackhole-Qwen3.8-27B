@@ -1535,9 +1535,23 @@ class TemplateTests(unittest.TestCase):
         with open(os.path.join(FOLDER, 'W-T1-tau-lab.env'), encoding='utf-8') as handle:
             return handle.read()
 
-    def test_the_template_is_the_one_job_the_order_names(self):
-        self.assertEqual(self.rows(), [['W-T1-tau-lab', 'optional', 'tp4-serve-2', '275']])
-        self.assertEqual(sorted(name for name in os.listdir(FOLDER) if name.endswith('.env')), ['W-T1-tau-lab.env'])
+    def test_the_templates_are_the_jobs_the_order_names(self):
+        # W-T1 whole, or split in two halves (A3 A1 A2, then A4 A5) so hardware tests can run between them.
+        self.assertEqual(self.rows(), [['W-T1-tau-lab', 'optional', 'tp4-serve-2', '275'],
+                                       ['W-T1a-tau-lab', 'optional', 'tp4-serve-2', '185'],
+                                       ['W-T1b-tau-lab', 'optional', 'tp4-serve-2', '125']])
+        self.assertEqual(sorted(name for name in os.listdir(FOLDER) if name.endswith('.env')),
+                         ['W-T1-tau-lab.env', 'W-T1a-tau-lab.env', 'W-T1b-tau-lab.env'])
+
+    def test_the_halves_cover_every_arm_once_within_the_whole_jobs_budget(self):
+        arms, minutes = [], 0
+        for name in ('W-T1a-tau-lab.env', 'W-T1b-tau-lab.env'):
+            outputs = job.read_job(job.parse_env(read_text(os.path.join(FOLDER, name))), NAMES, meshes=job.profile_meshes())
+            self.assertEqual((outputs['tag'], outputs['taulab_profile'], outputs['actions']), ('tp4-serve-2', 'c2-packed-tp4', 'reset taulab'))
+            arms += outputs['taulab_arms'].split()
+            minutes += int(outputs['taulab_deadline'])
+        self.assertEqual(sorted(arms), ['A1', 'A2', 'A3', 'A4', 'A5'])
+        self.assertLessEqual(minutes, 300)
 
     def test_it_parses_to_the_production_image_the_production_profile_and_the_lab(self):
         outputs = job.read_job(job.parse_env(self.text()), NAMES, meshes=job.profile_meshes())
