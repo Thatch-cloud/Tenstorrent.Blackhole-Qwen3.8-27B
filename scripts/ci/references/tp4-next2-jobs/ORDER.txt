@@ -1,0 +1,34 @@
+# The order of the four-card tp4/next-2 window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
+# Image: the tag of the tt-vllm image the job serves or builds (N0 builds tp4-next-2). Minutes: runner time for ONE run of the job, a quad
+# reset (1-3 min) included.
+# tp4/next-2 is tp4/serve-4 (tail caps, the capture plug, the stall watch, the repaired trace census, the two sampler arms) merged with
+# tp4/next (the speed slide, per-tile exact collectives, the quad draft on live banks, the TP4 fused commit in place on live banks, the
+# prefill warm before every capture, the five verify-glue levers). Every lever is its own flag and none is in the production profile.
+# NOTHING COMBINED HAS RUN ON A CARD: the best profiles as a set, and the levers on the hang-fix stack, are unverified. ONE IMAGE FOR THE
+# WHOLE WINDOW: C2_IMAGE_TAG=tp4-next-2, built by N0 from the commit the window tag sits on.
+# Early-failure order, cheapest first: N0 builds the image and smokes the PRODUCTION profile (the merge must not have changed it); N1 is
+# the audited smoke of the best gate profile (coherence, every audit, the prefill tripwire, the fused-commit and vglue lines); N2 is the
+# S3a matrix on the same profile (strict); N3 the staggered trigger (strict). Then the paired timing ABAB on coding prompts (4 x 4k and
+# 4 x 32k): N4a (speed, the control) N4b (best) N4c (speed) N4d (best); they are optional, their product is the numbers. N5 hands the cards
+# back.
+# The control of the timed best is c2-packed-tp4-speed, not c2-packed-tp4-time-gate: the best is the speed twin plus the levers, so the
+# speed twin differs from it in the levers alone (time-gate lacks the tail caps and stays the lanes window's control).
+# The timing jobs carry the audits-off exposure of the v163/v164 hang. Run N4 only on an image whose hang-fix arm (c2-packed-tp4-speed-fix,
+# -speed-sprewarm or -speed-strace, references/tp4-serve5-jobs and tp4-sampler-jobs) has passed its five consecutive runs; the driver then
+# adds that arm's flags to c2-packed-tp4-speed AND c2-packed-tp4-best (one edit each, the test holds best equal to speed plus the levers)
+# before building, so the pair stays paired.
+# N5 hands the cards back to production (status, then the all-four reset; the re-placement of the AUDITED production image, never a gate
+# arm, is the template's text). It is always last and it runs even when a stop job halts the window: a stall leaves the cards hung until
+# its reset.
+# Durations (estimate, wall clock): N0 45 min typical / 120 at most; N1 35 / 55 / 100; N2 40-90 min, up to 170 with a re-run on a
+# divergence; N3 35-60 min, worst case about 6 h; N4a-d 30-60 min each; N5 15 min. Stop jobs N0-N3: about 2 h at best, 4 h expected.
+N0-build-smoke stop tp4-next-2 120
+N1-best-gate-smoke-audited stop tp4-next-2 100
+N2-s3a-matrix-best-gate stop tp4-next-2 170
+N3-staggered-trigger-best-gate stop tp4-next-2 180
+N4a-speed-timed optional tp4-next-2 60
+N4b-best-timed optional tp4-next-2 60
+N4c-speed-timed optional tp4-next-2 60
+N4d-best-timed optional tp4-next-2 60
+N5-handback-reset stop tp4-next-2 15

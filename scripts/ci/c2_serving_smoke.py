@@ -253,6 +253,13 @@ def concurrent4_code_equal():
     return dict(run_users('concurrent4_code_equal', prompts), corpus=corpus)
 
 
+def concurrent4_code_32k():
+    # Opt-in. Four real-code prompts of about 32k tokens each (the long-context lane of the paired timing windows), a code task each,
+    # 800 tokens out, started together: the four-user prefill queue at 32k, then the packed decode at that depth.
+    prompts, corpus = code_prompts((32768,) * 4)
+    return dict(run_users('concurrent4_code_32k', prompts), corpus=corpus)
+
+
 def concurrent8_code():
     # Opt-in. Eight users, the target's standard seats: real code prompts of about 4k, 8k, 16k and 24k tokens twice over, a code
     # task each, 800 tokens out, started together. A profile with fewer seats queues the rest, which this measures too (the
@@ -426,6 +433,8 @@ if ONLY and 'concurrent4_code' in ONLY:
     record('concurrent4_code', concurrent4_code)
 if ONLY and 'concurrent4_code_equal' in ONLY:
     record('concurrent4_code_equal', concurrent4_code_equal)
+if ONLY and 'concurrent4_code_32k' in ONLY:
+    record('concurrent4_code_32k', concurrent4_code_32k)
 if ONLY and 'concurrent8_code' in ONLY:
     record('concurrent8_code', concurrent8_code)
 
