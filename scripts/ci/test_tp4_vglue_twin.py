@@ -132,6 +132,8 @@ class TwinTests(PackedFixture):
         rows = [row for row in tp_addresses.TWINS if row[0] == 'gdn_device_loop_state']
         self.assertEqual(rows, [('gdn_device_loop_state', 'DeviceLoopState', 'gdn_device_loop_state_tp', 'DeviceLoopState')])
         with four_installed():
+            self.assertIs(importlib.import_module('gdn_device_loop_state').DeviceLoopState, pinned_state.DeviceLoopState)
+        with patch.dict(os.environ, {'QWEN_FAST_TP4_GDN_GLUE': '1'}), four_installed():
             self.assertIs(importlib.import_module('gdn_device_loop_state').DeviceLoopState, twin.DeviceLoopState)
 
     def test_only_the_two_methods_are_overridden_and_the_pinned_ones_reach_them_through_self(self):

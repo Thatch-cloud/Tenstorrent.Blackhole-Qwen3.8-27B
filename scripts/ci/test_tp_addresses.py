@@ -128,5 +128,77 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(tp_addresses.install(), 0)
 
 
+class FlaggedTwinTests(unittest.TestCase):
+    """The twins tp4/next added bind only under their lever flag; unflagged, production keeps the qualified originals."""
+
+    FOUR = {'QWEN_FAST_TP': '4'}
+
+    def setUp(self):
+        import extent_attention_replay_tp
+        import fused_commit
+        import gdn_device_loop_state
+        self.reader = extent_attention_replay_tp.PackedExtentReplayReader
+        self.state = gdn_device_loop_state.DeviceLoopState
+        self.fused_module = sys.modules['fused_commit']
+        self.assertIs(self.fused_module, fused_commit)
+        self.addCleanup(tp_addresses.uninstall)
+
+    def bound(self, environ):
+        import extent_attention_replay_tp
+        import gdn_device_loop_state
+        tp_addresses.install(dict(environ))
+        return (gdn_device_loop_state.DeviceLoopState, extent_attention_replay_tp.PackedExtentReplayReader,
+                sys.modules['fused_commit'])
+
+    def test_the_flagged_rows_are_the_three_tp4_next_added(self):
+        self.assertEqual(sorted(tp_addresses.FLAGGED_TWINS), [('extent_attention_replay_tp', 'PackedExtentReplayReader'),
+                                                              ('gdn_device_loop_state', 'DeviceLoopState')])
+        self.assertEqual(list(tp_addresses.FLAGGED_MODULE_TWINS), ['fused_commit'])
+        for key in tp_addresses.FLAGGED_TWINS:
+            self.assertIn(key, [row[:2] for row in tp_addresses.TWINS])
+
+    def test_flags_unset_or_zero_bind_exactly_the_s2_classes(self):
+        for extra in ({}, {'QWEN_FAST_TP4_GDN_GLUE': '0', 'QWEN_FAST_TP4_ATTN_FOLD': '0', 'QWEN_FAST_FUSED_COMMIT': '0'}):
+            with self.subTest(extra=extra):
+                state, reader, fused = self.bound(dict(self.FOUR, **extra))
+                self.assertIs(state, self.state)
+                self.assertIs(reader, self.reader)
+                self.assertIs(fused, self.fused_module)
+                self.assertNotEqual(state.__module__, 'gdn_device_loop_state_tp')
+                self.assertNotEqual(reader.__module__, 'extent_attention_fold_tp')
+                tp_addresses.uninstall()
+
+    def test_the_other_twins_stay_bound_with_the_flags_off(self):
+        rows, modules = tp_addresses.bound_twins(dict(self.FOUR))
+        self.assertEqual(len(rows), len(tp_addresses.TWINS) - 2)
+        self.assertEqual([row[0] for row in modules], ['extent_attention_replay', 'quad_draft'])
+        tp_addresses.install(dict(self.FOUR))
+        import quad_draft
+        self.assertEqual(quad_draft.__name__, 'quad_draft_tp')
+
+    def test_each_flag_binds_its_own_twin_only(self):
+        cases = (('QWEN_FAST_TP4_GDN_GLUE', 0), ('QWEN_FAST_TP4_ATTN_FOLD', 1), ('QWEN_FAST_FUSED_COMMIT', 2))
+        for flag, index in cases:
+            with self.subTest(flag=flag):
+                bound = self.bound(dict(self.FOUR, **{flag: '1'}))
+                originals = (self.state, self.reader, self.fused_module)
+                for place, (got, original) in enumerate(zip(bound, originals)):
+                    if place == index:
+                        self.assertIsNot(got, original)
+                    else:
+                        self.assertIs(got, original)
+                tp_addresses.uninstall()
+        self.assertEqual(self.bound(dict(self.FOUR, QWEN_FAST_TP4_GDN_GLUE='1'))[0].__module__, 'gdn_device_loop_state_tp')
+        tp_addresses.uninstall()
+        self.assertEqual(self.bound(dict(self.FOUR, QWEN_FAST_TP4_ATTN_FOLD='1'))[1].__module__, 'extent_attention_fold_tp')
+        tp_addresses.uninstall()
+        self.assertEqual(self.bound(dict(self.FOUR, QWEN_FAST_FUSED_COMMIT='1'))[2].__name__, 'fused_commit_tp')
+
+    def test_a_malformed_flag_is_refused_not_ignored(self):
+        for flag in ('QWEN_FAST_TP4_GDN_GLUE', 'QWEN_FAST_TP4_ATTN_FOLD', 'QWEN_FAST_FUSED_COMMIT'):
+            with self.subTest(flag=flag), self.assertRaises(ValueError):
+                tp_addresses.install(dict(self.FOUR, **{flag: '2'}))
+
+
 if __name__ == '__main__':
     unittest.main()

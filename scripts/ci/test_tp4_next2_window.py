@@ -210,7 +210,8 @@ class SmokeTests(unittest.TestCase):
 
     def test_the_audited_smoke_includes_the_4k_coding_reference_the_timed_best_is_held_against(self):
         self.assertEqual(tests_of('N1-best-gate-smoke-audited'),
-                         ['warmup', 'coding', 'concurrent4', 'concurrent4_steady', 'steady_resend', 'concurrent4_code_equal'])
+                         ['warmup', 'coding', 'concurrent4', 'concurrent4_steady', 'steady_resend', 'concurrent4_code_equal',
+                          'concurrent4_code_32k'])
 
     def test_the_four_timing_jobs_run_the_same_coding_tests_4x4k_and_4x32k(self):
         for name in TIMED:

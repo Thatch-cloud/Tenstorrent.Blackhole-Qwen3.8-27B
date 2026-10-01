@@ -120,6 +120,45 @@ MODULE_TWINS = (
     ('fused_commit', 'fused_commit_tp'),
 )
 
+# The twins tp4/next added are subclasses and whole-module twins whose bytes the production admission does not pin (it pins the base
+# files), so they are bound ONLY when their lever flag is set; with the flag off the original qualified class or module stays bound,
+# exactly as at the S2 build. Keyed by the TWINS row's (module, attribute) or the MODULE_TWINS row's module name; the value reads the
+# flag the way the lever code reads it (tp4_vglue.enabled, fused_commit.enabled: strict, 0 or 1).
+def _gdn_glue(environ):
+    import tp4_vglue
+
+    return tp4_vglue.enabled(tp4_vglue.GDN_GLUE, environ) or tp4_vglue.enabled(tp4_vglue.GDN_BLOCK_CONV, environ)
+
+
+def _attn_fold(environ):
+    import tp4_vglue
+
+    return tp4_vglue.enabled(tp4_vglue.ATTN_FOLD, environ)
+
+
+def _fused_commit(environ):
+    import fused_commit
+
+    return fused_commit.enabled(environ)
+
+
+FLAGGED_TWINS = {
+    ('gdn_device_loop_state', 'DeviceLoopState'): ('QWEN_FAST_TP4_GDN_GLUE', _gdn_glue),
+    ('extent_attention_replay_tp', 'PackedExtentReplayReader'): ('QWEN_FAST_TP4_ATTN_FOLD', _attn_fold),
+}
+FLAGGED_MODULE_TWINS = {
+    'fused_commit': ('QWEN_FAST_FUSED_COMMIT', _fused_commit),
+}
+
+
+def bound_twins(environ=None):
+    """-> (TWINS rows, MODULE_TWINS rows) install() binds under `environ`: every row but the flagged ones whose flag is unset."""
+    rows = tuple(row for row in TWINS if row[:2] not in FLAGGED_TWINS or FLAGGED_TWINS[row[:2]][1](environ))
+    modules = tuple(row for row in MODULE_TWINS
+                    if row[0] not in FLAGGED_MODULE_TWINS or FLAGGED_MODULE_TWINS[row[0]][1](environ))
+    return rows, modules
+
+
 # What install() changed: (namespace, name, the pinned object), so a test can put the pair's functions back.
 _REBOUND = []
 _ALIASED = []
@@ -137,7 +176,8 @@ def install(environ=None):
     import importlib
 
     swaps = []
-    for module_name, name, twin_module, twin_name in TWINS:
+    twins, module_twins = bound_twins(environ)
+    for module_name, name, twin_module, twin_name in twins:
         old = getattr(importlib.import_module(module_name), name)
         new = getattr(importlib.import_module(twin_module), twin_name)
         if old is not new:
@@ -156,7 +196,7 @@ def install(environ=None):
                     namespace[name] = new
                     _REBOUND.append((namespace, name, old))
                     rebound += 1
-    for original_name, twin_name in MODULE_TWINS:
+    for original_name, twin_name in module_twins:
         original = importlib.import_module(original_name)
         twin = importlib.import_module(twin_name)
         if original is twin or sys.modules.get(original_name) is twin:

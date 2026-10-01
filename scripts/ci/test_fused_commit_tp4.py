@@ -107,6 +107,8 @@ class SeamTests(unittest.TestCase):
         self.assertIn(('fused_commit', 'fused_commit_tp'), tp_addresses.MODULE_TWINS)
         self.assertIs(sys.modules['fused_commit'], pinned)
         with four_cards():
+            self.assertIs(sys.modules['fused_commit'], pinned, 'the flag unset, the pinned module stays bound (tp_addresses.FLAGGED_MODULE_TWINS)')
+        with clean_environment(QWEN_FAST_FUSED_COMMIT='1'), four_cards():
             self.assertIs(sys.modules['fused_commit'], twin)
             import fused_commit as reached
 
@@ -480,7 +482,8 @@ class TwinFixture(unittest.TestCase):
     def setUp(self):
         stack = ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(clean_environment(QWEN_FAST_TP_KV_SLIDE='1'))
+        # The fused flag is on so the seam binds the twin module (tp_addresses.FLAGGED_MODULE_TWINS); inner four_cards() then install nothing.
+        stack.enter_context(clean_environment(QWEN_FAST_TP_KV_SLIDE='1', QWEN_FAST_FUSED_COMMIT='1'))
         stack.enter_context(four_cards())
         self.ops = Ops4()
         self.mesh = grid_mesh(CHIPS)
@@ -580,9 +583,9 @@ class ConstructionTests(TwinFixture):
                                QWEN_FAST_TP_KV_SLIDE='1'), four_cards():
             built = twin.build(self.block, operations=self.ops, mesh=self.mesh, pool=None, shared_weights=self.weights,
                                collectives=self.collectives, diagnostic=lines.append)
-        self.assertIsInstance(built, twin.FusedCommit)
-        self.assertEqual((built.inplace, built.audit), (True, True))
-        built.release_buffers()
+            self.assertIsInstance(built, twin.FusedCommit)
+            self.assertEqual((built.inplace, built.audit), (True, True))
+            built.release_buffers()
 
 
 class CaptureTests(TwinFixture):

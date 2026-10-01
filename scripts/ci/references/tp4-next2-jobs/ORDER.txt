@@ -18,6 +18,14 @@
 # -speed-sprewarm or -speed-strace, references/tp4-serve5-jobs and tp4-sampler-jobs) has passed its five consecutive runs; the driver then
 # adds that arm's flags to c2-packed-tp4-speed AND c2-packed-tp4-best (one edit each, the test holds best equal to speed plus the levers)
 # before building, so the pair stays paired.
+# N0's read-out must name the ONE UNFLAGGED runtime change tp4/next carries: the D0 tap-protect fix in dflash_device.py (the feature taps
+# are protected under merge_release; production sets QWEN_FAST_PIPELINED_PUBLISH=1, so it runs there). Check N0's exactness against
+# tp4-serve-6's B5 (the production-profile smoke of the serve window): any difference is this fix or the merge, and stops the window.
+# With QWEN_FAST_QUAD_DRAFT=1 the quad trace is captured DURING SERVING, when four users first become packable: outside the capture
+# plug's packed zone (sealed at attach) and outside the engine zone. The fit of the fused-commit traces in the plug zone is also
+# unverified. So if the capture-plug arm is the hang fix chosen, the plug must be shown to cover those captures before any timing run.
+# Whichever hang-fix arm passes on tp4-serve-6 must be added to BOTH c2-packed-tp4-speed and c2-packed-tp4-best before N4 (one edit each,
+# the pair stays paired); until then N4 is not run.
 # N5 hands the cards back to production (status, then the all-four reset; the re-placement of the AUDITED production image, never a gate
 # arm, is the template's text). It is always last and it runs even when a stop job halts the window: a stall leaves the cards hung until
 # its reset.
