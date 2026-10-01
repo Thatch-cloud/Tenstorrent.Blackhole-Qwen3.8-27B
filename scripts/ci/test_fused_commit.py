@@ -1565,8 +1565,8 @@ class ParentTests(unittest.TestCase):
         if result.returncode != 0:
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
-        after = without_prefill_scratch(without_any_request(without_sticky(
-            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))
+        after = without_trace_census(without_prefill_scratch(without_any_request(without_sticky(
+            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1639,6 +1639,17 @@ def without_sticky(lines):
                      "pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}', str(state.req_id)[:48],",
                      '(time.perf_counter() - began) * 1000.0, state.num_computed_tokens,',
                      'len(state.prompt_token_ids))'))
+
+
+def without_trace_census(lines):
+    """serving_runtime.py less the sequential-hang diagnostics' hooks (trace_census; each a no-op unless its flag is set), which
+    landed after this parent: the import and the three call lines, asserted to be exactly those, found once each."""
+    hooks = ('import trace_census', 'trace_census.note_collectives(collectives)', 'trace_census.engine_begin()',
+             'trace_census.census_engine(str(state.req_id), request, operations)')
+    found = [value for value in lines if value.strip() in hooks]
+    if sorted(value.strip() for value in found) != sorted(hooks):
+        raise AssertionError('The trace_census hooks are not in serving_runtime.py exactly once each')
+    return [value for value in lines if value.strip() not in hooks]
 
 
 def without_prefill_scratch(lines):

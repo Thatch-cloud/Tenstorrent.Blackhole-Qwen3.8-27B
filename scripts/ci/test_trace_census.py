@@ -14,11 +14,53 @@ import packed_verifier
 import tp_addresses
 import trace_census
 import verifier_engine
-from test_memory_ledger import FakeOperations, FakeTensor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ORIGINAL_CAPTURE = attention_batch.capture_operation
 ORIGINAL_NOTE = verifier_engine.note_packed_step
+
+
+class FakeShard:
+    def __init__(self, device, address, shape):
+        self._device, self.address, self.padded_shape, self.dtype = device, address, shape, 'bf16'
+
+    def device(self):
+        return self._device
+
+    def buffer_address(self):
+        return self.address
+
+    def memory_config(self):
+        return SimpleNamespace(buffer_type='dram')
+
+
+class FakeTensor:
+    """A two-chip replicated tensor of 2-byte elements; each chip's allocator hands out the next 64 KiB."""
+
+    def __init__(self, operations, shape=(32, 32)):
+        self.shards = []
+        for chip, device in enumerate(operations.devices):
+            self.shards.append(FakeShard(device, operations.next_address[chip], shape))
+            operations.next_address[chip] += 0x10000
+
+
+class FakeOperations:
+    Tensor = FakeTensor
+    bfloat16 = 'bf16'
+    BufferType = SimpleNamespace(DRAM='dram', L1='l1')
+
+    def __init__(self):
+        self.devices = [SimpleNamespace(name='chip0'), SimpleNamespace(name='chip1')]
+        self.next_address = [0x100000, 0x100000]
+        self.views = 0
+
+    def get_device_tensors(self, tensor):
+        return tensor.shards
+
+    def get_memory_view(self, device, kind):
+        self.views += 1
+        return SimpleNamespace(num_banks=8, total_bytes_per_bank=4000, total_bytes_allocated_per_bank=0,
+                               total_bytes_free_per_bank=4000, largest_contiguous_bytes_free_per_bank=2000)
 
 
 def alloc(address, size, kind='DRAM'):
