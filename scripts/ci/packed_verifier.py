@@ -185,6 +185,7 @@ from verifier_inputs import host_inputs, validate_tokens
 from verifier_pack import GDN_LAYERS, build_pack, participant
 import gdn_seq_block
 import verify_prestage
+import capture_plug
 import tp_shapes
 import verify_trace_t1
 import verify_trace_t2
@@ -657,6 +658,9 @@ class PackedVerifierEngine:
         import torch
 
         self.shape = validate_shape(shape)
+        # QWEN_FAST_CAPTURE_PLUG (TP4 only, off by default): the capture zone, opened before the warm forward and sealed after
+        # the last capture (capture_plug); None otherwise.
+        self.plug = None
         self.rows_per_user, self.block_rows, self.users = shape.rows_per_user, shape.block_rows, shape.users
         # QWEN_FAST_PADDED_BLOCK (variable-user rounds M2): the fewest live users a round of this
         # block may serve, the rest of its segments idle; None, the default, serves exactly
@@ -878,6 +882,7 @@ class PackedVerifierEngine:
             placeholders = [SimpleNamespace(position=capture_position,
                                             pages=torch.zeros((1, shape.page_width), dtype=torch.int32))
                             for user in range(shape.users)]
+            self.open_capture_plug(operations)
             self.stage = 'warm forward'
             # QWEN_FAST_VERIFY_T2 (#2): the placeholders put every user on page 0's first tile
             # row, which per-user chains would write concurrently; the warm forward - the one
@@ -931,6 +936,7 @@ class PackedVerifierEngine:
                 # next to the GDN commit traces and after the verify trace.
                 self.stage = 'fused commit capture'
                 self.fused.capture(capture_operation)
+            self.seal_capture_plug()
             if self.extent:
                 # S2 B6 (publication_warm.py): today's eager publication - what a packed round the fused
                 # commit refuses and every sequential step run - published and discarded once at every shape
@@ -987,6 +993,34 @@ class PackedVerifierEngine:
             self.report_failure(failure)
             self.close(wait=False)
             raise
+
+    def open_capture_plug(self, operations):
+        """QWEN_FAST_CAPTURE_PLUG=1 at QWEN_FAST_TP=4: the capture zone (capture_plug.Zone), opened before the block's first
+        eager forward so the warm forward, the fixture and every capture allocate in it. A failure raises: the attach fails
+        closed. Without the flag, nothing."""
+        if os.environ.get('QWEN_FAST_TP', '2') != '4':
+            return
+        settings = capture_plug.config()
+        if settings is None:
+            return
+        import trace_census
+
+        self.plug_sequence = trace_census.SEQUENCE
+        self.plug = capture_plug.Plug.packed(settings, operations, self.mesh, diagnostic)
+        self.plug.open()
+
+    def seal_capture_plug(self):
+        """After the block's last capture: plug every hole the captures freed, then let the later allocations in below the zone.
+        With the graph census on, every recorded freed extent of these captures is held against the zone's top (fail closed)."""
+        if self.plug is None:
+            return
+        import trace_census
+
+        self.stage = 'capture plug seal'
+        self.plug.seal()
+        self.plug.verify_extents([extent for trace in trace_census.TRACES if trace['seq'] > self.plug_sequence
+                                  for extent in trace['ranges']])
+        capture_plug.PACKED.append(self.plug)
 
     def take_extent_storage(self, operations, pool, shape, capture_position):
         """S2 (design W3): take the pool's extent storage for this shape (serving_buffer_pool.
@@ -1896,6 +1930,16 @@ class PackedVerifierEngine:
         if self.fixture is not None:
             self.fixture.close()
             self.fixture = None
+        if self.plug is not None:
+            # After the traces and the captured buffers: the plugs sat under them. A block closed without the device fence
+            # (a failed attach: the device may still run work above these blocks) frees nothing, ever.
+            if wait:
+                self.plug.close()
+                if self.plug in capture_plug.PACKED:
+                    capture_plug.PACKED.remove(self.plug)
+            else:
+                self.plug.abandon()
+            self.plug = None
         # The readers' page tables are the pool's: handed back, never freed here.
         if getattr(self, 'replay', None) is not None:
             self.replay.release()

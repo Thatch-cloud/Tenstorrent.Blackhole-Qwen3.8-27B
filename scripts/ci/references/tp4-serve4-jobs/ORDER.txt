@@ -1,0 +1,17 @@
+# The order of the tp4-serve-4 window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window. Image: the tag of the
+# tt-vllm image the job serves or builds (B4 builds tp4-serve-4). Minutes: runner time for ONE run of the job, a quad reset (1-3 min)
+# included.
+# B4 first: build tp4-serve-4 and smoke the PRODUCTION profile (audits on, caps on). A hang or a refusal on it stops the window.
+# FX is the fix arm (audits OFF, caps, the capture plug, the stall watch and the handle guard) on B4's image. Accepting a fix needs at
+# least FIVE consecutive passing runs of FX on the same image, each preceded by its own card reset (the template's actions say
+# reset smoke), on BOTH hang shapes: the steady engine build after 200+ packed rounds (the v172 shape, in concurrent4_steady and
+# replay_concurrent4) and the four-user sequential tail (the v164 and v163 shape, in concurrent4). Run it five times in a row; one
+# failure restarts the count and keeps the stall watch's triage output for the report. Two repeats cannot separate a fix from chance at
+# the hang rate seen so far. The minutes below are for one run.
+# F1 and F2 are the factorial arms with the instruments and the stall watch on (T1 audit only; T2 audit only): run them only if FX
+# stalls or the hang is still not localised, as the stall watch's triage is what they are for.
+B4-build-smoke stop tp4-serve-4 45
+FX-fix-arm optional tp4-serve-4 25
+F1-diag-t1 optional tp4-serve-4 20
+F2-diag-t2 optional tp4-serve-4 20

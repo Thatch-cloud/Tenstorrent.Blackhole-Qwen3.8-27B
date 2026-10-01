@@ -259,6 +259,14 @@ ARITHMETIC_NEUTRAL = frozenset((
     # The sequential-hang diagnostics (trace_census): host-side logging and a stall watchdog, no device operation.
     'QWEN_FAST_SEQ_DEADLINE_S', 'QWEN_FAST_SEQ_STAGE_LOG', 'QWEN_FAST_TRACE_CENSUS', 'QWEN_FAST_TRACE_CENSUS_GRAPH',
     'QWEN_FAST_CCL_HANDLE_LOG', 'QWEN_FAST_MEMORY_LEDGER_L1',
+    # tp4-serve-4: the stall watch and the handle guard (host-side, no arithmetic), the census's own switches, and the capture plug
+    # (it places inert buffers and never changes what a kernel computes: the fix arm's tokens are held against the audited arm's).
+    'QWEN_FAST_STALL_DEADLINE_S', 'QWEN_FAST_STALL_BUILD_S', 'QWEN_FAST_STALL_PREFILL_S', 'QWEN_FAST_STALL_KILL',
+    'QWEN_FAST_TRIAGE_ROOT', 'QWEN_FAST_TRIAGE_TOOLS', 'QWEN_FAST_TRIAGE_TIMEOUT_S', 'QWEN_FAST_TRIAGE_CMD',
+    'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_TRACE_CENSUS_FAIL_CLOSED',
+    'QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CAPTURE_PLUG_L1', 'QWEN_FAST_CAPTURE_PLUG_LEAVE_MB',
+    'QWEN_FAST_CAPTURE_PLUG_RESERVE_MB', 'QWEN_FAST_CAPTURE_PLUG_ENGINE_LEAVE_MB', 'QWEN_FAST_CAPTURE_PLUG_MIN_FREE_MB',
+    'QWEN_FAST_CAPTURE_PLUG_L1_LEAVE_KB', 'QWEN_FAST_CAPTURE_PLUG_L1_RESERVE_KB',
     # Paths (the 'qwen-tt' scope): where the runtime, the weight cache and the kernel cache live.
     'TT_METAL_HOME', 'TT_CACHE_PATH', 'TT_METAL_CACHE',
 ))

@@ -105,7 +105,7 @@ class InstalledTwin(unittest.TestCase):
         stack.start()
         self.addCleanup(stack.stop)
         for name in (trace_census.CENSUS_FLAG, trace_census.GRAPH_FLAG, trace_census.STAGE_LOG_FLAG,
-                     trace_census.CCL_LOG_FLAG, 'QWEN_FAST_TP'):
+                     trace_census.CCL_LOG_FLAG, trace_census.FAIL_CLOSED_FLAG, trace_census.HANDLE_GUARD_FLAG, 'QWEN_FAST_TP'):
             os.environ.pop(name, None)
         trace_census.reset()
         self.addCleanup(trace_census.reset)
@@ -189,6 +189,7 @@ class CaptureTests(InstalledTwin):
 
     def test_with_the_flag_a_capture_logs_its_site_views_and_freed_temporaries(self):
         os.environ[trace_census.CENSUS_FLAG] = '1'
+        os.environ[trace_census.GRAPH_FLAG] = '1'
         operations = CaptureOperations(nodes=[alloc(0x1000, 256), alloc(0x2000, 512), free(0x1000),
                                               alloc(0x3000, 64, 'L1'), free(0x3000)])
         mesh = SimpleNamespace(get_devices=lambda: operations.devices)
@@ -208,6 +209,7 @@ class CaptureTests(InstalledTwin):
 
     def test_a_graph_capture_that_raises_logs_once_and_the_capture_still_succeeds(self):
         os.environ[trace_census.CENSUS_FLAG] = '1'
+        os.environ[trace_census.GRAPH_FLAG] = '1'
         operations = CaptureOperations(graph_refuses=True)
         for _ in range(2):
             self.assertEqual(self.twin()(operations, SimpleNamespace(), lambda: 'output'), ('trace', 'output'))
@@ -217,15 +219,27 @@ class CaptureTests(InstalledTwin):
         self.assertNotIn(('graph_end',), operations.calls)
         self.assertEqual(trace_census.TRACES, [])
 
-    def test_the_graph_part_can_be_switched_off_on_its_own(self):
+    def test_the_graph_part_is_off_by_default_and_only_exactly_1_turns_it_on(self):
         os.environ[trace_census.CENSUS_FLAG] = '1'
-        os.environ[trace_census.GRAPH_FLAG] = '0'
+        for value in (None, '0', 'true', '', '2'):
+            if value is None:
+                os.environ.pop(trace_census.GRAPH_FLAG, None)
+            else:
+                os.environ[trace_census.GRAPH_FLAG] = value
+            operations = CaptureOperations()
+            self.twin()(operations, SimpleNamespace(), lambda: 'output')
+            self.assertEqual(operations.calls, [('begin', 0), ('end', 0)], value)
+            self.assertFalse(trace_census.graph_census_enabled(), value)
+        self.assertEqual(trace_census.TRACES, [], 'no graph, no ranges: a trace is recorded only with its freed extents')
+        os.environ[trace_census.GRAPH_FLAG] = '1'
+        self.assertTrue(trace_census.graph_census_enabled())
         operations = CaptureOperations()
         self.twin()(operations, SimpleNamespace(), lambda: 'output')
-        self.assertEqual(operations.calls, [('begin', 0), ('end', 0)])
+        self.assertEqual(operations.calls, [('graph_begin', 'normal'), ('begin', 0), ('end', 0), ('graph_end',)])
 
     def test_an_operation_that_raises_ends_the_graph_capture_and_propagates(self):
         os.environ[trace_census.CENSUS_FLAG] = '1'
+        os.environ[trace_census.GRAPH_FLAG] = '1'
         operations = CaptureOperations()
 
         def refuse():
@@ -274,6 +288,7 @@ class CaptureTests(InstalledTwin):
 
     def test_releasing_a_trace_forgets_its_temporaries_and_only_its_own(self):
         os.environ[trace_census.CENSUS_FLAG] = '1'
+        os.environ[trace_census.GRAPH_FLAG] = '1'
         operations = CaptureOperations(nodes=[alloc(0x1000, 256), free(0x1000)])
         for handle in ('first', 'second'):
             operations.begin_trace_capture = lambda mesh, cq_id, handle=handle: handle
@@ -315,19 +330,74 @@ class EngineCensusTests(InstalledTwin):
                                                     output=(later, None))})
         return SimpleNamespace(engine=engine)
 
-    def test_a_buffer_inside_an_earlier_traces_freed_temporaries_is_reported_per_chip(self):
+    def test_a_buffer_inside_an_earlier_traces_freed_temporaries_is_reported_per_chip_and_fails_closed(self):
         os.environ[trace_census.CENSUS_FLAG] = '1'
         operations = FakeOperations()
         trace_census.ENGINE_BOUNDARY = 5
         trace_census.TRACES.append(dict(seq=3, site='packed_verifier.capture:909', ranges=[(0x100000, 0x108000, 'DRAM')]))
-        trace_census.census_engine('request-E', self.request(operations), operations)
+        with self.assertRaisesRegex(trace_census.TraceOverlap, '2 buffer'):
+            trace_census.census_engine('request-E', self.request(operations), operations)
         overlaps = [line for line in self.lines if 'trace overlap' in line]
         self.assertEqual(overlaps, [
-            '[PINDIAG] trace overlap request=request-E rows=4 buffer=chip0@0x100000+2048/bank trace=packed_verifier.capture:909',
-            '[PINDIAG] trace overlap request=request-E rows=4 buffer=chip1@0x100000+2048/bank trace=packed_verifier.capture:909'])
+            '[PINDIAG] trace overlap request=request-E rows=4 buffer=DRAM chip0@0x100000+2048/bank trace=packed_verifier.capture:909',
+            '[PINDIAG] trace overlap request=request-E rows=4 buffer=DRAM chip1@0x100000+2048/bank trace=packed_verifier.capture:909'])
         extents = [line for line in self.lines if 'engine buffers' in line]
-        self.assertEqual(extents[0], '[PINDIAG] engine buffers request=request-E rows=4 chip0 buffers=2 lo=0x100000 hi=0x110800')
+        self.assertEqual(extents[0], '[PINDIAG] engine buffers request=request-E rows=4 DRAM chip0 buffers=2 lo=0x100000 hi=0x110800')
         self.assertIn('overlaps=2', self.lines[-1])
+
+    def test_the_fail_closed_flag_turns_the_raise_off_and_the_log_stays(self):
+        os.environ[trace_census.CENSUS_FLAG] = '1'
+        os.environ[trace_census.FAIL_CLOSED_FLAG] = '0'
+        operations = FakeOperations()
+        trace_census.ENGINE_BOUNDARY = 5
+        trace_census.TRACES.append(dict(seq=3, site='s', ranges=[(0x100000, 0x108000, 'DRAM')]))
+        trace_census.census_engine('request-E', self.request(operations), operations)
+        self.assertIn('overlaps=2', self.lines[-1])
+
+    def test_with_no_recorded_ranges_the_engine_is_not_walked_at_all(self):
+        os.environ[trace_census.CENSUS_FLAG] = '1'
+        operations = FakeOperations()
+        trace_census.TRACES.append(dict(seq=1, site='graph off', ranges=[], handle='t'))
+        trace_census.census_engine('request-E', self.request(operations), operations)
+        self.assertEqual(self.lines, ['[PINDIAG] trace census engine request=request-E traces=0 overlaps=0 skipped=no ranges recorded'])
+        self.assertEqual(operations.views, 0, 'no allocator read and no tensor walked: the v174 timeout')
+
+    def test_a_host_tensor_is_never_asked_for_its_address(self):
+        os.environ[trace_census.CENSUS_FLAG] = '1'
+        operations = FakeOperations()
+        operations.StorageType = SimpleNamespace(DEVICE='device', HOST='host')
+        request = self.request(operations)
+
+        def refuse():
+            raise RuntimeError('StorageType::HOST does not support buffer_address')
+
+        for tensor in (request.engine.buckets['k']['fixture'].resident, request.engine.buckets['k']['output'][0]):
+            for shard in tensor.shards:
+                shard.storage_type = lambda: 'host'
+                shard.buffer_address = refuse
+        trace_census.ENGINE_BOUNDARY = 5
+        trace_census.TRACES.append(dict(seq=3, site='s', ranges=[(0x100000, 0x108000, 'DRAM')]))
+        trace_census.census_engine('request-E', request, operations)
+        self.assertEqual([line for line in self.lines if 'overlap' in line and 'overlaps=' not in line], [])
+        self.assertIn('overlaps=0', self.lines[-1])
+        self.assertFalse(trace_census.on_device(operations, request.engine.buckets['k']['output'][0].shards[0]))
+        self.assertTrue(trace_census.on_device(operations, FakeShard(None, 0, (32, 32))), 'a shard that cannot say is read, guarded')
+
+    def test_an_l1_buffer_is_held_against_the_l1_write_set_and_not_the_drams(self):
+        os.environ[trace_census.CENSUS_FLAG] = '1'
+        operations = FakeOperations()
+        request = self.request(operations)
+        for tensor in (request.engine.buckets['k']['fixture'].resident, request.engine.buckets['k']['output'][0]):
+            for shard in tensor.shards:
+                shard.memory_config = lambda: SimpleNamespace(buffer_type='l1')
+        trace_census.ENGINE_BOUNDARY = 5
+        trace_census.TRACES.append(dict(seq=3, site='dram only', ranges=[(0x100000, 0x120000, 'DRAM')]))
+        trace_census.census_engine('request-E', request, operations)
+        self.assertIn('overlaps=0', self.lines[-1])
+        trace_census.TRACES.append(dict(seq=4, site='l1', ranges=[(0x100000, 0x100800, 'L1')]))
+        with self.assertRaises(trace_census.TraceOverlap):
+            trace_census.census_engine('request-E', request, operations)
+        self.assertTrue(any('buffer=L1 chip0@0x100000' in line for line in self.lines))
 
     def test_disjoint_ranges_and_the_engines_own_traces_report_nothing(self):
         os.environ[trace_census.CENSUS_FLAG] = '1'
@@ -342,6 +412,7 @@ class EngineCensusTests(InstalledTwin):
 
     def captured(self, nodes):
         os.environ[trace_census.CENSUS_FLAG] = '1'
+        os.environ[trace_census.GRAPH_FLAG] = '1'
         operations = CaptureOperations(nodes=nodes)
         mesh = SimpleNamespace(get_devices=lambda: operations.devices)
         trace_census.census_capture(ORIGINAL_CAPTURE)(operations, mesh, lambda: 'output')
@@ -362,9 +433,10 @@ class EngineCensusTests(InstalledTwin):
         # per bank [0x100000, 0x110000): the resident buffer is inside it, the later one (0x110000) is not
         ops = self.captured([alloc(0x100000, 0x80000), free(0x100000)])
         trace_census.ENGINE_BOUNDARY = 5
-        trace_census.census_engine('request-E', self.request(operations), operations)
+        with self.assertRaises(trace_census.TraceOverlap):
+            trace_census.census_engine('request-E', self.request(operations), operations)
         self.assertEqual([line.split(' buffer=')[1].split(' trace=')[0] for line in self.lines if 'trace overlap' in line],
-                         ['chip0@0x100000+2048/bank', 'chip1@0x100000+2048/bank'])
+                         ['DRAM chip0@0x100000+2048/bank', 'DRAM chip1@0x100000+2048/bank'])
         del self.lines[:]
         trace_census.census_release(ops.release_trace)('mesh', 'trace')
         trace_census.census_engine('request-E', self.request(operations), operations)
@@ -389,6 +461,7 @@ class EngineCensusTests(InstalledTwin):
         os.environ[trace_census.CENSUS_FLAG] = '1'
         operations = FakeOperations()
         request = SimpleNamespace(engine=SimpleNamespace(buckets=5))
+        trace_census.TRACES.append(dict(seq=0, site='s', ranges=[(0, 1, 'DRAM')]))
         trace_census.census_engine('request-E', request, operations)
         trace_census.census_engine('request-E', request, operations)
         self.assertEqual(len([line for line in self.lines if 'unavailable' in line]), 1)
@@ -422,6 +495,249 @@ class WatchTests(InstalledTwin):
             self.assertEqual(trace_census.watched_step('r', 1, lambda: 'done'), 'done')
         cancel.assert_not_called()
         self.assertIn('[PINDIAG] seq watchdog unavailable OSError: no fileno', self.lines)
+
+
+class WriteSetTests(unittest.TestCase):
+    def test_a_buffer_allocated_before_the_capture_and_freed_inside_it_joins_the_write_set_when_its_size_is_known(self):
+        sized = dict(node_type='buffer_deallocate', params=dict(address=0x500, type='DRAM', size=0x400))
+        per_bank = dict(node_type='buffer_deallocate', params=dict(address=0x900, type='L1', max_size_per_bank=0x20))
+        unsized = free(0x999)
+        self.assertEqual(trace_census.freed_ranges([sized, per_bank, unsized], banks=8),
+                         [(0x500, 0x580, 'DRAM'), (0x900, 0x920, 'L1')], 'an address alone says nothing and adds nothing')
+
+    def test_a_range_of_unnamed_type_is_held_against_both_kinds(self):
+        traces = [dict(ranges=[(0x100, 0x200, '?')], site='s')]
+        self.assertIs(trace_census.overlapping(0x180, 0x190, traces, 'DRAM'), traces[0])
+        self.assertIs(trace_census.overlapping(0x180, 0x190, traces, 'L1'), traces[0])
+        self.assertIsNone(trace_census.overlapping(0x200, 0x210, traces, 'DRAM'))
+
+
+class EagerAllocationTests(InstalledTwin):
+    def live(self):
+        trace_census.TRACES.append(dict(seq=1, site='packed_verifier.capture:909',
+                                        ranges=[(0x1000, 0x2000, 'DRAM'), (0x40, 0x80, 'L1')], handle='t'))
+
+    def test_no_live_ranges_means_nothing_is_parsed_or_raised(self):
+        self.assertEqual(trace_census.note_eager_allocations([alloc(0x1000, 64)], 'prefill'), 0)
+        self.assertEqual(self.lines, [])
+
+    def test_an_allocation_in_a_live_traces_write_set_is_logged_and_fails_closed(self):
+        self.live()
+        nodes = [alloc(0x1800, 0x100), alloc(0x3000, 0x100), alloc(0x50, 8, 'L1'), alloc(0x50, 8, 'DRAM')]
+        with self.assertRaisesRegex(trace_census.TraceOverlap, '2 allocation'):
+            trace_census.note_eager_allocations(nodes, 'window snapshot', banks=1)
+        self.assertEqual([line for line in self.lines if 'trace overlap' in line], [
+            '[PINDIAG] trace overlap site=window snapshot allocation=DRAM@0x1800+256/bank trace=packed_verifier.capture:909',
+            '[PINDIAG] trace overlap site=window snapshot allocation=L1@0x50+8/bank trace=packed_verifier.capture:909'])
+        self.assertIn('allocations=4 overlaps=2', self.lines[-1])
+
+    def test_log_only_when_fail_closed_is_off_and_clean_work_returns_zero(self):
+        self.live()
+        os.environ[trace_census.FAIL_CLOSED_FLAG] = '0'
+        self.assertEqual(trace_census.note_eager_allocations([alloc(0x1800, 8)], 'x', banks=1), 1)
+        self.assertEqual(trace_census.note_eager_allocations([alloc(0x5000, 8)], 'x', banks=1), 0)
+
+    def test_eager_graph_is_a_noop_without_both_flags_and_checks_the_work_with_them(self):
+        operations = CaptureOperations(nodes=[alloc(0x1800, 0x100)])
+        with trace_census.eager_graph(operations, 'prefill'):
+            pass
+        os.environ[trace_census.CENSUS_FLAG] = '1'
+        with trace_census.eager_graph(operations, 'prefill'):
+            pass
+        self.assertEqual(operations.calls, [], 'the graph flag is off by default: no graph capture around eager work either')
+        os.environ[trace_census.GRAPH_FLAG] = '1'
+        self.live()
+        with self.assertRaises(trace_census.TraceOverlap):
+            with trace_census.eager_graph(operations, 'prefill'):
+                operations.calls.append(('work',))
+        self.assertEqual(operations.calls, [('graph_begin', 'normal'), ('work',), ('graph_end',)])
+
+
+class Collectives:
+    """The shape of TT_CCL: two handles per getter, cycled by a host index that a replay does not advance."""
+
+    def __init__(self):
+        self.ag = [object(), object()]
+        self.barrier = [object(), object()]
+        self.index = 0
+
+    def get_and_cycle_ag_semaphore_handles(self):
+        handle = self.ag[self.index % 2]
+        self.index += 1
+        return [handle]
+
+    def get_and_cycle_barrier_semaphore_handle(self, axis=0):
+        return self.barrier[self.index % 2]
+
+
+class HandleGuardTests(InstalledTwin):
+    def setUp(self):
+        super().setUp()
+        os.environ[trace_census.HANDLE_GUARD_FLAG] = '1'
+        os.environ[trace_census.CENSUS_FLAG] = '1'
+        self.ccl = Collectives()
+        trace_census.note_collectives(self.ccl)
+        self.assertEqual(len(trace_census.TAPPED), 1)
+
+    def capture(self, trace, *calls):
+        operations = CaptureOperations()
+        operations.begin_trace_capture = lambda mesh, cq_id: trace
+
+        def work():
+            for call in calls:
+                call()
+            return 'output'
+
+        trace_census.census_capture(ORIGINAL_CAPTURE)(operations, SimpleNamespace(), work)
+
+    def ag(self):
+        return self.ccl.get_and_cycle_ag_semaphore_handles()
+
+    def test_the_mode_is_read_exactly(self):
+        for value, mode in (('1', 'fail'), ('log', 'log'), ('0', None), ('', None)):
+            self.assertEqual(trace_census.handle_guard_mode({trace_census.HANDLE_GUARD_FLAG: value}), mode)
+        self.assertIsNone(trace_census.handle_guard_mode({}))
+        with self.assertRaises(ValueError):
+            trace_census.handle_guard_mode({trace_census.HANDLE_GUARD_FLAG: 'yes'})
+
+    def test_the_guard_alone_records_the_handles_without_the_census_or_any_allocator_read(self):
+        del os.environ[trace_census.CENSUS_FLAG]
+        operations = CaptureOperations()
+        operations.begin_trace_capture = lambda mesh, cq_id: 'solo'
+        trace_census.census_capture(ORIGINAL_CAPTURE)(operations, SimpleNamespace(get_devices=lambda: operations.devices),
+                                                      lambda: self.ag() and 'output')
+        self.assertIn('solo', trace_census.TRACE_SLOTS)
+        self.assertEqual(operations.views, 0)
+        self.assertEqual([line for line in self.lines if 'census seq' in line], [])
+        self.assertEqual(len([line for line in self.lines if 'trace handles' in line]), 1)
+
+    def test_a_capture_records_the_first_and_last_handle_per_slot_and_logs_them(self):
+        self.capture('t1', self.ag, self.ag, self.ag)
+        slots = trace_census.TRACE_SLOTS['t1']
+        (slot, (first, last)), = slots.items()
+        self.assertEqual(slot[:2], ('shared', 'get_and_cycle_ag_semaphore_handles'))
+        self.assertEqual(first, (id(self.ccl.ag[0]),))
+        self.assertEqual(last, (id(self.ccl.ag[0]),), 'three calls: handle 0, 1, 0')
+        lines = [line for line in self.lines if 'trace handles' in line]
+        self.assertEqual(len(lines), 1)
+        self.assertIn('slot=shared.ag_semaphore_handles first=', lines[0])
+        self.assertEqual(trace_census.PENDING, {}, 'a capture enqueues nothing')
+
+    def test_a_replay_that_starts_on_the_handle_the_previous_replay_ended_on_is_refused_before_it_is_enqueued(self):
+        self.capture('a', self.ag)          # handle 0
+        self.ccl.index = 0
+        self.capture('b', self.ag)          # handle 0 again: the same slot, the same handle
+        ran = []
+        execute = trace_census.census_execute(lambda mesh, trace, cq_id=0, blocking=True: ran.append(trace))
+        execute('mesh', 'a', cq_id=0, blocking=False)
+        with self.assertRaises(trace_census.UnfencedHandleReuse):
+            execute('mesh', 'b', cq_id=0, blocking=False)
+        self.assertEqual(ran, ['a'], 'the second replay was never enqueued')
+        self.assertEqual(len(trace_census.VIOLATIONS), 1)
+
+    def test_a_fence_between_the_replays_makes_the_same_handles_safe(self):
+        self.capture('a', self.ag)
+        self.ccl.index = 0
+        self.capture('b', self.ag)
+        ran = []
+        execute = trace_census.census_execute(lambda mesh, trace, cq_id=0, blocking=True: ran.append(trace))
+        synchronize = trace_census.census_synchronize(lambda mesh: None)
+        execute('mesh', 'a', cq_id=0, blocking=False)
+        synchronize('mesh')
+        execute('mesh', 'b', cq_id=0, blocking=False)
+        self.assertEqual((ran, trace_census.VIOLATIONS), (['a', 'b'], []))
+
+    def test_a_blocking_replay_is_a_fence_for_the_one_after_it(self):
+        self.capture('a', self.ag)
+        self.ccl.index = 0
+        self.capture('b', self.ag)
+        ran = []
+        execute = trace_census.census_execute(lambda mesh, trace, cq_id=0, blocking=True: ran.append(trace))
+        execute('mesh', 'a', cq_id=0, blocking=True)
+        execute('mesh', 'b', cq_id=0, blocking=True)
+        self.assertEqual((ran, trace_census.VIOLATIONS, trace_census.PENDING), (['a', 'b'], [], {}))
+
+    def test_an_eager_collective_after_a_non_blocking_replay_on_the_same_handle_is_refused(self):
+        self.capture('a', self.ag)          # ends on handle 0; the index is now 1
+        self.ccl.index = 0                  # the eager index happens to be back on 0
+        execute = trace_census.census_execute(lambda mesh, trace, cq_id=0, blocking=True: None)
+        execute('mesh', 'a', cq_id=0, blocking=False)
+        with self.assertRaisesRegex(trace_census.UnfencedHandleReuse, 'eager collective'):
+            self.ag()
+        trace_census.census_synchronize(lambda mesh: None)('mesh')
+        self.ccl.index = 0
+        self.ag()                           # after the fence it is fine
+
+    def test_eager_collectives_alternate_by_construction_and_never_trip_it(self):
+        for _ in range(10):
+            self.ag()
+            self.ccl.get_and_cycle_barrier_semaphore_handle()
+        self.assertEqual(trace_census.VIOLATIONS, [])
+
+    def test_log_mode_logs_and_lets_the_replay_through(self):
+        os.environ[trace_census.HANDLE_GUARD_FLAG] = 'log'
+        self.capture('a', self.ag)
+        self.ccl.index = 0
+        self.capture('b', self.ag)
+        ran = []
+        execute = trace_census.census_execute(lambda mesh, trace, cq_id=0, blocking=True: ran.append(trace))
+        execute('mesh', 'a', cq_id=0, blocking=False)
+        execute('mesh', 'b', cq_id=0, blocking=False)
+        self.assertEqual(ran, ['a', 'b'])
+        self.assertTrue(any('unfenced same-handle collective: a replay starts' in line for line in self.lines))
+
+    def test_off_the_twins_are_the_originals_call_and_install_binds_them_only_with_the_guard(self):
+        del os.environ[trace_census.HANDLE_GUARD_FLAG]
+        ran = []
+        execute = trace_census.census_execute(lambda *args, **kwargs: ran.append(args) or 'r')
+        self.assertEqual(execute('mesh', 't', cq_id=0, blocking=False), 'r')
+        os.environ['QWEN_FAST_TP'] = '4'
+
+        def fake():
+            return SimpleNamespace(release_trace=lambda mesh, trace: None, execute_trace=lambda *a, **k: None,
+                                   synchronize_device=lambda mesh: None)
+
+        unguarded = fake()
+        with patch.dict(sys.modules, {'ttnn': unguarded}):
+            tp_addresses.install()
+            self.assertTrue(hasattr(unguarded.release_trace, 'census_of'))
+            self.assertFalse(hasattr(unguarded.execute_trace, 'census_of'), 'the hot-path twins stay unbound without the guard')
+            self.assertFalse(hasattr(unguarded.synchronize_device, 'census_of'))
+            tp_addresses.uninstall()
+        os.environ[trace_census.HANDLE_GUARD_FLAG] = '1'
+        guarded = fake()
+        with patch.dict(sys.modules, {'ttnn': guarded}):
+            tp_addresses.install()
+            self.assertTrue(hasattr(guarded.execute_trace, 'census_of') and hasattr(guarded.synchronize_device, 'census_of'))
+            tp_addresses.uninstall()
+
+    def test_releasing_a_trace_forgets_its_slots(self):
+        self.capture('a', self.ag)
+        trace_census.census_release(lambda mesh, trace: None)('mesh', 'a')
+        self.assertNotIn('a', trace_census.TRACE_SLOTS)
+
+
+class StallWiringTests(InstalledTwin):
+    def test_with_the_stall_flag_a_sequential_step_is_a_watched_scope_and_faulthandlers_exit_is_not_armed(self):
+        import stall_watch
+        os.environ[stall_watch.DEADLINE_FLAG] = '120'
+        os.environ[trace_census.SEQ_DEADLINE_FLAG] = '120'
+        seen = []
+
+        class Scope:
+            def __enter__(self):
+                seen.append('enter')
+
+            def __exit__(self, *exc):
+                seen.append('exit')
+                return False
+
+        with patch.object(stall_watch, 'scope', lambda kind, label: seen.append((kind, label)) or Scope()), \
+                patch('faulthandler.dump_traceback_later') as dump:
+            self.assertEqual(trace_census.watched_step('request-1', 4, lambda: 'done'), 'done')
+        dump.assert_not_called()
+        self.assertEqual(seen, [('step', 'sequential request=request-1 rows=4'), 'enter', 'exit'])
+        self.assertTrue(trace_census.watching({stall_watch.DEADLINE_FLAG: '5'}))
 
 
 if __name__ == '__main__':

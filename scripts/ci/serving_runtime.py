@@ -5,10 +5,13 @@ from functools import partial
 import json
 import os
 import re
+import sys
 import time
 
 from dflash_device import PreparedDraftWeights, pindiag
+import capture_plug
 import memory_ledger
+import stall_watch
 import trace_census
 from serving_buffer_pool import ServingBufferPool, dram_line
 from serving_cache_owner import ServingCacheOwner
@@ -193,6 +196,38 @@ def prefill_warm_before_traces(runner, model, scheduler_requests, environ=None, 
     return True
 
 
+def open_engine_plug(operations, model, environ=None):
+    """QWEN_FAST_CAPTURE_PLUG=1 with QWEN_FAST_CAPTURE_PLUG_ENGINES=1 at four cards: one engine's capture zone (capture_plug.Plug.engine),
+    opened before its build and kept under the packed block's zone, or None. The pair and an unset flag get None."""
+    environ = os.environ if environ is None else environ
+    if environ.get('QWEN_FAST_TP', '2') != '4':
+        return None
+    settings = capture_plug.config(environ)
+    if settings is None or not settings['engines']:
+        return None
+    plug = capture_plug.Plug.engine(settings, operations, model.mesh_device, lambda message: pindiag('{}', message),
+                                    ceiling=capture_plug.packed_ceiling())
+    plug.monitor('before engine build')
+    plug.open()
+    return plug
+
+
+def seal_engine_plug(plug, request, sequence):
+    """The engine is built: plug the holes its captures freed, hold every recorded freed extent of them against the zone's top
+    (the graph census, when on), and tie the plugs' life to the engine's: they go back when request.close has released its traces."""
+    plug.seal()
+    plug.verify_extents([extent for trace in trace_census.TRACES if trace['seq'] > sequence for extent in trace['ranges']])
+    inner = request.close
+
+    def close(*args, **kwargs):
+        try:
+            return inner(*args, **kwargs)
+        finally:
+            plug.close()
+
+    request.close = close
+
+
 def prefill_tripwire(model, capture_factory, bridge_factory, environ=None):
     """(capture_factory, bridge_factory), wrapped at four cards to log one line per prefill segment (one per prompt
     without chunked prefill): '[PINDIAG] four-card prefill programs=A->B window=W prompt=P', the program-cache count
@@ -219,8 +254,12 @@ def prefill_tripwire(model, capture_factory, bridge_factory, environ=None):
             dflash_prefill_window.window_programs(reset=True)
             before = program_count(model)
             try:
-                with segment() as value:
-                    yield value
+                # QWEN_FAST_STALL_DEADLINE_S: a prefill segment is a watched scope; under the census graph flag its
+                # allocations are held against every live trace (eager work, never inside a trace capture).
+                with stall_watch.scope('prefill', 'segment prompt=%s' % position), \
+                        trace_census.eager_graph(sys.modules.get('ttnn'), 'prefill segment prompt=%s' % position):
+                    with segment() as value:
+                        yield value
             finally:
                 pindiag(PREFILL_PROGRAMS_MARKER + '{}->{} window={} prompt={}', before, program_count(model),
                         dflash_prefill_window.window_programs(), position)
@@ -673,7 +712,22 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             if sticky:
                 began = time.perf_counter()
             trace_census.engine_begin()
-            request = create_request() if experiment is None else experiment.create(create_request)
+            sequence = trace_census.SEQUENCE
+            engine_plug = open_engine_plug(operations, model)
+            try:
+                # QWEN_FAST_STALL_DEADLINE_S: the engine build (its captured forwards) is a watched scope.
+                with stall_watch.scope('build', 'engine request=%s' % str(state.req_id)[:48]):
+                    request = create_request() if experiment is None else experiment.create(create_request)
+                if engine_plug is not None:
+                    try:
+                        seal_engine_plug(engine_plug, request, sequence)
+                    except BaseException:
+                        request.close(state.req_id)
+                        raise
+            except BaseException:
+                if engine_plug is not None:
+                    engine_plug.close()
+                raise
             if sticky:
                 # Sticky sessions: the engine build per request, so a gate can split a hit's TTFT into
                 # its tail prefill and the build phase 1 still pays (STICKY_ENGINE_MARKER).

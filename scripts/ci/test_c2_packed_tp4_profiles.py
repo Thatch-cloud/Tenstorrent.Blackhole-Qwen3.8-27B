@@ -53,11 +53,19 @@ VERIFY_AUDITS = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': 
 TAIL_CAPS = {'QWEN_FAST_BUDGET_CAP': '1', 'QWEN_FAST_SEQ_DEADLINE_S': '120'}
 # The hang diagnosis's profiles: the speed twin as it stood before the caps (the environment of SS v164) with the caps OFF
 # and the host-only instruments on; the factorial arms turn one verify audit back on each.
+# (tp4-serve-4) plus the stall watch (stacks, then the pinned triage, then the end) and the handle guard in log mode.
 DIAG_INSTRUMENTS = {'QWEN_FAST_BUDGET_CAP': '0', 'QWEN_FAST_SEQ_DEADLINE_S': '120', 'QWEN_FAST_SEQ_STAGE_LOG': '1',
-                    'QWEN_FAST_TRACE_CENSUS': '1', 'QWEN_FAST_CCL_HANDLE_LOG': '1', 'QWEN_FAST_MEMORY_LEDGER_L1': '1'}
-DIAG_PROFILES = {'c2-packed-tp4-diag': {}, 'c2-packed-tp4-diag-nograph': {'QWEN_FAST_TRACE_CENSUS_GRAPH': '0'},
-                 'c2-packed-tp4-diag-t1': {'QWEN_FAST_VERIFY_T1_AUDIT': '1'},
-                 'c2-packed-tp4-diag-t2': {'QWEN_FAST_VERIFY_T2_AUDIT': '1'}}
+                    'QWEN_FAST_TRACE_CENSUS': '1', 'QWEN_FAST_CCL_HANDLE_LOG': '1', 'QWEN_FAST_MEMORY_LEDGER_L1': '1',
+                    'QWEN_FAST_STALL_DEADLINE_S': '120', 'QWEN_FAST_CCL_HANDLE_GUARD': 'log'}
+# The graph census is off unless it is exactly '1': the first diag arm turns it on explicitly, every other one says so off.
+DIAG_PROFILES = {'c2-packed-tp4-diag': {'QWEN_FAST_TRACE_CENSUS_GRAPH': '1'},
+                 'c2-packed-tp4-diag-nograph': {'QWEN_FAST_TRACE_CENSUS_GRAPH': '0'},
+                 'c2-packed-tp4-diag-t1': {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_TRACE_CENSUS_GRAPH': '0'},
+                 'c2-packed-tp4-diag-t2': {'QWEN_FAST_VERIFY_T2_AUDIT': '1', 'QWEN_FAST_TRACE_CENSUS_GRAPH': '0'}}
+# The fix arm: the audits-off speed twin plus the capture plug (flags default off everywhere else), the stall watch and the guard.
+FIX_ENV = {'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1', 'QWEN_FAST_TRACE_CENSUS_GRAPH': '0',
+           'QWEN_FAST_STALL_DEADLINE_S': '120', 'QWEN_FAST_CCL_HANDLE_GUARD': '1'}
+FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
 SPEED = 'QWEN_FAST_TP_KV_SLIDE'
@@ -265,7 +273,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed') + tuple(DIAG_PROFILES):
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES):
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -292,17 +300,28 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_diag_instruments_are_the_host_only_flags_and_every_tail_flag_parses(self):
         import trace_census
-        for name in ('c2-packed-tp4', 'c2-packed-tp4-speed') + tuple(DIAG_PROFILES):
+        import stall_watch
+        for name in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES):
             env = profiles()[name]['env']
             with self.subTest(profile=name):
                 self.assertEqual(trace_census.seq_deadline(env), 120.0)
                 self.assertIn(env['QWEN_FAST_BUDGET_CAP'], ('0', '1'))
+                self.assertEqual(stall_watch.enabled(env), name in DIAG_PROFILES or name.endswith('-fix'))
+                if stall_watch.enabled(env):
+                    self.assertEqual(stall_watch.deadline('step', env), 120.0)
+                self.assertIn(trace_census.handle_guard_mode(env), (None, 'log', 'fail'))
         diag = profiles()['c2-packed-tp4-diag']['env']
         for flag in ('QWEN_FAST_SEQ_STAGE_LOG', 'QWEN_FAST_TRACE_CENSUS', 'QWEN_FAST_CCL_HANDLE_LOG', 'QWEN_FAST_MEMORY_LEDGER_L1'):
             self.assertEqual(diag[flag], '1', flag)
-        self.assertNotIn('QWEN_FAST_TRACE_CENSUS_GRAPH', diag, 'the graph census is on by default in the diag profile')
-        self.assertEqual(profiles()['c2-packed-tp4-diag-nograph']['env']['QWEN_FAST_TRACE_CENSUS_GRAPH'], '0',
-                         'the fallback twin turns only the graph part off')
+        self.assertEqual(diag['QWEN_FAST_TRACE_CENSUS_GRAPH'], '1', 'the graph census is off by default now: T5 turns it on explicitly')
+        self.assertTrue(trace_census.graph_census_enabled(diag))
+        for name in ('c2-packed-tp4-diag-nograph', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2'):
+            env = profiles()[name]['env']
+            self.assertEqual(env['QWEN_FAST_TRACE_CENSUS_GRAPH'], '0', name)
+            self.assertFalse(trace_census.graph_census_enabled(env), name)
+            self.assertEqual(trace_census.handle_guard_mode(env), 'log', name)
+        for name in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-gate'):
+            self.assertFalse(trace_census.graph_census_enabled(profiles()[name]['env']), name)
 
     def test_the_admission_accepts_each_tail_profile_over_the_image_environment_and_only_the_gate_ones_carry_the_waiver(self):
         image = image_env()
@@ -312,6 +331,68 @@ class TailProfileTests(unittest.TestCase):
                 self.assertEqual(admission.width(environ), 4)
                 self.assertEqual(admission.check_environment(environ, M3), [])
         self.assertNotIn('QWEN_C2_GATE_PROFILE', profiles()['c2-packed-tp4']['env'])
+
+
+class FixProfileTests(unittest.TestCase):
+    """tp4-serve-4: the fix arm (c2-packed-tp4-speed-fix) and the flags that exist only in it and the diagnosis arms."""
+
+    def test_the_fix_arm_is_the_audits_off_speed_twin_plus_exactly_the_fix_flags(self):
+        found = profiles()
+        mine, speed = found['c2-packed-tp4-speed-fix'], found['c2-packed-tp4-speed']
+        self.assertEqual(mine['env'], dict(speed['env'], **FIX_ENV))
+        self.assertEqual({key for key in set(mine['env']) | set(speed['env']) if mine['env'].get(key) != speed['env'].get(key)}, set(FIX_ENV))
+        for key in set(mine) | set(speed):
+            if key not in ('description', 'env'):
+                self.assertEqual(mine.get(key), speed.get(key), key)
+        self.assertIs(mine['gate_only'], True)
+        self.assertTrue(mine['description'].startswith('GATE ONLY'))
+        self.assertEqual((mine['env']['QWEN_FAST_VERIFY_T1_AUDIT'], mine['env']['QWEN_FAST_VERIFY_T2_AUDIT']), ('0', '0'), 'audits OFF')
+        self.assertEqual(mine['env']['QWEN_FAST_BUDGET_CAP'], '1', 'the tail caps stay on')
+        self.assertEqual(contract.mesh_problems(dict(mine, name='c2-packed-tp4-speed-fix')), [])
+        self.assertIn('c2-packed-tp4-speed-fix', list(found)[list(found).index('c2-packed-tp4-speed'):][:2])
+
+    def test_the_fix_flags_parse_and_the_graph_census_is_off_in_the_fix_arm(self):
+        import capture_plug
+        import stall_watch
+        import trace_census
+        env = profiles()['c2-packed-tp4-speed-fix']['env']
+        settings = capture_plug.config(env)
+        self.assertTrue(settings['engines'])
+        self.assertFalse(settings['l1'], 'L1 stays opt-in on top of the plug')
+        self.assertEqual(trace_census.handle_guard_mode(env), 'fail')
+        self.assertFalse(trace_census.graph_census_enabled(env))
+        self.assertEqual(stall_watch.deadline('step', env), 120.0)
+
+    def test_no_other_profile_carries_the_plug_the_guard_in_fail_mode_or_the_stall_watch_except_the_diagnosis_arms(self):
+        for name, profile in profiles().items():
+            env = profile['env']
+            with self.subTest(profile=name):
+                self.assertNotIn('QWEN_FAST_CAPTURE_PLUG', env if name != 'c2-packed-tp4-speed-fix' else {})
+                self.assertNotIn('QWEN_FAST_CAPTURE_PLUG_ENGINES', env if name != 'c2-packed-tp4-speed-fix' else {})
+                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix':
+                    for flag in ('QWEN_FAST_STALL_DEADLINE_S', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_TRACE_CENSUS_GRAPH'):
+                        self.assertNotIn(flag, env)
+
+    def test_the_production_profile_is_untouched_by_this_window(self):
+        env = profiles()['c2-packed-tp4']['env']
+        for flag in FIX_FLAGS:
+            self.assertNotIn(flag, env)
+
+    def test_the_admission_accepts_the_fix_arm_over_the_image_environment(self):
+        environ = dict(image_env(), **profiles()['c2-packed-tp4-speed-fix']['env'])
+        self.assertEqual(admission.width(environ), 4)
+        self.assertEqual(admission.check_environment(environ, M3), [])
+
+    def test_the_pair_never_reads_the_plug_flag(self):
+        import os
+        import capture_plug
+        for name in PAIR_DIGESTS:
+            self.assertIsNone(capture_plug.config(profiles()[name]['env']), name)
+        with open(HERE / 'packed_verifier.py', encoding='utf-8') as handle:
+            source = handle.read()
+        self.assertIn("os.environ.get('QWEN_FAST_TP', '2') != '4'", source, 'the packed block opens a plug at four cards only')
+        with open(HERE / 'serving_runtime.py', encoding='utf-8') as handle:
+            self.assertIn("environ.get('QWEN_FAST_TP', '2') != '4'", handle.read(), 'and so does the engine plug')
 
 
 class DraftProfileTests(unittest.TestCase):

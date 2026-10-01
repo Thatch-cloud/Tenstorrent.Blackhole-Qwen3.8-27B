@@ -290,7 +290,7 @@ class PlanTests(unittest.TestCase):
                           'c2-packed-tp4', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-nograph', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2',
                           'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
                           'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-quad',
-                          'c2-packed-tp4-gate-ring', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
+                          'c2-packed-tp4-gate-ring', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix', 'c2-packed-tp4-speed-noslide',
                           'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad'])
         # The four-card S2 profiles serve their pair twins' edge (their engine block is the twin's).
         for four, twin in (('c2-packed-tp4', 'c2-packed'), ('c2-packed-tp4-gate', 'c2-packed-gate')):

@@ -7,7 +7,10 @@ of the arm with them off.
 
 QWEN_FAST_SEQ_DEADLINE_S=<seconds>: serving_sequential_step.step_request arms faulthandler.dump_traceback_later around each
   request.step. The timer is a C thread, so it fires while the stalled call holds the GIL: it writes every thread's Python stack
-  to stderr (the EngineCore log) and exits the process. It does not unwedge the card; the next job's reset does.
+  to stderr (the EngineCore log) and exits the process. It does not unwedge the card; the next job's reset does. When
+  QWEN_FAST_STALL_DEADLINE_S is set as well, the stall watch (stall_watch.py) replaces this exit: the stacks are dumped without
+  ending the process, the pinned tt-metal triage reads the hung mesh, and only then is the process ended; the watch also covers
+  packed rounds, engine builds and prefill segments, which this flag never did.
 QWEN_FAST_SEQ_STAGE_LOG=1: '[SEQ-STAGE] request= rows= stage= begin|end' before each stage of a sequential step (the step,
   verifier_engine_tp.VerifierEngine.verify's stages, publish, serving_packed_step's publication stages), flushed as it is
   written, so the last line names the stage the process entered and never left. Also one '[PINDIAG] first replay' line per
@@ -18,14 +21,24 @@ QWEN_FAST_CCL_HANDLE_LOG=1: the integer state of every collectives object the se
   and by eager prefill) and sampler (the pinned sampler's gathers). This is the test for the documented hang mode: an eager
   collective reusing a handle a replayed trace baked.
 QWEN_FAST_TRACE_CENSUS=1: every trace capture logs its call site, the DRAM and L1 allocator views before and after, and the
-  collectives' state before and after; best effort (QWEN_FAST_TRACE_CENSUS_GRAPH=0 turns it off) the address ranges the
-  capture allocated and freed again - its temporaries, which a replay rewrites - from a ttnn.graph capture around it.
-  census_engine then lists each width's persistent buffer extents per chip and reports every buffer that sits inside the freed
-  temporaries of a trace that is still live ('[PINDIAG] trace overlap'): a replay of that trace writes into the buffer. Every
-  range here is a per-bank extent (an address is the same offset in each DRAM bank), and a released trace's ranges are dropped.
-  The graph part is NOT fail-soft end to end: the begin, end and parse are guarded, but the graph processor's work on each
-  captured operation runs inside the capture itself, and an error there fails the trace capture. QWEN_FAST_TRACE_CENSUS_GRAPH=0
-  (the c2-packed-tp4-diag-nograph profile) is the fallback that keeps everything else.
+  collectives' state before and after. With QWEN_FAST_TRACE_CENSUS_GRAPH=1 (OFF unless it is exactly '1') it also records the
+  address ranges the capture allocated and freed again - its temporaries, which a replay rewrites - from a ttnn.graph capture
+  around it. census_engine then lists each width's persistent buffer extents per chip and reports every buffer that sits inside
+  the write set of a trace that is still live ('[PINDIAG] trace overlap'): a replay of that trace writes into the buffer. The write
+  set is every extent the capture freed, DRAM and L1, including a buffer allocated BEFORE the capture and freed inside it when the
+  graph names its size. Every range is a per-bank extent (an address is the same offset in each bank), and a released trace's
+  ranges are dropped. An overlap fails closed (RuntimeError from census_engine, so the engine is refused) unless
+  QWEN_FAST_TRACE_CENSUS_FAIL_CLOSED=0. census_engine returns at once, after one line, when no trace has recorded ranges, and it
+  never reads a host tensor's address (the 'StorageType::HOST doesn't support buffer_address' error of v174).
+  The graph part is why the default is off: the graph processor's work on each captured operation runs INSIDE the trace capture,
+  strings every tensor argument, and a tensor str() reads the device, which a trace capture refuses ('Reads are not supported
+  during trace capture': v173 died at attach on it). With the graph off the census records no ranges and the overlap check has
+  nothing to check; record_events() is the capture-free way to feed it (allocation and free events from a graph capture around
+  EAGER work, never around a trace capture), and note_eager_allocations() checks such events against every live trace.
+QWEN_FAST_CCL_HANDLE_GUARD=log|1: wraps the registered collectives' get_and_cycle_* getters and the execute_trace and
+  synchronize_device entry points. Per trace the handle each collective slot held at its first and last collective is recorded
+  ('[PINDIAG] trace handles ...'); between two fences a non-blocking replay that follows another on the same slot with the very
+  handle the first one ended on is an unfenced same-handle reuse, logged ('log') or refused before it is enqueued ('1').
 
 install() is a twin of attention_batch.capture_operation, bound by tp_addresses.install() at QWEN_FAST_TP=4 only; attention_batch.py
 stays the pair's pinned bytes. Without the flag the twin returns the original's result and makes the original's calls.
@@ -42,6 +55,8 @@ STAGE_LOG_FLAG = 'QWEN_FAST_SEQ_STAGE_LOG'
 CCL_LOG_FLAG = 'QWEN_FAST_CCL_HANDLE_LOG'
 CENSUS_FLAG = 'QWEN_FAST_TRACE_CENSUS'
 GRAPH_FLAG = 'QWEN_FAST_TRACE_CENSUS_GRAPH'
+FAIL_CLOSED_FLAG = 'QWEN_FAST_TRACE_CENSUS_FAIL_CLOSED'
+HANDLE_GUARD_FLAG = 'QWEN_FAST_CCL_HANDLE_GUARD'
 ID_WIDTH = 48
 LINE_BUDGET = 240
 CCL_LINE_BUDGET = 180
@@ -74,6 +89,15 @@ def census_enabled():
     return flag_on(CENSUS_FLAG)
 
 
+def graph_census_enabled(environ=None):
+    """The ttnn.graph part of the census: OFF unless QWEN_FAST_TRACE_CENSUS_GRAPH is exactly '1'."""
+    return flag_on(GRAPH_FLAG, environ)
+
+
+def fail_closed(environ=None):
+    return (os.environ if environ is None else environ).get(FAIL_CLOSED_FLAG, '1') != '0'
+
+
 def seq_deadline(environ=None):
     """QWEN_FAST_SEQ_DEADLINE_S as a positive number of seconds, None when unset; anything else is a configuration error."""
     text = (os.environ if environ is None else environ).get(SEQ_DEADLINE_FLAG)
@@ -89,7 +113,9 @@ def seq_deadline(environ=None):
 
 
 def watching(environ=None):
-    return seq_deadline(environ) is not None or stage_log_enabled()
+    import stall_watch
+
+    return seq_deadline(environ) is not None or stage_log_enabled() or stall_watch.enabled(environ)
 
 
 def log(message):
@@ -202,8 +228,16 @@ def watched_step(request_id, rows, call):
     """`call()` between its '[SEQ-STAGE] ... stage=step' lines and, under QWEN_FAST_SEQ_DEADLINE_S, a faulthandler timer
     that dumps every thread's stack and exits the process if the step has not returned in time. The timer is cancelled
     whatever the step does. A stderr faulthandler cannot write to is logged and the step runs unwatched."""
+    import stall_watch
+
     deadline = seq_deadline()
     stage(request_id, rows, 'step', 'begin')
+    if stall_watch.enabled():
+        # QWEN_FAST_STALL_DEADLINE_S: the stall watch replaces faulthandler's exit=True: stacks, then the triage, then the end.
+        with stall_watch.scope('step', 'sequential request=%s rows=%s' % (request_label(request_id), rows)):
+            result = call()
+        stage(request_id, rows, 'step', 'end')
+        return result
     armed = False
     if deadline is not None:
         try:
@@ -304,6 +338,13 @@ def freed_ranges(nodes, banks=1):
         else:
             key = next((key for key in reversed(list(live)) if key[1] == address), None)
         if key not in live:
+            # Allocated before the capture and freed inside it: the capture could reuse its bytes for a temporary, so it
+            # belongs to the trace's write set when the node says how big it was (an address alone says nothing).
+            known = _per_bank(params)
+            if known is None and params.get('size') is not None:
+                known = int(params['size']) if 'DRAM' not in str(params.get('type', '?')).upper() else -(-int(params['size']) // max(banks, 1))
+            if known:
+                freed.append((address, address + known, str(params.get('type', '?'))))
             continue
         size, per_bank = live.pop(key)
         buffer_type = key[0]
@@ -323,10 +364,29 @@ def census_capture(original):
     """The twin of capture_operation: the original's call and result, with the census around it under QWEN_FAST_TRACE_CENSUS=1."""
     def capture_operation(operations, mesh, operation):
         if not census_enabled():
-            return original(operations, mesh, operation)
+            if handle_guard_mode() is None:
+                return original(operations, mesh, operation)
+            return guarded(original, operations, mesh, operation, caller_site(2))
         return censused(original, operations, mesh, operation, caller_site(2))
     capture_operation.census_of = original
     return capture_operation
+
+
+def guarded(original, operations, mesh, operation, site):
+    """The capture under QWEN_FAST_CCL_HANDLE_GUARD alone (no census): only the handles its collectives baked are recorded, no
+    allocator view is read and nothing is logged beyond the per-slot lines."""
+    global SEQUENCE
+    SEQUENCE += 1
+    seq = SEQUENCE
+    begin_capture_slots()
+    try:
+        trace, result = original(operations, mesh, operation)
+    except BaseException:
+        if CAPTURE_SLOTS:
+            CAPTURE_SLOTS.pop()
+        raise
+    end_capture_slots(trace, seq, site)
+    return trace, result
 
 
 def censused(original, operations, mesh, operation, site):
@@ -335,14 +395,21 @@ def censused(original, operations, mesh, operation, site):
     seq = SEQUENCE
     before, state_before = memory_views(operations, mesh), collective_groups()
     started = False
-    if os.environ.get(GRAPH_FLAG, '1') != '0':
+    if graph_census_enabled():
         try:
             operations.graph.begin_graph_capture(operations.graph.RunMode.NORMAL)
             started = True
         except BaseException as failure:
             unavailable('graph capture %s: %s' % (type(failure).__name__, str(failure)[:80]))
+    guarded = handle_guard_mode() is not None
+    if guarded:
+        begin_capture_slots()
     try:
         trace, result = original(operations, mesh, operation)
+    except BaseException:
+        if guarded and CAPTURE_SLOTS:
+            CAPTURE_SLOTS.pop()
+        raise
     finally:
         nodes = None
         if started:
@@ -357,6 +424,8 @@ def censused(original, operations, mesh, operation, site):
         except BaseException as failure:
             unavailable('graph parse %s: %s' % (type(failure).__name__, str(failure)[:80]))
     after, state_after = memory_views(operations, mesh), collective_groups()
+    if guarded:
+        end_capture_slots(trace, seq, site)
     if ranges is not None and len(TRACES) < MAX_TRACES:
         TRACES.append(dict(seq=seq, site=site, ranges=ranges, handle=trace))
     total = sum(hi - lo for lo, hi, _ in ranges) if ranges else 0
@@ -408,6 +477,11 @@ def census_release(original):
 
 def forget_trace(handles):
     """Drop the recorded traces whose handle is one of `handles`."""
+    for handle in handles:
+        try:
+            TRACE_SLOTS.pop(handle, None)
+        except TypeError:
+            continue
     if not TRACES:
         return
 
@@ -431,6 +505,144 @@ def count_packed_step(original):
     return note_packed_step
 
 
+# --- unfenced same-handle collectives ---------------------------------------------------------------------------------------
+#
+# TT_CCL cycles two semaphore handles per slot (a getter and its arguments) by a HOST-side index that advances when an op is
+# enqueued or captured; a trace bakes the handles current at its capture and a replay does not advance the index. A collective
+# writer waits on its barrier and then resets it, so an early increment from the peer's NEXT op on the same handle can be wiped:
+# the hazard is two consecutive ops on one slot with the same handle and no fence between them. Eager ops alternate by
+# construction; the places it can occur are a replay after a replay (or after an eager op) whose baked handles meet, with the
+# first not yet complete: the non-blocking replays of PackedProposalCoordinator.prepare, and eager work after one.
+
+
+class UnfencedHandleReuse(RuntimeError):
+    """Two consecutive collectives on one slot would use the same handle with no fence between them (refused before the second
+    is enqueued, under QWEN_FAST_CCL_HANDLE_GUARD=1)."""
+
+
+TRACE_SLOTS = {}    # trace handle -> {slot: [first handle key, last handle key]}
+CAPTURE_SLOTS = []  # the slot record of the capture in progress (a stack of at most one)
+PENDING = {}        # slot -> the handle key the most recent op (eager or replay) ended on, cleared by every fence
+VIOLATIONS = []
+TAPPED = set()
+
+
+def handle_guard_mode(environ=None):
+    """None (off), 'log' or 'fail' from QWEN_FAST_CCL_HANDLE_GUARD ('log' | '1'); anything else is a configuration error."""
+    text = (os.environ if environ is None else environ).get(HANDLE_GUARD_FLAG)
+    if text is None or text in ('', '0'):
+        return None
+    if text == 'log':
+        return 'log'
+    if text == '1':
+        return 'fail'
+    raise ValueError('%s must be 0, log or 1, got %r' % (HANDLE_GUARD_FLAG, text))
+
+
+def handle_key(value):
+    """What identifies a handle (or a list of them) across calls: object identity."""
+    if isinstance(value, (list, tuple)):
+        return tuple(id(item) for item in value)
+    return id(value)
+
+
+def tap_collectives(collectives, name):
+    """Wrap every get_and_cycle_* getter of one collectives object (as an instance attribute, once) so each handle it hands out
+    is noted: into the capture in progress, or checked against what the last op on its slot ended on."""
+    if collectives is None or id(collectives) in TAPPED:
+        return 0
+    TAPPED.add(id(collectives))
+    wrapped = 0
+    for attribute in dir(type(collectives)):
+        if not attribute.startswith('get_and_cycle_') or not callable(getattr(collectives, attribute, None)):
+            continue
+        setattr(collectives, attribute, _tapped(getattr(collectives, attribute), name, attribute))
+        wrapped += 1
+    return wrapped
+
+
+def _tapped(getter, name, attribute):
+    def tapped(*args, **kwargs):
+        result = getter(*args, **kwargs)
+        note_handle((name, attribute, repr(args) + repr(sorted(kwargs.items()))), handle_key(result))
+        return result
+    tapped.tapped_of = getter
+    return tapped
+
+
+def slot_text(slot):
+    return '%s.%s%s' % (slot[0], slot[1][len('get_and_cycle_'):], slot[2] if slot[2] != '()[]' else '')
+
+
+def note_handle(slot, key):
+    if handle_guard_mode() is None:
+        return
+    if CAPTURE_SLOTS:
+        record = CAPTURE_SLOTS[-1].setdefault(slot, [key, key])
+        record[1] = key
+        return
+    if PENDING.get(slot) == key:
+        violation('an eager collective reuses the handle the previous op on its slot ended on', slot)
+    PENDING[slot] = key
+
+
+def violation(what, slot, trace=None):
+    VIOLATIONS.append((what, slot, trace))
+    log('[PINDIAG] unfenced same-handle collective: %s slot=%s%s' % (
+        what, slot_text(slot), '' if trace is None else ' trace=%s' % (trace,)))
+    if handle_guard_mode() == 'fail':
+        raise UnfencedHandleReuse('%s (slot %s)' % (what, slot_text(slot)))
+
+
+def begin_capture_slots():
+    del CAPTURE_SLOTS[:]
+    CAPTURE_SLOTS.append({})
+
+
+def end_capture_slots(trace, seq, site):
+    """The capture is over: keep its slots under `trace` and log the handles its first and last collectives baked."""
+    record = CAPTURE_SLOTS.pop() if CAPTURE_SLOTS else {}
+    if handle_guard_mode() is None:
+        return
+    TRACE_SLOTS[trace] = record
+    for slot, (first, last) in sorted(record.items(), key=lambda item: slot_text(item[0])):
+        log('[PINDIAG] trace handles seq=%d site=%s slot=%s first=%s last=%s' % (seq, site, slot_text(slot), first, last))
+
+
+def census_execute(original):
+    """The twin of ttnn.execute_trace. Off, the original's call. On, before the replay is enqueued: its first handle on each
+    slot against what the previous op on that slot ended on; after: a blocking replay is a fence (nothing is pending), a
+    non-blocking one leaves its last handles pending."""
+    def execute_trace(*args, **kwargs):
+        if handle_guard_mode() is None:
+            return original(*args, **kwargs)
+        trace = args[1] if len(args) > 1 else kwargs.get('trace_id', kwargs.get('trace'))
+        blocking = kwargs.get('blocking', args[3] if len(args) > 3 else True)
+        record = TRACE_SLOTS.get(trace, {})
+        for slot, (first, last) in record.items():
+            if PENDING.get(slot) == first:
+                violation('a replay starts on the handle the previous op on its slot ended on', slot, trace)
+        result = original(*args, **kwargs)
+        if blocking:
+            PENDING.clear()
+        else:
+            for slot, (first, last) in record.items():
+                PENDING[slot] = last
+        return result
+    execute_trace.census_of = original
+    return execute_trace
+
+
+def census_synchronize(original):
+    """The twin of ttnn.synchronize_device: a host fence, so nothing is pending after it."""
+    def synchronize_device(*args, **kwargs):
+        result = original(*args, **kwargs)
+        PENDING.clear()
+        return result
+    synchronize_device.census_of = original
+    return synchronize_device
+
+
 # --- persistent buffers against traces' freed temporaries ------------------------------------------------------------------
 
 
@@ -441,41 +653,76 @@ def engine_begin():
     ENGINE_BOUNDARY, ENGINE_NOTES = SEQUENCE, PACKED_NOTES
 
 
-def overlapping(lo, hi, traces):
-    """The first trace whose freed temporaries intersect the per-bank extent [lo, hi), or None."""
+def overlapping(lo, hi, traces, kind='DRAM'):
+    """The first trace whose write set intersects the per-bank extent [lo, hi) of a `kind` ('DRAM' or 'L1') buffer, or None. A
+    range whose type the graph did not name ('?') is held against both kinds."""
     for trace in traces:
         for start, stop, buffer_type in trace['ranges']:
-            if 'DRAM' in buffer_type.upper() and lo < stop and start < hi:
+            if (kind in buffer_type.upper() or buffer_type == '?') and lo < stop and start < hi:
                 return trace
     return None
 
 
+class TraceOverlap(RuntimeError):
+    """A buffer lies inside the write set of a live trace: a replay of that trace writes into it. Raised (fail closed) by
+    census_engine and note_eager_allocations unless QWEN_FAST_TRACE_CENSUS_FAIL_CLOSED=0."""
+
+
 def census_engine(request_id, request, operations):
     """After an engine is admitted (QWEN_FAST_TRACE_CENSUS=1): each captured width's persistent buffer extents per chip (per
-    bank), and '[PINDIAG] trace overlap' for each buffer inside the freed temporaries of a live trace captured before this
-    engine's build.
-    Never raises. Also notes, under QWEN_FAST_SEQ_STAGE_LOG, when the engine was built (first_replay)."""
+    bank), and '[PINDIAG] trace overlap' for each buffer inside the write set of a live trace captured before this engine's
+    build. Returns at once (one line) when no live trace has recorded ranges. Raises TraceOverlap, after logging every overlap,
+    when any buffer overlaps (QWEN_FAST_TRACE_CENSUS_FAIL_CLOSED=0 to log only); anything else that goes wrong is logged once and
+    swallowed. Also notes, under QWEN_FAST_SEQ_STAGE_LOG, when the engine was built (first_replay)."""
     if stage_log_enabled():
         BUILT_AT[id(getattr(request, 'engine', None))] = ENGINE_NOTES
     if not census_enabled():
         return
     try:
         _census_engine(request_id, request, operations)
+    except TraceOverlap:
+        raise
     except BaseException as failure:
         unavailable('engine census %s: %s' % (type(failure).__name__, str(failure)[:80]))
 
 
-def banks_of(operations, shard):
-    """The DRAM bank count of the chip a shard lives on."""
-    return max(int(operations.get_memory_view(shard.device(), operations.BufferType.DRAM).num_banks), 1)
+def banks_of(operations, shard, kind='DRAM'):
+    """The bank count of the chip a shard lives on, for DRAM or L1."""
+    buffer_type = operations.BufferType.L1 if kind == 'L1' else operations.BufferType.DRAM
+    return max(int(operations.get_memory_view(shard.device(), buffer_type).num_banks), 1)
 
 
 def bank_extent(walker, shard, banks):
-    """The bytes a DRAM-interleaved shard occupies in each bank: its pages dealt round-robin over `banks`, so the buffer's
-    address is the same offset in every bank and its extent there is ceil(pages / banks) pages."""
+    """The bytes an interleaved shard occupies in each bank: its pages dealt round-robin over `banks`, so the buffer's
+    address is the same offset in every bank and its extent there is ceil(pages / banks) pages. (For an L1 shard that is
+    sharded rather than interleaved this is a lower bound.)"""
     page = walker.page_bytes(shard)
     pages = -(-walker.shard_bytes(shard) // page)
     return -(-pages // banks) * page
+
+
+def on_device(operations, shard):
+    """False for a shard in host storage, whose buffer_address() is a TT_FATAL (logged once a second by the census in v174).
+    True where the shard cannot say (a fake, an older ttnn): the address read stays guarded either way."""
+    storage = getattr(shard, 'storage_type', None)
+    device = getattr(getattr(operations, 'StorageType', None), 'DEVICE', None)
+    if not callable(storage) or device is None:
+        return True
+    try:
+        return storage() == device
+    except BaseException:
+        return False
+
+
+def buffer_kind(operations, walker, shard):
+    """'DRAM', 'L1', or None for a host shard (or a buffer type that is neither)."""
+    if not on_device(operations, shard):
+        return None
+    if walker.in_dram(shard):
+        return 'DRAM'
+    config = shard.memory_config() if callable(getattr(shard, 'memory_config', None)) else None
+    l1 = getattr(getattr(operations, 'BufferType', None), 'L1', None)
+    return 'L1' if l1 is not None and getattr(config, 'buffer_type', None) == l1 else None
 
 
 def _census_engine(request_id, request, operations):
@@ -483,44 +730,126 @@ def _census_engine(request_id, request, operations):
     from tp_addresses import addresses
 
     engine = getattr(request, 'engine', None)
-    walker = memory_ledger.MemoryLedger(operations, None, log=lambda message: None, emit=lambda text: None)
-    earlier = [trace for trace in TRACES if trace['seq'] <= ENGINE_BOUNDARY]
+    earlier = [trace for trace in TRACES if trace['seq'] <= ENGINE_BOUNDARY and trace['ranges']]
     label, reported = request_label(request_id), 0
+    if not earlier:
+        # Nothing to check against (the graph part is off, or recorded nothing): do not walk the engine's tensors at all.
+        log('[PINDIAG] trace census engine request=%s traces=0 overlaps=0 skipped=no ranges recorded' % label)
+        return
+    walker = memory_ledger.MemoryLedger(operations, None, log=lambda message: None, emit=lambda text: None)
     for key, bucket in sorted(getattr(engine, 'buckets', {}).items(), key=lambda item: str(item[0])):
         rows = bucket.get('rows', key)
         extents, count = {}, {}
         for tensor in walker.tensors([bucket.get('fixture'), bucket.get('output')]):
             try:
                 shards = operations.get_device_tensors(tensor)
-                if not all(walker.in_dram(shard) for shard in shards):
+                kinds = [buffer_kind(operations, walker, shard) for shard in shards]
+                if any(kind is None for kind in kinds) or len(set(kinds)) != 1:
                     continue
+                kind = kinds[0]
                 chip_addresses = addresses(operations, tensor)
-                sizes = [bank_extent(walker, shard, banks_of(operations, shard)) for shard in shards]
+                sizes = [bank_extent(walker, shard, banks_of(operations, shard, kind)) for shard in shards]
             except BaseException:
                 continue
             for chip, (address, size) in enumerate(zip(chip_addresses, sizes)):
-                low, high = extents.get(chip, (address, address))
-                extents[chip] = (min(low, address), max(high, address + size))
-                count[chip] = count.get(chip, 0) + 1
-                trace = overlapping(address, address + size, earlier)
+                low, high = extents.get((kind, chip), (address, address))
+                extents[(kind, chip)] = (min(low, address), max(high, address + size))
+                count[(kind, chip)] = count.get((kind, chip), 0) + 1
+                trace = overlapping(address, address + size, earlier, kind)
                 if trace is not None:
                     reported += 1
                     if reported <= MAX_OVERLAP_LINES:
-                        log('[PINDIAG] trace overlap request=%s rows=%s buffer=chip%d@%#x+%d/bank trace=%s'
-                            % (label, rows, chip, address, size, trace['site']))
-        for chip, (low, high) in sorted(extents.items()):
-            log('[PINDIAG] engine buffers request=%s rows=%s chip%d buffers=%d lo=%#x hi=%#x'
-                % (label, rows, chip, count[chip], low, high))
+                        log('[PINDIAG] trace overlap request=%s rows=%s buffer=%s chip%d@%#x+%d/bank trace=%s'
+                            % (label, rows, kind, chip, address, size, trace['site']))
+        for (kind, chip), (low, high) in sorted(extents.items()):
+            log('[PINDIAG] engine buffers request=%s rows=%s %s chip%d buffers=%d lo=%#x hi=%#x'
+                % (label, rows, kind, chip, count[(kind, chip)], low, high))
     if reported > MAX_OVERLAP_LINES:
         log('[PINDIAG] trace overlap request=%s more=%d' % (label, reported - MAX_OVERLAP_LINES))
     log('[PINDIAG] trace census engine request=%s traces=%d overlaps=%d' % (label, len(earlier), reported))
+    if reported and fail_closed():
+        raise TraceOverlap('%d buffer(s) of the engine for %s lie inside the write set of a live trace' % (reported, label))
+
+
+def allocated_ranges(nodes, banks=1):
+    """Every buffer a graph capture saw allocated: [(lo, hi, buffer type)] per-bank extents, freed again or not."""
+    if isinstance(nodes, (str, bytes)):
+        nodes = json.loads(nodes)
+    found = []
+    for node in nodes:
+        params = node.get('params') or {}
+        if node.get('node_type') != 'buffer_allocate' or 'address' not in params:
+            continue
+        address, per_bank = _address(params['address']), _per_bank(params)
+        buffer_type = str(params.get('type', '?'))
+        if per_bank is None:
+            size = int(params.get('size', 0))
+            per_bank = -(-size // max(banks, 1)) if 'DRAM' in buffer_type.upper() else size
+        found.append((address, address + per_bank, buffer_type))
+    return found
+
+
+def note_eager_allocations(nodes, site, banks=1):
+    """Hold every allocation of one stretch of EAGER work (a prefill segment, a window snapshot, the publication warm, a lazily
+    created model or sampler object) against the write set of every live trace: the packed block's and every engine's drafter,
+    verify and commit captures. `nodes` is the graph capture around that work - never around a trace capture, where the graph
+    processor's tensor reads are refused. Logs each overlap and raises TraceOverlap (fail closed) after them. -> overlap count."""
+    live = [trace for trace in TRACES if trace['ranges']]
+    if not live:
+        return 0
+    allocations = allocated_ranges(nodes, banks)
+    hits = []
+    for lo, hi, buffer_type in allocations:
+        kind = 'L1' if 'L1' in buffer_type.upper() else 'DRAM'
+        trace = overlapping(lo, hi, live, kind)
+        if trace is not None:
+            hits.append((lo, hi, buffer_type, trace))
+    for lo, hi, buffer_type, trace in hits[:MAX_OVERLAP_LINES]:
+        log('[PINDIAG] trace overlap site=%s allocation=%s@%#x+%d/bank trace=%s' % (site, buffer_type, lo, hi - lo, trace['site']))
+    log('[PINDIAG] trace census eager site=%s traces=%d allocations=%d overlaps=%d' % (
+        site, len(live), len(allocations), len(hits)))
+    if hits and fail_closed():
+        raise TraceOverlap('%d allocation(s) of %s lie inside the write set of a live trace' % (len(hits), site))
+    return len(hits)
+
+
+def eager_graph(operations, site):
+    """A context manager around EAGER work: under QWEN_FAST_TRACE_CENSUS=1 and QWEN_FAST_TRACE_CENSUS_GRAPH=1 the work runs under
+    a ttnn.graph capture whose allocations are checked by note_eager_allocations on exit; otherwise it is a no-op. Never put it
+    around a trace capture."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def scope():
+        if not (census_enabled() and graph_census_enabled()) or operations is None:
+            yield
+            return
+        started = False
+        try:
+            operations.graph.begin_graph_capture(operations.graph.RunMode.NORMAL)
+            started = True
+        except BaseException as failure:
+            unavailable('eager graph capture %s: %s' % (type(failure).__name__, str(failure)[:80]))
+        try:
+            yield
+        finally:
+            nodes = None
+            if started:
+                try:
+                    nodes = operations.graph.end_graph_capture()
+                except BaseException as failure:
+                    unavailable('eager graph end %s: %s' % (type(failure).__name__, str(failure)[:80]))
+            if nodes is not None:
+                note_eager_allocations(nodes, site)
+    return scope()
 
 
 def note_collectives(collectives, model=None, sampler=None):
     """serving_runtime: the collectives object every request shares ('shared', the drafter's), and the two others that cycle
     their own semaphore handles: the target model's (the all-reduces in the verify and packed traces, eager prefill) and the
     pinned sampler's (its gathers, which the packed capture holds under the T1 audit)."""
-    if not (census_enabled() or stage_log_enabled() or flag_on(CCL_LOG_FLAG)):
+    guard = handle_guard_mode() is not None
+    if not (census_enabled() or stage_log_enabled() or flag_on(CCL_LOG_FLAG) or guard):
         return
     register_collectives(collectives)
     register_collectives(getattr(model, 'tt_ccl', None), 'model')
@@ -528,6 +857,9 @@ def note_collectives(collectives, model=None, sampler=None):
     if sampler_ccl is None:
         sampler_ccl = getattr(getattr(sampler, 'tt_sampling', None), 'tt_ccl', None)
     register_collectives(sampler_ccl, 'sampler')
+    if guard:
+        for name, registered in list(COLLECTIVES.items()):
+            tap_collectives(registered, name)
 
 
 def install(environ=None):
@@ -538,9 +870,13 @@ def install(environ=None):
     import importlib
 
     changed = []
-    for module_name, name, wrap in (('attention_batch', 'capture_operation', census_capture),
-                                    ('verifier_engine', 'note_packed_step', count_packed_step),
-                                    ('ttnn', 'release_trace', census_release)):
+    twins = [('attention_batch', 'capture_operation', census_capture),
+             ('verifier_engine', 'note_packed_step', count_packed_step),
+             ('ttnn', 'release_trace', census_release)]
+    if handle_guard_mode(environ) is not None:
+        # The replay and fence twins sit on the hot path: only a process that asked for the handle guard binds them.
+        twins += [('ttnn', 'execute_trace', census_execute), ('ttnn', 'synchronize_device', census_synchronize)]
+    for module_name, name, wrap in twins:
         try:
             module = importlib.import_module(module_name)
         except ImportError:
@@ -563,5 +899,10 @@ def reset():
     SEQUENCE, ENGINE_BOUNDARY, PACKED_NOTES, ENGINE_NOTES = 0, 0, 0, 0
     COLLECTIVES.clear()
     del TRACES[:]
+    TRACE_SLOTS.clear()
+    del CAPTURE_SLOTS[:]
+    PENDING.clear()
+    del VIOLATIONS[:]
+    TAPPED.clear()
     BUILT_AT.clear()
     UNAVAILABLE_REPORTED.clear()

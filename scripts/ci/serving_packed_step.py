@@ -79,6 +79,7 @@ from serving_fast_request import CommittedOutput, budget_cap_enabled
 from serving_sequential_step import describe as describe_sequential, sequential_packed_step
 from serving_worker_hook import phase
 import memory_ledger
+import stall_watch
 import trace_census
 import verifier_engine
 
@@ -423,9 +424,12 @@ class PackedStep:
             audit_log(FORCE_CAP_MARKER + '{cap} (gate only)', cap=cap)
 
     def __call__(self, entries, *, cancelled):
-        if len(self.blocks) == 1:
-            return packed_device_step(entries, cancelled=cancelled, block=self.blocks[0])
-        return packed_device_rounds(entries, cancelled=cancelled, blocks=self.blocks)
+        # QWEN_FAST_STALL_DEADLINE_S: one packed round (or its sequential fallback) is one watched scope; without the flag
+        # scope() is a nullcontext and this is the two calls below.
+        with stall_watch.scope('step', 'packed round users=%d' % len(entries)):
+            if len(self.blocks) == 1:
+                return packed_device_step(entries, cancelled=cancelled, block=self.blocks[0])
+            return packed_device_rounds(entries, cancelled=cancelled, blocks=self.blocks)
 
     def proposal_rows(self, requests):
         return proposal_rows(self.blocks, requests)

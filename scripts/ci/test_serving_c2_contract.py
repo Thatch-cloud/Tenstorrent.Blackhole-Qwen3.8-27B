@@ -219,7 +219,7 @@ class PackedAnyProfileTest(unittest.TestCase):
                           'c2-packed-tp4-diag', 'c2-packed-tp4-diag-nograph', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2',
                           'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
                           'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring',
-                          'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs',
+                          'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix', 'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs',
                           'c2-packed-tp4-speed-quad'])
         for name in names:
             env = self.load(name)['env']
@@ -534,7 +534,7 @@ RING_FABRIC_PROFILES = ('general-tp4-ring-mmrs', 'c2-packed-tp4-gate-ring')
 MMRS_PROFILES = ('general-tp4-mmrs', 'general-tp4-ring-mmrs')
 # The four-card fast-path (S2) profiles: mesh_device P150x4 with the fast path on, under QWEN_FAST_TP=4.
 FAST_TP4_PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-nograph', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16',
-                     'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
+                     'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix', 'c2-packed-tp4-speed-noslide',
                      'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-gate-quad',
                      'c2-packed-tp4-gate-pairs')
 # The bring-up switches every TP4 profile carries in its env (see the profiles' descriptions): the fused prefill
