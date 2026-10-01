@@ -472,6 +472,8 @@ class InstalledVllmTailCapTests(unittest.TestCase):
     def setUp(self):
         if not vllm_installed():
             self.skipTest('vLLM is not installed')
+        sys.modules.pop(quarantine.HOLDER_KEY, None)
+        self.addCleanup(sys.modules.pop, quarantine.HOLDER_KEY, None)
 
     def started(self, scheduler_type, prompt_length, max_tokens):
         """A scheduler whose one request has been prefilled and has its first output token (100)."""
