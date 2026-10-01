@@ -1,4 +1,5 @@
 """Smoke a C2 serving container over its OpenAI API (stdlib only; runs on the rig host)."""
+import hashlib
 import json
 import sys
 import threading
@@ -22,13 +23,14 @@ def post(path, body, timeout=900):
         return error.code, error.read().decode(errors='replace')[:400]
 
 
-def stream(messages, max_tokens, drop_after=None, **extra):
+def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, **extra):
     body = dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
                 stream_options={'include_usage': True}, **extra)
     request = urllib.request.Request(BASE + '/v1/chat/completions', data=json.dumps(body).encode(), method='POST',
                                      headers={'content-type': 'application/json'})
     started, first, pieces, usage, finish, count = time.time(), None, [], None, None, 0
-    with urllib.request.urlopen(request, timeout=1800) as response:
+    content, reasoning, stamps = [], [], []
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         for raw in response:
             line = raw.decode(errors='replace').strip()
             if not line.startswith('data:') or line == 'data: [DONE]':
@@ -42,7 +44,10 @@ def stream(messages, max_tokens, drop_after=None, **extra):
                 if text:
                     if first is None:
                         first = time.time()
+                    stamps.append(time.time())
                     pieces.append(text)
+                    content.append(delta.get('content') or '')
+                    reasoning.append(delta.get('reasoning_content') or delta.get('reasoning') or '')
                     count += 1
                 finish = choice.get('finish_reason') or finish
             if drop_after is not None and count >= drop_after:
@@ -50,10 +55,17 @@ def stream(messages, max_tokens, drop_after=None, **extra):
     ended = time.time()
     tokens = (usage or {}).get('completion_tokens') or 0
     decode = (ended - first) if first else None
+    # The full answer is kept as two hashes, one per field: the delta that carries </think> splits differently at a different
+    # step width (16 rows packed, 4 solo), so a hash of the merged text would call identical tokens different.
+    content, reasoning = ''.join(content), ''.join(reasoning)
     return dict(ttft=round(first - started, 2) if first else None, tokens=tokens,
                 prompt_tokens=(usage or {}).get('prompt_tokens'), finish=finish,
                 decode_tok_s=round((tokens - 1) / decode, 2) if decode and tokens > 1 else None,
-                text=''.join(pieces)[:300])
+                text=''.join(pieces)[:300], completion_tokens=tokens,
+                content_sha256=hashlib.sha256(content.encode('utf-8')).hexdigest(), content_chars=len(content),
+                reasoning_sha256=hashlib.sha256(reasoning.encode('utf-8')).hexdigest(), reasoning_chars=len(reasoning),
+                started_at=round(started, 3), first_at=round(first, 3) if first else None, ended_at=round(ended, 3),
+                **(dict(delta_stamps=stamps) if keep_stamps else {}))
 
 
 def record(name, function):
@@ -110,24 +122,141 @@ record('long_real_text', lambda: stream([{'role': 'user', 'content': 'Summarise 
        'section by section:\n\n' + source[:90000]}], 1200))
 
 
-def concurrent():
-    prompts = [coding, 'Write a Python LRU cache class with tests. ' * 40,
-               'Explain this code:\n' + source[:30000], 'Write a Rust function that parses RFC 3339 dates, with tests.' * 30]
-    out = [None] * 4
+def live_report(users):
+    """Per-user rates over the window all four users are live in, and the aggregate. `users` are stream() results with their
+    delta stamps (keep_stamps=True). The all-four-live window runs from the LAST user's first token to the FIRST user's last:
+    decode_tok_s (the existing clock) runs from each user's own first token, so the earlier users' figure includes the ramp
+    while the later users were still prefilling. Each user's tokens in the window are its stamps in it, scaled by completion
+    tokens over stamps (a delta can carry more than one token). The stamps are dropped from the results."""
+    done = [user for user in users if isinstance(user, dict) and user.get('first_at') and user.get('delta_stamps')]
+    window = None
+    if len(done) == len(users):
+        window = (max(user['first_at'] for user in done), min(user['ended_at'] for user in done))
+    for user in done:
+        stamps = user.pop('delta_stamps')
+        user['live4_tok_s'] = None
+        if window and window[1] - window[0] > 0.5:
+            inside = sum(1 for stamp in stamps if window[0] < stamp <= window[1])
+            user['live4_tok_s'] = round(inside * (user.get('tokens') or 0) / len(stamps) / (window[1] - window[0]), 2)
+    for user in users:
+        if isinstance(user, dict):
+            user.pop('delta_stamps', None)
+    rates = [user['live4_tok_s'] for user in done if user.get('live4_tok_s') is not None]
+    tokens = sum(user.get('tokens') or 0 for user in done)
+    first = min([user['started_at'] for user in done] or [0])
+    last = max([user['ended_at'] for user in done] or [0])
+    return dict(users=len(done), live4_window_s=round(window[1] - window[0], 2) if window else None,
+                last_first_token_s=round(window[0] - first, 2) if window else None,
+                live4_agg_tok_s=round(sum(rates), 2) if len(rates) == len(users) else None,
+                live4_min_tok_s=min(rates) if rates else None,
+                decode_agg_tok_s=round(sum(user.get('decode_tok_s') or 0 for user in done), 2),
+                wall_tok_s=round(tokens / (last - first), 2) if last > first else None,
+                ttft_max_s=max([user.get('ttft') or 0 for user in done] or [0]))
+
+
+def run_users(label, prompts, max_tokens=800, order=None, stagger=0.0, timeout=1800):
+    """The four-user shape: one streamed request per prompt, threads started in `order` (default the prompts' own) `stagger`
+    seconds apart, per-read timeout `timeout`. users[i] is prompt i's answer, whatever the order. Per user: TTFT, decode tok/s
+    on the existing clock and live4_tok_s (live_report); the aggregate is printed and returned first."""
+    out = [None] * len(prompts)
 
     def run(index):
         try:
-            out[index] = stream([{'role': 'user', 'content': prompts[index]}], 800)
+            out[index] = stream([{'role': 'user', 'content': prompts[index]}], max_tokens, timeout=timeout, keep_stamps=True)
         except Exception as error:
             out[index] = dict(error=repr(error)[:300])
 
-    threads = [threading.Thread(target=run, args=(index,)) for index in range(4)]
-    [thread.start() for thread in threads]
+    threads = []
+    for position, index in enumerate(order if order is not None else range(len(prompts))):
+        if position and stagger:
+            time.sleep(stagger)
+        thread = threading.Thread(target=run, args=(index,))
+        thread.start()
+        threads.append(thread)
     [thread.join() for thread in threads]
-    return dict(users=out)
+    aggregate = live_report(out)
+    print(label, 'AGGREGATE', json.dumps(aggregate), flush=True)
+    for index, user in enumerate(out):
+        print(label, 'user', index, json.dumps(dict((key, user.get(key)) for key in (
+            'prompt_tokens', 'tokens', 'ttft', 'decode_tok_s', 'live4_tok_s', 'finish', 'error'))), flush=True)
+    return dict(aggregate=aggregate, users=out)
+
+
+def concurrent_prompts():
+    return [coding, 'Write a Python LRU cache class with tests. ' * 40,
+            'Explain this code:\n' + source[:30000], 'Write a Rust function that parses RFC 3339 dates, with tests.' * 30]
+
+
+def concurrent():
+    return run_users('concurrent4', concurrent_prompts())
 
 
 record('concurrent4', concurrent)
+
+
+def concurrent4_v164order():
+    # Opt-in (named in the tests list). The same four prompts, threads started 0.25 s apart in v164's admission order: the
+    # 8,376-token coding prompt, the 7,423-token explain prompt, then the 452-token LRU and 533-token Rust prompts (prompt
+    # indices 0, 2, 1, 3). Slots 0 and 1 pair on the two long prompts before the short prompts' engines are built, which the
+    # simultaneous start of concurrent4 does not reproduce. Per-read timeout 300 s: a stalled stream is an error, not a wait.
+    return run_users('concurrent4_v164order', concurrent_prompts(), order=(0, 2, 1, 3), stagger=0.25, timeout=300)
+
+
+if ONLY and 'concurrent4_v164order' in ONLY:
+    record('concurrent4_v164order', concurrent4_v164order)
+
+
+CODE_CHARS_PER_TOKEN = 3.6   # tp_decode_bench's estimate: the results carry the server's own prompt_tokens to calibrate it
+
+
+def code_corpus():
+    """Real code to build prompts from: the installed vLLM package source (the corpus of the real-text runs,
+    real_text_prompts.build_corpus), else the tree named by SMOKE_CODE_ROOT, else the python stdlib (the smoke runs on the rig
+    host, which has no vLLM). SMOKE_CODE_ROOT wins when set."""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import real_text_prompts
+    root = os.environ.get('SMOKE_CODE_ROOT')
+    if not root:
+        try:
+            root = str(real_text_prompts.package_root('vllm'))
+        except RuntimeError:
+            root = sysconfig.get_paths()['stdlib']
+    return real_text_prompts.build_corpus(root), real_text_prompts.TASKS
+
+
+def code_prompts(targets):
+    """One real-code prompt per target token count (about: characters at CODE_CHARS_PER_TOKEN). User i reads its own disjoint
+    window of the corpus (from i * len // users, as real_text_prompts does) inside the repository framing, then a code task
+    from real_text_prompts.TASKS (each asks for a long answer, so no user ends early and thins the rounds)."""
+    (corpus, info), tasks = code_corpus()
+    prompts = []
+    for index, target in enumerate(targets):
+        start = index * len(corpus) // len(targets)
+        excerpt = corpus[start:start + int(target * CODE_CHARS_PER_TOKEN)]
+        prompts.append('<repository_context>\n%s\n</repository_context>\n\n%s' % (excerpt, tasks[index % len(tasks)]))
+    return prompts, dict(files=info['files'], characters=info['characters'])
+
+
+def concurrent4_code():
+    # Opt-in. The coding workload: four users on real code prompts of about 4k, 8k, 16k and 24k tokens, a code task each, 800
+    # tokens out, started together.
+    prompts, corpus = code_prompts((4096, 8192, 16384, 24576))
+    return dict(run_users('concurrent4_code', prompts), corpus=corpus)
+
+
+def concurrent4_code_equal():
+    # Opt-in. Four real-code prompts of the same length (about 4k tokens), a code task each: the padded-4k lanes shape.
+    prompts, corpus = code_prompts((4096,) * 4)
+    return dict(run_users('concurrent4_code_equal', prompts), corpus=corpus)
+
+
+if ONLY and 'concurrent4_code' in ONLY:
+    record('concurrent4_code', concurrent4_code)
+if ONLY and 'concurrent4_code_equal' in ONLY:
+    record('concurrent4_code_equal', concurrent4_code_equal)
 
 
 def steady_prompts():
@@ -143,19 +272,7 @@ def concurrent4_steady():
     # about 3,500 tokens each: four different 14,000-character stretches of the same real code), so the fixed slot pairs (0, 1)
     # and (2, 3) can pack and, with QWEN_FAST_QUAD_DRAFT=1, the four-user quad can draft. The mixed concurrent4 above holds two
     # short prompts in the ramp, which keep both pairs drafting singly for their whole answer: it can never show a batched draft.
-    prompts = steady_prompts()
-    out = [None] * 4
-
-    def run(index):
-        try:
-            out[index] = stream([{'role': 'user', 'content': prompts[index]}], 800)
-        except Exception as error:
-            out[index] = dict(error=repr(error)[:300])
-
-    threads = [threading.Thread(target=run, args=(index,)) for index in range(4)]
-    [thread.start() for thread in threads]
-    [thread.join() for thread in threads]
-    return dict(users=out)
+    return run_users('concurrent4_steady', steady_prompts())
 
 
 if ONLY and 'concurrent4_steady' in ONLY:
@@ -265,6 +382,42 @@ record('alive_after_refusal', alive)
 record('stream_dropped', lambda: stream([{'role': 'user', 'content': coding}], 1500, drop_after=20))
 time.sleep(5)
 record('alive_after_drop', alive)
+
+
+def concurrent4_solo():
+    # Opt-in (named in the tests list, after alive_after_drop): each concurrent4 prompt alone, at the same 800-token budget, so
+    # the full answers (content and reasoning hashes) are this image's own solo references for concurrent4's four users.
+    # c2_smoke_check.solo_problems compares them.
+    return dict(users=[stream([{'role': 'user', 'content': prompt}], 800) for prompt in concurrent_prompts()])
+
+
+def replay_concurrent4():
+    # Opt-in (after concurrent4_solo): c2_platform_replay's concurrent4 - four NON-streamed requests, one short prompt each
+    # (a unit test for a CSV, JSON, INI and TOML parser), 300 tokens, all at once: the traffic shape the platform sends.
+    out = [None] * 4
+
+    def run(index):
+        started = time.time()
+        try:
+            status, body = post('/v1/chat/completions', dict(model=MODEL, max_tokens=300, messages=[{'role': 'user',
+                                'content': 'Write a unit test for a %s parser in Python.' % ('CSV', 'JSON', 'INI', 'TOML')[index]}]))
+            wall = time.time() - started
+            tokens = ((body.get('usage') or {}).get('completion_tokens') or 0) if status == 200 else 0
+            out[index] = dict(status=status, tokens=tokens, wall_s=round(wall, 1), tok_s_e2e=round(tokens / wall, 2),
+                              finish=body['choices'][0].get('finish_reason') if status == 200 else body)
+        except Exception as error:
+            out[index] = dict(error=repr(error)[:300])
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(4)]
+    [thread.start() for thread in threads]
+    [thread.join() for thread in threads]
+    return dict(users=out)
+
+
+if ONLY and 'concurrent4_solo' in ONLY:
+    record('concurrent4_solo', concurrent4_solo)
+if ONLY and 'replay_concurrent4' in ONLY:
+    record('replay_concurrent4', replay_concurrent4)
 
 
 def agreement():

@@ -316,7 +316,7 @@ class TextJudge(unittest.TestCase):
         resend = smoke.index("if ONLY and 'steady_resend' in ONLY:\n    record('steady_resend', steady_resend)")
         self.assertLess(steady, resend)
         self.assertIn("stream([{'role': 'user', 'content': steady_prompts()[0]}], 800)", smoke)
-        self.assertIn('prompts = steady_prompts()', smoke)
+        self.assertIn("run_users('concurrent4_steady', steady_prompts())", smoke)
 
 
 WARM = '(EngineCore pid=66) | INFO | [PINDIAG] four-card eager prefill warmed before the packed traces: page_table_blocks=2052 slots=4 programs=117->503 ms=9000'

@@ -29,6 +29,13 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     above zero is the #48536 sequence). Every prefill is counted, the ones that end at their first token (the max_tokens=1
     warmup, the first prefill after the attach) included; the engine builds' own lines ('[PINDIAG] four-card engine
     programs=A->B') are facts, not rules: they compile after the capture by design;
+  - the speed window's full-text reference (opt-in tests concurrent4_solo, concurrent4_v164order, concurrent4_code,
+    concurrent4_code_equal, replay_concurrent4): every concurrent4 (and concurrent4_v164order) user's content hash, reasoning hash,
+    completion tokens and finish reason must equal the same prompt's solo run on this image (concurrent4_solo, 800 tokens each); a
+    difference names the user's packed segment, read from the container log's [PACKED] lines (the user's prompt length is the
+    position of its request's first line). The two fields are hashed apart because the step that carries </think> splits the
+    delta differently at 16 packed rows than at 4 solo. The stream rules above apply to the new concurrent tests, the code tests
+    are judged as code answers, and replay_concurrent4's four non-streamed requests must each return 200 with tokens;
   - steady_resend (opt-in, after concurrent4_steady): the first steady prompt again, alone, judged as a code answer (above).
     Its prefill reuses, after packed and pair replays, the window-snapshot programs the steady test compiled after the
     capture - the one prefill program set no attach warm covers;
@@ -51,7 +58,17 @@ import statistics
 import sys
 from pathlib import Path
 
-CORE = ('warmup', 'warm_lifecycle', 'coding', 'concurrent4', 'concurrent4_steady', 'long_real_text', 'steady_resend')
+SOLO_TEST = 'concurrent4_solo'
+REPLAY_TEST = 'replay_concurrent4'
+# Four-user streamed tests: their users get the stream rules; the code ones are code answers too (TEXT_TESTS).
+CONCURRENT_TESTS = ('concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code', 'concurrent4_code_equal')
+# The tests whose users are the four concurrent4 prompts, comparable with their solo runs.
+SOLO_COMPARED = ('concurrent4', 'concurrent4_v164order')
+CORE = ('warmup', 'warm_lifecycle', 'coding', 'concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code',
+        'concurrent4_code_equal', SOLO_TEST, REPLAY_TEST, 'long_real_text', 'steady_resend')
+PACKED_LINE = re.compile(r'\[PACKED\] request=(\S+) segment=(\d+) position=(\d+) ')
+SOLO_FIELDS = (('content_sha256', 'content'), ('reasoning_sha256', 'reasoning'), ('completion_tokens', 'tokens'),
+               ('finish', 'finish'))
 PUBLISH = re.compile(r'\[PACKED-PUBLISH\] round=\d+ stages=\{.*?prepare_history: \[([0-9.,\s]*)\]')
 MISMATCH = re.compile(r'audit mismatch', re.IGNORECASE)
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
@@ -71,7 +88,7 @@ QUAD_AUDIT = re.compile(r'\[QUAD-AUDIT\] round=\S+ equal=([01]) ')
 SINGLES_AUDIT_LINE = re.compile(r'\[DRAFT-SINGLES-AUDIT\] round=\S+ group=\[[0-9, ]*\] equal=([01]) stage=(\S+) ')
 # A code prompt asked to be explained and rewritten (800 or 1500 tokens out) does not end by itself in a few tokens.
 MIN_ANSWER_TOKENS = 16
-TEXT_TESTS = ('coding', STEADY_TEST, RESEND_TEST)
+TEXT_TESTS = ('coding', STEADY_TEST, RESEND_TEST, 'concurrent4_code', 'concurrent4_code_equal')
 STREAM_PARSER_TESTS = ('stream_tool_call', 'stream_reasoning')
 EXTENT_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 GATE_PROFILE_FLAG = 'QWEN_C2_GATE_PROFILE'
@@ -157,7 +174,53 @@ def stream_problems(name, stream, text_needed=True):
     return problems
 
 
-def smoke_problems(results):
+def packed_segments(container_text):
+    """{request id: (segment, position of its first [PACKED] line)}: the segment the packed block served each request in."""
+    found = {}
+    for request, segment, position in PACKED_LINE.findall(container_text):
+        found.setdefault(request, (int(segment), int(position)))
+    return found
+
+
+def segment_of(prompt_tokens, container_text):
+    """The packed segment a user ran in, as text: its request's first [PACKED] line is at the prompt's length (or one past it,
+    the seed token), and a prompt length that one request matches names one segment. Otherwise 'unread' (no such line or the
+    audit off) or the candidates, when several requests of that length ran in different segments."""
+    if not isinstance(prompt_tokens, int):
+        return 'unread'
+    segments = sorted({segment for segment, position in packed_segments(container_text).values()
+                       if position in (prompt_tokens, prompt_tokens + 1)})
+    return ', '.join(str(segment) for segment in segments) if segments else 'unread'
+
+
+def solo_problems(results, container_text=''):
+    """A concurrent4 user whose full answer differs from its solo run's. The answer is its content hash, its reasoning hash,
+    its completion tokens and its finish reason (all four must be equal: the same greedy tokens split into the two fields
+    equally). Skipped when concurrent4_solo did not run, errored, or was recorded without hashes."""
+    solo = results.get(SOLO_TEST)
+    if not isinstance(solo, dict) or 'error' in solo:
+        return []
+    references = solo.get('users') or []
+    problems = []
+    for name in SOLO_COMPARED:
+        entry = results.get(name)
+        if not isinstance(entry, dict) or 'error' in entry:
+            continue
+        for index, user in enumerate(entry.get('users') or []):
+            reference = references[index] if index < len(references) else None
+            if not isinstance(user, dict) or not isinstance(reference, dict) or 'error' in user or 'error' in reference:
+                continue
+            if 'content_sha256' not in user or 'content_sha256' not in reference:
+                continue
+            differing = [label for key, label in SOLO_FIELDS if user.get(key) != reference.get(key)]
+            if differing:
+                problems.append('%s user %d: diverged from solo (segment %s): %s differ (%s tokens against %s solo)'
+                                % (name, index, segment_of(user.get('prompt_tokens'), container_text), ', '.join(differing),
+                                   user.get('completion_tokens'), reference.get('completion_tokens')))
+    return problems
+
+
+def smoke_problems(results, container_text=''):
     problems = []
     if results is None:
         return ['no SMOKE_JSON line in the smoke log']
@@ -173,12 +236,24 @@ def smoke_problems(results):
         if name in results and 'error' not in results[name]:
             problems += stream_problems(name, results[name])
             problems += answer_problems(name, results[name])
-    for name in ('concurrent4', STEADY_TEST):
+    for name in CONCURRENT_TESTS + (SOLO_TEST,):
         if name in results and 'error' not in results[name]:
             for index, user in enumerate(results[name].get('users') or []):
                 problems += stream_problems('%s user %d' % (name, index), user)
                 if name in TEXT_TESTS:
                     problems += answer_problems('%s user %d' % (name, index), user)
+    if REPLAY_TEST in results and 'error' not in results[REPLAY_TEST]:
+        for index, user in enumerate(results[REPLAY_TEST].get('users') or []):
+            name = '%s user %d' % (REPLAY_TEST, index)
+            if 'error' in user:
+                problems.append('%s: %s' % (name, user['error']))
+            elif user.get('status') != 200:
+                problems.append('%s: status %s' % (name, user.get('status')))
+            elif not user.get('tokens'):
+                problems.append('%s: no tokens' % name)
+            elif user.get('finish') is None:
+                problems.append('%s: no finish reason' % name)
+    problems += solo_problems(results, container_text)
     for name in STREAM_PARSER_TESTS:
         entry = results.get(name)
         if entry is None:
@@ -341,7 +416,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
     smoke = smoke_results(smoke_text)
-    problems = smoke_problems(smoke)
+    problems = smoke_problems(smoke, container_text)
     mismatches = [line.strip()[:200] for line in container_text.splitlines() if MISMATCH.search(line)]
     problems += ['audit mismatch in the container log: %s' % line for line in mismatches[:4]]
     median, rounds = ramp_kv_median(container_text)
