@@ -10,23 +10,29 @@
 # Early-failure order, cheapest first: N0 builds the image and smokes the PRODUCTION profile (the merge must not have changed it); N1 is
 # the audited smoke of the best gate profile (coherence, every audit, the prefill tripwire, the fused-commit and vglue lines); N2 is the
 # S3a matrix on the same profile (strict); N3 the staggered trigger (strict). Then the paired timing ABAB on coding prompts (4 x 4k and
-# 4 x 32k): N4a (speed, the control) N4b (best) N4c (speed) N4d (best); they are optional, their product is the numbers. N5 hands the cards
-# back.
-# The control of the timed best is c2-packed-tp4-speed, not c2-packed-tp4-time-gate: the best is the speed twin plus the levers, so the
-# speed twin differs from it in the levers alone (time-gate lacks the tail caps and stays the lanes window's control).
-# The timing jobs carry the audits-off exposure of the v163/v164 hang. Run N4 only on an image whose hang-fix arm (c2-packed-tp4-speed-fix,
-# -speed-sprewarm or -speed-strace, references/tp4-serve5-jobs and tp4-sampler-jobs) has passed its five consecutive runs; the driver then
-# adds that arm's flags to c2-packed-tp4-speed AND c2-packed-tp4-best (one edit each, the test holds best equal to speed plus the levers)
-# before building, so the pair stays paired.
+# 4 x 32k): N4a (speed-strace, the control) N4b (best-strace) N4c (speed-strace) N4d (best-strace); they are optional, their product is the
+# numbers. N5a-N5d is the same ABAB on the request-shard arm (speed-rshard, best-rshard, speed-rshard, best-rshard), optional, run only if R1
+# to R1e all completed. N6 hands the cards back.
+# The control of the timed best is c2-packed-tp4-speed plus the same hang fix, not c2-packed-tp4-time-gate: the best is the speed twin plus
+# the levers, so each pair differs in the levers alone (time-gate lacks the tail caps and stays the lanes window's control).
+# EVERY TIMED AUDITS-OFF PAIR CARRIES A HANG FIX. On tp4-serve-6 the S0t timing job hung: with the verify audits off and no hang fix S2
+# deadlocks deterministically in the pinned sampler's all-gather after a long sampler-free packed phase (the first rows=2 sequential replay,
+# and a request engine build after many packed rounds), so the un-fixed pair c2-packed-tp4-speed against c2-packed-tp4-best is never timed
+# here. Each hang-fix arm is its own flag, one per pair, so the pair stays paired: N4a-N4d use hang fix A (QWEN_FAST_PACKED_SAMPLER_IN_TRACE=1,
+# c2-packed-tp4-speed-strace against c2-packed-tp4-best-strace; its tail shape passed five audits-off repeats on tp4-serve-6), N5a-N5d use
+# hang fix B (QWEN_FAST_REQUEST_SHARD_ARGMAX=1, c2-packed-tp4-speed-rshard against c2-packed-tp4-best-rshard; unproven on hardware).
+# Which pair runs when: N4 runs after the stop jobs (N1-N3), on the image that carries fix A. N5 runs after N4 and ONLY IF R1, R1b, R1c, R1d
+# and R1e all completed (a stall there skips N5 and R0 to R3b with it). Each pair is judged PAIRED, A against B, never against the other
+# pair; a hang on any timed arm is a finding. Both hang-fix arms are unqualified until their own evidence says otherwise.
 # N0's read-out must name the ONE UNFLAGGED runtime change tp4/next carries: the D0 tap-protect fix in dflash_device.py (the feature taps
 # are protected under merge_release; production sets QWEN_FAST_PIPELINED_PUBLISH=1, so it runs there). Check N0's exactness against
 # tp4-serve-6's B5 (the production-profile smoke of the serve window): any difference is this fix or the merge, and stops the window.
 # With QWEN_FAST_QUAD_DRAFT=1 the quad trace is captured DURING SERVING, when four users first become packable: outside the capture
 # plug's packed zone (sealed at attach) and outside the engine zone. The fit of the fused-commit traces in the plug zone is also
 # unverified. So if the capture-plug arm is the hang fix chosen, the plug must be shown to cover those captures before any timing run.
-# Whichever hang-fix arm passes on tp4-serve-6 must be added to BOTH c2-packed-tp4-speed and c2-packed-tp4-best before N4 (one edit each,
-# the pair stays paired); until then N4 is not run.
-# N5 hands the cards back to production (status, then the all-four reset; the re-placement of the AUDITED production image, never a gate
+# The hang-fix arm of each pair is added to BOTH of its profiles (the twins of c2-packed-tp4-speed AND c2-packed-tp4-best), the test holds
+# each twin equal to its base plus the one flag.
+# N6 hands the cards back to production (status, then the all-four reset; the re-placement of the AUDITED production image, never a gate
 # arm, is the template's text). It is always last and it runs even when a stop job halts the window: a stall leaves the cards hung until
 # its reset.
 # R1 (x5), R2, R2b, R0 and R3 (x2) (optional, after N0) test one lever in the request engine: QWEN_FAST_REQUEST_SHARD_ARGMAX=1 makes the
@@ -39,7 +45,7 @@
 # the timing of the speed twin without and with the flag, and run ONLY AFTER ALL FIVE R1 RUNS COMPLETED (R3's read-out says so too); if an
 # R1 run stalls, skip R0 to R3b. The lever is its own flag and is in no other profile.
 # Durations (estimate, wall clock): N0 45 min typical / 120 at most; N1 35 / 55 / 100; N2 40-90 min, up to 170 with a re-run on a
-# divergence; N3 35-60 min, worst case about 6 h; N4a-d 30-60 min each; N5 15 min. Stop jobs N0-N3: about 2 h at best, 4 h expected.
+# divergence; N3 35-60 min, worst case about 6 h; N4a-d and N5a-d 30-60 min each; N6 15 min. Stop jobs N0-N3: about 2 h at best, 4 h expected.
 # The optional R jobs ahead of them add about 4.5 h when all run (R2b 25, R2 45, R1 x5 100, R0/R3 x2 100: 270 min); skip them to reach the stop
 # jobs sooner, none is a precondition of N1-N3.
 N0-build-smoke stop tp4-next-2 120
@@ -61,4 +67,8 @@ N4a-speed-timed optional tp4-next-2 60
 N4b-best-timed optional tp4-next-2 60
 N4c-speed-timed optional tp4-next-2 60
 N4d-best-timed optional tp4-next-2 60
-N5-handback-reset stop tp4-next-2 15
+N5a-speed-rshard-timed optional tp4-next-2 60
+N5b-best-rshard-timed optional tp4-next-2 60
+N5c-speed-rshard-timed optional tp4-next-2 60
+N5d-best-rshard-timed optional tp4-next-2 60
+N6-handback-reset stop tp4-next-2 15

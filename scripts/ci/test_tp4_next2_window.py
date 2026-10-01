@@ -3,8 +3,9 @@
 tp4/next-2 is tp4/serve-4 (the hang-fix arms) merged with tp4/next (the round-time levers). N0 builds the image tp4-next-2 and smokes
 the PRODUCTION profile (the merge must not have changed it); N1 is the audited smoke of the best gate profile; N2 and N3 are the strict
 exactness plans (S3a matrix, staggered trigger) on it; N4a..N4d are the paired timing ABAB of the timed best against its control, the
-speed twin, on coding prompts (4 x 4k, 4 x 32k); R1 (five runs), R2, R2b, R0 and R3 (an ABAB; optional, after N0) test the request engine's shard argmax
-(QWEN_FAST_REQUEST_SHARD_ARGMAX) on the hang shapes, audited, and timed against the speed twin; N5 hands the cards back. Every job resets the cards first. The templates are public,
+speed twin, each carrying hang fix A (QWEN_FAST_PACKED_SAMPLER_IN_TRACE), on coding prompts (4 x 4k, 4 x 32k); N5a..N5d are the same ABAB
+carrying hang fix B (QWEN_FAST_REQUEST_SHARD_ARGMAX), run only if R1..R1e all completed (every timed audits-off pair carries a hang fix); R1 (five runs), R2, R2b, R0 and R3 (an ABAB; optional, after N0) test the request engine's shard argmax
+(QWEN_FAST_REQUEST_SHARD_ARGMAX) on the hang shapes, audited, and timed against the speed twin; N6 hands the cards back. Every job resets the cards first. The templates are public,
 so they name no rig, card, address, registry or digest."""
 
 import json
@@ -26,14 +27,16 @@ DEVICE_STEPS = ('cardm', 'smoke', 'gate', 'prefix', 'fabric', 'replay')
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.|@[A-Z0-9_]+@')
 IMAGE = 'tp4-next-2'
-TIMED = ('N4a-speed-timed', 'N4b-best-timed', 'N4c-speed-timed', 'N4d-best-timed')
+TIMED_A = ('N4a-speed-timed', 'N4b-best-timed', 'N4c-speed-timed', 'N4d-best-timed')
+TIMED_B = ('N5a-speed-rshard-timed', 'N5b-best-rshard-timed', 'N5c-speed-rshard-timed', 'N5d-best-rshard-timed')
+TIMED = TIMED_A + TIMED_B
+HANDBACK = 'N6-handback-reset'
 CONTROL, BEST, BEST_GATE, PRODUCTION = 'c2-packed-tp4-speed', 'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4'
 R1_RUNS = ('R1-diag-rshard', 'R1b-diag-rshard', 'R1c-diag-rshard', 'R1d-diag-rshard', 'R1e-diag-rshard')
 R0_R3 = ('R0-speed-base', 'R3-speed-rshard', 'R0b-speed-base', 'R3b-speed-rshard')
 RSHARD_JOBS = ('R2b-rshard-audit-hang-shapes', 'R2-rshard-audit') + R1_RUNS + R0_R3
 STOP_JOBS = ('N1-best-gate-smoke-audited', 'N2-s3a-matrix-best-gate', 'N3-staggered-trigger-best-gate')
-ORDERED = ('N0-build-smoke',) + RSHARD_JOBS + STOP_JOBS + TIMED + (
-    'N5-handback-reset',)
+ORDERED = ('N0-build-smoke',) + RSHARD_JOBS + STOP_JOBS + TIMED + (HANDBACK,)
 WORK = ORDERED[:-1]
 RSHARD_ARM = 'QWEN_FAST_REQUEST_SHARD_ARGMAX'
 HANG_SHAPES = ['warmup', 'coding', 'long_real_text', 'concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'replay_concurrent4']
@@ -42,8 +45,11 @@ PROFILE_OF = {'N0-build-smoke': PRODUCTION, 'R2-rshard-audit': 'c2-packed-tp4-ga
               'R2b-rshard-audit-hang-shapes': 'c2-packed-tp4-diag-t1-rshard-audit',
               **{name: 'c2-packed-tp4-diag-rshard' for name in R1_RUNS},
               **{name: ('c2-packed-tp4-speed' if name.startswith('R0') else 'c2-packed-tp4-speed-rshard') for name in R0_R3}, 'N1-best-gate-smoke-audited': BEST_GATE, 'N2-s3a-matrix-best-gate': BEST_GATE,
-              'N3-staggered-trigger-best-gate': BEST_GATE, 'N4a-speed-timed': CONTROL, 'N4b-best-timed': BEST,
-              'N4c-speed-timed': CONTROL, 'N4d-best-timed': BEST}
+              'N3-staggered-trigger-best-gate': BEST_GATE,
+              'N4a-speed-timed': 'c2-packed-tp4-speed-strace', 'N4b-best-timed': 'c2-packed-tp4-best-strace',
+              'N4c-speed-timed': 'c2-packed-tp4-speed-strace', 'N4d-best-timed': 'c2-packed-tp4-best-strace',
+              'N5a-speed-rshard-timed': 'c2-packed-tp4-speed-rshard', 'N5b-best-rshard-timed': 'c2-packed-tp4-best-rshard',
+              'N5c-speed-rshard-timed': 'c2-packed-tp4-speed-rshard', 'N5d-best-rshard-timed': 'c2-packed-tp4-best-rshard'}
 SS = ['warmup', 'coding', 'long_real_text', 'concurrent4', 'concurrent4_steady', 'steady_resend', 'tool_call', 'stream_tool_call',
       'stream_reasoning', 'refused_n2', 'alive_after_refusal', 'stream_dropped', 'alive_after_drop']
 CODE = ['concurrent4_code', 'concurrent4_code_equal']
@@ -94,27 +100,28 @@ class OrderTests(unittest.TestCase):
                 self.assertEqual(parsed(name)['tag'], IMAGE)
                 self.assertTrue(minutes.isdigit() and 15 <= int(minutes) <= 180, minutes)
         modes = {row[0]: row[1] for row in read_order()}
-        for name in ('N0-build-smoke',) + STOP_JOBS + ('N5-handback-reset',):
+        for name in ('N0-build-smoke',) + STOP_JOBS + (HANDBACK,):
             self.assertEqual(modes[name], 'stop', name)
         for name in TIMED + RSHARD_JOBS:
             self.assertEqual(modes[name], 'optional', name)
 
     def test_the_hand_back_is_last_and_the_order_says_it_runs_even_when_a_stop_job_halts_the_window(self):
-        self.assertEqual(read_order()[-1][0], 'N5-handback-reset')
+        self.assertEqual(read_order()[-1][0], HANDBACK)
         with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
             order = handle.read()
         self.assertIn('runs even when a stop job', order)
-        text = text_of('N5-handback-reset')
-        self.assertEqual(parsed('N5-handback-reset')['actions'], 'status reset')
-        self.assertEqual(parsed('N5-handback-reset')['cards'], 'quad')
+        text = text_of(HANDBACK)
+        self.assertEqual(parsed(HANDBACK)['actions'], 'status reset')
+        self.assertEqual(parsed(HANDBACK)['cards'], 'quad')
         for word in ('AUDITED production image', 'NEVER place a gate arm', 'fabric', ':latest retag', 'admin API'):
             self.assertIn(word, text)
 
     def test_the_order_names_the_control_the_hang_fix_precondition_and_the_exactness_before_timing_rule(self):
         with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
             order = handle.read()
-        for word in ('c2-packed-tp4-speed, not c2-packed-tp4-time-gate', 'hang-fix arm', 'AND c2-packed-tp4-best',
-                     'ABAB', 'NOTHING COMBINED HAS RUN ON A CARD'):
+        for word in ('not c2-packed-tp4-time-gate', 'EVERY TIMED AUDITS-OFF PAIR CARRIES A HANG FIX', 'S0t', 'tp4-serve-6', 'hang-fix arm',
+                     'AND c2-packed-tp4-best', 'N4 runs after the stop jobs', 'ONLY IF R1, R1b, R1c, R1d', 'ABAB',
+                     'NOTHING COMBINED HAS RUN ON A CARD'):
             self.assertIn(word, order)
         names = [row[0] for row in read_order()]
         for exact in ('N2-s3a-matrix-best-gate', 'N3-staggered-trigger-best-gate'):
@@ -201,7 +208,35 @@ class ProfileTests(unittest.TestCase):
     def test_the_control_is_the_speed_twin_the_old_control_is_not_used_here(self):
         for name in TIMED:
             self.assertNotEqual(parsed(name)['profile'], 'c2-packed-tp4-time-gate', name)
-        self.assertEqual([parsed(name)['profile'] for name in TIMED], [CONTROL, BEST, CONTROL, BEST], 'A B A B')
+        for jobs, fix in ((TIMED_A, 'strace'), (TIMED_B, 'rshard')):
+            self.assertEqual([parsed(name)['profile'] for name in jobs],
+                             ['%s-%s' % (CONTROL, fix), '%s-%s' % (BEST, fix)] * 2, 'A B A B')
+
+    def test_no_timed_audits_off_arm_is_without_a_hang_fix_and_each_pair_differs_in_the_levers_alone(self):
+        flags = {'strace': 'QWEN_FAST_PACKED_SAMPLER_IN_TRACE', 'rshard': RSHARD_ARM}
+        levers = {key for key in set(env_of(CONTROL)) | set(env_of(BEST)) if env_of(CONTROL).get(key) != env_of(BEST).get(key)}
+        for jobs, fix in ((TIMED_A, 'strace'), (TIMED_B, 'rshard')):
+            control, best = env_of('%s-%s' % (CONTROL, fix)), env_of('%s-%s' % (BEST, fix))
+            self.assertEqual({key for key in set(control) | set(best) if control.get(key) != best.get(key)}, levers, fix)
+            for name in jobs:
+                env = env_of(parsed(name)['profile'])
+                self.assertEqual(env[flags[fix]], '1', name)
+                self.assertEqual((env['QWEN_FAST_VERIFY_T1_AUDIT'], env['QWEN_FAST_VERIFY_T2_AUDIT']), ('0', '0'), name)
+                self.assertEqual([other for other in flags.values() if other != flags[fix] and env.get(other) == '1'], [], name)
+            self.assertEqual(env_of('c2-packed-tp4-best-' + fix), dict(env_of(BEST), **{flags[fix]: '1'}))
+            self.assertEqual(env_of('c2-packed-tp4-speed-' + fix), dict(env_of(CONTROL), **{flags[fix]: '1'}))
+        for name in (CONTROL, BEST):
+            for flag in flags.values():
+                self.assertNotIn(flag, env_of(name), 'the un-fixed pair is never timed: it hangs audits-off')
+
+    def test_the_rshard_pair_runs_after_the_strace_pair_before_the_hand_back_and_says_it_needs_r1_to_r1e(self):
+        names = [row[0] for row in read_order()]
+        self.assertEqual(names[names.index(TIMED_A[0]):], list(TIMED_A + TIMED_B + (HANDBACK,)))
+        for name in TIMED_B:
+            self.assertIn('R1..R1e all completed', text_of(name))
+            self.assertIn('S0t', text_of(name))
+        for name in TIMED_A:
+            self.assertIn('S0t', text_of(name))
 
 
 class RequestShardJobTests(unittest.TestCase):

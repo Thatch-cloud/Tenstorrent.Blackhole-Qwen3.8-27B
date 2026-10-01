@@ -75,12 +75,15 @@ PREWARM, IN_TRACE = 'QWEN_FAST_PACKED_SAMPLER_PREWARM', 'QWEN_FAST_PACKED_SAMPLE
 SAMPLER_PROFILES = {'c2-packed-tp4-diag-sprewarm': ('c2-packed-tp4-diag', PREWARM),
                     'c2-packed-tp4-diag-strace': ('c2-packed-tp4-diag', IN_TRACE),
                     'c2-packed-tp4-speed-sprewarm': ('c2-packed-tp4-speed', PREWARM),
-                    'c2-packed-tp4-speed-strace': ('c2-packed-tp4-speed', IN_TRACE)}
+                    'c2-packed-tp4-speed-strace': ('c2-packed-tp4-speed', IN_TRACE),
+                    # the timed best with hang fix A: every timed audits-off profile must carry a hang fix
+                    'c2-packed-tp4-best-strace': ('c2-packed-tp4-best', IN_TRACE)}
 # The request-shard-argmax arms (tp4/next-2): each is its base profile plus exactly these env flags (the audited one also carries the gate
 # waiver's marker, as every gate-only twin of the traffic profile does).
 RSHARD, RSHARD_AUDIT = 'QWEN_FAST_REQUEST_SHARD_ARGMAX', 'QWEN_FAST_REQUEST_SHARD_AUDIT'
 RSHARD_PROFILES = {'c2-packed-tp4-diag-rshard': ('c2-packed-tp4-diag', {RSHARD: '1'}),
                    'c2-packed-tp4-speed-rshard': ('c2-packed-tp4-speed', {RSHARD: '1'}),
+                   'c2-packed-tp4-best-rshard': ('c2-packed-tp4-best', {RSHARD: '1'}),
                    'c2-packed-tp4-diag-t1-rshard-audit': ('c2-packed-tp4-diag-t1', {RSHARD: '1', RSHARD_AUDIT: '1'}),
                    'c2-packed-tp4-gate-rshard-audit': ('c2-packed-tp4', {RSHARD: '1', RSHARD_AUDIT: '1', 'QWEN_C2_GATE_PROFILE': '1'})}
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
@@ -126,7 +129,9 @@ FCOMMIT_PROFILES = {
 
 # The combined best (tp4/next): the fused-commit quad arms with the five verify-glue levers added (see VGLUE_PROFILES).
 BEST_PROFILES = ('c2-packed-tp4-best', 'c2-packed-tp4-best-gate')
-FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES))
+# The timed best with a hang fix (tp4/next-2): c2-packed-tp4-best plus exactly one flag (SAMPLER_PROFILES, RSHARD_PROFILES hold the rule).
+BEST_HANG_FIX = ('c2-packed-tp4-best-strace', 'c2-packed-tp4-best-rshard')
+FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES) | set(BEST_HANG_FIX))
 
 
 def without_caps(env):
@@ -541,7 +546,7 @@ class DraftProfileTests(unittest.TestCase):
         found = profiles()
         on = sorted(name for name, profile in found.items() if profile['env'].get(QUAD) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
-        self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-gate-fcommit-quad',
+        self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-gate-fcommit-quad',
                               'c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad'])
         self.assertEqual([name for name in on if 'fcommit' not in name and 'best' not in name],
                          ['c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-quad'], 'the fused-commit family is the other two')
@@ -667,6 +672,33 @@ class RequestShardProfileTests(unittest.TestCase):
             with self.subTest(profile=name):
                 self.assertEqual(admission.width(environ), 4)
                 self.assertEqual(admission.check_environment(environ, M3), [])
+
+
+class BestHangFixProfileTests(unittest.TestCase):
+    """tp4/next-2: the timed best with a hang fix, each exactly c2-packed-tp4-best plus one flag, audits off, gate only."""
+
+    def test_each_is_the_timed_best_plus_exactly_one_flag(self):
+        found = profiles()
+        for name, flag in (('c2-packed-tp4-best-strace', IN_TRACE), ('c2-packed-tp4-best-rshard', RSHARD)):
+            with self.subTest(profile=name):
+                mine, base = found[name], found['c2-packed-tp4-best']
+                self.assertEqual(mine['env'], dict(base['env'], **{flag: '1'}))
+                self.assertEqual([key for key in mine['env'] if key not in base['env']], [flag])
+                for key in set(mine) | set(base):
+                    if key not in ('description', 'env'):
+                        self.assertEqual(mine.get(key), base.get(key), key)
+                self.assertIs(mine['gate_only'], True)
+                self.assertIn(flag + '=1', mine['description'])
+                self.assertIn('audits OFF', mine['description'].replace('audits off', 'audits OFF'))
+                self.assertEqual((mine['env']['QWEN_FAST_VERIFY_T1_AUDIT'], mine['env']['QWEN_FAST_VERIFY_T2_AUDIT']), ('0', '0'))
+
+    def test_each_differs_from_its_speed_twin_in_the_levers_and_the_one_flag_alone(self):
+        found = profiles()
+        levers = {key for key in set(found['c2-packed-tp4-best']['env']) | set(found['c2-packed-tp4-speed']['env'])
+                  if found['c2-packed-tp4-best']['env'].get(key) != found['c2-packed-tp4-speed']['env'].get(key)}
+        for name, twin in (('c2-packed-tp4-best-strace', 'c2-packed-tp4-speed-strace'), ('c2-packed-tp4-best-rshard', 'c2-packed-tp4-speed-rshard')):
+            mine, other = found[name]['env'], found[twin]['env']
+            self.assertEqual({key for key in set(mine) | set(other) if mine.get(key) != other.get(key)}, levers, name)
 
 
 class FusedCommitProfileTests(unittest.TestCase):
@@ -809,7 +841,7 @@ class VglueProfileTests(unittest.TestCase):
         image = image_env()
         flags = (C1A, V4A, V2, V1, V3A, VGLUE_AUDIT)
         for name, profile in found.items():
-            if name in VGLUE_PROFILES:
+            if name in VGLUE_PROFILES or name in BEST_HANG_FIX:
                 self.assertEqual(profile['env']['QWEN_FAST_TP'], '4', name)
                 continue
             for flag in flags:
