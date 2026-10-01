@@ -1,7 +1,7 @@
 # The order of the four-card S2 serving window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
 # stop: the window halts at the first failure of this job (a differing comparison, a reproduced divergence, a replay restart wedge, a refusal).
 # optional: not needed to place; run after every stop job has passed. Image: the tag of the tt-vllm image the job serves or builds
-# (tp4-stackfix-3 is validated and built; tp4-serve-1 is built by SB from the commit that records the evidence). Minutes: runner time
+# (tp4-stackfix-3 is validated and built; tp4-serve-2 is built by SB from the commit that records the evidence). Minutes: runner time
 # for the job, a quad reset included (1-3 min) where the job has one.
 #
 # STAGE 1, before any evidence: the gate plans on c2-packed-tp4-gate and tp4-stackfix-3 (about 2.6-3 h). They need no harness port and
@@ -12,7 +12,7 @@
 #   py -3.11 -B scripts/ci/record_packed_any_evidence_tp4.py ...   (its --help gives the flags),
 # commit packed_any_evidence_tp4.json and the re-pinned EVIDENCE_TP4_SHA256 together (git add by path: scripts/ci/__pycache__ is
 # tracked), run the CPU suite, and only then build.
-# STAGE 3, after the evidence commit: build tp4-serve-1, smoke and confirm on the traffic profile, then the four-card replay of the thin
+# STAGE 3, after the evidence commit: build tp4-serve-2, smoke and confirm on the traffic profile, then the four-card replay of the thin
 # layer. Then the quad reset, the platform's fabric re-measure, the :latest retag in the rig daemon's local store, and placement,
 # which needs the user's go-ahead and an admin token (not part of this window).
 # Optional go/no-go BEFORE stage 1 or 2 (not a template here; it is tp4/evidence-jobs CB1-nkv1-full, the nkv1 spike at seeds 0-2,
@@ -32,7 +32,7 @@ EV-F1-cb1 stop tp4-stackfix-3 6
 EV-F2-cb2a stop tp4-stackfix-3 6
 EV-W2-cb2b-watcher stop tp4-stackfix-3 8
 EV-F3-cb2b stop tp4-stackfix-3 10
-SB-build stop tp4-serve-1 23
-SS-smoke stop tp4-serve-1 23
-SM-mixed-traffic stop tp4-serve-1 21
-SR-quad-replay stop tp4-serve-1 38
+SB-build stop tp4-serve-2 23
+SS-smoke stop tp4-serve-2 23
+SM-mixed-traffic stop tp4-serve-2 21
+SR-quad-replay stop tp4-serve-2 38

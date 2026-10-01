@@ -46,6 +46,9 @@ OFF_ENV = {'QWEN_FAST_QUAD_DRAFT': '0', 'QWEN_FAST_FUSED_COMMIT': '0', 'QWEN_FAS
            'QWEN_GDN_SHARED_QK_EXPERIMENT': '0'}
 # QWEN_C2_GATE_PROFILE is the admission waiver's marker: only the gate-only profile's own env carries it.
 AUDIT_ENV = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1', 'QWEN_C2_GATE_PROFILE': '1'}
+# The traffic profile serves with the verify audits on (the gate's configuration): with them off it hung twice at the
+# packed-to-sequential tail of the first four-user answers (SR v163, SS v164). Only the gate profile takes the waiver.
+VERIFY_AUDITS = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1'}
 
 
 SPEED = 'QWEN_FAST_TP_KV_SLIDE'
@@ -108,7 +111,7 @@ class FourCardProfileTests(unittest.TestCase):
         return profiles()[name]
 
     def test_each_four_card_profile_is_its_pair_twin_with_the_documented_differences(self):
-        for four, twin, extra in (('c2-packed-tp4', 'c2-packed', {}), ('c2-packed-tp4-gate', 'c2-packed-gate', AUDIT_ENV)):
+        for four, twin, extra in (('c2-packed-tp4', 'c2-packed', VERIFY_AUDITS), ('c2-packed-tp4-gate', 'c2-packed-gate', AUDIT_ENV)):
             mine, theirs = profiles()[four], self.pair(twin)
             with self.subTest(profile=four):
                 self.assertEqual(mine['env'], dict(theirs['env'], **dict(FOUR_ENV, **dict(OFF_ENV, **extra))))
@@ -162,11 +165,11 @@ class FourCardProfileTests(unittest.TestCase):
         environ = dict(image, **profiles()['c2-packed']['env'])
         self.assertEqual(admission.check_environment(environ, M3), [])
 
-    def test_the_audits_are_on_the_gate_profile_only(self):
-        for name, wanted in (('c2-packed-tp4-gate', True), ('c2-packed-tp4', False)):
+    def test_both_profiles_verify_with_the_audits_and_only_the_gate_takes_the_waiver(self):
+        for name, waiver in (('c2-packed-tp4-gate', True), ('c2-packed-tp4', False)):
             env = profiles()[name]['env']
-            self.assertEqual(all(env.get(key) == value for key, value in AUDIT_ENV.items()), wanted, name)
-            self.assertEqual(any(key in env for key in AUDIT_ENV), wanted, name)
+            self.assertEqual({key: env.get(key) for key in VERIFY_AUDITS}, VERIFY_AUDITS, name)
+            self.assertEqual('QWEN_C2_GATE_PROFILE' in env, waiver, name)
 
     def test_the_switched_off_flags_are_the_images_own_and_are_off(self):
         image = image_env()

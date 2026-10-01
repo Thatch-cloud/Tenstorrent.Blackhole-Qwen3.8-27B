@@ -2,7 +2,7 @@
 the tree (serving/tp4-s2).
 
 Three stages: the pre-evidence gate jobs (image tp4-stackfix-3, profile c2-packed-tp4-gate), the evidence jobs on card M alone, and the
-post-evidence jobs (image tp4-serve-1, the traffic profile c2-packed-tp4: build, smoke, the mixed gate again, the four-card replay).
+post-evidence jobs (image tp4-serve-2, the traffic profile c2-packed-tp4: build, smoke, the mixed gate again, the four-card replay).
 The templates are public, so they name no rig, card, address, registry or digest; the values the driver fills in are @...@ placeholders."""
 
 import json
@@ -26,7 +26,7 @@ PLACEHOLDERS = {'@K64J_GRAFT_DIR@': '/graft', '@K64J_TTNNCPP_SHA256@': '0' * 64,
 DEVICE_STEPS = ('cardm', 'smoke', 'gate', 'prefix', 'fabric', 'replay')
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.')
-PRE_IMAGE, POST_IMAGE = 'tp4-stackfix-3', 'tp4-serve-1'
+PRE_IMAGE, POST_IMAGE = 'tp4-stackfix-3', 'tp4-serve-2'
 GATES = ('G-L1-lifecycle', 'G-L2-lifecycle-arrival', 'G-M1-mixed', 'G-M2-mixed-long', 'G-S-short', 'G-B-boundaries', 'G-MEM-memory',
          'G-ST-staggered', 'G-C-churn')
 RESET = ('EV-R0-quad-reset',)
@@ -226,7 +226,7 @@ class TemplateTests(unittest.TestCase):
             values, outputs = parsed(name)
             self.assertEqual((outputs['cards'], outputs['profile'], outputs['tag']), ('quad', 'c2-packed-tp4', POST_IMAGE), name)
         _, build = parsed('SB-build')
-        self.assertEqual((build['cards'], build['actions'], build['tag']), ('quad', 'status reset build push', POST_IMAGE))
+        self.assertEqual((build['cards'], build['actions'], build['tag']), ('quad', 'status reset build', POST_IMAGE))
         self.assertEqual(parsed('SM-mixed-traffic')[1]['gate_jit'], 'judge', 'the pre-evidence arms warmed the kernel cache')
 
     def test_the_smoke_names_tests_the_smoke_knows_and_includes_both_streamed_ones(self):
