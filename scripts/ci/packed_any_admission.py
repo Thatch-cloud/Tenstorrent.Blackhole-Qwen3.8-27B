@@ -127,7 +127,7 @@ QUALIFIED_SOURCES = ('extent_attention_replay.py',)
 QUALIFIED_SOURCES_TP4 = ('extent_attention_replay_tp.py',)
 # The four-card record, its own pin, and the flag set its CB1 combo must hold.
 EVIDENCE_TP4 = HERE / 'packed_any_evidence_tp4.json'
-EVIDENCE_TP4_SHA256 = 'c55da96d49f0aac73adaf26f500d8b4d07c29c1c7a6316ae1ffb5cc4db7de283'
+EVIDENCE_TP4_SHA256 = 'd221f68f494e7b1a7571cefdfc28a986458d1ae4511e00a8bf56bfc79aa262cf'
 CB1_FLAG = '0x27'
 CB1_FLAG_TP4 = '0x23'
 # Four cards: the evidence must be the ONE-KV-HEAD runs. K64j is the same binary at both widths and 0x23 is a legal flag set at

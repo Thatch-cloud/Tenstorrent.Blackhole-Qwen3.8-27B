@@ -105,8 +105,13 @@ class Workspace:
         test.addCleanup(shutil.rmtree, str(self.dir), True)
         self.evidence = self.dir / 'packed_any_evidence_tp4.json'
         self.admission = self.dir / 'packed_any_admission.py'
-        shutil.copyfile(str(admission.EVIDENCE_TP4), str(self.evidence))
-        shutil.copyfile(str(HERE / 'packed_any_admission.py'), str(self.admission))
+        # The skeleton (the committed record is filled in now), with the admission copy re-pinned to it.
+        from test_packed_any_admission_tp4 import SKELETON_TP4_TEXT
+        self.evidence.write_bytes(SKELETON_TP4_TEXT.encode('utf-8'))
+        source = (HERE / 'packed_any_admission.py').read_text(encoding='utf-8')
+        pin = hashlib.sha256(self.evidence.read_bytes()).hexdigest()
+        assert source.count(admission.EVIDENCE_TP4_SHA256) == 1, 'the pin is in the admission source exactly once'
+        self.admission.write_text(source.replace(admission.EVIDENCE_TP4_SHA256, pin), encoding='utf-8', newline=chr(10))
 
     def report(self, name, report):
         path = self.dir / name

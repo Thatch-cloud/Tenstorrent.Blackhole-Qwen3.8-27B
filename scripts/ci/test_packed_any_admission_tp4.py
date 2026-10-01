@@ -6,10 +6,12 @@ packed_any_evidence_tp4.json at its own pin - a SKELETON until the card windows 
 refused except in a gate run of a gate-only profile (QWEN_C2_GATE=1 and the profile's own QWEN_C2_GATE_PROFILE=1), where each missing piece is logged as UNQUALIFIED.
 The pair's admission is untouched (test_packed_any_admission, unchanged)."""
 
+import contextlib
 import copy
 import hashlib
 import json
 import os
+import tempfile
 from pathlib import Path
 import sys
 import unittest
@@ -32,8 +34,24 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+# The record as the four-card port first committed it (every section PENDING, no reader sha): the committed record is
+# now filled in from the card windows, so the skeleton's behaviour is pinned on this fixed copy instead.
+SKELETON_TP4_TEXT = '{\n "schema": "qwen-c2-packed-any-evidence/1",\n "what": "The four-card (QWEN_FAST_TP=4) record of packed_any_admission: the same three sections as packed_any_evidence.json, to be recorded from a one-card window (CB1-TP4, CB2a-TP4 and CB2b-TP4 with the four-card ChipView, 1of4) and a four-card window (the extent audit on chips 0-3). SKELETON: every section is PENDING, so packed_any_admission refuses the attach, except for a gate-only profile (QWEN_C2_GATE=1), which logs each missing piece as UNQUALIFIED and proceeds. Recording a section changes this file and EVIDENCE_TP4_SHA256 in the same commit.",\n "provenance": "Skeleton written with the four-card S2 port (docs: the S2 TP4 plan, S2T-09). Nothing here has run on a card.",\n "binary": {\n  "ttnncpp_sha256": "152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7",\n  "note": "the same K64j binary and kernels as the pair\'s record: K64j takes the head count and geometry as arguments; whether it is exact at one KV head (0x23) is what CB1-TP4 decides"\n },\n "kernels": {\n  "dataflow/reader_decode_qwen.cpp": "adb6091878ba3f0a0805846ff56f05352610d7fe779b5ae96320c437c095db49",\n  "dataflow/reader_decode_qwen_slice.cpp": "518d8096e3cceb160eaef8ab4f0ae976ccbffd3904d31176b7f9d02828c37f8a",\n  "compute/sdpa_flash_decode_qwen.cpp": "409a1aafc3ffaaca2c6afba0e999525b7d141491f0a52e5583efa70447ee5c0e",\n  "dataflow/writer_decode_qwen_slice.cpp": "642c36f809be0f1ad1664deb405dc310dabaa32d5628710320a118eb37a6cc7a"\n },\n "sources": {},\n "sections": {\n  "CB1": {\n   "status": "PENDING",\n   "what": "K64j K1/K3 at NKV = 1: the runtime extent (0x20) at cur_pos E - 1 equals the compile-time call at capacity E, G8B2 flags 0x21, 0x23 (and G16B1 if the spike prefers it)"\n  },\n  "CB2a": {\n   "status": "PENDING",\n   "what": "K2 (bitwise), X7 and Z at one KV head with the extent flag"\n  },\n  "CB2b": {\n   "status": "PENDING",\n   "what": "The extent reader twin (extent_attention_replay_tp.py) at full scope with the 1of4 chip view, C = 131328"\n  }\n }\n}\n'
+
+
 def skeleton():
-    return json.loads(admission.EVIDENCE_TP4.read_text(encoding='utf-8'))
+    return json.loads(SKELETON_TP4_TEXT)
+
+
+@contextlib.contextmanager
+def skeleton_on_disk():
+    """The admission reading the skeleton (at its own pin) where it reads the committed record."""
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'packed_any_evidence_tp4.json'
+        path.write_bytes(SKELETON_TP4_TEXT.encode('utf-8'))
+        with mock.patch.object(admission, 'EVIDENCE_TP4', path), \
+                mock.patch.object(admission, 'EVIDENCE_TP4_SHA256', sha(path.read_bytes())):
+            yield
 
 
 def qualifying():
@@ -88,13 +106,19 @@ class RecordTests(unittest.TestCase):
                          'packed_any_evidence_tp4.json changed: re-pin EVIDENCE_TP4_SHA256 in the same commit')
         self.assertNotIn(b'\r', data)
 
+    def test_the_committed_record_qualifies_four_cards(self):
+        record = json.loads(admission.EVIDENCE_TP4.read_text(encoding='utf-8'))
+        self.assertEqual(admission.evidence_problems(record, HERE, tp=4), [])
+        self.assertEqual([record['sections'][name]['status'] for name in admission.SECTIONS], ['PASS'] * 3)
+        self.assertEqual(admission.check_evidence(tp=4)['sections']['CB2b']['chips'], '1of4')
+
     def test_the_skeleton_qualifies_nothing_and_names_every_missing_piece(self):
         problems = admission.evidence_problems(skeleton(), HERE, tp=4)
         self.assertEqual(len(problems), 4, problems)
         self.assertIn('sources: no sha256 recorded for extent_attention_replay_tp.py', problems)
         for section in ('CB1', 'CB2a', 'CB2b'):
             self.assertTrue(any(problem.startswith(section + ': status PENDING') for problem in problems), section)
-        with self.assertRaises(admission.AdmissionRefused) as refused:
+        with skeleton_on_disk(), self.assertRaises(admission.AdmissionRefused) as refused:
             admission.check_evidence(tp=4)
         self.assertEqual(len(refused.exception.problems), 4)
 
@@ -187,15 +211,22 @@ class AdmitTests(unittest.TestCase):
         self.assertTrue(self.lines[-1].startswith('[PINDIAG] packed-any admission passed: K64j'))
         self.assertIn(admission.EVIDENCE_TP4_SHA256[:16], self.lines[-1])
 
+    def test_the_committed_record_admits_the_traffic_profile(self):
+        record = self.admit(GOOD_ENV)
+        self.assertNotIn('unqualified', record)
+        self.assertTrue(admission.admitted())
+        self.assertTrue(self.lines[-1].startswith('[PINDIAG] packed-any admission passed: K64j'))
+
     def test_the_skeleton_refuses_the_attach_outside_a_gate_run(self):
-        with self.assertRaises(admission.AdmissionRefused) as refused:
+        with skeleton_on_disk(), self.assertRaises(admission.AdmissionRefused) as refused:
             self.admit(GOOD_ENV)
         self.assertFalse(admission.admitted())
         self.assertEqual(len(refused.exception.problems), 4)
         self.assertTrue(all('PENDING' in problem or 'no sha256' in problem for problem in refused.exception.problems))
 
     def test_a_gate_run_proceeds_unqualified_with_every_piece_on_the_record(self):
-        record = self.admit(GATE)
+        with skeleton_on_disk():
+            record = self.admit(GATE)
         self.assertEqual(len(record['unqualified']), 4)
         self.assertIsNone(record['evidence'])
         self.assertTrue(admission.admitted())
@@ -236,10 +267,12 @@ class GuardTests(unittest.TestCase):
         self.assertIsNone(admission.tp_guard({'QWEN_C2_GATE': '1'}))
 
     def test_four_cards_need_the_record_or_a_gate_run(self):
-        with self.assertRaises(admission.AdmissionRefused):
+        self.assertEqual(admission.tp_guard(dict(FOUR)), [], 'the committed record qualifies four cards')
+        with skeleton_on_disk(), self.assertRaises(admission.AdmissionRefused):
             admission.tp_guard(dict(FOUR))
         lines = Lines()
-        problems = admission.tp_guard(dict(FOUR, QWEN_C2_GATE='1', QWEN_C2_GATE_PROFILE='1'), log=lines)
+        with skeleton_on_disk():
+            problems = admission.tp_guard(dict(FOUR, QWEN_C2_GATE='1', QWEN_C2_GATE_PROFILE='1'), log=lines)
         self.assertEqual(len(problems), 4)
         self.assertEqual(len(lines), 4)
         with mock.patch.object(admission, 'check_evidence', return_value=qualifying()):
@@ -252,11 +285,11 @@ class GuardTests(unittest.TestCase):
         with mock.patch.dict(factory._ATTACH_QUALIFICATION, clear=True):
             with mock.patch.dict(os.environ, {}, clear=True):
                 factory.attach_source_check(Path('/pair'), qualify=good, log=lambda *a: None)
-            with mock.patch.dict(os.environ, dict(FOUR), clear=True):
+            with skeleton_on_disk(), mock.patch.dict(os.environ, dict(FOUR), clear=True):
                 with self.assertRaises(admission.AdmissionRefused):
                     factory.attach_source_check(Path('/four'), qualify=good, log=lambda *a: None)
                 self.assertNotIn(str(Path('/four')), factory._ATTACH_QUALIFICATION)
-            with mock.patch.dict(os.environ, dict(FOUR, QWEN_C2_GATE='1', QWEN_C2_GATE_PROFILE='1'), clear=True):
+            with skeleton_on_disk(), mock.patch.dict(os.environ, dict(FOUR, QWEN_C2_GATE='1', QWEN_C2_GATE_PROFILE='1'), clear=True):
                 factory.attach_source_check(Path('/four'), qualify=good, log=Lines())
 
 
