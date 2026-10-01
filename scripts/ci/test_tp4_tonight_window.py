@@ -191,5 +191,22 @@ class GateTests(unittest.TestCase):
             self.assertIn('QWEN_C2_PROFILE=c2-packed-tp4', argv)
 
 
+class G1CheckTests(unittest.TestCase):
+    """T3 serves G1 (general-tp4), which never drafts: the smoke check must not hold it to S2's batched-draft rules
+    (E3, the early G1 run, went red on 'no round was served by two packed pairs' with every test ok)."""
+
+    def problems(self, name):
+        import c2_smoke_check as check
+
+        env = PROFILES['profiles'][name]['env']
+        smoke = 'SMOKE_JSON ' + json.dumps({check.STEADY_TEST: {'users': []}})
+        return check.check(smoke, '', slide=False, env=env)[0]
+
+    def test_g1_is_not_held_to_the_draft_rules_and_s2_still_is(self):
+        pair_rule = 'no round was served by two packed pairs'
+        self.assertFalse(any(pair_rule in problem for problem in self.problems('general-tp4')))
+        self.assertTrue(any(pair_rule in problem for problem in self.problems('c2-packed-tp4')))
+
+
 if __name__ == '__main__':
     unittest.main()

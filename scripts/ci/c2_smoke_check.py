@@ -358,6 +358,16 @@ def draft_facts(container_text):
                 singles_audit_stages=sorted({stage for equal, stage in singles if equal != '1'})[:4])
 
 
+FAST_PATH_KEYS = ('QWEN_FAST_ANY_REQUEST', 'QWEN_FAST_EXTENT_REPLAY', 'QWEN_FAST_TP')
+
+
+def fast_path(env):
+    """Whether the profile drafts: it serves the speculative fast path (S2) or names a batched-draft flag. The G1
+    profiles (general-*) set none of these keys."""
+    return (any(env.get(key) not in (None, '', '0') for key in FAST_PATH_KEYS)
+            or any(key in env for key in (QUAD_FLAG, SINGLES_AUDIT_FLAG)))
+
+
 def draft_problems(facts, env, steady):
     """The problems the profile's batched-draft settings leave: see the module docstring. Only a smoke that ran the steady
     four-user mix can be held to it; the audits' unequal lines fail whatever ran."""
@@ -434,7 +444,9 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         drafts = draft_facts(container_text)
         facts['draft'] = drafts
         steady = STEADY_TEST in (smoke or {}) and 'error' not in smoke[STEADY_TEST]
-        problems += draft_problems(drafts, env, steady)
+        # The batched-draft conditions are the S2 fast path's: a G1 profile (general-*) never drafts, so they would fail it.
+        if fast_path(env):
+            problems += draft_problems(drafts, env, steady)
     if entry is not None:
         problems += traffic_problems(container_text, entry)
     if slide:
