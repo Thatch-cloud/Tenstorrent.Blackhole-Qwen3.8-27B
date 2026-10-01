@@ -291,7 +291,11 @@ class ProfileTests(unittest.TestCase):
         extra = set(gated['env']) - set(traffic['env'])
         self.assertTrue('QWEN_C2_GATE_PROFILE' in extra)
         differing = {key for key in set(traffic['env']) & set(gated['env']) if traffic['env'][key] != gated['env'][key]}
-        self.assertEqual(differing, set(), 'a flag both set must be set alike')
+        # tp4-serve-7: production serves with the verify audits OFF (the verified winning recipe, with the sampler recorded in the verify
+        # trace); its gate twin c2-packed-tp4-gate keeps them on. Every other flag both set is set alike.
+        self.assertEqual(differing, {'QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'}, 'a flag both set must be set alike')
+        for key in differing:
+            self.assertEqual((traffic['env'][key], gated['env'][key]), ('0', '1'), key)
         self.assertEqual(traffic['engine'], gated['engine'])
 
 

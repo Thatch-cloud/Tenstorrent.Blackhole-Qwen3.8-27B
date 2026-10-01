@@ -46,9 +46,17 @@ OFF_ENV = {'QWEN_FAST_QUAD_DRAFT': '0', 'QWEN_FAST_FUSED_COMMIT': '0', 'QWEN_FAS
            'QWEN_GDN_SHARED_QK_EXPERIMENT': '0'}
 # QWEN_C2_GATE_PROFILE is the admission waiver's marker: only the gate-only profile's own env carries it.
 AUDIT_ENV = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1', 'QWEN_C2_GATE_PROFILE': '1'}
-# The traffic profile serves with the verify audits on (the gate's configuration): with them off it hung twice at the
-# packed-to-sequential tail of the first four-user answers (SR v163, SS v164). Only the gate profile takes the waiver.
-VERIFY_AUDITS = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1'}
+# tp4-serve-7: the traffic profile serves with the verify audits OFF and the pinned sampler recorded in the verify trace. This is the
+# verified winning recipe (tp4-serve-6, the gate-only c2-packed-tp4-speed-strace): 5/5 audits-off passes of the deterministic hang,
+# the engine-build hang shape (concurrent8_code) passed, the S3a matrix gate identical to solo (first run and rerun, POLICY PASS), about
+# +23% four-user coding throughput over the audited profile. With the audits off and WITHOUT the in-trace sampler the profile hung
+# twice at the packed-to-sequential tail of the first four-user answers (SR v163, SS v164); the in-trace sampler is what removes the hang.
+# Only the gate profile takes the waiver.
+VERIFY_AUDITS = {'QWEN_FAST_VERIFY_T1_AUDIT': '0', 'QWEN_FAST_VERIFY_T2_AUDIT': '0',
+                 'QWEN_FAST_PACKED_SAMPLER_IN_TRACE': '1'}
+# The environment the traffic profile carried through tp4-serve-5 (audits on, no in-trace sampler): the freeze twins (f2, f12) were
+# measured on it and still carry it; they are asserted against production with exactly these keys put back.
+PRE_SERVE7_TRAFFIC = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1'}
 # The tail caps and the sequential-step watchdog (tp4-serve-3): the traffic profile and its audits-off speed twin carry them.
 TAIL_CAPS = {'QWEN_FAST_BUDGET_CAP': '1', 'QWEN_FAST_SEQ_DEADLINE_S': '120'}
 # The hang diagnosis's profiles: the speed twin as it stood before the caps (the environment of SS v164) with the caps OFF
@@ -144,7 +152,7 @@ class FourCardProfileTests(unittest.TestCase):
         return profiles()[name]
 
     def test_each_four_card_profile_is_its_pair_twin_with_the_documented_differences(self):
-        for four, twin, extra in (('c2-packed-tp4', 'c2-packed', VERIFY_AUDITS), ('c2-packed-tp4-gate', 'c2-packed-gate', AUDIT_ENV)):
+        for four, twin, extra in (('c2-packed-tp4', 'c2-packed', dict(VERIFY_AUDITS)), ('c2-packed-tp4-gate', 'c2-packed-gate', AUDIT_ENV)):
             mine, theirs = profiles()[four], self.pair(twin)
             with self.subTest(profile=four):
                 expected = dict(theirs['env'], **dict(FOUR_ENV, **dict(OFF_ENV, **extra)))
@@ -201,10 +209,13 @@ class FourCardProfileTests(unittest.TestCase):
         environ = dict(image, **profiles()['c2-packed']['env'])
         self.assertEqual(admission.check_environment(environ, M3), [])
 
-    def test_both_profiles_verify_with_the_audits_and_only_the_gate_takes_the_waiver(self):
+    def test_traffic_audits_off_with_the_sampler_in_trace_gate_audits_on_and_only_the_gate_takes_the_waiver(self):
         for name, waiver in (('c2-packed-tp4-gate', True), ('c2-packed-tp4', False)):
             env = profiles()[name]['env']
-            self.assertEqual({key: env.get(key) for key in VERIFY_AUDITS}, VERIFY_AUDITS, name)
+            if name == 'c2-packed-tp4':
+                self.assertEqual({key: env.get(key) for key in VERIFY_AUDITS}, VERIFY_AUDITS, name)
+            else:
+                self.assertEqual({key: env.get(key) for key in PRE_SERVE7_TRAFFIC}, PRE_SERVE7_TRAFFIC, name)
             self.assertEqual('QWEN_C2_GATE_PROFILE' in env, waiver, name)
 
     def test_the_switched_off_flags_are_the_images_own_and_are_off(self):
@@ -276,16 +287,17 @@ class SpeedProfileTests(unittest.TestCase):
 class TailProfileTests(unittest.TestCase):
     """tp4-serve-3: the tail caps on the traffic profile and its speed twin, and the hang diagnosis's gate-only profiles."""
 
-    def test_the_traffic_profile_and_its_speed_twin_differ_only_in_the_audits_and_the_waiver(self):
+    def test_the_traffic_profile_and_its_speed_twin_differ_only_in_the_sampler_and_the_waiver(self):
         found = profiles()
         traffic, speed = found['c2-packed-tp4']['env'], found['c2-packed-tp4-speed']['env']
         self.assertEqual({key for key in set(traffic) | set(speed) if traffic.get(key) != speed.get(key)},
-                         {'QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT', 'QWEN_C2_GATE_PROFILE'})
+                         {'QWEN_FAST_PACKED_SAMPLER_IN_TRACE', 'QWEN_C2_GATE_PROFILE'})
         for env in (traffic, speed):
             for key, value in TAIL_CAPS.items():
                 self.assertEqual(env[key], value, key)
-        self.assertEqual((traffic['QWEN_FAST_VERIFY_T1_AUDIT'], traffic['QWEN_FAST_VERIFY_T2_AUDIT']), ('1', '1'), 'audits stay on')
-        self.assertIn('hang is not found', found['c2-packed-tp4']['description'])
+        self.assertEqual((traffic['QWEN_FAST_VERIFY_T1_AUDIT'], traffic['QWEN_FAST_VERIFY_T2_AUDIT']), ('0', '0'), 'audits off (serve-7)')
+        self.assertEqual(traffic[IN_TRACE], '1')
+        self.assertIn('verified winning recipe', found['c2-packed-tp4']['description'])
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
@@ -440,7 +452,8 @@ class FreezeProfileTests(unittest.TestCase):
         for name, flags in FREEZE_PROFILES.items():
             mine = found[name]
             with self.subTest(profile=name):
-                self.assertEqual(mine['env'], dict(traffic['env'], **dict(flags, QWEN_C2_GATE_PROFILE='1')))
+                audited = {k: v for k, v in traffic['env'].items() if k != IN_TRACE}
+                self.assertEqual(mine['env'], dict(audited, **dict(PRE_SERVE7_TRAFFIC, **dict(flags, QWEN_C2_GATE_PROFILE='1'))))
                 self.assertEqual(mine['engine'], traffic['engine'])
                 for key in set(mine) | set(traffic):
                     if key not in ('description', 'env', 'gate_only'):
@@ -449,7 +462,7 @@ class FreezeProfileTests(unittest.TestCase):
                 self.assertTrue(mine['description'].startswith('GATE ONLY'))
                 self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
                 self.assertEqual((mine['env']['QWEN_FAST_VERIFY_T1_AUDIT'], mine['env']['QWEN_FAST_VERIFY_T2_AUDIT']),
-                                 ('1', '1'), 'the audits stay on, as in the traffic profile')
+                                 ('1', '1'), 'the twins keep the audits on, as the traffic profile did when they were measured')
 
     def test_the_traffic_profile_and_every_other_profile_leave_the_flags_unset(self):
         for name, profile in profiles().items():
@@ -573,13 +586,28 @@ class SamplerProfileTests(unittest.TestCase):
                     for key in ('QWEN_FAST_STALL_DEADLINE_S', 'QWEN_FAST_TRACE_CENSUS', 'QWEN_FAST_CCL_HANDLE_GUARD'):
                         self.assertNotIn(key, env)
 
-    def test_no_other_profile_carries_a_sampler_flag_and_the_traffic_profile_is_untouched(self):
+    def test_no_other_profile_carries_a_sampler_flag_and_the_traffic_profile_is_the_strace_recipe(self):
         for name, profile in profiles().items():
             if name not in SAMPLER_PROFILES:
                 self.assertNotIn(PREWARM, profile['env'], name)
-                self.assertNotIn(IN_TRACE, profile['env'], name)
+                if name != 'c2-packed-tp4':
+                    self.assertNotIn(IN_TRACE, profile['env'], name)
+        # tp4-serve-7: production is the strace arm's recipe (audits off, sampler in the verify trace, no prewarm)
         env = profiles()['c2-packed-tp4']['env']
-        self.assertEqual((env['QWEN_FAST_VERIFY_T1_AUDIT'], env['QWEN_FAST_VERIFY_T2_AUDIT']), ('1', '1'))
+        self.assertEqual((env['QWEN_FAST_VERIFY_T1_AUDIT'], env['QWEN_FAST_VERIFY_T2_AUDIT'], env[IN_TRACE]), ('0', '0', '1'))
+
+    def test_production_is_the_verified_strace_recipe_less_the_gate_marker_and_gate_limits(self):
+        """tp4-serve-7: c2-packed-tp4 is c2-packed-tp4-speed-strace (verified on tp4-serve-6) except the gate-only marker, the
+        gate_only flag and the gate limits: production keeps the prompt cap and the 8,192-token answer room."""
+        found = profiles()
+        prod, strace = found['c2-packed-tp4'], found['c2-packed-tp4-speed-strace']
+        self.assertEqual(strace['env'], dict(prod['env'], QWEN_C2_GATE_PROFILE='1'))
+        for key in set(prod) | set(strace):
+            if key not in ('description', 'env', 'gate_only', 'min_answer_tokens', 'max_prompt_tokens'):
+                self.assertEqual(prod.get(key), strace.get(key), key)
+        self.assertEqual((prod['min_answer_tokens'], prod['max_prompt_tokens']), (8192, 123136))
+        self.assertEqual((strace['min_answer_tokens'], strace.get('max_prompt_tokens')), (256, None))
+        self.assertNotIn('gate_only', prod)
 
     def test_the_admission_accepts_each_arm_over_the_image_environment(self):
         for name in SAMPLER_PROFILES:

@@ -1,0 +1,18 @@
+# The order of the tp4-serve-7 window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window. Image: the tag of the
+# tt-vllm image the job serves or builds (B7 builds tp4-serve-7). Minutes: runner time for ONE run of the job, a quad reset (1-3 min)
+# included.
+# tp4-serve-7 puts the VERIFIED WINNING RECIPE into production: c2-packed-tp4 with the verify audits OFF and the pinned sampler recorded
+# in the verify trace (QWEN_FAST_PACKED_SAMPLER_IN_TRACE=1), under the production limits. Verified on tp4-serve-6 as the gate-only profile
+# c2-packed-tp4-speed-strace.
+# B7 first: build tp4-serve-7 and smoke the PRODUCTION profile on every hang shape (the engine build after many packed rounds, the
+# four-user sequential tail, eight users on code). A hang, a refusal or a divergence stops the window.
+# M7 is the S3a matrix gate on the production profile: four users at four lengths, identical to solo. SR7 is the platform replay of the
+# thin layer image built on tp4-serve-7: the agent's own serving sequence, which hung with the audits off before the fix.
+# H7 hands the cards back to production (status, then the all-four reset; the placement of tp4-serve-7 if B7, M7 and SR7 all passed,
+# else of the previous audited image, is the template's text). It is always last and it runs even when a stop job halts the window: a
+# stall never resets the cards by itself, so it leaves them hung until H7's reset.
+B7-build-smoke stop tp4-serve-7 60
+M7-matrix stop tp4-serve-7 60
+SR7-platform-replay stop tp4-serve-7 35
+H7-handback-reset stop tp4-serve-7 15
