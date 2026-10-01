@@ -353,5 +353,283 @@ class DraftCheckTests(unittest.TestCase):
         compile(smoke, 'c2_serving_smoke.py', 'exec')   # the rig host's python 3.7 takes the same syntax
 
 
+SMOKE_SOURCE = (Path(__file__).resolve().parent / 'c2_serving_smoke.py').read_text(encoding='utf-8')
+
+
+def smoke_functions(*names):
+    """The named top-level functions of c2_serving_smoke.py, executed alone (the script itself talks to a server on import)."""
+    class Request:
+        def __init__(self, url, data=None, method=None, headers=None):
+            self.data = data
+
+    class Response:
+        def __init__(self, lines):
+            self.lines = lines
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def __iter__(self):
+            return iter(self.lines)
+
+    namespace = dict(json=json, time=__import__('time'), hashlib=__import__('hashlib'), BASE='http://x', MODEL='m',
+                     sys=sys, os=os, urllib=type('urllib', (), dict(request=type('request', (), dict(
+                         Request=Request, urlopen=lambda request, timeout=None: namespace['SSE'])))))
+    namespace['Response'] = Response
+    for name in names:
+        start = SMOKE_SOURCE.index('def %s(' % name)
+        end = SMOKE_SOURCE.index('\n\n\n', start)
+        exec(SMOKE_SOURCE[start:end], namespace)
+    return namespace
+
+
+def sse(deltas, completion_tokens):
+    """A streamed body: one chunk per (field, text) delta, then the usage chunk and [DONE]."""
+    lines = [b'data: ' + json.dumps(dict(choices=[dict(delta={field: text}, finish_reason=None)])).encode() + b'\n'
+             for field, text in deltas]
+    lines.append(b'data: ' + json.dumps(dict(choices=[dict(delta={}, finish_reason='length')])).encode() + b'\n')
+    lines.append(b'data: ' + json.dumps(dict(choices=[], usage=dict(completion_tokens=completion_tokens, prompt_tokens=9))).encode() + b'\n')
+    lines.append(b'data: [DONE]\n')
+    return lines
+
+
+class SmokeStreamTests(unittest.TestCase):
+    def read(self, deltas, tokens=20):
+        namespace = smoke_functions('stream')
+        namespace['SSE'] = namespace['Response'](sse(deltas, tokens))
+        return namespace['stream']([dict(role='user', content='hi')], 20)
+
+    def test_the_text_stays_300_characters_and_the_full_answer_is_two_hashes_and_two_lengths(self):
+        thinking = [('reasoning_content', 'think %d ' % n) for n in range(30)]
+        answer = [('content', 'answer word %d. ' % n) for n in range(30)]
+        got = self.read(thinking + answer)
+        self.assertEqual(len(got['text']), 300)
+        self.assertEqual(got['completion_tokens'], 20)
+        self.assertEqual(got['tokens'], 20)
+        self.assertEqual(got['content_chars'], sum(len(text) for _, text in answer))
+        self.assertEqual(got['reasoning_chars'], sum(len(text) for _, text in thinking))
+        self.assertNotEqual(got['content_sha256'], got['reasoning_sha256'])
+        self.assertNotIn('delta_stamps', got)
+
+    def test_the_same_tokens_split_differently_between_the_fields_give_the_same_two_hashes(self):
+        # </think> falling in one 16-row delta or across two 4-row ones: the fields' contents are the same text either way
+        whole = [('reasoning_content', 'let me think'), ('reasoning_content', ' about it'), ('content', 'The answer'),
+                 ('content', ' is 4.')]
+        split = [('reasoning_content', 'let me '), ('reasoning_content', 'think about'), ('reasoning_content', ' it'),
+                 ('content', 'The '), ('content', 'answer is'), ('content', ' 4.')]
+        one, other = self.read(whole), self.read(split)
+        self.assertEqual((one['content_sha256'], one['reasoning_sha256']), (other['content_sha256'], other['reasoning_sha256']))
+        self.assertEqual(one['text'], other['text'])
+        different = self.read(whole[:3] + [('content', ' is 5.')])
+        self.assertNotEqual(one['content_sha256'], different['content_sha256'])
+        self.assertEqual(one['reasoning_sha256'], different['reasoning_sha256'])
+
+    def test_the_delta_stamps_are_kept_only_when_asked(self):
+        namespace = smoke_functions('stream')
+        namespace['SSE'] = namespace['Response'](sse([('content', 'a'), ('content', 'b')], 2))
+        got = namespace['stream']([dict(role='user', content='hi')], 2, keep_stamps=True)
+        self.assertEqual(len(got['delta_stamps']), 2)
+
+
+class SmokeLiveReportTests(unittest.TestCase):
+    def user(self, start, first, end, tokens, stamps):
+        return dict(started_at=start, first_at=first, ended_at=end, tokens=tokens, decode_tok_s=10.0, ttft=first - start,
+                    delta_stamps=stamps)
+
+    def test_the_rate_is_over_the_window_all_four_are_live_in(self):
+        report = smoke_functions('live_report')['live_report']
+        # user 3's first token is at 10 s and user 0 ends at 20 s: the window is 10 s; every user emits one delta per second
+        users = [self.user(0, 1 + n * 3, 20 + n, 20, [float(t) for t in range(1 + n * 3, 21 + n)]) for n in range(4)]
+        for index, user in enumerate(users):
+            user['tokens'] = len(user['delta_stamps'])
+        aggregate = report(users)
+        self.assertEqual(aggregate['live4_window_s'], 10.0)
+        self.assertEqual(aggregate['last_first_token_s'], 10.0)
+        self.assertEqual([user['live4_tok_s'] for user in users], [1.0] * 4)
+        self.assertEqual(aggregate['live4_agg_tok_s'], 4.0)
+        self.assertTrue(all('delta_stamps' not in user for user in users))
+
+    def test_tokens_are_scaled_from_deltas_and_a_user_that_never_streamed_leaves_no_window(self):
+        report = smoke_functions('live_report')['live_report']
+        users = [self.user(0, 1, 11, 20, [1 + t * 0.5 for t in range(20)])] * 3 + [dict(error='ReadTimeout()')]
+        users = [dict(user) for user in users]
+        aggregate = report(users)
+        self.assertIsNone(aggregate['live4_window_s'])
+        self.assertIsNone(aggregate['live4_agg_tok_s'])
+        self.assertNotIn('delta_stamps', users[0])
+
+
+class SmokeNewTestsTests(unittest.TestCase):
+    def test_the_new_tests_sit_where_the_plan_puts_them(self):
+        order = [SMOKE_SOURCE.index(text) for text in (
+            "record('concurrent4', concurrent)", "record('concurrent4_v164order', concurrent4_v164order)",
+            "record('alive_after_drop', alive)", "record('concurrent4_solo', concurrent4_solo)",
+            "record('replay_concurrent4', replay_concurrent4)")]
+        self.assertEqual(order, sorted(order))
+        between = SMOKE_SOURCE[order[0]:order[1]]
+        self.assertNotIn("record('", between[len("record('concurrent4', concurrent)"):])
+        for name in ('concurrent4_v164order', 'concurrent4_solo', 'replay_concurrent4', 'concurrent4_code', 'concurrent4_code_equal'):
+            self.assertIn("if ONLY and '%s' in ONLY:" % name, SMOKE_SOURCE)
+        self.assertIn("record('concurrent4', concurrent)", SMOKE_SOURCE)
+        self.assertIn("return run_users('concurrent4', concurrent_prompts())", SMOKE_SOURCE)
+
+    def test_the_v164_order_is_the_admission_order_of_the_prompts_by_length(self):
+        # v164 admitted 8,376, 7,423, 452 and 533 tokens: the coding, explain, LRU and Rust prompts (indices 0, 2, 1, 3)
+        self.assertIn("order=(0, 2, 1, 3), stagger=0.25, timeout=300", SMOKE_SOURCE)
+        prompts = SMOKE_SOURCE[SMOKE_SOURCE.index('def concurrent_prompts'):SMOKE_SOURCE.index('def concurrent():')]
+        self.assertLess(prompts.index('coding'), prompts.index('LRU'))
+        self.assertLess(prompts.index('LRU'), prompts.index('Explain this code'))
+        self.assertLess(prompts.index('Explain this code'), prompts.index('Rust'))
+
+    def test_replay_concurrent4_is_the_platform_replays_traffic_shape(self):
+        replay = (Path(__file__).resolve().parent / 'c2_platform_replay.py').read_text(encoding='utf-8')
+        for text in ("'Write a unit test for a %s parser in Python.'", "('CSV', 'JSON', 'INI', 'TOML')[index]"):
+            self.assertIn(text, replay)
+            self.assertIn(text, SMOKE_SOURCE)
+        self.assertIn("in Python.'\n                                       % ('CSV', 'JSON', 'INI', 'TOML')[index], 300)", replay)
+        self.assertIn('max_tokens=300', SMOKE_SOURCE)
+        self.assertNotIn('stream=True', SMOKE_SOURCE[SMOKE_SOURCE.index('def replay_concurrent4'):])
+
+    def test_the_smoke_still_compiles_for_the_rig_hosts_python(self):
+        compile(SMOKE_SOURCE, 'c2_serving_smoke.py', 'exec')
+
+
+class SmokeCodePromptsTests(unittest.TestCase):
+    def prompts(self, targets, root):
+        namespace = smoke_functions('code_corpus', 'code_prompts')
+        namespace.update(CODE_CHARS_PER_TOKEN=3.6, __file__=str(Path(__file__).resolve().parent / 'c2_serving_smoke.py'),
+                         sysconfig=__import__('sysconfig'))
+        os.environ['SMOKE_CODE_ROOT'] = str(root)
+        try:
+            return namespace['code_prompts'](targets)
+        finally:
+            del os.environ['SMOKE_CODE_ROOT']
+
+    def tree(self, root):
+        package = Path(root) / 'pkg'
+        package.mkdir()
+        for number in range(40):
+            (package / ('module%02d.py' % number)).write_text(
+                ''.join('def function_%d_%d(value):\n    return value * %d + %d\n\n' % (number, line, line, number)
+                        for line in range(400)), encoding='utf-8')
+        return package
+
+    def test_four_users_read_disjoint_code_windows_of_about_their_target_length(self):
+        with tempfile.TemporaryDirectory() as root:
+            prompts, info = self.prompts((4096, 8192, 16384, 24576), self.tree(root))
+        self.assertEqual(len(prompts), 4)
+        self.assertEqual(info['files'], 40)
+        lengths = [len(prompt) for prompt in prompts]
+        self.assertEqual(lengths, sorted(lengths))
+        for target, length in zip((4096, 8192, 16384, 24576), lengths):
+            self.assertGreater(length, target * 3.6)
+            self.assertLess(length, target * 3.6 + 1500)
+        windows = [prompt[prompt.index('\n') + 1:prompt.index('\n</repository_context>')] for prompt in prompts]
+        self.assertEqual(len(set(windows)), 4, 'each user reads a different part of the code')
+        for prompt in prompts:
+            self.assertTrue(prompt.endswith('Python code block.') or 'repository context above' in prompt)
+
+    def test_the_equal_shape_is_four_prompts_of_one_length_with_four_different_tasks(self):
+        with tempfile.TemporaryDirectory() as root:
+            prompts, _ = self.prompts((4096,) * 4, self.tree(root))
+        self.assertEqual(len({len(prompt) - len(prompt.split('</repository_context>')[1]) for prompt in prompts}), 1)
+        self.assertEqual(len({prompt.split('</repository_context>')[1] for prompt in prompts}), 4)
+
+    def test_both_code_tests_ask_for_800_tokens_and_the_four_prompt_shapes(self):
+        self.assertIn("code_prompts((4096, 8192, 16384, 24576))", SMOKE_SOURCE)
+        self.assertIn("code_prompts((4096,) * 4)", SMOKE_SOURCE)
+        self.assertIn("def run_users(label, prompts, max_tokens=800", SMOKE_SOURCE)
+
+
+def user_with(**fields):
+    return dict(dict(tokens=800, completion_tokens=800, finish='length', prompt_tokens=100, content_sha256='c', reasoning_sha256='r',
+                     text='Here is the answer to the question. ' * 5), **fields)
+
+
+def packed_log(*requests):
+    """[PACKED] audit lines: (request id, segment, first position) then a later round of each."""
+    lines = []
+    for request, segment, position in requests:
+        lines += ['(EngineCore pid=66) | INFO | x - [PACKED] request=%s segment=%d position=%d prefix=3 emitted=4 predictions=[1]'
+                  % (request, segment, position + step) for step in (0, 4)]
+    return '\n'.join(lines)
+
+
+class SoloComparisonTests(unittest.TestCase):
+    PROMPTS = (8376, 452, 7423, 533)
+
+    def results(self, concurrent, solo=None, **more):
+        body = dict(SMOKE_OK, concurrent4=dict(users=concurrent), **more)
+        if solo is not None:
+            body['concurrent4_solo'] = dict(users=solo)
+        return body
+
+    def users(self, changes=None):
+        changes = changes or {}
+        return [user_with(prompt_tokens=prompt, **changes.get(index, {})) for index, prompt in enumerate(self.PROMPTS)]
+
+    LOG = None
+
+    def log(self):
+        return packed_log(('cmpl-a', 0, 8376), ('cmpl-b', 1, 452), ('cmpl-c', 2, 7423), ('cmpl-d', 3, 533))
+
+    def test_equal_hashes_tokens_and_finish_are_no_problem(self):
+        problems, _ = check.check(smoke_text(self.results(self.users(), self.users())), self.log(), False)
+        self.assertEqual(problems, [])
+
+    def test_a_differing_hash_names_the_user_and_its_packed_segment(self):
+        for field, label in (('content_sha256', 'content'), ('reasoning_sha256', 'reasoning'), ('completion_tokens', 'tokens'),
+                             ('finish', 'finish')):
+            concurrent = self.users({3: {field: 'other' if field != 'completion_tokens' else 612}})
+            problems, _ = check.check(smoke_text(self.results(concurrent, self.users())), self.log(), False)
+            self.assertEqual(len(problems), 1, (field, problems))
+            self.assertIn('concurrent4 user 3: diverged from solo (segment 3)', problems[0])
+            self.assertIn(label, problems[0])
+
+    def test_a_user_without_a_packed_line_is_a_problem_with_its_segment_unread(self):
+        concurrent = self.users({1: dict(content_sha256='other')})
+        problems, _ = check.check(smoke_text(self.results(concurrent, self.users())), '', False)
+        self.assertEqual(problems, ['concurrent4 user 1: diverged from solo (segment unread): content differ '
+                                    '(800 tokens against 800 solo)'])
+
+    def test_the_v164_order_users_are_held_to_the_same_solo_references(self):
+        results = self.results(self.users(), self.users(), concurrent4_v164order=dict(users=self.users({0: dict(content_sha256='x')})))
+        problems, _ = check.check(smoke_text(results), self.log(), False)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('concurrent4_v164order user 0: diverged from solo (segment 0)', problems[0])
+
+    def test_without_concurrent4_solo_or_its_hashes_the_comparison_is_skipped_and_the_core_rules_stand(self):
+        plain = smoke_text(self.results(self.users({3: dict(content_sha256='other')})))
+        self.assertEqual(check.check(plain, self.log(), False)[0], [])
+        old = [dict(tokens=800, finish='length', text='fine words here ' * 8)] * 4
+        self.assertEqual(check.check(smoke_text(self.results(self.users(), old)), self.log(), False)[0], [])
+        self.assertEqual(check.check(smoke_text(SMOKE_OK), '', False)[0], [])
+        bad = self.users({2: dict(tokens=0, finish=None, text='')})
+        problems, _ = check.check(smoke_text(self.results(bad)), self.log(), False)
+        self.assertIn('concurrent4 user 2: no tokens', ' | '.join(problems))
+
+    def test_stream_rules_cover_the_new_concurrent_tests_and_the_solo_run(self):
+        empty = dict(tokens=0, finish=None, text='')
+        results = dict(SMOKE_OK, concurrent4_v164order=dict(users=[empty] * 4), concurrent4_solo=dict(users=[empty] * 4),
+                       concurrent4_code=dict(users=[dict(user_with(), tokens=5, finish='stop')] * 4),
+                       concurrent4_code_equal=dict(error='ReadTimeout()'),
+                       replay_concurrent4=dict(users=[dict(status=200, tokens=300, finish='length'), dict(status=500, tokens=0),
+                                                      dict(error='boom'), dict(status=200, tokens=0, finish='stop')]))
+        joined = ' | '.join(check.smoke_problems(results))
+        for text in ('concurrent4_v164order user 0: no tokens', 'concurrent4_solo user 3: no tokens',
+                     'concurrent4_code user 1: finished with stop after 5 token(s)', 'concurrent4_code_equal: ReadTimeout()',
+                     'replay_concurrent4 user 1: status 500', 'replay_concurrent4 user 2: boom', 'replay_concurrent4 user 3: no tokens'):
+            self.assertIn(text, joined)
+        self.assertNotIn('replay_concurrent4 user 0', joined)
+
+    def test_the_summary_line_matches_the_packed_audits_format(self):
+        import serving_packed_step
+        line = serving_packed_step.AUDIT_LINE.format(request='cmpl-a', segment=2, position=452, prefix=3, emitted=4, predictions=[1])
+        self.assertEqual(check.packed_segments(line), {'cmpl-a': (2, 452)})
+
+
 if __name__ == '__main__':
     unittest.main()
