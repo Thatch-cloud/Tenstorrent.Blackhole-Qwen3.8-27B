@@ -253,6 +253,14 @@ def concurrent4_code_equal():
     return dict(run_users('concurrent4_code_equal', prompts), corpus=corpus)
 
 
+def concurrent8_code():
+    # Opt-in. Eight users, the target's standard seats: real code prompts of about 4k, 8k, 16k and 24k tokens twice over, a code
+    # task each, 800 tokens out, started together. A profile with fewer seats queues the rest, which this measures too (the
+    # all-live window is then empty and only the per-user clock and TTFT report).
+    prompts, corpus = code_prompts((4096, 8192, 16384, 24576) * 2)
+    return dict(run_users('concurrent8_code', prompts), corpus=corpus)
+
+
 def steady_prompts():
     # About 3,500 tokens each: four different 14,000-character stretches of the same real code.
     span = 14000
@@ -418,6 +426,8 @@ if ONLY and 'concurrent4_code' in ONLY:
     record('concurrent4_code', concurrent4_code)
 if ONLY and 'concurrent4_code_equal' in ONLY:
     record('concurrent4_code_equal', concurrent4_code_equal)
+if ONLY and 'concurrent8_code' in ONLY:
+    record('concurrent8_code', concurrent8_code)
 
 
 def agreement():
