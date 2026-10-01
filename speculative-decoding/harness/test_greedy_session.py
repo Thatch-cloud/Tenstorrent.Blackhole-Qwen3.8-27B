@@ -205,5 +205,103 @@ class SessionTests(unittest.TestCase):
         session.close('request')
 
 
+def neural(request_id, history, count):
+    """A feature drafter proposing `count` tokens that continue the history by one."""
+    return tuple((history[-1] + 1 + index) % 100 for index in range(count))
+
+
+def target(ticket):
+    """The target's predictions for `ticket` when every proposal is right: the next token after each row."""
+    return tuple((token + 1) % 100 for token in ticket.tokens)
+
+
+class BudgetCapTests(unittest.TestCase):
+    """QWEN_FAST_BUDGET_CAP: propose(full_width=True) keeps the ticket's width past the budget and
+    commit cuts the emission at it."""
+
+    def fixture(self, budget, emitted=1, eos_ids=()):
+        session = GreedySession('request', [0, 1, 2] * 12, 0, vocab_size=100, max_new_tokens=budget,
+                                eos_ids=eos_ids, neural={'dflash2': neural}, lookup_enabled=False)
+        while len(session.emitted) < emitted:
+            ticket = session.propose('request', max_rows=1, selected='dflash2')
+            session.commit('request', ticket, target(ticket), lambda prefix: None)
+        return session
+
+    def propose(self, session, **options):
+        return session.propose('request', max_rows=16, selected='dflash2', **options)
+
+    def test_a_full_width_ticket_keeps_its_rows_past_the_budget_and_the_default_does_not(self):
+        session = self.fixture(budget=6, emitted=3)
+        self.assertEqual(len(self.propose(session, full_width=True).tokens), 16)
+        session.abort('request', session.pending, lambda prefix: None)
+        self.assertEqual(len(self.propose(session).tokens), 2, 'the default narrows to the widest bucket that fits 3 left')
+
+    def test_an_all_accepting_commit_emits_exactly_the_remaining_tokens_and_finishes(self):
+        session = self.fixture(budget=6, emitted=3)
+        ticket = self.propose(session, full_width=True)
+        position = session.position
+        published = []
+        decision = session.commit('request', ticket, target(ticket), published.append)
+        self.assertEqual(len(decision.emitted), 3)
+        self.assertEqual(published, [3])
+        self.assertTrue(session.finished)
+        self.assertEqual((len(session.emitted), session.position), (6, position + 3))
+
+    def test_the_capped_emission_is_the_uncapped_emissions_first_remaining_tokens(self):
+        for budget in range(2, 18):
+            for accepted in range(0, 16):
+                with self.subTest(budget=budget, accepted=accepted):
+                    wide = self.fixture(budget=64, emitted=1)
+                    capped = self.fixture(budget=budget, emitted=1)
+                    ticket = self.propose(wide)
+                    narrow = self.propose(capped, full_width=True)
+                    self.assertEqual(ticket.tokens, narrow.tokens)
+                    predictions = list(target(ticket))
+                    for row in range(accepted, 16):
+                        predictions[row] = 99  # the proposal after the accepted run is rejected
+                    uncapped = wide.commit('request', ticket, predictions, lambda prefix: None)
+                    cut = capped.commit('request', narrow, predictions, lambda prefix: None)
+                    remaining = budget - 1
+                    self.assertEqual(cut.emitted, uncapped.emitted[:remaining])
+                    self.assertLessEqual(len(capped.emitted), budget)
+                    self.assertEqual(capped.finished, len(capped.emitted) == budget or cut.finished)
+
+    def test_an_eos_inside_the_cap_finishes_at_the_eos(self):
+        session = self.fixture(budget=6, emitted=3, eos_ids=(5,))
+        ticket = self.propose(session, full_width=True)  # tokens continue 3, 4, 5, ...
+        decision = session.commit('request', ticket, target(ticket), lambda prefix: None)
+        self.assertEqual(decision.emitted[-1], 5)
+        self.assertLessEqual(len(decision.emitted), 3)
+        self.assertTrue(session.finished)
+
+    def test_a_full_width_ticket_narrowed_and_committed_without_max_rows_emits_at_most_the_remaining(self):
+        session = self.fixture(budget=6, emitted=3)
+        ticket = session.narrow('request', self.propose(session, full_width=True), 4)
+        decision = session.commit('request', ticket, target(ticket), lambda prefix: None)
+        self.assertEqual(len(decision.emitted), 3)
+        self.assertTrue(session.finished)
+
+    def test_max_rows_wider_than_the_remaining_budget_is_cut_to_it(self):
+        session = self.fixture(budget=6, emitted=3)
+        ticket = self.propose(session, full_width=True)
+        decision = session.commit('request', ticket, target(ticket), lambda prefix: None, max_rows=8)
+        self.assertEqual(len(decision.emitted), 3)
+
+    def test_a_commit_cap_outside_the_ticket_is_still_refused(self):
+        session = self.fixture(budget=6, emitted=3)
+        ticket = self.propose(session, full_width=True)
+        for rows in (0, 17, True, 2.0):
+            with self.assertRaises(ValueError):
+                session.commit('request', ticket, target(ticket), lambda prefix: None, max_rows=rows)
+
+    def test_default_propose_and_commit_are_unchanged(self):
+        session = self.fixture(budget=64)
+        ticket = self.propose(session)
+        self.assertEqual(len(ticket.tokens), 16)
+        decision = session.commit('request', ticket, target(ticket), lambda prefix: None)
+        self.assertEqual(len(decision.emitted), 16)
+        self.assertFalse(session.finished)
+
+
 if __name__ == '__main__':
     unittest.main()

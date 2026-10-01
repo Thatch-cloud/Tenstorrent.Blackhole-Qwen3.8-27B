@@ -255,6 +255,32 @@ class HookTests(unittest.TestCase):
             with self.subTest(environ=environ):
                 self.assertEqual(run(environ), today)
 
+    def test_under_the_budget_cap_a_tail_stays_at_the_blocks_width_early_and_today_and_none_left_drafts_natively(self):
+        """QWEN_FAST_BUDGET_CAP: a user with 14 real tokens left no longer narrows the round, in the early
+        draft or in take_draft_token_ids; one with none left still does, in both."""
+        def run(environ, left):
+            harness = Harness(self, environ)
+            for bridge in harness.bridges.values():
+                bridge.state = SimpleNamespace(sampling_params=SimpleNamespace(max_tokens=40),
+                                               output_token_ids=[0] * 10)
+
+            def apply_committed_output(bridges):
+                bridges['a'].state.output_token_ids.extend([1] * (30 - left))
+                bridges['b'].state.output_token_ids.extend([1] * 4)
+
+            harness.on_step = apply_committed_output
+            harness.execute()
+            result = summary(harness.take())
+            return result, [event for event in harness.order if isinstance(event, tuple) and event[0] == 'drafts']
+
+        capped = dict(QWEN_FAST_BUDGET_CAP='1')
+        for left, width in ((14, 16), (1, 16), (0, None)):
+            today = run(capped, left)
+            self.assertEqual(today[1], [('drafts', 'a', width), ('drafts', 'b', width)])
+            for environ in (dict(EARLY, **capped), dict(GDN, **capped)):
+                with self.subTest(left=left, environ=environ):
+                    self.assertEqual(run(environ, left), today)
+
     def test_the_flush_composes_with_the_window_and_pairs_packed_only(self):
         harness = Harness(self, dict(GDN, QWEN_FAST_PRESTAGE='1', QWEN_FAST_ROUND_FENCES='1',
                                      QWEN_FAST_PAIRS_PACKED_ONLY='1'))

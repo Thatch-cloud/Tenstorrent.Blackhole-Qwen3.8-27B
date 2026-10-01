@@ -457,5 +457,85 @@ class InstalledVllmNarrowingTests(unittest.TestCase):
                     self.assertEqual(following.num_scheduled_tokens, {}, 'wedged: its frontier is past its tokens')
 
 
+class InstalledVllmTailCapTests(unittest.TestCase):
+    """QWEN_FAST_BUDGET_CAP against vLLM 0.25.1's own synchronous scheduler: it schedules the block's
+    rows whatever max_tokens says (its max_tokens skip needs async placeholders, which a synchronous step
+    never leaves pending), so a user near its budget is scheduled whole and the capped commit finishes it.
+    Its only cap on a decode step is max_model_len - 1 - num_computed_tokens, the rule
+    serving_worker_hook.schedulable_rows mirrors. Skipped where vLLM is not installed (the CPU suite);
+    qwen-fast-vllm-cpu.yml runs it."""
+
+    scheduler_types = InstalledVllmNarrowingTests.scheduler_types
+    decode_step = InstalledVllmNarrowingTests.__dict__['decode_step']
+    DRAFTS = list(range(101, 116))
+
+    def setUp(self):
+        if not vllm_installed():
+            self.skipTest('vLLM is not installed')
+
+    def started(self, scheduler_type, prompt_length, max_tokens):
+        """A scheduler whose one request has been prefilled and has its first output token (100)."""
+        from vllm.sampling_params import SamplingParams
+        from vllm.v1.request import Request
+
+        from serving_vllm_packed import packed_model_runner_output
+
+        scheduler = build_scheduler(scheduler_type)
+        request = Request('request', [42] * prompt_length, SamplingParams(temperature=0, max_tokens=max_tokens), None)
+        scheduler.add_request(request)
+        scheduler.update_from_output(scheduler.schedule(), packed_model_runner_output(
+            [CommittedOutput('request', (100,), prompt_length, False)]))
+        return scheduler, request
+
+    def commit(self, scheduler, scheduled, request, prompt_length, ticket_rows, budget):
+        """The worker's side of one round: a real GreedySession (budget tokens including the first) drafts at
+        `ticket_rows` without narrowing to its budget, the target agrees with every draft, and its capped
+        commit is applied to the runner's state and handed to the scheduler."""
+        from serving_vllm_packed import packed_model_runner_output
+        from serving_vllm_state import apply_committed_output
+
+        live = session(budget=budget)
+        ticket = live.propose('request', max_rows=ticket_rows, selected='dflash2', full_width=True)
+        self.assertEqual(len(ticket.tokens), ticket_rows)
+        decision = live.commit('request', ticket, (*ticket.tokens[1:], 55), lambda prefix: None)
+        output = CommittedOutput('request', tuple(decision.emitted), prompt_length + decision.state_rows, live.finished)
+        runner, state = runner_view([42] * prompt_length, [100])
+        apply_committed_output(runner, state, output)
+        scheduler.update_from_output(scheduled, packed_model_runner_output([output]))
+        return decision, state
+
+    def test_a_block_round_at_nine_tokens_left_is_scheduled_whole_and_a_capped_commit_finishes_exactly(self):
+        from vllm.v1.request import RequestStatus
+
+        for source, scheduler_type in self.scheduler_types():
+            with self.subTest(scheduler=source):
+                scheduler, request = self.started(scheduler_type, 4096, max_tokens=10)
+                scheduled = self.decode_step(scheduler, ['request'], self.DRAFTS)
+                self.assertEqual(scheduled.num_scheduled_tokens, {'request': 16}, 'max_tokens does not narrow it')
+                self.assertEqual(scheduled.scheduled_spec_decode_tokens, {'request': self.DRAFTS})
+                decision, state = self.commit(scheduler, scheduled, request, 4096, 16, budget=10)
+                self.assertEqual(len(decision.emitted), 9)
+                self.assertEqual(request.status, RequestStatus.FINISHED_LENGTH_CAPPED)
+                self.assertEqual(len(request.output_token_ids), 10)
+                self.assertEqual((state.output_token_ids, state.num_computed_tokens),
+                                 (list(request.output_token_ids), request.num_computed_tokens),
+                                 'the runner state is the scheduler state')
+
+    def test_the_scheduler_offers_at_most_max_model_len_minus_one_minus_the_frontier_rows(self):
+        """Pins serving_worker_hook.schedulable_rows: sixteen rows through num_computed = max_model_len - 17,
+        fifteen at max_model_len - 16."""
+        from serving_worker_hook import schedulable_rows
+
+        for source, scheduler_type in self.scheduler_types():
+            for prompt_length, rows in ((4352 - 17, 16), (4352 - 16, 15), (4352 - 4, 3)):
+                with self.subTest(scheduler=source, position=prompt_length):
+                    scheduler, request = self.started(scheduler_type, prompt_length, max_tokens=256)
+                    scheduled = self.decode_step(scheduler, ['request'], self.DRAFTS)
+                    self.assertEqual(scheduled.num_scheduled_tokens, {'request': rows})
+                    bridge = SimpleNamespace(runner=SimpleNamespace(model_config=SimpleNamespace(max_model_len=4352)),
+                                             request=SimpleNamespace(session=SimpleNamespace(position=prompt_length)))
+                    self.assertEqual(min(16, schedulable_rows(bridge)), rows)
+
+
 if __name__ == '__main__':
     unittest.main()

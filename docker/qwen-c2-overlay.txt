@@ -59,6 +59,10 @@ scripts/ci/serving_request_factory.py
 # The sequential engine's verify readback at any width (verifier_engine.py is a critical bundle-inventory file and stays
 # untouched: its four-card class is a subclass) and the per-chip page / metadata / hidden-row bindings that counted two chips.
 scripts/ci/verifier_engine_tp.py
+# The tail caps (QWEN_FAST_BUDGET_CAP): FastRequest.prepare drafts at full width under the flag and the flag's one
+# reader (budget_cap_enabled) lives here, imported by serving_packed_step, serving_worker_hook and verifier_engine_tp.
+# Without this line the image ships the base copy, which has neither, and those modules fail to import it.
+scripts/ci/serving_fast_request.py
 scripts/ci/serving_page_binding.py
 scripts/ci/verifier_inputs.py
 scripts/ci/pooled_attention_replay.py

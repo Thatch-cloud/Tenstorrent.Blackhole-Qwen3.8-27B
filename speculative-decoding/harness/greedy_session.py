@@ -60,14 +60,19 @@ class GreedySession:
             raise ValueError('Request preparation is not active')
         self.phase = 'failed'
 
-    def propose(self, request_id, *, max_rows=16, selected=None):
+    def propose(self, request_id, *, max_rows=16, selected=None, full_width=False):
+        """The next block's ticket, at most `max_rows` wide and no wider than the remaining budget.
+        `full_width` (QWEN_FAST_BUDGET_CAP) keeps the ticket's width past the budget: the rows beyond
+        the remaining tokens are drafted like any others and commit() cuts the emission at the budget,
+        so a block the packed step serves, or the widest capture a sequential engine holds, is not
+        narrowed to a width nothing beside it captured."""
         self.check_owner(request_id)
         if self.phase != 'idle' or self.finished:
             raise ValueError('An unfinished idle request is required')
         if type(max_rows) is not int or max_rows not in (1, 2, 4, 8, 16, 32) or max_rows > self.verifier_rows:
             raise ValueError('Supported verifier bucket required')
         remaining = self.max_new_tokens - len(self.emitted)
-        limit = min(max_rows, remaining)
+        limit = max_rows if full_width else min(max_rows, remaining)
         self.phase = 'drafting'
         try:
             proposal = self.drafter.propose(request_id, limit - 1, greedy=True, verifier_ready=True,
@@ -117,14 +122,20 @@ class GreedySession:
         rows commit and the rows past them are handled like rejected drafts (the verify's K/V past
         the frontier is overwritten later, and the GDN state commits at the prefix). The packed
         step passes the block's accept_limit: the extent path's rows at or past their family end
-        read all of it and never their own key, so their predictions are never used."""
+        read all of it and never their own key, so their predictions are never used. A ticket wider
+        than the remaining budget (propose(full_width=True), or one narrowed from it) is cut at the
+        budget whatever `max_rows` says: the capped emission is the uncapped emission's first
+        `remaining` tokens, and the state commits at the prefix that emitted them."""
         self.check_ticket(request_id, ticket)
         if not callable(publish):
             raise ValueError('Synchronized state publication callback required')
         proposals, targets = ticket.tokens[1:], predictions
+        if max_rows is not None and (type(max_rows) is not int or not 1 <= max_rows <= len(ticket.tokens)):
+            raise ValueError('A commit cap of 1 to %d rows is required, got %r' % (len(ticket.tokens), max_rows))
+        remaining = self.max_new_tokens - len(self.emitted)
+        if len(ticket.tokens) > remaining:
+            max_rows = remaining if max_rows is None else min(max_rows, remaining)
         if max_rows is not None:
-            if type(max_rows) is not int or not 1 <= max_rows <= len(ticket.tokens):
-                raise ValueError('A commit cap of 1 to %d rows is required, got %r' % (len(ticket.tokens), max_rows))
             proposals, targets = ticket.tokens[1:max_rows], tuple(predictions)[:max_rows]
         decision = select_prefix(proposals, targets, vocab_size=self.vocab_size, eos_ids=self.eos_ids,
                                  max_proposals=self.verifier_rows - 1)
@@ -143,7 +154,7 @@ class GreedySession:
         self.accepted_proposals += decision.accepted
         self.committed_blocks += 1
         self.committed_decode_tokens += len(decision.emitted)
-        self.finished = decision.finished or len(self.emitted) == self.max_new_tokens
+        self.finished = decision.finished or len(self.emitted) >= self.max_new_tokens
         self.pending, self.phase = None, 'idle'
         return decision
 

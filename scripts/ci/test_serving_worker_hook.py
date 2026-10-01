@@ -6,7 +6,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from serving_worker_hook import FastWorkerHook
 from test_serving_runner_bridge import RunnerBridgeTests
@@ -618,6 +618,90 @@ class WorkerHookTests(unittest.TestCase):
             hook.close()
         self.assertFalse(hook.closed)
         self.assertIs(worker.model_runner._qwen_fast_hook, hook)
+
+
+class BudgetCapHookTests(unittest.TestCase):
+    """QWEN_FAST_BUDGET_CAP: the round narrows natively only when vLLM no longer owes a user a token,
+    or the scheduler cannot offer the block's rows at a user's position; any other tail stays packed."""
+
+    fixture = WorkerHookTests.fixture
+    MAX_MODEL_LEN = 131328
+
+    def setUp(self):
+        stack = patch.dict(os.environ, {'QWEN_FAST_BUDGET_CAP': '1'})
+        stack.start()
+        self.addCleanup(stack.stop)
+
+    def make_bridge(self, name, *, max_tokens, produced, position=5000):
+        session = SimpleNamespace(request_id=name, pending=None, phase='idle', finished=False, position=position)
+        state = SimpleNamespace(sampling_params=SimpleNamespace(max_tokens=max_tokens), output_token_ids=[0] * produced)
+        runner = SimpleNamespace(model_config=SimpleNamespace(max_model_len=self.MAX_MODEL_LEN))
+        return SimpleNamespace(request=SimpleNamespace(session=session, runtime=SimpleNamespace()), state=state,
+                               runner=runner,
+                               drafts=Mock(return_value=SimpleNamespace(req_ids=[name], draft_token_ids=[[1]])))
+
+    def draft(self, bridges):
+        worker, bridge, events, scheduled = self.fixture()
+        policy = Mock(return_value=16)
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False, packed_step=SimpleNamespace(proposal_rows=policy))
+        original = hook.bridges
+        hook.bridges = bridges
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = SimpleNamespace
+        try:
+            with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+                worker.take_draft_token_ids()
+        finally:
+            hook.bridges = original
+            hook.close()
+
+    def drafted(self, bridges):
+        return [bridges[name].drafts.call_args for name in sorted(bridges)]
+
+    def test_one_to_fifteen_real_tokens_left_draft_at_the_blocks_width(self):
+        for left in (1, 2, 5, 15, 16, 40):
+            bridges = {'a': self.make_bridge('a', max_tokens=100, produced=100 - left),
+                       'b': self.make_bridge('b', max_tokens=100, produced=10)}
+            self.draft(bridges)
+            with self.subTest(left=left):
+                self.assertEqual(self.drafted(bridges), [call(packed_rows=16)] * 2)
+
+    def test_no_token_left_on_an_unfinished_session_drafts_natively(self):
+        bridges = {'a': self.make_bridge('a', max_tokens=100, produced=100),
+                   'b': self.make_bridge('b', max_tokens=100, produced=10)}
+        self.draft(bridges)
+        self.assertEqual(self.drafted(bridges), [call()] * 2)
+
+    def test_a_position_the_scheduler_cannot_offer_sixteen_rows_at_drafts_natively(self):
+        # vLLM's cap: max_model_len - 1 - position rows. At position max_model_len - 17 sixteen fit; one later, fifteen.
+        for position, packed in ((self.MAX_MODEL_LEN - 17, True), (self.MAX_MODEL_LEN - 16, False)):
+            bridges = {'a': self.make_bridge('a', max_tokens=1000, produced=10, position=position),
+                       'b': self.make_bridge('b', max_tokens=1000, produced=10)}
+            self.draft(bridges)
+            with self.subTest(position=position):
+                self.assertEqual(self.drafted(bridges), [call(packed_rows=16)] * 2 if packed
+                                 else [call()] * 2)
+
+    def test_a_request_without_readable_state_or_runner_cannot_second_guess_the_policy(self):
+        bridges = {'a': self.make_bridge('a', max_tokens=100, produced=10),
+                   'b': self.make_bridge('b', max_tokens=100, produced=10)}
+        bridges['a'].state = None
+        bridges['b'].runner = None
+        self.draft(bridges)
+        self.assertEqual(self.drafted(bridges), [call(packed_rows=16)] * 2)
+
+    def test_flag_off_the_old_narrowing_stands(self):
+        os.environ.pop('QWEN_FAST_BUDGET_CAP')
+        bridges = {'a': self.make_bridge('a', max_tokens=100, produced=95),
+                   'b': self.make_bridge('b', max_tokens=100, produced=10)}
+        self.draft(bridges)
+        self.assertEqual(self.drafted(bridges), [call()] * 2)
+
+    def test_the_flag_with_async_scheduling_is_refused_at_install(self):
+        worker, bridge, events, scheduled = self.fixture()
+        bridge.runner.non_dp_async_scheduling = True
+        with self.assertRaisesRegex(ValueError, 'Idle synchronous driver worker'):
+            FastWorkerHook(worker, bridge, cancelled=lambda: False, packed_step=SimpleNamespace(proposal_rows=Mock()))
 
 
 class DeadProposalReleaseTests(unittest.TestCase):

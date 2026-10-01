@@ -4,6 +4,8 @@ from functools import partial
 import os
 from types import MethodType
 
+from serving_fast_request import budget_cap_enabled
+
 
 PHASE_LOG = os.environ.get('QWEN_FAST_PHASE_LOG') == '1'
 
@@ -50,6 +52,21 @@ def real_remaining_budget(bridge):
     if type(max_tokens) is not int or output_token_ids is None:
         return None
     return max_tokens - len(output_token_ids)
+
+
+def schedulable_rows(bridge):
+    """The most rows vLLM's scheduler will offer this request now, or `None` when they cannot be
+    read: max_model_len - 1 - position, its only cap on a decode step that max_tokens does not
+    enter (Scheduler.schedule bounds num_new_tokens by max_model_len - 1 - num_computed_tokens),
+    and the same bound serving_vllm_state.validate_runner_reservation holds a block to. A round
+    drafted wider than this for any request is admitted short by the scheduler and refused by
+    admit_packed_scheduler_output."""
+    runner = getattr(bridge, 'runner', None)
+    max_model_len = getattr(getattr(runner, 'model_config', None), 'max_model_len', None)
+    position = getattr(bridge.request.session, 'position', None)
+    if type(max_model_len) is not int or type(position) is not int:
+        return None
+    return max_model_len - 1 - position
 
 
 def discard_stale_ticket(request, packed_rows):
@@ -464,7 +481,14 @@ class FastWorkerHook:
         bridges = list(self.bridges.values())
         packed_rows = policy([bridge.request for bridge in bridges]) if have_policy else None
         if packed_rows is not None:
-            # proposal_rows only sees session.finished (EOS or the full 256-slot
+            # QWEN_FAST_BUDGET_CAP: the round keeps the block's width for any user with a token
+            # left; its commit alone is cut at the budget (serving_packed_step.commit_limit).
+            # vLLM's sync scheduler schedules the rows whatever max_tokens says (its
+            # max_tokens skip needs async placeholders, and install refuses async scheduling:
+            # __init__), so only a request vLLM no longer owes a token, or one too near the
+            # end of the context for the scheduler to offer the rows, narrows the round.
+            #
+            # Otherwise: proposal_rows only sees session.finished (EOS or the full 256-slot
             # ceiling), never a request's own shorter max_tokens - that budget is
             # vLLM's own, enforced by excluding the request from the NEXT schedule,
             # not by anything here. A live request already at or past ITS real
@@ -474,11 +498,17 @@ class FastWorkerHook:
             # entry short, with no capture anywhere to serve them standalone
             # (real_remaining_budget's docstring). Caught here, before drafting,
             # the round degrades to native widths THIS tick instead of next.
+            capped = budget_cap_enabled()
             for bridge in bridges:
                 if getattr(bridge.request.session, 'finished', False):
                     continue
                 remaining = real_remaining_budget(bridge)
-                if remaining is not None and remaining < packed_rows:
+                if capped:
+                    room = schedulable_rows(bridge)
+                    if (remaining is not None and remaining < 1) or (room is not None and room < packed_rows):
+                        packed_rows = None
+                        break
+                elif remaining is not None and remaining < packed_rows:
                     packed_rows = None
                     break
         # Before drafting, not after: a bridge whose pending ticket is already

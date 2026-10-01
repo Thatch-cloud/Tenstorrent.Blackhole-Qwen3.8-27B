@@ -35,7 +35,7 @@ from acceptance_report import PACKED_LINE  # noqa: E402
 from extent_attention_replay import accept_limit, extent  # noqa: E402
 from packed_verifier import PackedVerifierEngine  # noqa: E402
 import serving_packed_step  # noqa: E402
-from serving_packed_step import (AUDIT_CAP, AUDIT_LINE, FORCE_CAP_MARKER, PackedStep, admitted,  # noqa: E402
+from serving_packed_step import (AUDIT_CAP, AUDIT_LINE, BUDGET_CAP_MARKER, FORCE_CAP_MARKER, PackedStep, admitted,  # noqa: E402
                                  commit_entry, commit_limit, forced_cap, ineligible, packed_device_step,
                                  proposal_rows, run_verified_block)
 import test_packed_extent_block as blocks  # noqa: E402
@@ -406,6 +406,147 @@ class PropertyTests(blocks.ExtentFixture):
         self.assertEqual(block.extent_counts['cap_refused'], 1)
         self.assertIn('[PINDIAG] packed extent cap refused round=1 segment=0 start=5370 prefix=16 limit=6', self.lines)
         self.assertEqual(block.phase, 'idle', 'fail_round released every segment at prefix 0')
+
+
+
+class BudgetCapTests(blocks.ExtentFixture):
+    """QWEN_FAST_BUDGET_CAP on the real extent block: a user near the end of its budget stays in the
+    packed round and commits at most its remaining tokens, composed by min with the block's accept_limit;
+    the others commit whole."""
+
+    FAMILIES = PropertyTests.FAMILIES
+
+    def setUp(self):
+        super().setUp()
+        self.env(QWEN_FAST_BUDGET_CAP='1')
+        for name in ('QWEN_FAST_GATE_FORCE_CAP', 'QWEN_FAST_PACKED_AUDIT'):
+            os.environ.pop(name, None)
+
+    def round(self, block, residues, remaining, bridges=None):
+        """One round through packed_device_step: user u has remaining[u] tokens left (its session's own
+        budget; `bridges` may give vLLM's own), every proposal agreed, no sequential step."""
+        requests, entries, ids = [], [], torch.zeros(64, dtype=torch.int32)
+        for segment, (family, residue, left) in enumerate(zip(self.FAMILIES, residues, remaining)):
+            live = session('R%d' % segment, budget=left + 1, position=256 * family + residue)
+            request = request_over(live, None, segment, carry=self.pool.slots[segment].verifier.carry)
+            request.engine.pages = torch.full((1, blocks.WIDTH), 7 + segment, dtype=torch.int32)
+            ticket = live.propose(live.request_id, max_rows=16, selected='dflash2', full_width=True)
+            ids[16 * segment:16 * segment + 16] = torch.tensor((*ticket.tokens[1:], 55), dtype=torch.int32)
+            requests.append(request)
+            entry = dict(request_id='R%d' % segment, request=request, ticket=ticket)
+            if bridges is not None and bridges[segment] is not None:
+                entry['bridge'] = bridges[segment]
+            entries.append(entry)
+        self.ids.value = ids
+        with patch.object(serving_packed_step, 'sequential_packed_step',
+                          side_effect=AssertionError('the round must stay packed')):
+            outputs = packed_device_step(entries, cancelled=lambda: False, block=block)
+        return requests, outputs
+
+    def test_a_user_with_five_left_commits_five_in_a_packed_round_and_the_others_commit_whole(self):
+        block = self.build()
+        marked = len(block.fixture.retained.commits)
+        requests, outputs = self.round(block, (0, 0, 0, 0), (5, 200, 200, 200))
+        self.assertEqual(block.fixture.retained.commits[marked:], [(0, 5), (1, 16), (2, 16), (3, 16)])
+        self.assertEqual([len(output.token_ids) for output in outputs], [5, 16, 16, 16])
+        self.assertEqual([output.finished for output in outputs], [True, False, False, False])
+        self.assertEqual(block.phase, 'idle')
+
+    def test_the_budget_composes_with_the_blocks_accept_limit_by_min(self):
+        block = self.build()
+        for left, limit in ((4, 4), (6, 6), (9, 6), (200, 6)):
+            marked = len(block.fixture.retained.commits)
+            requests, outputs = self.round(block, (250, 0, 0, 0), (left, 200, 200, 200))
+            with self.subTest(left=left):
+                self.assertEqual(block.fixture.retained.commits[marked:][0], (0, limit))
+                self.assertEqual(len(outputs[0].token_ids), limit)
+        self.assertEqual(block.extent_counts['cap_refused'], 0)
+
+    def test_the_emission_is_the_smaller_of_the_budget_the_family_end_and_the_block(self):
+        block = self.build()
+        for residue in (0, 100, 240, 241, 250, 255):
+            for left in (1, 2, 5, 6, 15, 16, 17):
+                requests, outputs = self.round(block, (residue, 0, 0, 0), (left, 200, 200, 200))
+                with self.subTest(residue=residue, left=left):
+                    self.assertEqual(len(outputs[0].token_ids), min(left, 256 - residue, 16))
+        self.assertEqual(block.extent_counts['cap_refused'], 0)
+
+    def test_vllms_smaller_budget_caps_at_vllms_and_one_line_is_logged_per_capped_commit(self):
+        self.env(QWEN_FAST_PACKED_AUDIT='1')
+        block = self.build()
+
+        def bridge(max_tokens, produced):
+            state = SimpleNamespace(sampling_params=SimpleNamespace(max_tokens=max_tokens),
+                                    output_token_ids=[0] * produced)
+            return SimpleNamespace(state=state)
+
+        bridges = [bridge(10, 5), None, None, None]  # user 0: vLLM owes 5, its own session 9
+        logged = []
+        with patch.object(serving_packed_step, 'audit_log', side_effect=lambda message, **values: logged.append(
+                message.format(**values))):
+            requests, outputs = self.round(block, (0, 0, 0, 0), (9, 200, 200, 200), bridges=bridges)
+        self.assertEqual([len(output.token_ids) for output in outputs], [5, 16, 16, 16])
+        cap = [line for line in logged if line.startswith(BUDGET_CAP_MARKER)]
+        self.assertEqual(len(cap), 1)
+        self.assertRegex(cap[0], r'^\[PINDIAG\] packed budget cap request=R0 segment=0 position=\d+ remaining=5 limit=5$')
+        packed = [line for line in logged if line.startswith('[PACKED] ')]
+        self.assertEqual(len(packed), 4)
+        self.assertTrue(packed[0].endswith(' cap=5'))
+        self.assertTrue(all(line.endswith(' cap=16') for line in packed[1:]), 'the extent block already logs its own cap')
+
+    def test_a_budget_under_one_raises_and_the_round_fails_closed(self):
+        ticket = SimpleNamespace(position=5000, tokens=tuple(range(16)))
+        for budget in (0, -1):
+            with self.subTest(budget=budget), self.assertRaisesRegex(ValueError, 'budget of at least one token'):
+                commit_limit(CappedBlock(), ticket, budget)
+        block = self.build()
+        state = SimpleNamespace(sampling_params=SimpleNamespace(max_tokens=5), output_token_ids=[0] * 5)
+        bridges = [SimpleNamespace(state=state), None, None, None]
+        with self.assertRaisesRegex(ValueError, 'budget of at least one token'):
+            self.round(block, (0, 0, 0, 0), (9, 200, 200, 200), bridges=bridges)
+        self.assertEqual(block.phase, 'idle', 'fail_round released every segment at prefix 0')
+
+    def test_a_budget_that_does_not_bite_leaves_the_limit_as_it_was(self):
+        ticket = SimpleNamespace(position=20218, tokens=tuple(range(16)))
+        self.assertIsNone(commit_limit(steps.FakeBlock(), ticket, 16))
+        self.assertIsNone(commit_limit(steps.FakeBlock(), ticket, 40))
+        self.assertEqual(commit_limit(steps.FakeBlock(), ticket, 5), 5)
+        self.assertEqual(commit_limit(CappedBlock(), ticket, 40), 6)
+        self.assertEqual(commit_limit(CappedBlock(), ticket, 4), 4)
+        self.assertEqual(commit_limit(CappedBlock(), ticket), 6)
+        with patch.dict(os.environ, {'QWEN_FAST_GATE_FORCE_CAP': '3'}):
+            self.assertEqual(commit_limit(CappedBlock(), ticket, 4), 3)
+            self.assertEqual(commit_limit(CappedBlock(), ticket, 2), 2)
+
+    def test_flag_off_the_step_passes_no_budget(self):
+        os.environ.pop('QWEN_FAST_BUDGET_CAP')
+        block = self.build()
+        with patch.object(serving_packed_step, 'commit_limit', wraps=serving_packed_step.commit_limit) as limit:
+            self.round(block, (0, 0, 0, 0), (200, 200, 200, 200))
+        self.assertEqual([call.args[2] for call in limit.call_args_list], [None] * 4)
+
+    def test_the_capped_emission_is_the_uncapped_prefix_for_every_accepted_and_remaining(self):
+        rng = random.Random(20261001)
+        block = CappedBlock()
+        for _ in range(600):
+            start = rng.randrange(128, C - 16)
+            left = rng.randrange(1, 40)
+            first = rng.randrange(100)
+            tokens = tuple((first + index) % 100 for index in range(16))
+            agree = rng.randrange(16)
+            predictions = [tokens[index + 1] if index < agree else (tokens[index + 1] + 1) % 100
+                           for index in range(15)] + [(first + 37) % 100]
+            results = []
+            for budget in (left + 1, 10 ** 6):
+                live = session(budget=budget)
+                live.epoch += 1
+                ticket = BlockTicket('request', live.epoch, start, tokens, 'dflash2', 0)
+                live.pending, live.phase, live.position = ticket, 'pending', start
+                limit = commit_limit(block, ticket, left if budget == left + 1 else None)
+                results.append(live.commit('request', ticket, predictions, lambda prefix: None, max_rows=limit))
+            capped, uncapped = results
+            self.assertLessEqual(len(capped.emitted), min(left, extent(start) - start))
+            self.assertEqual(capped.emitted, uncapped.emitted[:len(capped.emitted)])
 
 
 if __name__ == '__main__':

@@ -340,6 +340,48 @@ class ProposalRowsTests(unittest.TestCase):
         self.assertEqual(self.stepped, [])
 
 
+class BudgetCapProposalRowsTests(ProposalRowsTests):
+    """QWEN_FAST_BUDGET_CAP: any token left keeps the block's width. Every case of the parent's, run
+    with the flag on, answers as it did except the ones the cap flips (the budget tails)."""
+
+    def setUp(self):
+        super().setUp()
+        stack = patch.dict('os.environ', {'QWEN_FAST_BUDGET_CAP': '1'})
+        stack.start()
+        self.addCleanup(stack.stop)
+
+    def test_the_blocks_rows_when_exactly_its_users_are_live_each_with_a_block_left_and_each_bound(self):
+        requests = self.requests()
+        self.assertEqual(proposal_rows(self.block, requests), 16)
+        # 15, 5 and 1 tokens left still hold the block's round; none left (an unfinished session at its budget) does not
+        for emitted, expected in ((241, 16), (251, 16), (255, 16), (256, None)):
+            requests[2].session.emitted = [1] * emitted
+            with self.subTest(emitted=emitted):
+                self.assertEqual(proposal_rows(self.block, requests), expected)
+
+    def test_a_tail_user_beside_three_live_ones_does_not_make_the_round_sequential(self):
+        requests = self.requests()
+        requests[0].session.emitted = [1] * 251
+        self.assertEqual(proposal_rows(self.block, requests), 16)
+        requests[0].session.finished = True
+        self.assertIsNone(proposal_rows(self.block, requests), 'three live users still make the round short')
+
+    def test_the_padded_skip_line_counts_a_budget_tail_as_eligible(self):
+        requests = self.requests()
+        requests[1].session.emitted = [1] * 245
+        entries = [dict(request_id=request.session.request_id, request=request) for request in requests[:3]]
+        lines = []
+        with patch.object(serving_packed_step, 'padded_log', side_effect=lambda text, once=False: lines.append(text)):
+            serving_packed_step.note_padded_skip(entries, self.block, 'test')
+        self.assertEqual(len(lines), 1)
+        self.assertIn('eligible=1', lines[0])
+        with patch.dict('os.environ', {'QWEN_FAST_BUDGET_CAP': '0'}):
+            lines.clear()
+            with patch.object(serving_packed_step, 'padded_log', side_effect=lambda text, once=False: lines.append(text)):
+                serving_packed_step.note_padded_skip(entries, self.block, 'test')
+        self.assertIn('eligible=0', lines[0], 'flag off, a user with fewer than 16 left is not eligible')
+
+
 class PackedStepTests(unittest.TestCase):
     def setUp(self):
         verifier_engine.note_prefill()
@@ -1465,6 +1507,29 @@ class TwoBlockProposalRowsTests(unittest.TestCase):
         a, b = self.requests(self.block_a, 'AB')
         self.assertEqual(proposal_rows(self.block_a, [a, b]), 16, 'a lone block still takes the bare, non-list form')
         self.assertIsNone(proposal_rows(self.block_a, [a]))
+
+
+class TwoBlockBudgetCapProposalRowsTests(TwoBlockProposalRowsTests):
+    """QWEN_FAST_BUDGET_CAP over two blocks: budget is any token left, family and completeness as before."""
+
+    def setUp(self):
+        super().setUp()
+        stack = patch.dict('os.environ', {'QWEN_FAST_BUDGET_CAP': '1'})
+        stack.start()
+        self.addCleanup(stack.stop)
+
+    def test_budget_and_family_are_checked_per_request_against_its_own_matched_block(self):
+        a, b = self.requests(self.block_a, 'AB')
+        c, d = self.requests(self.block_b, 'CD')
+        c.session.emitted = [1] * 241
+        self.assertEqual(proposal_rows([self.block_a, self.block_b], [a, b, c, d]), 16, 'C has 15 left: still a block round')
+        c.session.emitted = [1] * 256
+        self.assertIsNone(proposal_rows([self.block_a, self.block_b], [a, b, c, d]), 'C has none left')
+        c.session.emitted = []
+        self.block_b.replay_capacity = 4352
+        d.session.position = 4340
+        self.assertIsNone(proposal_rows([self.block_a, self.block_b], [a, b, c, d]),
+                          "D's frontier leaves block B's native chunk family")
 
 
 class TwoBlockStepTests(unittest.TestCase):

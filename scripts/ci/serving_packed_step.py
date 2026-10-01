@@ -22,7 +22,9 @@ M3 block - and each entry's draft proposal stays its own pass in the hook (one p
 serving_worker_hook._drafts), before this one verify.
 
 A round the block cannot serve goes to the sequential step WHOLE: a ticket narrower than
-the block's rows per user (greedy_session narrows the last block of a budget), more or
+the block's rows per user (greedy_session narrows the last block of a budget; under
+QWEN_FAST_BUDGET_CAP it does not: a user with any budget left keeps the block's width and its
+commit alone is cut at the budget, commit_limit), more or
 fewer entries than the block's users (the survivors after a partner finished - one of two,
 or one to three of four), an engine the block was not captured against, or a cancellation
 already raised before any device work. The two are never mixed within a round. Either way
@@ -73,7 +75,7 @@ import time
 from types import SimpleNamespace
 
 from attention_mask_replay import validate_ticket
-from serving_fast_request import CommittedOutput
+from serving_fast_request import CommittedOutput, budget_cap_enabled
 from serving_sequential_step import describe as describe_sequential, sequential_packed_step
 from serving_worker_hook import phase
 import memory_ledger
@@ -87,6 +89,9 @@ AUDIT_LINE = ('[PACKED] request={request} segment={segment} position={position} 
 # S2 W4: appended to AUDIT_LINE whenever the round's commit had a cap (commit_limit: an extent block,
 # or the gate-only forced cap), so a family block's line is byte for byte what it was.
 AUDIT_CAP = ' cap={cap}'
+# QWEN_FAST_BUDGET_CAP: one line per commit the remaining budget cut (commit_limit's `budget`).
+BUDGET_CAP_MARKER = '[PINDIAG] packed budget cap'
+BUDGET_CAP_LINE = BUDGET_CAP_MARKER + ' request={request} segment={segment} position={position} remaining={remaining} limit={limit}'
 # QWEN_FAST_GATE_FORCE_CAP (S2 design Q5, M4's forced-cap arm; GATE ONLY, unset by default): every
 # packed commit capped at this many rows, to show that commit granularity does not change the text.
 FORCE_CAP_FLAG = 'QWEN_FAST_GATE_FORCE_CAP'
@@ -215,15 +220,24 @@ def admitted(block, position):
     return True
 
 
-def commit_limit(block, ticket):
+def commit_limit(block, ticket, budget=None):
     """How many of this ticket's rows its user may commit, or None for all of them: the block's
     accept_limit at the ticket's position (S2: min(rows, E - start) on the extent block; None on a
-    family block, or a block without it), then at most QWEN_FAST_GATE_FORCE_CAP when that is set."""
+    family block, or a block without it), then at most QWEN_FAST_GATE_FORCE_CAP when that is set,
+    then - `budget`, the tokens the request may still emit (QWEN_FAST_BUDGET_CAP; None: no budget
+    cap) - at most that, by min, so a user at its last tokens commits only them while the others
+    commit whole. A budget under one is a request the scheduler no longer owes a token: it raises
+    (the round fails closed) rather than commit one past vLLM's budget."""
     accept = getattr(block, 'accept_limit', None)
     limit = accept(ticket.position) if callable(accept) else None
     forced = forced_cap()
     if forced is not None:
         limit = min(len(ticket.tokens) if limit is None else limit, forced)
+    if budget is not None:
+        if budget < 1:
+            raise ValueError('A packed commit needs a budget of at least one token, got %r' % (budget,))
+        if budget < (len(ticket.tokens) if limit is None else limit):
+            limit = budget
     return limit
 
 
@@ -246,6 +260,13 @@ def proposal_rows(block, requests):
     users, makes the WHOLE round None, exactly as a lone block always required all its own
     users present. Every configured block shares one rows-per-user in practice; if they
     ever did not, the mismatch answers None rather than picking one width over another.
+
+    QWEN_FAST_BUDGET_CAP: "a block's worth of tokens left" becomes "any token left". A user near
+    the end of its budget stays in the block's round at the block's width and its commit alone is
+    cut at the budget (commit_limit), where it used to send the whole round, every other user
+    included, down the one-pass-per-user sequential step for the tail. vLLM's sync scheduler offers
+    the rows regardless of max_tokens, and the commit at a prefix within the budget is one of the
+    block's existing traces, so nothing is captured or allocated for it.
 
     Beside the 64-row block (or the two 32-row blocks together, the same total rows) the
     per-request engines may capture only the sequential widths
@@ -296,7 +317,7 @@ def proposal_rows(block, requests):
             return None
         for request in group:
             session = request.session
-            if session.max_new_tokens - len(session.emitted) < shape.rows_per_user:
+            if session.max_new_tokens - len(session.emitted) < (1 if budget_cap_enabled() else shape.rows_per_user):
                 return None
             # The block's own admits (S2 W4): the extent path's range, or its one family.
             if not admitted(matched, session.position):
@@ -725,7 +746,7 @@ def note_padded_skip(entries, block, reason):
         rows = block.shape.rows_per_user
         eligible = True
         for entry in entries:
-            if remaining_budget(entry) < rows:
+            if remaining_budget(entry) < (1 if budget_cap_enabled() else rows):
                 eligible = False
                 break
             if not admitted(block, entry['request'].session.position):
@@ -881,7 +902,8 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
         session_started = time.perf_counter()
         # S2 W4: the rows this user may commit (the extent block's boundary cap, the gate's forced
         # cap), or None - every block before S2 - for the call exactly as it was.
-        limit = commit_limit(block, ticket)
+        budget = remaining_budget(entry) if budget_cap_enabled() else None
+        limit = commit_limit(block, ticket, budget)
         if cancelled():
             session.abort(request_id, ticket, runtime.publish)
             request.cancelled = True
@@ -905,6 +927,9 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
             PUBLICATION_SPLITS.reset(split_token)
     finished = time.perf_counter()
     if audit_enabled():
+        if budget is not None and limit == budget and budget < len(ticket.tokens):
+            audit_log(BUDGET_CAP_LINE, request=str(request_id)[:48], segment=segment, position=ticket.position,
+                      remaining=budget, limit=limit)
         audit_log(AUDIT_LINE if limit is None else AUDIT_LINE + AUDIT_CAP, request=str(request_id)[:48],
                   segment=segment, position=ticket.position, prefix=0 if decision is None else decision.state_rows,
                   emitted=0 if decision is None else len(decision.emitted), predictions=list(rows[:8]),

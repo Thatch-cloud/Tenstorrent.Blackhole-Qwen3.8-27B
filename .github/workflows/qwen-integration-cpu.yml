@@ -40,6 +40,9 @@ jobs:
           python -B -m unittest test_draft_kv_slide_gate
           python -B -m unittest test_gdn_slot_copy
           python -B -m unittest test_serving_fast_request
+          python -B -m unittest test_budget_cap_fast_request
+          python -B -m unittest test_verifier_engine_tp
+          python -B -m unittest discover -s speculative-decoding/harness -p 'test_greedy_session.py'
           python -B -m unittest test_serving_vllm_contract
           python -B -m unittest test_serving_vllm_state
           python -B -m unittest test_serving_page_binding
