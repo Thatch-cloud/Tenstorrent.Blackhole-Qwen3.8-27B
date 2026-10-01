@@ -44,7 +44,7 @@ RSHARD_TIMING_TESTS = ['warmup', 'coding', 'concurrent4_code', 'concurrent4_code
 PROFILE_OF = {'N0-build-smoke': PRODUCTION, 'R2-rshard-audit': 'c2-packed-tp4-gate-rshard-audit',
               'R2b-rshard-audit-hang-shapes': 'c2-packed-tp4-diag-t1-rshard-audit',
               **{name: 'c2-packed-tp4-diag-rshard' for name in R1_RUNS},
-              **{name: ('c2-packed-tp4-speed' if name.startswith('R0') else 'c2-packed-tp4-speed-rshard') for name in R0_R3}, 'N1-best-gate-smoke-audited': BEST_GATE, 'N2-s3a-matrix-best-gate': BEST_GATE,
+              **{name: ('c2-packed-tp4-speed-strace' if name.startswith('R0') else 'c2-packed-tp4-speed-rshard') for name in R0_R3}, 'N1-best-gate-smoke-audited': BEST_GATE, 'N2-s3a-matrix-best-gate': BEST_GATE,
               'N3-staggered-trigger-best-gate': BEST_GATE,
               'N4a-speed-timed': 'c2-packed-tp4-speed-strace', 'N4b-best-timed': 'c2-packed-tp4-best-strace',
               'N4c-speed-timed': 'c2-packed-tp4-speed-strace', 'N4d-best-timed': 'c2-packed-tp4-best-strace',
@@ -284,11 +284,13 @@ class RequestShardJobTests(unittest.TestCase):
 
     def test_the_timing_is_an_abab_of_the_speed_twin_without_and_with_the_flag_on_the_same_tests(self):
         names = [row[0] for row in read_order()]
-        self.assertEqual([parsed(name)['profile'] for name in R0_R3], [CONTROL, 'c2-packed-tp4-speed-rshard'] * 2)
+        # A is fix A (the in-trace sampler), not the bare speed twin: that deadlocked on these tests (S0t, tp4-serve-6).
+        self.assertEqual([parsed(name)['profile'] for name in R0_R3], ['c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-rshard'] * 2)
         for name in R0_R3:
             self.assertEqual(tests_of(name), RSHARD_TIMING_TESTS, name)
-        control, armed = env_of(CONTROL), env_of('c2-packed-tp4-speed-rshard')
-        self.assertEqual({key for key in set(control) | set(armed) if control.get(key) != armed.get(key)}, {RSHARD_ARM})
+        control, armed = env_of('c2-packed-tp4-speed-strace'), env_of('c2-packed-tp4-speed-rshard')
+        self.assertEqual({key for key in set(control) | set(armed) if control.get(key) != armed.get(key)},
+                         {RSHARD_ARM, 'QWEN_FAST_PACKED_SAMPLER_IN_TRACE'})
         self.assertEqual(names[names.index('R0-speed-base'):][:4], list(R0_R3), 'A B A B, back to back')
 
     def test_only_the_arm_profiles_carry_the_flag_and_the_audit_is_the_audited_arms(self):
