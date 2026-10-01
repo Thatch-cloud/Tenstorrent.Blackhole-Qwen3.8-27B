@@ -728,7 +728,11 @@ class HandleGuardTests(InstalledTwin):
                                    synchronize_device=lambda mesh: None)
 
         unguarded = fake()
-        with patch.dict(sys.modules, {'ttnn': unguarded}):
+        # Inside the image the model tree is importable, and tile_collective_tp.install would import its ccl module against
+        # this bare fake ttnn (no MeshDevice): this test is about the census twins only, so the tile split is held out.
+        import tile_collective_tp
+        no_tile_split = patch.object(tile_collective_tp, 'install', return_value=[])
+        with patch.dict(sys.modules, {'ttnn': unguarded}), no_tile_split:
             tp_addresses.install()
             self.assertTrue(hasattr(unguarded.release_trace, 'census_of'))
             self.assertFalse(hasattr(unguarded.execute_trace, 'census_of'), 'the hot-path twins stay unbound without the guard')
@@ -736,7 +740,7 @@ class HandleGuardTests(InstalledTwin):
             tp_addresses.uninstall()
         os.environ[trace_census.HANDLE_GUARD_FLAG] = '1'
         guarded = fake()
-        with patch.dict(sys.modules, {'ttnn': guarded}):
+        with patch.dict(sys.modules, {'ttnn': guarded}), patch.object(tile_collective_tp, 'install', return_value=[]):
             tp_addresses.install()
             self.assertTrue(hasattr(guarded.execute_trace, 'census_of') and hasattr(guarded.synchronize_device, 'census_of'))
             tp_addresses.uninstall()
