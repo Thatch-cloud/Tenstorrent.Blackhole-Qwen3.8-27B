@@ -27,7 +27,8 @@ IMAGE = 'tp4-sampler-1'
 PREWARM_REPEATS = ('SPa-diag-sprewarm', 'SPb-diag-sprewarm', 'SPc-diag-sprewarm', 'SPd-diag-sprewarm', 'SPe-diag-sprewarm')
 TRACE_REPEATS = ('STa-diag-strace', 'STb-diag-strace', 'STc-diag-strace', 'STd-diag-strace', 'STe-diag-strace')
 TIMING = ('SPt-speed-sprewarm', 'STt-speed-strace')
-ORDERED = ('SB-build-smoke',) + PREWARM_REPEATS + TRACE_REPEATS + TIMING + ('SH-handback-reset',)
+BASE = 'S0t-speed-base'
+ORDERED = ('SB-build-smoke',) + PREWARM_REPEATS + TRACE_REPEATS + (BASE,) + TIMING + ('SH-handback-reset',)
 WORK = ORDERED[:-1]
 SS = ['warmup', 'coding', 'long_real_text', 'concurrent4', 'concurrent4_steady', 'steady_resend', 'tool_call', 'stream_tool_call',
       'stream_reasoning', 'refused_n2', 'alive_after_refusal', 'stream_dropped', 'alive_after_drop']
@@ -38,7 +39,7 @@ TIMING_TESTS = ['warmup', 'coding', 'concurrent4_code', 'concurrent4_code_equal'
 PROFILE_OF = {'SB-build-smoke': 'c2-packed-tp4',
               **{name: 'c2-packed-tp4-diag-sprewarm' for name in PREWARM_REPEATS},
               **{name: 'c2-packed-tp4-diag-strace' for name in TRACE_REPEATS},
-              'SPt-speed-sprewarm': 'c2-packed-tp4-speed-sprewarm', 'STt-speed-strace': 'c2-packed-tp4-speed-strace'}
+              BASE: 'c2-packed-tp4-speed', 'SPt-speed-sprewarm': 'c2-packed-tp4-speed-sprewarm', 'STt-speed-strace': 'c2-packed-tp4-speed-strace'}
 
 
 def read_order():
@@ -136,6 +137,16 @@ class TemplateTests(unittest.TestCase):
             self.assertTrue(parsed(name)['profile'].startswith('c2-packed-tp4-diag-s'), name)
         for name in TIMING:
             self.assertTrue(parsed(name)['profile'].startswith('c2-packed-tp4-speed-s'), name)
+        self.assertEqual(parsed(BASE)['profile'], 'c2-packed-tp4-speed')
+
+    def test_the_timing_baseline_runs_the_speed_twin_without_a_flag_before_both_timing_jobs(self):
+        names = [row[0] for row in read_order()]
+        self.assertLess(names.index(BASE), min(names.index(name) for name in TIMING))
+        self.assertNotIn('QWEN_FAST_PACKED_SAMPLER', text_of(BASE).replace('SAMPLER_PREWARM=1', '').replace('SAMPLER_IN_TRACE=1', ''))
+        self.assertEqual(tests_of(BASE), TIMING_TESTS)
+        for name in TIMING:
+            self.assertEqual(tests_of(name), tests_of(BASE))
+            self.assertIn(BASE, text_of(name))
         self.assertEqual({parsed(name)['profile'] for name in PREWARM_REPEATS}, {'c2-packed-tp4-diag-sprewarm'})
         self.assertEqual({parsed(name)['profile'] for name in TRACE_REPEATS}, {'c2-packed-tp4-diag-strace'})
 
@@ -171,7 +182,7 @@ class SmokeTests(unittest.TestCase):
     def test_the_diag_repeats_run_the_hang_shapes_and_the_timing_jobs_the_coding_tests(self):
         for name in PREWARM_REPEATS + TRACE_REPEATS:
             self.assertEqual(tests_of(name), SHAPES, name)
-        for name in TIMING:
+        for name in (BASE,) + TIMING:
             self.assertEqual(tests_of(name), TIMING_TESTS, name)
             for test in ('concurrent4_code', 'concurrent4_code_equal', 'concurrent8_code'):
                 self.assertIn(test, tests_of(name))
