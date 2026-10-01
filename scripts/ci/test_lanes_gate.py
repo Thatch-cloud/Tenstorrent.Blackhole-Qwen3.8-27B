@@ -49,6 +49,10 @@ def lane_world(schedule, standard=3, seconds=40.0, lever='phase1', context='32k'
     return world
 
 
+WARM_LINE = 'INFO [PINDIAG] four-card eager prefill warmed before the packed traces: page_table_blocks=2052 slots=4 programs=117->503 ms=9000'
+PREFILL_LINE = 'INFO [PINDIAG] four-card prefill programs=503->503 window=0 prompt=4096'
+
+
 class Fixtures(object):
     """Server logs and arm reports the plans' arms would leave."""
 
@@ -69,6 +73,9 @@ class Fixtures(object):
     def log(cls, users=4, lanes=None, solo=False, positions=None, rounds=12, **lane_options):
         """An arm's server log: the S2 arm's lines (s2_log) plus the lane lines and the solo-lane route line when asked."""
         text = s2t.s2_log(users=users, rounds=rounds, positions=positions or EXACT_LENGTHS[:users])
+        # the four-card prefill tripwire (c2_serving_gate.prefill_tripwire_check, on every four-card S2 arm): the warm line before
+        # the packed traces and a prefill that compiled nothing beyond its window snapshot
+        text = '\n'.join((WARM_LINE, PREFILL_LINE, text)) if WARM_LINE not in text else text
         extra = []
         if solo:
             extra += cls.solo_route_lines()
