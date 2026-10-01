@@ -267,6 +267,8 @@ ARITHMETIC_NEUTRAL = frozenset((
     'QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CAPTURE_PLUG_L1', 'QWEN_FAST_CAPTURE_PLUG_LEAVE_MB',
     'QWEN_FAST_CAPTURE_PLUG_RESERVE_MB', 'QWEN_FAST_CAPTURE_PLUG_ENGINE_LEAVE_MB', 'QWEN_FAST_CAPTURE_PLUG_MIN_FREE_MB',
     'QWEN_FAST_CAPTURE_PLUG_L1_LEAVE_KB', 'QWEN_FAST_CAPTURE_PLUG_L1_RESERVE_KB',
+    # tp4/sampler: the pinned sampler's output is never read (tokens come from the shard argmax), so neither isolation arm changes a token.
+    'QWEN_FAST_PACKED_SAMPLER_PREWARM', 'QWEN_FAST_PACKED_SAMPLER_IN_TRACE',
     # Paths (the 'qwen-tt' scope): where the runtime, the weight cache and the kernel cache live.
     'TT_METAL_HOME', 'TT_CACHE_PATH', 'TT_METAL_CACHE',
 ))

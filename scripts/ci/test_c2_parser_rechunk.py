@@ -882,6 +882,9 @@ class ProfileGatingTests(unittest.TestCase):
                                  'c2-packed-tp4-speed-noslide': True,
                                  # the fix arm (tp4-serve-4)
                                  'c2-packed-tp4-speed-fix': True,
+                                 # the sampler isolation arms (tp4/sampler)
+                                 'c2-packed-tp4-diag-sprewarm': True, 'c2-packed-tp4-diag-strace': True,
+                                 'c2-packed-tp4-speed-sprewarm': True, 'c2-packed-tp4-speed-strace': True,
                                  # the batched-draft window's arms (tp4/draft)
                                  'c2-packed-tp4-speed-quad': True, 'c2-packed-tp4-speed-pairs': True,
                                  # the hang diagnosis's arms (tp4-serve-3)
@@ -902,6 +905,7 @@ class ProfileGatingTests(unittest.TestCase):
                                       'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
                                       'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-fix',
                                       'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs',
+                                      'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace',
                                       'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f2', 'c2-packed-tp4-f12',
                                       'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-pairs'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):

@@ -51,6 +51,8 @@ GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate
                     'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2',
                     # the fix arm (tp4-serve-4)
                     'c2-packed-tp4-speed-fix',
+                    # the sampler isolation arms (tp4/sampler)
+                    'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace',
                     # the admission-freeze window's arms (tp4/freeze)
                     'c2-packed-tp4-f2', 'c2-packed-tp4-f12')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
