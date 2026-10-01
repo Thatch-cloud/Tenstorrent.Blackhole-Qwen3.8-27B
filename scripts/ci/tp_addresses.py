@@ -61,6 +61,10 @@ TWINS = (
     # The packed block's split and merge as one DMA launch each (tp4/vglue, QWEN_FAST_TP4_GDN_GLUE): the twin subclasses the pinned
     # class and delegates to it with the flag off. model_batch imports the class lazily, so it gets the twin.
     ('gdn_device_loop_state', 'DeviceLoopState', 'gdn_device_loop_state_tp', 'DeviceLoopState'),
+    # The packed block's attention fold as two launches (tp4/vglue, QWEN_FAST_TP4_ATTN_FOLD): the reader twin's bytes are pinned by the S2
+    # four-card evidence, so the hook is a subclass in its own module, binding in place of the class in extent_attention_replay_tp (which
+    # model_batch reaches as extent_attention_replay once MODULE_TWINS has aliased it); the flag off, every call is the pinned class's.
+    ('extent_attention_replay_tp', 'PackedExtentReplayReader', 'extent_attention_fold_tp', 'PackedExtentReplayReader'),
     ('gdn_commit_dma', 'validate_shapes', 'gdn_commit_dma_tp', 'validate_shapes'),
     ('gdn_commit_dma', 'prepare', 'gdn_commit_dma_tp', 'prepare'),
     ('gdn_commit_dma', 'publish', 'gdn_commit_dma_tp', 'publish'),

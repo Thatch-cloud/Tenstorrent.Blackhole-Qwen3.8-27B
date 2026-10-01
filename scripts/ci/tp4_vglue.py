@@ -41,7 +41,7 @@ AUDIT_MISMATCH = '[PINDIAG] tp4 vglue audit mismatch'
 # (test_tp4_vglue checks it), so what the CPU tests proved is what ships.
 RUNTIME_FILES = ('tp4_vglue.py', 'gdn_commit_lanes_tp.cpp', 'gdn_rows_dma_tp.py', 'gdn_rows_dma_tp.cpp',
                  'gdn_device_loop_state_tp.py', 'gdn_block_conv_tp.py', 'attention_block_fold_tp.py',
-                 'attention_block_fold_tp.cpp')
+                 'attention_block_fold_tp.cpp', 'extent_attention_fold_tp.py')
 
 
 def _read(name, environ):

@@ -21,6 +21,7 @@ import torch
 
 import attention_block_fold_tp as fold
 import extent_attention_replay as pinned
+import extent_attention_fold_tp as folded
 import extent_attention_replay_tp as quad
 import tp4_vglue
 from test_extent_attention_replay import WIDTH, host_table
@@ -332,7 +333,7 @@ class LaunchTests(unittest.TestCase):
 def block_reader(device, segments=((0, 16), (16, 32), (32, 48), (48, 64))):
     lent = [lend(device, last - first) for first, last in segments]
     starts = (4200, 9000, 4300, 5000)[:len(segments)]
-    return quad.PackedExtentReplayReader(device, MESH, segments, WIDTH, [host_table(i + 1) for i in range(len(segments))],
+    return folded.PackedExtentReplayReader(device, MESH, segments, WIDTH, [host_table(i + 1) for i in range(len(segments))],
                                          storage=lent, max_group_rows=8, starts=starts)
 
 
@@ -466,9 +467,9 @@ class ReaderHookTests(unittest.TestCase):
 
     def test_a_query_the_launch_is_not_written_for_falls_back_to_the_served_path(self):
         lines = []
-        quad.PackedExtentReplayReader.fold_fallbacks = set()
+        folded.PackedExtentReplayReader.fold_fallbacks = set()
         tp4_vglue.take()
-        with patch('extent_attention_replay_tp.tp4_vglue.log_line', side_effect=lines.append):
+        with patch('extent_attention_fold_tp.tp4_vglue.log_line', side_effect=lines.append):
             reader, output, sdpa, refreshed, query, keys = self.call(memory='sharded', QWEN_FAST_TP4_ATTN_FOLD='1')
         self.assertEqual(output.origin[0], 'concat')
         self.assertEqual(len(sdpa), 4)
@@ -484,6 +485,35 @@ class ReaderHookTests(unittest.TestCase):
         with pair(), env(QWEN_FAST_TP4_ATTN_FOLD='1'):
             with self.assertRaises(ValueError):
                 tp4_vglue.enabled(tp4_vglue.ATTN_FOLD)
+
+
+class PinnedReaderTests(unittest.TestCase):
+    """extent_attention_replay_tp.py is the bytes CB2b qualified (packed_any_admission refuses the traffic profile on any other), so
+    V3a lives in a subclass that tp_addresses binds in its place."""
+
+    EVIDENCE = HERE / 'packed_any_evidence_tp4.json'
+
+    @unittest.skipUnless((HERE / 'packed_any_evidence_tp4.json').is_file(), 'the evidence record is not in this tree (the image)')
+    def test_the_reader_twin_still_has_the_bytes_the_evidence_qualified(self):
+        import hashlib
+        import json
+
+        recorded = json.loads(self.EVIDENCE.read_text(encoding='utf-8'))['sources']['extent_attention_replay_tp.py']
+        self.assertEqual(hashlib.sha256((HERE / 'extent_attention_replay_tp.py').read_bytes()).hexdigest(), recorded)
+
+    def test_the_hook_is_not_in_the_pinned_module(self):
+        text = (HERE / 'extent_attention_replay_tp.py').read_text(encoding='utf-8')
+        self.assertNotIn('tp4_vglue', text)
+        self.assertNotIn('attention_block_fold_tp', text)
+
+    def test_the_subclass_is_bound_in_place_of_the_reader_at_four_cards(self):
+        import tp_addresses
+
+        entry = ('extent_attention_replay_tp', 'PackedExtentReplayReader', 'extent_attention_fold_tp', 'PackedExtentReplayReader')
+        self.assertIn(entry, tp_addresses.TWINS)
+        self.assertTrue(issubclass(folded.PackedExtentReplayReader, quad.PackedExtentReplayReader) or
+                        folded.PackedExtentReplayReader.__mro__[1].__module__ == 'extent_attention_replay_tp')
+        self.assertIn('extent_attention_fold_tp.py', tp4_vglue.RUNTIME_FILES)
 
 
 if __name__ == '__main__':

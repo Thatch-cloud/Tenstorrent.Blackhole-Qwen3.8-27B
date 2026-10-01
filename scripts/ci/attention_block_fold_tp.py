@@ -1,6 +1,6 @@
 """QWEN_FAST_TP4_ATTN_FOLD (tp4/vglue V3a): the packed block's attention fold-in and fold-out as one launch each.
 
-Served (extent_attention_replay_tp.PackedExtentReplayReader), per attention layer and per packed user segment: a query
+Served (extent_attention_fold_tp.PackedExtentReplayReader, the twin of extent_attention_replay_tp's reader), per attention layer and per packed user segment: a query
 Slice, one fold DMA per eight-row group and a Concat into the bundle's stacked (1, 2, 48, 256) query; after the SDPA, a
 Slice per group, one inverse fold DMA per group and a Concat back to the segment's rows; then one Concat over the users:
 37 glue ops per layer. Every one of them is data movement (slices and concats along the untiled dim 1, and the fold's
