@@ -113,6 +113,31 @@ def triage_commands(tool, environ=None, python=None):
     return [template.format(**values).split() for template in templates]
 
 
+def triage_problems(environ=None, find_spec=None):
+    """What stops the triage tools running in THIS interpreter: [] when the root, every tool and the ttexalens module they import
+    are present, else one sentence per problem. Never raises."""
+    environ = os.environ if environ is None else environ
+    root = environ.get(ROOT_FLAG) or DEFAULT_ROOT
+    problems = []
+    try:
+        if not os.path.isdir(root):
+            problems.append('the triage directory %s does not exist' % root)
+        else:
+            absent = [tool for tool in triage_tools(environ)
+                      if not (os.path.isfile(os.path.join(root, tool + '.py')) or os.path.isfile(os.path.join(root, 'triage.py')))]
+            if absent:
+                problems.append('missing from %s: %s' % (root, ', '.join(absent)))
+        if find_spec is None:
+            import importlib.util
+            find_spec = importlib.util.find_spec
+        if find_spec('ttexalens') is None:
+            problems.append('the ttexalens module is not installed for %s (the image build installs the pinned '
+                            '%s/requirements.txt)' % (sys.executable or 'python3', root))
+    except BaseException as failure:
+        problems.append('the triage readiness check failed: %s: %s' % (type(failure).__name__, str(failure)[:80]))
+    return problems
+
+
 def say(message):
     """One flushed stderr line (the serving log): a stalled process cannot be trusted with a logger."""
     for line in str(message).splitlines() or ['']:
@@ -210,6 +235,11 @@ def stalled(armed, parent, environ, runner, log, kill):
     when, label = armed
     log('[STALL] %s did not finish by its deadline: the serving process is stalled in it. Stacks of every host thread follow from '
         'faulthandler (the process is NOT ended yet); then the tt-metal triage reads the hung mesh.' % label)
+    problems = triage_problems(environ)
+    if problems:
+        log('[TRIAGE-CHECK] UNAVAILABLE, the device triage will not give a reading: %s' % '; '.join(problems))
+    else:
+        log('[TRIAGE-CHECK] ready: the triage tools and ttexalens are present')
     results = run_triage(environ, runner, log)
     log('[STALL] triage finished: %s' % ' '.join('%s=%s' % (tool, 'ok' if ok else 'failed') for tool, ok in results.items()))
     if environ.get(KILL_FLAG, '1') == '0':

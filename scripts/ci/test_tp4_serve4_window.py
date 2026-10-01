@@ -146,6 +146,29 @@ class TriageInImageTests(unittest.TestCase):
         self.assertIn('WARNING', script)
 
 
+DOCKERFILE = os.path.join(HERE, '..', '..', 'docker', 'qwen-c2-serving.Dockerfile')
+
+
+class TriageInstallTests(unittest.TestCase):
+    """The image installs the triage requirements (ttexalens) so the stall watch's device triage can run (v185 had none)."""
+
+    @unittest.skipUnless(os.path.isfile(DOCKERFILE), 'the Dockerfile is not shipped in the image')
+    def test_the_dockerfile_installs_the_pinned_triage_requirements_under_constraints_and_checks_the_import(self):
+        with open(DOCKERFILE, encoding='utf-8') as handle:
+            text = handle.read()
+        start = text.index('ARG TRIAGE_INSTALL=1')
+        block = text[start:text.index('# Provenance, last')]
+        self.assertIn('/opt/tt-metal/tools/triage/requirements.txt', block)
+        self.assertIn('-c /tmp/triage-constraints.txt', block, 'the installed stack must not be upgraded by the triage requirements')
+        self.assertIn('pip freeze', block)
+        self.assertIn('import ttexalens', block)
+        self.assertIn('rev-parse HEAD', block)
+        self.assertIn('9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9', block, 'pinned to the tt-metal commit the image carries')
+        self.assertIn('sys.exit(1 if missing else 0)', block, 'a missing tool or module fails the build')
+        self.assertNotIn('set +e', block)
+        self.assertLess(start, text.index('ARG SOURCE_REVISION'), 'before the provenance layers, which stay last')
+
+
 class SmokeTests(unittest.TestCase):
     def test_every_named_test_is_one_the_smoke_knows_and_runs_in_the_order_the_template_lists_them(self):
         with open(os.path.join(HERE, 'c2_serving_smoke.py'), encoding='utf-8') as handle:

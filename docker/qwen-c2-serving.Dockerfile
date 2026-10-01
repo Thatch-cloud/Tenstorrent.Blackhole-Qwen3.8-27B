@@ -115,6 +115,16 @@ ENV QWEN_ATTN_PREP=1 QWEN_CARDS_ALLOCATED=1 QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 QWE
     MESH_DEVICE=P300 OMP_NUM_THREADS=8 TT_CACHE_PATH=/experiment-cache/weights TT_METAL_CACHE=${KERNEL_CACHE} \
     VLLM_CACHE_ROOT=/tmp/vllm-cache QWEN_C2_SERVING=1
 
+# The stall watch's device triage (scripts/ci/stall_watch.py) runs /opt/tt-metal/tools/triage/*.py from INSIDE the serving container,
+# whose root filesystem is read-only, and those tools import ttexalens, which the base image lacked (v185: "the image lacks the
+# ttexalens module"). Install the triage requirements the pinned tt-metal checkout itself ships (so their versions are the
+# checkout's), under a constraints file of everything already installed so nothing the serving stack imports (torch, numpy,
+# ttnn's dependencies) can be upgraded or replaced: a conflict fails the build instead of changing the stack. The tt-metal commit
+# is asserted first, and the build fails unless ttexalens imports and every triage tool file is there. Needs network at build time;
+# --build-arg TRIAGE_INSTALL=0 skips it (the stall watch then logs [TRIAGE-CHECK] UNAVAILABLE at a stall).
+ARG TRIAGE_INSTALL=1
+RUN set -eu; if [ "${TRIAGE_INSTALL}" = 1 ]; then       test "$(git -C /opt/tt-metal rev-parse HEAD)" = 9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9;       req=/opt/tt-metal/tools/triage/requirements.txt; test -s "$req";       python3 -m pip freeze 2>/dev/null | grep -v ' @ \|^-e ' > /tmp/triage-constraints.txt;       python3 -m pip install --no-cache-dir -c /tmp/triage-constraints.txt -r "$req";       rm -f /tmp/triage-constraints.txt;       python3 -c "import importlib.util, os, sys; r = '/opt/tt-metal/tools/triage'; import ttexalens; tools = ('dump_running_operations', 'dump_callstacks', 'check_binary_integrity', 'check_noc_status', 'dump_fast_dispatch', 'check_eth_status'); missing = [t for t in tools if not (os.path.isfile(os.path.join(r, t + '.py')) or os.path.isfile(os.path.join(r, 'triage.py')))]; print('[TRIAGE-CHECK] ttexalens', getattr(ttexalens, '__file__', '?'), 'missing', missing or 'none'); sys.exit(1 if missing else 0)";     else echo '[TRIAGE-CHECK] TRIAGE_INSTALL=0: ttexalens not installed'; fi
+
 # Provenance, last so a new commit or stamp never invalidates the cached layers above (an ARG
 # busts the cache of every RUN after it). P8's revision label names P8's commit; this one names
 # the commit the context was staged from (c2_overlay.py stage writes source-revision). The build

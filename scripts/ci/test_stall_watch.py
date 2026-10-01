@@ -105,6 +105,33 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(seen, list(stall_watch.TOOLS))
 
 
+class TriageReadinessTests(unittest.TestCase):
+    def test_a_missing_directory_tool_or_ttexalens_is_named(self):
+        import tempfile
+        have, lack = (lambda name: object()), (lambda name: None)
+        with tempfile.TemporaryDirectory() as root:
+            environ = {stall_watch.ROOT_FLAG: root}
+            problems = stall_watch.triage_problems(environ, lack)
+            self.assertEqual(len(problems), 2)
+            self.assertIn('missing from', problems[0])
+            self.assertIn('ttexalens', problems[1])
+            with open(os.path.join(root, 'triage.py'), 'w') as handle:
+                handle.write('')
+            self.assertEqual(stall_watch.triage_problems(environ, have), [])
+            self.assertEqual(len(stall_watch.triage_problems(environ, lack)), 1)
+        self.assertIn('does not exist', stall_watch.triage_problems({stall_watch.ROOT_FLAG: root}, have)[0])
+
+    def test_a_stall_says_plainly_that_the_triage_is_unavailable(self):
+        log = []
+        runner = lambda argv, **kwargs: SimpleNamespace(returncode=1, stdout='')
+        stall_watch.stalled((0.0, 'packed round'), 1, {stall_watch.ROOT_FLAG: os.path.join(os.sep, 'no', 'such', 'dir'),
+                                                       stall_watch.KILL_FLAG: '0'}, runner, log.append, lambda pid: None)
+        line = [entry for entry in log if entry.startswith('[TRIAGE-CHECK]')]
+        self.assertEqual(len(line), 1)
+        self.assertIn('UNAVAILABLE', line[0])
+        self.assertLess(log.index(line[0]), [i for i, entry in enumerate(log) if 'triage finished' in entry][0])
+
+
 class SidecarTests(unittest.TestCase):
     def feed(self, *lines, then=None):
         """A line source that yields `lines` then blocks until `then` is set (or ends at once without it)."""
