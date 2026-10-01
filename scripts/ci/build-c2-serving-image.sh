@@ -112,6 +112,8 @@ sudo -n test -d "$persistent/${kernel_cache#/experiment-cache/}" && echo "warm k
 # on removes it (the rig is the production control plane; a multi-GB image nobody owns is not free). The provisional tag keeps
 # it from being dangling, so another CI job's `docker image prune` on the shared daemon cannot delete it mid-provenance.
 provisional="$image-unverified"
+# A build killed outright (SIGKILL, a cancelled job) never ran the cleanup below and leaves this tag behind; clear it first.
+docker rmi "$provisional" >/dev/null 2>&1 || true
 iid=$(mktemp)
 built=
 cleanup() {
@@ -121,8 +123,8 @@ cleanup() {
     if [ "${C2_KEEP_FAILED_IMAGE:-0}" = 1 ]; then
       docker tag "$built" "$image-g1-failed" && echo "kept the failed build as $image-g1-failed" >&2
     fi
-    docker rmi "$provisional" >/dev/null 2>&1 && echo "removed the failed build $provisional" >&2 \
-      || echo "could not remove the failed build $provisional (another tag or container holds it)" >&2
+    docker rmi "$provisional" >/dev/null 2>&1 && echo "removed the provisional tag $provisional" >&2 \
+      || echo "could not remove the provisional tag $provisional (another tag or container holds it)" >&2
   fi
   return "$status"
 }
@@ -164,7 +166,7 @@ if ! docker run --rm --network none --entrypoint python3 "$built" -c "$triage_pr
   echo "[TRIAGE-CHECK] WARNING: the triage tools or ttexalens are not usable in this image: a stall will give stacks but no device triage" >&2
 fi
 docker tag "$built" "$image"
-docker rmi "$provisional" >/dev/null
+docker rmi "$provisional" >/dev/null || echo "could not remove the provisional tag $provisional; $image is tagged" >&2
 built=
 echo "built $image $(docker image inspect "$image" --format '{{.Id}}')"
 rm -rf "$ctx"
