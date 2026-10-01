@@ -50,6 +50,12 @@ name: Qwen C2 serving image
 #            equality, the S2 lines, and exactness-shared (four agents on one system block in packed rounds).
 #            Every prefix container is removed however the step ends, and the kill-switch file only if the
 #            gate wrote it
+#   taulab - the W-T1 tau lab (scripts/ci/c2_tau_lab.py, C2_CARDS=quad only): ONE container of the image on all four cards
+#            serving C2_TAULAB_PROFILE (the production profile) plus two arithmetic-neutral log flags, the arms A1-A5
+#            (SWE-rebench turns, our own agent traces, calibration, chained synthetic sessions, thinking OFF) sent over its
+#            API from the host; tau per round per seat from the container log. Everything private stays rig-local under
+#            kwork64/taulab/ (this repo and its Actions artifacts are PUBLIC): the artifact gets only taulab/
+#            tau-lab-summary.json, aggregates. C2_TAULAB_DATA is read, never written
 #   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py);
 #            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt).
 #            With C2_CARDS=quad the copy gets every Blackhole board present (card_set.sh, none named) and
@@ -769,6 +775,70 @@ jobs:
             grep -F '[PINDIAG] prefix: install' "$log" | head -2 || true
             grep -F 'Automatic prefix caching is' "$log" | head -2 || true
           done
+          exit "$status"
+      - name: Tau lab (W-T1) on the four-card set
+        if: contains(steps.job.outputs.actions, 'taulab') && steps.job.outputs.cards == 'quad'
+        working-directory: c2
+        timeout-minutes: 560
+        shell: bash
+        env:
+          TAG: ${{ steps.job.outputs.tag }}
+          TAULAB_PROFILE: ${{ steps.job.outputs.taulab_profile }}
+          TAULAB_DATA: ${{ steps.job.outputs.taulab_data }}
+          TAULAB_ARMS: ${{ steps.job.outputs.taulab_arms }}
+          TAULAB_DEADLINE: ${{ steps.job.outputs.taulab_deadline }}
+          TAULAB_IN_FLIGHT: ${{ steps.job.outputs.taulab_in_flight }}
+          TAULAB_MAX_TOKENS: ${{ steps.job.outputs.taulab_max_tokens }}
+          TAULAB_COUNTERS: ${{ steps.job.outputs.taulab_counters }}
+        run: |
+          set -euo pipefail
+          # The W-T1 tau lab (docs: scripts/ci/c2_tau_lab.py): ONE container of the image on all four cards serving the
+          # production profile plus two arithmetic-neutral log flags, the arms driven over its API from this host. The Qwen
+          # repo is PUBLIC and so are its Actions logs and artifacts: the driver prints counts and aggregates only, the
+          # artifact gets only taulab/tau-lab-summary.json, and everything private (the data, the turns, the token ids, the
+          # container's log) stays under the rig-local kwork64/taulab/ and is never listed here.
+          image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          docker image inspect "$image" > /dev/null
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to open the cards under it" >&2; exit 1
+          fi
+          docker rm -f qwen-c2-taulab >/dev/null 2>&1 || true
+          cleanup_taulab() { docker rm -f qwen-c2-taulab >/dev/null 2>&1 || true; }
+          trap cleanup_taulab EXIT
+          . scripts/ci/card_set.sh
+          card_set_nodes 60
+          if ! card_set_unheld "$RUNNER_TEMP/c2-results/taulab-holders.txt"; then
+            echo 'a card of the set is held; refusing the tau lab' >&2; cat "$RUNNER_TEMP/c2-results/taulab-holders.txt" >&2; exit 1
+          fi
+          # Rig-local paths: relative ones are under the runner's home. Only kwork64/taulab/ is ever written.
+          data="${TAULAB_DATA:-kwork64/taulab/data}"
+          case "$data" in /*) ;; *) data="$HOME/$data" ;; esac
+          if [ ! -d "$data" ]; then echo 'the tau lab data directory is missing; refusing' >&2; exit 1; fi
+          # Keyed by the run id alone: a re-run of the same run (a new attempt) RESUMES from the turns already done.
+          run="$HOME/kwork64/taulab/results/run-$GITHUB_RUN_ID"
+          umask 077
+          mkdir -p "$run"
+          public="$RUNNER_TEMP/c2-results/taulab"
+          mkdir -p "$public"
+          # What this step (560 min) and the job (600 min, from C2_JOB_STARTED) leave, less margins, against the job's own box.
+          step_left=$(( 560 * 60 - 600 ))
+          job_left=$(( 600 * 60 - ($(date +%s) - ${C2_JOB_STARTED:?}) - 900 ))
+          box=$(( ${TAULAB_DEADLINE} * 60 ))
+          budget=$(( step_left < job_left ? step_left : job_left ))
+          budget=$(( budget < box ? budget : box ))
+          echo "tau lab budget: $budget s (step $step_left s, job $job_left s, job file $box s)"
+          args=(--image "$image" --profile "$TAULAB_PROFILE" --data "$data" --results "$run" --public "$public"
+                --arms "$TAULAB_ARMS" --deadline-seconds "$budget" --in-flight "$TAULAB_IN_FLIGHT" --cards quad)
+          if [ -n "$TAULAB_MAX_TOKENS" ]; then args+=(--max-tokens "$TAULAB_MAX_TOKENS"); fi
+          if [ -n "$TAULAB_COUNTERS" ]; then
+            counters="$TAULAB_COUNTERS"
+            case "$counters" in /*) ;; *) counters="$HOME/$counters" ;; esac
+            args+=(--counters "$counters")
+          fi
+          status=0
+          python3 scripts/ci/c2_tau_lab.py "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/c2-results/taulab.log" || status=$?
+          # Read the launched argv (memory read-the-launched-argv): the contract's own lines name the profile it booted.
+          if [ -f "$run/server.log" ]; then grep -F '[QWEN-C2]' "$run/server.log" | head -4 || true; fi
           exit "$status"
       - name: Smoke on the four-card set
         if: contains(steps.job.outputs.actions, 'smoke') && steps.job.outputs.cards == 'quad'

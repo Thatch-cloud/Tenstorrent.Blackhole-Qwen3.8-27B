@@ -80,6 +80,18 @@ Keys (every one optional but C2_IMAGE_TAG):
                       the baseline arm)
   C2_PREFIX_AGENTS    the timing plan's busy-agent counts, one phase each (default 1,4,5,6)
   The C2_PREFIX_* keys are read only when C2_ACTIONS has prefix; otherwise their defaults are output.
+  C2_TAULAB_*         the taulab action (the W-T1 tau lab, scripts/ci/c2_tau_lab.py; C2_CARDS=quad only): ONE container of
+                      the image on all four cards serving C2_TAULAB_PROFILE plus two log flags, the arms sent over its API.
+                      Read only when C2_ACTIONS has taulab (otherwise defaults are output).
+  C2_TAULAB_PROFILE   the production profile it serves (default c2-packed-tp4; a P150x4 profile of the checkout)
+  C2_TAULAB_DATA      the rig-local data directory (default, rendered empty: kwork64/taulab/data under the runner's home);
+                      relative paths are under the home, no '..'; the driver READS it and never writes it
+  C2_TAULAB_ARMS      the arms, space or comma separated, run in their own order (default: A1 A2 A3 A4 A5)
+  C2_TAULAB_DEADLINE  the whole run in minutes, container load included (default 270, at most 540)
+  C2_TAULAB_IN_FLIGHT requests in flight per independent-turn arm (default 8: the four seats and four queued; 1..16)
+  C2_TAULAB_MAX_TOKENS  every arm's answer budget (default, rendered empty: each arm's own)
+  C2_TAULAB_COUNTERS  production's spec-decode counters, a rig-local JSON of aggregates (default: none; positions 1-3 are then
+                      NOT_ESTABLISHED in the report)
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -89,12 +101,12 @@ import re
 import sys
 
 ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'fabric', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
-           'prefix', 'replay', 'push')
+           'prefix', 'taulab', 'replay', 'push')
 CARD_SETS = ('pair', 'quad')
 # What a four-card job may run: the pair-shaped steps (a single-card harness on card M, the M+A smoke and replay, the
 # CPU-priority measurement of the M+A container) do not apply to it, and fabric applies to nothing else.
 QUAD_ACTIONS = ('status', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
-                'replay', 'push')
+                'taulab', 'replay', 'push')
 TP4_MESH_DEVICE = 'P150x4'
 # The mesh_device values of a pair profile: none (the image's P300 under upstream's four-channel p150_x2) and P300
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
@@ -126,6 +138,15 @@ PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exac
                     ('exactness-eager', 'exactness'), ('exactness-shared', 'exactness'),
                     ('lifecycle-evict', 'lifecycle'), ('lifecycle-store', 'lifecycle'),
                     ('lifecycle-tiny', 'lifecycle'))
+# The W-T1 tau lab (c2_tau_lab.py): its arms, the production profile it serves and its time box.
+TAULAB_ARMS = ('A1', 'A2', 'A3', 'A4', 'A5')
+TAULAB_PROFILE = 'c2-packed-tp4'
+TAULAB_DEADLINE_MINUTES = 270
+MAX_TAULAB_DEADLINE_MINUTES = 540
+TAULAB_IN_FLIGHT = 8
+MAX_TAULAB_IN_FLIGHT = 16
+# A rig-local path: plain characters, relative to the runner's home or absolute, never a '..' component or a leading '-'.
+PLAIN_PATH = re.compile(r'(?!-)[A-Za-z0-9_./-]{1,200}')
 PREFIX_PROFILE = 'general-prefix'
 PREFIX_BASELINE = 'general'
 PREFIX_AGENTS = (1, 4, 5, 6)
@@ -190,7 +211,7 @@ def profile_meshes(path=PROFILES):
 def refuse_fabric_with_serving(actions):
     """The fabric probe closes the mesh it opened, and a second open in one job is what the ethernet-core teardown
     wedge punishes: it runs in a job of its own, never beside a step that serves or gates."""
-    beside = sorted(set(actions) & set(('smoke', 'gate', 'prefix')))
+    beside = sorted(set(actions) & set(('smoke', 'gate', 'prefix', 'taulab')))
     if 'fabric' in actions and beside:
         raise JobError('C2_ACTIONS has fabric with %s: the probe closes the mesh and a second open in one job wedges '
                        'the ethernet cores; run the probe in its own job, reset first' % ', '.join(beside))
@@ -349,12 +370,17 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     if replay_served_model and not MODEL_ID.fullmatch(replay_served_model):
         raise JobError('C2_REPLAY_SERVED_MODEL must match %s, got %r' % (MODEL_ID.pattern, replay_served_model))
     prefix = read_prefix(values, profiles, 'prefix' in actions)
+    taulab = read_taulab(values, profiles, 'taulab' in actions)
     if meshes is None:
         meshes = profile_meshes()
     named = [('C2_PROFILE', profile if set(actions) & set(('smoke', 'gate')) else ''),
              ('C2_REPLAY_PROFILE', replay_profile if 'replay' in actions else '')]
     if 'prefix' in actions:
         named += [('C2_PREFIX_PROFILE', prefix['prefix_profile']), ('C2_PREFIX_BASELINE', prefix['prefix_baseline'])]
+    if 'taulab' in actions:
+        named += [('C2_TAULAB_PROFILE', taulab['taulab_profile'])]
+        if (values.get('C2_CARDS') or 'pair') != 'quad':
+            raise JobError('C2_ACTIONS has taulab: the tau lab serves the four-card (1, 4) mesh and needs C2_CARDS=quad')
     cards = read_cards(values, actions, meshes, named)
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
@@ -365,6 +391,7 @@ def read_job(values, profiles, root=ROOT, meshes=None):
                    cardm_env=cardm_env)
     outputs.update(s2)
     outputs.update(prefix)
+    outputs.update(taulab)
     return outputs
 
 
@@ -441,6 +468,39 @@ def read_prefix(values, profiles, running):
     agents = [positive_int('C2_PREFIX_AGENTS', part) for part in split_list(agents_text)] or list(PREFIX_AGENTS)
     return dict(prefix_plan=','.join(plans), prefix_profile=profile, prefix_baseline=baseline,
                 prefix_agents=','.join(str(count) for count in agents))
+
+
+def read_taulab(values, profiles, running):
+    """The taulab action's outputs (module docstring, C2_TAULAB_*), each rendered empty or defaulted when unset. Its keys are
+    checked only when the action runs: a job that does not run it is never refused over them."""
+    if not running:
+        return dict(taulab_profile=TAULAB_PROFILE, taulab_data='', taulab_arms=' '.join(TAULAB_ARMS),
+                    taulab_deadline=str(TAULAB_DEADLINE_MINUTES), taulab_in_flight=str(TAULAB_IN_FLIGHT),
+                    taulab_max_tokens='', taulab_counters='')
+    profile = values.get('C2_TAULAB_PROFILE') or TAULAB_PROFILE
+    if profile not in profiles:
+        raise JobError('C2_TAULAB_PROFILE %r is not a profile of qwen_c2_profiles.json (%s)' % (profile, ', '.join(profiles)))
+    arms = split_list(values.get('C2_TAULAB_ARMS', '')) or list(TAULAB_ARMS)
+    unknown = sorted(set(arms) - set(TAULAB_ARMS))
+    if unknown or len(set(arms)) != len(arms):
+        raise JobError('C2_TAULAB_ARMS: %s (known: %s, each once)' % (
+            ('unknown ' + ', '.join(unknown)) if unknown else 'an arm named twice', ' '.join(TAULAB_ARMS)))
+    paths = {}
+    for key in ('C2_TAULAB_DATA', 'C2_TAULAB_COUNTERS'):
+        path = values.get(key, '')
+        if path and (not PLAIN_PATH.fullmatch(path) or '..' in path.split('/')):
+            raise JobError('%s must be a plain path (%s) with no .. component, got %r' % (key, PLAIN_PATH.pattern, path))
+        paths[key] = path
+    minutes = positive_int('C2_TAULAB_DEADLINE', values['C2_TAULAB_DEADLINE']) if values.get('C2_TAULAB_DEADLINE')         else TAULAB_DEADLINE_MINUTES
+    if minutes > MAX_TAULAB_DEADLINE_MINUTES:
+        raise JobError('C2_TAULAB_DEADLINE: at most %d minutes, got %d' % (MAX_TAULAB_DEADLINE_MINUTES, minutes))
+    in_flight = positive_int('C2_TAULAB_IN_FLIGHT', values['C2_TAULAB_IN_FLIGHT']) if values.get('C2_TAULAB_IN_FLIGHT')         else TAULAB_IN_FLIGHT
+    if in_flight > MAX_TAULAB_IN_FLIGHT:
+        raise JobError('C2_TAULAB_IN_FLIGHT: at most %d, got %d' % (MAX_TAULAB_IN_FLIGHT, in_flight))
+    max_tokens = positive_int('C2_TAULAB_MAX_TOKENS', values['C2_TAULAB_MAX_TOKENS']) if values.get('C2_TAULAB_MAX_TOKENS') else ''
+    return dict(taulab_profile=profile, taulab_data=paths['C2_TAULAB_DATA'], taulab_arms=' '.join(arms),
+                taulab_deadline=str(minutes), taulab_in_flight=str(in_flight), taulab_max_tokens=str(max_tokens),
+                taulab_counters=paths['C2_TAULAB_COUNTERS'])
 
 
 def render(outputs):

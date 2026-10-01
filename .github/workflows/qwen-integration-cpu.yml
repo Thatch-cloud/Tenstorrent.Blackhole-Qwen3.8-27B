@@ -97,6 +97,7 @@ jobs:
           python -B -m unittest test_qwen_prefix_registry test_qwen_prefix_scheduler_patch test_qwen_prefix_runner_patch test_qwen_prefix_scheduler_vllm test_qwen_prefix_image_closure
           python -B -m unittest test_prefix_agent_corpus test_prefix_markers test_prefix_judge test_prefix_report test_prefix_oracle_check
           python -B -m unittest test_prefix_replay test_c2_prefix_gate
+          python -B -m unittest test_tau_lab
           python -B -m unittest test_prefix_p0a_probe
           python -B -m unittest test_sticky_sessions
           python -B -m unittest test_lever_n_prefill_profile_report
