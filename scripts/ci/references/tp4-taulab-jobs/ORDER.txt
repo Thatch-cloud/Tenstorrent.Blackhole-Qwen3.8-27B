@@ -7,3 +7,5 @@
 # The data directory (the data agent's files) must already be on the rig under kwork64/taulab/data: a missing directory refuses the job
 # before any container starts.
 W-T1-tau-lab optional tp4-serve-2 275
+W-T1a-tau-lab optional tp4-serve-2 185
+W-T1b-tau-lab optional tp4-serve-2 125
