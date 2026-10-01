@@ -61,8 +61,8 @@ DIAG_PROFILES = {'c2-packed-tp4-diag': {}, 'c2-packed-tp4-diag-nograph': {'QWEN_
 
 
 # The admission-freeze window's twins (tp4/freeze): each is the traffic profile plus exactly these env flags, gate only.
-TRIM = 'QWEN_FAST_ADMISSION_DIAG_TRIM'
-FREEZE_PROFILES = {'c2-packed-tp4-f2': {TRIM: '1'}}
+TRIM, CREDIT = 'QWEN_FAST_ADMISSION_DIAG_TRIM', 'QWEN_FAST_DECODE_STEPS_PER_ADMISSION'
+FREEZE_PROFILES = {'c2-packed-tp4-f2': {TRIM: '1'}, 'c2-packed-tp4-f12': {TRIM: '1', CREDIT: '1'}}
 
 
 SPEED = 'QWEN_FAST_TP_KV_SLIDE'
@@ -343,7 +343,17 @@ class FreezeProfileTests(unittest.TestCase):
         for name, profile in profiles().items():
             if name not in FREEZE_PROFILES:
                 self.assertNotIn(TRIM, profile['env'], name)
-        self.assertNotIn(TRIM, image_env(), 'the image leaves it unset: the full ledger is the default')
+                self.assertNotIn(CREDIT, profile['env'], name)
+        for flag in (TRIM, CREDIT):
+            self.assertNotIn(flag, image_env(), 'the image leaves it unset: off is the default')
+
+    def test_the_credit_is_on_in_the_f12_twin_alone_and_the_f2_twin_is_its_base(self):
+        found = profiles()
+        self.assertNotIn(CREDIT, found['c2-packed-tp4-f2']['env'])
+        self.assertEqual(found['c2-packed-tp4-f12']['env'], dict(found['c2-packed-tp4-f2']['env'], **{CREDIT: '1'}))
+        import serving_prefill_admission
+        for name in FREEZE_PROFILES:
+            self.assertIn(serving_prefill_admission.decode_steps_per_admission(found[name]['env']), (0, 1), name)
 
     def test_the_admission_accepts_each_twin_over_the_image_environment(self):
         image = image_env()

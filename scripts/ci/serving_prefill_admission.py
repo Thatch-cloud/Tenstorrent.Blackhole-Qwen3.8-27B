@@ -119,9 +119,31 @@ the rule above, call for call.
                                                                                        it was admitted on (M11)
 Only lines that start with DRAM_HOLD are holds (what a gate counts). Each state logs once; the state kept to
 decide that is the held (request, decodes) and the last line noted, so it stays bounded whatever the traffic.
+
+DECODE CREDIT (QWEN_FAST_DECODE_STEPS_PER_ADMISSION=R, default 0 = off; lever N's alternation, docs/lever-N). When
+several fresh prompts wait, each admission's prefill and engine build holds the gate for 2 to 3 s and no live user
+decodes (the admission freeze: four arrivals together stall every earlier user for about 14 s). With R > 0 the
+wrapper owes the running decodes R decode-only steps after each admission: the next R calls answer allowed = 0
+with both queues hidden, exactly as behind a held gate or a DRAM hold, so the plugin runs a decode-only pass for
+each. A step is a schedule() call, and the credit
+- is armed by an admission (the call let one prompt in and scheduled it), whatever is waiting at that time;
+- is paid by each decode-only pass that follows it: its own holds, and a pass a held gate or a DRAM hold forced;
+- is dropped by a schedule() call that asks for no prefill (nothing pending, so the decodes ran), by a call that
+  finds no decode running, and by a call that finds a partial prefill in flight, so a credit never outlives the
+  burst it was armed in: a lone arrival, or the first one after the burst, is admitted at once;
+- holds only while a decode is running, so it never idles the device, and never holds a partial prefill.
+It moves time from the later users' first token to the earlier users' decode and changes no token: the steps it
+buys are the decode steps the scheduler would run anyway, in the same order, and the finished ids of a held pass
+are put back for the decode pass as under the DRAM hold (carry_finished). R = 0 wraps schedule() in nothing and
+every call is what it was.
+    [PINDIAG] decode credit installed on <class>: steps=<R>               once, at install, with R > 0
+    [PINDIAG] decode credit armed steps=<R> decodes=<d> waiting=<n>      once per admission
+    [PINDIAG] decode credit hold left=<k> decodes=<d>                    once per held pass
+    [PINDIAG] decode credit carried finished=[<ids>] ...                 the ids put back past the held pass
 """
 
 import importlib
+import os
 import sys
 import types
 
@@ -154,6 +176,14 @@ DRAM_CARRIED_LINE = ('[PINDIAG] dram admission carried finished={} past the disc
                      'decode-only step')
 DRAM_FIT_LINE = ('[PINDIAG] dram admission fit prompt={} largest_free={} need={} request={} decodes={} free={} '
                  'trace_largest_free={}')
+# DECODE CREDIT (the module docstring): decode-only steps owed after an admission; 0 (the default) is off.
+STEPS_FLAG = 'QWEN_FAST_DECODE_STEPS_PER_ADMISSION'
+MAX_STEPS = 64
+CREDIT_ARMED_LINE = '[PINDIAG] decode credit armed steps={} decodes={} waiting={}'
+CREDIT_HOLD_LINE = '[PINDIAG] decode credit hold left={} decodes={}'
+CREDIT_CARRIED_LINE = ('[PINDIAG] decode credit carried finished={} past the discarded prefill pass into the '
+                       'decode-only step')
+CREDIT_INSTALLED_LINE = '[PINDIAG] decode credit installed on {}: steps={}'
 MEGABYTE = 10 ** 6
 # The need: one set of defaults, per chip (s2-design.md section 3.2 item 2). M8 and M11 calibrate them.
 ENGINE_BUILD_BYTES = 800 * MEGABYTE          # (m) an engine with one 2048 proposal bucket (v26, run 36218104858)
@@ -547,7 +577,18 @@ def dram_hold(scheduler, decodes, state, log, modules=None):
     return True
 
 
-def carry_finished(scheduler, result, decodes, log):
+def decode_steps_per_admission(environ=None):
+    """R, the decode-only steps owed after an admission (STEPS_FLAG): a whole number from 0 to MAX_STEPS in plain
+    digits, 0 when unset. Anything else is a configuration error, not a silent 0."""
+    value = (os.environ if environ is None else environ).get(STEPS_FLAG)
+    if value is None:
+        return 0
+    if not value.isascii() or not value.isdigit() or int(value) > MAX_STEPS:
+        raise ValueError('%s must be a whole number of steps from 0 to %d, got %r' % (STEPS_FLAG, MAX_STEPS, value))
+    return int(value)
+
+
+def carry_finished(scheduler, result, decodes, log, line=DRAM_CARRIED_LINE):
     """After a DRAM-held pass: put back the finished request ids it took when the plugin will discard it.
 
     schedule() handed them to `result` and started a new set (scheduler.py:1105, :1210). With a decode running and
@@ -565,7 +606,7 @@ def carry_finished(scheduler, result, decodes, log):
         return ()
     scheduler.finished_req_ids = set(taken) | set(getattr(scheduler, 'finished_req_ids', None) or ())
     carried = tuple(sorted(taken, key=str))
-    log(DRAM_CARRIED_LINE, list(carried))
+    log(line, list(carried))
     return carried
 
 
@@ -584,15 +625,31 @@ def _module_queue_factory(original):
     return lambda scheduler: create(scheduler.policy)
 
 
-def wrap(original, *, queue_factory, log):
-    """The wrapper installed as <class>._schedule_prefill_only around `original`."""
-    state = dict(live=False, seen=set(), dram_held=None, dram_noted=None)
+def new_state():
+    return dict(live=False, seen=set(), dram_held=None, dram_noted=None, credit=0, asked=False)
+
+
+def wrap(original, *, queue_factory, log, steps=None, state=None):
+    """The wrapper installed as <class>._schedule_prefill_only around `original`. `steps` is R, the decode credit
+    (decode_steps_per_admission() when None); `state` is shared with the schedule() wrapper (wrap_schedule)."""
+    steps = decode_steps_per_admission() if steps is None else steps
+    if type(steps) is not int or steps < 0:
+        raise ValueError('A non-negative integer decode credit is required, got %r' % (steps,))
+    state = new_state() if state is None else state
 
     def _schedule_prefill_only(self):
         decodes = sum(1 for request in self.running if not request.is_prefill_chunk)
         partials = len(self.running) - decodes
         held = gate_held()
         allowed, hide = admission(partials, held)
+        state['asked'] = True
+        # DECODE CREDIT: with a decode running and a credit owed, this call is a decode step, not an admission.
+        credit_held = False
+        if steps:
+            if partials or not decodes:
+                state['credit'] = 0
+            elif state['credit'] and not hide:
+                allowed, hide, credit_held = 0, True, True
         # S2 W6b: asked only when this step would admit a fresh prompt - nothing in flight, the gate free and a
         # seat free (with every seat decoding the waiting loop admits nobody, and nothing is asked or logged).
         # When the prompt does not fit the DRAM left, it waits as behind a held gate.
@@ -600,6 +657,11 @@ def wrap(original, *, queue_factory, log):
                      and dram_hold(self, decodes, state, log))
         if dram_held:
             allowed, hide = 0, True
+        if steps and state['credit'] and hide and decodes and not partials:
+            # A decode-only pass follows whatever held this one (the credit, the gate or the DRAM hold): it pays a step.
+            state['credit'] -= 1
+            if credit_held:
+                log(CREDIT_HOLD_LINE, state['credit'], decodes)
         if not state['live']:
             state['live'] = True
             log(LIVE + '{}', type(self).__name__)
@@ -635,11 +697,33 @@ def wrap(original, *, queue_factory, log):
         if dram_held:
             # S2 W6b: the pass the plugin is about to discard took the finished ids; its decode-only pass carries them.
             carry_finished(self, result, decodes, log)
+        elif credit_held:
+            carry_finished(self, result, decodes, log, CREDIT_CARRIED_LINE)
+        elif steps and not hide and allowed and getattr(result, 'total_num_scheduled_tokens', 0):
+            # An admission: the decodes it paused are owed R steps before the next prompt (the module docstring).
+            state['credit'] = steps
+            log(CREDIT_ARMED_LINE, steps, decodes, len(self.waiting) + len(getattr(self, 'skipped_waiting', None) or ()))
         return result
 
     setattr(_schedule_prefill_only, WRAPPED, True)
     _schedule_prefill_only.__wrapped__ = original
     return _schedule_prefill_only
+
+
+def wrap_schedule(original, state):
+    """The wrapper installed as <class>.schedule when the decode credit is on: a schedule() call that asked for no
+    prefill (nothing pending, or a forced decode mode) was a decode-only step, and it drops the credit."""
+
+    def schedule(self, *args, **kwargs):
+        state['asked'] = False
+        result = original(self, *args, **kwargs)
+        if not state['asked']:
+            state['credit'] = 0
+        return result
+
+    setattr(schedule, WRAPPED, True)
+    schedule.__wrapped__ = original
+    return schedule
 
 
 def install(config, *, importer=importlib.import_module, log=None, queue_factory=None):
@@ -658,6 +742,14 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
         return name
     if queue_factory is None:
         queue_factory = _module_queue_factory(original)
-    setattr(cls, METHOD, wrap(original, queue_factory=queue_factory, log=log))
+    steps = decode_steps_per_admission()
+    schedule = getattr(cls, 'schedule', None)
+    if steps and not callable(schedule):
+        raise ValueError('%s has no schedule: the decode credit cannot see its decode-only steps' % name)
+    state = new_state()
+    setattr(cls, METHOD, wrap(original, queue_factory=queue_factory, log=log, steps=steps, state=state))
     log(INSTALLED + '{}', name)
+    if steps:
+        setattr(cls, 'schedule', wrap_schedule(schedule, state))
+        log(CREDIT_INSTALLED_LINE, name, steps)
     return name

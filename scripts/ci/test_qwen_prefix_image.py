@@ -50,7 +50,7 @@ GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate
                     # the hang diagnosis's arms (tp4-serve-3)
                     'c2-packed-tp4-diag', 'c2-packed-tp4-diag-nograph', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2',
                     # the admission-freeze window's arms (tp4/freeze)
-                    'c2-packed-tp4-f2')
+                    'c2-packed-tp4-f2', 'c2-packed-tp4-f12')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
 STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate')
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')
