@@ -300,3 +300,5 @@ scripts/ci/mtp_hidden_rows_tp.py
 scripts/ci/gdn_batched_conv_tp.py
 scripts/ci/gdn_conv_windows_tp.py
 scripts/ci/attach_scopes_tp.py
+# The GDN slot adoption's readback switch (QWEN_FAST_ADMISSION_DIAG_TRIM, tp4/freeze): serving_request_factory passes readback=False to it.
+scripts/ci/gdn_snapshot.py

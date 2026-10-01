@@ -645,7 +645,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             owner.validate()
             # The allocator just before this user's prefill; the bridge factory reads it
             # again just after, so the pair bounds what the prefill leaves resident.
-            memory_ledger.record('prefill', point='before prompt=%d' % position)
+            # QWEN_FAST_ADMISSION_DIAG_TRIM=1 (the traffic twins): the first admission's point only.
+            if memory_ledger.admission_diag('prefill_before'):
+                memory_ledger.record('prefill', point='before prompt=%d' % position)
             if not sticky:
                 if start:
                     raise ValueError('A prefill resumed at %d needs %s=1' % (start, STICKY_SESSIONS_FLAG))
@@ -654,8 +656,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
 
         def bridge_factory(state, capture):
             owner.validate()
-            memory_ledger.record('prefill', point='after req=%s' % memory_ledger.short_id(state.req_id),
-                                 request=str(state.req_id), model_after_prefill=model)
+            if memory_ledger.admission_diag('prefill_after'):
+                memory_ledger.record('prefill', point='after req=%s' % memory_ledger.short_id(state.req_id),
+                                     request=str(state.req_id), model_after_prefill=model)
             if len(state.block_ids) != 1:
                 raise ValueError('One scheduler KV group required')
             blocks = tuple(state.block_ids[0])
@@ -682,8 +685,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                         len(state.prompt_token_ids))
             # The allocator after this request's engine and its captures: one line per
             # admitted request, so the log shows what each costs and what is left.
-            pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))
-            memory_ledger.engine_admitted(str(state.req_id), engine_request=request)
+            # Under QWEN_FAST_ADMISSION_DIAG_TRIM=1 the line is off (it reads the allocator of every chip, and
+            # the first engine's ledger point carries the same reading) and only the first engine is walked.
+            if not memory_ledger.trim_enabled():
+                pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))
+            if memory_ledger.admission_diag('engine'):
+                memory_ledger.engine_admitted(str(state.req_id), engine_request=request)
             trace_census.census_engine(str(state.req_id), request, operations)
             try:
                 binding = VerifierPageBinding(request.engine, blocks, physical_pages=owner.physical_pages)

@@ -60,6 +60,11 @@ DIAG_PROFILES = {'c2-packed-tp4-diag': {}, 'c2-packed-tp4-diag-nograph': {'QWEN_
                  'c2-packed-tp4-diag-t2': {'QWEN_FAST_VERIFY_T2_AUDIT': '1'}}
 
 
+# The admission-freeze window's twins (tp4/freeze): each is the traffic profile plus exactly these env flags, gate only.
+TRIM = 'QWEN_FAST_ADMISSION_DIAG_TRIM'
+FREEZE_PROFILES = {'c2-packed-tp4-f2': {TRIM: '1'}}
+
+
 SPEED = 'QWEN_FAST_TP_KV_SLIDE'
 # The speed window's profiles (tp4/speed): each is c2-packed-tp4-gate plus exactly these env differences and a description.
 SPEED_PROFILES = {
@@ -265,7 +270,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed') + tuple(DIAG_PROFILES):
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES):
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -312,6 +317,41 @@ class TailProfileTests(unittest.TestCase):
                 self.assertEqual(admission.width(environ), 4)
                 self.assertEqual(admission.check_environment(environ, M3), [])
         self.assertNotIn('QWEN_C2_GATE_PROFILE', profiles()['c2-packed-tp4']['env'])
+
+
+class FreezeProfileTests(unittest.TestCase):
+    """tp4/freeze: the traffic profile's gate-only twins that switch the admission-freeze flags on, one by one."""
+
+    def test_each_twin_is_the_traffic_profile_plus_exactly_its_flags_and_gate_only(self):
+        found = profiles()
+        traffic = found['c2-packed-tp4']
+        for name, flags in FREEZE_PROFILES.items():
+            mine = found[name]
+            with self.subTest(profile=name):
+                self.assertEqual(mine['env'], dict(traffic['env'], **dict(flags, QWEN_C2_GATE_PROFILE='1')))
+                self.assertEqual(mine['engine'], traffic['engine'])
+                for key in set(mine) | set(traffic):
+                    if key not in ('description', 'env', 'gate_only'):
+                        self.assertEqual(mine.get(key), traffic.get(key), key)
+                self.assertIs(mine['gate_only'], True)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+                self.assertEqual((mine['env']['QWEN_FAST_VERIFY_T1_AUDIT'], mine['env']['QWEN_FAST_VERIFY_T2_AUDIT']),
+                                 ('1', '1'), 'the audits stay on, as in the traffic profile')
+
+    def test_the_traffic_profile_and_every_other_profile_leave_the_flags_unset(self):
+        for name, profile in profiles().items():
+            if name not in FREEZE_PROFILES:
+                self.assertNotIn(TRIM, profile['env'], name)
+        self.assertNotIn(TRIM, image_env(), 'the image leaves it unset: the full ledger is the default')
+
+    def test_the_admission_accepts_each_twin_over_the_image_environment(self):
+        image = image_env()
+        for name in FREEZE_PROFILES:
+            environ = dict(image, **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
 
 
 class DraftProfileTests(unittest.TestCase):

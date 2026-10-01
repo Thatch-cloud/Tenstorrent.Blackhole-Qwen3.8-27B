@@ -292,6 +292,11 @@ def _proposal_ladder(position, budget):
         return 'unavailable (%s)' % type(failure).__name__
 
 
+# QWEN_FAST_ADMISSION_DIAG_TRIM (memory_ledger.trim_enabled): the native slots whose conv-slice readback has verified
+# once in this process. Only read and written under the flag.
+_ADOPT_VERIFIED = set()
+
+
 def adopt_prefill_slot(helpers, capture, request_id):
     """Bring the prefill's GDN state to slot 0 before anything reads it.
 
@@ -314,10 +319,20 @@ def adopt_prefill_slot(helpers, capture, request_id):
     # Each helper verifies its conv-state slices against a host readback before
     # writing (rec_state by metadata only) and reports the chips it verified on; one
     # count for every layer, or the copy is not the proof the gate run needs.
-    chips = {helper.adopt_slot(slot, layer=layer) for layer, helper in enumerate(helpers)}
+    # QWEN_FAST_ADMISSION_DIAG_TRIM=1: the host readback of the conv slices (some 0.1 to 0.2 s per admission, inside the
+    # admission freeze) is taken at each slot's first adoption only; the later adoptions of that slot keep the metadata
+    # checks and copy exactly the same. Off, every adoption is called as it always was.
+    import memory_ledger
+    skip_readback = memory_ledger.trim_enabled() and slot in _ADOPT_VERIFIED
+    if skip_readback:
+        chips = {helper.adopt_slot(slot, layer=layer, readback=False) for layer, helper in enumerate(helpers)}
+    else:
+        chips = {helper.adopt_slot(slot, layer=layer) for layer, helper in enumerate(helpers)}
     if len(chips) != 1 or not isinstance(next(iter(chips)), int) or next(iter(chips)) < 1:
         raise ValueError('Every GDN layer must verify its adopted slot on the same chips; got %r' % (sorted(chips, key=repr),))
     (verified,) = chips
+    if memory_ledger.trim_enabled():
+        _ADOPT_VERIFIED.add(slot)
     _log('[PINDIAG] adopted GDN slot {} into slot 0: {} layers, conv slices verified on {} for request {}',
          slot, len(helpers), 'both chips' if verified == 2 else '%d chips' % verified, request_id)
 
@@ -444,8 +459,9 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             import memory_ledger
             import serving_prefill_admission
 
-            memory_ledger.before('engine', estimate=serving_prefill_admission.engine_build_peak(),
-                                 point='req=%s' % memory_ledger.short_id(state.req_id), request=str(state.req_id))
+            if memory_ledger.admission_diag('before_engine'):
+                memory_ledger.before('engine', estimate=serving_prefill_admission.engine_build_peak(),
+                                     point='req=%s' % memory_ledger.short_id(state.req_id), request=str(state.req_id))
         shared_ccl = os.environ.get('QWEN_FAST_SHARED_CCL', '1') == '1'
         device = components.device(operations, model,
             collectives if collectives is not None and shared_ccl else components.collectives(model.mesh_device),

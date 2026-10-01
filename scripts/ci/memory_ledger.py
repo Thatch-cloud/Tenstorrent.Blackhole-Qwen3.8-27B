@@ -79,6 +79,8 @@ import os
 import types
 
 FLAG = 'QWEN_FAST_MEMORY_LEDGER'
+# QWEN_FAST_ADMISSION_DIAG_TRIM=1 (trim_enabled): the per-admission points after the first are skipped.
+TRIM_FLAG = 'QWEN_FAST_ADMISSION_DIAG_TRIM'
 # QWEN_FAST_MEMORY_LEDGER_L1=1 (with the ledger on): an L1 allocator view per chip at P6, P7 and each engine build, for the
 # hang census (trace_census): the DRAM figures say nothing about the L1 a trace's circular buffers and replay kernels share.
 L1_FLAG = 'QWEN_FAST_MEMORY_LEDGER_L1'
@@ -113,6 +115,35 @@ _active = None
 
 def enabled(environ=None):
     return (os.environ if environ is None else environ).get(FLAG) == '1'
+
+
+def trim_enabled(environ=None):
+    """QWEN_FAST_ADMISSION_DIAG_TRIM=1 (default off; the traffic-profile twins c2-packed-tp4-f2 and -f12 set it): the
+    per-admission diagnostics of a concurrent arrival burst are cut to the first admission. Each costs host time inside
+    the admission freeze, when no live user decodes (the engine build holds the prefill gate). The gate profiles leave
+    it unset and keep every point, which their memory checks read (the W6d 'before op=engine' point, the P8..P11
+    lifecycle verdicts)."""
+    return (os.environ if environ is None else environ).get(TRIM_FLAG) == '1'
+
+
+_first_taken = set()
+
+
+def admission_diag(kind, environ=None):
+    """Whether the admission now running takes the per-admission diagnostic `kind`. Always True with the trim off.
+    With it on, True once per process for each kind (the first admission's), False after: c2_smoke_check reads only the
+    first prefill's and the first engine's points. The later engines' P9..P11 points (and the W6d 'before op=engine' point of
+    each) are what the trim drops, so a run that wants them leaves the flag off."""
+    if not trim_enabled(environ):
+        return True
+    if kind in _first_taken:
+        return False
+    _first_taken.add(kind)
+    return True
+
+
+def reset_admission_diag():
+    _first_taken.clear()
 
 
 def l1_enabled(environ=None):

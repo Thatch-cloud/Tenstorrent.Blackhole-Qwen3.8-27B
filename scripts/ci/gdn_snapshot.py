@@ -44,7 +44,7 @@ class ActiveSnapshot:
         for target, saved in zip(self.gdn.conv_states, source[1:], strict=True):
             self.gdn._write_index(target, operations.clone(saved), 0, 1)
 
-    def adopt_slot(self, index, *, layer=None):
+    def adopt_slot(self, index, *, layer=None, readback=True):
         """Copy native row `index` of every live tensor into row 0.
 
         The plugin's batched prefill writes the admitted user's recurrent and conv
@@ -65,6 +65,10 @@ class ActiveSnapshot:
         whole - so it keeps only the shard-count, shape and dtype checks, from the
         device tensors' metadata, with no readback. Unconditional, once per
         admission. Returns the number of chips every tensor was verified on.
+
+        `readback=False` (QWEN_FAST_ADMISSION_DIAG_TRIM, serving_request_factory.adopt_prefill_slot: a slot already
+        verified once in this process) skips the conv-state readback and keeps the shard-count, shape and dtype
+        checks from the device tensors' metadata, which is all rec_state ever had. The copy is the same.
         """
         if type(index) is not int or not 0 <= index < self.gdn.B:
             raise ValueError("Native GDN slot index within the eight-slot batch required")
@@ -80,7 +84,7 @@ class ActiveSnapshot:
                 # 35495982721's row-1 slice came back empty under the count reading.
                 sources.append(self.gdn._slice_along(tensor, dimension, index, index + 1))
             for name, tensor, dimension, source in zip(names, self.live, self.dimensions, sources, strict=True):
-                verified = self._verify_row(name, tensor, dimension, source, index, layer)
+                verified = self._verify_row(name, tensor, dimension, source, index, layer, readback)
                 if chips is not None and verified != chips:
                     raise ValueError("Live GDN tensors of layer %s span %d and %d chips" % (layer, chips, verified))
                 chips = verified
@@ -92,7 +96,7 @@ class ActiveSnapshot:
                 operations.deallocate(source)
         return chips
 
-    def _verify_row(self, name, tensor, dimension, source, index, layer):
+    def _verify_row(self, name, tensor, dimension, source, index, layer, readback=True):
         """Per chip, the device slice must have the live tensor's shard count and row
         `index`'s shape and dtype; a conv-state slice must also equal that row bit for
         bit when both are read back whole (the check_shards readback in
@@ -103,6 +107,7 @@ class ActiveSnapshot:
 
         operations = self.operations
         aligned = dimension == 0
+        metadata_only = aligned or not readback
         kind = "Recurrent-state" if aligned else "Unaligned conv-state"
         where = "layer %s %s" % ("?" if layer is None else layer, name)
         fulls = list(operations.get_device_tensors(tensor))
@@ -111,7 +116,7 @@ class ActiveSnapshot:
             raise ValueError("%s slice at row %d has %d shards against %d live shards: %s"
                              % (kind, index, len(parts), len(fulls), where))
         for chip, (full, part) in enumerate(zip(fulls, parts, strict=True)):
-            if aligned:
+            if metadata_only:
                 expected_shape = tuple(1 if axis == dimension else size for axis, size in enumerate(tuple(full.shape)))
                 expected_dtype, actual_shape, actual_dtype = full.dtype, tuple(part.shape), part.dtype
             else:
@@ -123,7 +128,7 @@ class ActiveSnapshot:
                 raise ValueError("%s slice at row %d differs from the row: %s chip %d shape %r %s, row %r %s"
                                  % (kind, index, where, chip, actual_shape, actual_dtype,
                                     expected_shape, expected_dtype))
-            if aligned:
+            if metadata_only:
                 continue
             if not _same_bits(torch, actual, expected):
                 difference = (actual.float() - expected.float()).abs()
