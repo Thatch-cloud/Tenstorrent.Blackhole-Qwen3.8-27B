@@ -89,7 +89,7 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_TAULAB_ARMS      the arms, space or comma separated, run in their own order (default: A1 A2 A3 A4 A5)
   C2_TAULAB_DEADLINE  the whole run in minutes, container load included (default 270, at most 540)
   C2_TAULAB_IN_FLIGHT requests in flight per independent-turn arm (default 8: the four seats and four queued; 1..16)
-  C2_TAULAB_MAX_TOKENS  every arm's answer budget (default, rendered empty: each arm's own)
+  C2_TAULAB_MAX_TOKENS  the answer budget of A1, A2, A4 and A5 (default, rendered empty: 2048; A3 always keeps the lanes' 2400)
   C2_TAULAB_COUNTERS  production's spec-decode counters, a rig-local JSON of aggregates (default: none; positions 1-3 are then
                       NOT_ESTABLISHED in the report)
 
@@ -491,10 +491,12 @@ def read_taulab(values, profiles, running):
         if path and (not PLAIN_PATH.fullmatch(path) or '..' in path.split('/')):
             raise JobError('%s must be a plain path (%s) with no .. component, got %r' % (key, PLAIN_PATH.pattern, path))
         paths[key] = path
-    minutes = positive_int('C2_TAULAB_DEADLINE', values['C2_TAULAB_DEADLINE']) if values.get('C2_TAULAB_DEADLINE')         else TAULAB_DEADLINE_MINUTES
+    minutes = (positive_int('C2_TAULAB_DEADLINE', values['C2_TAULAB_DEADLINE']) if values.get('C2_TAULAB_DEADLINE')
+               else TAULAB_DEADLINE_MINUTES)
     if minutes > MAX_TAULAB_DEADLINE_MINUTES:
         raise JobError('C2_TAULAB_DEADLINE: at most %d minutes, got %d' % (MAX_TAULAB_DEADLINE_MINUTES, minutes))
-    in_flight = positive_int('C2_TAULAB_IN_FLIGHT', values['C2_TAULAB_IN_FLIGHT']) if values.get('C2_TAULAB_IN_FLIGHT')         else TAULAB_IN_FLIGHT
+    in_flight = (positive_int('C2_TAULAB_IN_FLIGHT', values['C2_TAULAB_IN_FLIGHT']) if values.get('C2_TAULAB_IN_FLIGHT')
+                 else TAULAB_IN_FLIGHT)
     if in_flight > MAX_TAULAB_IN_FLIGHT:
         raise JobError('C2_TAULAB_IN_FLIGHT: at most %d, got %d' % (MAX_TAULAB_IN_FLIGHT, in_flight))
     max_tokens = positive_int('C2_TAULAB_MAX_TOKENS', values['C2_TAULAB_MAX_TOKENS']) if values.get('C2_TAULAB_MAX_TOKENS') else ''

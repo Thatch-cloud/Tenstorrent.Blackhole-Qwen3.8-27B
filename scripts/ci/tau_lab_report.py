@@ -12,17 +12,25 @@ fill) joined to the lab's turns by the request id the stream carried:
   the stream's continuous usage stats                            completion tokens per chunk
 
 THE STATISTIC (design 1.3, tau-lab.md section 7): pooled agent T16 tau = sum of `emitted` / number of rounds over the
-[PACKED] rounds (rows = 16, all four seats live), excluding each request's terminal round (cut by EOS or the budget), the
-prefill seed token and the 4-row steps. A round with a cap= (a commit the remaining budget or an extent block cut) counts in
-`tau` as served and is left out of `tau_uncapped`. Thinking-ON arms A1 (swe), A2 (own) and A4 (chained) are pooled with EQUAL
-WEIGHT per set, the 95% interval a cluster bootstrap over conversations (10,000 resamples, resampled within each set).
-A3 (calibration) and A5 (thinking OFF) are reported beside it and never pooled into it.
+[PACKED] rounds of rows = 16 with ALL FOUR SEATS LIVE (each [PACKED] line is attributed to the [PACKED-PHASE] live= value of its
+round; the padded 3-live and 2-live rounds are reported separately under rounds_by_live, never pooled), excluding each request's
+terminal round (cut by EOS or the budget), a round that logged emitted=0 (a cancelled commit), the prefill seed token and the
+4-row steps. A round with cap < 16 (a commit the remaining budget or an extent block cut: every extent-path line carries cap=,
+and cap=16 is the uncut round) counts in `tau` as served and is left out of `tau_uncapped`; a capped round that emitted exactly
+its cap is censored (counted in rounds_censored). Thinking-ON arms A1 (swe), A2 (own) and A4 (chained) are pooled with EQUAL
+WEIGHT per set. Within a set every turn carries its inverse-probability weight (the data's eligible_per_bucket / chosen_in_bucket)
+in the pooled tau, the per-turn p10 / p50, the buckets, the regions and the bootstrap, so the number describes the population the
+design means, not the stratified sample; the 95% interval is a cluster bootstrap over conversations (10,000 resamples, resampled
+within each set). A3 (calibration) and A5 (thinking OFF) are reported beside it and never pooled into it.
 
 WHAT IT REPORTS (every number an aggregate; the public summary holds no id, text or token):
-  arms             per arm: turns, rounds, tau, per-turn p10 / p50, worst seat (the lowest per-segment tau)
+  arms             per arm: turns, rounds, tau, per-turn p10 / p50, segment_min (the lowest per-segment tau: the segments are
+                   hardware slots every turn rotates through, NOT a user), coverage (the share of turns past </think>, with a
+                   tool call, finish stop vs length, the answer budget) and the thinking mode
   k_inputs         the gate-G inputs: pooled tau and its CI, per-turn min / p10 / p50 per set, the share of turns under 4.2, tau
                    by context bucket (the >80k bucket separately), by output region (reasoning / content / tool), per segment,
-                   worst-of-8 and worst-of-9 (P(min tau >= bar) over the strict and the 8 x 75 bars), and the K1 / K2 SCREENS:
+                   worst-of-8 and worst-of-9 (P(min tau >= bar) over the strict and the 8 x 75 bars), and the K1 / K2 SCREENS (K2 also as the
+                   PROJECTED worst-of-8: the observed turns' taus scaled by the low and the high multiplier):
                    the observed values times the design's fine-tune (+15-33%) and lookup (+3-5%) multipliers against the bars.
                    The screens are arithmetic, not the simulation: the class-0 sweep and drafter_sens.py rerun on tapes.jsonl
                    (private) decide K1 at gate G.
@@ -64,12 +72,17 @@ POSITION_TOLERANCE = 0.10
 RESAMPLES = 10000
 DRAWS = 20000
 ROUND_FIELDS = ('segment', 'position', 'prefix', 'emitted', 'rows', 'cap')
+FULL_ROWS = 16                    # a round that cuts its commit below 16 logs cap < 16 (every extent-path line carries cap=)
+LIVE_SEATS = 4                    # the statistic counts the rounds with all four seats live
+SET_OF_TOKENS = ((4096, '4k'), (32768, '32k'))   # A3's two prompt sizes
+PHASE_LIVE = re.compile(r'\[PACKED-PHASE\] round=([0-9]+) users=([0-9]+)[^\n]*?\blive=([0-9]+)')
 
 # Everything a public string may be: the report is aggregates, so a word outside this set (or the image tag) is a leak.
 PUBLIC_WORDS = frozenset((
     'A1', 'A2', 'A3', 'A4', 'A5', 'swe', 'own', 'chained', 'calib', '4k', '8k', '16k', '32k', '64k', '80k', '80k+',
     'reasoning', 'content', 'tool', 'PASS', 'FAIL', 'MAYBE', 'NOT_ESTABLISHED', 'NOT_RUN', 'exact', 'coalesced', 'disagree',
-    'none', 'unique', 'ambiguous', 'on', 'off', 'baked', 'production', 'non-production', 'phases', 'spec_lines'))
+    'none', 'unique', 'ambiguous', 'on', 'off', 'baked', 'production', 'non-production', 'phases', 'spec_lines',
+    'no_production_counters', 'no_lab_positions'))
 PUBLIC_KEY = re.compile(r'[A-Za-z0-9_.>+-]{1,48}')
 IMAGE_TAG = re.compile(r'[0-9a-z.-]{3,40}')
 MAX_LIST = 64
@@ -116,9 +129,17 @@ def assert_public(value, path='summary'):
 
 def parse_rounds(log_text):
     """{engine request id: [round, ...]} in log order: kind P (a packed round) or S (a sequential step), and the fields each
-    line carries (acceptance_report.PATH_FIELD reads them by name)."""
-    rounds = {}
-    for match in acc.PATH_LINE.finditer(log_text):
+    line carries (acceptance_report.PATH_FIELD reads them by name). A packed round also carries `live`: the live-user count of
+    the [PACKED-PHASE] line that opens its round (the verifier logs that line before the round's [PACKED] lines), None until
+    the log's first such line (a profile that logs none: see has_live)."""
+    events = [(match.start(), 0, match) for match in PHASE_LIVE.finditer(log_text)]
+    events += [(match.start(), 1, match) for match in acc.PATH_LINE.finditer(log_text)]
+    events.sort(key=lambda event: (event[0], event[1]))
+    rounds, live = {}, None
+    for _, which, match in events:
+        if which == 0:
+            live = int(match.group(3))
+            continue
         kind, request_id, rest = match.groups()
         if kind == 'SEQ-PUBLISH' and not rest.startswith('rows='):
             continue
@@ -128,8 +149,15 @@ def parse_rounds(log_text):
         entry = dict(kind=acc.PATH_KINDS[kind])
         for name in ROUND_FIELDS:
             entry[name] = fields.get(name)
+        entry['live'] = live if entry['kind'] == 'P' else None
         rounds.setdefault(request_id, []).append(entry)
     return rounds
+
+
+def has_live(engine_rounds):
+    """Whether the log carried [PACKED-PHASE] live= lines at all (a profile without the padded block logs none: every packed
+    round is then four-live by construction, the narrower rounds run sequentially)."""
+    return any(entry.get('live') is not None for rounds in engine_rounds.values() for entry in rounds)
 
 
 def owner_of(request_id, index):
@@ -157,20 +185,27 @@ def bucket_of(tokens):
 
 # -- one turn --------------------------------------------------------------------------------------------------------
 
-def counted_rounds(rounds):
-    """The rounds the statistic counts: the packed ones before the request's terminal round, as (round, start offset in the
-    completion's tokens). The offset starts at 1 (the prefill seed) and is tracked while every round's emitted count is
-    known: a step that logs none (a sequential one) leaves later offsets unknown (None), never guessed."""
+def counted_rounds(rounds, live=None):
+    """The rounds the statistic counts: the packed ones before the request's terminal round that committed something, as
+    (round, start offset in the completion's tokens). The offset starts at 1 (the prefill seed) and is tracked while every
+    round's emitted count is known: a step that logs none (a sequential one) leaves later offsets unknown (None), never guessed.
+    `live`: only the rounds with that many live seats (None: every packed round)."""
     out, offset = [], 1
     last = len(rounds) - 1
     for position, entry in enumerate(rounds):
-        if entry['kind'] == 'P' and position != last and entry.get('emitted') is not None:
+        if (entry['kind'] == 'P' and position != last and entry.get('emitted')
+                and (live is None or entry.get('live') == live)):
             out.append((entry, offset))
         if entry.get('emitted') is None:
             offset = None
         elif offset is not None:
             offset += entry['emitted']
     return out
+
+
+def is_capped(entry):
+    """A round whose commit was cut below the full 16 rows (the remaining budget, an extent block)."""
+    return entry.get('cap') is not None and entry['cap'] < FULL_ROWS
 
 
 def region_of(turn, start):
@@ -192,17 +227,30 @@ def stream_check(turn, rounds):
     return acc.stream_agreement(dict(chunk_tokens=turn.get('chunk_tokens')), blocks)
 
 
-def analyze_turn(turn, rounds):
-    """The turn's statistics from its rounds: the counted rounds (segment, emitted, cap, region), their sums and tau."""
-    counted = counted_rounds(rounds or [])
+def analyze_turn(turn, rounds, live=None):
+    """The turn's statistics from its rounds: the counted rounds (segment, emitted, cap, region), their sums and tau. `live`
+    (LIVE_SEATS when the log carries live counts, else None) is the statistic's round filter; the other packed rounds are
+    tallied by their live count in `other_live` ({live: [emitted, rounds]}), never in tau."""
+    counted = counted_rounds(rounds or [], live)
     emitted = [entry['emitted'] for entry, _ in counted]
-    uncapped = [entry['emitted'] for entry, _ in counted if entry.get('cap') is None]
+    uncapped = [entry['emitted'] for entry, _ in counted if not is_capped(entry)]
+    censored = [entry for entry, _ in counted if is_capped(entry) and entry['emitted'] >= entry['cap']]
+    other = {}
+    if live is not None:
+        for entry, _ in counted_rounds(rounds or []):
+            if entry.get('live') != live:
+                pair = other.setdefault(entry.get('live'), [0, 0])
+                pair[0] += entry['emitted']
+                pair[1] += 1
     tokens = turn.get('prompt_tokens') or turn.get('declared_tokens')
+    weight = turn.get('weight')
     return dict(rounds=len(emitted), emitted=sum(emitted), uncapped_rounds=len(uncapped), uncapped_emitted=sum(uncapped),
+                capped_rounds=len(emitted) - len(uncapped), censored_rounds=len(censored),
                 tau=(sum(emitted) / float(len(emitted))) if emitted else None, bucket=bucket_of(tokens),
                 segments=[entry.get('segment') for entry, _ in counted],
                 regions=[region_of(turn, start) for _, start in counted],
-                values=emitted, caps=[entry.get('cap') for entry, _ in counted])
+                values=emitted, caps=[entry.get('cap') for entry, _ in counted], other_live=other,
+                weight=float(weight) if isinstance(weight, (int, float)) and weight > 0 else 1.0)
 
 
 # -- statistics ------------------------------------------------------------------------------------------------------
@@ -227,13 +275,45 @@ def rounded(value, digits=3):
     return None if value is None else round(value, digits)
 
 
-def distribution(taus):
-    return dict(turns=len(taus), min=rounded(min(taus)) if taus else None, p10=rounded(quantile(taus, 0.10)),
-                p50=rounded(quantile(taus, 0.50)), mean=rounded(mean(taus)))
+def weighted_quantile(values, weights, q):
+    """The quantile of `values` under inverse-probability `weights`: numpy's linear quantile when the weights are equal, else
+    the midpoint rule (each value sits at its cumulative weight less half its own) interpolated linearly, or None."""
+    if not values:
+        return None
+    if len(set(weights)) <= 1:
+        return quantile(values, q)
+    pairs = sorted(zip(values, weights))
+    total = float(sum(weight for _, weight in pairs))
+    running, points = 0.0, []
+    for value, weight in pairs:
+        points.append(((running + weight / 2.0) / total, value))
+        running += weight
+    if q <= points[0][0]:
+        return points[0][1]
+    for (left, low), (right, high) in zip(points, points[1:]):
+        if q <= right:
+            return low + (high - low) * (q - left) / (right - left)
+    return points[-1][1]
+
+
+def distribution(taus, weights=None):
+    """min (unweighted), p10 / p50 / mean (under `weights` when given: the data's inverse-probability weights)."""
+    weights = list(weights) if weights is not None else [1.0] * len(taus)
+    total = float(sum(weights))
+    return dict(turns=len(taus), min=rounded(min(taus)) if taus else None, p10=rounded(weighted_quantile(taus, weights, 0.10)),
+                p50=rounded(weighted_quantile(taus, weights, 0.50)),
+                mean=rounded(sum(tau * weight for tau, weight in zip(taus, weights)) / total) if taus and total else None)
 
 
 def tally(stats):
-    return (sum(item['emitted'] for item in stats), sum(item['rounds'] for item in stats))
+    """(weighted emitted, weighted rounds) over turn stats: each turn counts at its inverse-probability weight (1.0 when it has
+    none), so the ratio is the population's tau, not the stratified sample's."""
+    return (sum(item.get('weight', 1.0) * item['emitted'] for item in stats),
+            sum(item.get('weight', 1.0) * item['rounds'] for item in stats))
+
+
+def raw_rounds(stats):
+    return sum(item['rounds'] for item in stats)
 
 
 def ratio(pair):
@@ -451,8 +531,42 @@ def phases_agreement(turn_rounds, log_text):
     return verdicts, len(records)
 
 
+THINKING_WORD = {True: 'on', False: 'off', None: 'baked'}
+
+
+def set_of_a3(turn):
+    """'4k' / '32k' for an A3 turn by its prompt's token count, else None."""
+    tokens = turn.get('declared_tokens') or turn.get('prompt_tokens')
+    if tokens is None:
+        return None
+    for edge, name in SET_OF_TOKENS:
+        if tokens <= edge:
+            return name
+    return None
+
+
+def coverage_of(turn_records):
+    """What the answers reached, per arm: the share of turns past </think>, with a tool call, and how they finished. A tau over
+    reasoning alone is a reasoning tau: the summary says how many turns got further."""
+    count = float(len(turn_records)) or 1.0
+    finishes = [turn.get('finish') for turn in turn_records]
+    budgets = [turn.get('max_tokens') for turn in turn_records if turn.get('max_tokens')]
+    return dict(turns=len(turn_records),
+                share_past_think=rounded(sum(1 for turn in turn_records if turn.get('past_think')) / count),
+                share_tool_call=rounded(sum(1 for turn in turn_records if turn.get('tool_call')) / count),
+                share_finish_stop=rounded(sum(1 for item in finishes if item == 'stop') / count),
+                share_finish_length=rounded(sum(1 for item in finishes if item == 'length') / count),
+                share_finish_tool=rounded(sum(1 for item in finishes if item == 'tool_calls') / count),
+                max_tokens=max(budgets) if budgets else None)
+
+
+def scaled(weighted, factor):
+    return dict((name, [(tau * factor, weight) for tau, weight in pool]) for name, pool in weighted.items())
+
+
 def build(results_dir, manifest=None, counters=None, info=None, seed=0, log_text=None, turns=None, outputs=None):
-    """-> (public summary, private report, tapes). Pure over the results directory's files (or the arguments)."""
+    """-> (public summary, private report, tapes). Pure over the results directory's files (or the arguments). The public
+    summary is NOT checked here (build_and_write writes the private files first, then refuses a leak)."""
     manifest = manifest or {}
     info = info or {}
     if turns is None:
@@ -467,6 +581,7 @@ def build(results_dir, manifest=None, counters=None, info=None, seed=0, log_text
     by_stream_id = dict((turn['request_id'], key) for key, turn in chosen.items()
                         if turn.get('request_id') and turn.get('status') == 'ok')
     engine_rounds = parse_rounds(log_text)
+    live_rule = LIVE_SEATS if has_live(engine_rounds) else None
     turn_rounds, unattributed = {}, 0
     for request_id, rounds in engine_rounds.items():
         stream_id = owner_of(request_id, by_stream_id)
@@ -483,7 +598,7 @@ def build(results_dir, manifest=None, counters=None, info=None, seed=0, log_text
         if turn.get('status') != 'ok':
             continue
         rounds = turn_rounds.get(key) or []
-        stats[key] = analyze_turn(turn, rounds)
+        stats[key] = analyze_turn(turn, rounds, live_rule)
         stats[key]['thinking'] = turn.get('thinking')
         if rounds:
             source['turns_with_rounds'] += 1
@@ -494,9 +609,9 @@ def build(results_dir, manifest=None, counters=None, info=None, seed=0, log_text
             source['turns_without_rounds'] += 1
         tapes.append(dict(arm=key[0], id=key[1], set=turn.get('set'), cluster=turn.get('cluster'), turn=turn.get('turn'),
                           prompt_tokens=turn.get('prompt_tokens'), completion_tokens=turn.get('completion_tokens'),
-                          thinking=turn.get('thinking'), finish=turn.get('finish'),
+                          thinking=turn.get('thinking'), finish=turn.get('finish'), weight=stats[key]['weight'],
                           rounds=[[entry['kind'], entry.get('segment'), entry.get('emitted'), entry.get('rows'),
-                                   entry.get('cap')] for entry in rounds]))
+                                   entry.get('cap'), entry.get('live')] for entry in rounds]))
 
     arms = {}
     for arm in sorted(set(key[0] for key in stats)):
@@ -511,20 +626,38 @@ def build(results_dir, manifest=None, counters=None, info=None, seed=0, log_text
                 pair[1] += 1
         seats = dict(('seat_%s' % segment, rounded(pair[0] / float(pair[1]))) for segment, pair in sorted(
             by_seat.items(), key=lambda item: (item[0] is None, item[0])) if pair[1] and segment is not None)
-        emitted, rounds_ = tally([stat for _, stat in items])
-        arms[arm] = dict(turns=len(items), turns_counted=len(usable), rounds=rounds_, tau=rounded(ratio((emitted, rounds_))),
-                         tau_per_turn=distribution(taus), seats=seats,
-                         worst_seat=min(seats.values()) if seats else None,
+        mine = [stat for _, stat in items]
+        rounds_ = raw_rounds(mine)
+        arms[arm] = dict(turns=len(items), turns_counted=len(usable), rounds=rounds_, tau=rounded(ratio(tally(mine))),
+                         tau_sample=rounded(ratio((sum(stat['emitted'] for stat in mine), rounds_))),
+                         tau_per_turn=distribution(taus, [stat['weight'] for stat in usable]), seats=seats,
+                         segment_min=min(seats.values()) if seats else None,
                          turns_under_rounds=len(items) - len(usable))
-        uncapped = (sum(stat['uncapped_emitted'] for _, stat in items), sum(stat['uncapped_rounds'] for _, stat in items))
+        uncapped = (sum(stat['uncapped_emitted'] for stat in mine), sum(stat['uncapped_rounds'] for stat in mine))
         arms[arm]['tau_uncapped'] = rounded(ratio(uncapped))
+        arms[arm]['rounds_capped'] = sum(stat['capped_rounds'] for stat in mine)
+        arms[arm]['rounds_censored'] = sum(stat['censored_rounds'] for stat in mine)
+        arms[arm]['coverage'] = coverage_of([chosen[key] for key, _ in items])
+        modes = set(stat.get('thinking') for stat in mine)
+        arms[arm]['thinking'] = THINKING_WORD[next(iter(modes))] if len(modes) == 1 else 'baked'
+        by_live = {}
+        for stat in mine:
+            for live, pair in stat['other_live'].items():
+                entry = by_live.setdefault('live_%s' % live, [0, 0])
+                entry[0] += pair[0]
+                entry[1] += pair[1]
+        if live_rule is not None:
+            by_live['live_%d' % live_rule] = [sum(stat['emitted'] for stat in mine), rounds_]
+        arms[arm]['rounds_by_live'] = dict((name, dict(rounds=pair[1], tau=rounded(ratio(pair))))
+                                           for name, pair in sorted(by_live.items()))
 
     # -- the gate-G inputs: the thinking-ON arms A1, A2, A4 -----------------------------------------------------------
     primary = [(key, stat) for key, stat in stats.items() if key[0] in PRIMARY_ARMS and stat['rounds']]
     items = []
     for key, stat in primary:
         turn = chosen[key]
-        items.append((SET_OF_ARM[key[0]], turn.get('cluster') or key[1], stat['emitted'], stat['rounds']))
+        items.append((SET_OF_ARM[key[0]], turn.get('cluster') or key[1], stat['weight'] * stat['emitted'],
+                      stat['weight'] * stat['rounds']))
     clusters = cluster_tallies(items)
     set_tallies = dict((name, (sum(pair[0] for pair in pool), sum(pair[1] for pair in pool))) for name, pool in clusters.items())
     pooled = pooled_equal_weight(set_tallies)
@@ -533,25 +666,28 @@ def build(results_dir, manifest=None, counters=None, info=None, seed=0, log_text
     weighted = {}
     for name in SET_ORDER:
         sets = [(key, stat) for key, stat in primary if SET_OF_ARM[key[0]] == name]
-        taus = [stat['tau'] for _, stat in sets if stat['rounds'] >= MIN_ROUNDS]
-        per_set[name] = dict(distribution(taus), rounds=sum(stat['rounds'] for _, stat in sets),
+        counted = [stat for _, stat in sets if stat['rounds'] >= MIN_ROUNDS]
+        per_set[name] = dict(distribution([stat['tau'] for stat in counted], [stat['weight'] for stat in counted]),
+                             rounds=raw_rounds([stat for _, stat in sets]),
                              tau=rounded(ratio(tally([stat for _, stat in sets]))) if sets else None)
-        weighted[name] = [(stat['tau'], stat['rounds']) for _, stat in sets if stat['rounds'] >= MIN_ROUNDS]
-    all_taus = [stat['tau'] for _, stat in primary if stat['rounds'] >= MIN_ROUNDS]
+        weighted[name] = [(stat['tau'], stat['weight'] * stat['rounds']) for stat in counted]
+    counted_all = [stat for _, stat in primary if stat['rounds'] >= MIN_ROUNDS]
+    all_taus = [stat['tau'] for stat in counted_all]
+    all_weights = [stat['weight'] for stat in counted_all]
     buckets = {}
     for label in [label for _, label in BUCKETS]:
         sets = [stat for _, stat in primary if stat['bucket'] == label]
-        taus = [stat['tau'] for stat in sets if stat['rounds'] >= MIN_ROUNDS]
+        counted = [stat for stat in sets if stat['rounds'] >= MIN_ROUNDS]
         if sets:
-            buckets[label] = dict(distribution(taus), rounds=sum(stat['rounds'] for stat in sets),
-                                  tau=rounded(ratio(tally(sets))))
+            buckets[label] = dict(distribution([stat['tau'] for stat in counted], [stat['weight'] for stat in counted]),
+                                  rounds=raw_rounds(sets), tau=rounded(ratio(tally(sets))))
     regions = {}
     for _, stat in primary:
         for region, value in zip(stat['regions'], stat['values']):
             if region:
-                pair = regions.setdefault(region, [0, 0])
-                pair[0] += value
-                pair[1] += 1
+                pair = regions.setdefault(region, [0.0, 0.0])
+                pair[0] += stat['weight'] * value
+                pair[1] += stat['weight']
     seats = {}
     for _, stat in primary:
         for segment, value in zip(stat['segments'], stat['values']):
@@ -562,18 +698,21 @@ def build(results_dir, manifest=None, counters=None, info=None, seed=0, log_text
     seat_tau = dict(('seat_%d' % segment, rounded(pair[0] / float(pair[1]))) for segment, pair in sorted(seats.items()))
     worst8 = worst_of_k(weighted, 8, STRICT_BARS + K2_BARS, seed=seed)
     worst9 = worst_of_k(weighted, 9, STRICT_BARS, seed=seed + 1)
-    p10 = quantile(all_taus, 0.10)
+    low_factor, high_factor = FINE_TUNE_CENTRAL[0] * LOOKUP[0], FINE_TUNE_CENTRAL[1] * LOOKUP[1]
+    p10 = weighted_quantile(all_taus, all_weights, 0.10)
     long_bucket = buckets.get(LONG_BUCKET) or {}
-    low_seat = min((pair[0] / float(pair[1]) for pair in seats.values() if pair[1]), default=None)
     k_inputs = dict(
-        pooled_tau=rounded(pooled), ci95=ci, sets=per_set, per_turn=distribution(all_taus),
-        share_turns_under_4_2=rounded(sum(1 for tau in all_taus if tau < LOW_TAU) / float(len(all_taus))) if all_taus else None,
+        pooled_tau=rounded(pooled), ci95=ci, sets=per_set, per_turn=distribution(all_taus, all_weights),
+        share_turns_under_4_2=(rounded(sum(weight for tau, weight in zip(all_taus, all_weights) if tau < LOW_TAU)
+                                       / float(sum(all_weights))) if all_taus else None),
         buckets=buckets, regions=dict((name, rounded(pair[0] / float(pair[1]))) for name, pair in regions.items()),
-        seats=seat_tau, worst_of_8=worst8, worst_of_9=worst9,
+        seats=seat_tau, worst_of_8=worst8, worst_of_9=worst9, live_rule=live_rule,
         k1=dict(screen=screen(pooled, (K1_BAR,)), bar=K1_BAR,
                 sanity_floor_ci_upper_below_5=bool(ci and ci['high'] is not None and ci['high'] < SANITY_FLOOR)),
         k2=dict(p10=screen(p10, K2_BARS), long_bucket_tau=screen(long_bucket.get('tau'), K2_BARS),
-                long_bucket_p10=screen(long_bucket.get('p10'), K2_BARS), worst_seat=screen(low_seat, K2_BARS)))
+                long_bucket_p10=screen(long_bucket.get('p10'), K2_BARS),
+                worst_of_8_projected=dict(low=worst_of_k(scaled(weighted, low_factor), 8, K2_BARS, seed=seed + 2),
+                                          high=worst_of_k(scaled(weighted, high_factor), 8, K2_BARS, seed=seed + 3))))
 
     # -- thinking on against off (A1 against A5 over the same turns) -----------------------------------------------------
     pairs = []
@@ -581,22 +720,38 @@ def build(results_dir, manifest=None, counters=None, info=None, seed=0, log_text
         if arm == 'A5' and stat['rounds'] >= MIN_ROUNDS:
             other = stats.get(('A1', ident))
             if other and other['rounds'] >= MIN_ROUNDS:
-                pairs.append((other['tau'], stat['tau']))
-    thinking = dict(pairs=len(pairs), tau_on=rounded(mean(on for on, _ in pairs)), tau_off=rounded(mean(off for _, off in pairs)),
-                    mean_difference=rounded(mean(off - on for on, off in pairs)),
-                    ratio_off_over_on=rounded(mean(off for _, off in pairs) / mean(on for on, _ in pairs)) if pairs else None)
+                pairs.append((other['tau'], stat['tau'], other['weight']))
+    total_weight = float(sum(weight for _, _, weight in pairs)) or 1.0
+    tau_on = sum(on * weight for on, _, weight in pairs) / total_weight if pairs else None
+    tau_off = sum(off * weight for _, off, weight in pairs) / total_weight if pairs else None
+    thinking = dict(pairs=len(pairs), tau_on=rounded(tau_on), tau_off=rounded(tau_off),
+                    mean_difference=rounded(tau_off - tau_on) if pairs else None,
+                    ratio_off_over_on=rounded(tau_off / tau_on) if pairs and tau_on else None)
 
     # -- the calibration -------------------------------------------------------------------------------------------------
     a3 = [(key, stat) for key, stat in stats.items() if key[0] == 'A3' and stat['rounds']]
-    reference = (manifest.get('a3_reference') or {}).get('pooled_tau')
+    reference_doc = manifest.get('a3_reference') or {}
+    reference = reference_doc.get('pooled_tau')
     refs = [chosen[key].get('ref_tau') for key, _ in a3 if chosen[key].get('ref_tau')]
     if reference is None and refs and len(refs) == len(a3):
         reference = mean(refs)
-    lab_a3 = ratio(tally([stat for _, stat in a3])) if a3 else None
+    lab_a3 = ratio((sum(stat['emitted'] for _, stat in a3), raw_rounds([stat for _, stat in a3]))) if a3 else None
     relative = (lab_a3 - reference) / float(reference) if lab_a3 is not None and reference else None
     calibration = dict(turns=len(a3), lab_tau=rounded(lab_a3), reference_tau=rounded(reference), relative=rounded(relative, 4),
                        verdict=('NOT_RUN' if not a3 else 'NOT_ESTABLISHED' if relative is None
-                                else 'PASS' if abs(relative) <= A3_TOLERANCE else 'FAIL'))
+                                else 'PASS' if abs(relative) <= A3_TOLERANCE else 'FAIL'),
+                       thinking='off')
+    per_set_cal = {}
+    for name in [name for _, name in SET_OF_TOKENS]:
+        mine = [stat for key, stat in a3 if set_of_a3(chosen[key]) == name]
+        wanted = (reference_doc.get('sets') or {}).get(name)
+        if mine:
+            lab_set = ratio((sum(stat['emitted'] for stat in mine), raw_rounds(mine)))
+            entry = dict(turns=len(mine), lab_tau=rounded(lab_set), reference_tau=rounded(wanted))
+            if wanted:
+                entry['relative'] = rounded((lab_set - wanted) / float(wanted), 4)
+            per_set_cal[name] = entry
+    calibration['sets'] = per_set_cal
     per_prompt = [(chosen[key]['ref_tau'], stat['tau']) for key, stat in a3 if chosen[key].get('ref_tau')]
     if per_prompt:
         calibration['per_prompt_relative_max'] = rounded(max(abs(lab - ref) / ref for ref, lab in per_prompt), 4)
@@ -612,23 +767,62 @@ def build(results_dir, manifest=None, counters=None, info=None, seed=0, log_text
         calibration=calibration['verdict'],
         image=('production' if info.get('production') else 'non-production'),
         arithmetic_diff_empty=not info.get('arithmetic_extra'),
-        positions_1_3=comparison if comparison else dict(verdict='NOT_ESTABLISHED'),
+        positions_1_3=comparison if comparison else dict(verdict='NOT_ESTABLISHED', reason=(
+            'no_production_counters' if production_positions(counters) is None else 'no_lab_positions')),
         unattributed_requests=unattributed)
     counts = info.get('counts') or {}
-    incomplete = [arm for arm, entry in counts.items() if entry.get('skipped') or entry.get('error')]
-    complete = bool(stats) and not incomplete and all(arm in set(key[0] for key in stats) for arm in (info.get('arms') or ()))
+    # An arm that skipped or lost a turn, or did not account for every planned one, is incomplete; so is a run that crashed or
+    # was stopped (the breaker, the canary, a vanished container) - its counts are whatever it reached, never a clean finish.
+    incomplete = [arm for arm, entry in counts.items()
+                  if entry.get('skipped') or entry.get('error')
+                  or entry.get('planned', 0) > entry.get('ok', 0) + entry.get('resumed', 0) + entry.get('refused', 0)]
+    stopped = bool(info.get('error') or info.get('tripped'))
+    complete = (bool(stats) and not incomplete and not stopped
+                and all(arm in set(key[0] for key in stats) for arm in (info.get('arms') or ())))
     public = dict(
         image_tag=info.get('image_tag') if info.get('image_tag') and IMAGE_TAG.fullmatch(info.get('image_tag') or '') else None,
-        label='production' if info.get('production') else 'non-production', complete=complete,
+        label='production' if info.get('production') else 'non-production', complete=complete, stopped=stopped,
         run=dict((arm, dict(('turns_' + key, value) for key, value in sorted(entry.items()))) for arm, entry in counts.items()),
         arms=arms, k_inputs=k_inputs, thinking=thinking, calibration=calibration, checks=checks,
         positions=dict(source=pos_source, phases_records=phase_records_seen,
                        lab=[rounded(value, 4) for value in (lab_pos or [])][:15]))
-    assert_public(public)
     private = dict(public=public, turns=[dict(arm=key[0], id=key[1], set=chosen[key].get('set'),
                                               cluster=chosen[key].get('cluster'), bucket=stat['bucket'], rounds=stat['rounds'],
-                                              tau=rounded(stat['tau'])) for key, stat in sorted(stats.items())])
+                                              weight=stat['weight'], tau=rounded(stat['tau']))
+                                         for key, stat in sorted(stats.items())])
     return public, private, tapes
+
+
+def estimate_log(log_text):
+    """This report's own estimator over one gate server.log (a padded four-user run): {emitted, rounds, tau, requests}. The
+    same rounds the lab counts: the four-live packed rounds (every packed round when the log has no live counts) before each
+    request's terminal round, no sequential step, no empty commit."""
+    engine_rounds = parse_rounds(log_text)
+    live = LIVE_SEATS if has_live(engine_rounds) else None
+    emitted = rounds = 0
+    for entries in engine_rounds.values():
+        counted = counted_rounds(entries, live)
+        emitted += sum(entry['emitted'] for entry, _ in counted)
+        rounds += len(counted)
+    return dict(emitted=emitted, rounds=rounds, tau=ratio((emitted, rounds)), requests=len(engine_rounds))
+
+
+def make_reference(entries):
+    """The A3 reference from logged runs: `entries` = [(set name, version label, log text)]. Per set and pooled,
+    rounds-weighted over the runs (the lab's A3 pools its eight prompts the same way), each run's own tau beside them. No
+    digest or host goes in: the document is committed to a public repository."""
+    sets, versions = {}, {}
+    for name, version, text in entries:
+        found = estimate_log(text)
+        pair = sets.setdefault(name, [0, 0])
+        pair[0] += found['emitted']
+        pair[1] += found['rounds']
+        versions['%s_%s' % (name, version)] = dict(tau=rounded(found['tau']), rounds=found['rounds'])
+    total = (sum(pair[0] for pair in sets.values()), sum(pair[1] for pair in sets.values()))
+    return dict(estimator='four-live packed rounds, emitted per round, terminal round and sequential steps excluded',
+                pooled_tau=rounded(ratio(total), 4), sets=dict((name, rounded(ratio(pair), 4)) for name, pair in sorted(sets.items())),
+                rounds=dict((name, pair[1]) for name, pair in sorted(sets.items())), runs=versions,
+                source='the padded four-user real-text runs (4k and 32k) of the lanes gates, their server logs')
 
 
 def write_json(path, value):
@@ -646,9 +840,13 @@ def summary_lines(public):
         public['label'], public['complete'], k.get('pooled_tau'), ci.get('low'), ci.get('high'),
         (k.get('per_turn') or {}).get('p10'))]
     for arm, entry in sorted(public['arms'].items()):
-        lines.append('[TAULAB-REPORT] arm %s: turns=%d rounds=%d tau=%s p10=%s p50=%s worst_seat=%s' % (
+        cover = entry.get('coverage') or {}
+        lines.append('[TAULAB-REPORT] arm %s: turns=%d rounds=%d tau=%s p10=%s p50=%s segment_min=%s thinking=%s' % (
             arm, entry['turns'], entry['rounds'], entry['tau'], entry['tau_per_turn']['p10'], entry['tau_per_turn']['p50'],
-            entry['worst_seat']))
+            entry['segment_min'], entry.get('thinking')))
+        lines.append('[TAULAB-REPORT] arm %s coverage: past_think=%s tool_call=%s stop=%s length=%s max_tokens=%s' % (
+            arm, cover.get('share_past_think'), cover.get('share_tool_call'), cover.get('share_finish_stop'),
+            cover.get('share_finish_length'), cover.get('max_tokens')))
     lines.append('[TAULAB-REPORT] calibration=%s lab=%s reference=%s sources=%s positions_1_3=%s' % (
         public['calibration']['verdict'], public['calibration']['lab_tau'], public['calibration']['reference_tau'],
         public['checks']['sources']['verdict'], public['checks']['positions_1_3'].get('verdict')))
@@ -663,10 +861,12 @@ def build_and_write(results_dir, public_dir, manifest=None, counters=None, produ
     info.setdefault('production', production)
     info.setdefault('image_tag', image_tag)
     public, private, tapes = build(results_dir, manifest=manifest, counters=counters, info=info, seed=seed)
+    # The private files first: a refused public summary must not take the private analysis with it.
     write_json(os.path.join(results_dir, 'report.private.json'), private)
     with open(os.path.join(results_dir, 'tapes.jsonl'), 'w', encoding='utf-8') as handle:
         for tape in tapes:
             handle.write(json.dumps(tape, sort_keys=True) + '\n')
+    assert_public(public)
     if public_dir:
         write_json(os.path.join(public_dir, 'tau-lab-summary.json'), public)
     for line in summary_lines(public):
@@ -681,10 +881,25 @@ def main(argv=None, say=print):
     parser.add_argument('--metrics', default=None, help='a scrape of the production /metrics: write its spec-decode counters '
                                                        '(--counters-out) and stop')
     parser.add_argument('--counters-out', default=None)
-    parser.add_argument('--data', default=None, help='the data directory (its manifest carries the A3 reference)')
+    parser.add_argument('--reference', default=None, help='the A3 reference JSON (make_reference\'s output)')
+    parser.add_argument('--reference-log', action='append', default=[], metavar='SET:VERSION:PATH',
+                        help='a logged padded run (set 4k or 32k) to build the A3 reference from; with --reference-out, then stop')
+    parser.add_argument('--reference-out', default=None)
     parser.add_argument('--counters', default=None)
     parser.add_argument('--seed', type=int, default=0)
     options = parser.parse_args(argv)
+    if options.reference_log:
+        if not options.reference_out:
+            parser.error('--reference-log needs --reference-out')
+        entries = []
+        for spec in options.reference_log:
+            name, version, path = spec.split(':', 2)
+            with open(path, encoding='utf-8', errors='replace') as handle:
+                entries.append((name, version, handle.read()))
+        document = make_reference(entries)
+        write_json(options.reference_out, document)
+        say('[TAULAB-REPORT] reference: pooled=%s sets=%s rounds=%s' % (document['pooled_tau'], document['sets'], document['rounds']))
+        return 0
     if options.metrics:
         if not options.counters_out:
             parser.error('--metrics needs --counters-out')
@@ -699,9 +914,9 @@ def main(argv=None, say=print):
     if not options.results:
         parser.error('--results is required')
     manifest = {}
-    if options.data and os.path.isfile(os.path.join(options.data, 'manifest.json')):
-        with open(os.path.join(options.data, 'manifest.json'), encoding='utf-8') as handle:
-            manifest = json.load(handle)
+    if options.reference:
+        with open(options.reference, encoding='utf-8') as handle:
+            manifest['a3_reference'] = json.load(handle)
     counters = None
     if options.counters:
         with open(options.counters, encoding='utf-8') as handle:
