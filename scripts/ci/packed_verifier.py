@@ -421,6 +421,20 @@ def dump_device_profiler_after_round(operations, mesh, rounds, environ=None):
 REPLAY_GROUP_ROWS_FLAG = 'QWEN_FAST_REPLAY_GROUP_ROWS'
 
 
+SAMPLER_PREWARM_FLAG = 'QWEN_FAST_PACKED_SAMPLER_PREWARM'
+SAMPLER_IN_TRACE_FLAG = 'QWEN_FAST_PACKED_SAMPLER_IN_TRACE'
+SAMPLER_ARM_MARKER = '[PINDIAG] packed sampler arm'
+
+
+def sampler_arm_enabled(flag, environ=None):
+    """QWEN_FAST_PACKED_SAMPLER_PREWARM=1 / QWEN_FAST_PACKED_SAMPLER_IN_TRACE=1: exactly '1' engages the arm (default off)."""
+    return (os.environ if environ is None else environ).get(flag) == '1'
+
+
+def sampler_arm_requested(environ=None):
+    return sampler_arm_enabled(SAMPLER_PREWARM_FLAG, environ) or sampler_arm_enabled(SAMPLER_IN_TRACE_FLAG, environ)
+
+
 def replay_group_rows(environ=None):
     """The opt-in flag for the packed block's per-user replay reader group-row width
     (model_batch.ModelBatch's replay_group_rows, which accepts only 4 or 8; 8 requires
@@ -790,6 +804,13 @@ class PackedVerifierEngine:
         self.shard_problem = verify_trace_t1.shard_sampling_problem(sampler) if shard_cut else None
         self.shard_argmax = shard_cut and self.shard_problem is None
         self.shard_audit = self.shard_argmax and verify_trace_t1.audit_enabled()
+        # QWEN_FAST_PACKED_SAMPLER_PREWARM / QWEN_FAST_PACKED_SAMPLER_IN_TRACE (the audits-off hang's
+        # isolation arms, default OFF): what the T1 audit's pinned sampler protects, without its per-round
+        # readback and compare. Both reuse the audit's sampler call (sample_shards below) and engage only
+        # beside the shard argmax with the audit off; they never change a token (shard_predictions reads
+        # output[1] and output[2] only, and the audit's compare stays gated on shard_audit).
+        self.sampler_prewarm = self.shard_argmax and not self.shard_audit and sampler_arm_enabled(SAMPLER_PREWARM_FLAG)
+        self.sampler_in_trace = self.shard_argmax and not self.shard_audit and sampler_arm_enabled(SAMPLER_IN_TRACE_FLAG)
         # QWEN_FAST_VERIFY_T2 (verify_trace_t2): read once here too. #2 (kv_chains) makes the
         # warm fixture's K/V write one chain (build_fixture); the fixture decides the writer
         # (model_batch) and this block reads what it became (kv_chains, warm_kv_chains). The
@@ -894,7 +915,7 @@ class PackedVerifierEngine:
             self.warm_kv_chains = self.kv_chains_cut and bool(getattr(warm, 'kv_chains', False))
             result = None
             try:
-                result = self.operation(warm)
+                result = self.operation(warm, warm=True)
                 self.stage = 'warm forward fence'
                 operations.synchronize_device(self.mesh)
             finally:
@@ -1252,14 +1273,14 @@ class PackedVerifierEngine:
             short_context=False, attention_audit=False, commit_only_gdn=True,
             **({'kv_single_chain': True} if warm and self.kv_chains_cut else {}))
 
-    def operation(self, fixture):
+    def operation(self, fixture, warm=False):
         logits = None
         try:
             with ExitStack() as captures:
                 captures.enter_context(self.feature_capture.capture())
                 logits = fixture.run(sharded_logits=True)
             if self.shard_argmax:
-                return (logits, *self.sample_shards(logits))
+                return (logits, *self.sample_shards(logits, warm=warm))
             ids = sample_rows(self.sampler, logits, self.block_rows, self.operations, native_rows=False)
             return logits, ids
         except BaseException:
@@ -1267,11 +1288,14 @@ class PackedVerifierEngine:
                 self.operations.deallocate(logits)
             raise
 
-    def sample_shards(self, logits):
+    def sample_shards(self, logits, warm=False):
         """QWEN_FAST_VERIFY_T1 (#8a): each chip's argmax and max over its own vocab shard, no
-        gather; under QWEN_FAST_VERIFY_T1_AUDIT also the pinned sampler's ids, for the audit."""
+        gather; under QWEN_FAST_VERIFY_T1_AUDIT also the pinned sampler's ids, for the audit. The
+        sampler arms run the same pinned sampler call without the audit: PREWARM in the eager warm
+        forward only (the result is released with the warm forward's outputs), IN_TRACE in the warm
+        forward and the capture (output[3] is held like the audit's, never read back here)."""
         ids, values = verify_trace_t1.sample_shards(self.operations, logits, self.block_rows)
-        if not self.shard_audit:
+        if not (self.shard_audit or self.sampler_in_trace or (warm and self.sampler_prewarm)):
             return ids, values
         try:
             reference = sample_rows(self.sampler, logits, self.block_rows, self.operations, native_rows=False)
@@ -1312,6 +1336,10 @@ class PackedVerifierEngine:
         diagnostic(verify_trace_t1.engaged_line('packed_verify', **fields))
         if self.shard_problem is not None:
             diagnostic('%s: %s' % (verify_trace_t1.KEPT_SAMPLER, self.shard_problem))
+        if self.sampler_prewarm or self.sampler_in_trace or sampler_arm_requested():
+            diagnostic('%s prewarm=%d in_trace=%d requested=%d shard_argmax=%d audit=%d'
+                       % (SAMPLER_ARM_MARKER, int(self.sampler_prewarm), int(self.sampler_in_trace),
+                          int(sampler_arm_requested()), int(self.shard_argmax), int(self.shard_audit)))
 
     def note_verify_t2(self, counts):
         """verify_trace_t2.MARKER once per captured verify trace: what the captured forward
