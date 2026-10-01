@@ -116,17 +116,16 @@ class PackedBlockTests(Isolated):
 
 
 class EnginePlugTests(Isolated):
-    def model(self):
-        return SimpleNamespace(mesh_device='mesh')
-
     def test_off_for_the_pair_an_unset_flag_and_the_packed_only_setting(self):
-        self.assertIsNone(serving_runtime.open_engine_plug('ops', self.model(), {}))
-        self.assertIsNone(serving_runtime.open_engine_plug('ops', self.model(), {'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1'}))
-        self.assertIsNone(serving_runtime.open_engine_plug('ops', self.model(), {'QWEN_FAST_TP': '4'}))
-        self.assertIsNone(serving_runtime.open_engine_plug('ops', self.model(), {'QWEN_FAST_TP': '4', 'QWEN_FAST_CAPTURE_PLUG': '1'}))
+        self.assertIsNone(capture_plug.engine_settings({}))
+        self.assertIsNone(capture_plug.engine_settings({'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1'}))
+        self.assertIsNone(capture_plug.engine_settings({'QWEN_FAST_TP': '4'}))
+        self.assertIsNone(capture_plug.engine_settings({'QWEN_FAST_TP': '4', 'QWEN_FAST_CAPTURE_PLUG': '1'}))
+        self.assertEqual(capture_plug.engine_settings({'QWEN_FAST_TP': '4', 'QWEN_FAST_CAPTURE_PLUG': '1',
+                                                       'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1'})['engine_leave'], 1024 * capture_plug.MB)
 
     def test_the_engine_zone_is_checked_then_opened_under_the_packed_zone(self):
-        environ = {'QWEN_FAST_TP': '4', 'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1'}
+        settings = capture_plug.config({'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1'})
         packed = FakePlug()
         packed.sealed = True
         capture_plug.PACKED.append(packed)
@@ -137,20 +136,17 @@ class EnginePlugTests(Isolated):
             return made[-1]
 
         with patch.object(capture_plug.Plug, 'engine', classmethod(engine)):
-            plug = serving_runtime.open_engine_plug('ops', self.model(), environ)
+            plug = capture_plug.open_engine(settings, 'ops', 'mesh')
         self.assertIs(plug, made[0])
         self.assertEqual(plug.calls, [('monitor', 'before engine build'), 'open'])
         self.assertEqual(plug.args[1:], ('ops', 'mesh', 0x4000))
-        self.assertEqual(plug.args[0]['engine_leave'], 1024 * capture_plug.MB)
 
     def test_sealing_plugs_the_engine_verifies_its_extents_and_ties_the_plugs_life_to_the_engines(self):
         closed = []
         request = SimpleNamespace(close=lambda *args: closed.append(('engine', args)) or 'closed')
         plug = FakePlug()
         plug.close = lambda: closed.append('plug')
-        trace_census.TRACES.extend([dict(seq=1, site='old', ranges=[(1, 2, 'DRAM')], handle='a'),
-                                    dict(seq=7, site='mine', ranges=[(30, 40, 'DRAM')], handle='b')])
-        serving_runtime.seal_engine_plug(plug, request, 5)
+        capture_plug.seal_engine(plug, request, [(30, 40, 'DRAM')])
         self.assertEqual(plug.calls, ['seal', ('verify', [(30, 40, 'DRAM')])])
         self.assertEqual(request.close('request-1'), 'closed')
         self.assertEqual(closed, [('engine', ('request-1',)), 'plug'], 'the engine releases its traces first, then the plugs go')
@@ -164,10 +160,88 @@ class EnginePlugTests(Isolated):
         request = SimpleNamespace(close=broken)
         plug = FakePlug()
         plug.close = lambda: closed.append('plug')
-        serving_runtime.seal_engine_plug(plug, request, 0)
+        capture_plug.seal_engine(plug, request, [])
         with self.assertRaises(RuntimeError):
             request.close('r')
         self.assertEqual(closed, ['plug'])
+
+
+class BuildGuardTests(Isolated):
+    """trace_census.build_guard: the one hook the runtime carries around an engine build."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ.pop('QWEN_FAST_STALL_DEADLINE_S', None)
+
+    def guard(self, create):
+        return trace_census.build_guard(create, 'ops', 'mesh', 'request-1')
+
+    def test_with_no_flag_the_build_is_returned_untouched(self):
+        def create():
+            return 'engine'
+
+        self.assertIs(self.guard(create), create)
+
+    def test_the_stall_watch_alone_wraps_the_build_in_a_build_scope(self):
+        import stall_watch
+        os.environ['QWEN_FAST_STALL_DEADLINE_S'] = '120'
+        seen = []
+
+        class Scope:
+            def __enter__(self):
+                seen.append('enter')
+
+            def __exit__(self, *exc):
+                seen.append('exit')
+                return False
+
+        with patch.object(stall_watch, 'scope', lambda kind, label: seen.append((kind, label)) or Scope()):
+            self.assertEqual(self.guard(lambda: 'engine')(), 'engine')
+        self.assertEqual(seen, [('build', 'engine request=request-1'), 'enter', 'exit'])
+
+    def plugged(self, create, **made):
+        os.environ.update({'QWEN_FAST_TP': '4', 'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1'})
+        plug = made.setdefault('plug', FakePlug())
+        patcher = patch.object(capture_plug, 'open_engine', lambda settings, operations, mesh, log=None: plug)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return plug, self.guard(create)
+
+    def test_the_zone_is_opened_before_the_build_and_sealed_with_this_builds_recorded_extents_only(self):
+        trace_census.TRACES.append(dict(seq=1, site='old', ranges=[(1, 2, 'DRAM')], handle='a'))
+        trace_census.SEQUENCE = 5
+        closed = []
+        request = SimpleNamespace(close=lambda *args: closed.append('engine'))
+
+        def create():
+            trace_census.TRACES.append(dict(seq=6, site='mine', ranges=[(30, 40, 'DRAM')], handle='b'))
+            return request
+
+        plug, guarded = self.plugged(create)
+        self.assertIs(guarded(), request)
+        self.assertEqual(plug.calls, ['seal', ('verify', [(30, 40, 'DRAM')])])
+        request.close('r')
+        self.assertEqual(closed, ['engine'])
+
+    def test_a_build_that_fails_gives_the_zone_back_and_a_seal_that_fails_closes_the_engine_first(self):
+        def broken():
+            raise RuntimeError('capture failed')
+
+        plug, guarded = self.plugged(broken)
+        with self.assertRaisesRegex(RuntimeError, 'capture failed'):
+            guarded()
+        self.assertEqual(plug.calls, ['close'])
+        closed = []
+        request = SimpleNamespace(close=lambda *args: closed.append(args))
+        plug, guarded = self.plugged(lambda: request)
+
+        def refuse():
+            raise capture_plug.CapturePlugError('a hole remains')
+
+        plug.seal = refuse
+        with self.assertRaisesRegex(capture_plug.CapturePlugError, 'hole remains'):
+            guarded()
+        self.assertEqual((closed, plug.calls), ([('request-1',)], ['close']))
 
 
 if __name__ == '__main__':

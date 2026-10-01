@@ -391,7 +391,7 @@ class FixProfileTests(unittest.TestCase):
         with open(HERE / 'packed_verifier.py', encoding='utf-8') as handle:
             source = handle.read()
         self.assertIn("os.environ.get('QWEN_FAST_TP', '2') != '4'", source, 'the packed block opens a plug at four cards only')
-        with open(HERE / 'serving_runtime.py', encoding='utf-8') as handle:
+        with open(HERE / 'capture_plug.py', encoding='utf-8') as handle:
             self.assertIn("environ.get('QWEN_FAST_TP', '2') != '4'", handle.read(), 'and so does the engine plug')
 
 

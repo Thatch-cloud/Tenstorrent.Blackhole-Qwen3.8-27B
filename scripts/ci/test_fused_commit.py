@@ -1643,9 +1643,11 @@ def without_sticky(lines):
 
 def without_trace_census(lines):
     """serving_runtime.py less the sequential-hang diagnostics' hooks (trace_census; each a no-op unless its flag is set), which
-    landed after this parent: the import and the three call lines, asserted to be exactly those, found once each."""
+    landed after this parent: the import and the four call lines (tp4-serve-4's engine build guard among them), asserted to be
+    exactly those, found once each."""
     hooks = ('import trace_census', 'trace_census.note_collectives(collectives, model, sampler)', 'trace_census.engine_begin()',
-             'trace_census.census_engine(str(state.req_id), request, operations)')
+             'trace_census.census_engine(str(state.req_id), request, operations)',
+             'create_request = trace_census.build_guard(create_request, operations, model.mesh_device, state.req_id)')
     found = [value for value in lines if value.strip() in hooks]
     if sorted(value.strip() for value in found) != sorted(hooks):
         raise AssertionError('The trace_census hooks are not in serving_runtime.py exactly once each')

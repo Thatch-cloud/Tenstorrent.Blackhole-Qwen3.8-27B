@@ -813,6 +813,50 @@ def note_eager_allocations(nodes, site, banks=1):
     return len(hits)
 
 
+def eager_segment(site):
+    """One stretch of EAGER serving work (a prefill segment): a watched 'prefill' scope under QWEN_FAST_STALL_DEADLINE_S and, with the
+    graph census on, a graph capture whose allocations are held against every live trace. Neither flag set: a no-op."""
+    import stall_watch
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(stall_watch.scope('prefill', site))
+    stack.enter_context(eager_graph(None, site))
+    return stack
+
+
+def build_guard(create, operations, mesh, request_id):
+    """`create`, the engine build, as it runs under the stall watch (a 'build' scope) and, under QWEN_FAST_CAPTURE_PLUG_ENGINES=1 at
+    four cards, in its own capture zone (capture_plug.open_engine / seal_engine). With neither flag it is `create` itself. A build or
+    a seal that fails gives the zone back (after closing the engine when it was built)."""
+    import capture_plug
+    import stall_watch
+
+    settings = capture_plug.engine_settings()
+    if settings is None and not stall_watch.enabled():
+        return create
+
+    def guarded():
+        sequence = SEQUENCE
+        plug = None if settings is None else capture_plug.open_engine(settings, operations, mesh, log)
+        try:
+            with stall_watch.scope('build', 'engine request=%s' % request_label(request_id)):
+                request = create()
+            if plug is not None:
+                try:
+                    capture_plug.seal_engine(plug, request, [extent for trace in TRACES if trace['seq'] > sequence
+                                                             for extent in trace['ranges']])
+                except BaseException:
+                    request.close(request_id)
+                    raise
+            return request
+        except BaseException:
+            if plug is not None:
+                plug.close()
+            raise
+    return guarded
+
+
 def eager_graph(operations, site):
     """A context manager around EAGER work: under QWEN_FAST_TRACE_CENSUS=1 and QWEN_FAST_TRACE_CENSUS_GRAPH=1 the work runs under
     a ttnn.graph capture whose allocations are checked by note_eager_allocations on exit; otherwise it is a no-op. Never put it
@@ -821,12 +865,13 @@ def eager_graph(operations, site):
 
     @contextmanager
     def scope():
-        if not (census_enabled() and graph_census_enabled()) or operations is None:
+        target = sys.modules.get('ttnn') if operations is None else operations
+        if not (census_enabled() and graph_census_enabled()) or target is None:
             yield
             return
         started = False
         try:
-            operations.graph.begin_graph_capture(operations.graph.RunMode.NORMAL)
+            target.graph.begin_graph_capture(target.graph.RunMode.NORMAL)
             started = True
         except BaseException as failure:
             unavailable('eager graph capture %s: %s' % (type(failure).__name__, str(failure)[:80]))
@@ -836,7 +881,7 @@ def eager_graph(operations, site):
             nodes = None
             if started:
                 try:
-                    nodes = operations.graph.end_graph_capture()
+                    nodes = target.graph.end_graph_capture()
                 except BaseException as failure:
                     unavailable('eager graph end %s: %s' % (type(failure).__name__, str(failure)[:80]))
             if nodes is not None:

@@ -553,6 +553,36 @@ class EagerAllocationTests(InstalledTwin):
         self.assertEqual(operations.calls, [('graph_begin', 'normal'), ('work',), ('graph_end',)])
 
 
+class EagerSegmentTests(InstalledTwin):
+    def test_without_flags_the_segment_scope_does_nothing_and_with_the_stall_flag_it_is_a_prefill_scope(self):
+        import stall_watch
+        with trace_census.eager_segment('prefill segment prompt=9'):
+            pass
+        seen = []
+
+        class Scope:
+            def __enter__(self):
+                seen.append('enter')
+
+            def __exit__(self, *exc):
+                seen.append('exit')
+                return False
+
+        with patch.object(stall_watch, 'scope', lambda kind, label: seen.append((kind, label)) or Scope()):
+            with trace_census.eager_segment('prefill segment prompt=9'):
+                seen.append('work')
+        self.assertEqual(seen, [('prefill', 'prefill segment prompt=9'), 'enter', 'work', 'exit'])
+
+    def test_eager_graph_resolves_ttnn_itself_when_given_none(self):
+        os.environ[trace_census.CENSUS_FLAG] = '1'
+        os.environ[trace_census.GRAPH_FLAG] = '1'
+        operations = CaptureOperations(nodes=[])
+        with patch.dict(sys.modules, {'ttnn': operations}):
+            with trace_census.eager_graph(None, 'prefill'):
+                pass
+        self.assertEqual(operations.calls, [('graph_begin', 'normal'), ('graph_end',)])
+
+
 class Collectives:
     """The shape of TT_CCL: two handles per getter, cycled by a host index that a replay does not advance."""
 

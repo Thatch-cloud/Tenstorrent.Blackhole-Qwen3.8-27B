@@ -301,6 +301,41 @@ def monitor(memories, min_free, log=None, where=''):
                 free / MB, memory.kind, where or 'monitor'))
 
 
+def engine_settings(environ=None):
+    """The settings an engine build's zone takes, or None: the pair, an unset flag and QWEN_FAST_CAPTURE_PLUG_ENGINES unset get None."""
+    environ = os.environ if environ is None else environ
+    if environ.get('QWEN_FAST_TP', '2') != '4':
+        return None
+    settings = config(environ)
+    return settings if settings is not None and settings['engines'] else None
+
+
+def open_engine(settings, operations, mesh, log=None, memory_factory=None):
+    """One engine's capture zone (Plug.engine), checked against the free-memory floor and opened, under the packed zone."""
+    extra = {} if memory_factory is None else dict(memory_factory=memory_factory)
+    plug = Plug.engine(settings, operations, mesh, log, ceiling=packed_ceiling(), **extra)
+    plug.monitor('before engine build')
+    plug.open()
+    return plug
+
+
+def seal_engine(plug, request, ranges):
+    """The engine is built: plug the holes its captures freed, hold the census's recorded extents of them (`ranges`, none without the
+    graph census) against the zone's top, and tie the plugs' life to the engine's: they go back when request.close has released its
+    traces, even if that close raises."""
+    plug.seal()
+    plug.verify_extents(ranges)
+    inner = request.close
+
+    def close(*args, **kwargs):
+        try:
+            return inner(*args, **kwargs)
+        finally:
+            plug.close()
+
+    request.close = close
+
+
 def packed_ceiling():
     """The address an engine's zone must end under: the lowest zone start of the packed plugs, None with no packed plug."""
     return min((plug.zone_lo() for plug in PACKED if plug.sealed), default=None)
