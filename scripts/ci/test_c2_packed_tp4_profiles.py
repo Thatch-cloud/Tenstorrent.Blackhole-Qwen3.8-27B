@@ -69,6 +69,13 @@ FIX_ENV = {'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1',
            'QWEN_FAST_CAPTURE_PLUG_RESERVE_MB': '256', 'QWEN_FAST_CAPTURE_PLUG_ENGINE_LEAVE_MB': '256',
            'QWEN_FAST_CAPTURE_PLUG_MIN_FREE_MB': '128', 'QWEN_FAST_TRACE_CENSUS_GRAPH': '0',
            'QWEN_FAST_STALL_DEADLINE_S': '120', 'QWEN_FAST_CCL_HANDLE_GUARD': 'log'}
+# The sampler isolation arms (tp4/sampler): each is its base profile plus exactly one flag (the audits-off hang's factorial found the T1
+# audit's pinned sampler protects; these two keep the sampler and drop the audit's per-round readback and compare).
+PREWARM, IN_TRACE = 'QWEN_FAST_PACKED_SAMPLER_PREWARM', 'QWEN_FAST_PACKED_SAMPLER_IN_TRACE'
+SAMPLER_PROFILES = {'c2-packed-tp4-diag-sprewarm': ('c2-packed-tp4-diag', PREWARM),
+                    'c2-packed-tp4-diag-strace': ('c2-packed-tp4-diag', IN_TRACE),
+                    'c2-packed-tp4-speed-sprewarm': ('c2-packed-tp4-speed', PREWARM),
+                    'c2-packed-tp4-speed-strace': ('c2-packed-tp4-speed', IN_TRACE)}
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
@@ -282,7 +289,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES):
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES):
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -398,7 +405,7 @@ class FixProfileTests(unittest.TestCase):
             with self.subTest(profile=name):
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG', env if name != 'c2-packed-tp4-speed-fix' else {})
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG_ENGINES', env if name != 'c2-packed-tp4-speed-fix' else {})
-                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix':
+                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and not name.startswith('c2-packed-tp4-diag-s'):
                     for flag in ('QWEN_FAST_STALL_DEADLINE_S', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_TRACE_CENSUS_GRAPH'):
                         self.assertNotIn(flag, env)
 
@@ -527,6 +534,56 @@ class DraftProfileTests(unittest.TestCase):
         image = image_env()
         for name in DRAFT_PROFILES:
             environ = dict(image, **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
+
+
+class SamplerProfileTests(unittest.TestCase):
+    """tp4/sampler: the four sampler isolation arms, each its base profile plus exactly one flag (audits stay off)."""
+
+    def test_each_arm_is_its_base_profile_plus_exactly_its_flag(self):
+        found = profiles()
+        for name, (base, flag) in SAMPLER_PROFILES.items():
+            mine = found[name]
+            with self.subTest(profile=name):
+                self.assertEqual(mine['env'], dict(found[base]['env'], **{flag: '1'}))
+                self.assertEqual([key for key in mine['env'] if key not in found[base]['env']], [flag])
+                for key in set(mine) | set(found[base]):
+                    if key not in ('description', 'env'):
+                        self.assertEqual(mine.get(key), found[base].get(key), key)
+                self.assertIs(mine['gate_only'], True)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                self.assertIn(flag, mine['description'])
+                self.assertEqual((mine['env']['QWEN_FAST_VERIFY_T1_AUDIT'], mine['env']['QWEN_FAST_VERIFY_T2_AUDIT']), ('0', '0'), 'audits OFF')
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+                other = IN_TRACE if flag == PREWARM else PREWARM
+                self.assertNotIn(other, mine['env'], 'one arm per profile')
+
+    def test_the_diag_twins_keep_the_old_tail_and_the_instruments_and_the_speed_twins_the_caps_and_no_instruments(self):
+        found = profiles()
+        for name, (base, flag) in SAMPLER_PROFILES.items():
+            env = found[name]['env']
+            with self.subTest(profile=name):
+                if base.endswith('diag'):
+                    self.assertEqual({key: env.get(key) for key in DIAG_INSTRUMENTS}, DIAG_INSTRUMENTS)
+                    self.assertEqual(env['QWEN_FAST_TRACE_CENSUS_GRAPH'], '0')
+                else:
+                    self.assertEqual({key: env[key] for key in TAIL_CAPS}, TAIL_CAPS)
+                    for key in ('QWEN_FAST_STALL_DEADLINE_S', 'QWEN_FAST_TRACE_CENSUS', 'QWEN_FAST_CCL_HANDLE_GUARD'):
+                        self.assertNotIn(key, env)
+
+    def test_no_other_profile_carries_a_sampler_flag_and_the_traffic_profile_is_untouched(self):
+        for name, profile in profiles().items():
+            if name not in SAMPLER_PROFILES:
+                self.assertNotIn(PREWARM, profile['env'], name)
+                self.assertNotIn(IN_TRACE, profile['env'], name)
+        env = profiles()['c2-packed-tp4']['env']
+        self.assertEqual((env['QWEN_FAST_VERIFY_T1_AUDIT'], env['QWEN_FAST_VERIFY_T2_AUDIT']), ('1', '1'))
+
+    def test_the_admission_accepts_each_arm_over_the_image_environment(self):
+        for name in SAMPLER_PROFILES:
+            environ = dict(image_env(), **profiles()[name]['env'])
             with self.subTest(profile=name):
                 self.assertEqual(admission.width(environ), 4)
                 self.assertEqual(admission.check_environment(environ, M3), [])

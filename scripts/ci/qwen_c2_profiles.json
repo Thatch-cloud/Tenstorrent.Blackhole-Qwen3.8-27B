@@ -726,6 +726,176 @@
       "parser_rechunk": true,
       "gate_only": true
     },
+    "c2-packed-tp4-speed-sprewarm": {
+      "description": "GATE ONLY (the audits-off hang, sampler isolation arm): c2-packed-tp4-speed plus QWEN_FAST_PACKED_SAMPLER_PREWARM=1: the packed block's EAGER warm forward runs the pinned sampler once (exactly the T1 audit's sample_rows call: the sampler all-gather, untilize and ArgMax over 248,320 columns, two 32-row sample_tiles calls for 64 rows) before the verify capture and discards the result; the capture and every replay are the audits-off ones, with no extra op in the trace and no per-round readback or compare. The factorial that led here: both verify audits on passes, the T1 audit alone passes every hang shape, the T2 audit alone hangs, both off hangs; every hang is the host blocked in ttnn.execute_trace on the first replay of a request's rows=2 verify trace after many four-user packed rounds. This arm keeps the verify audits OFF (QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0), so tokens are the audits-off ones (the served path never uses the sampler output). The tail caps stay on (QWEN_FAST_BUDGET_CAP=1) and no instrument or stall watch is on, so the round time reads against c2-packed-tp4-speed for the arm's cost (the timing twin of the diag arm). Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_PREWARM": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-speed-strace": {
+      "description": "GATE ONLY (the audits-off hang, sampler isolation arm): c2-packed-tp4-speed plus QWEN_FAST_PACKED_SAMPLER_IN_TRACE=1: the packed verify capture also records the pinned sampler's ops exactly as the T1 audit does (the warm forward runs them too, and every packed replay runs the sampler gathers on handles 0 then 1) but the output is never read back and never compared per round, so no host sync is added. The factorial that led here: both verify audits on passes, the T1 audit alone passes every hang shape, the T2 audit alone hangs, both off hangs; every hang is the host blocked in ttnn.execute_trace on the first replay of a request's rows=2 verify trace after many four-user packed rounds. This arm keeps the verify audits OFF (QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0), so tokens are the audits-off ones (the served path never uses the sampler output). The tail caps stay on (QWEN_FAST_BUDGET_CAP=1) and no instrument or stall watch is on, so the round time reads against c2-packed-tp4-speed for the arm's cost (the timing twin of the diag arm). Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
     "c2-packed-tp4-diag": {
       "description": "GATE ONLY (hang diagnosis): c2-packed-tp4-speed as it was before the tail caps - the environment of the direct smoke SS v164 (the verify audits off; v164 ran the traffic profile, so QWEN_C2_GATE_PROFILE=1 here only waives the traffic checks on these prompts and budgets) - with the caps OFF (QWEN_FAST_BUDGET_CAP=0: the old tail narrowing, so the packed-to-sequential transition that hung is reproduced) and the hang instruments on: the sequential-step watchdog (QWEN_FAST_SEQ_DEADLINE_S=120), the stage markers (QWEN_FAST_SEQ_STAGE_LOG), the first-replay trace census (QWEN_FAST_TRACE_CENSUS), the collectives handle log (QWEN_FAST_CCL_HANDLE_LOG) and the L1 allocator view (QWEN_FAST_MEMORY_LEDGER_L1). Every instrument is host-only, so the device allocation sequence is v164's. The graph census is OFF (QWEN_FAST_TRACE_CENSUS_GRAPH=0: the ttnn.graph capture reads every tensor argument and the capture refuses reads, which killed v173 at attach, so no diag profile turns it on). The stall watch (QWEN_FAST_STALL_DEADLINE_S=120) covers sequential steps, packed rounds, engine builds and prefill segments: on a stall every thread stack is dumped without ending the process, the pinned tt-metal triage tools (dump_running_operations, dump_callstacks, check_binary_integrity, check_noc_status, dump_fast_dispatch, check_eth_status) read the hung mesh, and only then is the process ended. QWEN_FAST_CCL_HANDLE_GUARD=log logs the handles every trace baked and any unfenced same-handle collective. Not for traffic. UNVERIFIED on hardware.",
       "eos_ids": [
@@ -1127,6 +1297,190 @@
         "QWEN_FAST_TRACE_CENSUS_GRAPH": "0",
         "QWEN_FAST_STALL_DEADLINE_S": "120",
         "QWEN_FAST_CCL_HANDLE_GUARD": "log"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-diag-sprewarm": {
+      "description": "GATE ONLY (the audits-off hang, sampler isolation arm): c2-packed-tp4-diag plus QWEN_FAST_PACKED_SAMPLER_PREWARM=1: the packed block's EAGER warm forward runs the pinned sampler once (exactly the T1 audit's sample_rows call: the sampler all-gather, untilize and ArgMax over 248,320 columns, two 32-row sample_tiles calls for 64 rows) before the verify capture and discards the result; the capture and every replay are the audits-off ones, with no extra op in the trace and no per-round readback or compare. The factorial that led here: both verify audits on passes, the T1 audit alone passes every hang shape, the T2 audit alone hangs, both off hangs; every hang is the host blocked in ttnn.execute_trace on the first replay of a request's rows=2 verify trace after many four-user packed rounds. This arm keeps the verify audits OFF (QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0), so tokens are the audits-off ones (the served path never uses the sampler output). The old tail (QWEN_FAST_BUDGET_CAP=0), the hang instruments (stage markers, trace census with the graph part off, collectives handle log, L1 view), the stall watch (QWEN_FAST_STALL_DEADLINE_S=120) and the handle guard in log mode are c2-packed-tp4-diag's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "0",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_SEQ_STAGE_LOG": "1",
+        "QWEN_FAST_TRACE_CENSUS": "1",
+        "QWEN_FAST_CCL_HANDLE_LOG": "1",
+        "QWEN_FAST_MEMORY_LEDGER_L1": "1",
+        "QWEN_FAST_TRACE_CENSUS_GRAPH": "0",
+        "QWEN_FAST_STALL_DEADLINE_S": "120",
+        "QWEN_FAST_CCL_HANDLE_GUARD": "log",
+        "QWEN_FAST_PACKED_SAMPLER_PREWARM": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-diag-strace": {
+      "description": "GATE ONLY (the audits-off hang, sampler isolation arm): c2-packed-tp4-diag plus QWEN_FAST_PACKED_SAMPLER_IN_TRACE=1: the packed verify capture also records the pinned sampler's ops exactly as the T1 audit does (the warm forward runs them too, and every packed replay runs the sampler gathers on handles 0 then 1) but the output is never read back and never compared per round, so no host sync is added. The factorial that led here: both verify audits on passes, the T1 audit alone passes every hang shape, the T2 audit alone hangs, both off hangs; every hang is the host blocked in ttnn.execute_trace on the first replay of a request's rows=2 verify trace after many four-user packed rounds. This arm keeps the verify audits OFF (QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0), so tokens are the audits-off ones (the served path never uses the sampler output). The old tail (QWEN_FAST_BUDGET_CAP=0), the hang instruments (stage markers, trace census with the graph part off, collectives handle log, L1 view), the stall watch (QWEN_FAST_STALL_DEADLINE_S=120) and the handle guard in log mode are c2-packed-tp4-diag's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "0",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_SEQ_STAGE_LOG": "1",
+        "QWEN_FAST_TRACE_CENSUS": "1",
+        "QWEN_FAST_CCL_HANDLE_LOG": "1",
+        "QWEN_FAST_MEMORY_LEDGER_L1": "1",
+        "QWEN_FAST_TRACE_CENSUS_GRAPH": "0",
+        "QWEN_FAST_STALL_DEADLINE_S": "120",
+        "QWEN_FAST_CCL_HANDLE_GUARD": "log",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1"
       },
       "engine": {
         "model": "@SNAPSHOT@",

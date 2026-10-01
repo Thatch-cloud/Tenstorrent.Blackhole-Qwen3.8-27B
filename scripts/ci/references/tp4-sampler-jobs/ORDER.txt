@@ -1,0 +1,30 @@
+# The order of the tp4/sampler window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window. Image: the tag of the
+# tt-vllm image the job serves or builds (SB builds tp4-sampler-1). Minutes: runner time for ONE run of the job, a quad reset (1-3 min)
+# included.
+# SB first: build tp4-sampler-1 and smoke the PRODUCTION profile (audits on, caps on). A hang or a refusal on it stops the window.
+# SPa..SPe and STa..STe are the sampler isolation arms on the diag twins (audits off, old tail, instruments on, stall watch): SP runs the
+# pinned sampler once in the packed warm forward only (QWEN_FAST_PACKED_SAMPLER_PREWARM=1), ST also records it inside the packed verify
+# capture (QWEN_FAST_PACKED_SAMPLER_IN_TRACE=1). Each is run FIVE consecutive times on the same image, each preceded by its own card
+# reset (the template's actions say reset smoke), on the hang shapes (concurrent4_steady and replay_concurrent4: the engine build after
+# many packed rounds; concurrent4_v164order and concurrent4: the four-user tail). One stall restarts that arm's count and keeps the
+# stall watch's triage output for the report.
+# SPt and STt time each arm on the speed twin (audits off, caps on, no instruments) with the coding tests; run them only for an arm
+# whose five diag repeats completed.
+# SH hands the cards back to production (status, then the all-four reset; the re-placement of the AUDITED production image, never a
+# gate arm, is the template's text). It is always last and it runs even when a stop job (SB) halts the window or an arm stalled: the
+# stall watch never resets the cards, so a stall leaves them hung until SH's reset.
+SB-build-smoke stop tp4-sampler-1 45
+SPa-diag-sprewarm optional tp4-sampler-1 20
+SPb-diag-sprewarm optional tp4-sampler-1 20
+SPc-diag-sprewarm optional tp4-sampler-1 20
+SPd-diag-sprewarm optional tp4-sampler-1 20
+SPe-diag-sprewarm optional tp4-sampler-1 20
+STa-diag-strace optional tp4-sampler-1 20
+STb-diag-strace optional tp4-sampler-1 20
+STc-diag-strace optional tp4-sampler-1 20
+STd-diag-strace optional tp4-sampler-1 20
+STe-diag-strace optional tp4-sampler-1 20
+SPt-speed-sprewarm optional tp4-sampler-1 25
+STt-speed-strace optional tp4-sampler-1 25
+SH-handback-reset stop tp4-sampler-1 15

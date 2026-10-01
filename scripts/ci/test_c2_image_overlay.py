@@ -1245,13 +1245,14 @@ class ProvenanceTests(unittest.TestCase):
         # ...and the speed window's arms (tp4/speed): the gate with the K/V slide off, and the timed pair with the verify audits off.
         # ...and the batched-draft window's four arms (tp4/draft): the speed and gate profiles with the quad on and with it off.
         # ...and the fix arm (tp4-serve-4): the audits-off speed twin with the capture plug, the stall watch and the handle guard.
+        # ...and the sampler isolation arms (tp4/sampler): the diag and speed twins with the sampler prewarm or in-trace flag.
         # ...and the hang diagnosis's three arms (tp4-serve-3): the audits-off speed environment with the caps off and the
         # host-only instruments on, and the two one-audit factorial arms.
-        tp4 = ['c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f2', 'c2-packed-tp4-f12',
+        tp4 = ['c2-packed-tp4-diag', 'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f2', 'c2-packed-tp4-f12',
                'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-gate-pairs',
                'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix',
                'c2-packed-tp4-speed-noslide',
-               'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad', 'general-prefix-eager', 'general-tp4-bench',
+               'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'general-prefix-eager', 'general-tp4-bench',
                'general-tp4-mmrs', 'general-tp4-ring-mmrs']
         self.assertEqual(gated, sorted("('%s', '%s')" % (step, name) for step in ('boot', 'environment') for name in tp4))
         runs = []
