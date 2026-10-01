@@ -156,6 +156,8 @@ class InstallTests(InstalledTwin):
         self.assertIs(verifier_engine.capture_operation, ORIGINAL_CAPTURE)
         self.assertIs(packed_verifier.capture_operation, ORIGINAL_CAPTURE)
 
+    @unittest.skipUnless(os.path.exists(os.path.join(HERE, 'tp2_pinned_sources.json')),
+                         'no tp2_pinned_sources.json (inside the image)')
     def test_the_pairs_pinned_attention_batch_is_byte_identical(self):
         with open(os.path.join(HERE, 'tp2_pinned_sources.json'), encoding='utf-8') as handle:
             pins = json.load(handle)
