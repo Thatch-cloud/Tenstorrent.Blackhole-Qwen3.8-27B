@@ -72,6 +72,11 @@ FIX_ENV = {'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1',
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
+# The admission-freeze window's twins (tp4/freeze): each is the traffic profile plus exactly these env flags, gate only.
+TRIM, CREDIT = 'QWEN_FAST_ADMISSION_DIAG_TRIM', 'QWEN_FAST_DECODE_STEPS_PER_ADMISSION'
+FREEZE_PROFILES = {'c2-packed-tp4-f2': {TRIM: '1'}, 'c2-packed-tp4-f12': {TRIM: '1', CREDIT: '1'}}
+
+
 SPEED = 'QWEN_FAST_TP_KV_SLIDE'
 # The speed window's profiles (tp4/speed): each is c2-packed-tp4-gate plus exactly these env differences and a description.
 SPEED_PROFILES = {
@@ -277,7 +282,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES):
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES):
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -417,6 +422,51 @@ class FixProfileTests(unittest.TestCase):
         self.assertIn("os.environ.get('QWEN_FAST_TP', '2') != '4'", source, 'the packed block opens a plug at four cards only')
         with open(HERE / 'capture_plug.py', encoding='utf-8') as handle:
             self.assertIn("environ.get('QWEN_FAST_TP', '2') != '4'", handle.read(), 'and so does the engine plug')
+
+
+class FreezeProfileTests(unittest.TestCase):
+    """tp4/freeze: the traffic profile's gate-only twins that switch the admission-freeze flags on, one by one."""
+
+    def test_each_twin_is_the_traffic_profile_plus_exactly_its_flags_and_gate_only(self):
+        found = profiles()
+        traffic = found['c2-packed-tp4']
+        for name, flags in FREEZE_PROFILES.items():
+            mine = found[name]
+            with self.subTest(profile=name):
+                self.assertEqual(mine['env'], dict(traffic['env'], **dict(flags, QWEN_C2_GATE_PROFILE='1')))
+                self.assertEqual(mine['engine'], traffic['engine'])
+                for key in set(mine) | set(traffic):
+                    if key not in ('description', 'env', 'gate_only'):
+                        self.assertEqual(mine.get(key), traffic.get(key), key)
+                self.assertIs(mine['gate_only'], True)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+                self.assertEqual((mine['env']['QWEN_FAST_VERIFY_T1_AUDIT'], mine['env']['QWEN_FAST_VERIFY_T2_AUDIT']),
+                                 ('1', '1'), 'the audits stay on, as in the traffic profile')
+
+    def test_the_traffic_profile_and_every_other_profile_leave_the_flags_unset(self):
+        for name, profile in profiles().items():
+            if name not in FREEZE_PROFILES:
+                self.assertNotIn(TRIM, profile['env'], name)
+                self.assertNotIn(CREDIT, profile['env'], name)
+        for flag in (TRIM, CREDIT):
+            self.assertNotIn(flag, image_env(), 'the image leaves it unset: off is the default')
+
+    def test_the_credit_is_on_in_the_f12_twin_alone_and_the_f2_twin_is_its_base(self):
+        found = profiles()
+        self.assertNotIn(CREDIT, found['c2-packed-tp4-f2']['env'])
+        self.assertEqual(found['c2-packed-tp4-f12']['env'], dict(found['c2-packed-tp4-f2']['env'], **{CREDIT: '1'}))
+        import serving_prefill_admission
+        for name in FREEZE_PROFILES:
+            self.assertIn(serving_prefill_admission.decode_steps_per_admission(found[name]['env']), (0, 1), name)
+
+    def test_the_admission_accepts_each_twin_over_the_image_environment(self):
+        image = image_env()
+        for name in FREEZE_PROFILES:
+            environ = dict(image, **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
 
 
 class DraftProfileTests(unittest.TestCase):

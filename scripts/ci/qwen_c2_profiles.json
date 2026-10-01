@@ -817,6 +817,179 @@
       "parser_rechunk": true,
       "gate_only": true
     },
+    "c2-packed-tp4-f2": {
+      "description": "GATE ONLY (the admission-freeze window's F2 arm): c2-packed-tp4 with the admission diagnostics trimmed (QWEN_FAST_ADMISSION_DIAG_TRIM=1). The per-admission memory-ledger points (prefill before and after, the engine's before point and walk) are taken for the first admission only, the GDN slot adoption reads the conv slices back at each slot's first adoption only (its metadata checks stay on every adoption), and the 'dram after engine' line is off. The measured components come to about 0.35 to 0.55 s per admission, all inside the freeze in which no live user decodes, but the full saving applies only from the second adoption of each slot onward: in the first burst after a boot, slots 1 to 3 are first adoptions and still pay the 0.2 to 0.28 s readback, so expect roughly the ledger and dram-line share (about 0.25 to 0.3 s for each admission after the first). The per-admission phase markers ('[MEMLEDGER] phase=prefill point=after req=', '[PINDIAG] dram after engine') are in the log for the first admission only, so measure TTFT and decode on the client side and take the freeze length from the prefill-gate lines. Everything else, the verify audits, the tail caps and the engine, is c2-packed-tp4's, so a speed comparison against it is attributable to the flag. It carries the admission waiver (QWEN_C2_GATE_PROFILE=1) as every gate-only twin does and never serves traffic; the traffic profile keeps the full ledger until this arm is measured.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_ADMISSION_DIAG_TRIM": "1",
+        "QWEN_C2_GATE_PROFILE": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "max_prompt_tokens": 123136,
+      "min_answer_tokens": 8192,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-f12": {
+      "description": "GATE ONLY (the admission-freeze window's F1 + F2 arm): c2-packed-tp4-f2 with the decode credit on (QWEN_FAST_DECODE_STEPS_PER_ADMISSION=1, lever N's alternation in serving_prefill_admission). After each admission the running decodes are owed one decode-only step before the next fresh prompt is let in, so the users admitted first decode while the later arrivals of a burst are admitted, instead of waiting out the whole freeze. The credit moves time from the later users' first token (about one decode round, 150 to 200 ms, per earlier admission) to the earlier users' decode, and is exactness-neutral by design (it changes scheduling order only) but UNVERIFIED on hardware: it runs decode rounds with 1 to 3 live users mid-burst, so judge this arm real-text exact against solo, as every TP4 arm is. It is armed by an admission, paid by any decode-only pass after it, and dropped when nothing is waiting, no decode runs or a partial prefill is in flight, so a lone arrival is admitted at once. The F2 flag (QWEN_FAST_ADMISSION_DIAG_TRIM=1) is on as in c2-packed-tp4-f2, so the per-admission phase markers are missing after the first admission, as in c2-packed-tp4-f2, and this arm against it isolates the credit and against c2-packed-tp4 measures both. It carries the admission waiver (QWEN_C2_GATE_PROFILE=1) and never serves traffic.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_ADMISSION_DIAG_TRIM": "1",
+        "QWEN_FAST_DECODE_STEPS_PER_ADMISSION": "1",
+        "QWEN_C2_GATE_PROFILE": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "max_prompt_tokens": 123136,
+      "min_answer_tokens": 8192,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
     "c2-packed-tp4-diag-t1": {
       "description": "GATE ONLY (hang diagnosis): c2-packed-tp4-speed as it was before the tail caps - the environment of the direct smoke SS v164 (the verify audits off; v164 ran the traffic profile, so QWEN_C2_GATE_PROFILE=1 here only waives the traffic checks on these prompts and budgets) - with the caps OFF (QWEN_FAST_BUDGET_CAP=0: the old tail narrowing, so the packed-to-sequential transition that hung is reproduced) and the hang instruments on: the sequential-step watchdog (QWEN_FAST_SEQ_DEADLINE_S=120), the stage markers (QWEN_FAST_SEQ_STAGE_LOG), the first-replay trace census (QWEN_FAST_TRACE_CENSUS), the collectives handle log (QWEN_FAST_CCL_HANDLE_LOG) and the L1 allocator view (QWEN_FAST_MEMORY_LEDGER_L1). Every instrument is host-only, so the device allocation sequence is v164's. The factorial arm with the verify T1 shard-argmax audit ON and the T2 window audit off (QWEN_FAST_VERIFY_T1_AUDIT=1). The ttnn.graph part of the census is EXPLICITLY off (QWEN_FAST_TRACE_CENSUS_GRAPH=0): the graph processor strings every tensor argument inside the trace capture and a tensor str() reads the device, which a capture refuses (v173 died at attach on it); the address census therefore records no ranges in this arm. The stall watch (QWEN_FAST_STALL_DEADLINE_S=120) covers sequential steps, packed rounds, engine builds and prefill segments: on a stall every thread stack is dumped without ending the process, the pinned tt-metal triage tools (dump_running_operations, dump_callstacks, check_binary_integrity, check_noc_status, dump_fast_dispatch, check_eth_status) read the hung mesh, and only then is the process ended. QWEN_FAST_CCL_HANDLE_GUARD=log logs the handles every trace baked and any unfenced same-handle collective. Not for traffic. UNVERIFIED on hardware.",
       "eos_ids": [

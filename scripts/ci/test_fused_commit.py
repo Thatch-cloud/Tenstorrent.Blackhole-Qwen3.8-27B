@@ -1565,8 +1565,8 @@ class ParentTests(unittest.TestCase):
         if result.returncode != 0:
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
-        after = without_trace_census(without_prefill_scratch(without_any_request(without_sticky(
-            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))
+        after = without_trace_census(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
+            (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1652,6 +1652,44 @@ def without_trace_census(lines):
     if sorted(value.strip() for value in found) != sorted(hooks):
         raise AssertionError('The trace_census hooks are not in serving_runtime.py exactly once each')
     return [value for value in lines if value.strip() not in hooks]
+
+
+def without_diag_trim(lines):
+    """serving_runtime.py less the admission-diagnostics trim (QWEN_FAST_ADMISSION_DIAG_TRIM, tp4/freeze), which landed
+    after this parent: each of its four guarded ledger and log calls put back as the parent had it, the block
+    asserted to be exactly the trim's text and found once."""
+    sites = (
+        (["# QWEN_FAST_ADMISSION_DIAG_TRIM=1 (the traffic twins): the first admission's point only.",
+          "if memory_ledger.admission_diag('prefill_before'):",
+          "memory_ledger.record('prefill', point='before prompt=%d' % position)"],
+         ["memory_ledger.record('prefill', point='before prompt=%d' % position)"]),
+        (["if memory_ledger.admission_diag('prefill_after'):",
+          "memory_ledger.record('prefill', point='after req=%s' % memory_ledger.short_id(state.req_id),",
+          "request=str(state.req_id), model_after_prefill=model)"],
+         ["memory_ledger.record('prefill', point='after req=%s' % memory_ledger.short_id(state.req_id),",
+          "request=str(state.req_id), model_after_prefill=model)"]),
+        (["# Under QWEN_FAST_ADMISSION_DIAG_TRIM=1 the line is off (it reads the allocator of every chip, and",
+          "# the first engine's ledger point carries the same reading) and only the first engine is walked.",
+          "if not memory_ledger.trim_enabled():",
+          "pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))",
+          "if memory_ledger.admission_diag('engine'):",
+          "memory_ledger.engine_admitted(str(state.req_id), engine_request=request)"],
+         ["pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))",
+          "memory_ledger.engine_admitted(str(state.req_id), engine_request=request)"]),
+    )
+    stripped = [value.strip() for value in lines]
+    for new, old in sites:
+        starts = [i for i in range(len(lines) - len(new) + 1) if stripped[i:i + len(new)] == new]
+        if len(starts) != 1:
+            raise AssertionError('The diagnostics-trim hunk %r is not in serving_runtime.py exactly once' % new[0])
+        first = starts[0]
+        indent = len(lines[first]) - len(lines[first].lstrip())
+        restored = [' ' * indent + value if not value.startswith('request=') else
+                    ' ' * (indent + len('memory_ledger.record(')) + value for value in old]
+        # a continuation line keeps the parent's alignment, one column past the call's opening parenthesis (the diff is exact)
+        lines = lines[:first] + restored + lines[first + len(new):]
+        stripped = [value.strip() for value in lines]
+    return lines
 
 
 def without_prefill_scratch(lines):

@@ -1,0 +1,5 @@
+# <template> <stop|optional> <image> <minutes>
+Z1-build-smoke-f2 stop tp4-freeze-1 45
+Z2-smoke-f12 optional tp4-freeze-1 25
+E5-g1-prefix-8users optional tp4-freeze-1 20
+E6-s2-f2-8users optional tp4-freeze-1 25

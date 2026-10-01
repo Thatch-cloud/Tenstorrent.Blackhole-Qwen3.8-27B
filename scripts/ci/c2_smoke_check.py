@@ -61,11 +61,12 @@ from pathlib import Path
 SOLO_TEST = 'concurrent4_solo'
 REPLAY_TEST = 'replay_concurrent4'
 # Four-user streamed tests: their users get the stream rules; the code ones are code answers too (TEXT_TESTS).
-CONCURRENT_TESTS = ('concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code', 'concurrent4_code_equal')
+CONCURRENT_TESTS = ('concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code', 'concurrent4_code_equal',
+                    'concurrent8_code')
 # The tests whose users are the four concurrent4 prompts, comparable with their solo runs.
 SOLO_COMPARED = ('concurrent4', 'concurrent4_v164order')
 CORE = ('warmup', 'warm_lifecycle', 'coding', 'concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code',
-        'concurrent4_code_equal', SOLO_TEST, REPLAY_TEST, 'long_real_text', 'steady_resend')
+        'concurrent4_code_equal', 'concurrent8_code', SOLO_TEST, REPLAY_TEST, 'long_real_text', 'steady_resend')
 PACKED_LINE = re.compile(r'\[PACKED\] request=(\S+) segment=(\d+) position=(\d+) ')
 SOLO_FIELDS = (('content_sha256', 'content'), ('reasoning_sha256', 'reasoning'), ('completion_tokens', 'tokens'),
                ('finish', 'finish'))
@@ -88,7 +89,7 @@ QUAD_AUDIT = re.compile(r'\[QUAD-AUDIT\] round=\S+ equal=([01]) ')
 SINGLES_AUDIT_LINE = re.compile(r'\[DRAFT-SINGLES-AUDIT\] round=\S+ group=\[[0-9, ]*\] equal=([01]) stage=(\S+) ')
 # A code prompt asked to be explained and rewritten (800 or 1500 tokens out) does not end by itself in a few tokens.
 MIN_ANSWER_TOKENS = 16
-TEXT_TESTS = ('coding', STEADY_TEST, RESEND_TEST, 'concurrent4_code', 'concurrent4_code_equal')
+TEXT_TESTS = ('coding', STEADY_TEST, RESEND_TEST, 'concurrent4_code', 'concurrent4_code_equal', 'concurrent8_code')
 STREAM_PARSER_TESTS = ('stream_tool_call', 'stream_reasoning')
 EXTENT_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 GATE_PROFILE_FLAG = 'QWEN_C2_GATE_PROFILE'

@@ -216,7 +216,7 @@ class PackedAnyProfileTest(unittest.TestCase):
         # (the ring fabric, the bfloat16 drafter), and the four batched-draft profiles (tp4/draft).
         self.assertEqual([name for name in names if EXTENT_FLAG in self.load(name)['env']],
                          ['c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-tp4',
-                          'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2',
+                          'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f12', 'c2-packed-tp4-f2',
                           'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
                           'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring',
                           'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix', 'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs',
@@ -533,7 +533,7 @@ TP4_PROFILES = ('general-tp4', 'general-prefix-tp4', 'general-tp4-131k', 'genera
 RING_FABRIC_PROFILES = ('general-tp4-ring-mmrs', 'c2-packed-tp4-gate-ring')
 MMRS_PROFILES = ('general-tp4-mmrs', 'general-tp4-ring-mmrs')
 # The four-card fast-path (S2) profiles: mesh_device P150x4 with the fast path on, under QWEN_FAST_TP=4.
-FAST_TP4_PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16',
+FAST_TP4_PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f12', 'c2-packed-tp4-f2', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16',
                      'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix', 'c2-packed-tp4-speed-noslide',
                      'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-gate-quad',
                      'c2-packed-tp4-gate-pairs')
