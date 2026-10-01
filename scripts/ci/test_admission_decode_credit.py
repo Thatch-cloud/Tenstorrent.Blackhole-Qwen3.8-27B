@@ -273,12 +273,30 @@ class FlagTests(Case):
                               log=lambda *args: None, queue_factory=lambda scheduler: Queue())
         self.assertIs(type(on).schedule, wrapped, 'a second install wraps nothing again')
 
-    def test_a_bad_value_refuses_the_install(self):
+    def test_a_bad_value_refuses_the_credit_but_keeps_the_cap(self):
+        for value in ('two', ' 1', '1.0', '65'):
+            cls = type('Scheduler', (Plugin,), {})
+            lines = []
+            with self.subTest(value=value), patch.dict(os.environ, {admission.STEPS_FLAG: value}):
+                admission.install(SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls=cls)),
+                                  log=lambda *args: lines.append(args[0].format(*args[1:])), queue_factory=lambda scheduler: Queue())
+                self.assertTrue(getattr(cls._schedule_prefill_only, admission.WRAPPED), 'the cap is installed')
+                self.assertIs(cls.schedule, Plugin.schedule, 'no credit')
+                self.assertTrue(any('decode credit REFUSED' in line for line in lines))
+
+    def test_the_lifecycle_keeps_one_fresh_prompt_per_step_under_a_bad_value(self):
+        from serving_lifecycle import FastServingLifecycle
+
         cls = type('Scheduler', (Plugin,), {})
-        with patch.dict(os.environ, {admission.STEPS_FLAG: 'two'}), self.assertRaisesRegex(ValueError, 'whole number'):
-            admission.install(SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls=cls)), log=lambda *args: None,
-                              queue_factory=lambda scheduler: Queue())
-        self.assertIs(cls._schedule_prefill_only, Plugin._schedule_prefill_only, 'nothing was wrapped')
+        real = admission.install
+        with patch.dict(os.environ, {admission.STEPS_FLAG: ' 1'}), patch.object(
+                admission, 'install', lambda config: real(config, log=lambda *args: None, queue_factory=lambda s: Queue())):
+            name = FastServingLifecycle._install_admission(
+                SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls=cls)))
+        self.assertIsNotNone(name)
+        scheduler = cls()
+        scheduler.waiting.extend(Request(n) for n in 'abc')
+        self.assertEqual(scheduler.schedule().new, ['a'])
 
 
 if __name__ == '__main__':

@@ -132,12 +132,14 @@ each. A step is a schedule() call, and the credit
   finds no decode running, and by a call that finds a partial prefill in flight, so a credit never outlives the
   burst it was armed in: a lone arrival, or the first one after the burst, is admitted at once;
 - holds only while a decode is running, so it never idles the device, and never holds a partial prefill.
-It moves time from the later users' first token to the earlier users' decode and changes no token: the steps it
-buys are the decode steps the scheduler would run anyway, in the same order, and the finished ids of a held pass
-are put back for the decode pass as under the DRAM hold (carry_finished). R = 0 wraps schedule() in nothing and
-every call is what it was.
+It moves time from the later users' first token to the earlier users' decode. It is exactness-neutral by design (it
+changes scheduling order only), UNVERIFIED on hardware: it runs decode rounds with 1 to 3 live users in the middle
+of a burst, which the scheduler never runs today, so token identity rests on packed == solo and the arm must be
+judged real-text exact against solo, as every TP4 arm is. The finished ids of a held pass are put back for the decode pass as under the DRAM hold (carry_finished). R = 0 wraps schedule() in nothing and
+every call is what it was. A bad value of the flag is refused (logged as REFUSED) and installs the cap with R = 0.
     [PINDIAG] decode credit installed on <class>: steps=<R>               once, at install, with R > 0
     [PINDIAG] decode credit armed steps=<R> decodes=<d> waiting=<n>      once per admission
+    [PINDIAG] decode credit REFUSED <value>: ...                          a bad flag value; the cap stays, credit off
     [PINDIAG] decode credit hold left=<k> decodes=<d>                    once per held pass
     [PINDIAG] decode credit carried finished=[<ids>] ...                 the ids put back past the held pass
 """
@@ -183,6 +185,7 @@ CREDIT_ARMED_LINE = '[PINDIAG] decode credit armed steps={} decodes={} waiting={
 CREDIT_HOLD_LINE = '[PINDIAG] decode credit hold left={} decodes={}'
 CREDIT_CARRIED_LINE = ('[PINDIAG] decode credit carried finished={} past the discarded prefill pass into the '
                        'decode-only step')
+CREDIT_REFUSED_LINE = '[PINDIAG] decode credit REFUSED {!r}: {}; the one-fresh-prefill cap is installed with the credit off'
 CREDIT_INSTALLED_LINE = '[PINDIAG] decode credit installed on {}: steps={}'
 MEGABYTE = 10 ** 6
 # The need: one set of defaults, per chip (s2-design.md section 3.2 item 2). M8 and M11 calibrate them.
@@ -742,7 +745,12 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
         return name
     if queue_factory is None:
         queue_factory = _module_queue_factory(original)
-    steps = decode_steps_per_admission()
+    try:
+        steps = decode_steps_per_admission()
+    except ValueError as refusal:
+        # A typo in the credit flag must never decide whether the one-fresh-prefill cap and the DRAM hold are installed.
+        steps = 0
+        log(CREDIT_REFUSED_LINE, os.environ.get(STEPS_FLAG), refusal)
     schedule = getattr(cls, 'schedule', None)
     if steps and not callable(schedule):
         raise ValueError('%s has no schedule: the decode credit cannot see its decode-only steps' % name)
